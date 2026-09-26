@@ -210,19 +210,28 @@ protocol AgentAdapter {
 
     /// **A legal conversation name for THIS agent's rename channel.**
     ///
-    /// Claude strips shell metacharacters, because its rename is typed at a pty that may be a
-    /// bare shell. Codex does not — even though `CodexAdapter.renameTyping` now ALSO types at
-    /// a pty, `thread/name/set` is still the call that actually commits the name, and it is
-    /// JSON-RPC, not shell. What lands in the modal is `AgentTitle.sanitized`'s output, not a
-    /// second, differently-sanitized string, so there is nothing extra a shell strip could be
-    /// protecting there either.
+    /// Neither agent strips shell metacharacters. Claude's rename used to, because an
+    /// injected `/rename <name>` could in theory reach a bare shell rather than a live
+    /// claude — but `SessionStore.inject` now gates on a rule-sandwiched composer box
+    /// actually being on screen (see `ClaudeTextChannel`), a bare shell never draws that, and
+    /// with the gate load-bearing the strip only cost the user their punctuation. Codex's
+    /// rename travels TWO channels and neither one is a shell: `CodexAdapter.renameTyping`
+    /// types `/rename`, then the name, at a pty (`CodexTextChannel.submitRename`), and
+    /// `SessionStore` separately sends `thread/name/set`, which is what actually commits the
+    /// thread. **A pty is not a shell** — the typing lands in a rename modal codex itself
+    /// drew, and when it cannot read that modal `submitRename` escapes rather than typing **the
+    /// name** (the fixed `/rename` literal has gone out by then; what the guard withholds is the
+    /// user-supplied string, the only part a strip would ever have touched) — so a strip there
+    /// never protected anything either; it only mangled the title.
+    /// Both converge on `AgentTitle.sanitized` with an empty forbidden set; see its own doc
+    /// comment.
     ///
-    /// Control characters are stripped for EVERY agent — `AgentTitle.sanitized`, which holds
-    /// the half both agents share — so a newline still cannot be smuggled into codex's modal.
-    /// That is why codex's rule does not need to grow a shell-metacharacter strip to match:
-    /// the hazard a strip like that guards against (a name reaching a shell prompt) does not
-    /// exist here, and the hazard that does exist (a control character reaching the modal) is
-    /// already covered. Do not "fix" this by copying claude's strip.
+    /// Control characters ARE stripped for EVERY agent — `AgentTitle.sanitized`, which holds
+    /// the half both agents share — so a newline still cannot be smuggled into either agent's
+    /// modal. Do not reintroduce a shell-metacharacter strip for either agent: the hazard it
+    /// guarded against is a name reaching a **shell prompt**, and for claude that is closed by
+    /// the injection gate above rather than by this function, while for codex the name never
+    /// had a shell to reach. Typing at a pty is not the hazard; typing at a *shell* is.
     nonisolated static func sanitizedTitle(_ raw: String) -> String?
 
     /// **A conversation's own name, read out of its transcript** — for a tab that repointed
@@ -459,6 +468,31 @@ protocol AgentDialogDriver {
     /// The interlock: does row `index` read as `label`? False means refuse — never "count
     /// instead".
     func row(_ index: Int, reads label: String, inViewport viewport: String) -> Bool
+
+    /// **Is a select list on screen at all** — the one screen fact the planned answer drive
+    /// checks before each press.
+    ///
+    /// `AnswerPlan` has already computed every keystroke from the transcript and the reader's
+    /// choices, so the drive is a fixed program and the screen's only remaining job is to say
+    /// that the program still has something to type into. Deliberately looser than
+    /// `focusedRow`: it reads the last marker line and nothing else, so an option's own wrapped
+    /// description cannot defeat it — which `focusedRow` does, on
+    /// `Fixtures/Claude/question-numbered-description.captured.txt`.
+    ///
+    /// **The predicate is shared with the injection veto, and the cost of a wrong answer points
+    /// the OTHER WAY here.** `ChoiceDialog.hasNumberedRowAtMarker` is written loose on purpose
+    /// for `AgentTextChannel.isKnownNonComposer`, where being too strict types a message into a
+    /// live dialog and being too loose only refuses an injection somebody can retry. In this
+    /// duty the loose direction is the expensive one: a false "yes" — a one-row draft beginning
+    /// `1. `, the false positive that doc names and accepts — is a Return fired into a composer
+    /// holding somebody's unsent text. Nothing here tightens it, because the screen carries no
+    /// attributes that would tell the two apart and the earlier gates (`statuses[id] ==
+    /// .waiting`, the transcript's own open prompt) are what actually keep a composer out of
+    /// this path. Recorded so that the next person to widen it knows both duties are reading it.
+    ///
+    /// **No default here either, for `allowRow`'s reason.** Every conformer states its own
+    /// agent's marker; a defaulted one would apply claude's grammar to somebody else's screen.
+    func hasSelectList(inViewport viewport: String) -> Bool
 
     /// **The plain-approval row, and it has no default on purpose.**
     ///

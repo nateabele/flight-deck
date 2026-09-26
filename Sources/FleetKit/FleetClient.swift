@@ -15,13 +15,25 @@ public final class FleetClient: @unchecked Sendable {
     public var onReady: (() -> Void)?
     public var onDisconnect: ((Error?) -> Void)?
 
-    private let key: FleetDeviceKey
+    /// Which wire this client dials. A paired client carries the TLS-PSK key that proves who
+    /// it is; a local client carries the `caller` string it puts in `hello` instead — see
+    /// `FleetSocketServer.startLocal`'s doc for why that string, not a key, is the local
+    /// socket's proof of who is asking (the file's permissions already answered "may this
+    /// process connect at all").
+    private enum Transport {
+        case paired(FleetDeviceKey)
+        case local(caller: String?)
+    }
+    private let transport: Transport
     /// What this client calls itself in `hello`, so the Mac can list it as something other
     /// than a placeholder. Injected rather than read here: FleetKit imports Foundation,
     /// Network and Security only — `UIDevice` is not reachable from this module, and the
-    /// `FleetKitiOS` target exists to keep it that way.
+    /// `FleetKitiOS` target exists to keep it that way. `nil` for a local client: `flightdeck`
+    /// has no device name to claim, and `FleetAttachment.isLocal` already tells the Mac what
+    /// this connection is.
     private let deviceName: String?
-    /// What this client tells the Mac it can be *asked*, sent in `hello`.
+    /// What this client tells the Mac it can be *asked*, sent in `hello`. Empty for a local
+    /// client — `flightdeck` answers nothing the Mac would `phoneRequest` a phone for.
     ///
     /// Injectable so a test can present a peer that claims nothing — which is what every
     /// phone in the field is, and the state the Mac must not send a `phoneRequest` into. See
@@ -54,22 +66,57 @@ public final class FleetClient: @unchecked Sendable {
         key: FleetDeviceKey, deviceName: String? = nil,
         caps: [String] = FleetCapability.supported, queue: DispatchQueue = .main
     ) {
-        self.key = key
+        self.transport = .paired(key)
         self.deviceName = deviceName
         self.caps = caps
         self.queue = queue
     }
 
+    /// A local client: no TLS-PSK key, because the socket path's permissions are the whole
+    /// authorization story (see `FleetSocketServer.startLocal`'s doc). `caller` — typically a
+    /// short opaque token, not a person's name — travels in `hello` for the app's own scope
+    /// check, exactly as `FleetAttachment.caller` documents.
+    public init(localCaller caller: String?, queue: DispatchQueue = .main) {
+        self.transport = .local(caller: caller)
+        self.deviceName = nil
+        self.caps = []
+        self.queue = queue
+    }
+
     public func connect(to endpoint: NWEndpoint, lastSeq: Int) {
+        guard case .paired(let key) = transport else {
+            preconditionFailure("a local FleetClient dials connect(toLocal:)")
+        }
+        open(
+            NWConnection(
+                to: FleetSocket.webSocketEndpoint(for: endpoint),
+                using: FleetSocket.webSocketParameters(FleetTLS.clientParameters(key: key))
+            ),
+            lastSeq: lastSeq
+        )
+    }
+
+    /// The local control socket. Same frames, same callbacks; line framing instead of TLS-PSK
+    /// and WebSocket (see `FleetLineFramer`), and a `caller` in the hello for the app's scope
+    /// check.
+    public func connect(toLocal path: String, lastSeq: Int) {
+        guard case .local = transport else {
+            preconditionFailure("a paired FleetClient dials connect(to:)")
+        }
+        open(NWConnection(to: .unix(path: path), using: FleetSocket.lineParameters()), lastSeq: lastSeq)
+    }
+
+    /// Shared body of both `connect` overloads, from the point their parameters diverge.
+    private func open(_ connection: NWConnection, lastSeq: Int) {
         disconnect()
         // Cleared after `disconnect()`, which sets it: the flag is per-connection, and this
         // is a new one.
         hasEnded = false
-        let parameters = FleetSocket.webSocketParameters(
-            FleetTLS.clientParameters(key: key)
-        )
-        let connection = NWConnection(to: FleetSocket.webSocketEndpoint(for: endpoint), using: parameters)
         self.connection = connection
+        // `callerForHello` is the `.local` caller and `nil` for `.paired` — a socket-paired
+        // phone has no caller to name, and the wire already omits an absent one.
+        let callerForHello: String?
+        if case .local(let caller) = transport { callerForHello = caller } else { callerForHello = nil }
         connection.stateUpdateHandler = { [weak self] state in
             guard let self else { return }
             switch state {
@@ -78,13 +125,24 @@ public final class FleetClient: @unchecked Sendable {
                 // established who we are, so this is a resume point, not a credential.
                 FleetSocket.send(
                     ClientFrame.hello(
-                        lastSeq: lastSeq, device: self.deviceName, caps: self.caps
+                        lastSeq: lastSeq, device: self.deviceName, caps: self.caps,
+                        caller: callerForHello
                     ),
                     over: connection
                 )
                 self.onReady?()
             case .failed(let error):
                 self.end(error)
+            case .waiting(let error):
+                // A phone dialling a Mac it hasn't reached yet *should* keep waiting —
+                // Network.framework will re-probe as the network changes, and that retry is
+                // the reconnect story `FleetConnector` already relies on. A local client has
+                // no such story: a missing socket path never becomes viable (no listener is
+                // coming up on it in the background the way a Mac might come back on the
+                // LAN), so leaving `.waiting` unhandled here would make `flightdeck` hang
+                // forever instead of exiting 69. Paired behaviour is untouched — this arm
+                // only fires for `.local`.
+                if case .local = self.transport { self.end(error) }
             case .cancelled:
                 self.end(nil)
             default:

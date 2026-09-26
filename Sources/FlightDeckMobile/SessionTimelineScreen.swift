@@ -184,6 +184,13 @@ struct SessionTimelineScreen: View {
             // inside the first. The fleet list's own comment explains why IT keeps
             // inset-grouped; the two screens differ because what they hold differs.
             .listStyle(.plain)
+            // `.interactively`, the Messages/Mail behaviour: a downward drag through the list
+            // pulls the keyboard down with the finger. Without it the default, `.automatic`,
+            // resolves to never dismissing on a List, so the keyboard stays up over the
+            // conversation until the person hunts for some other way to put it away. This does
+            // not undo the composer keeping focus after a send (see `PromptComposer`): only a
+            // scroll dismisses, and a person scrolling has already stopped typing.
+            .scrollDismissesKeyboard(.interactively)
             // `simultaneousGesture`, so the list keeps scrolling and rows keep taking taps —
             // this only observes. `minimumDistance: 1` because the point is to know a drag
             // happened at all, not to interpret it.
@@ -324,7 +331,7 @@ struct SessionTimelineScreen: View {
         // the person typing into it — and it would also scroll away from `bottomSentinel`,
         // which is how this screen knows whether the reader is at the live edge.
         .safeAreaInset(edge: .bottom) {
-            VStack(spacing: 0) {
+            KeyboardLiftedInset {
                 // The card and the composer are one inset, in that order: the dialog the agent
                 // is blocked on sits directly above the field, so a reader whose keyboard is up
                 // can still see what they are answering.
@@ -347,6 +354,12 @@ struct SessionTimelineScreen: View {
                 PromptComposer(session: session, model: model)
             }
         }
+        // The other half of `KeyboardLiftedInset`'s hand-done lift, and neither works alone.
+        // Without this line SwiftUI lifts the inset by the keyboard AND the wrapper lifts it
+        // again; without the wrapper nothing lifts it at all. On the SCREEN because
+        // that is where SwiftUI's avoidance is applied to the inset; `.bottom` only, so the
+        // top inset and the navigation bar are untouched.
+        .ignoresSafeArea(.keyboard, edges: .bottom)
         // The top inset, and the reason it exists at all: `ExitPlanMode` is the one tool call
         // a hook blocks WITHOUT claude ever reporting `waiting` (see `ClaudeOpenPlanGate`'s own
         // comment), so a session gated on a plan draws no `PromptCard` at the bottom of this
@@ -1105,5 +1118,55 @@ struct SessionTimelineScreen: View {
               case .string(let plan) = members.first(where: { $0.key == "plan" })?.value
         else { return nil }
         return plan
+    }
+}
+
+/// The bottom inset's content, lifted by the keyboard by hand rather than by SwiftUI.
+///
+/// **Why by hand.** SwiftUI would lift the inset by its keyboard safe area, which only moves on
+/// `keyboardWillShow`/`Hide` — so during an interactive dismissal the keyboard followed the
+/// finger, the composer stayed put above a widening gap, and it snapped down when the finger
+/// lifted. `KeyboardOverlapReader` reports on every frame of the drag instead.
+///
+/// **Two values, because a drag must not re-lay the `List` out.** `settled` — where the last
+/// show, hide or height change ENDED, from the reader's `keyboardWillChangeFrame` report — is
+/// padding: the inset's height grows with a keyboard at rest, the `List`'s content inset grows
+/// with it, the last message stays above the field, and `bottomSentinel` sees the same geometry
+/// it always did. `live` is where the keyboard is right now, and only its difference from
+/// `settled` is applied, as an OFFSET — a transform, no layout — so mid-drag the field rides the
+/// keyboard's top edge while the inset keeps its settled height. The first build applied every
+/// drag frame as padding, and on an iPhone 15 Pro that was visibly jerky: the inset's height
+/// changed at display rate, re-laying the whole `List` out and moving its content inset under
+/// the very finger that was scrolling it. Messages behaves the same way: the transcript does not
+/// reflow while the keyboard is dragged, only once it lets go — here, when the release posts
+/// `keyboardWillChangeFrame` and `settled` springs to the end frame (down, or back up for a
+/// drag released halfway), taking `live` with it so the offset returns to zero.
+///
+/// **Why the state lives in this small view and not on the screen.** The reader fires at the
+/// display's rate for the whole drag. As `@State` on `SessionTimelineScreen`, each report
+/// re-ran the screen's entire body — the `List`, the `ForEach` identity diff over the whole
+/// conversation, every row's modifier chain, both navigation destinations — which is
+/// O(conversation) work per frame, precisely what the timeline's `rebuild()` funnel exists to
+/// keep out of a render. Here, a report re-runs only this body; `content` was built by the
+/// screen and is not re-evaluated.
+private struct KeyboardLiftedInset<Content: View>: View {
+    @ViewBuilder let content: Content
+
+    @State private var settled: CGFloat = 0
+    @State private var live: CGFloat = 0
+
+    var body: some View {
+        VStack(spacing: 0) {
+            content
+        }
+        .padding(.bottom, settled)
+        .offset(y: settled - live)
+        .background {
+            KeyboardOverlapReader { overlap, isSettled in
+                if isSettled { settled = overlap }
+                live = overlap
+            }
+            .frame(width: 0, height: 0)
+        }
     }
 }

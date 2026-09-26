@@ -221,6 +221,35 @@ final class ChoiceDialogTests: XCTestCase {
         ))
     }
 
+    /// **A description that begins with a number, and what it costs `list()`.**
+    ///
+    /// `question-numbered-description` is a live screen off the answer log: option 1's
+    /// description reads "… on top of Level 0. I'd spin up a fresh worktree …" and the terminal
+    /// wrapped straight after "Level", so a DESCRIPTION line begins `0. ` at column 5. `parse`
+    /// reads it as row number 0, the contiguous run breaks there, and no run of two survives —
+    /// so `focusedRow` is nil on a dialog a person is looking at, deterministically, for as long
+    /// as those options are on screen.
+    ///
+    /// **This pins the shape so the drive's regression test cannot pass for the wrong reason.**
+    /// `AnswerPromptTests.testASetIsDrivenOnAScreenWhoseDescriptionBreaksTheListParse` asserts
+    /// that the drive completes here; if a future parser change made this screen readable, that
+    /// test would still pass while no longer exercising anything, and this one fails instead.
+    /// It is a record of what `list()` does today, not a rule about what it should do.
+    func testADescriptionBeginningWithANumberDefeatsTheListParse() throws {
+        let screen = try captured("question-numbered-description.captured")
+        XCTAssertTrue(screen.contains("     0. I'd spin up a fresh worktree"),
+                      "the wrapped description is the whole point of this capture")
+        XCTAssertNil(focusedRow(inViewport: screen),
+                     "the marker is on row 0 of a real dialog; the parser cannot say so")
+        XCTAssertFalse(row(0, reads: "Level 1: Observe", inViewport: screen))
+        XCTAssertTrue(
+            ChoiceDialog.hasNumberedRowAtMarker(inViewport: screen,
+                                                marker: ChoiceDialog.claudeMarker),
+            "the looser check reads only the last marker line, which is untouched by the wrap — "
+            + "this is the one interlock the drive keeps"
+        )
+    }
+
     /// **The dialog answered on the Mac a moment ago.** The ordinary outcome, because this is
     /// asked on every answer and the screen may have moved on between the tap and the read: the
     /// list is simply gone, and what is left is the scrollback and the input bar. A label that

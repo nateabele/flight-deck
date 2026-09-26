@@ -23,7 +23,8 @@
     "question-checkbox.captured.txt",
     "question-checkbox-toggled.captured.txt",
     "question-checkbox-submit-focused.captured.txt",
-    "question-set-with-checkbox.captured.txt"
+    "question-set-with-checkbox.captured.txt",
+    "question-numbered-description.captured.txt"
   ],
   "isVerbatimCapturedOutput": true,
   "claudeVersion": "2.1.241 (Claude Code)",
@@ -52,7 +53,8 @@
     "question-checkbox.captured.txt": "82d11731873083c16f21883fe1835e0e6ebd187daf26952efbdd92a5bb686b6d",
     "question-checkbox-toggled.captured.txt": "f72605edd4ee012d802203e230bdf9aa8fba005e7af0d19bc920b67f6af5d998",
     "question-checkbox-submit-focused.captured.txt": "8496ddf345f5fc1b89279a1f8fa057fb409f7768c933170c66e2984c1321e7ac",
-    "question-set-with-checkbox.captured.txt": "2d9c531b6f1a0e915e20eca4d02aac0592baec91d2ab1950dc1c288284162c40"
+    "question-set-with-checkbox.captured.txt": "2d9c531b6f1a0e915e20eca4d02aac0592baec91d2ab1950dc1c288284162c40",
+    "question-numbered-description.captured.txt": "1722c61cae83ac84a143005bd6aa68ee67bb5663aabd41858c1a815b874329e5"
   },
   "whatTheseAre": [
     "The terminal SCREEN a blocked claude session shows, as plain text on a fixed-width grid \u2014",
@@ -305,6 +307,13 @@
         "question-set-with-checkbox.captured.txt"
       ],
       "note": "The checkbox (multiSelect) interaction, captured by driving a real claude. Enter TOGGLES a checkbox: it neither submits nor advances, and the cursor stays on the row. For n transcript options the rows are 0..n-1 options, n 'Type something', n+1 the unnumbered action row, n+2 'Chat about this' - so the action row is always n+1 from the top, verified by -submit-focused (Down x5 with n=4 lands on it). That row reads 'Submit' for a lone question and 'Next' inside a set, which is what -set-with-checkbox records and what a driver written from the lone case alone would get wrong. NOTE: the hint line is NOT a stable discriminator - it gained 'ctrl+g to edit in Cursor' on this machine, so it varies with installed tooling. Discriminate on the checkbox glyphs and the tab strip."
+    },
+    "2.1.280 (Claude Code)": {
+      "capturedOn": "2026-09-23",
+      "files": [
+        "question-numbered-description.captured.txt"
+      ],
+      "note": "Not a pty/pyte render like every batch above it: this screen came off a LIVE ghostty surface, written by Flight Deck's own AnswerAbortLog when a real phone answer was refused, and lifted verbatim out of the `--- viewport begin/end ---` block of ~/Library/Logs/flight-deck-answer.log (the 2026-09-23T20:52:54.373-05:00 record, check=no-focused-row). So it is exactly the string readViewport() returned on the refusal it documents \u2014 the one provenance gap the codex captures still record as open, closed here by accident rather than by method.\n\nNothing was dropped or edited: the whole 92-line viewport is here, banner and all, because the banner rows are above the dialog and a parser that scans the screen meets them. It carries this machine's own project path, which the earlier captures dropped to keep an account name out of the repo; there is no account name or org in this one.\n\nWhat it is for: option 1's description wraps immediately after the word \"Level\", so a DESCRIPTION line begins `0. ` at column 5 and ChoiceDialog.list() reads it as row number 0. The contiguous run breaks, focusedRow returns nil, and every answer to this dialog was refused for as long as it was on screen. AnswerPromptTests drives it; ChoiceDialogTests pins the shape."
     }
   }
 }

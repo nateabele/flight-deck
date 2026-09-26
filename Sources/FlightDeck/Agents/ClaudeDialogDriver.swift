@@ -16,6 +16,11 @@ struct ClaudeDialogDriver: AgentDialogDriver {
                          marker: ChoiceDialog.claudeMarker)
     }
 
+    func hasSelectList(inViewport viewport: String) -> Bool {
+        ChoiceDialog.hasNumberedRowAtMarker(inViewport: viewport,
+                                            marker: ChoiceDialog.claudeMarker)
+    }
+
     /// **The first row, and only ever the first row.** Claude's permission dialog is ordered
     /// "Yes" / (sometimes) "Yes, and don't ask again for …" / "No, and tell Claude …", so row
     /// 0 is the plain approval and any middle row is a DURABLE GRANT. Checked against the six
@@ -26,6 +31,11 @@ struct ClaudeDialogDriver: AgentDialogDriver {
 
     /// Escape is a real denial and not a dismissal: the transcript closes the call
     /// `is_error=True "The user doesn't want to proceed with this tool use. The tool use was
-    /// rejected"`, measured against claude 2.1.241.
+    /// rejected"`, measured by hand against claude 2.1.241. The `escapeDeniesPermission` row in
+    /// `scripts/adapterprobe/capabilities.py` exists to re-derive that against the installed
+    /// binary at `--tier full` — but **it has never produced a verdict**: a sandboxed claude
+    /// cannot authenticate, so the row fails closed on its login guard. Treat this claim as
+    /// hand-checked at 2.1.241 and unverified since; the row is the mechanism, not yet the
+    /// evidence. See docs/FOLLOWUPS.md.
     func deny(_ injector: TextInjecting) { injector.sendEscape() }
 }

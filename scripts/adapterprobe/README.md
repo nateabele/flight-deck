@@ -15,8 +15,10 @@ This suite is the same idea at the scope of a whole adapter: `capabilities.py` d
 **row** per claim `AgentAdapter` makes, and `run.py` derives a **verdict** for each row against
 both `claude` and `codex` — sometimes against a checked-in corpus (cheap, no agent spawned),
 sometimes against a live agent driven through a real pty inside a throwaway sandbox (`full`,
-spends real API tokens). The output is a matrix: 21 rows × 2 agents = 42 cells, refreshed on
-demand rather than trusted forever.
+spends real API tokens). The output is a matrix: 24 rows (most checked against both agents,
+three — `askUserQuestionShape`, `escapeDeniesPermission`, `codexPasteDetectsSameBurstReturn` —
+checked against only the one they claim something about) = 45 cells, refreshed on demand rather
+than trusted forever.
 
 ## Verdict vocabulary
 
@@ -55,7 +57,7 @@ above is optional — it exists for running the hermetic tests directly:
 ```sh
 ./scripts/test-adapters.sh                          # cheap tier: no live agent, < 1 minute
 ./scripts/test-adapters.sh --tier full               # adds the rows needing a real turn
-./scripts/test-adapters.sh --update-baseline         # write this run's matrix as the new baseline
+./scripts/test-adapters.sh --update-baseline         # write this run's matrix as the new baseline — tier-sensitive: a cheap run silently drops all 10 full-tier cells
 ./scripts/test-adapters.sh --capture                 # (full tier) stage fresh transcripts under scripts/adapterprobe/corpus/
 ./scripts/test-adapters.sh --keep                    # keep the sandbox tree after the run, for inspection
 ./scripts/test-adapters.sh --json PATH               # also write the matrix as JSON to PATH
@@ -84,26 +86,59 @@ transcript under `scripts/adapterprobe/corpus/` and prints which version it came
 So a `corpus stale` print is a prompt to go capture and review, not something `--capture` alone
 resolves, and not something to silence by editing this file directly.
 
-Exit code: `0` clean (matches `baseline.json`), `1` capability drift (a cell changed or is new),
-`3` a harness failure (a cell that used to read something else now reads `error`, or a brand-new
-cell reads `error` outright — always outranks plain drift), `4` the sandbox guard refused to run
-at all (see below), `5` the real `~/.codex/sessions` or `~/.claude/projects` listing changed
-during the run — spec invariant 9, checked unconditionally around the whole sandbox lifetime,
-never just trusted.
+### Exit codes
+
+| Code | Meaning |
+|---|---|
+| `0` | Clean — matches `baseline.json`. |
+| `1` | Capability drift — a cell changed, was newly added, or was removed. |
+| `2` | `build-probe.sh` failed; no row ran at all. |
+| `3` | Harness failure — a cell that used to read something else now reads `error`, or a brand-new cell reads `error` outright. `error` never counts as passing, so this always outranks plain drift (`1`) and version drift (`6`). |
+| `4` | The sandbox guard refused to run at all — see [Safety](#safety) below. |
+| `5` | The real `~/.codex/sessions` or `~/.claude/projects` listing changed during the run — spec invariant 9, checked unconditionally around the whole sandbox lifetime, never just trusted. |
+| `6` | Version drift — the live agent's version no longer matches the one recorded in `baseline.json`'s `versions` map, even though every cell it was checked against still agrees. This is the exact bug that shipped to production: Claude Code 2.1.281 silently changed when a transcript record is written, and the row covering it kept reading `ok` for nineteen versions because it read a fixture frozen at 2.1.241 — with no code of its own, a version bump with unchanged cells used to fall through to plain `0`. Ranked below `1`/`3` (an observed cell difference is stronger, more actionable evidence than a version number alone moving) and above `0` (a run must never call itself clean while sitting on an agent build its baseline has never seen). See `run.py`'s `_exit_code` docstring for the full reasoning. |
+
+`2`, `4`, and `5` are early exits — nothing is diffed against `baseline.json` at all. `1`, `3`, and
+`6` are the three possible outcomes of that diff, and only one is ever returned per run, ranked
+`3` > `1` > `6` > `0`.
 
 **`baseline.json` was captured at `--tier full`, and records each cell's own tier alongside its
 verdict.** A bare `./scripts/test-adapters.sh` (cheap only) diffs cleanly against it: a
 full-tier-only cell this run never attempted is reported as "not exercised", not "removed", and
 does not affect the exit code. Only a cell whose own tier this run *did* run, and that vanished
 from the matrix anyway, is real drift. The full-tier-only count is printed above the matrix
-(e.g. `8 full-tier cells not exercised (run --tier full to check them)`) so the gap stays
+(e.g. `10 full-tier cells not exercised (run --tier full to check them)`) so the gap stays
 visible rather than silent.
 
+**Baseline note (2026-09-25): a bare cheap run is red right now, and that is this branch, not
+upstream.** `baseline.json` was last refreshed at `claude 2.1.259` / `codex 0.153.0`; installed on
+this machine is `2.1.282` / `0.155.1`. A cheap run today reports three expected deltas:
+`+ claude.askUserQuestionShape` (a row this branch added), `~ codex.sanitizedTitle: broken -> ok`
+(the contract correction below, under "First capture"), and version drift on both agents — exit
+`1`, because cell drift (`1`) outranks version drift (`6`), so the `6` a stale baseline would
+otherwise also produce on its own is currently masked by the `1`. What clears all three: the
+first `--tier full --update-baseline` after this branch is reviewed — as a genuine two-step act
+(run `--tier full`, read the diff, *then* `--update-baseline`), never chained; see the cadence
+note below for why.
+
 **`--tier full` spends real API tokens and creates real threads** (inside the sandbox, which is
-deleted afterwards) — four rows per agent need a live model turn, and `ROW_TIMEOUT["full"]` is
-420 seconds per row. Budget up to ~30 minutes for a full run. **Do not loop it.** Run it once,
-read the result, and only re-run if you have a specific reason to believe the environment
-changed (a new agent version, a config edit) — not to "make sure".
+deleted afterwards) — five rows per agent need a live model turn, and `ROW_TIMEOUT["full"]` is
+420 seconds per row. Budget up to ~30 minutes for a full run. This is exactly why it is not folded
+into `./scripts/test-adapters.sh`'s default tier or into `test-unit.sh`: `cheap` spends no tokens
+and is safe to run on every loop; `full` costs real money and must be a deliberate, occasional act.
+
+**Cadence: after every `claude`/`codex` upgrade, run `--tier full`, read the diff, and only then
+run `--update-baseline` as its own separate step** — never chained into the same command. `run.py`
+writes the matrix and `return`s `0` **before** `_exit_code` is ever consulted, so
+`--tier full --update-baseline` run together cannot fail: it pins whatever the run found,
+including a brand-new `broken` or `error` cell, and reports success regardless — the exact "a
+check that looks like a check but cannot fail" hazard this whole suite exists to remove, sitting
+inside its own recommended routine. Do this reactively, not on a timer and not to "make sure": a
+bare `cheap`-tier run already tells you a refresh is due, by exiting `6` the moment the installed
+agent's version no longer matches what `baseline.json` last recorded, even when every `cheap`-tier
+cell still agrees (see the exit-code table above). **`baseline.json`'s own `versions` map is where
+"last run at version X" is recorded** — do not add a second changelog for the same fact; a
+reviewed `--update-baseline` is what keeps that map current. **Do not loop `--tier full`.**
 
 ## Safety
 
@@ -153,9 +188,14 @@ or not, `--tier full`, committed as `baseline.json`. 7 rows were red or admitted
 out of 42 cells — three independent codex findings, one derivative of them, and three
 harness/timing questions still open:
 
-- **`codex.sanitizedTitle` — broken.** Codex's declared contract is "no sanitizing; the RPC
-  channel needs none" — but the real CLI strips `\n` and `\t` from a hostile title anyway. The
-  declaration has drifted from what codex actually does.
+- **`codex.sanitizedTitle` — broken at capture time; now `ok` by design (see the baseline note
+  above).** This row never measured the codex CLI, then or now — it calls
+  `probe sanitize codex`, i.e. Flight Deck's own `CodexAdapter.sanitizedTitle`. At capture the
+  declared contract was "no sanitizing; the RPC channel needs none", and the adapter stripping
+  `\n`/`\t` from a hostile title anyway read as drift from that declaration. This branch corrected
+  the declaration instead of the code: stripping `\n`/`\t` (while still letting `;` and other
+  shell metacharacters through) is now the expected contract for both agents, so the cell reads
+  `ok` — see `_sanitized_title`'s own comment in `capabilities.py`.
 - **`codex.dialogDriver` — broken.** The approval-list screen's own affirmative row no longer
   reads back the way `AgentAdapter`'s driver expects — apparent grammar drift in that screen.
 - **`codex.resumeCommand` — broken.** This is the reported symptom that commissioned this whole

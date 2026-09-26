@@ -55,6 +55,20 @@ enum FleetSocket {
         return base
     }
 
+    /// The local control socket's parameters: a plain stream plus `FleetLineFramer`. See that
+    /// type for why this is not `webSocketParameters`. The caller sets `requiredLocalEndpoint`
+    /// (listener) or dials `.unix(path:)` (client).
+    static func lineParameters(
+        maximumMessageSize: Int = TimelineLimits.maximumMessageSize
+    ) -> NWParameters {
+        FleetLineFramer.maximumLineLength = maximumMessageSize
+        let parameters = NWParameters.tcp
+        parameters.defaultProtocolStack.applicationProtocols.insert(
+            NWProtocolFramer.Options(definition: FleetLineFramer.definition), at: 0
+        )
+        return parameters
+    }
+
     /// `NWProtocolWebSocket`'s automatic HTTP-upgrade handshake needs a URL to build its
     /// Upgrade request from. Handed a bare `.hostPort` endpoint instead — what most callers
     /// here pass — it aborts the connection (`ECONNABORTED`, silently, before `.ready`)
