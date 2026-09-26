@@ -213,6 +213,26 @@ final class SessionStoreTests: XCTestCase {
         XCTAssertTrue(store.unreadIdle.contains(s.id))
     }
 
+    /// Fix round 2: `deselectProject()` returns the detail column to `S`'s terminal without
+    /// ever reassigning `selectedSessionID`, so its `didSet` — the thing that normally clears
+    /// a mark on "looking at it" — never runs. Without this, a mark `S` acquired while hidden
+    /// behind the project view (the case above) would stay lit on a terminal now back on
+    /// screen, which is the same bug finding 1 fixed, just on the way back out.
+    func testDeselectingTheProjectClearsAMarkTheHiddenSessionAcquired() {
+        let store = SessionStore(provider: StubProvider())
+        store.appIsActive = { true }
+        let s = store.newSession(in: URL(fileURLWithPath: "/work/foo", isDirectory: true))
+        guard let project = store.repos.first?.id else { return XCTFail("expected a repo") }
+        store.selectProject(project)
+        store.applyRegistry([1: row(s, activity: .busy)])
+        store.applyRegistry([1: row(s, activity: .idle)])
+        XCTAssertTrue(store.unreadIdle.contains(s.id), "precondition: marked while hidden")
+
+        store.deselectProject()
+
+        XCTAssertFalse(store.unreadIdle.contains(s.id))
+    }
+
     func testClosingASessionDropsItsMark() {
         let store = SessionStore(provider: StubProvider())
         let s = store.newSession(in: URL(fileURLWithPath: "/work/foo", isDirectory: true))
