@@ -27,7 +27,10 @@ struct RootView: View {
                            phoneActiveSessions: phoneActiveSessions)
                 .navigationSplitViewColumnWidth(min: 200, ideal: 240)
         } detail: {
-            if let surface = store.selectedSessionID.flatMap({ store.surface(for: $0) }) {
+            if let projectID = store.selectedProjectID,
+               let repo = store.repos.first(where: { $0.id == projectID }) {
+                ProjectView(store: store, repo: repo)
+            } else if let surface = store.selectedSessionID.flatMap({ store.surface(for: $0) }) {
                 VStack(spacing: 0) {
                     TerminalPane(store: store)
                         .frame(minWidth: 400, minHeight: 300)
