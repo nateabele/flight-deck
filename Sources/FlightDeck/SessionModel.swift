@@ -44,6 +44,10 @@ struct Session: Identifiable, Equatable {
     /// follows the live cwd. Codex hands back a full path that does not move when the cwd
     /// changes, so there is nothing to derive and nothing to retarget.
     var transcriptPath: String?
+    /// The flywheel Agent-Mail identity this tab was booted with, or nil for a non-flywheel
+    /// session. In-memory; persisted via `SessionSnapshot.Entry.flywheelAgentName` (name only —
+    /// `project` re-derives from `workingDirectory` on restore).
+    var flywheelIdentity: FlywheelIdentity?
 
     init(
         id: UUID = UUID(),
@@ -53,7 +57,8 @@ struct Session: Identifiable, Equatable {
         pinnedConversationID: UUID? = nil,
         agent: AgentID = .claude,
         accountID: UUID? = nil,
-        transcriptPath: String? = nil
+        transcriptPath: String? = nil,
+        flywheelIdentity: FlywheelIdentity? = nil
     ) {
         self.id = id
         self.title = title
@@ -63,6 +68,7 @@ struct Session: Identifiable, Equatable {
         self.agent = agent
         self.accountID = accountID
         self.transcriptPath = transcriptPath
+        self.flywheelIdentity = flywheelIdentity
     }
 }
 
