@@ -14,7 +14,9 @@ protocol TextInjecting: AnyObject {
     func sendReturn()
 
     /// Ctrl+E then Ctrl+U: move to the end of the current logical line and kill it into
-    /// Claude Code's own deleted-text ring, from where `sendYank()` can restore it.
+    /// Claude Code's own deleted-text ring, from where `sendYank()` can restore it. This holds
+    /// under both keyboard encodings, legacy and kitty (which Claude Code enables) — see
+    /// `sendControl`'s comment for why the kitty path still delivers the literal control byte.
     ///
     /// Ctrl+E first is load-bearing — Ctrl+U deletes from the cursor to the line *start*,
     /// so without it a draft's tail survives and the injected command is spliced into the
@@ -116,9 +118,21 @@ extension Ghostty.SurfaceView: TextInjecting {
     /// Control keys go the same route as Return, and for the same reason — a control byte
     /// inside a bracketed paste is inserted as content, not acted on.
     ///
-    /// The encoded byte is passed as `text` rather than left to the key encoder to derive
-    /// from key+modifier: it is what the terminal must actually receive, and stating it
-    /// here keeps the mapping visible next to the key it belongs to.
+    /// `byte` is what the terminal receives, under the kitty keyboard protocol (which Claude
+    /// Code enables) as well as the legacy encoding — but under kitty that holds only because
+    /// of a fragile invariant: Flight Deck never sets `unshiftedCodepoint` on this call, and it
+    /// defaults to 0. Ghostty's kitty encoder (`vendor/ghostty/src/input/key_encode.zig`) looks
+    /// up a table entry for the key first; for a plain letter like `.u` that table has no
+    /// entry, so it falls back to `unshifted_codepoint > 0` (`:132`) — which is false here — and
+    /// with no entry found at all, the `orelse` fallback at `:217` writes `event.utf8`, i.e.
+    /// `byte`, verbatim. **A caller that does supply an unshifted codepoint — as the real
+    /// `NSEvent` path derives for an actual human keypress — makes that `:132` fallback yield an
+    /// entry, and this same call then silently becomes a `KittySequence` (`ESC[117;5u` for
+    /// Ctrl+U) with `byte` discarded.** So the byte survives because of who calls this, not
+    /// because of what the encoder guarantees. Nothing in the suite guards the invariant: no
+    /// test stands on a real surface, and the encoder is ghostty's, not ours. This is a static
+    /// source trace, not a live measurement — full derivation, and the one observation it does
+    /// NOT explain, in docs/HANDOFF-agent-surface-findings.md §4.
     private func sendControl(_ key: Ghostty.Input.Key, byte: String) {
         guard let surfaceModel else { return }
         surfaceModel.sendKeyEvent(.init(key: key, action: .press, text: byte, mods: .ctrl))

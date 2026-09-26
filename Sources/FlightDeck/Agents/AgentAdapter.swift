@@ -210,19 +210,28 @@ protocol AgentAdapter {
 
     /// **A legal conversation name for THIS agent's rename channel.**
     ///
-    /// Claude strips shell metacharacters, because its rename is typed at a pty that may be a
-    /// bare shell. Codex does not — even though `CodexAdapter.renameTyping` now ALSO types at
-    /// a pty, `thread/name/set` is still the call that actually commits the name, and it is
-    /// JSON-RPC, not shell. What lands in the modal is `AgentTitle.sanitized`'s output, not a
-    /// second, differently-sanitized string, so there is nothing extra a shell strip could be
-    /// protecting there either.
+    /// Neither agent strips shell metacharacters. Claude's rename used to, because an
+    /// injected `/rename <name>` could in theory reach a bare shell rather than a live
+    /// claude — but `SessionStore.inject` now gates on a rule-sandwiched composer box
+    /// actually being on screen (see `ClaudeTextChannel`), a bare shell never draws that, and
+    /// with the gate load-bearing the strip only cost the user their punctuation. Codex's
+    /// rename travels TWO channels and neither one is a shell: `CodexAdapter.renameTyping`
+    /// types `/rename`, then the name, at a pty (`CodexTextChannel.submitRename`), and
+    /// `SessionStore` separately sends `thread/name/set`, which is what actually commits the
+    /// thread. **A pty is not a shell** — the typing lands in a rename modal codex itself
+    /// drew, and when it cannot read that modal `submitRename` escapes rather than typing **the
+    /// name** (the fixed `/rename` literal has gone out by then; what the guard withholds is the
+    /// user-supplied string, the only part a strip would ever have touched) — so a strip there
+    /// never protected anything either; it only mangled the title.
+    /// Both converge on `AgentTitle.sanitized` with an empty forbidden set; see its own doc
+    /// comment.
     ///
-    /// Control characters are stripped for EVERY agent — `AgentTitle.sanitized`, which holds
-    /// the half both agents share — so a newline still cannot be smuggled into codex's modal.
-    /// That is why codex's rule does not need to grow a shell-metacharacter strip to match:
-    /// the hazard a strip like that guards against (a name reaching a shell prompt) does not
-    /// exist here, and the hazard that does exist (a control character reaching the modal) is
-    /// already covered. Do not "fix" this by copying claude's strip.
+    /// Control characters ARE stripped for EVERY agent — `AgentTitle.sanitized`, which holds
+    /// the half both agents share — so a newline still cannot be smuggled into either agent's
+    /// modal. Do not reintroduce a shell-metacharacter strip for either agent: the hazard it
+    /// guarded against is a name reaching a **shell prompt**, and for claude that is closed by
+    /// the injection gate above rather than by this function, while for codex the name never
+    /// had a shell to reach. Typing at a pty is not the hazard; typing at a *shell* is.
     nonisolated static func sanitizedTitle(_ raw: String) -> String?
 
     /// **A conversation's own name, read out of its transcript** — for a tab that repointed

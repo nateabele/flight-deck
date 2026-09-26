@@ -103,9 +103,13 @@ Fixed by removing the parse from the drive path (§5), but §2 is what retires t
 
 ---
 
-## 4. Injection: under kitty, `sendControl`'s explicit byte is DISCARDED
+## 4. Injection: `sendControl`'s explicit byte SURVIVES — but only by an unguarded invariant
 
-Confirms the Harness hypothesis, and **falsifies a load-bearing comment in our own code**.
+**Corrected 2026-09-25.** This section previously claimed the opposite: that under kitty the
+byte is discarded and ghostty emits `ESC[117;5u`. That was wrong, it was written into
+`TextInjecting.sendControl`'s doc comment (106b357) on the strength of this section, and both
+have been corrected. The error is recorded rather than deleted because it is the fourth instance
+of this file's own §7 lesson — and this time the overclaim was in the correction.
 
 `TextInjecting.sendControl` passes the control byte explicitly:
 
@@ -113,30 +117,66 @@ Confirms the Harness hypothesis, and **falsifies a load-bearing comment in our o
 surfaceModel.sendKeyEvent(.init(key: key, action: .press, text: byte, mods: .ctrl))
 ```
 
-and its doc (`TextInjecting.swift:117`) claims: *"The encoded byte is passed as `text` rather
-than left to the key encoder to derive from key+modifier: it is what the terminal must
-actually receive."*
+**That byte is what the terminal receives, under kitty as well as legacy.** Every link traced in
+source (static trace, no probe):
 
-**That is true under the legacy encoder and false under kitty** — which is the mode claude
-enables. Traced through `vendor/ghostty/src/input/key_encode.zig` for `Ctrl+U`:
+1. `Ghostty.Input.KeyEvent.init` defaults `unshiftedCodepoint` to `0`, and `sendControl` builds
+   its event without passing it. (Narrow claim, deliberately: it is this *call* that leaves the
+   field at zero. An earlier draft of this section said "nothing in `Sources/` ever sets it",
+   which is false — see item 4.)
+2. `withCValue` copies it to the C struct unchanged (`Ghostty.Input.swift:209`), and `text`
+   becomes `keyEvent.text`. `sendKeyEvent` has exactly one definition — a trivial pass-through
+   to `ghostty_surface_key` (`Ghostty.Surface.swift:60-64`).
+3. `ghostty_surface_key` (`apprt/embedded.zig:1762`) converts via `event.keyEvent()`
+   (`:1269`), which passes `unshifted_codepoint` straight through. **Note:** `embedded.zig`
+   declares *two* unrelated `KeyEvent` structs with a same-named converter — `Surface.KeyEvent`'s
+   `core()` at `:93`, reached only by `ghostty_app_key` and
+   `ghostty_surface_key_is_binding`, and the extern `CAPI.KeyEvent`'s `keyEvent()` at `:1255`,
+   which is the one `ghostty_surface_key` actually takes. Reading `core()` by name is how the
+   original trace went wrong.
+4. Nothing on *this* path writes `unshifted_codepoint`, and within ghostty itself the only
+   derivation is `apprt/gtk/class/surface.zig:1406` (GTK, not macOS). **But Flight Deck's own
+   human-keypress path does derive one:** `NSEvent+Extension.swift:40-44` sets
+   `key_ev.unshifted_codepoint` from `characters(byApplyingModifiers: [])`, writing the C struct
+   field directly rather than the Swift `KeyEvent` property. That is not a counterexample — it
+   is exactly the invariant stated below, and it is why the invariant is fragile rather than
+   guaranteed. (This item previously claimed there was no such write anywhere on the macOS path.
+   That was a reassuring absolute falsified by one grep, in the section the rest of this file
+   cites — §7's lesson, a fifth time.)
+5. `kitty.zig`'s `raw_entries` holds only functional, keypad and modifier keys — **no plain
+   letters.** `.u` and `.e` never match it.
+6. So the table lookup misses, and `key_encode.zig:132` synthesizes an entry only
+   `if (event.unshifted_codepoint > 0)` — false here. `entry_` is `null`.
+7. Nothing intercepts `.u`+ctrl in between: `composing` is false; the utf8 short-circuit
+   (`:158`) is `.enter`/`.backspace`-only; the `report_all` and `plain_text` branches both
+   require `binding_mods.empty()` and ctrl is set. (Even reaching `plain_text` changes nothing —
+   `0x15` is a control character, so it breaks out to the same fallback.)
+8. `key_encode.zig:217` — `entry_ orelse { if (event.utf8.len > 0) return try
+   writer.writeAll(event.utf8); … }`. The byte goes out verbatim. `KittySequence` is constructed
+   at `:228`, **after** that fallback, so it is unreachable with a null entry.
 
-1. `.u` is not a functional key, so the entry comes from `unshifted_codepoint` →
-   `{code: 117, final: 'u'}`. **Entry found.**
-2. The utf8 short-circuit (`:157`) fires only for `.enter` / `.backspace`. Not `.u`.
-3. The `plain_text` branch requires `binding_mods.empty()`; ctrl is set → **skipped**.
-4. The `entry_ orelse` fallback that would `writeAll(event.utf8)` is **not reached**, because
-   an entry exists.
-5. Falls through to `KittySequence` → emits **`ESC[117;5u`**. Ctrl-E likewise `ESC[101;5u`.
+**The invariant, which is the part worth carrying:** the byte survives because Flight Deck never
+supplies an unshifted codepoint — not because the encoder promises anything. A caller that does
+supply one (the real `NSEvent` path derives it for a human keypress) makes `:132` yield an entry
+and flips the same call to `ESC[117;5u`, discarding the byte. No test guards this, because
+nothing under XCTest stands on a real surface.
 
-**Candidate root cause for the live rename bug** (a rename into a composer *holding a draft*
-submits the draft): if `Ctrl-U` leaves as `ESC[117;5u` and claude's composer does not act on
-that form, the box never clears, the injected text appends to the draft, and the submit sends
-both.
+**Consequences for what this file used to claim:**
 
-**Open, one pty probe away:** does claude's composer act on `ESC[117;5u`? Testable without a
-GUI — put a draft in the composer, send those bytes, look; test both forms so the result is
-self-diagnosing. Note a raw pty may leave claude in legacy mode, so the probe must detect
-which mode is active rather than assume.
+- The "candidate root cause for the live rename bug" is **withdrawn.** A rename into a composer
+  holding a draft does submit the draft, but not because Ctrl-U left as CSI-u — it does not.
+  **That bug currently has no identified cause.**
+- §7's raw-`\x04` pty-probe entry stands as a lesson, but its own reassuring clause ("ghostty
+  actually encodes Ctrl+U as `ESC[117;5u`") was itself unchecked, and is now falsified for this
+  call path.
+
+**What is genuinely open, and it is not the old question.** Live test #3 left
+`;5u;5u/rename Rename 3` at a zsh prompt — two CSI-u tails, matching Ctrl-E then Ctrl-U. The
+trace above says this path cannot emit them, and `git log -S` shows `text: byte` entered in
+6c2a39d and never changed, so the code under test did carry it. **Unexplained.** Asking "does
+claude honour `ESC[117;5u`" is moot while nothing sends it; the question is what produced those
+bytes. A probe must record **which keyboard mode was active and which code path sent the keys**,
+and refuse a verdict without establishing both.
 
 ---
 
@@ -201,6 +241,13 @@ unchecked:
 The retraction was right every time; the comfort clause bolted onto it was wrong every time.
 Three separate wrong conclusions came from probes asserting an outcome for a **configuration
 they never established** — not from wrong numbers.
+
+**Fourth instance, added 2026-09-25, and it is the sharpest one:** §4 of this file asserted that
+ghostty discards `sendControl`'s explicit byte and emits `ESC[117;5u`. The retraction it rested
+on was right — the old comment's phrasing *was* sloppy — but the replacement claim was false, and
+it was written into production comments before anyone traced the call site's own
+`unshifted_codepoint`. **A correction is not exempt from the rule it invokes.** When you overturn
+a claim, the replacement needs the same evidence you demanded of the original.
 
 ---
 

@@ -106,5 +106,46 @@ class PtyGateTests(unittest.TestCase):
         self.assertEqual(ctx._ptys, [])
 
 
+class ExitCodeTests(unittest.TestCase):
+    def test_a_version_change_alone_is_not_a_clean_run(self):
+        diff = {"changed": {}, "added": {}, "removed": {},
+                "versions_changed": {"claude": ("2.1.263", "2.1.281")}}
+        code, _ = run._exit_code(diff)
+        self.assertNotEqual(code, 0,
+            "a new agent build with identical cells must not report clean: the cells may be "
+            "identical only because a frozen fixture cannot see the change")
+
+    def test_a_clean_run_with_no_version_change_is_still_zero(self):
+        diff = {"changed": {}, "added": {}, "removed": {}, "versions_changed": {}}
+        code, _ = run._exit_code(diff)
+        self.assertEqual(code, 0)
+
+    def test_error_outranks_version_drift(self):
+        """Even when the version also moved, a harness failure (`error`) must still win --
+        the same ranking `_exit_code` already guarantees against plain capability drift."""
+        diff = {"changed": {}, "added": {"someRow": "error"}, "removed": {},
+                "versions_changed": {"claude": ("2.1.263", "2.1.281")}}
+        code, _ = run._exit_code(diff)
+        self.assertEqual(code, 3)
+
+    def test_capability_drift_outranks_version_drift_alone(self):
+        """A cell that actually moved is concrete, already-observed evidence -- stronger than
+        merely knowing the version number changed with no cell to show for it -- so plain
+        capability drift keeps its own code even when a version also moved."""
+        diff = {"changed": {"someRow": ("ok", "unclaimed")}, "added": {}, "removed": {},
+                "versions_changed": {"claude": ("2.1.263", "2.1.281")}}
+        code, _ = run._exit_code(diff)
+        self.assertEqual(code, 1)
+
+    def test_version_drift_has_its_own_code_distinct_from_drift_and_harness_failure(self):
+        diff = {"changed": {}, "added": {}, "removed": {},
+                "versions_changed": {"claude": ("2.1.263", "2.1.281")}}
+        code, _ = run._exit_code(diff)
+        self.assertNotIn(code, (0, 1, 3))
+        # Pinned exactly, not just "not one of the others": a future edit to `return 5` would
+        # satisfy the assertion above while silently colliding with the listing-churn code.
+        self.assertEqual(code, 6)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -4,10 +4,11 @@ import Foundation
 /// argument rather than two copies of the same trim-and-cap.
 ///
 /// **Neither agent strips shell metacharacters, and the two converged on that answer for
-/// different reasons — the channel the name travels down.** Codex's rename is
-/// `thread/name/set` over JSON-RPC and touches no shell at any point, so the strip only ever
-/// mangled the user's title: `fix build (part 2)` became `fix build part 2` in codex's own
-/// thread list. Claude's rename is `/rename <name>` typed into a pty, which used to double as
+/// different reasons — the channel the name travels down.** Codex's rename never reaches a
+/// shell: `thread/name/set` over JSON-RPC is what commits the thread, and although
+/// `CodexTextChannel.submitRename` ALSO types the name at a pty, it types into a rename modal
+/// codex drew — a pty is not a shell. So the strip only ever mangled the user's title:
+/// `fix build (part 2)` became `fix build part 2` in codex's own thread list. Claude's rename is `/rename <name>` typed into a pty, which used to double as
 /// a bare shell whenever `claude` itself was not yet running — an explicitly supported
 /// degradation the strip existed to guard. `SessionStore.inject` now refuses to type anywhere
 /// but a live, on-screen composer (see `ClaudeTextChannel`), so that bare-shell case cannot

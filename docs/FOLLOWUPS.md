@@ -1524,3 +1524,118 @@ recorded rather than fixed in this pass.
   an in-progress draft — claude restores and codex does not, because they travel different
   channels. AGENTS.md's "a feature shipped for one adapter is a defect" rule applies, but the
   window is two renames in flight inside ~600ms, and it predates this branch.
+
+## What actually sent CSI-u at a bare shell (2026-09-25)
+
+**Supersedes the entry written here on 2026-09-24**, which asked whether Claude's composer acts
+on `ESC[117;5u`. That entry has been withdrawn, not left in place — its own claim was wrong, so
+it is not reproduced here; docs/HANDOFF-agent-surface-findings.md §4 keeps the record of what it
+said and why. The question it asked is moot regardless: `TextInjecting.sendControl` does not send
+that sequence.
+
+`sendControl` passes an explicit control byte via `text:`, and **that byte is what reaches the
+terminal, under the kitty keyboard protocol as well as the legacy encoding.** Traced link by link
+through ghostty's encoder: Flight Deck never sets `unshiftedCodepoint` (it defaults to 0 and
+nothing in `Sources/` assigns it), ghostty's kitty table holds no plain letters, and
+`key_encode.zig:132` synthesizes a fallback entry only when `unshifted_codepoint > 0` — so no
+entry is found and the `:217` fallback writes `event.utf8` verbatim. `KittySequence` is built
+only *after* that point. Full derivation, and the correction of the earlier wrong claim, in
+docs/HANDOFF-agent-surface-findings.md §4.
+
+**The open question is now an observation nothing explains.** Live test #3 left the literal text
+`;5u;5u/rename Rename 3` at a zsh prompt after claude was killed in that tab — two CSI-u tails,
+matching Ctrl-E then Ctrl-U. The traced path cannot emit them, and `git log -S` shows `text: byte`
+entered in 6c2a39d and never changed, so the code under test did carry it. Either some other path
+sent those keys, or an assumption in the trace is wrong. **Unexplained.**
+
+**Two things must not be inferred from this.**
+
+- **The draft-rename bug has no identified cause.** A rename into a composer holding a draft
+  submits the draft; the "Ctrl-U leaves as CSI-u so the box never clears" hypothesis is dead, and
+  nothing has replaced it.
+- The byte's survival is **an unguarded invariant, not a guarantee.** Any caller that supplies an
+  unshifted codepoint — as the real `NSEvent` path derives for a human keypress — flips the same
+  call to `ESC[117;5u` and discards the byte. Nothing in the suite can catch that: no test stands
+  on a real surface.
+
+**Binding on any probe that settles this.** It **must record which keyboard mode was active and
+which code path actually sent the keys, and must refuse to report a verdict if it cannot
+establish both.** This is not boilerplate. This project has now produced four wrong conclusions
+from probes that asserted an outcome for a configuration they never established — including one
+where a bare pty left claude in *legacy* mode, so the probe exercised an encoder ghostty never
+uses in production, and including the 2026-09-24 correction above (**withdrawn**, not restored —
+see docs/HANDOFF-agent-surface-findings.md §4, which keeps the record). A probe that cannot name
+its configuration must fail, not conclude. See docs/HANDOFF-agent-surface-findings.md §7.
+
+## Claude has no live coverage in the adapter suite (2026-09-25)
+
+This branch's stated top priority was `claude.openPromptReader` — "the one row that should have
+caught 2.1.281 and didn't" — so it was rewritten to drive a live `claude` instead of the frozen
+`question-single.captured.jsonl` fixture (claude 2.1.241) it used to parse. The rewrite works,
+but its verdict moved `ok` -> **`error`**: a sandboxed claude cannot authenticate. Claude Code
+keys its keychain credential to a hash of `CLAUDE_CONFIG_DIR` — the default home uses the service
+`Claude Code-credentials`, any other config dir uses `Claude Code-credentials-<hash>` — and
+`AgentSandbox` hands every run a fresh temp home whose hash has no entry, so the sandboxed session
+always comes up "Not logged in", regardless of what `.claude.json` was copied in. Unblocking it
+means extracting the user's real OAuth token out of the login keychain — a security-sensitive act,
+escalated rather than performed here.
+
+`claude.escapeDeniesPermission`, the other row this branch added, needs the same thing (a real
+approval dialog raised in a live, authenticated claude pty) and hits the identical guard. So
+**claude has no live coverage in this suite today** — both of its live-turn rows fail closed on
+sandbox auth rather than measuring anything — and a `--tier full` run against the committed
+baseline exits `3` (harness failure) on that account.
+
+Stated plainly rather than buried: the plan's own top priority is **not delivered.**
+`claude.openPromptReader` still cannot catch a 2.1.281-class change; the honest gap it can close
+is refusing to report a false `ok` the way the frozen fixture did. That is a real improvement over
+a green fixture that measures nothing live, but it is not the fix, and exit code `6` (version
+drift, see `scripts/adapterprobe/README.md`) is the compensating control that currently stands in
+for it — a version bump gets caught, a same-version behaviour change on claude still would not.
+
+Also unproven: **all three** new full-tier rows have never once run to completion against a live
+agent. The two claude rows (`claude.openPromptReader`'s live rewrite,
+`claude.escapeDeniesPermission`) stop at the auth guard above.
+`codex.codexPasteDetectsSameBurstReturn` is not blocked by auth but has simply never been run —
+`baseline.json` was last written before this branch and holds no cell for it, so no comment may
+cite it as evidence yet. `baseline.json` is deliberately not refreshed against this branch; see
+`scripts/adapterprobe/README.md`'s baseline note for the resulting diff.
+
+**Two premises inside the codex paste row are untested, and both fail SAFE — to `error`, never to
+a wrong verdict — which is also why its expected first live result is `error` rather than `ok`.**
+(1) It establishes "typed" by looking for the marker in `term.display()`, which assumes codex
+renders a detected paste literally rather than as a `[Pasted N chars]` placeholder; no codex
+fixture captures a pasted composer, so this is unverified. (2) It reads the rollout path `prepare`
+returned, which requires `codex resume <id>` to append to that same file — and this suite already
+records `codex.resumeCommand` as **broken** (history not reattached). Whoever runs `--tier full`
+first should expect to debug the row before trusting a verdict from it, and should read an `error`
+here as "the row could not establish its configuration", which is what it is designed to say.
+
+## adapterprobe: two harness gaps found while wiring the drift gate (2026-09-25)
+
+Both found incidentally during the durable-control-surface work, both verified against the code
+at `d85a40f`, and both are pre-existing rather than introduced by it.
+
+**1. `seed_one_turn` never confirms a model turn completed, so no claude row has ever exercised
+one.** `run.py:333-349` types a marker, waits for **its own echo** (`term.wait([seeded_marker])` —
+which matches the instant the typed line is echoed, regardless of whether the model ever answers),
+then dwells `pump(20)` and tears the pty down. Its docstring is candid that it does not depend on
+the model replying. So a row that asks for "prior history to attach to" can proceed against a
+transcript holding a user line and no assistant turn. This is the *deeper* reason the
+`openPromptReader` row sat green through claude 2.1.281 — the frozen fixture was the visible half;
+the other half is that the suite's claude arms never completed a live turn at all. Fixing it means
+waiting on something only a real reply produces, which costs tokens, so it is a `--tier full`
+concern and wants a positive control of its own (see the codex paste row for the shape).
+
+**2. `ANTHROPIC_BASE_URL` leaks into the sandboxed agent.** `sandbox.py:24-29`'s
+`_CLAUDE_SESSION_MARKERS` strips the `CLAUDE_CODE_*` family so a probe running *inside* a Claude
+Code session does not inherit transcript-disabling state — a good guard — but it does not strip
+`ANTHROPIC_BASE_URL`. That variable is set in this machine's environment
+(`http://localhost:8787`), so a sandboxed `claude` points at a local inference gateway rather than
+the real API, and every live claude row silently measures whatever that gateway does. Add it to the
+strip list. Two consequences worth separating: it is a **sandbox-hygiene bug** regardless, and it
+independently answers spike B7 in the control-surface plan, which recorded the proxy route as
+"unresolved, needs execution" — the base URL *is* honoured and a gateway is already running, so a
+proxy tier would be far cheaper than the plan assumed. That does not make the proxy a good idea
+(it is observation, never control, and blind to everything client-side); it just removes the
+feasibility unknown.

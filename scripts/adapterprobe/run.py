@@ -53,12 +53,39 @@ GLYPH = {"ok": "✓", "broken": "✗", "by-design": "⊘", "rotted": "!",
 # (not hung) agent gets force-recorded as `error` on exactly the rows this suite exists to
 # measure, and the next task pins that wrong verdict into `baseline.json`.
 #
-# `_resume_command` (full tier) is the worst case: `prepare` (<= PROBE_TIMEOUT) + `seed_one_turn`
-# (its own launch-command probe <= PROBE_TIMEOUT, plus two 30s `term.wait`s, plus a fixed 20s
+# `_resume_command` (full tier): `prepare` (<= PROBE_TIMEOUT) + `seed_one_turn` (its own
+# launch-command probe <= PROBE_TIMEOUT, plus two 30s `term.wait`s, plus a fixed 20s
 # `term.pump`) + its own `resume-command` probe (<= PROBE_TIMEOUT) + a 60s attach `term.wait`.
+#
+# `_open_prompt_reader`'s claude arm is the worst case, and it is longer because it waits on a
+# MODEL, not on a file: `prepare` (<= PROBE_TIMEOUT) + `launch-command` (<= PROBE_TIMEOUT) + a
+# 30s up-marker `term.wait` + a 120s wait for the AskUserQuestion dialog to actually be raised +
+# a 15s transcript-existence `_poll` + a 5s re-check that the dialog is still up + `open-prompt`
+# (<= PROBE_TIMEOUT).
 PROBE_TIMEOUT = 45  # ProbeContext.__init__'s own default `timeout=`
 _SEED_ONE_TURN_CHAIN = PROBE_TIMEOUT + 30 + 30 + 20  # == 125
-_WORST_FULL_CHAIN = PROBE_TIMEOUT + _SEED_ONE_TURN_CHAIN + PROBE_TIMEOUT + 60  # == 275
+_RESUME_COMMAND_CHAIN = PROBE_TIMEOUT + _SEED_ONE_TURN_CHAIN + PROBE_TIMEOUT + 60  # == 275
+_OPEN_PROMPT_CLAUDE_CHAIN = (
+    PROBE_TIMEOUT + PROBE_TIMEOUT + 30 + 120 + 15 + 5 + PROBE_TIMEOUT  # == 305
+)
+_ESCAPE_DENIES_CHAIN = (
+    PROBE_TIMEOUT + PROBE_TIMEOUT + 30 + 60 + 15  # == 195
+)
+# Two long polled waits, not dwells, and both are long deliberately. The `90` is the positive
+# control: it returns the moment the marker reaches the rollout, so only a stalled codex pays it.
+# The `60` is the regression arm, and it has to be generous even though it usually runs to
+# completion -- it waits for an ABSENCE (a same-burst write that is NOT submitted), and a short
+# window there made a merely-slow codex read as `ok` for the exact regression the row exists to
+# catch. See `_codex_paste_detects_same_burst_return`.
+_CODEX_PASTE_CHAIN = (
+    PROBE_TIMEOUT + PROBE_TIMEOUT + 30 + 60 + PROBE_TIMEOUT + 30 + 90  # == 345
+)
+_WORST_FULL_CHAIN = max(
+    _RESUME_COMMAND_CHAIN,        # 275
+    _OPEN_PROMPT_CLAUDE_CHAIN,    # 305
+    _ESCAPE_DENIES_CHAIN,         # 195
+    _CODEX_PASTE_CHAIN,           # 345 -- now the worst chain; raise the cap, not this row
+)  # == 345
 
 ROW_TIMEOUT = {"cheap": 120, "full": 420}
 assert ROW_TIMEOUT["full"] > _WORST_FULL_CHAIN, (
@@ -412,12 +439,35 @@ def _capture(ctx):
 
 
 def _exit_code(diff):
-    """0 clean, 1 capability drift, 3 harness failure -- and `error` never satisfies any
-    baseline expectation, so it always outranks plain drift. That has to hold whether the
-    `error` cell shows up in `changed` (something that used to read `ok` now reads `error`) or
-    in `added` (a cell with no baseline entry at all reads `error`) -- the latter is this
-    repo's exact current state before any `baseline.json` exists, and a wholly broken harness
-    must not be reported as mere "capability drift"."""
+    """0 clean, 1 capability drift, 3 harness failure, 6 version drift -- and `error` never
+    satisfies any baseline expectation, so it always outranks every other signal, plain drift
+    included. That has to hold whether the `error` cell shows up in `changed` (something that
+    used to read `ok` now reads `error`) or in `added` (a cell with no baseline entry at all
+    reads `error`) -- the latter is this repo's exact current state before any `baseline.json`
+    exists, and a wholly broken harness must not be reported as mere "capability drift".
+
+    6 is version drift: `diff["versions_changed"]` is non-empty -- the live agent this run
+    talked to is not the one `baseline.json` was recorded against -- but no cell actually
+    differs. This is the exact bug this code exists to close: Claude Code 2.1.281 silently
+    changed when a transcript record is written, and the row covering that capability kept
+    reading `ok` for nineteen versions because it reads a fixture frozen at 2.1.241 that still
+    parses -- so with no code of its own, a version bump with unchanged cells used to fall
+    through to plain `0`, indistinguishable from an actually-clean run. Ranked below capability
+    drift (1): an observed cell difference is concrete evidence something changed, a stronger
+    and more actionable signal than merely knowing the version number moved with no cell to
+    show for it, so if both are true in the same run 1 wins -- the version bump is still visible
+    in the printed diff either way. Ranked above clean (0): a run must never call itself clean
+    while sitting on an agent build its baseline has never seen, cells notwithstanding.
+
+    `corpus_staleness` (the checked-in grammar corpus vs. the live agent's version) is a
+    related but deliberately advisory-only signal, printed by `main()` and never folded in here.
+    Promoting a capture into that corpus is a manual, reviewed step (see `CORPUS_CAPTURE_DIR`'s
+    comment) with no fixed cadence, so failing the run merely because nobody has re-captured it
+    since the last agent bump would make the exit code permanently red for reasons no code
+    change here can fix. `versions_changed` above already fails the run on the fact that
+    actually caused the incident -- the live agent baseline.json was recorded against moved --
+    so real drift still gets caught; corpus staleness stays a nudge to go recapture, not a gate.
+    """
     harness_failures = {k: v for k, v in diff["changed"].items()
                          if v[1] == "error" and v[0] != "error"}
     harness_failures.update({k: v for k, v in diff["added"].items() if v == "error"})
@@ -425,6 +475,8 @@ def _exit_code(diff):
         return 3, harness_failures
     if diff["changed"] or diff["added"] or diff["removed"]:
         return 1, harness_failures
+    if diff.get("versions_changed"):
+        return 6, harness_failures
     return 0, harness_failures
 
 

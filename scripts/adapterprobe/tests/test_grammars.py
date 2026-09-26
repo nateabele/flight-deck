@@ -13,11 +13,20 @@ def run(args, stdin=""):
 
 
 class GrammarTests(unittest.TestCase):
-    def test_claude_strips_shell_metacharacters_codex_does_not(self):
+    def test_neither_agent_strips_shell_metacharacters_but_both_strip_control_characters(self):
+        # Production dropped claude's shell-metacharacter strip once `SessionStore.inject`
+        # started gating on a live composer box (see `AgentAdapter.sanitizedTitle`'s own
+        # comment) -- this test used to assert the removed behaviour and had been failing
+        # since. Both agents now go through the same `AgentTitle.sanitized` with an empty
+        # forbidden set: metacharacters survive for both, a newline survives for neither.
         _, c = run(["sanitize", "claude", "a; rm -rf /"])
         _, x = run(["sanitize", "codex", "a; rm -rf /"])
-        self.assertNotIn(";", c["sanitized"] or "")
+        self.assertIn(";", c["sanitized"] or "")
         self.assertIn(";", x["sanitized"] or "")
+        _, c_nl = run(["sanitize", "claude", "line1\nline2"])
+        _, x_nl = run(["sanitize", "codex", "line1\nline2"])
+        self.assertNotIn("\n", c_nl["sanitized"] or "")
+        self.assertNotIn("\n", x_nl["sanitized"] or "")
 
     def test_codex_refuses_to_read_a_title_from_a_transcript(self):
         _, x = run(["title-from-transcript", "codex", ROLLOUT_FIXTURE])

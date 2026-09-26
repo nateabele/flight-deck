@@ -32,7 +32,10 @@ import Foundation
 struct ClaudeTextChannel: AgentTextChannel {
     /// Claude shows this in the input box when messages are queued behind a running turn — the
     /// input itself is empty and typing appends another queued message, so it is a hint, not a
-    /// draft. Version-pinned to Claude Code's wording (verified 2.1.268). Only `isComposerEmpty`
+    /// draft. Version-pinned to Claude Code's wording (verified 2.1.268 **by hand — this one is
+    /// deliberately NOT machine-checked**, unlike the sibling claims now carried as rows in
+    /// `scripts/adapterprobe/capabilities.py`; the reason it is safe to leave unchecked is the
+    /// paragraph below, not an absence of drift). Only `isComposerEmpty`
     /// reads it now, and `isComposerEmpty` only feeds the `composer=` diagnostic string
     /// (`promptTypingComposerState`) — nothing gates typing on it. So a wording drift merely
     /// mislabels that log line; it can never cause a clobber, because injection is gated on
