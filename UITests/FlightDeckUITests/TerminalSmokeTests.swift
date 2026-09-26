@@ -110,6 +110,42 @@ final class TerminalSmokeTests: XCTestCase {
         app.windows.containing(.button, identifier: "Agents").firstMatch
     }
 
+    /// A point `dx` **points** in from a project heading's leading edge, vertically centred.
+    ///
+    /// Points rather than a normalized fraction, deliberately. The sidebar is ~240pt wide and
+    /// both seeded names are short — the home directory ("me" here) and the temporary one
+    /// ("T") — so any fraction big enough to clear the chevron on a wide sidebar overshoots a
+    /// short name into empty row space, which is exactly the hazard that made the midpoint
+    /// press vacuous before this test existed. Shared with the sidebar-churn hunt case below,
+    /// which drives the identical drag repeatedly rather than duplicating this geometry.
+    private func headingPoint(_ app: XCUIApplication, _ index: Int, inset dx: CGFloat) -> XCUICoordinate {
+        app.descendants(matching: .any).matching(identifier: "project-header")
+            .element(boundBy: index)
+            .coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0.5))
+            .withOffset(CGVector(dx: dx, dy: 0))
+    }
+
+    /// The drop target for a heading drag: the drop lands below that project's own rows, so
+    /// aim well beneath the heading rather than exactly on it.
+    private func belowHeading(_ app: XCUIApplication, _ index: Int) -> XCUICoordinate {
+        app.descendants(matching: .any).matching(identifier: "project-header")
+            .element(boundBy: index)
+            .coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 1.0))
+            .withOffset(CGVector(dx: 0, dy: 60))
+    }
+
+    /// The session titles, top to bottom. Order is read from the SESSION rows, never from the
+    /// headings: a heading is an `.accessibilityElement(children: .combine)` and XCUITest
+    /// reports its label as `""` (see the FOLLOWUPS note on project-header accessibility), so
+    /// an assertion on heading labels compares `""` to `""` and passes no matter what happened.
+    /// Each seeded project owns exactly one session, so the session order IS the project order
+    /// — and the session COUNT is the collapse state, since a collapsed project contributes no
+    /// session rows (`SidebarRow.rows(for:)`).
+    private func sessionOrder(_ app: XCUIApplication) -> [String?] {
+        let rows = app.staticTexts.matching(identifier: "session-row-title")
+        return (0..<rows.count).map { rows.element(boundBy: $0).value as? String }
+    }
+
     /// The one behaviour that earns its own launch.
     ///
     /// Reordering projects needs TWO projects, and the big test's seeded slate has one. The
@@ -175,35 +211,9 @@ final class TerminalSmokeTests: XCTestCase {
         XCTAssertEqual(rows.count, 2, "precondition: one session per seeded project")
         assertFlightDeckIsFrontmost(app, "after launch")
 
-        /// A point `dx` **points** in from a heading's leading edge, vertically centred.
-        ///
-        /// Points rather than a normalized fraction, deliberately. The sidebar is ~240pt wide
-        /// and both seeded names are short — the home directory ("me" here) and the temporary
-        /// one ("T") — so any fraction big enough to clear the chevron on a wide sidebar
-        /// overshoots a short name into empty row space, which is exactly the hazard that made
-        /// the midpoint press below vacuous.
-        func headingPoint(_ index: Int, inset dx: CGFloat) -> XCUICoordinate {
-            headers.element(boundBy: index)
-                .coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0.5))
-                .withOffset(CGVector(dx: dx, dy: 0))
-        }
-
-        /// The drop target for a heading drag: the drop lands below that project's own rows,
-        /// so aim well beneath the heading rather than exactly on it.
-        func belowHeading(_ index: Int) -> XCUICoordinate {
-            headers.element(boundBy: index)
-                .coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 1.0))
-                .withOffset(CGVector(dx: 0, dy: 60))
-        }
-
-        /// The two session titles, top to bottom. Order is read from the SESSION rows, never
-        /// from the headings: a heading is an `.accessibilityElement(children: .combine)` and
-        /// XCUITest reports its label as `""` (see the FOLLOWUPS note on project-header
-        /// accessibility), so an assertion on heading labels compares `""` to `""` and passes
-        /// no matter what happened. Each seeded project owns exactly one session, so the
-        /// session order IS the project order — and the session COUNT is the collapse state,
-        /// since a collapsed project contributes no session rows (`SidebarRow.rows(for:)`).
-        func sessionOrder() -> [String?] { (0..<rows.count).map { rows.element(boundBy: $0).value as? String } }
+        // `headingPoint`/`belowHeading`/`sessionOrder` now live at class scope (above
+        // `preferencesWindow`) so the sidebar-churn hunt case below can drive the identical
+        // drag without duplicating this geometry.
 
         // Evidence rather than an assertion: these are the numbers every coordinate below is
         // derived from, and there is no stable value to pin them to. When a group here starts
@@ -245,7 +255,7 @@ final class TerminalSmokeTests: XCTestCase {
                 + "exists to replace (width=\(headers.element(boundBy: 0).frame.width))"
             )
 
-            let before = sessionOrder()
+            let before = sessionOrder(app)
             // 24pt in: past the chevron — a `.small` SF Symbol plus the HStack's 4pt spacing,
             // comfortably under 20pt — and into the first characters of the name.
             //
@@ -254,10 +264,10 @@ final class TerminalSmokeTests: XCTestCase {
             // was completely broken. With a short name on a wide sidebar the midpoint lands in
             // empty row space, where there is no title view to swallow the mouse-down, so the
             // one place a new recognizer would break first was the one place nothing pressed.
-            headingPoint(0, inset: 24).press(forDuration: 0.6, thenDragTo: belowHeading(1))
+            headingPoint(app, 0, inset: 24).press(forDuration: 0.6, thenDragTo: belowHeading(app, 1))
             settle()
 
-            let after = sessionOrder()
+            let after = sessionOrder(app)
             XCTAssertNotEqual(
                 after, before,
                 "dragging a project heading BY ITS TITLE did not reorder anything — something "
@@ -276,15 +286,15 @@ final class TerminalSmokeTests: XCTestCase {
             // swallowing the mouse-down. That accusation is only worth making about a press
             // that reached this app.
             assertFlightDeckIsFrontmost(app, "before the control drag")
-            let before = sessionOrder()
+            let before = sessionOrder(app)
             // Both ends are coordinates: the press/drag pair is typed, and mixing an element
             // source with a coordinate destination does not compile.
             headers.element(boundBy: 0)
                 .coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
-                .press(forDuration: 0.6, thenDragTo: belowHeading(1))
+                .press(forDuration: 0.6, thenDragTo: belowHeading(app, 1))
             settle()
 
-            let after = sessionOrder()
+            let after = sessionOrder(app)
             XCTAssertNotEqual(
                 after, before,
                 "dragging a project heading did not reorder anything — a gesture on the header "
@@ -296,7 +306,7 @@ final class TerminalSmokeTests: XCTestCase {
             )
         }
 
-        XCTContext.runActivity(named: "a single click on a project heading toggles collapse") { _ in
+        XCTContext.runActivity(named: "a chevron click toggles collapse; a body click selects the project") { _ in
             // Asserted, not assumed: `activate()` loses to a human using the machine, and a
             // click that lands in someone else's app would leave every count below unchanged —
             // which is indistinguishable from a broken toggle without this line. The two drag
@@ -308,16 +318,19 @@ final class TerminalSmokeTests: XCTestCase {
                 "precondition: both projects expanded, one session row each (rows=\(rows.count))"
             )
 
-            // The midpoint deliberately, this time: the whole row is the toggle, and the
-            // midpoint is the one part of it that is neither the chevron nor the
-            // hover-revealed X.
-            let midpoint = headers.element(boundBy: 0)
-                .coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+            // The chevron zone is the leading 22pt of the ROW view
+            // (`SidebarClickIntent.chevronZoneWidth`), measured from the `NSTableRowView`'s
+            // leading edge — which sits a few points left of the header element's own frame.
+            // +10 from the element's left edge lands inside that zone without having to guess
+            // exactly where the row's edge falls relative to the element's.
+            let chevron = headers.element(boundBy: 0)
+                .coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0.5))
+                .withOffset(CGVector(dx: 10, dy: 0))
 
-            midpoint.click()
+            chevron.click()
             XCTAssertTrue(
                 waitFor(timeout: 5) { rows.count == 1 },
-                "clicking a project heading did not collapse it (rows=\(rows.count)). The "
+                "clicking a project's chevron did not collapse it (rows=\(rows.count)). The "
                 + "toggle is decided a press later, in `.default` mode only, so a press that "
                 + "never resolved to a row — or that was still down when the decision ran, "
                 + "which `finishToggleDecision` declines outright — looks exactly like this."
@@ -332,12 +345,27 @@ final class TerminalSmokeTests: XCTestCase {
             settle()
             settle()
 
-            midpoint.click()
+            chevron.click()
             XCTAssertTrue(
                 waitFor(timeout: 5) { rows.count == 2 },
-                "clicking the collapsed heading did not expand it again (rows=\(rows.count)) — "
-                + "the toggle is one-way, or the second click was read as a double-click"
+                "clicking the chevron again did not expand it (rows=\(rows.count)) — the toggle "
+                + "is one-way, or the second click was read as a double-click"
             )
+            settle()
+            settle()
+
+            // The midpoint is now the SELECT gesture, not the toggle — chevron and body split
+            // apart in this task. A row-body click opening the project view, with the row count
+            // unchanged, is what proves that split rather than the click having landed back on
+            // the chevron by coincidence.
+            headers.element(boundBy: 0)
+                .coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+                .click()
+            XCTAssertTrue(
+                app.descendants(matching: .any)["project-view"].waitForExistence(timeout: 5),
+                "clicking a project row's body did not open the project view"
+            )
+            XCTAssertEqual(rows.count, 2, "clicking a project row's body collapsed it")
         }
 
         // What this group does and does not establish, since the difference is not obvious.
@@ -447,7 +475,7 @@ final class TerminalSmokeTests: XCTestCase {
                 "the surviving project lost its session row — closing one project collapsed or "
                 + "closed the other (rows=\(rows.count))"
             )
-            XCTAssertEqual(sessionOrder().first ?? nil, survivor, "the wrong project closed")
+            XCTAssertEqual(sessionOrder(app).first ?? nil, survivor, "the wrong project closed")
         }
 
         app.terminate()
@@ -528,6 +556,105 @@ final class TerminalSmokeTests: XCTestCase {
             } else {
                 failures.append("iteration \(i): no confirmation appeared (checkbox stayed off)")
             }
+        }
+
+        XCTAssertTrue(
+            failures.isEmpty,
+            "\(failures.count)/\(iterations) iterations failed:\n" + failures.joined(separator: "\n")
+        )
+        app.terminate()
+    }
+
+    /// Flake hunt for row selection interfering with drag reorder. **Skipped unless
+    /// `FLIGHTDECK_SIDEBAR_HUNT` is set**, so it costs normal runs nothing:
+    ///
+    ///     TEST_RUNNER_FLIGHTDECK_SIDEBAR_HUNT=1 FLIGHTDECK_TEST_THROTTLE=0 ./scripts/smoke.sh
+    ///
+    /// The `TEST_RUNNER_` prefix is required, same as the permission-bypass hunt above:
+    /// `xcodebuild` only forwards env vars with that prefix into the UI-test runner, stripping
+    /// it on the way in, and a bare `FLIGHTDECK_SIDEBAR_HUNT` silently skips this test rather
+    /// than failing.
+    ///
+    /// This task split the project header's single click into two readings — chevron collapses,
+    /// body selects (opens the project view) — sitting alongside the drag-to-reorder gesture
+    /// that already lived on the same mouse-down. Making the body a NATIVE selection target is
+    /// exactly the kind of change that can make `NSTableView` start a selection drag of its own
+    /// on the same press `SidebarInputMonitor` is trying to read as a reorder, and that
+    /// contention would be rate-based, not deterministic — hence a hunt rather than a single
+    /// assertion. Each iteration selects header 0, drags it below header 1, confirms the order
+    /// flipped, then selects again — so a sample that goes wrong points at the select-then-drag
+    /// sequence specifically, not the drag alone (already covered, without churn, by the
+    /// control group in the reorder test above).
+    ///
+    /// If this comes up red, the plan's documented fallback is to put `.selectionDisabled()`
+    /// back on the headers and rely on `selectRow` alone for the project-view-opens behaviour.
+    func testProjectRowSelectAndReorderUnderChurn() throws {
+        try XCTSkipUnless(
+            ProcessInfo.processInfo.environment["FLIGHTDECK_SIDEBAR_HUNT"] != nil,
+            "flake hunt — set FLIGHTDECK_SIDEBAR_HUNT=1 to run"
+        )
+
+        let app = XCUIApplication()
+        app.launchArguments += [
+            "-ApplePersistenceIgnoreState", "YES",
+            "-FlightDeckResetState", "YES",
+            "-FlightDeckSeedSecondProject", "YES",
+        ]
+        app.launch()
+        app.activate()
+        XCTAssertTrue(app.windows.firstMatch.waitForExistence(timeout: 15), "no window appeared")
+
+        let headers = app.descendants(matching: .any).matching(identifier: "project-header")
+        XCTAssertTrue(
+            headers.element(boundBy: 1).waitForExistence(timeout: 10),
+            "expected two project headings; the seed flag may not have taken effect"
+        )
+
+        let iterations = 20
+        var failures: [String] = []
+
+        // A single coordinate does double duty as both gestures below, exactly as it does in
+        // the reorder test's "control" group and this task's collapse group: a quick click
+        // selects, a press-and-hold-then-drag reorders. Re-deriving it after body 0 has moved
+        // is what makes each iteration select and drag the CURRENT top header, not a stale one.
+        func header0Body() -> XCUICoordinate {
+            headers.element(boundBy: 0).coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+        }
+
+        for i in 1...iterations {
+            header0Body().click()
+            guard app.descendants(matching: .any)["project-view"].waitForExistence(timeout: 5) else {
+                failures.append("iteration \(i): selecting header 0 did not open the project view")
+                continue
+            }
+            settle()
+
+            let before = sessionOrder(app)
+            header0Body().press(forDuration: 0.6, thenDragTo: belowHeading(app, 1))
+            settle()
+
+            let after = sessionOrder(app)
+            guard after != before else {
+                failures.append(
+                    "iteration \(i): dragging header 0 below header 1 did not reorder anything "
+                    + "(got \(after)) — selection likely swallowed the mouse-down"
+                )
+                continue
+            }
+            guard after.compactMap({ $0 }).sorted() == before.compactMap({ $0 }).sorted() else {
+                failures.append(
+                    "iteration \(i): the reorder lost or duplicated a project "
+                    + "(before=\(before), after=\(after))"
+                )
+                continue
+            }
+
+            header0Body().click()
+            guard app.descendants(matching: .any)["project-view"].waitForExistence(timeout: 5) else {
+                failures.append("iteration \(i): re-selecting header 0 after the drag did not open the project view")
+                continue
+            }
+            settle()
         }
 
         XCTAssertTrue(
