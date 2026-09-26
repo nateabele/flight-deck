@@ -535,12 +535,22 @@ page.
     down through the list. The field must stay glued to the keyboard's top edge the whole way,
     Messages-style — not sit still above a widening gap and snap down when the finger lifts,
     which is what SwiftUI's own keyboard avoidance did (its keyboard safe area only moves on
-    show/hide notifications, and a drag posts none until it ends). Then the four shapes around
-    it: release halfway and the keyboard springs back with the field riding it; tap the field
-    and it slides up with the keyboard, no jump at either end; with the keyboard up the last
-    message is not hidden behind the composer; and a blocked `PromptCard` rides above the field
-    throughout. A snap here means the probe in `KeyboardOverlapReader` is not being laid out on
-    every frame of the drag — the fallback its spec names is a `CADisplayLink` sampling
+    show/hide notifications, and a drag posts none until it ends). Then the shapes around it:
+    - **Smooth at both speeds.** Drag slowly, then flick fast. The field must move without
+      judder either way. Jerkiness here means a per-frame value is reaching LAYOUT again —
+      `KeyboardLiftedInset` pads only by the settled overlap and offsets by the live one;
+      padding by the drag re-lays the whole `List` out under your finger on every frame.
+    - **Release halfway.** The keyboard springs back up and the field rides it, no gap and no
+      jump when it lands.
+    - **Tap to raise.** Tap the field with the keyboard down: it slides up with the keyboard,
+      no jump at either end. A field left UNDER the keyboard means the probe is not tracking —
+      it must be pinned to the root view controller's view's `keyboardLayoutGuide`, not the
+      window's, which on iOS 18.3.1 never moves.
+    - With the keyboard up the last message is not hidden behind the composer, and a blocked
+      `PromptCard` rides above the field throughout.
+
+    A snap at the end of a drag means the probe in `KeyboardOverlapReader` is not being laid
+    out on every frame of it — the fallback its spec names is a `CADisplayLink` sampling
     `keyboardLayoutGuide.layoutFrame` while the drag lasts, in that same file.
 
 ## A second checklist: the iOS plumbing
