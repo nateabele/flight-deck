@@ -52,6 +52,95 @@ final class SidebarClickIntentTests: XCTestCase {
             inChevronZone: true))
     }
 
+    /// `selectsRow`'s counterpart to `toggles(...)` above: same defaults, `inChevronZone: false`
+    /// fixed, since selection is only ever a candidate outside the chevron zone.
+    private func selects(
+        from down: CGPoint,
+        to up: CGPoint,
+        downRow: String? = nil,
+        upRow: String? = nil,
+        clickCount: Int = 1,
+        pressedRowControl: Bool = false
+    ) -> Bool {
+        SidebarClickIntent.selectsRow(
+            downPoint: down,
+            upPoint: up,
+            downRow: downRow ?? row,
+            upRow: upRow ?? downRow ?? row,
+            clickCount: clickCount,
+            pressedRowControl: pressedRowControl,
+            inChevronZone: false
+        )
+    }
+
+    func testAPlainClickOutsideTheChevronZoneSelects() {
+        XCTAssertTrue(selects(from: CGPoint(x: 100, y: 10), to: CGPoint(x: 100, y: 10)))
+    }
+
+    func testADragOutsideTheChevronZoneDoesNotSelect() {
+        XCTAssertFalse(selects(from: CGPoint(x: 100, y: 10), to: CGPoint(x: 100, y: 30)))
+    }
+
+    func testADoubleClickOutsideTheChevronZoneDoesNotSelect() {
+        XCTAssertFalse(selects(
+            from: CGPoint(x: 100, y: 10), to: CGPoint(x: 100, y: 10), clickCount: 2))
+    }
+
+    func testAPressOnTheCloseButtonDoesNotSelect() {
+        XCTAssertFalse(selects(
+            from: CGPoint(x: 100, y: 10), to: CGPoint(x: 100, y: 10), pressedRowControl: true))
+    }
+
+    func testReleasingOverADifferentRowDoesNotSelect() {
+        XCTAssertFalse(selects(
+            from: CGPoint(x: 100, y: 10), to: CGPoint(x: 100, y: 10),
+            downRow: row, upRow: otherRow))
+    }
+
+    func testInsideTheChevronZoneAPlainClickDoesNotSelect() {
+        // The mirror image of `testAPlainClickOutsideTheChevronZoneSelects`: the zone is
+        // `togglesCollapse`'s job, not this one's.
+        XCTAssertFalse(SidebarClickIntent.selectsRow(
+            downPoint: .init(x: 8, y: 10), upPoint: .init(x: 8, y: 10),
+            downRow: row, upRow: row, clickCount: 1, pressedRowControl: false,
+            inChevronZone: true))
+    }
+
+    func testTogglesCollapseAndSelectsRowAreNeverBothTrue() {
+        // A small table over the dimensions either rule can flip on: which zone the press
+        // landed in, click vs. drag, click count, the close-button exclusion, and row identity.
+        // `inChevronZone` is the only one of these the two rules disagree about, so no row of
+        // this table should ever produce true from both.
+        struct Case { let down, up: CGPoint; let downRow, upRow: String?; let clickCount: Int; let pressedRowControl: Bool }
+        let cases: [Case] = [
+            Case(down: .init(x: 8, y: 10), up: .init(x: 8, y: 10), downRow: row, upRow: row, clickCount: 1, pressedRowControl: false),
+            Case(down: .init(x: 8, y: 10), up: .init(x: 8, y: 30), downRow: row, upRow: row, clickCount: 1, pressedRowControl: false),
+            Case(down: .init(x: 100, y: 10), up: .init(x: 100, y: 10), downRow: row, upRow: row, clickCount: 1, pressedRowControl: false),
+            Case(down: .init(x: 100, y: 10), up: .init(x: 100, y: 30), downRow: row, upRow: row, clickCount: 1, pressedRowControl: false),
+            Case(down: .init(x: 8, y: 10), up: .init(x: 8, y: 10), downRow: row, upRow: row, clickCount: 2, pressedRowControl: false),
+            Case(down: .init(x: 100, y: 10), up: .init(x: 100, y: 10), downRow: row, upRow: row, clickCount: 2, pressedRowControl: false),
+            Case(down: .init(x: 8, y: 10), up: .init(x: 8, y: 10), downRow: row, upRow: row, clickCount: 1, pressedRowControl: true),
+            Case(down: .init(x: 100, y: 10), up: .init(x: 100, y: 10), downRow: row, upRow: row, clickCount: 1, pressedRowControl: true),
+            Case(down: .init(x: 8, y: 10), up: .init(x: 8, y: 10), downRow: row, upRow: otherRow, clickCount: 1, pressedRowControl: false),
+            Case(down: .init(x: 100, y: 10), up: .init(x: 100, y: 10), downRow: row, upRow: otherRow, clickCount: 1, pressedRowControl: false),
+            Case(down: .init(x: 8, y: 10), up: .init(x: 8, y: 10), downRow: nil, upRow: nil, clickCount: 1, pressedRowControl: false),
+        ]
+        for inChevronZone in [true, false] {
+            for c in cases {
+                let toggles = SidebarClickIntent.togglesCollapse(
+                    downPoint: c.down, upPoint: c.up, downRow: c.downRow, upRow: c.upRow,
+                    clickCount: c.clickCount, pressedRowControl: c.pressedRowControl,
+                    inChevronZone: inChevronZone)
+                let selects = SidebarClickIntent.selectsRow(
+                    downPoint: c.down, upPoint: c.up, downRow: c.downRow, upRow: c.upRow,
+                    clickCount: c.clickCount, pressedRowControl: c.pressedRowControl,
+                    inChevronZone: inChevronZone)
+                XCTAssertFalse(toggles && selects,
+                                "toggle and select both true for \(c), inChevronZone=\(inChevronZone)")
+            }
+        }
+    }
+
     func testAPressThatBarelyMovesIsAClick() {
         // 3pt of travel: a hand resting on the mouse, not a drag.
         XCTAssertTrue(toggles(from: CGPoint(x: 40, y: 200), to: CGPoint(x: 42, y: 198)))

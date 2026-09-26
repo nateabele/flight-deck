@@ -393,7 +393,8 @@ final class SidebarInputMonitor {
         let upIdentity = rowIdentity?(rowIndex)
         // The index resolved NOW, not the one pressed: whichever callback fires below, the rule
         // has just proved the two name the same row, and it is today's index that indexes
-        // today's `sidebarRows`.
+        // today's `sidebarRows`. `togglesCollapse` and `selectsRow` share every guard but
+        // `inChevronZone`, so at most one of them can answer true for a given press.
         if SidebarClickIntent.togglesCollapse(
             downPoint: downOnScreen,
             upPoint: upOnScreen,
@@ -404,12 +405,15 @@ final class SidebarInputMonitor {
             inChevronZone: inChevronZone
         ) {
             toggleRow?(rowIndex)
-        } else if !inChevronZone, clickCount == 1, !pressedRowControl, downIdentity == upIdentity,
-                  hypot(upOnScreen.x - downOnScreen.x, upOnScreen.y - downOnScreen.y) < SidebarClickIntent.dragThreshold {
-            // The same click-vs-drag test as above, run by hand: `togglesCollapse` always
-            // answers false outside the chevron zone, so it cannot also be the source of "was
-            // this a click" for the row body. A completed single click there selects the
-            // project instead of collapsing it.
+        } else if SidebarClickIntent.selectsRow(
+            downPoint: downOnScreen,
+            upPoint: upOnScreen,
+            downRow: downIdentity,
+            upRow: upIdentity,
+            clickCount: clickCount,
+            pressedRowControl: pressedRowControl,
+            inChevronZone: inChevronZone
+        ) {
             selectRow?(rowIndex)
         }
     }
@@ -511,7 +515,45 @@ enum SidebarClickIntent {
         pressedRowControl: Bool,
         inChevronZone: Bool
     ) -> Bool {
-        guard clickCount == 1, !pressedRowControl, inChevronZone else { return false }
+        guard inChevronZone else { return false }
+        return isClick(
+            downPoint: downPoint, upPoint: upPoint, downRow: downRow, upRow: upRow,
+            clickCount: clickCount, pressedRowControl: pressedRowControl
+        )
+    }
+
+    /// Whether a press/release pair should select the project the row it landed on belongs to —
+    /// the row-body counterpart to `togglesCollapse`. Same click-vs-drag test, over the same six
+    /// inputs, differing only in which side of `inChevronZone` it requires: the two can never
+    /// both be true, so a press is never both a collapse and a selection.
+    static func selectsRow(
+        downPoint: CGPoint,
+        upPoint: CGPoint,
+        downRow: String?,
+        upRow: String?,
+        clickCount: Int,
+        pressedRowControl: Bool,
+        inChevronZone: Bool
+    ) -> Bool {
+        guard !inChevronZone else { return false }
+        return isClick(
+            downPoint: downPoint, upPoint: upPoint, downRow: downRow, upRow: upRow,
+            clickCount: clickCount, pressedRowControl: pressedRowControl
+        )
+    }
+
+    /// The click-vs-drag test shared by `togglesCollapse` and `selectsRow`. Neither rule differs
+    /// on this half — clickCount, the close-button exclusion, identity, and travel — only on
+    /// which side of the chevron zone it requires the press to have landed.
+    private static func isClick(
+        downPoint: CGPoint,
+        upPoint: CGPoint,
+        downRow: String?,
+        upRow: String?,
+        clickCount: Int,
+        pressedRowControl: Bool
+    ) -> Bool {
+        guard clickCount == 1, !pressedRowControl else { return false }
         guard let downRow, downRow == upRow else { return false }
         return hypot(upPoint.x - downPoint.x, upPoint.y - downPoint.y) < dragThreshold
     }
