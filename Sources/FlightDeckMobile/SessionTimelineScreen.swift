@@ -184,6 +184,13 @@ struct SessionTimelineScreen: View {
             // inside the first. The fleet list's own comment explains why IT keeps
             // inset-grouped; the two screens differ because what they hold differs.
             .listStyle(.plain)
+            // `.interactively`, the Messages/Mail behaviour: a downward drag through the list
+            // pulls the keyboard down with the finger. Without it the default, `.automatic`,
+            // resolves to never dismissing on a List, so the keyboard stays up over the
+            // conversation until the person hunts for some other way to put it away. This does
+            // not undo the composer keeping focus after a send (see `PromptComposer`): only a
+            // scroll dismisses, and a person scrolling has already stopped typing.
+            .scrollDismissesKeyboard(.interactively)
             // `simultaneousGesture`, so the list keeps scrolling and rows keep taking taps —
             // this only observes. `minimumDistance: 1` because the point is to know a drag
             // happened at all, not to interpret it.
