@@ -100,6 +100,10 @@ struct SessionTimelineScreen: View {
     /// below. Only ever read through `reportWindow()`, which turns it into the first/last id in
     /// feed order the model needs to schedule spill and rehydrate.
     @State private var visibleIDs: Set<String> = []
+    /// How far the keyboard reaches above the bottom safe area, from `KeyboardOverlapReader`.
+    /// It pads the composer instead of SwiftUI's own keyboard avoidance, which this screen
+    /// turns off — see the `.ignoresSafeArea(.keyboard)` below for why.
+    @State private var keyboardOverlap: CGFloat = 0
 
     var body: some View {
         ScrollViewReader { scroll in
@@ -352,7 +356,26 @@ struct SessionTimelineScreen: View {
                     onAbortBlocked: { await onAbortBlocked(model.sessionID) }
                 )
                 PromptComposer(session: session, model: model)
+                    // The keyboard lift, done by hand. SwiftUI's own would lift this inset by
+                    // its keyboard safe area, which only moves on `keyboardWillShow`/`Hide` —
+                    // so during an interactive dismissal the keyboard followed the finger, the
+                    // field stayed put above a widening gap, and it snapped down when the
+                    // finger lifted. `keyboardOverlap` moves on every frame of the drag (see
+                    // `KeyboardOverlapReader`). Padding rather than an offset, so the inset's
+                    // height grows with the keyboard and the `List` content inset grows with
+                    // it: the last message stays above the field, and `bottomSentinel`'s
+                    // live-edge logic sees the same geometry it always did.
+                    .padding(.bottom, keyboardOverlap)
             }
+        }
+        // Both halves of the lift above, and neither works alone. Without this line SwiftUI
+        // lifts the inset by the keyboard AND the padding lifts it again; without the reader
+        // there is nothing to lift it at all. `.bottom` only, so the top inset and the
+        // navigation bar are untouched.
+        .ignoresSafeArea(.keyboard, edges: .bottom)
+        .background {
+            KeyboardOverlapReader { keyboardOverlap = $0 }
+                .frame(width: 0, height: 0)
         }
         // The top inset, and the reason it exists at all: `ExitPlanMode` is the one tool call
         // a hook blocks WITHOUT claude ever reporting `waiting` (see `ClaudeOpenPlanGate`'s own

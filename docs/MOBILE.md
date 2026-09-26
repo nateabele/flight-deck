@@ -531,6 +531,17 @@ page.
       of dead space at the top of every session on the phone.
     - **Gone.** Let the retry succeed, or interrupt the agent's turn on the Mac. The strip
       disappears on its own, with no reopen needed.
+74. **Drag the keyboard away through the conversation, slowly.** Tap the composer, then drag
+    down through the list. The field must stay glued to the keyboard's top edge the whole way,
+    Messages-style — not sit still above a widening gap and snap down when the finger lifts,
+    which is what SwiftUI's own keyboard avoidance did (its keyboard safe area only moves on
+    show/hide notifications, and a drag posts none until it ends). Then the four shapes around
+    it: release halfway and the keyboard springs back with the field riding it; tap the field
+    and it slides up with the keyboard, no jump at either end; with the keyboard up the last
+    message is not hidden behind the composer; and a blocked `PromptCard` rides above the field
+    throughout. A snap here means the probe in `KeyboardOverlapReader` is not being laid out on
+    every frame of the drag — the fallback its spec names is a `CADisplayLink` sampling
+    `keyboardLayoutGuide.layoutFrame` while the drag lasts, in that same file.
 
 ## A second checklist: the iOS plumbing
 
