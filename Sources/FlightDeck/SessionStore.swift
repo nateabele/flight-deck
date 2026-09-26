@@ -222,7 +222,18 @@ final class SessionStore: ObservableObject {
     /// selected project row deselects the row, not the session underneath it, so this leaves
     /// `selectedSessionID` alone — the terminal that was selected before the project view
     /// opened is still what the detail column falls back to.
-    func deselectProject() { selectedProjectID = nil }
+    ///
+    /// Because `selectedSessionID` itself never changes here, its `didSet` — the thing that
+    /// normally clears a mark on "looking at it" — never runs. Without the explicit
+    /// `setUnread` below, a mark that session acquired while hidden behind the project view
+    /// (see `applyReadState`'s `isViewed`) would stay lit on a terminal now back on screen.
+    /// Mirrors the `didSet`'s own clear exactly — same helper, same lack of an `appIsActive()`
+    /// gate — so returning to a session reads as "viewed" the same way selecting it fresh does.
+    func deselectProject() {
+        selectedProjectID = nil
+        if let id = selectedSessionID { setUnread(id, false) }
+        persist()
+    }
 
     /// Sessions that finished while the user was not looking at them, rendered as the unread
     /// dot in the sidebar. See `SessionReadPolicy`.
