@@ -13,21 +13,41 @@ import UIKit
 ///
 /// **What does track the drag is `keyboardLayoutGuide`**, which UIKit built for exactly this:
 /// its top anchor follows the keyboard frame through an interactive dismissal. SwiftUI does not
-/// expose it, so this installs a hidden, zero-width probe in the window pinned from the guide's
-/// top to the window's bottom. The guide moving changes the probe's height, a height change
-/// lays the probe out, and its `layoutSubviews` is the per-frame callback nothing else offers.
+/// expose it, so this installs a hidden, zero-width probe in the window's ROOT VIEW
+/// CONTROLLER'S VIEW, pinned from that view's guide top to its bottom. The guide moving changes
+/// the probe's height, a height change lays the probe out, and its `layoutSubviews` is the
+/// per-frame callback nothing else offers. Not the window's own guide: on an iPhone 15 Pro
+/// (iOS 18.3.1) that one never moved — it logged its top at 852, the window's full height,
+/// while `keyboardWillChangeFrame` put the keyboard's top at 561 — so the probe was laid out
+/// once at launch, the lift stayed 0, and with SwiftUI's avoidance off the keyboard covered
+/// the composer. The root view controller's view has a guide UIKit actually drives.
+///
+/// **Two kinds of report, `settled` and live.** A show, hide or height change is reported
+/// once, from `keyboardWillChangeFrame`'s END frame, as `settled` and inside an animation; the
+/// interactive drag is reported per frame from the probe, unanimated and not settled. The
+/// consumer lays out by the settled value and only OFFSETS by the live one — see
+/// `KeyboardLiftedInset` for why applying a per-frame value as layout made the drag jerk.
 ///
 /// Used by `SessionTimelineScreen`, which turns SwiftUI's keyboard avoidance OFF
-/// (`.ignoresSafeArea(.keyboard)`) and pads its composer by this value instead — both halves
-/// are needed; with the padding alone, the composer would be lifted twice. **Host it in the
+/// (`.ignoresSafeArea(.keyboard)`) and lifts its composer by this value instead — both halves
+/// are needed; with the lift alone, the composer would be lifted twice. **Host it in the
 /// smallest view that uses the value** (there, `KeyboardLiftedInset`): it reports at display
 /// rate through a drag, and every report re-runs the body of whichever view owns the state.
 struct KeyboardOverlapReader: UIViewRepresentable {
-    /// Called with the new overlap, only when it differs from the last one reported. The
+    /// Called with the keyboard's `overlap` and whether it is `settled`.
+    ///
+    /// `settled == true` is where a show, hide or height change will END, delivered once per
+    /// `keyboardWillChangeFrame` inside a `withAnimation` matched to the keyboard's duration —
+    /// the value to lay out by. `settled == false` is one frame of an interactive drag,
+    /// delivered unanimated — a value to track the finger with, not to lay out by. A consumer
+    /// should treat every report as the current position and only a settled one as the new
+    /// resting place.
+    ///
+    /// Drag reports arrive only when the overlap differs from the last one reported. That
     /// equality gate is what keeps this out of a loop: setting SwiftUI state re-renders the
-    /// screen, a re-render can lay the window out again, and an unconditional report would
-    /// answer every one of those passes with another state write.
-    let onChange: (CGFloat) -> Void
+    /// screen, a re-render can lay the view out again, and an unconditional report would answer
+    /// every one of those passes with another state write.
+    let onChange: (_ overlap: CGFloat, _ settled: Bool) -> Void
 
     /// The pure half, and the only part a simulator test can reach. With the keyboard down the
     /// guide's top sits at the top of the home-indicator inset, so the probe is exactly that
@@ -50,23 +70,26 @@ struct KeyboardOverlapReader: UIViewRepresentable {
     }
 
     /// The representable's own view: zero-size, invisible, and only there to learn which
-    /// window the screen is in. The probe goes in the WINDOW rather than in this view because
-    /// `keyboardLayoutGuide` is measured against the view that owns it, and this view sits
-    /// wherever SwiftUI put the `.background` — the window's bottom edge is the one fixed
-    /// reference the keyboard is also measured from.
+    /// window the screen is in. The probe goes in the root view controller's view rather than
+    /// in this view because `keyboardLayoutGuide` is measured against the view that owns it,
+    /// and this view sits wherever SwiftUI put the `.background` — the root view fills the
+    /// window, so its bottom edge is the same fixed reference the keyboard is measured from.
+    /// Not the window itself, whose guide does not track the keyboard at all (see the type's
+    /// header for the device evidence).
     final class HostView: UIView {
-        var onChange: ((CGFloat) -> Void)?
+        var onChange: ((CGFloat, Bool) -> Void)?
 
         private var probe: ProbeView?
         /// `nil` until the first report in a window, so a screen re-entering a window always
         /// reports once even if the value happens to match what it last saw somewhere else.
         private var lastReported: CGFloat?
-        /// Until when a report should animate. A show/hide is announced by a notification that
-        /// carries the keyboard's own duration; the guide's layout lands inside UIKit's
-        /// animation block as ONE jump to the final frame, and SwiftUI has to be told to
-        /// animate that jump or the composer teleports while the keyboard slides. A report
-        /// outside this window is the interactive drag, which must be applied unanimated so the
-        /// field tracks the finger 1:1 instead of trailing it on a spring.
+        /// Until when the probe's reports are ignored. A show/hide is announced by a
+        /// notification that carries the keyboard's own duration and end frame, and is reported
+        /// from there, animated. The guide's own layout of that same move lands inside UIKit's
+        /// animation block as ONE jump to the final frame; reported too, it would replace the
+        /// animated value with an unanimated one and the composer would teleport while the
+        /// keyboard slides. A probe report outside this window is the interactive drag, which
+        /// must be applied unanimated so the field tracks the finger 1:1.
         private var animateUntil: CFTimeInterval = 0
 
         override init(frame: CGRect) {
@@ -87,9 +110,29 @@ struct KeyboardOverlapReader: UIViewRepresentable {
             let duration = (note.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey]
                 as? NSNumber)?.doubleValue ?? 0.25
             // A little slack past the keyboard's own duration: the guide's layout pass can land
-            // a runloop turn after the notification, and missing the window by a frame would
-            // turn a slide into a snap.
+            // a runloop turn after the notification, and missing the window by a frame would let
+            // that one-jump report through, unanimated, turning a slide into a snap.
             animateUntil = CACurrentMediaTime() + max(duration, 0.25) + 0.1
+            // The notification carries where the keyboard will END, which is the settled value
+            // — reported from here rather than from the probe, because the probe cannot be
+            // trusted to report it: after a drag that already carried the keyboard to the
+            // bottom, the guide does not move again, the probe is not laid out again, and a
+            // composer whose layout was still reserving the keyboard's height would be stranded
+            // above an empty gap.
+            if let window, let end = (note.userInfo?[UIResponder.keyboardFrameEndUserInfoKey]
+                as? NSValue)?.cgRectValue {
+                let top = window.convert(end, from: window.screen.coordinateSpace).minY
+                let overlap = KeyboardOverlapReader.overlap(
+                    probeHeight: window.bounds.height - top,
+                    safeBottom: window.safeAreaInsets.bottom)
+                lastReported = overlap
+                guard let onChange else { return }
+                // A spring close to the keyboard's own curve, which SwiftUI cannot be handed
+                // directly — the notification's curve is a private `UIView.AnimationCurve` (7).
+                withAnimation(.spring(duration: max(duration, 0.25), bounce: 0)) {
+                    onChange(overlap, true)
+                }
+            }
         }
 
         override func didMoveToWindow() {
@@ -106,11 +149,16 @@ struct KeyboardOverlapReader: UIViewRepresentable {
             probe.isHidden = true
             probe.isUserInteractionEnabled = false
             probe.translatesAutoresizingMaskIntoConstraints = false
-            window.addSubview(probe)
+            // The root view controller's view, not the window: the window's guide sat at the
+            // window's full height with the keyboard up, so a probe pinned to it never resized
+            // and the composer was left under the keyboard. The window is only a fallback for a
+            // window with no root view controller, which a SwiftUI scene never produces.
+            let container: UIView = window.rootViewController?.view ?? window
+            container.addSubview(probe)
             NSLayoutConstraint.activate([
-                probe.topAnchor.constraint(equalTo: window.keyboardLayoutGuide.topAnchor),
-                probe.bottomAnchor.constraint(equalTo: window.bottomAnchor),
-                probe.trailingAnchor.constraint(equalTo: window.trailingAnchor),
+                probe.topAnchor.constraint(equalTo: container.keyboardLayoutGuide.topAnchor),
+                probe.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+                probe.trailingAnchor.constraint(equalTo: container.trailingAnchor),
                 probe.widthAnchor.constraint(equalToConstant: 0),
             ])
             probe.onLayout = { [weak self, weak window] height in
@@ -121,17 +169,15 @@ struct KeyboardOverlapReader: UIViewRepresentable {
             self.probe = probe
         }
 
+        /// The probe's per-frame value, which is only ever the interactive drag: a show or hide
+        /// is reported from `keyboardWillChangeFrame` with its settled target, and the probe's
+        /// own report of that same move — one jump inside UIKit's animation block — is ignored
+        /// until the animation window closes, or it would cut the animated move short.
         private func report(_ overlap: CGFloat) {
+            guard CACurrentMediaTime() >= animateUntil else { return }
             guard overlap != lastReported else { return }
             lastReported = overlap
-            guard let onChange else { return }
-            if CACurrentMediaTime() < animateUntil {
-                // Close to the keyboard's own curve, which SwiftUI cannot be handed directly —
-                // the notification's curve is a private `UIView.AnimationCurve` value (7).
-                withAnimation(.spring(duration: 0.35, bounce: 0)) { onChange(overlap) }
-            } else {
-                onChange(overlap)
-            }
+            onChange?(overlap, false)
         }
     }
 

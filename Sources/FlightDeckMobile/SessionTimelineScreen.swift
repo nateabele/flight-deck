@@ -355,8 +355,8 @@ struct SessionTimelineScreen: View {
             }
         }
         // The other half of `KeyboardLiftedInset`'s hand-done lift, and neither works alone.
-        // Without this line SwiftUI lifts the inset by the keyboard AND the wrapper's padding
-        // lifts it again; without the wrapper nothing lifts it at all. On the SCREEN because
+        // Without this line SwiftUI lifts the inset by the keyboard AND the wrapper lifts it
+        // again; without the wrapper nothing lifts it at all. On the SCREEN because
         // that is where SwiftUI's avoidance is applied to the inset; `.bottom` only, so the
         // top inset and the navigation bar are untouched.
         .ignoresSafeArea(.keyboard, edges: .bottom)
@@ -1126,32 +1126,47 @@ struct SessionTimelineScreen: View {
 /// **Why by hand.** SwiftUI would lift the inset by its keyboard safe area, which only moves on
 /// `keyboardWillShow`/`Hide` — so during an interactive dismissal the keyboard followed the
 /// finger, the composer stayed put above a widening gap, and it snapped down when the finger
-/// lifted. `KeyboardOverlapReader` reports on every frame of the drag instead. Padding rather
-/// than an offset, so the inset's height grows with the keyboard and the `List`'s content
-/// inset grows with it: the last message stays above the field, and `bottomSentinel`'s
-/// live-edge logic sees the same geometry it always did.
+/// lifted. `KeyboardOverlapReader` reports on every frame of the drag instead.
+///
+/// **Two values, because a drag must not re-lay the `List` out.** `settled` — where the last
+/// show, hide or height change ENDED, from the reader's `keyboardWillChangeFrame` report — is
+/// padding: the inset's height grows with a keyboard at rest, the `List`'s content inset grows
+/// with it, the last message stays above the field, and `bottomSentinel` sees the same geometry
+/// it always did. `live` is where the keyboard is right now, and only its difference from
+/// `settled` is applied, as an OFFSET — a transform, no layout — so mid-drag the field rides the
+/// keyboard's top edge while the inset keeps its settled height. The first build applied every
+/// drag frame as padding, and on an iPhone 15 Pro that was visibly jerky: the inset's height
+/// changed at display rate, re-laying the whole `List` out and moving its content inset under
+/// the very finger that was scrolling it. Messages behaves the same way: the transcript does not
+/// reflow while the keyboard is dragged, only once it lets go — here, when the release posts
+/// `keyboardWillChangeFrame` and `settled` springs to the end frame (down, or back up for a
+/// drag released halfway), taking `live` with it so the offset returns to zero.
 ///
 /// **Why the state lives in this small view and not on the screen.** The reader fires at the
-/// display's rate for the whole drag. As `@State` on `SessionTimelineScreen`, each of those
-/// reports re-ran the screen's entire body — the `List`, the `ForEach` identity diff over the
-/// whole conversation, every row's modifier chain, both navigation destinations — which is
-/// O(conversation) work per frame, precisely what makes the drag stutter on a long session
-/// and what the timeline's `rebuild()` funnel exists to keep out of a render. Here, a report
-/// re-runs only this body; `content` was built by the screen and is not re-evaluated, and the
-/// inset's new height still relays the `List` out as it must.
+/// display's rate for the whole drag. As `@State` on `SessionTimelineScreen`, each report
+/// re-ran the screen's entire body — the `List`, the `ForEach` identity diff over the whole
+/// conversation, every row's modifier chain, both navigation destinations — which is
+/// O(conversation) work per frame, precisely what the timeline's `rebuild()` funnel exists to
+/// keep out of a render. Here, a report re-runs only this body; `content` was built by the
+/// screen and is not re-evaluated.
 private struct KeyboardLiftedInset<Content: View>: View {
     @ViewBuilder let content: Content
 
-    @State private var keyboardOverlap: CGFloat = 0
+    @State private var settled: CGFloat = 0
+    @State private var live: CGFloat = 0
 
     var body: some View {
         VStack(spacing: 0) {
             content
         }
-        .padding(.bottom, keyboardOverlap)
+        .padding(.bottom, settled)
+        .offset(y: settled - live)
         .background {
-            KeyboardOverlapReader { keyboardOverlap = $0 }
-                .frame(width: 0, height: 0)
+            KeyboardOverlapReader { overlap, isSettled in
+                if isSettled { settled = overlap }
+                live = overlap
+            }
+            .frame(width: 0, height: 0)
         }
     }
 }
