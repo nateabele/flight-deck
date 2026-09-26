@@ -54,18 +54,20 @@ import SwiftUI
 /// - **Return with the sidebar table as first responder** → rename the selected row, consuming
 ///   the key. Gated on the first responder, so Return still reaches the terminal and still
 ///   commits an open rename field.
-/// - **mouse-down, `clickCount == 1`, that turns out not to have been a drag** → toggle that
-///   project header's collapse state. The "turns out" is the whole trick; see below.
+/// - **mouse-down, `clickCount == 1`, that turns out not to have been a drag** → collapse that
+///   project header if the press landed in its chevron zone, or select the project otherwise.
+///   The "turns out" is the whole trick; see below.
 ///
 /// Mouse events are always returned unchanged, so row hit-testing and list dragging cannot
 /// change. A drag begins with a `clickCount == 1` down, so dragging never renames.
 ///
 /// # Click-to-collapse: why there is no mouse-up handler
 ///
-/// The whole project-header row toggles on a click and reorders on a drag. Both begin with the
-/// same mouse-down, and nothing here may consume it, so the two can only be told apart *after
-/// the fact*. The obvious way to do that — widen the monitor's mask to `.leftMouseUp` and
-/// compare the two points — **does not work, and was measured not to work**:
+/// A project-header row collapses on a click to its chevron, selects the project on a click
+/// anywhere else in the row, and reorders on a drag. All three begin with the same mouse-down,
+/// and nothing here may consume it, so they can only be told apart *after the fact*. The obvious
+/// way to do that — widen the monitor's mask to `.leftMouseUp` and compare the two points — **does
+/// not work, and was measured not to work**:
 ///
 ///     [plain SwiftUI view]                       DOWN seen, UP seen
 ///     [List row, press resolved to a row]        DOWN seen, UP NEVER SEEN
@@ -192,8 +194,12 @@ final class SidebarInputMonitor {
     var renameSelected: (() -> Bool)?
     /// Toggle the collapse state of the row at this table row index. Every row is reported, not
     /// just project headers — this monitor has no model of what a row is — so the caller is what
-    /// makes a click on a session row a no-op. See `SessionSidebar`.
+    /// makes a click on a session row a no-op. See `SessionSidebar`. Fires only for a completed
+    /// single click inside the header's chevron zone; see `SidebarClickIntent.chevronZoneWidth`.
     var toggleRow: ((Int) -> Void)?
+    /// Fires for a completed single click on a row outside the chevron zone — a header click that
+    /// did not collapse it. Not yet wired to anything; the caller decides what "select" means.
+    var selectRow: ((Int) -> Void)?
     /// The identity of the row at this table index — `SidebarRow.id`, supplied by the caller for
     /// the same reason as above. Click-to-collapse decides a press-duration after it began, and
     /// a bare index does not survive that: sessions come and go asynchronously here, so a row
@@ -268,23 +274,23 @@ final class SidebarInputMonitor {
         // Ask to be called back once this click is over, so it can be told apart from a drag.
         //
         // Deliberately *after* the field-editor guard above, which is broader than "a click
-        // inside the field": while a rename is open it suppresses the toggle for a click
-        // ANYWHERE in the sidebar, including on some other project's header. That is the right
-        // behaviour and it is what the user sees — the first click commits the rename, the
-        // second one toggles — but it is worth saying, because it is not what "never collapse a
-        // project from inside a rename field" implies.
+        // inside the field": while a rename is open it suppresses the collapse/select decision
+        // for a click ANYWHERE in the sidebar, including on some other project's header. That is
+        // the right behaviour and it is what the user sees — the first click commits the rename,
+        // the second one acts on the row it landed on — but it is worth saying, because it is not
+        // what "never collapse a project from inside a rename field" implies.
         //
         // Deliberately *before* the selected-row guard below, which returns early on every row
         // but one.
         //
         // `clickCount == 1` is the only value that reaches the scheduler, so **clicking a header
-        // repeatedly and fast toggles it exactly once, however many clicks land**: the first
-        // (cc=1) schedules and toggles, the second (cc=2) goes to `renameRow` above, which
-        // guards `case .session` and no-ops on a header, and the third and beyond (cc>=3) match
-        // nothing here at all. That is the intended behaviour and not flakiness — a double-click
-        // that toggled twice would look like it had done nothing — but nobody should have to
-        // derive it from the guards. The rule keeps its own `clickCount` guard anyway, because a
-        // pure rule should be total over its inputs rather than rely on this call site.
+        // repeatedly and fast collapses or selects it exactly once, however many clicks land**:
+        // the first (cc=1) schedules and decides, the second (cc=2) goes to `renameRow` above,
+        // which guards `case .session` and no-ops on a header, and the third and beyond (cc>=3)
+        // match nothing here at all. That is the intended behaviour and not flakiness — a
+        // double-click that acted twice would look like it had done nothing — but nobody should
+        // have to derive it from the guards. The rule keeps its own `clickCount` guard anyway,
+        // because a pure rule should be total over its inputs rather than rely on this call site.
         if event.clickCount == 1 {
             scheduleToggleDecision(
                 window: window, rowView: rowView, rowIndex: rowIndex,
@@ -319,6 +325,10 @@ final class SidebarInputMonitor {
         // `NSEvent.mouseLocation`, and a reorder can slide the rows under the pointer in between.
         let downOnScreen = window.convertPoint(toScreen: downPoint)
         let pressedRowControl = Self.pressedControl(in: rowView, at: downPoint)
+        // The row view's own coordinate space, not the window's: that is what
+        // `SidebarClickIntent.chevronZoneWidth` is measured against, and it is stable across a
+        // scroll — `downPoint` is a window point captured at press time, before any of that.
+        let inChevronZone = rowView.convert(downPoint, from: nil).x < SidebarClickIntent.chevronZoneWidth
 
         // `.default` ONLY. A block that also listed `.eventTracking` — or a
         // `DispatchQueue.main.async`, which effectively does, since event tracking is a common
@@ -327,7 +337,8 @@ final class SidebarInputMonitor {
             MainActor.assumeIsolated {
                 self?.finishToggleDecision(
                     downOnScreen: downOnScreen, downIdentity: identity,
-                    pressedRowControl: pressedRowControl, clickCount: clickCount
+                    pressedRowControl: pressedRowControl, inChevronZone: inChevronZone,
+                    clickCount: clickCount
                 )
             }
         }
@@ -337,6 +348,7 @@ final class SidebarInputMonitor {
         downOnScreen: NSPoint,
         downIdentity: String,
         pressedRowControl: Bool,
+        inChevronZone: Bool,
         clickCount: Int
     ) {
         // The press is not over, so this is not yet a click — and it may never be one.
@@ -378,17 +390,28 @@ final class SidebarInputMonitor {
             inWindow: window, at: window.convertPoint(fromScreen: upOnScreen)
         ), let (_, _, rowIndex) = Self.sidebarRow(under: hit) else { return }
 
-        guard SidebarClickIntent.togglesCollapse(
+        let upIdentity = rowIdentity?(rowIndex)
+        // The index resolved NOW, not the one pressed: whichever callback fires below, the rule
+        // has just proved the two name the same row, and it is today's index that indexes
+        // today's `sidebarRows`.
+        if SidebarClickIntent.togglesCollapse(
             downPoint: downOnScreen,
             upPoint: upOnScreen,
             downRow: downIdentity,
-            upRow: rowIdentity?(rowIndex),
+            upRow: upIdentity,
             clickCount: clickCount,
-            pressedRowControl: pressedRowControl
-        ) else { return }
-        // The index resolved NOW, not the one pressed: the rule has just proved the two name the
-        // same row, and it is today's index that indexes today's `sidebarRows`.
-        toggleRow?(rowIndex)
+            pressedRowControl: pressedRowControl,
+            inChevronZone: inChevronZone
+        ) {
+            toggleRow?(rowIndex)
+        } else if !inChevronZone, clickCount == 1, !pressedRowControl, downIdentity == upIdentity,
+                  hypot(upOnScreen.x - downOnScreen.x, upOnScreen.y - downOnScreen.y) < SidebarClickIntent.dragThreshold {
+            // The same click-vs-drag test as above, run by hand: `togglesCollapse` always
+            // answers false outside the chevron zone, so it cannot also be the source of "was
+            // this a click" for the row body. A completed single click there selects the
+            // project instead of collapsing it.
+            selectRow?(rowIndex)
+        }
     }
 
     /// Whether a press landed on a real AppKit control inside the row — in a project header, the
@@ -457,6 +480,15 @@ enum SidebarClickIntent {
     /// that was dragged. See the file's doc comment.
     static let dragThreshold: CGFloat = 4.0
 
+    /// Width, from the row view's leading edge, of the strip where a header click collapses.
+    /// The chevron is a SwiftUI `Image`, not an `NSControl`, so there is no view to hit-test —
+    /// the zone is geometry. The earlier note here rejected a "reserved strip of guessed width"
+    /// because the WHOLE row toggled then and a strip would have shrunk the target; now the row
+    /// body selects the project (the per-project view) and only the chevron may collapse, so a
+    /// strip is the only way to tell the two apart. 22pt covers the list's leading inset plus the
+    /// `.imageScale(.small)` chevron with margin.
+    static let chevronZoneWidth: CGFloat = 22
+
     /// Whether a press/release pair should toggle the row it landed on.
     ///
     /// The two points only have to share a coordinate space — the caller passes screen points.
@@ -466,15 +498,20 @@ enum SidebarClickIntent {
     /// `pressedRowControl` is whether the press landed on an AppKit control inside the row —
     /// the close button. There is no exclusion *width* here to get wrong: the caller measures
     /// the control's own frame. See `SidebarInputMonitor.pressedControl(in:at:)`.
+    ///
+    /// `inChevronZone` is the one exclusion that IS a guessed width — see `chevronZoneWidth` —
+    /// because collapsing is now only the chevron's job; a press anywhere else on the row is a
+    /// candidate to select the project instead. See `SidebarInputMonitor.finishToggleDecision`.
     static func togglesCollapse(
         downPoint: CGPoint,
         upPoint: CGPoint,
         downRow: String?,
         upRow: String?,
         clickCount: Int,
-        pressedRowControl: Bool
+        pressedRowControl: Bool,
+        inChevronZone: Bool
     ) -> Bool {
-        guard clickCount == 1, !pressedRowControl else { return false }
+        guard clickCount == 1, !pressedRowControl, inChevronZone else { return false }
         guard let downRow, downRow == upRow else { return false }
         return hypot(upPoint.x - downPoint.x, upPoint.y - downPoint.y) < dragThreshold
     }
