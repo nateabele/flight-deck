@@ -654,6 +654,12 @@ final class TerminalSmokeTests: XCTestCase {
                 failures.append("iteration \(i): re-selecting header 0 after the drag did not open the project view")
                 continue
             }
+            // Two settles, not one: the NEXT iteration's select click lands on this same
+            // screen slot (header 0's body), and one settle (~0.5s) is not reliably outside
+            // the double-click interval — same hazard the chevron activity above guards
+            // against with its own paired settles. A misread here would arrive as a rename
+            // rather than a second select, silently invalidating the rest of that sample.
+            settle()
             settle()
         }
 
