@@ -23,8 +23,33 @@ final class SidebarClickIntentTests: XCTestCase {
             downRow: downRow ?? row,
             upRow: upRow ?? downRow ?? row,
             clickCount: clickCount,
-            pressedRowControl: pressedRowControl
+            pressedRowControl: pressedRowControl,
+            inChevronZone: true
         )
+    }
+
+    func testClickOutsideChevronZoneDoesNotToggle() {
+        let row = "p:A"
+        XCTAssertFalse(SidebarClickIntent.togglesCollapse(
+            downPoint: .init(x: 100, y: 10), upPoint: .init(x: 100, y: 10),
+            downRow: row, upRow: row, clickCount: 1, pressedRowControl: false,
+            inChevronZone: false))
+    }
+
+    func testClickInChevronZoneToggles() {
+        let row = "p:A"
+        XCTAssertTrue(SidebarClickIntent.togglesCollapse(
+            downPoint: .init(x: 8, y: 10), upPoint: .init(x: 9, y: 10),
+            downRow: row, upRow: row, clickCount: 1, pressedRowControl: false,
+            inChevronZone: true))
+    }
+
+    func testChevronZoneDragStillDoesNotToggle() {
+        let row = "p:A"
+        XCTAssertFalse(SidebarClickIntent.togglesCollapse(
+            downPoint: .init(x: 8, y: 10), upPoint: .init(x: 8, y: 30),
+            downRow: row, upRow: row, clickCount: 1, pressedRowControl: false,
+            inChevronZone: true))
     }
 
     func testAPressThatBarelyMovesIsAClick() {
@@ -71,7 +96,8 @@ final class SidebarClickIntentTests: XCTestCase {
         XCTAssertFalse(
             SidebarClickIntent.togglesCollapse(
                 downPoint: CGPoint(x: 40, y: 200), upPoint: CGPoint(x: 40, y: 200),
-                downRow: row, upRow: nil, clickCount: 1, pressedRowControl: false
+                downRow: row, upRow: nil, clickCount: 1, pressedRowControl: false,
+                inChevronZone: true
             )
         )
     }
@@ -81,7 +107,8 @@ final class SidebarClickIntentTests: XCTestCase {
         XCTAssertFalse(
             SidebarClickIntent.togglesCollapse(
                 downPoint: CGPoint(x: 40, y: 200), upPoint: CGPoint(x: 40, y: 200),
-                downRow: nil, upRow: nil, clickCount: 1, pressedRowControl: false
+                downRow: nil, upRow: nil, clickCount: 1, pressedRowControl: false,
+                inChevronZone: true
             )
         )
     }
