@@ -68,4 +68,16 @@ final class BeadWriterTests: XCTestCase {
         XCTAssertEqual(r.calls[1], ["br", "comments", "add", "b1",
                                      "Reopened by Flight Deck intake: needs more work", "--actor", "flightdeck-intake:X"])
     }
+    /// `FlywheelProcessRunner` discards stderr, so a failure with empty stdout (a real
+    /// possibility — `br` sometimes writes only to stderr) must still name what happened.
+    /// Without the exit code in the message, this case degrades to `"reopen b1: "` — the
+    /// step description with no information about the failure at all.
+    func testFailureWithEmptyStdoutStillReportsTheExitCode() async {
+        let r = RecordingRunner(replies: ["br reopen": ("", 1)])
+        let w = BeadWriter(runner: r, brPath: "br", actor: "a")
+        let out = await w.apply([.reopen(id: "b1", reason: "r")], project: "/p")
+        XCTAssertEqual(out.applied, 0)
+        XCTAssertTrue(out.error?.contains("reopen b1") == true, out.error ?? "nil")
+        XCTAssertTrue(out.error?.contains("exit 1") == true, out.error ?? "nil")
+    }
 }
