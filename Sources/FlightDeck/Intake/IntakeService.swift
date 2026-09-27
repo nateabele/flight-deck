@@ -38,7 +38,9 @@ struct TriageSettings: Equatable, Sendable {
 @MainActor
 protocol IntakeRunnerControlling: AnyObject {
     func ensureRunning(_ id: UUID) -> Result<Void, RunnerStartError>
-    func isRunning(_ id: UUID) -> Bool
+    /// `tape` is the caller's own fresh read of `tape.json`, when it has one — so a tick that
+    /// already decoded it doesn't make the controller decode it again. nil reads it from disk.
+    func isRunning(_ id: UUID, tape: Tape?) -> Bool
     func reap(_ id: UUID)
     /// Where the runner's `fd-abduco` socket lives, so launch can find a daemon left behind
     /// by an intake that has since stopped shaping.
@@ -86,6 +88,11 @@ final class IntakeService: ObservableObject {
     /// Each `.shaping` intake's `tape.json` as last read — what `ShapingView` draws and what
     /// `attentionCount` consults. Refreshed on the shared clock (`pollTapes`).
     @Published private(set) var tapes: [UUID: Tape] = [:]
+    /// The newest read of each tape, heartbeat and all — what the runner-liveness checks use.
+    /// Kept apart from `tapes` because a running tape's heartbeat changes every second, and
+    /// republishing for that alone re-rendered every view observing this service each second
+    /// of a run for nothing it draws.
+    private var latestTapes: [UUID: Tape] = [:]
 
     private let store: IntakeStore
     private let headless: HeadlessRunner
@@ -212,14 +219,23 @@ final class IntakeService: ObservableObject {
     /// only with no target: an idle tape WITH one is queued work a runner is about to pick up
     /// (the same "unfinished work" test launch recovery uses), and lighting the badge for the
     /// second between Start and the runner's first write would be noise. No tape read yet
-    /// likewise reads as starting, not waiting.
+    /// likewise reads as starting, not waiting. Nor does a tape with commands the runner hasn't
+    /// acked: a ▶ just pressed on a paused tape is queued work, not a tape waiting for the human.
     private func shapingNeedsAttention(_ i: Intake) -> Bool {
         guard i.state == .shaping, let tape = tapes[i.id] else { return false }
+        let waiting: Bool
         switch tape.status {
-        case .paused, .failed, .stopped: return true
-        case .idle: return tape.target == .none
-        case .running, .reachedReview: return false
+        case .paused, .failed, .stopped: waiting = true
+        case .idle: waiting = tape.target == .none
+        case .running, .reachedReview: waiting = false
         }
+        // Checked last, so the common case (not waiting) never touches `commands.jsonl`.
+        return waiting && !hasPendingCommands(i.id, tape)
+    }
+
+    /// Commands queued after the last one the runner acked — work a runner still has to read.
+    private func hasPendingCommands(_ id: UUID, _ tape: Tape) -> Bool {
+        !tapeStore(id).commands(after: tape.ackedCommandSeq).isEmpty
     }
 
     /// The live task for `id`, if any — so tests (and nothing else) can await a turn.
@@ -305,7 +321,7 @@ final class IntakeService: ObservableObject {
         catch { return fail(id, "Could not queue the command for the planning runner: \(error)") }
         switch command {
         case .pause, .annotate: return
-        case .stop: if runner?.isRunning(id) != true { startRunner(id) }
+        case .stop: if runner?.isRunning(id, tape: nil) != true { startRunner(id) }
         case .step, .nextMajor, .toReview, .extend: startRunner(id)
         }
     }
@@ -332,37 +348,50 @@ final class IntakeService: ObservableObject {
     /// recovery, which is what makes a relaunch resume.
     func pollTapes() {
         let shaping = Set(intakes.lazy.filter { $0.state == .shaping }.map(\.id))
-        for gone in Set(tapes.keys).union(tapeDates.keys).subtracting(shaping) {
+        for gone in Set(latestTapes.keys).union(tapes.keys).union(tapeDates.keys).subtracting(shaping) {
             tapes[gone] = nil
+            latestTapes[gone] = nil
             tapeDates[gone] = nil
         }
         for id in shaping {
             let store = tapeStore(id)
             let modified = (try? FileManager.default.attributesOfItem(atPath: store.tapeURL.path))?[.modificationDate] as? Date
-            if tapes[id] == nil || modified != tapeDates[id] {
+            if latestTapes[id] == nil || modified != tapeDates[id] {
                 tapeDates[id] = modified
                 let tape = store.loadTape()
-                if tapes[id] != tape { tapes[id] = tape }
+                latestTapes[id] = tape
+                if tapes[id].map({ !Self.sameIgnoringLiveness($0, tape) }) ?? true { tapes[id] = tape }
             }
-            if tapes[id]?.status == .reachedReview { finishShaping(id) } else { resumeIfStalled(id) }
+            if latestTapes[id]?.status == .reachedReview { finishShaping(id) } else { resumeIfStalled(id) }
         }
         if let runner {
-            for id in pendingReaps where !runner.isRunning(id) {
+            for id in pendingReaps where !runner.isRunning(id, tape: nil) {
                 runner.reap(id)
                 pendingReaps.remove(id)
             }
         }
     }
 
-    /// A tape with unfinished work — `.running`, or `.idle` with a target — and no live runner
-    /// behind it: the runner crashed or was killed, at launch or mid-session. A paused,
-    /// stopped or failed tape stopped for a reason the human has to see, and respawning it
-    /// would just stop again. `isRunning` is the controller's own heartbeat/grace judgement,
-    /// so a just-spawned runner that hasn't written yet is never spawned twice.
+    /// Equal but for the runner's liveness fields, which change every poll of a running tape
+    /// and which no view draws — see `latestTapes`.
+    private static func sameIgnoringLiveness(_ a: Tape, _ b: Tape) -> Bool {
+        var a = a, b = b
+        a.heartbeat = nil; b.heartbeat = nil
+        a.runnerPID = nil; b.runnerPID = nil
+        return a == b
+    }
+
+    /// A tape with unfinished work — `.running`, `.idle` with a target, or commands queued that
+    /// no runner has acked — and no live runner behind it: the runner crashed or was killed,
+    /// at launch or mid-session, or a spawn was deferred (`RunnerStartError.notReady`). A
+    /// paused, stopped or failed tape with nothing queued stopped for a reason the human has
+    /// to see, and respawning it would just stop again. `isRunning` is the controller's own
+    /// heartbeat/grace judgement, so a just-spawned runner that hasn't written yet is never
+    /// spawned twice.
     private func resumeIfStalled(_ id: UUID) {
-        guard let runner, let tape = tapes[id],
-              tape.status == .running || (tape.status == .idle && tape.target != .none),
-              !runner.isRunning(id) else { return }
+        guard let runner, let tape = latestTapes[id],
+              tape.status == .running || (tape.status == .idle && tape.target != .none) || hasPendingCommands(id, tape),
+              !runner.isRunning(id, tape: tape) else { return }
         startRunner(id)
     }
 
@@ -373,7 +402,7 @@ final class IntakeService: ObservableObject {
     /// from and re-validates against `triageGraph`; the triage-time graph predates beads the
     /// shaped change set may reference, and would make the review sheet fail to load.
     private func finishShaping(_ id: UUID) {
-        guard var i = intake(id), i.state == .shaping, let tape = tapes[id] else { return }
+        guard var i = intake(id), i.state == .shaping, let tape = latestTapes[id] else { return }
         let store = tapeStore(id)
         var found: (changeSet: ChangeSet, graph: Data)?
         for cp in tape.checkpoints.reversed() {
@@ -408,7 +437,9 @@ final class IntakeService: ObservableObject {
         guard let runner else { return fail(id, "This build cannot run planning rounds (no runner).") }
         // The runner is wanted again (a retry); collecting it later would kill that one.
         pendingReaps.remove(id)
-        if case .failure(let error) = runner.ensureRunning(id) {
+        // `.notReady` isn't a refusal: the tick retries it, since the queued command (or the
+        // tape's unfinished work) still reads as work to `resumeIfStalled`.
+        if case .failure(let error) = runner.ensureRunning(id), error != .notReady {
             fail(id, "Could not start the planning runner: \(Self.describe(error))")
         }
     }

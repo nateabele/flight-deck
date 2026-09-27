@@ -1,3 +1,4 @@
+import Combine
 import XCTest
 import IntakeKit
 @testable import FlightDeck
@@ -16,7 +17,12 @@ private final class FakeRunnerController: IntakeRunnerControlling {
         ensured.append(id)
         return startResult
     }
-    func isRunning(_ id: UUID) -> Bool { running.contains(id) }
+    /// The tape each liveness check was handed (nil: the caller had none).
+    private(set) var runningChecks: [Tape?] = []
+    func isRunning(_ id: UUID, tape: Tape?) -> Bool {
+        runningChecks.append(tape)
+        return running.contains(id)
+    }
     func reap(_ id: UUID) { if !running.contains(id) { reaped.append(id) } }
     func socketPath(for id: UUID) -> String {
         socketDirectory.appendingPathComponent("intake-\(id.uuidString.lowercased()).sock").path
@@ -214,6 +220,71 @@ final class IntakeServiceShapingTests: XCTestCase {
         clock.fire()
         XCTAssertEqual(runner.ensured, [seeded.id])
         XCTAssertEqual(intake(svc, seeded.id).state, .shaping)
+    }
+
+    /// A running tape's heartbeat changes every second; republishing for it re-rendered every
+    /// observer of the service each second of a run. Liveness still sees the new heartbeat.
+    func testHeartbeatOnlyChangeIsNotPublished() async throws {
+        let seeded = try seed(.shaping)
+        let svc = makeService()
+        await svc.launchRecovery?.value
+        runner.running = [seeded.id]
+        var tape = Tape(target: .nextMajor, status: .running, runnerPID: 42, heartbeat: Date(timeIntervalSince1970: 100))
+        try tapeStore(seeded.id).saveTape(tape)
+        clock.fire()
+        XCTAssertEqual(svc.tapes[seeded.id], tape)
+
+        var publishes = 0
+        let sink = svc.objectWillChange.sink { publishes += 1 }
+        defer { sink.cancel() }
+        tape.heartbeat = Date(timeIntervalSince1970: 101)
+        tape.runnerPID = 43
+        try tapeStore(seeded.id).saveTape(tape)
+        // tape.json's mtime has 1 s-or-finer resolution; make sure the tick sees a change.
+        try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(5)],
+                                              ofItemAtPath: tapeStore(seeded.id).tapeURL.path)
+        clock.fire()
+        XCTAssertEqual(publishes, 0, "a heartbeat-only change must not publish")
+        XCTAssertEqual(svc.tapes[seeded.id]?.heartbeat, Date(timeIntervalSince1970: 100))
+        XCTAssertEqual(runner.runningChecks.last??.heartbeat, Date(timeIntervalSince1970: 101),
+                       "liveness is judged on the latest read, shared rather than re-decoded")
+
+        tape.status = .paused
+        try tapeStore(seeded.id).saveTape(tape)
+        try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(10)],
+                                              ofItemAtPath: tapeStore(seeded.id).tapeURL.path)
+        clock.fire()
+        XCTAssertGreaterThan(publishes, 0)
+        XCTAssertEqual(svc.tapes[seeded.id]?.status, .paused)
+    }
+
+    /// A ▶ queued on a paused tape whose runner never came up (a deferred spawn, a crash before
+    /// it read the command) is pending work: it isn't waiting on the human, and the tick
+    /// brings a runner back for it.
+    func testPendingCommandsCountAsWorkNotAttention() async throws {
+        let seeded = try seed(.shaping)
+        try saveTape(seeded.id, .paused)
+        let svc = makeService()
+        await svc.launchRecovery?.value
+        XCTAssertEqual(svc.attentionCount(forProject: "/p"), 1)
+        XCTAssertEqual(runner.ensured, [])
+
+        runner.startResult = .failure(.notReady)
+        svc.send(seeded.id, .step)
+        XCTAssertEqual(intake(svc, seeded.id).state, .shaping, "a deferred spawn is not a failure")
+        XCTAssertEqual(svc.attentionCount(forProject: "/p"), 0)
+        clock.fire()
+        XCTAssertEqual(runner.ensured, [seeded.id, seeded.id], "the tick retries the deferred spawn")
+
+        // Once a runner acks it, a paused tape is waiting on the human again.
+        var tape = tapeStore(seeded.id).loadTape()
+        tape.ackedCommandSeq = 1
+        try tapeStore(seeded.id).saveTape(tape)
+        try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(5)],
+                                              ofItemAtPath: tapeStore(seeded.id).tapeURL.path)
+        clock.fire()
+        XCTAssertEqual(svc.attentionCount(forProject: "/p"), 1)
+        XCTAssertEqual(runner.ensured.count, 2)
     }
 
     func testTapeChangesArePublishedOnTheClockTick() async throws {
