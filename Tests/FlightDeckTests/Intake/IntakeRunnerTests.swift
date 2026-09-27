@@ -1,6 +1,6 @@
 import XCTest
 import Darwin
-import IntakeKit
+@testable import IntakeKit
 
 /// `ScriptedHarnessRunner`'s script is synchronous, and the runner's tests need a round that
 /// can be held open (to land a command mid-round) or cancelled — so this one awaits its script.
@@ -274,6 +274,66 @@ final class IntakeRunnerTests: XCTestCase {
         let status = await run.value
         XCTAssertEqual(status, .paused)
         XCTAssertNil(store.loadTape().heartbeat)
+    }
+
+    /// The app treats a live runner socket without a fresh heartbeat as suspect, so the runner's
+    /// FIRST tape write — before recovery kills anything or a command is folded in — adopts the
+    /// tape: `runnerPID` and a fresh `heartbeat`. The injected kill is the observation point:
+    /// it runs inside recovery, before recovery (or anything after it) has saved.
+    func testFirstWriteAdoptsTheTapeBeforeRecovery() async throws {
+        let orphanPID = PIDCell()
+        let orphan = Task {
+            try await SystemCommandRunner().run(executable: "sleep", arguments: ["30"], cwd: project,
+                                                environment: ["PATH": "/usr/bin:/bin"], processGroup: true,
+                                                onSpawn: { orphanPID.set($0) })
+        }
+        try await eventually("the orphan to spawn") { orphanPID.value != nil }
+        let pid = try XCTUnwrap(orphanPID.value)
+        let runDir = store.runDirectory("draft-0-drafter-0")
+        try FileManager.default.createDirectory(at: runDir, withIntermediateDirectories: true)
+        try IntakeJSON.encoder.encode(RunRecord(pid: pid, started: Date())).write(to: runDir.appendingPathComponent("run.json"))
+        try store.saveTape(Tape(target: .nextMinor, status: .running, runnerPID: 999_999,
+                                heartbeat: Date(timeIntervalSinceNow: -60),
+                                roundInProgress: PlannedRound(stage: .draft, round: 0, major: true)))
+        _ = try store.appendCommand(.annotate("pending"))
+
+        final class Seen: @unchecked Sendable { var tape: Tape? }
+        let seen = Seen()
+        let tapeStore = store
+        let gate = Gate()
+        let commands = AsyncScriptedRunner { call in
+            if call.role == "drafter" { try await gate.wait() }
+            return Self.answer(call)
+        }
+        let poll = 0.05
+        let started = Date()
+        let run = Task {
+            await IntakeRunner(root: intakes, intakeID: intake.id,
+                               executor: RoundExecutor(runner: commands, graphReader: GraphReader(runner: commands, environment: [:])),
+                               environment: ["PATH": "/usr/bin:/bin"], pollInterval: .milliseconds(50), now: Date.init,
+                               killGroup: { seen.tape = tapeStore.loadTape(); _ = killpg($0, SIGKILL) }).run()
+        }
+        try await eventually("the slow round to start") { gate.entered == 1 }
+
+        let atRecovery = try XCTUnwrap(seen.tape, "recovery killed the orphan")
+        XCTAssertEqual(atRecovery.runnerPID, getpid(), "adopted before recovery killed anything")
+        XCTAssertGreaterThanOrEqual(try XCTUnwrap(atRecovery.heartbeat).timeIntervalSince(started), -0.001,
+                                    "a fresh heartbeat, not the dead runner's")
+        XCTAssertEqual(atRecovery.ackedCommandSeq, 0, "adopted before any command was applied")
+        XCTAssertNotNil(atRecovery.roundInProgress, "recovery had not saved yet")
+        _ = try? await orphan.value
+        XCTAssertNotEqual(kill(pid, 0), 0)
+
+        // Then, through a slow first round, the heartbeat never falls more than a poll behind.
+        // One extra poll of slack absorbs scheduler jitter; it is still 100x inside the app's 10 s.
+        for _ in 0..<10 {
+            let age = Date().timeIntervalSince(try XCTUnwrap(store.loadTape().heartbeat))
+            XCTAssertLessThan(age, 2 * poll, "heartbeat \(age)s old mid-round")
+            try await Task.sleep(nanoseconds: 30_000_000)
+        }
+        gate.open()
+        let status = await run.value
+        XCTAssertEqual(status, .paused)
     }
 
     // MARK: - Recovery
