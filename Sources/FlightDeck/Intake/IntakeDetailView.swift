@@ -131,20 +131,34 @@ struct IntakeDetailView: View {
                 Button("Start") { startShaping() }
             }
         }
-        .task(id: intake.id) { selectedPreset = intake.recommended ?? .bead }
+        .task(id: intake.id) { selectedPreset = intake.recommended ?? .bead; seedConfig() }
+        .onChange(of: selectedPreset) { seedConfig() }
     }
 
-    /// INSERTION POINT for the Rounds editor disclosure (`RoundConfigEditor`, Task 12), wired
-    /// in at merge time. When it lands it edits the config `startShaping` hands to
-    /// `beginShaping`; until then Start runs the preset's stock expansion.
+    /// The Rounds disclosure: the selected preset's expansion, editable before Start. Re-seeded
+    /// whenever the preset changes, so an edit to Full plan's config never leaks into Sketch's.
+    @ViewBuilder
     private var roundsEditor: some View {
-        EmptyView()
+        if let config = editedConfig {
+            RoundConfigEditor(
+                preset: selectedPreset,
+                config: Binding(get: { config }, set: { editedConfig = $0 }),
+                available: service.availableModels()
+            )
+        }
     }
 
-    /// The preset's stock config for the models this machine has. `beginShaping` rather than
-    /// `choose` so an edited config (once `roundsEditor` exists) is what actually runs.
+    /// The config `startShaping` hands to `beginShaping` — `nil` until the preset's expansion
+    /// seeds it. `beginShaping` rather than `choose` so the edited config is what actually runs.
+    @State private var editedConfig: RoundConfig?
+
+    private func seedConfig() {
+        editedConfig = PresetExpansion.config(for: selectedPreset, available: service.availableModels())
+    }
+
     private func startShaping() {
-        guard let config = PresetExpansion.config(for: selectedPreset, available: service.availableModels()) else { return }
+        guard let config = editedConfig ?? PresetExpansion.config(for: selectedPreset, available: service.availableModels())
+        else { return }
         service.beginShaping(intake.id, preset: selectedPreset, config: config)
     }
 
