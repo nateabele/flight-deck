@@ -1,0 +1,1 @@
+{"type":"result","subtype":"success","is_error":false,"num_turns":2,"session_id":"a4861836-f024-45f3-9f11-f3a2d366e96f","result":"{\"answer\":\"PONG\"}","structured_output":{"answer":"PONG"},"stop_reason":"tool_use","total_cost_usd":0.1295}
