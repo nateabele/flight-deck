@@ -276,7 +276,7 @@ struct TimelineRow: View {
             .font(proseFont)
             .foregroundStyle(proseColor)
         } else {
-            Text(linkedPlainText)
+            Text(linkedText(for: item))
                 .font(proseFont)
                 .italic(item.kind == .thinking)
                 .foregroundStyle(proseColor)
@@ -284,13 +284,23 @@ struct TimelineRow: View {
         }
     }
 
-    /// `item.body.text`, with its bare URLs turned into taps — see `TimelineLinkCache` for why
-    /// this goes through the screen's memo rather than `TimelineStyle.linkedPlainText` directly.
-    private var linkedPlainText: AttributedString {
+    /// A machine-text body's bare URLs, turned into taps — see `TimelineLinkCache` for why this
+    /// goes through the screen's memo rather than `TimelineStyle.linkedPlainText` directly.
+    ///
+    /// **One function, two callers, one cache entry per id.** `proseBody` above asks for `item`
+    /// itself; `toolCard` below asks for `output` — the paired `.toolResult`, not `item`, since
+    /// `TimelineStyle.outputBody(of:result:)` is where a folded card's output actually lands.
+    /// Taking the target as a parameter rather than reading `item` keeps both call sites on the
+    /// one lookup instead of growing a near-duplicate for the card.
+    ///
+    /// Internal rather than `private`, so `TimelineLinkTests` can prove a row is actually wired
+    /// to its `linkCache` without hosting a view — the same "drivable by a test with no window"
+    /// reason `isExpanded`'s own doc comment gives for staying a plain argument.
+    func linkedText(for target: TimelineItem) -> AttributedString {
         if let linkCache {
-            return linkCache.linked(for: item)
+            return linkCache.linked(for: target)
         }
-        return TimelineStyle.linkedPlainText(item.body.text)
+        return TimelineStyle.linkedPlainText(target.body.text)
     }
 
     /// The body this row draws, already cut to the ceiling if it needed cutting.
@@ -352,7 +362,7 @@ struct TimelineRow: View {
             }
             if let output, !output.body.text.isEmpty {
                 if item.kind == .toolCall { Divider() }
-                Text(TimelineStyle.linkedPlainText(output.body.text))
+                Text(linkedText(for: output))
                     .font(.system(.caption, design: .monospaced))
                     .foregroundStyle(output.body.isError ? .red : .secondary)
                     // Six lines of output is enough to recognise it and not enough to bury

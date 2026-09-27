@@ -163,16 +163,31 @@ enum TimelineStyle {
     /// The Mac never parses this (see `TimelineItem.at`), so the client is the first thing to
     /// look at it, and a string it cannot read gets `nil` — the row then shows no time at all
     /// rather than a formatted lie about a date nobody has.
+    ///
+    /// **Memoized** — this runs on every render of a row's header (`TimelineRow.swift:169`), and
+    /// a re-render that leaves `raw` untouched used to reparse the same ISO-8601 string and
+    /// reformat the same `Date` every poll tick, across every visible row. See `dateMemo`.
+    @MainActor
     static func time(_ raw: String?) -> String? {
-        guard let raw, let date = date(raw) else { return nil }
-        return date.formatted(date: .omitted, time: .shortened)
+        guard let raw else { return nil }
+        return dateMemo.strings(for: raw).time
     }
 
-    /// The whole instant, for the detail screen's header.
+    /// The whole instant, for the detail screen's header. Shares `time(_:)`'s memo entry —
+    /// both come off the one parsed `Date`, so asking for both on the same raw string costs one
+    /// parse, not two.
+    @MainActor
     static func timestamp(_ raw: String?) -> String? {
-        guard let raw, let date = date(raw) else { return nil }
-        return date.formatted(date: .abbreviated, time: .standard)
+        guard let raw else { return nil }
+        return dateMemo.strings(for: raw).timestamp
     }
+
+    /// How many times `time`/`timestamp` actually parsed and formatted rather than hit the
+    /// memo — internal rather than `private` only so `TimelineStyleTests` can assert a repeat
+    /// call is a hit, the same shape as `TimelineLinkCache.computeCount`/
+    /// `TimelineSegmentCache.computeCount`.
+    @MainActor
+    static var dateMemoComputeCount: Int { dateMemo.computeCount }
 
     /// The two spellings ISO-8601 arrives in, allocated once. Claude writes fractional seconds
     /// and codex does not, and `ISO8601DateFormatter` fails the spelling it was not configured
@@ -196,6 +211,68 @@ enum TimelineStyle {
     /// coping — so both are tried, and neither matching means `nil`.
     private static func date(_ raw: String) -> Date? {
         isoFractional.date(from: raw) ?? isoPlain.date(from: raw)
+    }
+
+    /// The `time(_:)`/`timestamp(_:)` memo, keyed by the raw ISO-8601 string — bounded and
+    /// evicted LRU, mirroring `TimelineLinkCache`/`TimelineSegmentCache` one call site over.
+    ///
+    /// **Main-actor, not `nonisolated(unsafe)` like `isoFractional`/`isoPlain` above.** Those
+    /// are read-only after `init`, which is what makes sharing them across threads safe; this is
+    /// a mutable dictionary an LRU eviction writes to on every miss, so it needs real isolation
+    /// rather than a promise nothing else touches it. Every real call site is already on the
+    /// main actor — `TimelineRow.header` and `TimelineItemDetailScreen.header` are both inside a
+    /// `View.body`, which SwiftUI itself isolates to it — so this costs no `await` anywhere it
+    /// is used.
+    ///
+    /// **Keyed by the raw string alone, and not further invalidated.** A `Date` never renders
+    /// two different strings for one instant on its own; what could change the answer for an
+    /// already-cached key is the reader's device `Locale`/`Calendar` changing mid-session
+    /// (Settings → General → Language & Region), which this does not observe. There is no
+    /// existing locale-invalidation pattern anywhere in this file, `TimelineLinkCache`, or
+    /// `TimelineSegmentCache` to follow for that, so it is left unhandled rather than guessed
+    /// at: a reader who changes locale mid-scroll keeps seeing the old spelling for any
+    /// already-rendered row's timestamp until that row's raw string falls out of the memo's
+    /// bound (200 entries — sized for more than one screenful, since this memo is shared by
+    /// every screen's rows rather than scoped to one screen's visible rows the way
+    /// `TimelineLinkCache`/`TimelineSegmentCache` are).
+    @MainActor private static var dateMemo = DateStringMemo()
+
+    @MainActor
+    private struct DateStringMemo {
+        struct Strings { let time: String?; let timestamp: String? }
+        private let capacity = 200
+        private var store: [String: Strings] = [:]
+        private var order: [String] = []  // least-recently-used first
+        private(set) var computeCount = 0
+
+        mutating func strings(for raw: String) -> Strings {
+            if let hit = store[raw] {
+                touch(raw)
+                return hit
+            }
+            computeCount += 1
+            let parsed = TimelineStyle.date(raw)
+            let value = Strings(
+                time: parsed.map { $0.formatted(date: .omitted, time: .shortened) },
+                timestamp: parsed.map { $0.formatted(date: .abbreviated, time: .standard) }
+            )
+            store[raw] = value
+            order.append(raw)
+            evictIfNeeded()
+            return value
+        }
+
+        private mutating func touch(_ key: String) {
+            if let index = order.firstIndex(of: key) { order.remove(at: index) }
+            order.append(key)
+        }
+
+        private mutating func evictIfNeeded() {
+            while order.count > capacity {
+                let oldest = order.removeFirst()
+                store.removeValue(forKey: oldest)
+            }
+        }
     }
 
     static func bytes(_ count: Int) -> String {
