@@ -19,14 +19,34 @@ final class HarnessWriteModeTests: XCTestCase {
                                      "--output-schema", "/intake/schema.json", "P"])
     }
 
-    func testClaudeWriteInWorkGrantsEditWriteAndAddsWorkDir() {
+    func testClaudeWriteInWorkGrantsEditWriteAndAddsOnlyTheWorkDir() {
         let c = HarnessCommand.build(req(.claude, access: .writeInWork(dir)))
         XCTAssertEqual(c.executable, "claude")
         XCTAssertEqual(c.arguments, ["-p", "P", "--model", "m", "--effort", "high", "--output-format", "json",
                                      "--json-schema", "{}", "--permission-mode", "acceptEdits",
                                      "--allowedTools", HarnessCommand.claudeWriteTools,
-                                     "--add-dir", "/work", "--add-dir", "/intake"])
-        XCTAssertFalse(c.arguments.contains("--disallowedTools"))
+                                     "--disallowedTools", HarnessCommand.claudeWriteDeniedTools,
+                                     "--strict-mcp-config", "--add-dir", "/work"])
+    }
+
+    /// `--allowedTools` only ADDS to whatever the operator's settings.json already allows —
+    /// this machine's has standing allows for `Bash(git add *)` and `Bash(rg:*)` that
+    /// `acceptEdits` would otherwise still run. A bare `Bash` deny is what actually holds even
+    /// though write mode never lists Bash in `--allowedTools`.
+    func testClaudeWriteInWorkAlwaysDeniesBash() {
+        let c = HarnessCommand.build(req(.claude, access: .writeInWork(dir)))
+        guard let i = c.arguments.firstIndex(of: "--disallowedTools") else {
+            return XCTFail("write mode must pass --disallowedTools")
+        }
+        XCTAssertTrue(c.arguments[i + 1].split(separator: " ").contains("Bash"))
+    }
+
+    /// Every `--add-dir` also grants Edit/Write, so a non-empty `readableDirs` must never widen
+    /// write access beyond the integrator's own work dir.
+    func testClaudeWriteInWorkNeverAddsReadableDirs() {
+        let c = HarnessCommand.build(req(.claude, access: .writeInWork(dir)))
+        let addDirValues = c.arguments.indices.filter { c.arguments[$0] == "--add-dir" }.map { c.arguments[$0 + 1] }
+        XCTAssertEqual(addDirValues, ["/work"])
     }
 
     /// `validate` is the pure check `build` traps on — exercised directly so this test never trips
