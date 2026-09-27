@@ -136,6 +136,33 @@ final class RoundPromptsTests: XCTestCase {
         XCTAssertTrue(p.contains("Never lose a feature"))
     }
 
+    /// Every change-set round copies `pre` out of the graph, so each must be told where it is.
+    func testChangeSetPromptsNameTheGraphFile() {
+        let c = context()
+        let prompts = [
+            "encode": RoundPrompts.encode(c, planFile: "/i/plan.md"),
+            "polish": RoundPrompts.polish(c, planFile: "/i/plan.md", changeSetFile: "/i/cs.json", round: 1),
+            "freshEyes": RoundPrompts.freshEyes(c, planFile: "/i/plan.md", changeSetFile: "/i/cs.json"),
+            "dedup": RoundPrompts.dedup(c, changeSetFile: "/i/cs.json"),
+        ]
+        for (name, p) in prompts {
+            XCTAssertTrue(p.contains("Read-only files:"), name)
+            XCTAssertTrue(p.contains("- Live bead graph: /i/graph.json"), name)
+            XCTAssertTrue(p.contains("/i/graph.json is a JSON snapshot shaped"), name)
+        }
+    }
+
+    func testChangeSetCorrectionAsksForTheWholeChangeSetNotARecommendation() {
+        let p = RoundPrompts.changeSetCorrection(errors: [.unknownBead("fd-9"), .cycle], observedAt: observedAt)
+        XCTAssertTrue(p.contains("failed validation"))
+        XCTAssertTrue(p.contains(ValidationError.unknownBead("fd-9").message))
+        XCTAssertTrue(p.contains(ValidationError.cycle.message))
+        XCTAssertTrue(p.contains(IntakeJSON.string(from: observedAt)))
+        XCTAssertTrue(p.contains(#"{"changeSet": {...}, "summary": "..."}"#))
+        XCTAssertTrue(p.contains("complete corrected change set"))
+        XCTAssertFalse(p.lowercased().contains("recommendation"))
+    }
+
     // MARK: - Polish
 
     func testPolishPromptHasDoNotOversimplifyAndObservedAt() {
