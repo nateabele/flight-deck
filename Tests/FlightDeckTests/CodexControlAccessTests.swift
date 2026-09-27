@@ -4,7 +4,7 @@ import XCTest
 /// `CodexControlAccess` is a pure builder: given a control socket and the options a codex
 /// tab is about to launch with, it decides whether to grant that tab's sandbox the one extra
 /// permission it needs to reach `flightdeck`'s control socket, and produces the five flags
-/// that do it — as raw argv for `Process` (`launchArguments`, Task 3's shape) or as the
+/// that do it — as raw argv for `Process` (`launchArguments`, the shape `CodexIntegrationTests` spawns via `Process`) or as the
 /// shell-quoted text Flight Deck types at a pty (`launchFlags`). See the type's own doc
 /// comment for why the grant goes through `network_proxy` rather than a sandbox override.
 ///
@@ -24,10 +24,11 @@ final class CodexControlAccessTests: XCTestCase {
                 "-c", #"default_permissions="flightdeck""#,
                 "-c", #"permissions.flightdeck.extends=":workspace""#,
                 "-c", "permissions.flightdeck.network.enabled=true",
-                "-c", #"permissions.flightdeck.network.unix_sockets={"/s/Flight Deck"="allow"}"#,
+                "-c", #"permissions.flightdeck.network.unix_sockets={"/s/Flight Deck/control.sock"="allow"}"#,
             ],
-            "the unix-socket key must be the socket's PARENT DIRECTORY, not the socket path "
-                + "itself — codex allowlists the directory a unix socket lives in"
+            "the unix-socket key must be the socket FILE, not its directory — codex emits "
+                + "`(subpath <key>)`, so a directory key would also open every other socket "
+                + "beside it, including the unauthenticated answer-trigger.sock"
         )
     }
 
@@ -61,7 +62,7 @@ final class CodexControlAccessTests: XCTestCase {
                 "-c", ClaudeSession.shellQuoted(#"permissions.flightdeck.extends=":workspace""#),
                 "-c", ClaudeSession.shellQuoted("permissions.flightdeck.network.enabled=true"),
                 "-c", ClaudeSession.shellQuoted(
-                    #"permissions.flightdeck.network.unix_sockets={"/s/Flight Deck"="allow"}"#),
+                    #"permissions.flightdeck.network.unix_sockets={"/s/Flight Deck/control.sock"="allow"}"#),
             ],
             "each -c value must be exactly one shell word — `--enable`/`network_proxy` need no "
                 + "quoting, since they contain no shell metacharacters"
@@ -100,7 +101,7 @@ final class CodexControlAccessTests: XCTestCase {
         let unquoted = try runThroughShell(quoted)
 
         // `unquoted` is now exactly what codex's own TOML parser would see after `-c`:
-        // `permissions.flightdeck.network.unix_sockets={"<dir>"="allow"}`. Split at the first
+        // `permissions.flightdeck.network.unix_sockets={"<socket>"="allow"}`. Split at the first
         // `=` to get the TOML value, then check it is the inline table TOML basic-string
         // escaping demands: `\"` for `"` (this path has no `\` of its own, so that rule is
         // exercised by `CodexControlAccessTests` unit-level TOML-escaping coverage below).
@@ -108,9 +109,9 @@ final class CodexControlAccessTests: XCTestCase {
             return XCTFail("expected key=value, got \(unquoted)")
         }
         let value = String(unquoted[unquoted.index(after: eq)...])
-        let expectedDir = #"/s/it's \"odd\"/x"#
-        XCTAssertEqual(value, "{\"\(expectedDir)\"=\"allow\"}",
-                       "the directory's own \" must be escaped as \\\" inside the TOML inline table")
+        let expectedPath = #"/s/it's \"odd\"/x/control.sock"#
+        XCTAssertEqual(value, "{\"\(expectedPath)\"=\"allow\"}",
+                       "the path's own \" must be escaped as \\\" inside the TOML inline table")
     }
 
     /// Embeds `shellQuotedValue` exactly where it would sit on a typed `codex ... -c <value>`
@@ -138,8 +139,8 @@ final class CodexControlAccessTests: XCTestCase {
         let backslashSocket = URL(fileURLWithPath: #"/s/a\b/control.sock"#)
         let flags = CodexControlAccess.launchArguments(socket: backslashSocket, options: CodexThreadOptions())
         guard let raw = flags.last else { return XCTFail("expected a unix_sockets flag") }
-        XCTAssertTrue(raw.contains(#"{"/s/a\\b"="allow"}"#),
-                      "a literal \\ in the directory must become \\\\ in the TOML value, got \(raw)")
+        XCTAssertTrue(raw.contains(#"{"/s/a\\b/control.sock"="allow"}"#),
+                      "a literal \\ in the path must become \\\\ in the TOML value, got \(raw)")
     }
 
     // MARK: - SessionStore pushes controlSocket onto the codex adapter, in both orders
