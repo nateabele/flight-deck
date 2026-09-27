@@ -512,7 +512,9 @@ private struct Pause: Error {
     let diagnosis: Diagnosis
     static func config(_ missing: String) -> Pause {
         Pause(diagnosis: Diagnosis(category: .harnessError, detail: "the round config has \(missing)",
-                                   action: "Edit the round config to fill that seat."))
+                                   // A `.shaping` intake's config is fixed, so "edit the
+                                   // config" was an action nobody could take from here.
+                                   action: "Discard this intake and capture it again with a different fidelity, or with that seat filled in the Rounds editor."))
     }
 }
 

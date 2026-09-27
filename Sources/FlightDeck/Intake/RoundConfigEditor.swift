@@ -147,7 +147,10 @@ struct RoundConfigEditor: View {
             }
             .labelsHidden()
             .pickerStyle(.menu)
-            .frame(width: ColumnWidth.fallback)
+            // Sized to its content and pinned leading: a menu picker centred in the fixed
+            // column sat at a different x on every row ("none" vs "codex gpt-…").
+            .fixedSize()
+            .frame(width: ColumnWidth.fallback, alignment: .leading)
         } else {
             Text("—").foregroundStyle(.secondary)
                 .frame(width: ColumnWidth.fallback, alignment: .leading)
@@ -162,14 +165,20 @@ struct RoundConfigEditor: View {
                 Text("Refinement cap").foregroundStyle(.secondary)
                 Stepper("\(config.refinementCap)", value: refinementCapBinding, in: 0...12)
             }
+            // Polish, fresh eyes and dedup are all seated by the polisher; with none, these
+            // controls would promise rounds the planner never runs (`TapePlanner.sequence`).
             GridRow {
                 Text("Polish cap").foregroundStyle(.secondary)
                 Stepper("\(config.polishCap)", value: polishCapBinding, in: 0...12)
+                    .disabled(!Self.polishControlsEnabled(config))
             }
+            .help(Self.polishControlsHelp(config))
             GridRow {
                 Text("Fresh eyes + dedup").foregroundStyle(.secondary)
                 Toggle("", isOn: freshEyesBinding).labelsHidden()
+                    .disabled(!Self.polishControlsEnabled(config))
             }
+            .help(Self.polishControlsHelp(config))
             GridRow {
                 Text("Default play").foregroundStyle(.secondary)
                 Picker("", selection: defaultPlayBinding) {
@@ -222,7 +231,8 @@ struct RoundConfigEditor: View {
     }
 
     private var freshEyesBinding: Binding<Bool> {
-        Binding(get: { config.freshEyesAndDedup }, set: { newValue in config = Self.setting(config) { $0.freshEyesAndDedup = newValue } })
+        // Reads off with no polisher, since that's what will run whatever the stored flag says.
+        Binding(get: { config.freshEyesAndDedup && Self.polishControlsEnabled(config) }, set: { newValue in config = Self.setting(config) { $0.freshEyesAndDedup = newValue } })
     }
 
     private var defaultPlayBinding: Binding<PlayMode> {
@@ -230,6 +240,15 @@ struct RoundConfigEditor: View {
     }
 
     // MARK: - Pure helpers (also covered directly by RoundConfigEditorTests)
+
+    /// The polish cap and fresh-eyes toggle only mean something with a polisher seated.
+    static func polishControlsEnabled(_ config: RoundConfig) -> Bool { config.polisher != nil }
+
+    /// Why those controls are greyed out, or an empty string (no tooltip) when they aren't.
+    static func polishControlsHelp(_ config: RoundConfig) -> String {
+        polishControlsEnabled(config) ? ""
+            : "This fidelity has no polisher, and polish, fresh eyes and dedup all run on the polisher's seat. Choose Feature plan or Full plan to use them."
+    }
 
     /// "<Preset>, customized" once any field has been edited — the label the brief specifies
     /// for the disclosure's own title.
