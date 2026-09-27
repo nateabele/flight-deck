@@ -1874,12 +1874,6 @@ feasibility unknown.
 
 **Accepted residuals:**
 
-- **Read-only claude seats still load the project's `.claude/settings.local.json`.**
-  `--setting-sources local` (`HarnessCommand.claudeIsolation`) drops the user's and project's
-  checked-in settings but keeps the gitignored local file, so a project whose local file allows
-  e.g. `Bash(git add *)` extends a "read-only" seat. Accepted: it is the operator's own file on
-  their own machine, the `br` write-verb denies still beat any allow in it, and dropping `local`
-  too was not verified to keep a headless run authenticated.
 - **Three app processes still use `waitUntilExit()`**: `LoginShellPath`,
   `CodexProcessTransport` and `FlywheelProcessRunner`. Called from a GCD worker it was shown to
   wedge after the child had already exited (sampled 2026-09-27, four concurrent test runs all
@@ -1887,17 +1881,23 @@ feasibility unknown.
   (f703040). None of the three has been seen hanging in the app, but each is the same pattern
   and should move the same way.
 
+**Not yet run or measured:**
+
+- **No live whole-tape run under fd-abduco with claude seats and the isolation flags.** Each
+  flag was probed live on its own (claude `--restricted` + `--tools`, codex
+  `--ignore-user-config --ignore-rules --disable hooks` + `-c service_tier`), and
+  `RoundsLiveProbeTests` ran a codex-only Sketch in-process — but no app-spawned runner has yet
+  taken a tape to review with claude seats under the full flag set. That is
+  `docs/FLYWHEEL-INTAKE-CHECKLIST.md`'s "Plan from scratch" job (including its Full plan variant
+  and the `.quillmap/` check).
+- **Main-thread cost during a run is unmeasured.** The tick stats `tape.json` per shaping intake,
+  decodes it when it moves (every heartbeat of a running tape), reads `commands.jsonl` for a
+  waiting tape, and probes the runner socket; heartbeat-only changes are no longer published.
+  None of it has been timed against a live app mid-run.
+
 **From the live Sketch probe** (`RoundsLiveProbeTests`, codex `gpt-5.6-luna`/`low` in every
 seat, 2026-09-27 — it reached review first time, 277 s, ~452k input / ~19k output tokens):
 
-- **Codex seats load the operator's MCP servers, and MCP servers are outside the sandbox.**
-  `HarnessCommand` has no codex equivalent of claude's `--strict-mcp-config`, so every codex
-  seat starts whatever `~/.codex/config.toml` lists. In the probe the read-only drafter and
-  reviewer called `quillmap_map`/`quillmap_grep`, and a quillmap index (`.quillmap/index.db`) was
-  written into the intake's `work/`. An MCP server runs as its own process, not under codex's
-  `-s read-only`, so a read-only seat whose operator has a *writing* MCP tool configured (quillmap
-  has mutators) is not read-only. Needs an isolation flag for codex seats, probed live before
-  it is trusted (a `-c mcp_servers={}` override is the obvious candidate; unverified).
 - **Cheap reviewers propose at line granularity.** The one refine round proposed 64 changes to a
   141-line draft (all 64 agreed; the plan came out at 85 lines), and the encoder turned a
   one-flag intent into 11 new beads and 18 edges — against a scratch project with no code, so

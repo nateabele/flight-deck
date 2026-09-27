@@ -12,7 +12,7 @@
 Confirm intake capture, headless triage, the release review, `br` release, and delivery to a
 bead's holder behave correctly end to end against a real flywheel project — plus the sidebar
 mechanics the project-row click depends on, and the collapsed/expanded rollup this plan adds
-to the project header. "Full plan from scratch" covers the round engine: planning rounds run by
+to the project header. "Plan from scratch (Feature plan)" covers the round engine: planning rounds run by
 the detached runner and driven from the shaping view.
 
 ## Prerequisites
@@ -179,27 +179,31 @@ and its **Retry** action starts a fresh triage turn from the unchanged intent te
 earlier partial turn, and any exchanges already answered, are intentionally discarded — see
 `docs/FOLLOWUPS.md`'s note on Retry).
 
-## Full plan from scratch
+## Plan from scratch (Feature plan)
 
 The round engine: a fidelity above Bead, run in the detached `flightdeck intake run` runner and
 driven from the shaping view's transport bar. `RoundsLiveProbeTests` proved the engine reaches
 review against real models in-process (Sketch, codex `gpt-5.6-luna`/`low`); nothing but this
-section exercises the app spawning the runner under fd-abduco, the tape watcher, the transport
-buttons, or a quit mid-round. Use the same real, non-temp project as above. Each round is a real
-model turn at the preset's default models — budget minutes per round, and real tokens.
+section exercises the app spawning the runner under fd-abduco with the isolation flags on its
+claude and codex seats, the tape watcher, the transport buttons, or a runner dying mid-round.
+Use the same real, non-temp project as above. Each round is a real model turn at the preset's
+default models — budget minutes per round, and real tokens.
 
 1. **Type an intent, choose Feature plan, and look at the Rounds editor.** Once triage
    recommends, pick **Feature plan** and open the **Rounds** disclosure.
    **Expect:** one row per seat — two drafters (arbiter, realist), synthesizer, reviewer,
    integrator, encoder, polisher — each with harness, model, effort (`low`…`max`, **no**
-   `ultra`) and fallback; refinement cap 3, polish cap 2, fresh-eyes + dedup off, default play
-   ⏭. Changing any field relabels it "Feature plan, customized". Put it back, or leave it.
-2. **Start. It stops after synthesis (⏭ default).**
+   `ultra`) and fallback, the Fallback pickers left-aligned in their column; refinement cap 3,
+   polish cap 2, fresh-eyes + dedup off, default play ⏭. Changing any field relabels it
+   "Feature plan, customized". Put it back, or leave it. (Choose **Sketch** for a moment and
+   check the polish cap and fresh-eyes toggle are greyed out, with a tooltip saying Sketch has
+   no polisher; then back to Feature plan.)
+2. **Start. It stops after draft; ⏭ again runs synthesis.**
    **Expect:** the intake goes to *shaping* and the shaping view appears (tape strip, transport
-   bar, status line). The strip's playhead moves through draft, then synthesis, and the tape
-   pauses there — synthesis is a major checkpoint. The round cards show both drafters (or a
-   *substituted*/*failed* badge with its diagnosis on hover) and the synthesis card's change
-   count and verdict tally.
+   bar, status line). The playhead runs draft and the tape pauses there — draft is a major
+   checkpoint, so the default ⏭ stops on it. The draft card shows both drafters (or a
+   *substituted*/*failed* badge with its diagnosis on hover). Press ⏭ again: synthesis runs and
+   the tape pauses after it, with its change count and verdict tally on the card.
 3. **Read the plan.** Click the synthesis card; the plan viewer shows its `plan.md`. Switch to
    **Diff vs previous**.
    **Expect:** monospaced, scrollable, selectable text; the diff is against drafter 0's draft.
@@ -210,20 +214,43 @@ model turn at the preset's default models — budget minutes per round, and real
 5. **⏩ to review.**
    **Expect:** the remaining refine rounds, encode, and both polish rounds run without stopping;
    the intake moves to *review* on its own, with the final change set in the release review.
-6. **Quit Flight Deck mid-round and relaunch.** Do this during step 5 (or a fresh intake's
-   rounds): quit while the status line says a round is running, wait ~30 s, relaunch.
+6. **`kill -9` the runner mid-round.** During step 5, while the status line says a round is
+   running, find the runner with `pgrep -f 'flightdeck intake run'` and `kill -9` it.
+   **Expect:** within ~30 s the app respawns a runner (`pgrep` shows a new pid, and only one),
+   the interrupted round's orphaned `codex`/`claude` children are killed, and the round reruns
+   from scratch — its card notes "rerun after interruption".
+7. **Quit Flight Deck mid-round and relaunch.** Also during step 5 (or a fresh intake's
+   rounds): quit while a round is running, wait ~30 s, relaunch.
    **Expect:** the runner kept going or was respawned, and the round completed. `ps -ef | rg
    'intake run'` shows **one** runner for the intake, never two. If it was respawned, the
    rerun round's card notes "rerun after interruption".
-7. **⏹ mid-round. Nothing is checkpointed.** On a fresh intake (or before step 5 finishes),
+8. **⏹ mid-round. Nothing is checkpointed.** On a fresh intake (or before step 5 finishes),
    press ⏹ while a round runs.
    **Expect:** the tape stops at the last checkpoint with no card for the cancelled round, and
    no `codex`/`claude` child of that round is left running (`ps -ef | rg 'codex exec|claude -p'`).
-8. **Release review, then release.** From step 5's intake, open the release review and Release,
-   as in steps 5–7 above.
-   **Expect:** the same release behaviour as a Bead intake: `br list`/`br graph` show exactly the
-   change set's beads and edges, and nothing was written to `br` before Release (check
-   `br list` for the intake's beads *before* step 8 — there must be none).
+9. **No MCP side effects in the work dir.** Once step 5 reaches review, search the intake's
+   directory, `work/` included: `find "$HOME/Library/Application Support/Flight Deck/intakes/<id>"
+   -name .quillmap` (under `$FLIGHT_DECK_STATE_DIR/intakes/<id>` if that is set).
+   **Expect:** nothing. A `.quillmap/` there means a seat started the user's MCP servers — the
+   isolation flags (`--ignore-user-config` for codex, `--restricted --strict-mcp-config` for
+   claude) did not hold.
+10. **Release review, then release.** From step 5's intake, open the release review and Release,
+    as in steps 5–7 above.
+    **Expect:** the same release behaviour as a Bead intake: `br list`/`br graph` show exactly
+    the change set's beads and edges, and nothing was written to `br` before Release (check
+    `br list` for the intake's beads *before* step 10 — there must be none).
+
+### Full plan variant
+
+Repeat steps 1–2 and 5 with **Full plan** on a fresh intake. It is the most expensive run here
+(four drafters, five refine rounds, six polish rounds) — run it once, not per change.
+
+**Expect:** the Rounds editor shows four drafters (arbiter, realist, coverage, stressTest)
+alternating codex and claude, polish cap 6 and fresh eyes + dedup **on**. ⏩ runs draft,
+synthesis, refine, encode, polish, then fresh eyes and dedup before review; the draft card
+lists all four drafters, and mixed codex/claude seats all complete (or substitute with a
+diagnosis) — no seat pauses on authentication or a missing proxy. Step 9's `.quillmap/` check
+holds here too.
 
 ## Pass criteria (summary)
 
@@ -243,8 +270,12 @@ model turn at the preset's default models — budget minutes per round, and real
 - [ ] Step 9 — the orange "needs you" icon shows collapsed AND expanded while an intake
   needs attention, and clears on its own once resolved (Discard, or Dismiss for a partial)
 - [ ] Step 10 — quitting mid-triage leaves the intake interrupted; Retry starts fresh
-- [ ] Full plan from scratch — the Rounds editor shows every Feature plan seat and relabels on
-  edit; Start pauses after synthesis; the plan and its diff read correctly; an annotation shapes
-  the next refine round; ⏩ lands in review; a quit mid-round completes the round with one runner;
-  ⏹ checkpoints nothing and leaves no child running; release writes the change set and nothing
-  reached `br` before it
+- [ ] Plan from scratch (Feature plan) — the Rounds editor shows every Feature plan seat and
+  relabels on edit (Sketch greys out polish/fresh eyes); Start pauses after draft and ⏭ after
+  synthesis; the plan and its diff read correctly; an annotation shapes the next refine round;
+  ⏩ lands in review; a `kill -9`'d runner is respawned within ~30 s and the round reruns with
+  "rerun after interruption"; a quit mid-round completes the round with one runner; ⏹
+  checkpoints nothing and leaves no child running; no `.quillmap/` under the intake; release
+  writes the change set and nothing reached `br` before it
+- [ ] Full plan variant — four mixed codex/claude drafters, polish, fresh eyes + dedup all run
+  to review
