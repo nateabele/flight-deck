@@ -299,9 +299,20 @@ final class FleetModelTests: XCTestCase {
             return counts[kind, default: 0]
         }
 
+        /// Every project a `newSessionOptions` request actually named, in the order asked —
+        /// finer-grained than `count`, for asserting `.projectAdded` asked for the ONE new
+        /// project rather than merely that the aggregate count went up by one.
+        private var newSessionOptionsProjectsStorage: [UUID] = []
+        func newSessionOptionsProjects() -> [UUID] {
+            lock.lock(); defer { lock.unlock() }
+            return newSessionOptionsProjectsStorage
+        }
+
         private func key(for request: FleetRequest) -> String {
             switch request {
-            case .newSessionOptions: return "newSessionOptions"
+            case .newSessionOptions(let project):
+                newSessionOptionsProjectsStorage.append(project)
+                return "newSessionOptions"
             case .conversations: return "conversations"
             case .recentlyClosed: return "recentlyClosed"
             default: return "other"
@@ -427,6 +438,34 @@ final class FleetModelTests: XCTestCase {
         XCTAssertEqual(tally.count("recentlyClosed"), 2, "a closed tab must refresh the reopen stack")
         XCTAssertEqual(tally.count("newSessionOptions"), 1, "closing a tab must not re-ask for the New Session menu")
         XCTAssertEqual(tally.count("conversations"), 1, "closing a tab must not re-ask for the conversation catalogue")
+    }
+
+    /// **The regression the quiet-event fix introduced.** A project added mid-connection used
+    /// to get its New Session menu on the next reconnect only — nothing else asks, since the
+    /// rows derive from preferences and preferences emit no other event — so the `+` on a
+    /// project that just appeared showed the default row until then. `.projectAdded` must ask
+    /// for that ONE project, the same shape `sessionAdded`/`sessionRemoved` already get above,
+    /// not drag `refreshConversations`/`refreshRecentlyClosed` along for a project that changed
+    /// nothing either of them tracks.
+    func testProjectAddedAsksForThatOneProjectsNewSessionOptionsAndNothingElse() async throws {
+        let tally = RequestTally()
+        let model = try await connectedModel(tally: tally)
+        try await waitUntil(timeout: 10) {
+            tally.count("newSessionOptions") == 1 && tally.count("conversations") == 1
+                && tally.count("recentlyClosed") == 1
+        }
+        let newProject = WireProject(id: UUID(), name: "new", path: "/Users/me/new")
+
+        server.broadcast(.event(seq: 1, .projectAdded(newProject, at: model.fleet.projects.count)))
+
+        try await waitUntil(timeout: 10) { tally.count("newSessionOptions") == 2 }
+        XCTAssertEqual(tally.count("newSessionOptions"), 2, "a new project must ask for its own New Session menu")
+        XCTAssertEqual(
+            tally.newSessionOptionsProjects().last, newProject.id,
+            "the request must name the project that was just added, not re-sweep every project"
+        )
+        XCTAssertEqual(tally.count("conversations"), 1, "a new project must not re-ask for the conversation catalogue")
+        XCTAssertEqual(tally.count("recentlyClosed"), 1, "a new project must not re-ask for the reopen stack")
     }
 
     /// One project, two sessions — enough for `newSessionOptions`' one-request-per-project

@@ -374,12 +374,20 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
     /// preferences do. `.connected` is once per dial, which is the only moment this can
     /// actually have gone stale.
     func refreshNewSessionOptions() {
-        guard let connector else { return }
         for project in fleet.projects {
-            connector.requestNewSessionOptions(project: project.id) { [weak self] result in
-                guard let self, case .success(let answer) = result else { return }
-                self.newSessionOptions[answer.project] = answer.options
-            }
+            requestNewSessionOptions(for: project.id)
+        }
+    }
+
+    /// The per-project half of `refreshNewSessionOptions`, factored out so `onEvent`'s
+    /// `.projectAdded` case can ask for exactly the one project that just appeared — see its
+    /// own comment — instead of resweeping every project the way a bare call to
+    /// `refreshNewSessionOptions()` there would.
+    private func requestNewSessionOptions(for project: UUID) {
+        guard let connector else { return }
+        connector.requestNewSessionOptions(project: project) { [weak self] result in
+            guard let self, case .success(let answer) = result else { return }
+            self.newSessionOptions[answer.project] = answer.options
         }
     }
 
@@ -732,6 +740,16 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
                     // activity, unread, rename — cannot move this list, so asking again for
                     // those was pure waste; see `refreshRecentlyClosed`'s own comment.
                     self?.refreshRecentlyClosed()
+                case .projectAdded(let project, _):
+                    // A project that appears mid-connection needs its own New Session menu now,
+                    // not on the next reconnect — `refreshNewSessionOptions`'s own comment is
+                    // why nothing else pushes a change here, and that reasoning applies to a
+                    // brand new project exactly as much as to one already on screen. Just the
+                    // one project this event names, via the same per-project helper
+                    // `refreshNewSessionOptions()` sweeps with — the other projects' menus have
+                    // not gone stale, so resweeping all of them would be the same waste
+                    // `activityChanged`/`unreadChanged` were cut for.
+                    self?.requestNewSessionOptions(for: project.id)
                 default:
                     break
                 }
