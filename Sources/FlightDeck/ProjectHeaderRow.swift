@@ -267,29 +267,14 @@ struct ProjectHeaderRow: View {
         .accessibilityElement(children: .combine)
         .accessibilityLabel(accessibilityLabel)
         .accessibilityIdentifier("project-header")
-        // Confirmation-gated: `enableFlywheel` shells out to `am guard install` and writes a
-        // git hook, so the user sees exactly what it is about to do before it runs.
-        .confirmationDialog(
-            "Enable Flywheel for \"\(repo.displayName)\"?",
-            isPresented: $showingFlywheelConfirmation
-        ) {
-            Button("Enable") { Task { await store.enableFlywheel(for: repo.url) } }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text(flywheelSetupStepsDescription)
-        }
-        // Same gating as above, for the plain-repo path: `setupFlywheel` additionally runs
-        // `br init`/`br agents --add`/`am projects discovery-init` before `enable`'s own
-        // steps, so the confirmation lists the bootstrap alongside the install.
-        .confirmationDialog(
-            "Setup Flywheel for \"\(repo.displayName)\"?",
-            isPresented: $showingFlywheelSetupConfirmation
-        ) {
-            Button("Setup") { Task { await store.setupFlywheel(for: repo.url) } }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text(flywheelInitializeStepsDescription)
-        }
+        // The two confirmation dialogs themselves live in `FlywheelEnableDialogs`, shared
+        // with `ProjectView`'s empty state so the header menu and that button's "Enable
+        // Flywheel…" run the literal same flow.
+        .flywheelEnableConfirmations(
+            repo: repo, store: store, status: flywheelStatus,
+            showingEnableConfirmation: $showingFlywheelConfirmation,
+            showingSetupConfirmation: $showingFlywheelSetupConfirmation
+        )
     }
 
     /// The native sidebar selection pill, reproduced. Every number was measured, not chosen:
@@ -313,7 +298,7 @@ struct ProjectHeaderRow: View {
     }
 
     private var isFlywheelEnabled: Bool {
-        store.preferences?.projectSettings(repo.url.path).flywheelEnabled == true
+        FlywheelEnablement.isEnabled(store.preferences?.projectSettings(repo.url.path))
     }
 
     /// The cached probe (`store.flywheelSuggestion(for:)`) only ever holds a hit for a
@@ -326,9 +311,7 @@ struct ProjectHeaderRow: View {
     /// is kept as a last-resort fallback for the brief window before that `.onAppear` fires
     /// (SwiftUI's first `body` pass), not as the steady-state path.
     private var flywheelStatus: FlywheelStatus {
-        store.flywheelSuggestion(for: repo.url)
-            ?? probedFlywheelStatus
-            ?? FlywheelProjectProbe.status(of: repo.url)
+        FlywheelEnableResolution.status(for: repo.url, store: store, cached: probedFlywheelStatus)
     }
 
     /// Runs the FileManager-backed probe at most once per row mount, into `@State`, instead of
@@ -343,27 +326,6 @@ struct ProjectHeaderRow: View {
     private func probeFlywheelStatusIfNeeded() {
         guard probedFlywheelStatus == nil, store.flywheelSuggestion(for: repo.url) == nil else { return }
         probedFlywheelStatus = FlywheelProjectProbe.status(of: repo.url)
-    }
-
-    /// What the confirmation dialog tells the user `enableFlywheel` is about to run — the
-    /// same steps `FlywheelSetup.enable` will actually perform, since both consult the same
-    /// `FlywheelStatus` shape.
-    private var flywheelSetupStepsDescription: String {
-        let status = flywheelStatus
-        var steps: [String] = []
-        if !status.guardInstalled { steps.append("Agent Mail commit guard") }
-        if !status.beadsSyncHooksInstalled { steps.append("beads sync hook") }
-        guard !steps.isEmpty else {
-            return "Setup is already complete; this only marks the project as Flywheel-enabled."
-        }
-        return "Will install: " + steps.joined(separator: ", ") + "."
-    }
-
-    /// What the confirmation dialog tells the user `setupFlywheel` is about to run: the
-    /// bootstrap `FlywheelSetup.initialize` performs on a plain repo, ahead of the same
-    /// guard/hook install `flywheelSetupStepsDescription` lists.
-    private var flywheelInitializeStepsDescription: String {
-        "Will initialize: beads, agent-mail marker, AGENTS.md. Will install: Agent Mail commit guard, beads sync hook."
     }
 
     /// How many of this project's intakes need the human — `IntakeService.attentionCount`,
