@@ -175,8 +175,17 @@ public struct SystemCommandRunner: CommandRunner {
         // A new process group, led by the child itself (pgid 0 => "make it my own pid") — so
         // a caller holding just the pid can `killpg` everything the child forks, the way
         // `SessionReaper`/`ForkedChild` already do for the app's own agent processes.
-        posix_spawnattr_setflags(&attr, Int16(POSIX_SPAWN_SETPGROUP))
+        // SETSIGDEF + SETSIGMASK: `posix_spawn` otherwise hands the child the spawning thread's
+        // signal mask and any ignored dispositions — which `Process` resets and raw spawn does
+        // not. Observed under xctest: a child's SIGTERM from `killpg` returned 0 yet `sleep 30`
+        // ran to completion, so ⏹ only ever landed via the SIGKILL a full second later and no
+        // harness got a chance to shut down cleanly.
+        posix_spawnattr_setflags(&attr, Int16(POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK))
         posix_spawnattr_setpgroup(&attr, 0)
+        var allSignals = sigset_t(), noSignals = sigset_t()
+        sigfillset(&allSignals); sigemptyset(&noSignals)
+        posix_spawnattr_setsigdefault(&attr, &allSignals)
+        posix_spawnattr_setsigmask(&attr, &noSignals)
 
         // argv[0] is "/usr/bin/env" itself — `Process` inserts this automatically (its
         // `arguments` docs say so explicitly), but raw `posix_spawn` does not: without it,
