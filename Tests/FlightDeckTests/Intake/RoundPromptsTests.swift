@@ -92,6 +92,7 @@ final class RoundPromptsTests: XCTestCase {
     func testSynthesisPromptNamesDraftPathsAndAsksForOwnEdits() {
         let p = RoundPrompts.synthesis(context(), ownDraft: "/i/draft-a.md",
                                        otherDrafts: ["/i/draft-b.md", "/i/draft-c.md"])
+        XCTAssertTrue(p.contains("Read-only files:"))
         XCTAssertTrue(p.contains("/i/draft-a.md"))
         XCTAssertTrue(p.contains("/i/draft-b.md"))
         XCTAssertTrue(p.contains("/i/draft-c.md"))
@@ -143,6 +144,7 @@ final class RoundPromptsTests: XCTestCase {
         XCTAssertTrue(p.contains(IntakeJSON.string(from: observedAt)))
         XCTAssertTrue(p.contains("/i/plan.md"))
         XCTAssertTrue(p.contains("/i/cs.json"))
+        XCTAssertTrue(p.contains("must stay exactly what it was"))
     }
 
     func testPolishPromptOmitsShadowBeadsClauseWhenNil() {
@@ -167,6 +169,7 @@ final class RoundPromptsTests: XCTestCase {
         XCTAssertTrue(p.contains("/i/cs.json"))
         XCTAssertTrue(p.contains("fresh"))
         XCTAssertFalse(p.contains("--robot-insights"))
+        XCTAssertTrue(p.contains("must stay exactly what it was"))
     }
 
     func testFreshEyesPromptAddsShadowBeadsClauseWhenPresent() {
@@ -182,6 +185,7 @@ final class RoundPromptsTests: XCTestCase {
         XCTAssertTrue(p.contains("/i/cs.json"))
         XCTAssertTrue(p.contains("duplicative"))
         XCTAssertFalse(p.contains("--robot-plan"))
+        XCTAssertTrue(p.contains("must stay exactly what it was"))
     }
 
     func testDedupPromptAddsShadowBeadsClauseWhenPresent() {
