@@ -152,6 +152,31 @@ public enum RoundPrompts {
         return pairs.isEmpty ? nil : pairs.joined(separator: "\n\n")
     }
 
+    /// The intake itself — intent, then the Q&A when there is any. Every seat that judges a
+    /// plan is a fresh session that never saw triage, so it needs these in its own prompt:
+    /// "the task you were just given" points at a conversation it never had.
+    private static func intakeText(_ c: RoundContext) -> String {
+        var s = "Intent:\n\(c.intent)"
+        if let qa = qaTranscript(c.qa) { s += "\n\nHere is the Q&A transcript so far:\n\(qa)" }
+        return s
+    }
+
+    /// The human's annotations, in the same words for every stage that takes them — draft,
+    /// synthesis, refine, encode, polish, fresh-eyes and dedup. An annotation is consumed by
+    /// whichever round runs next, so a stage that silently dropped it would lose the note
+    /// for good. Empty when there is nothing to say, so no stage gets a bare header.
+    private static func steering(_ c: RoundContext) -> String {
+        guard !c.annotations.isEmpty else { return "" }
+        let notes = c.annotations.map { "- \($0)" }.joined(separator: "\n")
+        return "\n\nThe human steering this plan says:\n\(notes)"
+    }
+
+    /// Points a polish-family seat at the project's agent instructions by path — only when FD
+    /// found the file, since naming a missing one sends the agent off to look for it.
+    private static func rereadAgents(_ c: RoundContext) -> String {
+        c.agentsFile.map { "Reread the project's agent instructions at \($0). " } ?? ""
+    }
+
     /// The extra clause every polish-family round gets once a shadow-beads database exists
     /// (Task 7b wires the path in): `bv`'s robot reports re-read the graph AS IF the current
     /// change set had already landed, so the model sees the shape its own beads would
@@ -210,19 +235,7 @@ public enum RoundPrompts {
         You are drafting a plan for this project intake. Write a complete, detailed, \
         granular markdown plan — not an outline, not a summary.
 
-        Intent:
-        \(c.intent)
-        """
-        if let qa = qaTranscript(c.qa) {
-            s += """
-
-
-            Here is the Q&A transcript so far:
-            \(qa)
-            """
-        }
-        s += """
-
+        \(intakeText(c))
 
         Read-only files:
         \(inputFiles(c))
@@ -230,6 +243,7 @@ public enum RoundPrompts {
         \(Triage.graphShapeText(graphFile: c.graphFile))
         """
         s += lens(for: persona)
+        s += steering(c)
         s += """
 
 
@@ -242,20 +256,23 @@ public enum RoundPrompts {
     public static func synthesis(_ c: RoundContext, ownDraft: String, otherDrafts: [String]) -> String {
         let others = otherDrafts.map { "- Competing draft: \($0)" }.joined(separator: "\n")
         return """
-        I asked competing models to independently do the same drafting task you were just \
-        given; be intellectually honest about what they did better than your own plan, and \
+        You are synthesizing a plan for this project intake. I asked competing models to \
+        independently draft the same plan; be intellectually honest about what the \
+        competing drafts did better than the draft at \(ownDraft) (yours to revise), and \
         fold it in.
 
-        Read-only files:
-        - Your draft: \(ownDraft)
-        \(others)
+        \(intakeText(c))
 
-        Read your own draft again alongside the competing drafts, and return the edits you \
-        would make to YOUR OWN draft (\(ownDraft)) — not a rewrite of theirs — as \
-        `changes[]`. Each change names the `section` it touches, the `rationale` (what a \
-        competing draft got right that yours didn't), and `edit`: a git-diff-style hunk or \
-        exact replacement instructions precise enough that another agent could apply it \
-        without guessing.
+        Read-only files:
+        - The draft at \(ownDraft) (yours to revise)
+        \(others)
+        \(inputFiles(c))\(steering(c))
+
+        Read that draft alongside the competing drafts, and return the edits you would make \
+        to it (\(ownDraft)) — not a rewrite of the competing drafts — as `changes[]`. Each \
+        change names the `section` it touches, the `rationale` (what a competing draft got \
+        right that this one didn't), and `edit`: a git-diff-style hunk or exact replacement \
+        instructions precise enough that another agent could apply it without guessing.
 
         Return only JSON matching the provided schema: `{"changes": [...], "summary": "..."}`.
         """
@@ -266,16 +283,13 @@ public enum RoundPrompts {
         This is refinement round \(round). Carefully review this entire plan and come up \
         with your best revisions to it: \(planFile). I am positive you missed or got wrong \
         at least 40 elements — find them.
+
+        \(intakeText(c))
+
+        Read-only files:
+        \(inputFiles(c))
         """
-        if !c.annotations.isEmpty {
-            let notes = c.annotations.map { "- \($0)" }.joined(separator: "\n")
-            s += """
-
-
-            The human steering this plan says:
-            \(notes)
-            """
-        }
+        s += steering(c)
         s += """
 
 
@@ -313,7 +327,7 @@ public enum RoundPrompts {
 
         \(changeSetInputs(c))
 
-        \(Triage.changeSetRulesText(observedAt: c.observedAt))
+        \(Triage.changeSetRulesText(observedAt: c.observedAt))\(steering(c))
 
         Return only JSON matching the provided schema: `{"changeSet": {...}, "summary": "..."}`.
         """
@@ -322,7 +336,7 @@ public enum RoundPrompts {
     public static func polish(_ c: RoundContext, planFile: String, changeSetFile: String, round: Int,
                                shadowBeads: String? = nil) -> String {
         """
-        This is polish round \(round). Reread AGENTS.md. Check over each proposed bead in \
+        This is polish round \(round). \(rereadAgents(c))Check over each proposed bead in \
         \(changeSetFile) super carefully against the plan at \(planFile): does it make \
         sense, is it optimal, could it be better? Revise it. DO NOT OVERSIMPLIFY. DO NOT \
         LOSE FEATURES. Merge duplicates, fill empty descriptions, fix dependencies, and \
@@ -334,7 +348,7 @@ public enum RoundPrompts {
 
         \(changeSetInputs(c))
 
-        \(Triage.changeSetRulesText(observedAt: c.observedAt))
+        \(Triage.changeSetRulesText(observedAt: c.observedAt))\(steering(c))
 
         Return only JSON matching the provided schema: `{"changeSet": {...}, "summary": "..."}`.
         """
@@ -344,7 +358,7 @@ public enum RoundPrompts {
                                   shadowBeads: String? = nil) -> String {
         """
         You are seeing this plan and its beads for the first time — a fresh-eyes reviewer, \
-        not someone who has been polishing them for rounds. Read the plan at \(planFile) \
+        not someone who has been polishing them for rounds. \(rereadAgents(c))Read the plan at \(planFile) \
         and the proposed beads at \(changeSetFile) fresh: does the change set make sense, is \
         it optimal, could it be better? Revise it. DO NOT OVERSIMPLIFY. DO NOT LOSE \
         FEATURES. Merge duplicates, fill empty descriptions, fix dependencies, and \
@@ -356,7 +370,7 @@ public enum RoundPrompts {
 
         \(changeSetInputs(c))
 
-        \(Triage.changeSetRulesText(observedAt: c.observedAt))
+        \(Triage.changeSetRulesText(observedAt: c.observedAt))\(steering(c))
 
         Return only JSON matching the provided schema: `{"changeSet": {...}, "summary": "..."}`.
         """
@@ -364,7 +378,7 @@ public enum RoundPrompts {
 
     public static func dedup(_ c: RoundContext, changeSetFile: String, shadowBeads: String? = nil) -> String {
         """
-        Check over ALL proposed beads at \(changeSetFile); none may be duplicative or \
+        \(rereadAgents(c))Check over ALL proposed beads at \(changeSetFile); none may be duplicative or \
         excessively overlapping. Merge into canonical beads, keeping the richer tests and \
         dependencies of whichever duplicate had them.\(shadowBeadsClause(shadowBeads))
 
@@ -374,7 +388,7 @@ public enum RoundPrompts {
 
         \(changeSetInputs(c))
 
-        \(Triage.changeSetRulesText(observedAt: c.observedAt))
+        \(Triage.changeSetRulesText(observedAt: c.observedAt))\(steering(c))
 
         Return only JSON matching the provided schema: `{"changeSet": {...}, "summary": "..."}`.
         """
