@@ -273,8 +273,9 @@ that fell off the 4096-entry ring. Every other reconnect is answered with a repl
 nothing at all. So a phone that drops Wi-Fi and rejoins, or is backgrounded and foregrounded
 against a Mac that has been up a while, resumed by replay and never refreshed — the roaming
 case the feature exists for. `.connected` covers snapshot and replay alike, once per connection.
-It is not, incidentally, the hook the New Session menu uses; that is `onFleet`, which fires on
-snapshots *and* on every event.
+It is, incidentally, the same hook the New Session menu uses too now (and the reopen stack's
+initial ask), with `sessionAdded`/`sessionRemoved` topping the reopen stack up between connects
+— see `FleetModel.refreshNewSessionOptions`'s own comment.
 
 From there the mechanics are unchanged: `FleetService.onRequest`'s `.macEndpoints` case answers
 with `LocalEndpoints.routable`; and `adoptEndpoints` takes the answer as authoritative, keeping
