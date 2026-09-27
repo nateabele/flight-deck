@@ -160,8 +160,45 @@ public struct ChangeSet: Codable, Equatable, Sendable {
 }
 
 public enum IntakeJSON {
-    public static let decoder: JSONDecoder = { let d = JSONDecoder(); d.dateDecodingStrategy = .iso8601; return d }()
+    public static let decoder: JSONDecoder = {
+        let d = JSONDecoder()
+        // Custom date decoding: accept ISO8601 with or without fractional seconds.
+        // Task 5 fixtures emit 2026-09-26T20:00:00Z (no fractions); Intake persists with fractions.
+        // Both forms must decode successfully.
+        d.dateDecodingStrategy = .custom { decoder in
+            let container = try decoder.singleValueContainer()
+            let dateString = try container.decode(String.self)
+
+            // Try ISO8601 formatter with fractional seconds first
+            let formatter = ISO8601DateFormatter()
+            formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            if let date = formatter.date(from: dateString) {
+                return date
+            }
+
+            // Fall back to formatter without fractional seconds
+            formatter.formatOptions = [.withInternetDateTime]
+            if let date = formatter.date(from: dateString) {
+                return date
+            }
+
+            throw DecodingError.dataCorruptedError(in: container, debugDescription: "Invalid ISO8601 date: \(dateString)")
+        }
+        return d
+    }()
     public static let encoder: JSONEncoder = {
-        let e = JSONEncoder(); e.dateEncodingStrategy = .iso8601; e.outputFormatting = [.prettyPrinted, .sortedKeys]; return e
+        let e = JSONEncoder()
+        // Encode dates as ISO8601 with fractional seconds (millisecond precision).
+        // This ensures round-trip fidelity for intake timestamps.
+        e.dateEncodingStrategy = .custom { date, encoder in
+            var container = encoder.singleValueContainer()
+            // Use ISO8601DateFormatter for Swift 5 compatibility
+            let formatter = ISO8601DateFormatter()
+            formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            let formatted = formatter.string(from: date)
+            try container.encode(formatted)
+        }
+        e.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return e
     }()
 }

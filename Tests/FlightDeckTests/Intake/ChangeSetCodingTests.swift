@@ -34,4 +34,38 @@ final class ChangeSetCodingTests: XCTestCase {
         XCTAssertEqual(BeadRef(parsing: "br-3"), .existing("br-3"))
         XCTAssertEqual(BeadRef.new("n3").wireValue, "new:n3")
     }
+
+    func testIntakeJSONRoundTripWithFractionalSeconds() throws {
+        // Date with fractional seconds must round-trip exactly after rounding to milliseconds.
+        // Intake.init rounds to millisecond precision to match ISO8601 formatter precision.
+        let dateWithSubMs = Date(timeIntervalSince1970: 1000.1234567)
+        var intake = Intake(projectPath: "/p", intent: "test", createdAt: dateWithSubMs)
+        intake.state = .review
+        let encoded = try IntakeJSON.encoder.encode(intake)
+        let decoded = try IntakeJSON.decoder.decode(Intake.self, from: encoded)
+        // After rounding to milliseconds in init, dates should match exactly
+        XCTAssertEqual(decoded.createdAt, intake.createdAt)
+        XCTAssertEqual(decoded, intake)
+    }
+
+    func testIntakeJSONDecodesNoFractionTimestamps() throws {
+        // Task 5 fixtures and agents emit dates without fractional seconds (e.g., 2026-09-26T20:00:00Z).
+        // These must still decode successfully.
+        let json = """
+        {
+          "id": "12345678-1234-5678-1234-567812345678",
+          "projectPath": "/p",
+          "intent": "test",
+          "createdAt": "2026-09-26T20:00:00Z",
+          "state": "triaging",
+          "exchanges": [],
+          "ratingOverrides": {},
+          "droppedOps": [],
+          "confirmedDrift": []
+        }
+        """.data(using: .utf8)!
+        let decoded = try IntakeJSON.decoder.decode(Intake.self, from: json)
+        XCTAssertEqual(decoded.intent, "test")
+        XCTAssertEqual(decoded.state, .triaging)
+    }
 }
