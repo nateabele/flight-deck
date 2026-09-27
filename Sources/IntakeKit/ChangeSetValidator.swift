@@ -6,6 +6,22 @@ public enum ValidationError: Equatable, Sendable {
 }
 public struct ValidationErrors: Error, Equatable, Sendable { public let errors: [ValidationError] }
 
+extension ValidationError {
+    /// One sentence an agent can act on — fed back verbatim by `Triage.correctionPrompt`, and
+    /// shown to the human when the corrected change set fails too (spec §11).
+    public var message: String {
+        switch self {
+        case .unknownBead(let id): "`\(id)` is not a bead in the graph"
+        case .undefinedTempId(let t): "`new:\(t)` is referenced, but no createBead or followUp op defines tempId `\(t)`"
+        case .duplicateTempId(let t): "tempId `\(t)` is defined by more than one op"
+        case .selfEdge(let ref): "an addEdge points `\(ref)` at itself"
+        case .cycle: "the blocking edges, together with the graph's existing edges, form a cycle"
+        case .missingDelivery(let id): "`\(id)` is in_progress, so its editBead needs a `delivery` rating"
+        case .preconditionMismatch(let id): "the `pre` for `\(id)` does not match its current status and assignee in the graph"
+        }
+    }
+}
+
 public struct ValidatedChangeSet: Equatable, Sendable {
     public let changeSet: ChangeSet
     /// Indices of `addEdge` ops whose dependent is an EXISTING bead and dependency a NEW one.
