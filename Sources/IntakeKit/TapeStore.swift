@@ -100,7 +100,11 @@ public struct TapeStore: Sendable {
         }
         try fm.createDirectory(at: dir, withIntermediateDirectories: true)
         for (name, data) in files {
-            try data.write(to: dir.appendingPathComponent(name))
+            // Names are relative paths (a draft round writes `drafts/<i>.md`), so each file's
+            // own parent may not exist yet.
+            let url = dir.appendingPathComponent(name)
+            try fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try data.write(to: url)
         }
 
         var next = tape

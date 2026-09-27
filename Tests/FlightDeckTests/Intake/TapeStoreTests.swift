@@ -108,6 +108,19 @@ final class TapeStoreTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: fileURL), Data("hello".utf8))
     }
 
+    /// A draft round's files are keyed `drafts/<i>.md` — a relative path whose own parent
+    /// doesn't exist yet inside the fresh checkpoint directory.
+    func testWriteCheckpointCreatesSubdirectoriesForNestedFiles() throws {
+        let store = TapeStore(intakeDirectory: root)
+        var tape = Tape.empty
+        let cp = Checkpoint(id: 1, stage: .draft, round: 0, major: true, createdAt: Date())
+        try store.writeCheckpoint(cp, files: ["drafts/0.md": Data("zero".utf8), "drafts/2.md": Data("two".utf8)], into: &tape)
+        let drafts = store.checkpointDirectory(1).appendingPathComponent("drafts")
+        XCTAssertEqual(try Data(contentsOf: drafts.appendingPathComponent("0.md")), Data("zero".utf8))
+        XCTAssertEqual(try Data(contentsOf: drafts.appendingPathComponent("2.md")), Data("two".utf8))
+        XCTAssertEqual(tape.checkpoints, [cp])
+    }
+
     func testWriteCheckpointRemovesAnOrphanDirectoryFirst() throws {
         let store = TapeStore(intakeDirectory: root)
         // Simulate a prior crash: checkpoints/7/ exists with a stale file, but tape.json
