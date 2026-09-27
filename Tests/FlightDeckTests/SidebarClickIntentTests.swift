@@ -298,6 +298,73 @@ final class SidebarPressedControlTests: XCTestCase {
     }
 }
 
+/// Which `NSTableView` is the sidebar's — the fix for the bug where a click on `ProjectView`'s
+/// Intakes list (also a table, in the same window) was treated as a click on the sidebar row at
+/// the same index. See the file's "Scoping" doc comment.
+///
+/// Built by hand from `NSSplitView`/`NSTableView` instances with no window, the same style as
+/// `SidebarPressedControlTests` above: the rule only reads the view tree, so a window would test
+/// AppKit's layout rather than this one's logic.
+@MainActor
+final class SidebarTableIdentityTests: XCTestCase {
+    /// Nests `table` a couple of levels deep under `pane`, the way a real sidebar or Intakes
+    /// list nests its table inside an `NSScrollView`'s clip view — the rule has to walk past
+    /// that, not just check `pane`'s immediate children.
+    private func nest(_ table: NSTableView, under pane: NSView) {
+        let scrollView = NSView(frame: pane.bounds)
+        let clipView = NSView(frame: pane.bounds)
+        scrollView.addSubview(clipView)
+        clipView.addSubview(table)
+        pane.addSubview(scrollView)
+    }
+
+    func testATableInTheOuterSplitsFirstPaneIsTheSidebar() {
+        let outer = NSSplitView(frame: NSRect(x: 0, y: 0, width: 600, height: 400))
+        let sidebarPane = NSView(frame: NSRect(x: 0, y: 0, width: 240, height: 400))
+        let detailPane = NSView(frame: NSRect(x: 240, y: 0, width: 360, height: 400))
+        outer.addSubview(sidebarPane)
+        outer.addSubview(detailPane)
+
+        let table = NSTableView()
+        nest(table, under: sidebarPane)
+
+        XCTAssertTrue(SidebarInputMonitor.isSidebarTable(table))
+    }
+
+    func testATableNestedInAnInnerSplitInsideTheOuterSplitsSecondPaneIsNotTheSidebar() {
+        // `ProjectView`'s shape: the Intakes table sits in an `HSplitView` (also an
+        // `NSSplitView`) that is itself the outer split's detail pane, not its sidebar pane.
+        let outer = NSSplitView(frame: NSRect(x: 0, y: 0, width: 600, height: 400))
+        let sidebarPane = NSView(frame: NSRect(x: 0, y: 0, width: 240, height: 400))
+        let detailPane = NSView(frame: NSRect(x: 240, y: 0, width: 360, height: 400))
+        outer.addSubview(sidebarPane)
+        outer.addSubview(detailPane)
+
+        let inner = NSSplitView(frame: detailPane.bounds)
+        let intakesPane = NSView(frame: NSRect(x: 240, y: 0, width: 160, height: 400))
+        let readingPane = NSView(frame: NSRect(x: 400, y: 0, width: 200, height: 400))
+        inner.addSubview(intakesPane)
+        inner.addSubview(readingPane)
+        detailPane.addSubview(inner)
+
+        let table = NSTableView()
+        nest(table, under: intakesPane)
+
+        XCTAssertFalse(SidebarInputMonitor.isSidebarTable(table))
+    }
+
+    func testATableInNoSplitViewAtAllIsNotTheSidebar() {
+        // Settings ▸ Projects and `NSOpenPanel` are table-backed but carry no split view — the
+        // scope check in `handleMouseDown`/`handleKeyDown` excludes those windows outright, but
+        // this rule must also be total and answer false rather than crash or guess.
+        let plain = NSView(frame: NSRect(x: 0, y: 0, width: 300, height: 300))
+        let table = NSTableView()
+        nest(table, under: plain)
+
+        XCTAssertFalse(SidebarInputMonitor.isSidebarTable(table))
+    }
+}
+
 /// `SidebarRow.id` is what the rule above compares, so its two documented properties — stable
 /// across a reorder, and distinct per row — are what make that comparison mean anything.
 @MainActor
