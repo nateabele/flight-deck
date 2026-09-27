@@ -19,6 +19,11 @@ public struct ShadowGraph: Sendable {
     private let brPath: String
     private let environment: [String: String]
 
+    /// A fixed system tool, not something a caller ever needs to fake — unlike `runner`
+    /// (`br`), nobody stubs the SQLite copy step in a test, so it always runs for real.
+    private let sqliteRunner = SystemCommandRunner()
+    private static let sqlite3Path = "/usr/bin/sqlite3"
+
     /// Every shadow write is attributed to this actor, not to whichever polish round
     /// triggered it: the shadow has no `Intake`/round identity of its own to attribute to,
     /// and it is deleted with `dir` anyway — a stable name is enough for `br`'s audit trail
@@ -42,14 +47,24 @@ public struct ShadowGraph: Sendable {
     /// nothing traceable at all. Passing `--db` explicitly on every call, on top of never
     /// pointing `cwd` at `project`, means neither one of those slip-ups is enough by itself
     /// to reach the real graph.
+    ///
+    /// Whatever fails underneath — `FileManager`, a `br`/`sqlite3` exit code, JSON decoding —
+    /// surfaces as `ShadowGraphBuildFailed`, never a raw `CocoaError`/`DecodingError`/etc.: the
+    /// brief's "the shadow is an aid, not a gate" only works if a caller can catch ONE type and
+    /// fold `.detail` into the round record, rather than enumerating every failure domain a
+    /// `FileManager` copy or a JSON decode could throw.
     public func build(project: URL, changeSet: ChangeSet, in dir: URL) async throws -> URL {
-        let fm = FileManager.default
-        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
-        let shadowBeads = dir.appendingPathComponent(".beads", isDirectory: true)
-        if fm.fileExists(atPath: shadowBeads.path) {
-            try fm.removeItem(at: shadowBeads)
+        do {
+            return try await buildUnchecked(project: project, changeSet: changeSet, in: dir)
+        } catch let failure as ShadowGraphBuildFailed {
+            throw failure
+        } catch {
+            throw ShadowGraphBuildFailed(detail: error.localizedDescription)
         }
-        try fm.copyItem(at: project.appendingPathComponent(".beads", isDirectory: true), to: shadowBeads)
+    }
+
+    private func buildUnchecked(project: URL, changeSet: ChangeSet, in dir: URL) async throws -> URL {
+        let shadowBeads = try await copyBeads(from: project, to: dir)
         let dbPath = shadowBeads.appendingPathComponent("beads.db").path
 
         // The "before" snapshot for validation is read from the COPY, not `project` — same
@@ -95,6 +110,69 @@ public struct ShadowGraph: Sendable {
             }
             return id
         }
+    }
+
+    /// Copies `<project>/.beads` to `<dir>/.beads`, replacing any earlier copy. Everything
+    /// except the live SQLite files is a plain `FileManager` copy; `beads.db` goes through
+    /// `sqlite3 -readonly … "VACUUM INTO …"` instead of copying `beads.db`/`-wal`/`-shm` as
+    /// three independent files. Those three files only add up to one consistent database
+    /// when nothing is mid-write; a real `br` process holding an open WAL transaction while
+    /// this runs would otherwise leave the shadow with a `beads.db` that doesn't match the
+    /// `-wal` bytes sitting next to it — a torn copy. `VACUUM INTO` instead opens the SOURCE
+    /// read-only and materializes one self-contained snapshot file, so the shadow is either
+    /// the graph as of the last commit before this ran, or (if `sqlite3` itself fails) no
+    /// copy at all — never a half-applied one. Falls back to the old three-file copy when
+    /// `/usr/bin/sqlite3` isn't present, since a stale-by-milliseconds shadow beats none.
+    private func copyBeads(from project: URL, to dir: URL) async throws -> URL {
+        let fm = FileManager.default
+        let sourceBeads = project.appendingPathComponent(".beads", isDirectory: true)
+        let shadowBeads = dir.appendingPathComponent(".beads", isDirectory: true)
+        if fm.fileExists(atPath: shadowBeads.path) {
+            try fm.removeItem(at: shadowBeads)
+        }
+        try fm.createDirectory(at: shadowBeads, withIntermediateDirectories: true)
+
+        // A prefix match, not an exact set: a real `br` checkout grows more than just `-wal`/
+        // `-shm` next to `beads.db` — WAL cert files, an fsqlite-ns gate/use pair, a
+        // migration-state marker, observed live against `br 0.6.0` — and every one of them is
+        // part of the live SQLite file's own state, handled below, never by this generic
+        // loop. `config.yaml`, `.gitignore`, `issues.jsonl`, `metadata.json` and the like all
+        // pass through here untouched.
+        let sourceItems = try fm.contentsOfDirectory(at: sourceBeads, includingPropertiesForKeys: nil)
+        for item in sourceItems where !item.lastPathComponent.hasPrefix("beads.db") {
+            try fm.copyItem(at: item, to: shadowBeads.appendingPathComponent(item.lastPathComponent))
+        }
+
+        let sourceDB = sourceBeads.appendingPathComponent("beads.db")
+        guard fm.fileExists(atPath: sourceDB.path) else { return shadowBeads }   // nothing to snapshot
+        let shadowDB = shadowBeads.appendingPathComponent("beads.db")
+
+        guard fm.isExecutableFile(atPath: Self.sqlite3Path) else {
+            // No `sqlite3` to snapshot with — copy every `beads.db*` sidecar verbatim instead.
+            // Same tearing risk as the whole-directory copy this replaces (a concurrent
+            // writer mid-transaction could still leave these inconsistent), but a
+            // stale-by-milliseconds shadow beats no shadow at all.
+            for item in sourceItems where item.lastPathComponent.hasPrefix("beads.db") {
+                try fm.copyItem(at: item, to: shadowBeads.appendingPathComponent(item.lastPathComponent))
+            }
+            return shadowBeads
+        }
+
+        // `cwd: dir` (the shadow side), never `project`, matching the never-cwd=project rule
+        // everywhere else in this type — belt-and-suspenders alongside `-readonly`, which is
+        // what actually stops this from ever taking a write lock on the real database. The
+        // destination path is SQL text, not a shell argument (`Process` execs `sqlite3`
+        // directly, no shell in between), so it only needs SQL's `''` quoting, never shell
+        // quoting.
+        let escapedDest = shadowDB.path.replacingOccurrences(of: "'", with: "''")
+        let result = try await sqliteRunner.run(
+            executable: Self.sqlite3Path,
+            arguments: ["-readonly", sourceDB.path, "VACUUM INTO '\(escapedDest)';"],
+            cwd: dir, environment: environment)
+        guard result.exitCode == 0 else {
+            throw ShadowGraphBuildFailed(detail: "vacuum shadow db: exit \(result.exitCode): \(result.stderr)")
+        }
+        return shadowBeads
     }
 
     private func readGraph(dbPath: String, cwd: URL) async throws -> GraphSnapshot {

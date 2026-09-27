@@ -116,6 +116,61 @@ final class ShadowGraphTests: XCTestCase {
         // Only the two reads (list, graph) that built the validation snapshot — nothing else.
         XCTAssertEqual(recorder.calls.map { $0.arguments[2] }, ["list", "graph"])
     }
+
+    /// `build()`'s contract is that it throws exactly one type — a raw `CocoaError` from
+    /// `FileManager` (here: no `.beads` under `project` to copy) must not leak through as
+    /// itself, or a caller that only catches `ShadowGraphBuildFailed` would crash instead of
+    /// folding the failure into the round record.
+    func testMissingSourceBeadsWrapsRatherThanLeakingARawFileManagerError() async throws {
+        let project = root.appendingPathComponent("no-beads-here", isDirectory: true)
+        try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+        let dir = root.appendingPathComponent("work/shadow", isDirectory: true)
+        let shadow = ShadowGraph(runner: ShadowGraphRunnerSpy(reply: fakeReply), environment: [:])
+        do {
+            _ = try await shadow.build(project: project, changeSet: ChangeSet(graphObservedAt: Date(), ops: []), in: dir)
+            XCTFail("expected ShadowGraphBuildFailed")
+        } catch is ShadowGraphBuildFailed {
+            // expected
+        } catch {
+            XCTFail("expected ShadowGraphBuildFailed, got \(type(of: error)): \(error)")
+        }
+    }
+
+    /// `copyBeads` copies non-db files with `FileManager` but snapshots `beads.db` through
+    /// `sqlite3 -readonly … VACUUM INTO …` — proved here with a REAL (if tiny) sqlite
+    /// database standing in for `beads.db`, not just a byte-for-byte file copy, so a
+    /// corrupted/truncated source would actually fail this rather than silently pass.
+    func testCopiesNonDbFilesAndSnapshotsTheDatabaseWithVacuumInto() async throws {
+        let project = try makeProject()
+        let beads = project.appendingPathComponent(".beads", isDirectory: true)
+        let sourceDB = beads.appendingPathComponent("beads.db")
+        let sqlite = SystemCommandRunner()
+        let createResult = try await sqlite.run(
+            executable: "/usr/bin/sqlite3",
+            arguments: [sourceDB.path, "CREATE TABLE t(x); INSERT INTO t VALUES(42);"],
+            cwd: root, environment: [:])
+        XCTAssertEqual(createResult.exitCode, 0, createResult.stderr)
+        // A non-db file that must ride along, same as `config.yaml` would in a real `.beads`.
+        try Data("actor: shadow\n".utf8).write(to: beads.appendingPathComponent("config.yaml"))
+
+        let dir = root.appendingPathComponent("work/shadow", isDirectory: true)
+        let shadow = ShadowGraph(runner: ShadowGraphRunnerSpy(reply: fakeReply), environment: [:])
+        let shadowBeads = try await shadow.build(project: project, changeSet: ChangeSet(graphObservedAt: Date(), ops: []), in: dir)
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: shadowBeads.appendingPathComponent("config.yaml").path),
+                      "non-db file wasn't copied into the shadow")
+
+        let shadowDB = shadowBeads.appendingPathComponent("beads.db")
+        let queryResult = try await sqlite.run(executable: "/usr/bin/sqlite3", arguments: [shadowDB.path, "SELECT x FROM t;"],
+                                               cwd: root, environment: [:])
+        XCTAssertEqual(queryResult.exitCode, 0, queryResult.stderr)
+        XCTAssertEqual(String(decoding: queryResult.stdout, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines), "42")
+
+        // `VACUUM INTO` materializes one self-contained file — no leftover `-wal`/`-shm`
+        // sidecars the way a naive three-file copy could leave.
+        XCTAssertFalse(FileManager.default.fileExists(atPath: shadowDB.path + "-wal"))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: shadowDB.path + "-shm"))
+    }
 }
 
 /// The same build against a REAL `br`, in a scratch repo under `$HOME` (never `/tmp` — `am`
@@ -193,6 +248,11 @@ final class ShadowGraphLiveTests: XCTestCase {
         let dir = scratchRoot.appendingPathComponent("work/shadow", isDirectory: true)
         let shadow = ShadowGraph(runner: runner, brPath: brPath, environment: env)
 
+        // The real database's own mtime must never move — `copyBeads` opens it `-readonly`
+        // for the `VACUUM INTO` snapshot, so nothing about this build should touch it.
+        let realDBPath = projectDir.appendingPathComponent(".beads/beads.db").path
+        let mtimeBefore = try FileManager.default.attributesOfItem(atPath: realDBPath)[.modificationDate] as? Date
+
         let shadowBeads = try await shadow.build(project: projectDir, changeSet: changeSet, in: dir)
         XCTAssertEqual(shadowBeads, dir.appendingPathComponent(".beads", isDirectory: true))
         let dbPath = shadowBeads.appendingPathComponent("beads.db").path
@@ -224,5 +284,8 @@ final class ShadowGraphLiveTests: XCTestCase {
             arguments: ["--db", dbPath, "list", "--all", "--json"], cwd: dir, environment: env)
         let listedAgain = try JSONDecoder().decode(ListEnvelope.self, from: listAgain.stdout)
         XCTAssertEqual(listedAgain.total, 4)
+
+        let mtimeAfter = try FileManager.default.attributesOfItem(atPath: realDBPath)[.modificationDate] as? Date
+        XCTAssertEqual(mtimeBefore, mtimeAfter, "the real beads.db was written to by the shadow build")
     }
 }
