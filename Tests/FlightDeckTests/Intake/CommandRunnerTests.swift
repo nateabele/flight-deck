@@ -104,6 +104,22 @@ final class CommandRunnerTests: XCTestCase {
         // `pgrep` exits 1 when nothing matches — anything else means a survivor in the group.
         XCTAssertEqual(check.terminationStatus, 1, "expected no survivors in group \(box.pid)")
     }
+
+    /// ⏹'s SIGTERM must actually land, not wait out the SIGKILL fallback: raw `posix_spawn`
+    /// hands the child the spawning thread's signal mask/ignored set unless told otherwise,
+    /// and under xctest that left `sleep 30` running through a SIGTERM (observed 1.035s to
+    /// die — exactly the SIGKILL delay — before `POSIX_SPAWN_SETSIGDEF|SETSIGMASK`).
+    func testProcessGroupCancellationLandsOnSIGTERM() async throws {
+        let t = Task {
+            try await SystemCommandRunner().run(executable: "sleep", arguments: ["30"], cwd: URL(fileURLWithPath: "/tmp"),
+                                                environment: env, processGroup: true, onSpawn: nil)
+        }
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        let cancelledAt = Date()
+        t.cancel()
+        _ = try? await t.value
+        XCTAssertLessThan(Date().timeIntervalSince(cancelledAt), 0.5)
+    }
 }
 
 /// `GraphReader`'s br-list/br-graph/decode sequence, against the same fixtures
