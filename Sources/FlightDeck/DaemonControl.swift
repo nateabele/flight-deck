@@ -44,6 +44,18 @@ protocol DaemonControlling {
     /// `SessionDaemon.pidfilePath` derives it from a socket path: `<socketPath>.pid`.
     func terminate(socketPath: String)
 
+    /// Recovers a live socket's peer pid straight from the kernel (`SOL_LOCAL`/`LOCAL_PEERPID`,
+    /// Darwin) rather than reading it from a pidfile — `IntakeRunnerController.reap`'s recovery
+    /// path for a socket that has been live past its orphan grace with no pidfile ever having
+    /// appeared (the launcher bound the socket but the daemon crashed, or was killed, before it
+    /// forked and wrote one). `nil` if the socket isn't connectable or the kernel can't answer.
+    func peerPID(socketPath: String) -> pid_t?
+
+    /// Same teardown ladder as `terminate(socketPath:)`, but for a pid already known — recovered
+    /// via `peerPID(socketPath:)`, not read from a pidfile — for the one case that has no
+    /// pidfile to read it from.
+    func terminate(pid: pid_t, socketPath: String)
+
     /// Freezes the idle agent's process group (`kill(-agentPGID, SIGSTOP)`) — the agent, not the
     /// daemon: the daemon must keep running its `select()` loop so a later re-attach still has
     /// something to connect to. Silent no-op if the daemon pid is missing/dead or no agent group
@@ -171,14 +183,56 @@ struct PosixDaemonControl: DaemonControlling {
         terminateCore(socketPath: path, pidfilePath: path + ".pid")
     }
 
+    func peerPID(socketPath path: String) -> pid_t? {
+        guard path.utf8.count <= Self.maxPathLength else { return nil }
+
+        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        guard fd >= 0 else { return nil }
+        defer { close(fd) }
+
+        var address = sockaddr_un()
+        address.sun_family = sa_family_t(AF_UNIX)
+        address.sun_len = UInt8(MemoryLayout<sockaddr_un>.size)
+        withUnsafeMutablePointer(to: &address.sun_path) { field in
+            field.withMemoryRebound(to: CChar.self, capacity: Self.maxPathLength + 1) {
+                _ = strlcpy($0, path, Self.maxPathLength + 1)
+            }
+        }
+        let connected = withUnsafePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
+            }
+        }
+        guard connected == 0 else { return nil }
+
+        // `SOL_LOCAL`/`LOCAL_PEERPID` (Darwin) reads the pid of whoever is on the other end of
+        // an AF_UNIX socket straight from the kernel — the one way `reap`'s orphan recovery can
+        // find a daemon's real pid when its launcher crashed before ever writing a pidfile.
+        var pid: pid_t = 0
+        var length = socklen_t(MemoryLayout<pid_t>.size)
+        guard getsockopt(fd, SOL_LOCAL, LOCAL_PEERPID, &pid, &length) == 0, pid > 0 else { return nil }
+        return pid
+    }
+
+    func terminate(pid: pid_t, socketPath path: String) {
+        terminateCore(pid: pid, socketPath: path, pidfilePath: path + ".pid")
+    }
+
     private func terminateCore(socketPath: String, pidfilePath: String) {
+        terminateCore(pid: readPID(pidfilePath: pidfilePath), socketPath: socketPath, pidfilePath: pidfilePath)
+    }
+
+    /// Shared by every `terminate` overload — `pid` is either read from a pidfile (the normal
+    /// case) or already known (`terminate(pid:socketPath:)`'s recovered `peerPID`); either way
+    /// the signal ladder and cleanup below are identical.
+    private func terminateCore(pid maybePID: pid_t?, socketPath: String, pidfilePath: String) {
         // Unconditional, however far the signaling below gets: a daemon that was already dead
         // (or never existed) can still have left a socket or pidfile behind, and a daemon that
         // survives even `SIGKILL` still needs its bookkeeping cleared so a next attempt does
         // not immediately see it as live.
         defer { unlinkStale(socketPath: socketPath, pidfilePath: pidfilePath) }
 
-        guard let pid = readPID(pidfilePath: pidfilePath), kill(pid, 0) == 0 else { return }
+        guard let pid = maybePID, kill(pid, 0) == 0 else { return }
 
         // A SIGSTOP'd agent can't act on the daemon's SIGTERM below — it can't process signals
         // or exit while stopped — so wake it first. Unconditional and safe: SIGCONT to an

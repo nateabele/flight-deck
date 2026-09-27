@@ -39,7 +39,12 @@ final class IntakeRunnerControllerTests: XCTestCase {
         /// the daemon proper forks and writes `<socket>.pid`, so tests need to model "live, no
         /// pidfile yet" as its own state.
         var pidfiledSockets: Set<String> = []
+        /// Sockets `peerPID(socketPath:)` can recover a pid for even with no pidfile — models
+        /// `getsockopt(SOL_LOCAL, LOCAL_PEERPID)` succeeding against a real orphaned daemon
+        /// (fix round 2, Review Focus 4).
+        var peerPIDsBySocket: [String: pid_t] = [:]
         private(set) var terminatedSockets: [String] = []
+        private(set) var terminatedPIDs: [pid_t] = []
 
         func isLive(_ id: UUID) -> Bool { false }
         func isLive(socketPath: String) -> Bool { liveSockets.contains(socketPath) }
@@ -50,6 +55,14 @@ final class IntakeRunnerControllerTests: XCTestCase {
             terminatedSockets.append(socketPath)
             liveSockets.remove(socketPath)
             pidfiledSockets.remove(socketPath)
+        }
+        func peerPID(socketPath: String) -> pid_t? { peerPIDsBySocket[socketPath] }
+        func terminate(pid: pid_t, socketPath: String) {
+            terminatedPIDs.append(pid)
+            terminatedSockets.append(socketPath)
+            liveSockets.remove(socketPath)
+            pidfiledSockets.remove(socketPath)
+            peerPIDsBySocket.removeValue(forKey: socketPath)
         }
         func stop(_ id: UUID) {}
         func cont(_ id: UUID) {}
@@ -204,19 +217,27 @@ final class IntakeRunnerControllerTests: XCTestCase {
 
     /// Review Focus 3 (fix round 1): `status == .running` on its own must never be trusted — a
     /// runner that crashed mid-round leaves exactly this tape behind (status still `.running`,
-    /// heartbeat stale), and adopting it forever would mean nothing ever restarts it.
+    /// heartbeat stale), and adopting it forever would mean nothing ever restarts it. Past
+    /// `staleGrace` from the first sighting (fix round 2, Review Focus 1 — see
+    /// `testStaleHeartbeatWithAliveDaemonSurvivesUntilStaleGraceElapses` for the "not yet" half
+    /// of this same check), it is reaped and respawned.
     func testStaleHeartbeatOnARunningStatusTapeGetsReapedAndRespawned() throws {
-        let fixed = Date(timeIntervalSince1970: 1_000_000)
-        let fixture = try makeFixture(now: { fixed })
+        var current = Date(timeIntervalSince1970: 1_000_000)
+        let fixture = try makeFixture(now: { current })
         let id = UUID()
         let socket = fixture.controller.socketPath(for: id)
         fixture.control.liveSockets.insert(socket)
         fixture.control.pidfiledSockets.insert(socket)
         try saveTape(
-            Tape(status: .running, heartbeat: fixed.addingTimeInterval(-60)), for: id,
+            Tape(status: .running, heartbeat: current.addingTimeInterval(-60)), for: id,
             intakesRoot: fixture.intakesRoot
         )
 
+        // First sighting of the stale heartbeat: within `staleGrace`, so still (provisionally)
+        // running.
+        XCTAssertTrue(fixture.controller.isRunning(id))
+
+        current = current.addingTimeInterval(21)
         XCTAssertFalse(fixture.controller.isRunning(id))
 
         let result = fixture.controller.ensureRunning(id)
@@ -289,6 +310,167 @@ final class IntakeRunnerControllerTests: XCTestCase {
         )
 
         XCTAssertTrue(fixture.controller.isRunning(id))
+    }
+
+    /// Fix round 2, Review Focus 1: right after the Mac wakes from sleep, a perfectly healthy
+    /// runner's heartbeat is exactly as old as the sleep — one stale reading must not reap it
+    /// while its daemon pid is still provably alive, only a reading that is STILL stale
+    /// `staleGrace` after the first sighting.
+    func testStaleHeartbeatWithAliveDaemonSurvivesUntilStaleGraceElapses() throws {
+        var current = Date(timeIntervalSince1970: 1_000_000)
+        let fixture = try makeFixture(now: { current })
+        let id = UUID()
+        let socket = fixture.controller.socketPath(for: id)
+        fixture.control.liveSockets.insert(socket)
+        fixture.control.pidfiledSockets.insert(socket)
+        try saveTape(Tape(status: .running, heartbeat: current), for: id, intakesRoot: fixture.intakesRoot)
+
+        // The heartbeat goes stale (past `heartbeatFreshness`) — this is the FIRST sighting.
+        // Within `staleGrace` (default 20s) of it, a healthy mid-sleep runner must survive.
+        current = current.addingTimeInterval(11)
+        let firstResult = fixture.controller.ensureRunning(id)
+        expectSuccess(firstResult)
+        XCTAssertTrue(fixture.control.terminatedSockets.isEmpty, "one stale reading must never reap a live daemon")
+        XCTAssertEqual(fixture.spawner.calls.count, 0)
+
+        // Still stale 21s after the FIRST sighting (not the heartbeat itself) — past the
+        // default 20s `staleGrace` — now it is genuinely treated as crashed and respawned.
+        current = current.addingTimeInterval(21)
+        let secondResult = fixture.controller.ensureRunning(id)
+        expectSuccess(secondResult)
+        XCTAssertEqual(fixture.control.terminatedSockets, [socket])
+        XCTAssertEqual(fixture.spawner.calls.count, 1)
+    }
+
+    /// The other half of Review Focus 1: a fresh heartbeat arriving before `staleGrace` elapses
+    /// clears the grace entirely, so a LATER stale reading starts its own grace rather than
+    /// inheriting the earlier sighting's clock.
+    func testFreshHeartbeatAfterAStaleSightingClearsTheGrace() throws {
+        var current = Date(timeIntervalSince1970: 1_000_000)
+        let fixture = try makeFixture(now: { current })
+        let id = UUID()
+        let socket = fixture.controller.socketPath(for: id)
+        fixture.control.liveSockets.insert(socket)
+        fixture.control.pidfiledSockets.insert(socket)
+        let store = TapeStore(intakeDirectory: IntakeStore(root: fixture.intakesRoot).directory(for: id))
+        try store.saveTape(Tape(status: .running, heartbeat: current))
+
+        current = current.addingTimeInterval(11)      // stale — first sighting, within grace
+        XCTAssertTrue(fixture.controller.isRunning(id))
+
+        // The runner catches up and writes a fresh heartbeat before `staleGrace` elapses.
+        try store.saveTape(Tape(status: .running, heartbeat: current))
+        XCTAssertTrue(fixture.controller.isRunning(id))
+
+        // Long after the ORIGINAL stale sighting: if that sighting were still being counted,
+        // this would now read as crashed even though the heartbeat is fresh again.
+        current = current.addingTimeInterval(30)
+        try store.saveTape(Tape(status: .running, heartbeat: current))
+        let result = fixture.controller.ensureRunning(id)
+
+        expectSuccess(result)
+        XCTAssertTrue(fixture.control.terminatedSockets.isEmpty)
+        XCTAssertEqual(fixture.spawner.calls.count, 0)
+    }
+
+    /// Fix round 2, Review Focus 2: `spawnedAt` must be recorded BEFORE `spawn()` is even
+    /// called, not after it returns — `fd-abduco` can bind the socket as a side effect of the
+    /// launcher running, and a re-entrant `ensureRunning` landing inside that call (a timer
+    /// tick, a user action) must already see this one as running.
+    func testSpawnedAtIsRecordedBeforeSpawnCompletes() throws {
+        let fixture = try makeFixture()
+        let id = UUID()
+        let socket = fixture.controller.socketPath(for: id)
+        var sawRunningDuringSpawn = false
+        fixture.spawner.onSpawn = { _ in
+            fixture.control.liveSockets.insert(socket)
+            sawRunningDuringSpawn = fixture.controller.isRunning(id)
+        }
+        try saveTape(Tape(status: .idle), for: id, intakesRoot: fixture.intakesRoot)
+
+        expectSuccess(fixture.controller.ensureRunning(id))
+
+        XCTAssertTrue(
+            sawRunningDuringSpawn, "spawnedAt must be recorded before spawn() runs, not after it returns"
+        )
+    }
+
+    /// A launcher that never exited within its own timeout may still be alive and about to
+    /// bind the socket — the grace `ensureRunning` recorded before calling `spawn` must survive
+    /// that failure, not just a successful one.
+    func testTimedOutLauncherKeepsTheSpawnGrace() throws {
+        let fixture = try makeFixture()
+        fixture.spawner.errorToThrow = FdAbducoRunnerSpawner.SpawnError.timedOut
+        let id = UUID()
+        // Models the launcher having bound the socket even though this call gave up on it.
+        fixture.control.liveSockets.insert(fixture.controller.socketPath(for: id))
+
+        let result = fixture.controller.ensureRunning(id)
+
+        switch result {
+        case .success: XCTFail("expected a spawn failure")
+        case .failure(.spawnFailed): break
+        case .failure(let other): XCTFail("expected .spawnFailed, got \(other)")
+        }
+        XCTAssertTrue(fixture.controller.isRunning(id), "a timed-out launcher may still be alive; the grace must survive it")
+    }
+
+    /// The complementary case: a launcher that DEFINITELY failed to start (a clean nonzero
+    /// exit) never bound anything, so its grace entry must not linger and block the next
+    /// `ensureRunning` from trying again immediately.
+    func testLauncherFailureClearsTheSpawnGrace() throws {
+        let fixture = try makeFixture()
+        fixture.spawner.errorToThrow = FdAbducoRunnerSpawner.SpawnError.launcherFailed(1)
+        let id = UUID()
+
+        _ = fixture.controller.ensureRunning(id)
+
+        XCTAssertFalse(
+            fixture.controller.isRunning(id), "a launcher that never started must not be trusted as running"
+        )
+    }
+
+    /// Fix round 2, Review Focus 4: a socket that stays live with no pidfile ever appearing —
+    /// the launcher bound it, then crashed before its daemon forked and wrote one — used to be
+    /// stuck forever under fix round 1's "never terminate without a readable pidfile" rule.
+    /// Past `orphanGrace`, `reap` recovers the daemon's real pid straight from the kernel
+    /// (`peerPID`, standing in for `getsockopt(SOL_LOCAL, LOCAL_PEERPID)`) and terminates by it.
+    func testOrphanedSocketPastGraceIsRecoveredViaPeerPIDAndTerminated() throws {
+        var current = Date(timeIntervalSince1970: 1_000_000)
+        let fixture = try makeFixture(now: { current })
+        let id = UUID()
+        let socket = fixture.controller.socketPath(for: id)
+        fixture.control.liveSockets.insert(socket)
+        fixture.control.peerPIDsBySocket[socket] = 9999
+        try saveTape(Tape(status: .stopped), for: id, intakesRoot: fixture.intakesRoot)
+
+        // Within `orphanGrace` (default 30s): a launcher that just bound the socket deserves a
+        // chance to write its pidfile before this gives up on it entirely.
+        fixture.controller.reap(id)
+        XCTAssertTrue(fixture.control.terminatedSockets.isEmpty)
+
+        // Past `orphanGrace` with the pidfile STILL never appearing.
+        current = current.addingTimeInterval(31)
+        fixture.controller.reap(id)
+
+        XCTAssertEqual(fixture.control.terminatedPIDs, [9999])
+        XCTAssertEqual(fixture.control.terminatedSockets, [socket])
+    }
+
+    /// If even the kernel can't answer (the process died between `isLive` and `connect()`),
+    /// `reap` must leave the socket alone rather than terminate nothing and call it done.
+    func testOrphanedSocketWithNoRecoverablePeerPIDIsLeftForTheNextAttempt() throws {
+        var current = Date(timeIntervalSince1970: 1_000_000)
+        let fixture = try makeFixture(now: { current })
+        let id = UUID()
+        let socket = fixture.controller.socketPath(for: id)
+        fixture.control.liveSockets.insert(socket)
+        try saveTape(Tape(status: .stopped), for: id, intakesRoot: fixture.intakesRoot)
+
+        current = current.addingTimeInterval(31)
+        fixture.controller.reap(id)
+
+        XCTAssertTrue(fixture.control.terminatedSockets.isEmpty, "nothing to signal, so leave the socket for a later attempt")
     }
 
     func testMissingCLIReportsNoBundledCLI() throws {

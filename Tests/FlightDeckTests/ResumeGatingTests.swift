@@ -25,6 +25,8 @@ final class ResumeGatingTests: XCTestCase {
         func daemonPID(socketPath: String) -> pid_t? { nil }
         func terminate(_ id: UUID) {}
         func terminate(socketPath: String) {}
+        func peerPID(socketPath: String) -> pid_t? { nil }
+        func terminate(pid: pid_t, socketPath: String) {}
         func stop(_ id: UUID) {}
         func cont(_ id: UUID) {}
     }

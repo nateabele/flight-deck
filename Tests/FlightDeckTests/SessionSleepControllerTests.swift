@@ -12,6 +12,8 @@ final class SessionSleepControllerTests: XCTestCase {
         func daemonPID(socketPath: String) -> pid_t? { 111 }
         func terminate(_ id: UUID) {}
         func terminate(socketPath: String) {}
+        func peerPID(socketPath: String) -> pid_t? { nil }
+        func terminate(pid: pid_t, socketPath: String) {}
         func stop(_ id: UUID) { stopped.append(id) }
         func cont(_ id: UUID) { conted.append(id); onCont?() }
     }

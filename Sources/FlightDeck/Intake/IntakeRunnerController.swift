@@ -99,12 +99,29 @@ final class IntakeRunnerController {
     /// it — see `spawnedAt`'s doc comment. Injectable so tests don't have to sleep for it.
     private let spawnGrace: TimeInterval
 
+    /// How long a heartbeat may stay stale, WITH the daemon pid still provably alive, before
+    /// `isRunning` gives up on it — fix round 2, Review Focus 1: right after the Mac wakes from
+    /// sleep, every runner's heartbeat is exactly as old as the sleep, so a bare age check would
+    /// reap and respawn a perfectly healthy runner mid-round the instant `ensureRunning` next
+    /// ran. Deliberately 2× `heartbeatFreshness`, not derived from it, per the review, so the
+    /// two can be tuned independently. Injectable so tests don't have to sleep for it.
+    private let staleGrace: TimeInterval
+
     /// How long a `Tape.heartbeat` may age before a live socket is no longer trusted as "still
     /// running" — see `isRunning`'s doc comment. Checked regardless of `tape.status` (Review
     /// Focus 3, fix round 1): the runner writes both from inside its own process on its own
     /// schedule, and a crash mid-round can leave `status == .running` behind forever with no
     /// heartbeat to say otherwise.
     private static let heartbeatFreshness: TimeInterval = 10
+
+    /// How long a socket may stay live with no readable pidfile ever appearing before `reap`
+    /// tries to recover its daemon's real pid straight from the kernel — fix round 2, Review
+    /// Focus 4: without a time bound here, a launcher that bound the socket and then crashed
+    /// (or was killed) before its daemon forked and wrote `<socket>.pid` left that socket
+    /// "live, no pidfile" forever, and the fix round 1 rule (never terminate without a readable
+    /// pidfile) made that permanent — nothing could ever reap it. Injectable so tests don't
+    /// have to sleep for it.
+    private let orphanGrace: TimeInterval
 
     /// This process's own record of when it last told `fd-abduco` to spawn a runner for a
     /// given intake — never persisted, because it only needs to cover one in-process race.
@@ -119,6 +136,19 @@ final class IntakeRunnerController {
     /// within `spawnGrace` as running — and `reap` as a no-op for it — closes that window
     /// without needing the runner to have caught up yet.
     private var spawnedAt: [UUID: Date] = [:]
+
+    /// The first moment `isRunning` saw a given intake's heartbeat go stale while its daemon
+    /// pid was still provably alive — cleared the moment either stops being true (a fresh
+    /// heartbeat arrives, or the pid dies), so only a heartbeat that is STILL stale `staleGrace`
+    /// after the FIRST sighting reads as genuinely crashed, not merely asleep. See
+    /// `staleGrace`'s doc comment.
+    private var firstSeenStale: [UUID: Date] = [:]
+
+    /// The first moment `reap` saw a given intake's socket live with no readable pidfile —
+    /// cleared the moment that stops being true (a pidfile appears, or the socket itself goes
+    /// away), so a single crossing of `orphanGrace` is what triggers the kernel-pid recovery,
+    /// not every call after that. See `orphanGrace`'s doc comment.
+    private var firstSeenOrphaned: [UUID: Date] = [:]
 
     init(
         daemon: SessionDaemon,
@@ -135,6 +165,8 @@ final class IntakeRunnerController {
         // in the initializer body instead of the signature.
         environment: (() -> [String: String])? = nil,
         spawnGrace: TimeInterval = 15,
+        staleGrace: TimeInterval = 2 * heartbeatFreshness,
+        orphanGrace: TimeInterval = 30,
         now: @escaping () -> Date = Date.init
     ) {
         self.daemon = daemon
@@ -143,6 +175,8 @@ final class IntakeRunnerController {
         self.flightdeckPath = flightdeckPath
         self.intakesRoot = intakesRoot
         self.spawnGrace = spawnGrace
+        self.staleGrace = staleGrace
+        self.orphanGrace = orphanGrace
         self.now = now
         if let environment {
             self.environment = environment
@@ -188,21 +222,53 @@ final class IntakeRunnerController {
     /// and respawning it. A heartbeat younger than `heartbeatFreshness` is the only signal this
     /// trusts for "genuinely still working"; **interface requirement for Task 8's runner: it
     /// must write a fresh `heartbeat` every poll interval, including mid-round on a long round,
-    /// not just at round boundaries**, or a slow round reads as crashed. Contract for the same
-    /// runner, the other direction: its FINAL write before exiting for any reason (`.stopped`,
-    /// `.failed`, `.reachedReview`, …) must be its terminal `status` — so once the socket goes
-    /// dark, whatever `tape.status` says at that moment is trustworthy again.
+    /// not just at round boundaries**, and — fix round 2, Review Focus 3 — **the runner's very
+    /// FIRST tape write at startup must be a heartbeat**, before anything else it does, so a
+    /// runner that dies before finishing its first poll still leaves one behind for this check
+    /// to find. Contract for the same runner, the other direction: its FINAL write before
+    /// exiting for any reason (`.stopped`, `.failed`, `.reachedReview`, …) must be its terminal
+    /// `status` — so once the socket goes dark, whatever `tape.status` says at that moment is
+    /// trustworthy again.
     ///
     /// **Why a fresh spawn is trusted without a heartbeat at all.** See `spawnedAt`'s doc
     /// comment: fd-abduco can make the socket live before the runner has written anything.
+    ///
+    /// **Why a stale heartbeat alone doesn't reap it (fix round 2, Review Focus 1).** After the
+    /// Mac sleeps, a perfectly healthy runner's heartbeat is exactly as old as the sleep the
+    /// instant it wakes — reaping on that reading alone would kill a runner mid-round for doing
+    /// nothing wrong. If the daemon pid is still provably alive, this gives it `staleGrace`
+    /// from the FIRST stale sighting before treating it as crashed; a fresh heartbeat in the
+    /// meantime clears that grace entirely. A dead pid (or no pid at all) skips the grace and
+    /// reads as not running immediately — there is nothing left to wait on.
     func isRunning(_ id: UUID) -> Bool {
-        guard control.isLive(socketPath: socketPath(for: id)) else { return false }
+        let socket = socketPath(for: id)
+        guard control.isLive(socketPath: socket) else {
+            firstSeenStale.removeValue(forKey: id)
+            return false
+        }
         if let spawnedAt = spawnedAt[id], now().timeIntervalSince(spawnedAt) < spawnGrace {
             return true
         }
         let tape = TapeStore(intakeDirectory: IntakeStore(root: intakesRoot).directory(for: id)).loadTape()
-        guard let heartbeat = tape.heartbeat else { return false }
-        return now().timeIntervalSince(heartbeat) < Self.heartbeatFreshness
+        // No heartbeat at all — as opposed to a STALE one — means this runner never got past
+        // its first poll (Task 8's contract makes a heartbeat the very first tape write) or is
+        // a genuinely finished one whose tape predates heartbeats entirely; either way there is
+        // nothing to give a sleep-survival grace to, so this reads as not running immediately.
+        guard let heartbeat = tape.heartbeat else {
+            firstSeenStale.removeValue(forKey: id)
+            return false
+        }
+        if now().timeIntervalSince(heartbeat) < Self.heartbeatFreshness {
+            firstSeenStale.removeValue(forKey: id)
+            return true
+        }
+        guard control.daemonPID(socketPath: socket) != nil else {
+            firstSeenStale.removeValue(forKey: id)
+            return false
+        }
+        let firstStale = firstSeenStale[id] ?? now()
+        firstSeenStale[id] = firstStale
+        return now().timeIntervalSince(firstStale) < staleGrace
     }
 
     /// Starts a runner for `id` unless one is already live (Review Focus 5: never stack two
@@ -226,14 +292,24 @@ final class IntakeRunnerController {
             "-n", socketPath(for: id), flightdeckPath, "intake", "run", id.uuidString.lowercased(),
             "--root", intakesRoot.path,
         ]
+        // Set BEFORE calling spawn (fix round 2, Review Focus 2): `fd-abduco` binds the socket
+        // inside `spawner.spawn` itself, before that call even returns, so recording the grace
+        // only on success left the exact window Review Focus 1 closed open again — a re-entrant
+        // `ensureRunning` landing between a real spawn and this line returning would see a live
+        // socket with no grace recorded yet. Removed only once the launcher is KNOWN to have
+        // never started; kept on `.timedOut`, since the launcher may still be alive and about to
+        // bind the socket even though this call gave up waiting on it.
+        spawnedAt[id] = now()
         do {
             try spawner.spawn(executable: fdAbducoPath, arguments: arguments, environment: environment())
-            // Recorded on success only: a failed spawn never bound a socket for `isRunning` to
-            // need protecting, and the next `ensureRunning` should be free to try again
-            // immediately rather than sit out a grace period for a runner that never started.
-            spawnedAt[id] = now()
             return .success(())
+        } catch let error as FdAbducoRunnerSpawner.SpawnError {
+            if case .launcherFailed = error {
+                spawnedAt.removeValue(forKey: id)
+            }
+            return .failure(.spawnFailed(String(describing: error)))
         } catch {
+            spawnedAt.removeValue(forKey: id)
             return .failure(.spawnFailed(String(describing: error)))
         }
     }
@@ -254,10 +330,38 @@ final class IntakeRunnerController {
     /// own `atexit` unlink would later delete the NEXT spawn's socket instead. Checking
     /// `daemonPID(socketPath:)` first — which itself requires a readable pidfile naming a pid
     /// that is actually alive — is what stops that.
+    ///
+    /// **Past `orphanGrace` with STILL no pidfile (fix round 2, Review Focus 4).** The rule
+    /// above otherwise leaves a socket like that stuck forever — nothing ever gets a pidfile
+    /// to read, so nothing ever passes the guard. Once `orphanGrace` has elapsed since `reap`
+    /// FIRST saw this socket in that state, it falls back to recovering the daemon's real pid
+    /// straight from the kernel — `getsockopt(SOL_LOCAL, LOCAL_PEERPID)` on a connected AF_UNIX
+    /// socket answers with the pid on the other end, pidfile or not (Darwin only; proven live
+    /// against a real peer process before writing this) — and terminates by that pid directly.
     func reap(_ id: UUID) {
         let socket = socketPath(for: id)
-        guard control.isLive(socketPath: socket), !isRunning(id) else { return }
-        guard control.daemonPID(socketPath: socket) != nil else { return }
-        control.terminate(socketPath: socket)
+        guard control.isLive(socketPath: socket) else {
+            firstSeenOrphaned.removeValue(forKey: id)
+            return
+        }
+        guard !isRunning(id) else { return }
+
+        if control.daemonPID(socketPath: socket) != nil {
+            firstSeenOrphaned.removeValue(forKey: id)
+            control.terminate(socketPath: socket)
+            return
+        }
+
+        let firstOrphaned = firstSeenOrphaned[id] ?? now()
+        firstSeenOrphaned[id] = firstOrphaned
+        guard now().timeIntervalSince(firstOrphaned) >= orphanGrace else { return }
+
+        // Past grace with no pidfile ever appearing: recover the real pid from the kernel.
+        // `nil` here means even that failed (the process died between `isLive` and this
+        // `connect()`) — nothing more to signal, so leave it for the next `reap` to retry.
+        if let peerPID = control.peerPID(socketPath: socket) {
+            control.terminate(pid: peerPID, socketPath: socket)
+        }
+        firstSeenOrphaned.removeValue(forKey: id)
     }
 }
