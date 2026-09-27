@@ -198,8 +198,8 @@ public struct SystemCommandRunner: CommandRunner {
         onSpawn?(childPID)
 
         let exitFlag = ExitFlag()
-        let result: (Data, Data, Int32, Bool) = await withTaskCancellationHandler {
-            await withCheckedContinuation { continuation in
+        let result: (Data, Data, Int32, Bool) = try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
                 let group = DispatchGroup()
                 let out = Buffer(), err = Buffer()
                 group.enter()
@@ -214,7 +214,18 @@ public struct SystemCommandRunner: CommandRunner {
                 }
                 group.notify(queue: .global()) {
                     var status: Int32 = 0
-                    waitpid(childPID, &status, 0)
+                    var rc: pid_t = -1
+                    // A signal delivered to THIS process (not the child) while blocked in
+                    // `waitpid` interrupts the call with EINTR and leaves `status` untouched —
+                    // at zero, which decodes below as a clean exit 0. Retrying is the only way
+                    // to avoid reporting a killed/failing child as a success.
+                    repeat {
+                        rc = waitpid(childPID, &status, 0)
+                    } while rc == -1 && errno == EINTR
+                    guard rc != -1 else {
+                        continuation.resume(throwing: WaitFailed(errno: errno))
+                        return
+                    }
                     exitFlag.markExited()
                     // `WIFSIGNALED`/`WTERMSIG`/`WEXITSTATUS` are `#define`s, not C functions —
                     // Swift can't call them, so this is their BSD wait-status layout by hand.
@@ -226,11 +237,11 @@ public struct SystemCommandRunner: CommandRunner {
             }
         } onCancel: {
             // SIGTERM the whole group first — the common case (the ladder in
-            // `SessionReaper` is the same idea): most things exit cleanly on it. Only after
-            // ~1s of not seeing the child reaped does this escalate to SIGKILL, and it
-            // checks `exitFlag` right before doing so, because `pid` is not safe to signal
-            // once the kernel has reaped and possibly reused it.
-            killpg(childPID, SIGTERM)
+            // `SessionReaper` is the same idea): most things exit cleanly on it. Guarded by
+            // `exitFlag` the same as the delayed SIGKILL below, because `waitpid` above can
+            // already have reaped (and the kernel can already have recycled) `childPID` by the
+            // time this cancellation handler runs.
+            if !exitFlag.hasExited { killpg(childPID, SIGTERM) }
             DispatchQueue.global().asyncAfter(deadline: .now() + 1) {
                 if !exitFlag.hasExited { killpg(childPID, SIGKILL) }
             }
@@ -248,5 +259,12 @@ public struct SystemCommandRunner: CommandRunner {
 /// or the spawn call itself failed, before there was a child to report on.
 struct SpawnFailed: Error, Equatable {
     let step: String
+    let errno: Int32
+}
+
+/// `waitpid` failed for a reason other than EINTR (already retried) — e.g. the child was
+/// reaped by something else first (ECHILD). There is no exit status to decode, so this can't
+/// be folded into a `CommandResult` the way a normal exit or signal death can.
+struct WaitFailed: Error, Equatable {
     let errno: Int32
 }
