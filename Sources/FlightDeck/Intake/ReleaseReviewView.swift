@@ -15,6 +15,14 @@ struct ReleaseReviewView: View {
 
     @State private var review: ReleaseReview?
     @State private var releasing = false
+    /// Set once `refresh()` has returned at least once, so a nil `review` can be told apart
+    /// from "still loading" (first load) vs. "a later refresh failed" (see `refreshWarning`).
+    @State private var hasLoadedOnce = false
+    /// Non-nil only when we already have a `review` on screen and a *later* refresh came
+    /// back nil — keeps showing the stale review rather than replacing it with a spinner or
+    /// an error state, per the review's guidance: a transient nil should never throw away
+    /// work already rendered.
+    @State private var refreshWarning: String?
 
     init(store: SessionStore, intakeID: UUID, onClose: @escaping () -> Void) {
         self.store = store
@@ -32,11 +40,21 @@ struct ReleaseReviewView: View {
             }
 
             if let review {
+                if let refreshWarning {
+                    Text(refreshWarning)
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                }
+
                 // Graph view: next plan (spec §8.4, phase 4).
                 List {
                     sections(for: review)
                 }
                 .listStyle(.inset)
+                // IntakeService still accepts setRating/drop/confirmDrift once release has
+                // started — the sheet is the only guard, so every row control (and the
+                // Release button below) has to freeze together while releasing.
+                .disabled(releasing || review.intake.state == .releasing)
 
                 Divider()
 
@@ -45,11 +63,27 @@ struct ReleaseReviewView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Spacer()
-                    Button("Release") { Task { await release() } }
-                        .keyboardShortcut(.defaultAction)
-                        .disabled(!review.canRelease || releasing)
-                        .accessibilityIdentifier("release-review-release")
+                    Button("Release") {
+                        // Synchronous, before the Task: SwiftUI runs button actions one at a
+                        // time on the main actor, so a second click landing before this
+                        // state change re-renders the (now-disabled) button still sees
+                        // `releasing == true` here and bails — it can never start a second
+                        // Task, so `release()` itself can never be entered twice.
+                        guard !releasing else { return }
+                        releasing = true
+                        Task { await release() }
+                    }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(!review.canRelease || releasing || review.intake.state == .releasing)
+                    .accessibilityIdentifier("release-review-release")
                 }
+            } else if hasLoadedOnce {
+                VStack(spacing: 8) {
+                    Text("Couldn't load the review").foregroundStyle(.secondary)
+                    Button("Retry") { Task { await refresh() } }
+                        .accessibilityIdentifier("release-review-retry")
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ProgressView()
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -220,7 +254,19 @@ struct ReleaseReviewView: View {
     // MARK: - Actions
 
     private func refresh() async {
-        review = await store.intakeService.reviewModel(intakeID)
+        let latest = await store.intakeService.reviewModel(intakeID)
+        if let latest {
+            review = latest
+            refreshWarning = nil
+        } else if review != nil {
+            // Already showing a review and this refresh came back nil — keep the stale
+            // one on screen rather than blanking it, and say so instead of pretending
+            // nothing happened.
+            refreshWarning = "Couldn't refresh — showing the last loaded review."
+        }
+        // A first-load nil leaves `review` nil; `hasLoadedOnce` is what tells the body to
+        // show "Couldn't load the review" + Retry instead of spinning forever.
+        hasLoadedOnce = true
     }
 
     private func confirmDrift(_ i: Int) {
@@ -234,7 +280,9 @@ struct ReleaseReviewView: View {
     }
 
     private func release() async {
-        releasing = true
+        // Belt-and-suspenders alongside the button action's own guard: `release()` never
+        // does the actual work unless something has already committed to releasing.
+        guard releasing else { return }
         await store.intakeService.release(intakeID)
         releasing = false
         onClose()
