@@ -182,6 +182,16 @@ import SwiftUI
 /// and Return-to-rename with it, since Return is only reachable once the mouse path has made
 /// the table first responder. Rename via the context menu still worked, which is what made it
 /// read as a rename bug rather than a monitor bug. See `SessionWindow`.
+///
+/// **The session window itself grew a second table, and `SessionWindow` alone cannot see that.**
+/// `ProjectView`'s Intakes `List` (`ProjectView.swift`) is an `NSTableView` in the SAME window as
+/// the sidebar — a project's detail pane, not a different window — so `SessionWindow.hitView(for:)`
+/// answers a real, non-nil view for a click on an intake row, and the old `sidebarRow(under:)`
+/// walked up from there to the Intakes table and treated it as `sidebarRows`: clicking intake row
+/// N landed on sidebar row N (row 0 is the first project header), double-clicking one renamed a
+/// session, and Return while the Intakes list had focus renamed the selected session instead of
+/// doing nothing. `isSidebarTable` is the fix — every path that resolves a table now also checks
+/// that IT, not just the window, is the sidebar's.
 @MainActor
 final class SidebarInputMonitor {
     private var mouseToken: Any?
@@ -451,9 +461,13 @@ final class SidebarInputMonitor {
         guard event.modifierFlags.intersection(.deviceIndependentFlagsMask).isEmpty else { return false }
         // Same scope check as the mouse path: only the session window.
         guard let window = NSApp.keyWindow, SessionWindow.isSessionWindow(window) else { return false }
-        // Only when a table holds focus. This is what keeps Return working normally in the
-        // terminal and inside the rename field editor.
-        guard window.firstResponder is NSTableView else { return false }
+        // Only when the SIDEBAR's table holds focus, not just any table. This is what keeps
+        // Return working normally in the terminal and inside the rename field editor — and, since
+        // the Intakes `List` can also become first responder, what keeps Return from renaming the
+        // selected session while a project's Intakes list has focus instead. See `isSidebarTable`.
+        guard let table = window.firstResponder as? NSTableView, Self.isSidebarTable(table) else {
+            return false
+        }
         return renameSelected?() ?? false
     }
 
@@ -469,10 +483,44 @@ final class SidebarInputMonitor {
         var tableCandidate: NSView? = rowView.superview
         while let current = tableCandidate, !(current is NSTableView) { tableCandidate = current.superview }
         guard let table = tableCandidate as? NSTableView else { return nil }
+        guard isSidebarTable(table) else { return nil }
 
         let index = table.row(for: rowView)
         guard index >= 0 else { return nil }
         return (table, rowView, index)
+    }
+
+    /// Whether `table` is the sidebar's own table, as opposed to some other `NSTableView` in the
+    /// session window — `ProjectView`'s Intakes `List` chief among them. See the "Scoping" doc
+    /// comment's Intakes paragraph for the bug this exists to stop.
+    ///
+    /// The rule: the table must live inside the FIRST arranged pane of the window's OUTERMOST
+    /// `NSSplitView` — `NavigationSplitView`'s sidebar column. `ProjectView` builds its own
+    /// `HSplitView` for the Intakes list and the detail pane, and `HSplitView` is an `NSSplitView`
+    /// too, so "the nearest enclosing split view" is the wrong question: the Intakes table's
+    /// nearest split view is that inner one, and it IS that split's first pane — walking outward
+    /// only one level would answer true. "Outermost" is what tells the sidebar's own split from
+    /// one nested inside its detail column.
+    ///
+    /// Walks every ancestor once, so it costs nothing a hit-test wasn't already paying for, and
+    /// needs no window: it is exercised in `SidebarTableIdentityTests` against hand-built
+    /// `NSSplitView`/`NSTableView` trees with nothing else attached.
+    static func isSidebarTable(_ table: NSTableView) -> Bool {
+        // Track the last (i.e. outermost, since the walk moves toward the window's root) split
+        // view seen and which of ITS immediate children the table descends through — not `table`
+        // itself, which by the time an outer split is reached is several nested views down.
+        var outermostSplit: NSSplitView?
+        var childUnderOutermostSplit: NSView?
+        var current: NSView = table
+        while let superview = current.superview {
+            if let split = superview as? NSSplitView {
+                outermostSplit = split
+                childUnderOutermostSplit = current
+            }
+            current = superview
+        }
+        guard let outermostSplit, let childUnderOutermostSplit else { return false }
+        return outermostSplit.subviews.first === childUnderOutermostSplit
     }
 }
 
