@@ -78,6 +78,7 @@ struct IntakeDetailView: View {
                 }
             }
             Button("Send answers") { service.answer(intake.id, answers: answers) }
+                .disabled(!Self.canSendAnswers(answers))
         }
         .task(id: questions) {
             if answers.count != questions.count { answers = Array(repeating: "", count: questions.count) }
@@ -92,6 +93,14 @@ struct IntakeDetailView: View {
                 answers[index] = newValue
             }
         )
+    }
+
+    /// At least one answer, and none of them blank once whitespace/newlines are trimmed —
+    /// otherwise "Send answers" would ship empty strings straight to `IntakeService.answer`,
+    /// which has no guard of its own against that (it only checks `state == .needsAnswers`
+    /// and a non-empty exchange).
+    static func canSendAnswers(_ answers: [String]) -> Bool {
+        !answers.isEmpty && !answers.contains { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
     }
 
     private var awaitingChoiceBody: some View {
