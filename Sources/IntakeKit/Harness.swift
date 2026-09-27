@@ -83,7 +83,9 @@ public enum HarnessCommand {
     /// that enabled it loads. Probed live on codex-cli 0.157.1, 2026-09-27: such a run still
     /// authenticates and answers; this machine's config sets no `model_provider`/`base_url`
     /// that would need carrying over with `-c`. Every seat passes `-m` and effort explicitly,
-    /// so losing the config's model defaults changes nothing a round depends on.
+    /// so losing the config's model defaults changes nothing a round depends on. The one
+    /// setting that IS carried over is `service_tier` (`CodexUserConfig`), which `build`
+    /// appends right after these.
     public static let codexIsolation = ["--ignore-user-config", "--ignore-rules", "--disable", "hooks"]
 
     /// Write mode's workspace-write sandbox, narrowed to the work dir alone. By default codex
@@ -110,13 +112,17 @@ public enum HarnessCommand {
         return nil
     }
 
-    public static func build(_ r: HarnessRequest) -> (executable: String, arguments: [String], unsetEnvironment: [String]) {
+    /// `home` is where `CodexUserConfig` reads `service_tier` from — injectable so a test never
+    /// reads the operator's own config.
+    public static func build(_ r: HarnessRequest, home: URL = FileManager.default.homeDirectoryForCurrentUser)
+        -> (executable: String, arguments: [String], unsetEnvironment: [String]) {
         if case .writeInWork = r.access {
             precondition(validate(r) == nil, "HarnessCommand.build: invalid write-mode request: \(String(describing: validate(r)))")
         }
         switch r.harness {
         case .codex:
             let effort = ["-m", r.model, "-c", "model_reasoning_effort=\(r.effort)"] + codexIsolation
+                + CodexUserConfig.arguments(home: home)
             let tail = ["--skip-git-repo-check", "--output-schema", r.schemaFile.path]
             if let s = r.resumeSessionID {
                 // `exec resume` has no -s flag, and IGNORES the session's recorded model unless

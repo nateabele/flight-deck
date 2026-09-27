@@ -2,6 +2,8 @@ import XCTest
 import IntakeKit
 
 final class HarnessWriteModeTests: XCTestCase {
+    /// A home with no `.codex/config.toml`, so argv never depends on the operator's own config.
+    static let noHome = URL(fileURLWithPath: "/nonexistent-fd-home")
     let dir = URL(fileURLWithPath: "/work")
 
     func req(_ h: Harness, access: HarnessAccess, cwd: URL? = nil, resume: String? = nil) -> HarnessRequest {
@@ -12,7 +14,7 @@ final class HarnessWriteModeTests: XCTestCase {
     }
 
     func testCodexWriteInWorkUsesWorkspaceWriteSandbox() {
-        let c = HarnessCommand.build(req(.codex, access: .writeInWork(dir)))
+        let c = HarnessCommand.build(req(.codex, access: .writeInWork(dir)), home: Self.noHome)
         XCTAssertEqual(c.executable, "codex")
         XCTAssertEqual(c.arguments, ["exec", "--json", "-m", "m", "-c", "model_reasoning_effort=high",
                                      "--ignore-user-config", "--ignore-rules", "--disable", "hooks",
@@ -25,7 +27,7 @@ final class HarnessWriteModeTests: XCTestCase {
     }
 
     func testClaudeWriteInWorkGrantsEditWriteAndAddsOnlyTheWorkDir() {
-        let c = HarnessCommand.build(req(.claude, access: .writeInWork(dir)))
+        let c = HarnessCommand.build(req(.claude, access: .writeInWork(dir)), home: Self.noHome)
         XCTAssertEqual(c.executable, "claude")
         XCTAssertEqual(c.arguments, ["-p", "P", "--model", "m", "--effort", "high", "--output-format", "json",
                                      "--json-schema", "{}", "--permission-mode", "acceptEdits",
@@ -40,7 +42,7 @@ final class HarnessWriteModeTests: XCTestCase {
     /// `acceptEdits` would otherwise still run. A bare `Bash` deny is what actually holds even
     /// though write mode never lists Bash in `--allowedTools`.
     func testClaudeWriteInWorkAlwaysDeniesBash() {
-        let c = HarnessCommand.build(req(.claude, access: .writeInWork(dir)))
+        let c = HarnessCommand.build(req(.claude, access: .writeInWork(dir)), home: Self.noHome)
         guard let i = c.arguments.firstIndex(of: "--disallowedTools") else {
             return XCTFail("write mode must pass --disallowedTools")
         }
@@ -50,7 +52,7 @@ final class HarnessWriteModeTests: XCTestCase {
     /// Every `--add-dir` also grants Edit/Write, so a non-empty `readableDirs` must never widen
     /// write access beyond the integrator's own work dir.
     func testClaudeWriteInWorkNeverAddsReadableDirs() {
-        let c = HarnessCommand.build(req(.claude, access: .writeInWork(dir)))
+        let c = HarnessCommand.build(req(.claude, access: .writeInWork(dir)), home: Self.noHome)
         let addDirValues = c.arguments.indices.filter { c.arguments[$0] == "--add-dir" }.map { c.arguments[$0 + 1] }
         XCTAssertEqual(addDirValues, ["/work"])
     }
