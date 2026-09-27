@@ -1,4 +1,5 @@
 import Foundation
+import IntakeKit
 
 /// Runs one headless agent turn (`codex exec` / `claude -p`) as built by
 /// `HarnessCommand.build`. A protocol so `IntakeService`'s tests can hand back canned harness
@@ -15,69 +16,25 @@ protocol HeadlessRunner: Sendable {
     ) async throws -> (stdout: Data, stderr: String, exitCode: Int32)
 }
 
+/// A thin adapter over `IntakeKit.SystemCommandRunner`, which carries the actual process
+/// logic (moved there so the CLI runner process can use it too — see IntakeKit/
+/// CommandRunner.swift). All this does is compute the environment `SystemHeadlessRunner`
+/// always used and unwrap `CommandResult` back into the tuple shape `HeadlessRunner` promises.
 struct SystemHeadlessRunner: HeadlessRunner {
+    private let runner = SystemCommandRunner()
+
     func run(
         _ command: (executable: String, arguments: [String], unsetEnvironment: [String]),
         cwd: URL
     ) async throws -> (stdout: Data, stderr: String, exitCode: Int32) {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        process.arguments = [command.executable] + command.arguments
-        process.currentDirectoryURL = cwd
         // The login shell's PATH, appended: a Finder-launched app has launchd's bare PATH,
         // which contains neither `~/.local/bin` (codex, claude) nor `/opt/homebrew/bin` — see
         // `LoginShellPath`. `/usr/bin/env` alone would report "no such file" for both.
         var environment = LoginShellPath.repairing(ProcessInfo.processInfo.environment)
         for key in command.unsetEnvironment { environment.removeValue(forKey: key) }
-        process.environment = environment
-        // Both CLIs look at stdin when it is not a TTY (as extra prompt input); an inherited
-        // stdin that never reaches EOF would stall a turn that should need no input at all.
-        process.standardInput = FileHandle.nullDevice
 
-        let stdoutPipe = Pipe(), stderrPipe = Pipe()
-        process.standardOutput = stdoutPipe
-        process.standardError = stderrPipe
-
-        try Task.checkCancellation()
-        try process.run()
-
-        // Both pipes drain on their own threads, off the cooperative pool: a triage turn runs
-        // for minutes, and either stream filling its 64KB buffer while we block on the other
-        // is the classic Foundation.Process deadlock (see `LoginShellPath.defaultRun`).
-        let result: (Data, Data, Int32, Bool) = await withTaskCancellationHandler {
-            await withCheckedContinuation { continuation in
-                let group = DispatchGroup()
-                let out = Buffer(), err = Buffer()
-                group.enter()
-                DispatchQueue.global().async {
-                    out.data = stdoutPipe.fileHandleForReading.readDataToEndOfFile(); group.leave()
-                }
-                group.enter()
-                DispatchQueue.global().async {
-                    err.data = stderrPipe.fileHandleForReading.readDataToEndOfFile(); group.leave()
-                }
-                group.notify(queue: .global()) {
-                    process.waitUntilExit()
-                    continuation.resume(returning: (out.data, err.data, process.terminationStatus,
-                                                    process.terminationReason == .uncaughtSignal))
-                }
-            }
-        } onCancel: {
-            // SIGTERM: the child exits, the kernel closes its ends of both pipes, the reads
-            // above hit EOF and the continuation resumes — a discarded or retried intake stops
-            // its model turn instead of letting it run to completion unobserved.
-            process.terminate()
-        }
-
-        // Only OUR cancellation is a CancellationError. A child killed by some other signal
-        // (OOM, a user's `kill`) is a failed turn the human must see, so it comes back as a
-        // nonzero shell-style code (128 + signal) with the signal named in stderr.
-        if Task.isCancelled { throw CancellationError() }
-        var stderr = String(decoding: result.1, as: UTF8.self)
-        guard result.3 else { return (result.0, stderr, result.2) }
-        stderr = "terminated by signal \(result.2)" + (stderr.isEmpty ? "" : "\n" + stderr)
-        return (result.0, stderr, 128 + result.2)
+        let result = try await runner.run(executable: command.executable, arguments: command.arguments,
+                                          cwd: cwd, environment: environment)
+        return (result.stdout, result.stderr, result.exitCode)
     }
-
-    private final class Buffer: @unchecked Sendable { var data = Data() }
 }
