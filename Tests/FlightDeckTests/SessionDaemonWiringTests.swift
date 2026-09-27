@@ -33,6 +33,7 @@ final class SessionDaemonWiringTests: XCTestCase {
         }
         func isLive(socketPath: String) -> Bool { forcedIsLive }
         func daemonPID(_ id: UUID) -> pid_t? { nil }
+        func daemonPID(socketPath: String) -> pid_t? { nil }
         func terminate(_ id: UUID) {}
         func terminate(socketPath: String) {}
         func stop(_ id: UUID) {}

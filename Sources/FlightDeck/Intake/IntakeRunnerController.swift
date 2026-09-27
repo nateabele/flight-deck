@@ -20,21 +20,46 @@ protocol RunnerSpawning {
 struct FdAbducoRunnerSpawner: RunnerSpawning {
     enum SpawnError: Error, CustomStringConvertible {
         case launcherFailed(Int32)
+        /// The launcher never exited within `launcherTimeout` — surfaced as its own case
+        /// (not folded into `launcherFailed`) so its `description` reads as a hang, not a
+        /// clean nonzero exit.
+        case timedOut
         var description: String {
             switch self {
             case .launcherFailed(let status):
                 return "fd-abduco launcher exited \(status)"
+            case .timedOut:
+                return "launcher did not exit"
             }
         }
     }
+
+    /// How long to wait for the `-n` launcher to exit before giving up on it — Review Focus 2:
+    /// bounds a wedged launcher to a failed spawn instead of hanging whatever called this.
+    private static let launcherTimeout: TimeInterval = 5
 
     func spawn(executable: String, arguments: [String], environment: [String: String]) throws {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
         process.environment = environment
+
+        // NEVER `waitUntilExit()`: it spins the CALLING thread's run loop waiting for
+        // Foundation's exit notification, and `IntakeRunnerController` calls this on the main
+        // actor — the exact setup that just wedged `SystemCommandRunner` under concurrent load
+        // (fixed in f703040) by missing that notification and blocking forever with the child
+        // long gone. Worse here: a spin on the main run loop lets SwiftUI service a re-entrant
+        // `ensureRunning` (a timer tick, a user action) before this one has returned, which is
+        // its own path to the double-spawn Review Focus 1 found. `terminationHandler` is
+        // installed before `run()` so an instant exit can't slip past it, and waiting on a
+        // semaphore (not the run loop) blocks only this call, not the app.
+        let exited = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in exited.signal() }
+
         try process.run()
-        process.waitUntilExit()
+        guard exited.wait(timeout: .now() + Self.launcherTimeout) == .success else {
+            throw SpawnError.timedOut
+        }
         guard process.terminationStatus == 0 else {
             throw SpawnError.launcherFailed(process.terminationStatus)
         }
@@ -46,7 +71,10 @@ enum RunnerStartError: Error, Equatable {
     /// `flightdeckPath()` returned `nil` — this build has no bundled `flightdeck` CLI to hand
     /// `fd-abduco` (a plain `swift test` host, or a bundle built without the CLI phase).
     case noBundledCLI
-    /// `SessionDaemon.resolvedBinaryPath()` couldn't produce a runnable `fd-abduco` symlink.
+    /// `SessionDaemon.resolvedBinaryPath()` threw — either this build has no bundled
+    /// `fd-abduco` binary to link to at all (`SessionDaemon.PathError.binaryNotBundled`), or
+    /// creating/verifying the symlink to it failed for some other reason (e.g. permissions).
+    /// Either way there is no `fd-abduco` path this call can hand to `RunnerSpawning`.
     case noFdAbduco
     /// The launcher process itself failed to start or exited non-zero; `String` is
     /// `RunnerSpawning`'s error, described for a log line, not parsed by any caller.
@@ -67,10 +95,30 @@ final class IntakeRunnerController {
     /// Injected so `isRunning`'s heartbeat-freshness check is deterministic under test —
     /// see the doc comment there for why a live socket alone isn't enough.
     private let now: () -> Date
+    /// How long a just-spawned runner is trusted as running before its own tape has to prove
+    /// it — see `spawnedAt`'s doc comment. Injectable so tests don't have to sleep for it.
+    private let spawnGrace: TimeInterval
 
-    /// How long a `Tape.heartbeat` may age before a live socket with a stale `status` is no
-    /// longer trusted as "still running" — see `isRunning`'s doc comment.
+    /// How long a `Tape.heartbeat` may age before a live socket is no longer trusted as "still
+    /// running" — see `isRunning`'s doc comment. Checked regardless of `tape.status` (Review
+    /// Focus 3, fix round 1): the runner writes both from inside its own process on its own
+    /// schedule, and a crash mid-round can leave `status == .running` behind forever with no
+    /// heartbeat to say otherwise.
     private static let heartbeatFreshness: TimeInterval = 10
+
+    /// This process's own record of when it last told `fd-abduco` to spawn a runner for a
+    /// given intake — never persisted, because it only needs to cover one in-process race.
+    ///
+    /// **Review Focus 1 (critical, fix round 1): the double-spawn.** `fd-abduco` binds and
+    /// listens on the socket in its `-n` launcher *before* it forks, so `control.isLive(
+    /// socketPath:)` can go true well before the runner underneath has written anything —
+    /// including its first heartbeat, or even flipped `tape.status` off `.idle`. Without this,
+    /// a SECOND `ensureRunning` landing in that window would see a live socket backed by a
+    /// tape that looks exactly like "nothing is running", call `reap` on a runner that is very
+    /// much alive, and then spawn a second one racing the same tape. Treating anything spawned
+    /// within `spawnGrace` as running — and `reap` as a no-op for it — closes that window
+    /// without needing the runner to have caught up yet.
+    private var spawnedAt: [UUID: Date] = [:]
 
     init(
         daemon: SessionDaemon,
@@ -86,6 +134,7 @@ final class IntakeRunnerController {
         // cannot reference a sibling parameter (`intakesRoot`), so the computation has to live
         // in the initializer body instead of the signature.
         environment: (() -> [String: String])? = nil,
+        spawnGrace: TimeInterval = 15,
         now: @escaping () -> Date = Date.init
     ) {
         self.daemon = daemon
@@ -93,6 +142,7 @@ final class IntakeRunnerController {
         self.spawner = spawner
         self.flightdeckPath = flightdeckPath
         self.intakesRoot = intakesRoot
+        self.spawnGrace = spawnGrace
         self.now = now
         if let environment {
             self.environment = environment
@@ -128,19 +178,29 @@ final class IntakeRunnerController {
     /// **Why liveness alone isn't enough.** `fd-abduco`'s socket answers `isLive` for as long as
     /// the daemon process exists, which outlives the runner it was hosting — the daemon keeps
     /// running its `select()` loop waiting for a re-attach even after the runner underneath has
-    /// finished. So a live socket backing a tape whose `status` says the run is over (anything
-    /// but `.running`) does not mean the run is still going; it means there is a finished
-    /// daemon to `reap`.
+    /// finished. So a live socket alone does not mean the run is still going; it means there is
+    /// a live daemon that is either running a runner or waiting to be `reap`ed.
     ///
-    /// **Why status alone isn't enough either.** The runner updates `tape.status` and
-    /// `tape.heartbeat` from inside its own process, on its own schedule — a crash between
-    /// "wrote `.running`" and "the next heartbeat" would otherwise read as running forever. A
-    /// heartbeat younger than `heartbeatFreshness` is trusted as a second, independent signal
-    /// the same way `status == .running` is.
+    /// **Why `tape.status` is never consulted here (fix round 1, Review Focus 3).** The runner
+    /// writes `status` and `heartbeat` from inside its own process, on its own schedule — a
+    /// crash between "wrote `.running`" and the next heartbeat would read as running forever if
+    /// `status == .running` were trusted on its own, adopting a dead runner instead of reaping
+    /// and respawning it. A heartbeat younger than `heartbeatFreshness` is the only signal this
+    /// trusts for "genuinely still working"; **interface requirement for Task 8's runner: it
+    /// must write a fresh `heartbeat` every poll interval, including mid-round on a long round,
+    /// not just at round boundaries**, or a slow round reads as crashed. Contract for the same
+    /// runner, the other direction: its FINAL write before exiting for any reason (`.stopped`,
+    /// `.failed`, `.reachedReview`, …) must be its terminal `status` — so once the socket goes
+    /// dark, whatever `tape.status` says at that moment is trustworthy again.
+    ///
+    /// **Why a fresh spawn is trusted without a heartbeat at all.** See `spawnedAt`'s doc
+    /// comment: fd-abduco can make the socket live before the runner has written anything.
     func isRunning(_ id: UUID) -> Bool {
         guard control.isLive(socketPath: socketPath(for: id)) else { return false }
+        if let spawnedAt = spawnedAt[id], now().timeIntervalSince(spawnedAt) < spawnGrace {
+            return true
+        }
         let tape = TapeStore(intakeDirectory: IntakeStore(root: intakesRoot).directory(for: id)).loadTape()
-        if tape.status == .running { return true }
         guard let heartbeat = tape.heartbeat else { return false }
         return now().timeIntervalSince(heartbeat) < Self.heartbeatFreshness
     }
@@ -168,6 +228,10 @@ final class IntakeRunnerController {
         ]
         do {
             try spawner.spawn(executable: fdAbducoPath, arguments: arguments, environment: environment())
+            // Recorded on success only: a failed spawn never bound a socket for `isRunning` to
+            // need protecting, and the next `ensureRunning` should be free to try again
+            // immediately rather than sit out a grace period for a runner that never started.
+            spawnedAt[id] = now()
             return .success(())
         } catch {
             return .failure(.spawnFailed(String(describing: error)))
@@ -175,13 +239,25 @@ final class IntakeRunnerController {
     }
 
     /// Collects a finished runner's daemon: no-op while `isRunning` still says yes (there is
-    /// nothing finished to collect), otherwise tears down whatever `fd-abduco` is still holding
-    /// the socket open — see `isRunning`'s doc comment for why a live socket can outlive its
-    /// runner. Also a no-op when the socket was never live at all, so calling this
-    /// speculatively (as `ensureRunning` does before every spawn) never errors.
+    /// nothing finished to collect — this also covers the spawn-grace window, since `isRunning`
+    /// does), otherwise tears down whatever `fd-abduco` is still holding the socket open — see
+    /// `isRunning`'s doc comment for why a live socket can outlive its runner. Also a no-op when
+    /// the socket was never live at all, so calling this speculatively (as `ensureRunning` does
+    /// before every spawn) never errors.
+    ///
+    /// **Requires a readable pidfile before it ever tears anything down (fix round 1, Review
+    /// Focus 1).** `fd-abduco` binds and listens on the socket in its launcher before the
+    /// daemon proper has forked and written `<socket>.pid` — so a socket can be live with no
+    /// pidfile yet. `terminate(socketPath:)`'s cleanup unconditionally unlinks the socket even
+    /// when it finds no pid to signal; calling it in that window would silently delete a live
+    /// daemon's socket out from under it (orphaning it) rather than kill it, and that orphan's
+    /// own `atexit` unlink would later delete the NEXT spawn's socket instead. Checking
+    /// `daemonPID(socketPath:)` first — which itself requires a readable pidfile naming a pid
+    /// that is actually alive — is what stops that.
     func reap(_ id: UUID) {
         let socket = socketPath(for: id)
         guard control.isLive(socketPath: socket), !isRunning(id) else { return }
+        guard control.daemonPID(socketPath: socket) != nil else { return }
         control.terminate(socketPath: socket)
     }
 }
