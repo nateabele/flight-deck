@@ -277,16 +277,18 @@ final class IntakeRunnerTests: XCTestCase {
         XCTAssertNil(tape.heartbeat)
     }
 
-    /// Cancelling the task running `run()` (the CLI wrapper shutting down) must reach the
-    /// round: its real child dies and the tape ends stopped, not left mid-round.
-    func testCancellingRunKillsTheRoundsChild() async throws {
+    /// Cancelling the task running `run()` (a SIGTERM/SIGHUP/SIGINT: logout, reboot, a daemon
+    /// reap) must reach the round — its real child dies — but is NOT the human's ⏹: the tape
+    /// stays `.running` mid-round with only the heartbeat cleared, so the app respawns a runner
+    /// and recovery reruns the round. Writing `.stopped` here meant a reboot never resumed.
+    func testCancellingRunKillsTheRoundsChildAndLeavesTheRoundToRerun() async throws {
         let child = PIDCell()
         let real = SystemCommandRunner()
         let commands = AsyncScriptedRunner { call in
             try await real.run(executable: "sleep", arguments: ["30"], cwd: call.cwd, environment: ["PATH": "/usr/bin:/bin"],
                                processGroup: true, onSpawn: { child.set($0) })
         }
-        _ = try store.appendCommand(.toReview)
+        _ = try store.appendCommand(.step)
         let run = Task { await runner(commands).run() }
         try await eventually("the drafter child to spawn") { child.value != nil }
         let pid = try XCTUnwrap(child.value)
@@ -295,13 +297,24 @@ final class IntakeRunnerTests: XCTestCase {
         run.cancel()
         let status = await run.value
         XCTAssertLessThan(Date().timeIntervalSince(cancelledAt), 5, "run() returned promptly, not after the child's 30 s")
-        XCTAssertEqual(status, .stopped)
+        XCTAssertEqual(status, .running)
         try await eventually("the drafter child to die", timeout: 3) { kill(pid, 0) != 0 }
         let tape = store.loadTape()
-        XCTAssertEqual(tape.status, .stopped)
-        XCTAssertNil(tape.roundInProgress)
+        XCTAssertEqual(tape.status, .running, "a signal is not a ⏹")
+        XCTAssertEqual(tape.roundInProgress, PlannedRound(stage: .draft, round: 0, major: true))
+        XCTAssertNil(tape.heartbeat, "the app must read the runner as dead and respawn it")
         XCTAssertNil(tape.runnerPID)
         XCTAssertTrue(tape.checkpoints.isEmpty)
+
+        // The respawned runner's recovery reruns the interrupted round.
+        let rerun = scripted()
+        let status2 = await runner(rerun).run()
+        XCTAssertEqual(status2, .paused)
+        let after = store.loadTape()
+        XCTAssertEqual(after.checkpoints.map(\.stage), [.draft])
+        XCTAssertEqual(after.checkpoints.first?.record.note, "rerun after interruption")
+        XCTAssertEqual(rerun.calls("drafter").count, 1)
+        XCTAssertNil(after.roundInProgress)
     }
 
     // MARK: - Mid-round commands

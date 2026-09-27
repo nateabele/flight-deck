@@ -54,8 +54,11 @@ public struct IntakeRunner: Sendable {
     ///   one tape, nor the loser's exit clearing the winner's heartbeat.
     /// - No `intake.json` at all returns `.failed` without touching disk: adopting would create
     ///   the directory, and a `tape.json`, for an intake that doesn't exist.
-    /// - Cancelling the calling task cancels the round (its children are killed) and ends
-    ///   `.stopped`.
+    /// - Cancelling the calling task (a signal: logout, reboot, a daemon reap) kills the round's
+    ///   children but writes nothing terminal: the tape keeps `.running` and `roundInProgress`,
+    ///   with only the heartbeat cleared, so the app sees a dead runner, respawns it, and
+    ///   recovery reruns the round. `.stopped` is reserved for a ⏹ in `commands.jsonl` — a
+    ///   shutdown that read as the human's stop would never resume.
     public func run() async -> RunnerStatus {
         let intakes = IntakeStore(root: root)
         let directory = intakes.directory(for: intakeID)
@@ -109,7 +112,7 @@ public struct IntakeRunner: Sendable {
     private func rounds(_ keeper: TapeKeeper, intake: Intake, config: RoundConfig) async -> RunnerStatus {
         var rerunNote = await keeper.recoverInterruptedRound()
         while true {
-            if Task.isCancelled { return await keeper.finish(.stopped) }
+            if Task.isCancelled { return await keeper.abandon() }
             if await keeper.applyCommands() { return await keeper.finish(.stopped) }
             let tape = await keeper.tape
             switch tape.status {
@@ -156,12 +159,15 @@ public struct IntakeRunner: Sendable {
             case .failure:
                 // `RoundExecutor.run` throws only `CancellationError`: ⏹, or `run()` itself
                 // cancelled. Its children are already killed (`CommandRunner`'s process-group
-                // cancel), and nothing from the round is checkpointed.
-                return await keeper.finish(.stopped)
+                // cancel), and nothing from the round is checkpointed. Only the ⏹ is a stop.
+                if await keeper.stopRequested { return await keeper.finish(.stopped) }
+                return await keeper.abandon()
             case .success(.paused(let diagnosis, _)):
                 // A child killed by ⏹ can surface as a failed seat rather than a cancellation;
-                // that's still the human's stop, not a failure to diagnose.
-                if await keeper.stopRequested || Task.isCancelled { return await keeper.finish(.stopped) }
+                // that's still the human's stop, not a failure to diagnose — and one killed by
+                // our own shutdown is neither, so the round is left to rerun.
+                if await keeper.stopRequested { return await keeper.finish(.stopped) }
+                if Task.isCancelled { return await keeper.abandon() }
                 return await keeper.finish(.failed, diagnosis: diagnosis)
             case .success(.checkpoint(var cp, let files)):
                 if rerunNote {
@@ -304,6 +310,20 @@ private actor TapeKeeper {
         hooks.beforeFinalSave()
         save()
         return status
+    }
+
+    /// The runner's last write when it is shut down rather than told to stop: status and
+    /// `roundInProgress` are left exactly as they are — an interrupted round still reads as
+    /// in progress, so the next runner's recovery reruns it — and only the heartbeat and pid
+    /// go, so the app's controller reads the runner as dead on its next tick and respawns it.
+    /// Writing `.stopped` here would make a logout or reboot look like the human's ⏹, and
+    /// nothing would ever resume the run.
+    func abandon() -> RunnerStatus {
+        tape.runnerPID = nil
+        tape.heartbeat = nil
+        hooks.beforeFinalSave()
+        save()
+        return tape.status
     }
 
     /// Best effort: a failed save here (a full disk, a read-only folder) must not crash the
