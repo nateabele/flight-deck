@@ -115,6 +115,49 @@ final class PlanMetricsTests: XCTestCase {
         XCTAssertEqual(d.sectionsChanged, ["## Second"])
     }
 
+    /// A CRLF plan must diff identically to its LF twin: splitting on "\n" as a `Character`
+    /// never fires inside a CRLF pair ("\r\n" is one grapheme cluster), so before the fix a
+    /// whole CRLF plan diffed as a single line and reported no section changes at all.
+    func testCRLFPlanMatchesLFPlan() {
+        let oldLF = "# Title\n## Foo\nfoo body\n## Bar\nbar body\n"
+        let newLF = "# Title\n## Foo\nfoo body changed\n## Bar\nbar body\n"
+        let oldCRLF = oldLF.replacingOccurrences(of: "\n", with: "\r\n")
+        let newCRLF = newLF.replacingOccurrences(of: "\n", with: "\r\n")
+
+        let lfDelta = PlanMetrics.delta(from: oldLF, to: newLF)
+        let crlfDelta = PlanMetrics.delta(from: oldCRLF, to: newCRLF)
+
+        XCTAssertEqual(crlfDelta.added, lfDelta.added)
+        XCTAssertEqual(crlfDelta.removed, lfDelta.removed)
+        XCTAssertEqual(crlfDelta.sectionsChanged, lfDelta.sectionsChanged)
+        XCTAssertEqual(crlfDelta.sectionsChanged, ["## Foo"])
+    }
+
+    /// A section that's both renamed AND moved earlier proves `sectionsChanged` sorts by real
+    /// document position rather than by when a change happens to surface while walking the edit
+    /// script: the edit script reaches "## Foo"'s delete (mapped to "## FooRenamed", which now
+    /// sits at new-document position 3) before it reaches "## Qux"'s insert (new-document
+    /// position 1), so an implementation that just appended in edit-script order would report
+    /// ["## FooRenamed", "## Qux", "## Bar"] -- backwards.
+    func testSectionsChangedOrderSurvivesAMovedSection() {
+        let old = """
+        # Title
+        ## Foo
+        shared body FOO
+        ## Bar
+        totally different bar body old
+        """
+        let new = """
+        # Title
+        ## Qux
+        qux body
+        ## FooRenamed
+        shared body FOO
+        """
+        let d = PlanMetrics.delta(from: old, to: new)
+        XCTAssertEqual(d.sectionsChanged, ["## Qux", "## FooRenamed", "## Bar"])
+    }
+
     // MARK: - unifiedDiff
 
     func testUnifiedDiffMatchesExpectedHunk() {
@@ -170,6 +213,27 @@ final class PlanMetricsTests: XCTestCase {
         ])
         // br-1's edit is modified (1), br-2's reopen is removed (1), n2's create is added (1).
         XCTAssertEqual(PlanMetrics.opsChanged(from: old, to: new), 3)
+    }
+
+    /// Two `followUp`s targeting the same bead collide on the same `BaseOpKey`; without an
+    /// occurrence index, both old-side entries collapse into one dictionary slot and only the
+    /// last write survives, so a real change on the first one reads back as unmodified (0)
+    /// instead of the expected 1. Pairing occurrence-by-occurrence (old[0]<->new[0],
+    /// old[1]<->new[1]) keeps them distinguishable.
+    func testOpsChangedCountsAChangeInADuplicateFollowUpByOccurrence() {
+        let old = ChangeSet(graphObservedAt: t0, ops: [
+            .followUp(tempId: "n1", of: "br-1", title: "first follow-up", description: "d1",
+                      pre: Precondition(status: "open", assignee: nil)),
+            .followUp(tempId: "n2", of: "br-1", title: "second follow-up", description: "d2",
+                      pre: Precondition(status: "open", assignee: nil)),
+        ])
+        let new = ChangeSet(graphObservedAt: t0, ops: [
+            .followUp(tempId: "n1", of: "br-1", title: "first follow-up, revised", description: "d1",
+                      pre: Precondition(status: "open", assignee: nil)),
+            .followUp(tempId: "n2", of: "br-1", title: "second follow-up", description: "d2",
+                      pre: Precondition(status: "open", assignee: nil)),
+        ])
+        XCTAssertEqual(PlanMetrics.opsChanged(from: old, to: new), 1)
     }
 
     func testOpsChangedIsZeroForIdenticalChangeSets() {
