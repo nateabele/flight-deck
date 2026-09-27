@@ -239,6 +239,19 @@ final class RoundExecutorTests: XCTestCase {
         XCTAssertEqual(runner.calls("drafter").count, 4, "each drafter plus its fallback, exactly once")
     }
 
+    /// A drafter's own words are not a diagnosis: this one wrote about "401 authentication"
+    /// and then died, which is a crash to retry — not a login to renew.
+    func testDrafterExitingNonzeroIsNotDiagnosedFromItsOwnText() async throws {
+        let runner = ScriptedHarnessRunner { call in
+            let out = codexOK("d", json(DraftOutput(plan: "Handle 401 authentication failures"))).stdout
+            return CommandResult(stdout: out, stderr: "", exitCode: 1)
+        }
+        let (d, rec) = try paused(try await executor(runner).run(PlannedRound(stage: .draft, round: 0, major: true),
+                                                                 inputs(config())))
+        XCTAssertEqual(d.category, .harnessError)
+        XCTAssertEqual(rec.slots.first?.diagnosis?.category, .harnessError)
+    }
+
     // MARK: - Synthesis / refine
 
     func synthesisTape() throws -> Tape {
