@@ -177,6 +177,14 @@ The rules:
 - **Bead and Sketch presets materialize nothing.** The whole change set is written at
   release.
 
+
+> **Amendment (2026-09-27, Nate):** polish rounds do **not** materialize beads in `br`. A polish
+> round receives the change set and returns a revised change set; FD validates and keeps it, so
+> nothing is written to `br` before release at any fidelity (§5.2's "may be materialized" and
+> §5.3 are superseded). Polishers get `bv --db <shadow>` over a *copy* of `.beads` with the
+> proposed change set applied, to keep bv's graph analytics without touching the real graph.
+> See `docs/superpowers/plans/2026-09-27-flywheel-intake-rounds.md`.
+
 ### 5.3 Materialization
 
 Polish rounds at Feature plan and Full plan fidelity need real beads for the polishing
