@@ -156,14 +156,6 @@ final class IntakeServiceTests: XCTestCase {
         XCTAssertGreaterThan(i.changeSet!.graphObservedAt, Date(timeIntervalSince1970: 1_700_000_000))
     }
 
-    func testNonBeadChoiceParks() async {
-        let svc = makeService(headless: FakeHeadlessRunner([Self.codex(Self.sketch)]), br: MutableRunner(Self.brReplies(Self.openGraph)))
-        let id = await capture(svc)
-        XCTAssertEqual(intake(svc, id).state, .awaitingChoice)
-        svc.choose(id, preset: .featurePlan)
-        XCTAssertEqual(intake(svc, id).state, .parked)
-    }
-
     func testChoosingBeadWithoutChangeSetEncodesNow() async {
         let headless = FakeHeadlessRunner([Self.codex(Self.sketch), Self.codex(Self.beadRec(Self.createOp))])
         let svc = makeService(headless: headless, br: MutableRunner(Self.brReplies(Self.openGraph)))

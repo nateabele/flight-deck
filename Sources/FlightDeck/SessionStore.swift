@@ -1238,9 +1238,18 @@ final class SessionStore: ObservableObject {
     /// `collapsedStatus` read the service THROUGH the store and observe only the store, so
     /// without the forward an intake that stopped needing the human left its project's
     /// orange badge lit until something unrelated republished the store.
+    ///
+    /// Planning rounds tick on the same shared `clock` as every other poller, and run under a
+    /// real `IntakeRunnerController` sharing this store's `daemon`/`daemonControl` — so a
+    /// runner's socket lives in the directory `SessionDaemon` already manages, and a fake-daemon
+    /// test's control is the one the runner is probed through too.
     private(set) lazy var intakeService: IntakeService = {
+        let root = resolvedIntakesRoot
         let service = IntakeService(
-            store: IntakeStore(root: resolvedIntakesRoot),
+            store: IntakeStore(root: root),
+            clock: clock,
+            runner: IntakeRunnerController(daemon: daemon, control: daemonControl,
+                                           spawner: FdAbducoRunnerSpawner(), intakesRoot: root),
             inject: { [weak self] project, agent, text, token in
                 guard let self, let session = self.session(project: project, agentName: agent) else { return false }
                 return self.submitPrompt(text, token: token, to: session.id).errorCode == nil

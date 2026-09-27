@@ -28,6 +28,16 @@ final class IntakeStatePillTests: XCTestCase {
         XCTAssertEqual(IntakeStatePill.label(for: intake(.discarded)), "discarded")
     }
 
+    /// While shaping, the pill says where the rounds are (`ShapingModel.pillLabel`), and falls
+    /// back to "Shaping" before the tape has been read.
+    func testShapingLabelFollowsTheTape() {
+        XCTAssertEqual(IntakeStatePill.label(for: intake(.shaping)), "Shaping")
+        var tape = Tape()
+        tape.status = .reachedReview
+        XCTAssertEqual(IntakeStatePill.label(for: intake(.shaping), tape: tape), ShapingModel.pillLabel(for: tape))
+        XCTAssertEqual(IntakeStatePill.label(for: intake(.shaping), tape: tape), "review ready")
+    }
+
     /// `released` is the one label that needs more than the state itself — the count lives on
     /// `Intake.release`. It counts STEPS, and says so: `appliedSteps` includes every recheck
     /// and edge, so "7 beads" for a release that created one bead was simply false.

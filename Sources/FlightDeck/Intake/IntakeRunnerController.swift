@@ -82,8 +82,8 @@ enum RunnerStartError: Error, Equatable {
 }
 
 /// Adopts, spawns and reaps the one detached runner process an intake's round engine needs —
-/// the app-side half of Tasks 7-9's `flightdeck intake run`. Never wired into
-/// `IntakeService`/`SessionStore` here (Task 11's job); this only owns the process lifecycle.
+/// the app-side half of Tasks 7-9's `flightdeck intake run`. Owns only the process lifecycle;
+/// `IntakeService` decides when (through `IntakeRunnerControlling`), and `SessionStore` builds it.
 @MainActor
 final class IntakeRunnerController {
     private let daemon: SessionDaemon
