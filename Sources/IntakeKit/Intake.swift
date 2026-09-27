@@ -5,6 +5,11 @@ public enum Preset: String, Codable, Sendable { case bead, sketch, featurePlan, 
 public enum IntakeState: String, Codable, Sendable {
     case triaging, needsAnswers, awaitingChoice, parked, review, releasing, released
     case partiallyReleased, failed, interrupted, discarded
+    /// Between choosing a fidelity above Bead and the round engine actually starting: the
+    /// chosen preset has been expanded into a `RoundConfig` (or the human is editing one) but
+    /// no tape has run yet. Not `needsAttention` — once a tape exists its own status is what
+    /// should pull the eye (Task 11), not the fact that shaping is in progress.
+    case shaping
 
     public var needsAttention: Bool {
         switch self {
@@ -79,6 +84,13 @@ public struct Intake: Codable, Identifiable, Equatable, Sendable {
     public var state: IntakeState
     public var recommended: Preset?
     public var recommendationReason: String?
+    /// The preset the human actually chose in `.awaitingChoice`/`.review` — distinct from
+    /// `recommended`, which is only ever the model's suggestion. Nil until `choose` records
+    /// a fidelity above Bead (Task 13 wires this write).
+    public var chosenPreset: Preset?
+    /// The expanded, possibly human-edited round shape for `chosenPreset`. Nil until shaping
+    /// starts, and nil forever for a Bead-fidelity intake, which has no shaping stage at all.
+    public var roundConfig: RoundConfig?
     public var triage: HarnessSession?
     public var exchanges: [TriageExchange]
     public var changeSet: ChangeSet?
@@ -113,6 +125,8 @@ public struct Intake: Codable, Identifiable, Equatable, Sendable {
         self.state = .triaging
         self.recommended = nil
         self.recommendationReason = nil
+        self.chosenPreset = nil
+        self.roundConfig = nil
         self.triage = nil
         self.exchanges = []
         self.changeSet = nil
@@ -126,6 +140,7 @@ public struct Intake: Codable, Identifiable, Equatable, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case id, projectPath, intent, createdAt, state, recommended, recommendationReason
+        case chosenPreset, roundConfig
         case triage, exchanges, changeSet, failure, rawFailureOutput, release
         case ratingOverrides, droppedOps, confirmedDrift
     }
@@ -139,6 +154,10 @@ public struct Intake: Codable, Identifiable, Equatable, Sendable {
         state = try container.decode(IntakeState.self, forKey: .state)
         recommended = try container.decodeIfPresent(Preset.self, forKey: .recommended)
         recommendationReason = try container.decodeIfPresent(String.self, forKey: .recommendationReason)
+        // Both absent on any intake saved before shaping existed — decodeIfPresent keeps that
+        // fixture loading unchanged.
+        chosenPreset = try container.decodeIfPresent(Preset.self, forKey: .chosenPreset)
+        roundConfig = try container.decodeIfPresent(RoundConfig.self, forKey: .roundConfig)
         triage = try container.decodeIfPresent(HarnessSession.self, forKey: .triage)
         exchanges = try container.decodeIfPresent([TriageExchange].self, forKey: .exchanges) ?? []
         changeSet = try container.decodeIfPresent(ChangeSet.self, forKey: .changeSet)
@@ -161,6 +180,8 @@ public struct Intake: Codable, Identifiable, Equatable, Sendable {
         try container.encode(state, forKey: .state)
         try container.encodeIfPresent(recommended, forKey: .recommended)
         try container.encodeIfPresent(recommendationReason, forKey: .recommendationReason)
+        try container.encodeIfPresent(chosenPreset, forKey: .chosenPreset)
+        try container.encodeIfPresent(roundConfig, forKey: .roundConfig)
         try container.encodeIfPresent(triage, forKey: .triage)
         try container.encode(exchanges, forKey: .exchanges)
         try container.encodeIfPresent(changeSet, forKey: .changeSet)

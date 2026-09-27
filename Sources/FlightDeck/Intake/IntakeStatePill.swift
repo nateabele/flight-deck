@@ -30,6 +30,7 @@ struct IntakeStatePill: View {
         case .triaging: return "triaging"
         case .needsAnswers: return "needs answers"
         case .awaitingChoice: return "choose fidelity"
+        case .shaping: return "Shaping"
         case .parked: return "parked"
         case .review: return "review"
         case .releasing: return "releasing"
@@ -47,7 +48,7 @@ struct IntakeStatePill: View {
         switch state {
         case .needsAnswers, .awaitingChoice, .review, .partiallyReleased, .failed, .interrupted:
             return .orange
-        case .triaging, .releasing:
+        case .triaging, .releasing, .shaping:
             return .accentColor
         case .released:
             return .green
