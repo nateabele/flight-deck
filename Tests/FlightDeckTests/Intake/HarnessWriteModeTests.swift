@@ -15,7 +15,12 @@ final class HarnessWriteModeTests: XCTestCase {
         let c = HarnessCommand.build(req(.codex, access: .writeInWork(dir)))
         XCTAssertEqual(c.executable, "codex")
         XCTAssertEqual(c.arguments, ["exec", "--json", "-m", "m", "-c", "model_reasoning_effort=high",
-                                     "-s", "workspace-write", "--skip-git-repo-check",
+                                     "--ignore-user-config", "--ignore-rules", "--disable", "hooks",
+                                     "-s", "workspace-write",
+                                     "-c", "sandbox_workspace_write.exclude_tmpdir_env_var=true",
+                                     "-c", "sandbox_workspace_write.exclude_slash_tmp=true",
+                                     "-c", "sandbox_workspace_write.writable_roots=[]",
+                                     "--skip-git-repo-check",
                                      "--output-schema", "/intake/schema.json", "P"])
     }
 
@@ -24,9 +29,10 @@ final class HarnessWriteModeTests: XCTestCase {
         XCTAssertEqual(c.executable, "claude")
         XCTAssertEqual(c.arguments, ["-p", "P", "--model", "m", "--effort", "high", "--output-format", "json",
                                      "--json-schema", "{}", "--permission-mode", "acceptEdits",
+                                     "--tools", "Read Edit Write",
                                      "--allowedTools", HarnessCommand.claudeWriteTools,
                                      "--disallowedTools", HarnessCommand.claudeWriteDeniedTools,
-                                     "--add-dir", "/work", "--setting-sources", "local", "--strict-mcp-config"])
+                                     "--add-dir", "/work", "--restricted", "--strict-mcp-config"])
     }
 
     /// `--allowedTools` only ADDS to whatever the operator's settings.json already allows —

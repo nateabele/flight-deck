@@ -380,11 +380,7 @@ public struct RoundExecutor: Sendable {
                                      action: "This is a Flight Deck bug — report it."), sessionID: nil)
         }
         let command = HarnessCommand.build(request)
-        // Settings `env` first, unsets last: `--setting-sources local` drops the user settings'
-        // `env` (see `ClaudeUserEnv`), and nothing it holds may re-introduce an unset variable.
-        var environment = choice.harness == .claude ? ClaudeUserEnv.merged(into: inputs.environment, home: userHome)
-                                                    : inputs.environment
-        for key in command.unsetEnvironment { environment.removeValue(forKey: key) }
+        let environment = HarnessCommand.environment(for: command, base: inputs.environment, home: userHome)
 
         let runFile = dir.appendingPathComponent("run.json")
         let started = inputs.now()
