@@ -19,9 +19,10 @@ public struct ShadowGraph: Sendable {
     private let brPath: String
     private let environment: [String: String]
 
-    /// A fixed system tool, not something a caller ever needs to fake — unlike `runner`
-    /// (`br`), nobody stubs the SQLite copy step in a test, so it always runs for real.
-    private let sqliteRunner = SystemCommandRunner()
+    /// Runs the `sqlite3 … VACUUM INTO` snapshot step. Injectable like `runner` so that step's
+    /// failure path is testable without a broken system `sqlite3`; the convenience init
+    /// below keeps the real one for every production caller.
+    private let sqliteRunner: CommandRunner
     private static let sqlite3Path = "/usr/bin/sqlite3"
 
     /// Every shadow write is attributed to this actor, not to whichever polish round
@@ -30,10 +31,16 @@ public struct ShadowGraph: Sendable {
     /// to show it never came from a real release.
     private static let actor = "flightdeck-intake:shadow"
 
-    public init(runner: CommandRunner, brPath: String = "br", environment: [String: String]) {
+    public init(runner: CommandRunner, sqliteRunner: CommandRunner, brPath: String = "br",
+                environment: [String: String]) {
         self.runner = runner
+        self.sqliteRunner = sqliteRunner
         self.brPath = brPath
         self.environment = environment
+    }
+
+    public init(runner: CommandRunner, brPath: String = "br", environment: [String: String]) {
+        self.init(runner: runner, sqliteRunner: SystemCommandRunner(), brPath: brPath, environment: environment)
     }
 
     /// Copies `<project>/.beads` to `<dir>/.beads` (replacing any earlier copy under `dir`),
@@ -193,7 +200,7 @@ public struct ShadowGraph: Sendable {
         let stdout = try await run(args, dbPath: dbPath, cwd: cwd, label: "create \(bead.tempId)")
         struct Reply: Decodable { let id: String }
         guard let reply = try? JSONDecoder().decode(Reply.self, from: stdout) else {
-            throw ShadowGraphBuildFailed(detail: "create \(bead.tempId): unexpected output: \(Self.firstLine(of: stdout))")
+            throw ShadowGraphBuildFailed(detail: "create \(bead.tempId): unexpected output: \(firstLine(of: stdout))")
         }
         return reply.id
     }
@@ -220,13 +227,8 @@ public struct ShadowGraph: Sendable {
         let result = try await runner.run(executable: brPath, arguments: ["--db", dbPath] + arguments,
                                           cwd: cwd, environment: environment)
         guard result.exitCode == 0 else {
-            throw ShadowGraphBuildFailed(detail: "\(label): exit \(result.exitCode): \(Self.firstLine(of: result.stdout))")
+            throw ShadowGraphBuildFailed(detail: "\(label): exit \(result.exitCode): \(firstLine(of: result.stdout))")
         }
         return result.stdout
-    }
-
-    private static func firstLine(of data: Data) -> String {
-        let s = String(decoding: data, as: UTF8.self)
-        return s.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? ""
     }
 }

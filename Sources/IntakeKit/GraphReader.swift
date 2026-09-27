@@ -15,7 +15,7 @@ public struct GraphReadFailed: Error, Equatable, Sendable {
 /// Reads the live bead graph for a project: `br list --all --json` (every bead, closed
 /// included) plus `br graph --all --json` (dependency edges across every open/blocked
 /// component), decoded together by `GraphSnapshot.decode`. The app's `IntakeGraphReader`
-/// and the CLI runner (Task 2) both delegate here rather than each hand-rolling the
+/// and the round runner (through `RoundExecutor`) both delegate here rather than each hand-rolling the
 /// two-call sequence and its envelope shapes.
 public struct GraphReader: Sendable {
     private let runner: CommandRunner
@@ -40,13 +40,15 @@ public struct GraphReader: Sendable {
                                           environment: environment)
         guard result.exitCode == 0 else {
             throw GraphReadFailed(command: label, exitCode: result.exitCode,
-                                  detail: Self.firstLine(of: result.stdout))
+                                  detail: firstLine(of: result.stdout))
         }
         return result.stdout
     }
+}
 
-    private static func firstLine(of data: Data) -> String {
-        let s = String(decoding: data, as: UTF8.self)
-        return s.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? ""
-    }
+/// The first line of a CLI's output — `br`'s own error text rather than a whole JSON payload
+/// or stack. Shared by `GraphReader` and `ShadowGraph`, which both report `br` failures.
+func firstLine(of data: Data) -> String {
+    let s = String(decoding: data, as: UTF8.self)
+    return s.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? ""
 }

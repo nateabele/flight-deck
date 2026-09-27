@@ -171,6 +171,25 @@ final class ShadowGraphTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: shadowDB.path + "-wal"))
         XCTAssertFalse(FileManager.default.fileExists(atPath: shadowDB.path + "-shm"))
     }
+
+    /// The SQLite snapshot step runs through an injectable runner too, so its failure path is
+    /// reachable without a broken `/usr/bin/sqlite3`: a failed `VACUUM INTO` surfaces as the
+    /// one error type `build` promises, naming the step.
+    func testInjectedSQLiteRunnerFailureSurfacesAsBuildFailed() async throws {
+        let project = try makeProject()
+        try Data("not really sqlite".utf8).write(to: project.appendingPathComponent(".beads/beads.db"))
+        let sqlite = ShadowGraphRunnerSpy(reply: { _ in (Data(), 1) })
+        let shadow = ShadowGraph(runner: ShadowGraphRunnerSpy(reply: fakeReply), sqliteRunner: sqlite, environment: [:])
+        do {
+            _ = try await shadow.build(project: project, changeSet: ChangeSet(graphObservedAt: Date(), ops: []),
+                                       in: root.appendingPathComponent("work/shadow", isDirectory: true))
+            XCTFail("expected ShadowGraphBuildFailed")
+        } catch let failure as ShadowGraphBuildFailed {
+            XCTAssertTrue(failure.detail.hasPrefix("vacuum shadow db: exit 1"), failure.detail)
+        }
+        XCTAssertEqual(sqlite.calls.count, 1)
+        XCTAssertTrue(sqlite.calls[0].arguments.last?.hasPrefix("VACUUM INTO") ?? false)
+    }
 }
 
 /// The same build against a REAL `br`, in a scratch repo under `$HOME` (never `/tmp` — `am`

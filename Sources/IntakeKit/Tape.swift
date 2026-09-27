@@ -59,12 +59,12 @@ public struct SlotOutcome: Codable, Equatable, Sendable {
 }
 
 /// What one round actually produced — the durable payload a `Checkpoint` carries. Fields not
-/// relevant to a given stage (e.g. `tally` outside review, `changeCount` outside
-/// review/synthesis/polish) are left at their defaults rather than made stage-specific types,
+/// relevant to a given stage (e.g. `tally` outside review, `changeCount` in a draft round)
+/// are left at their defaults rather than made stage-specific types,
 /// so the shape stays uniform across the tape.
 public struct RoundRecord: Codable, Equatable, Sendable {
     public var slots: [SlotOutcome]
-    public var changeCount: Int?        // proposed changes (review/synthesis) or ops changed (polish)
+    public var changeCount: Int?        // proposed changes (review/synthesis), ops.count (encode), or ops changed (polish/freshEyes/dedup)
     public var linesAdded: Int
     public var linesRemoved: Int
     public var sectionsChanged: [String]
@@ -84,9 +84,10 @@ public struct RoundRecord: Codable, Equatable, Sendable {
     }
 }
 
-/// One entry on the tape. `id` is sequential starting at 1, assigned by the caller (usually
-/// `TapeStore.writeCheckpoint`, which also derives `parent` from the current head); `major`
-/// marks a stage boundary a "Continue to next major" click is allowed to stop on.
+/// One entry on the tape. `id` is sequential starting at 1 and `parent` is the head it grew
+/// from — both assigned by `RoundExecutor.run` from the tape it was handed (`writeCheckpoint`
+/// only stores what it is given); `major` marks a stage boundary a "Continue to next major"
+/// click is allowed to stop on.
 public struct Checkpoint: Codable, Equatable, Sendable, Identifiable {
     public var id: Int
     public var parent: Int?
