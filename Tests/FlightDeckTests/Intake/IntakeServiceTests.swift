@@ -21,10 +21,16 @@ private final class FakeHeadlessRunner: HeadlessRunner, @unchecked Sendable {
 private final class MutableRunner: FlywheelProcessRunner, @unchecked Sendable {
     private(set) var calls: [[String]] = []
     var replies: [String: (String, Int32)]
+    /// Keys (same `"<exe> <arg0>"` form) whose call sleeps first — a cancellable stand-in
+    /// for a slow `br`, so a test can act while a turn or release is mid-flight.
+    var slow: [String: UInt64] = [:]
     init(_ replies: [String: (String, Int32)]) { self.replies = replies }
     func run(_ exe: String, _ args: [String], cwd: String?) async throws -> (stdout: String, exitCode: Int32) {
         calls.append([exe] + args)
-        return replies[([exe] + args.prefix(1)).joined(separator: " ")] ?? ("", 127)
+        let key = ([exe] + args.prefix(1)).joined(separator: " ")
+        if let ns = slow[key] { try await Task.sleep(nanoseconds: ns) }
+        // A per-bead reply (`"br update b2"`) wins over the verb-wide one.
+        return replies[([exe] + args.prefix(2)).joined(separator: " ")] ?? replies[key] ?? ("", 127)
     }
 }
 
@@ -75,20 +81,35 @@ final class IntakeServiceTests: XCTestCase {
         #"{"op":"editBead","tempId":null,"title":null,"type":null,"priority":null,"description":null,"acceptance":null,"labels":null,"from":null,"to":null,"kind":null,"id":"b1","set":{"title":"New","description":null,"acceptance":null,"priority":null},"pre":{"status":"open","assignee":null},"delivery":null,"reason":null,"of":null}"#
 
     private func makeService(headless: FakeHeadlessRunner, br: MutableRunner,
-                             hasSession: @escaping (String, String) -> Bool = { _, _ in false }) -> IntakeService {
+                             hasSession: @escaping (String, String) -> Bool = { _, _ in false },
+                             inject: @escaping (String, String, String, UUID) -> Bool = { _, _, _, _ in true }) -> IntakeService {
         IntakeService(store: IntakeStore(root: root), headless: headless, processRunner: br,
                       triageSettings: TriageSettings(harness: .codex, model: "m1", effort: "high"),
-                      inject: { _, _, _, _ in true }, hasSession: hasSession)
+                      inject: inject, hasSession: hasSession)
     }
 
-    private func capture(_ svc: IntakeService) async -> UUID {
-        svc.capture(intent: "Add a note", project: "/p")
+    private func capture(_ svc: IntakeService, project: String = "/p") async -> UUID {
+        svc.capture(intent: "Add a note", project: project)
         let id = svc.intakes[0].id
         await svc.task(for: id)?.value
         return id
     }
 
     private func intake(_ svc: IntakeService, _ id: UUID) -> Intake { svc.intakes.first { $0.id == id }! }
+
+    private static func inProgressEdit(_ id: String, holder: String, rating: String) -> String {
+        #"{"op":"editBead","tempId":null,"title":null,"type":null,"priority":null,"description":null,"acceptance":null,"labels":null,"from":null,"to":null,"kind":null,"id":"\#(id)","set":{"title":"New","description":null,"acceptance":null,"priority":null},"pre":{"status":"in_progress","assignee":"\#(holder)"},"delivery":{"rating":"\#(rating)","reason":"why"},"reason":null,"of":null}"#
+    }
+    private static let heldGraph: [(id: String, status: String, assignee: String?)] =
+        [("b1", "in_progress", "BlueFalcon"), ("b2", "in_progress", "RedFox")]
+    private static let amReplies: [String: (String, Int32)] = [
+        "am macros": (#"{"agent":{"name":"FDName"},"inbox":[]}"#, 0), "am mail": ("", 0), "am file_reservations": ("", 0)]
+
+    /// Spins the main actor until `condition` holds, so a test can act mid-flight.
+    private func until(_ condition: () -> Bool) async throws {
+        for _ in 0..<2000 where !condition() { try await Task.sleep(nanoseconds: 1_000_000) }
+        XCTAssertTrue(condition(), "timed out")
+    }
 
     // MARK: tests
 
@@ -247,6 +268,81 @@ final class IntakeServiceTests: XCTestCase {
         XCTAssertEqual(try store.load(id: i.id).state, .interrupted)
     }
 
+    func testProjectPathIsStandardizedForListingAndDelivery() async {
+        var injected: [(String, String)] = []
+        let br = MutableRunner(Self.brReplies(Self.heldGraph))
+        let svc = makeService(headless: FakeHeadlessRunner([Self.codex(Self.beadRec(Self.inProgressEdit("b1", holder: "BlueFalcon", rating: "scopeChange")))]),
+                              br: br,
+                              // A holder's session is keyed by the standardized path, as SessionStore keys flywheel identities.
+                              hasSession: { project, agent in project == "/p" && agent == "BlueFalcon" },
+                              inject: { project, agent, _, _ in injected.append((project, agent)); return true })
+        let id = await capture(svc, project: "/p/")
+        XCTAssertEqual(svc.intakes(forProject: "/p").map(\.id), [id])
+        XCTAssertEqual(svc.attentionCount(forProject: "/p"), 1)
+        br.replies.merge(["br show": (#"[{"id":"b1","status":"in_progress","assignee":"BlueFalcon"}]"#, 0),
+                          "br update": ("", 0), "br sync": ("", 0)].merging(Self.amReplies) { $1 }) { $1 }
+        await svc.release(id)
+        XCTAssertEqual(intake(svc, id).state, .released, intake(svc, id).release?.error ?? "")
+        XCTAssertEqual(injected.map(\.0), ["/p"])
+        XCTAssertEqual(injected.map(\.1), ["BlueFalcon"])
+    }
+
+    func testPartialReleaseNotifiesOnlyLandedEdits() async {
+        var injected: [String] = []
+        let ops = Self.inProgressEdit("b1", holder: "BlueFalcon", rating: "invalidating") + "," + Self.inProgressEdit("b2", holder: "RedFox", rating: "invalidating")
+        let br = MutableRunner(Self.brReplies(Self.heldGraph))
+        let svc = makeService(headless: FakeHeadlessRunner([Self.codex(Self.beadRec(ops))]), br: br,
+                              hasSession: { _, _ in true },
+                              inject: { _, agent, _, _ in injected.append(agent); return true })
+        let id = await capture(svc)
+        XCTAssertEqual(intake(svc, id).state, .review)
+        br.replies.merge([
+            "br show b1": (#"[{"id":"b1","status":"in_progress","assignee":"BlueFalcon"}]"#, 0),
+            "br show b2": (#"[{"id":"b2","status":"in_progress","assignee":"RedFox"}]"#, 0),
+            "br update b1": ("", 0), "br update b2": ("database is locked", 1),
+        ].merging(Self.amReplies) { $1 }) { $1 }
+        await svc.release(id)
+        let i = intake(svc, id)
+        XCTAssertEqual(i.state, .partiallyReleased)
+        // b1's edit landed before b2's failed: its holder is reclaimed, injected and mailed.
+        XCTAssertEqual(injected, ["BlueFalcon"])
+        XCTAssertTrue(br.calls.contains { $0.prefix(3) == ["am", "mail", "send"] && $0.contains("BlueFalcon") })
+        XCTAssertFalse(br.calls.contains { $0.contains("RedFox") }, "\(br.calls)")
+        // b2's never landed: named in the warnings, not notified.
+        XCTAssertTrue(i.release?.warnings.contains { $0.contains("b2") && $0.contains("RedFox") } == true,
+                      "\(i.release?.warnings ?? [])")
+    }
+
+    func testDiscardMidTriageStaysDiscarded() async throws {
+        let br = MutableRunner(Self.brReplies(Self.openGraph))
+        br.slow["br list"] = 5_000_000_000
+        let svc = makeService(headless: FakeHeadlessRunner([Self.codex(Self.questions)]), br: br)
+        svc.capture(intent: "Add a note", project: "/p")
+        let id = svc.intakes[0].id
+        let task = svc.task(for: id)
+        try await until { !br.calls.isEmpty }
+        svc.discard(id)
+        await task?.value
+        XCTAssertEqual(intake(svc, id).state, .discarded)
+        XCTAssertEqual(try IntakeStore(root: root).load(id: id).state, .discarded)
+    }
+
+    func testDiscardAndSecondClickRefusedWhileReleasing() async throws {
+        let br = MutableRunner(Self.brReplies(Self.openGraph).merging(
+            ["br create": (#"{"id":"b9"}"#, 0), "br sync": ("", 0)]) { $1 })
+        let svc = makeService(headless: FakeHeadlessRunner([Self.codex(Self.beadRec(Self.createOp))]), br: br)
+        let id = await capture(svc)
+        br.slow["br create"] = 200_000_000
+        let first = Task { await svc.release(id) }
+        try await until { self.intake(svc, id).state == .releasing }
+        await svc.release(id)                       // double click: returns at once
+        XCTAssertFalse(svc.discard(id))
+        XCTAssertEqual(intake(svc, id).state, .releasing)
+        await first.value
+        XCTAssertEqual(intake(svc, id).state, .released)
+        XCTAssertEqual(br.calls.filter { $0.prefix(2) == ["br", "create"] }.count, 1)
+    }
+
     func testDiscardCancelsAndHides() async {
         let svc = makeService(headless: FakeHeadlessRunner([Self.codex(Self.questions)]), br: MutableRunner(Self.brReplies(Self.openGraph)))
         let id = await capture(svc)
@@ -254,5 +350,17 @@ final class IntakeServiceTests: XCTestCase {
         XCTAssertEqual(intake(svc, id).state, .discarded)
         XCTAssertTrue(svc.intakes(forProject: "/p").isEmpty)
         XCTAssertEqual(svc.attentionCount(forProject: "/p"), 0)
+    }
+}
+
+final class SystemHeadlessRunnerTests: XCTestCase {
+    /// A child killed by a signal nobody on our side sent is a failed turn, not a
+    /// cancellation — the caller must get a code and text that name the signal.
+    func testSignalDeathIsAFailureNotACancellation() async throws {
+        let out = try await SystemHeadlessRunner().run(
+            (executable: "sh", arguments: ["-c", "kill -9 $$"], unsetEnvironment: []),
+            cwd: FileManager.default.temporaryDirectory)
+        XCTAssertEqual(out.exitCode, 137)
+        XCTAssertTrue(out.stderr.contains("signal 9"), out.stderr)
     }
 }
