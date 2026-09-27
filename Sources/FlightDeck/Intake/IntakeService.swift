@@ -31,6 +31,23 @@ struct ReleaseReview {
     /// False while any `.drifted` op is neither confirmed nor dropped — releasing it as
     /// triaged would write over a change someone made since (spec §5.5).
     var canRelease: Bool
+    /// The bead's state NOW, for every `.drifted` op, keyed by op index. Confirming drift
+    /// releases against this, not the triage-time `pre` (`IntakeService.refreshing`), so
+    /// the sheet has to show it too — an edit to a bead that was open at triage and is
+    /// in progress now gets a holder and a delivery, and gating the rating picker on the
+    /// stale `pre` would hide exactly the notice release is about to send.
+    var livePre: [Int: Precondition] = [:]
+
+    /// What release will treat as op `i`'s precondition: the live state for a drifted op,
+    /// the triage-time `pre` otherwise.
+    func effectivePre(_ i: Int) -> Precondition? {
+        if let live = livePre[i] { return live }
+        guard let ops = intake.changeSet?.ops, i < ops.count else { return nil }
+        return switch ops[i] {
+        case .editBead(_, _, let p, _), .reopen(_, _, let p), .followUp(_, _, _, _, let p): p
+        default: nil
+        }
+    }
 }
 
 /// Orchestrates intakes end to end (spec §4): capture → headless triage (with clarifying
@@ -193,7 +210,13 @@ final class IntakeService: ObservableObject {
         let drift = DriftClassifier.classify(v, current: current)
         // Re-fetch: a rating/drop/confirm may have landed while the graph was being read.
         let latest = intake(id) ?? i
-        return Self.review(latest, drift: drift)
+        var review = Self.review(latest, drift: drift)
+        for (n, d) in drift.enumerated() {
+            guard case .drifted = d, let target = cs.ops[n].existingTarget,
+                  let live = current.beads[target]?.precondition else { continue }
+            review.livePre[n] = live
+        }
+        return review
     }
 
     static func review(_ i: Intake, drift: [OpDrift]) -> ReleaseReview {
@@ -296,14 +319,14 @@ final class IntakeService: ObservableObject {
         var warnings: [String] = []
         var unnotified = Set<String>()
         for action in planned {
-            guard case .mail(let to, let bead, _, _, _) = action, !landed.contains(bead) else { continue }
+            guard case .mail(let to, let bead, _, _) = action, !landed.contains(bead) else { continue }
             if unnotified.insert(bead).inserted {
                 warnings.append("\(bead) (held by \(to)) was not changed because the release stopped partway, so \(to) was not notified.")
             }
         }
         let actions = planned.filter { action in
             switch action {
-            case .mail(_, let bead, _, _, _), .inject(_, let bead, _), .reclaim(let bead, _, _): landed.contains(bead)
+            case .mail(_, let bead, _, _), .inject(_, let bead, _), .reclaim(let bead, _, _): landed.contains(bead)
             }
         }
         let delivery = IntakeDelivery(runner: processRunner, amPath: amPath, brPath: brPath, store: store,
@@ -321,8 +344,9 @@ final class IntakeService: ObservableObject {
     }
 
     /// `op` with its precondition replaced by the live one, plus a delivery rating when it is
-    /// an edit to a bead that is now in progress and triage gave none.
-    private static func refreshing(_ op: ChangeOp, to live: Precondition, rating: DeliveryRating?, reason: String) -> ChangeOp {
+    /// an edit to a bead that is now in progress and triage gave none. Also what the review
+    /// sheet's footer counts notices from, so its "N notices" matches what release will send.
+    static func refreshing(_ op: ChangeOp, to live: Precondition, rating: DeliveryRating?, reason: String) -> ChangeOp {
         switch op {
         case .editBead(let id, let set, _, let delivery):
             var d = delivery
@@ -536,12 +560,13 @@ final class IntakeService: ObservableObject {
     }
 
     private func initialPrompt(_ i: Intake, files: TriageFiles, observedAt: Date) -> String {
-        let readme = (i.projectPath as NSString).appendingPathComponent("README.md")
+        func existing(_ name: String) -> String? {
+            let path = (i.projectPath as NSString).appendingPathComponent(name)
+            return FileManager.default.fileExists(atPath: path) ? path : nil
+        }
         return Triage.initialPrompt(
             intent: i.intent, graphFile: files.graph.path, triageFile: files.bv.path,
-            agentsFile: (i.projectPath as NSString).appendingPathComponent("AGENTS.md"),
-            readmeFile: FileManager.default.fileExists(atPath: readme) ? readme : nil,
-            observedAt: observedAt)
+            agentsFile: existing("AGENTS.md"), readmeFile: existing("README.md"), observedAt: observedAt)
     }
 
     // MARK: - Plumbing

@@ -27,10 +27,18 @@ public enum ApplyPlanner {
         let ops = v.changeSet.ops.enumerated().filter { !skipping.contains($0.offset) }
         var creates: [ApplyStep] = [], edges: [ApplyStep] = [], edits: [ApplyStep] = []
         var reopens: [ApplyStep] = [], held: [ApplyStep] = []
-        var knownPre: [String: Precondition] = [:]
+        // What a held edge's recheck may demand of its `from` bead. Held edges run LAST, after
+        // every edit and reopen: an edit leaves status and assignee alone, so its `pre` still
+        // describes the bead then; a reopen does not — it has just set the bead open itself,
+        // so demanding its triage-time `closed` would fail FD's own write on FD's own check
+        // and stop every "reopen X, X blocked by new:n1" release one step short. A reopened
+        // bead is therefore rechecked for existence only, whether or not it was also edited
+        // and in whichever order those two ops were listed.
+        var editPre: [String: Precondition] = [:], reopened = Set<String>()
         for (_, op) in ops {
             switch op {
-            case .editBead(let id, _, let p, _), .reopen(let id, _, let p): knownPre[id] = p
+            case .editBead(let id, _, let p, _): editPre[id] = p
+            case .reopen(let id, _, _): reopened.insert(id)
             default: break
             }
         }
@@ -47,7 +55,7 @@ public enum ApplyPlanner {
                 if fromSkipped || toSkipped { break }
 
                 if v.heldOpIndices.contains(i), case .existing(let id) = from {
-                    held += [.recheck(id: id, pre: knownPre[id]), .depend(dependent: from, dependency: to, kind: kind)]
+                    held += [.recheck(id: id, pre: reopened.contains(id) ? nil : editPre[id]), .depend(dependent: from, dependency: to, kind: kind)]
                 } else {
                     edges.append(.depend(dependent: from, dependency: to, kind: kind))
                 }
