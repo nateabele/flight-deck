@@ -297,6 +297,78 @@ final class CodexAdapterTests: XCTestCase {
         )
     }
 
+    // MARK: - controlSocket appends the control-access flags to every launch line
+
+    func testLaunchCommandAppendsTheControlAccessFlagsWhenASocketIsSet() async throws {
+        let (baseAdapter, t) = makeAdapter()
+        var adapter = baseAdapter
+        adapter.controlSocket = URL(fileURLWithPath: "/s/Flight Deck/control.sock")
+        let session = Session(title: "my tab", workingDirectory: "/w/a")
+        let binding = try await adapter.prepare(for: session, options: .codex(CodexThreadOptions()))
+
+        let expectedFlags = CodexControlAccess.launchFlags(
+            socket: adapter.controlSocket, options: CodexThreadOptions()
+        ).joined(separator: " ")
+
+        XCTAssertEqual(
+            adapter.launchCommand(binding, session, .codex(CodexThreadOptions())),
+            "codex resume \(t.threadID) \(expectedFlags)\n"
+        )
+    }
+
+    /// `resumeCommand` delegates to `launchCommand` — this pins that the delegation itself,
+    /// not just `launchCommand` in isolation, carries the flags through.
+    func testResumeCommandAlsoAppendsTheControlAccessFlags() async throws {
+        let (baseAdapter, t) = makeAdapter()
+        var adapter = baseAdapter
+        adapter.controlSocket = URL(fileURLWithPath: "/s/Flight Deck/control.sock")
+        let session = Session(title: "my tab", workingDirectory: "/w/a")
+        let binding = try await adapter.prepare(for: session, options: .codex(CodexThreadOptions()))
+
+        let expectedFlags = CodexControlAccess.launchFlags(
+            socket: adapter.controlSocket, options: CodexThreadOptions()
+        ).joined(separator: " ")
+
+        XCTAssertEqual(
+            adapter.resumeCommand(binding, session, .codex(CodexThreadOptions())),
+            "codex resume \(t.threadID) \(expectedFlags)\n"
+        )
+    }
+
+    func testColdCreateCommandsFreshLaunchBranchAlsoAppendsTheControlAccessFlags() throws {
+        var adapter = CodexAdapter(rpc: CodexRPC(transport: ScriptedTransport()), rolloutExists: { _ in true })
+        adapter.controlSocket = URL(fileURLWithPath: "/s/Flight Deck/control.sock")
+        let session = Session(
+            id: UUID(), title: "t", workingDirectory: "/w/a",
+            pinnedConversationID: UUID(), agent: .codex, transcriptPath: nil
+        )
+        let binding = adapter.binding(for: session)
+
+        let expectedFlags = CodexControlAccess.launchFlags(
+            socket: adapter.controlSocket, options: CodexThreadOptions()
+        ).joined(separator: " ")
+
+        XCTAssertEqual(
+            adapter.coldCreateCommand(binding, session, .codex(CodexThreadOptions())),
+            "codex \(expectedFlags)\n"
+        )
+    }
+
+    /// The whole point of gating this behind a stored `nil` default: a tab launched before
+    /// `FlightDeckApp` ever sets `controlSocket` (or under a UITest reset, which leaves it nil
+    /// on purpose) must type EXACTLY what it typed before this feature existed.
+    func testControlSocketNilLeavesEveryLaunchLineByteIdentical() async throws {
+        let (adapter, t) = makeAdapter()
+        XCTAssertNil(adapter.controlSocket, "nil is the required default — no opt-in, no flags")
+        let session = Session(title: "my tab", workingDirectory: "/w/a")
+        let binding = try await adapter.prepare(for: session, options: .codex(CodexThreadOptions()))
+
+        XCTAssertEqual(adapter.launchCommand(binding, session, .codex(CodexThreadOptions())),
+                       "codex resume \(t.threadID)\n")
+        XCTAssertEqual(adapter.resumeCommand(binding, session, .codex(CodexThreadOptions())),
+                       "codex resume \(t.threadID)\n")
+    }
+
     func testRenameSendsThreadNameSet() async throws {
         let (adapter, t) = makeAdapter()
         let session = Session(title: "t", workingDirectory: "/w/a")
