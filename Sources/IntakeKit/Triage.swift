@@ -33,6 +33,14 @@ public enum Triage {
       "reason":\(nullableString),"of":\(nullableString)}}
     """
 
+    /// The `changeSet` object on its own — a nullable `{graphObservedAt, ops}` shape, `ops`
+    /// items typed by `op` above. Exposed so `RoundSchemas.changeSet` (encode, polish) embeds
+    /// exactly this fragment rather than a hand-copied twin that could drift from it.
+    public static let changeSetSchemaFragment = """
+    {"type":["object","null"],"additionalProperties":false,"required":["graphObservedAt","ops"],
+                   "properties":{"graphObservedAt":{"type":"string"},"ops":{"type":"array","items":\(op)}}}
+    """
+
     /// Strict-mode schema for both `codex exec --output-schema` and `claude --json-schema`:
     /// every object declares `additionalProperties: false` and lists every property in
     /// `required`, with optional values typed `[<type>, "null"]` instead of simply omitted —
@@ -45,8 +53,7 @@ public enum Triage {
       "questions":{"type":["array","null"],"items":{"type":"string"}},
       "preset":{"type":["string","null"],"enum":["bead","sketch","featurePlan","fullPlan",null]},
       "reason":\(nullableString),
-      "changeSet":{"type":["object","null"],"additionalProperties":false,"required":["graphObservedAt","ops"],
-                   "properties":{"graphObservedAt":{"type":"string"},"ops":{"type":"array","items":\(op)}}}}}
+      "changeSet":\(changeSetSchemaFragment)}}
     """
 
     private struct Wire: Decodable {
