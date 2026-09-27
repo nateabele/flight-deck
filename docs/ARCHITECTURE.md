@@ -804,18 +804,34 @@ proxy: `CodexControlAccess` (`Sources/FlightDeck/Agents/Codex/`) appends
 `--enable network_proxy` and four `-c` overrides to every `codex`/`codex resume` line a codex tab
 types. They define a `flightdeck` permissions profile that extends `:workspace`, turns
 `network.enabled` on, and allows exactly one entry in `network.unix_sockets`: the control
-socket's *directory* (codex allowlists a path prefix, not a file). Probed on codex-cli 0.155.1
-and re-checked on 0.157.1: the socket connects and a TCP connect to the internet still fails.
-Codex's session header says "network access enabled" under this profile; that line is wrong
-about reach, because all traffic goes through the proxy, which allows nothing else.
-`CodexAdapter.controlSocket` carries the path, and `SessionStore` sets it on every codex stack,
-both ones built after `controlSocket` is set and ones that already exist.
+socket *file*. Codex writes each key into the seatbelt profile as `(subpath <key>)`, so a
+directory key would allow every socket in the state directory, including the unauthenticated
+`answer-trigger.sock`; the file key allows that one socket and nothing beside it. Probed on
+codex-cli 0.155.1 and re-checked on 0.157.1: the socket connects, a sibling socket in the same
+directory gets `EPERM`, and a direct TCP connect to the internet gets `EPERM` from the seatbelt.
+Codex's session header says "network access enabled" under this profile. Egress is not open:
+direct connects are refused, and codex points the child's `http_proxy`/`https_proxy`/… at its
+own proxy, which denies every host by default. What the proxy does with a denied host depends
+on the approval policy. Under `codex exec` with `approval: never` (the only live run) it
+returned 403. In a `codex resume` TUI tab the policy is not `never`, and codex 0.157.1's source
+sends the host to an approval decider, so a proxy-aware tool (curl, pip, npm, git over https)
+should raise a per-host "`<host>` is not in the allowed_domains" / `network-access <host>`
+approval dialog. **That TUI behaviour is read from the source and is unverified live** (see
+FOLLOWUPS). `CodexAdapter.controlSocket` carries the path, and `SessionStore` sets it on every
+codex stack, both ones built after `controlSocket` is set and ones that already exist.
+The flags are typed only when the probed codex is at least
+`CodexVersionProbe.controlAccessMinimumVersion` (0.155.1): `startCodex` sets
+`CodexAdapter.controlAccessSupported` beside `historyMode`, and the adapter needs both it and a
+socket. An older codex gets no flags, and its `flightdeck` exits 77. Claude tabs need none of
+this: Flight Deck does not sandbox claude, so its `flightdeck` reaches the socket directly.
 
 - **Experimental dependency.** `network_proxy` is an experimental codex feature. The guard is
   `CodexIntegrationTests.testControlSocketGrantConnectsWithoutOpeningTheInternet`, run by
   `./scripts/test-codex-live.sh` (no model turn, no tokens). It runs our exact argv through
   `codex sandbox`, checks that `:workspace` alone refuses the socket, that the grant connects,
-  and that 1.1.1.1:443 stays blocked. Run it after a codex update.
+  that a second socket beside it is refused with `EPERM`, that a direct connect to
+  1.1.1.1:443 is refused with the seatbelt's `EPERM` (an offline Mac's timeout does not pass),
+  and that an HTTP request through codex's own proxy is denied. Run it after a codex update.
 - **Sandbox-choice exception.** A user who picked a codex sandbox in Preferences
   (`CodexThreadOptions.sandbox` set) gets no flags: codex refuses to start when both
   `sandbox_mode` and `default_permissions` are set as overrides. That tab's agent cannot reach
