@@ -1,5 +1,6 @@
 // Sources/FlightDeck/SessionStore.swift
 import AppKit
+import Combine
 import FleetKit
 import IntakeKit
 import Foundation
@@ -219,17 +220,23 @@ final class SessionStore: ObservableObject {
 
     func selectProject(_ id: UUID) { selectedProjectID = id }
 
+    /// The session ⌘R and Return-to-rename act on: the selected one, but only while its
+    /// terminal is what the detail column shows. Behind a project view it is still selected
+    /// (it is what `deselectProject` falls back to) yet hidden, and renaming a row the user is
+    /// not looking at — from a key pressed while looking at something else — is a surprise.
+    var renamableSessionID: UUID? { selectedProjectID == nil ? selectedSessionID : nil }
+
     /// Closes the project view and returns the detail column to whatever session was selected
     /// underneath it — `selectedSessionID` is left alone, not cleared, so the terminal that was
     /// selected before the project view opened is still what the detail column falls back to.
     ///
-    /// Nothing in the sidebar calls this today: headers are `.selectionDisabled()`, so a project
-    /// row can no longer be ⌘-clicked to produce this the way an earlier version of this comment
+    /// Nothing in the sidebar calls this: headers are `.selectionDisabled()`, so a project row
+    /// can no longer be ⌘-clicked to produce this the way an earlier version of this comment
     /// described (`SidebarSelection.Route` no longer has the case that routed here — see its
     /// `.ignore` case for why a `nil` write while a project is selected is now a no-op instead).
-    /// This stays as the programmatic path for whatever eventually gives `ProjectView` its own
-    /// way to close — a back button, Escape, etc. — which eventually needs this exact unread-mark
-    /// handling and would otherwise have to duplicate it.
+    /// ⌘W reaches it, through `closeSelectedSession`, and anything that later gives
+    /// `ProjectView` its own way to close — a back button, Escape — should too, rather than
+    /// duplicating the unread-mark handling below.
     ///
     /// Because `selectedSessionID` itself never changes here, its `didSet` — the thing that
     /// normally clears a mark on "looking at it" — never runs. Without the explicit
@@ -1200,25 +1207,46 @@ final class SessionStore: ObservableObject {
         return service
     }()
 
+    /// Where intakes live, as handed to `init` — nil for every store but the app's own.
+    /// `FlightDeckApp.makeStore` is the one caller that names `<state dir>/intakes`; hundreds
+    /// of tests build a bare store, and `collapsedStatus` builds `intakeService` on first
+    /// read, whose launch recovery REWRITES any `.triaging`/`.releasing` intake it finds to
+    /// `.interrupted`. Defaulting to the real directory let a unit test do that to the
+    /// developer's live intakes.
+    private let intakesRoot: URL?
+
+    /// `intakesRoot`, or — when none was given — a per-store scratch path that nothing has
+    /// written to, so the service starts empty and reads nothing real.
+    lazy var resolvedIntakesRoot: URL = intakesRoot
+        ?? FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlightDeck-intakes-\(UUID().uuidString)", isDirectory: true)
+
     /// Owns every project's intakes (triage, review, release). Lazy for the same reason as
-    /// `observeService`, and one more: its init reads and writes `<state dir>/intakes`, so a
-    /// test host that never touches intakes never creates that directory. Honours
-    /// `-FlightDeckStateDir` like the search index does, so a debug instance pointed at a
-    /// copy of a real deck never triages into the real one's intakes.
+    /// `observeService`, and one more: its init reads and writes its root, so a host that
+    /// never touches intakes never creates that directory. The root is `resolvedIntakesRoot`.
     ///
     /// Both closures resolve through `self` at call time, and against the SAME
     /// `session(project:agentName:)` lookup the flywheel notifier routes with, so "has a
     /// session" (delivery planning) and "inject into it" can never disagree about a holder.
-    private(set) lazy var intakeService: IntakeService = IntakeService(
-        store: IntakeStore(root: (FlightDeckApp.stateDirectory() ?? FileSessionPersistence.defaultDirectory())
-            .appendingPathComponent("intakes", isDirectory: true)),
-        inject: { [weak self] project, agent, text, token in
-            guard let self, let session = self.session(project: project, agentName: agent) else { return false }
-            return self.submitPrompt(text, token: token, to: session.id).errorCode == nil
-        },
-        hasSession: { [weak self] project, agent in
-            self?.session(project: project, agentName: agent) != nil
-        })
+    ///
+    /// The service's changes are forwarded as this store's: `ProjectHeaderRow` and
+    /// `collapsedStatus` read the service THROUGH the store and observe only the store, so
+    /// without the forward an intake that stopped needing the human left its project's
+    /// orange badge lit until something unrelated republished the store.
+    private(set) lazy var intakeService: IntakeService = {
+        let service = IntakeService(
+            store: IntakeStore(root: resolvedIntakesRoot),
+            inject: { [weak self] project, agent, text, token in
+                guard let self, let session = self.session(project: project, agentName: agent) else { return false }
+                return self.submitPrompt(text, token: token, to: session.id).errorCode == nil
+            },
+            hasSession: { [weak self] project, agent in
+                self?.session(project: project, agentName: agent) != nil
+            })
+        intakeChangeForward = service.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
+        return service
+    }()
+    private var intakeChangeForward: AnyCancellable?
 
     /// Built by `FlightDeckApp` immediately after this store, wrapping the SAME
     /// `Notifying` instance `notifier` (below) wraps for ordinary session notifications
@@ -1791,8 +1819,10 @@ final class SessionStore: ObservableObject {
         daemonControl: DaemonControlling? = nil,
         flywheelCoordinator: FlywheelCoordinator = FlywheelCoordinator(),
         flywheelSetup: FlywheelSetup = FlywheelSetup(),
-        flywheelObserveReads: FlywheelReadCommands = FlywheelReadCommands()
+        flywheelObserveReads: FlywheelReadCommands = FlywheelReadCommands(),
+        intakesRoot: URL? = nil
     ) {
+        self.intakesRoot = intakesRoot
         self.provider = provider
         self.persistence = persistence
         self.preferences = preferences
@@ -1866,13 +1896,15 @@ final class SessionStore: ObservableObject {
         statusRoot: URL? = nil,
         transcriptsRoot: URL? = nil,
         statusIsAlive: ((pid_t) -> Bool)? = nil,
-        daemon: SessionDaemon = SessionDaemon()
+        daemon: SessionDaemon = SessionDaemon(),
+        intakesRoot: URL? = nil
     ) {
         self.init(
             provider: ghostty,
             persistence: persistence,
             preferences: preferences,
-            daemon: daemon
+            daemon: daemon,
+            intakesRoot: intakesRoot
         )
         // Load-bearing: `display` defaults to the always-permissive `AlwaysDrawableDisplay()`
         // so tests that construct a `SessionStore` don't have to stub it (see that type's doc
@@ -4301,8 +4333,15 @@ final class SessionStore: ObservableObject {
     ///
     /// The `Bool` is what keeps the empty state honest: with no session there is nothing to
     /// close, and the caller falls back to closing the window rather than swallowing the key.
+    ///
+    /// With a project view up, ⌘W closes the VIEW: the selected session is hidden behind it,
+    /// and closing a terminal the user cannot see is exactly what ⌘W must not do.
     @discardableResult
     func closeSelectedSession() -> Bool {
+        if selectedProjectID != nil {
+            deselectProject()
+            return true
+        }
         guard let id = selectedSessionID else { return false }
         closeSession(id)
         return true
@@ -4723,6 +4762,10 @@ final class SessionStore: ObservableObject {
         }
         // Re-found rather than reusing `index`: every `closeSession` above rewrote `repos`.
         repos.removeAll { $0.id == id }
+        // A view of a project that no longer exists. Left set, it also made `isViewed` false
+        // for the terminal actually on screen (the detail column falls back to it when the
+        // project is gone), so that terminal collected unread marks while being looked at.
+        if selectedProjectID == id { selectedProjectID = nil }
         emit(.projectRemoved(id: id))
         persist()
     }
@@ -4808,10 +4851,11 @@ final class SessionStore: ObservableObject {
     /// candidate pool as a synthetic `.waiting` status — a project sitting on an unanswered
     /// triage question is exactly as demanding as a session with a permission prompt open,
     /// and a collapsed header that only reported sessions would hide that entirely. Reading
-    /// `intakeService` here is safe to do unconditionally: its `IntakeStore` only creates
-    /// `<state dir>/intakes` on the first `save(_:)`, never merely by being asked to list
-    /// what is already there, so a project with no intakes never creates the directory just
-    /// because its header rendered.
+    /// `intakeService` here is safe to do unconditionally: its `IntakeStore` only creates its
+    /// root on the first `save(_:)`, never merely by being asked to list what is already
+    /// there, so a project with no intakes never creates the directory just because its header
+    /// rendered — and a store built without an `intakesRoot` (every test's) reads a scratch
+    /// path, never the real one (`resolvedIntakesRoot`).
     func collapsedStatus(forProjectAt id: Repo.ID) -> SessionStatus? {
         guard let repo = repos.first(where: { $0.id == id }) else { return nil }
         var candidates = repo.sessions

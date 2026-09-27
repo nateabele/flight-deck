@@ -237,7 +237,13 @@ struct FlightDeckApp: App {
             // default (debug and release already differ, so they never share a socket dir).
             // The store forwards this same daemon to its `PosixDaemonControl`, so `liveSessionIDs`
             // and `terminate` operate on one consistent directory.
-            daemon: SessionDaemon(directory: Self.daemonDirectory())
+            daemon: SessionDaemon(directory: Self.daemonDirectory()),
+            // The only store that names the real intakes directory — every other gets a scratch
+            // one (`SessionStore.resolvedIntakesRoot`). Honours `-FlightDeckStateDir` like the
+            // search index does, so a debug instance pointed at a copy of a real deck never
+            // triages into the real one's intakes.
+            intakesRoot: (Self.stateDirectory() ?? FileSessionPersistence.defaultDirectory())
+                .appendingPathComponent("intakes", isDirectory: true)
         )
 
         // Test-only second project, so the sidebar has something to reorder. Guarded by
