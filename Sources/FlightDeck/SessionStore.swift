@@ -531,6 +531,12 @@ final class SessionStore: ObservableObject {
                     .first { $0.pinnedConversationID == conversationID }?.transcriptDirectory
             }
         )
+        // Picked up at construction, not left to `controlSocket`'s own `didSet`: that observer
+        // only fires on a value already set by the time this stack is built. Without this line,
+        // a stack built AFTER `FlightDeckApp` already set `controlSocket` (the common case — the
+        // app wires its socket up before a user opens any codex tab) would carry a `nil` adapter
+        // forever, since nothing would ever assign to `controlSocket` again to trigger `didSet`.
+        stack.adapter.controlSocket = controlSocket
         // Composed on top of the stack's own hook rather than replacing it: failing every
         // in-flight request is the stack's job, forgetting the stack is the store's, and both
         // have to happen for the same event.
@@ -1092,7 +1098,19 @@ final class SessionStore: ObservableObject {
     /// socket is off. `FlightDeckApp` sets this (with `controlSecret`) when
     /// `ControlEnvironment.isEnabled()`; left nil under a UITest reset so a GUI test's tabs
     /// never learn a live socket. Read at launch time only, like `preferences`.
-    var controlSocket: URL?
+    ///
+    /// `didSet` pushes a late-arriving value onto every codex stack that already exists —
+    /// the other order from `makeCodexStackIfNeeded`'s own assignment (a stack built AFTER
+    /// this is set). Without both, whichever order happens to occur leaves that order's
+    /// stacks with a `nil` adapter forever: this property changes at most once in practice
+    /// (`FlightDeckApp` sets it once, at launch), so there is no second chance later.
+    var controlSocket: URL? {
+        didSet {
+            for stack in codexStacks.values {
+                stack.adapter.controlSocket = controlSocket
+            }
+        }
+    }
     /// The key each tab's `FLIGHT_DECK_CALLER` token is minted under — `FleetService`'s own
     /// `controlSecret`, which `FlightDeckApp` copies here so the token a tab carries is one the
     /// server that judges it can verify. Only consulted when `controlSocket` is also set.
