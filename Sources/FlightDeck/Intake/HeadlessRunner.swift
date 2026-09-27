@@ -63,16 +63,20 @@ struct SystemHeadlessRunner: HeadlessRunner {
                 }
             }
         } onCancel: {
-            // Closes the child's pipes, so both reads above hit EOF and the continuation
-            // resumes — a discarded or retried intake stops its model turn instead of
-            // letting it run to completion unobserved.
+            // SIGTERM: the child exits, the kernel closes its ends of both pipes, the reads
+            // above hit EOF and the continuation resumes — a discarded or retried intake stops
+            // its model turn instead of letting it run to completion unobserved.
             process.terminate()
         }
 
-        // Same rule as `SystemFlywheelProcessRunner`: a run we killed is a cancellation, not
-        // an exit code the caller should classify.
-        if result.3 || Task.isCancelled { throw CancellationError() }
-        return (result.0, String(decoding: result.1, as: UTF8.self), result.2)
+        // Only OUR cancellation is a CancellationError. A child killed by some other signal
+        // (OOM, a user's `kill`) is a failed turn the human must see, so it comes back as a
+        // nonzero shell-style code (128 + signal) with the signal named in stderr.
+        if Task.isCancelled { throw CancellationError() }
+        var stderr = String(decoding: result.1, as: UTF8.self)
+        guard result.3 else { return (result.0, stderr, result.2) }
+        stderr = "terminated by signal \(result.2)" + (stderr.isEmpty ? "" : "\n" + stderr)
+        return (result.0, stderr, 128 + result.2)
     }
 
     private final class Buffer: @unchecked Sendable { var data = Data() }

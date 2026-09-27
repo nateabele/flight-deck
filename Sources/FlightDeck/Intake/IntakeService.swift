@@ -53,8 +53,10 @@ final class IntakeService: ObservableObject {
     private let now: () -> Date
 
     /// At most one live triage/release per intake. Starting another cancels the first, so a
-    /// retry or discard never races a turn whose result would overwrite the newer state.
-    private var tasks: [UUID: Task<Void, Never>] = [:]
+    /// retry or discard never races a turn whose result would overwrite the newer state. The
+    /// token lets a finishing task clear only its OWN entry, never a newer one's; an entry
+    /// here therefore means "still running", which is what `release` checks.
+    private var tasks: [UUID: (token: UUID, task: Task<Void, Never>)] = [:]
 
     init(
         store: IntakeStore,
@@ -91,9 +93,19 @@ final class IntakeService: ObservableObject {
 
     // MARK: - Reads
 
+    /// The one spelling of a project path this service stores and compares — exactly how
+    /// `SessionStore` keys flywheel identities (`flywheelStandardizedKey`,
+    /// `bootFlywheelIdentityIfNeeded`). Without it `/p/` and `/p` are two projects, and a
+    /// holder's session keyed by the standardized path is never found, so an invalidating
+    /// change silently degrades to mail-only.
+    static func projectKey(_ path: String) -> String {
+        URL(fileURLWithPath: path, isDirectory: true).standardizedFileURL.path
+    }
+
     /// Newest first; discarded intakes are kept on disk but never listed.
     func intakes(forProject path: String) -> [Intake] {
-        intakes.filter { $0.projectPath == path && $0.state != .discarded }
+        let key = Self.projectKey(path)
+        return intakes.filter { Self.projectKey($0.projectPath) == key && $0.state != .discarded }
     }
 
     func attentionCount(forProject path: String) -> Int {
@@ -101,13 +113,13 @@ final class IntakeService: ObservableObject {
     }
 
     /// The live task for `id`, if any — so tests (and nothing else) can await a turn.
-    func task(for id: UUID) -> Task<Void, Never>? { tasks[id] }
+    func task(for id: UUID) -> Task<Void, Never>? { tasks[id]?.task }
 
     // MARK: - Pipeline
 
     func capture(intent: String, project: String) {
         guard !intent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        let intake = Intake(projectPath: project, intent: intent, createdAt: now())
+        let intake = Intake(projectPath: Self.projectKey(project), intent: intent, createdAt: now())
         save(intake)
         start(intake.id) { await $0.runTriage(intake.id, turn: .initial) }
     }
@@ -148,11 +160,16 @@ final class IntakeService: ObservableObject {
         start(id) { await $0.runTriage(id, turn: .initial) }
     }
 
-    func discard(_ id: UUID) {
-        tasks.removeValue(forKey: id)?.cancel()
-        guard var i = intake(id) else { return }
+    /// Refused (returns false) while `.releasing`: cancelling mid-write would leave beads
+    /// half-written with no record of how far it got, and the release's own final save would
+    /// then overwrite `.discarded` anyway. The UI disables Discard in that state.
+    @discardableResult
+    func discard(_ id: UUID) -> Bool {
+        guard var i = intake(id), i.state != .releasing else { return false }
+        tasks.removeValue(forKey: id)?.task.cancel()
         i.state = .discarded
         save(i)
+        return true
     }
 
     // MARK: - Release review
@@ -201,21 +218,27 @@ final class IntakeService: ObservableObject {
     // MARK: - Release
 
     func release(_ id: UUID) async {
-        guard let i = intake(id), i.state == .review, i.changeSet != nil else { return }
-        await withTaskHandle(id) { await $0.runRelease(id) }
+        // `.releasing` is set here, before the first await, so a second click (or a discard)
+        // arriving while the graph is re-read already sees a release in flight.
+        guard var i = intake(id), i.state == .review, i.changeSet != nil, tasks[id] == nil else { return }
+        i.state = .releasing
+        i.failure = nil
+        save(i)
+        start(id) { await $0.runRelease(id) }
+        await tasks[id]?.task.value
     }
 
     private func runRelease(_ id: UUID) async {
-        guard var i = intake(id), let cs = i.changeSet else { return }
+        guard let i = intake(id), let cs = i.changeSet else { return }
         let current: GraphSnapshot
         do { current = try await graphReader.read(project: i.projectPath) }
-        catch { return fail(id, keepState: true, "Could not read the bead graph before release: \(error)") }
+        catch { return fail(id, backTo: .review, "Could not read the bead graph before release: \(error)") }
         guard let triaged = triageGraph(id), case .success(let v) = ChangeSetValidator.validate(cs, against: triaged) else {
-            return fail(id, keepState: true, "The triage-time graph for this change set is missing or no longer validates; retry triage.")
+            return fail(id, backTo: .review, "The triage-time graph for this change set is missing or no longer validates; retry triage.")
         }
         let drift = DriftClassifier.classify(v, current: current)
         guard Self.review(i, drift: drift).canRelease else {
-            return fail(id, keepState: true, "Drift changed since review; confirm or drop the drifted ops again.")
+            return fail(id, backTo: .review, "Drift changed since review; confirm or drop the drifted ops again.")
         }
 
         // Confirming drift accepts the bead as it is NOW, so the op's `pre` is refreshed to
@@ -243,7 +266,7 @@ final class IntakeService: ObservableObject {
                 let gone = Set(errs.errors.compactMap { if case .unknownBead(let b) = $0 { b } else { nil } })
                 let other = errs.errors.filter { if case .unknownBead = $0 { false } else { true } }
                 guard other.isEmpty, !gone.isEmpty else {
-                    return fail(id, keepState: true, "The change set no longer validates against the live graph: "
+                    return fail(id, backTo: .review, "The change set no longer validates against the live graph: "
                                 + errs.errors.map(\.message).joined(separator: "; "))
                 }
                 skip.formUnion(ops.indices.filter { n in Self.references(ops[n]).contains { gone.contains($0) } })
@@ -251,31 +274,45 @@ final class IntakeService: ObservableObject {
             }
             break
         }
-        guard let validated else { return fail(id, keepState: true, "The change set could not be reconciled with the live graph.") }
-
-        i.state = .releasing
-        i.failure = nil
-        save(i)
+        guard let validated else { return fail(id, backTo: .review, "The change set could not be reconciled with the live graph.") }
+        guard !Task.isCancelled else { return }
 
         let actor = "flightdeck-intake:\(id.uuidString)"
+        let steps = ApplyPlanner.plan(validated, skipping: [])
         let outcome = await BeadWriter(runner: processRunner, brPath: brPath, actor: actor)
-            .apply(ApplyPlanner.plan(validated, skipping: []), project: i.projectPath)
+            .apply(steps, project: i.projectPath)
 
+        // The plan is ordered and BeadWriter stops at the first failure, so exactly
+        // `steps[..<applied]` landed. A notice says "this bead changed", so it goes only to
+        // holders of edits whose `update` step is in that prefix; the holder of an edit that
+        // never landed is named in the warnings instead of being told about a change that
+        // didn't happen.
+        let landed = Set(steps.prefix(outcome.applied).compactMap { if case .update(let id, _) = $0 { id } else { nil } })
+        var ratings: [Int: DeliveryRating] = [:]
+        for (sub, original) in kept.enumerated() { ratings[sub] = i.ratingOverrides[original] }
+        let project = i.projectPath
+        let planned = DeliveryPlanner.plan(validated.changeSet, ratings: ratings,
+                                           hasSession: { [hasSession] in hasSession(project, $0) })
         var warnings: [String] = []
-        if outcome.error == nil {
-            var ratings: [Int: DeliveryRating] = [:]
-            for (sub, original) in kept.enumerated() { ratings[sub] = i.ratingOverrides[original] }
-            let project = i.projectPath
-            let actions = DeliveryPlanner.plan(validated.changeSet, ratings: ratings,
-                                               hasSession: { [hasSession] in hasSession(project, $0) })
-            let delivery = IntakeDelivery(runner: processRunner, amPath: amPath, brPath: brPath, store: store,
-                                          inject: { [inject] agent, text, token in inject(project, agent, text, token) })
-            warnings = await delivery.deliver(actions, project: project, intakeID: id)
-        } else {
-            // Notices describe edits as done; after a stop partway, some of them weren't.
-            warnings = ["Notices were not sent because the release stopped partway."]
+        var unnotified = Set<String>()
+        for action in planned {
+            guard case .mail(let to, let bead, _, _, _) = action, !landed.contains(bead) else { continue }
+            if unnotified.insert(bead).inserted {
+                warnings.append("\(bead) (held by \(to)) was not changed because the release stopped partway, so \(to) was not notified.")
+            }
         }
+        let actions = planned.filter { action in
+            switch action {
+            case .mail(_, let bead, _, _, _), .inject(_, let bead, _), .reclaim(let bead, _, _): landed.contains(bead)
+            }
+        }
+        let delivery = IntakeDelivery(runner: processRunner, amPath: amPath, brPath: brPath, store: store,
+                                      inject: { [inject] agent, text, token in inject(project, agent, text, token) })
+        warnings += await delivery.deliver(actions, project: project, intakeID: id)
 
+        // Deliberately NOT gated on cancellation: beads are already written, and a record of
+        // exactly what landed is the one thing a release must never lose. (Nothing cancels a
+        // release today — `discard` refuses and every other starter is state-gated.)
         guard var done = intake(id) else { return }
         done.release = ReleaseRecord(releasedAt: now(), appliedSteps: outcome.applied, idMap: outcome.idMap,
                                      error: outcome.error, warnings: warnings)
@@ -337,7 +374,7 @@ final class IntakeService: ObservableObject {
     }
 
     private func runTriage(_ id: UUID, turn: Turn) async {
-        guard var i = intake(id) else { return }
+        guard var i = intake(id), !Task.isCancelled else { return }
         i.state = .triaging
         i.failure = nil; i.rawFailureOutput = nil
         save(i)
@@ -346,6 +383,7 @@ final class IntakeService: ObservableObject {
         if let s = triageSettings { settings = s } else {
             settings = await Task.detached { TriageSettings.detect() }.value
             triageSettings = settings
+            guard !Task.isCancelled else { return }
         }
 
         // Every turn re-reads the graph, so the change set is validated against — and stamped
@@ -389,6 +427,7 @@ final class IntakeService: ObservableObject {
             cs.graphObservedAt = observedAt  // FD owns this timestamp — see `Triage.initialPrompt`.
             if case .failure(let errs) = ChangeSetValidator.validate(cs, against: graph) {
                 // One automatic retry in the same session, errors listed (spec §11).
+                guard !Task.isCancelled else { return }
                 save(i)
                 reply = await turnResult(prompt: Triage.correctionPrompt(errors: errs.errors, observedAt: observedAt),
                                          resume: result.sessionID, settings: session, files: files, project: project)
@@ -428,6 +467,7 @@ final class IntakeService: ObservableObject {
             // Bead with its change set already in hand has nothing left to choose.
             i.state = (preset == .bead && cs != nil) ? .review : .awaitingChoice
         }
+        guard !Task.isCancelled else { return }
         save(i)
     }
 
@@ -510,20 +550,15 @@ final class IntakeService: ObservableObject {
 
     private func intake(_ id: UUID) -> Intake? { intakes.first { $0.id == id } }
 
-    /// A finished task stays in `tasks` until replaced — cancelling it is a no-op, and
-    /// clearing it from inside its own body would race a newer task that already took the slot.
     private func start(_ id: UUID, _ body: @escaping (IntakeService) async -> Void) {
-        tasks[id]?.cancel()
-        tasks[id] = Task { [weak self] in
+        tasks[id]?.task.cancel()
+        let token = UUID()
+        let task = Task { [weak self] in
             guard let self else { return }
             await body(self)
+            if self.tasks[id]?.token == token { self.tasks[id] = nil }
         }
-    }
-
-    /// `start` for a caller that awaits the work (release): same one-task-per-intake rule.
-    private func withTaskHandle(_ id: UUID, _ body: @escaping (IntakeService) async -> Void) async {
-        start(id, body)
-        await tasks[id]?.value
+        tasks[id] = (token, task)
     }
 
     private func mutate(_ id: UUID, _ change: (inout Intake) -> Void) {
@@ -532,11 +567,12 @@ final class IntakeService: ObservableObject {
         save(i)
     }
 
-    /// `keepState` leaves a `.review` intake in review (with the reason in `failure`) — a
-    /// release refused before anything was written has lost nothing worth re-triaging.
-    private func fail(_ id: UUID, keepState: Bool = false, _ message: String, raw: String? = nil) {
-        guard var i = intake(id) else { return }
-        if !keepState { i.state = .failed }
+    /// `backTo: .review` is for a release refused before anything was written — it has lost
+    /// nothing worth re-triaging. A no-op once the task is cancelled: the canceller (discard,
+    /// retry) has already set the state, and a failure here would overwrite it.
+    private func fail(_ id: UUID, backTo state: IntakeState = .failed, _ message: String, raw: String? = nil) {
+        guard !Task.isCancelled, var i = intake(id) else { return }
+        i.state = state
         i.failure = message
         i.rawFailureOutput = raw
         save(i)
