@@ -169,6 +169,19 @@ public enum RoundPrompts {
         """
     }
 
+    /// The read-only inputs every change-set round (encode, polish, fresh-eyes, dedup) is
+    /// pointed at. The graph is the one that matters: every existing-bead op must copy its
+    /// `pre` out of it, and a prompt that never names the file leaves the model guessing at
+    /// statuses and assignees — which then fail validation and burn the one correction turn.
+    private static func changeSetInputs(_ c: RoundContext) -> String {
+        """
+        Read-only files:
+        \(inputFiles(c))
+
+        \(Triage.graphShapeText(graphFile: c.graphFile))
+        """
+    }
+
     private static func lens(for persona: DrafterPersona) -> String {
         switch persona {
         case .general:
@@ -298,6 +311,8 @@ public enum RoundPrompts {
         plan can pick it up and work it. Include unit and end-to-end test obligations in \
         every bead's acceptance criteria. Never lose a feature the plan describes.
 
+        \(changeSetInputs(c))
+
         \(Triage.changeSetRulesText(observedAt: c.observedAt))
 
         Return only JSON matching the provided schema: `{"changeSet": {...}, "summary": "..."}`.
@@ -316,6 +331,8 @@ public enum RoundPrompts {
         Return the complete revised change set — not a diff — under the same rules encode \
         followed. Existing-bead ops (`editBead`, `reopen`, `followUp`) may be revised, but \
         their `pre` must stay exactly what it was; it is not yours to change.
+
+        \(changeSetInputs(c))
 
         \(Triage.changeSetRulesText(observedAt: c.observedAt))
 
@@ -337,6 +354,8 @@ public enum RoundPrompts {
         followed. Existing-bead ops (`editBead`, `reopen`, `followUp`) may be revised, but \
         their `pre` must stay exactly what it was; it is not yours to change.
 
+        \(changeSetInputs(c))
+
         \(Triage.changeSetRulesText(observedAt: c.observedAt))
 
         Return only JSON matching the provided schema: `{"changeSet": {...}, "summary": "..."}`.
@@ -353,7 +372,27 @@ public enum RoundPrompts {
         followed. Existing-bead ops (`editBead`, `reopen`, `followUp`) may be revised, but \
         their `pre` must stay exactly what it was; it is not yours to change.
 
+        \(changeSetInputs(c))
+
         \(Triage.changeSetRulesText(observedAt: c.observedAt))
+
+        Return only JSON matching the provided schema: `{"changeSet": {...}, "summary": "..."}`.
+        """
+    }
+
+    /// The single automatic retry after an encode/polish/fresh-eyes/dedup change set fails
+    /// validation — resumed in the same session. Not `Triage.correctionPrompt`: that one asks
+    /// for a "recommendation", which a change-set seat never gave, and a model told to return
+    /// something it doesn't recognise is one more way to spend the only retry on confusion.
+    public static func changeSetCorrection(errors: [ValidationError], observedAt: Date) -> String {
+        let list = errors.map { "- \($0.message)" }.joined(separator: "\n")
+        return """
+        Your change set failed validation:
+        \(list)
+
+        Return the complete corrected change set — every op, not just the ones you fixed — \
+        that fixes every error above, under the same change-set rules as before. Set \
+        changeSet.graphObservedAt to exactly "\(IntakeJSON.string(from: observedAt))".
 
         Return only JSON matching the provided schema: `{"changeSet": {...}, "summary": "..."}`.
         """
