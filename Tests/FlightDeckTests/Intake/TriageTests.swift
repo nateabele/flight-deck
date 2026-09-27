@@ -29,9 +29,28 @@ final class TriageTests: XCTestCase {
     }
     func testPromptNamesTheInputFiles() {
         let p = Triage.initialPrompt(intent: "I", graphFile: "/i/graph.json", triageFile: "/i/bv.json",
-                                     agentsFile: "/p/AGENTS.md", readmeFile: nil)
+                                     agentsFile: "/p/AGENTS.md", readmeFile: nil, observedAt: Date(timeIntervalSince1970: 0))
         XCTAssertTrue(p.contains("/i/graph.json")); XCTAssertTrue(p.contains("/p/AGENTS.md"))
         XCTAssertTrue(p.contains("new:"))           // teaches the temp-id reference form
+    }
+    func testPromptStatesPerOpRequiredFieldsAndFollowUpIsAnOp() {
+        let p = Triage.initialPrompt(intent: "I", graphFile: "/i/graph.json", triageFile: "/i/bv.json",
+                                     agentsFile: "/p/AGENTS.md", readmeFile: nil, observedAt: Date(timeIntervalSince1970: 0))
+        XCTAssertTrue(p.contains("op=followUp"))    // an op, not "add a followUp bead"
+        XCTAssertTrue(p.contains("kind"))           // addEdge's required `kind` field
+    }
+    func testPromptCarriesFDsGraphObservedAt() {
+        let observedAt = Date(timeIntervalSince1970: 1_798_920_000)
+        let p = Triage.initialPrompt(intent: "I", graphFile: "/i/graph.json", triageFile: "/i/bv.json",
+                                     agentsFile: "/p/AGENTS.md", readmeFile: nil, observedAt: observedAt)
+        XCTAssertTrue(p.contains(IntakeJSON.string(from: observedAt)))
+        XCTAssertTrue(Triage.encodeNowPrompt(observedAt: observedAt).contains(IntakeJSON.string(from: observedAt)))
+    }
+    func testPromptDescribesGraphFileShape() {
+        let p = Triage.initialPrompt(intent: "I", graphFile: "/i/graph.json", triageFile: "/i/bv.json",
+                                     agentsFile: "/p/AGENTS.md", readmeFile: nil, observedAt: Date(timeIntervalSince1970: 0))
+        XCTAssertTrue(p.contains("dependent"))
+        XCTAssertTrue(p.contains(#""assignee": null"#))
     }
 
     // Live probe (2026-09-26): both real CLIs accept Triage.schemaJSON as a strict schema —

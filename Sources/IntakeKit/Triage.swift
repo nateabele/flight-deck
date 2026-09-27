@@ -75,8 +75,12 @@ public enum Triage {
 
     /// The opening triage turn: intent plus the read-only files to consult, the fidelity
     /// presets to choose among, and the change-set rules to follow if it encodes now.
+    /// `observedAt` is FD's own clock, not the agent's — it owns `graphObservedAt` because
+    /// that timestamp is what release drift-checks against, and an agent's clock can be
+    /// off or absent in a sandboxed harness.
     public static func initialPrompt(
-        intent: String, graphFile: String, triageFile: String, agentsFile: String, readmeFile: String?
+        intent: String, graphFile: String, triageFile: String, agentsFile: String, readmeFile: String?,
+        observedAt: Date
     ) -> String {
         var files = """
         - Live bead graph: \(graphFile)
@@ -95,6 +99,14 @@ public enum Triage {
 
         Read-only files:
         \(files)
+
+        \(graphFile) is a JSON snapshot shaped:
+        `{"beads": {"<id>": {"id","title","status","assignee"?,"updatedAt"?,"labels"}}, \
+        "edges": [{"dependent": "<id>", "dependency": "<id>"}]}`. An edge's `dependent` \
+        depends on its `dependency` — that is, `dependent` is `from` and `dependency` is \
+        `to`. A bead with no `assignee` key has no assignee; when you copy its `pre` \
+        precondition, use `"assignee": null` for it — never an empty string, and never
+        omit the key.
 
         Rules:
         - You are read-only. Never run a `br` command that writes (create, update, dep, or
@@ -116,6 +128,8 @@ public enum Triage {
         later encode step, so this is the only chance to produce it.
 
         Change-set rules, whenever you return a change set:
+        - Set `changeSet.graphObservedAt` to exactly "\(IntakeJSON.string(from: observedAt))"
+          — the moment FD read the graph, not your own clock.
         - Reference a bead you are creating in this same change set as `new:<tempId>` (never
           a bare tempId), everywhere another op needs to point at it.
         - Edge direction is `from` depends on `to`: `{"from": A, "to": B}` means A cannot
@@ -127,11 +141,24 @@ public enum Triage {
           understanding, `scopeChange` if it changes what is being delivered, or
           `invalidating` if it makes the bead's current work moot — and give a reason for
           the rating.
-        - For new work on a bead that is already closed, add a `followUp` bead related to
-          it instead of reopening it. Use `reopen` only when the closed work was itself
+        - For new work on a bead that is already closed, use `op=followUp` — it creates a
+          new bead with a `related` edge to the closed one; never emit `createBead` plus a
+          separate `addEdge` instead. Use `op=reopen` only when the closed work was itself
           wrong, and say why in its reason.
         - Before creating a bead, check for duplicates against both open and closed beads,
           not just open ones.
+
+        Each op must fill in exactly the fields its kind needs, and set every other field
+        to null:
+        - `createBead`: `tempId`, `title`, `description` are required; `type`, `priority`,
+          `acceptance`, and `labels` are optional (null falls back to `task` priority 2
+          with no acceptance or labels).
+        - `addEdge`: `from`, `to`, and `kind` — `kind` is required, one of `blocks`,
+          `related`, or `parent-child`.
+        - `editBead`: `id`, `set` (a non-null object of the fields you are changing), and
+          `pre`; also `delivery` when the bead you are editing is `in_progress`.
+        - `reopen`: `id`, `reason`, and `pre`.
+        - `followUp`: `tempId`, `of`, `title`, `description`, and `pre`.
 
         Return only JSON matching the provided schema. Do not write prose.
         """
@@ -155,11 +182,14 @@ public enum Triage {
     }
 
     /// Forces a Bead-fidelity encode regardless of what triage would otherwise recommend —
-    /// used when the human picks Bead over triage's own recommendation.
-    public static func encodeNowPrompt() -> String {
+    /// used when the human picks Bead over triage's own recommendation. Carries its own
+    /// `graphObservedAt` instruction because it can start a fresh session (unlike
+    /// `answersPrompt`, which resumes the session `initialPrompt` already gave it to).
+    public static func encodeNowPrompt(observedAt: Date) -> String {
         """
         Encode this intent now at Bead fidelity as a single pass, regardless of your \
-        recommended preset; return kind=recommendation, preset=bead with the full changeSet.
+        recommended preset; return kind=recommendation, preset=bead with the full changeSet. \
+        Set changeSet.graphObservedAt to exactly "\(IntakeJSON.string(from: observedAt))".
         """
     }
 }
