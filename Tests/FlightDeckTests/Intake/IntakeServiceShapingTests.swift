@@ -2,18 +2,25 @@ import XCTest
 import IntakeKit
 @testable import FlightDeck
 
-/// Records what the service asked of the runner, instead of spawning `fd-abduco`.
+/// Records what the service asked of the runner, instead of spawning `fd-abduco`. `running`
+/// is scriptable between ticks; `reap` records only calls made while the fake says the runner
+/// is NOT running, since the real controller's `reap` is a no-op otherwise.
 @MainActor
 private final class FakeRunnerController: IntakeRunnerControlling {
     private(set) var ensured: [UUID] = []
     private(set) var reaped: [UUID] = []
+    var running: Set<UUID> = []
+    var socketDirectory: URL = FileManager.default.temporaryDirectory
     var startResult: Result<Void, RunnerStartError> = .success(())
     func ensureRunning(_ id: UUID) -> Result<Void, RunnerStartError> {
         ensured.append(id)
         return startResult
     }
-    func isRunning(_ id: UUID) -> Bool { false }
-    func reap(_ id: UUID) { reaped.append(id) }
+    func isRunning(_ id: UUID) -> Bool { running.contains(id) }
+    func reap(_ id: UUID) { if !running.contains(id) { reaped.append(id) } }
+    func socketPath(for id: UUID) -> String {
+        socketDirectory.appendingPathComponent("intake-\(id.uuidString.lowercased()).sock").path
+    }
 }
 
 /// The app side of planning rounds (Task 11): starting a shaping run, queuing transport
@@ -30,6 +37,7 @@ final class IntakeServiceShapingTests: XCTestCase {
         root = FileManager.default.temporaryDirectory
             .appendingPathComponent("IntakeServiceShapingTests-\(UUID())", isDirectory: true)
         runner = FakeRunnerController()
+        runner.socketDirectory = root
         clock = WatchClock(appIsActive: { false })
     }
     override func tearDown() {
@@ -58,6 +66,13 @@ final class IntakeServiceShapingTests: XCTestCase {
         }
         try IntakeStore(root: root).save(i)
         return i
+    }
+
+    private func saveTape(_ id: UUID, _ status: RunnerStatus, target: TapeTarget = .none) throws {
+        var tape = tapeStore(id).loadTape()
+        tape.status = status
+        tape.target = target
+        try tapeStore(id).saveTape(tape)
     }
 
     private func tapeStore(_ id: UUID) -> TapeStore {
@@ -149,27 +164,62 @@ final class IntakeServiceShapingTests: XCTestCase {
         XCTAssertEqual(commands(seeded.id), [.toReview])
     }
 
-    func testSendPlayRelaunchesRunner() throws {
+    func testSendPlayRelaunchesRunner() async throws {
         let seeded = try seed(.shaping)
         let svc = makeService()
+        await svc.launchRecovery?.value
         XCTAssertEqual(runner.ensured, [], "an untouched tape has no unfinished work to resume")
 
         svc.send(seeded.id, .step)
         XCTAssertEqual(runner.ensured, [seeded.id])
-        // A paused/stopped runner exits on its own, and a note waits for the next round —
-        // none of them needs a runner.
+        // With a live runner, pause and stop are just read by it; a note waits for the next
+        // round. None of them spawns.
+        runner.running = [seeded.id]
         svc.send(seeded.id, .pause)
         svc.send(seeded.id, .stop)
         svc.send(seeded.id, .annotate("tighten scope"))
         XCTAssertEqual(runner.ensured, [seeded.id])
+        runner.running = []
         svc.send(seeded.id, .toReview)
         XCTAssertEqual(runner.ensured, [seeded.id, seeded.id])
         XCTAssertEqual(commands(seeded.id), [.step, .pause, .stop, .annotate("tighten scope"), .toReview])
     }
 
-    func testTapeChangesArePublishedOnTheClockTick() throws {
+    /// Left unread, a stop would be the first thing the NEXT play's runner saw — so that play
+    /// did nothing. A runner is started to consume it instead.
+    func testStopWithNoRunnerStartsOneToConsumeIt() async throws {
         let seeded = try seed(.shaping)
         let svc = makeService()
+        await svc.launchRecovery?.value
+        svc.send(seeded.id, .stop)
+        XCTAssertEqual(runner.ensured, [seeded.id])
+        // Pause with no runner stays a plain append: the next play overrides it in order.
+        svc.send(seeded.id, .pause)
+        XCTAssertEqual(runner.ensured, [seeded.id])
+        XCTAssertEqual(commands(seeded.id), [.stop, .pause])
+    }
+
+    /// A runner that dies mid-run while the app stays open is brought back on the next tick,
+    /// and one that is still alive is left alone.
+    func testTickRespawnsARunnerThatDiedMidRun() async throws {
+        let seeded = try seed(.shaping)
+        let svc = makeService()
+        await svc.launchRecovery?.value
+        runner.running = [seeded.id]
+        try saveTape(seeded.id, .running, target: .nextMajor)
+        clock.fire()
+        XCTAssertEqual(runner.ensured, [], "a live runner is never respawned")
+
+        runner.running = []
+        clock.fire()
+        XCTAssertEqual(runner.ensured, [seeded.id])
+        XCTAssertEqual(intake(svc, seeded.id).state, .shaping)
+    }
+
+    func testTapeChangesArePublishedOnTheClockTick() async throws {
+        let seeded = try seed(.shaping)
+        let svc = makeService()
+        await svc.launchRecovery?.value
         XCTAssertEqual(svc.tapes[seeded.id]?.status ?? .idle, .idle)
 
         var tape = Tape()
@@ -180,10 +230,13 @@ final class IntakeServiceShapingTests: XCTestCase {
         XCTAssertEqual(svc.tapes[seeded.id]?.status, .running)
     }
 
-    func testReachedReviewMovesIntakeToReviewWithFinalChangeSet() throws {
+    func testReachedReviewMovesIntakeToReviewWithFinalChangeSet() async throws {
         let seeded = try seed(.shaping)
         let svc = makeService()
+        await svc.launchRecovery?.value
         try writeFinishedTape(seeded.id)
+        clock.fire()
+        // A second beat must not apply the finished tape again.
         clock.fire()
 
         let i = intake(svc, seeded.id)
@@ -192,15 +245,17 @@ final class IntakeServiceShapingTests: XCTestCase {
         XCTAssertEqual(i.changeSet, Self.changeSet("B"))
         XCTAssertEqual(try IntakeStore(root: root).load(id: seeded.id).state, .review)
         XCTAssertEqual(runner.reaped, [seeded.id])
+        XCTAssertEqual(runner.ensured, [])
         // Release review validates against the graph that change set was validated against.
         let triageGraph = IntakeStore(root: root).directory(for: seeded.id)
             .appendingPathComponent("triage/graph.json")
         XCTAssertEqual(try IntakeJSON.decoder.decode(GraphSnapshot.self, from: Data(contentsOf: triageGraph)), Self.graph)
     }
 
-    func testReachedReviewWithoutAChangeSetFailsInsteadOfAnEmptyReview() throws {
+    func testReachedReviewWithoutAChangeSetFailsInsteadOfAnEmptyReview() async throws {
         let seeded = try seed(.shaping)
         let svc = makeService()
+        await svc.launchRecovery?.value
         try writeFinishedTape(seeded.id, withChangeSets: false)
         clock.fire()
 
@@ -210,7 +265,7 @@ final class IntakeServiceShapingTests: XCTestCase {
         XCTAssertNotNil(i.failure)
     }
 
-    func testShapingSurvivesRelaunchAndRespawnsRunner() throws {
+    func testShapingSurvivesRelaunchAndRespawnsRunner() async throws {
         let running = try seed(.shaping)
         var tape = Tape(); tape.status = .running; tape.target = .nextMajor
         try tapeStore(running.id).saveTape(tape)
@@ -224,6 +279,8 @@ final class IntakeServiceShapingTests: XCTestCase {
         try tapeStore(paused.id).saveTape(tape)
 
         let svc = makeService()
+        XCTAssertEqual(runner.ensured, [], "recovery is deferred out of init (it may be inside a view body)")
+        await svc.launchRecovery?.value
         for id in [running.id, queued.id, paused.id] {
             XCTAssertEqual(intake(svc, id).state, .shaping)
             XCTAssertEqual(try IntakeStore(root: root).load(id: id).state, .shaping)
@@ -232,7 +289,7 @@ final class IntakeServiceShapingTests: XCTestCase {
         XCTAssertEqual(runner.ensured.count, 2)
     }
 
-    func testPausedTapeCountsForAttention() throws {
+    func testPausedTapeCountsForAttention() async throws {
         let paused = try seed(.shaping)
         var tape = Tape(); tape.status = .paused
         try tapeStore(paused.id).saveTape(tape)
@@ -241,17 +298,103 @@ final class IntakeServiceShapingTests: XCTestCase {
         try tapeStore(running.id).saveTape(tape)
 
         let svc = makeService()
+        await svc.launchRecovery?.value
         XCTAssertEqual(svc.attentionCount(forProject: "/p"), 1)
     }
 
-    func testDiscardWhileShapingStopsRunner() throws {
+    func testTapeThatStopsOrFailsLightsAttentionAfterATick() async throws {
+        for terminal: RunnerStatus in [.stopped, .failed] {
+            let seeded = try seed(.shaping)
+            try saveTape(seeded.id, .running, target: .review)
+            runner.running = [seeded.id]
+            let svc = makeService()
+            await svc.launchRecovery?.value
+            XCTAssertEqual(svc.attentionCount(forProject: "/p"), 0, "\(terminal)")
+
+            try saveTape(seeded.id, terminal, target: .none)
+            clock.fire()
+            XCTAssertEqual(svc.attentionCount(forProject: "/p"), 1, "\(terminal)")
+            svc.discard(seeded.id)
+        }
+    }
+
+    /// The runner is still live (fresh heartbeat) the instant it is discarded, so a one-shot
+    /// reap was a no-op and leaked its daemon. The reap is retried every tick until it lands.
+    func testDiscardWhileShapingStopsRunner() async throws {
         let seeded = try seed(.shaping)
         let svc = makeService()
+        await svc.launchRecovery?.value
+        runner.running = [seeded.id]
         XCTAssertTrue(svc.discard(seeded.id))
-
         XCTAssertEqual(commands(seeded.id), [.stop])
-        XCTAssertEqual(runner.reaped, [seeded.id])
         XCTAssertEqual(intake(svc, seeded.id).state, .discarded)
+
+        clock.fire()
+        XCTAssertEqual(runner.reaped, [], "still running: nothing to collect yet")
+        runner.running = []
+        clock.fire()
+        XCTAssertEqual(runner.reaped, [seeded.id])
+        clock.fire()
+        XCTAssertEqual(runner.reaped, [seeded.id], "collected once, then forgotten")
+        XCTAssertEqual(runner.ensured, [])
+    }
+
+    func testReachedReviewReapsOnlyOnceTheRunnerHasExited() async throws {
+        let seeded = try seed(.shaping)
+        let svc = makeService()
+        await svc.launchRecovery?.value
+        runner.running = [seeded.id]
+        try writeFinishedTape(seeded.id)
+        clock.fire()
+        XCTAssertEqual(intake(svc, seeded.id).state, .review)
+        XCTAssertEqual(runner.reaped, [])
+        runner.running = []
+        clock.fire()
+        XCTAssertEqual(runner.reaped, [seeded.id])
+    }
+
+    /// A daemon left behind by an intake that stopped shaping while FD was not running (it
+    /// reached review, or was discarded, just before a quit) is collected at launch. A shaping
+    /// intake's socket is its live runner and is left alone.
+    func testLaunchQueuesAReapForAnOrphanedRunnerSocket() async throws {
+        let reviewed = try seed(.review, changeSet: Self.changeSet("A"))
+        let shaping = try seed(.shaping)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        for id in [reviewed.id, shaping.id] {
+            FileManager.default.createFile(atPath: runner.socketPath(for: id), contents: nil)
+        }
+        let svc = makeService()
+        await svc.launchRecovery?.value
+        XCTAssertEqual(runner.reaped, [reviewed.id])
+    }
+
+    func testRetryResumesAFailedShapingRunWithoutRetriaging() async throws {
+        var seeded = try seed(.shaping)
+        seeded.state = .failed
+        seeded.failure = "Could not start the planning runner: x"
+        try IntakeStore(root: root).save(seeded)
+        let svc = makeService()
+        await svc.launchRecovery?.value
+
+        svc.retry(seeded.id)
+        let i = intake(svc, seeded.id)
+        XCTAssertEqual(i.state, .shaping)
+        XCTAssertNil(i.failure)
+        XCTAssertEqual(i.recommended, .featurePlan, "nothing re-triaged")
+        XCTAssertNil(svc.task(for: seeded.id), "no triage turn started")
+        XCTAssertEqual(runner.ensured, [seeded.id])
+    }
+
+    /// A review holds a finished change set; shaping over it would replace what is being
+    /// reviewed, so only Bead is accepted from `.review`.
+    func testNonBeadChoiceFromReviewIsRejected() async throws {
+        let seeded = try seed(.review, changeSet: Self.changeSet("A"))
+        let svc = makeService()
+        await svc.launchRecovery?.value
+        svc.choose(seeded.id, preset: .featurePlan)
+        XCTAssertEqual(intake(svc, seeded.id).state, .review)
+        XCTAssertNil(intake(svc, seeded.id).chosenPreset)
+        XCTAssertEqual(commands(seeded.id), [])
         XCTAssertEqual(runner.ensured, [])
     }
 
