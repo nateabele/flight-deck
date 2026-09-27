@@ -40,14 +40,16 @@ final class IntakeDeliveryTests: XCTestCase {
         let intakeID = UUID()
 
         let warnings = await delivery.deliver(
-            [.mail(to: "BlueFalcon", bead: "b1", subject: "subj", body: "body", urgent: false)],
+            [.mail(to: "BlueFalcon", bead: "b1", rating: .clarifying, reason: "why")],
             project: "/tmp/proj", intakeID: intakeID)
 
         XCTAssertEqual(warnings, [])
         XCTAssertEqual(runner.argv, [
             ["am", "macros", "start-session", "--project", "/tmp/proj", "--program", "flightdeck", "--model", "n/a", "--json"],
             ["am", "mail", "send", "--project", "/tmp/proj", "--from", "FDName", "--to", "BlueFalcon",
-             "--subject", "subj", "--body", "body", "--thread-id", "bead:b1", "--topic", "fd-intake"],
+             "--subject", DeliveryPlanner.subject(for: .clarifying, bead: "b1"),
+             "--body", DeliveryPlanner.mailBody(for: .clarifying, bead: "b1", reason: "why", outcome: .notAttempted),
+             "--thread-id", "bead:b1", "--topic", "fd-intake"],
         ])
     }
 
@@ -56,14 +58,10 @@ final class IntakeDeliveryTests: XCTestCase {
         let delivery = makeDelivery(runner: runner)
 
         _ = await delivery.deliver(
-            [.mail(to: "BlueFalcon", bead: "b1", subject: "s", body: "b", urgent: true)],
+            [.mail(to: "BlueFalcon", bead: "b1", rating: .invalidating, reason: "why")],
             project: "/tmp/proj", intakeID: UUID())
 
-        XCTAssertEqual(runner.argv.last, [
-            "am", "mail", "send", "--project", "/tmp/proj", "--from", "FDName", "--to", "BlueFalcon",
-            "--subject", "s", "--body", "b", "--thread-id", "bead:b1", "--topic", "fd-intake",
-            "--importance", "high", "--ack-required",
-        ])
+        XCTAssertEqual(runner.argv.last?.suffix(3), ["--importance", "high", "--ack-required"])
     }
 
     func testReclaimUpdatesBeadThenReleasesReservations() async {
@@ -118,7 +116,7 @@ final class IntakeDeliveryTests: XCTestCase {
         let warnings = await delivery.deliver([
             .reclaim(bead: "b1", agent: "BlueFalcon", reason: "why"),
             .inject(agent: "BlueFalcon", bead: "b1", text: "stop"),
-            .mail(to: "BlueFalcon", bead: "b1", subject: "s", body: "b", urgent: false),
+            .mail(to: "BlueFalcon", bead: "b1", rating: .invalidating, reason: "why"),
         ], project: "/tmp/proj", intakeID: intakeID)
 
         XCTAssertTrue(injected, "inject must not depend on FD's Agent-Mail identity")
@@ -141,7 +139,7 @@ final class IntakeDeliveryTests: XCTestCase {
         let text = try! XCTUnwrap(seenText)
         XCTAssertFalse(text.contains("has been reclaimed"), text)
         XCTAssertTrue(text.contains("could not reclaim"), text)
-        XCTAssertTrue(text.hasPrefix("Stop work on b1"), text)
+        XCTAssertTrue(text.hasPrefix("Stop work on b1: why."), text)
     }
 
     func testInjectAfterASuccessfulReclaimKeepsThePlannedText() async {
@@ -163,7 +161,7 @@ final class IntakeDeliveryTests: XCTestCase {
         let delivery = makeDelivery(runner: runner)
 
         let warnings = await delivery.deliver(
-            [.mail(to: "Nobody", bead: "b1", subject: "s", body: "b", urgent: false)],
+            [.mail(to: "Nobody", bead: "b1", rating: .clarifying, reason: "why")],
             project: "/tmp/proj", intakeID: UUID())
 
         XCTAssertEqual(warnings.count, 1)
@@ -203,9 +201,9 @@ final class IntakeDeliveryTests: XCTestCase {
         let runner = FakeRunner()
         let delivery = makeDelivery(runner: runner)
 
-        _ = await delivery.deliver([.mail(to: "A", bead: "b1", subject: "s", body: "b", urgent: false)],
+        _ = await delivery.deliver([.mail(to: "A", bead: "b1", rating: .clarifying, reason: "why")],
                                     project: "/tmp/proj", intakeID: UUID())
-        _ = await delivery.deliver([.mail(to: "A", bead: "b2", subject: "s", body: "b", urgent: false)],
+        _ = await delivery.deliver([.mail(to: "A", bead: "b2", rating: .clarifying, reason: "why")],
                                     project: "/tmp/proj", intakeID: UUID())
 
         let startSessionCalls = runner.argv.filter { $0.first == "am" && $0.dropFirst().first == "macros" }
@@ -233,5 +231,72 @@ final class IntakeDeliveryTests: XCTestCase {
         let t3 = IntakeDelivery.injectToken(intake: intake, bead: "b2")
         XCTAssertEqual(t1, t2)
         XCTAssertNotEqual(t1, t3)
+    }
+
+    // MARK: - Mail wording follows what actually happened
+
+    private func mailBody(_ runner: FakeRunner) -> String? {
+        runner.argv.first { $0.prefix(3) == ["am", "mail", "send"] }.map { $0[$0.firstIndex(of: "--body")! + 1] }
+    }
+
+    func testMailAfterAFailedReclaimDoesNotClaimTheReclaim() async {
+        let runner = FakeRunner()
+        runner.responses["br update"] = ("issue is locked", 1)
+        let delivery = makeDelivery(runner: runner)
+
+        _ = await delivery.deliver(DeliveryPlanner.plan(Self.edit(.invalidating), ratings: [:], hasSession: { _ in true }),
+                                   project: "/tmp/proj", intakeID: UUID())
+
+        let body = try! XCTUnwrap(mailBody(runner))
+        XCTAssertFalse(body.contains("has been reclaimed"), body)
+        XCTAssertTrue(body.contains("could not reclaim"), body)
+    }
+
+    func testMailAfterASuccessfulReclaimSaysItWasReclaimed() async {
+        let runner = FakeRunner()
+        let delivery = makeDelivery(runner: runner)
+
+        _ = await delivery.deliver(DeliveryPlanner.plan(Self.edit(.invalidating), ratings: [:], hasSession: { _ in true }),
+                                   project: "/tmp/proj", intakeID: UUID())
+
+        XCTAssertTrue(mailBody(runner)?.contains("has been reclaimed") == true, mailBody(runner) ?? "nil")
+    }
+
+    func testScopeChangeMailAfterAFailedInjectDoesNotClaimAPromptWasSent() async {
+        let runner = FakeRunner()
+        let delivery = makeDelivery(runner: runner) { _, _, _ in false }
+
+        _ = await delivery.deliver(DeliveryPlanner.plan(Self.edit(.scopeChange), ratings: [:], hasSession: { _ in true }),
+                                   project: "/tmp/proj", intakeID: UUID())
+
+        let body = try! XCTUnwrap(mailBody(runner))
+        XCTAssertFalse(body.contains("prompt has been sent"), body)
+        XCTAssertTrue(body.contains("could not send a prompt"), body)
+    }
+
+    func testScopeChangeMailAfterASuccessfulInjectSaysAPromptWasSent() async {
+        let runner = FakeRunner()
+        let delivery = makeDelivery(runner: runner)
+
+        _ = await delivery.deliver(DeliveryPlanner.plan(Self.edit(.scopeChange), ratings: [:], hasSession: { _ in true }),
+                                   project: "/tmp/proj", intakeID: UUID())
+
+        XCTAssertTrue(mailBody(runner)?.contains("prompt has been sent") == true, mailBody(runner) ?? "nil")
+    }
+
+    func testMailToAHolderWithNoSessionSaysNothingWasSent() async {
+        let runner = FakeRunner()
+        let delivery = makeDelivery(runner: runner)
+
+        _ = await delivery.deliver(DeliveryPlanner.plan(Self.edit(.scopeChange), ratings: [:], hasSession: { _ in false }),
+                                   project: "/tmp/proj", intakeID: UUID())
+
+        XCTAssertTrue(mailBody(runner)?.contains("no prompt was sent") == true, mailBody(runner) ?? "nil")
+    }
+
+    private static func edit(_ rating: DeliveryRating) -> ChangeSet {
+        ChangeSet(graphObservedAt: .distantPast, ops: [
+            .editBead(id: "b1", set: FieldSet(title: "x"), pre: Precondition(status: "in_progress", assignee: "BlueFalcon"),
+                      delivery: Delivery(rating: rating, reason: "why"))])
     }
 }

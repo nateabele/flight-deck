@@ -78,15 +78,21 @@ public enum Triage {
     /// `observedAt` is FD's own clock, not the agent's — it owns `graphObservedAt` because
     /// that timestamp is what release drift-checks against, and an agent's clock can be
     /// off or absent in a sandboxed harness.
+    ///
+    /// `agentsFile`/`readmeFile` are nil when the project has no such file: listing a path
+    /// that does not exist sends the agent to read it, and a failed read is a wasted tool
+    /// call at best and a triage that stalls on "where are the instructions?" at worst.
     public static func initialPrompt(
-        intent: String, graphFile: String, triageFile: String, agentsFile: String, readmeFile: String?,
+        intent: String, graphFile: String, triageFile: String, agentsFile: String?, readmeFile: String?,
         observedAt: Date
     ) -> String {
         var files = """
         - Live bead graph: \(graphFile)
         - Current triage view: \(triageFile)
-        - Project agent instructions: \(agentsFile)
         """
+        if let agentsFile {
+            files += "\n- Project agent instructions: \(agentsFile)"
+        }
         if let readmeFile {
             files += "\n- Project README: \(readmeFile)"
         }

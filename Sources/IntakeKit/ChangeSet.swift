@@ -192,7 +192,9 @@ public enum IntakeJSON {
         // This ensures round-trip fidelity for intake timestamps.
         e.dateEncodingStrategy = .custom { date, encoder in
             var container = encoder.singleValueContainer()
-            // Use ISO8601DateFormatter for Swift 5 compatibility
+            // Not `.iso8601`: that strategy drops fractional seconds, so a date written with
+            // it would come back up to a second earlier and `Intake` would stop equalling
+            // itself after a save/load (see `Intake.init`'s millisecond rounding).
             let formatter = ISO8601DateFormatter()
             formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
             let formatted = formatter.string(from: date)

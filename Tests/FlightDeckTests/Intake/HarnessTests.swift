@@ -38,8 +38,22 @@ final class HarnessTests: XCTestCase {
         XCTAssertEqual(c.executable, "claude")
         XCTAssertEqual(c.unsetEnvironment, ["CLAUDE_CODE_CHILD_SESSION", "CLAUDECODE"])
         XCTAssertEqual(c.arguments, ["-p", "P", "--model", "m", "--effort", "high", "--output-format", "json",
-                                     "--json-schema", "{}", "--allowedTools", HarnessCommand.claudeReadOnlyTools,
+                                     "--json-schema", "{}", "--permission-mode", "dontAsk",
+                                     "--allowedTools", HarnessCommand.claudeReadOnlyTools,
+                                     "--disallowedTools", HarnessCommand.claudeDeniedTools,
                                      "--add-dir", "/intake", "--resume", "S1"])
+    }
+    /// `--allowedTools` only ADDS allow rules: a project `.claude/settings.json` allowing
+    /// `Bash(br:*)`, or a user `defaultMode: bypassPermissions`, would otherwise let triage
+    /// write to `br`. Deny rules beat allow rules, so every `br` write verb is denied by name.
+    func testClaudeDeniesEveryBrWriteVerb() {
+        for verb in ["create", "update", "close", "reopen", "delete", "dep", "label", "comments",
+                     "sync", "defer", "undefer", "q", "init"] {
+            XCTAssertTrue(HarnessCommand.claudeDeniedTools.contains("Bash(br \(verb) *)"), verb)
+        }
+        for read in ["list", "show", "graph", "ready"] {
+            XCTAssertFalse(HarnessCommand.claudeDeniedTools.contains("Bash(br \(read)"), read)
+        }
     }
     func testProseOutputIsNotJSON() {
         let line1 = "{\"type\":\"thread.started\",\"thread_id\":\"T\"}"

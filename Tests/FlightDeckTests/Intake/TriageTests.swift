@@ -33,6 +33,13 @@ final class TriageTests: XCTestCase {
         XCTAssertTrue(p.contains("/i/graph.json")); XCTAssertTrue(p.contains("/p/AGENTS.md"))
         XCTAssertTrue(p.contains("new:"))           // teaches the temp-id reference form
     }
+    /// A project with no AGENTS.md must not send the agent off to read one.
+    func testPromptOmitsAnAbsentAgentsFile() {
+        let p = Triage.initialPrompt(intent: "I", graphFile: "/i/graph.json", triageFile: "/i/bv.json",
+                                     agentsFile: nil, readmeFile: nil, observedAt: Date(timeIntervalSince1970: 0))
+        XCTAssertFalse(p.contains("agent instructions"), p)
+        XCTAssertFalse(p.contains("README"), p)
+    }
     func testPromptStatesPerOpRequiredFieldsAndFollowUpIsAnOp() {
         let p = Triage.initialPrompt(intent: "I", graphFile: "/i/graph.json", triageFile: "/i/bv.json",
                                      agentsFile: "/p/AGENTS.md", readmeFile: nil, observedAt: Date(timeIntervalSince1970: 0))

@@ -18,6 +18,14 @@ public enum HarnessCommand {
     public static let claudeReadOnlyTools =
         "Read Grep Glob Bash(br list *) Bash(br show *) Bash(br graph *) Bash(br ready *) Bash(bv *)"
 
+    /// Every `br` write verb, denied by name. `--allowedTools` only ADDS allow rules on top of
+    /// the user's and project's settings, so a project `.claude/settings.json` allowing
+    /// `Bash(br:*)` would still let triage write; deny rules beat allow rules wherever they
+    /// come from, so this is what actually holds FD to being the only writer.
+    public static let claudeDeniedTools = ["create", "update", "close", "reopen", "delete", "dep", "label",
+                                           "comments", "sync", "defer", "undefer", "q", "init"]
+        .map { "Bash(br \($0) *)" }.joined(separator: " ")
+
     public static func build(_ r: HarnessRequest) -> (executable: String, arguments: [String], unsetEnvironment: [String]) {
         switch r.harness {
         case .codex:
@@ -30,8 +38,14 @@ public enum HarnessCommand {
             }
             return ("codex", ["exec", "--json"] + effort + ["-s", "read-only"] + tail + [r.prompt], [])
         case .claude:
+            // `--permission-mode dontAsk`: a user `defaultMode: bypassPermissions` would
+            // otherwise skip every check, allow list included. `dontAsk` denies anything not
+            // pre-approved rather than prompting — there is nobody to answer a prompt under
+            // `-p`. (`default` is not a choice in claude 2.1.283's `--help`: acceptEdits,
+            // auto, bypassPermissions, manual, dontAsk, plan.)
             var args = ["-p", r.prompt, "--model", r.model, "--effort", r.effort, "--output-format", "json",
-                        "--json-schema", r.schemaJSON, "--allowedTools", claudeReadOnlyTools]
+                        "--json-schema", r.schemaJSON, "--permission-mode", "dontAsk",
+                        "--allowedTools", claudeReadOnlyTools, "--disallowedTools", claudeDeniedTools]
             for d in r.readableDirs { args += ["--add-dir", d.path] }
             if let s = r.resumeSessionID { args += ["--resume", s] }
             // Without these unset, a claude spawned from inside Claude Code silently skips

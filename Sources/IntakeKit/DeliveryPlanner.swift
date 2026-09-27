@@ -4,7 +4,11 @@ import Foundation
 /// intake release changed it. Pure data — `IntakeDelivery` (app side) is what actually
 /// shells out or injects.
 public enum DeliveryAction: Equatable, Sendable {
-    case mail(to: String, bead: String, subject: String, body: String, urgent: Bool)
+    /// Carries the rating and reason, not a finished body: the body says what Flight Deck did
+    /// for the holder (prompt sent, bead reclaimed), and only `IntakeDelivery` knows whether
+    /// the `inject`/`reclaim` before it actually worked. A body fixed here would tell a holder
+    /// their bead "has been reclaimed" after the `br update` behind that claim failed.
+    case mail(to: String, bead: String, rating: DeliveryRating, reason: String)
     case inject(agent: String, bead: String, text: String)
     /// `reason` rides along so `IntakeDelivery` can build a correct stop-work notice at
     /// delivery time if the live `br update` this implies turns out to fail — it has no
@@ -21,6 +25,11 @@ public enum DeliveryAction: Equatable, Sendable {
         }
     }
 }
+
+/// What became of the side effect a mail body describes — the `inject` for a scope change,
+/// the `reclaim` for an invalidating edit. `notAttempted` is a holder with no FD session,
+/// where the planner never emitted one.
+public enum DeliveryOutcome: Equatable, Sendable { case notAttempted, succeeded, failed }
 
 /// Turns a released `ChangeSet` into the notifications its affected beads' holders need,
 /// graded by how much the change matters. `ratings` is the *final* rating per edit-op
@@ -45,8 +54,7 @@ public enum DeliveryPlanner {
             let reason = delivery?.reason ?? ""
             // No FD session means no way to inject or safely reassign the bead out from
             // under whoever holds it — mail is the only channel left, at any rating.
-            let holderHasSession = hasSession(assignee)
-            if holderHasSession {
+            if hasSession(assignee) {
                 switch rating {
                 case .clarifying: break
                 case .scopeChange:
@@ -56,11 +64,9 @@ public enum DeliveryPlanner {
                     actions.append(.inject(agent: assignee, bead: id, text: invalidatingInjectText(bead: id, reason: reason)))
                 }
             }
-            actions.append(.mail(
-                to: assignee, bead: id,
-                subject: subject(for: rating, bead: id),
-                body: mailBody(for: rating, bead: id, reason: reason, holderHasSession: holderHasSession),
-                urgent: rating == .invalidating))
+            // Always after this bead's inject/reclaim: `IntakeDelivery` words the mail from
+            // how those went, so they must already have run when it gets here.
+            actions.append(.mail(to: assignee, bead: id, rating: rating, reason: reason))
         }
         return actions
     }
@@ -73,26 +79,32 @@ public enum DeliveryPlanner {
         }
     }
 
-    private static func subject(for rating: DeliveryRating, bead: String) -> String {
+    public static func subject(for rating: DeliveryRating, bead: String) -> String {
         "Flight Deck intake: \(bead) changed (\(label(rating)))"
     }
 
+    /// Mail for an invalidating edit is sent with high importance and a required ack — the
+    /// holder has to stop, not just read it eventually.
+    public static func isUrgent(_ rating: DeliveryRating) -> Bool { rating == .invalidating }
+
     /// Every rating's body names the bead, the reason, and gives the reader somewhere to go
-    /// (`br show` + the Agent Mail thread) — `holderHasSession` gates only the sentence
-    /// describing what Flight Deck actually *did*, so a no-session holder is never told a
-    /// prompt was injected or a reclaim happened when neither is true.
-    private static func mailBody(for rating: DeliveryRating, bead: String, reason: String, holderHasSession: Bool) -> String {
+    /// (`br show` + the Agent Mail thread) — `outcome` gates only the sentence describing
+    /// what Flight Deck actually *did*, so a holder is never told a prompt was sent or a
+    /// reclaim happened when it was not attempted or did not work.
+    public static func mailBody(for rating: DeliveryRating, bead: String, reason: String, outcome: DeliveryOutcome) -> String {
         let trailer = "Run `br show \(bead)` to see the full change, or reply on the Agent Mail thread bead:\(bead)."
         switch rating {
         case .clarifying:
             return "Flight Deck intake changed \(bead) (clarifying): \(reason). No action needed unless it changes your plan. \(trailer)"
         case .scopeChange:
-            let didWhat = holderHasSession
-                ? "A prompt has been sent to your session."
-                : "You have no active Flight Deck session, so no prompt was sent."
+            let didWhat = switch outcome {
+            case .succeeded: "A prompt has been sent to your session."
+            case .notAttempted: "You have no active Flight Deck session, so no prompt was sent."
+            case .failed: "Flight Deck could not send a prompt to your session, so this mail is the only notice."
+            }
             return "Flight Deck intake changed \(bead) (scope change) while you were working on it: \(reason). \(didWhat) \(trailer)"
         case .invalidating:
-            let didWhat = holderHasSession
+            let didWhat = outcome == .succeeded
                 ? "It has been reclaimed and returned to open."
                 : "Flight Deck could not reclaim it for you — set it back to open yourself (`br update \(bead) --status open --assignee \"\"`)."
             return "Stop work on \(bead) (invalidating): \(reason). \(didWhat) \(trailer)"

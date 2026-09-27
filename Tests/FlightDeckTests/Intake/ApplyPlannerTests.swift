@@ -41,4 +41,41 @@ final class ApplyPlannerTests: XCTestCase {
         let v = try ChangeSetValidator.validate(cs, against: g).get()
         XCTAssertEqual(ApplyPlanner.plan(v, skipping: [0]), [])
     }
+    /// The reopen runs before the held edge and sets `c1` open, so a held-edge recheck
+    /// carrying the reopen's `pre` (closed) would refuse FD's own write — every "reopen X, X
+    /// blocked by new:n1" change set ended `.partiallyReleased`. Existence-only instead.
+    func testHeldEdgeOnAReopenedBeadRechecksExistenceOnly() throws {
+        let g = GraphSnapshot(beads: ["c1": BeadSnapshot(id: "c1", title: "c", status: "closed")])
+        let closed = Precondition(status: "closed", assignee: nil)
+        let cs = ChangeSet(graphObservedAt: .init(timeIntervalSince1970: 0), ops: [
+            .createBead(NewBead(tempId: "n1", title: "n", description: "d")),
+            .reopen(id: "c1", reason: "r", pre: closed),
+            .addEdge(from: .existing("c1"), to: .new("n1"), kind: .blocks),     // held
+        ])
+        let v = try ChangeSetValidator.validate(cs, against: g).get()
+        XCTAssertEqual(ApplyPlanner.plan(v, skipping: []), [
+            .create(NewBead(tempId: "n1", title: "n", description: "d")),
+            .recheck(id: "c1", pre: closed), .reopen(id: "c1", reason: "r"),
+            .recheck(id: "c1", pre: nil), .depend(dependent: .existing("c1"), dependency: .new("n1"), kind: .blocks),
+        ])
+    }
+    /// Edit + reopen on one bead: the edit's `pre` (closed) must not leak into the held
+    /// edge's recheck just because it came first or last — the reopen's status change is what
+    /// the bead looks like by then, whatever order the ops were listed in.
+    func testHeldEdgeOnAnEditedAndReopenedBeadRechecksExistenceOnly() throws {
+        let g = GraphSnapshot(beads: ["c1": BeadSnapshot(id: "c1", title: "c", status: "closed")])
+        let closed = Precondition(status: "closed", assignee: nil)
+        for reopenFirst in [true, false] {
+            let edit = ChangeOp.editBead(id: "c1", set: FieldSet(title: "x"), pre: closed, delivery: nil)
+            let reopen = ChangeOp.reopen(id: "c1", reason: "r", pre: closed)
+            let cs = ChangeSet(graphObservedAt: .init(timeIntervalSince1970: 0), ops:
+                (reopenFirst ? [reopen, edit] : [edit, reopen]) + [
+                .createBead(NewBead(tempId: "n1", title: "n", description: "d")),
+                .addEdge(from: .existing("c1"), to: .new("n1"), kind: .blocks)])
+            let v = try ChangeSetValidator.validate(cs, against: g).get()
+            XCTAssertEqual(ApplyPlanner.plan(v, skipping: []).suffix(2), [
+                .recheck(id: "c1", pre: nil), .depend(dependent: .existing("c1"), dependency: .new("n1"), kind: .blocks),
+            ], "reopenFirst=\(reopenFirst)")
+        }
+    }
 }
