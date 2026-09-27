@@ -797,6 +797,37 @@ on case-insensitive APFS). The xcodegen target is `FlightDeckCLI`, its product i
 embedded at `Flight Deck.app/Contents/MacOS/flightdeck` — already on every tab's `PATH` as
 `GHOSTTY_BIN_DIR` — so running it never boots the app.
 
+**Codex tabs.** Codex runs every tool call in its own seatbelt sandbox, and its default
+`:workspace` profile refuses `connect()` on a unix socket with `EPERM`, so a codex agent cannot
+run `flightdeck` at all without a grant. The only narrow grant codex has is its managed network
+proxy: `CodexControlAccess` (`Sources/FlightDeck/Agents/Codex/`) appends
+`--enable network_proxy` and four `-c` overrides to every `codex`/`codex resume` line a codex tab
+types. They define a `flightdeck` permissions profile that extends `:workspace`, turns
+`network.enabled` on, and allows exactly one entry in `network.unix_sockets`: the control
+socket's *directory* (codex allowlists a path prefix, not a file). Probed on codex-cli 0.155.1
+and re-checked on 0.157.1: the socket connects and a TCP connect to the internet still fails.
+Codex's session header says "network access enabled" under this profile; that line is wrong
+about reach, because all traffic goes through the proxy, which allows nothing else.
+`CodexAdapter.controlSocket` carries the path, and `SessionStore` sets it on every codex stack,
+both ones built after `controlSocket` is set and ones that already exist.
+
+- **Experimental dependency.** `network_proxy` is an experimental codex feature. The guard is
+  `CodexIntegrationTests.testControlSocketGrantConnectsWithoutOpeningTheInternet`, run by
+  `./scripts/test-codex-live.sh` (no model turn, no tokens). It runs our exact argv through
+  `codex sandbox`, checks that `:workspace` alone refuses the socket, that the grant connects,
+  and that 1.1.1.1:443 stays blocked. Run it after a codex update.
+- **Sandbox-choice exception.** A user who picked a codex sandbox in Preferences
+  (`CodexThreadOptions.sandbox` set) gets no flags: codex refuses to start when both
+  `sandbox_mode` and `default_permissions` are set as overrides. That tab's agent cannot reach
+  `flightdeck`. A `sandbox_mode` in the user's `~/.codex/config.toml` does *not* conflict: the
+  command-line `default_permissions` wins (probed 2026-09-26, the active profile was
+  `flightdeck`).
+- **Exit 77.** When a sandbox still refuses the socket (a tab opened before this change, the
+  exception above, or a codex that dropped the mechanism), `flightdeck` exits `77`
+  (`EX_NOPERM`) with a message that names the sandbox, not `69` ("cannot reach"). The check is
+  `CLIRunner.isSandboxRefusal` (`EPERM`/`EACCES` from `NWConnection` or a raw `POSIXError`).
+  Verified with the real binary under `codex sandbox -P :workspace`.
+
 ## Search (`⌘K`, `Sources/FlightDeck/Search/`)
 
 `⌘K` opens a floating overlay (`SearchPanel`, an `NSPanel` added as a child window over the

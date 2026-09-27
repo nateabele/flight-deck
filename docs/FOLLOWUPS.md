@@ -1677,3 +1677,25 @@ feasibility unknown.
   `PhoneLog.entries` touches none. Worth confirming before relying on it: whether a single
   unloaded fetch alone exceeds 10 s, or only fetches that queue behind each other on the main
   thread, which decides whether `askDeadline` needs raising too.
+
+## Codex control-socket grant (2026-09-26)
+
+- **It depends on an experimental codex feature.** `CodexControlAccess` needs
+  `--enable network_proxy` and the `permissions.<profile>.network.unix_sockets` map. Codex
+  labels `network_proxy` experimental, so a release can rename or drop it with no warning.
+  Verified on codex-cli 0.155.1 and 0.157.1.
+- **If the live guard fails** (`testControlSocketGrantConnectsWithoutOpeningTheInternet` under
+  `./scripts/test-codex-live.sh`), read which assertion failed:
+  - *The control* (`:workspace` connected without the grant): codex now allows unix sockets by
+    default. The grant is not needed, but check that the internet is still blocked before you
+    remove it.
+  - *The connect*: every codex tab's `flightdeck` now exits `77`. Probe the new codex with
+    `codex sandbox --help` and a manual `codex sandbox … -P flightdeck -- python3 client.py`,
+    find the new spelling in codex-rs `sandboxing/src/seatbelt.rs`, and fix
+    `CodexControlAccess.launchArguments`. Do not fall back to `danger-full-access`.
+  - *The internet check* (1.1.1.1:443 connected): the grant now opens general network access.
+    This is the serious one. Stop injecting the flags (return `[]` from `launchArguments`)
+    until the grant is narrow again, and accept exit `77` in codex tabs meanwhile.
+- **A tab that predates the grant keeps its old launch line.** Reopen it to get the flags.
+- **A user-chosen codex sandbox gets no grant**, on purpose (codex rejects `sandbox_mode` with
+  `default_permissions`). Such a tab's agent always sees exit `77`.

@@ -6,7 +6,7 @@ import XCTest
 /// `setUpWithError` — so `./scripts/test-unit.sh` stays hermetic and never spawns a process;
 /// opt in with `FLIGHT_DECK_CODEX_INTEGRATION=1`.
 ///
-/// It exists because the codex adapter leans on four undocumented behaviours of an
+/// It exists because the codex adapter leans on several undocumented behaviours of an
 /// experimental, fast-moving binary, none of which the other 708 tests can see because they
 /// all talk to a scripted `CodexTransport`:
 ///
@@ -38,6 +38,10 @@ import XCTest
 ///    a SECOND app-server connection to resume — the exact refusal codex-cli 0.148.0 raises
 ///    against the TUI, reproduced headlessly via `thread/resume` rather than a pty.
 ///    `testPrepareReleasesTheWriterLockSoASecondConnectionCanResumeTheThread` below.
+/// 6. **The control-socket grant** — `CodexControlAccess`'s flags, which ride on codex's
+///    experimental `network_proxy` feature, must still let a sandboxed command reach one unix
+///    socket directory while a TCP connect to the internet stays refused.
+///    `testControlSocketGrantConnectsWithoutOpeningTheInternet` below.
 ///
 /// Every thread a test here creates is deleted by that same test, by the id codex handed
 /// back — never by name or recency, which could catch the user's real history. Every
@@ -566,6 +570,97 @@ final class CodexIntegrationTests: XCTestCase {
         _ = try? await rpc.request("thread/archive", ["threadId": threadID])
     }
 
+    // MARK: - 6. The control-socket grant
+
+    /// `CodexControlAccess` rests on an EXPERIMENTAL codex feature (`network_proxy`) and on the
+    /// shape of a permissions profile no codex document promises to keep. If a codex update
+    /// renames the feature, drops `network.unix_sockets`, or stops honouring it, every codex
+    /// tab silently loses `flightdeck` (the CLI exits 77) and nothing hermetic can notice,
+    /// because the unit suite only ever sees the argv we build. This runs that exact argv
+    /// through `codex sandbox`, which applies the same seatbelt profile a codex tab's tool
+    /// calls get, and asserts three things:
+    ///
+    /// 1. **Control:** without the grant, the default `:workspace` profile refuses the socket.
+    ///    Without this, a codex that allowed every unix socket by default would make the grant
+    ///    look like it works when it no longer does anything.
+    /// 2. **The grant reaches the socket:** a sandboxed client connects and gets its echo back.
+    /// 3. **The grant does not open the internet:** a TCP connect to 1.1.1.1:443 still fails.
+    ///    This is the most important assertion. The whole reason for the proxy route over
+    ///    `danger-full-access` is that it opens one socket directory and nothing else; if this
+    ///    ever passes a connection, the grant is wider than its documentation claims.
+    ///
+    /// No model turn: `codex sandbox` runs a local command, so this costs no tokens.
+    func testControlSocketGrantConnectsWithoutOpeningTheInternet() throws {
+        // `/tmp`, not `NSTemporaryDirectory()`: a unix socket path is capped at 104 bytes on
+        // macOS, and the per-user temp dir plus a UUID leaves too little room.
+        let dir = URL(fileURLWithPath: "/tmp", isDirectory: true)
+            .appendingPathComponent("fdcx-\(UUID().uuidString.prefix(8).lowercased())", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let socket = dir.appendingPathComponent("control.sock")
+
+        // Stands in for Flight Deck's control socket. An echo is enough: the sandbox decides at
+        // `connect()`, before any protocol byte, so what the server speaks does not matter.
+        let server = Process()
+        server.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        server.arguments = ["python3", "-c", """
+        import socket, sys
+        s = socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); s.listen(8)
+        while True:
+            c, _ = s.accept(); c.sendall(c.recv(64)); c.close()
+        """, socket.path]
+        server.standardOutput = FileHandle.nullDevice
+        server.standardError = FileHandle.nullDevice
+        try server.run()
+        defer { server.terminate(); server.waitUntilExit() }
+
+        let listening = FileManager.default.fileExists(atPath: socket.path)
+            || waitSynchronously(timeout: 5) { FileManager.default.fileExists(atPath: socket.path) }
+        XCTAssertTrue(listening, "the echo server never bound \(socket.path)")
+        guard listening else { return }
+
+        // Each script prints a marker and exits 0 whatever the outcome, so a result the test
+        // does not recognise (python missing, codex refusing the flags) cannot be mistaken for
+        // "blocked" — only the exact marker counts.
+        let client = """
+        import socket, sys
+        s = socket.socket(socket.AF_UNIX); s.settimeout(4)
+        try:
+            s.connect(sys.argv[1]); s.sendall(b"ping")
+            print("CONNECTED" if s.recv(16) == b"ping" else "WRONG-ECHO")
+        except OSError as e:
+            print("REFUSED", e)
+        """
+        let netCheck = """
+        import socket
+        try:
+            socket.create_connection(("1.1.1.1", 443), timeout=4); print("INTERNET-OPEN")
+        except OSError as e:
+            print("INTERNET-BLOCKED", e)
+        """
+
+        let control = try runCodexSandbox(profile: ":workspace", grant: [], cwd: dir,
+                                          command: ["python3", "-c", client, socket.path])
+        XCTAssertTrue(control.stdout.hasPrefix("REFUSED"),
+                      "without the grant the default sandbox must refuse the socket, or this test "
+                      + "proves nothing about the grant: \(control)")
+
+        let grant = CodexControlAccess.launchArguments(socket: socket, options: CodexThreadOptions())
+        XCTAssertFalse(grant.isEmpty, "no sandbox chosen and a socket given: the grant must be built")
+
+        let reached = try runCodexSandbox(profile: "flightdeck", grant: grant, cwd: dir,
+                                          command: ["python3", "-c", client, socket.path])
+        XCTAssertEqual(reached.stdout, "CONNECTED",
+                       "codex no longer honours the network_proxy unix-socket grant; every codex "
+                       + "tab's flightdeck now exits 77 (see docs/FOLLOWUPS.md): \(reached)")
+
+        let internet = try runCodexSandbox(profile: "flightdeck", grant: grant, cwd: dir,
+                                           command: ["python3", "-c", netCheck])
+        XCTAssertTrue(internet.stdout.hasPrefix("INTERNET-BLOCKED"),
+                      "the control-socket grant opened general network access — it must allow "
+                      + "one socket directory and nothing else: \(internet)")
+    }
+
     // MARK: - Test doubles
 
     private final class FakePersistence: SessionPersisting {
@@ -684,6 +779,47 @@ final class CodexIntegrationTests: XCTestCase {
             if Date() >= deadline { return false }
             try await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
         }
+    }
+
+    /// `waitUntil` without the `async`, for the one synchronous test that needs a bound.
+    private func waitSynchronously(timeout: TimeInterval, _ condition: () -> Bool) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if condition() { return true }
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+        return condition()
+    }
+
+    private struct SandboxRun: CustomStringConvertible {
+        let status: Int32
+        let stdout: String
+        let stderr: String
+        var description: String { "exit \(status), stdout \(stdout.debugDescription), stderr \(stderr.debugDescription)" }
+    }
+
+    /// `codex sandbox <grant> -P <profile> -C <cwd> -- <command>`, bounded at 30 s. The grant is
+    /// the RAW argv (`launchArguments`), never the shell-quoted `launchFlags`: `Process` does no
+    /// shell parsing, so quotes left in would reach codex's TOML parser and break every value.
+    private func runCodexSandbox(profile: String, grant: [String], cwd: URL,
+                                 command: [String]) throws -> SandboxRun {
+        let codex = Process()
+        codex.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        codex.arguments = ["codex", "sandbox"] + grant + ["-P", profile, "-C", cwd.path, "--"] + command
+        codex.currentDirectoryURL = cwd
+        let out = Pipe()
+        let err = Pipe()
+        codex.standardOutput = out
+        codex.standardError = err
+        try codex.run()
+        // A sandbox that hangs a connect must fail this test, not hang the human running it.
+        let exited = waitSynchronously(timeout: 30) { !codex.isRunning }
+        if !exited { codex.terminate(); codex.waitUntilExit() }
+        let stdout = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let stderr = String(data: err.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        return SandboxRun(status: exited ? codex.terminationStatus : -1,
+                          stdout: stdout.trimmingCharacters(in: .whitespacesAndNewlines),
+                          stderr: stderr)
     }
 
     /// The opposite of `waitUntil`: polls `condition` for the whole `timeout` window and
