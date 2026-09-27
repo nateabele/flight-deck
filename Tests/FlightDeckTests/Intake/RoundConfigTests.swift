@@ -23,6 +23,7 @@ final class RoundConfigTests: XCTestCase {
         XCTAssertEqual(cfg.drafters[0].fallback?.harness, .claude)
         XCTAssertNil(cfg.synthesizer)
         XCTAssertEqual(cfg.reviewer?.choice.harness, .codex)
+        XCTAssertEqual(cfg.reviewer?.fallback?.harness, .claude)
         XCTAssertEqual(cfg.integrator.harness, .claude)
         XCTAssertEqual(cfg.encoder.harness, .codex)
         XCTAssertNil(cfg.polisher)
@@ -38,6 +39,7 @@ final class RoundConfigTests: XCTestCase {
         XCTAssertEqual(cfg.drafters.count, 1)
         XCTAssertNil(cfg.drafters[0].fallback)
         XCTAssertNil(cfg.synthesizer)
+        XCTAssertNil(cfg.reviewer?.fallback)
         XCTAssertNil(cfg.polisher)
         XCTAssertEqual(cfg.defaultPlay, .toReview)
         XCTAssertEqual(cfg.integrator.harness, .claude)
@@ -48,6 +50,8 @@ final class RoundConfigTests: XCTestCase {
         let cfg = try XCTUnwrap(PresetExpansion.config(for: .sketch, available: codexOnly))
         XCTAssertEqual(cfg.drafters[0].choice.harness, .codex)
         XCTAssertNil(cfg.drafters[0].fallback)
+        XCTAssertEqual(cfg.reviewer?.choice.harness, .codex)
+        XCTAssertNil(cfg.reviewer?.fallback)
         // No claude to integrate with, so A stands in.
         XCTAssertEqual(cfg.integrator.harness, .codex)
     }
@@ -62,7 +66,9 @@ final class RoundConfigTests: XCTestCase {
         XCTAssertEqual(cfg.drafters[1].fallback?.harness, .codex)
         XCTAssertEqual(cfg.synthesizer?.choice.harness, .codex)
         XCTAssertEqual(cfg.synthesizer?.persona, .arbiter)
+        XCTAssertEqual(cfg.synthesizer?.fallback?.harness, .claude)
         XCTAssertEqual(cfg.reviewer?.choice.harness, .codex)
+        XCTAssertEqual(cfg.reviewer?.fallback?.harness, .claude)
         XCTAssertEqual(cfg.refinementCap, 3)
         XCTAssertEqual(cfg.polisher?.harness, .claude)
         XCTAssertEqual(cfg.polishCap, 2)
@@ -77,6 +83,8 @@ final class RoundConfigTests: XCTestCase {
         XCTAssertEqual(cfg.drafters.map(\.choice.harness), [.codex, .codex])
         XCTAssertNil(cfg.drafters[0].fallback)
         XCTAssertNil(cfg.drafters[1].fallback)
+        XCTAssertNil(cfg.synthesizer?.fallback)
+        XCTAssertNil(cfg.reviewer?.fallback)
         // Claude isn't installed, so the polisher (which defaults to claude) falls back to A.
         XCTAssertEqual(cfg.polisher?.harness, .codex)
         XCTAssertEqual(cfg.integrator.harness, .codex)
@@ -86,6 +94,8 @@ final class RoundConfigTests: XCTestCase {
         let cfg = try XCTUnwrap(PresetExpansion.config(for: .featurePlan, available: claudeOnly))
         XCTAssertEqual(cfg.drafters.map(\.choice.harness), [.claude, .claude])
         XCTAssertNil(cfg.drafters[0].fallback)
+        XCTAssertNil(cfg.synthesizer?.fallback)
+        XCTAssertNil(cfg.reviewer?.fallback)
         XCTAssertEqual(cfg.polisher?.harness, .claude)
         XCTAssertEqual(cfg.integrator.harness, .claude)
     }
@@ -108,6 +118,9 @@ final class RoundConfigTests: XCTestCase {
         XCTAssertEqual(cfg.defaultPlay, .nextMajor)
         XCTAssertEqual(cfg.synthesizer?.choice.harness, .codex)
         XCTAssertEqual(cfg.synthesizer?.persona, .arbiter)
+        XCTAssertEqual(cfg.synthesizer?.fallback?.harness, .claude)
+        XCTAssertEqual(cfg.reviewer?.choice.harness, .codex)
+        XCTAssertEqual(cfg.reviewer?.fallback?.harness, .claude)
     }
 
     func testFullPlanSingleModelHasNoFallbacks() throws {
@@ -115,6 +128,29 @@ final class RoundConfigTests: XCTestCase {
         XCTAssertEqual(cfg.drafters.count, 4)
         for slot in cfg.drafters { XCTAssertNil(slot.fallback) }
         XCTAssertTrue(cfg.drafters.allSatisfy { $0.choice.harness == .claude })
+        XCTAssertNil(cfg.synthesizer?.fallback)
+        XCTAssertNil(cfg.reviewer?.fallback)
+    }
+
+    /// The brief's expansion table applies equally when only codex is installed — every seat
+    /// (drafters, synthesizer, reviewer, polisher, integrator, encoder) collapses onto codex,
+    /// with no fallback pointing at a claude that doesn't exist.
+    func testFullPlanCodexOnly() throws {
+        let cfg = try XCTUnwrap(PresetExpansion.config(for: .fullPlan, available: codexOnly))
+        XCTAssertEqual(cfg.drafters.map(\.persona), [.arbiter, .realist, .coverage, .stressTest])
+        XCTAssertTrue(cfg.drafters.allSatisfy { $0.choice.harness == .codex })
+        for slot in cfg.drafters { XCTAssertNil(slot.fallback) }
+        XCTAssertEqual(cfg.synthesizer?.choice.harness, .codex)
+        XCTAssertEqual(cfg.synthesizer?.persona, .arbiter)
+        XCTAssertNil(cfg.synthesizer?.fallback)
+        XCTAssertEqual(cfg.reviewer?.choice.harness, .codex)
+        XCTAssertNil(cfg.reviewer?.fallback)
+        XCTAssertEqual(cfg.polisher?.harness, .codex)
+        XCTAssertEqual(cfg.integrator.harness, .codex)
+        XCTAssertEqual(cfg.encoder.harness, .codex)
+        XCTAssertEqual(cfg.refinementCap, 5)
+        XCTAssertEqual(cfg.polishCap, 6)
+        XCTAssertTrue(cfg.freshEyesAndDedup)
     }
 
     // MARK: - Round-trip
