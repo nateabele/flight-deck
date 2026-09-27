@@ -49,10 +49,15 @@ public struct RunRecord: Codable, Equatable, Sendable {
 public struct RoundExecutor: Sendable {
     private let runner: CommandRunner
     private let graphReader: GraphReader
+    private let userHome: URL
 
-    public init(runner: CommandRunner, graphReader: GraphReader) {
+    /// `userHome` is where `ClaudeUserEnv` looks for `.claude/settings.json` — injectable so a
+    /// test never depends on (or leaks) the operator's own settings.
+    public init(runner: CommandRunner, graphReader: GraphReader,
+                userHome: URL = FileManager.default.homeDirectoryForCurrentUser) {
         self.runner = runner
         self.graphReader = graphReader
+        self.userHome = userHome
     }
 
     /// Throws only `CancellationError` (⏹); every other failure — a harness that died, prose
@@ -176,6 +181,14 @@ public struct RoundExecutor: Sendable {
         let work = inputs.store.workDirectory()
         let planFile = work.appendingPathComponent("plan.md"), changesFile = work.appendingPathComponent("changes.json")
         let before = try Data(contentsOf: base)
+        // Nothing proposed means nothing to apply: running an integrator anyway costs a model
+        // turn and can only drift the plan. The round still lands, so the tape shows a
+        // reviewer that found nothing — the signal refinement has converged.
+        guard !review.changes.isEmpty else {
+            record.changeCount = 0
+            record.note = review.summary.isEmpty ? nil : review.summary
+            return ["plan.md": before]
+        }
         try IntakeJSON.encoder.encode(review.changes).write(to: changesFile, options: .atomic)
         try before.write(to: planFile, options: .atomic)
 
@@ -188,7 +201,14 @@ public struct RoundExecutor: Sendable {
         let after = try Data(contentsOf: planFile)
         record.changeCount = review.changes.count
         record.tally = VerdictTally(agree: tally.agree, somewhat: tally.somewhat, disagree: tally.disagree)
-        record.note = [review.summary, tally.notes].filter { !$0.isEmpty }.joined(separator: "\n\n")
+        var notes = [review.summary, tally.notes]
+        // A tally that doesn't add up is worth showing, not worth pausing over: the plan edit is
+        // what matters, and the integrator's arithmetic is only a summary of it.
+        let verdicts = tally.agree + tally.somewhat + tally.disagree
+        if verdicts != review.changes.count {
+            notes.append("The integrator tallied \(verdicts) verdicts for \(review.changes.count) proposed changes.")
+        }
+        record.note = notes.filter { !$0.isEmpty }.joined(separator: "\n\n")
         // An integrator that claims it applied changes but left the file untouched has either
         // edited some other path or hallucinated its report — either way the next round would
         // silently build on a plan that never moved.
@@ -215,11 +235,17 @@ public struct RoundExecutor: Sendable {
                                          readable: [plan.deletingLastPathComponent(), inputs.store.workDirectory()],
                                          graph: graph, observedAt: observedAt, inputs: inputs, &record)
         record.changeCount = cs.ops.count
-        return ["changeset.json": try cs.encoded(), "plan.md": try Data(contentsOf: plan)]
+        return ["changeset.json": try cs.encoded(), "plan.md": try Data(contentsOf: plan),
+                "graph.json": try IntakeJSON.encoder.encode(graph)]
     }
 
     /// Polish, fresh-eyes and dedup: each hands back a whole revised change set, held to the
-    /// same validation (and single correction turn) encode is.
+    /// same validation (and single correction turn) encode is — but against the graph ENCODE
+    /// saw, carried forward in every checkpoint since, never a fresh read. A bead that moves
+    /// after encode is drift, and drift is release's job (it rechecks every `pre`); validating
+    /// against a fresh graph here would instead pause polish on a `pre` the polisher was told
+    /// to keep exactly as it was. `graphObservedAt` stays that snapshot's time for the same
+    /// reason: release measures drift from when the graph was read, not from the last polish.
     private func polish(_ planned: PlannedRound, _ inputs: RoundInputs, _ record: inout RoundRecord) async throws -> [String: Data] {
         guard let polisher = inputs.config.polisher else { throw Pause.config("no polisher") }
         let plan = try currentPlan(inputs)
@@ -227,11 +253,18 @@ public struct RoundExecutor: Sendable {
             throw Pause(diagnosis: Diagnosis(category: .harnessError, detail: "no change set to \(planned.stage.rawValue)",
                                              action: "Run the encode round first."))
         }
+        guard let snapshot = latestFile("graph.json", inputs) else {
+            throw Pause(diagnosis: Diagnosis(category: .harnessError, detail: "the encode checkpoint has no graph.json",
+                                             action: "Re-run the encode round."))
+        }
         let old = try ChangeSet.decode(Data(contentsOf: current))
+        let graphData = try Data(contentsOf: snapshot)
+        let graph = try IntakeJSON.decoder.decode(GraphSnapshot.self, from: graphData)
+        let observedAt = old.graphObservedAt
         let work = inputs.store.workDirectory()
-        let changeSetFile = work.appendingPathComponent("changeset.json")
+        let changeSetFile = work.appendingPathComponent("changeset.json"), graphFile = work.appendingPathComponent("graph.json")
         try old.encoded().write(to: changeSetFile, options: .atomic)
-        let (graph, graphFile, observedAt) = try await readGraph(inputs)
+        try graphData.write(to: graphFile, options: .atomic)
         let ctx = context(inputs, graphFile: graphFile, observedAt: observedAt)
         let prompt: String
         switch planned.stage {
@@ -243,12 +276,13 @@ public struct RoundExecutor: Sendable {
                                          readable: [plan.deletingLastPathComponent(), work],
                                          graph: graph, observedAt: observedAt, inputs: inputs, &record)
         record.changeCount = PlanMetrics.opsChanged(from: old, to: cs)
-        return ["changeset.json": try cs.encoded(), "plan.md": try Data(contentsOf: plan)]
+        return ["changeset.json": try cs.encoded(), "plan.md": try Data(contentsOf: plan), "graph.json": graphData]
     }
 
     /// One change-set seat: run it, stamp FD's own `graphObservedAt` (the agent's clock is not
     /// the one release drift-checks against), validate, and on failure resume the SAME session
-    /// once with the errors listed — the same one-retry rule triage follows (spec §11).
+    /// once with the errors listed — the same one-retry rule triage follows (spec §11), in
+    /// words that ask for a `{changeSet, summary}` rather than triage's "recommendation".
     private func changeSetSeat(_ planned: PlannedRound, _ role: String, _ choice: ModelChoice, prompt: String,
                                readable: [URL], graph: GraphSnapshot, observedAt: Date, inputs: RoundInputs,
                                _ record: inout RoundRecord) async throws -> ChangeSet {
@@ -260,7 +294,7 @@ public struct RoundExecutor: Sendable {
             return first.changeSet
         }
         let slot = record.slots.count - 1
-        let correction = Triage.correctionPrompt(errors: errors.errors, observedAt: observedAt)
+        let correction = RoundPrompts.changeSetCorrection(errors: errors.errors, observedAt: observedAt)
         switch try await attempt(ChangeSetOutput.self, runName(planned, role) + "-correction", choice, prompt: correction,
                                  schema: RoundSchemas.changeSet, cwd: inputs.project, readable: readable,
                                  resume: record.slots[slot].sessionID, inputs: inputs) {
@@ -337,7 +371,10 @@ public struct RoundExecutor: Sendable {
                                      action: "This is a Flight Deck bug — report it."), sessionID: nil)
         }
         let command = HarnessCommand.build(request)
-        var environment = inputs.environment
+        // Settings `env` first, unsets last: `--setting-sources local` drops the user settings'
+        // `env` (see `ClaudeUserEnv`), and nothing it holds may re-introduce an unset variable.
+        var environment = choice.harness == .claude ? ClaudeUserEnv.merged(into: inputs.environment, home: userHome)
+                                                    : inputs.environment
         for key in command.unsetEnvironment { environment.removeValue(forKey: key) }
 
         let runFile = dir.appendingPathComponent("run.json")
@@ -360,9 +397,6 @@ public struct RoundExecutor: Sendable {
             return .failed(Diagnosis(category: .harnessError, detail: "Could not run \(command.executable): \(error)",
                                      action: "Check that \(command.executable) is installed, then retry."), sessionID: nil)
         }
-        try result.stdout.write(to: dir.appendingPathComponent("stdout"), options: .atomic)
-        try Data(result.stderr.utf8).write(to: dir.appendingPathComponent("stderr"), options: .atomic)
-
         var session: String?
         var outcome: Attempt<T>
         do {
@@ -382,8 +416,13 @@ public struct RoundExecutor: Sendable {
                                                         parseError: error is NonZeroExit ? nil : error, harness: choice.harness),
                               sessionID: nil)
         }
+        // The finished record goes down BEFORE the streams: a stream write that fails would
+        // otherwise leave a pid with no `finished`, which a restart's reaper reads as a child
+        // still alive — and might signal whatever process has since reused that pid.
         try Self.write(RunRecord(pid: pid.value, sessionID: session, started: started, finished: inputs.now(),
                                  exitCode: result.exitCode), to: runFile)
+        try result.stdout.write(to: dir.appendingPathComponent("stdout"), options: .atomic)
+        try Data(result.stderr.utf8).write(to: dir.appendingPathComponent("stderr"), options: .atomic)
         return outcome
     }
 

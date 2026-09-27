@@ -55,9 +55,11 @@ public enum HarnessCommand {
     /// so under `dontAsk` a read-only reviewer still inherits standing allows like
     /// `Bash(git add *)` — a "read-only" seat that can stage files. `--setting-sources local`
     /// drops the user and project settings files (keeping only the project's gitignored
-    /// `settings.local.json`); probed live on claude 2.1.283, 2026-09-27: a
-    /// `claude -p --setting-sources local --strict-mcp-config` run still authenticates and
-    /// answers, because login lives in the keychain, not in settings.json.
+    /// `settings.local.json`, an accepted residual). Probed live on claude 2.1.283,
+    /// 2026-09-27: such a run still authenticates, since login lives in the keychain — but the
+    /// probe's shell exported `ANTHROPIC_BASE_URL`, which hid the other half: the user
+    /// settings' `env` block is dropped too. Every caller therefore re-applies it with
+    /// `ClaudeUserEnv.merged(into:)` when building a claude child's environment.
     /// `--strict-mcp-config` with no `--mcp-config` drops every MCP server rather than guessing
     /// whether an `mcp__*` glob is valid `--disallowedTools` syntax.
     public static let claudeIsolation = ["--setting-sources", "local", "--strict-mcp-config"]
