@@ -173,7 +173,8 @@ public enum Triage {
         Rules:
         - You are read-only. Never run a `br` command that writes (create, update, dep, or
           any other mutating verb) — FD is the only writer. You may run `br list`, `br show`,
-          `br graph`, `br ready`, and `bv`.
+          `br graph`, and `br ready`. `bv` is not available to you; the graph file above is
+          already the read you'd use it for.
         - Ask a clarifying question only when its answer would change the change set you
           would produce. If the intent is already unambiguous, do not ask anything.
 

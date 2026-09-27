@@ -98,6 +98,21 @@ public enum RoundSchemas {
     """
 }
 
+/// The three `bv` robot reports FD itself runs against a polish round's shadow graph
+/// (`RoundExecutor.runShadowAnalytics`), as plain read-only files a polish-family prompt
+/// points the agent at. Never a `bv --db <path>` invitation for the agent to run itself: a
+/// prefix allow like `Bash(bv --db <path> *)` would also match `bv`'s write flags (`--update`,
+/// `--rollback`, `--save-baseline`, `--export`, …), so no claude seat is ever granted `bv` at
+/// all, and codex's read-only sandbox is not a reason to trust it there either.
+public struct ShadowAnalytics: Sendable, Equatable {
+    public var insights: String
+    public var plan: String
+    public var priority: String
+    public init(insights: String, plan: String, priority: String) {
+        self.insights = insights; self.plan = plan; self.priority = priority
+    }
+}
+
 /// Everything every round prompt needs about the intake itself. Seat-specific pieces —
 /// persona, which files to reference, the round number — are separate function parameters
 /// on `RoundPrompts`, since which of them apply differs stage to stage (Integrate, for
@@ -177,20 +192,26 @@ public enum RoundPrompts {
         c.agentsFile.map { "Reread the project's agent instructions at \($0). " } ?? ""
     }
 
-    /// The extra clause every polish-family round gets once a shadow-beads database exists
-    /// (Task 7b wires the path in): `bv`'s robot reports re-read the graph AS IF the current
-    /// change set had already landed, so the model sees the shape its own beads would
-    /// actually produce before committing to it — nil when no shadow database has been
-    /// built yet, e.g. the first polish round of a fresh intake.
-    private static func shadowBeadsClause(_ shadowBeads: String?) -> String {
-        guard let shadowBeads else { return "" }
+    /// The extra clause every polish-family round gets once FD has run `bv`'s robot reports
+    /// against this round's shadow graph (Task 7b wires this in, `RoundExecutor.polish`): the
+    /// model reads what `bv` found AS IF the current change set had already landed, so it sees
+    /// the shape its own beads would actually produce before committing to it — nil when the
+    /// shadow or the `bv` runs themselves failed, e.g. the first polish round of a fresh
+    /// intake, or a `bv` version too old for one of these flags. The agent reads these files;
+    /// it never runs `bv` itself — see `ShadowAnalytics`'s doc comment for why.
+    private static func shadowAnalyticsClause(_ analytics: ShadowAnalytics?) -> String {
+        guard let analytics else { return "" }
         return """
 
 
-        `bv --db \(shadowBeads) --robot-insights` / `--robot-plan` / `--robot-priority` \
-        analyse the graph AS IF your current change set were applied: use them to find \
-        bottlenecks, long serial chains, and narrow ready fronts, and restructure \
-        dependencies for parallel work where it doesn't lose correctness.
+        `bv`'s graph analytics for this change set, AS IF it were already applied, are at:
+        - Insights (bottlenecks, cycles): \(analytics.insights)
+        - Execution plan (ready-set width, serial chains): \(analytics.plan)
+        - Priority recommendations: \(analytics.priority)
+
+        Read them (do not run `bv` yourself) to find bottlenecks, long serial chains, and \
+        narrow ready fronts, and restructure dependencies for parallel work where it doesn't \
+        lose correctness.
         """
     }
 
@@ -334,13 +355,13 @@ public enum RoundPrompts {
     }
 
     public static func polish(_ c: RoundContext, planFile: String, changeSetFile: String, round: Int,
-                               shadowBeads: String? = nil) -> String {
+                               analytics: ShadowAnalytics? = nil) -> String {
         """
         This is polish round \(round). \(rereadAgents(c))Check over each proposed bead in \
         \(changeSetFile) super carefully against the plan at \(planFile): does it make \
         sense, is it optimal, could it be better? Revise it. DO NOT OVERSIMPLIFY. DO NOT \
         LOSE FEATURES. Merge duplicates, fill empty descriptions, fix dependencies, and \
-        cross-check every bead against the plan.\(shadowBeadsClause(shadowBeads))
+        cross-check every bead against the plan.\(shadowAnalyticsClause(analytics))
 
         Return the complete revised change set — not a diff — under the same rules encode \
         followed. Existing-bead ops (`editBead`, `reopen`, `followUp`) may be revised, but \
@@ -355,14 +376,14 @@ public enum RoundPrompts {
     }
 
     public static func freshEyes(_ c: RoundContext, planFile: String, changeSetFile: String,
-                                  shadowBeads: String? = nil) -> String {
+                                  analytics: ShadowAnalytics? = nil) -> String {
         """
         You are seeing this plan and its beads for the first time — a fresh-eyes reviewer, \
         not someone who has been polishing them for rounds. \(rereadAgents(c))Read the plan at \(planFile) \
         and the proposed beads at \(changeSetFile) fresh: does the change set make sense, is \
         it optimal, could it be better? Revise it. DO NOT OVERSIMPLIFY. DO NOT LOSE \
         FEATURES. Merge duplicates, fill empty descriptions, fix dependencies, and \
-        cross-check every bead against the plan.\(shadowBeadsClause(shadowBeads))
+        cross-check every bead against the plan.\(shadowAnalyticsClause(analytics))
 
         Return the complete revised change set — not a diff — under the same rules encode \
         followed. Existing-bead ops (`editBead`, `reopen`, `followUp`) may be revised, but \
@@ -376,11 +397,11 @@ public enum RoundPrompts {
         """
     }
 
-    public static func dedup(_ c: RoundContext, changeSetFile: String, shadowBeads: String? = nil) -> String {
+    public static func dedup(_ c: RoundContext, changeSetFile: String, analytics: ShadowAnalytics? = nil) -> String {
         """
         \(rereadAgents(c))Check over ALL proposed beads at \(changeSetFile); none may be duplicative or \
         excessively overlapping. Merge into canonical beads, keeping the richer tests and \
-        dependencies of whichever duplicate had them.\(shadowBeadsClause(shadowBeads))
+        dependencies of whichever duplicate had them.\(shadowAnalyticsClause(analytics))
 
         Return the complete revised change set — not a diff — under the same rules encode \
         followed. Existing-bead ops (`editBead`, `reopen`, `followUp`) may be revised, but \

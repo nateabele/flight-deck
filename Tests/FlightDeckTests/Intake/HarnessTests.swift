@@ -158,6 +158,27 @@ final class HarnessTests: XCTestCase {
         XCTAssertNil(CodexUserConfig.serviceTier(home: Self.noHome))
         XCTAssertFalse(HarnessCommand.build(req(.codex), home: Self.noHome).arguments.contains { $0.contains("service_tier") })
     }
+
+    /// No claude seat — polish rounds included — is ever granted `bv`: a `Bash` allow is a
+    /// prefix match on the WHOLE command line, so even one scoped to a shadow's `--db` path
+    /// would also match `bv`'s write flags on that same invocation (`--update`, `--rollback`,
+    /// `--save-baseline`, `--export`, …). FD runs `bv` itself against the shadow and hands the
+    /// agent the resulting files instead (`ShadowAnalytics` in RoundPrompts.swift). Checks
+    /// `--tools` (the `--restricted` built-in allowlist) as well as `--allowedTools`, since
+    /// `bv` needs to be absent from BOTH places a claude seat's tool access can now live.
+    func testNoClaudeArgvEverAllowsBv() {
+        let write = HarnessRequest(harness: .claude, model: "m", effort: "high", cwd: URL(fileURLWithPath: "/work"),
+                                   readableDirs: [], prompt: "P", schemaFile: URL(fileURLWithPath: "/s.json"),
+                                   schemaJSON: "{}", resumeSessionID: nil, access: .writeInWork(URL(fileURLWithPath: "/work")))
+        for r in [req(.claude), req(.claude, resume: "S1"), write] {
+            let a = HarnessCommand.build(r, home: Self.noHome).arguments
+            XCTAssertFalse(a.contains { $0.contains("bv") }, "\(a)")
+        }
+        XCTAssertFalse(HarnessCommand.claudeReadOnlyTools.contains("bv"))
+        XCTAssertFalse(HarnessCommand.claudeReadOnlyBuiltins.contains("bv"))
+        XCTAssertFalse(HarnessCommand.claudeWriteTools.contains("bv"))
+    }
+
     func testProseOutputIsNotJSON() {
         let line1 = "{\"type\":\"thread.started\",\"thread_id\":\"T\"}"
         let line2 = "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"Sure! Here you go\"}}"

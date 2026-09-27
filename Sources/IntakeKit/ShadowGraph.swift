@@ -8,12 +8,14 @@ public struct ShadowGraphBuildFailed: Error, Equatable, Sendable {
     public let detail: String
 }
 
-/// A throwaway copy of a project's `.beads` with a proposed `ChangeSet` applied on top, so a
-/// polish round can run `bv`'s graph analytics (bottlenecks, critical path, ready-set width,
-/// cycles) against what the graph would look like AFTER the change set landed — without ever
+/// A throwaway copy of a project's `.beads` with a proposed `ChangeSet` applied on top, so `bv`
+/// can be run against what the graph would look like AFTER the change set landed — without ever
 /// writing to the real bead database. `RoundExecutor` builds one per polish round under
-/// `work/shadow/` and points the `bv --db <shadowPath>` it allows agents to run at the URL
-/// this returns.
+/// `work/shadow/`, then runs `bv`'s robot reports against the URL this returns ITSELF — never
+/// the agent: a claude `Bash` allow is a prefix match on the whole command line, so even one
+/// scoped to this URL would also match `bv`'s write flags on the same invocation. The reports
+/// land as plain files (`ShadowAnalytics` in RoundPrompts.swift) that the polish prompt points
+/// the agent at to read.
 public struct ShadowGraph: Sendable {
     private let runner: CommandRunner
     private let brPath: String
