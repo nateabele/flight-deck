@@ -7,8 +7,10 @@ final class SessionSleepControllerTests: XCTestCase {
         var stopped: [UUID] = []; var conted: [UUID] = []
         var onCont: (() -> Void)?
         func isLive(_ id: UUID) -> Bool { true }
+        func isLive(socketPath: String) -> Bool { true }
         func daemonPID(_ id: UUID) -> pid_t? { 111 }
         func terminate(_ id: UUID) {}
+        func terminate(socketPath: String) {}
         func stop(_ id: UUID) { stopped.append(id) }
         func cont(_ id: UUID) { conted.append(id); onCont?() }
     }

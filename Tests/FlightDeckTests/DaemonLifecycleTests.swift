@@ -46,11 +46,13 @@ private final class RecordingDaemonControl: DaemonControlling, @unchecked Sendab
     private(set) var terminatedIDs: [UUID] = []
     var onTerminate: ((UUID) -> Void)?
     func isLive(_ id: UUID) -> Bool { false }
+    func isLive(socketPath: String) -> Bool { false }
     func daemonPID(_ id: UUID) -> pid_t? { nil }
     func terminate(_ id: UUID) {
         terminatedIDs.append(id)
         onTerminate?(id)
     }
+    func terminate(socketPath: String) {}
     func stop(_ id: UUID) {}
     func cont(_ id: UUID) {}
 }
