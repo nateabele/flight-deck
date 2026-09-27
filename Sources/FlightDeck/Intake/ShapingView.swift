@@ -162,6 +162,18 @@ struct ShapingView: View {
             if let tally = card.tally {
                 Text(tally).font(.caption2).foregroundStyle(.secondary)
             }
+            if let sections = card.sections {
+                Text(sections).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+            }
+            // Expanded only on the selected card: a row of cards each carrying a paragraph
+            // would push the viewer off screen. Every card keeps it as hover text.
+            if selected, let note = card.note {
+                // A horizontal scroll view proposes unlimited width, so without a cap the
+                // note would lay out as one long line instead of wrapping.
+                Text(note).font(.caption2).foregroundStyle(.secondary).lineLimit(6)
+                    .frame(maxWidth: 220, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             if !card.slots.isEmpty {
                 HStack(spacing: 3) {
                     ForEach(card.slots.indices, id: \.self) { i in slotBadge(card.slots[i]) }
@@ -175,6 +187,7 @@ struct ShapingView: View {
         .overlay(RoundedRectangle(cornerRadius: 5)
             .strokeBorder(selected ? Color.accentColor : Color.secondary.opacity(0.2), lineWidth: 1))
         .contentShape(Rectangle())
+        .help(card.note ?? "")
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier("round-card-\(card.checkpointID)")
     }

@@ -37,6 +37,11 @@ struct RoundCard: Identifiable, Equatable {
     var lines: String
     var tally: String?
     var slots: [SlotBadge]
+    /// The record's note — reviewer summary, integrator notes, a fallback remark — shown
+    /// expanded on the selected card and as the hover text on every card.
+    var note: String?
+    /// The sections the round touched, short: the first three and a count of the rest.
+    var sections: String?
     var id: Int { checkpointID }
 }
 
@@ -189,8 +194,19 @@ struct ShapingModel {
                 changes: r.changeCount.map { "\($0) change\($0 == 1 ? "" : "s")" },
                 lines: "+\(r.linesAdded)/−\(r.linesRemoved)",
                 tally: r.tally.map { "agree \($0.agree) / some \($0.somewhat) / no \($0.disagree)" },
-                slots: r.slots.map(Self.badge))
+                slots: r.slots.map(Self.badge),
+                note: r.note,
+                sections: Self.sectionList(r.sectionsChanged))
         }
+    }
+
+    /// "Scope, Rollout, Risks +1": a card is a few lines wide, and the full list is one click
+    /// away in the diff. Headings lose their `#` marks — the card already says it's a plan.
+    private static func sectionList(_ sections: [String]) -> String? {
+        guard !sections.isEmpty else { return nil }
+        let names = sections.prefix(3).map { $0.drop { $0 == "#" }.trimmingCharacters(in: .whitespaces) }
+        let rest = sections.count - names.count
+        return names.joined(separator: ", ") + (rest > 0 ? " +\(rest)" : "")
     }
 
     private static func badge(_ slot: SlotOutcome) -> SlotBadge {
@@ -226,11 +242,19 @@ struct ShapingModel {
     // MARK: - Plan viewer
 
     /// A checkpoint's plan: the integrated `plan.md` when the round produced one, else the
-    /// first draft — the draft round writes only `drafts/<n>.md`, and showing nothing for the
-    /// very first checkpoint would make the tape look empty until synthesis.
-    static func planText(checkpoint: Int, loadFile: (Int, String) -> Data?) -> String? {
-        let data = loadFile(checkpoint, "plan.md") ?? loadFile(checkpoint, "drafts/0.md")
-        return data.map { String(decoding: $0, as: UTF8.self) }
+    /// lowest-numbered draft — the draft round writes only `drafts/<n>.md`, and showing
+    /// nothing for the very first checkpoint would make the tape look empty until synthesis.
+    /// Lowest-numbered, not `drafts/0.md`: a draft round writes only the drafters that
+    /// succeeded, so with drafter 0 failed its file doesn't exist — and the first surviving
+    /// draft is the one synthesis and Sketch's refine build on (`RoundExecutor.draftFiles`).
+    /// The draft record has one slot per drafter, which bounds the search.
+    static func planText(checkpoint: Int, in tape: Tape, loadFile: (Int, String) -> Data?) -> String? {
+        if let plan = loadFile(checkpoint, "plan.md") { return String(decoding: plan, as: UTF8.self) }
+        let drafters = tape.checkpoints.first { $0.id == checkpoint }?.record.slots.count ?? 0
+        for i in 0..<max(drafters, 1) {
+            if let draft = loadFile(checkpoint, "drafts/\(i).md") { return String(decoding: draft, as: UTF8.self) }
+        }
+        return nil
     }
 
     /// The nearest checkpoint before `checkpoint` (in tape order) that has a plan. Encode and
@@ -238,7 +262,7 @@ struct ShapingModel {
     /// diff a plan against nothing and show every line as added.
     static func previousPlanCheckpoint(before checkpoint: Int, in tape: Tape, loadFile: (Int, String) -> Data?) -> Int? {
         guard let index = tape.checkpoints.firstIndex(where: { $0.id == checkpoint }) else { return nil }
-        return tape.checkpoints[..<index].reversed().first { planText(checkpoint: $0.id, loadFile: loadFile) != nil }?.id
+        return tape.checkpoints[..<index].reversed().first { planText(checkpoint: $0.id, in: tape, loadFile: loadFile) != nil }?.id
     }
 
     /// What the plan viewer's text depends on — and nothing else. The view memoizes its text
@@ -263,11 +287,11 @@ struct ShapingModel {
     static func viewerText(_ mode: ViewerMode, checkpoint: Int, tape: Tape, loadFile: (Int, String) -> Data?) -> String {
         switch mode {
         case .plan:
-            return planText(checkpoint: checkpoint, loadFile: loadFile) ?? "No plan at this checkpoint."
+            return planText(checkpoint: checkpoint, in: tape, loadFile: loadFile) ?? "No plan at this checkpoint."
         case .diff:
-            guard let current = planText(checkpoint: checkpoint, loadFile: loadFile) else { return "No plan at this checkpoint." }
+            guard let current = planText(checkpoint: checkpoint, in: tape, loadFile: loadFile) else { return "No plan at this checkpoint." }
             guard let base = previousPlanCheckpoint(before: checkpoint, in: tape, loadFile: loadFile),
-                  let old = planText(checkpoint: base, loadFile: loadFile) else { return "No earlier plan to compare with." }
+                  let old = planText(checkpoint: base, in: tape, loadFile: loadFile) else { return "No earlier plan to compare with." }
             let diff = PlanMetrics.unifiedDiff(from: old, to: current)
             return diff.isEmpty ? "No changes since the previous plan." : diff
         case .changeSet:
