@@ -14,6 +14,13 @@ protocol DaemonControlling {
     /// less often, a stale pidfile naming a pid the OS has since recycled for something else).
     func isLive(_ id: UUID) -> Bool
 
+    /// Same probe as `isLive(_:)`, keyed directly on a socket path rather than a session
+    /// `UUID` — what `IntakeRunnerController` needs, since an intake runner's daemon has no
+    /// `SessionDaemon`-assigned session id to look one up from. `isLive(_:)` is defined in
+    /// terms of this one, not the other way around, so both keep the exact same connect()
+    /// semantics.
+    func isLive(socketPath: String) -> Bool
+
     /// The daemon's own pid, from its pidfile — but only if that pid is still alive. `nil`
     /// covers both "never ran" and "pidfile is stale", so a caller never has to `kill(pid, 0)`
     /// this a second time itself.
@@ -23,6 +30,11 @@ protocol DaemonControlling {
     /// socket and pidfile regardless of how far that got. No-throw — this runs from teardown
     /// paths that cannot fail the operation they are cleaning up after; problems are logged.
     func terminate(_ id: UUID)
+
+    /// Same teardown as `terminate(_:)`, keyed on a socket path — see `isLive(socketPath:)`
+    /// for why a path-based twin exists at all. The pidfile is derived the same way
+    /// `SessionDaemon.pidfilePath` derives it from a socket path: `<socketPath>.pid`.
+    func terminate(socketPath: String)
 
     /// Freezes the idle agent's process group (`kill(-agentPGID, SIGSTOP)`) — the agent, not the
     /// daemon: the daemon must keep running its `select()` loop so a later re-attach still has
@@ -77,7 +89,10 @@ struct PosixDaemonControl: DaemonControlling {
     }
 
     func isLive(_ id: UUID) -> Bool {
-        let path = daemon.socketPath(for: id)
+        isLive(socketPath: daemon.socketPath(for: id))
+    }
+
+    func isLive(socketPath path: String) -> Bool {
         guard path.utf8.count <= Self.maxPathLength else {
             Self.logger.error(
                 "socket path too long for sun_path (\(path.utf8.count, privacy: .public) bytes): \(path, privacy: .public)"
@@ -124,7 +139,7 @@ struct PosixDaemonControl: DaemonControlling {
             // A socket file with nothing listening behind it: the daemon died without
             // unlinking (or something else raced the unlink). Leaving it behind would make
             // every future `isLive` pay this same failed connect, so clear it now.
-            unlinkStale(id)
+            unlinkStale(socketPath: path, pidfilePath: path + ".pid")
             return false
         default:
             return false
@@ -132,24 +147,33 @@ struct PosixDaemonControl: DaemonControlling {
     }
 
     func daemonPID(_ id: UUID) -> pid_t? {
-        guard let pid = readPID(id), kill(pid, 0) == 0 else { return nil }
+        guard let pid = readPID(pidfilePath: daemon.pidfilePath(for: id)), kill(pid, 0) == 0
+        else { return nil }
         return pid
     }
 
     func terminate(_ id: UUID) {
+        terminateCore(socketPath: daemon.socketPath(for: id), pidfilePath: daemon.pidfilePath(for: id))
+    }
+
+    func terminate(socketPath path: String) {
+        terminateCore(socketPath: path, pidfilePath: path + ".pid")
+    }
+
+    private func terminateCore(socketPath: String, pidfilePath: String) {
         // Unconditional, however far the signaling below gets: a daemon that was already dead
         // (or never existed) can still have left a socket or pidfile behind, and a daemon that
         // survives even `SIGKILL` still needs its bookkeeping cleared so a next attempt does
         // not immediately see it as live.
-        defer { unlinkStale(id) }
+        defer { unlinkStale(socketPath: socketPath, pidfilePath: pidfilePath) }
 
-        guard let pid = readPID(id), kill(pid, 0) == 0 else { return }
+        guard let pid = readPID(pidfilePath: pidfilePath), kill(pid, 0) == 0 else { return }
 
         // A SIGSTOP'd agent can't act on the daemon's SIGTERM below — it can't process signals
         // or exit while stopped — so wake it first. Unconditional and safe: SIGCONT to an
-        // already-running agent group is a harmless no-op, and `cont` is itself a no-op if no
-        // agent group resolves.
-        cont(id)
+        // already-running agent group is a harmless no-op, and `signalAgentGroup` is itself a
+        // no-op if no agent group resolves.
+        signalAgentGroup(daemonPID: pid, SIGCONT)
 
         if kill(pid, SIGTERM) != 0 {
             let reason = String(cString: strerror(errno))
@@ -172,21 +196,29 @@ struct PosixDaemonControl: DaemonControlling {
         }
     }
 
-    func stop(_ id: UUID) { signalAgentGroup(id, SIGSTOP) }
+    func stop(_ id: UUID) {
+        guard let pid = daemonPID(id) else { return }
+        signalAgentGroup(daemonPID: pid, SIGSTOP)
+    }
 
-    func cont(_ id: UUID) { signalAgentGroup(id, SIGCONT) }
+    func cont(_ id: UUID) {
+        guard let pid = daemonPID(id) else { return }
+        signalAgentGroup(daemonPID: pid, SIGCONT)
+    }
 
     // MARK: - Helpers
 
     /// Resolves the agent pgid from the (validated, live) daemon pid and signals the NEGATIVE
     /// pgid, so the whole agent tree (claude + any node/MCP children) is hit — but never the
-    /// daemon itself. `daemon > 0` mirrors `readPID`'s own guard as belt-and-suspenders, and
+    /// daemon itself. `daemonPID > 0` mirrors `readPID`'s own guard as belt-and-suspenders, and
     /// `pgid > 0` is the same non-negotiable rail: `kill(-0, …)` broadcasts to this app's own
     /// process group and would freeze/resume Flight Deck itself, and `kill(-1, …)` broadcasts
-    /// system-wide. Neither target is ever signaled.
-    private func signalAgentGroup(_ id: UUID, _ sig: Int32) {
-        guard let daemon = daemonPID(id), daemon > 0 else { return }
-        guard let pgid = agentGroupResolver.agentProcessGroup(daemonPID: daemon), pgid > 0 else {
+    /// system-wide. Neither target is ever signaled. Takes the daemon pid directly (not a
+    /// session id) so `terminate(socketPath:)` — which has no session id to resolve one from —
+    /// can share this with `stop`/`cont`.
+    private func signalAgentGroup(daemonPID: pid_t, _ sig: Int32) {
+        guard daemonPID > 0 else { return }
+        guard let pgid = agentGroupResolver.agentProcessGroup(daemonPID: daemonPID), pgid > 0 else {
             return
         }
         _ = signal(-pgid, sig)
@@ -204,11 +236,9 @@ struct PosixDaemonControl: DaemonControlling {
         return socketError == 0
     }
 
-    private func readPID(_ id: UUID) -> pid_t? {
+    private func readPID(pidfilePath: String) -> pid_t? {
         guard
-            let contents = try? String(
-                contentsOfFile: daemon.pidfilePath(for: id), encoding: .utf8
-            )
+            let contents = try? String(contentsOfFile: pidfilePath, encoding: .utf8)
         else { return nil }
         let trimmed = contents.trimmingCharacters(in: .whitespacesAndNewlines)
         // `> 0`, not just "parses as an Int32": `kill(pid, 0)` treats 0 and negative pids as
@@ -223,9 +253,7 @@ struct PosixDaemonControl: DaemonControlling {
         return pid_t(value)
     }
 
-    private func unlinkStale(_ id: UUID) {
-        let socketPath = daemon.socketPath(for: id)
-        let pidPath = daemon.pidfilePath(for: id)
+    private func unlinkStale(socketPath: String, pidfilePath pidPath: String) {
         if unlink(socketPath) != 0 && errno != ENOENT {
             let reason = String(cString: strerror(errno))
             Self.logger.debug(
