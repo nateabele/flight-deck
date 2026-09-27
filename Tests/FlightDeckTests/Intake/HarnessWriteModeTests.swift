@@ -26,7 +26,7 @@ final class HarnessWriteModeTests: XCTestCase {
                                      "--json-schema", "{}", "--permission-mode", "acceptEdits",
                                      "--allowedTools", HarnessCommand.claudeWriteTools,
                                      "--disallowedTools", HarnessCommand.claudeWriteDeniedTools,
-                                     "--strict-mcp-config", "--add-dir", "/work"])
+                                     "--add-dir", "/work", "--setting-sources", "local", "--strict-mcp-config"])
     }
 
     /// `--allowedTools` only ADDS to whatever the operator's settings.json already allows —

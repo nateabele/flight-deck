@@ -50,6 +50,18 @@ public enum HarnessCommand {
     /// defense in depth for the same reason, since none of them are edits either.
     public static let claudeWriteDeniedTools = "Bash WebFetch WebSearch Task NotebookEdit"
 
+    /// Appended to EVERY headless claude run, read-only and write alike. `--allowedTools` and
+    /// the denies above only ADD rules on top of the operator's own `~/.claude/settings.json`,
+    /// so under `dontAsk` a read-only reviewer still inherits standing allows like
+    /// `Bash(git add *)` — a "read-only" seat that can stage files. `--setting-sources local`
+    /// drops the user and project settings files (keeping only the project's gitignored
+    /// `settings.local.json`); probed live on claude 2.1.283, 2026-09-27: a
+    /// `claude -p --setting-sources local --strict-mcp-config` run still authenticates and
+    /// answers, because login lives in the keychain, not in settings.json.
+    /// `--strict-mcp-config` with no `--mcp-config` drops every MCP server rather than guessing
+    /// whether an `mcp__*` glob is valid `--disallowedTools` syntax.
+    public static let claudeIsolation = ["--setting-sources", "local", "--strict-mcp-config"]
+
     /// The pure check behind `build`'s write-mode `precondition` — a request that fails this
     /// would sandbox the integrator somewhere other than its own work dir, or let it resume
     /// (the integrator always starts fresh), so `build` must never construct argv for it.
@@ -103,13 +115,12 @@ public enum HarnessCommand {
                 // Edit/Write, not just read access, so adding the intake root (the integrator's
                 // one readableDir) would let it write outside its own work dir — the integrator
                 // only ever needs to read plan.md/changes.json, which already live under `dir`.
-                // `--strict-mcp-config` with no `--mcp-config` drops every MCP server rather than
-                // guessing whether an `mcp__*` glob is valid `--disallowedTools` syntax.
                 args = ["-p", r.prompt, "--model", r.model, "--effort", r.effort, "--output-format", "json",
                         "--json-schema", r.schemaJSON, "--permission-mode", "acceptEdits",
                         "--allowedTools", claudeWriteTools, "--disallowedTools", claudeWriteDeniedTools,
-                        "--strict-mcp-config", "--add-dir", dir.path]
+                        "--add-dir", dir.path]
             }
+            args += claudeIsolation
             if let s = r.resumeSessionID { args += ["--resume", s] }
             // Without these unset, a claude spawned from inside Claude Code silently skips
             // saving its transcript — and then `--resume` has nothing to resume.

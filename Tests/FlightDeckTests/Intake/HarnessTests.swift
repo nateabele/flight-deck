@@ -41,7 +41,22 @@ final class HarnessTests: XCTestCase {
                                      "--json-schema", "{}", "--permission-mode", "dontAsk",
                                      "--allowedTools", HarnessCommand.claudeReadOnlyTools,
                                      "--disallowedTools", HarnessCommand.claudeDeniedTools,
-                                     "--add-dir", "/intake", "--resume", "S1"])
+                                     "--add-dir", "/intake", "--setting-sources", "local", "--strict-mcp-config",
+                                     "--resume", "S1"])
+    }
+    /// `--allowedTools` only ADDS to the operator's settings.json allows, so without dropping
+    /// the user/project setting sources a `dontAsk` read-only seat still inherits standing
+    /// allows like `Bash(git add *)`. Every claude run, read-only and write, must carry both.
+    func testEveryClaudeRunIgnoresUserAndProjectSettingsAndMCP() {
+        let write = HarnessRequest(harness: .claude, model: "m", effort: "high", cwd: URL(fileURLWithPath: "/work"),
+                                   readableDirs: [], prompt: "P", schemaFile: URL(fileURLWithPath: "/s.json"),
+                                   schemaJSON: "{}", resumeSessionID: nil, access: .writeInWork(URL(fileURLWithPath: "/work")))
+        for r in [req(.claude), req(.claude, resume: "S1"), write] {
+            let a = HarnessCommand.build(r).arguments
+            guard let i = a.firstIndex(of: "--setting-sources") else { return XCTFail("no --setting-sources in \(a)") }
+            XCTAssertEqual(a[i + 1], "local")
+            XCTAssertEqual(a.filter { $0 == "--strict-mcp-config" }.count, 1, "\(a)")
+        }
     }
     /// `--allowedTools` only ADDS allow rules: a project `.claude/settings.json` allowing
     /// `Bash(br:*)`, or a user `defaultMode: bypassPermissions`, would otherwise let triage
