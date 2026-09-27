@@ -22,13 +22,27 @@ cd "$(dirname "$0")/.."
 # scripts/smoke.sh + a one-time UI-automation TCC grant; this script is only for
 # the headless unit suite.
 
+#
+# Knobs (all optional):
+#   FD_TEST_FILTER=ClassA,ClassB/testX  run only these, in one process (xctest -XCTest syntax).
+#                                       Every class name is checked first: xctest itself
+#                                       silently runs NOTHING for a misspelled class.
+#   FD_TEST_SHARDS=N                    parallel xctest processes for a full run (default 6;
+#                                       1 = the old serial run).
+#   FD_SKIP_BUILD=1                     reuse the last build-for-testing as is.
+
 CONFIG=Debug
 PRODUCTS="DerivedData/Build/Products/${CONFIG}"
+SHARDS="${FD_TEST_SHARDS:-6}"
+TIMINGS_CACHE="DerivedData/fd-test-class-timings.tsv"   # refreshed by every sharded run
+TIMINGS_SEED="scripts/test-class-timings.tsv"            # committed fallback for a fresh worktree
 
-xcodegen generate
-xcodebuild -project FlightDeck.xcodeproj -scheme FlightDeck \
-  -configuration "$CONFIG" -destination 'platform=macOS' \
-  -derivedDataPath DerivedData build-for-testing
+if [ -z "${FD_SKIP_BUILD:-}" ]; then
+  xcodegen generate
+  xcodebuild -project FlightDeck.xcodeproj -scheme FlightDeck \
+    -configuration "$CONFIG" -destination 'platform=macOS' \
+    -derivedDataPath DerivedData build-for-testing
+fi
 
 BUNDLE="${PRODUCTS}/Flight Deck.app/Contents/PlugIns/FlightDeckTests.xctest"
 APPMACOS="$PWD/${PRODUCTS}/Flight Deck.app/Contents/MacOS"
@@ -56,5 +70,81 @@ XCTEST="$(xcrun --find xctest)"
 # Contents/Frameworks joins the search path for FleetKit.framework, which the test bundle
 # links but does not embed. Without it `xctest` aborts at load with an @rpath failure that
 # reads like a missing symbol rather than a missing directory.
-DYLD_LIBRARY_PATH="$APPMACOS" DYLD_FRAMEWORK_PATH="$APPMACOS:$APPFRAMEWORKS" \
-  "$XCTEST" "$BUNDLE"
+run_xctest() {  # $1: an -XCTest selector, or empty for the whole bundle
+  if [ -n "$1" ]; then set -- -XCTest "$1"; else set --; fi
+  DYLD_LIBRARY_PATH="$APPMACOS" DYLD_FRAMEWORK_PATH="$APPMACOS:$APPFRAMEWORKS" \
+    "$XCTEST" "$@" "$BUNDLE"
+}
+
+# The class list comes from source, not the binary. It matched the executed set exactly
+# (342/342) when this was written. A class declared some other way (with an attribute on the same line,
+# or via a base class other than XCTestCase) would be silently skipped
+# by a sharded or filtered run, so keep test classes to the plain form.
+CLASSES="$(rg -o --no-filename '^\s*(?:final\s+)?class\s+(\w+)\s*:\s*XCTestCase' -r '$1' \
+  Tests/FlightDeckTests | sort -u)"
+
+if [ -n "${FD_TEST_FILTER:-}" ]; then
+  for sel in ${FD_TEST_FILTER//,/ }; do
+    cls="${sel%%/*}"; cls="${cls#FlightDeckTests.}"
+    printf '%s\n' "$CLASSES" | rg -qx "$cls" \
+      || { echo "error: FD_TEST_FILTER names unknown test class '$cls'" >&2; exit 2; }
+  done
+  run_xctest "$FD_TEST_FILTER"
+  exit
+fi
+
+if [ "$SHARDS" -le 1 ]; then
+  run_xctest ""
+  exit
+fi
+
+# Why shards: the suite's cost is wall-clock WAITING, not CPU. A serial run measured 107s
+# wall for ~2s of xctest CPU — the slow tests are negative-assertion polls and socket
+# deadlines (PairingWindowTests alone is 21s of sleeping). N processes cut the wall time
+# ~N-fold for no extra CPU, which matters on a box already at load 25. Classes are dealt
+# longest-first to the least-loaded shard using the last run's per-class times, so the
+# floor is the slowest single class (~21s), not the sum.
+LOGDIR="DerivedData/fd-test-shards"
+rm -rf "$LOGDIR"; mkdir -p "$LOGDIR"
+TIMINGS="$TIMINGS_CACHE"; [ -f "$TIMINGS" ] || TIMINGS="$TIMINGS_SEED"
+printf '%s\n' "$CLASSES" | python3 -c '
+import sys, os
+n, logdir, timings = int(sys.argv[1]), sys.argv[2], sys.argv[3]
+known = {}
+if os.path.exists(timings):
+    for line in open(timings):
+        c, t = line.rstrip("\n").split("\t"); known[c] = float(t)
+shards = [[0.0, []] for _ in range(n)]
+for c in sorted(sys.stdin.read().split(), key=lambda c: -known.get(c, 0.05)):
+    s = min(shards, key=lambda s: s[0]); s[0] += known.get(c, 0.05); s[1].append(c)
+for i, (_, cs) in enumerate(shards):
+    open(f"{logdir}/shard{i}.sel", "w").write(",".join(cs))
+' "$SHARDS" "$LOGDIR" "$TIMINGS"
+
+pids=()
+for ((i = 0; i < SHARDS; i++)); do
+  [ -s "$LOGDIR/shard$i.sel" ] || continue
+  run_xctest "$(cat "$LOGDIR/shard$i.sel")" > "$LOGDIR/shard$i.log" 2>&1 &
+  pids+=("$i:$!")
+done
+rc=0
+for entry in "${pids[@]}"; do
+  i="${entry%%:*}"
+  if ! wait "${entry#*:}"; then
+    rc=1
+    echo "=== shard $i FAILED ($LOGDIR/shard$i.log)" >&2
+    rg -N 'error:|\) failed \(' "$LOGDIR/shard$i.log" >&2 || true
+  fi
+done
+
+# Refresh the per-class timings the next run balances with, and report one total.
+cat "$LOGDIR"/shard*.log | python3 -c '
+import re, sys, collections
+t = collections.Counter(); n = 0
+for l in sys.stdin:
+    m = re.search(r"Test Case .-\[\w+\.(\w+) \w+\]. \w+ \(([\d.]+) seconds\)", l)
+    if m: t[m[1]] += float(m[2]); n += 1
+open(sys.argv[1], "w").write("".join(f"{c}\t{v:.3f}\n" for c, v in sorted(t.items())))
+print(f"Executed {n} test cases across all shards")
+' "$TIMINGS_CACHE"
+echo "** SHARDED UNIT RUN $([ "$rc" = 0 ] && echo PASSED || echo FAILED) ($SHARDS shards; logs in $LOGDIR) **"
