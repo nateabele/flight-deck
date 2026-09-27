@@ -45,6 +45,20 @@ final class ChangeSetValidatorTests: XCTestCase {
         let cs = ChangeSet(graphObservedAt: t0, ops: [new("n1"), new("n1")])
         XCTAssertEqual(ChangeSetValidator.validate(cs, against: graph).failureErrors, [.duplicateTempId("n1")])
     }
+    func testInProgressInGraphRequiresDeliveryEvenIfPreClaimsOpen() {
+        // Agent wrote pre: open for b2, but graph shows in_progress; needs delivery + must reject the mismatch
+        let cs = ChangeSet(graphObservedAt: t0, ops: [
+            .editBead(id: "b2", set: FieldSet(title: "x"), pre: .init(status: "open", assignee: nil), delivery: nil)])
+        let errors = ChangeSetValidator.validate(cs, against: graph).failureErrors
+        XCTAssert(errors.contains(where: { if case .missingDelivery("b2") = $0 { true } else { false } }))
+        XCTAssert(errors.contains(where: { if case .preconditionMismatch("b2") = $0 { true } else { false } }))
+    }
+    func testMatchingPreconditionIsValid() throws {
+        // Agent wrote pre: in_progress for b2, which matches the graph, and provided a delivery rating
+        let cs = ChangeSet(graphObservedAt: t0, ops: [
+            .editBead(id: "b2", set: FieldSet(title: "x"), pre: .init(status: "in_progress", assignee: "BlueFalcon"), delivery: Delivery(rating: .scopeChange, reason: "r"))])
+        XCTAssertNoThrow(try ChangeSetValidator.validate(cs, against: graph).get())
+    }
 }
 
 extension Result where Failure == ValidationErrors {
