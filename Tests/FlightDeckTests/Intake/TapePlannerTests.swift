@@ -147,6 +147,24 @@ final class TapePlannerTests: XCTestCase {
         ])
     }
 
+    func testNextFailsSafeToReviewWhenHeadIsNoLongerInTheRebuiltSequence() throws {
+        var cfg = try XCTUnwrap(PresetExpansion.config(for: .featurePlan, available: .defaults)) // polishCap 2
+        var tape = Tape()
+        while let round = TapePlanner.next(after: tape, config: cfg) {
+            tape.checkpoints.append(Checkpoint(id: tape.checkpoints.count + 1, stage: round.stage, round: round.round,
+                                                major: round.major, createdAt: Date()))
+        }
+        XCTAssertEqual(tape.head?.stage, .polish)
+        XCTAssertEqual(tape.head?.round, 2)
+
+        // The config is edited out from under the in-progress tape — polishCap lowered below
+        // the round the head already ran — so polish round 2 no longer appears anywhere in
+        // the rebuilt sequence. There's no sound round to resume with, so `next` deliberately
+        // fails safe to release review rather than guessing.
+        cfg.polishCap = 1
+        XCTAssertNil(TapePlanner.next(after: tape, config: cfg))
+    }
+
     // MARK: - Skipped stages
 
     func testRefineSkippedWithNoReviewer() throws {
