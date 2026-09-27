@@ -45,9 +45,12 @@ final class CLIRunner {
     private var fleet = FleetSnapshot.empty
     private var lastSeq = 0
     /// The socket reached `.ready`, or any frame arrived. Before that, a disconnect is an
-    /// unreachable Mac (69); after it, a dropped connection. `onReady` is needed as well as
-    /// frames: a caught-up `tail --since` resume is answered with an empty replay, so a quiet
-    /// fleet sends nothing at all, and judging by frames alone turned an app restart into 69.
+    /// unreachable Mac (69) — unless the agent's sandbox refused the `connect()` itself, which
+    /// `disconnected` checks first and reports as 77 whatever this says, because "start Flight
+    /// Deck" is the wrong advice for a tab that cannot reach a running one. After it, a dropped
+    /// connection. `onReady` is needed as well as frames: a caught-up `tail --since` resume is
+    /// answered with an empty replay, so a quiet fleet sends nothing at all, and judging by
+    /// frames alone turned an app restart into 69.
     private var reachedMac = false
     private var dispatched = false
     /// Every exit path goes through `finish`, and this makes a second one a no-op — a late
