@@ -1020,15 +1020,20 @@ ignores, so session reconcile never touches it), with the login-shell PATH and w
 `CLAUDECODE`/`CLAUDE_CODE_CHILD_SESSION`. It outlives the app. `IntakeRunner.run()` is a
 restartable loop over `tape.json`: its first write adopts the tape (`runnerPID`, a fresh
 `heartbeat`), then it folds in commands, runs the next round, writes the checkpoint, and
-repeats until the target is spent, a round pauses, ⏹ lands or the tape reaches review; its
-last write clears `runnerPID`/`heartbeat` so an exited runner never reads as alive. A command
-watcher polls alongside each round and moves the heartbeat every poll; the app treats a runner
+repeats until the target is spent, a round fails, ⏹ lands or the tape reaches review; its
+last write clears `runnerPID`/`heartbeat` so an exited runner never reads as alive. One runner
+per intake is enforced by the runner itself: it takes an exclusive, non-blocking `flock` on
+`<intake>/runner.lock` before anything else, and a second runner that finds it held returns
+without writing the tape (the kernel drops the lock when a runner dies, so a crash never leaves
+a stale one). A command watcher polls alongside each round and moves the heartbeat every
+poll; the app treats a runner
 as live only while its socket answers and the heartbeat is under 10 s old, and `reap`s a live
 socket whose tape has finished (fd-abduco keeps a `-n` daemon's socket until something
 attaches). `ensureRunning` never starts a second runner while one is live — two would write
 the same `tape.json`.
 
-*One writer per file*, so there are no locks:
+*One writer per file* — `runner.lock` above only keeps two runners apart, never the app and
+the runner:
 
 | File | Writer | What |
 |---|---|---|
@@ -1037,7 +1042,7 @@ the same `tape.json`.
 | `tape.json` | runner | status, target, checkpoints, `roundInProgress`, pending annotations, extensions, heartbeat |
 | `checkpoints/<n>/` | runner | `drafts/<i>.md`, `plan.md`, `changeset.json` — each round's output |
 | `runs/<stage>-<round>-<role>[-i]/` | runner | per child: `run.json` (pid, session id, start/finish, exit), `stdout`, `stderr`, `schema.json` |
-| `work/` | runner / integrator | scratch: `graph.json`, `plan.md` + `changes.json` for the integrator, `shadow/` for polish |
+| `work/` | runner / integrator | scratch: `graph.json`, `plan.md` + `changes.json` for the integrator, `shadow/` and `bv-*.json` for polish |
 
 Every JSON write is atomic. A checkpoint's files are written before the tape entry that points
 at them, so a crash leaves either the whole round recorded or none of it, and a rerun reusing
@@ -1052,48 +1057,78 @@ process-group leader (`SystemCommandRunner`, `posix_spawn` + `POSIX_SPAWN_SETPGR
 cancellation `killpg`s the whole subtree, and nothing from the round is checkpointed. A fresh
 ▶/⏭/⏩ is the only thing that clears `.failed`/`.stopped`; a runner relaunched without one
 won't quietly retry a failure or undo a ⏹. ✎ annotations queue on the tape and are consumed by
-the next refine round, recorded in that round's record. There is no ⏮ (rewind) yet — see
-FOLLOWUPS.
+the next round of any stage — every stage's prompt carries them — and recorded in that round's
+record. There is no ⏮ (rewind) yet — see FOLLOWUPS.
 
-*Crash and quit.* Quitting FD doesn't touch the runner. If the runner itself died mid-round,
-the tape still has `roundInProgress`: the next runner kills any child whose `run.json` has a
-pid but no `finished` (they were group leaders, so the parent's death didn't take them), then
-reruns that round from the last checkpoint, noting "rerun after interruption" on it. At launch,
-`IntakeService` respawns the runner for a `.shaping` intake whose tape is `.running` but whose
-runner isn't live.
+*Crash, quit and signals.* Quitting FD doesn't touch the runner. If the runner itself died
+mid-round, the tape still has `roundInProgress`: the next runner kills any child whose
+`run.json` has a pid but no `finished` (they were group leaders, so the parent's death didn't
+take them), then reruns that round from the last checkpoint, noting "rerun after interruption"
+on it. A SIGTERM/SIGHUP/SIGINT (logout, reboot, a daemon reap) is **not** a ⏹: the runner
+cancels its round, `killpg`s the children, and writes nothing terminal — the tape stays
+`.running` with `roundInProgress` kept and only `heartbeat`/`runnerPID` cleared, so the app
+reads the runner as dead and respawns it, and the round reruns the same way. `.stopped` is
+written only for a ⏹ read from `commands.jsonl`. On every clock tick — and once at launch —
+`IntakeService` respawns the runner for a `.shaping` intake with unfinished work (tape
+`.running`, `.idle` with a target, or commands the runner hasn't acked) whose runner isn't
+live. The controller builds the runner's environment from the login-shell PATH prewarmed off
+the main actor; until that lookup has landed it spawns nothing (`notReady`) and the next tick
+retries, rather than blocking the main actor on a login shell.
 
 *Round execution* (`RoundExecutor`, no tape writes of its own — it hands back a checkpoint or a
 diagnosis). Drafters run in parallel; synthesis and refine have a seat propose `ProposedChange`s
 and the **integrator** apply them to `work/plan.md`; encode, polish, fresh-eyes and dedup each
 return a whole change set in the triage schema. Each seat is one headless `codex exec --json` /
 `claude -p` turn with an explicit model and effort (resumes included), a JSON schema, and its
-own `runs/` directory. Access: every seat but the integrator is **read-only** on the repo and on
-`br` (codex `-s read-only`; claude `dontAsk` with the read allow list, the `br` write-verb deny
-list and `--setting-sources local --strict-mcp-config`). The integrator alone may write, and only
-in `work/`: codex `-s workspace-write` with cwd = `work/`, claude `acceptEdits` with
-`Read Edit Write` and `--add-dir <work>`, never the project as cwd. The reviewer is a **fresh
-session every refine round**, so it never anchors on its own earlier verdicts. An integrator that
-reports changes but leaves `plan.md` byte-identical pauses the round as `invalidOutput`. A change
-set gets FD's own `graphObservedAt` (taken before the graph read), is validated against the live
-graph, and on failure the same session is resumed once with the errors listed; a second failure
-pauses. Polish rounds get a `ShadowGraph` under `work/shadow/` — a `sqlite3` snapshot of
-`.beads` with the proposed change set applied — so the polisher can run `bv` against the graph
-as it would be after release; a shadow that fails to build is recorded and the round runs
-without it.
+own `runs/` directory. Isolation, on every seat, fresh and resumed (`HarnessCommand`): claude
+runs with `--restricted --strict-mcp-config` (no user/project/local settings files, so no
+standing Bash allows, and no MCP servers) and `--tools` naming the only built-ins that exist;
+because `--restricted` also drops the settings file's `env` block (this machine's
+`ANTHROPIC_BASE_URL` proxy), `ClaudeUserEnv` merges that block back under the child's
+environment (never PATH or HOME). Codex runs with `--ignore-user-config --ignore-rules
+--disable hooks` (no `config.toml` MCP servers such as qartez, no execpolicy allows, no
+hooks), with the config's `service_tier` alone read back and passed as `-c service_tier=…`
+(`CodexUserConfig`). Access: every seat but the integrator is **read-only** on the repo and on
+`br` (codex `-s read-only`; claude `dontAsk` with the read allow list and the `br` write-verb
+deny list). The integrator alone may write, and only in `work/`: codex `-s workspace-write`
+with cwd = `work/` and `codexWriteSandbox` (no `$TMPDIR`, no `/tmp`, no configured
+`writable_roots`), claude `acceptEdits` with `--tools`/`--allowedTools Read Edit Write`,
+`Bash WebFetch WebSearch Task NotebookEdit` denied and `--add-dir <work>`, never the project as
+cwd. The reviewer is a **fresh session every refine round**, so it never anchors on its own
+earlier verdicts. An integrator that reports changes but leaves `plan.md` byte-identical fails
+the round as `invalidOutput`. A change
+set gets FD's own `graphObservedAt` (taken before the graph read), is validated, and on failure
+the same session is resumed once with the errors listed; a second failure fails the round.
+Encode validates against a fresh graph read and saves it as the checkpoint's `graph.json`;
+polish, fresh-eyes and dedup validate against **that** snapshot, carried forward in every
+checkpoint since (a fresh read only if no checkpoint has one) — a bead that moved after encode
+is drift, which release rechecks, not something polish should pause on. Polish rounds get a
+`ShadowGraph` under `work/shadow/` — a `sqlite3` snapshot of `.beads` with the proposed change
+set applied — and FD itself runs `bv --robot-*` against it into `work/bv-*.json`, which the
+polish prompts point the seat at; no agent runs `bv` (a `Bash(bv …)` allow is a write path, so
+every seat's allow list omits it). A shadow that fails to build is recorded and the round runs
+without it. (This wiring lands from the sibling ShadowGraph branch.)
 
 *Failure policy* (spec §6.3). A drafter that fails gets its slot's fallback once (recorded
 *substituted*), and without one the round goes on without that draft (recorded *failed*); the
-round pauses only if no draft survives. Every other role pauses the tape with a `Diagnosis`
+round fails only if no draft survives. Every other role fails the round with a `Diagnosis`
 (`authExpired`, `rateLimited`, `timeout`, `invalidOutput`, `harnessError`), each with the action
-the shaping view shows — never a silent substitution.
+the shaping view shows — never a silent substitution. A failed round leaves the tape `.failed`
+with that diagnosis; only a fresh ▶/⏭/⏩ (or Retry) runs it again.
 
 *The app side.* `IntakeService` watches every `.shaping` intake's `tape.json` on the shared
 `WatchClock` (reloading only when its mtime moves) and publishes it to the shaping view:
 `TapeStrip`, the transport bar, the status line, the pause banner, round cards, and a plan viewer
-(Plan / Diff vs previous / Change set). When the tape reaches review it copies the last
-checkpoint's `changeset.json` into `intake.json`, moves the intake to `.review`, and reaps the
-runner. A `.shaping` intake whose tape is paused, failed, stopped or idle counts toward the
-project's "needs you" rollup; Discard while shaping sends ⏹, reaps, then discards.
+(Plan / Diff vs previous / Change set). A tape change that is only the runner's
+`heartbeat`/`runnerPID` is not republished (it would re-render every observer each second of a
+run); the latest read is kept for the liveness check instead. When the tape reaches review it
+copies the latest checkpoint's `changeset.json` into `intake.json` and that checkpoint's
+`graph.json` into `triage/graph.json` (release review measures drift from, and re-validates
+against, the graph the change set was validated against), moves the intake to `.review`, and
+reaps the runner. A `.shaping` intake counts toward the project's "needs you" rollup when its
+tape is paused, failed, stopped, or idle with **no** target — and in each case only with no
+commands pending (an unacked command is queued work, not a wait on the human); idle with a
+target is a runner about to start. Discard while shaping sends ⏹, reaps, then discards.
 
 **Held edges.** An edge from an *existing* bead onto a *new* one is always held — written last
 in a release, after every create, edit and reopen has landed and been rechecked — because
