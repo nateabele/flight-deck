@@ -72,13 +72,14 @@ final class IntakeDeliveryTests: XCTestCase {
         let intakeID = UUID()
 
         let warnings = await delivery.deliver(
-            [.reclaim(bead: "b1", agent: "BlueFalcon")], project: "/tmp/proj", intakeID: intakeID)
+            [.reclaim(bead: "b1", agent: "BlueFalcon", reason: "why")], project: "/tmp/proj", intakeID: intakeID)
 
+        // A reclaim needs no FD Agent-Mail identity, so no `am macros start-session` runs first.
         XCTAssertEqual(warnings, [])
-        XCTAssertEqual(runner.argv[1], [
-            "br", "update", "b1", "--status", "open", "--assignee", "", "--actor", "flightdeck-intake:\(intakeID.uuidString)",
+        XCTAssertEqual(runner.argv, [
+            ["br", "update", "b1", "--status", "open", "--assignee", "", "--actor", "flightdeck-intake:\(intakeID.uuidString)"],
+            ["am", "file_reservations", "release", "/tmp/proj", "BlueFalcon"],
         ])
-        XCTAssertEqual(runner.argv[2], ["am", "file_reservations", "release", "/tmp/proj", "BlueFalcon"])
     }
 
     func testReservationReleaseFailureIsAWarningNotAnAbort() async {
@@ -87,10 +88,73 @@ final class IntakeDeliveryTests: XCTestCase {
         let delivery = makeDelivery(runner: runner)
 
         let warnings = await delivery.deliver(
-            [.reclaim(bead: "b1", agent: "BlueFalcon")], project: "/tmp/proj", intakeID: UUID())
+            [.reclaim(bead: "b1", agent: "BlueFalcon", reason: "why")], project: "/tmp/proj", intakeID: UUID())
 
         XCTAssertEqual(warnings.count, 1)
         XCTAssertTrue(warnings[0].contains("cannot release another agent's reservations"), warnings[0])
+    }
+
+    func testFailedReclaimSkipsReservationReleaseAndWarns() async {
+        let runner = FakeRunner()
+        runner.responses["br update"] = ("issue is locked", 1)
+        let delivery = makeDelivery(runner: runner)
+
+        let warnings = await delivery.deliver(
+            [.reclaim(bead: "b1", agent: "BlueFalcon", reason: "why")], project: "/tmp/proj", intakeID: UUID())
+
+        XCTAssertEqual(warnings.count, 1)
+        XCTAssertTrue(warnings[0].contains("issue is locked"), warnings[0])
+        // Nothing to release if the bead was never actually reclaimed.
+        XCTAssertFalse(runner.argv.contains { $0.first == "am" && $0.dropFirst().first == "file_reservations" })
+    }
+
+    func testBootFailureWarnsPerMailButStillRunsInjectAndReclaim() async {
+        let runner = FakeRunner()
+        runner.responses["am macros"] = ("no such project", 1)
+        var injected = false
+        let delivery = makeDelivery(runner: runner) { _, _, _ in injected = true; return true }
+        let intakeID = UUID()
+
+        let warnings = await delivery.deliver([
+            .reclaim(bead: "b1", agent: "BlueFalcon", reason: "why"),
+            .inject(agent: "BlueFalcon", bead: "b1", text: "stop"),
+            .mail(to: "BlueFalcon", bead: "b1", subject: "s", body: "b", urgent: false),
+        ], project: "/tmp/proj", intakeID: intakeID)
+
+        XCTAssertTrue(injected, "inject must not depend on FD's Agent-Mail identity")
+        XCTAssertTrue(runner.argv.contains { $0.first == "br" }, "reclaim must not depend on FD's Agent-Mail identity")
+        XCTAssertEqual(warnings.count, 1)
+        XCTAssertTrue(warnings[0].contains("BlueFalcon"), warnings[0])
+    }
+
+    func testInjectAfterAFailedReclaimGetsANeutralNoticeInstead() async {
+        let runner = FakeRunner()
+        runner.responses["br update"] = ("issue is locked", 1)
+        var seenText: String?
+        let delivery = makeDelivery(runner: runner) { _, text, _ in seenText = text; return true }
+
+        _ = await delivery.deliver([
+            .reclaim(bead: "b1", agent: "BlueFalcon", reason: "why"),
+            .inject(agent: "BlueFalcon", bead: "b1", text: "Stop work on b1: why. It has been reclaimed and returned to open."),
+        ], project: "/tmp/proj", intakeID: UUID())
+
+        let text = try! XCTUnwrap(seenText)
+        XCTAssertFalse(text.contains("has been reclaimed"), text)
+        XCTAssertTrue(text.contains("could not reclaim"), text)
+        XCTAssertTrue(text.hasPrefix("Stop work on b1"), text)
+    }
+
+    func testInjectAfterASuccessfulReclaimKeepsThePlannedText() async {
+        let runner = FakeRunner()
+        var seenText: String?
+        let delivery = makeDelivery(runner: runner) { _, text, _ in seenText = text; return true }
+
+        _ = await delivery.deliver([
+            .reclaim(bead: "b1", agent: "BlueFalcon", reason: "why"),
+            .inject(agent: "BlueFalcon", bead: "b1", text: "Stop work on b1: why. It has been reclaimed and returned to open."),
+        ], project: "/tmp/proj", intakeID: UUID())
+
+        XCTAssertEqual(seenText, "Stop work on b1: why. It has been reclaimed and returned to open.")
     }
 
     func testFailedMailProducesAWarningQuotingFirstLine() async {
