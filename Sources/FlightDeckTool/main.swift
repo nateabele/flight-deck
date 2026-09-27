@@ -82,11 +82,28 @@ if case .intakeRun(let id, let root) = invocation.command {
     // blocking that thread deadlocks forever rather than letting the Task ever run. `exit(_:)`
     // never returns, so nothing after `dispatchMain()` executes and there is no fall-through
     // into the socket/transport code below.
-    Task {
+    //
+    // `runTask` is boxed in a class rather than a plain local `var` so `RunnerSignals.install`'s
+    // closure can be handed a stable reference before the Task it cancels exists yet — the
+    // closure only runs later, once a real signal arrives, by which point `box.task` is set.
+    final class TaskBox { var task: Task<Void, Never>? }
+    let box = TaskBox()
+    // fd-abduco / the app terminates this process with one of these when the intake is
+    // stopped or the app quits. Ignored and rewired to cancellation rather than left at their
+    // default action, so `RoundExecutor`'s children — each its own process-group leader — get
+    // `killpg`'d by the same cancellation path ⏹ already uses, instead of being orphaned to
+    // keep spending tokens with nothing left alive to reap them.
+    let signalSources = RunnerSignals.install { box.task?.cancel() }
+    box.task = Task {
         let status = await runner.run()
         exit(status == .failed ? 1 : 0)
     }
-    dispatchMain()
+    // `withExtendedLifetime` rather than a bare unused `let`: `signalSources` is never read
+    // again, only held — a `DispatchSourceSignal` with nothing retaining it is released, and
+    // its handler stops firing, before it ever gets the chance to.
+    withExtendedLifetime(signalSources) {
+        dispatchMain()
+    }
 }
 
 // `--socket` → `$FLIGHT_DECK_CONTROL_SOCKET` → `$FLIGHT_DECK_STATE_DIR/control.sock` → the
