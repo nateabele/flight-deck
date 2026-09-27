@@ -978,11 +978,14 @@ project with no intakes never conjures the directory into existence. A `.triagin
 is rewritten `.interrupted` before anything is published, so `intake.json` always describes
 what actually happened, and Retry is the recovery path.
 
-**FD is the sole writer of `br` on an intake's behalf; `br` never sees the change set before
-release**, except for beads a polish round needs to work against at Feature/Full plan
-fidelity, which are materialized as `deferred` and labelled `fd-intake:<id>` so a post-round
-diff can catch (and revert) anything outside that label set. Every other op — edits, reopens,
-edges — is staged in FD's own `intake.json` only, until release.
+**FD is the sole writer of `br` on an intake's behalf; `br` never sees the change set at all
+before release.** Every op — creates, edits, reopens, edges — is staged in FD's own
+`intake.json` only, until `BeadWriter` applies the release. (Spec §5.3 plans an exception for
+Feature/Full plan fidelity: materializing the `createBead` ops early, as `deferred` beads
+labelled `fd-intake:<id>`, so a polish round has real beads to work against, with a
+post-round diff reverting anything outside that label set. That materialization is **not
+built** — it is next-plan scope, same as the round engine it exists to serve — so today
+nothing is written before release regardless of fidelity.)
 
 **Held edges.** An edge from an *existing* bead onto a *new* one is always held (never
 written before release, even when other new-bead ops are materialized early), because
@@ -992,17 +995,22 @@ value a triage or encoder agent put in the JSON, the same "recompute, don't trus
 rule `ChangeSetValidator` applies to every other invariant it checks (schema, referenced ids
 existing, no cycles).
 
-**Release order** (`ApplyPlanner.plan`): creates, then un-defer the materialized beads, then
-new→\* edges, then edits/reopens/follow-ups, and finally existing→new edges (the ones that
-were held) — each step tagged `--actor flightdeck-intake:<id>`, and `br sync` run once at the
-end so the JSONL export matches what was just written. Before every op that touches an
-existing bead, FD rechecks that bead's current state against the op's `pre` precondition
-(`DriftClassifier`) — this is the release review's drift check, re-run rather than trusted
-from when the review sheet was last loaded, because the window between review and release is
-exactly where `br update`'s missing `--if-version` (see `docs/FOLLOWUPS.md`) could bite. A
-`br` command failing partway through a release stops the apply; the intake is left
-`.partiallyReleased` with the ops that did land recorded, and the review reopens on what
-remains — there is no automatic rollback, since another agent may already be acting on a bead
+**Release order** (`ApplyPlanner.plan`, run by `BeadWriter`): creates (`createBead` ops and
+each `followUp`'s new bead together), then non-held edges (new→\* edges, including a
+`followUp`'s own `related` edge onto the bead it follows up), then edits, then reopens, and
+finally the held edges — existing→new edges withheld until now precisely because they are
+the ones that would block an existing bead on a bead nobody has reviewed yet. Every edit,
+reopen, and held edge is preceded by its own `recheck` step, re-reading that bead and
+refusing to proceed if it no longer matches the op's `pre` precondition (`DriftClassifier`'s
+review-time check, re-run at write time rather than trusted from when the review sheet was
+last loaded) — the window between that recheck and the write is exactly where `br update`'s
+missing `--if-version` (see `docs/FOLLOWUPS.md`) could still bite. Every write carries
+`--actor flightdeck-intake:<id>`, and `br sync --flush-only` runs once at the end, tagged the
+same way, so the JSONL export matches what was just written. A `br` command failing partway
+through a release stops the apply right there — `BeadWriter` runs steps in order and stops at
+the first failure or recheck mismatch; the intake is left `.partiallyReleased` with the ops
+that did land recorded, and the review reopens on what remains — there is no automatic
+rollback, since another agent may already be acting on a bead
 that was written.
 
 **The delivery ladder** (`DeliveryPlanner` → `IntakeDelivery`) tells a bead's current holder
