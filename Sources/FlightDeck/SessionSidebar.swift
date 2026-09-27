@@ -377,9 +377,18 @@ struct SessionSidebar: View {
     var body: some View {
         let conflicted = store.conflictedSessionIDs
         let mismatched = store.accountMismatchedSessionIDs
-        // The `List`'s one `UUID?` selection now routes to either a project or a session,
-        // since `ProjectHeaderRow` carries a `.tag(repo.id)` alongside `SessionRow`'s
-        // `.tag(session.id)` — see `SidebarSelection`.
+        // The `List`'s one `UUID?` selection routes to either a project or a session — see
+        // `SidebarSelection` — but only `SessionRow`'s `.tag(session.id)` reaches it natively.
+        // `ProjectHeaderRow` was tagged the same way through Task 2's first pass, and a real
+        // GUI run (`testProjectHeadingsReorderByDragging`) caught what that breaks: once a
+        // header is selectable, `NSTableView` claims its mouse-down for the table's own
+        // selection tracking regardless of which zone (chevron or not) it landed in, so by the
+        // time `SidebarInputMonitor`'s post-press click-vs-drag decision runs, the button reads
+        // as still held and it declines to fire either `toggleRow` or `selectRow` — a chevron
+        // click silently opened the project view instead of collapsing the row. Headers are
+        // `.selectionDisabled()` below for that reason; `store.selectProject` is reached solely
+        // through the monitor's `selectRow` now, and `ProjectHeaderRow` draws its own selection
+        // highlight since the List no longer will.
         //
         // The inner `#if DEBUG` tag call is TEMPORARY DIAGNOSTIC INSTRUMENTATION from the
         // double-click session-swap investigation (`.superpowers/sdd/quiet-foraging-babbage/
@@ -413,7 +422,11 @@ struct SessionSidebar: View {
                         ProjectHeaderRow(store: store, repo: repo) {
                             close(projectAt: projectID)
                         }
-                        .tag(repo.id)
+                        // See the `selectionBinding` comment above: a header must not be
+                        // selectable, or its own mouse-down starves the click-vs-drag decision
+                        // that makes the chevron collapse it. `ProjectHeaderRow` draws its own
+                        // selected look instead of relying on the highlight this would enable.
+                        .selectionDisabled()
                     }
 
                 case .session(let sessionID, let projectID):
@@ -494,10 +507,10 @@ struct SessionSidebar: View {
                 store.setCollapsed(!(store.repos.first { $0.id == id }?.isCollapsed ?? false),
                                    forProjectAt: id)
             },
-            // Fallback for when `NSTableView` refuses the click itself — e.g. while a drag is
-            // being set up. `toggleRow`'s guard above and this one both drop anything that is
-            // not `case .project`, since a click on a session row is handled by `List`'s own
-            // selection binding.
+            // The ONLY way a project header gets selected — headers are `.selectionDisabled()`
+            // above, so `List`'s own selection binding never sees one. `toggleRow`'s guard above
+            // and this one both drop anything that is not `case .project`, since a click on a
+            // session row is handled by `List`'s own selection binding instead.
             selectRow: { index in
                 guard index >= 0, index < store.sidebarRows.count else { return }
                 guard case .project(let id) = store.sidebarRows[index] else { return }

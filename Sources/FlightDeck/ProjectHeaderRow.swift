@@ -21,6 +21,18 @@ struct ProjectHeaderRow: View {
     // `flywheelStatus`'s doc comment for why this exists at all.
     @State private var probedFlywheelStatus: FlywheelStatus?
 
+    /// Whether this row should draw as the selected project. A pure static function rather than
+    /// a computed property so `SidebarSelectionTests` can assert it without standing up a
+    /// `SessionStore` or rendering SwiftUI — see `SessionSidebar`'s doc comment for why this row
+    /// can no longer rely on `List`'s own selection highlight to answer the same question.
+    static func isSelected(repoID: UUID, selectedProjectID: UUID?) -> Bool {
+        repoID == selectedProjectID
+    }
+
+    private var isSelected: Bool {
+        Self.isSelected(repoID: repo.id, selectedProjectID: store.selectedProjectID)
+    }
+
     var body: some View {
         HStack(spacing: 4) {
             // Nothing in this row toggles anything, and that is load-bearing: a `Button` — or
@@ -40,12 +52,19 @@ struct ProjectHeaderRow: View {
             // loop, where no local monitor can see it. That file's doc comment has the
             // measurements. The upshot here is that only a click landing in the chevron's zone
             // (`SidebarClickIntent.chevronZoneWidth`, measured from the row's leading edge)
-            // collapses the row; a click anywhere else on it selects the project instead — opens
-            // the per-project view, wired in a later task — and a drag anywhere on the row still
-            // reorders. Finder and the Xcode navigator toggle from the whole label, so that
-            // precedent no longer applies: this row now has two things a click can mean, not
-            // one, and only geometry (not a view Finder's chevron has and this one doesn't) can
-            // tell them apart.
+            // collapses the row; a click anywhere else on it selects the project instead —
+            // `SidebarInputMonitor.selectRow`, wired to `store.selectProject`, opens the
+            // per-project view — and a drag anywhere on the row still reorders. Finder and the
+            // Xcode navigator toggle from the whole label, so that precedent no longer applies:
+            // this row now has two things a click can mean, not one, and only geometry (not a
+            // view Finder's chevron has and this one doesn't) can tell them apart.
+            //
+            // This row is also NOT in `List`'s own selection any more (`.selectionDisabled()`
+            // below): a real GUI run proved a selectable header lets `NSTableView` claim its own
+            // mouse-down for row-selection tracking regardless of chevron zone, which starves the
+            // click-vs-drag decision above and silently opens the project view on what should
+            // have been a collapse. Since the List will not draw a highlight for a row it never
+            // selects, `isSelected` below draws one by hand instead.
             //
             // For VoiceOver this row is not actuatable, and the context menu's Expand/Collapse
             // is the accessible route to collapsing a project.
@@ -61,7 +80,7 @@ struct ProjectHeaderRow: View {
             // an observation of VoiceOver.
             Image(systemName: "chevron.right")
                 .imageScale(.small)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(isSelected ? .white : .secondary)
                 .rotationEffect(.degrees(repo.isCollapsed ? 0 : 90))
                 // Invisible on an empty project, but still occupying its space: collapsing the
                 // layout instead would knock every project name out of alignment as sessions
@@ -89,7 +108,7 @@ struct ProjectHeaderRow: View {
 
             Text(repo.displayName)
                 .font(.subheadline.weight(.semibold))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(isSelected ? .white : .secondary)
                 .lineLimit(1)
                 .truncationMode(.middle)
 
@@ -123,6 +142,17 @@ struct ProjectHeaderRow: View {
                 .help("Close Project")
                 .accessibilityLabel("Close Project")
                 .accessibilityIdentifier("close-project")
+            }
+        }
+        // Hand-drawn selection, now that the row is `.selectionDisabled()` and `List` will not
+        // draw one of its own — see `isSelected`'s doc comment. `.selection` is the SDK's own
+        // `ShapeStyle` for the system's selection tint, so this tracks light/dark and
+        // window-active/inactive the same way a natively-selected row would, without hand-coding
+        // a color. Conditioned with `if` rather than an always-present clear fill, so an
+        // unselected row draws nothing extra at all.
+        .background {
+            if isSelected {
+                RoundedRectangle(cornerRadius: 6, style: .continuous).fill(.selection)
             }
         }
         // `.contentShape` stays — it is what makes hover cover the whole row rather than just

@@ -43,4 +43,20 @@ final class SidebarSelectionTests: XCTestCase {
         store.selectedSessionID = UUID()
         XCTAssertNil(store.selectedProjectID)
     }
+
+    /// Fix round 3: `ProjectHeaderRow` lost its `List` selection highlight (see
+    /// `SessionSidebar`'s `selectionBinding` comment for why) and now draws its own from this
+    /// pure helper instead. Routed through `store.selectProject` rather than calling the helper
+    /// directly, so this also covers the wiring — not just the equality check underneath it.
+    @MainActor func testSelectingProjectDrivesTheHeaderRowsSelectedState() {
+        let store = SessionStore(provider: nil, persistence: nil)
+        let project = UUID()
+        let other = UUID()
+        XCTAssertFalse(ProjectHeaderRow.isSelected(repoID: project, selectedProjectID: store.selectedProjectID))
+
+        store.selectProject(project)
+
+        XCTAssertTrue(ProjectHeaderRow.isSelected(repoID: project, selectedProjectID: store.selectedProjectID))
+        XCTAssertFalse(ProjectHeaderRow.isSelected(repoID: other, selectedProjectID: store.selectedProjectID))
+    }
 }

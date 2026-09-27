@@ -198,7 +198,12 @@ final class SidebarInputMonitor {
     /// single click inside the header's chevron zone; see `SidebarClickIntent.chevronZoneWidth`.
     var toggleRow: ((Int) -> Void)?
     /// Fires for a completed single click on a row outside the chevron zone — a header click that
-    /// did not collapse it. Not yet wired to anything; the caller decides what "select" means.
+    /// did not collapse it. This is the ONLY way `SessionSidebar` selects a project header today:
+    /// headers are `.selectionDisabled()` in the `List`, because making one natively selectable
+    /// let `NSTableView` claim its mouse-down for the table's own selection tracking regardless of
+    /// chevron zone, starving this file's own click-vs-drag decision (see `SessionSidebar`'s
+    /// `selectionBinding` comment for the GUI evidence). The caller still decides what "select"
+    /// means; this file has no model of what a row is.
     var selectRow: ((Int) -> Void)?
     /// The identity of the row at this table index — `SidebarRow.id`, supplied by the caller for
     /// the same reason as above. Click-to-collapse decides a press-duration after it began, and
