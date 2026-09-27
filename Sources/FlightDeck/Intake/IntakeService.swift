@@ -254,8 +254,52 @@ final class IntakeService: ObservableObject {
         guard var i = intake(id), i.state == .needsAnswers, !i.exchanges.isEmpty else { return }
         i.exchanges[i.exchanges.count - 1].answers = answers
         save(i)
+        clearAnswerDrafts(id)
         let questions = i.exchanges[i.exchanges.count - 1].questions
         start(id) { await $0.runTriage(id, turn: .answers(questions: questions, answers: answers)) }
+    }
+
+    // MARK: - Answer drafts
+
+    /// What `answer-drafts.json` holds: the unsent answers, and the exact questions they were
+    /// typed against — so a follow-up round with the same number of questions can never pick
+    /// up drafts written for different ones.
+    private struct AnswerDrafts: Codable {
+        var questions: [String]
+        var answers: [String]
+    }
+
+    private func answerDraftsURL(_ id: UUID) -> URL {
+        store.directory(for: id).appendingPathComponent("answer-drafts.json")
+    }
+
+    /// Persists the open round's unsent answers. `intake.json` already survives a relaunch in
+    /// every state; the drafts were `@State` alone, so a release swap mid-answer threw away
+    /// whatever had been typed. Refused unless `questions` is still the open round: a debounced
+    /// write landing after Send would otherwise resurrect drafts for a round already answered.
+    func saveAnswerDrafts(_ id: UUID, questions: [String], answers: [String]) {
+        guard let i = intake(id), i.state == .needsAnswers, let open = i.exchanges.last,
+              open.answers == nil, open.questions == questions, answers.count == questions.count
+        else { return }
+        guard let data = try? JSONEncoder().encode(AnswerDrafts(questions: questions, answers: answers)) else { return }
+        try? data.write(to: answerDraftsURL(id), options: .atomic)
+    }
+
+    /// The drafts saved against exactly `questions`, or nil. Drafts for any other question set
+    /// are stale — a newer round replaced them — so they're deleted rather than left to match
+    /// by accident later.
+    func answerDrafts(_ id: UUID, questions: [String]) -> [String]? {
+        guard let data = try? Data(contentsOf: answerDraftsURL(id)),
+              let drafts = try? JSONDecoder().decode(AnswerDrafts.self, from: data) else { return nil }
+        guard drafts.questions == questions, drafts.answers.count == questions.count else {
+            clearAnswerDrafts(id)
+            return nil
+        }
+        return drafts.answers
+    }
+
+    private func clearAnswerDrafts(_ id: UUID) {
+        try? FileManager.default.removeItem(at: answerDraftsURL(id))
     }
 
     /// Bead encodes (or goes straight to review); anything else starts planning rounds with the

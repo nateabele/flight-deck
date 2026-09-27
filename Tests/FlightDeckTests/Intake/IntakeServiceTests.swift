@@ -130,6 +130,41 @@ final class IntakeServiceTests: XCTestCase {
         XCTAssertEqual(try IntakeStore(root: root).load(id: id).state, .needsAnswers)
     }
 
+    /// Unsent answers survive a relaunch (a release swap mid-answer) by coming back through a
+    /// fresh service on the same root — and only against the exact questions they were typed for.
+    func testAnswerDraftsSurviveAFreshServiceOnlyForTheSameQuestions() throws {
+        let questions = ["Which README?", "Keep the badge?"]
+        var seeded = Intake(projectPath: "/p", intent: "Add a note")
+        seeded.state = .needsAnswers
+        seeded.exchanges = [TriageExchange(questions: questions)]
+        try IntakeStore(root: root).save(seeded)
+
+        let first = makeService(headless: FakeHeadlessRunner([]), br: MutableRunner([:]))
+        first.saveAnswerDrafts(seeded.id, questions: questions, answers: ["The root one", "Ye"])
+
+        let relaunched = makeService(headless: FakeHeadlessRunner([]), br: MutableRunner([:]))
+        XCTAssertEqual(relaunched.answerDrafts(seeded.id, questions: questions), ["The root one", "Ye"])
+        XCTAssertNil(relaunched.answerDrafts(seeded.id, questions: ["Which README?", "Something else?"]))
+        // A mismatch deletes the stale file, so the original questions no longer match either.
+        XCTAssertNil(relaunched.answerDrafts(seeded.id, questions: questions))
+    }
+
+    /// Sending the round deletes its drafts, and a debounced save arriving after Send is refused
+    /// — otherwise the answered round's drafts would reappear on the next launch.
+    func testSendingARoundClearsItsDraftsAndRefusesLateSaves() async {
+        let svc = makeService(headless: FakeHeadlessRunner([Self.codex(Self.questions), Self.codex(Self.sketch)]),
+                              br: MutableRunner(Self.brReplies(Self.openGraph)))
+        let id = await capture(svc)
+        svc.saveAnswerDrafts(id, questions: ["Which README?"], answers: ["The root one"])
+        XCTAssertEqual(svc.answerDrafts(id, questions: ["Which README?"]), ["The root one"])
+        svc.answer(id, answers: ["The root one"])
+        svc.saveAnswerDrafts(id, questions: ["Which README?"], answers: ["late"])
+        await svc.task(for: id)?.value
+        XCTAssertNil(svc.answerDrafts(id, questions: ["Which README?"]))
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: IntakeStore(root: root).directory(for: id).appendingPathComponent("answer-drafts.json").path))
+    }
+
     func testAnswerResumesSameSessionWithModelPinned() async {
         let headless = FakeHeadlessRunner([Self.codex(Self.questions), Self.codex(Self.sketch)])
         let svc = makeService(headless: headless, br: MutableRunner(Self.brReplies(Self.openGraph)))

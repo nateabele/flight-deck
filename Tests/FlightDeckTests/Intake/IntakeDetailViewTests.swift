@@ -38,4 +38,27 @@ final class IntakeDetailViewTests: XCTestCase {
             XCTAssertEqual(IntakeDetailView.closeAction(for: state), label, "\(state)")
         }
     }
+
+    /// The trailing default button per state, title-cased (HIG). Triage, shaping and release
+    /// have nothing to press — shaping's transport lives in `ShapingView` — and released
+    /// intakes only offer Dismiss.
+    func testPrimaryActionPerState() {
+        let expected: [IntakeState: String?] = [
+            .needsAnswers: "Send Answers", .awaitingChoice: "Continue", .parked: "Continue",
+            .review: "Open Release Review", .failed: "Retry", .interrupted: "Retry",
+            .triaging: nil, .shaping: nil, .releasing: nil, .released: nil, .partiallyReleased: nil, .discarded: nil,
+        ]
+        for (state, title) in expected {
+            XCTAssertEqual(IntakeDetailView.primaryAction(for: state, preset: .bead), title, "\(state)")
+        }
+        XCTAssertEqual(IntakeDetailView.primaryAction(for: .awaitingChoice, preset: .featurePlan), "Start Planning")
+        XCTAssertEqual(IntakeDetailView.primaryAction(for: .parked, preset: .sketch), "Start Planning")
+    }
+
+    func testRoundLabelNumbersByExchangePosition() {
+        XCTAssertEqual(IntakeDetailView.roundLabel(index: 0, exchange: TriageExchange(questions: ["a", "b", "c"], answers: ["1", "2", "3"])),
+                       "Round 1 · 3 questions")
+        XCTAssertEqual(IntakeDetailView.roundLabel(index: 1, exchange: TriageExchange(questions: ["a"], answers: ["1"])),
+                       "Round 2 · 1 question")
+    }
 }
