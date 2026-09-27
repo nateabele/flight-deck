@@ -964,8 +964,14 @@ knows nothing of `SessionStore`, notifications, or subprocesses — `Intake`, `C
 thing that actually shells out — to a headless `codex`/`claude` for triage
 (`HeadlessRunner`), to `br`/`bv`/`am` for the graph and delivery (`FlywheelProcessRunner`,
 `BeadWriter`, `IntakeDelivery`) — and the only thing `SessionStore` talks to
-(`store.intakeService`, a lazy var so a host that never touches intakes never even reads the
-directory below).
+(`store.intakeService`, a lazy var, so a host that never touches intakes never builds it). It
+is rooted at `SessionStore.resolvedIntakesRoot`: the real directory below only when the store
+was given it — `FlightDeckApp.makeStore` is the one caller that does — and otherwise a per-store
+scratch path nothing has written to. That matters because building the service DOES read its
+root (launch recovery, below, rewrites what it finds there), and `collapsedStatus` builds it on
+first read — so a bare test store must never be pointed at a developer's live intakes. The
+store also forwards the service's `objectWillChange` as its own: the header badge reads intakes
+through the store and observes only the store.
 
 **Storage is one directory per intake**, `<state dir>/intakes/<uuid>/intake.json` — not a
 single index file — because the next plan's runner writes checkpoints and run output beside
@@ -1003,7 +1009,10 @@ the ones that would block an existing bead on a bead nobody has reviewed yet. Ev
 reopen, and held edge is preceded by its own `recheck` step, re-reading that bead and
 refusing to proceed if it no longer matches the op's `pre` precondition (`DriftClassifier`'s
 review-time check, re-run at write time rather than trusted from when the review sheet was
-last loaded) — the window between that recheck and the write is exactly where `br update`'s
+last loaded). The one exception is a held edge from a bead the same release reopens: the reopen
+has already set that bead `open` by the time the held edge runs, so its recheck is
+existence-only — demanding the triage-time `closed` would fail FD's own write on FD's own
+check. The window between that recheck and the write is exactly where `br update`'s
 missing `--if-version` (see `docs/FOLLOWUPS.md`) could still bite. Every write carries
 `--actor flightdeck-intake:<id>`, and `br sync --flush-only` runs once at the end, tagged the
 same way, so the JSONL export matches what was just written. A `br` command failing partway
@@ -1027,6 +1036,10 @@ is Agent Mail only; `scopeChange` (the default rating) is both an inject into th
 session — `submitPrompt(_:token:to:)`, which queues if the agent is busy and is idempotent by
 token — and the same text by mail, for a holder with no FD session; `invalidating` reclaims
 the bead outright (back to `open`, reservations released) with a stop notice on both channels.
+The mail is worded at delivery time, not by the planner: `DeliveryAction.mail` carries the
+rating and reason, and `IntakeDelivery` builds the body (`DeliveryPlanner.mailBody(…outcome:)`)
+from how that bead's inject or reclaim actually went — a failed reclaim's mail says Flight Deck
+could not reclaim it, a failed inject's says no prompt reached the session.
 The holder is found from the bead's `assignee`, matched to an FD session the same way Observe
 already does it; no session found means mail is the only channel, and the review says so.
 
@@ -1036,7 +1049,9 @@ synthetic `.waiting` status, so a project sitting on an unanswered triage questi
 exactly as demanding, in a collapsed header, as a session with a permission prompt open.
 Expanded, `ProjectHeaderRow` draws the same glyph (`questionmark.circle.fill`, orange)
 directly, since there is no per-project status row to fold it into when every session row is
-already visible on its own.
+already visible on its own. Every intake state except `.releasing` has a way off the list —
+Discard, or Dismiss once released — and Dismiss is the only thing that stops a
+`.partiallyReleased` intake counting (it hides the intake; its `ReleaseRecord` stays on disk).
 
 ## Not yet built (design, not code)
 
