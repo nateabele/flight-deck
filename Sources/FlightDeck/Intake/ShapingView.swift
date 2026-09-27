@@ -21,7 +21,8 @@ struct ShapingView: View {
     @State private var viewerMode: ShapingModel.ViewerMode = .plan
     @State private var annotating = false
     @State private var extending = false
-    @State private var annotation = ""
+    /// The rendered viewer text, recomputed only when `ShapingModel.ViewerKey` changes.
+    @State private var viewerText = AttributedString()
 
     init(intake: Intake, tape: Tape, loadFile: @escaping (Int, String) -> Data?,
          onSend: @escaping (TapeCommand) -> Void, viewerMode: ShapingModel.ViewerMode = .plan) {
@@ -58,7 +59,9 @@ struct ShapingView: View {
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("shaping-view")
-        .sheet(isPresented: $annotating) { annotateSheet }
+        .sheet(isPresented: $annotating) {
+            AnnotateSheet(onSend: { onSend(.annotate($0)) }, onClose: { annotating = false })
+        }
     }
 
     // MARK: - Transport
@@ -193,7 +196,7 @@ struct ShapingView: View {
     // MARK: - Plan viewer
 
     private var planViewer: some View {
-        let checkpoint = selectedCheckpoint ?? tape.head?.id
+        let key = ShapingModel.viewerKey(selected: selectedCheckpoint, mode: viewerMode, tape: tape)
         return VStack(alignment: .leading, spacing: 6) {
             Picker("View", selection: $viewerMode) {
                 Text("Plan").tag(ShapingModel.ViewerMode.plan)
@@ -206,8 +209,9 @@ struct ShapingView: View {
 
             // Vertical only: a horizontal axis gives the text infinite width, which centred it.
             ScrollView(.vertical) {
-                viewerBody(checkpoint)
+                Text(viewerText)
                     .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(key.checkpoint == nil ? .secondary : .primary)
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .topLeading)
                     .padding(8)
@@ -216,19 +220,11 @@ struct ShapingView: View {
             .background(Color.secondary.opacity(0.06), in: RoundedRectangle(cornerRadius: 6))
         }
         .accessibilityIdentifier("plan-viewer")
-    }
-
-    @ViewBuilder
-    private func viewerBody(_ checkpoint: Int?) -> some View {
-        if let checkpoint {
-            let text = ShapingModel.viewerText(viewerMode, checkpoint: checkpoint, tape: tape, loadFile: loadFile)
-            if viewerMode == .diff {
-                Text(Self.coloredDiff(text))
-            } else {
-                Text(text)
-            }
-        } else {
-            Text("No rounds yet.").foregroundStyle(.secondary)
+        // `initial: true` is the `.onAppear` half: it computes the text once on first render,
+        // then again only when the key changes.
+        .onChange(of: key, initial: true) { _, key in
+            let text = ShapingModel.viewerContent(key, tape: tape, loadFile: loadFile)
+            viewerText = key.mode == .diff ? Self.coloredDiff(text) : AttributedString(text)
         }
     }
 
@@ -245,10 +241,19 @@ struct ShapingView: View {
         }
         return out
     }
+}
 
-    // MARK: - Annotate
+// MARK: - Annotate
 
-    private var annotateSheet: some View {
+/// Its own view so the draft lives in its own `@State`: held on `ShapingView`, every keystroke
+/// re-evaluated the whole shaping body — model, strip, cards and all.
+private struct AnnotateSheet: View {
+    let onSend: (String) -> Void
+    let onClose: () -> Void
+    @State private var annotation = ""
+
+    var body: some View {
+        let trimmed = annotation.trimmingCharacters(in: .whitespacesAndNewlines)
         VStack(alignment: .leading, spacing: 12) {
             Text("Annotate the next round").font(.headline)
             Text("The runner hands this note to the next round's agents.")
@@ -261,15 +266,14 @@ struct ShapingView: View {
                 .accessibilityIdentifier("annotate-text")
             HStack {
                 Spacer()
-                Button("Cancel") { annotating = false }
+                Button("Cancel", action: onClose)
                     .keyboardShortcut(.cancelAction)
                 Button("Send") {
-                    onSend(.annotate(annotation.trimmingCharacters(in: .whitespacesAndNewlines)))
-                    annotation = ""
-                    annotating = false
+                    onSend(trimmed)
+                    onClose()
                 }
                 .keyboardShortcut(.defaultAction)
-                .disabled(annotation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .disabled(trimmed.isEmpty)
                 .accessibilityIdentifier("annotate-send")
             }
         }

@@ -92,6 +92,8 @@ final class ShapingModelTests: XCTestCase {
         XCTAssertEqual(ShapingModel(intake: try featureIntake(), tape: tape).statusLine, "Running R3 · runs to review")
         tape.target = .nextMajor
         XCTAssertEqual(ShapingModel(intake: try featureIntake(), tape: tape).statusLine, "Running R3 · stops at plan final")
+        tape.target = .nextMinor
+        XCTAssertEqual(ShapingModel(intake: try featureIntake(), tape: tape).statusLine, "Running R3 · stops after R3")
         tape.target = .none
         XCTAssertEqual(ShapingModel(intake: try featureIntake(), tape: tape).statusLine, "Running R3 · pausing after R3")
     }
@@ -232,6 +234,40 @@ final class ShapingModelTests: XCTestCase {
         XCTAssertEqual(ShapingModel.viewerText(.plan, checkpoint: 3, tape: tape, loadFile: load), "No plan at this checkpoint.")
         XCTAssertEqual(ShapingModel.viewerText(.changeSet, checkpoint: 3, tape: tape, loadFile: load),
                        "No change set at this checkpoint.")
+    }
+
+    /// The viewer memoizes on this key, so it must change exactly when the text could: a new
+    /// head (a following viewer moves with it), a new selection, a new mode — and NOT on the
+    /// runner churn (status, heartbeat, queued notes) that re-renders the view constantly.
+    func testViewerKeyChangesOnlyWithWhatTheTextDependsOn() {
+        let tape = pausedAtR2()
+        let key = ShapingModel.viewerKey(selected: nil, mode: .plan, tape: tape)
+        XCTAssertEqual(key.checkpoint, 4, "no selection follows the head")
+
+        var churned = tape
+        churned.status = .running
+        churned.heartbeat = Date(timeIntervalSince1970: 1_790_000_100)
+        churned.pendingAnnotations = ["no plugin system"]
+        XCTAssertEqual(ShapingModel.viewerKey(selected: nil, mode: .plan, tape: churned), key)
+
+        var advanced = tape
+        advanced.checkpoints.append(cp(5, .refine, 3, major: true))
+        XCTAssertNotEqual(ShapingModel.viewerKey(selected: nil, mode: .plan, tape: advanced), key)
+        XCTAssertEqual(ShapingModel.viewerKey(selected: nil, mode: .plan, tape: advanced).checkpoint, 5)
+        XCTAssertNotEqual(ShapingModel.viewerKey(selected: 3, mode: .plan, tape: tape), key)
+        XCTAssertNotEqual(ShapingModel.viewerKey(selected: nil, mode: .diff, tape: tape), key)
+    }
+
+    func testViewerContentFollowsTheKey() {
+        let tape = pausedAtR2()
+        let load = files(["2/plan.md": "a\n", "4/plan.md": "a\nb\n"])
+        XCTAssertEqual(ShapingModel.viewerContent(ShapingModel.viewerKey(selected: nil, mode: .diff, tape: tape),
+                                                  tape: tape, loadFile: load),
+                       PlanMetrics.unifiedDiff(from: "a\n", to: "a\nb\n"))
+        XCTAssertEqual(ShapingModel.viewerContent(ShapingModel.viewerKey(selected: 2, mode: .plan, tape: tape),
+                                                  tape: tape, loadFile: load), "a\n")
+        XCTAssertEqual(ShapingModel.viewerContent(ShapingModel.viewerKey(selected: nil, mode: .plan, tape: .empty),
+                                                  tape: .empty, loadFile: load), "No rounds yet.")
     }
 
     func testChangeSetIsListedReadably() throws {
