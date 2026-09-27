@@ -71,6 +71,13 @@ public struct Intake: Codable, Identifiable, Equatable, Sendable {
     public var droppedOps: Set<Int>
     public var confirmedDrift: Set<Int>
 
+    /// Create a new intake with the given project path and intent.
+    /// - Parameters:
+    ///   - projectPath: Path to the project.
+    ///   - intent: Description of the requested work.
+    ///   - createdAt: Timestamp for intake creation; rounded to millisecond precision because
+    ///     persisted dates via ISO8601 with fractional seconds carry millisecond precision only.
+    ///     An unrounded date would not equal itself after save/load. Defaults to the current time.
     public init(
         projectPath: String,
         intent: String,
