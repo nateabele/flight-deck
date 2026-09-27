@@ -18,8 +18,8 @@ struct BeadWriter {
     }
 
     /// What one step produced: a minted id to fold into `Outcome.idMap` (only `.create`),
-    /// plain success, or a failure message already formatted as `"<step
-    /// description>: <first line of stdout>"`.
+    /// plain success, or a failure message already formatted as `"<step description>: exit
+    /// <code>[: <first line of stdout>]"`.
     private enum StepOutcome {
         case created(tempId: String, id: String)
         case ok
@@ -66,6 +66,9 @@ struct BeadWriter {
         case .create(let bead):
             var args = ["create", "--title", bead.title, "-t", bead.type, "-p", String(bead.priority),
                         "--description", bead.description]
+            // `--acceptance` here, `--acceptance-criteria` on `.update` below — both spellings
+            // verified live against `br 0.6.0 --help` (create's is a documented alias); this
+            // is not a mismatch to "fix".
             if let acceptance = bead.acceptance { args += ["--acceptance", acceptance] }
             if !bead.labels.isEmpty { args += ["-l", bead.labels.joined(separator: ",")] }
             args += ["--actor", actor, "--json"]
@@ -143,7 +146,7 @@ struct BeadWriter {
     }
 
     /// Short, stable text naming the step — used only to prefix an error, e.g. `"dep add
-    /// new:n1 b1: database is locked"`.
+    /// new:n1 b1: exit 1: database is locked"`.
     private func describe(_ step: ApplyStep) -> String {
         switch step {
         case .create(let bead): "create \(bead.tempId)"
@@ -155,19 +158,24 @@ struct BeadWriter {
     }
 
     /// `String` isn't `Error`, so `exec`'s `Result` needs a wrapper — the message itself is
-    /// the whole point, already formatted as `"<description>: <first line of stdout>"`.
+    /// the whole point, already formatted as `"<description>: exit <code>[: <first line of
+    /// stdout>]"`.
     private struct ExecFailure: Error { let message: String }
 
     /// Runs one `br` command, folding a non-zero exit (or a runner that couldn't even
-    /// start the process) into `Result.failure` with the standard `"<description>: <first
-    /// line of stdout>"` text — stderr is discarded by `FlywheelProcessRunner`, so that
-    /// first line of stdout is all there is to report.
+    /// start the process) into `Result.failure`. The exit code is always in the message —
+    /// `FlywheelProcessRunner` discards stderr, so a `br` failure that writes only there
+    /// (or nothing at all) would otherwise report just `"<description>: "`, naming the step
+    /// but nothing about what went wrong. The first line of stdout, when there is one, is
+    /// appended after it.
     private func exec(_ args: [String], description: String, project: String) async -> Result<String, ExecFailure> {
         guard let (stdout, exitCode) = try? await runner.run(brPath, args, cwd: project) else {
             return .failure(ExecFailure(message: "\(description): process could not be started"))
         }
         guard exitCode == 0 else {
-            return .failure(ExecFailure(message: "\(description): \(stdout.firstLine)"))
+            let firstLine = stdout.firstLine
+            let detail = firstLine.isEmpty ? "" : ": \(firstLine)"
+            return .failure(ExecFailure(message: "\(description): exit \(exitCode)\(detail)"))
         }
         return .success(stdout)
     }
