@@ -102,7 +102,7 @@ public struct IntakeRunner: Sendable {
         } catch {
             let detail = error is MissingConfig ? "the intake has no round config" : "could not read the intake: \(error)"
             return (await keeper.finish(.failed, diagnosis: Diagnosis(category: .harnessError, detail: detail,
-                                                                      action: "Choose a fidelity for the intake, then start it again.")),
+                                                                      action: "Discard this intake and capture it again with a different fidelity.")),
                     true)
         }
         return (await rounds(keeper, intake: intake, config: config), false)

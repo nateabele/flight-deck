@@ -62,6 +62,20 @@ final class RoundConfigEditorTests: XCTestCase {
         XCTAssertEqual(roles, ["drafter", "reviewer", "integrator", "encoder"])
     }
 
+    // MARK: - polish controls
+
+    /// Sketch has no polisher, so its polish cap and fresh-eyes toggle are disabled and say why;
+    /// left live, turning fresh eyes on planned rounds nobody could seat.
+    func testPolishControlsDisabledWithoutAPolisher() throws {
+        let sketch = try XCTUnwrap(PresetExpansion.config(for: .sketch, available: available))
+        XCTAssertFalse(RoundConfigEditor.polishControlsEnabled(sketch))
+        XCTAssertTrue(RoundConfigEditor.polishControlsHelp(sketch).contains("no polisher"))
+
+        let full = try fullPlan()
+        XCTAssertTrue(RoundConfigEditor.polishControlsEnabled(full))
+        XCTAssertEqual(RoundConfigEditor.polishControlsHelp(full), "")
+    }
+
     // MARK: - setting
 
     /// The pure mutation helper every field edit in the view routes through: it applies the

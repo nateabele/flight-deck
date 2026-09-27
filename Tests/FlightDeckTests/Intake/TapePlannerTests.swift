@@ -194,6 +194,18 @@ final class TapePlannerTests: XCTestCase {
         XCTAssertFalse(rounds.contains { $0.stage == .freshEyes || $0.stage == .dedup })
     }
 
+    /// Fresh eyes and dedup are seated by the polisher. Planned without one (a Sketch with the
+    /// toggle on), the tape ran to encode and then paused on "no polisher" — a pause a
+    /// `.shaping` intake can't act on, since its config is fixed once shaping starts.
+    func testFreshEyesAndDedupSkippedWithNoPolisher() throws {
+        var cfg = try XCTUnwrap(PresetExpansion.config(for: .sketch, available: .defaults))
+        XCTAssertNil(cfg.polisher)
+        cfg.freshEyesAndDedup = true
+        let (rounds, _) = walk(cfg)
+        XCTAssertEqual(rounds.last, PlannedRound(stage: .encode, round: 0, major: true))
+        XCTAssertFalse(rounds.contains { $0.stage == .freshEyes || $0.stage == .dedup })
+    }
+
     // MARK: - satisfies
 
     func testSatisfiesNoneIsAlwaysTrue() {
