@@ -26,6 +26,14 @@ protocol DaemonControlling {
     /// this a second time itself.
     func daemonPID(_ id: UUID) -> pid_t?
 
+    /// Same lookup as `daemonPID(_:)`, keyed on a socket path — what `IntakeRunnerController`'s
+    /// `reap` uses to require a genuinely readable pidfile before it ever tears a socket down.
+    /// fd-abduco binds and listens on the socket in its launcher before it forks, so a runner's
+    /// socket can answer `isLive` well before its pidfile exists; `terminate(socketPath:)` would
+    /// otherwise still unlink that live socket in its unconditional cleanup (having found no pid
+    /// to signal), orphaning the daemon underneath it. Checking this first is what stops that.
+    func daemonPID(socketPath: String) -> pid_t?
+
     /// Tears the daemon down: `SIGTERM`, wait, `SIGKILL` if it did not listen, then remove its
     /// socket and pidfile regardless of how far that got. No-throw — this runs from teardown
     /// paths that cannot fail the operation they are cleaning up after; problems are logged.
@@ -147,8 +155,11 @@ struct PosixDaemonControl: DaemonControlling {
     }
 
     func daemonPID(_ id: UUID) -> pid_t? {
-        guard let pid = readPID(pidfilePath: daemon.pidfilePath(for: id)), kill(pid, 0) == 0
-        else { return nil }
+        daemonPID(socketPath: daemon.socketPath(for: id))
+    }
+
+    func daemonPID(socketPath path: String) -> pid_t? {
+        guard let pid = readPID(pidfilePath: path + ".pid"), kill(pid, 0) == 0 else { return nil }
         return pid
     }
 

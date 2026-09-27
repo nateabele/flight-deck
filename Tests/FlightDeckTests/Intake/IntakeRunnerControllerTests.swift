@@ -33,15 +33,23 @@ final class IntakeRunnerControllerTests: XCTestCase {
 
     private final class FakeDaemonControl: DaemonControlling {
         var liveSockets: Set<String> = []
+        /// Sockets with a "readable pidfile" — i.e. what `reap` requires (fix round 1, Review
+        /// Focus 1) before it will ever call `terminate`. Deliberately NOT implied by
+        /// `liveSockets` membership: the real fd-abduco binds the socket in its launcher before
+        /// the daemon proper forks and writes `<socket>.pid`, so tests need to model "live, no
+        /// pidfile yet" as its own state.
+        var pidfiledSockets: Set<String> = []
         private(set) var terminatedSockets: [String] = []
 
         func isLive(_ id: UUID) -> Bool { false }
         func isLive(socketPath: String) -> Bool { liveSockets.contains(socketPath) }
         func daemonPID(_ id: UUID) -> pid_t? { nil }
+        func daemonPID(socketPath: String) -> pid_t? { pidfiledSockets.contains(socketPath) ? 4242 : nil }
         func terminate(_ id: UUID) {}
         func terminate(socketPath: String) {
             terminatedSockets.append(socketPath)
             liveSockets.remove(socketPath)
+            pidfiledSockets.remove(socketPath)
         }
         func stop(_ id: UUID) {}
         func cont(_ id: UUID) {}
@@ -55,9 +63,15 @@ final class IntakeRunnerControllerTests: XCTestCase {
         }
         private(set) var calls: [Call] = []
         var errorToThrow: Error?
+        /// Lets a test simulate fd-abduco's own ordering — the socket goes live as a side
+        /// effect of the launcher running, before this call even returns — the exact race
+        /// Review Focus 1's fix round 1 tests exercise.
+        var onSpawn: ((Call) -> Void)?
 
         func spawn(executable: String, arguments: [String], environment: [String: String]) throws {
-            calls.append(Call(executable: executable, arguments: arguments, environment: environment))
+            let call = Call(executable: executable, arguments: arguments, environment: environment)
+            calls.append(call)
+            onSpawn?(call)
             if let errorToThrow { throw errorToThrow }
         }
     }
@@ -171,17 +185,96 @@ final class IntakeRunnerControllerTests: XCTestCase {
         XCTAssertNotNil(env["PATH"])
     }
 
+    /// A live socket with a fresh heartbeat is adopted, not respawned — `tape.status` is not
+    /// consulted at all (fix round 1, Review Focus 3): see `testStaleHeartbeatOnARunningStatus
+    /// TapeGetsReapedAndRespawned` for the case that used to (wrongly) matter on `status` alone.
     func testLiveRunnerIsAdoptedNotRespawned() throws {
-        let fixture = try makeFixture()
+        let fixed = Date(timeIntervalSince1970: 1_000_000)
+        let fixture = try makeFixture(now: { fixed })
         let id = UUID()
         fixture.control.liveSockets.insert(fixture.controller.socketPath(for: id))
-        try saveTape(Tape(status: .running), for: id, intakesRoot: fixture.intakesRoot)
+        try saveTape(Tape(status: .running, heartbeat: fixed), for: id, intakesRoot: fixture.intakesRoot)
 
         let result = fixture.controller.ensureRunning(id)
 
         expectSuccess(result)
         XCTAssertEqual(fixture.spawner.calls.count, 0, "a running runner must never be respawned")
         XCTAssertEqual(fixture.control.terminatedSockets.count, 0)
+    }
+
+    /// Review Focus 3 (fix round 1): `status == .running` on its own must never be trusted — a
+    /// runner that crashed mid-round leaves exactly this tape behind (status still `.running`,
+    /// heartbeat stale), and adopting it forever would mean nothing ever restarts it.
+    func testStaleHeartbeatOnARunningStatusTapeGetsReapedAndRespawned() throws {
+        let fixed = Date(timeIntervalSince1970: 1_000_000)
+        let fixture = try makeFixture(now: { fixed })
+        let id = UUID()
+        let socket = fixture.controller.socketPath(for: id)
+        fixture.control.liveSockets.insert(socket)
+        fixture.control.pidfiledSockets.insert(socket)
+        try saveTape(
+            Tape(status: .running, heartbeat: fixed.addingTimeInterval(-60)), for: id,
+            intakesRoot: fixture.intakesRoot
+        )
+
+        XCTAssertFalse(fixture.controller.isRunning(id))
+
+        let result = fixture.controller.ensureRunning(id)
+
+        expectSuccess(result)
+        XCTAssertEqual(fixture.control.terminatedSockets, [socket], "the stale daemon must be reaped first")
+        XCTAssertEqual(fixture.spawner.calls.count, 1, "a fresh runner must be spawned after reaping it")
+    }
+
+    /// Review Focus 1 (critical, fix round 1): fd-abduco binds and listens on the socket in its
+    /// launcher before the runner underneath has written anything — so a second `ensureRunning`
+    /// landing right after the first, with a live socket and a tape that still looks idle, must
+    /// never see that as "finished" and spawn a competing runner on the same tape.
+    func testDoubleEnsureRunningWithinGraceSpawnsOnlyOnce() throws {
+        let fixture = try makeFixture()
+        let id = UUID()
+        let socket = fixture.controller.socketPath(for: id)
+        // Simulates fd-abduco's own ordering: the socket is live as a side effect of the
+        // launcher running, well before the runner has written a heartbeat or moved off `.idle`.
+        fixture.spawner.onSpawn = { _ in fixture.control.liveSockets.insert(socket) }
+        try saveTape(Tape(status: .idle), for: id, intakesRoot: fixture.intakesRoot)
+
+        expectSuccess(fixture.controller.ensureRunning(id))
+        expectSuccess(fixture.controller.ensureRunning(id))
+
+        XCTAssertEqual(fixture.spawner.calls.count, 1, "the second call must adopt, not respawn")
+        XCTAssertTrue(fixture.control.terminatedSockets.isEmpty, "a runner still in its grace period must never be reaped")
+    }
+
+    /// Same race as above, aimed at `reap` directly: called on its own (not via `ensureRunning`)
+    /// inside the grace period, it must still be a no-op.
+    func testReapIsANoOpWithinTheSpawnGracePeriod() throws {
+        let fixture = try makeFixture()
+        let id = UUID()
+        let socket = fixture.controller.socketPath(for: id)
+        fixture.spawner.onSpawn = { _ in fixture.control.liveSockets.insert(socket) }
+        try saveTape(Tape(status: .idle), for: id, intakesRoot: fixture.intakesRoot)
+        expectSuccess(fixture.controller.ensureRunning(id))
+
+        fixture.controller.reap(id)
+
+        XCTAssertTrue(fixture.control.terminatedSockets.isEmpty)
+    }
+
+    /// Review Focus 1's other half: even outside the grace period, `reap` must never unlink a
+    /// live socket it cannot confirm has a real pid behind it — that would orphan a daemon
+    /// mid-fork rather than kill it. No pidfile yet (only `liveSockets`, not `pidfiledSockets`)
+    /// must leave the socket alone.
+    func testReapNeverTerminatesALiveSocketWithNoReadablePidfile() throws {
+        let fixture = try makeFixture()
+        let id = UUID()
+        let socket = fixture.controller.socketPath(for: id)
+        fixture.control.liveSockets.insert(socket)
+        try saveTape(Tape(status: .stopped), for: id, intakesRoot: fixture.intakesRoot)
+
+        fixture.controller.reap(id)
+
+        XCTAssertTrue(fixture.control.terminatedSockets.isEmpty)
     }
 
     /// A live socket whose heartbeat is fresh counts as running even if `status` has not (yet)
@@ -227,6 +320,7 @@ final class IntakeRunnerControllerTests: XCTestCase {
         let id = UUID()
         let socket = fixture.controller.socketPath(for: id)
         fixture.control.liveSockets.insert(socket)
+        fixture.control.pidfiledSockets.insert(socket)
         try saveTape(Tape(status: .stopped), for: id, intakesRoot: fixture.intakesRoot)
 
         fixture.controller.reap(id)
@@ -241,6 +335,7 @@ final class IntakeRunnerControllerTests: XCTestCase {
         let id = UUID()
         let socket = fixture.controller.socketPath(for: id)
         fixture.control.liveSockets.insert(socket)
+        fixture.control.pidfiledSockets.insert(socket)
         try saveTape(Tape(status: .failed), for: id, intakesRoot: fixture.intakesRoot)
 
         let result = fixture.controller.ensureRunning(id)
@@ -309,11 +404,17 @@ final class IntakeRunnerControllerTests: XCTestCase {
         // by the time this runs, but liveness is a real `connect()` against the daemon it
         // exec'd, not a synchronous consequence of that exit.
         XCTAssertTrue(waitUntil(timeout: 2) { control.isLive(socketPath: socketPath) })
+        // The real pid, not the launcher's — proves `daemonPID(socketPath:)` (what `reap` now
+        // requires before it will ever terminate anything, fix round 1 Review Focus 1) sees the
+        // same live pidfile a real fd-abduco run produces, not just a fake's stand-in.
+        let pid = try waitForPidfile(socketPath + ".pid")
+        XCTAssertEqual(control.daemonPID(socketPath: socketPath), pid)
 
         control.terminate(socketPath: socketPath)
 
         XCTAssertFalse(control.isLive(socketPath: socketPath))
         XCTAssertFalse(FileManager.default.fileExists(atPath: socketPath))
+        XCTAssertNotEqual(kill(pid, 0), 0, "terminate must actually kill the daemon, not just unlink its socket")
     }
 
     private func waitUntil(timeout: TimeInterval, _ condition: () -> Bool) -> Bool {
@@ -323,5 +424,25 @@ final class IntakeRunnerControllerTests: XCTestCase {
             usleep(20_000)
         }
         return condition()
+    }
+
+    /// Polls for the pidfile `fd-abduco` writes at session creation, mirroring
+    /// `DaemonControlTests.waitForPidfile` — the daemon proper forks and re-parents after the
+    /// launcher this test already waited on, so the pidfile can lag the launcher's own exit.
+    private func waitForPidfile(_ path: String) throws -> pid_t {
+        for _ in 0..<40 {
+            if let contents = try? String(contentsOfFile: path, encoding: .utf8),
+                let value = Int32(contents.trimmingCharacters(in: .whitespacesAndNewlines))
+            {
+                return pid_t(value)
+            }
+            usleep(50_000)
+        }
+        throw TimeoutError(message: "pidfile never appeared at \(path)")
+    }
+
+    private struct TimeoutError: Error, CustomStringConvertible {
+        let message: String
+        var description: String { message }
     }
 }
