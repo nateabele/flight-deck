@@ -177,6 +177,14 @@ struct CodexAdapter: AgentAdapter {
     /// `CodexControlAccess` for what a non-nil value adds to the command line.
     var controlSocket: URL?
 
+    /// Set by `SessionStore.startCodex` from the probed codex version, alongside
+    /// `historyMode`. The grant rides on codex's experimental `network_proxy` feature and was
+    /// verified only on codex-cli 0.155.1 and 0.157.1; an older codex could reject the flags
+    /// and fail the tab's launch, or honour them differently. `false` until probed, so a codex
+    /// that was never version-checked gets no flags rather than an untested feature. See
+    /// `CodexVersionProbe.controlAccessMinimumVersion`.
+    var controlAccessSupported = false
+
     /// Start, then name, then archive/unarchive. NOT optional and NOT reorderable.
     ///
     /// `thread/start` does not persist anything: no `threads` row, no rollout file, even
@@ -359,8 +367,11 @@ struct CodexAdapter: AgentAdapter {
     /// The text appended after the base `codex`/`codex resume <id>` command, granting this
     /// tab's own sandbox access to `controlSocket` (see `CodexControlAccess`). Empty — not a
     /// lone trailing space — when there is nothing to grant, so a `controlSocket == nil` launch
-    /// line stays byte-identical to what it typed before this feature existed.
+    /// line stays byte-identical to what it typed before this feature existed. Both inputs are
+    /// read here, at the moment of typing, so it does not matter whether the socket or the
+    /// version-probe result reached this adapter first — both do, from different writers.
     private func controlAccessSuffix(_ options: AgentOptions) -> String {
+        guard controlAccessSupported else { return "" }
         let flags = CodexControlAccess.launchFlags(socket: controlSocket, options: threadOptions(options))
         guard !flags.isEmpty else { return "" }
         return " " + flags.joined(separator: " ")
