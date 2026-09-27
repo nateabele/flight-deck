@@ -30,11 +30,21 @@ struct SystemHeadlessRunner: HeadlessRunner {
         // The login shell's PATH, appended: a Finder-launched app has launchd's bare PATH,
         // which contains neither `~/.local/bin` (codex, claude) nor `/opt/homebrew/bin` — see
         // `LoginShellPath`. `/usr/bin/env` alone would report "no such file" for both.
-        var environment = LoginShellPath.repairing(ProcessInfo.processInfo.environment)
-        for key in command.unsetEnvironment { environment.removeValue(forKey: key) }
-
+        let environment = Self.environment(for: command, base: LoginShellPath.repairing(ProcessInfo.processInfo.environment))
         let result = try await runner.run(executable: command.executable, arguments: command.arguments,
                                           cwd: cwd, environment: environment)
         return (result.stdout, result.stderr, result.exitCode)
+    }
+
+    /// A claude child gets the user settings' `env` back underneath `base` (see
+    /// `ClaudeUserEnv` — `--setting-sources local` drops it), then the unsets, so the settings
+    /// file can never re-introduce a variable `HarnessCommand.build` removed.
+    static func environment(
+        for command: (executable: String, arguments: [String], unsetEnvironment: [String]),
+        base: [String: String], home: URL = FileManager.default.homeDirectoryForCurrentUser
+    ) -> [String: String] {
+        var environment = command.executable == "claude" ? ClaudeUserEnv.merged(into: base, home: home) : base
+        for key in command.unsetEnvironment { environment.removeValue(forKey: key) }
+        return environment
     }
 }

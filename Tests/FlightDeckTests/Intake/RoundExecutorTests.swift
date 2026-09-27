@@ -118,8 +118,10 @@ final class RoundExecutorTests: XCTestCase {
                            now: { fixed })
     }
 
+    /// An empty home by default, so the operator's own `~/.claude/settings.json` never leaks in.
+    var home: URL { root.appendingPathComponent("home") }
     func executor(_ runner: CommandRunner) -> RoundExecutor {
-        RoundExecutor(runner: runner, graphReader: GraphReader(runner: runner, environment: [:]))
+        RoundExecutor(runner: runner, graphReader: GraphReader(runner: runner, environment: [:]), userHome: home)
     }
 
     /// Writes a checkpoint's files the way the runner would, and appends it to `tape`.
@@ -187,6 +189,24 @@ final class RoundExecutorTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: work.appendingPathComponent("graph.json").path))
     }
 
+    /// `--setting-sources local` drops the user settings' `env`; the executor puts it back for
+    /// claude children only, under the explicit environment, and before the unsets.
+    func testClaudeChildrenGetTheUserSettingsEnvUnderneathTheProcessEnv() async throws {
+        let settings = home.appendingPathComponent(".claude/settings.json")
+        try FileManager.default.createDirectory(at: settings.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data(#"{"env":{"ANTHROPIC_BASE_URL":"http://localhost:8787","PATH":"/settings/bin","CLAUDECODE":"1"}}"#.utf8)
+            .write(to: settings)
+        let runner = ScriptedHarnessRunner { call in ok(call, "s", json(DraftOutput(plan: "# P"))) }
+        let cfg = config(drafters: [Slot(codexA), Slot(claudeB)])
+        _ = try checkpoint(try await executor(runner).run(PlannedRound(stage: .draft, round: 0, major: true), inputs(cfg)))
+        let claude = try XCTUnwrap(runner.calls("drafter").first { $0.executable == "claude" })
+        XCTAssertEqual(claude.environment["ANTHROPIC_BASE_URL"], "http://localhost:8787")
+        XCTAssertEqual(claude.environment["PATH"], "/usr/bin:/bin", "the explicit environment wins")
+        XCTAssertNil(claude.environment["CLAUDECODE"], "the unsets run after the merge")
+        let codex = try XCTUnwrap(runner.calls("drafter").first { $0.executable == "codex" })
+        XCTAssertNil(codex.environment["ANTHROPIC_BASE_URL"])
+    }
+
     func testDrafterFallsBackOnce() async throws {
         let runner = ScriptedHarnessRunner { call in
             call.model == "A" ? failed("Error: 401 Unauthorized") : ok(call, "fb", json(DraftOutput(plan: "# Fallback")))
@@ -204,11 +224,18 @@ final class RoundExecutorTests: XCTestCase {
     }
 
     func testAllDraftersFailPausesTape() async throws {
-        let runner = ScriptedHarnessRunner { _ in failed("Error: 401 Unauthorized") }
-        let cfg = config(drafters: [Slot(codexA, fallback: claudeB), Slot(claudeB, fallback: codexA)])
+        // Drafter 0 (and its fallback) fail on auth, drafter 1 (and its fallback) on a rate
+        // limit: the pause carries drafter 0's diagnosis, not whichever finished last.
+        let runner = ScriptedHarnessRunner { call in
+            call.prompt.contains("Your lens: global coherence") ? failed("Error: 401 Unauthorized")
+                                                                 : failed("Error: 429 rate limit exceeded")
+        }
+        let cfg = config(drafters: [Slot(codexA, persona: .arbiter, fallback: claudeB),
+                                    Slot(claudeB, persona: .realist, fallback: codexA)])
         let (d, rec) = try paused(try await executor(runner).run(PlannedRound(stage: .draft, round: 0, major: true), inputs(cfg)))
         XCTAssertEqual(d.category, .authExpired)
         XCTAssertEqual(rec.slots.map(\.status), [.failed, .failed])
+        XCTAssertEqual(rec.slots.map { $0.diagnosis?.category }, [.authExpired, .rateLimited])
         XCTAssertEqual(runner.calls("drafter").count, 4, "each drafter plus its fallback, exactly once")
     }
 
@@ -272,6 +299,33 @@ final class RoundExecutorTests: XCTestCase {
                                                                         inputs(config(), tape: try synthesisTape())))
         XCTAssertEqual(text(files["plan.md"]), draftPlan)
         XCTAssertEqual(cp.record.linesAdded, 0)
+    }
+
+    func testReviewWithNoChangesSkipsTheIntegrator() async throws {
+        let runner = ScriptedHarnessRunner { [unowned self] call in
+            call.role == "synthesizer" ? ok(call, "syn", self.review(0)) : failed("the integrator must not run")
+        }
+        let (cp, files) = try checkpoint(try await executor(runner).run(PlannedRound(stage: .synthesis, round: 0, major: true),
+                                                                        inputs(config(), tape: try synthesisTape())))
+        XCTAssertTrue(runner.calls("integrator").isEmpty)
+        XCTAssertEqual(cp.record.changeCount, 0)
+        XCTAssertEqual(cp.record.slots.map(\.role), ["synthesizer"])
+        XCTAssertEqual(text(files["plan.md"]), draftPlan)
+    }
+
+    func testTallyThatDoesNotAddUpIsNotedNotPaused() async throws {
+        let runner = ScriptedHarnessRunner { [unowned self] call in
+            guard call.role == "synthesizer" else {
+                // Three proposed, but only two verdicts reported.
+                _ = self.editingIntegrator(call)
+                return ok(call, "int", json(IntegrateOutput(agree: 1, somewhat: 1, disagree: 0, notes: "applied")))
+            }
+            return ok(call, "syn", self.review(3))
+        }
+        let (cp, _) = try checkpoint(try await executor(runner).run(PlannedRound(stage: .synthesis, round: 0, major: true),
+                                                                    inputs(config(), tape: try synthesisTape())))
+        XCTAssertEqual(cp.record.changeCount, 3)
+        XCTAssertTrue(cp.record.note?.contains("tallied 2 verdicts for 3 proposed changes") ?? false, cp.record.note ?? "nil")
     }
 
     func refineTape() throws -> Tape {
@@ -364,7 +418,12 @@ final class RoundExecutorTests: XCTestCase {
         XCTAssertTrue(correction.arguments.contains("enc-1"))
         XCTAssertTrue(correction.arguments.contains("model_reasoning_effort=high") && correction.model == "A")
         XCTAssertTrue(correction.prompt.contains("fd-1"))
+        XCTAssertEqual(correction.prompt, RoundPrompts.changeSetCorrection(
+            errors: [.preconditionMismatch("fd-1")], observedAt: now), "the change-set correction, not triage's")
         XCTAssertTrue(FileManager.default.fileExists(atPath: work.appendingPathComponent("graph.json").path))
+        let saved = try IntakeJSON.decoder.decode(GraphSnapshot.self, from: try XCTUnwrap(files["graph.json"]))
+        XCTAssertEqual(saved.beads["fd-1"]?.status, "open", "the checkpoint keeps the graph encode validated against")
+        XCTAssertTrue(try XCTUnwrap(runner.calls("encoder").first).prompt.contains(work.appendingPathComponent("graph.json").path))
     }
 
     func testEncodeSecondFailurePauses() async throws {
@@ -379,11 +438,34 @@ final class RoundExecutorTests: XCTestCase {
         XCTAssertEqual(rec.slots.first?.status, .failed)
     }
 
+    let encodeObservedAt = Date(timeIntervalSince1970: 1_789_000_000)
     func polishTape() throws -> Tape {
         var tape = try refineTape()
-        let cs = ChangeSet(graphObservedAt: now, ops: [.editBead(id: "fd-1", set: FieldSet(title: "Renamed"), pre: existingPre, delivery: nil)])
-        try seed(&tape, .encode, files: ["changeset.json": String(decoding: try cs.encoded(), as: UTF8.self), "plan.md": draftPlan])
+        let cs = ChangeSet(graphObservedAt: encodeObservedAt,
+                           ops: [.editBead(id: "fd-1", set: FieldSet(title: "Renamed"), pre: existingPre, delivery: nil)])
+        let graph = GraphSnapshot(beads: ["fd-1": BeadSnapshot(id: "fd-1", title: "Existing", status: "open")])
+        try seed(&tape, .encode, files: ["changeset.json": String(decoding: try cs.encoded(), as: UTF8.self), "plan.md": draftPlan,
+                                         "graph.json": json(graph)])
         return tape
+    }
+
+    /// Drift after encode is release's job: polish validates against the graph encode saw, so a
+    /// bead that has since moved must not pause a polisher that kept its `pre` as told.
+    func testBeadChangedAfterEncodeDoesNotPausePolish() async throws {
+        let runner = ScriptedHarnessRunner { [unowned self] call in
+            ok(call, "pol", self.changeSetReply(pre: self.existingPre, extra: [self.newBead]))
+        }
+        runner.graphList = #"{"issues":[{"id":"fd-1","title":"Existing","status":"in_progress","assignee":"someone","labels":[]}]}"#
+        let (cp, files) = try checkpoint(try await executor(runner).run(PlannedRound(stage: .polish, round: 1, major: true),
+                                                                        inputs(config(), tape: try polishTape())))
+        XCTAssertEqual(cp.record.slots.map(\.status), [.ok])
+        XCTAssertTrue(runner.calls("correction").isEmpty)
+        XCTAssertFalse(runner.calls.contains { $0.executable == "br" }, "polish never re-reads the live graph")
+        XCTAssertEqual(try ChangeSet.decode(try XCTUnwrap(files["changeset.json"])).graphObservedAt, encodeObservedAt)
+        let carried = try IntakeJSON.decoder.decode(GraphSnapshot.self, from: try XCTUnwrap(files["graph.json"]))
+        XCTAssertEqual(carried.beads["fd-1"]?.status, "open")
+        let polisher = try XCTUnwrap(runner.calls("polisher").first)
+        XCTAssertTrue(polisher.prompt.contains(work.appendingPathComponent("graph.json").path))
     }
 
     func testPolishKeepsExistingOpPreconditionsOrFails() async throws {
@@ -442,6 +524,23 @@ final class RoundExecutorTests: XCTestCase {
             XCTAssertTrue(FileManager.default.fileExists(atPath: dir.appendingPathComponent("stderr").path), name)
         }
         XCTAssertTrue(runner.calls.filter { $0.executable != "br" }.allSatisfy(\.processGroup))
+    }
+
+    /// A stream that fails to write must not leave run.json looking like a child still alive.
+    func testRunJSONIsFinishedEvenWhenAStreamWriteFails() async throws {
+        let runner = ScriptedHarnessRunner { call in ok(call, "s", json(DraftOutput(plan: "# P"))) }
+        runner.onCall = { call in
+            // A directory where the stdout file goes: the write after exit fails.
+            try? FileManager.default.createDirectory(at: call.runDirectory!.appendingPathComponent("stdout"),
+                                                     withIntermediateDirectories: true)
+        }
+        let (d, _) = try paused(try await executor(runner).run(PlannedRound(stage: .draft, round: 0, major: true), inputs(config())))
+        XCTAssertEqual(d.category, .harnessError)
+        let run = try IntakeJSON.decoder.decode(RunRecord.self, from: Data(contentsOf:
+            store.runDirectory("draft-0-drafter-0").appendingPathComponent("run.json")))
+        XCTAssertNotNil(run.pid)
+        XCTAssertEqual(run.finished, now)
+        XCTAssertEqual(run.exitCode, 0)
     }
 
     /// A real `sleep 30` stands in for every harness child, through `SystemCommandRunner`'s own
