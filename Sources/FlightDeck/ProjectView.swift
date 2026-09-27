@@ -98,6 +98,11 @@ struct ProjectView: View {
                 }
             }
         }
+        // Fill the viewport so the message centers in it. `body` pins its content to
+        // `.topLeading` (right for the intake layout), and `ContentUnavailableView` only
+        // takes its intrinsic size — so without this it sat in the top-left corner instead of
+        // centered the way `RootView`'s no-session state is.
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .accessibilityIdentifier("project-flywheel-disabled")
     }
 
