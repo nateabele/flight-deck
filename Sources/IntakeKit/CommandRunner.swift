@@ -175,11 +175,13 @@ public struct SystemCommandRunner: CommandRunner {
         // A new process group, led by the child itself (pgid 0 => "make it my own pid") — so
         // a caller holding just the pid can `killpg` everything the child forks, the way
         // `SessionReaper`/`ForkedChild` already do for the app's own agent processes.
-        // SETSIGDEF + SETSIGMASK: `posix_spawn` otherwise hands the child the spawning thread's
-        // signal mask and any ignored dispositions — which `Process` resets and raw spawn does
-        // not. Observed under xctest: a child's SIGTERM from `killpg` returned 0 yet `sleep 30`
-        // ran to completion, so ⏹ only ever landed via the SIGKILL a full second later and no
-        // harness got a chance to shut down cleanly.
+        // SETSIGMASK (empty) + SETSIGDEF: libdispatch workqueue threads — every thread Swift
+        // concurrency runs this on — start with the async signals blocked, and `posix_spawn`
+        // hands the child the SPAWNING THREAD's mask (plus any ignored dispositions); `Process`
+        // resets both, raw spawn does not. So in the app as much as under xctest, a child
+        // spawned here had SIGTERM blocked: `killpg(pid, SIGTERM)` returned 0 yet `sleep 30`
+        // ran to completion, ⏹ only ever landed via the SIGKILL a second later, and no harness
+        // got a chance to shut down cleanly.
         posix_spawnattr_setflags(&attr, Int16(POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK))
         posix_spawnattr_setpgroup(&attr, 0)
         var allSignals = sigset_t(), noSignals = sigset_t()
@@ -256,12 +258,18 @@ public struct SystemCommandRunner: CommandRunner {
         } onCancel: {
             // SIGTERM the whole group first — the common case (the ladder in
             // `SessionReaper` is the same idea): most things exit cleanly on it. Guarded by
-            // `exitFlag` the same as the delayed SIGKILL below, because `waitpid` above can
-            // already have reaped (and the kernel can already have recycled) `childPID` by the
-            // time this cancellation handler runs.
+            // `exitFlag`, because `waitpid` above can already have reaped (and the kernel can
+            // already have recycled) `childPID` by the time this cancellation handler runs; the
+            // delayed SIGKILL below re-checks the group itself instead.
             if !exitFlag.hasExited { killpg(childPID, SIGTERM) }
             DispatchQueue.global().asyncAfter(deadline: .now() + 1) {
-                if !exitFlag.hasExited { killpg(childPID, SIGKILL) }
+                // Sweep the GROUP, not just the leader: a descendant that ignores SIGTERM and
+                // detached its streams outlives a leader that exited cleanly on it, and would
+                // otherwise run on unowned. Safe after the leader is reaped because a pid is
+                // never reused while a process group with that id still has a member — so if
+                // `killpg(_, 0)` finds the group, it is still ours. (Only once the group is
+                // empty could the id be recycled, and then the probe finds nothing to kill.)
+                if !exitFlag.hasExited || killpg(childPID, 0) == 0 { killpg(childPID, SIGKILL) }
             }
         }
 
