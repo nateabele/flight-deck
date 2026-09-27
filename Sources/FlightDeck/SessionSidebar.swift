@@ -471,6 +471,10 @@ struct SessionSidebar: View {
             }
             .onMove { store.moveSidebarRows(fromOffsets: $0, toOffset: $1) }
         }
+        // Lets `SidebarInputMonitor.isSidebarTable` tell this table apart from `ProjectView`'s
+        // Intakes `List` — see that function's doc comment for why the two cannot be told apart
+        // by `NSSplitView` subview order alone. Behind the list's own content, never inside a row.
+        .background(SidebarTableMarker())
         // Read-only: nothing ever assigns `isListFocused`, so this cannot move focus — assigning
         // it would pull first responder off the terminal. See its doc comment.
         .focused($isListFocused)
