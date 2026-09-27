@@ -345,11 +345,19 @@ struct SessionSidebar: View {
     /// render: the monitor holds `NSEvent` tokens that must be installed once and removed once,
     /// and a value recreated on every body evaluation would leak monitors.
     ///
-    /// There is deliberately no `@FocusState` here. Measured: `.focused($flag)` on a `List`
-    /// never reported true — the terminal `SurfaceView` holds first responder and neither a
-    /// click nor Tab moves it — so anything gated on it was dead on arrival. The monitor works
-    /// from the real first responder instead.
+    /// The monitor works from the real first responder, not `isListFocused` below: Return must
+    /// act the instant the table holds focus, inside the same key event.
     @State private var input = SidebarInputMonitor()
+
+    /// Whether the sidebar's table is first responder, for `ProjectHeaderRow`'s hand-drawn
+    /// selection only — it decides accent versus gray the way `NSTableView` decides it for a
+    /// natively selected session row. Usually false: the terminal `SurfaceView` holds first
+    /// responder and neither a click nor Tab moves it. It does become true when
+    /// `SidebarInputMonitor` makes the table first responder (a click on the selected row) —
+    /// measured on a replica list, where `.focused` on the `List` tracked `makeFirstResponder`
+    /// onto its table and back off it. An older note here called it dead because it "never
+    /// reported true"; that predates the monitor giving the table focus at all.
+    @FocusState private var isListFocused: Bool
 
     /// Drives both the label and which shortcut the button claims.
     private var isEmpty: Bool { store.repos.isEmpty }
@@ -388,7 +396,8 @@ struct SessionSidebar: View {
         // click silently opened the project view instead of collapsing the row. Headers are
         // `.selectionDisabled()` below for that reason; `store.selectProject` is reached solely
         // through the monitor's `selectRow` now, and `ProjectHeaderRow` draws its own selection
-        // highlight since the List no longer will.
+        // highlight since the List no longer will (a row background measured to match the native
+        // pill — see `ProjectHeaderRow.selectionHighlight`).
         //
         // The inner `#if DEBUG` tag call is TEMPORARY DIAGNOSTIC INSTRUMENTATION from the
         // double-click session-swap investigation (`.superpowers/sdd/quiet-foraging-babbage/
@@ -422,13 +431,13 @@ struct SessionSidebar: View {
                 switch row {
                 case .project(let projectID):
                     if let repo = store.repos.first(where: { $0.id == projectID }) {
-                        ProjectHeaderRow(store: store, repo: repo) {
+                        ProjectHeaderRow(store: store, repo: repo, isSidebarFocused: isListFocused) {
                             close(projectAt: projectID)
                         }
                         // See the `selectionBinding` comment above: a header must not be
                         // selectable, or its own mouse-down starves the click-vs-drag decision
                         // that makes the chevron collapse it. `ProjectHeaderRow` draws its own
-                        // selected look instead of relying on the highlight this would enable.
+                        // selected look — a row background matched to the native one — instead.
                         .selectionDisabled()
                     }
 
@@ -462,6 +471,9 @@ struct SessionSidebar: View {
             }
             .onMove { store.moveSidebarRows(fromOffsets: $0, toOffset: $1) }
         }
+        // Read-only: nothing ever assigns `isListFocused`, so this cannot move focus — assigning
+        // it would pull first responder off the terminal. See its doc comment.
+        .focused($isListFocused)
         // Double-click-to-rename. The monitor reports a table row index; `sidebarRows` is the
         // same flat array the `ForEach` above renders, so the index maps straight back to a
         // row. Bounds-checked because the index comes from AppKit, not from us, and a

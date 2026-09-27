@@ -12,8 +12,12 @@ import SwiftUI
 struct ProjectHeaderRow: View {
     @ObservedObject var store: SessionStore
     let repo: Repo
+    /// Whether the sidebar's table is first responder — `SessionSidebar`'s `@FocusState` on the
+    /// `List`. Half of what decides `isEmphasized`; see there.
+    let isSidebarFocused: Bool
     let onClose: () -> Void
 
+    @Environment(\.controlActiveState) private var controlActiveState
     @State private var isHovered = false
     @State private var showingFlywheelConfirmation = false
     @State private var showingFlywheelSetupConfirmation = false
@@ -31,6 +35,26 @@ struct ProjectHeaderRow: View {
 
     private var isSelected: Bool {
         Self.isSelected(repoID: repo.id, selectedProjectID: store.selectedProjectID)
+    }
+
+    /// Whether the selected highlight should draw accent-filled rather than system gray — the
+    /// same rule `NSTableView` applies to a natively selected session row (`NSTableRowView
+    /// .isEmphasized`): its table must be first responder AND its window key. Window-key alone
+    /// is not enough, and is what the SDK's `.selection` style follows: in this app the terminal
+    /// holds first responder nearly always, so a selected session row is gray most of the time,
+    /// and a header keyed on the window alone drew accent blue beside it. Pure and static for the
+    /// same reason as `isSelected`.
+    static func isEmphasized(
+        isSelected: Bool, sidebarFocused: Bool, controlActiveState: ControlActiveState
+    ) -> Bool {
+        isSelected && sidebarFocused && controlActiveState == .key
+    }
+
+    private var isEmphasized: Bool {
+        Self.isEmphasized(
+            isSelected: isSelected, sidebarFocused: isSidebarFocused,
+            controlActiveState: controlActiveState
+        )
     }
 
     var body: some View {
@@ -64,7 +88,7 @@ struct ProjectHeaderRow: View {
             // mouse-down for row-selection tracking regardless of chevron zone, which starves the
             // click-vs-drag decision above and silently opens the project view on what should
             // have been a collapse. Since the List will not draw a highlight for a row it never
-            // selects, `isSelected` below draws one by hand instead.
+            // selects, `selectionHighlight` below draws one by hand instead.
             //
             // For VoiceOver this row is not actuatable, and the context menu's Expand/Collapse
             // is the accessible route to collapsing a project.
@@ -106,8 +130,13 @@ struct ProjectHeaderRow: View {
                 // found", with an assertion message that blamed the seed flag.
                 .accessibilityHidden(true)
 
+            // The list's own row font, the same size a session title gets — only the weight
+            // is set, so the header still reads as the heading of the rows under it. A fixed
+            // `.subheadline` here drew the header a size smaller than every session row, and
+            // would have stayed that size under System Settings' "Sidebar icon size", which
+            // rescales the inherited font.
             Text(repo.displayName)
-                .font(.subheadline.weight(.semibold))
+                .fontWeight(.semibold)
                 .foregroundStyle(isSelected ? .primary : .secondary)
                 .lineLimit(1)
                 .truncationMode(.middle)
@@ -163,24 +192,20 @@ struct ProjectHeaderRow: View {
         // A native selected `List` row sets this for its content automatically; a hand-drawn
         // selection has to do it itself. Without it, `.secondary`/`.primary` render as if still
         // sitting on the plain sidebar background — which is how the session count, the status
-        // icon, and the chevron/title above went unreadable against the `.selection` fill below,
-        // and why a hard-coded `.white` (this row's very first attempt) went unreadable the
-        // *other* direction the moment the window lost key status and the fill turned system
-        // gray instead of accent-tinted. `backgroundProminence` is what every hierarchical
-        // `ShapeStyle` actually reads to pick a legible color for whatever is actually behind it,
-        // in both directions, so it is the one lever that survives both.
-        .environment(\.backgroundProminence, isSelected ? .increased : .standard)
+        // icon, and the chevron/title above went unreadable against the accent fill below, and
+        // why a hard-coded `.white` (this row's very first attempt) went unreadable the *other*
+        // direction on the gray fill. `backgroundProminence` is what every hierarchical
+        // `ShapeStyle` reads to pick a legible color for what is behind it. `.increased` only
+        // while emphasized, because that is exactly when a native row sets it — measured on a
+        // replica list: a selected row reports `.standard` on the gray fill and `.increased` on
+        // the accent one. Raising it on gray too lightened the text against a light fill.
+        .environment(\.backgroundProminence, isEmphasized ? .increased : .standard)
         // Hand-drawn selection, now that the row is `.selectionDisabled()` and `List` will not
-        // draw one of its own — see `isSelected`'s doc comment. `.selection` is the SDK's own
-        // `ShapeStyle` for the system's selection tint, so this tracks light/dark and
-        // window-active/inactive the same way a natively-selected row would, without hand-coding
-        // a color. Conditioned with `if` rather than an always-present clear fill, so an
-        // unselected row draws nothing extra at all.
-        .background {
-            if isSelected {
-                RoundedRectangle(cornerRadius: 6, style: .continuous).fill(.selection)
-            }
-        }
+        // draw one of its own — see `isSelected`'s doc comment. A row background rather than a
+        // `.background` on this stack: the stack only spans the content, so a fill there hugged
+        // the title — short, over-inset, and visibly not the pill a selected session row gets.
+        // The row background spans the whole table row, as native selection does.
+        .listRowBackground(selectionHighlight)
         // `.contentShape` stays — it is what makes hover cover the whole row rather than just
         // the drawn content. It is safe on its own; it was the `.onTapGesture` it used to sit
         // beside that killed the drag, not the hit-test shape.
@@ -264,6 +289,22 @@ struct ProjectHeaderRow: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text(flywheelInitializeStepsDescription)
+        }
+    }
+
+    /// The native sidebar selection pill, reproduced. Every number was measured, not chosen:
+    /// rendered beside a natively selected row of a `.sidebar` `List`, pixel-diffed, and kept at
+    /// the value that diffed least (radii 5–12, continuous and circular, were tried) — the full
+    /// row height, inset 10pt from each side of the table, an 8pt continuous corner. The colors
+    /// are the two AppKit draws with, which matched the native fill exactly in light and dark.
+    /// An unselected row draws nothing, so its row background stays the list's own.
+    @ViewBuilder private var selectionHighlight: some View {
+        if isSelected {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color(nsColor: isEmphasized
+                    ? .selectedContentBackgroundColor
+                    : .unemphasizedSelectedContentBackgroundColor))
+                .padding(.horizontal, 10)
         }
     }
 

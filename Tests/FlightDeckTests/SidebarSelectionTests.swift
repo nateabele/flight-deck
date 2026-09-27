@@ -1,3 +1,4 @@
+import SwiftUI
 import XCTest
 @testable import FlightDeck
 
@@ -60,5 +61,18 @@ final class SidebarSelectionTests: XCTestCase {
 
         XCTAssertTrue(ProjectHeaderRow.isSelected(repoID: project, selectedProjectID: store.selectedProjectID))
         XCTAssertFalse(ProjectHeaderRow.isSelected(repoID: other, selectedProjectID: store.selectedProjectID))
+    }
+
+    /// A natively selected sidebar row is accent-filled only while its table is first responder
+    /// in the key window, and system-gray otherwise — which in this app is most of the time,
+    /// because the terminal holds focus. The hand-drawn header highlight must follow the same
+    /// rule, or a selected project reads blue beside the gray a selected session shows in the
+    /// same window state.
+    func testHeaderHighlightIsEmphasizedOnlyWhenTheSidebarHasFocusInTheKeyWindow() {
+        XCTAssertTrue(ProjectHeaderRow.isEmphasized(isSelected: true, sidebarFocused: true, controlActiveState: .key))
+        XCTAssertFalse(ProjectHeaderRow.isEmphasized(isSelected: true, sidebarFocused: false, controlActiveState: .key))
+        XCTAssertFalse(ProjectHeaderRow.isEmphasized(isSelected: true, sidebarFocused: true, controlActiveState: .active))
+        XCTAssertFalse(ProjectHeaderRow.isEmphasized(isSelected: true, sidebarFocused: true, controlActiveState: .inactive))
+        XCTAssertFalse(ProjectHeaderRow.isEmphasized(isSelected: false, sidebarFocused: true, controlActiveState: .key))
     }
 }
