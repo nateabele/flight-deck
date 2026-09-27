@@ -51,17 +51,22 @@ public enum ReleaseSummary {
         var parts: [String] = []
         if beads > 0 { parts.append("\(beads) \(plural(beads, "bead"))") }
         if heldEdges > 0 { parts.append("\(heldEdges) held \(plural(heldEdges, "edge"))") }
-        if !actions.isEmpty {
-            // Ordered by first appearance in `actions`, not declaration order — the same
-            // sequence a rating produces (`inject` before `mail`, `reclaim` before both).
+        // Spec §8.4's format is "N notices (x inject, y mail)" — a `reclaim` is a graph
+        // write IntakeDelivery makes on the holder's behalf, not a notice sent *to* them, so
+        // it's excluded from both the count and the breakdown even though `DeliveryPlanner`
+        // emits one alongside the invalidating inject+mail pair.
+        let notices = actions.filter { $0.kindName != "reclaim" }
+        if !notices.isEmpty {
+            // Ordered by first appearance in `notices`, not declaration order — the same
+            // sequence a rating produces (`inject` before `mail`).
             var order: [String] = []
             var counts: [String: Int] = [:]
-            for a in actions {
+            for a in notices {
                 if counts[a.kindName] == nil { order.append(a.kindName) }
                 counts[a.kindName, default: 0] += 1
             }
             let breakdown = order.map { "\(counts[$0]!) \($0)" }.joined(separator: ", ")
-            parts.append("\(actions.count) \(plural(actions.count, "notice")) (\(breakdown))")
+            parts.append("\(notices.count) \(plural(notices.count, "notice")) (\(breakdown))")
         }
         return parts.isEmpty ? "Nothing to release" : "Release " + parts.joined(separator: " · ")
     }
