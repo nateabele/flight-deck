@@ -23,10 +23,15 @@ public struct HarnessRequest: Sendable {
 }
 
 public enum HarnessCommand {
-    /// Read-only tool set for triage under `claude -p`: file reading plus `br`/`bv` READ verbs.
-    /// FD is the only `br` writer (spec §5) — no `br create/update/dep` here.
+    /// Read-only tool set for triage under `claude -p`: file reading plus `br` READ verbs. FD is
+    /// the only `br` writer (spec §5) — no `br create/update/dep` here. `bv` is deliberately
+    /// NOT on this list, for any claude seat: even `Bash(bv --db <path> *)`, scoped to one
+    /// round's shadow, is still a prefix match against the WHOLE command line, so it would also
+    /// match `bv`'s write/mutating flags on that same invocation (`--export*`, `--update --yes`,
+    /// `--rollback`, `--save-baseline`, …). FD runs `bv` itself instead and hands the agent the
+    /// resulting files — see `ShadowAnalytics` in RoundPrompts.swift.
     public static let claudeReadOnlyTools =
-        "Read Grep Glob Bash(br list *) Bash(br show *) Bash(br graph *) Bash(br ready *) Bash(bv *)"
+        "Read Grep Glob Bash(br list *) Bash(br show *) Bash(br graph *) Bash(br ready *)"
 
     /// Every `br` write verb, denied by name. `--allowedTools` only ADDS allow rules on top of
     /// the user's and project's settings, so a project `.claude/settings.json` allowing

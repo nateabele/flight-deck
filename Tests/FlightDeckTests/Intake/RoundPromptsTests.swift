@@ -232,50 +232,54 @@ final class RoundPromptsTests: XCTestCase {
         XCTAssertTrue(p.contains("must stay exactly what it was"))
     }
 
-    func testPolishPromptOmitsShadowBeadsClauseWhenNil() {
+    private let analytics = ShadowAnalytics(insights: "/i/shadow/bv-insights.json", plan: "/i/shadow/bv-plan.json",
+                                            priority: "/i/shadow/bv-priority.json")
+
+    func testPolishPromptOmitsShadowAnalyticsClauseWhenNil() {
         let p = RoundPrompts.polish(context(), planFile: "/i/plan.md", changeSetFile: "/i/cs.json", round: 3)
-        XCTAssertFalse(p.contains("--robot-insights"))
+        XCTAssertFalse(p.contains("bv-insights.json"))
     }
 
-    func testPolishPromptAddsShadowBeadsClauseWhenPresent() {
+    func testPolishPromptAddsShadowAnalyticsClauseWhenPresent() {
         let p = RoundPrompts.polish(context(), planFile: "/i/plan.md", changeSetFile: "/i/cs.json",
-                                    round: 3, shadowBeads: "/i/shadow.db")
-        XCTAssertTrue(p.contains("--db /i/shadow.db --robot-insights"))
-        XCTAssertTrue(p.contains("--robot-plan"))
-        XCTAssertTrue(p.contains("--robot-priority"))
+                                    round: 3, analytics: analytics)
+        XCTAssertTrue(p.contains("/i/shadow/bv-insights.json"))
+        XCTAssertTrue(p.contains("/i/shadow/bv-plan.json"))
+        XCTAssertTrue(p.contains("/i/shadow/bv-priority.json"))
+        XCTAssertTrue(p.contains("do not run `bv` yourself"))
         XCTAssertTrue(p.contains("restructure"))
     }
 
     // MARK: - Fresh eyes
 
-    func testFreshEyesPromptOmitsShadowBeadsClauseWhenNil() {
+    func testFreshEyesPromptOmitsShadowAnalyticsClauseWhenNil() {
         let p = RoundPrompts.freshEyes(context(), planFile: "/i/plan.md", changeSetFile: "/i/cs.json")
         XCTAssertTrue(p.contains("/i/plan.md"))
         XCTAssertTrue(p.contains("/i/cs.json"))
         XCTAssertTrue(p.contains("fresh"))
-        XCTAssertFalse(p.contains("--robot-insights"))
+        XCTAssertFalse(p.contains("bv-insights.json"))
         XCTAssertTrue(p.contains("must stay exactly what it was"))
     }
 
-    func testFreshEyesPromptAddsShadowBeadsClauseWhenPresent() {
+    func testFreshEyesPromptAddsShadowAnalyticsClauseWhenPresent() {
         let p = RoundPrompts.freshEyes(context(), planFile: "/i/plan.md", changeSetFile: "/i/cs.json",
-                                       shadowBeads: "/i/shadow.db")
-        XCTAssertTrue(p.contains("--db /i/shadow.db"))
+                                       analytics: analytics)
+        XCTAssertTrue(p.contains("/i/shadow/bv-insights.json"))
     }
 
     // MARK: - Dedup
 
-    func testDedupPromptOmitsShadowBeadsClauseWhenNil() {
+    func testDedupPromptOmitsShadowAnalyticsClauseWhenNil() {
         let p = RoundPrompts.dedup(context(), changeSetFile: "/i/cs.json")
         XCTAssertTrue(p.contains("/i/cs.json"))
         XCTAssertTrue(p.contains("duplicative"))
-        XCTAssertFalse(p.contains("--robot-plan"))
+        XCTAssertFalse(p.contains("bv-plan.json"))
         XCTAssertTrue(p.contains("must stay exactly what it was"))
     }
 
-    func testDedupPromptAddsShadowBeadsClauseWhenPresent() {
-        let p = RoundPrompts.dedup(context(), changeSetFile: "/i/cs.json", shadowBeads: "/i/shadow.db")
-        XCTAssertTrue(p.contains("--db /i/shadow.db"))
+    func testDedupPromptAddsShadowAnalyticsClauseWhenPresent() {
+        let p = RoundPrompts.dedup(context(), changeSetFile: "/i/cs.json", analytics: analytics)
+        XCTAssertTrue(p.contains("/i/shadow/bv-plan.json"))
     }
 
     // MARK: - decode

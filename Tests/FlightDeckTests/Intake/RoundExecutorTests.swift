@@ -36,10 +36,19 @@ final class ScriptedHarnessRunner: CommandRunner, @unchecked Sendable {
     private let lock = NSLock()
     private var _calls: [Call] = []
     var calls: [Call] { lock.lock(); defer { lock.unlock() }; return _calls }
-    func calls(_ role: String) -> [Call] { calls.filter { $0.executable != "br" && $0.role == role } }
+    // `bv` calls fall through to the default "polisher" role (their argv has no prompt for
+    // `role` to match against), so exclude them here the same way `br` already is — otherwise
+    // `calls("polisher").first` would return FD's own bv analytics call instead of the
+    // polisher's actual harness turn, since the analytics run before it.
+    func calls(_ role: String) -> [Call] { calls.filter { $0.executable != "br" && $0.executable != "bv" && $0.role == role } }
 
     var graphList = #"{"issues":[{"id":"fd-1","title":"Existing","status":"open","labels":[]}]}"#
     var graphEdges = #"{"components":[{"edges":[]}]}"#
+    /// Controls `RoundExecutor.buildShadowAnalytics`'s three `bv` calls: `0` (default) answers
+    /// every one with `bvStdout`; any other code simulates a `bv` failure, which the redirect
+    /// requires to drop the analytics but still let the round run to completion.
+    var bvExitCode: Int32 = 0
+    var bvStdout = #"{"ok":true}"#
     var nextPID: Int32 = 4000
     let script: @Sendable (Call) -> CommandResult
     var onCall: (@Sendable (Call) -> Void)?
@@ -52,8 +61,29 @@ final class ScriptedHarnessRunner: CommandRunner, @unchecked Sendable {
                         processGroup: processGroup)
         let pid: Int32 = lock.withLock { _calls.append(call); nextPID += 1; return nextPID }
         if executable == "br" {
+            // A polish round's `ShadowGraph.build` (Task 7b wiring) puts `--db <path>` first,
+            // ahead of the subcommand — dispatch on `arguments[2]` rather than `arguments.first`
+            // for those, and reuse the same `graphList`/`graphEdges` fixtures a test already set
+            // for the live graph read: nothing in these tests needs the shadow to diverge from it.
+            if arguments.first == "--db" {
+                guard arguments.count >= 3 else { return CommandResult(stdout: Data(), stderr: "", exitCode: 127) }
+                switch arguments[2] {
+                case "list": return CommandResult(stdout: Data(graphList.utf8), stderr: "", exitCode: 0)
+                case "graph": return CommandResult(stdout: Data(graphEdges.utf8), stderr: "", exitCode: 0)
+                case "create":
+                    let title = arguments[arguments.firstIndex(of: "--title")! + 1]
+                    return CommandResult(stdout: Data(#"{"id":"shadow-\#(title)"}"#.utf8), stderr: "", exitCode: 0)
+                default: return CommandResult(stdout: Data(), stderr: "", exitCode: 0)   // update, dep add
+                }
+            }
             let out = arguments.first == "list" ? graphList : graphEdges
             return CommandResult(stdout: Data(out.utf8), stderr: "", exitCode: 0)
+        }
+        if executable == "bv" {
+            // `RoundExecutor.buildShadowAnalytics` — FD's own `bv --robot-insights/-plan/-priority`
+            // runs against the shadow, never the agent's. Scripted the same way `br` is above:
+            // the tests never need these to diverge from `bvStdout`/`bvExitCode`.
+            return CommandResult(stdout: Data(bvStdout.utf8), stderr: bvExitCode == 0 ? "" : "bv: failed", exitCode: bvExitCode)
         }
         onCall?(call)
         onSpawn?(pid)
@@ -102,6 +132,27 @@ final class RoundExecutorTests: XCTestCase {
     var store: TapeStore { TapeStore(intakeDirectory: root.appendingPathComponent("intake")) }
     var project: URL { root.appendingPathComponent("project") }
     var work: URL { store.workDirectory() }
+
+    /// Checks the `--allowedTools`/`--disallowedTools` VALUES only, not the whole argv — the
+    /// prompt itself is one of `arguments` too, and the polish-family prompt legitimately says
+    /// the word "bv" in prose (pointing at the analytics files); only the tool-allow flags are
+    /// the thing that must never mention it.
+    func hasBvAllow(_ args: [String]) -> Bool {
+        for flag in ["--allowedTools", "--disallowedTools"] {
+            if let i = args.firstIndex(of: flag), args[i + 1].contains("bv") { return true }
+        }
+        return false
+    }
+
+    /// A minimal real `.beads` directory under `project` — `ShadowGraph.build`'s copy step is
+    /// real `FileManager`, not the fake runner, so a shadow-success test needs something on
+    /// disk to copy from (mirrors `ShadowGraphTests.makeProject`). Left uncalled, `project` has
+    /// no `.beads` at all, which is exactly what exercises the build-failure path.
+    func makeProjectBeads() throws {
+        let beads = project.appendingPathComponent(".beads", isDirectory: true)
+        try FileManager.default.createDirectory(at: beads, withIntermediateDirectories: true)
+        try Data("placeholder\n".utf8).write(to: beads.appendingPathComponent("marker.txt"))
+    }
 
     func config(drafters: [Slot]? = nil, integrator: ModelChoice? = nil, polisher: ModelChoice? = nil) -> RoundConfig {
         RoundConfig(drafters: drafters ?? [Slot(codexA)], synthesizer: Slot(codexA, persona: .arbiter),
@@ -551,6 +602,113 @@ final class RoundExecutorTests: XCTestCase {
         XCTAssertEqual(d.category, .invalidOutput)
         XCTAssertTrue(d.detail.contains("fd-1"), d.detail)
         XCTAssertEqual(bad.calls("correction").count, 1)
+    }
+
+    // MARK: - Shadow graph + bv analytics (Task 7b wiring)
+
+    /// A shadow builds successfully (`project/.beads` exists): FD itself runs the three `bv`
+    /// robot reports against it — never the agent — writes each to `work/bv-*.json`, and the
+    /// prompt names those files. No claude argv anywhere carries a `bv` allow, scoped or not.
+    func testPolishBuildsShadowRunsBvItselfAndPointsThePromptAtTheFiles() async throws {
+        try makeProjectBeads()
+        let runner = ScriptedHarnessRunner { [unowned self] call in
+            ok(call, "pol", self.changeSetReply(pre: self.existingPre))
+        }
+        let (cp, _) = try checkpoint(try await executor(runner).run(PlannedRound(stage: .polish, round: 1, major: true),
+                                                                     inputs(config(), tape: try polishTape())))
+        XCTAssertEqual(cp.record.slots.map(\.status), [.ok])
+        XCTAssertFalse(cp.record.note?.contains("unavailable") ?? false, cp.record.note ?? "nil")
+
+        // `shadow.build`'s return value IS the `.beads` directory — that's the path `bv --db`
+        // takes (it accepts either form); `br --db` always takes the `beads.db` FILE inside it.
+        let shadowBeads = work.appendingPathComponent("shadow/.beads", isDirectory: true)
+        let dbFilePath = shadowBeads.appendingPathComponent("beads.db").path
+        let insightsPath = work.appendingPathComponent("bv-insights.json").path
+        let planPath = work.appendingPathComponent("bv-plan.json").path
+        let priorityPath = work.appendingPathComponent("bv-priority.json").path
+
+        let polisher = try XCTUnwrap(runner.calls("polisher").first)
+        XCTAssertTrue(polisher.prompt.contains(insightsPath), polisher.prompt)
+        XCTAssertTrue(polisher.prompt.contains(planPath), polisher.prompt)
+        XCTAssertTrue(polisher.prompt.contains(priorityPath), polisher.prompt)
+        XCTAssertFalse(hasBvAllow(polisher.arguments),
+                       "claude polisher argv must never carry a bv allow: \(polisher.arguments)")
+        for call in runner.calls where call.executable == "claude" {
+            XCTAssertFalse(hasBvAllow(call.arguments), "\(call.role): \(call.arguments)")
+        }
+
+        let bvCalls = runner.calls.filter { $0.executable == "bv" }
+        XCTAssertEqual(bvCalls.map { $0.arguments[2] }.sorted(), ["--robot-insights", "--robot-plan", "--robot-priority"])
+        for call in bvCalls {
+            XCTAssertEqual(call.arguments[0], "--db")
+            XCTAssertEqual(call.arguments[1], shadowBeads.path)
+            XCTAssertNotEqual(call.cwd.standardizedFileURL.path, project.standardizedFileURL.path,
+                              "bv ran with cwd = project: \(call.arguments)")
+        }
+        for path in [insightsPath, planPath, priorityPath] {
+            XCTAssertTrue(FileManager.default.fileExists(atPath: path), path)
+        }
+
+        let shadowCalls = runner.calls.filter { $0.executable == "br" && $0.arguments.first == "--db" }
+        XCTAssertFalse(shadowCalls.isEmpty)
+        for call in shadowCalls {
+            XCTAssertEqual(call.arguments[1], dbFilePath)
+            XCTAssertNotEqual(call.cwd.standardizedFileURL.path, project.standardizedFileURL.path,
+                              "argv \(call.arguments) ran with cwd = project")
+        }
+    }
+
+    /// No `.beads` under `project` at all: `ShadowGraph.build` fails before issuing any `br`
+    /// or `bv` call, but the round still runs to completion (the shadow is an aid, not a gate)
+    /// and the failure is folded into the checkpoint's note rather than pausing the round.
+    func testShadowBuildFailureStillRunsPolishAndRecordsNote() async throws {
+        let runner = ScriptedHarnessRunner { [unowned self] call in
+            ok(call, "pol", self.changeSetReply(pre: self.existingPre))
+        }
+        let (cp, _) = try checkpoint(try await executor(runner).run(PlannedRound(stage: .polish, round: 1, major: true),
+                                                                     inputs(config(), tape: try polishTape())))
+        XCTAssertEqual(cp.record.slots.map(\.status), [.ok])
+        XCTAssertTrue(cp.record.note?.contains("shadow graph unavailable") ?? false, cp.record.note ?? "nil")
+        let polisher = try XCTUnwrap(runner.calls("polisher").first)
+        XCTAssertFalse(polisher.prompt.contains("bv-insights.json"), "no analytics guidance when the shadow build fails")
+        XCTAssertFalse(runner.calls.contains { $0.executable == "br" }, "copyBeads fails before any br call runs")
+        XCTAssertFalse(runner.calls.contains { $0.executable == "bv" }, "no bv run without a shadow to run it against")
+    }
+
+    /// The shadow builds, but `bv` itself fails (e.g. not on PATH, or a genuine error): the
+    /// round still runs to completion, the failure note replaces the analytics rather than
+    /// pausing anything, and the prompt carries no analytics guidance.
+    func testBvFailureStillRunsPolishAndRecordsNote() async throws {
+        try makeProjectBeads()
+        let runner = ScriptedHarnessRunner { [unowned self] call in
+            ok(call, "pol", self.changeSetReply(pre: self.existingPre))
+        }
+        runner.bvExitCode = 1
+        runner.bvStdout = "database not found"
+        let (cp, _) = try checkpoint(try await executor(runner).run(PlannedRound(stage: .polish, round: 1, major: true),
+                                                                     inputs(config(), tape: try polishTape())))
+        XCTAssertEqual(cp.record.slots.map(\.status), [.ok])
+        XCTAssertTrue(cp.record.note?.contains("bv analytics unavailable") ?? false, cp.record.note ?? "nil")
+        let polisher = try XCTUnwrap(runner.calls("polisher").first)
+        XCTAssertFalse(polisher.prompt.contains("bv-insights.json"), "no analytics guidance when bv itself fails")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: work.appendingPathComponent("bv-insights.json").path))
+    }
+
+    /// No claude seat, anywhere in the round system — polish family or not — ever carries a
+    /// `bv` allow. A scoped `Bash(bv --db <shadow> *)` would still match `bv`'s write flags on
+    /// the same invocation, so FD runs `bv` itself instead (see the tests above) and no seat is
+    /// ever granted it at all.
+    func testNoClaudeArgvAnywhereEverAllowsBv() async throws {
+        let runner = ScriptedHarnessRunner { [unowned self] call in
+            call.role == "reviewer" ? ok(call, "rev", self.review(1)) : self.editingIntegrator(call)
+        }
+        _ = try checkpoint(try await executor(runner).run(PlannedRound(stage: .refine, round: 1, major: false),
+                                                           inputs(config(), tape: try refineTape())))
+        let claudeCalls = runner.calls.filter { $0.executable == "claude" }
+        XCTAssertFalse(claudeCalls.isEmpty)
+        for call in claudeCalls {
+            XCTAssertFalse(hasBvAllow(call.arguments), "\(call.role): \(call.arguments)")
+        }
     }
 
     // MARK: - Run layout

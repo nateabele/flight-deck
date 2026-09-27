@@ -50,15 +50,20 @@ public struct RoundExecutor: Sendable {
     private let runner: CommandRunner
     private let graphReader: GraphReader
     private let userHome: URL
+    private let bvPath: String
 
     /// `userHome` is where `ClaudeUserEnv` looks for `.claude/settings.json` and
     /// `CodexUserConfig` for `.codex/config.toml` — injectable so a test never depends on (or
-    /// leaks) the operator's own settings.
+    /// leaks) the operator's own settings. `bvPath` mirrors `GraphReader`/`ShadowGraph`'s
+    /// `brPath`: FD runs `bv` itself against a polish round's shadow (never the agent — see
+    /// `ShadowAnalytics`'s doc comment), so the same injectability that already covers `br` and
+    /// the harnesses covers it too.
     public init(runner: CommandRunner, graphReader: GraphReader,
-                userHome: URL = FileManager.default.homeDirectoryForCurrentUser) {
+                userHome: URL = FileManager.default.homeDirectoryForCurrentUser, bvPath: String = "bv") {
         self.runner = runner
         self.graphReader = graphReader
         self.userHome = userHome
+        self.bvPath = bvPath
     }
 
     /// Throws only `CancellationError` (⏹); every other failure — a harness that died, prose
@@ -274,18 +279,84 @@ public struct RoundExecutor: Sendable {
         try old.encoded().write(to: changeSetFile, options: .atomic)
         try graphData.write(to: graphFile, options: .atomic)
         let ctx = context(inputs, graphFile: graphFile, observedAt: observedAt)
+
+        // A shadow copy of `old` — the change set THIS round starts from, never whatever the
+        // polisher goes on to propose — so FD can run `bv`'s robot reports against the graph as
+        // if it had already landed and hand the agent the resulting files. Both the shadow and
+        // the `bv` runs are aids, not gates: either one failing only drops the analytics
+        // guidance from the prompt and folds a note into `record.note` below, never a `Pause`.
+        let (analytics, shadowNote) = await buildShadowAnalytics(project: inputs.project, changeSet: old, in: work, inputs: inputs)
         let prompt: String
         switch planned.stage {
-        case .freshEyes: prompt = RoundPrompts.freshEyes(ctx, planFile: plan.path, changeSetFile: changeSetFile.path)
-        case .dedup: prompt = RoundPrompts.dedup(ctx, changeSetFile: changeSetFile.path)
-        default: prompt = RoundPrompts.polish(ctx, planFile: plan.path, changeSetFile: changeSetFile.path, round: planned.round)
+        case .freshEyes:
+            prompt = RoundPrompts.freshEyes(ctx, planFile: plan.path, changeSetFile: changeSetFile.path, analytics: analytics)
+        case .dedup:
+            prompt = RoundPrompts.dedup(ctx, changeSetFile: changeSetFile.path, analytics: analytics)
+        default:
+            prompt = RoundPrompts.polish(ctx, planFile: plan.path, changeSetFile: changeSetFile.path, round: planned.round,
+                                         analytics: analytics)
         }
         let cs = try await changeSetSeat(planned, "polisher", polisher, prompt: prompt,
                                          readable: [plan.deletingLastPathComponent(), work],
                                          graph: graph, observedAt: observedAt, inputs: inputs, &record)
         record.changeCount = PlanMetrics.opsChanged(from: old, to: cs)
-        if let fallbackNote { record.note = [fallbackNote, record.note].compactMap { $0 }.joined(separator: "\n\n") }
+        // Both notes are independent aids, not gates, and either or both can be nil: the graph
+        // snapshot fallback (no encode checkpoint to carry one) and the shadow/bv analytics
+        // failure note (Task 7b) can each fire on their own round.
+        record.note = [fallbackNote, record.note, shadowNote].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "\n\n")
         return ["changeset.json": try cs.encoded(), "plan.md": try Data(contentsOf: plan), "graph.json": graphData]
+    }
+
+    /// `bv`'s three robot reports, run by FD ITSELF against a fresh shadow of `changeSet` and
+    /// written under `work/` as plain files for the polisher to read. No claude seat is ever
+    /// granted `bv` (see `ShadowAnalytics`'s doc comment for why a scoped `--db` allow still
+    /// isn't safe), so this is the only way the guidance reaches the prompt. Returns `nil` with
+    /// a "… unavailable: …" note on any failure — building the shadow, running `bv`, or writing
+    /// its output — since the analytics are an aid, not a gate; nothing here ever throws.
+    private func buildShadowAnalytics(project: URL, changeSet: ChangeSet, in work: URL,
+                                      inputs: RoundInputs) async -> (ShadowAnalytics?, String?) {
+        let shadow = ShadowGraph(runner: runner, environment: inputs.environment)
+        let shadowDir = work.appendingPathComponent("shadow", isDirectory: true)
+        let shadowBeads: URL
+        do {
+            shadowBeads = try await shadow.build(project: project, changeSet: changeSet, in: shadowDir)
+        } catch let failure as ShadowGraphBuildFailed {
+            return (nil, "shadow graph unavailable: \(failure.detail)")
+        } catch {
+            return (nil, "shadow graph unavailable: \(error)")
+        }
+
+        // Every `bv` call runs with `cwd` = `shadowDir`, never `project`, for the same reason
+        // `ShadowGraph` never lets `br` run with `cwd` = `project`: `bv` also auto-discovers a
+        // `.beads` from `cwd` when `--db` is absent, and a call that fell back to that here
+        // would silently read the real graph instead of the shadow.
+        let runs: [(flag: String, filename: String)] = [("--robot-insights", "bv-insights.json"),
+                                                        ("--robot-plan", "bv-plan.json"),
+                                                        ("--robot-priority", "bv-priority.json")]
+        var paths: [String: String] = [:]
+        for run in runs {
+            let result: CommandResult
+            do {
+                result = try await runner.run(executable: bvPath,
+                    arguments: ["--db", shadowBeads.path, run.flag, "--format", "json", "--no-hooks"],
+                    cwd: shadowDir, environment: inputs.environment)
+            } catch {
+                return (nil, "bv analytics unavailable: \(run.flag): \(error)")
+            }
+            guard result.exitCode == 0 else {
+                let stderr = String(decoding: result.stdout, as: UTF8.self).prefix(200)
+                return (nil, "bv analytics unavailable: \(run.flag) exit \(result.exitCode): \(stderr)")
+            }
+            let path = work.appendingPathComponent(run.filename)
+            do {
+                try result.stdout.write(to: path, options: .atomic)
+            } catch {
+                return (nil, "bv analytics unavailable: could not write \(run.filename): \(error)")
+            }
+            paths[run.filename] = path.path
+        }
+        return (ShadowAnalytics(insights: paths["bv-insights.json"]!, plan: paths["bv-plan.json"]!,
+                                priority: paths["bv-priority.json"]!), nil)
     }
 
     /// One change-set seat: run it, stamp FD's own `graphObservedAt` (the agent's clock is not
@@ -293,8 +364,8 @@ public struct RoundExecutor: Sendable {
     /// once with the errors listed — the same one-retry rule triage follows (spec §11), in
     /// words that ask for a `{changeSet, summary}` rather than triage's "recommendation".
     private func changeSetSeat(_ planned: PlannedRound, _ role: String, _ choice: ModelChoice, prompt: String,
-                               readable: [URL], graph: GraphSnapshot, observedAt: Date, inputs: RoundInputs,
-                               _ record: inout RoundRecord) async throws -> ChangeSet {
+                               readable: [URL], graph: GraphSnapshot, observedAt: Date,
+                               inputs: RoundInputs, _ record: inout RoundRecord) async throws -> ChangeSet {
         var first = try await seat(ChangeSetOutput.self, planned, role, choice, prompt: prompt, schema: RoundSchemas.changeSet,
                                    cwd: inputs.project, readable: readable, inputs: inputs, &record)
         first.changeSet.graphObservedAt = observedAt
@@ -340,7 +411,8 @@ public struct RoundExecutor: Sendable {
     /// has to look at.
     private func seat<T: Decodable & Sendable>(_ type: T.Type, _ planned: PlannedRound, _ role: String,
                                                persona: DrafterPersona? = nil, _ choice: ModelChoice, prompt: String,
-                                               schema: String, cwd: URL, readable: [URL], access: HarnessAccess = .readOnly,
+                                               schema: String, cwd: URL, readable: [URL],
+                                               access: HarnessAccess = .readOnly,
                                                inputs: RoundInputs, _ record: inout RoundRecord) async throws -> T {
         switch try await attempt(type, runName(planned, role), choice, prompt: prompt, schema: schema, cwd: cwd,
                                  readable: readable, access: access, inputs: inputs) {
@@ -358,7 +430,8 @@ public struct RoundExecutor: Sendable {
     /// One harness turn in its own `runs/<name>/`, parsed and decoded. Model and effort are
     /// always passed explicitly (a codex resume otherwise falls back to its config default).
     private func attempt<T: Decodable & Sendable>(_ type: T.Type, _ name: String, _ choice: ModelChoice, prompt: String,
-                                                  schema: String, cwd: URL, readable: [URL], access: HarnessAccess = .readOnly,
+                                                  schema: String, cwd: URL, readable: [URL],
+                                                  access: HarnessAccess = .readOnly,
                                                   resume: String? = nil, inputs: RoundInputs) async throws -> Attempt<T> {
         try Task.checkCancellation()
         let dir = inputs.store.runDirectory(name)
