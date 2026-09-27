@@ -102,6 +102,7 @@ final class IntakeRunnerControllerTests: XCTestCase {
     /// dir>/intakes` layout.
     private func makeFixture(
         flightdeckPath: (() -> String?)? = nil,
+        environment: @escaping () -> [String: String]? = { ["PATH": "/fake/path"] },
         now: @escaping () -> Date = Date.init
     ) throws -> Fixture {
         let daemonDir = tempDir.appendingPathComponent("daemon")
@@ -117,7 +118,7 @@ final class IntakeRunnerControllerTests: XCTestCase {
             daemon: daemon, control: control, spawner: spawner,
             flightdeckPath: flightdeckPath ?? { "/fake/flightdeck" },
             intakesRoot: intakesRoot,
-            environment: { ["PATH": "/fake/path"] },
+            environment: environment,
             now: now
         )
         return Fixture(
@@ -188,6 +189,9 @@ final class IntakeRunnerControllerTests: XCTestCase {
             daemon: daemon, control: control, spawner: spawner,
             flightdeckPath: { "/fake/flightdeck" }, intakesRoot: intakesRoot
         )
+        // The recipe never runs the login-shell lookup itself (see `notReady`); the app's
+        // prewarm does, and this stands in for it.
+        _ = LoginShellPath.resolve()
 
         expectSuccess(controller.ensureRunning(UUID()))
 
@@ -471,6 +475,39 @@ final class IntakeRunnerControllerTests: XCTestCase {
         fixture.controller.reap(id)
 
         XCTAssertTrue(fixture.control.terminatedSockets.isEmpty, "nothing to signal, so leave the socket for a later attempt")
+    }
+
+    /// The environment isn't ready (the login-shell PATH is still being looked up off the main
+    /// actor): nothing is spawned and no spawn grace is recorded, so the next tick's call —
+    /// once it is ready — spawns for real instead of trusting a runner that was never started.
+    func testEnvironmentNotReadyDefersTheSpawn() throws {
+        var ready = false
+        let fixture = try makeFixture(environment: { ready ? ["PATH": "/fake/path"] : nil })
+        let id = UUID()
+
+        expectFailure(fixture.controller.ensureRunning(id), .notReady)
+        XCTAssertEqual(fixture.spawner.calls.count, 0)
+        XCTAssertFalse(fixture.controller.isRunning(id))
+
+        ready = true
+        expectSuccess(fixture.controller.ensureRunning(id))
+        XCTAssertEqual(fixture.spawner.calls.count, 1)
+    }
+
+    /// A caller that already decoded the tape hands it over, and `isRunning` judges that one
+    /// rather than reading `tape.json` again.
+    func testIsRunningUsesTheCallersTape() throws {
+        var current = Date(timeIntervalSince1970: 1_000_000)
+        let fixture = try makeFixture(now: { current })
+        let id = UUID()
+        let socket = fixture.controller.socketPath(for: id)
+        fixture.control.liveSockets.insert(socket)
+        fixture.control.pidfiledSockets.insert(socket)
+        try saveTape(Tape(status: .running), for: id, intakesRoot: fixture.intakesRoot) // no heartbeat on disk
+        current = current.addingTimeInterval(1)
+
+        XCTAssertFalse(fixture.controller.isRunning(id))
+        XCTAssertTrue(fixture.controller.isRunning(id, tape: Tape(status: .running, heartbeat: current)))
     }
 
     func testMissingCLIReportsNoBundledCLI() throws {

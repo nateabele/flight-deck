@@ -28,7 +28,23 @@ enum LoginShellPath {
     /// than replace it with something worse.
     private static let cached: String? = lookUp()
 
-    static func resolve() -> String? { cached }
+    /// Set once `cached` has been computed, so `resolvedIfReady` can answer without being the
+    /// caller that blocks on the lookup.
+    private static let readyLock = NSLock()
+    nonisolated(unsafe) private static var ready = false
+
+    static func resolve() -> String? {
+        let path = cached
+        readyLock.withLock { ready = true }
+        return path
+    }
+
+    /// `resolve()`'s answer if the lookup has already finished, without ever running it: the
+    /// outer nil means "not looked up yet", the inner one "looked up, and failed". For the main
+    /// actor, which must not wait on a login shell.
+    static func resolvedIfReady() -> String?? {
+        readyLock.withLock { ready } ? .some(cached) : nil
+    }
 
     /// How long the login shell gets before we give up and keep the inherited PATH. A profile
     /// that hangs must not hang session creation; the same reasoning as `CodexVersionProbe`'s

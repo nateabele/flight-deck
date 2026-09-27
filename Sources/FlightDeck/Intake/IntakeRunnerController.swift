@@ -79,6 +79,10 @@ enum RunnerStartError: Error, Equatable {
     /// The launcher process itself failed to start or exited non-zero; `String` is
     /// `RunnerSpawning`'s error, described for a log line, not parsed by any caller.
     case spawnFailed(String)
+    /// Not a refusal: the runner's environment isn't ready yet (the login-shell PATH lookup is
+    /// still in flight off the main actor), so nothing was spawned. The caller's next tick
+    /// retries — computing it here instead would block the main actor on a login shell.
+    case notReady
 }
 
 /// Adopts, spawns and reaps the one detached runner process an intake's round engine needs —
@@ -91,7 +95,8 @@ final class IntakeRunnerController {
     private let spawner: RunnerSpawning
     private let flightdeckPath: () -> String?
     private let intakesRoot: URL
-    private let environment: () -> [String: String]
+    /// nil means "not ready yet" — see `RunnerStartError.notReady`.
+    private let environment: () -> [String: String]?
     /// Injected so `isRunning`'s heartbeat-freshness check is deterministic under test —
     /// see the doc comment there for why a live socket alone isn't enough.
     private let now: () -> Date
@@ -162,8 +167,9 @@ final class IntakeRunnerController {
         // Claude identity stripped, `FLIGHT_DECK_STATE_DIR` pointed at the intakes root's
         // parent — at CALL time, not at init time: default *parameter* expressions in Swift
         // cannot reference a sibling parameter (`intakesRoot`), so the computation has to live
-        // in the initializer body instead of the signature.
-        environment: (() -> [String: String])? = nil,
+        // in the initializer body instead of the signature. A supplied provider may return nil
+        // for "not ready yet".
+        environment: (() -> [String: String]?)? = nil,
         spawnGrace: TimeInterval = 15,
         staleGrace: TimeInterval = 2 * heartbeatFreshness,
         orphanGrace: TimeInterval = 30,
@@ -183,7 +189,15 @@ final class IntakeRunnerController {
         } else {
             let stateDir = intakesRoot.deletingLastPathComponent().path
             self.environment = {
-                var env = LoginShellPath.repairing(ProcessInfo.processInfo.environment)
+                // Never the lookup itself: `LoginShellPath.resolve()` runs a login shell (up to
+                // its 5 s timeout) the first time, and this is called on the main actor. The
+                // PATH is prewarmed off-main (`IntakeService`'s model probe resolves it); until
+                // that lands, kick the warm-up and let the tick retry.
+                guard let path = LoginShellPath.resolvedIfReady() else {
+                    Task.detached(priority: .utility) { _ = LoginShellPath.resolve() }
+                    return nil
+                }
+                var env = LoginShellPath.repairing(ProcessInfo.processInfo.environment, path: path)
                 // The runner is not this tab's Claude session and must never be mistaken for
                 // a nested one — same hazard `AGENTS.md` warns every agent about.
                 env.removeValue(forKey: "CLAUDE_CODE_CHILD_SESSION")
@@ -240,7 +254,10 @@ final class IntakeRunnerController {
     /// from the FIRST stale sighting before treating it as crashed; a fresh heartbeat in the
     /// meantime clears that grace entirely. A dead pid (or no pid at all) skips the grace and
     /// reads as not running immediately — there is nothing left to wait on.
-    func isRunning(_ id: UUID) -> Bool {
+    ///
+    /// `tape` is the caller's own fresh read, when it has one (the service's tick just decoded
+    /// it); nil reads `tape.json` here.
+    func isRunning(_ id: UUID, tape: Tape? = nil) -> Bool {
         let socket = socketPath(for: id)
         guard control.isLive(socketPath: socket) else {
             firstSeenStale.removeValue(forKey: id)
@@ -249,7 +266,7 @@ final class IntakeRunnerController {
         if let spawnedAt = spawnedAt[id], now().timeIntervalSince(spawnedAt) < spawnGrace {
             return true
         }
-        let tape = TapeStore(intakeDirectory: IntakeStore(root: intakesRoot).directory(for: id)).loadTape()
+        let tape = tape ?? TapeStore(intakeDirectory: IntakeStore(root: intakesRoot).directory(for: id)).loadTape()
         // No heartbeat at all — as opposed to a STALE one — means this runner never got past
         // its first poll (Task 8's contract makes a heartbeat the very first tape write) or is
         // a genuinely finished one whose tape predates heartbeats entirely; either way there is
@@ -288,6 +305,8 @@ final class IntakeRunnerController {
             return .failure(.noFdAbduco)
         }
 
+        guard let environment = environment() else { return .failure(.notReady) }
+
         let arguments = [
             "-n", socketPath(for: id), flightdeckPath, "intake", "run", id.uuidString.lowercased(),
             "--root", intakesRoot.path,
@@ -301,7 +320,10 @@ final class IntakeRunnerController {
         // bind the socket even though this call gave up waiting on it.
         spawnedAt[id] = now()
         do {
-            try spawner.spawn(executable: fdAbducoPath, arguments: arguments, environment: environment())
+            // Blocks the main actor until the `-n` launcher exits — accepted: it forks and
+            // returns almost at once, runs only on a (re)spawn, and is bounded to
+            // `launcherTimeout` (5 s) if it wedges.
+            try spawner.spawn(executable: fdAbducoPath, arguments: arguments, environment: environment)
             return .success(())
         } catch let error as FdAbducoRunnerSpawner.SpawnError {
             if case .launcherFailed = error {
