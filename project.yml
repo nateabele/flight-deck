@@ -294,6 +294,11 @@ targets:
     dependencies:
       - target: FleetKit
         embed: false
+      # `intake run` calls straight into IntakeRunner — no socket, no app in the loop. Not
+      # embedded, same as FleetKit above: the app embeds both frameworks into `Contents/
+      # Frameworks`, and `LD_RUNPATH_SEARCH_PATHS` below already points this binary there.
+      - target: IntakeKit
+        embed: false
     settings:
       base:
         PRODUCT_NAME: flightdeck

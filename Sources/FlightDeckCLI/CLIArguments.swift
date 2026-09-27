@@ -47,6 +47,10 @@ public enum CLICommand: Equatable {
     case closed
     case options(project: String)
     case raw(String)
+    /// `main.swift` intercepts this before the runner even exists — see its comment — so
+    /// `CLIRunner` never sees one dispatched. Parsed here anyway because argument validation
+    /// (a real UUID, `--root` present) belongs with every other verb's, not duplicated in main.
+    case intakeRun(id: UUID, root: String)
 }
 
 /// A fully parsed command line: the command itself, plus the two globals (`--json`,
@@ -296,6 +300,9 @@ public enum CLIArguments {
         case "raw":
             return .raw(try c.requirePositional("raw: missing command"))
 
+        case "intake":
+            return try parseIntake(&c)
+
         default:
             throw CLIUsageError("unknown command \"\(verb)\"")
         }
@@ -332,6 +339,29 @@ public enum CLIArguments {
         }
     }
 
+    private static func parseIntake(_ c: inout Cursor) throws -> CLICommand {
+        let sub = try c.requirePositional("intake: missing subcommand")
+        switch sub {
+        case "run":
+            let token = try c.requirePositional("intake run: missing id")
+            guard let id = UUID(uuidString: token) else {
+                throw CLIUsageError("intake run: requires a full UUID, got \"\(token)\"")
+            }
+            var root: String?
+            while let flag = c.nextFlag() {
+                switch flag {
+                case "--root": root = try c.require(after: flag)
+                default: throw Cursor.unknownFlag(flag, in: "intake run")
+                }
+            }
+            guard let root else { throw CLIUsageError("intake run: --root DIR is required") }
+            return .intakeRun(id: id, root: root)
+
+        default:
+            throw CLIUsageError("intake: unknown subcommand \"\(sub)\"")
+        }
+    }
+
     /// `allow`, `deny`, or a JSON `[[Int]]` — the shape a multi-select dialog's answer takes.
     private static func parseAnswerChoice(_ token: String) throws -> CLIAnswerChoice {
         switch token {
@@ -353,6 +383,7 @@ public enum CLIArguments {
     private static let valueFlags: Set<String> = [
         "--session", "--since", "--for", "--timeout", "--agent", "--account", "--call",
         "--before", "--after", "--around", "--limit", "--project", "--feedback", "--block",
+        "--root",
     ]
 
     /// One verb's tokens, split up front into two streams: operands (session, text, …) and
