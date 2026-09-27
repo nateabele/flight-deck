@@ -1139,6 +1139,11 @@ final class SessionStore: ObservableObject {
     /// Not `private`: `AppDelegate` reads this to wire the Tools menu to the same store.
     let preferences: PreferencesStore?
 
+    /// See the assignment in `init` for why this exists: forwards `preferences`'
+    /// `objectWillChange` into this store's own, so a view that only observes `store` (e.g.
+    /// `ProjectView`) still redraws when a project's `flywheelEnabled` flag flips.
+    private var preferencesChangeForward: AnyCancellable?
+
     /// The local control socket every launched tab is pointed at, or nil when the control
     /// socket is off. `FlightDeckApp` sets this (with `controlSecret`) when
     /// `ControlEnvironment.isEnabled()`; left nil under a UITest reset so a GUI test's tabs
@@ -1832,6 +1837,15 @@ final class SessionStore: ObservableObject {
         self.flywheelCoordinator = flywheelCoordinator
         self.flywheelSetup = flywheelSetup
         self.flywheelObserveReads = flywheelObserveReads
+        // `PreferencesStore` publishes independently of this store, but `ProjectView` only
+        // observes `store` — without forwarding, flipping `flywheelEnabled` (enableFlywheel/
+        // setupFlywheel) would leave that project's empty state on screen until some
+        // unrelated store mutation happened to republish it. Same shape as
+        // `intakeChangeForward`, for the same reason. After every stored property above:
+        // `[weak self]` still needs `self` fully initialized before it can be captured.
+        preferencesChangeForward = preferences?.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
+        }
         // Shell records land asynchronously, up to half a second after the tab they belong to
         // (see `SurfaceProcessRegistry`), so the `persist()` that `newSession`/`restore` already
         // ran is too early to contain them. Without this the snapshot names no shell for any
