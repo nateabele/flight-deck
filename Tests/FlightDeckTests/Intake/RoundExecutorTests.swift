@@ -252,6 +252,31 @@ final class RoundExecutorTests: XCTestCase {
         XCTAssertEqual(rec.slots.first?.diagnosis?.category, .harnessError)
     }
 
+    /// Annotations are consumed by whichever round runs next — here a polish round, long after
+    /// refinement ended — and reach its prompt in the shared steering words.
+    func testPolishConsumesAnnotations() async throws {
+        let runner = ScriptedHarnessRunner { [unowned self] call in
+            ok(call, "pol", self.changeSetReply(pre: self.existingPre, extra: [self.newBead]))
+        }
+        var tape = try polishTape()
+        tape.pendingAnnotations = ["split the auth bead"]
+        let (cp, _) = try checkpoint(try await executor(runner).run(PlannedRound(stage: .polish, round: 1, major: true),
+                                                                    inputs(config(), tape: tape)))
+        XCTAssertEqual(cp.record.annotations, ["split the auth bead"])
+        let polisher = try XCTUnwrap(runner.calls("polisher").first)
+        XCTAssertTrue(polisher.prompt.contains("The human steering this plan says:\n- split the auth bead"), polisher.prompt)
+    }
+
+    func testDraftConsumesAnnotations() async throws {
+        let runner = ScriptedHarnessRunner { call in ok(call, "d", json(DraftOutput(plan: "# P"))) }
+        var tape = Tape()
+        tape.pendingAnnotations = ["web only"]
+        let (cp, _) = try checkpoint(try await executor(runner).run(PlannedRound(stage: .draft, round: 0, major: true),
+                                                                    inputs(config(), tape: tape)))
+        XCTAssertEqual(cp.record.annotations, ["web only"])
+        XCTAssertTrue(try XCTUnwrap(runner.calls("drafter").first).prompt.contains("- web only"))
+    }
+
     // MARK: - Synthesis / refine
 
     func synthesisTape() throws -> Tape {

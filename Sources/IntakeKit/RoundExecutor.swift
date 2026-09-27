@@ -63,7 +63,9 @@ public struct RoundExecutor: Sendable {
     /// Throws only `CancellationError` (⏹); every other failure — a harness that died, prose
     /// where JSON belonged, a disk error — comes back as `.paused` so the human sees why.
     public func run(_ planned: PlannedRound, _ inputs: RoundInputs) async throws -> RoundResult {
-        var record = RoundRecord()
+        // Every stage's prompt carries the pending annotations (see `context`), so every
+        // stage consumes them, and the runner can clear exactly what the checkpoint records.
+        var record = RoundRecord(annotations: inputs.tape.pendingAnnotations)
         let files: [String: Data]
         do {
             try FileManager.default.createDirectory(at: inputs.store.workDirectory(), withIntermediateDirectories: true)
@@ -163,10 +165,7 @@ public struct RoundExecutor: Sendable {
         guard let reviewer = inputs.config.reviewer else { throw Pause.config("no reviewer") }
         let plan = try currentPlan(inputs)
         let work = inputs.store.workDirectory()
-        let annotations = inputs.tape.pendingAnnotations
-        let ctx = context(inputs, graphFile: work.appendingPathComponent("graph.json"), annotations: annotations,
-                          observedAt: inputs.now())
-        record.annotations = annotations
+        let ctx = context(inputs, graphFile: work.appendingPathComponent("graph.json"), observedAt: inputs.now())
         let review = try await seat(ReviewOutput.self, planned, "reviewer", reviewer.choice,
                                     prompt: RoundPrompts.review(ctx, planFile: plan.path, round: planned.round),
                                     schema: RoundSchemas.review, cwd: inputs.project,
@@ -456,7 +455,7 @@ public struct RoundExecutor: Sendable {
         return (graph, file, observedAt)
     }
 
-    private func context(_ inputs: RoundInputs, graphFile: URL, annotations: [String] = [], observedAt: Date) -> RoundContext {
+    private func context(_ inputs: RoundInputs, graphFile: URL, observedAt: Date) -> RoundContext {
         // Only files that exist: listing a missing one sends the agent off to read it (see
         // `Triage.initialPrompt`'s doc).
         func existing(_ name: String) -> String? {
@@ -465,7 +464,7 @@ public struct RoundExecutor: Sendable {
         }
         return RoundContext(intent: inputs.intake.intent, qa: inputs.intake.exchanges, graphFile: graphFile.path,
                             agentsFile: existing("AGENTS.md"), readmeFile: existing("README.md"),
-                            annotations: annotations, observedAt: observedAt)
+                            annotations: inputs.tape.pendingAnnotations, observedAt: observedAt)
     }
 
     /// The newest checkpoint on the tape that has `relativePath` on disk.

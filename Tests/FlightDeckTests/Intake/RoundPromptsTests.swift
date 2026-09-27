@@ -118,6 +118,64 @@ final class RoundPromptsTests: XCTestCase {
         XCTAssertFalse(p.contains("The human steering this plan says:"))
     }
 
+    // MARK: - Steering and context, every stage
+
+    /// Every stage that reads the intake takes the human's annotations, in the same words —
+    /// an annotation left while polish is next must not wait for a refine round that never
+    /// comes. Integrate is the exception: it applies someone else's edits and never judges.
+    func testEveryStagePromptCarriesAnnotationsThroughOneClause() {
+        let c = context(annotations: ["Keep it Mac-only", "No new deps"])
+        let prompts = [
+            RoundPrompts.draft(c, persona: .general),
+            RoundPrompts.synthesis(c, ownDraft: "/i/a.md", otherDrafts: ["/i/b.md"]),
+            RoundPrompts.review(c, planFile: "/i/plan.md", round: 1),
+            RoundPrompts.encode(c, planFile: "/i/plan.md"),
+            RoundPrompts.polish(c, planFile: "/i/plan.md", changeSetFile: "/i/cs.json", round: 1),
+            RoundPrompts.freshEyes(c, planFile: "/i/plan.md", changeSetFile: "/i/cs.json"),
+            RoundPrompts.dedup(c, changeSetFile: "/i/cs.json"),
+        ]
+        for p in prompts {
+            XCTAssertTrue(p.contains("The human steering this plan says:\n- Keep it Mac-only\n- No new deps"), p)
+        }
+        XCTAssertFalse(RoundPrompts.encode(context(), planFile: "/i/plan.md").contains("The human steering this plan says:"))
+        XCTAssertFalse(RoundPrompts.dedup(context(), changeSetFile: "/i/cs.json").contains("The human steering this plan says:"))
+    }
+
+    /// A synthesizer is a fresh session: "the drafting task you were just given" pointed at a
+    /// conversation it never had. It needs the intent, the Q&A and the project files itself.
+    func testSynthesisPromptStandsOnItsOwn() {
+        let qa = [TriageExchange(questions: ["Which platforms?"], answers: ["Mac only"])]
+        let p = RoundPrompts.synthesis(context(qa: qa), ownDraft: "/i/draft-a.md", otherDrafts: ["/i/draft-b.md"])
+        XCTAssertTrue(p.contains("Ship the thing"))
+        XCTAssertTrue(p.contains("Q: Which platforms?\nA: Mac only"))
+        XCTAssertTrue(p.contains("/p/AGENTS.md"))
+        XCTAssertTrue(p.contains("the draft at /i/draft-a.md (yours to revise)"), p)
+        XCTAssertFalse(p.contains("you were just given"))
+    }
+
+    func testReviewPromptCarriesIntentQAAndProjectFiles() {
+        let qa = [TriageExchange(questions: ["Which platforms?"], answers: ["Mac only"])]
+        let p = RoundPrompts.review(context(qa: qa), planFile: "/i/plan.md", round: 2)
+        XCTAssertTrue(p.contains("Ship the thing"))
+        XCTAssertTrue(p.contains("Q: Which platforms?\nA: Mac only"))
+        XCTAssertTrue(p.contains("/p/AGENTS.md"))
+    }
+
+    /// "Reread AGENTS.md" names no file — the seat's cwd is the project, but the instruction
+    /// should point at the path FD found, and say nothing when there is none.
+    func testPolishFamilyPromptsNameTheAgentsFile() {
+        let c = context()
+        for p in [RoundPrompts.polish(c, planFile: "/i/plan.md", changeSetFile: "/i/cs.json", round: 1),
+                  RoundPrompts.freshEyes(c, planFile: "/i/plan.md", changeSetFile: "/i/cs.json"),
+                  RoundPrompts.dedup(c, changeSetFile: "/i/cs.json")] {
+            XCTAssertTrue(p.contains("Reread the project's agent instructions at /p/AGENTS.md"), p)
+        }
+        let none = RoundContext(intent: "x", qa: [], graphFile: "/g", agentsFile: nil, readmeFile: nil,
+                                annotations: [], observedAt: observedAt)
+        XCTAssertFalse(RoundPrompts.polish(none, planFile: "/i/plan.md", changeSetFile: "/i/cs.json", round: 1)
+            .contains("AGENTS.md"))
+    }
+
     // MARK: - Integrate
 
     func testIntegratePromptEditsOnlyThatFile() {
