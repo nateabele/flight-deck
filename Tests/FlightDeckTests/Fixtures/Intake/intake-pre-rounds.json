@@ -1,0 +1,16 @@
+{
+  "id": "12345678-1234-5678-1234-567812345678",
+  "projectPath": "/p",
+  "intent": "add a tooltip to the send button",
+  "createdAt": "2026-09-20T12:00:00Z",
+  "state": "awaitingChoice",
+  "recommended": "sketch",
+  "recommendationReason": "small, isolated change",
+  "triage": {"harness": "claude", "sessionID": "sess-1", "model": "opus", "effort": "high"},
+  "exchanges": [
+    {"questions": ["Which button?"], "answers": ["The one in the composer"]}
+  ],
+  "ratingOverrides": {},
+  "droppedOps": [],
+  "confirmedDrift": []
+}

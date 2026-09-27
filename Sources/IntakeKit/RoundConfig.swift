@@ -1,0 +1,155 @@
+import Foundation
+
+/// The angle a drafter is asked to take. `.general` is the only persona a single-drafter
+/// round (Sketch) ever uses; Feature/Full plan assign the rest to spread disagreement across
+/// drafts rather than have every model converge on the same read.
+public enum DrafterPersona: String, Codable, Sendable, CaseIterable {
+    case general, arbiter, realist, coverage, stressTest
+}
+
+/// One harness/model/effort triple. Distinct from `HarnessSession` (which also carries a
+/// live `sessionID`) — a `RoundConfig` describes what to run, before any session exists.
+public struct ModelChoice: Codable, Equatable, Sendable {
+    public var harness: Harness
+    public var model: String
+    public var effort: String
+    public init(harness: Harness, model: String, effort: String) {
+        self.harness = harness
+        self.model = model
+        self.effort = effort
+    }
+}
+
+/// A single seat in a round: the model doing the work, the persona it's asked to take, and
+/// the model to retry with if the first one fails outright (not a quality fallback — an
+/// availability one).
+public struct Slot: Codable, Equatable, Sendable {
+    public var choice: ModelChoice
+    public var persona: DrafterPersona
+    public var fallback: ModelChoice?
+    public init(_ choice: ModelChoice, persona: DrafterPersona = .general, fallback: ModelChoice? = nil) {
+        self.choice = choice
+        self.persona = persona
+        self.fallback = fallback
+    }
+}
+
+/// How far an armed round is allowed to run before it stops and hands back to the human.
+/// `.step` runs one stage; `.nextMajor` runs to the next major checkpoint (e.g. through
+/// refinement or through polish); `.toReview` runs everything and lands on release review.
+public enum PlayMode: String, Codable, Sendable { case step, nextMajor, toReview }
+
+/// The fully expanded shape of a shaping round: every seat, every cap, and the play mode a
+/// "Continue" click uses by default. `PresetExpansion` builds the initial one from a
+/// `Preset`; the config editor (Task 13) lets the human edit it in place, at which point
+/// `customized` flips true so later tooling can tell an edited config from a stock one.
+public struct RoundConfig: Codable, Equatable, Sendable {
+    public var drafters: [Slot]
+    public var synthesizer: Slot?
+    public var reviewer: Slot?
+    public var integrator: ModelChoice
+    public var encoder: ModelChoice
+    public var polisher: ModelChoice?
+    public var refinementCap: Int
+    public var polishCap: Int
+    public var freshEyesAndDedup: Bool
+    public var defaultPlay: PlayMode
+    public var customized: Bool
+
+    public init(drafters: [Slot], synthesizer: Slot?, reviewer: Slot?, integrator: ModelChoice,
+                encoder: ModelChoice, polisher: ModelChoice?, refinementCap: Int, polishCap: Int,
+                freshEyesAndDedup: Bool, defaultPlay: PlayMode, customized: Bool) {
+        self.drafters = drafters
+        self.synthesizer = synthesizer
+        self.reviewer = reviewer
+        self.integrator = integrator
+        self.encoder = encoder
+        self.polisher = polisher
+        self.refinementCap = refinementCap
+        self.polishCap = polishCap
+        self.freshEyesAndDedup = freshEyesAndDedup
+        self.defaultPlay = defaultPlay
+        self.customized = customized
+    }
+}
+
+/// Which harnesses are actually installed, and the model/effort each should run at. Either
+/// side can be nil — a machine with only one CLI installed still gets a usable, if
+/// single-model, round.
+public struct AvailableModels: Sendable, Equatable {
+    public var codex: ModelChoice?
+    public var claude: ModelChoice?
+    public init(codex: ModelChoice?, claude: ModelChoice?) {
+        self.codex = codex
+        self.claude = claude
+    }
+
+    /// codex gpt-6-sol/high and claude opus/high when both are present.
+    public static let defaults = AvailableModels(
+        codex: ModelChoice(harness: .codex, model: "gpt-6-sol", effort: "high"),
+        claude: ModelChoice(harness: .claude, model: "opus", effort: "high")
+    )
+}
+
+/// Turns a chosen fidelity preset into a starting `RoundConfig`, before any human edits it.
+public enum PresetExpansion {
+    /// "A" is the first available model, codex if present, else claude. "B" is the other one
+    /// if present, else A — so a single-harness machine gets every seat filled with the one
+    /// model it has, and no fallback pointing at a model that doesn't exist.
+    public static func config(for preset: Preset, available: AvailableModels) -> RoundConfig? {
+        guard preset != .bead else { return nil }
+        let a: ModelChoice
+        let b: ModelChoice
+        if let codex = available.codex {
+            a = codex
+            b = available.claude ?? codex
+        } else if let claude = available.claude {
+            a = claude
+            b = claude
+        } else {
+            return nil
+        }
+        // Fallbacks only make sense when there's a second model to fall back to — otherwise
+        // the "fallback" is the same model that just failed.
+        let hasFallback = available.codex != nil && available.claude != nil
+        let integrator = available.claude ?? a
+        let encoder = a
+
+        switch preset {
+        case .bead:
+            return nil
+        case .sketch:
+            return RoundConfig(
+                drafters: [Slot(a, persona: .general, fallback: hasFallback ? b : nil)],
+                synthesizer: nil,
+                reviewer: Slot(a, fallback: hasFallback ? b : nil),
+                integrator: integrator, encoder: encoder, polisher: nil,
+                refinementCap: 2, polishCap: 0, freshEyesAndDedup: false,
+                defaultPlay: .toReview, customized: false)
+        case .featurePlan:
+            return RoundConfig(
+                drafters: [
+                    Slot(a, persona: .arbiter, fallback: hasFallback ? b : nil),
+                    Slot(b, persona: .realist, fallback: hasFallback ? a : nil),
+                ],
+                synthesizer: Slot(a, persona: .arbiter, fallback: hasFallback ? b : nil),
+                reviewer: Slot(a, fallback: hasFallback ? b : nil),
+                integrator: integrator, encoder: encoder, polisher: available.claude ?? a,
+                refinementCap: 3, polishCap: 2, freshEyesAndDedup: false,
+                defaultPlay: .nextMajor, customized: false)
+        case .fullPlan:
+            return RoundConfig(
+                drafters: [
+                    Slot(a, persona: .arbiter, fallback: hasFallback ? b : nil),
+                    Slot(b, persona: .realist, fallback: hasFallback ? a : nil),
+                    Slot(a, persona: .coverage, fallback: hasFallback ? b : nil),
+                    Slot(b, persona: .stressTest, fallback: hasFallback ? a : nil),
+                ],
+                synthesizer: Slot(a, persona: .arbiter, fallback: hasFallback ? b : nil),
+                reviewer: Slot(a, fallback: hasFallback ? b : nil),
+                integrator: integrator, encoder: encoder, polisher: available.claude ?? a,
+                refinementCap: 5, polishCap: 6, freshEyesAndDedup: true,
+                defaultPlay: .nextMajor, customized: false)
+        }
+    }
+}

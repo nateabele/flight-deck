@@ -42,6 +42,7 @@ struct IntakeDetailView: View {
         case .triaging: triagingBody
         case .needsAnswers: needsAnswersBody
         case .awaitingChoice: awaitingChoiceBody
+        case .shaping: shapingBody
         case .parked: parkedBody
         case .review: reviewBody
         case .releasing: releasingBody
@@ -137,6 +138,14 @@ struct IntakeDetailView: View {
         }
     }
 
+    /// Placeholder for the config editor Task 13 builds — this task only needs `.shaping` to
+    /// exist and compile, not to be reachable yet.
+    private var shapingBody: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Planning rounds…").foregroundStyle(.secondary)
+        }
+    }
+
     private var reviewBody: some View {
         VStack(alignment: .leading, spacing: 12) {
             // A refused release comes back here with its reason — without this line the only
@@ -212,7 +221,7 @@ struct IntakeDetailView: View {
     /// `.releasing` (see `closeButton`) and `.discarded` (never listed).
     static func closeAction(for state: IntakeState) -> String? {
         switch state {
-        case .triaging, .needsAnswers, .awaitingChoice, .parked, .review, .failed, .interrupted: "Discard"
+        case .triaging, .needsAnswers, .awaitingChoice, .shaping, .parked, .review, .failed, .interrupted: "Discard"
         case .released, .partiallyReleased: "Dismiss"
         case .releasing, .discarded: nil
         }
