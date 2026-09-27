@@ -407,7 +407,10 @@ struct SessionSidebar: View {
                 ) {
                 case .project(let id): store.selectProject(id)
                 case .session(let id): store.selectedSessionID = id
-                case .clearProject: store.deselectProject()
+                // See `SidebarSelection.Route.ignore`'s doc comment: this is `List` echoing the
+                // `nil` deselection that selecting a project (below) itself produces, not a
+                // choice the user made. Doing nothing here is what leaves the project selected.
+                case .ignore: break
                 }
             }
         )

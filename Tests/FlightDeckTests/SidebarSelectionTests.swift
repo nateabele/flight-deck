@@ -18,14 +18,16 @@ final class SidebarSelectionTests: XCTestCase {
             SidebarSelection.route(nil, projectIDs: [], currentProject: nil), .session(nil))
     }
 
-    /// Fix round 1, finding 2: ⌘-clicking the *selected project row* writes `nil` to the
-    /// `List`'s selection. Without `currentProject`, that indistinguishably matched the
-    /// "deselecting a session" case and zeroed `selectedSessionID` — losing which terminal
-    /// was selected underneath the project view for no reason the user asked for.
-    func testNilWhileAProjectIsSelectedClearsOnlyTheProject() {
+    /// Controller ruling, fix round 4: headers are `.selectionDisabled()`, so nothing the user
+    /// does to a project row legitimately produces this `nil` any more — but `List` can still
+    /// echo one back on its own right after `selectProject` sets `currentProject` (nothing is
+    /// tagged with the project id, so the table has nothing selected to show). Fix round 1 had
+    /// this routing to `.clearProject`, which instantly undid the very selection that produced
+    /// it. `.ignore` is the fix: leave both selections exactly as they were.
+    func testNilWhileAProjectIsSelectedIsANoOp() {
         let p = UUID()
         XCTAssertEqual(
-            SidebarSelection.route(nil, projectIDs: [], currentProject: p), .clearProject)
+            SidebarSelection.route(nil, projectIDs: [], currentProject: p), .ignore)
     }
 
     /// The unchanged half of the same fix: with no project selected, `nil` still means "no
