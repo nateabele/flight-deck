@@ -241,6 +241,25 @@ struct ShapingModel {
         return tape.checkpoints[..<index].reversed().first { planText(checkpoint: $0.id, loadFile: loadFile) != nil }?.id
     }
 
+    /// What the plan viewer's text depends on — and nothing else. The view memoizes its text
+    /// on this key: without it, every body evaluation (a runner heartbeat, a card hover)
+    /// re-read two files and re-ran `PlanMetrics.unifiedDiff`. `head` is in the key because a
+    /// nil selection follows the head, and a new checkpoint landing must refresh the viewer.
+    struct ViewerKey: Equatable {
+        var checkpoint: Int?
+        var mode: ViewerMode
+        var head: Int?
+    }
+
+    static func viewerKey(selected: Int?, mode: ViewerMode, tape: Tape) -> ViewerKey {
+        ViewerKey(checkpoint: selected ?? tape.head?.id, mode: mode, head: tape.head?.id)
+    }
+
+    static func viewerContent(_ key: ViewerKey, tape: Tape, loadFile: (Int, String) -> Data?) -> String {
+        guard let checkpoint = key.checkpoint else { return "No rounds yet." }
+        return viewerText(key.mode, checkpoint: checkpoint, tape: tape, loadFile: loadFile)
+    }
+
     static func viewerText(_ mode: ViewerMode, checkpoint: Int, tape: Tape, loadFile: (Int, String) -> Data?) -> String {
         switch mode {
         case .plan:
