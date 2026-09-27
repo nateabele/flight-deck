@@ -88,11 +88,13 @@ if case .intakeRun(let id, let root) = invocation.command {
     // closure only runs later, once a real signal arrives, by which point `box.task` is set.
     final class TaskBox { var task: Task<Void, Never>? }
     let box = TaskBox()
-    // fd-abduco / the app terminates this process with one of these when the intake is
-    // stopped or the app quits. Ignored and rewired to cancellation rather than left at their
-    // default action, so `RoundExecutor`'s children — each its own process-group leader — get
-    // `killpg`'d by the same cancellation path ⏹ already uses, instead of being orphaned to
-    // keep spending tokens with nothing left alive to reap them.
+    // Logout, reboot or a daemon reap ends this process with one of these. Ignored and rewired
+    // to cancellation rather than left at their default action, so `RoundExecutor`'s children
+    // — each its own process-group leader — get `killpg`'d by the same cancellation path ⏹
+    // uses, instead of being orphaned to keep spending tokens with nothing left alive to reap
+    // them. Unlike ⏹ (a command in `commands.jsonl`), a signal writes nothing terminal: the
+    // tape stays mid-round with its heartbeat cleared, so the app respawns a runner and the
+    // round reruns (`IntakeRunner.run`).
     let signalSources = RunnerSignals.install { box.task?.cancel() }
     box.task = Task {
         let status = await runner.run()
