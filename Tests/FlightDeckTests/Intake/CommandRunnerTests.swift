@@ -46,6 +46,28 @@ final class CommandRunnerTests: XCTestCase {
         XCTAssertEqual(r.stdout.count, 2_000_000)
     }
 
+    /// The non-cancelled `posix_spawn` path (`processGroup: true`) has its own argv/envp
+    /// construction and its own fd wiring (`posix_spawn_file_actions_t` rather than `Process`),
+    /// so a normal exit needs its own coverage rather than relying on the cancellation test
+    /// (which never inspects stdout/stderr/exitCode) to prove it works at all.
+    func testCapturesStdoutStderrAndExitCodeWithProcessGroup() async throws {
+        let r = try await SystemCommandRunner().run(
+            executable: "sh", arguments: ["-c", "printf out; printf err >&2; exit 3"],
+            cwd: URL(fileURLWithPath: "/tmp"), environment: env, processGroup: true, onSpawn: nil)
+        XCTAssertEqual(String(decoding: r.stdout, as: UTF8.self), "out")
+        XCTAssertEqual(r.stderr, "err")
+        XCTAssertEqual(r.exitCode, 3)
+    }
+
+    /// Same deadlock risk as `testLargeOutputDoesNotDeadlock`, but for the posix_spawn path's
+    /// own pipes — nothing here shares the `Process`-path draining code.
+    func testLargeOutputDoesNotDeadlockWithProcessGroup() async throws {
+        let r = try await SystemCommandRunner().run(
+            executable: "sh", arguments: ["-c", "head -c 2000000 /dev/zero | tr '\\0' a"],
+            cwd: URL(fileURLWithPath: "/tmp"), environment: env, processGroup: true, onSpawn: nil)
+        XCTAssertEqual(r.stdout.count, 2_000_000)
+    }
+
     /// The `posix_spawn` path (Task 7's ⏹): a shell that forks two background sleeps, both
     /// outliving the shell itself unless something reaches the whole group. Cancelling with
     /// `processGroup: true` must leave neither alive.
