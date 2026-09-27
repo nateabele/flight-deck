@@ -84,4 +84,62 @@ final class FailureDiagnosisTests: XCTestCase {
         let d = FailureDiagnosis.classify(exitCode: 2, stdout: Data(), stderr: "some unrelated failure", parseError: nil)
         XCTAssertEqual(d.category, .harnessError)
     }
+
+    // MARK: - Only stderr and structured error events count
+
+    /// The agent's own words are not a diagnosis: a drafter whose plan discusses "401
+    /// authentication" and then dies must read as the crash it was, not send the human off to
+    /// log in again.
+    func testAgentTextInStdoutNeverClassifies() {
+        let started = #"{"type":"thread.started","thread_id":"T"}"#
+        let message = #"{"type":"item.completed","item":{"type":"agent_message","text":"Handle 401 authentication and rate limit errors"}}"#
+        let d = FailureDiagnosis.classify(exitCode: 1, stdout: Data((started + "\n" + message).utf8),
+                                           stderr: "", parseError: nil, harness: .codex)
+        XCTAssertEqual(d.category, .harnessError)
+    }
+
+    func testCodexErrorEventClassifies() {
+        let out = #"{"type":"thread.started","thread_id":"T"}"# + "\n" + #"{"type":"error","message":"unexpected status 401 Unauthorized"}"#
+        let d = FailureDiagnosis.classify(exitCode: 1, stdout: Data(out.utf8), stderr: "", parseError: nil, harness: .codex)
+        XCTAssertEqual(d.category, .authExpired)
+        XCTAssertEqual(d.action, "Run `codex login` in a terminal")
+        XCTAssertEqual(d.detail, "unexpected status 401 Unauthorized")
+    }
+
+    func testCodexTurnFailedEventClassifies() {
+        let out = #"{"type":"turn.failed","error":{"message":"You've hit your usage limit."}}"#
+        let d = FailureDiagnosis.classify(exitCode: 1, stdout: Data(out.utf8), stderr: "", parseError: nil, harness: .codex)
+        XCTAssertEqual(d.category, .rateLimited)
+    }
+
+    func testClaudeIsErrorResultClassifies() {
+        let out = #"{"type":"result","is_error":true,"result":"Invalid API key · Please run /login","session_id":"S"}"#
+        let d = FailureDiagnosis.classify(exitCode: 1, stdout: Data(out.utf8), stderr: "", parseError: nil, harness: .claude)
+        XCTAssertEqual(d.category, .authExpired)
+    }
+
+    /// A successful claude result is the model's answer, however it is worded.
+    func testClaudeResultWithoutIsErrorNeverClassifies() {
+        let out = #"{"type":"result","is_error":false,"result":"The API returns 429 when rate limited","session_id":"S"}"#
+        let d = FailureDiagnosis.classify(exitCode: 1, stdout: Data(out.utf8), stderr: "", parseError: nil, harness: .claude)
+        XCTAssertEqual(d.category, .harnessError)
+    }
+
+    /// The END of the text is where a CLI says why it died; a long stderr's opening lines are
+    /// banners and warnings.
+    func testDetailIsTheEndOfTheText() {
+        let stderr = String(repeating: "warning: noise\n", count: 40) + "error: 401 Unauthorized"
+        let d = FailureDiagnosis.classify(exitCode: 1, stdout: Data(), stderr: stderr, parseError: nil)
+        XCTAssertEqual(d.category, .authExpired)
+        XCTAssertTrue(d.detail.hasSuffix("error: 401 Unauthorized"), d.detail)
+        XCTAssertLessThanOrEqual(d.detail.count, 200)
+    }
+
+    /// With nothing on stderr, the error event is what the human reads.
+    func testHarnessErrorFallsBackToTheErrorEvent() {
+        let out = #"{"type":"turn.failed","error":{"message":"stream disconnected before completion"}}"#
+        let d = FailureDiagnosis.classify(exitCode: 1, stdout: Data(out.utf8), stderr: "", parseError: nil, harness: .codex)
+        XCTAssertEqual(d.category, .harnessError)
+        XCTAssertEqual(d.detail, "stream disconnected before completion")
+    }
 }
