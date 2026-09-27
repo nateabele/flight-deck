@@ -78,6 +78,14 @@ public enum HarnessCommand {
     /// whether an `mcp__*` glob is valid `--disallowedTools` syntax.
     public static let claudeIsolation = ["--restricted", "--strict-mcp-config"]
 
+    /// Every headless claude run streams its events as JSONL, so a seat shows what it is doing
+    /// while it works — `--output-format json` is silent until the very end. `-p` refuses
+    /// stream-json without `--verbose`. Probed live on claude 2.1.283, 2026-09-27, with
+    /// `--json-schema` and the isolation flags above, fresh and `--resume`: the stream ends in
+    /// the same `result` object `json` printed alone, `structured_output` included (see
+    /// `HarnessOutput.parse`).
+    public static let claudeStreaming = ["--output-format", "stream-json", "--verbose"]
+
     /// Prepended to EVERY codex run, fresh, resumed and write alike. `-s` only sandboxes the
     /// shell commands the model runs; `~/.codex/config.toml` also starts MCP servers (quillmap,
     /// whose file mutators write anywhere) and `~/.codex/hooks.json` hooks, and both run
@@ -149,7 +157,7 @@ public enum HarnessCommand {
             var args: [String]
             switch r.access {
             case .readOnly:
-                args = ["-p", r.prompt, "--model", r.model, "--effort", r.effort, "--output-format", "json",
+                args = ["-p", r.prompt, "--model", r.model, "--effort", r.effort] + claudeStreaming + [
                         "--json-schema", r.schemaJSON, "--permission-mode", "dontAsk",
                         "--tools", claudeReadOnlyBuiltins, "--allowedTools", claudeReadOnlyTools, "--disallowedTools", claudeDeniedTools]
                 for d in r.readableDirs { args += ["--add-dir", d.path] }
@@ -158,7 +166,7 @@ public enum HarnessCommand {
                 // Edit/Write, not just read access, so adding the intake root (the integrator's
                 // one readableDir) would let it write outside its own work dir — the integrator
                 // only ever needs to read plan.md/changes.json, which already live under `dir`.
-                args = ["-p", r.prompt, "--model", r.model, "--effort", r.effort, "--output-format", "json",
+                args = ["-p", r.prompt, "--model", r.model, "--effort", r.effort] + claudeStreaming + [
                         "--json-schema", r.schemaJSON, "--permission-mode", "acceptEdits",
                         // `--tools` makes Read/Edit/Write the ONLY tools that exist, not just
                         // the only pre-approved ones (probed: the init event lists exactly
@@ -192,7 +200,7 @@ public enum HarnessCommand {
 }
 
 public enum HarnessOutput {
-    public enum ParseError: Error, Equatable { case noSession, noResult, notJSON(String) }
+    public enum ParseError: Error, Equatable { case noSession, noResult, notJSON(String), isError(String) }
 
     public static func parse(_ harness: Harness, stdout: Data) throws -> (sessionID: String, structured: Data) {
         switch harness {
@@ -212,17 +220,40 @@ public enum HarnessOutput {
             guard (try? JSONSerialization.jsonObject(with: data)) != nil else { throw ParseError.notJSON(text) }
             return (session, data)
         case .claude:
-            guard let obj = try? JSONSerialization.jsonObject(with: stdout) as? [String: Any] else {
-                throw ParseError.notJSON(String(decoding: stdout.prefix(400), as: UTF8.self))
+            // `--output-format json`'s single object — kept for fixtures recorded before claude
+            // seats streamed.
+            if let obj = try? JSONSerialization.jsonObject(with: stdout) as? [String: Any] {
+                guard let session = obj["session_id"] as? String else { throw ParseError.noSession }
+                return (session, try claudeStructured(obj))
             }
-            guard let session = obj["session_id"] as? String else { throw ParseError.noSession }
-            if let structured = obj["structured_output"] {
-                return (session, try JSONSerialization.data(withJSONObject: structured))
+            // stream-json: the session id is on the leading `system/init` line (and every
+            // event after it); the answer is the final `result` event. A stream that never got
+            // that far — killed, crashed — has no answer, whatever it said on the way.
+            var session: String?, result: [String: Any]?
+            for line in stdout.split(separator: UInt8(ascii: "\n")) {
+                guard let obj = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any] else { continue }
+                if let s = obj["session_id"] as? String { session = s }
+                if obj["type"] as? String == "result" { result = obj }
             }
-            guard let text = obj["result"] as? String else { throw ParseError.noResult }
-            let data = Data(text.utf8)
-            guard (try? JSONSerialization.jsonObject(with: data)) != nil else { throw ParseError.notJSON(text) }
-            return (session, data)
+            guard let session else { throw ParseError.noSession }
+            guard let result else { throw ParseError.noResult }
+            return (session, try claudeStructured(result))
         }
+    }
+
+    /// The structured answer in a claude `result` object. `is_error` means `result` holds the
+    /// error text, not an answer — parsing it as one would pass a JSON-shaped error message
+    /// off as the seat's output.
+    private static func claudeStructured(_ obj: [String: Any]) throws -> Data {
+        if obj["is_error"] as? Bool == true {
+            throw ParseError.isError(obj["result"] as? String ?? obj["subtype"] as? String ?? "is_error")
+        }
+        if let structured = obj["structured_output"] {
+            return try JSONSerialization.data(withJSONObject: structured)
+        }
+        guard let text = obj["result"] as? String else { throw ParseError.noResult }
+        let data = Data(text.utf8)
+        guard (try? JSONSerialization.jsonObject(with: data)) != nil else { throw ParseError.notJSON(text) }
+        return data
     }
 }

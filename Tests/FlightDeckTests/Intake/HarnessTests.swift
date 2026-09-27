@@ -22,6 +22,36 @@ final class HarnessTests: XCTestCase {
         XCTAssertEqual(out.sessionID, "a4861836-f024-45f3-9f11-f3a2d366e96f")
         XCTAssertEqual(try JSONSerialization.jsonObject(with: out.structured) as? [String: String], ["answer": "PONG"])
     }
+    /// Every claude build now streams (`--output-format stream-json --verbose`) so a seat's
+    /// activity can be shown while it runs. Probed live on claude 2.1.283, 2026-09-27, with the
+    /// real isolation flags and `--json-schema`: the run's LAST line is the `result` event, and
+    /// it still carries `structured_output` (and the same JSON as text in `result`); the
+    /// session id is on the leading `system/init` line and on the result. A resume keeps the
+    /// same session id.
+    func testClaudeParsesTheStreamJSONResult() throws {
+        let fresh = try HarnessOutput.parse(.claude, stdout: try load("claude-stream-schema", "jsonl"))
+        XCTAssertEqual(fresh.sessionID, "8552adc8-bbae-48c2-9b86-29a5becfa369")
+        XCTAssertEqual(try JSONSerialization.jsonObject(with: fresh.structured) as? [String: String], ["answer": "PONG-FILE"])
+        let resumed = try HarnessOutput.parse(.claude, stdout: try load("claude-stream-schema-resume", "jsonl"))
+        XCTAssertEqual(resumed.sessionID, fresh.sessionID)
+        XCTAssertEqual(try JSONSerialization.jsonObject(with: resumed.structured) as? [String: String], ["answer": "RESUMED"])
+    }
+    /// A stream whose `result` is flagged `is_error` carries the error, not an answer — never
+    /// parse its text as the structured output. A stream cut off before its `result` has no
+    /// answer at all, even though the init line already named the session.
+    func testClaudeStreamErrorAndTruncation() {
+        let initLine = #"{"type":"system","subtype":"init","session_id":"S"}"#
+        let error = initLine + "\n" + #"{"type":"result","subtype":"success","is_error":true,"result":"{\"answer\":\"no\"}","session_id":"S"}"# + "\n"
+        XCTAssertThrowsError(try HarnessOutput.parse(.claude, stdout: Data(error.utf8))) {
+            XCTAssertEqual($0 as? HarnessOutput.ParseError, .isError(#"{"answer":"no"}"#))
+        }
+        XCTAssertThrowsError(try HarnessOutput.parse(.claude, stdout: Data((initLine + "\n").utf8))) {
+            XCTAssertEqual($0 as? HarnessOutput.ParseError, .noResult)
+        }
+        XCTAssertThrowsError(try HarnessOutput.parse(.claude, stdout: Data("garbage\n".utf8))) {
+            XCTAssertEqual($0 as? HarnessOutput.ParseError, .noSession)
+        }
+    }
     func testCodexFreshIsReadOnlyWithSchema() {
         let c = HarnessCommand.build(req(.codex), home: Self.noHome)
         XCTAssertEqual(c.executable, "codex")
@@ -41,8 +71,8 @@ final class HarnessTests: XCTestCase {
         let c = HarnessCommand.build(req(.claude, resume: "S1"), home: Self.noHome)
         XCTAssertEqual(c.executable, "claude")
         XCTAssertEqual(c.unsetEnvironment, ["CLAUDE_CODE_CHILD_SESSION", "CLAUDECODE"])
-        XCTAssertEqual(c.arguments, ["-p", "P", "--model", "m", "--effort", "high", "--output-format", "json",
-                                     "--json-schema", "{}", "--permission-mode", "dontAsk",
+        XCTAssertEqual(c.arguments, ["-p", "P", "--model", "m", "--effort", "high", "--output-format", "stream-json",
+                                     "--verbose", "--json-schema", "{}", "--permission-mode", "dontAsk",
                                      "--tools", "Read Grep Glob Bash",
                                      "--allowedTools", HarnessCommand.claudeReadOnlyTools,
                                      "--disallowedTools", HarnessCommand.claudeDeniedTools,
@@ -63,6 +93,8 @@ final class HarnessTests: XCTestCase {
             XCTAssertEqual(a.filter { $0 == "--restricted" }.count, 1, "\(a)")
             XCTAssertEqual(a.filter { $0 == "--strict-mcp-config" }.count, 1, "\(a)")
             XCTAssertFalse(a.contains("--setting-sources"), "\(a)")
+            guard let i = a.firstIndex(of: "--output-format") else { return XCTFail("no output format in \(a)") }
+            XCTAssertEqual(Array(a[i...].prefix(3)), ["--output-format", "stream-json", "--verbose"], "\(a)")
         }
     }
     /// `~/.codex/config.toml` carries MCP servers (quillmap, with file mutators) and hooks that

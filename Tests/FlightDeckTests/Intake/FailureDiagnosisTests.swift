@@ -118,6 +118,19 @@ final class FailureDiagnosisTests: XCTestCase {
         XCTAssertEqual(d.category, .authExpired)
     }
 
+    /// Under stream-json the `is_error` result is the LAST of many lines, not the whole stdout.
+    func testClaudeStreamIsErrorResultClassifies() {
+        let out = #"{"type":"system","subtype":"init","session_id":"S"}"# + "\n"
+            + #"{"type":"assistant","message":{"content":[{"type":"text","text":"401 is an HTTP status"}]}}"# + "\n"
+            + #"{"type":"result","is_error":true,"result":"Invalid API key · Please run /login","session_id":"S"}"# + "\n"
+        let d = FailureDiagnosis.classify(exitCode: 1, stdout: Data(out.utf8), stderr: "", parseError: nil, harness: .claude)
+        XCTAssertEqual(d.category, .authExpired)
+        XCTAssertEqual(d.detail, "Invalid API key · Please run /login")
+        let fine = out.replacingOccurrences(of: #""is_error":true"#, with: #""is_error":false"#)
+        XCTAssertEqual(FailureDiagnosis.classify(exitCode: 1, stdout: Data(fine.utf8), stderr: "", parseError: nil,
+                                                 harness: .claude).category, .harnessError)
+    }
+
     /// A successful claude result is the model's answer, however it is worded.
     func testClaudeResultWithoutIsErrorNeverClassifies() {
         let out = #"{"type":"result","is_error":false,"result":"The API returns 429 when rate limited","session_id":"S"}"#

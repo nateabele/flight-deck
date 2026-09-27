@@ -101,11 +101,15 @@ func codexOK(_ session: String, _ json: String) -> CommandResult {
                          stderr: "", exitCode: 0)
 }
 
+/// `claude -p --output-format stream-json --verbose`'s shape: an init line, then (after the
+/// turn's own events) the final `result` carrying the structured output.
 func claudeOK(_ session: String, _ json: String) -> CommandResult {
     let structured = try! JSONSerialization.jsonObject(with: Data(json.utf8))
-    let out = try! JSONSerialization.data(withJSONObject: ["type": "result", "session_id": session,
-                                                           "structured_output": structured])
-    return CommandResult(stdout: out, stderr: "", exitCode: 0)
+    let initLine = try! JSONSerialization.data(withJSONObject: ["type": "system", "subtype": "init", "session_id": session])
+    let result = try! JSONSerialization.data(withJSONObject: ["type": "result", "subtype": "success", "is_error": false,
+                                                              "session_id": session, "structured_output": structured])
+    return CommandResult(stdout: Data((String(decoding: initLine, as: UTF8.self) + "\n" + String(decoding: result, as: UTF8.self) + "\n").utf8),
+                         stderr: "", exitCode: 0)
 }
 
 /// Answers in whichever shape the call's harness speaks.

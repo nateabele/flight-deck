@@ -29,8 +29,8 @@ final class HarnessWriteModeTests: XCTestCase {
     func testClaudeWriteInWorkGrantsEditWriteAndAddsOnlyTheWorkDir() {
         let c = HarnessCommand.build(req(.claude, access: .writeInWork(dir)), home: Self.noHome)
         XCTAssertEqual(c.executable, "claude")
-        XCTAssertEqual(c.arguments, ["-p", "P", "--model", "m", "--effort", "high", "--output-format", "json",
-                                     "--json-schema", "{}", "--permission-mode", "acceptEdits",
+        XCTAssertEqual(c.arguments, ["-p", "P", "--model", "m", "--effort", "high", "--output-format", "stream-json",
+                                     "--verbose", "--json-schema", "{}", "--permission-mode", "acceptEdits",
                                      "--tools", "Read Edit Write",
                                      "--allowedTools", HarnessCommand.claudeWriteTools,
                                      "--disallowedTools", HarnessCommand.claudeWriteDeniedTools,
