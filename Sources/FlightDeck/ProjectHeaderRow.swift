@@ -80,7 +80,7 @@ struct ProjectHeaderRow: View {
             // an observation of VoiceOver.
             Image(systemName: "chevron.right")
                 .imageScale(.small)
-                .foregroundStyle(isSelected ? .white : .secondary)
+                .foregroundStyle(isSelected ? .primary : .secondary)
                 .rotationEffect(.degrees(repo.isCollapsed ? 0 : 90))
                 // Invisible on an empty project, but still occupying its space: collapsing the
                 // layout instead would knock every project name out of alignment as sessions
@@ -108,7 +108,7 @@ struct ProjectHeaderRow: View {
 
             Text(repo.displayName)
                 .font(.subheadline.weight(.semibold))
-                .foregroundStyle(isSelected ? .white : .secondary)
+                .foregroundStyle(isSelected ? .primary : .secondary)
                 .lineLimit(1)
                 .truncationMode(.middle)
 
@@ -144,6 +144,16 @@ struct ProjectHeaderRow: View {
                 .accessibilityIdentifier("close-project")
             }
         }
+        // A native selected `List` row sets this for its content automatically; a hand-drawn
+        // selection has to do it itself. Without it, `.secondary`/`.primary` render as if still
+        // sitting on the plain sidebar background — which is how the session count, the status
+        // icon, and the chevron/title above went unreadable against the `.selection` fill below,
+        // and why a hard-coded `.white` (this row's very first attempt) went unreadable the
+        // *other* direction the moment the window lost key status and the fill turned system
+        // gray instead of accent-tinted. `backgroundProminence` is what every hierarchical
+        // `ShapeStyle` actually reads to pick a legible color for whatever is actually behind it,
+        // in both directions, so it is the one lever that survives both.
+        .environment(\.backgroundProminence, isSelected ? .increased : .standard)
         // Hand-drawn selection, now that the row is `.selectionDisabled()` and `List` will not
         // draw one of its own — see `isSelected`'s doc comment. `.selection` is the SDK's own
         // `ShapeStyle` for the system's selection tint, so this tracks light/dark and

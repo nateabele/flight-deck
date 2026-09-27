@@ -218,10 +218,17 @@ final class SessionStore: ObservableObject {
 
     func selectProject(_ id: UUID) { selectedProjectID = id }
 
-    /// The counterpart `SidebarSelection.Route.clearProject` routes to: ⌘-clicking the
-    /// selected project row deselects the row, not the session underneath it, so this leaves
-    /// `selectedSessionID` alone — the terminal that was selected before the project view
-    /// opened is still what the detail column falls back to.
+    /// Closes the project view and returns the detail column to whatever session was selected
+    /// underneath it — `selectedSessionID` is left alone, not cleared, so the terminal that was
+    /// selected before the project view opened is still what the detail column falls back to.
+    ///
+    /// Nothing in the sidebar calls this today: headers are `.selectionDisabled()`, so a project
+    /// row can no longer be ⌘-clicked to produce this the way an earlier version of this comment
+    /// described (`SidebarSelection.Route` no longer has the case that routed here — see its
+    /// `.ignore` case for why a `nil` write while a project is selected is now a no-op instead).
+    /// This stays as the programmatic path for whatever eventually gives `ProjectView` its own
+    /// way to close — a back button, Escape, etc. — which eventually needs this exact unread-mark
+    /// handling and would otherwise have to duplicate it.
     ///
     /// Because `selectedSessionID` itself never changes here, its `didSet` — the thing that
     /// normally clears a mark on "looking at it" — never runs. Without the explicit
