@@ -29,24 +29,63 @@ struct RoundConfigEditor: View {
     /// tune) exactly this, not something they need to go find behind a second click.
     @State private var isExpanded = true
 
+    /// Column widths shared by the header row and every data row — a Picker's intrinsic width
+    /// otherwise shifts with whichever value is selected (e.g. "codex" vs "claude"), which
+    /// would make the columns wander out of alignment row to row.
+    private enum ColumnWidth {
+        static let role: CGFloat = 92
+        static let harness: CGFloat = 76
+        static let effort: CGFloat = 70
+        static let fallback: CGFloat = 150
+    }
+
     var body: some View {
         DisclosureGroup(Self.label(preset: preset, config: config), isExpanded: $isExpanded) {
-            VStack(alignment: .leading, spacing: 10) {
-                ForEach(Self.slots(of: config), id: \.keyPath) { row in
-                    slotRow(role: row.role, persona: row.persona, keyPath: row.keyPath)
-                }
-                Divider()
-                Stepper("Refinement cap: \(config.refinementCap)", value: refinementCapBinding, in: 0...12)
-                Stepper("Polish cap: \(config.polishCap)", value: polishCapBinding, in: 0...12)
-                Toggle("Fresh eyes + dedup", isOn: freshEyesBinding)
-                Picker("Default play", selection: defaultPlayBinding) {
-                    Text("Step").tag(PlayMode.step)
-                    Text("Next major").tag(PlayMode.nextMajor)
-                    Text("To review").tag(PlayMode.toReview)
-                }
-                .pickerStyle(.menu)
+            VStack(alignment: .leading, spacing: 14) {
+                slotsGrid
+                capsForm
             }
             .padding(.top, 6)
+        }
+    }
+
+    /// One `Grid` row per filled seat, drafters first (their persona is what distinguishes
+    /// them from each other), then a divider, then the singleton seats in run order — replaces
+    /// the two-line-per-slot `VStack` layout that made Full plan run to ~1000pt tall.
+    private var slotsGrid: some View {
+        let rows = Self.slots(of: config)
+        let drafterRows = rows.filter { if case .drafter = $0.keyPath { true } else { false } }
+        let seatRows = rows.filter { if case .drafter = $0.keyPath { false } else { true } }
+        return Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 6) {
+            GridRow {
+                columnHeader("Role", width: ColumnWidth.role)
+                columnHeader("Harness", width: ColumnWidth.harness)
+                columnHeader("Model", width: nil)
+                columnHeader("Effort", width: ColumnWidth.effort)
+                columnHeader("Fallback", width: ColumnWidth.fallback)
+            }
+            ForEach(drafterRows, id: \.keyPath) { row in
+                slotRow(role: row.role, persona: row.persona, keyPath: row.keyPath)
+            }
+            if !drafterRows.isEmpty, !seatRows.isEmpty {
+                GridRow { Divider().gridCellColumns(5) }
+            }
+            ForEach(seatRows, id: \.keyPath) { row in
+                slotRow(role: row.role, persona: row.persona, keyPath: row.keyPath)
+            }
+        }
+    }
+
+    /// `width: nil` (the Model column) gets `.frame(maxWidth: .infinity)` instead of a fixed
+    /// width — that's what tells `Grid` this is the one column that should absorb whatever
+    /// horizontal space the fixed columns don't need.
+    @ViewBuilder
+    private func columnHeader(_ title: String, width: CGFloat?) -> some View {
+        let label = Text(title).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+        if let width {
+            label.frame(width: width, alignment: .leading)
+        } else {
+            label.frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
@@ -56,53 +95,91 @@ struct RoundConfigEditor: View {
         // synthesizer/reviewer/polisher), so this only returns nil if config and keyPath have
         // gone out of sync between render passes — nothing to show mid-edit.
         if let choice = Self.choice(for: keyPath, in: config) {
-            VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: 6) {
+            GridRow {
+                VStack(alignment: .leading, spacing: 1) {
                     Text(role.capitalized).font(.callout.weight(.semibold))
                     // `.general` is the only persona a single-drafter round ever uses and
                     // says nothing a Sketch/Feature-plan reader doesn't already know.
                     if let persona, persona != .general {
-                        Text(persona.rawValue).font(.caption).foregroundStyle(.secondary)
+                        Text(persona.rawValue).font(.caption2).foregroundStyle(.secondary)
                     }
                 }
-                HStack(spacing: 8) {
-                    Picker("Harness", selection: harnessBinding(for: keyPath)) {
-                        ForEach(Self.harnesses(in: available), id: \.self) { harness in
-                            Text(harness.rawValue).tag(harness)
-                        }
+                .frame(width: ColumnWidth.role, alignment: .leading)
+                Picker("Harness", selection: harnessBinding(for: keyPath)) {
+                    ForEach(Self.harnesses(in: available), id: \.self) { harness in
+                        Text(harness.rawValue).tag(harness)
                     }
-                    .pickerStyle(.menu)
-                    .labelsHidden()
-                    .frame(width: 90)
-                    TextField("Model", text: modelBinding(for: keyPath))
-                        .textFieldStyle(.roundedBorder)
-                    Picker("Effort", selection: effortBinding(for: keyPath)) {
-                        ForEach(Self.effortChoices, id: \.self) { effort in
-                            Text(effort).tag(effort)
-                        }
-                    }
-                    .pickerStyle(.menu)
-                    .labelsHidden()
-                    .frame(width: 90)
                 }
-                if Self.supportsFallback(keyPath) {
-                    let other = Self.otherModel(for: choice, available: available)
-                    // `ModelChoice` isn't `Hashable` (its `.effort` is a free-text `String`
-                    // that never needs set/dictionary membership elsewhere), so the Picker's
-                    // selection is the two-way "has a fallback at all" toggle the brief
-                    // actually asks for ("none" or the other model), not the choice itself.
-                    Picker("Fallback", selection: fallbackBinding(for: keyPath, other: other)) {
-                        Text("None").tag(false)
-                        if let other {
-                            Text("\(other.harness.rawValue) \(other.model)").tag(true)
-                        }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .frame(width: ColumnWidth.harness)
+                TextField("Model", text: modelBinding(for: keyPath))
+                    .textFieldStyle(.roundedBorder)
+                    .frame(maxWidth: .infinity)
+                Picker("Effort", selection: effortBinding(for: keyPath)) {
+                    ForEach(Self.effortChoices, id: \.self) { effort in
+                        Text(effort).tag(effort)
                     }
-                    .pickerStyle(.menu)
-                    .labelsHidden()
-                    .frame(width: 160)
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .frame(width: ColumnWidth.effort)
+                fallbackCell(for: keyPath, choice: choice)
+            }
+        }
+    }
+
+    /// "none" or the other available model on a `Slot` seat; an em dash on the three bare-
+    /// `ModelChoice` seats, which have no fallback field to show a picker for at all.
+    @ViewBuilder
+    private func fallbackCell(for keyPath: SlotKeyPath, choice: ModelChoice) -> some View {
+        if Self.supportsFallback(keyPath) {
+            let other = Self.otherModel(for: choice, available: available)
+            // `ModelChoice` isn't `Hashable` (its `.effort` is a free-text `String` that never
+            // needs set/dictionary membership elsewhere), so the Picker's selection is the
+            // two-way "has a fallback at all" toggle the brief actually asks for ("none" or
+            // the other model), not the choice itself.
+            Picker("Fallback", selection: fallbackBinding(for: keyPath, other: other)) {
+                Text("none").tag(false)
+                if let other {
+                    Text("\(other.harness.rawValue) \(other.model)").tag(true)
                 }
             }
-            .padding(.vertical, 2)
+            .labelsHidden()
+            .pickerStyle(.menu)
+            .frame(width: ColumnWidth.fallback)
+        } else {
+            Text("—").foregroundStyle(.secondary)
+                .frame(width: ColumnWidth.fallback, alignment: .leading)
+        }
+    }
+
+    /// The caps/toggle/default-play controls below the seat grid, as a compact label-left
+    /// two-column form rather than each control spelling its own label out in full.
+    private var capsForm: some View {
+        Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 6) {
+            GridRow {
+                Text("Refinement cap").foregroundStyle(.secondary)
+                Stepper("\(config.refinementCap)", value: refinementCapBinding, in: 0...12)
+            }
+            GridRow {
+                Text("Polish cap").foregroundStyle(.secondary)
+                Stepper("\(config.polishCap)", value: polishCapBinding, in: 0...12)
+            }
+            GridRow {
+                Text("Fresh eyes + dedup").foregroundStyle(.secondary)
+                Toggle("", isOn: freshEyesBinding).labelsHidden()
+            }
+            GridRow {
+                Text("Default play").foregroundStyle(.secondary)
+                Picker("", selection: defaultPlayBinding) {
+                    Text("Step").tag(PlayMode.step)
+                    Text("Next major").tag(PlayMode.nextMajor)
+                    Text("To review").tag(PlayMode.toReview)
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+            }
         }
     }
 

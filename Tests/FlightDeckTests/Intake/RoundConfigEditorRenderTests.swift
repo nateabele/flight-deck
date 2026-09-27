@@ -12,21 +12,31 @@ final class RoundConfigEditorRenderTests: XCTestCase {
     @MainActor
     func testRenderFullPlanExpanded() throws {
         guard let dir = ProcessInfo.processInfo.environment["FD_ROUNDS_RENDER_DIR"] else {
-            throw XCTSkip("set FD_ROUNDS_RENDER_DIR to render the round-config-editor PNG")
+            throw XCTSkip("set FD_ROUNDS_RENDER_DIR to render the round-config-editor PNGs")
         }
-        var config = try XCTUnwrap(PresetExpansion.config(for: .fullPlan, available: .defaults))
-        config.customized = true
+        var full = try XCTUnwrap(PresetExpansion.config(for: .fullPlan, available: .defaults))
+        full.customized = true
         try render(
-            RoundConfigEditor(preset: .fullPlan, config: .constant(config), available: .defaults),
+            RoundConfigEditor(preset: .fullPlan, config: .constant(full), available: .defaults),
+            size: NSSize(width: 620, height: 520),
             to: URL(fileURLWithPath: dir).appendingPathComponent("rounds-editor.png")
+        )
+
+        // Sketch: one drafter, no synthesizer, no polisher — the shortest a Grid this shape
+        // gets, and the case most likely to reveal a column that only "aligns" by accident
+        // when there happen to be several rows to average across.
+        let sketch = try XCTUnwrap(PresetExpansion.config(for: .sketch, available: .defaults))
+        try render(
+            RoundConfigEditor(preset: .sketch, config: .constant(sketch), available: .defaults),
+            size: NSSize(width: 620, height: 340),
+            to: URL(fileURLWithPath: dir).appendingPathComponent("rounds-editor-sketch.png")
         )
     }
 
     /// Parked offscreen `NSHostingView` + `layer.render(in:)` — screencapture is denied here,
     /// and `cacheDisplay` drops layer-backed SwiftUI content.
     @MainActor
-    private func render(_ view: some View, to url: URL) throws {
-        let size = NSSize(width: 620, height: 1300)
+    private func render(_ view: some View, size: NSSize, to url: URL) throws {
         let root = view.padding(16).frame(width: size.width, height: size.height, alignment: .topLeading)
             .background(Color(nsColor: .windowBackgroundColor))
         let host = NSHostingView(rootView: root)
