@@ -1794,3 +1794,43 @@ feasibility unknown.
   `PhoneLog.entries` touches none. Worth confirming before relying on it: whether a single
   unloaded fetch alone exceeds 10 s, or only fetches that queue behind each other on the main
   thread, which decides whether `askDeadline` needs raising too.
+
+## From flywheel intake, phases 1–3 (2026-09-26)
+
+- **In-process triage is lost on quit.** `IntakeService` runs triage and release as an
+  in-process `Task`, tracked only in its own `tasks: [UUID: Task<Void, Never>]` dictionary — if
+  Flight Deck quits mid-turn, the `Task` is simply gone, and the intake is left `.interrupted`
+  at the next launch for the human to Retry. Correct for this plan, since there is no runner
+  yet to hand the work to; the next plan's `flightdeck intake run <id>` under its own
+  fd-abduco daemon (spec §7) is what actually survives an FD quit, and once it lands this
+  entry should be removed rather than carried forward as "still true."
+- **`br update` has no `--if-version` precondition.** Release re-reads and rechecks every
+  bead an op touches (`DriftClassifier`) right before writing it, but there is still a window
+  of real milliseconds between that recheck and the write where another actor could get in —
+  FD has no way to make the write itself conditional on the state it just observed. Today's
+  mitigation is a second recheck error surfaced as a post-release warning rather than silently
+  applying over a change. An upstream `br update --if-version <n>` (or similar optimistic-lock
+  primitive) would close the window instead of narrowing it; filed as a `br` feature request,
+  not something FD can fix on its own side.
+- **No Beads tab, no graph review UI yet.** The release review sheet (`ReleaseReviewView`)
+  shows drift and lets you confirm/drop/re-triage, but there is no dedicated place to browse
+  the bead graph itself, see an intake's change set laid over it, or navigate from a bead to
+  the intake that touched it. Spec §8.3–8.4 sketches this and §14 phases it as step 4, after
+  phases 1–3 this plan covers — expected, not a gap in this work.
+- **A partial release cannot be re-released.** `.partiallyReleased` records exactly which ops
+  applied before a `br` command failed, and the review reopens on the remainder — but nothing
+  in `IntakeService` yet drives that remainder back through `release(_:)` a second time. Today
+  the human's only path forward from a partial release is manual: check `br list`/`br graph`
+  for what actually landed, then decide by hand. Re-release-the-remainder is straightforward
+  given `ApplyPlanner` already knows how to skip ops (`skipping:`), but no code path calls it
+  that way yet.
+- **Retry discards the Q&A that got the intake there.** `IntakeService.retry(_:)` clears
+  `exchanges` and re-runs triage from `.initial` on the unchanged intent text — deliberate
+  (its own comment: "the earlier Q&A goes with it — the agent will ask again if it still
+  matters"), since the old session's context is exactly what may have gone wrong, and a
+  fresh triage against a re-read graph is the only safe base after an interrupted release.
+  Noted here rather than as a bug because it is a real cost to the human when a triage failed
+  *after* several rounds of clarifying answers: they answer the same questions again. A
+  `retry` that replayed `exchanges` as follow-up turns before failing forward on the current
+  question would recover that, at the cost of trusting stale context more than today's design
+  wants to.
