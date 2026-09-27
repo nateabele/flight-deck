@@ -1008,10 +1008,16 @@ missing `--if-version` (see `docs/FOLLOWUPS.md`) could still bite. Every write c
 `--actor flightdeck-intake:<id>`, and `br sync --flush-only` runs once at the end, tagged the
 same way, so the JSONL export matches what was just written. A `br` command failing partway
 through a release stops the apply right there — `BeadWriter` runs steps in order and stops at
-the first failure or recheck mismatch; the intake is left `.partiallyReleased` with the ops
-that did land recorded, and the review reopens on what remains — there is no automatic
-rollback, since another agent may already be acting on a bead
-that was written.
+the first failure or recheck mismatch; there is no automatic rollback, since another agent may
+already be acting on a bead that was written. The intake is left `.partiallyReleased`, with
+`ReleaseRecord.appliedSteps` recording how many steps landed before the failure and `idMap`
+recording any beads that got created along the way. No delivery notices go out on a partial
+release — `IntakeService` skips `DeliveryPlanner`/`IntakeDelivery` entirely when the outcome
+carries an error, and records one generic warning explaining why, rather than risk repeating a
+notice for an edit that already went out. Finishing the rest is manual (`br`), until the next
+plan: nothing yet re-drives the un-applied ops back through `release(_:)` (`ApplyPlanner.plan`
+already supports skipping the ones that landed via its `skipping:` parameter — see
+`docs/FOLLOWUPS.md` — but no caller passes it that way today).
 
 **The delivery ladder** (`DeliveryPlanner` → `IntakeDelivery`) tells a bead's current holder
 what an edit to their in-progress work just did, graded by how much it matters: `clarifying`
