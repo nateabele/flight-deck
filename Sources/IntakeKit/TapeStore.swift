@@ -104,7 +104,9 @@ public struct TapeStore: Sendable {
             // own parent may not exist yet.
             let url = dir.appendingPathComponent(name)
             try fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try data.write(to: url)
+            // Atomic, like every other tape write: a crash mid-write must not leave a torn
+            // plan.md or changeset.json in a directory the next load might trust.
+            try data.write(to: url, options: .atomic)
         }
 
         var next = tape
