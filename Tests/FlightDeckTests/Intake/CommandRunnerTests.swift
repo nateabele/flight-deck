@@ -120,6 +120,32 @@ final class CommandRunnerTests: XCTestCase {
         _ = try? await t.value
         XCTAssertLessThan(Date().timeIntervalSince(cancelledAt), 0.5)
     }
+
+    /// The leader exits on SIGTERM, but a descendant that ignores it and detached its streams
+    /// lives on after the leader is reaped. The SIGKILL sweep must reach the group anyway.
+    func testCancellationSweepsATermIgnoringDescendantAfterTheLeaderExits() async throws {
+        let pidFile = FileManager.default.temporaryDirectory.appendingPathComponent("fd-sweep-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: pidFile) }
+        let script = "(trap '' TERM; exec sleep 30) >/dev/null 2>&1 </dev/null & echo $! > '\(pidFile.path)'; wait"
+        let t = Task {
+            try await SystemCommandRunner().run(executable: "sh", arguments: ["-c", script], cwd: URL(fileURLWithPath: "/tmp"),
+                                                environment: env, processGroup: true, onSpawn: nil)
+        }
+        var waited = 0
+        while (try? String(contentsOf: pidFile, encoding: .utf8))?.isEmpty ?? true, waited < 100 {
+            try await Task.sleep(nanoseconds: 20_000_000); waited += 1
+        }
+        try await Task.sleep(nanoseconds: 100_000_000)
+        let child = try XCTUnwrap(Int32(try String(contentsOf: pidFile, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)))
+        XCTAssertEqual(kill(child, 0), 0, "the descendant is running before ⏹")
+        let cancelledAt = Date()
+        t.cancel()
+        _ = try? await t.value
+        while kill(child, 0) == 0, Date().timeIntervalSince(cancelledAt) < 1.5 { try await Task.sleep(nanoseconds: 20_000_000) }
+        let survived = kill(child, 0) == 0
+        if survived { kill(child, SIGKILL) }
+        XCTAssertFalse(survived, "a TERM-ignoring descendant outlived ⏹ by 1.5s")
+    }
 }
 
 /// `GraphReader`'s br-list/br-graph/decode sequence, against the same fixtures
