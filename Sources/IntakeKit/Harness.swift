@@ -50,19 +50,49 @@ public enum HarnessCommand {
     /// defense in depth for the same reason, since none of them are edits either.
     public static let claudeWriteDeniedTools = "Bash WebFetch WebSearch Task NotebookEdit"
 
+    /// The built-in tools a read-only seat is given at all. `--restricted` (below) removes
+    /// Bash unless `--tools` names it, and every `br` read verb in `claudeReadOnlyTools` is a
+    /// Bash rule — so without Bash here the seat could not read the graph. Naming Bash only
+    /// makes it AVAILABLE: under `dontAsk`, anything the allow list above doesn't match is
+    /// still denied. Probed live on claude 2.1.283, 2026-09-27: the init event lists exactly
+    /// these four tools.
+    public static let claudeReadOnlyBuiltins = "Read Grep Glob Bash"
+
     /// Appended to EVERY headless claude run, read-only and write alike. `--allowedTools` and
-    /// the denies above only ADD rules on top of the operator's own `~/.claude/settings.json`,
-    /// so under `dontAsk` a read-only reviewer still inherits standing allows like
-    /// `Bash(git add *)` — a "read-only" seat that can stage files. `--setting-sources local`
-    /// drops the user and project settings files (keeping only the project's gitignored
-    /// `settings.local.json`, an accepted residual). Probed live on claude 2.1.283,
-    /// 2026-09-27: such a run still authenticates, since login lives in the keychain — but the
-    /// probe's shell exported `ANTHROPIC_BASE_URL`, which hid the other half: the user
-    /// settings' `env` block is dropped too. Every caller therefore re-applies it with
-    /// `ClaudeUserEnv.merged(into:)` when building a claude child's environment.
+    /// the denies above only ADD rules on top of whatever settings files load, so under
+    /// `dontAsk` a read-only reviewer would inherit standing allows like `Bash(git add *)` — a
+    /// "read-only" seat that can stage files. `--restricted` ignores the user, project AND
+    /// local settings files (the earlier `--setting-sources local` still loaded the project's
+    /// `settings.local.json`), confines the file tools to the working directories plus
+    /// `--add-dir`, and refuses `bypassPermissions`. Probed live on claude 2.1.283,
+    /// 2026-09-27: a restricted run still authenticates, since login lives in the keychain —
+    /// but the settings' `env` block (this machine's `ANTHROPIC_BASE_URL` proxy) is dropped
+    /// with the file, so every caller builds the child's environment with
+    /// `environment(for:base:home:)`, which re-applies it.
     /// `--strict-mcp-config` with no `--mcp-config` drops every MCP server rather than guessing
     /// whether an `mcp__*` glob is valid `--disallowedTools` syntax.
-    public static let claudeIsolation = ["--setting-sources", "local", "--strict-mcp-config"]
+    public static let claudeIsolation = ["--restricted", "--strict-mcp-config"]
+
+    /// Prepended to EVERY codex run, fresh, resumed and write alike. `-s` only sandboxes the
+    /// shell commands the model runs; `~/.codex/config.toml` also starts MCP servers (qartez,
+    /// whose file mutators write anywhere) and `~/.codex/hooks.json` hooks, and both run
+    /// OUTSIDE that sandbox — a read-only drafter that could still edit the user's repo.
+    /// `--ignore-user-config` skips config.toml (auth still comes from `CODEX_HOME`),
+    /// `--ignore-rules` skips execpolicy `.rules` allows, and `--disable hooks` turns the
+    /// hooks feature off, since hooks.json is read from `CODEX_HOME` whether or not the config
+    /// that enabled it loads. Probed live on codex-cli 0.157.1, 2026-09-27: such a run still
+    /// authenticates and answers; this machine's config sets no `model_provider`/`base_url`
+    /// that would need carrying over with `-c`. Every seat passes `-m` and effort explicitly,
+    /// so losing the config's model defaults changes nothing a round depends on.
+    public static let codexIsolation = ["--ignore-user-config", "--ignore-rules", "--disable", "hooks"]
+
+    /// Write mode's workspace-write sandbox, narrowed to the work dir alone. By default codex
+    /// also makes `$TMPDIR` and `/tmp` writable — shared scratch another process (or a later
+    /// round) reads — and would add any configured `writable_roots`. Key names verified
+    /// against the codex-cli 0.157.1 binary's config schema.
+    public static let codexWriteSandbox = ["-c", "sandbox_workspace_write.exclude_tmpdir_env_var=true",
+                                           "-c", "sandbox_workspace_write.exclude_slash_tmp=true",
+                                           "-c", "sandbox_workspace_write.writable_roots=[]"]
 
     /// The pure check behind `build`'s write-mode `precondition` — a request that fails this
     /// would sandbox the integrator somewhere other than its own work dir, or let it resume
@@ -86,19 +116,19 @@ public enum HarnessCommand {
         }
         switch r.harness {
         case .codex:
-            let effort = ["-m", r.model, "-c", "model_reasoning_effort=\(r.effort)"]
+            let effort = ["-m", r.model, "-c", "model_reasoning_effort=\(r.effort)"] + codexIsolation
             let tail = ["--skip-git-repo-check", "--output-schema", r.schemaFile.path]
             if let s = r.resumeSessionID {
                 // `exec resume` has no -s flag, and IGNORES the session's recorded model unless
                 // -m is passed again (observed 2026-09-26: luna → terra). Pin both.
                 return ("codex", ["exec", "resume", "--json"] + effort + ["-c", "sandbox_mode=\"read-only\""] + tail + [s, r.prompt], [])
             }
-            let sandbox: String
+            let sandbox: [String]
             switch r.access {
-            case .readOnly: sandbox = "read-only"
-            case .writeInWork: sandbox = "workspace-write"
+            case .readOnly: sandbox = ["-s", "read-only"]
+            case .writeInWork: sandbox = ["-s", "workspace-write"] + codexWriteSandbox
             }
-            return ("codex", ["exec", "--json"] + effort + ["-s", sandbox] + tail + [r.prompt], [])
+            return ("codex", ["exec", "--json"] + effort + sandbox + tail + [r.prompt], [])
         case .claude:
             // `--permission-mode dontAsk`: a user `defaultMode: bypassPermissions` would
             // otherwise skip every check, allow list included. `dontAsk` denies anything not
@@ -110,7 +140,7 @@ public enum HarnessCommand {
             case .readOnly:
                 args = ["-p", r.prompt, "--model", r.model, "--effort", r.effort, "--output-format", "json",
                         "--json-schema", r.schemaJSON, "--permission-mode", "dontAsk",
-                        "--allowedTools", claudeReadOnlyTools, "--disallowedTools", claudeDeniedTools]
+                        "--tools", claudeReadOnlyBuiltins, "--allowedTools", claudeReadOnlyTools, "--disallowedTools", claudeDeniedTools]
                 for d in r.readableDirs { args += ["--add-dir", d.path] }
             case .writeInWork(let dir):
                 // readableDirs is deliberately NOT added here: every `--add-dir` also grants
@@ -119,7 +149,10 @@ public enum HarnessCommand {
                 // only ever needs to read plan.md/changes.json, which already live under `dir`.
                 args = ["-p", r.prompt, "--model", r.model, "--effort", r.effort, "--output-format", "json",
                         "--json-schema", r.schemaJSON, "--permission-mode", "acceptEdits",
-                        "--allowedTools", claudeWriteTools, "--disallowedTools", claudeWriteDeniedTools,
+                        // `--tools` makes Read/Edit/Write the ONLY tools that exist, not just
+                        // the only pre-approved ones (probed: the init event lists exactly
+                        // these three); the denies below stay as defense in depth.
+                        "--tools", claudeWriteTools, "--allowedTools", claudeWriteTools, "--disallowedTools", claudeWriteDeniedTools,
                         "--add-dir", dir.path]
             }
             args += claudeIsolation
@@ -128,6 +161,22 @@ public enum HarnessCommand {
             // saving its transcript — and then `--resume` has nothing to resume.
             return ("claude", args, ["CLAUDE_CODE_CHILD_SESSION", "CLAUDECODE"])
         }
+    }
+
+    /// The complete environment for a child `build` produced, from the caller's resolved
+    /// `base` (PATH already repaired). The ONE place both triage (`SystemHeadlessRunner`) and
+    /// every round (`RoundExecutor`) get it from, so the two can't drift: a claude child gets
+    /// the user settings' `env` back underneath `base` (see `ClaudeUserEnv` — `--restricted`
+    /// drops the file that carries it), then the unsets, so the settings file can never
+    /// re-introduce a variable `build` removed. `home` is injectable so a test never reads the
+    /// operator's own settings.
+    public static func environment(
+        for command: (executable: String, arguments: [String], unsetEnvironment: [String]),
+        base: [String: String], home: URL = FileManager.default.homeDirectoryForCurrentUser
+    ) -> [String: String] {
+        var environment = command.executable == "claude" ? ClaudeUserEnv.merged(into: base, home: home) : base
+        for key in command.unsetEnvironment { environment.removeValue(forKey: key) }
+        return environment
     }
 }
 

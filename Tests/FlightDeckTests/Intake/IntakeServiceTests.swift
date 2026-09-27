@@ -433,25 +433,6 @@ final class IntakeServiceTests: XCTestCase {
 }
 
 final class SystemHeadlessRunnerTests: XCTestCase {
-    /// Triage's claude runs through here, not `RoundExecutor`: it needs the same settings-`env`
-    /// merge under `--setting-sources local`, with the unsets applied after it.
-    func testClaudeEnvironmentGetsUserSettingsEnvThenUnsets() throws {
-        let home = FileManager.default.temporaryDirectory.appendingPathComponent("fd-home-\(UUID().uuidString)")
-        defer { try? FileManager.default.removeItem(at: home) }
-        try FileManager.default.createDirectory(at: home.appendingPathComponent(".claude"), withIntermediateDirectories: true)
-        try Data(#"{"env":{"ANTHROPIC_BASE_URL":"http://localhost:8787","CLAUDECODE":"1","HOME":"/nope"}}"#.utf8)
-            .write(to: home.appendingPathComponent(".claude/settings.json"))
-        let base = ["PATH": "/usr/bin", "HOME": "/Users/me", "CLAUDE_CODE_CHILD_SESSION": "1"]
-        let unset = ["CLAUDE_CODE_CHILD_SESSION", "CLAUDECODE"]
-
-        let claude = SystemHeadlessRunner.environment(for: (executable: "claude", arguments: [], unsetEnvironment: unset),
-                                                      base: base, home: home)
-        XCTAssertEqual(claude, ["PATH": "/usr/bin", "HOME": "/Users/me", "ANTHROPIC_BASE_URL": "http://localhost:8787"])
-        let codex = SystemHeadlessRunner.environment(for: (executable: "codex", arguments: [], unsetEnvironment: []),
-                                                     base: base, home: home)
-        XCTAssertEqual(codex, base)
-    }
-
     /// A child killed by a signal nobody on our side sent is a failed turn, not a
     /// cancellation — the caller must get a code and text that name the signal.
     func testSignalDeathIsAFailureNotACancellation() async throws {

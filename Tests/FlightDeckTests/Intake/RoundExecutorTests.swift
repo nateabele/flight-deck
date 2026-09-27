@@ -189,7 +189,7 @@ final class RoundExecutorTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: work.appendingPathComponent("graph.json").path))
     }
 
-    /// `--setting-sources local` drops the user settings' `env`; the executor puts it back for
+    /// `--restricted` drops the user settings' `env`; the executor puts it back for
     /// claude children only, under the explicit environment, and before the unsets.
     func testClaudeChildrenGetTheUserSettingsEnvUnderneathTheProcessEnv() async throws {
         let settings = home.appendingPathComponent(".claude/settings.json")
