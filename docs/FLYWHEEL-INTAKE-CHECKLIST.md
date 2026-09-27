@@ -53,6 +53,10 @@ why `List`'s native highlight is gone). Before touching intakes:
   window if one is open, then look back at this one). The highlight is hand-drawn now, not
   `List`'s, so both of those are real ways for it to silently vanish that a native selection
   ring wouldn't have.
+- Compare it with a selected session row: same pill height, side inset, corner and text size.
+  It is **gray** while the terminal has focus and turns **accent** only once the sidebar holds
+  focus (click the selected row again) in the key window — exactly when a selected session row
+  does. A blue header beside a gray session highlight in the same window state is the bug.
 - Drag a project header up or down past another one. Confirm it still reorders — this is the
   mechanic the whole "no `Button`/gesture/`NSViewRepresentable` in this row" constraint
   exists to protect, per the row's own doc comment.
