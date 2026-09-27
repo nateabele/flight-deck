@@ -12,6 +12,18 @@ public enum ApplyStep: Equatable, Sendable {
 
 public enum ApplyPlanner {
     public static func plan(_ v: ValidatedChangeSet, skipping: Set<Int>) -> [ApplyStep] {
+        // Collect tempIds from skipped createBead and followUp ops
+        var skippedTempIds = Set<String>()
+        for (i, op) in v.changeSet.ops.enumerated() {
+            if skipping.contains(i) {
+                switch op {
+                case .createBead(let b): skippedTempIds.insert(b.tempId)
+                case .followUp(let t, _, _, _, _): skippedTempIds.insert(t)
+                default: break
+                }
+            }
+        }
+
         let ops = v.changeSet.ops.enumerated().filter { !skipping.contains($0.offset) }
         var creates: [ApplyStep] = [], edges: [ApplyStep] = [], edits: [ApplyStep] = []
         var reopens: [ApplyStep] = [], held: [ApplyStep] = []
@@ -29,6 +41,11 @@ public enum ApplyPlanner {
                 creates.append(.create(NewBead(tempId: t, title: title, description: d)))
                 edges.append(.depend(dependent: .new(t), dependency: .existing(of), kind: .related))
             case .addEdge(let from, let to, let kind):
+                // Skip edges that reference skipped tempIds
+                let fromSkipped = if case .new(let t) = from { skippedTempIds.contains(t) } else { false }
+                let toSkipped = if case .new(let t) = to { skippedTempIds.contains(t) } else { false }
+                if fromSkipped || toSkipped { break }
+
                 if v.heldOpIndices.contains(i), case .existing(let id) = from {
                     held += [.recheck(id: id, pre: knownPre[id]), .depend(dependent: from, dependency: to, kind: kind)]
                 } else {

@@ -32,4 +32,13 @@ final class ApplyPlannerTests: XCTestCase {
         let v = try ChangeSetValidator.validate(cs, against: g).get()
         XCTAssertEqual(ApplyPlanner.plan(v, skipping: [0]), [])
     }
+    func testSkippedCreateBeadAlsoSkipsItsDependentEdges() throws {
+        let g = GraphSnapshot(beads: ["b1": BeadSnapshot(id: "b1", title: "t", status: "open")])
+        let cs = ChangeSet(graphObservedAt: .init(timeIntervalSince1970: 0), ops: [
+            .createBead(NewBead(tempId: "n1", title: "n", description: "d")),              // idx 0 (skipped)
+            .addEdge(from: .existing("b1"), to: .new("n1"), kind: .blocks),               // idx 1 (should also skip)
+            .addEdge(from: .new("n1"), to: .existing("b1"), kind: .related)])             // idx 2 (should also skip)
+        let v = try ChangeSetValidator.validate(cs, against: g).get()
+        XCTAssertEqual(ApplyPlanner.plan(v, skipping: [0]), [])
+    }
 }
