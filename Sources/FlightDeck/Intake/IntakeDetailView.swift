@@ -5,7 +5,9 @@ import SwiftUI
 /// Entirely state-driven off `Intake.state` — see the table in
 /// `.superpowers/sdd/2026-09-26-flywheel-intake-phase1-3/task-17-brief.md`.
 struct IntakeDetailView: View {
-    let service: IntakeService
+    /// Observed, not just held: a tape advancing changes `service.tapes` without changing
+    /// `intake`, and a plain `let` would let SwiftUI skip this body on exactly that update.
+    @ObservedObject var service: IntakeService
     let intake: Intake
     /// Opens `ProjectView`'s release-review sheet; the sheet's own state (`reviewIntakeID`)
     /// lives on `ProjectView`, not here, because `Task 18`'s `ReleaseReviewView` loads its
@@ -23,7 +25,7 @@ struct IntakeDetailView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
-                IntakeStatePill(intake: intake)
+                IntakeStatePill(intake: intake, tape: service.tapes[intake.id])
                 Text(intake.intent)
                 Divider()
                 content
@@ -122,28 +124,44 @@ struct IntakeDetailView: View {
                 }
             }
             .pickerStyle(.menu)
-            // Only `.bead` encodes today — every other preset just parks, so the person
-            // choosing it needs to know Continue won't actually start planning yet.
-            if selectedPreset != .bead {
-                Text("Planning rounds arrive with the round engine").font(.caption).foregroundStyle(.secondary)
+            if selectedPreset == .bead {
+                Button("Continue") { service.choose(intake.id, preset: .bead) }
+            } else {
+                roundsEditor
+                Button("Start") { startShaping() }
             }
-            Button("Continue") { service.choose(intake.id, preset: selectedPreset) }
         }
         .task(id: intake.id) { selectedPreset = intake.recommended ?? .bead }
     }
 
+    /// INSERTION POINT for the Rounds editor disclosure (`RoundConfigEditor`, Task 12), wired
+    /// in at merge time. When it lands it edits the config `startShaping` hands to
+    /// `beginShaping`; until then Start runs the preset's stock expansion.
+    private var roundsEditor: some View {
+        EmptyView()
+    }
+
+    /// The preset's stock config for the models this machine has. `beginShaping` rather than
+    /// `choose` so an edited config (once `roundsEditor` exists) is what actually runs.
+    private func startShaping() {
+        guard let config = PresetExpansion.config(for: selectedPreset, available: service.availableModels()) else { return }
+        service.beginShaping(intake.id, preset: selectedPreset, config: config)
+    }
+
+    /// Chosen before planning rounds existed; the same choice as `.awaitingChoice` resumes it.
     private var parkedBody: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Parked — planning rounds arrive with the round engine.").foregroundStyle(.secondary)
+            Text("Parked before planning rounds existed — choose a fidelity to continue.").foregroundStyle(.secondary)
+            awaitingChoiceBody
         }
     }
 
-    /// Placeholder for the config editor Task 13 builds — this task only needs `.shaping` to
-    /// exist and compile, not to be reachable yet.
     private var shapingBody: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Planning rounds…").foregroundStyle(.secondary)
-        }
+        ShapingView(intake: intake, tape: service.tapes[intake.id] ?? .empty,
+                    loadFile: { [service, id = intake.id] checkpoint, path in
+                        service.checkpointFile(id, checkpoint: checkpoint, path)
+                    },
+                    onSend: { [service, id = intake.id] command in service.send(id, command) })
     }
 
     private var reviewBody: some View {

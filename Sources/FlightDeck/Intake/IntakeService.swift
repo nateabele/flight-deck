@@ -15,11 +15,34 @@ struct TriageSettings: Equatable, Sendable {
     /// user's own terminal), claude otherwise. Resolves `LoginShellPath`, which spawns a login
     /// shell on first use — call it off the main actor.
     static func detect(path: String? = LoginShellPath.repairing()["PATH"]) -> TriageSettings {
-        let dirs = (path ?? "").split(separator: ":").map(String.init)
-        let hasCodex = dirs.contains { FileManager.default.isExecutableFile(atPath: "\($0)/codex") }
-        return hasCodex ? codexDefault : claudeDefault
+        installed("codex", path: path) ? codexDefault : claudeDefault
+    }
+
+    /// The models planning rounds may seat, from the same PATH probe as `detect`: codex and
+    /// claude defaults for whichever is installed. Neither found falls back to claude alone,
+    /// exactly as `detect` does — `PresetExpansion` needs at least one model, and a round that
+    /// then fails to find `claude` says so in its own diagnosis rather than never starting.
+    static func available(path: String? = LoginShellPath.repairing()["PATH"]) -> AvailableModels {
+        let codex = installed("codex", path: path), claude = installed("claude", path: path)
+        return AvailableModels(codex: codex ? AvailableModels.defaults.codex : nil,
+                               claude: claude || !codex ? AvailableModels.defaults.claude : nil)
+    }
+
+    private static func installed(_ tool: String, path: String?) -> Bool {
+        (path ?? "").split(separator: ":").contains { FileManager.default.isExecutableFile(atPath: "\($0)/\(tool)") }
     }
 }
+
+/// The part of `IntakeRunnerController` the service drives — a seam so the service's tests
+/// never spawn `fd-abduco`.
+@MainActor
+protocol IntakeRunnerControlling: AnyObject {
+    func ensureRunning(_ id: UUID) -> Result<Void, RunnerStartError>
+    func isRunning(_ id: UUID) -> Bool
+    func reap(_ id: UUID)
+}
+
+extension IntakeRunnerController: IntakeRunnerControlling {}
 
 /// What the release review sheet shows for one intake: every op's drift against the live
 /// graph, and whether release is allowed yet.
@@ -57,6 +80,9 @@ struct ReleaseReview {
 @MainActor
 final class IntakeService: ObservableObject {
     @Published private(set) var intakes: [Intake]
+    /// Each `.shaping` intake's `tape.json` as last read — what `ShapingView` draws and what
+    /// `attentionCount` consults. Refreshed on the shared clock (`pollTapes`).
+    @Published private(set) var tapes: [UUID: Tape] = [:]
 
     private let store: IntakeStore
     private let headless: HeadlessRunner
@@ -68,6 +94,14 @@ final class IntakeService: ObservableObject {
     private let inject: (_ project: String, _ agent: String, _ text: String, _ token: UUID) -> Bool
     private let hasSession: (_ project: String, _ agent: String) -> Bool
     private let now: () -> Date
+    /// nil until first needed, for the same reason as `triageSettings`.
+    private var availableModelsCache: AvailableModels?
+    /// nil in a host that cannot run planning rounds; `beginShaping` then fails the intake
+    /// with that reason instead of leaving it shaping with nothing behind it.
+    private let runner: IntakeRunnerControlling?
+    /// `tape.json`'s modification date at the last read, per intake, so an idle tick costs one
+    /// stat per shaping intake rather than a decode.
+    private var tapeDates: [UUID: Date] = [:]
 
     /// At most one live triage/release per intake. Starting another cancels the first, so a
     /// retry or discard never races a turn whose result would overwrite the newer state. The
@@ -81,6 +115,9 @@ final class IntakeService: ObservableObject {
         processRunner: FlywheelProcessRunner = SystemFlywheelProcessRunner(),
         brPath: String = "br", bvPath: String = "bv", amPath: String = "am",
         triageSettings: TriageSettings? = nil,
+        availableModels: AvailableModels? = nil,
+        clock: WatchClock? = nil,
+        runner: IntakeRunnerControlling? = nil,
         inject: @escaping (String, String, String, UUID) -> Bool,
         hasSession: @escaping (String, String) -> Bool,
         now: @escaping () -> Date = Date.init
@@ -90,6 +127,8 @@ final class IntakeService: ObservableObject {
         self.processRunner = processRunner
         self.brPath = brPath; self.bvPath = bvPath; self.amPath = amPath
         self.triageSettings = triageSettings
+        self.availableModelsCache = availableModels
+        self.runner = runner
         self.inject = inject
         self.hasSession = hasSession
         self.now = now
@@ -106,6 +145,18 @@ final class IntakeService: ObservableObject {
             try? store.save(loaded[i])
         }
         intakes = loaded
+
+        // `.shaping` is deliberately NOT interrupted: its runner is detached and may still be
+        // working, and even a dead one left everything it needs in `tape.json`. Only a tape
+        // with unfinished work gets a runner back — a paused, stopped or failed one stopped
+        // for a reason the human has to see, and respawning it would just stop again.
+        pollTapes()
+        for i in intakes where i.state == .shaping {
+            guard let tape = tapes[i.id],
+                  tape.status == .running || (tape.status == .idle && tape.target != .none) else { continue }
+            startRunner(i.id)
+        }
+        clock?.add(self) { [weak self] in self?.pollTapes() }
     }
 
     // MARK: - Reads
@@ -126,7 +177,21 @@ final class IntakeService: ObservableObject {
     }
 
     func attentionCount(forProject path: String) -> Int {
-        intakes(forProject: path).filter(\.state.needsAttention).count
+        intakes(forProject: path).filter { $0.state.needsAttention || shapingNeedsAttention($0) }.count
+    }
+
+    /// A shaping intake whose runner has stopped and is waiting for the human. `.idle` counts
+    /// only with no target: an idle tape WITH one is queued work a runner is about to pick up
+    /// (the same "unfinished work" test launch recovery uses), and lighting the badge for the
+    /// second between Start and the runner's first write would be noise. No tape read yet
+    /// likewise reads as starting, not waiting.
+    private func shapingNeedsAttention(_ i: Intake) -> Bool {
+        guard i.state == .shaping, let tape = tapes[i.id] else { return false }
+        switch tape.status {
+        case .paused, .failed, .stopped: return true
+        case .idle: return tape.target == .none
+        case .running, .reachedReview: return false
+        }
     }
 
     /// The live task for `id`, if any — so tests (and nothing else) can await a turn.
@@ -149,13 +214,17 @@ final class IntakeService: ObservableObject {
         start(id) { await $0.runTriage(id, turn: .answers(questions: questions, answers: answers)) }
     }
 
+    /// Bead encodes (or goes straight to review); anything else starts planning rounds with the
+    /// preset's stock config. The UI starts an edited config through `beginShaping` directly,
+    /// and once that has run the intake is `.shaping`, so this can't overwrite it. `.parked`
+    /// intakes — chosen before the round engine existed — resume through here too.
     func choose(_ id: UUID, preset: Preset) {
-        guard var i = intake(id), i.state == .awaitingChoice || i.state == .review else { return }
+        guard var i = intake(id), [.awaitingChoice, .review, .parked].contains(i.state) else { return }
         guard preset == .bead else {
-            // The round engine that shapes Sketch and above is the next plan; park, don't drop.
-            i.state = .parked
-            save(i)
-            return
+            guard let config = PresetExpansion.config(for: preset, available: availableModels()) else {
+                return fail(id, "No model is available to run planning rounds.")
+            }
+            return beginShaping(id, preset: preset, config: config)
         }
         if i.changeSet != nil {
             i.state = .review
@@ -163,6 +232,133 @@ final class IntakeService: ObservableObject {
         } else {
             start(id) { await $0.runTriage(id, turn: .encodeNow) }
         }
+    }
+
+    // MARK: - Shaping
+
+    /// Starts planning rounds: records the preset and (possibly edited) config, queues the
+    /// config's default play as the first command, then makes sure a runner is there to read
+    /// it. Saved before the command is queued, so a runner that starts reading the moment it
+    /// is spawned always finds the intake it belongs to already `.shaping`.
+    func beginShaping(_ id: UUID, preset: Preset, config: RoundConfig) {
+        guard var i = intake(id), i.state == .awaitingChoice || i.state == .parked else { return }
+        i.chosenPreset = preset
+        i.roundConfig = config
+        i.state = .shaping
+        i.failure = nil; i.rawFailureOutput = nil
+        save(i)
+        let play: TapeCommand = switch config.defaultPlay {
+        case .toReview: .toReview
+        case .nextMajor: .nextMajor
+        case .step: .step
+        }
+        do { _ = try tapeStore(id).appendCommand(play) }
+        catch { return fail(id, "Could not queue the first planning round: \(error)") }
+        startRunner(id)
+    }
+
+    /// Queues `command` for the runner, then relaunches it for anything that asks for more
+    /// rounds — a runner that paused, stopped or reached a target has exited, so "play" means
+    /// a new one. `.pause`/`.stop` are for a live runner (none running means nothing to stop),
+    /// and an annotation is consumed by whichever round runs next, so none of those spawns.
+    func send(_ id: UUID, _ command: TapeCommand) {
+        guard intake(id)?.state == .shaping else { return }
+        do { _ = try tapeStore(id).appendCommand(command) }
+        catch { return fail(id, "Could not queue the command for the planning runner: \(error)") }
+        switch command {
+        case .pause, .stop, .annotate: return
+        case .step, .nextMajor, .toReview, .extend: startRunner(id)
+        }
+    }
+
+    /// Which models planning rounds can seat. Detected once, off the same PATH probe triage
+    /// uses; the login-shell lookup behind it is cached process-wide after its first run.
+    func availableModels() -> AvailableModels {
+        if let cached = availableModelsCache { return cached }
+        let detected = TriageSettings.available()
+        availableModelsCache = detected
+        return detected
+    }
+
+    /// A file a round wrote into `checkpoints/<checkpoint>/` — `ShapingView`'s `loadFile`.
+    func checkpointFile(_ id: UUID, checkpoint: Int, _ path: String) -> Data? {
+        try? Data(contentsOf: tapeStore(id).checkpointDirectory(checkpoint).appendingPathComponent(path))
+    }
+
+    /// One clock beat: re-read the tape of every `.shaping` intake whose `tape.json` changed
+    /// since the last read (one stat each when nothing did), publish it, and move a tape that
+    /// reached review into release review. Also run once from `init`, so a relaunch has every
+    /// tape before recovery decides which runners to bring back.
+    func pollTapes() {
+        let shaping = Set(intakes.lazy.filter { $0.state == .shaping }.map(\.id))
+        for gone in Set(tapes.keys).union(tapeDates.keys).subtracting(shaping) {
+            tapes[gone] = nil
+            tapeDates[gone] = nil
+        }
+        for id in shaping {
+            let store = tapeStore(id)
+            let modified = (try? FileManager.default.attributesOfItem(atPath: store.tapeURL.path))?[.modificationDate] as? Date
+            if tapes[id] == nil || modified != tapeDates[id] {
+                tapeDates[id] = modified
+                let tape = store.loadTape()
+                if tapes[id] != tape { tapes[id] = tape }
+            }
+            if tapes[id]?.status == .reachedReview { finishShaping(id) }
+        }
+    }
+
+    /// The runner reached review: its final change set is whatever the LATEST checkpoint that
+    /// carries one says (a freshEyes/dedup round may have come after polish, or a plan-only
+    /// round after both). Its `graph.json` — the snapshot encode validated against, carried
+    /// forward by every round since — replaces triage's, because release review measures drift
+    /// from and re-validates against `triageGraph`; the triage-time graph predates beads the
+    /// shaped change set may reference, and would make the review sheet fail to load.
+    private func finishShaping(_ id: UUID) {
+        guard var i = intake(id), i.state == .shaping, let tape = tapes[id] else { return }
+        let store = tapeStore(id)
+        var found: (changeSet: ChangeSet, graph: Data)?
+        for cp in tape.checkpoints.reversed() {
+            let dir = store.checkpointDirectory(cp.id)
+            guard let data = try? Data(contentsOf: dir.appendingPathComponent("changeset.json")) else { continue }
+            guard let cs = try? ChangeSet.decode(data),
+                  let graph = try? Data(contentsOf: dir.appendingPathComponent("graph.json")) else { break }
+            found = (cs, graph)
+            break
+        }
+        runner?.reap(id)
+        // Never an empty review: with nothing to release, "review" would be a dead end that
+        // looks like success.
+        guard let found else {
+            return fail(id, "Planning rounds reached review, but no checkpoint has a readable change set and graph to release.")
+        }
+        do {
+            try FileManager.default.createDirectory(at: triageDirectory(id), withIntermediateDirectories: true)
+            try found.graph.write(to: triageDirectory(id).appendingPathComponent("graph.json"), options: .atomic)
+        } catch {
+            return fail(id, "Could not record the planning rounds' graph for release review: \(error)")
+        }
+        i.changeSet = found.changeSet
+        i.ratingOverrides = [:]; i.droppedOps = []; i.confirmedDrift = []
+        i.failure = nil
+        i.state = .review
+        save(i)
+    }
+
+    /// `ensureRunning`, with a refusal failing the intake so it shows why nothing is running.
+    private func startRunner(_ id: UUID) {
+        guard let runner else { return fail(id, "This build cannot run planning rounds (no runner).") }
+        if case .failure(let error) = runner.ensureRunning(id) {
+            fail(id, "Could not start the planning runner: \(Self.describe(error))")
+        }
+    }
+
+    /// Readable text for a start refusal. `if case` rather than an exhaustive `switch` so a
+    /// case added to `RunnerStartError` later still reads sensibly here without an edit.
+    static func describe(_ error: RunnerStartError) -> String {
+        if case .noBundledCLI = error { return "this build has no bundled flightdeck CLI" }
+        if case .noFdAbduco = error { return "this build has no usable fd-abduco" }
+        if case .spawnFailed(let why) = error { return why }
+        return String(describing: error)
     }
 
     func retry(_ id: UUID) {
@@ -184,6 +380,12 @@ final class IntakeService: ObservableObject {
     func discard(_ id: UUID) -> Bool {
         guard var i = intake(id), i.state != .releasing else { return false }
         tasks.removeValue(forKey: id)?.task.cancel()
+        if i.state == .shaping {
+            // Stop first so a live runner exits at its next command check instead of shaping
+            // on for an intake nobody can see; reap collects one that has already finished.
+            _ = try? tapeStore(id).appendCommand(.stop)
+            runner?.reap(id)
+        }
         i.state = .discarded
         save(i)
         return true
@@ -570,6 +772,8 @@ final class IntakeService: ObservableObject {
     }
 
     // MARK: - Plumbing
+
+    private func tapeStore(_ id: UUID) -> TapeStore { TapeStore(intakeDirectory: store.directory(for: id)) }
 
     private var graphReader: IntakeGraphReader { IntakeGraphReader(runner: processRunner, brPath: brPath) }
 

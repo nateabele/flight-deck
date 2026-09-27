@@ -9,9 +9,12 @@ import SwiftUI
 /// a resting or terminal state that should not pull the eye.
 struct IntakeStatePill: View {
     let intake: Intake
+    /// The intake's tape while `.shaping` (`IntakeService.tapes`), so the pill can say where
+    /// the rounds are rather than just "Shaping".
+    var tape: Tape? = nil
 
     var body: some View {
-        Text(Self.label(for: intake))
+        Text(Self.label(for: intake, tape: tape))
             .font(.caption.weight(.medium))
             .foregroundStyle(Self.tint(for: intake.state))
             .padding(.horizontal, 6)
@@ -25,12 +28,12 @@ struct IntakeStatePill: View {
     /// needs the step count off `Intake.release`, which `IntakeState` alone cannot carry.
     /// Steps, not beads: `appliedSteps` counts every recheck and edge too, so a one-bead
     /// release read "released · 5 beads".
-    static func label(for intake: Intake) -> String {
+    static func label(for intake: Intake, tape: Tape? = nil) -> String {
         switch intake.state {
         case .triaging: return "triaging"
         case .needsAnswers: return "needs answers"
         case .awaitingChoice: return "choose fidelity"
-        case .shaping: return "Shaping"
+        case .shaping: return tape.map(ShapingModel.pillLabel(for:)) ?? "Shaping"
         case .parked: return "parked"
         case .review: return "review"
         case .releasing: return "releasing"

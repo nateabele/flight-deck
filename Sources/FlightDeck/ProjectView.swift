@@ -123,7 +123,7 @@ struct ProjectView: View {
                 List(selection: $selection) {
                     ForEach(intakes) { intake in
                         HStack(spacing: 8) {
-                            IntakeStatePill(intake: intake)
+                            IntakeStatePill(intake: intake, tape: intakeService.tapes[intake.id])
                             Text(intake.intent).lineLimit(1).truncationMode(.tail)
                         }
                         .tag(intake.id)
