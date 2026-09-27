@@ -40,6 +40,16 @@ public enum HarnessCommand {
     /// it needs to write there — unlike every read-only seat, which only ever reads/greps/`br`s.
     public static let claudeWriteTools = "Read Edit Write"
 
+    /// Non-edit tools denied in write mode, on top of `--strict-mcp-config` (below): granting
+    /// exactly Read/Edit/Write via `--allowedTools` above is not a sandbox by itself, because
+    /// `--allowedTools` only ADDS to whatever the operator's own settings.json already allows —
+    /// and this machine's has standing allows like `Bash(git add *)` and `Bash(rg:*)` that
+    /// `acceptEdits` would still run unprompted. A bare `Bash` deny beats every one of those
+    /// allows regardless of where they came from, which is what actually confines the integrator
+    /// to Read/Edit/Write; WebFetch/WebSearch/Task/NotebookEdit are denied the same way as
+    /// defense in depth for the same reason, since none of them are edits either.
+    public static let claudeWriteDeniedTools = "Bash WebFetch WebSearch Task NotebookEdit"
+
     /// The pure check behind `build`'s write-mode `precondition` — a request that fails this
     /// would sandbox the integrator somewhere other than its own work dir, or let it resume
     /// (the integrator always starts fresh), so `build` must never construct argv for it.
@@ -87,14 +97,19 @@ public enum HarnessCommand {
                 args = ["-p", r.prompt, "--model", r.model, "--effort", r.effort, "--output-format", "json",
                         "--json-schema", r.schemaJSON, "--permission-mode", "dontAsk",
                         "--allowedTools", claudeReadOnlyTools, "--disallowedTools", claudeDeniedTools]
+                for d in r.readableDirs { args += ["--add-dir", d.path] }
             case .writeInWork(let dir):
-                // No `--disallowedTools`: the integrator's sandbox is the directory scope
-                // (`--add-dir`, below), not a `br`-verb denylist like triage's.
+                // readableDirs is deliberately NOT added here: every `--add-dir` also grants
+                // Edit/Write, not just read access, so adding the intake root (the integrator's
+                // one readableDir) would let it write outside its own work dir — the integrator
+                // only ever needs to read plan.md/changes.json, which already live under `dir`.
+                // `--strict-mcp-config` with no `--mcp-config` drops every MCP server rather than
+                // guessing whether an `mcp__*` glob is valid `--disallowedTools` syntax.
                 args = ["-p", r.prompt, "--model", r.model, "--effort", r.effort, "--output-format", "json",
                         "--json-schema", r.schemaJSON, "--permission-mode", "acceptEdits",
-                        "--allowedTools", claudeWriteTools, "--add-dir", dir.path]
+                        "--allowedTools", claudeWriteTools, "--disallowedTools", claudeWriteDeniedTools,
+                        "--strict-mcp-config", "--add-dir", dir.path]
             }
-            for d in r.readableDirs { args += ["--add-dir", d.path] }
             if let s = r.resumeSessionID { args += ["--resume", s] }
             // Without these unset, a claude spawned from inside Claude Code silently skips
             // saving its transcript — and then `--resume` has nothing to resume.
