@@ -123,7 +123,9 @@ struct ProjectHeaderRow: View {
                     .foregroundStyle(.secondary)
                     .accessibilityHidden(true)
                 // Reused rather than reimplemented so the collapsed and expanded renderings
-                // of the same state cannot drift apart.
+                // of the same state cannot drift apart. `collapsedStatus` already folds an
+                // intake needing attention into its candidate pool (see its doc comment), so
+                // this one icon covers both a busy/waiting session AND a stalled intake.
                 SessionStatusIcon(status: store.collapsedStatus(forProjectAt: repo.id))
                 // Independent of the icon above: `collapsedStatus` filters out idle children,
                 // so a project whose only active tab is idle-with-background-work would
@@ -132,6 +134,20 @@ struct ProjectHeaderRow: View {
                 if store.projectHasBackgroundWork(forProjectAt: repo.id) {
                     BackgroundWorkBadge()
                 }
+            } else if intakeAttentionCount > 0 {
+                // `collapsedStatus` already surfaces this via the icon above when the project
+                // is collapsed; expanded, there is no header-level status row to fold it into,
+                // so this draws it directly. Same glyph and tint as `SessionStatusIcon`'s
+                // `.waiting` case (`questionmark.circle.fill`, orange) so a stalled intake reads
+                // the same way whether the project is open or shut — but its own `Image` rather
+                // than a `SessionStatusIcon(status:)` call, since there is no session-shaped
+                // `SessionStatus` for "an intake, not a session, needs you" to construct.
+                Image(systemName: "questionmark.circle.fill")
+                    .imageScale(.small)
+                    .symbolRenderingMode(.hierarchical)
+                    .foregroundStyle(.orange)
+                    .help(intakeAttentionTooltip)
+                    .accessibilityHidden(true)
             }
 
             if isHovered {
@@ -309,6 +325,22 @@ struct ProjectHeaderRow: View {
         "Will initialize: beads, agent-mail marker, AGENTS.md. Will install: Agent Mail commit guard, beads sync hook."
     }
 
+    /// How many of this project's intakes need the human — `IntakeService.attentionCount`,
+    /// keyed the same way `SessionStore.collapsedStatus` keys it (the standardized path, since
+    /// that is the spelling `SessionStore` keys flywheel identities by).
+    private var intakeAttentionCount: Int {
+        store.intakeService.attentionCount(forProject: repo.url.standardizedFileURL.path)
+    }
+
+    /// Same wording `collapsedStatus` builds for the synthetic `.waiting` status it folds an
+    /// intake into — kept in sync by eye rather than shared, since the two call sites want
+    /// slightly different sentences around it ("Waiting for you — N intakes need you" there,
+    /// a bare tooltip here).
+    private var intakeAttentionTooltip: String {
+        let n = intakeAttentionCount
+        return "\(n) intake\(n == 1 ? "" : "s") need\(n == 1 ? "s" : "") you"
+    }
+
     /// The count and the status glyph reach VoiceOver as words here; on screen they are a
     /// bare numeral and an unnamed symbol.
     private var accessibilityLabel: String {
@@ -324,6 +356,10 @@ struct ProjectHeaderRow: View {
             if store.projectHasBackgroundWork(forProjectAt: repo.id) {
                 parts.append("background command running")
             }
+        } else if intakeAttentionCount > 0 {
+            // The badge itself is `.accessibilityHidden(true)` (its glyph carries no name of
+            // its own), so this is the only route this fact has to VoiceOver while expanded.
+            parts.append(intakeAttentionTooltip)
         }
         return parts.joined(separator: ", ")
     }

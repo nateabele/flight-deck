@@ -948,6 +948,94 @@ a real, terminal-focused UI test can, which is what
 `TerminalSmokeTests.testCommandKOpensTheSearchOverlayOverAFocusedTerminal` exists for — its own
 test rather than a group, so an unrelated failure elsewhere in the suite cannot stop it running.
 
+## Intake (`Sources/IntakeKit/`, `Sources/FlightDeck/Intake/`)
+
+Turns a typed intent into a reviewed diff against the bead graph, then releases it. Full
+design: [specs/2026-09-26-flywheel-intake-design.md](superpowers/specs/2026-09-26-flywheel-intake-design.md).
+
+**`IntakeKit` is a pure engine, `IntakeService` is the app's orchestration of it.** The split
+is the same one `Sources/FleetKit` draws for pairing: `IntakeKit` is Swift 6, `Sendable`, and
+knows nothing of `SessionStore`, notifications, or subprocesses — `Intake`, `ChangeSet` and its
+`Op` cases, `ValidatedChangeSet`/`ChangeSetValidator`, `ApplyPlanner` (change set → ordered
+`ApplyStep`s), `DeliveryPlanner` (released edits → `DeliveryAction`s), `DriftClassifier`
+(an op's `pre` vs. the live graph → still-holds/drifted/impossible) and `IntakeStore`
+(the on-disk format) all live there and are unit-tested with canned JSON, no live process.
+`IntakeService` (`@MainActor`, `Sources/FlightDeck/Intake/IntakeService.swift`) is the only
+thing that actually shells out — to a headless `codex`/`claude` for triage
+(`HeadlessRunner`), to `br`/`bv`/`am` for the graph and delivery (`FlywheelProcessRunner`,
+`BeadWriter`, `IntakeDelivery`) — and the only thing `SessionStore` talks to
+(`store.intakeService`, a lazy var so a host that never touches intakes never even reads the
+directory below).
+
+**Storage is one directory per intake**, `<state dir>/intakes/<uuid>/intake.json` — not a
+single index file — because the next plan's runner writes checkpoints and run output beside
+`intake.json` from another process (a `flightdeck intake run <id>` under its own fd-abduco
+daemon), and a shared index file would race that writer. `IntakeStore.save` creates the
+directory tree lazily, on first write; `all()` only lists what is already there and never
+creates `intakes/` itself, which is why reading `attentionCount` — the rollup below — from a
+project with no intakes never conjures the directory into existence. A `.triaging` or
+`.releasing` intake found on disk at launch — no process survives an FD quit to finish it —
+is rewritten `.interrupted` before anything is published, so `intake.json` always describes
+what actually happened, and Retry is the recovery path.
+
+**FD is the sole writer of `br` on an intake's behalf; `br` never sees the change set at all
+before release.** Every op — creates, edits, reopens, edges — is staged in FD's own
+`intake.json` only, until `BeadWriter` applies the release. (Spec §5.3 plans an exception for
+Feature/Full plan fidelity: materializing the `createBead` ops early, as `deferred` beads
+labelled `fd-intake:<id>`, so a polish round has real beads to work against, with a
+post-round diff reverting anything outside that label set. That materialization is **not
+built** — it is next-plan scope, same as the round engine it exists to serve — so today
+nothing is written before release regardless of fidelity.)
+
+**Held edges.** An edge from an *existing* bead onto a *new* one is always held (never
+written before release, even when other new-bead ops are materialized early), because
+writing it live would block the existing bead on a bead that has not been reviewed yet. FD
+**computes** the held flag itself from which endpoint is new — it does not trust whatever
+value a triage or encoder agent put in the JSON, the same "recompute, don't trust the model"
+rule `ChangeSetValidator` applies to every other invariant it checks (schema, referenced ids
+existing, no cycles).
+
+**Release order** (`ApplyPlanner.plan`, run by `BeadWriter`): creates (`createBead` ops and
+each `followUp`'s new bead together), then non-held edges (new→\* edges, including a
+`followUp`'s own `related` edge onto the bead it follows up), then edits, then reopens, and
+finally the held edges — existing→new edges withheld until now precisely because they are
+the ones that would block an existing bead on a bead nobody has reviewed yet. Every edit,
+reopen, and held edge is preceded by its own `recheck` step, re-reading that bead and
+refusing to proceed if it no longer matches the op's `pre` precondition (`DriftClassifier`'s
+review-time check, re-run at write time rather than trusted from when the review sheet was
+last loaded) — the window between that recheck and the write is exactly where `br update`'s
+missing `--if-version` (see `docs/FOLLOWUPS.md`) could still bite. Every write carries
+`--actor flightdeck-intake:<id>`, and `br sync --flush-only` runs once at the end, tagged the
+same way, so the JSONL export matches what was just written. A `br` command failing partway
+through a release stops the apply right there — `BeadWriter` runs steps in order and stops at
+the first failure or recheck mismatch; there is no automatic rollback, since another agent may
+already be acting on a bead that was written. The intake is left `.partiallyReleased`, with
+`ReleaseRecord.appliedSteps` recording how many steps landed before the failure and `idMap`
+recording any beads that got created along the way. No delivery notices go out on a partial
+release — `IntakeService` skips `DeliveryPlanner`/`IntakeDelivery` entirely when the outcome
+carries an error, and records one generic warning explaining why, rather than risk repeating a
+notice for an edit that already went out. Finishing the rest is manual (`br`), until the next
+plan: nothing yet re-drives the un-applied ops back through `release(_:)` (`ApplyPlanner.plan`
+already supports skipping the ones that landed via its `skipping:` parameter — see
+`docs/FOLLOWUPS.md` — but no caller passes it that way today).
+
+**The delivery ladder** (`DeliveryPlanner` → `IntakeDelivery`) tells a bead's current holder
+what an edit to their in-progress work just did, graded by how much it matters: `clarifying`
+is Agent Mail only; `scopeChange` (the default rating) is both an inject into the holder's FD
+session — `submitPrompt(_:token:to:)`, which queues if the agent is busy and is idempotent by
+token — and the same text by mail, for a holder with no FD session; `invalidating` reclaims
+the bead outright (back to `open`, reservations released) with a stop notice on both channels.
+The holder is found from the bead's `assignee`, matched to an FD session the same way Observe
+already does it; no session found means mail is the only channel, and the review says so.
+
+**The rollup**: `SessionStore.collapsedStatus(forProjectAt:)` folds
+`IntakeService.attentionCount(forProject:)` into its usual per-session candidate pool as a
+synthetic `.waiting` status, so a project sitting on an unanswered triage question reads
+exactly as demanding, in a collapsed header, as a session with a permission prompt open.
+Expanded, `ProjectHeaderRow` draws the same glyph (`questionmark.circle.fill`, orange)
+directly, since there is no per-project status row to fold it into when every session row is
+already visible on its own.
+
 ## Not yet built (design, not code)
 
 **The shared code index and the context engine** are design only — see the
