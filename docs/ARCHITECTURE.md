@@ -1011,13 +1011,15 @@ through a release stops the apply right there — `BeadWriter` runs steps in ord
 the first failure or recheck mismatch; there is no automatic rollback, since another agent may
 already be acting on a bead that was written. The intake is left `.partiallyReleased`, with
 `ReleaseRecord.appliedSteps` recording how many steps landed before the failure and `idMap`
-recording any beads that got created along the way. No delivery notices go out on a partial
-release — `IntakeService` skips `DeliveryPlanner`/`IntakeDelivery` entirely when the outcome
-carries an error, and records one generic warning explaining why, rather than risk repeating a
-notice for an edit that already went out. Finishing the rest is manual (`br`), until the next
-plan: nothing yet re-drives the un-applied ops back through `release(_:)` (`ApplyPlanner.plan`
-already supports skipping the ones that landed via its `skipping:` parameter — see
-`docs/FOLLOWUPS.md` — but no caller passes it that way today).
+recording any beads that got created along the way. Because the plan is ordered and `BeadWriter`
+stops at the first failure, `steps[..<appliedSteps]` is exactly what landed, so `runRelease`
+takes delivery to the same granularity: a notice only goes out to the holder of an edit whose
+own `update` step is in that landed prefix, and every edit whose `update` step did *not* land
+gets a warning instead — `ReleaseRecord.warnings` names that bead and its holder, and says the
+edit never happened, rather than risk telling someone about a change that didn't. Finishing the
+rest is manual (`br`), until the next plan: nothing yet re-drives the un-applied ops back
+through `release(_:)` (`ApplyPlanner.plan` already supports skipping the ones that landed via
+its `skipping:` parameter — see `docs/FOLLOWUPS.md` — but no caller passes it that way today).
 
 **The delivery ladder** (`DeliveryPlanner` → `IntakeDelivery`) tells a bead's current holder
 what an edit to their in-progress work just did, graded by how much it matters: `clarifying`
