@@ -77,10 +77,21 @@ struct SelectableProseView: UIViewRepresentable {
         private var cachedCategory: UIContentSizeCategory?
 
         /// Whether `cachedAttributed` has already been handed to `view`, tracked explicitly
-        /// rather than by reading `view.attributedText` back — see `apply`'s own comment for
-        /// why that reading can never be trusted. Cleared whenever the cache above is
-        /// invalidated, which is every case that legitimately needs a reassignment.
+        /// rather than by reading `view.attributedText` back and comparing. `UITextView`
+        /// normalizes what it is handed on the way into its text storage, so the getter can
+        /// hand back a copy that is not `isEqual` to what was just set — confirmed unequal for
+        /// link/code-bearing prose, the shape of the 3.7K-character message this was measured
+        /// against, though simple prose can round-trip equal. A guard keyed on that comparison
+        /// is therefore unreliable rather than merely slow: on the prose that matters it never
+        /// short-circuits, so `sizeThatFits` measuring a scrolling row several times a frame was
+        /// reassigning `attributedText` and forcing a relayout before the measurement it was
+        /// there to speed up (3.54ms vs 2.09ms measure-only). Cleared whenever the cache above
+        /// is invalidated, which is every case that legitimately needs a reassignment.
         private var appliedCachedAttributed = false
+
+        /// How many times `apply` has actually assigned `attributedText`, kept only so a test
+        /// can see the guard above short-circuit without timing anything.
+        private(set) var assignmentCount = 0
 
         init(onReply: @escaping (String) -> Void) {
             self.onReply = onReply
@@ -97,24 +108,12 @@ struct SelectableProseView: UIViewRepresentable {
                 appliedCachedAttributed = false
             }
             guard let attributed = cachedAttributed, !appliedCachedAttributed else { return }
-            // `view.attributedText != attributed` looks like the obvious guard and is the one
-            // this replaced — it cannot work. `UITextView` normalizes what it is handed on the
-            // way into its text storage, so the getter hands back a copy that is not `isEqual`
-            // to what was just set; a probe that assigned `attributed` and immediately read the
-            // property back found them unequal every time. That guard therefore never
-            // short-circuits: `sizeThatFits` measures a scrolling row several times a frame, and
-            // every one of those calls was reassigning `attributedText` and forcing a relayout
-            // before the measurement it was there to speed up (3.54ms vs 2.09ms measure-only on
-            // a 3.7K-character message). Tracking whether *this coordinator* already applied
-            // `cachedAttributed` needs no read-back, so it is not exposed to the mismatch.
+            // See `appliedCachedAttributed` above for why this can't be a `view.attributedText
+            // != attributed` comparison instead.
             view.attributedText = attributed
             appliedCachedAttributed = true
             assignmentCount += 1
         }
-
-        /// How many times `apply` has actually assigned `attributedText`, kept only so a test
-        /// can see the guard above short-circuit without timing anything.
-        private(set) var assignmentCount = 0
 
         /// **Reply is appended, not spliced in beside Copy.** The suggested actions arrive as an
         /// opaque list whose contents are the system's to change between releases, and reaching

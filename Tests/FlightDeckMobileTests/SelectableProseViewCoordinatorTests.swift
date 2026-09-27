@@ -6,10 +6,13 @@ import XCTest
 /// changed, or on every call — which is the difference between a `sizeThatFits` that measures
 /// and one that relays out first. A simulator probe (see the commit this ships with) assigned
 /// `TimelineProseText.attributed(md)` to a `UITextView` and compared `view.attributedText ==
-/// attributed`: false, even though nothing had changed — `UITextView` normalizes what it is
-/// handed, so the getter hands back a copy the setter's argument is never `isEqual` to.
-/// `assignmentCount` is the seam that makes that regression visible without a timing
-/// measurement, which is not something a unit test can assert on.
+/// attributed`: for link/code-bearing prose — the shape of the 3.7K-character message the
+/// regression was measured against — that came back false; simple prose can round-trip equal.
+/// That is exactly why comparing against the getter is unreliable rather than merely slow, and
+/// why `testRepeatedMeasurementWithUnchangedMarkdownAssignsOnce` below uses link/code-bearing
+/// markdown rather than something simpler. `assignmentCount` is the seam that makes the
+/// regression visible without a timing measurement, which is not something a unit test can
+/// assert on.
 @MainActor
 final class SelectableProseViewCoordinatorTests: XCTestCase {
 
@@ -25,8 +28,21 @@ final class SelectableProseViewCoordinatorTests: XCTestCase {
         super.tearDown()
     }
 
+    /// Configured like `SelectableProseView.makeUIView` (and the probe that measured the
+    /// regression) rather than a bare `UITextView` — `isScrollEnabled`/`textContainerInset`/
+    /// `lineFragmentPadding` all affect layout, and the getter round-trip this file exists to
+    /// route around is content- and configuration-dependent, so a fixture that doesn't match
+    /// production risks a test that passes for the wrong reason.
     private func makeView() -> UITextView {
         let view = UITextView()
+        view.isEditable = false
+        view.isSelectable = true
+        view.isScrollEnabled = false
+        view.backgroundColor = .clear
+        view.textContainerInset = .zero
+        view.textContainer.lineFragmentPadding = 0
+        view.setContentCompressionResistancePriority(.required, for: .vertical)
+        view.setContentHuggingPriority(.required, for: .vertical)
         let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 300, height: 800))
         window.rootViewController = UIViewController()
         window.rootViewController?.view.addSubview(view)
@@ -39,11 +55,18 @@ final class SelectableProseViewCoordinatorTests: XCTestCase {
     /// **The regression this whole file exists to catch.** `SelectableProseView.sizeThatFits`
     /// calls `apply` and then measures on every pass, and a scrolling list measures the same row
     /// repeatedly, so this drives that exact sequence — apply, then the real `UITextView`
-    /// measurement — rather than calling `apply` in isolation.
+    /// measurement — rather than calling `apply` in isolation. The markdown is link/code-bearing
+    /// on purpose: that is the shape the getter round-trip actually goes unequal for (see the
+    /// file-level comment above), so simple prose here would pass even against the old
+    /// `view.attributedText != attributed` guard and not pin the regression at all.
     func testRepeatedMeasurementWithUnchangedMarkdownAssignsOnce() {
         let coordinator = SelectableProseView.Coordinator(onReply: { _ in })
         let view = makeView()
-        let markdown = "A short paragraph of **prose**, unremarkable on purpose."
+        let para = "This is **bold** prose with `code`, a [link](https://example.com) and some " +
+            "_emphasis_ that wraps across several lines on a phone. "
+        let markdown = (0..<12)
+            .map { i in "Paragraph \(i). " + String(repeating: para, count: 3) }
+            .joined(separator: "\n\n")
 
         for _ in 0..<5 {
             coordinator.apply(markdown, to: view)
@@ -52,9 +75,9 @@ final class SelectableProseViewCoordinatorTests: XCTestCase {
 
         XCTAssertEqual(
             coordinator.assignmentCount, 1,
-            "unchanged markdown measured five times must assign attributedText once, not five"
+            "unchanged link/code-bearing markdown measured five times must assign attributedText once, not five"
         )
-        XCTAssertEqual(view.attributedText.string, "A short paragraph of prose, unremarkable on purpose.")
+        XCTAssertTrue(view.attributedText.string.hasPrefix("Paragraph 0."))
     }
 
     /// The first call is the one `sizeThatFits`'s own comment calls "not belt-and-braces": a
