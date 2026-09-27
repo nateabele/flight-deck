@@ -85,10 +85,13 @@ let runner = CLIRunner(
     },
     err: { line in writeStderr(line) },
     finish: { code in
-        // CLIRunner itself never prints for 69 — the comment on `disconnected(_:)` says the
-        // path is main's to supply, so this is the only place this message is ever printed.
+        // CLIRunner itself never prints for 69 or 77 — the comment on `disconnected(_:)` says
+        // the path is main's to supply, so this is the only place either message is printed.
         if code == 69 {
             writeStderr("flightdeck: cannot reach Flight Deck at \(socketPath)")
+        } else if code == 77 {
+            writeStderr("flightdeck: the agent's sandbox blocked the control socket at \(socketPath)")
+            writeStderr("flightdeck: codex tabs opened by Flight Deck are granted it; reopen a tab that predates this, or one run with an explicit sandbox mode")
         }
         exit(code)
     },
