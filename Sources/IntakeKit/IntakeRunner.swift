@@ -15,15 +15,26 @@ public struct IntakeRunner: Sendable {
     private let environment: [String: String]
     private let pollInterval: Duration
     private let now: @Sendable () -> Date
+    /// Recovery's process-group kill. Injectable (internally) only so a test can look at the
+    /// tape at the exact moment recovery acts — the one point that orders "adopt the tape"
+    /// against "recover" without racing a poller.
+    private let killGroup: @Sendable (Int32) -> Void
 
     public init(root: URL, intakeID: UUID, executor: RoundExecutor, environment: [String: String],
                 pollInterval: Duration = .seconds(1), now: @escaping @Sendable () -> Date = Date.init) {
+        self.init(root: root, intakeID: intakeID, executor: executor, environment: environment,
+                  pollInterval: pollInterval, now: now, killGroup: { _ = killpg($0, SIGKILL) })
+    }
+
+    init(root: URL, intakeID: UUID, executor: RoundExecutor, environment: [String: String],
+         pollInterval: Duration, now: @escaping @Sendable () -> Date, killGroup: @escaping @Sendable (Int32) -> Void) {
         self.root = root
         self.intakeID = intakeID
         self.executor = executor
         self.environment = environment
         self.pollInterval = pollInterval
         self.now = now
+        self.killGroup = killGroup
     }
 
     /// Runs until the target is satisfied, the tape pauses/fails/stops, or reaches review.
@@ -32,6 +43,10 @@ public struct IntakeRunner: Sendable {
     public func run() async -> RunnerStatus {
         let intakes = IntakeStore(root: root)
         let keeper = TapeKeeper(store: TapeStore(intakeDirectory: intakes.directory(for: intakeID)), now: now)
+        // The FIRST tape write, before anything else reads or changes state: the app treats a
+        // live runner socket without a fresh heartbeat as suspect, so a runner busy recovering
+        // (or failing on a bad intake) must already look like the tape's owner.
+        await keeper.adopt(pid: getpid())
 
         let intake: Intake
         let config: RoundConfig
@@ -45,8 +60,7 @@ public struct IntakeRunner: Sendable {
                                                                      action: "Choose a fidelity for the intake, then start it again."))
         }
 
-        await keeper.adopt(pid: getpid())
-        var rerunNote = await keeper.recoverInterruptedRound()
+        var rerunNote = await keeper.recoverInterruptedRound(killGroup: killGroup)
         while true {
             if await keeper.applyCommands() { return await keeper.finish(.stopped) }
             let tape = await keeper.tape
@@ -139,7 +153,7 @@ private actor TapeKeeper {
     /// may still be running — they were each their own process-group leader, so a parent's
     /// death didn't take them with it — and their output can't be trusted, so they are killed
     /// and the round reruns from scratch. Returns whether there was such a round.
-    func recoverInterruptedRound() -> Bool {
+    func recoverInterruptedRound(killGroup: (Int32) -> Void) -> Bool {
         guard let round = tape.roundInProgress else { return false }
         let prefix = "\(round.stage.rawValue)-\(round.round)-"
         let runs = store.intakeDirectory.appendingPathComponent("runs", isDirectory: true)
@@ -152,7 +166,7 @@ private actor TapeKeeper {
             // unrelated process. `killpg` narrows it — it only lands if that pid now leads a
             // process group — but can't rule it out; the alternative, leaving a live harness
             // child editing `work/` under the rerun, is the worse failure.
-            killpg(pid, SIGKILL)
+            killGroup(pid)
         }
         tape.roundInProgress = nil
         save()
