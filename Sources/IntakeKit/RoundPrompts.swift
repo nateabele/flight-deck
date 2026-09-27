@@ -124,27 +124,13 @@ public struct RoundContext: Sendable {
 
 /// The round engine's prompts (spec §6): one function per stage, each returning plain words
 /// plus the schema its stage's `RoundSchemas` member matches. Adapted from the methodology's
-/// original prompts, not copied verbatim, except for the pieces later tasks or `Triage`
-/// itself depend on staying word-for-word identical (the graph shape, the change-set rules).
+/// original prompts, not copied verbatim, except for the pieces `Triage` itself owns — the
+/// graph shape and the change-set rules — which are built from `Triage.graphShapeText` /
+/// `Triage.changeSetRulesText` rather than a hand copy, so the wording can't drift.
 public enum RoundPrompts {
     public struct Malformed: Error, Equatable { public let why: String }
 
     // MARK: - Shared fragments
-
-    /// Same wording as `Triage.initialPrompt`'s graph-shape paragraph. A drafter reading the
-    /// live graph needs to know the same shape triage already explained to the human's own
-    /// agent — not a second, possibly-drifting description of the same JSON.
-    private static func graphShape(_ graphFile: String) -> String {
-        """
-        \(graphFile) is a JSON snapshot shaped:
-        `{"beads": {"<id>": {"id","title","status","assignee"?,"updatedAt"?,"labels"}}, \
-        "edges": [{"dependent": "<id>", "dependency": "<id>"}]}`. An edge's `dependent` \
-        depends on its `dependency` — that is, `dependent` is `from` and `dependency` is \
-        `to`. A bead with no `assignee` key has no assignee; when you copy its `pre` \
-        precondition, use `"assignee": null` for it — never an empty string, and never
-        omit the key.
-        """
-    }
 
     private static func inputFiles(_ c: RoundContext) -> String {
         var files = "- Live bead graph: \(c.graphFile)"
@@ -164,47 +150,6 @@ public enum RoundPrompts {
             }
         }
         return pairs.isEmpty ? nil : pairs.joined(separator: "\n\n")
-    }
-
-    /// Triage's own change-set rules (spec §4), verbatim: encode, polish, fresh-eyes, and
-    /// dedup all produce the same change-set shape triage does at Bead fidelity, so they
-    /// follow the exact same rules for what each op needs and how existing beads are
-    /// referenced — a second wording of the same rules is a second place for them to drift.
-    private static func changeSetRules(observedAt: Date) -> String {
-        """
-        Change-set rules, whenever you return a change set:
-        - Set `changeSet.graphObservedAt` to exactly "\(IntakeJSON.string(from: observedAt))"
-          — the moment FD read the graph, not your own clock.
-        - Reference a bead you are creating in this same change set as `new:<tempId>` (never
-          a bare tempId), everywhere another op needs to point at it.
-        - Edge direction is `from` depends on `to`: `{"from": A, "to": B}` means A cannot
-          proceed until B is done.
-        - For every existing bead an op touches, copy its `pre` precondition (status and
-          assignee) exactly as read from the graph — FD uses it to detect drift before
-          release.
-        - Rate every edit to a bead that is `in_progress`: `clarifying` if it only affects
-          understanding, `scopeChange` if it changes what is being delivered, or
-          `invalidating` if it makes the bead's current work moot — and give a reason for
-          the rating.
-        - For new work on a bead that is already closed, use `op=followUp` — it creates a
-          new bead with a `related` edge to the closed one; never emit `createBead` plus a
-          separate `addEdge` instead. Use `op=reopen` only when the closed work was itself
-          wrong, and say why in its reason.
-        - Before creating a bead, check for duplicates against both open and closed beads,
-          not just open ones.
-
-        Each op must fill in exactly the fields its kind needs, and set every other field
-        to null:
-        - `createBead`: `tempId`, `title`, `description` are required; `type`, `priority`,
-          `acceptance`, and `labels` are optional (null falls back to `task` priority 2
-          with no acceptance or labels).
-        - `addEdge`: `from`, `to`, and `kind` — `kind` is required, one of `blocks`,
-          `related`, or `parent-child`.
-        - `editBead`: `id`, `set` (a non-null object of the fields you are changing), and
-          `pre`; also `delivery` when the bead you are editing is `in_progress`.
-        - `reopen`: `id`, `reason`, and `pre`.
-        - `followUp`: `tempId`, `of`, `title`, `description`, and `pre`.
-        """
     }
 
     /// The extra clause every polish-family round gets once a shadow-beads database exists
@@ -269,7 +214,7 @@ public enum RoundPrompts {
         Read-only files:
         \(inputFiles(c))
 
-        \(graphShape(c.graphFile))
+        \(Triage.graphShapeText(graphFile: c.graphFile))
         """
         s += lens(for: persona)
         s += """
@@ -282,14 +227,14 @@ public enum RoundPrompts {
     }
 
     public static func synthesis(_ c: RoundContext, ownDraft: String, otherDrafts: [String]) -> String {
-        let others = otherDrafts.map { "- \($0)" }.joined(separator: "\n")
+        let others = otherDrafts.map { "- Competing draft: \($0)" }.joined(separator: "\n")
         return """
         I asked competing models to independently do the same drafting task you were just \
         given; be intellectually honest about what they did better than your own plan, and \
         fold it in.
 
-        Your draft: \(ownDraft)
-        Competing drafts:
+        Read-only files:
+        - Your draft: \(ownDraft)
         \(others)
 
         Read your own draft again alongside the competing drafts, and return the edits you \
@@ -353,7 +298,7 @@ public enum RoundPrompts {
         plan can pick it up and work it. Include unit and end-to-end test obligations in \
         every bead's acceptance criteria. Never lose a feature the plan describes.
 
-        \(changeSetRules(observedAt: c.observedAt))
+        \(Triage.changeSetRulesText(observedAt: c.observedAt))
 
         Return only JSON matching the provided schema: `{"changeSet": {...}, "summary": "..."}`.
         """
@@ -372,7 +317,7 @@ public enum RoundPrompts {
         followed. Existing-bead ops (`editBead`, `reopen`, `followUp`) may be revised, but \
         their `pre` must stay exactly what it was; it is not yours to change.
 
-        \(changeSetRules(observedAt: c.observedAt))
+        \(Triage.changeSetRulesText(observedAt: c.observedAt))
 
         Return only JSON matching the provided schema: `{"changeSet": {...}, "summary": "..."}`.
         """
@@ -392,7 +337,7 @@ public enum RoundPrompts {
         followed. Existing-bead ops (`editBead`, `reopen`, `followUp`) may be revised, but \
         their `pre` must stay exactly what it was; it is not yours to change.
 
-        \(changeSetRules(observedAt: c.observedAt))
+        \(Triage.changeSetRulesText(observedAt: c.observedAt))
 
         Return only JSON matching the provided schema: `{"changeSet": {...}, "summary": "..."}`.
         """
@@ -408,7 +353,7 @@ public enum RoundPrompts {
         followed. Existing-bead ops (`editBead`, `reopen`, `followUp`) may be revised, but \
         their `pre` must stay exactly what it was; it is not yours to change.
 
-        \(changeSetRules(observedAt: c.observedAt))
+        \(Triage.changeSetRulesText(observedAt: c.observedAt))
 
         Return only JSON matching the provided schema: `{"changeSet": {...}, "summary": "..."}`.
         """

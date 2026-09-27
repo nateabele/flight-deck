@@ -80,6 +80,61 @@ public enum Triage {
         }
     }
 
+    /// The graph's JSON shape, explained once. `RoundPrompts` reuses this verbatim wherever
+    /// a round reads the live graph, so a drafter or reviewer is told the exact same thing
+    /// triage was — never a second, possibly-drifting description of the same JSON.
+    public static func graphShapeText(graphFile: String) -> String {
+        """
+        \(graphFile) is a JSON snapshot shaped:
+        `{"beads": {"<id>": {"id","title","status","assignee"?,"updatedAt"?,"labels"}}, \
+        "edges": [{"dependent": "<id>", "dependency": "<id>"}]}`. An edge's `dependent` \
+        depends on its `dependency` — that is, `dependent` is `from` and `dependency` is \
+        `to`. A bead with no `assignee` key has no assignee; when you copy its `pre` \
+        precondition, use `"assignee": null` for it — never an empty string, and never
+        omit the key.
+        """
+    }
+
+    /// The change-set rules (spec §4). `RoundPrompts.encode`/`polish`/`freshEyes`/`dedup`
+    /// reuse this verbatim — they all produce the same change-set shape triage does at Bead
+    /// fidelity, so a second wording of the same rules is a second place for them to drift.
+    public static func changeSetRulesText(observedAt: Date) -> String {
+        """
+        Change-set rules, whenever you return a change set:
+        - Set `changeSet.graphObservedAt` to exactly "\(IntakeJSON.string(from: observedAt))"
+          — the moment FD read the graph, not your own clock.
+        - Reference a bead you are creating in this same change set as `new:<tempId>` (never
+          a bare tempId), everywhere another op needs to point at it.
+        - Edge direction is `from` depends on `to`: `{"from": A, "to": B}` means A cannot
+          proceed until B is done.
+        - For every existing bead an op touches, copy its `pre` precondition (status and
+          assignee) exactly as read from the graph — FD uses it to detect drift before
+          release.
+        - Rate every edit to a bead that is `in_progress`: `clarifying` if it only affects
+          understanding, `scopeChange` if it changes what is being delivered, or
+          `invalidating` if it makes the bead's current work moot — and give a reason for
+          the rating.
+        - For new work on a bead that is already closed, use `op=followUp` — it creates a
+          new bead with a `related` edge to the closed one; never emit `createBead` plus a
+          separate `addEdge` instead. Use `op=reopen` only when the closed work was itself
+          wrong, and say why in its reason.
+        - Before creating a bead, check for duplicates against both open and closed beads,
+          not just open ones.
+
+        Each op must fill in exactly the fields its kind needs, and set every other field
+        to null:
+        - `createBead`: `tempId`, `title`, `description` are required; `type`, `priority`,
+          `acceptance`, and `labels` are optional (null falls back to `task` priority 2
+          with no acceptance or labels).
+        - `addEdge`: `from`, `to`, and `kind` — `kind` is required, one of `blocks`,
+          `related`, or `parent-child`.
+        - `editBead`: `id`, `set` (a non-null object of the fields you are changing), and
+          `pre`; also `delivery` when the bead you are editing is `in_progress`.
+        - `reopen`: `id`, `reason`, and `pre`.
+        - `followUp`: `tempId`, `of`, `title`, `description`, and `pre`.
+        """
+    }
+
     /// The opening triage turn: intent plus the read-only files to consult, the fidelity
     /// presets to choose among, and the change-set rules to follow if it encodes now.
     /// `observedAt` is FD's own clock, not the agent's — it owns `graphObservedAt` because
@@ -113,13 +168,7 @@ public enum Triage {
         Read-only files:
         \(files)
 
-        \(graphFile) is a JSON snapshot shaped:
-        `{"beads": {"<id>": {"id","title","status","assignee"?,"updatedAt"?,"labels"}}, \
-        "edges": [{"dependent": "<id>", "dependency": "<id>"}]}`. An edge's `dependent` \
-        depends on its `dependency` — that is, `dependent` is `from` and `dependency` is \
-        `to`. A bead with no `assignee` key has no assignee; when you copy its `pre` \
-        precondition, use `"assignee": null` for it — never an empty string, and never
-        omit the key.
+        \(graphShapeText(graphFile: graphFile))
 
         Rules:
         - You are read-only. Never run a `br` command that writes (create, update, dep, or
@@ -140,38 +189,7 @@ public enum Triage {
         If you recommend Bead fidelity, also return the full change set now — Bead has no
         later encode step, so this is the only chance to produce it.
 
-        Change-set rules, whenever you return a change set:
-        - Set `changeSet.graphObservedAt` to exactly "\(IntakeJSON.string(from: observedAt))"
-          — the moment FD read the graph, not your own clock.
-        - Reference a bead you are creating in this same change set as `new:<tempId>` (never
-          a bare tempId), everywhere another op needs to point at it.
-        - Edge direction is `from` depends on `to`: `{"from": A, "to": B}` means A cannot
-          proceed until B is done.
-        - For every existing bead an op touches, copy its `pre` precondition (status and
-          assignee) exactly as read from the graph — FD uses it to detect drift before
-          release.
-        - Rate every edit to a bead that is `in_progress`: `clarifying` if it only affects
-          understanding, `scopeChange` if it changes what is being delivered, or
-          `invalidating` if it makes the bead's current work moot — and give a reason for
-          the rating.
-        - For new work on a bead that is already closed, use `op=followUp` — it creates a
-          new bead with a `related` edge to the closed one; never emit `createBead` plus a
-          separate `addEdge` instead. Use `op=reopen` only when the closed work was itself
-          wrong, and say why in its reason.
-        - Before creating a bead, check for duplicates against both open and closed beads,
-          not just open ones.
-
-        Each op must fill in exactly the fields its kind needs, and set every other field
-        to null:
-        - `createBead`: `tempId`, `title`, `description` are required; `type`, `priority`,
-          `acceptance`, and `labels` are optional (null falls back to `task` priority 2
-          with no acceptance or labels).
-        - `addEdge`: `from`, `to`, and `kind` — `kind` is required, one of `blocks`,
-          `related`, or `parent-child`.
-        - `editBead`: `id`, `set` (a non-null object of the fields you are changing), and
-          `pre`; also `delivery` when the bead you are editing is `in_progress`.
-        - `reopen`: `id`, `reason`, and `pre`.
-        - `followUp`: `tempId`, `of`, `title`, `description`, and `pre`.
+        \(changeSetRulesText(observedAt: observedAt))
 
         Return only JSON matching the provided schema. Do not write prose.
         """
