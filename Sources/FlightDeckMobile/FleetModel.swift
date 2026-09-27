@@ -764,13 +764,16 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
                     // never evicted, so a reader who has opened ten sessions holds ten of
                     // these, and each decides for itself via `isOnScreen` whether a resumed
                     // link is its business. `.connected` is the right signal to fan out here
-                    // because it fires once per successful dial and covers snapshot, replay
-                    // and empty-replay alike — unlike the open session's own triggers
-                    // (`.task(id:)`, its two `.onChange`s, the busy poll), none of which fire
-                    // on a reconnect that changes nothing the screen was already watching.
-                    // `FleetConnector.accept()` sets `winner` before reporting `.connected`
-                    // (FleetConnector.swift:521,530), so `linkResumed()`'s own calls back out
-                    // through `fleet` already ride the new link rather than a dead one.
+                    // because it fires once per successful dial that actually has something to
+                    // report — a snapshot or the first event of a replay — unlike the open
+                    // session's own triggers (`.task(id:)`, its two `.onChange`s, the busy
+                    // poll), none of which fire on a reconnect that changes nothing the screen
+                    // was already watching. A fully-up-to-date resume never fires `.connected`
+                    // at all (see the deferral comment below), but there is nothing there for
+                    // `linkResumed()` to care about either — nothing changed. `accept(_:from:
+                    // client:)` sets `winner` before calling `report(.connected(...))`, so the
+                    // calls this makes back out through `fleet` already ride the new link
+                    // rather than a dead one.
                     self?.timelineModels.values.forEach { $0.linkResumed() }
                     // Once per successful dial, not once per fleet event — see
                     // `refreshNewSessionOptions`, `refreshConversations` and
@@ -782,13 +785,23 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
                     // ordering comment two blocks above), so on a genuine first connect —
                     // where `fleet.projects` starts empty — calling `refreshNewSessionOptions`
                     // inline here would iterate zero projects and never ask, because nothing
-                    // else re-triggers it before the next reconnect. `accept()` runs on this
-                    // same main queue and applies that frame synchronously later in the same
-                    // call, so hopping to the next turn is enough to see it — no polling, no
-                    // second hook. The empty-replay case this races against (see
-                    // `FleetConnector.apply`'s doc comment) never applies a frame at all, but
-                    // it only happens on a reconnect, where `fleet` already holds whatever the
-                    // prior connection last saw, so there is nothing to wait for there.
+                    // else re-triggers it before the next reconnect. `report(.connected(...))`
+                    // is only ever called from inside `accept(frame:)`, which then applies that
+                    // same frame synchronously later in the same call — before `accept()`
+                    // returns, so before this closure's own call frame unwinds — so hopping to
+                    // the next turn is enough to see it, no polling, no second hook. This is not
+                    // racing an empty-replay case: an up-to-date resume answers with zero
+                    // frames (see `apply`'s doc comment), so `client.onFrame` never fires,
+                    // `accept()` never runs, and `.connected` itself does not get reported
+                    // until a frame — snapshot or a genuine event — eventually does. There is
+                    // nothing here for the deferral to race against.
+                    //
+                    // This ordering guarantee holds only because the connector's callbacks all
+                    // land on `.main` (see the identical caveat on the `onFleet` closure above).
+                    // If `FleetConnector` is ever given its own queue, `accept()`'s synchronous
+                    // report-then-apply would still happen together, but this `DispatchQueue
+                    // .main.async` would no longer be guaranteed to run after it — it would need
+                    // to become a hop onto the connector's queue instead.
                     DispatchQueue.main.async { [weak self] in
                         self?.refreshNewSessionOptions()
                         self?.refreshConversations()
