@@ -303,6 +303,7 @@ final class CodexAdapterTests: XCTestCase {
         let (baseAdapter, t) = makeAdapter()
         var adapter = baseAdapter
         adapter.controlSocket = URL(fileURLWithPath: "/s/Flight Deck/control.sock")
+        adapter.controlAccessSupported = true
         let session = Session(title: "my tab", workingDirectory: "/w/a")
         let binding = try await adapter.prepare(for: session, options: .codex(CodexThreadOptions()))
 
@@ -322,6 +323,7 @@ final class CodexAdapterTests: XCTestCase {
         let (baseAdapter, t) = makeAdapter()
         var adapter = baseAdapter
         adapter.controlSocket = URL(fileURLWithPath: "/s/Flight Deck/control.sock")
+        adapter.controlAccessSupported = true
         let session = Session(title: "my tab", workingDirectory: "/w/a")
         let binding = try await adapter.prepare(for: session, options: .codex(CodexThreadOptions()))
 
@@ -338,6 +340,7 @@ final class CodexAdapterTests: XCTestCase {
     func testColdCreateCommandsFreshLaunchBranchAlsoAppendsTheControlAccessFlags() throws {
         var adapter = CodexAdapter(rpc: CodexRPC(transport: ScriptedTransport()), rolloutExists: { _ in true })
         adapter.controlSocket = URL(fileURLWithPath: "/s/Flight Deck/control.sock")
+        adapter.controlAccessSupported = true
         let session = Session(
             id: UUID(), title: "t", workingDirectory: "/w/a",
             pinnedConversationID: UUID(), agent: .codex, transcriptPath: nil
@@ -367,6 +370,71 @@ final class CodexAdapterTests: XCTestCase {
                        "codex resume \(t.threadID)\n")
         XCTAssertEqual(adapter.resumeCommand(binding, session, .codex(CodexThreadOptions())),
                        "codex resume \(t.threadID)\n")
+
+        // The fresh-launch branch of `coldCreateCommand` (no rollout on disk) builds its own
+        // line rather than delegating to `resumeCommand`, so it can drift on its own: pin it.
+        let restored = Session(
+            id: UUID(), title: "t", workingDirectory: "/w/a",
+            pinnedConversationID: UUID(), agent: .codex, transcriptPath: nil
+        )
+        XCTAssertEqual(
+            adapter.coldCreateCommand(adapter.binding(for: restored), restored, .codex(CodexThreadOptions())),
+            "codex\n"
+        )
+    }
+
+    // MARK: - controlAccessSupported gates the flags on the probed codex version
+
+    /// The grant is verified only on codex-cli 0.155.1 and 0.157.1, and `network_proxy` is
+    /// experimental: an older codex could reject the flags or honour them differently. So a
+    /// socket alone must not add them — `SessionStore` sets `controlAccessSupported` from the
+    /// version probe, and without it (below the floor, or never probed) the line is unchanged.
+    func testASocketWithoutControlAccessSupportLeavesEveryLaunchLineUnchanged() async throws {
+        let (baseAdapter, t) = makeAdapter()
+        var adapter = baseAdapter
+        XCTAssertFalse(adapter.controlAccessSupported,
+                       "false is the required default — an unprobed codex gets no flags")
+        adapter.controlSocket = URL(fileURLWithPath: "/s/Flight Deck/control.sock")
+        let session = Session(title: "my tab", workingDirectory: "/w/a")
+        let binding = try await adapter.prepare(for: session, options: .codex(CodexThreadOptions()))
+
+        XCTAssertEqual(adapter.launchCommand(binding, session, .codex(CodexThreadOptions())),
+                       "codex resume \(t.threadID)\n")
+        XCTAssertEqual(adapter.resumeCommand(binding, session, .codex(CodexThreadOptions())),
+                       "codex resume \(t.threadID)\n")
+        let restored = Session(
+            id: UUID(), title: "t", workingDirectory: "/w/a",
+            pinnedConversationID: UUID(), agent: .codex, transcriptPath: nil
+        )
+        XCTAssertEqual(
+            adapter.coldCreateCommand(adapter.binding(for: restored), restored, .codex(CodexThreadOptions())),
+            "codex\n"
+        )
+    }
+
+    /// The socket arrives from `FlightDeckApp` via `SessionStore.controlSocket` and the
+    /// support flag from the version probe in `startCodex` — two independent writers with no
+    /// ordering between them. The flags must depend on both values, not on which came last.
+    func testTheFlagsNeedBothTheSocketAndSupportInEitherOrder() async throws {
+        let socket = URL(fileURLWithPath: "/s/Flight Deck/control.sock")
+        let expectedFlags = CodexControlAccess.launchFlags(socket: socket, options: CodexThreadOptions())
+            .joined(separator: " ")
+
+        for socketFirst in [true, false] {
+            let (baseAdapter, t) = makeAdapter()
+            var adapter = baseAdapter
+            let session = Session(title: "my tab", workingDirectory: "/w/a")
+            let binding = try await adapter.prepare(for: session, options: .codex(CodexThreadOptions()))
+
+            if socketFirst { adapter.controlSocket = socket } else { adapter.controlAccessSupported = true }
+            XCTAssertEqual(adapter.launchCommand(binding, session, .codex(CodexThreadOptions())),
+                           "codex resume \(t.threadID)\n",
+                           "one of the two alone (socketFirst: \(socketFirst)) must add nothing")
+            if socketFirst { adapter.controlAccessSupported = true } else { adapter.controlSocket = socket }
+            XCTAssertEqual(adapter.launchCommand(binding, session, .codex(CodexThreadOptions())),
+                           "codex resume \(t.threadID) \(expectedFlags)\n",
+                           "both set (socketFirst: \(socketFirst)) must add the flags")
+        }
     }
 
     func testRenameSendsThreadNameSet() async throws {

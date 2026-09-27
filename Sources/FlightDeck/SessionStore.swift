@@ -2409,6 +2409,10 @@ final class SessionStore: ObservableObject {
             // observe the stack with the probe done but the mode unset.
             let version = try await CodexVersionProbe.checkOffMainActor()
             stack.adapter.historyMode = CodexVersionProbe.supportsHistoryMode(version) ? "legacy" : nil
+            // Same timing and reason as `historyMode`: set before any launch line can be typed.
+            // `controlSocket` reaches the adapter separately (its `didSet` and the stack
+            // builder); the flags need both, and neither write depends on the other's order.
+            stack.adapter.controlAccessSupported = CodexVersionProbe.supportsControlAccess(version)
             try stack.transport.start()
             try await CodexProcessTransport.verifyHandshake(stack.rpc)
         }
