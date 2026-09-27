@@ -22,7 +22,9 @@ struct IntakeStatePill: View {
 
     /// Pure so every case can be pinned by `IntakeStatePillTests`. Takes the whole `Intake`
     /// rather than just `IntakeState` (the brief's original signature) because `released`
-    /// needs the bead count off `Intake.release`, which `IntakeState` alone cannot carry.
+    /// needs the step count off `Intake.release`, which `IntakeState` alone cannot carry.
+    /// Steps, not beads: `appliedSteps` counts every recheck and edge too, so a one-bead
+    /// release read "released · 5 beads".
     static func label(for intake: Intake) -> String {
         switch intake.state {
         case .triaging: return "triaging"
@@ -31,7 +33,9 @@ struct IntakeStatePill: View {
         case .parked: return "parked"
         case .review: return "review"
         case .releasing: return "releasing"
-        case .released: return "released · \(intake.release?.appliedSteps ?? 0) beads"
+        case .released:
+            let n = intake.release?.appliedSteps ?? 0
+            return "released · \(n) step\(n == 1 ? "" : "s")"
         case .partiallyReleased: return "partial"
         case .failed: return "failed"
         case .interrupted: return "interrupted"

@@ -28,17 +28,18 @@ final class IntakeStatePillTests: XCTestCase {
         XCTAssertEqual(IntakeStatePill.label(for: intake(.discarded)), "discarded")
     }
 
-    /// `released` is the one label that needs more than the state itself — the bead count
-    /// lives on `Intake.release`, not on `IntakeState`.
-    func testReleasedLabelInterpolatesAppliedSteps() {
-        XCTAssertEqual(IntakeStatePill.label(for: intake(.released, appliedSteps: 7)), "released · 7 beads")
-        XCTAssertEqual(IntakeStatePill.label(for: intake(.released, appliedSteps: 1)), "released · 1 beads")
+    /// `released` is the one label that needs more than the state itself — the count lives on
+    /// `Intake.release`. It counts STEPS, and says so: `appliedSteps` includes every recheck
+    /// and edge, so "7 beads" for a release that created one bead was simply false.
+    func testReleasedLabelCountsAppliedSteps() {
+        XCTAssertEqual(IntakeStatePill.label(for: intake(.released, appliedSteps: 7)), "released · 7 steps")
+        XCTAssertEqual(IntakeStatePill.label(for: intake(.released, appliedSteps: 1)), "released · 1 step")
     }
 
     /// A `.released` intake with no release record (should never happen, but the pure
     /// function must not crash on it) falls back to zero.
     func testReleasedLabelWithoutRecordFallsBackToZero() {
-        XCTAssertEqual(IntakeStatePill.label(for: Intake(projectPath: "/tmp/p", intent: "x").with(state: .released)), "released · 0 beads")
+        XCTAssertEqual(IntakeStatePill.label(for: Intake(projectPath: "/tmp/p", intent: "x").with(state: .released)), "released · 0 steps")
     }
 
     /// Matches `SessionStatusIcon`'s colour language: orange means "needs your attention".
