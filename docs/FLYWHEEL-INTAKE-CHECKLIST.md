@@ -89,10 +89,20 @@ anything."
 
 ### 3. Answer the triage questions
 
-If triage came back with clarifying questions, answer them in the composer it presents.
+If triage came back with clarifying questions, answer them in the numbered Questions form.
+Before sending, type part of an answer, pause a second, quit Flight Deck and relaunch it.
 
-**Expect:** the intake re-triages with your answers folded in as a follow-up turn in the same
-harness session, and lands on either more questions or a recommendation.
+**Expect:**
+
+- The half-typed answer is still there after the relaunch (`<intake dir>/answer-drafts.json`).
+- **Send Answers** (trailing edge of the bottom bar) stays disabled until every answer is
+  non-blank; ⌘↩ sends, and plain Return inside an answer does **not** send.
+- **Discard** sits alone on the leading edge and asks "Discard this intake?" before it acts.
+- Once sent, the questions leave the form and reappear under **Clarifications** as a
+  collapsed "Round 1 · N questions" section, which expands to each question over its answer —
+  and stays reviewable from the recommendation, shaping and review states.
+- The intake re-triages with your answers folded in as a follow-up turn in the same harness
+  session, and lands on either more questions or a recommendation.
 
 ### 4. Accept Bead
 
@@ -117,7 +127,7 @@ sheet, without reopening it.
 
 **Expect:** nothing is written. The sheet stays open with the refusal in orange at the top
 ("Drift changed since review; confirm or drop the drifted ops again."), and the intake's detail
-pane shows the same line above "Open release review". The sheet reloads its review as it
+pane shows the same line above **Open Release Review** in its bottom bar. The sheet reloads its review as it
 refuses, so it now shows the drift too:
 
 **Expect:** that op is flagged as drifted, with the change explained (the text reads
@@ -259,7 +269,8 @@ holds here too.
   clicking a session returns to the terminal; ⌘W closes the project view, not the hidden
   session; ⌘R/Return don't rename it
 - [ ] Step 2 — capture starts triage
-- [ ] Step 3 — answering questions re-triages
+- [ ] Step 3 — answering questions re-triages; a half-typed draft survives a relaunch; ⌘↩ sends
+  and Return doesn't; answered rounds collapse under Clarifications
 - [ ] Step 4 — accepting Bead produces a change set, moves to review
 - [ ] Step 5 — review shows the change set with no drift
 - [ ] Step 6 — a concurrent `br update` is caught as drift, with the live holder and a rating
