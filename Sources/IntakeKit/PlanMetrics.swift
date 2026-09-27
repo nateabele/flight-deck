@@ -23,8 +23,8 @@ public enum PlanMetrics {
     /// Line-level diff (Myers' LCS) — counts, plus the markdown headings (`#`...) whose section
     /// bodies changed, in document order.
     public static func delta(from old: String, to new: String) -> PlanDelta {
-        let oldLines = old.split(separator: "\n", omittingEmptySubsequences: false)
-        let newLines = new.split(separator: "\n", omittingEmptySubsequences: false)
+        let oldLines = planLines(old)
+        let newLines = planLines(new)
         let ops = lineDiff(oldLines, newLines)
 
         var added = 0, removed = 0
@@ -46,8 +46,8 @@ public enum PlanMetrics {
     /// context, no `---`/`+++` file headers (there's no filename worth putting there — both
     /// sides are the same plan, at two rounds).
     public static func unifiedDiff(from old: String, to new: String) -> String {
-        let oldLines = old.split(separator: "\n", omittingEmptySubsequences: false)
-        let newLines = new.split(separator: "\n", omittingEmptySubsequences: false)
+        let oldLines = planLines(old)
+        let newLines = planLines(new)
         let ops = lineDiff(oldLines, newLines)
         let codes = opcodes(from: ops)
         let groups = groupedOpcodes(codes, context: 3)
@@ -83,10 +83,8 @@ public enum PlanMetrics {
     /// reopens, follow-ups, dependency edges) by the existing bead id (or edge endpoints) plus
     /// op kind. `ChangeOp` is already `Equatable`, so "modified" is just "matched but unequal".
     public static func opsChanged(from old: ChangeSet, to new: ChangeSet) -> Int {
-        var oldByKey: [OpKey: ChangeOp] = [:]
-        for op in old.ops { oldByKey[opKey(op)] = op }
-        var newByKey: [OpKey: ChangeOp] = [:]
-        for op in new.ops { newByKey[opKey(op)] = op }
+        let oldByKey = keyedOps(old.ops)
+        let newByKey = keyedOps(new.ops)
 
         var changed = 0
         for (key, oldOp) in oldByKey {
@@ -105,11 +103,11 @@ public enum PlanMetrics {
 
 // MARK: - opsChanged matching
 
-/// Identity a `ChangeOp` is matched by across two change sets — see `opsChanged`'s doc comment.
-/// Dependency edges (`addEdge`) match by `(from, to)` only, deliberately dropping `kind`: an
-/// edge whose `kind` flips (e.g. `related` -> `blocks`) between rounds is the same edge,
-/// modified, not a different edge entirely.
-private enum OpKey: Hashable {
+/// The identity a `ChangeOp` is matched by across two change sets — see `opsChanged`'s doc
+/// comment. Dependency edges (`addEdge`) match by `(from, to)` only, deliberately dropping
+/// `kind`: an edge whose `kind` flips (e.g. `related` -> `blocks`) between rounds is the same
+/// edge, modified, not a different edge entirely.
+private enum BaseOpKey: Hashable {
     case create(String)
     case edge(String, String)
     case edit(String)
@@ -117,7 +115,19 @@ private enum OpKey: Hashable {
     case followUp(String)
 }
 
-private func opKey(_ op: ChangeOp) -> OpKey {
+/// `BaseOpKey` plus which occurrence (0-based) of it this op is within its own `ChangeSet`.
+/// The validator allows more than one op sharing a `BaseOpKey` — two `followUp`s targeting the
+/// same bead, two `editBead`s on the same id — so keying on `BaseOpKey` alone collapses every
+/// such duplicate into one dictionary slot and only the last write survives; a real change on an
+/// earlier occurrence then reads back as unmodified. Pairing the Nth occurrence in `old` with
+/// the Nth occurrence in `new` (both counted by each set's own op order) keeps duplicates
+/// distinguishable without needing anything beyond position to tell them apart.
+private struct OpKey: Hashable {
+    var base: BaseOpKey
+    var occurrence: Int
+}
+
+private func baseOpKey(_ op: ChangeOp) -> BaseOpKey {
     switch op {
     case .createBead(let bead): .create(bead.tempId)
     case .addEdge(let from, let to, _): .edge(from.wireValue, to.wireValue)
@@ -127,7 +137,53 @@ private func opKey(_ op: ChangeOp) -> OpKey {
     }
 }
 
+private func keyedOps(_ ops: [ChangeOp]) -> [OpKey: ChangeOp] {
+    var occurrences: [BaseOpKey: Int] = [:]
+    var result: [OpKey: ChangeOp] = [:]
+    for op in ops {
+        let base = baseOpKey(op)
+        let occurrence = occurrences[base, default: 0]
+        occurrences[base] = occurrence + 1
+        result[OpKey(base: base, occurrence: occurrence)] = op
+    }
+    return result
+}
+
 // MARK: - Line-level diff
+
+/// Splits `text` into lines the way `split(separator: "\n", omittingEmptySubsequences: false)`
+/// would for LF-only text, but correct for CRLF too. Splitting on `"\n"` as a `Character` never
+/// fires inside a CRLF pair: `"\r\n"` is a single extended grapheme cluster, not two characters,
+/// so a `Character`-based split treats a whole CRLF plan as one giant line. This splits on the
+/// LF *unicode scalar* instead (bypassing grapheme-cluster segmentation entirely) and strips a
+/// trailing CR scalar off each resulting line — all still via `String.Index`, so the result is
+/// ordinary `Substring`s, safe to hash/compare/interpolate like any other line here.
+func planLines(_ text: String) -> [Substring] {
+    let scalars = text.unicodeScalars
+    var lines: [Substring] = []
+    var lineStart = scalars.startIndex
+    var i = scalars.startIndex
+    while i < scalars.endIndex {
+        if scalars[i] == "\n" {
+            lines.append(lineDroppingTrailingCR(text, lineStart, i))
+            i = scalars.index(after: i)
+            lineStart = i
+        } else {
+            i = scalars.index(after: i)
+        }
+    }
+    lines.append(lineDroppingTrailingCR(text, lineStart, scalars.endIndex))
+    return lines
+}
+
+private func lineDroppingTrailingCR(_ text: String, _ start: String.Index, _ end: String.Index) -> Substring {
+    let scalars = text.unicodeScalars
+    if end > start {
+        let beforeEnd = scalars.index(before: end)
+        if scalars[beforeEnd] == "\r" { return text[start..<beforeEnd] }
+    }
+    return text[start..<end]
+}
 
 /// One step of an edit script that aligns `old` and `new` line arrays: which lines matched
 /// unchanged, which were only in `old`, and which were only in `new`. Indices are into the
@@ -285,9 +341,12 @@ private func headingPerLine(_ lines: [Substring]) -> [String] {
 /// instead of standing alone as "old only". Only a heading with NO surviving line at all (the
 /// whole section, heading and body, genuinely removed) lands in the old-only bucket.
 ///
-/// Simplification: ops are walked in edit-script order, which tracks new-document order closely
-/// but not by construction — good enough for the plans this measures (no wholesale section
-/// reordering), not a guarantee for an adversarial reorder.
+/// The result is sorted by each heading's position in its own document, not by ops-traversal
+/// order: a `delete` mapped through `oldToNewHeading` can be reached before an `insert` that's
+/// structurally earlier in the new document (an edit script interleaves old/new positions, it
+/// doesn't walk either document's order on its own), so collecting into `Set`s first and sorting
+/// by `documentOrder` afterward is what actually guarantees "new document's order" rather than
+/// just usually matching it — exercised by `testSectionsChangedOrderSurvivesAMovedSection`.
 private func sectionsChanged(_ ops: [LineEditOp], oldHeadings: [String], newHeadings: [String]) -> [String] {
     var oldToNewHeading: [String: String] = [:]
     for op in ops {
@@ -305,28 +364,41 @@ private func sectionsChanged(_ ops: [LineEditOp], oldHeadings: [String], newHead
     // particular deleted line happened to map through.
     let newHeadingSet = Set(newHeadings)
 
-    var changedNew: [String] = []
-    var seenNew = Set<String>()
-    var changedOldOnly: [String] = []
-    var seenOldOnly = Set<String>()
+    var changedNew = Set<String>()
+    var changedOldOnly = Set<String>()
 
     for op in ops {
         switch op {
         case .insert(let ni):
-            let heading = newHeadings[ni]
-            if seenNew.insert(heading).inserted { changedNew.append(heading) }
+            changedNew.insert(newHeadings[ni])
         case .delete(let oi):
             let heading = oldHeadings[oi]
             if let mapped = oldToNewHeading[heading] {
-                if seenNew.insert(mapped).inserted { changedNew.append(mapped) }
-            } else if !newHeadingSet.contains(heading), seenOldOnly.insert(heading).inserted {
-                changedOldOnly.append(heading)
+                changedNew.insert(mapped)
+            } else if !newHeadingSet.contains(heading) {
+                changedOldOnly.insert(heading)
             }
         case .equal:
             continue
         }
     }
-    return changedNew + changedOldOnly
+
+    let newOrder = documentOrder(newHeadings)
+    let oldOrder = documentOrder(oldHeadings)
+    let sortedNew = changedNew.sorted { newOrder[$0]! < newOrder[$1]! }
+    let sortedOldOnly = changedOldOnly.sorted { oldOrder[$0]! < oldOrder[$1]! }
+    return sortedNew + sortedOldOnly
+}
+
+/// Maps each distinct heading (as produced by `headingPerLine`) to the line index of its FIRST
+/// occurrence — i.e. its rank in document order — so `sectionsChanged` can sort by "where this
+/// heading actually sits" instead of "when its change happened to surface in the edit script".
+private func documentOrder(_ headingPerLine: [String]) -> [String: Int] {
+    var order: [String: Int] = [:]
+    for (i, heading) in headingPerLine.enumerated() where order[heading] == nil {
+        order[heading] = i
+    }
+    return order
 }
 
 // MARK: - unifiedDiff hunks
