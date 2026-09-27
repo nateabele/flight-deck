@@ -142,6 +142,24 @@ final class ShapingModelTests: XCTestCase {
         XCTAssertEqual(card.tally, "agree 33 / some 6 / no 2")
     }
 
+    /// The record's `note` (reviewer summary, integrator notes, a fallback remark) and the
+    /// sections a round touched were recorded and never shown — the card is where the human
+    /// decides whether another round is worth it.
+    func testRoundCardShowsTheNoteAndTheSectionsChanged() throws {
+        var tape = pausedAtR2()
+        tape.checkpoints[2].record.note = "Tightened the rollout.\n\nApplied 39 of 41."
+        tape.checkpoints[2].record.sectionsChanged = ["## Scope", "## Rollout", "## Risks", "## Testing"]
+        tape.checkpoints[3].record.sectionsChanged = ["## Scope"]
+        let cards = ShapingModel(intake: try featureIntake(), tape: tape).roundCards
+        let r1 = try XCTUnwrap(cards.first { $0.checkpointID == 3 })
+        XCTAssertEqual(r1.note, "Tightened the rollout.\n\nApplied 39 of 41.")
+        XCTAssertEqual(r1.sections, "Scope, Rollout, Risks +1")
+        let r2 = try XCTUnwrap(cards.first { $0.checkpointID == 4 })
+        XCTAssertNil(r2.note)
+        XCTAssertEqual(r2.sections, "Scope")
+        XCTAssertNil(try XCTUnwrap(cards.first { $0.checkpointID == 1 }).sections)
+    }
+
     func testRoundCardSlotBadgesCarryTheDiagnosis() throws {
         var tape = pausedAtR2()
         tape.checkpoints[0].record.slots = [
@@ -209,9 +227,24 @@ final class ShapingModelTests: XCTestCase {
 
     func testPlanSourcePrefersPlanThenFallsBackToTheFirstDraft() {
         let load = files(["1/drafts/0.md": "draft zero", "2/plan.md": "synthesised", "2/drafts/0.md": "stale"])
-        XCTAssertEqual(ShapingModel.planText(checkpoint: 2, loadFile: load), "synthesised")
-        XCTAssertEqual(ShapingModel.planText(checkpoint: 1, loadFile: load), "draft zero")
-        XCTAssertNil(ShapingModel.planText(checkpoint: 3, loadFile: load))
+        let tape = pausedAtR2()
+        XCTAssertEqual(ShapingModel.planText(checkpoint: 2, in: tape, loadFile: load), "synthesised")
+        XCTAssertEqual(ShapingModel.planText(checkpoint: 1, in: tape, loadFile: load), "draft zero")
+        XCTAssertNil(ShapingModel.planText(checkpoint: 3, in: tape, loadFile: load))
+    }
+
+    /// A draft round writes only the drafters that succeeded, so with drafter 0 failed there is
+    /// no `drafts/0.md` — the lowest-numbered draft that exists is the plan, the same one
+    /// synthesis and Sketch's refine build on.
+    func testPlanSourceFallsBackToTheLowestNumberedDraft() {
+        var tape = pausedAtR2()
+        tape.checkpoints[0].record.slots = [
+            SlotOutcome(role: "drafter", persona: .arbiter, used: codex, requested: codex, status: .failed),
+            SlotOutcome(role: "drafter", persona: .realist, used: codex, requested: codex, status: .ok),
+            SlotOutcome(role: "drafter", persona: .coverage, used: claude, requested: claude, status: .ok),
+        ]
+        let load = files(["1/drafts/1.md": "draft one", "1/drafts/2.md": "draft two"])
+        XCTAssertEqual(ShapingModel.planText(checkpoint: 1, in: tape, loadFile: load), "draft one")
     }
 
     /// The diff base is the nearest EARLIER checkpoint that has a plan — an encode checkpoint
