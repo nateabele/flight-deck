@@ -1808,22 +1808,37 @@ feasibility unknown.
   bead an op touches (`DriftClassifier`) right before writing it, but there is still a window
   of real milliseconds between that recheck and the write where another actor could get in —
   FD has no way to make the write itself conditional on the state it just observed. Today's
-  mitigation is a second recheck error surfaced as a post-release warning rather than silently
-  applying over a change. An upstream `br update --if-version <n>` (or similar optimistic-lock
+  mitigation is the recheck itself: a mismatch stops the release right there, before that
+  bead's write, and leaves the intake `.partiallyReleased` with the mismatch as its
+  `ReleaseRecord.error` — it never applies over the change. An upstream `br update --if-version <n>` (or similar optimistic-lock
   primitive) would close the window instead of narrowing it; filed as a `br` feature request,
   not something FD can fix on its own side.
 - **No Beads tab, no graph review UI yet.** The release review sheet (`ReleaseReviewView`)
-  shows drift and lets you confirm/drop/re-triage, but there is no dedicated place to browse
+  shows drift and lets you confirm or drop each drifted op, but there is no dedicated place to browse
   the bead graph itself, see an intake's change set laid over it, or navigate from a bead to
   the intake that touched it. Spec §8.3–8.4 sketches this and §14 phases it as step 4, after
   phases 1–3 this plan covers — expected, not a gap in this work.
-- **A partial release cannot be re-released.** `.partiallyReleased` records exactly which ops
-  applied before a `br` command failed, and the review reopens on the remainder — but nothing
-  in `IntakeService` yet drives that remainder back through `release(_:)` a second time. Today
-  the human's only path forward from a partial release is manual: check `br list`/`br graph`
-  for what actually landed, then decide by hand. Re-release-the-remainder is straightforward
+- **A drifted op cannot be re-triaged.** Confirm (release against the bead as it is now) and
+  Drop are the only answers the review offers to drift. Sending just the drifted ops back to
+  the triage agent against the live graph — so it can re-derive the edit rather than the human
+  accepting or discarding it wholesale — is deferred; today the nearest thing is discarding the
+  intake and capturing the intent again.
+- **A partial release cannot be re-released.** `.partiallyReleased` records how many plan
+  steps applied before a `br` command failed or a recheck refused (`ReleaseRecord.appliedSteps`,
+  `idMap`, `error`), and the intake's detail pane shows that record — but there is no review of
+  the remainder, and nothing in `IntakeService` drives it back through `release(_:)` a second
+  time. Today the human's only path forward from a partial release is manual: check
+  `br list`/`br graph` for what actually landed, finish by hand, then Dismiss the intake (the one
+  action that stops it counting toward the project's "needs you" badge). Re-release-the-remainder is straightforward
   given `ApplyPlanner` already knows how to skip ops (`skipping:`), but no code path calls it
   that way yet.
+- **Claude triage's `br` deny rules match the verb in first position only.** `HarnessCommand`
+  passes `--permission-mode dontAsk` and denies every `br` write verb as `Bash(br <verb> *)`, which
+  beats any allow rule a project's `.claude/settings.json` adds. A command that puts a global flag
+  before the verb (`br --actor x create …`) would not match those patterns; it would still need
+  an allow rule broad enough to cover it (`Bash(br:*)`). Codex triage is unaffected — its sandbox
+  is `read-only` at the OS level. A tighter fix is a `br` wrapper on the triage `PATH` that refuses
+  write verbs wherever they appear.
 - **Retry discards the Q&A that got the intake there.** `IntakeService.retry(_:)` clears
   `exchanges` and re-runs triage from `.initial` on the unchanged intent text — deliberate
   (its own comment: "the earlier Q&A goes with it — the agent will ask again if it still

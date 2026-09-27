@@ -45,8 +45,8 @@ why `List`'s native highlight is gone). Before touching intakes:
   nothing).
 - Click the row **anywhere else** (the name, the blank trailing space). Confirm the project
   becomes selected — the row's text switches from secondary to primary tint and stays that
-  way — and the detail pane switches to the per-project view (`ProjectView`, currently just a
-  header + "Intakes" placeholder until Task 17 lands the real tab).
+  way — and the detail pane switches to the per-project view (`ProjectView`: the intake
+  composer, the Intakes list and the selected intake's detail).
 - With the project selected, check the highlight is visible in **both** light and dark
   appearance (System Settings → Appearance, or the sidebar's own context if themed), and in
   **both** an active and an inactive window (click another app, or another Flight Deck
@@ -59,11 +59,18 @@ why `List`'s native highlight is gone). Before touching intakes:
 - With a project selected (detail pane showing `ProjectView`), click a **session** row in the
   sidebar (in this or another project). Confirm the detail pane switches to that session's
   terminal — the project view is left, not stacked or backgrounded.
+- Select a project again, then press **⌘W**. Confirm the project view closes and the detail
+  pane returns to the session that was selected before — that session is **not** closed, and
+  its tab is still in the sidebar. With the project view up, **⌘R** and **Return** (sidebar
+  focused) do nothing — no rename field opens on the hidden session's row.
+- Select a project, then close that project (its header's context menu). Confirm the detail
+  pane falls back to a terminal and that terminal does not pick up an unread dot while you are
+  looking at it.
 
 **Expect:** chevron collapses without selecting; a row click elsewhere selects + opens the
 project view, with a highlight visible in every appearance/window-focus combination tried;
 drag-to-reorder still works; clicking a session returns to the terminal from the project
-view.
+view; ⌘W closes the project view, never the hidden session, and ⌘R/Return don't rename it.
 
 ### 2. Capture an intent
 
@@ -98,13 +105,22 @@ graph, with no drift flagged yet, and a **Release** button.
 
 ### 6. Force drift, confirm it's caught
 
-In the second terminal, run `br update <bead> --assignee <someone> --status in_progress` on a
-bead the change set actually edits (pick one from the ops the review just showed you). Reopen
-(or refresh) the review.
+With the review from step 5 still open (and showing no drift), run `br update <bead> --assignee
+<someone> --status in_progress` in the second terminal on a bead the change set actually edits
+(pick one from the ops the review just showed you). Then press **Release** on the now-stale
+sheet, without reopening it.
 
-**Expect:** that op is now flagged as drifted, with the change explained (e.g. "claimed by
-`<someone>` since triage — this edit is now an in-progress change"), and **Release is
-disabled** until you either confirm it, drop it, or re-triage it.
+**Expect:** nothing is written. The sheet stays open with the refusal in orange at the top
+("Drift changed since review; confirm or drop the drifted ops again."), and the intake's detail
+pane shows the same line above "Open release review". The sheet reloads its review as it
+refuses, so it now shows the drift too:
+
+**Expect:** that op is flagged as drifted, with the change explained (the text reads
+"`<bead>` was open at triage and is in_progress by `<someone>` now"), and **Release is
+disabled** until you either confirm it or drop it (re-triaging a drifted op is not built — see
+`docs/FOLLOWUPS.md`). Because the bead is in progress *now*, the edit's row also shows
+**Holder: `<someone>`** — the live holder, not whoever held it at triage — with a rating picker
+(defaulting to Scope change) and the delivery release will make.
 
 ### 7. Release
 
@@ -137,8 +153,12 @@ answers*/*review* without resolving it) so at least one intake is in a state
 - **Expand** it. Confirm the same orange icon still shows in the header (drawn directly by
   `ProjectHeaderRow` this time, since there is no per-project status row to fold it into once
   every session row is visible on its own), with tooltip "N intake(s) need you".
-- Resolve the intake (release it, or discard it). Confirm the icon disappears from the header
-  in both collapse states once no intake in that project needs attention.
+- Resolve the intake (release it, or Discard it — every state but *releasing* has a Discard
+  button in the detail pane). Confirm the icon disappears from the header in both collapse
+  states once no intake in that project needs attention, **without** clicking anything else in
+  the sidebar first — the header must update on its own.
+- If you have a *partial* intake (a release that stopped partway), its detail pane has a
+  **Dismiss** button; confirm dismissing it clears the icon too.
 
 **Expect:** the orange "needs you" icon appears in both the collapsed and expanded header
 exactly while an intake needs attention, and clears once none do.
@@ -158,14 +178,17 @@ earlier partial turn, and any exchanges already answered, are intentionally disc
 
 - [ ] Step 1 — chevron collapses without selecting; row click selects + opens the project
   view with a highlight visible in light/dark and active/inactive window; drag reorders;
-  clicking a session returns to the terminal
+  clicking a session returns to the terminal; ⌘W closes the project view, not the hidden
+  session; ⌘R/Return don't rename it
 - [ ] Step 2 — capture starts triage
 - [ ] Step 3 — answering questions re-triages
 - [ ] Step 4 — accepting Bead produces a change set, moves to review
 - [ ] Step 5 — review shows the change set with no drift
-- [ ] Step 6 — a concurrent `br update` is caught as drift; Release disabled until confirmed
+- [ ] Step 6 — a concurrent `br update` is caught as drift, with the live holder and a rating
+  picker; Release disabled until confirmed or dropped; a refused Release keeps the sheet open
+  with its reason
 - [ ] Step 7 — Release writes the beads and edges `br list`/`br graph` show correctly
 - [ ] Step 8 — a scopeChange edit injects the holder's tab and lands in `am inbox`
 - [ ] Step 9 — the orange "needs you" icon shows collapsed AND expanded while an intake
-  needs attention, and clears once resolved
+  needs attention, and clears on its own once resolved (Discard, or Dismiss for a partial)
 - [ ] Step 10 — quitting mid-triage leaves the intake interrupted; Retry starts fresh
