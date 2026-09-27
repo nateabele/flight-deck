@@ -6,37 +6,28 @@ import IntakeKit
 /// so a project whose intake is sitting on an unanswered triage question still shows up as
 /// `.waiting` in the collapsed header, the same as a session with a permission prompt open.
 ///
-/// `store.intakeService` is a lazy var pointed at `FlightDeckApp.stateDirectory()`, which reads
-/// `UserDefaults.standard`. Overriding `FlightDeckStateDir` to a scratch directory for the
-/// duration of each test — the same flag a real debug launch uses to run against a *copy* of
-/// state — is what lets these cases seed a fixture intake on disk without ever touching the
-/// developer's real `~/Library/Application Support/Flight Deck`.
+/// Each case hands its store a scratch `intakesRoot`, so the fixture intakes seeded here are
+/// the only ones the store can see, and the developer's real
+/// `~/Library/Application Support/Flight Deck/intakes` is never read — let alone rewritten by
+/// `IntakeService.init`'s launch recovery.
 @MainActor
 final class IntakeRollupTests: XCTestCase {
     private var scratchDir: URL!
-    private var previousStateDir: String?
 
     override func setUp() {
         super.setUp()
-        previousStateDir = UserDefaults.standard.string(forKey: "FlightDeckStateDir")
         scratchDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("IntakeRollupTests-\(UUID())", isDirectory: true)
-        UserDefaults.standard.set(scratchDir.path, forKey: "FlightDeckStateDir")
     }
 
     override func tearDown() {
-        if let previousStateDir {
-            UserDefaults.standard.set(previousStateDir, forKey: "FlightDeckStateDir")
-        } else {
-            UserDefaults.standard.removeObject(forKey: "FlightDeckStateDir")
-        }
         try? FileManager.default.removeItem(at: scratchDir)
         super.tearDown()
     }
 
     private func makeStore() -> (SessionStore, SessionPersistenceTests.FakePersistence) {
         let persistence = SessionPersistenceTests.FakePersistence()
-        return (SessionStore(provider: nil, persistence: persistence), persistence)
+        return (SessionStore(provider: nil, persistence: persistence, intakesRoot: intakesRoot), persistence)
     }
 
     private var intakesRoot: URL { scratchDir.appendingPathComponent("intakes", isDirectory: true) }

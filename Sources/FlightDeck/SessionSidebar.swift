@@ -486,7 +486,9 @@ struct SessionSidebar: View {
                 store.renameRequest = id
             },
             renameSelected: {
-                guard let selected = store.selectedSessionID,
+                // `renamableSessionID` is nil behind a project view, so Return there falls
+                // through rather than renaming the hidden session's row.
+                guard let selected = store.renamableSessionID,
                       store.renameRequest == nil,
                       // A rename field being open is the case first-responder checks cannot
                       // fully cover; without this the Return that COMMITS a rename would be

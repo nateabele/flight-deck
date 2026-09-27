@@ -145,8 +145,10 @@ struct SessionCommands: Commands {
             // time and never refresh as the selection changes — the item would freeze in
             // whatever state existed when the menu was constructed. Guarding in the action
             // keeps the item live and correct without requiring observation.
+            // `renamableSessionID`, not `selectedSessionID`: behind a project view the
+            // selection is hidden, and ⌘R used to open a rename on a row nobody was looking at.
             Button("Rename Session") {
-                guard let id = store.selectedSessionID else { return }
+                guard let id = store.renamableSessionID else { return }
                 store.renameRequest = id
             }
             .keyboardShortcut("r", modifiers: .command)
@@ -189,6 +191,9 @@ struct SessionCommands: Commands {
             // `SessionWindow.isKey` is the guard, and the fallback is the same one the empty
             // state already used — close the focused window, which is what ⌘W means anywhere
             // but here.
+            //
+            // With a project view up, `closeSelectedSession` closes the view instead of the
+            // session hidden behind it — see that method.
             Button("Close Session") {
                 guard SessionWindow.isKey else {
                     NSApp.keyWindow?.performClose(nil)
