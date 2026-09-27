@@ -51,9 +51,10 @@ public enum FailureDiagnosis {
     }
 
     /// The error messages a harness reported in its own structured output: codex `--json`'s
-    /// `error` / `turn.failed` events, and a claude JSON result flagged `is_error` (whose
-    /// `result` is then the error, not an answer). Everything else in stdout — agent messages,
-    /// a successful result — is the model talking and is skipped.
+    /// `error` / `turn.failed` events, and a claude result flagged `is_error` (whose `result`
+    /// is then the error, not an answer) — the whole of stdout under `--output-format json`,
+    /// the last line under stream-json. Everything else in stdout — agent messages, a
+    /// successful result — is the model talking and is skipped.
     static func errorEvents(in stdout: Data) -> [String] {
         // Keyed on `is_error` itself, not on "stdout is one JSON object": a codex run that
         // printed only its `turn.failed` line is one object too.
@@ -66,6 +67,8 @@ public enum FailureDiagnosis {
             switch obj["type"] as? String {
             case "error": return obj["message"] as? String
             case "turn.failed": return (obj["error"] as? [String: Any])?["message"] as? String
+            case "result" where obj["is_error"] as? Bool == true:
+                return obj["result"] as? String ?? obj["subtype"] as? String ?? "is_error"
             default: return nil
             }
         }
