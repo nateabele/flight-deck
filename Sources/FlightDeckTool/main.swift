@@ -1,6 +1,7 @@
 import Dispatch
 import FleetKit
 import Foundation
+import IntakeKit
 
 // `flightdeck tail | head` must end quietly, not crash the process on the write that finds
 // the reader gone.
@@ -32,6 +33,7 @@ let usageLines = [
     "flightdeck search \"q\" [--limit N]",
     "flightdeck open CONVO --project PATH",
     "flightdeck closed",
+    "flightdeck intake run ID --root DIR   run an intake's planning rounds (started by Flight Deck)",
     "flightdeck options P",
     "flightdeck raw '<ClientFrame JSON>'",
     "",
@@ -57,6 +59,34 @@ do {
 if invocation.command == .help {
     usageLines.forEach { print($0) }
     exit(0)
+}
+
+// The detached round runner Flight Deck launches under fd-abduco (Task 10). It has no fleet
+// to reach and needs no socket, so it is intercepted here, before any of the transport setup
+// below runs — that setup would be dead weight, and worse, a socket connect attempt this
+// process has no reason to make. Environment is inherited as-is: the app builds it before
+// launching this process (Task 10's job, not this one's).
+if case .intakeRun(let id, let root) = invocation.command {
+    let environment = ProcessInfo.processInfo.environment
+    let runner = IntakeRunner(
+        root: URL(fileURLWithPath: root),
+        intakeID: id,
+        executor: RoundExecutor(
+            runner: SystemCommandRunner(),
+            graphReader: GraphReader(runner: SystemCommandRunner(), environment: environment)
+        ),
+        environment: environment
+    )
+    // A semaphore `wait()` here would block the main thread the `Task` needs scheduled onto —
+    // this binary has no main actor of its own, only Foundation's runloop-backed executor, so
+    // blocking that thread deadlocks forever rather than letting the Task ever run. `exit(_:)`
+    // never returns, so nothing after `dispatchMain()` executes and there is no fall-through
+    // into the socket/transport code below.
+    Task {
+        let status = await runner.run()
+        exit(status == .failed ? 1 : 0)
+    }
+    dispatchMain()
 }
 
 // `--socket` → `$FLIGHT_DECK_CONTROL_SOCKET` → `$FLIGHT_DECK_STATE_DIR/control.sock` → the

@@ -227,6 +227,13 @@ final class CLIRunner {
             request(.openConversation(conversationID: conversation, projectPath: path))
         case .raw:
             raw()
+        case .intakeRun:
+            // main.swift intercepts `intake run` right after the usage check, before a
+            // transport or this runner exists at all — the detached process has no fleet to
+            // reach and no reply to wait on. `dispatch()` is only reached once `run()` has
+            // already connected, so this arm is unreachable in practice and exists only to
+            // keep the switch exhaustive.
+            break
         }
     }
 
