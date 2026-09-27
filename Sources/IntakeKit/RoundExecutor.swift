@@ -241,8 +241,8 @@ public struct RoundExecutor: Sendable {
 
     /// Polish, fresh-eyes and dedup: each hands back a whole revised change set, held to the
     /// same validation (and single correction turn) encode is — but against the graph ENCODE
-    /// saw, carried forward in every checkpoint since, never a fresh read. A bead that moves
-    /// after encode is drift, and drift is release's job (it rechecks every `pre`); validating
+    /// saw, carried forward in every checkpoint since (read fresh only when no checkpoint has
+    /// one). A bead that moves after encode is drift, and drift is release's job (it rechecks every `pre`); validating
     /// against a fresh graph here would instead pause polish on a `pre` the polisher was told
     /// to keep exactly as it was. `graphObservedAt` stays that snapshot's time for the same
     /// reason: release measures drift from when the graph was read, not from the last polish.
@@ -253,14 +253,22 @@ public struct RoundExecutor: Sendable {
             throw Pause(diagnosis: Diagnosis(category: .harnessError, detail: "no change set to \(planned.stage.rawValue)",
                                              action: "Run the encode round first."))
         }
-        guard let snapshot = latestFile("graph.json", inputs) else {
-            throw Pause(diagnosis: Diagnosis(category: .harnessError, detail: "the encode checkpoint has no graph.json",
-                                             action: "Re-run the encode round."))
-        }
         let old = try ChangeSet.decode(Data(contentsOf: current))
-        let graphData = try Data(contentsOf: snapshot)
-        let graph = try IntakeJSON.decoder.decode(GraphSnapshot.self, from: graphData)
-        let observedAt = old.graphObservedAt
+        let graph: GraphSnapshot, graphData: Data, observedAt: Date
+        var fallbackNote: String?
+        if let snapshot = latestFile("graph.json", inputs) {
+            graphData = try Data(contentsOf: snapshot)
+            graph = try IntakeJSON.decoder.decode(GraphSnapshot.self, from: graphData)
+            observedAt = old.graphObservedAt
+        } else {
+            // No snapshot to carry (an encode from before snapshots were saved). Never pause
+            // here: a pause writes no checkpoint, so the planner would hand back this same
+            // round and ⏯ would loop on it forever. Read once, and this round's graph.json
+            // becomes the snapshot every later round carries.
+            (graph, _, observedAt) = try await readGraph(inputs)
+            graphData = try IntakeJSON.encoder.encode(graph)
+            fallbackNote = "no encode graph snapshot; read the graph fresh"
+        }
         let work = inputs.store.workDirectory()
         let changeSetFile = work.appendingPathComponent("changeset.json"), graphFile = work.appendingPathComponent("graph.json")
         try old.encoded().write(to: changeSetFile, options: .atomic)
@@ -276,6 +284,7 @@ public struct RoundExecutor: Sendable {
                                          readable: [plan.deletingLastPathComponent(), work],
                                          graph: graph, observedAt: observedAt, inputs: inputs, &record)
         record.changeCount = PlanMetrics.opsChanged(from: old, to: cs)
+        if let fallbackNote { record.note = [fallbackNote, record.note].compactMap { $0 }.joined(separator: "\n\n") }
         return ["changeset.json": try cs.encoded(), "plan.md": try Data(contentsOf: plan), "graph.json": graphData]
     }
 
