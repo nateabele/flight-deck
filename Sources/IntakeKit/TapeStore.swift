@@ -93,6 +93,13 @@ public struct TapeStore: Sendable {
     /// this id, so any stale file from the dead attempt is removed first rather than left to
     /// mix with the new one.
     public func writeCheckpoint(_ cp: Checkpoint, files: [String: Data], into tape: inout Tape) throws {
+        try writeCheckpoint(cp, files: files, into: &tape, beforeSave: {})
+    }
+
+    /// `beforeSave` runs between the files landing and the tape save — a test seam for failing
+    /// exactly that save (`IntakeRunner.Hooks.beforeCheckpointSave`).
+    func writeCheckpoint(_ cp: Checkpoint, files: [String: Data], into tape: inout Tape,
+                         beforeSave: () throws -> Void) throws {
         let dir = checkpointDirectory(cp.id)
         let fm = FileManager.default
         if fm.fileExists(atPath: dir.path) {
@@ -109,6 +116,7 @@ public struct TapeStore: Sendable {
             try data.write(to: url, options: .atomic)
         }
 
+        try beforeSave()
         var next = tape
         next.checkpoints.append(cp)
         try saveTape(next)

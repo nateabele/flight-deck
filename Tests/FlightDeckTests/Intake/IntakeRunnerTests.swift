@@ -44,6 +44,22 @@ private final class Gate: @unchecked Sendable {
     }
 }
 
+/// True exactly once — for a hook that must act on its first call only.
+private final class Once: @unchecked Sendable {
+    private let lock = NSLock()
+    private var fired = false
+    func fire() -> Bool { lock.withLock { defer { fired = true }; return !fired } }
+}
+
+private final class TapeBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _tape: Tape?
+    var tape: Tape? {
+        get { lock.withLock { _tape } }
+        set { lock.withLock { _tape = newValue } }
+    }
+}
+
 private final class PIDCell: @unchecked Sendable {
     private let lock = NSLock()
     private var pid: Int32?
@@ -69,7 +85,6 @@ final class IntakeRunnerTests: XCTestCase {
         try IntakeStore(root: intakes).save(intake)
     }
     override func tearDownWithError() throws {
-        chmod(store.intakeDirectory.path, 0o755) // testCheckpointWriteIsAtomic makes it read-only
         try? FileManager.default.removeItem(at: root)
     }
 
@@ -77,10 +92,24 @@ final class IntakeRunnerTests: XCTestCase {
     var intakes: URL { root.appendingPathComponent("intakes") }
     var store: TapeStore { TapeStore(intakeDirectory: IntakeStore(root: intakes).directory(for: intake.id)) }
 
-    fileprivate func runner(_ commands: CommandRunner) -> IntakeRunner {
-        IntakeRunner(root: intakes, intakeID: intake.id,
+    fileprivate func runner(_ commands: CommandRunner, id: UUID? = nil, poll: Duration = .milliseconds(20),
+                            hooks: IntakeRunner.Hooks = .init()) -> IntakeRunner {
+        IntakeRunner(root: intakes, intakeID: id ?? intake.id,
                      executor: RoundExecutor(runner: commands, graphReader: GraphReader(runner: commands, environment: [:])),
-                     environment: ["PATH": "/usr/bin:/bin"], pollInterval: .milliseconds(20))
+                     environment: ["PATH": "/usr/bin:/bin"], pollInterval: poll, now: Date.init, hooks: hooks)
+    }
+
+    /// A real `sleep 30` in its own process group, standing in for a harness child.
+    func spawnSleeper() async throws -> (pid: Int32, task: Task<CommandResult, Error>) {
+        let cell = PIDCell()
+        let project = self.project
+        let task = Task {
+            try await SystemCommandRunner().run(executable: "sleep", arguments: ["30"], cwd: project,
+                                                environment: ["PATH": "/usr/bin:/bin"], processGroup: true,
+                                                onSpawn: { cell.set($0) })
+        }
+        try await eventually("a sleeper to spawn") { cell.value != nil }
+        return (try XCTUnwrap(cell.value), task)
     }
 
     /// Answers every Sketch seat successfully. The integrator really edits `work/plan.md`, or the
@@ -188,6 +217,93 @@ final class IntakeRunnerTests: XCTestCase {
         XCTAssertNil(try IntakeStore(root: intakes).load(id: intake.id).roundConfig, "the runner never writes intake.json")
     }
 
+    /// No `intake.json` means nothing to run and nothing to own: the runner must not adopt,
+    /// which would create the intake's directory (and a `tape.json`) for an intake that isn't there.
+    func testMissingIntakeFailsWithoutTouchingDisk() async throws {
+        let ghost = UUID()
+        let commands = scripted()
+        let status = await runner(commands, id: ghost).run()
+        XCTAssertEqual(status, .failed)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: IntakeStore(root: intakes).directory(for: ghost).path))
+        XCTAssertTrue(commands.calls.isEmpty)
+    }
+
+    // MARK: - Exclusivity and exit
+
+    /// Two runners on one intake (the app double-spawning, or a stale runner the app thought
+    /// dead): the second finds `runner.lock` held and stands aside without writing the tape.
+    func testSecondRunnerOnSameIntakeStandsAside() async throws {
+        let gate = Gate()
+        let commands = AsyncScriptedRunner { call in
+            if call.role == "drafter" { try await gate.wait() }
+            return Self.answer(call)
+        }
+        _ = try store.appendCommand(.step)
+        let first = Task { await runner(commands).run() }
+        try await eventually("the first runner's round to start") { gate.entered == 1 }
+
+        let second = scripted()
+        let secondStatus = await runner(second).run()
+        XCTAssertEqual(secondStatus, .running, "reports the lock holder's status")
+        XCTAssertTrue(second.calls.isEmpty, "never ran a round")
+        let live = store.loadTape()
+        XCTAssertEqual(live.runnerPID, getpid(), "the first runner still owns the tape")
+        XCTAssertNotNil(live.heartbeat, "the second runner did not write its exit over the live one")
+        XCTAssertEqual(live.roundInProgress, PlannedRound(stage: .draft, round: 0, major: true))
+
+        gate.open()
+        let status = await first.value
+        XCTAssertEqual(status, .paused)
+        XCTAssertEqual(store.loadTape().checkpoints.map(\.stage), [.draft])
+        XCTAssertEqual(commands.calls("drafter").count, 1)
+    }
+
+    /// A ▶ appended after the runner's last command read but before its final save: the app saw a
+    /// fresh heartbeat and didn't spawn, so unless the exiting runner notices it, it is stranded.
+    func testCommandArrivingAtExitIsNotStranded() async throws {
+        let once = Once()
+        let tapeStore = store
+        _ = try store.appendCommand(.step)
+        let commands = scripted()
+        let status = await runner(commands, hooks: .init(beforeFinalSave: {
+            if once.fire() { _ = try? tapeStore.appendCommand(.step) }
+        })).run()
+
+        XCTAssertEqual(status, .paused)
+        let tape = store.loadTape()
+        XCTAssertEqual(tape.checkpoints.map(\.stage), [.draft, .refine], "the ▶ that landed at exit ran a round")
+        XCTAssertEqual(tape.ackedCommandSeq, 2)
+        XCTAssertNil(tape.runnerPID)
+        XCTAssertNil(tape.heartbeat)
+    }
+
+    /// Cancelling the task running `run()` (the CLI wrapper shutting down) must reach the
+    /// round: its real child dies and the tape ends stopped, not left mid-round.
+    func testCancellingRunKillsTheRoundsChild() async throws {
+        let child = PIDCell()
+        let real = SystemCommandRunner()
+        let commands = AsyncScriptedRunner { call in
+            try await real.run(executable: "sleep", arguments: ["30"], cwd: call.cwd, environment: ["PATH": "/usr/bin:/bin"],
+                               processGroup: true, onSpawn: { child.set($0) })
+        }
+        _ = try store.appendCommand(.toReview)
+        let run = Task { await runner(commands).run() }
+        try await eventually("the drafter child to spawn") { child.value != nil }
+        let pid = try XCTUnwrap(child.value)
+
+        let cancelledAt = Date()
+        run.cancel()
+        let status = await run.value
+        XCTAssertLessThan(Date().timeIntervalSince(cancelledAt), 5, "run() returned promptly, not after the child's 30 s")
+        XCTAssertEqual(status, .stopped)
+        try await eventually("the drafter child to die", timeout: 3) { kill(pid, 0) != 0 }
+        let tape = store.loadTape()
+        XCTAssertEqual(tape.status, .stopped)
+        XCTAssertNil(tape.roundInProgress)
+        XCTAssertNil(tape.runnerPID)
+        XCTAssertTrue(tape.checkpoints.isEmpty)
+    }
+
     // MARK: - Mid-round commands
 
     func testPauseStopsAfterCurrentRound() async throws {
@@ -240,6 +356,27 @@ final class IntakeRunnerTests: XCTestCase {
         XCTAssertNil(tape.runnerPID)
         XCTAssertEqual(tape.ackedCommandSeq, 2)
         XCTAssertFalse(FileManager.default.fileExists(atPath: store.checkpointDirectory(1).path))
+    }
+
+    /// A harness killed by ⏹ can surface as a failed seat (a non-zero exit) rather than a
+    /// cancellation, so the executor reports `.paused`. That is still the human's ⏹, not a failure.
+    func testPausedRoundDuringStopFinishesStopped() async throws {
+        let gate = Gate()
+        let commands = AsyncScriptedRunner { _ in
+            try? await gate.wait() // returns once cancelled, like a child that died of SIGTERM
+            return failed("Terminated: 15")
+        }
+        _ = try store.appendCommand(.toReview)
+        let run = Task { await runner(commands).run() }
+        try await eventually("the draft round to start") { gate.entered == 1 }
+        _ = try store.appendCommand(.stop)
+        let status = await run.value
+
+        XCTAssertEqual(status, .stopped)
+        let tape = store.loadTape()
+        XCTAssertEqual(tape.status, .stopped)
+        XCTAssertNil(tape.pauseDiagnosis, "a ⏹ is not a diagnosis")
+        XCTAssertTrue(tape.checkpoints.isEmpty)
     }
 
     func testStopWhileIdleSetsStopped() async throws {
@@ -311,7 +448,7 @@ final class IntakeRunnerTests: XCTestCase {
             await IntakeRunner(root: intakes, intakeID: intake.id,
                                executor: RoundExecutor(runner: commands, graphReader: GraphReader(runner: commands, environment: [:])),
                                environment: ["PATH": "/usr/bin:/bin"], pollInterval: .milliseconds(50), now: Date.init,
-                               killGroup: { seen.tape = tapeStore.loadTape(); _ = killpg($0, SIGKILL) }).run()
+                               hooks: .init(killGroup: { seen.tape = tapeStore.loadTape(); _ = killpg($0, SIGKILL) })).run()
         }
         try await eventually("the slow round to start") { gate.entered == 1 }
 
@@ -354,11 +491,23 @@ final class IntakeRunnerTests: XCTestCase {
         try store.saveTape(Tape(target: .nextMinor, status: .running, runnerPID: 999_999,
                                 heartbeat: Date(timeIntervalSinceNow: -60),
                                 roundInProgress: PlannedRound(stage: .draft, round: 0, major: true)))
+        // A live sentinel no recovery may touch, named by two run.json files recovery must skip:
+        // one in the interrupted round that already finished (its pid is known dead — any live
+        // process there now is someone else's), and one from another round entirely.
+        let sentinel = try await spawnSleeper()
+        defer { killpg(sentinel.pid, SIGKILL) }
+        for (name, finished) in [("draft-0-drafter-1", Date() as Date?), ("refine-1-reviewer", nil)] {
+            let dir = store.runDirectory(name)
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            try IntakeJSON.encoder.encode(RunRecord(pid: sentinel.pid, started: Date(), finished: finished))
+                .write(to: dir.appendingPathComponent("run.json"))
+        }
 
         let commands = scripted()
         let status = await runner(commands).run()
 
         XCTAssertEqual(status, .paused)
+        XCTAssertEqual(kill(sentinel.pid, 0), 0, "recovery killed a finished run's pid or another round's")
         try await eventually("the orphan to be killed", timeout: 3) { kill(pid, 0) != 0 }
         _ = try? await orphan.value
         let tape = store.loadTape()
@@ -456,24 +605,38 @@ final class IntakeRunnerTests: XCTestCase {
         XCTAssertEqual(store.loadTape().pauseDiagnosis?.category, .authExpired)
     }
 
-    /// The round's files land, then `tape.json` can't be written (the intake directory turns
-    /// read-only mid-round): the reloaded tape must not list the checkpoint — the files are an
-    /// orphan a rerun overwrites, never a half-recorded round.
+    /// The round's files land, then the one tape save that records the checkpoint fails. The
+    /// tape must not list the checkpoint, and nothing that save would have carried (the
+    /// consumed annotation, the spent target, the cleared `roundInProgress`) may leak into a
+    /// later save — the files are an orphan a rerun overwrites, never a half-recorded round.
     func testCheckpointWriteIsAtomic() async throws {
-        let intakeDir = store.intakeDirectory
-        let commands = AsyncScriptedRunner { call in
-            try FileManager.default.createDirectory(at: intakeDir.appendingPathComponent("checkpoints"),
-                                                    withIntermediateDirectories: true)
-            chmod(intakeDir.path, 0o555)
-            return Self.answer(call)
-        }
         _ = try store.appendCommand(.step)
-        let status = await runner(commands).run()
+        let first = await runner(scripted()).run()
+        XCTAssertEqual(first, .paused)
+        _ = try store.appendCommand(.annotate("focus on auth"))
+        _ = try store.appendCommand(.step)
+
+        let once = Once()
+        let atExit = TapeBox()
+        let tapeStore = store
+        let hooks = IntakeRunner.Hooks(
+            beforeCheckpointSave: { if once.fire() { throw CocoaError(.fileWriteOutOfSpace) } },
+            beforeFinalSave: { atExit.tape = tapeStore.loadTape() })
+        let status = await runner(scripted(), hooks: hooks).run()
         XCTAssertEqual(status, .failed)
 
-        chmod(intakeDir.path, 0o755)
-        XCTAssertTrue(FileManager.default.fileExists(atPath: store.checkpointDirectory(1).appendingPathComponent("drafts/0.md").path),
+        XCTAssertTrue(FileManager.default.fileExists(atPath: store.checkpointDirectory(2).appendingPathComponent("plan.md").path),
                       "the failure came after the files were written")
-        XCTAssertTrue(store.loadTape().checkpoints.isEmpty)
+        let beforeFinal = try XCTUnwrap(atExit.tape)
+        XCTAssertEqual(beforeFinal.checkpoints.map(\.stage), [.draft])
+        XCTAssertEqual(beforeFinal.roundInProgress, PlannedRound(stage: .refine, round: 1, major: false),
+                       "on disk, the round is still in progress")
+        XCTAssertEqual(beforeFinal.pendingAnnotations, ["focus on auth"])
+
+        let tape = store.loadTape()
+        XCTAssertEqual(tape.checkpoints.map(\.stage), [.draft])
+        XCTAssertEqual(tape.pendingAnnotations, ["focus on auth"], "not consumed by a round that never landed")
+        XCTAssertEqual(tape.target, .nextMinor, "not spent by a round that never landed")
+        XCTAssertEqual(tape.status, .failed)
     }
 }
