@@ -954,14 +954,17 @@ Turns a typed intent into a reviewed diff against the bead graph, then releases 
 design: [specs/2026-09-26-flywheel-intake-design.md](superpowers/specs/2026-09-26-flywheel-intake-design.md).
 
 **`IntakeKit` is a pure engine, `IntakeService` is the app's orchestration of it.** The split
-is the same one `Sources/FleetKit` draws for pairing: `IntakeKit` is Swift 6, `Sendable`, and
-knows nothing of `SessionStore`, notifications, or subprocesses — `Intake`, `ChangeSet` and its
+is the same one `Sources/FleetKit` draws for pairing: `IntakeKit` is Swift 6, `Sendable`,
+Foundation-only, and knows nothing of `SessionStore` or notifications — `Intake`, `ChangeSet` and its
 `Op` cases, `ValidatedChangeSet`/`ChangeSetValidator`, `ApplyPlanner` (change set → ordered
 `ApplyStep`s), `DeliveryPlanner` (released edits → `DeliveryAction`s), `DriftClassifier`
 (an op's `pre` vs. the live graph → still-holds/drifted/impossible) and `IntakeStore`
 (the on-disk format) all live there and are unit-tested with canned JSON, no live process.
-`IntakeService` (`@MainActor`, `Sources/FlightDeck/Intake/IntakeService.swift`) is the only
-thing that actually shells out — to a headless `codex`/`claude` for triage
+So does the whole round engine (below), which is the one part of `IntakeKit` that spawns
+processes — always through its `CommandRunner` protocol, so every test scripts the replies and
+only `RoundsLiveProbeTests` (skipped unless `FLIGHTDECK_ROUNDS_LIVE=1`) runs real models.
+In the app, `IntakeService` (`@MainActor`, `Sources/FlightDeck/Intake/IntakeService.swift`) is
+the only thing that shells out — to a headless `codex`/`claude` for triage
 (`HeadlessRunner`), to `br`/`bv`/`am` for the graph and delivery (`FlywheelProcessRunner`,
 `BeadWriter`, `IntakeDelivery`) — and the only thing `SessionStore` talks to
 (`store.intakeService`, a lazy var, so a host that never touches intakes never builds it). It
@@ -974,28 +977,127 @@ store also forwards the service's `objectWillChange` as its own: the header badg
 through the store and observes only the store.
 
 **Storage is one directory per intake**, `<state dir>/intakes/<uuid>/intake.json` — not a
-single index file — because the next plan's runner writes checkpoints and run output beside
-`intake.json` from another process (a `flightdeck intake run <id>` under its own fd-abduco
-daemon), and a shared index file would race that writer. `IntakeStore.save` creates the
+single index file — because the round runner writes checkpoints and run output beside
+`intake.json` from another process (`flightdeck intake run <id>` under its own fd-abduco
+daemon, below), and a shared index file would race that writer. `IntakeStore.save` creates the
 directory tree lazily, on first write; `all()` only lists what is already there and never
 creates `intakes/` itself, which is why reading `attentionCount` — the rollup below — from a
 project with no intakes never conjures the directory into existence. A `.triaging` or
-`.releasing` intake found on disk at launch — no process survives an FD quit to finish it —
-is rewritten `.interrupted` before anything is published, so `intake.json` always describes
-what actually happened, and Retry is the recovery path.
+`.releasing` intake found on disk at launch — both still run in-process, so nothing survives
+an FD quit to finish them — is rewritten `.interrupted` before anything is published, so
+`intake.json` always describes what actually happened, and Retry is the recovery path. A
+`.shaping` intake is **not**: its rounds run in the detached runner, so launch recovery
+respawns the runner instead (below).
 
 **FD is the sole writer of `br` on an intake's behalf; `br` never sees the change set at all
-before release.** Every op — creates, edits, reopens, edges — is staged in FD's own
-`intake.json` only, until `BeadWriter` applies the release. (Spec §5.3 plans an exception for
-Feature/Full plan fidelity: materializing the `createBead` ops early, as `deferred` beads
-labelled `fd-intake:<id>`, so a polish round has real beads to work against, with a
-post-round diff reverting anything outside that label set. That materialization is **not
-built** — it is next-plan scope, same as the round engine it exists to serve — so today
-nothing is written before release regardless of fidelity.)
+before release, at any fidelity.** Every op — creates, edits, reopens, edges — is staged in
+FD's own files only, until `BeadWriter` applies the release. Spec §5.3's early
+materialization of `createBead` ops (as `deferred` beads, reverted by a post-round diff) was
+dropped by the 2026-09-27 amendment: polish rounds revise the *change set*, validated like any
+other, and never touch `br`. There is no materialization, no revert check and no un-defer step.
 
-**Held edges.** An edge from an *existing* bead onto a *new* one is always held (never
-written before release, even when other new-bead ops are materialized early), because
-writing it live would block the existing bead on a bead that has not been reviewed yet. FD
+**Planning rounds (Sketch, Feature plan, Full plan).** Choosing a fidelity above Bead expands
+it into a `RoundConfig` (`PresetExpansion`; the Rounds editor lets the human change any seat's
+harness, model, effort or fallback and the caps before Start, which marks it `customized`),
+moves the intake to `.shaping`, and appends the config's default play to the tape:
+
+| Preset | Drafters | Synthesis | Refine cap | Polish cap | Fresh-eyes + dedup | Default play |
+|---|---|---|---|---|---|---|
+| Sketch | 1 (general) | — | 2 | 0 | — | ⏩ to review |
+| Feature plan | 2 (arbiter, realist) | yes | 3 | 2 | — | ⏭ next major |
+| Full plan | 4 (arbiter, realist, coverage, stress-test) | yes | 5 | 6 | yes | ⏭ next major |
+
+`TapePlanner` turns a config into the round sequence — draft, synthesis, refine 1…N, encode,
+polish 1…M, fresh-eyes, dedup — recomputed on every call rather than cached, so ＋ (extend) on
+a stage still running lengthens it and moves its major checkpoint to the new last round. The
+last round of each stage is a **major** checkpoint (⏭'s stop). Release is never a tape target:
+the tape stops at release review and the existing release flow takes over unchanged.
+
+*The runner.* `flightdeck intake run <id> --root <intakesRoot>` (the bundled CLI, which links
+`IntakeKit`) is spawned by `IntakeRunnerController` inside its own fd-abduco daemon (`-n`,
+socket `<daemon dir>/intake-<uuid lowercased>.sock` — a name `SessionDaemon.liveSessionIDs()`
+ignores, so session reconcile never touches it), with the login-shell PATH and without
+`CLAUDECODE`/`CLAUDE_CODE_CHILD_SESSION`. It outlives the app. `IntakeRunner.run()` is a
+restartable loop over `tape.json`: its first write adopts the tape (`runnerPID`, a fresh
+`heartbeat`), then it folds in commands, runs the next round, writes the checkpoint, and
+repeats until the target is spent, a round pauses, ⏹ lands or the tape reaches review; its
+last write clears `runnerPID`/`heartbeat` so an exited runner never reads as alive. A command
+watcher polls alongside each round and moves the heartbeat every poll; the app treats a runner
+as live only while its socket answers and the heartbeat is under 10 s old, and `reap`s a live
+socket whose tape has finished (fd-abduco keeps a `-n` daemon's socket until something
+attaches). `ensureRunning` never starts a second runner while one is live — two would write
+the same `tape.json`.
+
+*One writer per file*, so there are no locks:
+
+| File | Writer | What |
+|---|---|---|
+| `intake.json` | app | intent, Q&A, `chosenPreset`, `roundConfig`, state, the final change set |
+| `commands.jsonl` | app (append-only) | ⏯ ⏭ ⏩ ⏸ ⏹ ＋ ✎ as `{seq, command}` lines; the runner acks by `seq` in the tape |
+| `tape.json` | runner | status, target, checkpoints, `roundInProgress`, pending annotations, extensions, heartbeat |
+| `checkpoints/<n>/` | runner | `drafts/<i>.md`, `plan.md`, `changeset.json` — each round's output |
+| `runs/<stage>-<round>-<role>[-i]/` | runner | per child: `run.json` (pid, session id, start/finish, exit), `stdout`, `stderr`, `schema.json` |
+| `work/` | runner / integrator | scratch: `graph.json`, `plan.md` + `changes.json` for the integrator, `shadow/` for polish |
+
+Every JSON write is atomic. A checkpoint's files are written before the tape entry that points
+at them, so a crash leaves either the whole round recorded or none of it, and a rerun reusing
+the same checkpoint id clears any stale files first. `commands.jsonl` is appended with a single
+write, and its reader skips a torn last line rather than failing.
+
+*Transport semantics.* ⏯ targets the next minor checkpoint, ⏭ the next major, ⏩ release
+review; a reached target is spent (set to `none`) in the same write as the checkpoint that
+reached it, so a relaunched runner doesn't run one more round. ⏸ drops the target — the round
+in flight finishes and is kept. ⏹ cancels the round task: every child was spawned as its own
+process-group leader (`SystemCommandRunner`, `posix_spawn` + `POSIX_SPAWN_SETPGROUP`), so
+cancellation `killpg`s the whole subtree, and nothing from the round is checkpointed. A fresh
+▶/⏭/⏩ is the only thing that clears `.failed`/`.stopped`; a runner relaunched without one
+won't quietly retry a failure or undo a ⏹. ✎ annotations queue on the tape and are consumed by
+the next refine round, recorded in that round's record. There is no ⏮ (rewind) yet — see
+FOLLOWUPS.
+
+*Crash and quit.* Quitting FD doesn't touch the runner. If the runner itself died mid-round,
+the tape still has `roundInProgress`: the next runner kills any child whose `run.json` has a
+pid but no `finished` (they were group leaders, so the parent's death didn't take them), then
+reruns that round from the last checkpoint, noting "rerun after interruption" on it. At launch,
+`IntakeService` respawns the runner for a `.shaping` intake whose tape is `.running` but whose
+runner isn't live.
+
+*Round execution* (`RoundExecutor`, no tape writes of its own — it hands back a checkpoint or a
+diagnosis). Drafters run in parallel; synthesis and refine have a seat propose `ProposedChange`s
+and the **integrator** apply them to `work/plan.md`; encode, polish, fresh-eyes and dedup each
+return a whole change set in the triage schema. Each seat is one headless `codex exec --json` /
+`claude -p` turn with an explicit model and effort (resumes included), a JSON schema, and its
+own `runs/` directory. Access: every seat but the integrator is **read-only** on the repo and on
+`br` (codex `-s read-only`; claude `dontAsk` with the read allow list, the `br` write-verb deny
+list and `--setting-sources local --strict-mcp-config`). The integrator alone may write, and only
+in `work/`: codex `-s workspace-write` with cwd = `work/`, claude `acceptEdits` with
+`Read Edit Write` and `--add-dir <work>`, never the project as cwd. The reviewer is a **fresh
+session every refine round**, so it never anchors on its own earlier verdicts. An integrator that
+reports changes but leaves `plan.md` byte-identical pauses the round as `invalidOutput`. A change
+set gets FD's own `graphObservedAt` (taken before the graph read), is validated against the live
+graph, and on failure the same session is resumed once with the errors listed; a second failure
+pauses. Polish rounds get a `ShadowGraph` under `work/shadow/` — a `sqlite3` snapshot of
+`.beads` with the proposed change set applied — so the polisher can run `bv` against the graph
+as it would be after release; a shadow that fails to build is recorded and the round runs
+without it.
+
+*Failure policy* (spec §6.3). A drafter that fails gets its slot's fallback once (recorded
+*substituted*), and without one the round goes on without that draft (recorded *failed*); the
+round pauses only if no draft survives. Every other role pauses the tape with a `Diagnosis`
+(`authExpired`, `rateLimited`, `timeout`, `invalidOutput`, `harnessError`), each with the action
+the shaping view shows — never a silent substitution.
+
+*The app side.* `IntakeService` watches every `.shaping` intake's `tape.json` on the shared
+`WatchClock` (reloading only when its mtime moves) and publishes it to the shaping view:
+`TapeStrip`, the transport bar, the status line, the pause banner, round cards, and a plan viewer
+(Plan / Diff vs previous / Change set). When the tape reaches review it copies the last
+checkpoint's `changeset.json` into `intake.json`, moves the intake to `.review`, and reaps the
+runner. A `.shaping` intake whose tape is paused, failed, stopped or idle counts toward the
+project's "needs you" rollup; Discard while shaping sends ⏹, reaps, then discards.
+
+**Held edges.** An edge from an *existing* bead onto a *new* one is always held — written last
+in a release, after every create, edit and reopen has landed and been rechecked — because
+writing it early would block the existing bead on a bead that has not been reviewed yet. FD
 **computes** the held flag itself from which endpoint is new — it does not trust whatever
 value a triage or encoder agent put in the JSON, the same "recompute, don't trust the model"
 rule `ChangeSetValidator` applies to every other invariant it checks (schema, referenced ids

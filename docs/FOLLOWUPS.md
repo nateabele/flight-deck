@@ -1797,13 +1797,13 @@ feasibility unknown.
 
 ## From flywheel intake, phases 1–3 (2026-09-26)
 
-- **In-process triage is lost on quit.** `IntakeService` runs triage and release as an
-  in-process `Task`, tracked only in its own `tasks: [UUID: Task<Void, Never>]` dictionary — if
-  Flight Deck quits mid-turn, the `Task` is simply gone, and the intake is left `.interrupted`
-  at the next launch for the human to Retry. Correct for this plan, since there is no runner
-  yet to hand the work to; the next plan's `flightdeck intake run <id>` under its own
-  fd-abduco daemon (spec §7) is what actually survives an FD quit, and once it lands this
-  entry should be removed rather than carried forward as "still true."
+- **In-process triage and release are lost on quit.** `IntakeService` runs triage and release
+  as an in-process `Task`, tracked only in its own `tasks: [UUID: Task<Void, Never>]`
+  dictionary — if Flight Deck quits mid-turn, the `Task` is simply gone, and the intake is left
+  `.interrupted` at the next launch for the human to Retry. Shaping rounds no longer have this
+  problem: they run in the detached `flightdeck intake run <id>` runner (see ARCHITECTURE,
+  "Planning rounds"), which survives an FD quit. Triage and release could move onto the same
+  runner; nothing has needed it yet, since both are single short turns.
 - **`br update` has no `--if-version` precondition.** Release re-reads and rechecks every
   bead an op touches (`DriftClassifier`) right before writing it, but there is still a window
   of real milliseconds between that recheck and the write where another actor could get in —
@@ -1849,3 +1849,58 @@ feasibility unknown.
   `retry` that replayed `exchanges` as follow-up turns before failing forward on the current
   question would recover that, at the cost of trusting stale context more than today's design
   wants to.
+
+## From flywheel intake, the round engine (2026-09-27)
+
+**Next** — designed in the spec, deliberately not in the round-engine plan:
+
+- **Branches and rewind.** The tape is a straight line: there is no ⏮, so a paused or failed
+  round can only be retried (⏯/⏭/⏩ rerun the next round from the head), never re-targeted to
+  an earlier checkpoint. Spec §6.4's branches — play forward from an earlier checkpoint, keep
+  the old line, compare lineages — need a rewind command, a `parent` that can point anywhere
+  (`Checkpoint.parent` already exists), and a strip that draws forks.
+- **The Beads tab and graph review.** Still unbuilt (see the phase 1–3 entry above). The
+  shaping view shows a change set as a list of ops; nothing yet lays it over the graph.
+- **Oracle, grok and gemini slots.** `Harness` is `codex | claude` only. Spec §6.2's slot-kind
+  interface (`start`/`adopt`/`result`/`cancel`), oracle's browser runner with its
+  `challenge`/`tierUnavailable`/`uiChanged` diagnoses, and the unverified grok/gemini adapters
+  are all next.
+- **Detection UI.** `IntakeService.availableModels()` only probes PATH for the two CLIs and
+  fills in fixed defaults. Spec §6.2's detection — plan type and rate limits from
+  `codex app-server`, `claude auth status`, per-value source labels, unreachable tiers shown as
+  unavailable with a reason — is not built, so the Rounds editor's model field is free text.
+- **The convergence gauge.** Spec §6.6: every input it needs (change lists, snapshots, tallies)
+  is already in the round records; nothing reads them as a gauge yet.
+
+**Accepted residuals:**
+
+- **Read-only claude seats still load the project's `.claude/settings.local.json`.**
+  `--setting-sources local` (`HarnessCommand.claudeIsolation`) drops the user's and project's
+  checked-in settings but keeps the gitignored local file, so a project whose local file allows
+  e.g. `Bash(git add *)` extends a "read-only" seat. Accepted: it is the operator's own file on
+  their own machine, the `br` write-verb denies still beat any allow in it, and dropping `local`
+  too was not verified to keep a headless run authenticated.
+- **Three app processes still use `waitUntilExit()`**: `LoginShellPath`,
+  `CodexProcessTransport` and `FlywheelProcessRunner`. Called from a GCD worker it was shown to
+  wedge after the child had already exited (sampled 2026-09-27, four concurrent test runs all
+  stuck in it), which is why `SystemCommandRunner` moved to a `terminationHandler` + semaphore
+  (f703040). None of the three has been seen hanging in the app, but each is the same pattern
+  and should move the same way.
+
+**From the live Sketch probe** (`RoundsLiveProbeTests`, codex `gpt-5.6-luna`/`low` in every
+seat, 2026-09-27 — it reached review first time, 277 s, ~452k input / ~19k output tokens):
+
+- **Codex seats load the operator's MCP servers, and MCP servers are outside the sandbox.**
+  `HarnessCommand` has no codex equivalent of claude's `--strict-mcp-config`, so every codex
+  seat starts whatever `~/.codex/config.toml` lists. In the probe the read-only drafter and
+  reviewer called `quillmap_map`/`quillmap_grep`, and a quillmap index (`.quillmap/index.db`) was
+  written into the intake's `work/`. An MCP server runs as its own process, not under codex's
+  `-s read-only`, so a read-only seat whose operator has a *writing* MCP tool configured (quillmap
+  has mutators) is not read-only. Needs an isolation flag for codex seats, probed live before
+  it is trusted (a `-c mcp_servers={}` override is the obvious candidate; unverified).
+- **Cheap reviewers propose at line granularity.** The one refine round proposed 64 changes to a
+  141-line draft (all 64 agreed; the plan came out at 85 lines), and the encoder turned a
+  one-flag intent into 11 new beads and 18 edges — against a scratch project with no code, so
+  the plan hedged with discovery/bootstrap beads. Not a schema problem; a prompt-calibration
+  one worth watching at real fidelity before anyone reads the change count as a convergence
+  signal.
