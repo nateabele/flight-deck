@@ -494,34 +494,67 @@ final class SidebarInputMonitor {
     /// session window — `ProjectView`'s Intakes `List` chief among them. See the "Scoping" doc
     /// comment's Intakes paragraph for the bug this exists to stop.
     ///
-    /// The rule: the table must live inside the FIRST arranged pane of the window's OUTERMOST
-    /// `NSSplitView` — `NavigationSplitView`'s sidebar column. `ProjectView` builds its own
-    /// `HSplitView` for the Intakes list and the detail pane, and `HSplitView` is an `NSSplitView`
-    /// too, so "the nearest enclosing split view" is the wrong question: the Intakes table's
-    /// nearest split view is that inner one, and it IS that split's first pane — walking outward
-    /// only one level would answer true. "Outermost" is what tells the sidebar's own split from
-    /// one nested inside its detail column.
+    /// **An earlier version of this rule checked "the FIRST pane of the window's outermost
+    /// `NSSplitView`", and it was wrong — caught by hosting the real `NavigationSplitView`
+    /// offscreen in `SidebarTableIdentityLiveTests` rather than trusting the hand-built trees
+    /// alone.** On this SDK, `NavigationSplitView`'s own `NSSplitView` holds SIX subviews per
+    /// side — dividers, glass-effect chrome (`NSContainerConcentricGlassEffectView`), a
+    /// `_NSSplitViewShadowView`, collapsed-interaction views — not two, and the DETAIL pane's
+    /// wrapper is `subviews[0]`; the SIDEBAR's own is `subviews[2]`. "First" picked
+    /// `ProjectView`'s Intakes table every time, which is the exact bug this file exists to fix,
+    /// just relocated into the fix itself.
     ///
-    /// Walks every ancestor once, so it costs nothing a hit-test wasn't already paying for, and
-    /// needs no window: it is exercised in `SidebarTableIdentityTests` against hand-built
-    /// `NSSplitView`/`NSTableView` trees with nothing else attached.
+    /// The rule instead: the table must live inside the pane of the window's OUTERMOST
+    /// `NSSplitView` that contains `SidebarTableMarker`'s view somewhere in its subtree.
+    /// "Outermost" still matters — `ProjectView` builds its own `HSplitView` for the Intakes list
+    /// and the detail pane, and `HSplitView` is an `NSSplitView` too, so asking about the NEAREST
+    /// split would find that inner one and answer about the wrong split entirely — but which
+    /// pane no longer depends on subview order, only on where the marker actually is.
+    ///
+    /// Walks every ancestor once — no worse than the hit-test walk this sits behind already — and
+    /// needs no window for the pure logic (`SidebarTableIdentityTests`, hand-built
+    /// `NSSplitView`/`NSTableView`/`SidebarTableMarker.MarkerView` trees). `SidebarTableIdentityLiveTests`
+    /// re-checks the load-bearing assumption itself — that `NavigationSplitView` really does put
+    /// an `NSSplitView` between the window and the sidebar's table at all — by hosting the real
+    /// shape offscreen; that is the one thing a hand-built tree cannot prove.
     static func isSidebarTable(_ table: NSTableView) -> Bool {
-        // Track the last (i.e. outermost, since the walk moves toward the window's root) split
-        // view seen and which of ITS immediate children the table descends through — not `table`
-        // itself, which by the time an outer split is reached is several nested views down.
-        var outermostSplit: NSSplitView?
+        // The last (i.e. outermost, since the walk moves toward the window's root) split view's
+        // immediate child that the table descends through — not `table` itself, which by the
+        // time an outer split is reached is several nested views down.
         var childUnderOutermostSplit: NSView?
         var current: NSView = table
         while let superview = current.superview {
-            if let split = superview as? NSSplitView {
-                outermostSplit = split
-                childUnderOutermostSplit = current
-            }
+            if superview is NSSplitView { childUnderOutermostSplit = current }
             current = superview
         }
-        guard let outermostSplit, let childUnderOutermostSplit else { return false }
-        return outermostSplit.subviews.first === childUnderOutermostSplit
+        guard let childUnderOutermostSplit else { return false }
+        return containsMarker(childUnderOutermostSplit)
     }
+
+    /// Depth-first search for `SidebarTableMarker.MarkerView` under `view`. There is exactly one
+    /// in the live tree — `SessionSidebar` plants it once — so finding it anywhere under the
+    /// candidate pane is unambiguous; nothing bounds the recursion because nothing needs to: the
+    /// caller already bounded the search to one pane of the outermost split before calling this.
+    private static func containsMarker(_ view: NSView) -> Bool {
+        if view is SidebarTableMarker.MarkerView { return true }
+        return view.subviews.contains(where: containsMarker)
+    }
+}
+
+/// An invisible marker `SessionSidebar` attaches to the sidebar `List` via `.background()`, so
+/// `SidebarInputMonitor.isSidebarTable` has something unambiguous to find instead of guessing
+/// from `NSSplitView` subview order (see that function's doc comment for why the order guess was
+/// wrong). `.background()` on the `List` itself, never inside a row: this backs the WHOLE list,
+/// behind the AppKit-owned `NSTableView` host, not a SwiftUI-drawn row's content, so it cannot
+/// compete for a row's click the way the file's doc comment's mechanism #2 measured a per-row
+/// `NSViewRepresentable` doing.
+struct SidebarTableMarker: NSViewRepresentable {
+    /// Never drawn, never hit-tested, never read for its frame — only ever matched by type
+    /// identity from `containsMarker`.
+    final class MarkerView: NSView {}
+
+    func makeNSView(context: Context) -> NSView { MarkerView() }
+    func updateNSView(_ nsView: NSView, context: Context) {}
 }
 
 /// Click, or drag? The whole rule, over plain numbers — no `NSEvent`, no view, no window — so it

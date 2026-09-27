@@ -318,12 +318,18 @@ final class SidebarTableIdentityTests: XCTestCase {
         pane.addSubview(scrollView)
     }
 
-    func testATableInTheOuterSplitsFirstPaneIsTheSidebar() {
+    func testATableInThePaneCarryingTheMarkerIsTheSidebar() {
         let outer = NSSplitView(frame: NSRect(x: 0, y: 0, width: 600, height: 400))
         let sidebarPane = NSView(frame: NSRect(x: 0, y: 0, width: 240, height: 400))
         let detailPane = NSView(frame: NSRect(x: 240, y: 0, width: 360, height: 400))
-        outer.addSubview(sidebarPane)
+        // Deliberately added detail-before-sidebar: `SidebarTableIdentityLiveTests` found the
+        // REAL `NavigationSplitView`'s outer `NSSplitView` puts the detail pane's wrapper at
+        // `subviews[0]` and the sidebar's at `subviews[2]` — an earlier version of this rule
+        // assumed "first pane is the sidebar" and that assumption was simply wrong. This ordering
+        // is what proves the current rule does not depend on it either.
         outer.addSubview(detailPane)
+        outer.addSubview(sidebarPane)
+        sidebarPane.addSubview(SidebarTableMarker.MarkerView())
 
         let table = NSTableView()
         nest(table, under: sidebarPane)
@@ -331,14 +337,30 @@ final class SidebarTableIdentityTests: XCTestCase {
         XCTAssertTrue(SidebarInputMonitor.isSidebarTable(table))
     }
 
-    func testATableNestedInAnInnerSplitInsideTheOuterSplitsSecondPaneIsNotTheSidebar() {
-        // `ProjectView`'s shape: the Intakes table sits in an `HSplitView` (also an
-        // `NSSplitView`) that is itself the outer split's detail pane, not its sidebar pane.
+    func testATableInTheOuterSplitsOtherPaneIsNotTheSidebar() {
         let outer = NSSplitView(frame: NSRect(x: 0, y: 0, width: 600, height: 400))
         let sidebarPane = NSView(frame: NSRect(x: 0, y: 0, width: 240, height: 400))
         let detailPane = NSView(frame: NSRect(x: 240, y: 0, width: 360, height: 400))
         outer.addSubview(sidebarPane)
         outer.addSubview(detailPane)
+        sidebarPane.addSubview(SidebarTableMarker.MarkerView())
+
+        let table = NSTableView()
+        nest(table, under: detailPane)
+
+        XCTAssertFalse(SidebarInputMonitor.isSidebarTable(table))
+    }
+
+    func testATableNestedInAnInnerSplitInsideTheOuterSplitsOtherPaneIsNotTheSidebar() {
+        // `ProjectView`'s shape: the Intakes table sits in an `HSplitView` (also an
+        // `NSSplitView`) that is itself the outer split's detail pane, not the pane carrying
+        // the marker.
+        let outer = NSSplitView(frame: NSRect(x: 0, y: 0, width: 600, height: 400))
+        let sidebarPane = NSView(frame: NSRect(x: 0, y: 0, width: 240, height: 400))
+        let detailPane = NSView(frame: NSRect(x: 240, y: 0, width: 360, height: 400))
+        outer.addSubview(sidebarPane)
+        outer.addSubview(detailPane)
+        sidebarPane.addSubview(SidebarTableMarker.MarkerView())
 
         let inner = NSSplitView(frame: detailPane.bounds)
         let intakesPane = NSView(frame: NSRect(x: 240, y: 0, width: 160, height: 400))
@@ -353,13 +375,17 @@ final class SidebarTableIdentityTests: XCTestCase {
         XCTAssertFalse(SidebarInputMonitor.isSidebarTable(table))
     }
 
-    func testATableInNoSplitViewAtAllIsNotTheSidebar() {
+    func testATableInNoSplitViewAtAllIsNotTheSidebarEvenWithAMarkerNearby() {
         // Settings ▸ Projects and `NSOpenPanel` are table-backed but carry no split view — the
         // scope check in `handleMouseDown`/`handleKeyDown` excludes those windows outright, but
-        // this rule must also be total and answer false rather than crash or guess.
+        // this rule must also be total and answer false rather than crash or guess. The marker
+        // is planted right next to the table to prove containment isn't checked until AFTER an
+        // outermost split is found at all — a stray marker cannot make a split-less table read
+        // as the sidebar.
         let plain = NSView(frame: NSRect(x: 0, y: 0, width: 300, height: 300))
         let table = NSTableView()
         nest(table, under: plain)
+        plain.addSubview(SidebarTableMarker.MarkerView())
 
         XCTAssertFalse(SidebarInputMonitor.isSidebarTable(table))
     }
