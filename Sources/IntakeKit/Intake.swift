@@ -45,11 +45,29 @@ public struct ReleaseRecord: Codable, Equatable, Sendable {
     public var appliedSteps: Int
     public var idMap: [String: String]
     public var error: String?
-    public init(releasedAt: Date, appliedSteps: Int, idMap: [String: String], error: String? = nil) {
+    /// Delivery failures (mail/inject/reclaim) from `IntakeDelivery.deliver`. Kept apart from
+    /// `error` because they never make a release partial — the beads were written either way,
+    /// and only the notice to a holder went missing.
+    public var warnings: [String]
+    public init(releasedAt: Date, appliedSteps: Int, idMap: [String: String], error: String? = nil,
+                warnings: [String] = []) {
         self.releasedAt = releasedAt
         self.appliedSteps = appliedSteps
         self.idMap = idMap
         self.error = error
+        self.warnings = warnings
+    }
+
+    enum CodingKeys: String, CodingKey { case releasedAt, appliedSteps, idMap, error, warnings }
+
+    /// `warnings` is optional on the wire so a record written before it existed still loads.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        releasedAt = try c.decode(Date.self, forKey: .releasedAt)
+        appliedSteps = try c.decode(Int.self, forKey: .appliedSteps)
+        idMap = try c.decode([String: String].self, forKey: .idMap)
+        error = try c.decodeIfPresent(String.self, forKey: .error)
+        warnings = try c.decodeIfPresent([String].self, forKey: .warnings) ?? []
     }
 }
 

@@ -1,6 +1,7 @@
 // Sources/FlightDeck/SessionStore.swift
 import AppKit
 import FleetKit
+import IntakeKit
 import Foundation
 import OSLog
 import SwiftUI
@@ -1191,6 +1192,26 @@ final class SessionStore: ObservableObject {
         }
         return service
     }()
+
+    /// Owns every project's intakes (triage, review, release). Lazy for the same reason as
+    /// `observeService`, and one more: its init reads and writes `<state dir>/intakes`, so a
+    /// test host that never touches intakes never creates that directory. Honours
+    /// `-FlightDeckStateDir` like the search index does, so a debug instance pointed at a
+    /// copy of a real deck never triages into the real one's intakes.
+    ///
+    /// Both closures resolve through `self` at call time, and against the SAME
+    /// `session(project:agentName:)` lookup the flywheel notifier routes with, so "has a
+    /// session" (delivery planning) and "inject into it" can never disagree about a holder.
+    private(set) lazy var intakeService: IntakeService = IntakeService(
+        store: IntakeStore(root: (FlightDeckApp.stateDirectory() ?? FileSessionPersistence.defaultDirectory())
+            .appendingPathComponent("intakes", isDirectory: true)),
+        inject: { [weak self] project, agent, text, token in
+            guard let self, let session = self.session(project: project, agentName: agent) else { return false }
+            return self.submitPrompt(text, token: token, to: session.id).errorCode == nil
+        },
+        hasSession: { [weak self] project, agent in
+            self?.session(project: project, agentName: agent) != nil
+        })
 
     /// Built by `FlightDeckApp` immediately after this store, wrapping the SAME
     /// `Notifying` instance `notifier` (below) wraps for ordinary session notifications

@@ -181,6 +181,22 @@ public enum Triage {
         """
     }
 
+    /// The single automatic retry after a change set fails validation (spec §11): resumes
+    /// the same session, lists what was wrong, and asks for the whole change set again —
+    /// not a patch, since FD re-validates the reply from scratch. Re-states
+    /// `graphObservedAt` because the graph file may have been re-read since the first turn.
+    public static func correctionPrompt(errors: [ValidationError], observedAt: Date) -> String {
+        let list = errors.map { "- \($0.message)" }.joined(separator: "\n")
+        return """
+        Your change set failed validation:
+        \(list)
+
+        Return your recommendation again as JSON matching the schema, with a corrected, \
+        complete change set that fixes every error above. Follow the same change-set rules \
+        as before. Set changeSet.graphObservedAt to exactly "\(IntakeJSON.string(from: observedAt))".
+        """
+    }
+
     /// Forces a Bead-fidelity encode regardless of what triage would otherwise recommend —
     /// used when the human picks Bead over triage's own recommendation. Carries its own
     /// `graphObservedAt` instruction because it can start a fresh session (unlike
