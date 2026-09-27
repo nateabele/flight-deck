@@ -42,36 +42,49 @@ struct IntakeDelivery {
     func deliver(_ actions: [DeliveryAction], project: String, intakeID: UUID) async -> [String] {
         guard !actions.isEmpty else { return [] }
 
-        let fdName: String
-        do {
-            fdName = try await agentMailIdentity(project: project)
-        } catch {
-            // No FD identity means every `am` call below is a dead end — report each
-            // planned action as failed rather than only the one that happened to boot.
-            return actions.map { _ in "could not resolve Flight Deck's Agent-Mail identity for \(project): \(error)" }
-        }
-
         var warnings: [String] = []
+        // FD's Agent-Mail identity is only needed by `.mail` — `.inject` and `.reclaim`
+        // don't touch `am mail send` at all, so a boot failure must not block them.
+        // Resolved lazily, at most once, on the first `.mail` this delivery actually hits.
+        var identity: Result<String, Error>?
+        // Beads whose `br update` (reclaim) just failed — the paired `.inject` that follows
+        // must not repeat the planner's "it has been reclaimed" claim for one of these.
+        var failedReclaims: Set<String> = []
+
         for action in actions {
             switch action {
             case .mail(let to, let bead, let subject, let body, let urgent):
-                var argv = ["mail", "send", "--project", project, "--from", fdName, "--to", to,
-                            "--subject", subject, "--body", body,
-                            "--thread-id", "bead:\(bead)", "--topic", "fd-intake"]
-                if urgent { argv += ["--importance", "high", "--ack-required"] }
-                if let warning = await run(argv, cwd: project, describing: "am mail send to \(to) for \(bead)") {
-                    warnings.append(warning)
+                if identity == nil {
+                    do { identity = .success(try await agentMailIdentity(project: project)) }
+                    catch { identity = .failure(error) }
+                }
+                switch identity! {
+                case .failure(let error):
+                    warnings.append("could not resolve Flight Deck's Agent-Mail identity for \(project), so mail to \(to) for \(bead) was not sent: \(error)")
+                case .success(let fdName):
+                    var argv = ["mail", "send", "--project", project, "--from", fdName, "--to", to,
+                                "--subject", subject, "--body", body,
+                                "--thread-id", "bead:\(bead)", "--topic", "fd-intake"]
+                    if urgent { argv += ["--importance", "high", "--ack-required"] }
+                    if let warning = await run(argv, cwd: project, describing: "am mail send to \(to) for \(bead)") {
+                        warnings.append(warning)
+                    }
                 }
             case .inject(let agent, let bead, let text):
+                // The planner writes this text assuming its preceding reclaim (if any)
+                // succeeds — swap in a neutral notice if it just didn't.
+                let finalText = failedReclaims.contains(bead) ? Self.reclaimFailedInjectText(bead: bead) : text
                 let token = Self.injectToken(intake: intakeID, bead: bead)
-                if !inject(agent, text, token) {
+                if !inject(agent, finalText, token) {
                     warnings.append("could not inject \(agent) for \(bead)")
                 }
-            case .reclaim(let bead, let agent):
+            case .reclaim(let bead, let agent, _):
                 let actor = "flightdeck-intake:\(intakeID.uuidString)"
                 let updateArgv = ["update", bead, "--status", "open", "--assignee", "", "--actor", actor]
                 if let warning = await run(updateArgv, cwd: project, brExecutable: true, describing: "br update \(bead)") {
                     warnings.append(warning)
+                    failedReclaims.insert(bead)
+                    continue // Nothing was actually reclaimed, so there's nothing to release.
                 }
                 // `am` may refuse to release reservations it didn't grant to this identity —
                 // that's a warning, not a reason to abandon the reclaim itself.
@@ -82,6 +95,15 @@ struct IntakeDelivery {
             }
         }
         return warnings
+    }
+
+    /// What a holder is told in place of the planner's "it has been reclaimed" notice when
+    /// the live `br update` behind that claim actually failed — points them at the same
+    /// command Flight Deck tried, so they can run it themselves.
+    private static func reclaimFailedInjectText(bead: String) -> String {
+        "Stop work on \(bead): Flight Deck could not reclaim it — " +
+        "set it back to open yourself (`br update \(bead) --status open --assignee \"\"`) " +
+        "or reply on the Agent Mail thread bead:\(bead)."
     }
 
     /// Runs one `am`/`br` invocation and turns a non-zero exit or a thrown error into a
