@@ -54,6 +54,16 @@ public struct TapeStore: Sendable {
         }
         let handle = try FileHandle(forWritingTo: commandsURL)
         defer { try? handle.close() }
+        // A prior append that crashed mid-write leaves a torn final line with no trailing
+        // newline. Appending straight onto that would glue this command onto the garbage,
+        // corrupting both — and since a torn line is silently dropped by `commands(after:)`,
+        // the command riding in on it (a pause/stop the user just asked for) would vanish
+        // with no error anywhere. Closing that line out with its own newline first keeps this
+        // append self-contained regardless of what the file already ends with.
+        if let existing = try? Data(contentsOf: commandsURL), let last = existing.last, last != 0x0A {
+            handle.seekToEndOfFile()
+            handle.write(Data([0x0A]))
+        }
         handle.seekToEndOfFile()
         handle.write(line)
         return seq

@@ -51,6 +51,13 @@ public enum TapePlanner {
         // ran only inserts rounds later in the same stage, so `head`'s tuple still identifies
         // the same slot in the rebuilt sequence and the walk resumes forward from there.
         guard let index = seq.firstIndex(where: { $0.stage == head.stage && $0.round == head.round }) else {
+            // The config changed out from under an in-progress tape (e.g. `polishCap` edited
+            // down below a round the head already ran) so `head` no longer appears in the
+            // rebuilt sequence at all. There's no sound "next round" to resume with — guessing
+            // one could replay or skip work — so this deliberately fails safe to release
+            // review rather than guessing; a human looking at a stale tape is expected to
+            // notice and decide, not have the runner push forward on a sequence that no
+            // longer matches what already happened.
             return nil
         }
         let nextIndex = index + 1

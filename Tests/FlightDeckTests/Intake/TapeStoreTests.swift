@@ -76,6 +76,13 @@ final class TapeStoreTests: XCTestCase {
         // The store must still be usable after the torn line — the next append picks up
         // seq 3, not seq 4, because the torn line never counted as a real command.
         XCTAssertEqual(try store.appendCommand(.pause), 3)
+
+        // And the append must have closed out the torn line with its own newline first —
+        // otherwise this command would be glued onto "...comman" and fail to decode, silently
+        // losing a pause/stop the caller just asked for.
+        let afterAppend = store.commands(after: 0)
+        XCTAssertEqual(afterAppend.map(\.seq), [1, 2, 3])
+        XCTAssertEqual(afterAppend.map(\.command), [.step, .nextMajor, .pause])
     }
 
     func testCommandsFileHasOneLinePerCommand() throws {
