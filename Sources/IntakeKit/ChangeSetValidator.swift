@@ -2,7 +2,7 @@ import Foundation
 
 public enum ValidationError: Equatable, Sendable {
     case unknownBead(String), undefinedTempId(String), duplicateTempId(String)
-    case selfEdge(String), cycle, missingDelivery(String)
+    case selfEdge(String), cycle, missingDelivery(String), preconditionMismatch(String)
 }
 public struct ValidationErrors: Error, Equatable, Sendable { public let errors: [ValidationError] }
 
@@ -40,9 +40,16 @@ public enum ChangeSetValidator {
                 if kind != .related { blocking.append((from.wireValue, to.wireValue)) }
             case .editBead(let id, _, let pre, let delivery):
                 check(.existing(id))
-                if pre.status == "in_progress", delivery == nil { errors.append(.missingDelivery(id)) }
-            case .reopen(let id, _, _): check(.existing(id))
-            case .followUp(_, let of, _, _, _): check(.existing(of))
+                if let bead = graph.beads[id] {
+                    if pre != bead.precondition { errors.append(.preconditionMismatch(id)) }
+                    if bead.status == "in_progress", delivery == nil { errors.append(.missingDelivery(id)) }
+                }
+            case .reopen(let id, _, let pre):
+                check(.existing(id))
+                if let bead = graph.beads[id], pre != bead.precondition { errors.append(.preconditionMismatch(id)) }
+            case .followUp(_, let of, _, _, let pre):
+                check(.existing(of))
+                if let bead = graph.beads[of], pre != bead.precondition { errors.append(.preconditionMismatch(of)) }
             }
         }
         if hasCycle(blocking) { errors.append(.cycle) }
