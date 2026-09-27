@@ -51,8 +51,9 @@ public struct RoundExecutor: Sendable {
     private let graphReader: GraphReader
     private let userHome: URL
 
-    /// `userHome` is where `ClaudeUserEnv` looks for `.claude/settings.json` — injectable so a
-    /// test never depends on (or leaks) the operator's own settings.
+    /// `userHome` is where `ClaudeUserEnv` looks for `.claude/settings.json` and
+    /// `CodexUserConfig` for `.codex/config.toml` — injectable so a test never depends on (or
+    /// leaks) the operator's own settings.
     public init(runner: CommandRunner, graphReader: GraphReader,
                 userHome: URL = FileManager.default.homeDirectoryForCurrentUser) {
         self.runner = runner
@@ -378,7 +379,7 @@ public struct RoundExecutor: Sendable {
             return .failed(Diagnosis(category: .harnessError, detail: "invalid harness request: \(invalid)",
                                      action: "This is a Flight Deck bug — report it."), sessionID: nil)
         }
-        let command = HarnessCommand.build(request)
+        let command = HarnessCommand.build(request, home: userHome)
         let environment = HarnessCommand.environment(for: command, base: inputs.environment, home: userHome)
 
         let runFile = dir.appendingPathComponent("run.json")
