@@ -201,4 +201,13 @@ public enum IntakeJSON {
         e.outputFormatting = [.prettyPrinted, .sortedKeys]
         return e
     }()
+
+    /// Renders a date exactly as `encoder` would inside a JSON string field — used to embed
+    /// a timestamp (e.g. `graphObservedAt`) into prompt text rather than a JSON payload,
+    /// while keeping it byte-for-byte what the encoder would have written.
+    public static func string(from date: Date) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter.string(from: date)
+    }
 }
