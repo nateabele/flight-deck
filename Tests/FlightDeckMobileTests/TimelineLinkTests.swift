@@ -183,6 +183,34 @@ final class TimelineLinkTests: XCTestCase {
         XCTAssertEqual(cache.computeCount, 4, "the evicted key recomputes rather than hitting")
     }
 
+    /// **The gap the cache's own tests above don't cover: the tool card never asked it.**
+    /// `TimelineRow.toolCard`'s output panel (`TimelineRow.swift:355`) used to call
+    /// `TimelineStyle.linkedPlainText` directly, bypassing the screen's `linkCache` the same way
+    /// `linkedPlainText` above used to before it was routed through the cache — so a tool result
+    /// re-rendered every poll tick re-ran `NSDataDetector` over its whole (up to 64 KB) body each
+    /// time. `linkedText(for:)` is `TimelineRow`'s one routing point for both the prose branch
+    /// and the tool card, so proving it here proves the card too — no view needs to be hosted,
+    /// the same reason `isExpanded`'s own doc comment gives for staying a plain argument.
+    func testTheToolCardsOutputPanelRoutesThroughTheLinkCache() {
+        let cache = TimelineLinkCache()
+        let call = TimelineItem(
+            id: "5#0", kind: .toolCall, status: .complete, body: .init(text: "ls -la", tool: "Bash")
+        )
+        let result = TimelineItem(
+            id: "5#1", kind: .toolResult, status: .complete,
+            body: .init(text: "see https://example.com/log for the run", tool: "Bash")
+        )
+        let row = TimelineRow(item: call, result: result, linkCache: cache)
+        let first = row.linkedText(for: result)
+        let second = row.linkedText(for: result)
+        XCTAssertEqual(cache.computeCount, 1, "the tool card's output should reuse the screen's link cache")
+        XCTAssertEqual(first, second)
+        XCTAssertEqual(
+            linkURLs(in: NSAttributedString(first)), ["https://example.com/log"],
+            "routing through the cache must not change what the tool card's output looks like"
+        )
+    }
+
     // MARK: Helpers
 
     /// Every `.link` URL in `attributed`, in string order — the shape both the attributed-path
