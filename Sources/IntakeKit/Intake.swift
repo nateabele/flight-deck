@@ -79,7 +79,12 @@ public struct Intake: Codable, Identifiable, Equatable, Sendable {
         self.id = UUID()
         self.projectPath = projectPath
         self.intent = intent
-        self.createdAt = createdAt
+        // Round to milliseconds: ISO8601 with fractional seconds preserves millisecond precision.
+        // Sub-millisecond precision is lost in the round-trip, so we truncate to ensure
+        // save/load equality and reliable newest-first ordering across multiple intakes.
+        let interval = createdAt.timeIntervalSince1970
+        let rounded = (interval * 1000).rounded() / 1000
+        self.createdAt = Date(timeIntervalSince1970: rounded)
         self.state = .triaging
         self.recommended = nil
         self.recommendationReason = nil
