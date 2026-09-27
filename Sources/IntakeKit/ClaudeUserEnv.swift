@@ -12,6 +12,8 @@ public enum ClaudeUserEnv {
     /// malformed settings file (or a non-object `env`) contributes nothing — never a failed
     /// run. Callers apply `HarnessCommand.build`'s `unsetEnvironment` AFTER this, so the
     /// settings file can never re-introduce `CLAUDE_CODE_CHILD_SESSION`/`CLAUDECODE`.
+    static let excluded: Set<String> = ["PATH", "HOME"]
+
     public static func merged(into environment: [String: String],
                               home: URL = FileManager.default.homeDirectoryForCurrentUser) -> [String: String] {
         let file = home.appendingPathComponent(".claude", isDirectory: true).appendingPathComponent("settings.json")
@@ -19,7 +21,10 @@ public enum ClaudeUserEnv {
               let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let env = root["env"] as? [String: Any] else { return environment }
         var merged = environment
-        for (key, value) in env where merged[key] == nil {
+        // Never PATH or HOME, even when the caller left them unset: they decide which binary
+        // runs and where it reads its own config and credentials from, and the one thing this
+        // merge exists to restore is the proxy/endpoint config the settings file carries.
+        for (key, value) in env where merged[key] == nil && !excluded.contains(key) {
             // claude itself stringifies scalar env values; anything nested isn't an env var.
             switch value {
             case let s as String: merged[key] = s

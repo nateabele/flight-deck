@@ -17,6 +17,13 @@ final class ClaudeUserEnvTests: XCTestCase {
         XCTAssertEqual(merged, ["PATH": "/usr/bin", "ANTHROPIC_BASE_URL": "http://localhost:8787", "MAX": "8"])
     }
 
+    /// Even with no explicit value to lose to, a settings file must never supply PATH or HOME:
+    /// those decide which binary runs and where its own config lives.
+    func testNeverTakesPathOrHomeFromSettings() throws {
+        try settings(#"{"env":{"PATH":"/evil","HOME":"/elsewhere","ANTHROPIC_BASE_URL":"http://localhost:8787"}}"#)
+        XCTAssertEqual(ClaudeUserEnv.merged(into: [:], home: home), ["ANTHROPIC_BASE_URL": "http://localhost:8787"])
+    }
+
     func testMissingFileMeansNoEnv() {
         XCTAssertEqual(ClaudeUserEnv.merged(into: ["A": "1"], home: home.appendingPathComponent("nowhere")), ["A": "1"])
     }

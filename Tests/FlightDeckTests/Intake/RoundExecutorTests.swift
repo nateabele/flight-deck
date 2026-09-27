@@ -449,6 +449,27 @@ final class RoundExecutorTests: XCTestCase {
         return tape
     }
 
+    /// A tape whose encode predates the saved snapshot must still move: pausing would write no
+    /// checkpoint, so the planner would hand back this same polish round and ⏯ would loop on the
+    /// same pause forever. Read the graph once, and save it for later rounds to carry forward.
+    func testPolishWithNoEncodeGraphReadsTheGraphFreshOnceAndSavesIt() async throws {
+        var tape = try refineTape()
+        let cs = ChangeSet(graphObservedAt: encodeObservedAt,
+                           ops: [.editBead(id: "fd-1", set: FieldSet(title: "Renamed"), pre: existingPre, delivery: nil)])
+        try seed(&tape, .encode, files: ["changeset.json": String(decoding: try cs.encoded(), as: UTF8.self), "plan.md": draftPlan])
+        let runner = ScriptedHarnessRunner { [unowned self] call in
+            ok(call, "pol", self.changeSetReply(pre: self.existingPre, extra: [self.newBead]))
+        }
+        let (cp, files) = try checkpoint(try await executor(runner).run(PlannedRound(stage: .polish, round: 1, major: true),
+                                                                        inputs(config(), tape: tape)))
+        XCTAssertEqual(runner.calls.filter { $0.executable == "br" && $0.arguments.first == "list" }.count, 1)
+        let saved = try IntakeJSON.decoder.decode(GraphSnapshot.self, from: try XCTUnwrap(files["graph.json"]))
+        XCTAssertEqual(saved.beads["fd-1"]?.status, "open")
+        XCTAssertTrue(cp.record.note?.contains("no encode graph snapshot; read the graph fresh") ?? false, cp.record.note ?? "nil")
+        XCTAssertEqual(try ChangeSet.decode(try XCTUnwrap(files["changeset.json"])).graphObservedAt, now,
+                       "stamped with the read it was actually validated against")
+    }
+
     /// Drift after encode is release's job: polish validates against the graph encode saw, so a
     /// bead that has since moved must not pause a polisher that kept its `pre` as told.
     func testBeadChangedAfterEncodeDoesNotPausePolish() async throws {
