@@ -74,6 +74,15 @@ public struct SystemCommandRunner: CommandRunner {
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
 
+        // Exit is observed through `terminationHandler`, never `waitUntilExit()`. The latter
+        // spins the calling thread's run loop waiting for Foundation's exit notification, and
+        // called from a GCD worker (below) it can miss it and block forever after the child is
+        // long gone — sampled on 2026-09-27 with four concurrent test runs, every one wedged in
+        // `waitUntilExit` with no child left. The handler is set before `run()` so an instant
+        // exit can't slip past it.
+        let exited = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in exited.signal() }
+
         try Task.checkCancellation()
         try process.run()
         onSpawn?(process.processIdentifier)
@@ -94,7 +103,7 @@ public struct SystemCommandRunner: CommandRunner {
                     err.data = stderrPipe.fileHandleForReading.readDataToEndOfFile(); group.leave()
                 }
                 group.notify(queue: .global()) {
-                    process.waitUntilExit()
+                    exited.wait()
                     continuation.resume(returning: (out.data, err.data, process.terminationStatus,
                                                     process.terminationReason == .uncaughtSignal))
                 }
