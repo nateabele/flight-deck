@@ -343,6 +343,85 @@ final class IntakeServiceTests: XCTestCase {
         XCTAssertEqual(br.calls.filter { $0.prefix(2) == ["br", "create"] }.count, 1)
     }
 
+    /// A project with no AGENTS.md (here, `/p` does not exist at all) must not have one listed.
+    func testInitialPromptOmitsAMissingAgentsFile() async {
+        let headless = FakeHeadlessRunner([Self.codex(Self.questions)])
+        let svc = makeService(headless: headless, br: MutableRunner(Self.brReplies(Self.openGraph)))
+        _ = await capture(svc)
+        let prompt = headless.commands[0].arguments.last ?? ""
+        XCTAssertFalse(prompt.contains("AGENTS.md"), prompt)
+    }
+
+    /// A release refused before anything was written returns to `.review` with the reason in
+    /// `failure` — the sheet shows it and stays open — and the next attempt starts clean
+    /// rather than carrying the old reason onto a release that worked.
+    func testRefusedReleaseKeepsItsReasonUntilTheNextAttempt() async {
+        let br = MutableRunner(Self.brReplies(Self.openGraph).merging(
+            ["br create": (#"{"id":"b9"}"#, 0), "br sync": ("", 0)]) { $1 })
+        let svc = makeService(headless: FakeHeadlessRunner([Self.codex(Self.beadRec(Self.createOp))]), br: br)
+        let id = await capture(svc)
+        let list = br.replies["br list"]
+        br.replies["br list"] = ("database is locked", 1)
+        await svc.release(id)
+        XCTAssertEqual(intake(svc, id).state, .review)
+        XCTAssertNotNil(intake(svc, id).failure)
+        XCTAssertFalse(ReleaseReviewView.shouldClose(after: intake(svc, id)))
+
+        br.replies["br list"] = list
+        await svc.release(id)
+        XCTAssertEqual(intake(svc, id).state, .released)
+        XCTAssertNil(intake(svc, id).failure)
+        XCTAssertTrue(ReleaseReviewView.shouldClose(after: intake(svc, id)))
+    }
+
+    /// Drift says b1 was open at triage and is in progress under BlueFalcon now; the sheet
+    /// has to gate its rating picker on THAT, since it is what release will act on.
+    func testReviewCarriesTheLiveStateOfADriftedOp() async {
+        let br = MutableRunner(Self.brReplies(Self.openGraph))
+        let svc = makeService(headless: FakeHeadlessRunner([Self.codex(Self.beadRec(Self.editB1))]), br: br)
+        let id = await capture(svc)
+        br.replies = Self.brReplies([("b1", "in_progress", "BlueFalcon"), ("b2", "open", nil)])
+        let review = await svc.reviewModel(id)
+        let live = Precondition(status: "in_progress", assignee: "BlueFalcon")
+        XCTAssertEqual(review?.livePre, [0: live])
+        XCTAssertEqual(review?.effectivePre(0), live)
+    }
+
+    /// The rating the human picks for a newly in-progress edit is the one release delivers —
+    /// here invalidating, so the holder is reclaimed and told to stop, not merely prompted.
+    func testConfirmedDriftReleasesWithTheUsersRating() async {
+        var injected: [String] = []
+        let br = MutableRunner(Self.brReplies(Self.openGraph))
+        let svc = makeService(headless: FakeHeadlessRunner([Self.codex(Self.beadRec(Self.editB1))]), br: br,
+                              hasSession: { _, _ in true }, inject: { _, _, text, _ in injected.append(text); return true })
+        let id = await capture(svc)
+        br.replies = Self.brReplies([("b1", "in_progress", "BlueFalcon"), ("b2", "open", nil)]).merging([
+            "br show": (#"[{"id":"b1","status":"in_progress","assignee":"BlueFalcon"}]"#, 0),
+            "br update": ("", 0), "br sync": ("", 0),
+        ].merging(Self.amReplies) { $1 }) { $1 }
+        svc.confirmDrift(id, op: 0)
+        svc.setRating(id, op: 0, .invalidating)
+        await svc.release(id)
+        XCTAssertEqual(intake(svc, id).state, .released, intake(svc, id).release?.error ?? "")
+        XCTAssertTrue(br.calls.contains { $0.prefix(5) == ["br", "update", "b1", "--status", "open"] }, "\(br.calls)")
+        XCTAssertEqual(injected.count, 1)
+        XCTAssertTrue(injected.first?.hasPrefix("Stop work on b1") == true, injected.first ?? "")
+    }
+
+    /// Dismissing a partial release is the one way its orange badge ever clears; the record
+    /// of what landed stays on disk.
+    func testDismissingAPartialReleaseStopsCountingItAndKeepsTheRecord() throws {
+        var i = Intake(projectPath: "/p", intent: "x")
+        i.state = .partiallyReleased
+        i.release = ReleaseRecord(releasedAt: Date(timeIntervalSince1970: 0), appliedSteps: 2, idMap: ["n1": "b9"], error: "boom")
+        try IntakeStore(root: root).save(i)
+        let svc = makeService(headless: FakeHeadlessRunner([]), br: MutableRunner([:]))
+        XCTAssertEqual(svc.attentionCount(forProject: "/p"), 1)
+        XCTAssertTrue(svc.discard(i.id))
+        XCTAssertEqual(svc.attentionCount(forProject: "/p"), 0)
+        XCTAssertEqual(try IntakeStore(root: root).load(id: i.id).release, i.release)
+    }
+
     func testDiscardCancelsAndHides() async {
         let svc = makeService(headless: FakeHeadlessRunner([Self.codex(Self.questions)]), br: MutableRunner(Self.brReplies(Self.openGraph)))
         let id = await capture(svc)

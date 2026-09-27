@@ -40,6 +40,15 @@ struct ReleaseReviewView: View {
             }
 
             if let review {
+                // Why the last Release was refused (drift moved, graph unreadable, …). It
+                // lands back in `.review` with nothing written, and the sheet stays open on
+                // it — closing silently would read as success.
+                if let failure = review.intake.failure {
+                    Text(failure)
+                        .font(.callout)
+                        .foregroundStyle(.orange)
+                        .accessibilityIdentifier("release-review-failure")
+                }
                 if let refreshWarning {
                     Text(refreshWarning)
                         .font(.caption2)
@@ -177,13 +186,17 @@ struct ReleaseReviewView: View {
                 }
             }
 
-        case .editBead(let id, let set, let pre, let delivery):
+        case .editBead(let id, let set, _, let delivery):
             VStack(alignment: .leading, spacing: 2) {
                 Text(id).bold()
                 ForEach(fieldDiff(set), id: \.self) { line in
                     Text(line).font(.caption)
                 }
-                if pre.status == "in_progress", let assignee = pre.assignee {
+                // Gated on the LIVE state for a drifted op, not the triage-time `pre`: a
+                // confirmed drift releases against the bead as it is now, so an edit to a
+                // bead someone claimed since triage gets a holder, a rating and a delivery —
+                // and this is the only place the human sees or chooses them.
+                if let pre = review.effectivePre(i), pre.status == "in_progress", let assignee = pre.assignee {
                     inProgressDetail(id: id, assignee: assignee, delivery: delivery, i: i, review: review)
                 }
             }
@@ -200,9 +213,10 @@ struct ReleaseReviewView: View {
     /// always, plus an inject or reclaim when the holder has a live session.
     @ViewBuilder
     private func inProgressDetail(id: String, assignee: String, delivery: Delivery?, i: Int, review: ReleaseReview) -> some View {
-        // Same fallback `DeliveryPlanner.plan` itself uses: a user override wins, otherwise
-        // the agent's own rating from triage.
-        let effective = review.intake.ratingOverrides[i] ?? delivery?.rating ?? .scopeChange
+        // The fallback release itself uses: a user override wins, then the agent's own rating
+        // from triage, then — for an edit that only became in-progress after triage — the
+        // rating drift suggests (`IntakeService.refreshing`).
+        let effective = review.intake.ratingOverrides[i] ?? delivery?.rating ?? suggestedRating(review, i) ?? .scopeChange
         let holderHasSession = hasSession(review, assignee)
 
         HStack(spacing: 6) {
@@ -223,7 +237,7 @@ struct ReleaseReviewView: View {
             .accessibilityIdentifier("release-review-rating-\(i)")
         }
         Text(plannedDelivery(id: id, assignee: assignee, rating: effective,
-                             reason: delivery?.reason ?? "", hasSession: holderHasSession))
+                             reason: delivery?.reason ?? driftReason(review, i) ?? "", hasSession: holderHasSession))
             .font(.caption2)
             .foregroundStyle(.secondary)
     }
@@ -231,7 +245,14 @@ struct ReleaseReviewView: View {
     // MARK: - Footer
 
     private func footerSummary(_ review: ReleaseReview) -> String {
-        let ops = self.ops(review)
+        // Drifted ops counted as release will write them — against the live state — or a
+        // bead claimed since triage would add a notice here that the footer never mentions.
+        var ops = self.ops(review)
+        for (n, live) in review.livePre where n < ops.count {
+            ops[n] = IntakeService.refreshing(ops[n], to: live,
+                                              rating: review.intake.ratingOverrides[n] ?? suggestedRating(review, n),
+                                              reason: driftReason(review, n) ?? "")
+        }
         let held = Set(ops.indices.filter { isHeld(ops[$0]) })
         return ReleaseSummary.text(
             ops, heldOpIndices: held, drift: review.drift, dropped: review.intake.droppedOps,
@@ -285,12 +306,37 @@ struct ReleaseReviewView: View {
         guard releasing else { return }
         await store.intakeService.release(intakeID)
         releasing = false
-        onClose()
+        let after = store.intakeService.intakes.first { $0.id == intakeID }
+        if Self.shouldClose(after: after) {
+            onClose()
+        } else {
+            await refresh()
+        }
+    }
+
+    /// Close only once something was written. A refused release lands back in `.review`
+    /// with its reason in `failure`; closing then hid the refusal entirely — the sheet went
+    /// away exactly as it does on success, and the detail pane showed only "Open release
+    /// review". A vanished intake has nothing left to review.
+    static func shouldClose(after intake: Intake?) -> Bool {
+        guard let intake else { return true }
+        return intake.state == .released || intake.state == .partiallyReleased
     }
 
     // MARK: - Helpers
 
     private func ops(_ review: ReleaseReview) -> [ChangeOp] { review.intake.changeSet?.ops ?? [] }
+
+    private func suggestedRating(_ review: ReleaseReview, _ i: Int) -> DeliveryRating? {
+        guard i < review.drift.count, case .drifted(_, let suggested) = review.drift[i] else { return nil }
+        return suggested
+    }
+
+    /// The reason release attaches to a delivery triage never rated (`IntakeService.refreshing`).
+    private func driftReason(_ review: ReleaseReview, _ i: Int) -> String? {
+        guard i < review.drift.count, case .drifted(let reason, _) = review.drift[i] else { return nil }
+        return reason
+    }
 
     private func hasSession(_ review: ReleaseReview, _ agent: String) -> Bool {
         store.session(project: review.intake.projectPath, agentName: agent) != nil

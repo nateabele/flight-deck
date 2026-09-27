@@ -27,6 +27,7 @@ struct IntakeDetailView: View {
                 Text(intake.intent)
                 Divider()
                 content
+                closeButton
             }
             .padding(16)
             .frame(maxWidth: .infinity, alignment: .topLeading)
@@ -80,8 +81,11 @@ struct IntakeDetailView: View {
             Button("Send answers") { service.answer(intake.id, answers: answers) }
                 .disabled(!Self.canSendAnswers(answers))
         }
-        .task(id: questions) {
-            if answers.count != questions.count { answers = Array(repeating: "", count: questions.count) }
+        // Keyed on the questions' CONTENTS (and the intake): a follow-up round with the same
+        // number of questions used to keep the previous round's answers typed into the new
+        // questions' fields, ready to send against questions they never answered.
+        .task(id: [intake.id.uuidString] + questions) {
+            answers = Array(repeating: "", count: questions.count)
         }
     }
 
@@ -130,12 +134,18 @@ struct IntakeDetailView: View {
     private var parkedBody: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Parked — planning rounds arrive with the round engine.").foregroundStyle(.secondary)
-            Button("Discard", role: .destructive) { service.discard(intake.id) }
         }
     }
 
     private var reviewBody: some View {
-        Button("Open release review", action: onOpenReview)
+        VStack(alignment: .leading, spacing: 12) {
+            // A refused release comes back here with its reason — without this line the only
+            // trace of the refusal was the sheet having closed.
+            if let failure = intake.failure {
+                Text(failure).foregroundStyle(.orange)
+            }
+            Button("Open release review", action: onOpenReview)
+        }
     }
 
     private var releasingBody: some View {
@@ -182,10 +192,29 @@ struct IntakeDetailView: View {
                     .frame(maxHeight: 200)
                 }
             }
-            HStack(spacing: 8) {
-                Button("Retry") { service.retry(intake.id) }
-                Button("Discard", role: .destructive) { service.discard(intake.id) }
-            }
+            Button("Retry") { service.retry(intake.id) }
+        }
+    }
+
+    /// Every state has a way off the list except `.releasing`, which `IntakeService.discard`
+    /// refuses (beads half-written, no record yet). Before this an intake stuck at a question,
+    /// a choice or the review had no exit, and a `.partiallyReleased` one — which counts as
+    /// needing attention — kept its project's orange badge lit forever.
+    @ViewBuilder
+    private var closeButton: some View {
+        if let label = Self.closeAction(for: intake.state) {
+            Button(label, role: label == "Discard" ? .destructive : nil) { service.discard(intake.id) }
+        }
+    }
+
+    /// "Dismiss" once released: nothing is thrown away — `discard` only hides the intake, its
+    /// `ReleaseRecord` stays in `intake.json` — so "Discard" would misdescribe it. Nil for
+    /// `.releasing` (see `closeButton`) and `.discarded` (never listed).
+    static func closeAction(for state: IntakeState) -> String? {
+        switch state {
+        case .triaging, .needsAnswers, .awaitingChoice, .parked, .review, .failed, .interrupted: "Discard"
+        case .released, .partiallyReleased: "Dismiss"
+        case .releasing, .discarded: nil
         }
     }
 
