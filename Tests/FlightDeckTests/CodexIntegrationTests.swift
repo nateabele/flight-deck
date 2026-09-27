@@ -39,8 +39,9 @@ import XCTest
 ///    against the TUI, reproduced headlessly via `thread/resume` rather than a pty.
 ///    `testPrepareReleasesTheWriterLockSoASecondConnectionCanResumeTheThread` below.
 /// 6. **The control-socket grant** — `CodexControlAccess`'s flags, which ride on codex's
-///    experimental `network_proxy` feature, must still let a sandboxed command reach one unix
-///    socket directory while a TCP connect to the internet stays refused.
+///    experimental `network_proxy` feature, must still let a sandboxed command reach exactly
+///    one unix socket FILE — not a sibling in the same directory — while a direct TCP connect
+///    is refused by the seatbelt and an HTTP request through codex's own proxy is denied.
 ///    `testControlSocketGrantConnectsWithoutOpeningTheInternet` below.
 ///
 /// Every thread a test here creates is deleted by that same test, by the id codex handed
@@ -578,16 +579,26 @@ final class CodexIntegrationTests: XCTestCase {
     /// tab silently loses `flightdeck` (the CLI exits 77) and nothing hermetic can notice,
     /// because the unit suite only ever sees the argv we build. This runs that exact argv
     /// through `codex sandbox`, which applies the same seatbelt profile a codex tab's tool
-    /// calls get, and asserts three things:
+    /// calls get, and asserts five things:
     ///
     /// 1. **Control:** without the grant, the default `:workspace` profile refuses the socket.
     ///    Without this, a codex that allowed every unix socket by default would make the grant
     ///    look like it works when it no longer does anything.
     /// 2. **The grant reaches the socket:** a sandboxed client connects and gets its echo back.
-    /// 3. **The grant does not open the internet:** a TCP connect to 1.1.1.1:443 still fails.
-    ///    This is the most important assertion. The whole reason for the proxy route over
-    ///    `danger-full-access` is that it opens one socket directory and nothing else; if this
-    ///    ever passes a connection, the grant is wider than its documentation claims.
+    /// 3. **The grant reaches ONLY that socket:** a second socket, `other.sock`, in the same
+    ///    directory is refused with EPERM. codex turns each `unix_sockets` key into a seatbelt
+    ///    `(subpath <key>)`, so a directory key would open every socket beside the control
+    ///    socket — in the real state dir that includes `answer-trigger.sock`, which is
+    ///    unauthenticated and can press Return in any tab.
+    /// 4. **No direct egress:** a TCP connect to 1.1.1.1:443 fails with the seatbelt's own
+    ///    `Operation not permitted` (EPERM). Any other failure — a timeout, no route — is what
+    ///    an offline Mac produces too, so it proves nothing about the sandbox and must not pass.
+    /// 5. **No egress through the proxy:** codex points the child's `http_proxy` and friends at
+    ///    its own managed proxy, which is the route a proxy-aware tool actually takes. An HTTP
+    ///    request through it must be denied (403, a proxy error or a refusal), never a 200.
+    ///    The whole reason for the proxy route over `danger-full-access` is that it opens one
+    ///    socket and nothing else; if 4 or 5 ever let traffic out, the grant is wider than its
+    ///    documentation claims.
     ///
     /// No model turn: `codex sandbox` runs a local command, so this costs no tokens.
     func testControlSocketGrantConnectsWithoutOpeningTheInternet() throws {
@@ -598,25 +609,37 @@ final class CodexIntegrationTests: XCTestCase {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
         let socket = dir.appendingPathComponent("control.sock")
+        // A sibling of the control socket, standing in for `answer-trigger.sock` and every
+        // other socket that shares Flight Deck's state directory.
+        let other = dir.appendingPathComponent("other.sock")
 
-        // Stands in for Flight Deck's control socket. An echo is enough: the sandbox decides at
+        // Stands in for Flight Deck's sockets. An echo is enough: the sandbox decides at
         // `connect()`, before any protocol byte, so what the server speaks does not matter.
+        // One process serves every path given, one thread per socket.
         let server = Process()
         server.executableURL = URL(fileURLWithPath: "/usr/bin/env")
         server.arguments = ["python3", "-c", """
-        import socket, sys
-        s = socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); s.listen(8)
+        import socket, sys, threading, time
+        def serve(path):
+            s = socket.socket(socket.AF_UNIX); s.bind(path); s.listen(8)
+            while True:
+                c, _ = s.accept(); c.sendall(c.recv(64)); c.close()
+        for path in sys.argv[1:]:
+            threading.Thread(target=serve, args=(path,), daemon=True).start()
         while True:
-            c, _ = s.accept(); c.sendall(c.recv(64)); c.close()
-        """, socket.path]
+            time.sleep(60)
+        """, socket.path, other.path]
         server.standardOutput = FileHandle.nullDevice
         server.standardError = FileHandle.nullDevice
         try server.run()
         defer { server.terminate(); server.waitUntilExit() }
 
-        let listening = FileManager.default.fileExists(atPath: socket.path)
-            || waitSynchronously(timeout: 5) { FileManager.default.fileExists(atPath: socket.path) }
-        XCTAssertTrue(listening, "the echo server never bound \(socket.path)")
+        let bothBound = { [socket, other] in
+            FileManager.default.fileExists(atPath: socket.path)
+                && FileManager.default.fileExists(atPath: other.path)
+        }
+        let listening = bothBound() || waitSynchronously(timeout: 5, bothBound)
+        XCTAssertTrue(listening, "the echo server never bound \(socket.path) and \(other.path)")
         guard listening else { return }
 
         // Each script prints a marker and exits 0 whatever the outcome, so a result the test
@@ -631,12 +654,30 @@ final class CodexIntegrationTests: XCTestCase {
         except OSError as e:
             print("REFUSED", e)
         """
+        // Prints the errno so the assertion can demand EPERM specifically: the seatbelt refuses
+        // a connect with EPERM, while an offline Mac times out or has no route.
         let netCheck = """
         import socket
         try:
             socket.create_connection(("1.1.1.1", 443), timeout=4); print("INTERNET-OPEN")
         except OSError as e:
-            print("INTERNET-BLOCKED", e)
+            print("INTERNET-BLOCKED errno=%s %s" % (e.errno, e))
+        """
+        // Goes through whatever proxy codex injected, via urllib's default env-proxy handling
+        // (`http_proxy`). Prints the proxy variables it saw on one line, then exactly one
+        // outcome marker on the last line. A 403 from the proxy arrives as an `HTTPError`,
+        // which is an `OSError` subclass, so it lands in the DENIED branch with its status.
+        let proxyCheck = """
+        import os, urllib.request, urllib.error
+        print("PROXY-VARS", " ".join(sorted("%s=%s" % (k, v) for k, v in os.environ.items()
+                                            if "proxy" in k.lower())) or "<none>")
+        try:
+            r = urllib.request.urlopen("http://example.com", timeout=8)
+            print("PROXY-ALLOWED status=%s" % r.status)
+        except urllib.error.HTTPError as e:
+            print("PROXY-DENIED http=%s %s" % (e.code, e.reason))
+        except OSError as e:
+            print("PROXY-DENIED error=%s" % e)
         """
 
         let control = try runCodexSandbox(profile: ":workspace", grant: [], cwd: dir,
@@ -654,11 +695,28 @@ final class CodexIntegrationTests: XCTestCase {
                        "codex no longer honours the network_proxy unix-socket grant; every codex "
                        + "tab's flightdeck now exits 77 (see docs/FOLLOWUPS.md): \(reached)")
 
+        let sibling = try runCodexSandbox(profile: "flightdeck", grant: grant, cwd: dir,
+                                          command: ["python3", "-c", client, other.path])
+        XCTAssertTrue(sibling.stdout.hasPrefix("REFUSED") && sibling.stdout.contains("Operation not permitted"),
+                      "the grant reached a SECOND socket beside the control socket — it must name "
+                      + "the socket file, or answer-trigger.sock is open to every codex tool call: \(sibling)")
+
         let internet = try runCodexSandbox(profile: "flightdeck", grant: grant, cwd: dir,
                                            command: ["python3", "-c", netCheck])
-        XCTAssertTrue(internet.stdout.hasPrefix("INTERNET-BLOCKED"),
-                      "the control-socket grant opened general network access — it must allow "
-                      + "one socket directory and nothing else: \(internet)")
+        XCTAssertTrue(internet.stdout.hasPrefix("INTERNET-BLOCKED errno=1 ")
+                        && internet.stdout.contains("Operation not permitted"),
+                      "a direct TCP connect must be refused by the SEATBELT (EPERM); any other "
+                      + "outcome is either open egress or an offline Mac, and neither proves the "
+                      + "grant stays narrow: \(internet)")
+
+        let proxied = try runCodexSandbox(profile: "flightdeck", grant: grant, cwd: dir,
+                                          command: ["python3", "-c", proxyCheck])
+        // Printed so a live run's log records which proxy variables codex injected.
+        print("control-socket guard, proxy check: \(proxied)")
+        let proxyOutcome = proxied.stdout.split(separator: "\n").last.map(String.init) ?? ""
+        XCTAssertTrue(proxied.stdout.hasPrefix("PROXY-VARS ") && proxyOutcome.hasPrefix("PROXY-DENIED"),
+                      "an HTTP request through codex's own proxy must be denied, never answered: "
+                      + "\(proxied)")
     }
 
     // MARK: - Test doubles
