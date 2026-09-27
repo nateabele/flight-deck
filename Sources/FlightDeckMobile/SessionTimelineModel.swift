@@ -1237,12 +1237,26 @@ final class SessionTimelineModel {
                     self.visibleFirstID = nil
                     self.visibleLastID = nil
                 }
-                let itemsChanged = self.feed.merge(page)
+                // **Merged into a copy and assigned back only if it moved**, and the same for the
+                // outbox below. `@Observable` notifies on every in-place mutation — a `mutating`
+                // call through the property's `_modify` — whether or not anything changed, so
+                // `self.feed.merge(page)` on a quiet poll invalidated every view that reads
+                // `feed`, which is every visible row, every 1.5s: profiled at over a third of
+                // the phone's CPU on a busy session with nothing arriving. The `!=` is cheap on
+                // exactly that poll — a no-op merge hands back the held array, so the item
+                // comparison short-circuits on buffer identity. Plain assignments need no such
+                // guard: the macro already skips notifying when an `Equatable` value is written
+                // unchanged, which `testAQuietPollNotifiesNothingTheScreenReads` pins.
+                var feed = self.feed
+                let itemsChanged = feed.merge(page)
+                if feed != self.feed { self.feed = feed }
                 // The transcript is the only thing that confirms a sent message reached the
                 // agent — see `PromptOutbox`. Done here rather than in `send` because the page
                 // that holds it can arrive from any fetch: the `loadNewer` an ack triggers,
                 // a reader scrolling, or a return to a screen kept in `FleetModel`.
-                self.outbox.reconcile(with: self.feed.items)
+                var outbox = outboxBefore
+                outbox.reconcile(with: feed.items)
+                if outbox != outboxBefore { self.outbox = outbox }
                 // Recompute maintained state only when an input to it actually moved: the folded
                 // items, whether there is more history (drives the prefetch id), or the set of
                 // delivered outbox ghosts. A quiet 1.5s poll changes none of these and rebuilds
