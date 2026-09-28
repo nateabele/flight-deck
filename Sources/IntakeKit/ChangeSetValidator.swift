@@ -7,17 +7,32 @@ public enum ValidationError: Equatable, Sendable {
 public struct ValidationErrors: Error, Equatable, Sendable { public let errors: [ValidationError] }
 
 extension ValidationError {
-    /// One sentence an agent can act on — fed back verbatim by `Triage.correctionPrompt`, and
-    /// shown to the human when the corrected change set fails too (spec §11).
+    /// One sentence an agent can act on — fed back verbatim by `Triage.correctionPrompt`, in the
+    /// schema's own words (createBead, tempId, addEdge). Never shown to the human: that is
+    /// `userMessage`.
     public var message: String {
         switch self {
-        case .unknownBead(let id): "`\(id)` is not a bead in the graph"
+        case .unknownBead(let id): "`\(id)` is not in the graph"
         case .undefinedTempId(let t): "`new:\(t)` is referenced, but no createBead or followUp op defines tempId `\(t)`"
         case .duplicateTempId(let t): "tempId `\(t)` is defined by more than one op"
         case .selfEdge(let ref): "an addEdge points `\(ref)` at itself"
         case .cycle: "the blocking edges, together with the graph's existing edges, form a cycle"
         case .missingDelivery(let id): "`\(id)` is in_progress, so its editBead needs a `delivery` rating"
         case .preconditionMismatch(let id): "the `pre` for `\(id)` does not match its current status and assignee in the graph"
+        }
+    }
+    /// The same failure for the human, when the corrected change set fails too (spec §11): in
+    /// tasks, never beads, and without the schema's op names (spec §2). Fed to the human as
+    /// `message` once, it read "no createBead or followUp op defines tempId `t1`".
+    public var userMessage: String {
+        switch self {
+        case .unknownBead(let id): "\(id) is not a task in the graph"
+        case .undefinedTempId: "a dependency names a new task the plan never creates"
+        case .duplicateTempId: "two new tasks were given the same name"
+        case .selfEdge: "a task was made to depend on itself"
+        case .cycle: "the new dependencies, with the graph's own, go round in a circle"
+        case .missingDelivery(let id): "\(id) is in progress, so its edit needs a rating for how to tell its holder"
+        case .preconditionMismatch(let id): "\(id)'s status or holder doesn't match the task graph"
         }
     }
 }

@@ -44,20 +44,29 @@ enum TerminologyScan {
         // (`inject(...)`), never shown to the human user — spec §2 exempts agent prompts.
         "or reply on the Agent Mail thread bead:$.",
 
-        // BeadWriter.run(.recheck) formats `br`'s own step failure — spec §2 names BeadWriter
-        // itself as a kept internal.
-        "$: bead not found: $",
-
-        // ObserveLaneModel.unavailableKeys: "beads" is FlywheelProjection's own snapshot-field
-        // key (mirrors `lanesUnavailable.insert("beads")`, itself exempt via the `.beads`
-        // line-component skip below) — an internal correlation key, never displayed.
-        "beads",
     ]
 
-    static func offenders(under root: URL, allow: Set<String>) throws -> [String] {
+    /// Literals exempt in ONE file only. A bare `"beads"` anywhere else is exactly the kind of
+    /// literal the guard exists to catch; allowing it app-wide exempted every future one too.
+    static let fileAllowList: [String: Set<String>] = [
+        // ObserveDrawer's lane keys and FlywheelProjection's `lanesUnavailable` both use
+        // "beads" as the snapshot-field key the two correlate on — never displayed.
+        "ObserveDrawer.swift": ["beads"],
+        "FlywheelProjection.swift": ["beads"],
+    ]
+
+    /// IntakeKit files whose literals are all agent- or `br`-facing: prompts and schemas an agent
+    /// reads, mail and injected text sent to an agent, and `br` argv/paths (spec §2 keeps the
+    /// word there). Every other IntakeKit file is scanned — its strings reach the human as a
+    /// failure, a diagnosis or a summary, and the app-side sweep can't see them.
+    static let agentFacingIntakeKitFiles: Set<String> = [
+        "Triage.swift", "RoundPrompts.swift", "DeliveryPlanner.swift", "ShadowGraph.swift",
+    ]
+
+    static func offenders(under root: URL, allow: Set<String>, skipping skipped: Set<String> = []) throws -> [String] {
         var offenses: [String] = []
-        for file in try swiftFiles(under: root) {
-            offenses += try scan(file: file, allow: allow)
+        for file in try swiftFiles(under: root) where !skipped.contains(file.lastPathComponent) {
+            offenses += try scan(file: file, allow: allow.union(fileAllowList[file.lastPathComponent] ?? []))
         }
         return offenses
     }
@@ -82,10 +91,15 @@ enum TerminologyScan {
     /// while a genuine, renamable literal sits right next to it on the same line — see
     /// `isPathFragment(_:)`, which checks the literal itself instead.
     private static func isExempt(line: String) -> Bool {
-        let needles = ["Logger", "logger.", "accessibilityIdentifier(", "argv", "args", "\"br\""]
+        let needles = ["Logger", "logger.", "accessibilityIdentifier(", "\"br\""]
         let lowered = line.lowercased()
         return needles.contains { lowered.contains($0.lowercased()) }
+            || argvWord.firstMatch(in: line, range: NSRange(location: 0, length: (line as NSString).length)) != nil
     }
+
+    /// `argv`/`args` as whole words: a bare substring match exempted any line that merely said
+    /// "targets" or "largest", along with whatever user-visible literal sat on it.
+    private static let argvWord = try! NSRegularExpression(pattern: "\\b(argv|args)\\b")
 
     /// True for a literal that IS an on-disk path fragment (SessionStore's `.beads` watch path,
     /// `beads.db`/`beads.db-wal`, or anything built via `.appendingPathComponent(`) — checked
@@ -197,6 +211,46 @@ final class TerminologyGuardTests: XCTestCase {
             .appendingPathComponent("../../../../Sources/FlightDeck").standardized
         let offenders = try TerminologyScan.offenders(under: root, allow: TerminologyScan.internalAllowList)
         XCTAssertEqual(offenders, [], offenders.joined(separator: "\n"))
+    }
+
+    /// IntakeKit's own user-facing strings — validation failures, round diagnoses, summaries —
+    /// reach the sheet, the board and the failed seat row, and the app-side sweep above never
+    /// read them: "is not a bead in the graph" and "Could not read the bead graph" both shipped.
+    func testNoUserVisibleIntakeKitStringSaysBead() throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .appendingPathComponent("../../../../Sources/IntakeKit").standardized
+        let offenders = try TerminologyScan.offenders(under: root, allow: TerminologyScan.internalAllowList,
+                                                      skipping: TerminologyScan.agentFacingIntakeKitFiles)
+        XCTAssertEqual(offenders, [], offenders.joined(separator: "\n"))
+    }
+
+    /// The validator's words are two: `message` goes back to the agent verbatim (its own schema
+    /// says createBead/tempId), `userMessage` is what a twice-failed change set shows the human.
+    func testValidationFailuresShownToTheHumanSayTask() {
+        let all: [ValidationError] = [.unknownBead("fd-1"), .undefinedTempId("t1"), .duplicateTempId("t1"),
+                                      .selfEdge("fd-1"), .cycle, .missingDelivery("fd-1"), .preconditionMismatch("fd-1")]
+        for error in all {
+            let text = error.userMessage.lowercased()
+            for word in ["bead", "tempid", "createbead", "followup", "addedge", "editbead", "new:"] {
+                XCTAssertFalse(text.contains(word), "\(error): \(error.userMessage)")
+            }
+        }
+    }
+
+    /// The `\bargs\b` exemption is a word, not a substring.
+    func testArgsExemptionIsAWholeWord() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("TerminologyScan-\(UUID())", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try """
+        let largest = "the largest bead"
+        let args = ["bead"]
+        let copy = "beads"
+        """.write(to: dir.appendingPathComponent("Probe.swift"), atomically: true, encoding: .utf8)
+        let offenders = try TerminologyScan.offenders(under: dir, allow: TerminologyScan.internalAllowList)
+        XCTAssertEqual(offenders.count, 2, offenders.joined(separator: "\n"))
+        XCTAssertTrue(offenders[0].contains("largest bead"))
+        XCTAssertTrue(offenders[1].contains("\"beads\""), "a bare \"beads\" is allowed in its two files only")
     }
 
     func testUIText() {
