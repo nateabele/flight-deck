@@ -13,9 +13,8 @@ struct TapeSlot: Identifiable, Equatable {
     let name: String
     let code: String
     var state: State
-    /// Finished rounds: this checkpoint's `createdAt` minus the previous one's. Live: now minus
-    /// the previous checkpoint's `createdAt`. nil where there's no honest origin — see
-    /// `BoardModel.init`.
+    /// How long the round ran (finished or failed) or has been running (live); nil where there's
+    /// no honest origin. See `BoardModel.duration`.
     var duration: TimeInterval?
     let major: Bool
     /// The round consumed notes, or will consume an unanchored note that's pending now.
@@ -64,13 +63,6 @@ struct BoardModel: Equatable {
     /// `now` is the caller's clock (a 1 Hz timer), not `Date()`, so the live slot's duration is
     /// testable and the board re-derives only when the view asks.
     ///
-    /// Durations are differences between checkpoint `createdAt`s, the only round timestamps the
-    /// tape keeps. The live round is timed from the previous checkpoint rather than from
-    /// `heartbeat`, which the runner rewrites on every beat and so marks "last seen", never "round
-    /// began". The first round has no earlier checkpoint, and `Intake.createdAt` would fold
-    /// triage and the human's think time into Draft, so it gets no duration rather than a wrong
-    /// one. Known bias: time the tape sat paused before a round started counts toward that
-    /// round, since no round-start timestamp is recorded.
     init(intake: Intake, tape: Tape, config: RoundConfig, now: Date, selected: Int?, preview: PlayMode?) {
         let markers = Self.stages(tape: tape, config: config)
         let pending = markers.firstIndex { !$0.done }
@@ -83,28 +75,26 @@ struct BoardModel: Equatable {
         for (i, marker) in markers.enumerated() {
             let checkpoint = marker.checkpointID.flatMap { id in tape.checkpoints.first { $0.id == id } }
             var state: TapeSlot.State = .future
-            var duration: TimeInterval?
             var flagged = false
             if let checkpoint {
                 state = checkpoint.id == selected ? .selected : .done
-                if i > 0, let prior = markers[i - 1].checkpointID.flatMap({ id in tape.checkpoints.first { $0.id == id } }) {
-                    duration = checkpoint.createdAt.timeIntervalSince(prior.createdAt)
-                }
                 flagged = !checkpoint.record.annotations.isEmpty
             } else if i == pending {
                 switch tape.status {
-                case .running:
-                    state = .live
-                    duration = tape.head.map { max(0, now.timeIntervalSince($0.createdAt)) }
+                case .running: state = .live
                 case .failed: state = .failed
                 default: break
                 }
                 flagged = unanchoredPending
             }
+            // Done markers are the tape's checkpoints in order, so the previous one is `i - 1`.
+            let previous = i > 0 && i <= tape.checkpoints.count ? tape.checkpoints[i - 1] : nil
             slots.append(TapeSlot(id: "\(marker.stage.rawValue)-\(marker.round)",
                                   name: Self.name(stage: marker.stage, round: marker.round),
                                   code: Self.code(stage: marker.stage, round: marker.round),
-                                  state: state, duration: duration, major: marker.major, flagged: flagged,
+                                  state: state,
+                                  duration: Self.duration(state: state, landed: checkpoint, previous: previous, tape: tape, now: now),
+                                  major: marker.major, flagged: flagged,
                                   checkpointID: marker.checkpointID, group: Self.group(marker.stage)))
         }
         slots.append(TapeSlot(id: "review", name: "Review", code: "REV",
@@ -148,7 +138,14 @@ struct BoardModel: Equatable {
             self.now = BoardField(label: "NOW", shortLabel: "NOW", value: next?.name ?? head ?? "—",
                                   detail: tape.pauseDiagnosis?.detail ?? "Round failed")
             self.nowChip = "FAILED"
-            self.inTheAir = Self.sinceHead(tape, head: head, label: "HALTED FOR", short: "HLT", now: now)
+            if let failedAt = tape.failedAt, let failed = next {
+                self.inTheAir = BoardField(label: "HALTED FOR", shortLabel: "HLT",
+                                           value: Self.clock(max(0, now.timeIntervalSince(failedAt))),
+                                           detail: "since \(failed.name) failed")
+            } else {
+                // A failure written before `failedAt` existed: the head's landing is the last time on record.
+                self.inTheAir = Self.sinceHead(tape, head: head, label: "HALTED FOR", short: "HLT", now: now)
+            }
         case .reachedReview:
             self.now = BoardField(label: "NOW", shortLabel: "NOW", value: "Review", detail: "Landed · ready for review")
             self.nowChip = "NEEDS YOU"
@@ -179,9 +176,10 @@ struct BoardModel: Equatable {
                                   value: stop.map { slots[$0].name } ?? "You’re here",
                                   detail: stop.map { (slots[$0].major ? "major · " : "minor · ") + modeName }
                                       ?? "Nothing left to run")
+        // The spec's shape: how many major stops remain, then their names ("2 · Dedup · Review").
         let after = stop.map { slots[($0 + 1)...].filter(\.major).map(\.name) } ?? []
         self.callingAt = BoardField(label: "CALLING AT", shortLabel: "CALL",
-                                    value: after.isEmpty ? "Release tasks · done" : after.joined(separator: " · "),
+                                    value: after.isEmpty ? "Release tasks · done" : (["\(after.count)"] + after).joined(separator: " · "),
                                     detail: nil)
     }
 
@@ -307,8 +305,39 @@ struct BoardModel: Equatable {
         }
     }
 
-    /// PAUSED FOR / HALTED FOR: time since the head landed, said as such in `detail` — for a
-    /// failed tape that includes the failed round's own run, since the failure isn't timestamped.
+    /// The one place a slot's duration is decided, from the engine's round timestamps:
+    ///
+    /// - finished: `createdAt − startedAt`;
+    /// - live: `now − roundStartedAt`;
+    /// - failed: `failedAt − roundStartedAt`.
+    ///
+    /// A tape written before those timestamps existed falls back to the gap since the previous
+    /// checkpoint, for finished and live rounds. That gap includes any time the tape sat paused
+    /// before the round, but it is the best the old tape records. `heartbeat` is never an
+    /// origin: the runner rewrites it on every beat, so it means "last seen", not "round began".
+    /// With no timestamps, the first round falls back to nothing: `Intake.createdAt` would fold
+    /// triage and the human's think time into Draft. A failure without both timestamps also gets
+    /// nothing. Clarify slots never reach here, because exchanges carry no timestamps.
+    private static func duration(state: TapeSlot.State, landed: Checkpoint?, previous: Checkpoint?,
+                                 tape: Tape, now: Date) -> TimeInterval? {
+        if let landed {
+            guard let start = landed.startedAt ?? previous?.createdAt else { return nil }
+            return landed.createdAt.timeIntervalSince(start)
+        }
+        switch state {
+        case .live:
+            guard let start = tape.roundStartedAt ?? tape.head?.createdAt else { return nil }
+            return max(0, now.timeIntervalSince(start))
+        case .failed:
+            guard let start = tape.roundStartedAt, let end = tape.failedAt else { return nil }
+            return end.timeIntervalSince(start)
+        case .done, .future, .selected:
+            return nil
+        }
+    }
+
+    /// PAUSED FOR (and HALTED FOR on a tape without `failedAt`): time since the head landed,
+    /// said as such in `detail`.
     private static func sinceHead(_ tape: Tape, head: String?, label: String, short: String, now: Date) -> BoardField {
         guard let checkpoint = tape.head, let head else {
             return BoardField(label: label, shortLabel: short, value: "—", detail: nil)

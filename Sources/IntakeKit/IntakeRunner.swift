@@ -276,7 +276,9 @@ private actor TapeKeeper {
             // child editing `work/` under the rerun, is the worse failure.
             hooks.killGroup(pid)
         }
+        // The interrupted round's work is thrown away, so is its start: the rerun gets its own.
         tape.roundInProgress = nil
+        tape.roundStartedAt = nil
         save()
         return true
     }
@@ -325,6 +327,8 @@ private actor TapeKeeper {
         tape.status = .running
         tape.pauseDiagnosis = nil
         tape.roundInProgress = next
+        tape.roundStartedAt = now()
+        tape.failedAt = nil
         tape.heartbeat = now()
         save()
         return tape
@@ -345,11 +349,14 @@ private actor TapeKeeper {
     /// and spends a reached target — all in `writeCheckpoint`'s single tape save, so a crash
     /// leaves either the whole round recorded or none of it.
     func writeCheckpoint(_ cp: Checkpoint, files: [String: Data], config: RoundConfig) throws {
+        var cp = cp
+        cp.startedAt = cp.startedAt ?? tape.roundStartedAt
         var next = tape
         for used in cp.record.annotations {
             if let i = next.pendingNotes.firstIndex(where: { $0.id == used.id }) { next.pendingNotes.remove(at: i) }
         }
         next.roundInProgress = nil
+        next.roundStartedAt = nil
         next.heartbeat = now()
         var after = next
         after.checkpoints.append(cp)
@@ -363,7 +370,17 @@ private actor TapeKeeper {
 
     /// The runner's last write: the final status, with `runnerPID` and `heartbeat` cleared so
     /// nothing reads an exited runner as alive.
+    ///
+    /// A round that fails keeps `roundStartedAt` and gets `failedAt`, so its duration survives
+    /// until the next round starts. Every other ending has no round left to time. A relaunched
+    /// runner re-finishing an already-failed tape has no round in progress, so it leaves both
+    /// timestamps as the failure wrote them.
     func finish(_ status: RunnerStatus, diagnosis: Diagnosis? = nil) -> RunnerStatus {
+        if status == .failed {
+            if tape.roundInProgress != nil { tape.failedAt = now() }
+        } else {
+            tape.roundStartedAt = nil
+        }
         tape.status = status
         if let diagnosis { tape.pauseDiagnosis = diagnosis }
         tape.roundInProgress = nil
