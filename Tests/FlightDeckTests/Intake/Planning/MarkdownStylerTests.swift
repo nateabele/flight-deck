@@ -155,4 +155,32 @@ final class MarkdownStylerTests: XCTestCase {
         let color = storage.attribute(.foregroundColor, at: location, effectiveRange: nil) as? NSColor
         return (font?.pointSize ?? 13) < 1 && color == .clear
     }
+
+    /// The keystroke re-parse (`blocks(_:after:edited:delta:)`) is the whole-text parse, only
+    /// cheaper: for edits that open and close fences, join and split paragraphs, turn lines
+    /// into headings and back, and edit at both ends, it gives exactly the blocks a fresh
+    /// parse of the new text does.
+    func testIncrementalReparseEqualsAFullParse() {
+        let base = "# Plan\n\nIntro **bold** line\nsecond line\n\n- item `a`\n- item b\n\n```\ncode\n```\n\n| a | b |\n| c | d |\n\n## Tail\nlast"
+        let edits: [(String, NSRange)] = [
+            ("x", NSRange(location: 0, length: 0)),           // at the very start
+            ("```\n", NSRange(location: 8, length: 0)),       // opens a fence that runs to the next
+            ("", NSRange(location: 25, length: 1)),            // joins two lines of the paragraph
+            ("\n\n", NSRange(location: 20, length: 0)),       // splits the paragraph
+            ("## ", NSRange(location: 8, length: 0)),          // a paragraph line becomes a heading
+            ("", NSRange(location: 57, length: 4)),            // eats the closing fence
+            ("|x|\n", NSRange(location: 62, length: 0)),       // grows the table
+            ("!", NSRange(location: (base as NSString).length, length: 0)), // at the very end
+            ("", NSRange(location: 38, length: 12)),           // across two blocks
+        ]
+        for (insert, range) in edits {
+            let ns = base as NSString
+            guard NSMaxRange(range) <= ns.length else { return XCTFail("bad fixture range \(range)") }
+            let edited = ns.replacingCharacters(in: range, with: insert)
+            let delta = (insert as NSString).length - range.length
+            let edit = NSRange(location: range.location, length: (insert as NSString).length)
+            XCTAssertEqual(MarkdownStyler.blocks(edited, after: MarkdownStyler.blocks(base), edited: edit, delta: delta),
+                           MarkdownStyler.blocks(edited), "insert \(insert.debugDescription) at \(range)")
+        }
+    }
 }

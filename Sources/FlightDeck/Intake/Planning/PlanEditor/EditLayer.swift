@@ -35,6 +35,11 @@ enum EditLayer {
     /// Shown once per plan the first time it carries edits — see `IntakeService.editNoteShown`.
     static let keptNote = "Your edits are kept; the next round treats them as fixed."
 
+    /// The chip's Revert all confirmation: "Revert all 3 edits?", "Revert your edit?".
+    static func revertAllPrompt(_ edits: Int) -> String {
+        edits == 1 ? "Revert your edit?" : "Revert all \(edits) edits?"
+    }
+
     // MARK: - Marks
 
     /// The edits in `edited` over `generated`, as marks plus the hunks they came from.
@@ -44,13 +49,12 @@ enum EditLayer {
     /// assigns it"), where marking the whole line twice would bury a two-word edit. Unpaired
     /// old lines become whole-line ghosts; unpaired new lines, whole-line insertions.
     static func marks(generated: String, edited: String) -> (marks: [EditMark], hunks: [PlanHunk]) {
-        let hunks = PlanLayers.userDiff(generated: generated, edited: edited)
+        let diff = LineWindowDiff(generated: generated, edited: edited)
+        let hunks = diff.hunks
         guard !hunks.isEmpty else { return ([], []) }
-        let starts = lineStarts(edited)
-        let length = (edited as NSString).length
         /// Where line `j` of the edited text begins; the end of the text past its last line —
         /// a ghost there is drawn below the plan's last line.
-        func start(_ j: Int) -> Int { j < starts.count ? starts[j] : length }
+        let start = diff.lineStart
 
         var out: [EditMark] = []
         for (h, hunk) in hunks.enumerated() {
@@ -104,11 +108,18 @@ enum EditLayer {
     /// UTF-16 offset of every line's first character, split on LF only — the rule
     /// `PlanLayers` diffs by (a CR before the LF stays part of its line).
     private static func lineStarts(_ text: String) -> [Int] {
+        // Over a UTF-16 copy: iterating `utf16` of the editor's (NSString-backed) text went
+        // through the bridge a character at a time.
+        let ns = text as NSString
+        var units = [unichar](repeating: 0, count: ns.length)
+        units.withUnsafeMutableBufferPointer { if let base = $0.baseAddress { ns.getCharacters(base, range: NSRange(location: 0, length: ns.length)) } }
         var starts = [0]
-        var offset = 0
-        for unit in text.utf16 {
-            offset += 1
-            if unit == 10 { starts.append(offset) }
+        units.withUnsafeBufferPointer { u in
+            var i = 0
+            while i < u.count {
+                if u[i] == 10 { starts.append(i + 1) }
+                i += 1
+            }
         }
         return starts
     }
@@ -689,4 +700,154 @@ struct PlanEditHooks {
     var onConflict: (EditConflict) -> Void = { _ in }
     /// Runs `git merge-file` for `EditLayer.retarget`; a test hands in a fake.
     var runner: CommandRunner = SystemCommandRunner()
+    /// The intake's tape as the service holds it now — what a merge waiting its turn re-reads
+    /// the plan head from (`PlanEditRouter`). Nil falls back to the last tape the section was
+    /// handed, which trails the service by a view update.
+    var liveTape: (() -> Tape?)?
+}
+
+/// `PlanLayers.userDiff`'s hunks, found without splitting and hashing the whole plan on every
+/// keystroke: the characters both texts share at each end are cut off first (a memcmp over
+/// UTF-16), back to whole lines plus one shared line of context either side, and only the
+/// window between is diffed. The diff trims shared end lines itself, so its middle — and every
+/// hunk — is the same as the whole-plan diff's; the hunks are then moved to whole-plan line
+/// numbers and given their section from the whole plan. On a 2,000-line plan this took the
+/// edit layer from most of a keystroke's budget to a small part of it.
+struct LineWindowDiff {
+    let hunks: [PlanHunk]
+    /// UTF-16 offset of line `j` of the edited text — for the window's lines and the one after
+    /// it, which is all a hunk's marks ask for; past the last line, the text's length.
+    let lineStart: (Int) -> Int
+
+    init(generated: String, edited: String) {
+        let a = Self.units(generated), b = Self.units(edited)
+        let limit = min(a.count, b.count)
+        var same = 0
+        a.withUnsafeBufferPointer { pa in
+            b.withUnsafeBufferPointer { pb in
+                // In blocks first: a Debug-build loop over every character was itself a
+                // millisecond on a long plan.
+                let block = 512
+                while same + block <= limit, memcmp(pa.baseAddress! + same, pb.baseAddress! + same, block * 2) == 0 { same += block }
+                while same < limit, pa[same] == pb[same] { same += 1 }
+            }
+        }
+        // Back to a line start, then one more line: a shared line of context before the window.
+        var prefix = Self.lineStart(before: same, in: a)
+        if prefix > 0 { prefix = Self.lineStart(before: prefix - 1, in: a) }
+
+        var tail = 0
+        let tailLimit = limit - prefix
+        a.withUnsafeBufferPointer { pa in
+            b.withUnsafeBufferPointer { pb in
+                let block = 512
+                while tail + block <= tailLimit,
+                      memcmp(pa.baseAddress! + a.count - tail - block, pb.baseAddress! + b.count - tail - block, block * 2) == 0 { tail += block }
+                while tail < tailLimit, pa[a.count - 1 - tail] == pb[b.count - 1 - tail] { tail += 1 }
+            }
+        }
+        // Forward to the start of a shared line, then one more: a line of context after it.
+        // `suffix` counts the characters cut from the end; 0 cuts nothing.
+        var suffix = 0
+        if let first = Self.nextLineStart(from: a.count - tail, in: a, within: tail),
+           let second = Self.nextLineStart(from: first, in: a, within: a.count - first) {
+            suffix = a.count - second
+        }
+
+        let skipped = Self.newlines(in: a, upTo: prefix)
+        func text(_ u: [unichar], _ from: Int, _ to: Int) -> String {
+            // Without the window's last newline when a suffix follows: the suffix's first line
+            // starts after it, and a trailing newline would read as one more, empty line.
+            let end = suffix > 0 ? to - 1 : to
+            guard end > from else { return "" }
+            // `String(decoding:)`, a native Swift string: `String(utf16CodeUnits:)` is an
+            // NSString underneath, and the line diff over it went through the bridge.
+            return u.withUnsafeBufferPointer { String(decoding: UnsafeBufferPointer(rebasing: $0[from..<end]), as: UTF16.self) }
+        }
+        let windowA = text(a, prefix, a.count - suffix), windowB = text(b, prefix, b.count - suffix)
+        let found = PlanLayers.userDiff(generated: windowA, edited: windowB)
+        hunks = found.map { h in
+            var hunk = h
+            hunk.oldStart += skipped
+            hunk.newStart += skipped
+            hunk.section = h.newLines.isEmpty && !h.oldLines.isEmpty
+                ? Self.heading(atLine: hunk.oldStart, lineOffset: Self.offset(ofLine: h.oldStart, in: a, from: prefix), in: a)
+                : Self.heading(atLine: hunk.newStart, lineOffset: Self.offset(ofLine: h.newStart, in: b, from: prefix), in: b)
+            return hunk
+        }
+
+        var starts: [Int] = [prefix]
+        let windowEnd = b.count - suffix
+        b.withUnsafeBufferPointer { pb in
+            var i = prefix
+            while i < windowEnd {
+                if pb[i] == 10 { starts.append(i + 1) }
+                i += 1
+            }
+        }
+        let length = b.count
+        lineStart = { j in
+            let k = j - skipped
+            if k >= 0, k < starts.count { return starts[k] }
+            return k < 0 ? 0 : length
+        }
+    }
+
+    private static func units(_ text: String) -> [unichar] {
+        let ns = text as NSString
+        var out = [unichar](repeating: 0, count: ns.length)
+        out.withUnsafeMutableBufferPointer { if let base = $0.baseAddress { ns.getCharacters(base, range: NSRange(location: 0, length: ns.length)) } }
+        return out
+    }
+
+    /// The start of the line holding offset `i` (`i` itself when it follows a newline).
+    private static func lineStart(before i: Int, in u: [unichar]) -> Int {
+        var j = i
+        while j > 0, u[j - 1] != 10 { j -= 1 }
+        return j
+    }
+
+    /// The first line start at or after `from` whose preceding newline lies inside the last
+    /// `within` characters (the shared tail); nil when there is none.
+    private static func nextLineStart(from: Int, in u: [unichar], within: Int) -> Int? {
+        var j = max(from, u.count - within, 1)
+        while j <= u.count {
+            if u[j - 1] == 10, j - 1 >= u.count - within { return j }
+            j += 1
+            if j > u.count { break }
+        }
+        return nil
+    }
+
+    private static func newlines(in u: [unichar], upTo end: Int) -> Int {
+        u.withUnsafeBufferPointer { p in
+            var n = 0, i = 0
+            while i < end { if p[i] == 10 { n += 1 }; i += 1 }
+            return n
+        }
+    }
+
+    /// The UTF-16 offset of window line `line` (window lines counted from `from`).
+    private static func offset(ofLine line: Int, in u: [unichar], from: Int) -> Int {
+        var i = from, n = 0
+        while n < line, i < u.count { if u[i] == 10 { n += 1 }; i += 1 }
+        return i
+    }
+
+    /// `PlanMetrics`' section for a hunk: the last line at or above it starting with `#`,
+    /// trimmed; nil in the preamble.
+    private static func heading(atLine _: Int, lineOffset: Int, in u: [unichar]) -> String? {
+        var start = lineStart(before: min(lineOffset, u.count), in: u)
+        while true {
+            if start < u.count, u[start] == 35 {
+                var end = start
+                while end < u.count, u[end] != 10 { end += 1 }
+                if end > start, u[end - 1] == 13 { end -= 1 }
+                let line = u.withUnsafeBufferPointer { String(utf16CodeUnits: $0.baseAddress! + start, count: end - start) }
+                return line.trimmingCharacters(in: .whitespaces)
+            }
+            guard start > 0 else { return nil }
+            start = lineStart(before: start - 1, in: u)
+        }
+    }
 }
