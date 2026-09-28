@@ -95,17 +95,51 @@ struct PendingStart: Equatable {
 
 /// The running round's seat files (`IntakeService.seatActivities`, `runRecords`, `seatResults`),
 /// observable apart from the service: the only state that changes every second of a run.
+///
+/// Published per intake (`channel(_:)`), not as one object: with one, a beat on any shaping
+/// intake redrew every reader of every intake — two shaping intakes redrew each other's live
+/// cards every second. A write notifies only the channels whose intake's files changed.
 @MainActor
-final class SeatFeed: ObservableObject {
-    @Published fileprivate(set) var activities: [UUID: [String: SeatActivity]] = [:]
-    @Published fileprivate(set) var records: [UUID: [String: RunRecord]] = [:]
-    @Published fileprivate(set) var results: [UUID: [String: SeatResult]] = [:]
+final class SeatFeed {
+    fileprivate(set) var activities: [UUID: [String: SeatActivity]] = [:] {
+        didSet { notify(Self.changed(oldValue, activities)) }
+    }
+    fileprivate(set) var records: [UUID: [String: RunRecord]] = [:] {
+        didSet { notify(Self.changed(oldValue, records)) }
+    }
+    fileprivate(set) var results: [UUID: [String: SeatResult]] = [:] {
+        didSet { notify(Self.changed(oldValue, results)) }
+    }
+    /// Kept for the service's lifetime, never dropped: a reader holds its channel, and a
+    /// replacement made later would be one it never hears from.
+    private var channels: [UUID: SeatChannel] = [:]
+
+    /// What intake `id`'s readers observe.
+    func channel(_ id: UUID) -> SeatChannel {
+        if let channel = channels[id] { return channel }
+        let channel = SeatChannel()
+        channels[id] = channel
+        return channel
+    }
 
     /// Intake `id`'s seats, as the live card and the seat inspector take them.
     func files(_ id: UUID) -> SeatFiles {
         SeatFiles(activities: activities[id] ?? [:], records: records[id] ?? [:], results: results[id] ?? [:])
     }
+
+    private func notify(_ ids: Set<UUID>) {
+        for id in ids { channels[id]?.objectWillChange.send() }
+    }
+
+    private static func changed<V: Equatable>(_ old: [UUID: V], _ new: [UUID: V]) -> Set<UUID> {
+        Set(old.keys).union(new.keys).filter { old[$0] != new[$0] }
+    }
 }
+
+/// One intake's seat-file publishes (`SeatFeed.channel`) — carries no state of its own; readers
+/// read the files back from the feed.
+@MainActor
+final class SeatChannel: ObservableObject {}
 
 /// Orchestrates intakes end to end (spec §4): capture → headless triage (with clarifying
 /// Q&A) → recommendation/choice → release review → release (write to `br`, then deliver

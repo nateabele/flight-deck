@@ -8,8 +8,8 @@ import SwiftUI
 /// bar says; this view lays them out and wires them to the service.
 ///
 /// **What redraws when.** The running round's seats change about once a second; they publish on
-/// `service.seats`, which only `SeatReader`s observe — the live card, the pinned block and the
-/// seat inspector. Everything else here re-evaluates on the service's own, rarer publishes, and
+/// this intake's channel of `service.seats`, which only `SeatReader`s observe — the live card,
+/// the pinned block and the seat inspector. Everything else here re-evaluates on the service's own, rarer publishes, and
 /// the header, the Clarifications and the plan are `Equatable` views on plain values, so even
 /// then they redraw only when what they show changed (`RenderProbe` counts it in tests).
 struct IntakeDetailView: View {
@@ -894,9 +894,18 @@ enum RenderProbe {
 /// Re-reads only intake `id`'s seat files (`SeatFeed`), so a seat beat redraws what is drawn
 /// from them and not the pane around it.
 private struct SeatReader<Content: View>: View {
-    @ObservedObject var feed: SeatFeed
+    let feed: SeatFeed
     let id: UUID
+    /// This intake's channel only: another intake's beats never redraw this reader.
+    @ObservedObject private var channel: SeatChannel
     @ViewBuilder let content: (SeatFiles) -> Content
+
+    init(feed: SeatFeed, id: UUID, @ViewBuilder content: @escaping (SeatFiles) -> Content) {
+        self.feed = feed
+        self.id = id
+        self.channel = feed.channel(id)
+        self.content = content
+    }
 
     var body: some View { content(feed.files(id)) }
 }
