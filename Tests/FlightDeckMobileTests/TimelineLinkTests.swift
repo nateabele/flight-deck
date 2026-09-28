@@ -119,14 +119,15 @@ final class TimelineLinkTests: XCTestCase {
 
     // MARK: Fix round 1 — the two row-level surfaces that route around `proseBody` entirely
     //
-    // `.toolResult` draws through `toolCard`'s own output block (`TimelineRow.swift:355`), and
-    // a free-text `.prompt` draws through `HistoricalPromptBody`'s else-branch in
-    // `PromptCard.swift:508` — neither goes through `TimelineRow.proseBody`, so the tests above
-    // (which exercise the helper against `.toolResult`/`.thinking`-shaped `TimelineItem`s) don't
-    // actually cover either row. These do, tied to the call sites by name.
+    // `.toolResult` draws through `toolCard`'s own output block (`TimelineRow.toolCard`'s
+    // `Text(linkedText(for: output))`), and a free-text `.prompt` draws through
+    // `HistoricalPromptBody`'s else-branch — neither goes through `TimelineRow.proseBody`, so
+    // the tests above (which exercise the helper against `.toolResult`/`.thinking`-shaped
+    // `TimelineItem`s) don't actually cover either row. These do, tied to the call sites by
+    // name.
 
     /// The headline case: a URL inline in a tool's output text, as drawn by `toolCard`'s own
-    /// `Text(...)` at `TimelineRow.swift:355`, not the general `proseBody` arm.
+    /// `Text(linkedText(for: output))`, not the general `proseBody` arm.
     func testABareURLInAToolOutputCardBecomesALinkRun() {
         let attributed = NSAttributedString(
             TimelineStyle.linkedPlainText("output written to https://example.com/artifact.zip")
@@ -134,8 +135,8 @@ final class TimelineLinkTests: XCTestCase {
         XCTAssertEqual(linkURLs(in: attributed), ["https://example.com/artifact.zip"])
     }
 
-    /// The free-text branch of `HistoricalPromptBody` (`PromptCard.swift:508`) — a prompt with
-    /// no parseable `PromptQuestion` falls back to raw text, now linkified the same way.
+    /// The free-text branch of `HistoricalPromptBody` — a prompt with no parseable
+    /// `PromptQuestion` falls back to raw text, now linkified the same way.
     func testABareURLInAFreeTextPromptCardBecomesALinkRun() {
         let attributed = NSAttributedString(
             TimelineStyle.linkedPlainText("approve the change at https://example.com/review")
@@ -181,6 +182,65 @@ final class TimelineLinkTests: XCTestCase {
         _ = cache.linked(for: item("2#0")) // evicts 0#0
         _ = cache.linked(for: item("0#0")) // recompute
         XCTAssertEqual(cache.computeCount, 4, "the evicted key recomputes rather than hitting")
+    }
+
+    /// **The gap the cache's own tests above don't cover: the tool card never asked it.**
+    /// `TimelineRow.toolCard`'s output panel used to call `TimelineStyle.linkedPlainText`
+    /// directly, bypassing the screen's `linkCache` the same way `proseBody`'s bare-URL pass
+    /// used to before it was routed through the cache — so a tool result re-rendered every poll
+    /// tick re-ran `NSDataDetector` over its whole (up to 64 KB) body each time.
+    /// `linkedText(for:)` is `TimelineRow`'s one routing point for both the prose branch and the
+    /// tool card, so proving it here proves the card too — no view needs to be hosted, the same
+    /// reason `isExpanded`'s own doc comment gives for staying a plain argument.
+    func testTheToolCardsOutputPanelRoutesThroughTheLinkCache() {
+        let cache = TimelineLinkCache()
+        let call = TimelineItem(
+            id: "5#0", kind: .toolCall, status: .complete, body: .init(text: "ls -la", tool: "Bash")
+        )
+        let result = TimelineItem(
+            id: "5#1", kind: .toolResult, status: .complete,
+            body: .init(text: "see https://example.com/log for the run", tool: "Bash")
+        )
+        let row = TimelineRow(item: call, result: result, linkCache: cache)
+        let first = row.linkedText(for: result)
+        let second = row.linkedText(for: result)
+        XCTAssertEqual(cache.computeCount, 1, "the tool card's output should reuse the screen's link cache")
+        XCTAssertEqual(first, second)
+        XCTAssertEqual(
+            linkURLs(in: NSAttributedString(first)), ["https://example.com/log"],
+            "routing through the cache must not change what the tool card's output looks like"
+        )
+    }
+
+    /// **The rehydration hazard `linked(for:)` has to know the name of.** A spilled item's
+    /// placeholder body (`TimelineItemBody.isPlaceholder`) shares its permanent id with the
+    /// real body that eventually replaces it — an ordinary cache entry keyed on that id would
+    /// go on serving the placeholder's (empty) linked text forever, since nothing evicts a key
+    /// just because the item it was computed from changed underneath it. This proves the
+    /// placeholder pass is never stored at all: if it were, the second call below would be a
+    /// hit and return the placeholder's text instead of the real body's link.
+    func testAPlaceholderOutputIsNeverCachedSoRehydrationIsSeenImmediately() {
+        let cache = TimelineLinkCache()
+        let placeholder = TimelineItem(
+            id: "9#0", kind: .toolResult, status: .complete,
+            body: .init(text: "", tool: "Bash", isPlaceholder: true)
+        )
+        _ = cache.linked(for: placeholder)
+
+        let rehydrated = TimelineItem(
+            id: "9#0", kind: .toolResult, status: .complete,
+            body: .init(text: "see https://example.com/log", tool: "Bash")
+        )
+        let linked = cache.linked(for: rehydrated)
+
+        XCTAssertEqual(
+            linkURLs(in: NSAttributedString(linked)), ["https://example.com/log"],
+            "the rehydrated body must be linked immediately, not served the placeholder a "
+                + "populated cache entry would have kept"
+        )
+        XCTAssertEqual(
+            cache.computeCount, 2, "neither call hit a cache entry — the placeholder is never stored"
+        )
     }
 
     // MARK: Helpers

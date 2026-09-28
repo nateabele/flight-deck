@@ -359,18 +359,35 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
     /// correlates by `cid`, and N small independent fetches mean one slow project cannot hold
     /// up the rest of the list.
     ///
-    /// Called when the list appears, on reconnect, and on returning to the foreground. The
-    /// third is the one that matters: the rows derive from preferences, preferences emit no
-    /// fleet events, and there is no hook to push a change from — so the only moment the phone
-    /// can learn that an account was signed in on the Mac is the moment someone picks the phone
-    /// up and it asks again.
+    /// Hung off `connect()`'s `onState`, on `.connected` — the first dial, every reconnect,
+    /// and the redial `reconnect()` fires on returning to the foreground, all in one hook. The
+    /// last of those is the one that matters: the rows derive from preferences, preferences
+    /// emit no fleet events, and there is no hook to push a change from — so the only moment
+    /// the phone can learn that an account was signed in on the Mac is the moment someone picks
+    /// the phone up and it reconnects.
+    ///
+    /// **Not `onFleet`, though `onFleet` also fires on `.connected`'s snapshot.** It used to
+    /// live there, under the claim that "every snapshot is every connect" — false: `onFleet`
+    /// fires on snapshots *and on every folded event*, so hanging this off it re-asked for
+    /// every project's menu on every activity tick, unread flip and rename. Measured at
+    /// 50–114 KB and ~0.16s of phone CPU per event, for a menu that changes only when
+    /// preferences do. `.connected` is once per dial, which is the only moment this can
+    /// actually have gone stale.
     func refreshNewSessionOptions() {
-        guard let connector else { return }
         for project in fleet.projects {
-            connector.requestNewSessionOptions(project: project.id) { [weak self] result in
-                guard let self, case .success(let answer) = result else { return }
-                self.newSessionOptions[answer.project] = answer.options
-            }
+            requestNewSessionOptions(for: project.id)
+        }
+    }
+
+    /// The per-project half of `refreshNewSessionOptions`, factored out so `onEvent`'s
+    /// `.projectAdded` case can ask for exactly the one project that just appeared — see its
+    /// own comment — instead of resweeping every project the way a bare call to
+    /// `refreshNewSessionOptions()` there would.
+    private func requestNewSessionOptions(for project: UUID) {
+        guard let connector else { return }
+        connector.requestNewSessionOptions(project: project) { [weak self] result in
+            guard let self, case .success(let answer) = result else { return }
+            self.newSessionOptions[answer.project] = answer.options
         }
     }
 
@@ -383,11 +400,11 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
 
     /// Ask for the whole conversation catalogue.
     ///
-    /// Called when the fleet list appears, on reconnect, and on returning to the foreground —
-    /// see `connect()`'s `onFleet` closure, which is every one of those moments at once. That
-    /// single placement is deliberate, the same reasoning `refreshNewSessionOptions` gives:
-    /// the catalogue is a request's answer, not fleet state, so nothing pushes it when it goes
-    /// stale — the only moment the phone can learn about it is the moment someone looks.
+    /// Hung off `connect()`'s `onState`, on `.connected` — see `refreshNewSessionOptions`'s
+    /// comment for why that one hook covers first dial, reconnect and foreground-return alike,
+    /// and why it replaced `onFleet`. Same reasoning applies here word for word: the catalogue
+    /// is a request's answer, not fleet state, so nothing pushes it when it goes stale — the
+    /// only moment the phone can learn about it is the moment it reconnects.
     func refreshConversations() {
         guard let connector else { return }
         connector.requestConversations { [weak self] result in
@@ -409,11 +426,15 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
 
     /// Ask for the whole reopen stack.
     ///
-    /// Hung off `connect()`'s `onFleet`, which fires on snapshots **and on every folded
-    /// event** — so a close at either end refreshes this without needing a hook of its own.
-    /// That matters more here than for `refreshNewSessionOptions`, which shares the hook: a
+    /// Hung off `connect()`'s `onState`, on `.connected` (first dial, reconnect, foreground
+    /// return — see `refreshNewSessionOptions`), **and** off `onEvent`'s `sessionAdded`/
+    /// `sessionRemoved` cases — the only two events that can change the reopen stack: a
     /// session the phone itself just closed has to appear in that project's `+` immediately,
-    /// not after a background-and-return.
+    /// not after a background-and-return, and one reopening has to disappear from it just as
+    /// fast. It used to hang off `onFleet` instead, which fires on **every** folded event, so
+    /// an activity tick or a rename asked the Mac for the whole stack again for nothing —
+    /// measured, like `refreshNewSessionOptions`, at 50–114 KB and ~0.16s of phone CPU each
+    /// time. `sessionAdded`/`sessionRemoved` are the only two that can actually move this list.
     func refreshRecentlyClosed() {
         guard let connector else { return }
         connector.requestRecentlyClosed { [weak self] result in
@@ -689,23 +710,16 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
                 // alike, is exactly the input `noteFleet` needs to tell a resolved blocked
                 // episode from one still open — see its own comment for why this is the hook
                 // rather than a dedicated per-session subscription.
-                self?.noteFleet(fleet)
-                // **Every snapshot, which is every connect** — first dial, reconnect, and the
-                // redial on return from the background. That covers all three moments the
-                // menu can have gone stale without a single one of them needing its own hook,
-                // because preferences emit no fleet events and there is nothing to be told.
                 //
-                // A project that appears later by event, rather than in a snapshot, has no
-                // rows until the next connect and falls back to the default row. That is the
-                // supported state, not a gap: it is also what an older Mac produces forever.
-                self?.refreshNewSessionOptions()
-                // Same reasoning, same placement: the catalogue is a request's answer, not
-                // fleet state (see `conversationCatalogue`'s doc comment), so this is the only
-                // hook it gets.
-                self?.refreshConversations()
-                // Same hook, and here the "every folded event" half is the point rather than a
-                // side effect — see `refreshRecentlyClosed`.
-                self?.refreshRecentlyClosed()
+                // Deliberately the ONLY thing this closure still does. It used to also refresh
+                // the New Session menu, the conversation catalogue and the reopen stack, on the
+                // theory that "every snapshot is every connect" — false, `onFleet` fires on
+                // snapshots **and on every folded event alike**, so those three re-asked the
+                // Mac for the same answer on every activity tick, unread flip and rename: 50–114
+                // KB and ~0.16s of phone CPU, measured, for nothing that had changed. They now
+                // hang off `onState`'s `.connected` branch and `onEvent`'s `sessionAdded`/
+                // `sessionRemoved` cases instead — see each `refresh*` function's own comment.
+                self?.noteFleet(fleet)
             }
         }
         // Routed to the tab's own model rather than held here: the outbox belongs to the
@@ -714,12 +728,31 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
         // row to fail, because the row only exists while that screen's model does.
         connector.onEvent = { [weak self] event in
             MainActor.assumeIsolated {
-                if case .promptTyped(let id, let token) = event {
+                switch event {
+                case .promptTyped(let id, let token):
                     self?.timelineModels[id]?.promptTyped(token)
-                    return
+                case .promptExpired(let id, let token):
+                    self?.timelineModels[id]?.promptExpired(token)
+                case .sessionAdded, .sessionRemoved:
+                    // The only two events that can change the reopen stack: a session leaving
+                    // is exactly what makes it reopenable, and one reappearing (this phone's
+                    // own reopen, or the Mac's) is what takes it back off. Every other event —
+                    // activity, unread, rename — cannot move this list, so asking again for
+                    // those was pure waste; see `refreshRecentlyClosed`'s own comment.
+                    self?.refreshRecentlyClosed()
+                case .projectAdded(let project, _):
+                    // A project that appears mid-connection needs its own New Session menu now,
+                    // not on the next reconnect — `refreshNewSessionOptions`'s own comment is
+                    // why nothing else pushes a change here, and that reasoning applies to a
+                    // brand new project exactly as much as to one already on screen. Just the
+                    // one project this event names, via the same per-project helper
+                    // `refreshNewSessionOptions()` sweeps with — the other projects' menus have
+                    // not gone stale, so resweeping all of them would be the same waste
+                    // `activityChanged`/`unreadChanged` were cut for.
+                    self?.requestNewSessionOptions(for: project.id)
+                default:
+                    break
                 }
-                guard case .promptExpired(let id, let token) = event else { return }
-                self?.timelineModels[id]?.promptExpired(token)
             }
         }
         connector.onState = { [weak self] state in
@@ -731,14 +764,49 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
                     // never evicted, so a reader who has opened ten sessions holds ten of
                     // these, and each decides for itself via `isOnScreen` whether a resumed
                     // link is its business. `.connected` is the right signal to fan out here
-                    // because it fires once per successful dial and covers snapshot, replay
-                    // and empty-replay alike — unlike the open session's own triggers
-                    // (`.task(id:)`, its two `.onChange`s, the busy poll), none of which fire
-                    // on a reconnect that changes nothing the screen was already watching.
-                    // `FleetConnector.accept()` sets `winner` before reporting `.connected`
-                    // (FleetConnector.swift:521,530), so `linkResumed()`'s own calls back out
-                    // through `fleet` already ride the new link rather than a dead one.
+                    // because it fires once per successful dial that actually has something to
+                    // report — a snapshot or the first event of a replay — unlike the open
+                    // session's own triggers (`.task(id:)`, its two `.onChange`s, the busy
+                    // poll), none of which fire on a reconnect that changes nothing the screen
+                    // was already watching. A fully-up-to-date resume never fires `.connected`
+                    // at all (see the deferral comment below), but there is nothing there for
+                    // `linkResumed()` to care about either — nothing changed. `accept(_:from:
+                    // client:)` sets `winner` before calling `report(.connected(...))`, so the
+                    // calls this makes back out through `fleet` already ride the new link
+                    // rather than a dead one.
                     self?.timelineModels.values.forEach { $0.linkResumed() }
+                    // Once per successful dial, not once per fleet event — see
+                    // `refreshNewSessionOptions`, `refreshConversations` and
+                    // `refreshRecentlyClosed`'s own comments for why `.connected` is the right
+                    // and sufficient hook for all three.
+                    //
+                    // Deferred a run-loop turn, deliberately: `FleetConnector.accept()` reports
+                    // `.connected` *before* it applies the frame that goes with it (see the
+                    // ordering comment two blocks above), so on a genuine first connect —
+                    // where `fleet.projects` starts empty — calling `refreshNewSessionOptions`
+                    // inline here would iterate zero projects and never ask, because nothing
+                    // else re-triggers it before the next reconnect. `report(.connected(...))`
+                    // is only ever called from inside `accept(frame:)`, which then applies that
+                    // same frame synchronously later in the same call — before `accept()`
+                    // returns, so before this closure's own call frame unwinds — so hopping to
+                    // the next turn is enough to see it, no polling, no second hook. This is not
+                    // racing an empty-replay case: an up-to-date resume answers with zero
+                    // frames (see `apply`'s doc comment), so `client.onFrame` never fires,
+                    // `accept()` never runs, and `.connected` itself does not get reported
+                    // until a frame — snapshot or a genuine event — eventually does. There is
+                    // nothing here for the deferral to race against.
+                    //
+                    // This ordering guarantee holds only because the connector's callbacks all
+                    // land on `.main` (see the identical caveat on the `onFleet` closure above).
+                    // If `FleetConnector` is ever given its own queue, `accept()`'s synchronous
+                    // report-then-apply would still happen together, but this `DispatchQueue
+                    // .main.async` would no longer be guaranteed to run after it — it would need
+                    // to become a hop onto the connector's queue instead.
+                    DispatchQueue.main.async { [weak self] in
+                        self?.refreshNewSessionOptions()
+                        self?.refreshConversations()
+                        self?.refreshRecentlyClosed()
+                    }
                 }
                 PhoneLog.connection.notice("state \(Self.describe(state), privacy: .public)")
             }

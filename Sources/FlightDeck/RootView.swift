@@ -13,6 +13,7 @@ struct RootView: View {
 
     @StateObject private var overlayModel = ToolOverlayModel()
     @StateObject private var overlayMonitor = ToolOverlayInputMonitorBox()
+    @State private var shortcutGroups: [ShortcutGroup]?
 
     /// Which node `DependencyDAGOverlay.onSelectNode` last picked, independent of the
     /// focused tab's own bead — the overlay lets you browse the graph without jumping
@@ -89,6 +90,41 @@ struct RootView: View {
                 )
                 .frame(minWidth: 640, minHeight: 440)
             }
+        }
+        // Over the whole window, not the detail column: the scrim has to cover the sidebar too,
+        // or a click there would change the selection behind an overlay the user is reading.
+        .overlay {
+            if let groups = shortcutGroups {
+                ShortcutOverlay(groups: groups, dismiss: dismissShortcuts)
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .flightDeckToggleShortcuts)) { _ in
+            if shortcutGroups == nil { shortcutGroups = ShortcutCatalog.currentGroups() }
+            else { dismissShortcuts() }
+        }
+        // ⌃⌘←/→, ⌘⇧], ⌘W, and ⌘⇧T all change the selection without going through this view at
+        // all — they act on `store` directly — so without this the overlay stays open, scrim and
+        // all, while the tab underneath it has already switched.
+        .onChange(of: store.selectedSessionID) {
+            if shortcutGroups != nil { dismissShortcuts() }
+        }
+        // Same for opening or closing a project view, which swaps the detail column without
+        // touching `selectedSessionID` at all.
+        .onChange(of: store.selectedProjectID) {
+            if shortcutGroups != nil { dismissShortcuts() }
+        }
+    }
+
+    /// Hands focus back to the terminal: the filter field held it, and without this the next
+    /// keystroke after Esc goes nowhere visible instead of to the prompt the user came from.
+    /// `Ghostty.moveFocus(to:)`, not a raw `makeFirstResponder`: it retries with backoff when
+    /// the surface isn't attached to a window yet, which is the established idiom for handing
+    /// focus back from a SwiftUI overlay — see `TerminalSearchBar.dismiss()` and the doc
+    /// comment on `moveFocus` in `SurfaceConfiguration.swift`.
+    private func dismissShortcuts() {
+        shortcutGroups = nil
+        if let id = store.selectedSessionID, let surface = store.surface(for: id) {
+            Ghostty.moveFocus(to: surface)
         }
     }
 }

@@ -59,6 +59,45 @@ final class SessionStatusStoreTests: XCTestCase {
         XCTAssertEqual(store.status(for: session.id)?.subagentCount, 3)
     }
 
+    /// The sidebar's activity is the whole tree's: an idle agent with a subagent still working
+    /// is busy, because the user is still waiting on its result.
+    func testIdleAgentWithWorkingSubagentsIsBusy() {
+        let store = makeStore()
+        let session = store.newSession(in: tmp)
+
+        store.applySubagentCount(session.id, 2)
+        store.applyRegistry([1: entry(session.id, .idle, cwd: tmp.path)])
+
+        XCTAssertEqual(store.status(for: session.id)?.activity, .busy)
+    }
+
+    /// Waiting means the user must act, which is more urgent than "something is running".
+    func testWaitingAgentStaysWaitingWhileSubagentsWork() {
+        let store = makeStore()
+        let session = store.newSession(in: tmp)
+
+        store.applySubagentCount(session.id, 2)
+        store.applyRegistry([1: entry(session.id, .waiting, waitingFor: "permission prompt",
+                                      cwd: tmp.path)])
+
+        XCTAssertEqual(store.status(for: session.id)?.activity, .waiting)
+    }
+
+    /// The count moving is enough on its own — the sidebar must not sit busy (or idle) until
+    /// the next registry tick happens to rebuild it.
+    func testSubagentCountChangeFlipsActivityImmediately() {
+        let store = makeStore()
+        let session = store.newSession(in: tmp)
+        store.applyRegistry([1: entry(session.id, .idle, cwd: tmp.path)])
+        XCTAssertEqual(store.status(for: session.id)?.activity, .idle)
+
+        store.applySubagentCount(session.id, 1)
+        XCTAssertEqual(store.status(for: session.id)?.activity, .busy)
+
+        store.applySubagentCount(session.id, 0)
+        XCTAssertEqual(store.status(for: session.id)?.activity, .idle)
+    }
+
     /// A count can arrive before the registry has ever been read.
     func testSubagentCountArrivingBeforeRegistryIsRetained() {
         let store = makeStore()

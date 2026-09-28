@@ -80,9 +80,10 @@ final class FleetListScreenTests: XCTestCase {
 
     /// **The wiring, which the pure tests above cannot reach.**
     ///
-    /// `refreshRecentlyClosed` hangs off `onFleet`, which fires on snapshots *and* on every
-    /// folded event — that is what makes a tab the phone just closed appear in the `+` without
-    /// a background-and-return. A model that never asked would leave `closedRows` filtering an
+    /// `refreshRecentlyClosed` hangs off `connect()`'s `onState`, on `.connected` — the first
+    /// dial and every reconnect — and off `onEvent`'s `sessionAdded`/`sessionRemoved` cases in
+    /// between, which is what makes a tab the phone just closed appear in the `+` without a
+    /// background-and-return. A model that never asked would leave `closedRows` filtering an
     /// empty list forever, and every assertion above would still be green. This file exists
     /// because that is exactly how this screen has failed before.
     func testTheModelAsksForTheReopenListOnConnect() async throws {

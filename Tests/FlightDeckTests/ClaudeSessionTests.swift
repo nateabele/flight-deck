@@ -319,6 +319,6 @@ final class ClaudeSessionTests: XCTestCase {
     /// the badge, a turn that died would clear its own error a moment later.
     func testTurnDurationDoesNotProgress() {
         let line = #"{"type":"system","subtype":"turn_duration"}"#
-        XCTAssertEqual(ClaudeSession.events(inLine: line, sessionID: UUID()), [.turnEnded])
+        XCTAssertEqual(ClaudeSession.events(inLine: line, sessionID: UUID()), [])
     }
 }

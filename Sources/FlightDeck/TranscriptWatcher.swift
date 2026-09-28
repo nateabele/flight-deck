@@ -37,10 +37,15 @@ final class TranscriptWatcher {
     /// nobody reads.
     private let onMessages: (([IndexedMessage]) -> Void)?
 
-    /// Outstanding top-level `Agent` tool_use ids. Cleared at every turn boundary, which
-    /// is what makes a miscount from attaching mid-turn self-correcting rather than
-    /// permanent.
-    private var outstandingAgents: Set<String> = []
+    /// Outstanding top-level agents: the tool_use id that started them (an `Agent` launch, or
+    /// a `SendMessage` that resumed a stopped one) → the agent id, `nil` until a launch's
+    /// result names it.
+    ///
+    /// Deliberately NOT cleared at a turn boundary any more: a background agent outlives the
+    /// turn that launched it, so clearing there hid every one of them. Only ids in here are
+    /// ever removed, so a notification for a launch this watcher never saw (it attached
+    /// later, or compaction dropped the launch) cannot push the count below what it tracks.
+    private var outstandingAgents: [String: String?] = [:]
 
     /// The error currently reported to the store, so an unchanged value re-emits nothing.
     /// Without this the store would receive an event per poll for a session that has been dead
@@ -155,14 +160,23 @@ final class TranscriptWatcher {
             case .title(let title):
                 lastTitle = title
             case .agentStarted(let id):
-                if outstandingAgents.insert(id).inserted { countChanged = true }
-            case .agentFinished(let id):
-                if outstandingAgents.remove(id) != nil { countChanged = true }
-            case .turnEnded:
-                if !outstandingAgents.isEmpty {
-                    outstandingAgents.removeAll()
+                if outstandingAgents.updateValue(nil, forKey: id) == nil { countChanged = true }
+            case .agentLaunched(let id, let agentID):
+                if outstandingAgents[id] != nil { outstandingAgents[id] = agentID }
+            case .agentResumed(let id, let agentID):
+                // Keyed by the `SendMessage` call, which is the tool-use id the agent's next
+                // notification carries. A still-held agent is not a second one.
+                if !outstandingAgents.values.contains(agentID) {
+                    outstandingAgents[id] = agentID
                     countChanged = true
                 }
+            case .agentFinished(let id):
+                if outstandingAgents.removeValue(forKey: id) != nil { countChanged = true }
+            case .taskNotified(let toolUseID, let taskID):
+                let before = outstandingAgents.count
+                if let toolUseID { outstandingAgents.removeValue(forKey: toolUseID) }
+                if let taskID { outstandingAgents = outstandingAgents.filter { $0.value != taskID } }
+                if outstandingAgents.count != before { countChanged = true }
             case .apiError(let error):
                 apiErrorOutcome = .some(error)
             case .progressed:

@@ -1972,3 +1972,81 @@ seat, 2026-09-27 — it reached review first time, 277 s, ~452k input / ~19k out
   T14's brief covered wording/grouping/buttons only, not this counting semantics. Worth
   reconciling — either make the footer count every releasing op too, or label it "N new tasks"
   so the two numbers stop looking like a bug.
+
+## Codex control-socket grant (2026-09-26)
+
+- **It depends on an experimental codex feature.** `CodexControlAccess` needs
+  `--enable network_proxy` and the `permissions.<profile>.network.unix_sockets` map. Codex
+  labels `network_proxy` experimental, so a release can rename or drop it with no warning.
+  Verified on codex-cli 0.155.1 and 0.157.1, so `CodexVersionProbe.controlAccessMinimumVersion`
+  is 0.155.1 and an older codex gets no flags. Raise the floor, never lower it, without a live
+  run of the guard on the older version.
+- **If the live guard fails** (`testControlSocketGrantConnectsWithoutOpeningTheInternet` under
+  `./scripts/test-codex-live.sh`), read which assertion failed:
+  - *The control* (`:workspace` connected without the grant): codex now allows unix sockets by
+    default. The grant is not needed, but check that the internet is still blocked before you
+    remove it.
+  - *The connect*: every codex tab's `flightdeck` now exits `77`. Probe the new codex with
+    `codex sandbox --help` and a manual `codex sandbox … -P flightdeck -- python3 client.py`,
+    find the new spelling in codex-rs `sandboxing/src/seatbelt.rs`, and fix
+    `CodexControlAccess.launchArguments`. Do not fall back to `danger-full-access`.
+  - *The sibling socket* (`other.sock` connected): codex now treats a `unix_sockets` key as
+    wider than the file. This is serious: in the real state dir, `answer-trigger.sock` is
+    unauthenticated and can press Return in any tab. Stop injecting the flags (return `[]` from
+    `launchArguments`), or move the control socket into its own directory and key that.
+  - *The internet check* (1.1.1.1:443 connected, or failed without `EPERM`): either the grant
+    now opens general network access, which is the serious case — stop injecting the flags
+    (return `[]` from `launchArguments`) until the grant is narrow again, and accept exit `77`
+    in codex tabs meanwhile — or the Mac is offline, in which case re-run it online.
+  - *The proxy check* (a request through codex's `http_proxy` succeeded): the proxy now
+    allows hosts by default. Treat it like the internet check.
+- **A tab that predates the grant keeps its old launch line.** Reopen it to get the flags.
+- **A user-chosen codex sandbox gets no grant**, on purpose (codex rejects `sandbox_mode` with
+  `default_permissions`). Such a tab's agent always sees exit `77`.
+- **TUI tabs probably get per-host network approval dialogs, and nothing handles them.** With
+  `network.enabled=true`, a proxy-aware tool (curl, pip, npm, git over https) in a codex tab
+  goes through codex's proxy. Codex 0.157.1's source sends a host the proxy does not allow to
+  an approval decider whenever the approval policy is not `never`, which is the case in a
+  `codex resume` TUI tab. So the tab should show a "`<host>` is not in the allowed_domains" /
+  `network-access <host>` dialog. This is read from the source only: the one live turn ran
+  `codex exec` with `approval: never` and saw a plain 403. `CodexDialogDriver` has no fixture
+  for this dialog, and the phone's answer path has never seen it. Next step is Nate's, in the
+  GUI: in a codex tab, have the agent run `curl -sS https://example.com`, capture the dialog's
+  screen text as a `CodexDialogDriver` fixture, and try answering it from the phone.
+- **Quoting limits of the typed launch line.** `ClaudeSession.shellQuoted` targets POSIX
+  shells only. fish collapses `\\` to `\` inside single quotes, so a state-dir path containing
+  `\` silently loses its TOML escape under fish and the grant breaks (the key is wrong, or
+  codex rejects the TOML). `CodexControlAccess.tomlEscaped` also does not escape control
+  characters. The default path (`~/Library/Application Support/Flight Deck/control.sock`)
+  contains neither, so it is unaffected. The round-trip test
+  (`testAPathWithSpacesAndQuotesIsQuotedForShellAndToml`) runs through `/bin/sh`, not fish.
+- **Two live tests were already failing before this branch, and it did not cause them.**
+  `./scripts/test-codex-live.sh` on 2026-09-26:
+  - `CodexIntegrationTests.testARealResumedTurnAppendsTheTurnRecordsToTheRolloutThreadStartNamed`
+    now sees a trailing `.apiError(nil)` after `.turnEnded`. That event comes from the API-error
+    work (f4fa03d, 89c4d23); the test's expected event list is out of date.
+  - `CodexIntegrationTests.testARestoredCodexTabReattachesAfterAStartCodexFailure` types a bare
+    `codex` instead of `codex resume <id>`. Its fixture's rollout path does not exist, so
+    `coldCreateCommand` falls back to a fresh launch, which it has done since 443bdc5.
+
+## From tab history and the shortcut overlay (2026-09-27)
+
+- **Back/Forward into a session inside a collapsed project selects a row that isn't drawn.**
+  `SessionSidebar`'s `List` only renders rows for an expanded project, so landing
+  `selectedSessionID` on a session whose project is collapsed changes the terminal pane but
+  leaves the sidebar showing no highlighted row at all — no visible feedback that the jump
+  happened. Two options, both touching `fi-tab-nav`'s cycling too since it has the same gap:
+  un-collapse the owning project as part of the traversal (`goBack`/`goForward` would need
+  `setCollapsed(false, forProjectAt:)` alongside the selection write), or treat it the way
+  cycling treats a collapsed project — landing on the project's own header row instead of the
+  session inside it. Left to Nate's call rather than picked here.
+
+## Back/Forward and the project view (merge of master into flywheel-intake, 2026-09-28)
+
+- **History does not know about the project view.** master's `SelectionHistory` records
+  sessions only (`traverseHistory` skips `.project` — "see fi-tab-nav"), while this branch
+  adds `selectedProjectID`. Opening a project view records nothing, and ⌃⌘← from a project
+  view steps back from the session hidden *behind* it. Landing on a session still closes the
+  project view (the `selectedSessionID` didSet clears it), so nothing shows two things at once.
+  Recording `.project(path:)` on `selectProject` and resolving it in `traverseHistory` is the
+  fix, and belongs with the `fi-tab-nav` project-row work.

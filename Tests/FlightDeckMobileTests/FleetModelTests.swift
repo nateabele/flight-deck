@@ -266,4 +266,217 @@ final class FleetModelTests: XCTestCase {
             serviceName: "Studio._flightdeck._tcp", endpoints: []
         ).encoded()
     }
+
+    // MARK: refresh-on-connect, not on every event
+
+    /// **The wiring these three requests get, driven through a real socket rather than a fake
+    /// `FleetConnector`.** `connector` is `private` on `FleetModel` and `FleetConnector` is a
+    /// concrete class, so there is no protocol seam to substitute — `FleetListScreenTests`
+    /// establishes the pattern this borrows: a real `FleetSocketServer` on loopback, standing
+    /// in for the Mac, with the server's own `onRequest` tallying what actually went out.
+    private var server: FleetSocketServer!
+
+    override func tearDown() async throws {
+        server?.stop()
+        server = nil
+        try await super.tearDown()
+    }
+
+    /// Tally of requests the phone actually sent, by kind. A class, not a captured `var`:
+    /// `onRequest` runs on the server's own queue, not the test's, so a plain local would be a
+    /// data race under Swift 6 — same reasoning as `FleetListScreenTests.Box`.
+    private final class RequestTally: @unchecked Sendable {
+        private let lock = NSLock()
+        private var counts: [String: Int] = [:]
+
+        func record(_ request: FleetRequest) {
+            lock.lock(); defer { lock.unlock() }
+            counts[key(for: request), default: 0] += 1
+        }
+
+        func count(_ kind: String) -> Int {
+            lock.lock(); defer { lock.unlock() }
+            return counts[kind, default: 0]
+        }
+
+        /// Every project a `newSessionOptions` request actually named, in the order asked —
+        /// finer-grained than `count`, for asserting `.projectAdded` asked for the ONE new
+        /// project rather than merely that the aggregate count went up by one.
+        private var newSessionOptionsProjectsStorage: [UUID] = []
+        func newSessionOptionsProjects() -> [UUID] {
+            lock.lock(); defer { lock.unlock() }
+            return newSessionOptionsProjectsStorage
+        }
+
+        private func key(for request: FleetRequest) -> String {
+            switch request {
+            case .newSessionOptions(let project):
+                newSessionOptionsProjectsStorage.append(project)
+                return "newSessionOptions"
+            case .conversations: return "conversations"
+            case .recentlyClosed: return "recentlyClosed"
+            default: return "other"
+            }
+        }
+    }
+
+    /// A `FleetModel` connected to a real, in-process Mac, plus the tally of what it asked for.
+    ///
+    /// One project, so `newSessionOptions` — one request per project — lands at exactly one
+    /// per connect rather than needing a per-project count of its own.
+    private func connectedModel(tally: RequestTally) async throws -> FleetModel {
+        let key = FleetDeviceKey.mint()
+        let server = FleetSocketServer()
+        self.server = server
+        server.onHello = { _, _ in [.snapshot(seq: 0, fleet: Self.fleet, reason: .initial)] }
+        server.onCommand = { _, cid, _, reply in reply(.ack(cid: cid)) }
+        server.onRequest = { _, cid, request, reply in
+            tally.record(request)
+            switch request {
+            case .newSessionOptions(let project):
+                reply(.newSessionOptions(cid: cid, WireNewSessionOptions(project: project, options: [])))
+            case .conversations:
+                reply(.conversations(
+                    cid: cid, WireConversationCatalogue(conversations: [], sessionActivity: [:])
+                ))
+            case .recentlyClosed:
+                reply(.recentlyClosed(cid: cid, []))
+            default:
+                break
+            }
+        }
+        let port = try await server.start(keys: [key], port: nil)
+
+        let store = InMemoryPairedMacStore()
+        store.save(PairedMac(
+            key: key, macName: "Studio", serviceName: "studio-tests._flightdeck._tcp",
+            endpoints: ["127.0.0.1:\(port.rawValue)"]
+        ))
+        let model = FleetModel(store: store)
+
+        try await waitUntil(timeout: 10) {
+            model.fleet.projects.flatMap(\.sessions).count == 2
+        }
+        XCTAssertEqual(
+            model.fleet.projects.flatMap(\.sessions).count, 2, "the fixture fleet never arrived"
+        )
+        return model
+    }
+
+    /// A sleep rather than a run-loop spin: this is an async context, and yielding the main
+    /// actor is what lets the connector's own main-queue callbacks land at all — same reason
+    /// `FleetListScreenTests`' deadline loops give.
+    private func waitUntil(
+        timeout: TimeInterval, _ condition: @MainActor () -> Bool
+    ) async throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !condition(), Date() < deadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+    }
+
+    /// **The bug this file exists to pin.** `activityChanged` and `unreadChanged` fire on every
+    /// status tick and every read/unread flip — by far the most common fleet events — and used
+    /// to hang off `onFleet`, which fires on every one of them. Each re-asked the Mac for the
+    /// New Session menu, the whole conversation catalogue and the whole reopen stack: 50–114 KB
+    /// and ~0.16s of phone CPU, measured, for nothing that had changed. Neither event can move
+    /// any of the three, so the fix is that they must not ask again at all.
+    func testActivityAndUnreadEventsIssueNoCatalogueOptionsOrClosedRequests() async throws {
+        let tally = RequestTally()
+        let model = try await connectedModel(tally: tally)
+        try await waitUntil(timeout: 10) {
+            tally.count("newSessionOptions") == 1 && tally.count("conversations") == 1
+                && tally.count("recentlyClosed") == 1
+        }
+        let sessionID = model.fleet.projects.first?.sessions.first?.id ?? UUID()
+
+        server.broadcast(.event(seq: 1, .activityChanged(
+            id: sessionID, activity: "busy", waitingFor: nil,
+            subagentCount: 0, hasBackgroundWork: false
+        )))
+        server.broadcast(.event(seq: 2, .unreadChanged(id: sessionID, isUnread: true)))
+        // No deadline loop: the assertion is that nothing changes, so the only thing a wait
+        // would buy is more time for a wrongly implemented refresh to sneak in before it runs.
+        try await Task.sleep(for: .milliseconds(300))
+
+        XCTAssertEqual(tally.count("newSessionOptions"), 1, "an activity/unread event must not re-ask for the New Session menu")
+        XCTAssertEqual(tally.count("conversations"), 1, "an activity/unread event must not re-ask for the conversation catalogue")
+        XCTAssertEqual(tally.count("recentlyClosed"), 1, "an activity/unread event must not re-ask for the reopen stack")
+    }
+
+    /// The other half: connecting must still ask for all three, exactly once — the fix must
+    /// not become "never asks again" merely because the loop moved off `onFleet`.
+    func testConnectingIssuesEachOfTheThreeRefreshesExactlyOnce() async throws {
+        let tally = RequestTally()
+        _ = try await connectedModel(tally: tally)
+
+        try await waitUntil(timeout: 10) {
+            tally.count("newSessionOptions") == 1 && tally.count("conversations") == 1
+                && tally.count("recentlyClosed") == 1
+        }
+        XCTAssertEqual(tally.count("newSessionOptions"), 1)
+        XCTAssertEqual(tally.count("conversations"), 1)
+        XCTAssertEqual(tally.count("recentlyClosed"), 1)
+    }
+
+    /// `sessionAdded`/`sessionRemoved` are the only two events that can move the reopen stack,
+    /// so they keep their own ask — unlike `activityChanged`/`unreadChanged` above — but must
+    /// not drag the other two along with them: a tab closing is not a reason to re-ask for the
+    /// New Session menu or the conversation catalogue.
+    func testSessionRemovedIssuesOneClosedStackRequestAndNothingElse() async throws {
+        let tally = RequestTally()
+        let model = try await connectedModel(tally: tally)
+        try await waitUntil(timeout: 10) {
+            tally.count("newSessionOptions") == 1 && tally.count("conversations") == 1
+                && tally.count("recentlyClosed") == 1
+        }
+        let sessionID = try XCTUnwrap(model.fleet.projects.first?.sessions.first?.id)
+
+        server.broadcast(.event(seq: 1, .sessionRemoved(id: sessionID)))
+
+        try await waitUntil(timeout: 10) { tally.count("recentlyClosed") == 2 }
+        XCTAssertEqual(tally.count("recentlyClosed"), 2, "a closed tab must refresh the reopen stack")
+        XCTAssertEqual(tally.count("newSessionOptions"), 1, "closing a tab must not re-ask for the New Session menu")
+        XCTAssertEqual(tally.count("conversations"), 1, "closing a tab must not re-ask for the conversation catalogue")
+    }
+
+    /// **The regression the quiet-event fix introduced.** A project added mid-connection used
+    /// to get its New Session menu on the next reconnect only — nothing else asks, since the
+    /// rows derive from preferences and preferences emit no other event — so the `+` on a
+    /// project that just appeared showed the default row until then. `.projectAdded` must ask
+    /// for that ONE project, the same shape `sessionAdded`/`sessionRemoved` already get above,
+    /// not drag `refreshConversations`/`refreshRecentlyClosed` along for a project that changed
+    /// nothing either of them tracks.
+    func testProjectAddedAsksForThatOneProjectsNewSessionOptionsAndNothingElse() async throws {
+        let tally = RequestTally()
+        let model = try await connectedModel(tally: tally)
+        try await waitUntil(timeout: 10) {
+            tally.count("newSessionOptions") == 1 && tally.count("conversations") == 1
+                && tally.count("recentlyClosed") == 1
+        }
+        let newProject = WireProject(id: UUID(), name: "new", path: "/Users/nate/new")
+
+        server.broadcast(.event(seq: 1, .projectAdded(newProject, at: model.fleet.projects.count)))
+
+        try await waitUntil(timeout: 10) { tally.count("newSessionOptions") == 2 }
+        XCTAssertEqual(tally.count("newSessionOptions"), 2, "a new project must ask for its own New Session menu")
+        XCTAssertEqual(
+            tally.newSessionOptionsProjects().last, newProject.id,
+            "the request must name the project that was just added, not re-sweep every project"
+        )
+        XCTAssertEqual(tally.count("conversations"), 1, "a new project must not re-ask for the conversation catalogue")
+        XCTAssertEqual(tally.count("recentlyClosed"), 1, "a new project must not re-ask for the reopen stack")
+    }
+
+    /// One project, two sessions — enough for `newSessionOptions`' one-request-per-project
+    /// count to be meaningful without needing a per-project tally of its own.
+    private static let fleet = FleetSnapshot(projects: [
+        WireProject(
+            id: UUID(), name: "nate", path: "/Users/nate",
+            sessions: [
+                WireSession(id: UUID(), title: "Home", agent: "claude"),
+                WireSession(id: UUID(), title: "session 2", agent: "claude"),
+            ]
+        )
+    ])
 }

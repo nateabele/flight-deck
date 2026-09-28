@@ -151,7 +151,9 @@ SessionStore
   usage error naming it.
 - **Exit codes:** `0` ok · `1` refused by the app (the wire `err` code on stderr, e.g.
   `unknown_session`, `out_of_scope`) · `2` usage error · `69` (`EX_UNAVAILABLE`) cannot
-  connect.
+  connect · `77` (`EX_NOPERM`) the calling agent's own sandbox refused the `connect()`
+  (`EPERM`/`EACCES`), so the app may be up but this process cannot reach it. Added
+  2026-09-26 with codex's control-socket grant; see ARCHITECTURE.md, "Codex tabs".
 
 | Command | Wire |
 |---|---|
@@ -179,6 +181,8 @@ badly.
 - A frame the app cannot decode: the existing salvage path answers `err` by `cid` where it
   can; otherwise the connection drops and the CLI exits `1` with `undecodable`.
 - App not running or socket disabled: exit `69`, and the message names the path it tried.
+- The agent's sandbox blocks the socket: exit `77`, never `69`, and a message saying so. A
+  retry cannot fix it, so `tail`/`wait` do not reconnect against it either.
 - `tail` survives an app restart by reconnecting with backoff and resuming from its last seq.
   If the app answers with a fresh `snapshot` (for example, replay is no longer available),
   `tail` emits it as a `{"type":"snapshot",…}` line so a consumer can tell the stream reset.
