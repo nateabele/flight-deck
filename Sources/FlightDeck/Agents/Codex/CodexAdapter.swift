@@ -168,6 +168,23 @@ struct CodexAdapter: AgentAdapter {
     /// test may override it, production never needs to.
     var rolloutExists: @Sendable (URL) -> Bool = { FileManager.default.fileExists(atPath: $0.path) }
 
+    /// `flightdeck`'s own control socket, learned from `SessionStore` (see its `controlSocket`
+    /// `didSet` and `makeCodexStackIfNeeded`) rather than passed in per-call: every launch line
+    /// this adapter types needs it, and it is the same value for the lifetime of the app, not
+    /// something that varies per session. `nil` by default and until `SessionStore` sets it, so
+    /// a codex tab launched before that happens (or under a UITest reset, which leaves it `nil`
+    /// on purpose) types exactly what it typed before this feature existed — see
+    /// `CodexControlAccess` for what a non-nil value adds to the command line.
+    var controlSocket: URL?
+
+    /// Set by `SessionStore.startCodex` from the probed codex version, alongside
+    /// `historyMode`. The grant rides on codex's experimental `network_proxy` feature and was
+    /// verified only on codex-cli 0.155.1 and 0.157.1; an older codex could reject the flags
+    /// and fail the tab's launch, or honour them differently. `false` until probed, so a codex
+    /// that was never version-checked gets no flags rather than an untested feature. See
+    /// `CodexVersionProbe.controlAccessMinimumVersion`.
+    var controlAccessSupported = false
+
     /// Start, then name, then archive/unarchive. NOT optional and NOT reorderable.
     ///
     /// `thread/start` does not persist anything: no `threads` row, no rollout file, even
@@ -323,7 +340,7 @@ struct CodexAdapter: AgentAdapter {
     /// otherwise opens a "Choose working directory" picker that blocks the session behind a
     /// prompt with one sane answer.
     func launchCommand(_ binding: AgentBinding, _ session: Session, _ options: AgentOptions) -> String {
-        "codex resume \(binding.conversationID.uuidString.lowercased())\n"
+        "codex resume \(binding.conversationID.uuidString.lowercased())\(controlAccessSuffix(options))\n"
     }
 
     func resumeCommand(_ binding: AgentBinding, _ session: Session, _ options: AgentOptions) -> String {
@@ -344,7 +361,20 @@ struct CodexAdapter: AgentAdapter {
         if let url = binding.transcriptURL, rolloutExists(url) {
             return resumeCommand(binding, session, options)
         }
-        return "codex\n"
+        return "codex\(controlAccessSuffix(options))\n"
+    }
+
+    /// The text appended after the base `codex`/`codex resume <id>` command, granting this
+    /// tab's own sandbox access to `controlSocket` (see `CodexControlAccess`). Empty — not a
+    /// lone trailing space — when there is nothing to grant, so a `controlSocket == nil` launch
+    /// line stays byte-identical to what it typed before this feature existed. Both inputs are
+    /// read here, at the moment of typing, so it does not matter whether the socket or the
+    /// version-probe result reached this adapter first — both do, from different writers.
+    private func controlAccessSuffix(_ options: AgentOptions) -> String {
+        guard controlAccessSupported else { return "" }
+        let flags = CodexControlAccess.launchFlags(socket: controlSocket, options: threadOptions(options))
+        guard !flags.isEmpty else { return "" }
+        return " " + flags.joined(separator: " ")
     }
 
     /// Authoritative title and status for an already-bound thread.

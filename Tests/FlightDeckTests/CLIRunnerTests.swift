@@ -1,4 +1,5 @@
 import FleetKit
+import Network
 import XCTest
 
 final class FakeTransport: CLITransport {
@@ -77,6 +78,40 @@ final class CLIRunnerTests: XCTestCase {
         _ = runner("ls", transport: t)
         t.onDisconnect?(nil)
         XCTAssertEqual(code, 69)
+    }
+
+    func testSandboxRefusalEPERMIsSeventySeven() {
+        let t = FakeTransport()
+        _ = runner("ls", transport: t)
+        t.onDisconnect?(NWError.posix(.EPERM))
+        XCTAssertEqual(code, 77)
+    }
+
+    func testSandboxRefusalEACCESIsSeventySeven() {
+        let t = FakeTransport()
+        _ = runner("ls", transport: t)
+        t.onDisconnect?(NWError.posix(.EACCES))
+        XCTAssertEqual(code, 77)
+    }
+
+    /// Only the two sandbox-denial codes are 77 — every other disconnect before the Mac is
+    /// reached (a missing socket file, say) is still "cannot reach" (69), not a misdiagnosed
+    /// sandbox refusal.
+    func testOtherDisconnectsBeforeReadyAreStillSixtyNine() {
+        let t = FakeTransport()
+        _ = runner("ls", transport: t)
+        t.onDisconnect?(NWError.posix(.ENOENT))
+        XCTAssertEqual(code, 69)
+    }
+
+    /// A sandbox refusal will not heal on retry, so unlike an ordinary drop, `tail` must not
+    /// schedule a reconnect against it.
+    func testTailNeverReconnectsAfterASandboxRefusal() {
+        let t = FakeTransport()
+        _ = runner("tail", transport: t)
+        t.onDisconnect?(NWError.posix(.EPERM))
+        XCTAssertEqual(code, 77)
+        XCTAssertTrue(scheduled.isEmpty, "a sandbox refusal is final, never a reconnect candidate")
     }
 
     func testTailReconnectsAndResumesFromLastSeq() {

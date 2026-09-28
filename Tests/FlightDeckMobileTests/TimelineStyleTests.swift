@@ -9,6 +9,13 @@ import XCTest
 /// renders own that. What IS reachable is every rule about *what text appears at all*, and that
 /// is where this screen's real failures have been: a 64 KB file read reduced to one line, a
 /// timestamp formatted from a date nobody has, a VoiceOver label that reads a whole transcript.
+///
+/// `@MainActor`: `time(_:)`/`timestamp(_:)` memoize their formatted output on a main-actor
+/// cache (see `TimelineStyle`'s date memo) — every real call site is already on the main actor
+/// (`TimelineRow.header`, `TimelineItemDetailScreen.header`, both inside a `View.body`), so the
+/// class picks up the same isolation `TimelineLinkTests`/`TimelineSegmentCacheTests` already
+/// carry for the same reason.
+@MainActor
 final class TimelineStyleTests: XCTestCase {
 
     // MARK: A result that arrives without its call
@@ -154,6 +161,43 @@ final class TimelineStyleTests: XCTestCase {
         )
         XCTAssertNotNil(TimelineStyle.timestamp("2026-08-23T09:14:02Z"))
         XCTAssertNil(TimelineStyle.timestamp("yesterday afternoon"))
+    }
+
+    /// **The defect this memo fixes.** `time(_:)` runs on every render of a row's header, and a
+    /// re-render that leaves the raw string untouched used to reparse the same ISO-8601 text and
+    /// reformat the same `Date` every time — hundreds of rows, dozens of times a minute. A second
+    /// ask for the same raw string must return the identical formatted string and must not touch
+    /// the formatters again; `dateMemoComputeCount` is the miss counter, the same shape as
+    /// `TimelineLinkCache.computeCount`/`TimelineSegmentCache.computeCount`.
+    /// **A raw string this file and its fixtures never otherwise use.** `dateMemoComputeCount`
+    /// is process-wide (the memo lives on `TimelineStyle`, not on an instance this test owns),
+    /// so a raw string any other test also asks for would make the `before` baseline here a lie
+    /// — the memo may already hold it. `2031-…` is not a date anything else in this file or
+    /// `TimelineFixtures` writes.
+    func testASecondCallWithTheSameRawStringIsAMemoHit() {
+        let before = TimelineStyle.dateMemoComputeCount
+        let raw = "2031-01-02T03:04:05.678Z"
+        let first = TimelineStyle.time(raw)
+        let second = TimelineStyle.time(raw)
+        XCTAssertEqual(first, second)
+        XCTAssertEqual(
+            TimelineStyle.dateMemoComputeCount, before + 1,
+            "the second ask for the same raw string should hit the memo, not reparse"
+        )
+    }
+
+    /// `timestamp(_:)` shares the same memo entry as `time(_:)` — asking both for one raw string
+    /// costs one parse, not two, because the full instant and the clock face come off the same
+    /// `Date`. A raw string of its own, for the same reason as the test above.
+    func testTimeAndTimestampShareOneMemoEntryForTheSameRawString() {
+        let before = TimelineStyle.dateMemoComputeCount
+        let raw = "2031-06-07T08:09:10Z"
+        _ = TimelineStyle.time(raw)
+        _ = TimelineStyle.timestamp(raw)
+        XCTAssertEqual(
+            TimelineStyle.dateMemoComputeCount, before + 1,
+            "time and timestamp should share the one memo entry for a raw string, not keep two"
+        )
     }
 
     // MARK: What the Mac cut

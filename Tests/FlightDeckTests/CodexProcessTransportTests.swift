@@ -160,6 +160,29 @@ final class CodexProcessTransportTests: XCTestCase {
         }
     }
 
+    // MARK: - CodexVersionProbe.supportsControlAccess
+
+    /// `0.155.1` is the floor: the control-socket grant rides on the experimental
+    /// `network_proxy` feature and was verified live only on 0.155.1 and 0.157.1. Anything
+    /// older must get no flags rather than an untested experimental feature.
+    func testSupportsControlAccessAtVariousVersions() {
+        let cases: [(String, Bool)] = [
+            ("0.142.4", false),
+            ("0.151.0", false),
+            ("0.155.0", false),
+            ("0.155.1", true),
+            ("0.157.1", true),
+            ("0.160.0", true),
+            ("1.0.0", true),
+        ]
+        for (version, expected) in cases {
+            XCTAssertEqual(
+                CodexVersionProbe.supportsControlAccess(version), expected,
+                "supportsControlAccess(\(version)) should be \(expected)"
+            )
+        }
+    }
+
     // MARK: - CodexVersionProbe.check
 
     func testCheckPassesSilentlyWhenTheInstalledVersionMeetsTheMinimum() {

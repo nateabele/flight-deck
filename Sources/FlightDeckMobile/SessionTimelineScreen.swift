@@ -1002,10 +1002,21 @@ struct SessionTimelineScreen: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Waiting on your review of a plan")
                         .font(.subheadline.weight(.semibold))
-                    if let elapsed = Self.elapsedText(since: gate.startedAt) {
-                        Text(elapsed)
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
+                    // Scoped to just this one line, for the same reason the retry banner's own
+                    // `TimelineView` above is scoped to its strip rather than the whole inset —
+                    // see that comment. It used to refresh only as a side effect of the timeline
+                    // model's per-poll invalidation, which the quiet-poll fix removed; with
+                    // nothing else re-rendering this row, "Started N min ago" would otherwise go
+                    // stale until the next unrelated redraw. 30s, not the retry banner's 1s:
+                    // `RelativeDateTimeFormatter`'s wording only moves every few minutes at the
+                    // durations this banner shows, so a second-granular tick would wake the
+                    // display link for text that reads identically almost every time.
+                    TimelineView(.periodic(from: .now, by: 30)) { context in
+                        if let elapsed = Self.elapsedText(since: gate.startedAt, at: context.date) {
+                            Text(elapsed)
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        }
                     }
                 }
                 Spacer(minLength: 0)
@@ -1084,16 +1095,23 @@ struct SessionTimelineScreen: View {
     /// is `private` to that file, and this is the only other place in the app that needs to
     /// parse a wire timestamp, so a second two-formatter pair (fractional seconds, then
     /// without) is the smaller duplication.
-    static func elapsedText(since startedAt: String) -> String? {
+    ///
+    /// `at` defaults to `Date()` rather than being required, unlike `retryBannerText`'s `at:` —
+    /// `planGateBanner`'s call used to read `Date()` here directly, and the default keeps every
+    /// existing caller and test source-compatible. The real caller now passes `context.date`
+    /// from the `TimelineView(.periodic(...))` wrapping its one `Text`, the same shape as the
+    /// retry banner, so the wording keeps advancing without this whole row re-rendering on a
+    /// timer of its own.
+    static func elapsedText(since startedAt: String, at now: Date = Date()) -> String? {
         let withFraction = ISO8601DateFormatter()
         withFraction.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         let whole = ISO8601DateFormatter()
         whole.formatOptions = [.withInternetDateTime]
-        guard let date = withFraction.date(from: startedAt) ?? whole.date(from: startedAt)
+        guard let startDate = withFraction.date(from: startedAt) ?? whole.date(from: startedAt)
         else { return nil }
         let formatter = RelativeDateTimeFormatter()
         formatter.unitsStyle = .full
-        return "Started " + formatter.localizedString(for: date, relativeTo: Date())
+        return "Started " + formatter.localizedString(for: startDate, relativeTo: now)
     }
 
     /// The `verdict` tier's plan source. There the gate itself carries none (see
