@@ -24,10 +24,14 @@ struct DeparturesBoard: View {
     /// Drawn in the board's glass under the tape: the convergence heatmap (spec §8.3), whose
     /// columns line up under the tape's slots via `slotColumns`.
     var disclosure: AnyView?
+    /// Centred in the footer, between DEP · CLR and ARR · REV — the pinned board's plan
+    /// breadcrumb (`PlanReadingCrumb`).
+    var footer: AnyView?
 
     init(model: BoardModel, policy: FlapPolicy, preview: Binding<PlayMode?>,
          onSelect: @escaping (Int) -> Void, onExtend: @escaping (Stage) -> Void,
-         onTrim: @escaping (Stage) -> Void = { _ in }, openCardSlotID: String? = nil, disclosure: AnyView? = nil) {
+         onTrim: @escaping (Stage) -> Void = { _ in }, openCardSlotID: String? = nil, disclosure: AnyView? = nil,
+         footer: AnyView? = nil) {
         self.model = model
         self.policy = policy
         self._preview = preview
@@ -36,6 +40,7 @@ struct DeparturesBoard: View {
         self.onTrim = onTrim
         self.openCardSlotID = openCardSlotID
         self.disclosure = disclosure
+        self.footer = footer
     }
 
     /// Where each of `slotIDs` sits across a board `width` points wide, measured from the board's
@@ -74,16 +79,16 @@ struct DeparturesBoard: View {
             fields
             tape
             HStack {
-                Text("DEP · CLR")
+                Text("DEP · CLR").accessibilityHidden(true)
                 Spacer()
-                Text("ARR · REV")
+                Text("ARR · REV").accessibilityHidden(true)
             }
+            .overlay { footer }
             .font(Style.caption)
             .tracking(Style.captionTracking)
             .foregroundStyle(Palette.ph3)
             .padding(.horizontal, Style.inset)
             .padding(.bottom, 12)
-            .accessibilityHidden(true)
             if let disclosure {
                 Rectangle().fill(Palette.ph.opacity(0.08)).frame(height: 1)
                 disclosure
@@ -618,5 +623,28 @@ private struct Stripes: Shape {
             x += 10
         }
         return path
+    }
+}
+
+/// The pinned board's plan breadcrumb (`PlanReadingPosition`): the section being read, in the
+/// board footer's caption, a click away from its heading. Its own view, observing the position
+/// alone, so a scroll that changes the section redraws this and not the board.
+struct PlanReadingCrumb: View {
+    @ObservedObject var position: PlanReadingPosition
+
+    var body: some View {
+        if let section = position.section {
+            Button { position.jump() } label: {
+                Text(PlanReadingPosition.label(section).uppercased())
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+            .buttonStyle(.plain)
+            .help("Back to \(section)")
+            .accessibilityLabel("Reading \(section)")
+            .accessibilityHint("Scrolls back to the section's heading")
+            .accessibilityIdentifier("plan-reading-crumb")
+            .padding(.horizontal, 90)
+        }
     }
 }

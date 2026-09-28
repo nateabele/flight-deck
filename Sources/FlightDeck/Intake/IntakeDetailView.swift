@@ -67,6 +67,8 @@ struct IntakeDetailView: View {
     /// `@State`, not `@StateObject`: this body must not re-render on every draft keystroke or
     /// scroll beat — only the views that draw notes observe it.
     @State private var notes = PlanNotesController()
+    /// The plan section being read, for the pinned board's breadcrumb (`PlanReadingPosition`).
+    @State private var reading = PlanReadingPosition()
     /// Whether the control bar and board have scrolled above the document's top edge and are
     /// drawn pinned under the toolbar instead — see `pinnedBar`.
     @State private var pinned = false
@@ -376,7 +378,8 @@ struct IntakeDetailView: View {
                                     Color.clear.preference(key: BarGeometryKey.self,
                                                            value: BarFrames(heatmap: geo.frame(in: .named(Self.scrollSpace))))
                                 }))
-                            })
+                            },
+                            footer: pinned ? AnyView(PlanReadingCrumb(position: reading)) : nil)
                 .clipShape(RoundedRectangle(cornerRadius: 10))
         }
     }
@@ -494,6 +497,7 @@ struct IntakeDetailView: View {
                             })
             .equatable()
             .environment(\.pageObscuredTop, pinnedHeight)
+            .environment(\.planReading, final ? nil : reading)
     }
 
     // MARK: - Stage bodies
@@ -1143,7 +1147,8 @@ private struct DocumentPlan: View, Equatable {
                                          onNoteShown: { [service, intakeID] in service.markEditNoteShown(intakeID) },
                                          onConflict: { [service, intakeID] in service.recordEditConflict(intakeID, $0) },
                                          liveTape: { [service, intakeID] in service.tapes[intakeID] },
-                                         router: final ? nil : service.editRouter(intakeID)))
+                                         router: final ? nil : service.editRouter(intakeID),
+                                         folds: service.planFolds(intakeID)))
                 .churnLane(churn)
                 .focus(focus)
                 .readOnly(final)
