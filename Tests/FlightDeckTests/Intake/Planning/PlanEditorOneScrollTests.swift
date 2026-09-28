@@ -124,13 +124,8 @@ final class PlanEditorOneScrollTests: XCTestCase {
         let top = try XCTUnwrap(f.viewport)
         XCTAssertLessThan(NSMaxRange(top), length / 4, "at the top only the top is laid out: \(top) of \(length)")
 
-        // As SwiftUI would: each scroll firms up the estimate near the end, the page takes the
-        // new height, and the end moves until the two agree.
-        for _ in 0..<3 {
-            f.scrollPage(to: .infinity)
-            drain()
-            f.fit()
-        }
+        waitForWholeLayout(f)
+        f.fit()
         f.scrollPage(to: .infinity)
         drain()
         let bottom = try XCTUnwrap(f.viewport)
@@ -139,6 +134,53 @@ final class PlanEditorOneScrollTests: XCTestCase {
         let last = f.rectInPage(length - 1)
         XCTAssertTrue(f.outer.contentView.documentVisibleRect.intersects(last),
                       "the last line is where the page shows: \(last) in \(f.outer.contentView.documentVisibleRect)")
+    }
+
+    /// After a load the whole plan is laid out once, off the keystroke path, so its height is
+    /// exact: one scroll to the bottom reaches the plan's last line, and scrolling there again
+    /// moves nothing. On TextKit 2's estimate alone the page's end ran short and moved down as
+    /// the plan was read — six scrolls to the bottom in the offscreen render.
+    @MainActor
+    func testOneScrollToTheBottomReachesThePlansEndAndItStaysPut() throws {
+        // The pass's cost, measured once in a single slice, then as it runs: in slices.
+        let slice = PlanNSTextView.fullLayoutSlice
+        PlanNSTextView.fullLayoutSlice = .seconds(10)
+        let whole = editor(PlanEditorKeystrokeTests.plan())
+        waitForWholeLayout(whole)
+        print("PlanEditor whole-plan layout, one slice: \(whole.container.textView.lastFullLayout.map { "\($0.time)" } ?? "none")")
+        whole.coordinator.timer?.invalidate()
+        whole.window.close()
+        PlanNSTextView.fullLayoutSlice = slice
+
+        let f = editor(PlanEditorKeystrokeTests.plan())
+        defer { f.coordinator.timer?.invalidate(); f.window.close() }
+        waitForWholeLayout(f)
+        let pass = try XCTUnwrap(f.container.textView.lastFullLayout, "the pass ran")
+        print("PlanEditor whole-plan layout, sliced: \(pass.time) over \(pass.slices) slices of ≤ \(slice)")
+        f.fit()
+        let length = (f.container.textView.string as NSString).length
+        f.scrollPage(to: .infinity)
+        drain()
+        let last = f.rectInPage(length - 1)
+        XCTAssertTrue(f.outer.contentView.documentVisibleRect.intersects(last),
+                      "one scroll reaches the last line: \(last) in \(f.outer.contentView.documentVisibleRect)")
+        let height = f.page.frame.height
+        for _ in 0..<3 {
+            f.fit()
+            f.scrollPage(to: .infinity)
+            drain()
+        }
+        f.fit()
+        XCTAssertEqual(f.page.frame.height, height, accuracy: 0.5, "the page's end stayed put")
+    }
+
+    /// Runs the runloop until the whole-plan pass is done (bounded).
+    @MainActor
+    private func waitForWholeLayout(_ f: Fixture) {
+        let deadline = Date().addingTimeInterval(5)
+        while f.container.textView.layingOutWholePlan, Date() < deadline { drain(0.01) }
+        drain()
+        XCTAssertFalse(f.container.textView.layingOutWholePlan, "the pass finished")
     }
 
     /// Typing new lines at the end of a plan that runs past the window keeps the caret on the

@@ -401,15 +401,9 @@ final class PlanningRenderTests: XCTestCase {
             try PlanningRender.write(IntakeDetailView(service: service, intake: intake, onOpenReview: {}),
                                      size: NSSize(width: 1100, height: 900),
                                      to: out.appendingPathComponent("onescroll-\(name)-1100.png"),
-                                     prepare: y == 0 ? nil : { host in
-                                         // Again and again for the end, as a wheel gets there: laying out
-                                         // text past the estimate firms up TextKit 2's height, and the
-                                         // page grows to it (`PlanEditorContainer.heightChanged`).
-                                         for _ in 0..<(y.isInfinite ? 6 : 1) {
-                                             Self.scroll(host, to: y)
-                                             RunLoop.current.run(until: Date().addingTimeInterval(0.3))
-                                         }
-                                     })
+                                     // One scroll, even to the end: the plan was laid out whole after
+                                     // it loaded, so the page's end is where it will stay.
+                                     prepare: y == 0 ? nil : { host in Self.scroll(host, to: y) })
         }
     }
 

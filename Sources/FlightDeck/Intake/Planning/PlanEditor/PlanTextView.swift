@@ -289,6 +289,7 @@ struct PlanTextView: NSViewRepresentable {
             editCount = 0
             taking = nil
             MainActor.assumeIsolated { notesBridge.textChanged() }
+            textView.layOutWholePlan()
         }
 
         func receive(_ incoming: String?, navigation: Bool) {
@@ -610,9 +611,11 @@ struct PlanTextView: NSViewRepresentable {
 /// the page only once the box hit its end. What an inner scroll view used to do for the text is
 /// now done against the pane's:
 /// - **Height.** The text view sizes itself to TextKit 2's `usageBoundsForTextContainer` (it is
-///   vertically resizable), an estimate below the laid-out part, so no keystroke ever lays out
-///   the whole plan. This view passes the height on to SwiftUI (`sizeThatFits`) — only a change
-///   of a point or more, once a runloop turn (`heightChanged`), since each one relays out the pane.
+///   vertically resizable). That is an estimate below the laid-out part, so after a load or a
+///   re-wrap the whole plan is laid out once, in slices off the keystroke path
+///   (`PlanNSTextView.layOutWholePlan`), and the height is exact; a keystroke never lays out the
+///   whole plan. This view passes the height on to SwiftUI (`sizeThatFits`) — only a change of a
+///   point or more, once a runloop turn (`heightChanged`), since each one relays out the pane.
 /// - **Viewport.** TextKit 2 lays out only what the text view's `visibleRect` shows, which AppKit
 ///   clips through every enclosing clip view, so the pane's scroll bounds it and a scroll of the
 ///   pane re-lays it on the next display — measured (`PlanEditorOneScrollTests`), so nothing
@@ -813,6 +816,74 @@ class PlanNSTextView: NSTextView {
         let width = PlanGutter.textWidth(viewWidth: frame.width, churn: showsChurn)
         guard container.size.width != width else { return }
         container.size = NSSize(width: width, height: container.size.height)
+        // Every line re-wraps: the height is an estimate again until it is all laid out.
+        layOutWholePlan()
+    }
+
+    // MARK: Whole-plan layout
+
+    /// The plan is part of the page, so its height is the page's end. TextKit 2 knows it
+    /// exactly only for what it has laid out — the rest is an estimate, which ran short for
+    /// wrapped paragraphs: the page's end moved down as the human read, six scrolls to the
+    /// bottom before it stayed put. So after a load or a re-wrap the whole plan is laid out
+    /// once, off the keystroke path: from the next runloop turn, in slices of
+    /// `fullLayoutSlice`, a newer load or width starting it over. Typing keeps TextKit 2's
+    /// incremental layout: an edit changes the height only by what its paragraph changed.
+    private var fullLayoutGeneration = 0
+    /// Where the pass has reached, nil when none is running.
+    private var fullLayoutNext: NSTextLocation?
+    /// Main-thread time the last completed pass took, all slices together, and in how many.
+    private(set) var lastFullLayout: (time: Duration, slices: Int)?
+    private var fullLayoutSpent: (time: Duration, slices: Int) = (.zero, 0)
+    /// Under a frame at 60 Hz, so a slice never costs the human a frame of scrolling.
+    static var fullLayoutSlice: Duration = .milliseconds(8)
+
+    /// Whether a pass is still running — for tests.
+    var layingOutWholePlan: Bool { fullLayoutNext != nil }
+
+    func layOutWholePlan() {
+        guard let content = textLayoutManager?.textContentManager else { return }
+        fullLayoutGeneration += 1
+        fullLayoutNext = content.documentRange.location
+        fullLayoutSpent = (.zero, 0)
+        scheduleLayoutSlice(fullLayoutGeneration)
+    }
+
+    private func scheduleLayoutSlice(_ generation: Int) {
+        // `.default` only: a slice waits out a live scroll (`.eventTracking`) rather than
+        // stealing its frames.
+        RunLoop.main.perform(inModes: [.default]) { [weak self] in
+            MainActor.assumeIsolated { self?.layOutSlice(generation) }
+        }
+    }
+
+    private func layOutSlice(_ generation: Int) {
+        guard generation == fullLayoutGeneration, let start = fullLayoutNext, let layout = textLayoutManager else { return }
+        let clock = ContinuousClock()
+        let began = clock.now
+        var next: NSTextLocation?
+        layout.enumerateTextLayoutFragments(from: start, options: [.ensuresLayout]) { fragment in
+            guard clock.now - began < Self.fullLayoutSlice else {
+                next = fragment.rangeInElement.endLocation
+                return false
+            }
+            return true
+        }
+        fullLayoutSpent = (fullLayoutSpent.time + (clock.now - began), fullLayoutSpent.slices + 1)
+        fullLayoutNext = next
+        guard next == nil else { return scheduleLayoutSlice(generation) }
+        lastFullLayout = fullLayoutSpent
+        // The frame takes the now-exact usage bounds at once; the container passes it on.
+        // Not `sizeToFit()`: measured, it left the frame at the estimate until a later layout.
+        let height = max(minSize.height, layout.usageBoundsForTextContainer.height + 2 * textContainerInset.height)
+        if abs(height - frame.height) >= 0.5 { setFrameSize(NSSize(width: frame.width, height: height)) }
+    }
+
+    /// An edit made while a pass was running may have replaced the text it was walking:
+    /// start over (what is laid out stays laid out, so the restart is quick).
+    override func didChangeText() {
+        super.didChangeText()
+        if fullLayoutNext != nil { layOutWholePlan() }
     }
 
     override func updateTrackingAreas() {
