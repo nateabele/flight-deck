@@ -217,7 +217,10 @@ default models — budget minutes per round, and real tokens.
 3. **Read the plan.** Click the synthesis card; the plan viewer shows its `plan.md`. Switch to
    **Diff vs previous**.
    **Expect:** monospaced, selectable text that is part of the page (the page scrolls it, not a
-   box of its own); the diff is against drafter 0's draft.
+   box of its own); the diff is against drafter 0's draft. Every paragraph and list item of the
+   plan is a single line (the editor soft-wraps it) — no hard breaks mid-sentence at ~80–100
+   columns. On an intake recorded before plans were stored unwrapped, the first round after it
+   shows only its real changes in the diff, not every reflowed paragraph.
 4. **✎ annotate, then ⏯ one refine round, and check that the annotation shaped it.** Annotate
    with something specific and checkable ("the plan must not add any new dependency"), then ⏯.
    **Expect:** exactly one refine round runs and the tape pauses again. Its card records your

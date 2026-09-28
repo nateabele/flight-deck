@@ -217,9 +217,11 @@ public enum ConvergenceSeries {
 
     /// Each checkpoint's generated plan paired with the effective plan of the checkpoint before
     /// it. The base is only the IMMEDIATELY preceding checkpoint's plan: when that one is
-    /// missing, reaching further back would charge two rounds' churn to this one.
+    /// missing, reaching further back would charge two rounds' churn to this one. Both read
+    /// unwrapped (`PlanLayers.readPlan`), so the first round after a checkpoint recorded wrapped
+    /// is not charged with reflowing every paragraph of it.
     private static func planPairs(_ checkpoints: [Checkpoint], loadFile: (Int, String) -> Data?) -> [Int: (base: String, plan: String)] {
-        func text(_ id: Int, _ path: String) -> String? { loadFile(id, path).map { String(decoding: $0, as: UTF8.self) } }
+        func text(_ id: Int, _ path: String) -> String? { loadFile(id, path).map(PlanLayers.readPlan) }
         var pairs: [Int: (base: String, plan: String)] = [:]
         var base: String?
         for cp in checkpoints {

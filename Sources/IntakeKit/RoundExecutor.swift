@@ -119,9 +119,10 @@ public struct RoundExecutor: Sendable {
                     }
                     switch try await attemptDraft(slot.choice, name) {
                     case .ok(let out, let session):
-                        publish(SeatResult(kind: .draft, linesAdded: lineCount(out.plan)), run: name, inputs)
+                        let plan = MarkdownUnwrap.unwrap(out.plan)
+                        publish(SeatResult(kind: .draft, linesAdded: lineCount(plan)), run: name, inputs)
                         return (i, SlotOutcome(role: "drafter", persona: slot.persona, used: slot.choice, requested: slot.choice,
-                                               status: .ok, sessionID: session), out.plan)
+                                               status: .ok, sessionID: session), plan)
                     case .failed(let firstDiagnosis, _):
                         guard let fallback = slot.fallback else {
                             return (i, SlotOutcome(role: "drafter", persona: slot.persona, used: slot.choice,
@@ -129,9 +130,10 @@ public struct RoundExecutor: Sendable {
                         }
                         switch try await attemptDraft(fallback, name + "-fallback") {
                         case .ok(let out, let session):
-                            publish(SeatResult(kind: .draft, linesAdded: lineCount(out.plan)), run: name + "-fallback", inputs)
+                            let plan = MarkdownUnwrap.unwrap(out.plan)
+                            publish(SeatResult(kind: .draft, linesAdded: lineCount(plan)), run: name + "-fallback", inputs)
                             return (i, SlotOutcome(role: "drafter", persona: slot.persona, used: fallback, requested: slot.choice,
-                                                   status: .substituted, sessionID: session), out.plan)
+                                                   status: .substituted, sessionID: session), plan)
                         case .failed(let diagnosis, _):
                             return (i, SlotOutcome(role: "drafter", persona: slot.persona, used: fallback,
                                                    requested: slot.choice, status: .failed, diagnosis: diagnosis), nil)
@@ -187,11 +189,17 @@ public struct RoundExecutor: Sendable {
 
     /// Shared tail of synthesis and refine: stage `base` and the proposed changes in `work/`,
     /// let the integrator edit `work/plan.md` in place, and measure what it actually did.
+    ///
+    /// Both ends are unwrapped (`MarkdownUnwrap`): the integrator is handed the unwrapped plan
+    /// even when the checkpoint it came from was recorded wrapped, and whatever it writes back
+    /// is joined again before it is measured or kept. Measured raw, the first round over a
+    /// wrapped checkpoint would count every reflowed paragraph as its own churn — and an
+    /// integrator that only reflowed would pass the did-it-edit check below.
     private func integrate(_ review: ReviewOutput, base: URL, ctx: RoundContext, _ planned: PlannedRound,
                            _ inputs: RoundInputs, _ record: inout RoundRecord) async throws -> [String: Data] {
         let work = inputs.store.workDirectory()
         let planFile = work.appendingPathComponent("plan.md"), changesFile = work.appendingPathComponent("changes.json")
-        let before = try Data(contentsOf: base)
+        let before = try unwrappedPlan(base)
         // Nothing proposed means nothing to apply: running an integrator anyway costs a model
         // turn and can only drift the plan. The round still lands, so the tape shows a
         // reviewer that found nothing — the signal refinement has converged.
@@ -214,7 +222,7 @@ public struct RoundExecutor: Sendable {
                                                                   humanEdits: ctx.humanEdits),
                                    schema: RoundSchemas.integrate, cwd: work, readable: [], access: .writeInWork(work),
                                    inputs: inputs, &record)
-        let after = try Data(contentsOf: planFile)
+        let after = try unwrappedPlan(planFile)
         record.changeCount = review.changes.count
         let tally = integrated.tally(forChanges: review.changes.count)
         record.tally = tally
@@ -273,7 +281,7 @@ public struct RoundExecutor: Sendable {
                                          graph: graph, observedAt: observedAt, inputs: inputs, &record)
         record.changeCount = cs.ops.count
         publish(SeatResult(kind: .changeSet, ops: cs.ops.count), run: run, inputs)
-        return ["changeset.json": try cs.encoded(), "plan.md": try Data(contentsOf: plan),
+        return ["changeset.json": try cs.encoded(), "plan.md": try unwrappedPlan(plan),
                 "graph.json": try IntakeJSON.encoder.encode(graph)]
     }
 
@@ -339,7 +347,7 @@ public struct RoundExecutor: Sendable {
         // snapshot fallback (no encode checkpoint to carry one) and the shadow/bv analytics
         // failure note (Task 7b) can each fire on their own round.
         record.note = [fallbackNote, record.note, shadowNote].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "\n\n")
-        return ["changeset.json": try cs.encoded(), "plan.md": try Data(contentsOf: plan), "graph.json": graphData]
+        return ["changeset.json": try cs.encoded(), "plan.md": try unwrappedPlan(plan), "graph.json": graphData]
     }
 
     /// `bv`'s three robot reports, run by FD ITSELF against a fresh shadow of `changeSet` and
@@ -650,6 +658,13 @@ public struct RoundExecutor: Sendable {
                                              action: "Re-run the draft round."))
         }
         return drafts
+    }
+
+    /// A plan file's bytes as a new checkpoint stores them: unwrapped (`PlanLayers.readPlan`).
+    /// Every plan a round records goes through here or `MarkdownUnwrap` directly — a checkpoint
+    /// recorded wrapped is the awkward-to-edit text this exists to stop writing.
+    private func unwrappedPlan(_ url: URL) throws -> Data {
+        Data(PlanLayers.readPlan(try Data(contentsOf: url)).utf8)
     }
 
     /// The head plan checkpoint's EFFECTIVE plan (`PlanLayers`): its `plan.user.md` when the

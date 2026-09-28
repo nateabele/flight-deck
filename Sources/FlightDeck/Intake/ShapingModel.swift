@@ -275,12 +275,15 @@ struct ShapingModel {
     /// Lowest-numbered, not `drafts/0.md`: a draft round writes only the drafters that
     /// succeeded, so with drafter 0 failed its file doesn't exist — and the first surviving
     /// draft is the one synthesis and Sketch's refine build on (`RoundExecutor.draftFiles`).
-    /// The draft record has one slot per drafter, which bounds the search.
+    /// The draft record has one slot per drafter, which bounds the search. Read unwrapped
+    /// (`PlanLayers.readPlan`), like the engine reads it: this is the edit layer's base, and
+    /// the runner stores the human's layer unwrapped, so a raw read of a checkpoint recorded
+    /// wrapped would mark every paragraph of it as the human's edit.
     static func planText(checkpoint: Int, in tape: Tape, loadFile: (Int, String) -> Data?) -> String? {
-        if let plan = loadFile(checkpoint, "plan.md") { return String(decoding: plan, as: UTF8.self) }
+        if let plan = loadFile(checkpoint, "plan.md") { return PlanLayers.readPlan(plan) }
         let drafters = tape.checkpoints.first { $0.id == checkpoint }?.record.slots.count ?? 0
         for i in 0..<max(drafters, 1) {
-            if let draft = loadFile(checkpoint, "drafts/\(i).md") { return String(decoding: draft, as: UTF8.self) }
+            if let draft = loadFile(checkpoint, "drafts/\(i).md") { return PlanLayers.readPlan(draft) }
         }
         return nil
     }

@@ -119,7 +119,7 @@ struct PlanSection: View {
     /// human edited it, else what the round generated) — the same layer the next round reads.
     /// `PlanLayers.effectivePlan` takes a directory; this is its rule over `loadFile`.
     static func effectivePlan(checkpoint: Int, tape: Tape, loadFile: (Int, String) -> Data?) -> String? {
-        if let edited = loadFile(checkpoint, PlanLayers.userName) { return String(decoding: edited, as: UTF8.self) }
+        if let edited = loadFile(checkpoint, PlanLayers.userName) { return PlanLayers.readPlan(edited) }
         return ShapingModel.planText(checkpoint: checkpoint, in: tape, loadFile: loadFile)
     }
 

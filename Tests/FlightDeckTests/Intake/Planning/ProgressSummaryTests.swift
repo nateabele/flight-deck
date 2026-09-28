@@ -57,7 +57,7 @@ final class ProgressSummaryTests: XCTestCase {
 
     func testSummaryAfterDraftAndSynthesis() throws {
         let tape = Tape(checkpoints: [cp(1, .draft, from: 0, to: 300), cp(2, .synthesis, from: 310, to: 592)])
-        let plan = (1...412).map { "line \($0)" }.joined(separator: "\n") + "\n"
+        let plan = (1...412).map { "- line \($0)" }.joined(separator: "\n") + "\n"
         let line = ProgressSummary.line(intake: try intake(.shaping), tape: tape,
                                         triage: triage(seconds: 220, files: ["Sources": 41])) { id, path in
             id == 2 && path == "plan.md" ? Data(plan.utf8) : nil
@@ -69,7 +69,7 @@ final class ProgressSummaryTests: XCTestCase {
         // the lowest surviving draft's, the same plan the viewer shows for a draft checkpoint.
         let draftOnly = Tape(checkpoints: [cp(1, .draft, from: 0, to: 300)])
         let drafted = ProgressSummary.line(intake: try intake(.shaping), tape: draftOnly, triage: nil) { id, path in
-            id == 1 && path == "drafts/0.md" ? Data("a\nb\nc".utf8) : nil
+            id == 1 && path == "drafts/0.md" ? Data("- a\n- b\n- c".utf8) : nil
         }
         XCTAssertEqual(flat(drafted), ["Triage|", "Draft|5:00 · 3 lines"])
 

@@ -124,17 +124,23 @@ public struct NoteAnchor: Codable, Equatable, Sendable {
     }
 
     /// `text` with every whitespace run (newlines included) collapsed to a single space, plus
-    /// the original index of each character that survived.
+    /// the original index of each character that survived. A blockquote's `>` markers at the
+    /// start of a line count as part of the run: a note quoted across a line break of a wrapped
+    /// quote (`races the\n> first sync`) must still find the passage once the quote is one
+    /// line (`MarkdownUnwrap`), where that `>` is gone.
     private static func collapsingWhitespace(_ text: String) -> (text: String, map: [String.Index]) {
         var out = "", map: [String.Index] = []
         var inRun = false
+        var lineStart = false
         var i = text.startIndex
         while i < text.endIndex {
             let ch = text[i]
-            if ch.isWhitespace {
+            if ch.isWhitespace || (ch == ">" && inRun && lineStart) {
                 if !inRun { out.append(" "); map.append(i) }
                 inRun = true
+                if ch.isNewline { lineStart = true }
             } else {
+                lineStart = false
                 out.append(ch); map.append(i)
                 inRun = false
             }
