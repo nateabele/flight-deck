@@ -171,13 +171,10 @@ final class SessionStore: ObservableObject {
     /// cannot recurse.
     @Published var selectedSessionID: UUID? {
         didSet {
-            let target = selectedSessionID.map(SelectionTarget.session)
-            noteSelectionChange(from: recordableSelection, to: target)
-            // Not simply `!isSuppressingHistory` folded into the call above: `recordableSelection`
-            // must stay stale across a suppressed change too, or a tab that only exists because
-            // it was just created, reopened, or resumed would still become the `from` the very
-            // next real click records — see `recordableSelection`'s own doc comment.
-            if !isSuppressingHistory { recordableSelection = target }
+            noteSelectionChange(
+                from: oldValue.map(SelectionTarget.session),
+                to: selectedSessionID.map(SelectionTarget.session)
+            )
             #if DEBUG
             Self.selectionDebugLogger.debug(
                 "selectedSessionID old=\(oldValue?.uuidString ?? "nil", privacy: .public) new=\(self.selectedSessionID?.uuidString ?? "nil", privacy: .public) reason=\(self.selectionChangeReason, privacy: .public) t=\(Date().timeIntervalSince1970, privacy: .public)"
@@ -218,18 +215,11 @@ final class SessionStore: ObservableObject {
     /// included, which is why recording in `selectSession(_:)` would miss every click.
     private(set) var selectionHistory = SelectionHistory()
 
-    /// Set while `goBack`/`goForward`, `restore`, or `select(_:selecting:)` assign the
-    /// selection: a traversal is not a new place, restoring last run's selection is not a
-    /// navigation, and neither is landing on a tab that was just created, reopened, or resumed.
+    /// Set while `goBack`/`goForward` or `restore` assign the selection: a traversal is not a
+    /// new place to record, and restoring last run's selection is not a navigation either. A
+    /// session created, reopened, or resumed through `select(_:selecting:)` is NOT suppressed —
+    /// the user sees that selection happen, so it belongs in history like any other.
     private var isSuppressingHistory = false
-
-    /// `noteSelectionChange`'s `from` on the next call, which is deliberately NOT simply
-    /// `selectedSessionID`'s previous value. A tab arrived at through a suppressed change (see
-    /// `isSuppressingHistory`) was never a place the user chose to be, so it must not become
-    /// somewhere ⌃⌘← can return to — left stale exactly when `isSuppressingHistory` is true, so
-    /// three `newSession(in:)` calls in a row seed no dead-weight Back entries before the user
-    /// has clicked anything.
-    private var recordableSelection: SelectionTarget?
 
     private func noteSelectionChange(from: SelectionTarget?, to: SelectionTarget?) {
         guard !isSuppressingHistory else { return }
@@ -2353,13 +2343,10 @@ final class SessionStore: ObservableObject {
         #if DEBUG
         selectionChangeReason = "select(_:selecting:)"
         #endif
-        // A tab this method creates, reopens or resumes is where the user is *arriving*, not
-        // somewhere they chose to leave — recording it would mean ⌘N and ⌘⇧T silently grew
-        // the Back stack on every use, and three tabs opened in a row would make ⌃⌘← cycle
-        // through them instead of returning to whatever the user actually had open before.
-        isSuppressingHistory = true
+        // Recorded like any other selection: the user sees a new tab open, get reopened, or
+        // get resumed, so ⌃⌘← returning to whatever they had open before is exactly what they
+        // expect — only `restore()`'s silent launch-time selection is not a navigation.
         selectedSessionID = id
-        isSuppressingHistory = false
     }
 
     /// The tail every creation shares: file the tab, reveal it, select it, save.
@@ -3612,7 +3599,10 @@ final class SessionStore: ObservableObject {
         let current = selectedSessionID.map(SelectionTarget.session)
         let destination = step(&selectionHistory, current) { [self] target in
             switch target {
-            case .session(let id): return locate(id) != nil
+            case .session(let id):
+                // `id != selectedSessionID` too: without it, Back can land on the row already
+                // showing — a keypress that visibly does nothing but still eats a history entry.
+                return locate(id) != nil && id != selectedSessionID
             case .project: return false  // master has no project selection; see fi-tab-nav
             }
         }
