@@ -93,10 +93,12 @@ final class IntakeRunnerTests: XCTestCase {
     var store: TapeStore { TapeStore(intakeDirectory: IntakeStore(root: intakes).directory(for: intake.id)) }
 
     fileprivate func runner(_ commands: CommandRunner, id: UUID? = nil, poll: Duration = .milliseconds(20),
-                            hooks: IntakeRunner.Hooks = .init()) -> IntakeRunner {
+                            hooks: IntakeRunner.Hooks = .init(),
+                            mergeRunner: CommandRunner = SystemCommandRunner()) -> IntakeRunner {
         IntakeRunner(root: intakes, intakeID: id ?? intake.id,
                      executor: RoundExecutor(runner: commands, graphReader: GraphReader(runner: commands, environment: [:])),
-                     environment: ["PATH": "/usr/bin:/bin"], pollInterval: poll, now: Date.init, hooks: hooks)
+                     environment: ["PATH": "/usr/bin:/bin"], pollInterval: poll, now: Date.init, hooks: hooks,
+                     mergeRunner: mergeRunner)
     }
 
     /// A real `sleep 30` in its own process group, standing in for a harness child.
@@ -684,32 +686,82 @@ extension IntakeRunnerTests {
             .hasPrefix(edited))
     }
 
-    /// An edit to the head that lands while a round is reading it is stored at once, but the
-    /// round in flight is unaffected — and its record says the edit missed it, since the new
-    /// checkpoint becomes the head.
-    func testEditDuringARoundIsStoredAndTheRoundSaysItMissedIt() async throws {
+    /// Runs draft, then refine 1 with the human's `edit` of checkpoint 1 landing while the
+    /// reviewer is held open. The integrator applies `integrate` to the plan it was given.
+    fileprivate func refineWithMidRoundEdit(_ edit: String, integrate: @escaping @Sendable (String) -> String = { $0 + "\n## Added\nline\n" },
+                                mergeRunner: CommandRunner = SystemCommandRunner()) async throws -> AsyncScriptedRunner {
         _ = try store.appendCommand(.step)
         _ = await runner(scripted()).run()
 
         let gate = Gate()
         let commands = AsyncScriptedRunner { call in
             if call.role == "reviewer" { try await gate.wait() }
-            return Self.answer(call)
+            guard call.role == "integrator" else { return Self.answer(call) }
+            let plan = call.cwd.appendingPathComponent("plan.md")
+            try! integrate(try! String(contentsOf: plan, encoding: .utf8)).write(to: plan, atomically: true, encoding: .utf8)
+            return ok(call, "int", json(IntegrateOutput(agree: 1, somewhat: 0, disagree: 0, notes: "applied")))
         }
         _ = try store.appendCommand(.step)
-        let run = Task { await runner(commands).run() }
+        let run = Task { await runner(commands, mergeRunner: mergeRunner).run() }
         try await eventually("refine 1's reviewer to start") { gate.entered == 1 }
-        let seq = try store.appendCommand(.editPlan(checkpoint: 1, markdown: "# Plan\n\nlate edit\n"))
+        let seq = try store.appendCommand(.editPlan(checkpoint: 1, markdown: edit))
         try await eventually("the watcher to apply the edit") { self.store.loadTape().ackedCommandSeq == seq }
-        XCTAssertEqual(store.userEdits(checkpoint: 1), "# Plan\n\nlate edit\n", "stored while the round runs")
+        XCTAssertEqual(store.userEdits(checkpoint: 1), edit, "stored while the round runs")
         gate.open()
         _ = await run.value
+        XCTAssertEqual(store.loadTape().checkpoints.map(\.stage), [.draft, .refine])
+        return commands
+    }
 
+    /// The maintainer edits while agents work: an edit to the head that lands mid-round doesn't reach the
+    /// running round, and is three-way merged onto the plan it produced — the new head's
+    /// `plan.user.md` — so the next round gets it.
+    func testMidRoundEditIsCarriedForwardOntoTheNewHead() async throws {
+        let commands = try await refineWithMidRoundEdit("# Plan (Mac only)\n\n## Scope\nOne\n")
+        XCTAssertFalse(try XCTUnwrap(commands.calls("reviewer").first).prompt.contains("Mac only"), "the running round is unaffected")
+        let generated = try String(contentsOf: store.checkpointDirectory(2).appendingPathComponent("plan.md"), encoding: .utf8)
+        XCTAssertEqual(generated, Self.draftPlan + "\n## Added\nline\n", "the round's own plan stays the generated layer")
+        XCTAssertEqual(store.userEdits(checkpoint: 2), "# Plan (Mac only)\n\n## Scope\nOne\n\n## Added\nline\n")
         let tape = store.loadTape()
-        XCTAssertEqual(tape.checkpoints.map(\.stage), [.draft, .refine])
-        XCTAssertFalse(try XCTUnwrap(commands.calls("reviewer").first).prompt.contains("late edit"), "the running round is unaffected")
-        let note = try XCTUnwrap(tape.checkpoints[1].record.note)
-        XCTAssertTrue(note.contains("Your edits to checkpoint 1 arrived while this round was running"), note)
+        XCTAssertTrue(tape.checkpoints[1].record.note?.contains("Carried your 1 edit forward from checkpoint 1.") ?? false,
+                      tape.checkpoints[1].record.note ?? "nil")
+        XCTAssertNil(tape.checkpoints[1].record.editConflict)
+        XCTAssertEqual(PlanLayers.conflictedEdits(tape), [])
+    }
+
+    /// The round rewrote the very line the human edited: nothing is written to the new head,
+    /// the edit stays on checkpoint 1, and the record points back at it.
+    func testMidRoundEditThatConflictsLeavesTheNewHeadClean() async throws {
+        let edit = "# Plan\n\n## Scope\nOne, Mac only\n"
+        _ = try await refineWithMidRoundEdit(edit, integrate: { $0.replacingOccurrences(of: "One", with: "Two") })
+        XCTAssertNil(store.userEdits(checkpoint: 2), "the new head is left clean")
+        XCTAssertEqual(store.userEdits(checkpoint: 1), edit, "the edit is kept where it was")
+        let tape = store.loadTape()
+        XCTAssertTrue(tape.checkpoints[1].record.note?.contains(
+            "Your edits to checkpoint 1 conflicted with this round; open 1 to reapply.") ?? false, tape.checkpoints[1].record.note ?? "nil")
+        XCTAssertEqual(PlanLayers.conflictedEdits(tape), [EditConflict(edits: 1, landedIn: 2)])
+    }
+
+    /// No usable merge tool — missing (127) or throwing — takes the conflict path, never a
+    /// guess and never a failed round.
+    func testMergeToolMissingOrFailingTakesTheConflictPath() async throws {
+        final class Broken: CommandRunner, @unchecked Sendable {
+            let throwing: Bool
+            init(throwing: Bool) { self.throwing = throwing }
+            func run(executable: String, arguments: [String], cwd: URL, environment: [String: String],
+                     processGroup: Bool, onSpawn: (@Sendable (Int32) -> Void)?) async throws -> CommandResult {
+                if throwing { throw CocoaError(.executableNotLoadable) }
+                return CommandResult(stdout: Data(), stderr: "env: git: No such file or directory", exitCode: 127)
+            }
+        }
+        for throwing in [false, true] {
+            try tearDownWithError(); try setUpWithError()
+            _ = try await refineWithMidRoundEdit("# Plan (Mac only)\n\n## Scope\nOne\n", mergeRunner: Broken(throwing: throwing))
+            let tape = store.loadTape()
+            XCTAssertEqual(tape.status, .paused, "a broken merge tool never fails the round")
+            XCTAssertNil(store.userEdits(checkpoint: 2))
+            XCTAssertEqual(PlanLayers.conflictedEdits(tape), [EditConflict(edits: 1, landedIn: 2)])
+        }
     }
 
     /// A note withdrawn before any round ran is never consumed; the kept one is, with its anchor.

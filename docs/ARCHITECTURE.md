@@ -1070,9 +1070,14 @@ markdown)`; the runner (the only writer of `checkpoints/`) stores it atomically 
 immediately, even mid-round — and markdown identical to the generated plan removes the layer.
 Each round reads the effective plan of the **head plan checkpoint** (the newest with a plan),
 fresh at round start: the round in flight is never affected, and an edit to an older checkpoint
-is stored and shown but feeds nothing. An edit to the head that lands while a round is reading it
-therefore misses that round *and* the next (the new checkpoint becomes the head); the landing
-round's record says so rather than merge it forward. When the head has edits, every
+is stored and shown but feeds nothing. An edit to the head that lands while a round runs (the
+human edits while agents work) is **carried forward** when that round lands: the runner
+three-way merges it with `git merge-file -p <new plan> <plan the round read> <edited plan>`
+(`PlanLayers.carryForward`, through `CommandRunner`) and a clean result rides in the same atomic
+checkpoint write as the new head's `plan.user.md` ("Carried your N edits forward…"). A conflict,
+or a merge tool that is missing or fails, writes nothing to the new head, leaves the edit on its
+checkpoint, and sets the record's `editConflict` ("…conflicted with this round; open K to
+reapply"), which `PlanLayers.conflictedEdits(tape)` lists for the UI. When the head has edits, every
 plan-reading prompt (synthesis, refine and its integrator, encode, polish, fresh-eyes, dedup)
 gets one shared block from `RoundPrompts.steering`: "These edits are authoritative…" plus the
 generated → edited unified diff, capped at 200 lines. Anchored notes render as a numbered list

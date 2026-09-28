@@ -73,8 +73,13 @@ public struct RoundRecord: Codable, Equatable, Sendable {
     /// stage's prompt carries them all.
     public var annotations: [PlanNote]
     public var note: String?
+    /// The checkpoint whose mid-round edits could not be carried forward onto this round's plan
+    /// (a merge conflict, or a merge tool that failed) — they are still there, unapplied. See
+    /// `PlanLayers.conflictedEdits`.
+    public var editConflict: Int?
     public init(slots: [SlotOutcome] = [], changeCount: Int? = nil, linesAdded: Int = 0, linesRemoved: Int = 0,
-                sectionsChanged: [String] = [], tally: VerdictTally? = nil, annotations: [PlanNote] = [], note: String? = nil) {
+                sectionsChanged: [String] = [], tally: VerdictTally? = nil, annotations: [PlanNote] = [], note: String? = nil,
+                editConflict: Int? = nil) {
         self.slots = slots
         self.changeCount = changeCount
         self.linesAdded = linesAdded
@@ -83,10 +88,11 @@ public struct RoundRecord: Codable, Equatable, Sendable {
         self.tally = tally
         self.annotations = annotations
         self.note = note
+        self.editConflict = editConflict
     }
 
     private enum CodingKeys: String, CodingKey {
-        case slots, changeCount, linesAdded, linesRemoved, sectionsChanged, tally, annotations, note
+        case slots, changeCount, linesAdded, linesRemoved, sectionsChanged, tally, annotations, note, editConflict
     }
 
     /// Synthesized but for `annotations`, which a tape written before `PlanNote` holds as bare
@@ -101,6 +107,7 @@ public struct RoundRecord: Codable, Equatable, Sendable {
         tally = try c.decodeIfPresent(VerdictTally.self, forKey: .tally)
         annotations = try decodeNotes(c, .annotations) ?? []
         note = try c.decodeIfPresent(String.self, forKey: .note)
+        editConflict = try c.decodeIfPresent(Int.self, forKey: .editConflict)
     }
 }
 

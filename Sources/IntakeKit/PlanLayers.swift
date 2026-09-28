@@ -17,6 +17,13 @@ public struct PlanHunk: Equatable, Sendable {
     }
 }
 
+/// Human edits that a round could not carry forward — see `PlanLayers.conflictedEdits`.
+public struct EditConflict: Equatable, Sendable {
+    public var edits: Int
+    public var landedIn: Int
+    public init(edits: Int, landedIn: Int) { self.edits = edits; self.landedIn = landedIn }
+}
+
 /// A checkpoint's plan is two layers: `plan.md`, what the round generated (never modified
 /// once written), and `plan.user.md`, the human's whole edited copy of it, when they have
 /// edited it. The *effective* plan is the edited one if there is one — it is what the next
@@ -85,6 +92,44 @@ public enum PlanLayers {
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty && !present.contains($0) }
             .count
+    }
+
+    /// How `carryForward` came out.
+    public enum Carry: Equatable, Sendable {
+        case merged(String)
+        /// A real conflict, or a merge tool that could not run — the caller treats both alike:
+        /// write nothing, and point the human at the edits that didn't carry.
+        case conflicted
+    }
+
+    /// Three-way merges the human's edit onto a round's new plan: `git merge-file -p <ours>
+    /// <base> <theirs>`, ours = the new round's plan, base = the plan the round read, theirs =
+    /// the human's edited plan. `git` rather than an in-process merge because its conflict
+    /// rules are the ones every user already knows; the project is always a git repo, so it is
+    /// always there — and when it isn't (or fails), `.conflicted` loses nothing, since the edit
+    /// stays on its checkpoint. Exit 0 is a clean merge; any other exit, or a throw, is not.
+    public static func carryForward(ours: String, base: String, theirs: String, runner: CommandRunner,
+                                    environment: [String: String], scratch: URL) async -> Carry {
+        let files = ["ours.md": ours, "base.md": base, "theirs.md": theirs]
+        do {
+            try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
+            for (name, text) in files { try Data(text.utf8).write(to: scratch.appendingPathComponent(name), options: .atomic) }
+            let result = try await runner.run(executable: "git",
+                                              arguments: ["merge-file", "-p", "ours.md", "base.md", "theirs.md"],
+                                              cwd: scratch, environment: environment)
+            guard result.exitCode == 0 else { return .conflicted }
+            return .merged(String(decoding: result.stdout, as: UTF8.self))
+        } catch {
+            return .conflicted
+        }
+    }
+
+    /// Every round that could not carry the human's mid-round edits forward, oldest first:
+    /// `edits` is the checkpoint still holding them, `landedIn` the round they conflicted with.
+    /// Pure over the tape's records — whether the human has since reapplied them is theirs to
+    /// judge; the UI will usually surface the newest.
+    public static func conflictedEdits(_ tape: Tape) -> [EditConflict] {
+        tape.checkpoints.compactMap { cp in cp.record.editConflict.map { EditConflict(edits: $0, landedIn: cp.id) } }
     }
 
     /// The generated → edited unified diff a prompt carries, cut to `maxLines` with a note of
