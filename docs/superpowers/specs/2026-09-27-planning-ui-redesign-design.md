@@ -45,7 +45,9 @@ anything is happening, what it is, or whether another round is worth it.
 - **Honest data only.** No invented percentages, ETAs or live cost estimates. A determinate fraction
   appears only where it is real: seats done/total, the agent's own plan steps, round N of M.
 - **Motion:** every animation respects Reduce Motion (cross-fade or none). Clocks tick at 1 Hz from a
-  local timer, independent of agent events; 1 Hz timers suspend when the window is occluded.
+  local timer, independent of agent events; 1 Hz timers suspend when the window is occluded. Once
+  nothing is running (paused, stopped, failed), the idle clocks (PAUSED FOR, HALTED FOR) tick at 1 Hz
+  for 60 s and then once a minute, on their own whole minutes (final-review ruling #9).
 - **Full names first.** Every label renders its proper name when it fits its measured slot and falls
   back to a short code otherwise (§5.3).
 

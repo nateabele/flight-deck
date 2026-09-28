@@ -57,7 +57,7 @@ struct LiveCard: View {
     }
 
     var body: some View {
-        LiveClock(ticking: isLive) { now in
+        LiveClock(mode: clockMode) { now in
             content(now: now)
         }
         .padding(14)
@@ -103,14 +103,16 @@ struct LiveCard: View {
 
     private var isTriage: Bool { if case .triage = kind { true } else { false } }
 
-    /// Anything on the card still counting: a start not yet heard from, triage mid-turn, or any
+    /// Anything on the card still counting: a start not yet heard from, triage mid-turn, or a
     /// shaping tape short of review — the board's PAUSED FOR / HALTED FOR count up while the
-    /// runner is idle too. A settled card ticking over frozen clocks would only burn redraws.
-    private var isLive: Bool {
-        if pending != nil { return true }
+    /// runner is idle too, at the slower idle rate (`LiveClockSchedule.Mode.shaping`). A settled
+    /// card ticking over frozen clocks would only burn redraws.
+    private var clockMode: LiveClockSchedule.Mode {
         switch kind {
-        case .triage(let activity): return intake.state == .triaging && activity?.finished != true
-        case .shaping(let tape, _, _, _, _, _, _): return tape.status != .reachedReview
+        case .triage(let activity):
+            return pending != nil || (intake.state == .triaging && activity?.finished != true) ? .live : .still
+        case .shaping(let tape, _, _, _, _, _, _):
+            return .shaping(tape: tape, pending: pending)
         }
     }
 
@@ -488,37 +490,78 @@ private struct FinishedRounds: View {
 
 // MARK: - Clock
 
-/// The 1 Hz clock a live surface draws from, suspended while its window is occluded (spec §2)
-/// and while `ticking` is false. The card runs one; the detail pane's pinned control bar runs
-/// the other while the card's copy is scrolled away — `LiveClockSchedule` puts both on the same
-/// whole seconds, so the pinned ELAPSED and the rows still visible below it never read apart.
+/// The clock a live surface draws from (`LiveClockSchedule`), suspended while its window is
+/// occluded (spec §2). The card runs one; the detail pane's pinned control bar runs the other
+/// while the card's copy is scrolled away — `LiveClockSchedule` puts both on the same whole
+/// seconds, so the pinned ELAPSED and the rows still visible below it never read apart.
 struct LiveClock<Content: View>: View {
-    var ticking: Bool
+    var mode: LiveClockSchedule.Mode
     @ViewBuilder var content: (Date) -> Content
     @State private var visible = true
 
     var body: some View {
-        TimelineView(LiveClockSchedule(ticking: visible && ticking)) { context in
+        TimelineView(LiveClockSchedule(mode: mode, visible: visible)) { context in
             content(context.date)
         }
         .background(WindowVisibilityReader(visible: $visible))
     }
 }
 
-/// `.periodic(from:by: 1)` while `ticking`, one frame and then nothing while not — the card's
-/// timeline is suspended rather than torn down, so the rows keep their identity (and their
-/// chips' expansion) across an occlusion.
+/// When a live surface redraws. `.periodic(from:by: 1)` while something runs; one frame and
+/// then nothing while nothing counts or the window can't be seen — the timeline is suspended
+/// rather than torn down, so the rows keep their identity (and their chips' expansion) across
+/// an occlusion.
+///
+/// Once nothing is running (paused, stopped, failed) the idle clocks — PAUSED FOR, HALTED FOR —
+/// still count, but a paused intake left on screen for hours redrew the card, the board and the
+/// LCD every second for them. They tick at 1 Hz for the first minute, while a glance at the
+/// seconds still means something, then on each whole minute of their own origin: every tick
+/// then reads "13:00", never a "12:34" held for a minute.
 struct LiveClockSchedule: TimelineSchedule {
-    var ticking: Bool
+    enum Mode: Equatable {
+        /// A round running, a start pending, triage mid-turn.
+        case live
+        /// Nothing running; the idle clocks count up from `since`.
+        case idle(since: Date)
+        /// Nothing counts: review's TOTAL, a finished triage.
+        case still
 
-    func entries(from startDate: Date, mode: TimelineScheduleMode) -> AnyIterator<Date> {
-        guard ticking else { return AnyIterator(CollectionOfOne(startDate).makeIterator()) }
-        // Anchored on a whole second, not on whenever this timeline mounted: two clocks on
-        // screen at once (the card, and the pinned bar above it) then tick on the same second
-        // instead of up to a second apart.
-        let anchor = Date(timeIntervalSinceReferenceDate: startDate.timeIntervalSinceReferenceDate.rounded(.down))
-        var periodic = PeriodicTimelineSchedule(from: anchor, by: 1).entries(from: startDate, mode: mode).makeIterator()
-        return AnyIterator { periodic.next() }
+        /// How long an idle clock keeps ticking every second.
+        static let secondsFor: TimeInterval = 60
+
+        /// A shaping tape's mode — idle from the same origin as the board's PAUSED FOR and
+        /// HALTED FOR (`BoardModel`), so the minute ticks land on its whole minutes.
+        static func shaping(tape: Tape, pending: PendingStart?) -> Mode {
+            if pending != nil || tape.status == .running { return .live }
+            if tape.status == .reachedReview { return .still }
+            let origin = tape.status == .failed ? tape.failedAt ?? tape.head?.createdAt : tape.head?.createdAt
+            return origin.map { .idle(since: $0) } ?? .still
+        }
+    }
+
+    var mode: Mode
+    /// False while the window is occluded: nobody can see the clock, so it doesn't tick.
+    var visible = true
+
+    func entries(from startDate: Date, mode _: TimelineScheduleMode) -> AnyIterator<Date> {
+        guard visible, mode != .still else { return AnyIterator(CollectionOfOne(startDate).makeIterator()) }
+        var next: Date? = startDate
+        return AnyIterator { [mode] in
+            defer { next = next.map { Self.tick(after: $0, mode: mode) } }
+            return next
+        }
+    }
+
+    /// The tick after `date`. Whole seconds are anchored on the reference date, not on whenever
+    /// the timeline mounted: two clocks on screen at once (the card, and the pinned bar above
+    /// it) then tick on the same second instead of up to a second apart.
+    static func tick(after date: Date, mode: Mode) -> Date {
+        let t = date.timeIntervalSinceReferenceDate
+        let nextSecond = Date(timeIntervalSinceReferenceDate: t.rounded(.down) + 1)
+        guard case .idle(let since) = mode else { return nextSecond }
+        let elapsed = date.timeIntervalSince(since)
+        if elapsed < Mode.secondsFor { return nextSecond }
+        return since.addingTimeInterval(((elapsed / 60).rounded(.down) + 1) * 60)
     }
 }
 
