@@ -262,6 +262,41 @@ final class IntakeServiceLiveTests: XCTestCase {
         XCTAssertNil(svc.pending[i.id])
     }
 
+    /// Stop discards the round in flight — paid work — so it goes through a confirmation, from
+    /// the bar's key and ⌘. alike (both press `PlanningActions`). Pause, which loses nothing,
+    /// still acts at once.
+    func testStopAsksFirstAndPauseDoesNot() async throws {
+        let shaping = try seed(.shaping)
+        try updateTape(shaping.id) { $0.status = .running; $0.roundInProgress = Self.refine1 }
+        let svc = await makeService()
+        svc.pollTapes()
+        let intake = try XCTUnwrap(svc.intakes.first { $0.id == shaping.id })
+        let tape = tapeStore(shaping.id).loadTape()
+        var asked = 0
+        let actions = PlanningActions.shaping(shaping.id, service: svc, model: ShapingModel(intake: intake, tape: tape),
+                                              annotate: {}, confirmStop: { asked += 1 })
+
+        actions.perform(.stop)
+        XCTAssertEqual(asked, 1)
+        XCTAssertEqual(tapeStore(shaping.id).commands(after: 0).map(\.command), [], "nothing is stopped until confirmed")
+
+        actions.perform(.pause)
+        XCTAssertEqual(asked, 1)
+        XCTAssertEqual(tapeStore(shaping.id).commands(after: 0).map(\.command), [.pause])
+    }
+
+    /// The confirmation names what Stop throws away: the round in flight, by name — or says
+    /// nothing is lost when no round is running.
+    func testStopConfirmationNamesTheRoundInFlight() {
+        var tape = Tape()
+        tape.roundInProgress = Self.refine1
+        XCTAssertEqual(PlanningActions.stopMessage(tape: tape),
+                       "Refine 1's work so far is discarded. Every round that already landed stays in the plan.")
+        tape.roundInProgress = nil
+        XCTAssertEqual(PlanningActions.stopMessage(tape: tape),
+                       "No round is running, so nothing is discarded. Every round that already landed stays in the plan.")
+    }
+
     /// Every way into a fresh triage turn answers the click at once — not only Send Answers.
     /// Continue with Single task (`.encodeNow`) and Retry once left `pending` unset, so while
     /// the turn read the graph the card drew the PREVIOUS turn's finished activity with its
