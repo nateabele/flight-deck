@@ -267,14 +267,13 @@ final class BoardModelTests: XCTestCase {
 
     // MARK: - Card and accessibility
 
-    /// The hover card says what the round did, in the board's own words: the full name, then
-    /// its status and duration. The name is the part that flaps; the rest is static.
-    func testHoverCardText() throws {
+    /// The hover card says what the round did, in the board's own words: under the full name
+    /// (the part that flaps), its status and duration as static text.
+    func testHoverCardDetail() throws {
         let tape = Tape(checkpoints: [cp(1, .draft, major: true, at: 0), cp(2, .synthesis, major: true, at: 182)],
                         status: .paused)
         let model = try board(try intake(.featurePlan), tape, now: 300)
         let syn = try XCTUnwrap(model.slots.first { $0.code == "SYN" })
-        XCTAssertEqual(model.hoverCardText(for: syn), "Synthesis · landed 3:02")
         XCTAssertEqual(model.cardDetail(for: syn), "landed 3:02")
         let draft = try XCTUnwrap(model.slots.first { $0.code == "DRFT" })
         XCTAssertEqual(model.cardDetail(for: draft), "landed", "no honest duration: say nothing rather than 0:00")
@@ -285,16 +284,14 @@ final class BoardModelTests: XCTestCase {
         running.status = .running
         running.roundStartedAt = t0.addingTimeInterval(200)
         let live = try board(try intake(.featurePlan), running, now: 272)
-        XCTAssertEqual(live.hoverCardText(for: try XCTUnwrap(live.slots.first { $0.state == .live })),
-                       "Refine 1 · in the air 1:12")
+        XCTAssertEqual(live.cardDetail(for: try XCTUnwrap(live.slots.first { $0.state == .live })), "in the air 1:12")
 
         var failed = tape
         failed.status = .failed
         failed.roundStartedAt = t0.addingTimeInterval(200)
         failed.failedAt = t0.addingTimeInterval(230)
         let halted = try board(try intake(.featurePlan), failed)
-        XCTAssertEqual(halted.hoverCardText(for: try XCTUnwrap(halted.slots.first { $0.state == .failed })),
-                       "Refine 1 · failed 0:30")
+        XCTAssertEqual(halted.cardDetail(for: try XCTUnwrap(halted.slots.first { $0.state == .failed })), "failed 0:30")
     }
 
     /// VoiceOver reads every slot in full words (spec §14) — never a code, never "4:48".
@@ -371,7 +368,7 @@ final class BoardModelTests: XCTestCase {
         var frames: [ClosedRange<CGFloat>] = []
         for (slot, width) in zip(model.slots, widths) {
             XCTAssertGreaterThanOrEqual(width, slot.codeWidth(measure: measure), slot.code)
-            let label = choose(full: slot.name, code: slot.code, width: width, measure: measure)
+            let label = LabelFit.choose(full: slot.name, code: slot.code, width: width, measure: measure)
             XCTAssertEqual(label, slot.code, "\(slot.name) at \(width) pt")
             let labelWidth = measure(label)
             let origin = x + (width - labelWidth) / 2
@@ -387,15 +384,38 @@ final class BoardModelTests: XCTestCase {
         // Wide enough for every full name: slots get their full width and full names show.
         let wide = model.slotWidths(available: 4000, measure: measure)
         for (slot, width) in zip(model.slots, wide) {
-            XCTAssertEqual(choose(full: slot.name, code: slot.code, width: width, measure: measure), slot.name)
+            XCTAssertEqual(LabelFit.choose(full: slot.name, code: slot.code, width: width, measure: measure), slot.name)
         }
         XCTAssertEqual(wide.reduce(0, +), 4000, accuracy: 0.001)
     }
 
-    /// Stand-in for Task 3's `LabelFit.choose`, same contract: full name when it fits with padding.
-    private func choose(full: String, code: String, width: CGFloat, padding: CGFloat = 8,
-                        measure: (String) -> CGFloat) -> String {
-        measure(full) + padding <= width ? full : code
+    /// Review Focus 1's other half: at round 18+ in a 600 pt pane the live slot is far off the
+    /// tape's first screen, and the tape keeps it in view. The target is the model's, so this
+    /// pins what the view scrolls to — the empty tape above has no live slot to follow.
+    func testNarrowTapeFollowsTheLiveSlotLateInARun() throws {
+        let stages: [(Stage, Int, Bool)] = [(.draft, 0, true), (.synthesis, 0, true)]
+            + (1...5).map { (.refine, $0, $0 == 5) } + [(.encode, 0, true)] + (1...5).map { (.polish, $0, false) }
+        var tape = Tape(checkpoints: stages.enumerated().map { n, s in cp(n + 1, s.0, s.1, major: s.2, at: TimeInterval(n) * 300) },
+                        status: .running)
+        tape.roundInProgress = PlannedRound(stage: .polish, round: 6, major: true)
+        let model = try board(try intake(.fullPlan, answered: 5), tape, now: 4000)
+        let live = try XCTUnwrap(model.slots.firstIndex { $0.state == .live })
+        XCTAssertGreaterThanOrEqual(live, 18)
+        XCTAssertEqual(model.followSlotID, model.slots[live].id)
+
+        let measure: (String) -> CGFloat = { CGFloat($0.count) * 7.8 }
+        let widths = model.slotWidths(available: 600, measure: measure)
+        XCTAssertGreaterThan(widths.prefix(live).reduce(0, +), 600, "off the first screen: only following shows it")
+        XCTAssertEqual(LabelFit.choose(full: model.slots[live].name, code: model.slots[live].code, width: widths[live],
+                                       measure: measure), model.slots[live].code)
+
+        // Paused, it follows where the run is held; with nothing landed, where play would stop.
+        tape.status = .paused
+        tape.roundInProgress = nil
+        let paused = try board(try intake(.fullPlan, answered: 5), tape, now: 4000)
+        XCTAssertEqual(paused.followSlotID, paused.pausedAtSlotID)
+        let fresh = try board(try intake(.fullPlan, answered: 5), .empty)
+        XCTAssertEqual(fresh.followSlotID, fresh.stopSlotID)
     }
 
     /// A bracket's title, longest first: the full title, then the group's code with its count

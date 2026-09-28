@@ -29,7 +29,11 @@ struct LiveCard: View {
     /// tick (their contract — `offer` each tick with the current values), and the returned
     /// values are what the rows draw. Observing them as well would redraw the card a second
     /// time for every tick that released a hold.
-    @State private var dwell = DwellBank()
+    @State private var ownDwell = DwellBank()
+    /// The detail pane's bank, when it hands one in: the seat inspector peeks at the same holds
+    /// the rows show (`DwellBank.peek`). Triage and the renders keep their own.
+    fileprivate var sharedDwell: DwellBank?
+    private var dwell: DwellBank { sharedDwell ?? ownDwell }
 
     /// `activity` is `IntakeService.triageActivity(_:)`; `pending` its `pending[id]`.
     static func triage(intake: Intake, activity: SeatActivity?, pending: PendingStart?) -> LiveCard {
@@ -48,16 +52,17 @@ struct LiveCard: View {
     static func shaping(intake: Intake, tape: Tape, activities: [String: SeatActivity], records: [String: RunRecord],
                         results: [String: SeatResult] = [:], pending: PendingStart?, editConflict: EditConflictNotice? = nil,
                         selectedRound: Binding<Int?> = .constant(nil), selectedSeat: Binding<String?> = .constant(nil),
+                        dwell: DwellBank? = nil,
                         controlBar: @escaping (Date) -> AnyView, board: @escaping (Date) -> AnyView) -> LiveCard {
         LiveCard(intake: intake,
                  kind: .shaping(tape: tape, seats: SeatFiles(activities: activities, records: records, results: results),
                                 editConflict: editConflict, selectedRound: selectedRound, selectedSeat: selectedSeat,
                                 controlBar: controlBar, board: board),
-                 pending: pending)
+                 pending: pending, sharedDwell: dwell)
     }
 
     var body: some View {
-        LiveClock(ticking: isLive) { now in
+        LiveClock(mode: clockMode) { now in
             content(now: now)
         }
         .padding(14)
@@ -103,14 +108,16 @@ struct LiveCard: View {
 
     private var isTriage: Bool { if case .triage = kind { true } else { false } }
 
-    /// Anything on the card still counting: a start not yet heard from, triage mid-turn, or any
+    /// Anything on the card still counting: a start not yet heard from, triage mid-turn, or a
     /// shaping tape short of review — the board's PAUSED FOR / HALTED FOR count up while the
-    /// runner is idle too. A settled card ticking over frozen clocks would only burn redraws.
-    private var isLive: Bool {
-        if pending != nil { return true }
+    /// runner is idle too, at the slower idle rate (`LiveClockSchedule.Mode.shaping`). A settled
+    /// card ticking over frozen clocks would only burn redraws.
+    private var clockMode: LiveClockSchedule.Mode {
         switch kind {
-        case .triage(let activity): return intake.state == .triaging && activity?.finished != true
-        case .shaping(let tape, _, _, _, _, _, _): return tape.status != .reachedReview
+        case .triage(let activity):
+            return pending != nil || (intake.state == .triaging && activity?.finished != true) ? .live : .still
+        case .shaping(let tape, _, _, _, _, _, _):
+            return .shaping(tape: tape, pending: pending)
         }
     }
 
@@ -146,12 +153,18 @@ struct LiveCard: View {
         let row = SeatRow(model: seat.model, queuedText: queuedText(now: now))
         if case .shaping(_, _, _, _, let selectedSeat, _, _) = kind {
             let selected = selectedSeat.wrappedValue == seat.id
+            let toggle = { selectedSeat.wrappedValue = selected ? nil : seat.id }
             row
                 .background(selected ? Color.accentColor.opacity(0.14) : .clear, in: RoundedRectangle(cornerRadius: 7))
                 .contentShape(Rectangle())
-                .onTapGesture { selectedSeat.wrappedValue = selected ? nil : seat.id }
+                .onTapGesture(perform: toggle)
+                // Keyboard access (spec §14), as the tape's slots have it: Tab reaches the row
+                // under Full Keyboard Access, Return or Space selects it as a click does. It was
+                // tap-only, so the seat inspector had no keyboard way in.
+                .focusable(interactions: .activate)
+                .onKeyPress(keys: [.return, .space]) { _ in toggle(); return .handled }
                 .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
-                .accessibilityAction { selectedSeat.wrappedValue = selected ? nil : seat.id }
+                .accessibilityAction { toggle() }
         } else {
             row
         }
@@ -218,7 +231,7 @@ struct LiveCard: View {
             return [LiveSeat(id: "triage", model: model)]
         case .shaping(let tape, let seats, _, _, _, _, _):
             guard let round = tape.roundInProgress ?? pendingRound else { return [] }
-            return LiveSeats.rows(round: round, config: intake.roundConfig, seats: pending == nil ? seats : SeatFiles(),
+            return LiveSeats.rows(round: round, config: intake.roundConfig, seats: LiveSeats.files(seats, pending: pending),
                                   now: now)
         }
     }
@@ -306,6 +319,13 @@ enum LiveSeats {
         }
     }
 
+    /// The seat files a round's rows draw from: none while a start is pending, because what is
+    /// on disk then is the PREVIOUS round's, and drawing it showed finished seats under a
+    /// "starting" clock. The card, the LCD and the seat inspector all read through this.
+    static func files(_ seats: SeatFiles, pending: PendingStart?) -> SeatFiles {
+        pending == nil ? seats : SeatFiles()
+    }
+
     static func rows(round: PlannedRound, config: RoundConfig?, seats: SeatFiles, now: Date) -> [LiveSeat] {
         let (activities, records) = (seats.activities, seats.records)
         let runs = Set(activities.keys).union(records.keys)
@@ -361,6 +381,17 @@ final class DwellBank {
             return seat
         }
     }
+
+    /// `seat` as its row shows it — the headline and action its scheduler is holding — without
+    /// offering anything or dropping other seats' schedulers (which `settle` over a one-seat list
+    /// would). For the seat inspector, which must never say something the row isn't.
+    func peek(_ seat: LiveSeat) -> LiveSeat {
+        guard let scheduler = schedulers[seat.id] else { return seat }
+        var seat = seat
+        seat.model.headline = scheduler.headline
+        seat.model.action = scheduler.action
+        return seat
+    }
 }
 
 // MARK: - Finished rounds
@@ -389,9 +420,12 @@ private struct FinishedRounds: View {
                         ForEach(cards) { card in
                             cardView(card, selected: card.checkpointID == selected)
                                 .id(card.checkpointID)
-                                .onTapGesture {
-                                    selection = card.checkpointID == tape.head?.id ? nil : card.checkpointID
-                                }
+                                .onTapGesture { choose(card) }
+                                // Keyboard and VoiceOver reach a card as a click does (spec §14):
+                                // it carried the button trait with no action behind it.
+                                .focusable(interactions: .activate)
+                                .onKeyPress(keys: [.return, .space]) { _ in choose(card); return .handled }
+                                .accessibilityAction { choose(card) }
                         }
                     }
                     // As wide as the fade, so a card at either end of the strip sits clear of it.
@@ -409,6 +443,11 @@ private struct FinishedRounds: View {
                 .onChange(of: cards.last?.checkpointID) { _, id in proxy.scrollTo(id, anchor: .trailing) }
             }
         }
+    }
+
+    /// Choosing the head goes back to following it, the same rule the board's slots follow.
+    private func choose(_ card: RoundCard) {
+        selection = card.checkpointID == tape.head?.id ? nil : card.checkpointID
     }
 
     private func name(_ card: RoundCard) -> String {
@@ -474,37 +513,78 @@ private struct FinishedRounds: View {
 
 // MARK: - Clock
 
-/// The 1 Hz clock a live surface draws from, suspended while its window is occluded (spec §2)
-/// and while `ticking` is false. The card runs one; the detail pane's pinned control bar runs
-/// the other while the card's copy is scrolled away — `LiveClockSchedule` puts both on the same
-/// whole seconds, so the pinned ELAPSED and the rows still visible below it never read apart.
+/// The clock a live surface draws from (`LiveClockSchedule`), suspended while its window is
+/// occluded (spec §2). The card runs one; the detail pane's pinned control bar runs the other
+/// while the card's copy is scrolled away — `LiveClockSchedule` puts both on the same whole
+/// seconds, so the pinned ELAPSED and the rows still visible below it never read apart.
 struct LiveClock<Content: View>: View {
-    var ticking: Bool
+    var mode: LiveClockSchedule.Mode
     @ViewBuilder var content: (Date) -> Content
     @State private var visible = true
 
     var body: some View {
-        TimelineView(LiveClockSchedule(ticking: visible && ticking)) { context in
+        TimelineView(LiveClockSchedule(mode: mode, visible: visible)) { context in
             content(context.date)
         }
         .background(WindowVisibilityReader(visible: $visible))
     }
 }
 
-/// `.periodic(from:by: 1)` while `ticking`, one frame and then nothing while not — the card's
-/// timeline is suspended rather than torn down, so the rows keep their identity (and their
-/// chips' expansion) across an occlusion.
+/// When a live surface redraws. `.periodic(from:by: 1)` while something runs; one frame and
+/// then nothing while nothing counts or the window can't be seen — the timeline is suspended
+/// rather than torn down, so the rows keep their identity (and their chips' expansion) across
+/// an occlusion.
+///
+/// Once nothing is running (paused, stopped, failed) the idle clocks — PAUSED FOR, HALTED FOR —
+/// still count, but a paused intake left on screen for hours redrew the card, the board and the
+/// LCD every second for them. They tick at 1 Hz for the first minute, while a glance at the
+/// seconds still means something, then on each whole minute of their own origin: every tick
+/// then reads "13:00", never a "12:34" held for a minute.
 struct LiveClockSchedule: TimelineSchedule {
-    var ticking: Bool
+    enum Mode: Equatable {
+        /// A round running, a start pending, triage mid-turn.
+        case live
+        /// Nothing running; the idle clocks count up from `since`.
+        case idle(since: Date)
+        /// Nothing counts: review's TOTAL, a finished triage.
+        case still
 
-    func entries(from startDate: Date, mode: TimelineScheduleMode) -> AnyIterator<Date> {
-        guard ticking else { return AnyIterator(CollectionOfOne(startDate).makeIterator()) }
-        // Anchored on a whole second, not on whenever this timeline mounted: two clocks on
-        // screen at once (the card, and the pinned bar above it) then tick on the same second
-        // instead of up to a second apart.
-        let anchor = Date(timeIntervalSinceReferenceDate: startDate.timeIntervalSinceReferenceDate.rounded(.down))
-        var periodic = PeriodicTimelineSchedule(from: anchor, by: 1).entries(from: startDate, mode: mode).makeIterator()
-        return AnyIterator { periodic.next() }
+        /// How long an idle clock keeps ticking every second.
+        static let secondsFor: TimeInterval = 60
+
+        /// A shaping tape's mode — idle from the same origin as the board's PAUSED FOR and
+        /// HALTED FOR (`BoardModel`), so the minute ticks land on its whole minutes.
+        static func shaping(tape: Tape, pending: PendingStart?) -> Mode {
+            if pending != nil || tape.status == .running { return .live }
+            if tape.status == .reachedReview { return .still }
+            let origin = tape.status == .failed ? tape.failedAt ?? tape.head?.createdAt : tape.head?.createdAt
+            return origin.map { .idle(since: $0) } ?? .still
+        }
+    }
+
+    var mode: Mode
+    /// False while the window is occluded: nobody can see the clock, so it doesn't tick.
+    var visible = true
+
+    func entries(from startDate: Date, mode _: TimelineScheduleMode) -> AnyIterator<Date> {
+        guard visible, mode != .still else { return AnyIterator(CollectionOfOne(startDate).makeIterator()) }
+        var next: Date? = startDate
+        return AnyIterator { [mode] in
+            defer { next = next.map { Self.tick(after: $0, mode: mode) } }
+            return next
+        }
+    }
+
+    /// The tick after `date`. Whole seconds are anchored on the reference date, not on whenever
+    /// the timeline mounted: two clocks on screen at once (the card, and the pinned bar above
+    /// it) then tick on the same second instead of up to a second apart.
+    static func tick(after date: Date, mode: Mode) -> Date {
+        let t = date.timeIntervalSinceReferenceDate
+        let nextSecond = Date(timeIntervalSinceReferenceDate: t.rounded(.down) + 1)
+        guard case .idle(let since) = mode else { return nextSecond }
+        let elapsed = date.timeIntervalSince(since)
+        if elapsed < Mode.secondsFor { return nextSecond }
+        return since.addingTimeInterval(((elapsed / 60).rounded(.down) + 1) * 60)
     }
 }
 

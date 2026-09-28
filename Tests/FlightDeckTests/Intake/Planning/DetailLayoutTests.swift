@@ -131,6 +131,15 @@ final class DetailLayoutTests: XCTestCase {
         XCTAssertFalse(DetailLayout.pinsBar(barTop: nil), "no bar on screen, nothing to pin")
     }
 
+    /// The room the plan leaves for the pinned block is the bar and the board WITHOUT the
+    /// heatmap: the pinned copy never carries it (a heatmap cell's jump pinned the block, and the
+    /// opaque map then sat over the very section it had jumped to).
+    func testPinnedBlockHeightLeavesTheHeatmapOut() {
+        XCTAssertEqual(DetailLayout.pinnedBlockHeight(bar: 78, board: 400, heatmap: 220), 8 + 78 + 12 + 180 + 10)
+        XCTAssertEqual(DetailLayout.pinnedBlockHeight(bar: 78, board: 180, heatmap: 0), 8 + 78 + 12 + 180 + 10)
+        XCTAssertNil(DetailLayout.pinnedBlockHeight(bar: 0, board: 0, heatmap: 0), "not measured yet")
+    }
+
     /// Shaping's plan is the live, editable one; from review on it is the final plan, read-only
     /// — edits after encode would change nothing that is written.
     func testPlanIsFinalFromReviewOn() {
@@ -201,5 +210,27 @@ final class DetailLayoutTests: XCTestCase {
                        PlanningActions(enabled: [.stop, .step], intakeID: a) { _ in XCTFail("never called") })
         XCTAssertNotEqual(PlanningActions(enabled: [.step], intakeID: a) { _ in }, PlanningActions(enabled: [.step], intakeID: b) { _ in })
         XCTAssertNotEqual(PlanningActions(enabled: [.step], intakeID: a) { _ in }, PlanningActions(enabled: [.pause], intakeID: a) { _ in })
+    }
+
+    /// The section heatmap is reachable from the Run menu (spec §14: every interaction by
+    /// keyboard — it opened only from a click on the CONVERGENCE cell). The menu's item title
+    /// and enablement follow the value, so whether a heatmap exists and whether it is open are
+    /// part of it; the toggle closure is not.
+    @MainActor
+    func testPlanningActionsCarryTheHeatmapToggle() {
+        let a = UUID()
+        var toggled = 0
+        var actions = PlanningActions(enabled: [.step], intakeID: a) { _ in }
+        let none = actions
+        actions.heatmap = PlanningActions.HeatmapToggle(open: false) { toggled += 1 }
+        XCTAssertNotEqual(actions, none, "gaining a heatmap enables the menu item")
+        var open = actions
+        open.heatmap = PlanningActions.HeatmapToggle(open: true) { XCTFail("never called") }
+        XCTAssertNotEqual(actions, open, "Show becomes Hide")
+        XCTAssertEqual(actions, { var same = actions; same.heatmap = .init(open: false) {}; return same }())
+        actions.heatmap?.toggle()
+        XCTAssertEqual(toggled, 1)
+        XCTAssertEqual(PlanningCommands.heatmapTitle(open: false), "Show Section Heatmap")
+        XCTAssertEqual(PlanningCommands.heatmapTitle(open: true), "Hide Section Heatmap")
     }
 }

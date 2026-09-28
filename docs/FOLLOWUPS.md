@@ -1960,18 +1960,21 @@ seat, 2026-09-27 — it reached review first time, 277 s, ~452k input / ~19k out
   turns out to matter in the GUI checklist, `PlanNSTextView` could forward Esc while the heatmap
   is open.
 
-**Accepted residual (pre-existing, not part of this redesign's scope):**
+- **Typing flushed as the plan reaches review can be dropped (final review #15, recorded, not
+  fixed).** `PlanTextView.dismantleNSView` commits the last idle-debounce window of typing when
+  the editor goes away, through `IntakeService.send`, which refuses anything but `.shaping`
+  (`guard intake(id)?.state == .shaping`). When the runner lands the last round and
+  `finishShaping` moves the intake to `.review` in the same tick that tears the editable plan
+  down (the plan turns into the read-only final plan), the flush arrives after the state
+  change and is silently dropped — up to the last ~2 s of keystrokes, only if they were typed
+  in the moment review arrived. Review Focus 3 ("no keystroke is lost") does not hold in that
+  window. Ruled a narrow race not worth a fix now; the remedy, if it shows up in use, is to
+  surface the dropped text (a note on the final plan, or a banner offering to copy it) rather
+  than let `send` accept edits after the change set was encoded from the plan.
 
-- **The release review's footer and its Release button can disagree on the task count.**
-  `ReleaseSummary.text`'s "N tasks" counts only `isCreate` ops (new tasks); the button's "Release
-  N Tasks" (`ReleaseReviewView.releaseCount`) counts every op that will actually write,
-  including follow-ups, edits and edges. A change set with a follow-up alongside creates shows
-  two different N's in the same sheet. `ReleaseSummary` lives in `Sources/IntakeKit`, so its
-  wording is right (it says "task", never "bead" — guarded by
-  `TerminologyGuardTests.testReleaseSheetHasNoBeadWording`), but its *count* predates T14 and
-  T14's brief covered wording/grouping/buttons only, not this counting semantics. Worth
-  reconciling — either make the footer count every releasing op too, or label it "N new tasks"
-  so the two numbers stop looking like a bug.
+**Resolved in the final review:** the release sheet's footer, button and header no longer count
+different things — `ReleaseCounts` is the one count ("Release 3 New Tasks" over "3 new tasks ·
+2 edits · 2 dependencies"), and the header says "N dropped" instead of "N of M selected".
 
 ## Codex control-socket grant (2026-09-26)
 

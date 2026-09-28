@@ -1,4 +1,4 @@
-import Foundation
+import AppKit
 import IntakeKit
 
 /// Which harness, model and effort run triage.
@@ -65,6 +65,9 @@ struct ReleaseReview {
     /// in progress now gets a holder and a delivery, and gating the rating picker on the
     /// stale `pre` would hide exactly the notice release is about to send.
     var livePre: [Int: Precondition] = [:]
+    /// Every task the graph holds, id → title, as of this read — so the sheet names the tasks
+    /// an edit, reopen, follow-up or dependency touches by title instead of by raw id.
+    var titles: [String: String] = [:]
 
     /// What release will treat as op `i`'s precondition: the live state for a drifted op,
     /// the triage-time `pre` otherwise.
@@ -92,17 +95,51 @@ struct PendingStart: Equatable {
 
 /// The running round's seat files (`IntakeService.seatActivities`, `runRecords`, `seatResults`),
 /// observable apart from the service: the only state that changes every second of a run.
+///
+/// Published per intake (`channel(_:)`), not as one object: with one, a beat on any shaping
+/// intake redrew every reader of every intake — two shaping intakes redrew each other's live
+/// cards every second. A write notifies only the channels whose intake's files changed.
 @MainActor
-final class SeatFeed: ObservableObject {
-    @Published fileprivate(set) var activities: [UUID: [String: SeatActivity]] = [:]
-    @Published fileprivate(set) var records: [UUID: [String: RunRecord]] = [:]
-    @Published fileprivate(set) var results: [UUID: [String: SeatResult]] = [:]
+final class SeatFeed {
+    fileprivate(set) var activities: [UUID: [String: SeatActivity]] = [:] {
+        didSet { notify(Self.changed(oldValue, activities)) }
+    }
+    fileprivate(set) var records: [UUID: [String: RunRecord]] = [:] {
+        didSet { notify(Self.changed(oldValue, records)) }
+    }
+    fileprivate(set) var results: [UUID: [String: SeatResult]] = [:] {
+        didSet { notify(Self.changed(oldValue, results)) }
+    }
+    /// Kept for the service's lifetime, never dropped: a reader holds its channel, and a
+    /// replacement made later would be one it never hears from.
+    private var channels: [UUID: SeatChannel] = [:]
+
+    /// What intake `id`'s readers observe.
+    func channel(_ id: UUID) -> SeatChannel {
+        if let channel = channels[id] { return channel }
+        let channel = SeatChannel()
+        channels[id] = channel
+        return channel
+    }
 
     /// Intake `id`'s seats, as the live card and the seat inspector take them.
     func files(_ id: UUID) -> SeatFiles {
         SeatFiles(activities: activities[id] ?? [:], records: records[id] ?? [:], results: results[id] ?? [:])
     }
+
+    private func notify(_ ids: Set<UUID>) {
+        for id in ids { channels[id]?.objectWillChange.send() }
+    }
+
+    private static func changed<V: Equatable>(_ old: [UUID: V], _ new: [UUID: V]) -> Set<UUID> {
+        Set(old.keys).union(new.keys).filter { old[$0] != new[$0] }
+    }
 }
+
+/// One intake's seat-file publishes (`SeatFeed.channel`) — carries no state of its own; readers
+/// read the files back from the feed.
+@MainActor
+final class SeatChannel: ObservableObject {}
 
 /// Orchestrates intakes end to end (spec §4): capture → headless triage (with clarifying
 /// Q&A) → recommendation/choice → release review → release (write to `br`, then deliver
@@ -206,6 +243,11 @@ final class IntakeService: ObservableObject {
     /// Intakes whose plan has already shown "Your edits are kept…" — once per plan, so it
     /// lives here rather than in the plan section, which is rebuilt on every visit.
     private(set) var editNoteShown: Set<UUID> = []
+    /// Each shaping intake's plan-edit router (`PlanEditRouter`): which edits are stuck on
+    /// their own round and which were sent but not yet applied. The intake's, not the plan
+    /// section's — as the section's `@State` it was lost on every intake switch, and an edit
+    /// that had already conflicted was merged onto the head on the next commit.
+    private var editRouters: [UUID: PlanEditRouter] = [:]
     /// How long a pending start may stay silent before it reads as queued rather than starting.
     static let queuedAfter: TimeInterval = 15
     /// Each seat file's mtime at its last read, per intake, keyed by path — the same stat-first
@@ -228,6 +270,9 @@ final class IntakeService: ObservableObject {
     /// count reads and prove a tick that found nothing changed read nothing.
     /// `@Sendable` because the convergence fold reads through it off the main actor.
     private let readFile: @Sendable (URL) -> Data?
+    /// Speaks a state change to VoiceOver (spec §14's live regions) — `postAnnouncement` in the
+    /// app, a recorder in tests. Called only with `announcement(from:to:)`'s words.
+    private let announce: (String) -> Void
     /// The deferred launch recovery, so tests (and nothing else) can await it.
     private(set) var launchRecovery: Task<Void, Never>?
 
@@ -250,7 +295,8 @@ final class IntakeService: ObservableObject {
         hasSession: @escaping (String, String) -> Bool,
         now: @escaping () -> Date = Date.init,
         defaults: UserDefaults = .standard,
-        readFile: @escaping @Sendable (URL) -> Data? = { try? Data(contentsOf: $0) }
+        readFile: @escaping @Sendable (URL) -> Data? = { try? Data(contentsOf: $0) },
+        announce: @escaping (String) -> Void = IntakeService.postAnnouncement
     ) {
         self.store = store
         self.headless = headless
@@ -264,6 +310,7 @@ final class IntakeService: ObservableObject {
         self.now = now
         self.defaults = defaults
         self.readFile = readFile
+        self.announce = announce
         // Cheap-to-lose UI state, same durability class `UserDefaultsPreferencesPersistence`
         // argues for — unlike the session graph (`FileSessionPersistence`'s doc comment has
         // the fuller case for why THAT needs a file instead). Stored as path -> uuidString
@@ -482,6 +529,9 @@ final class IntakeService: ObservableObject {
             i.state = .review
             save(i)
         } else {
+            // The same optimistic start `answer` sets: without it the card drew the previous
+            // turn's finished activity, clock stopped, until this turn wrote its first event.
+            pending[id] = PendingStart(kind: .triage, since: now())
             start(id) { await $0.runTriage(id, turn: .encodeNow) }
         }
     }
@@ -572,6 +622,14 @@ final class IntakeService: ObservableObject {
 
     func markEditNoteShown(_ id: UUID) { editNoteShown.insert(id) }
 
+    /// Intake `id`'s plan-edit router, made on first use and kept while it shapes.
+    func editRouter(_ id: UUID) -> PlanEditRouter {
+        if let router = editRouters[id] { return router }
+        let router = PlanEditRouter()
+        editRouters[id] = router
+        return router
+    }
+
     func recordEditConflict(_ id: UUID, _ conflict: EditConflict) {
         editConflicts[id, default: []].append(conflict)
     }
@@ -628,7 +686,7 @@ final class IntakeService: ObservableObject {
         let shaping = Set(intakes.lazy.filter { $0.state == .shaping }.map(\.id))
         let tracked = Set(latestTapes.keys).union(tapes.keys).union(tapeDates.keys).union(seatRounds.keys)
             .union(seatActivities.keys).union(runRecords.keys).union(seatResults.keys).union(convergence.keys)
-            .union(convergenceKeys.keys).union(halts.keys).union(editConflicts.keys)
+            .union(convergenceKeys.keys).union(halts.keys).union(editConflicts.keys).union(editRouters.keys)
         for gone in tracked.subtracting(shaping) {
             tapes[gone] = nil
             latestTapes[gone] = nil
@@ -639,6 +697,7 @@ final class IntakeService: ObservableObject {
             convergenceFolds[gone] = nil
             halts[gone] = nil
             editConflicts[gone] = nil
+            editRouters[gone] = nil
         }
         for id in shaping {
             let store = tapeStore(id)
@@ -646,6 +705,7 @@ final class IntakeService: ObservableObject {
             if latestTapes[id] == nil || modified != tapeDates[id] {
                 tapeDates[id] = modified
                 let tape = store.loadTape()
+                if let words = Self.announcement(from: latestTapes[id], to: tape) { announce(words) }
                 latestTapes[id] = tape
                 if tapes[id].map({ !Self.sameIgnoringLiveness($0, tape) }) ?? true { tapes[id] = tape }
             }
@@ -909,6 +969,12 @@ final class IntakeService: ObservableObject {
         i.changeSet = nil; i.failure = nil; i.rawFailureOutput = nil
         i.ratingOverrides = [:]; i.droppedOps = []; i.confirmedDrift = []
         save(i)
+        // After the save, which drops a triage start for any state but `.triaging`; the turn's
+        // own `.triaging` save keeps it. The failed turn's activity goes with it — it is not
+        // this turn's, and the card would otherwise draw it as a finished seat.
+        pending[id] = PendingStart(kind: .triage, since: now())
+        triageActivities[id] = nil
+        triageActivityDates[id] = nil
         start(id) { await $0.runTriage(id, turn: .initial) }
     }
 
@@ -959,6 +1025,9 @@ final class IntakeService: ObservableObject {
                   let live = current.beads[target]?.precondition else { continue }
             review.livePre[n] = live
         }
+        // The triage-time graph first, the live one over it: a task retitled since triage reads
+        // as it is now, and one deleted since still has a name on its (impossible) row.
+        review.titles = triaged.beads.mapValues(\.title).merging(current.beads.mapValues(\.title)) { _, now in now }
         return review
     }
 
@@ -1033,7 +1102,7 @@ final class IntakeService: ObservableObject {
                 let other = errs.errors.filter { if case .unknownBead = $0 { false } else { true } }
                 guard other.isEmpty, !gone.isEmpty else {
                     return fail(id, backTo: .review, "The change set no longer validates against the live graph: "
-                                + errs.errors.map(\.message).joined(separator: "; "))
+                                + errs.errors.map(\.userMessage).joined(separator: "; "))
                 }
                 skip.formUnion(ops.indices.filter { n in Self.references(ops[n]).contains { gone.contains($0) } })
                 continue
@@ -1130,6 +1199,46 @@ final class IntakeService: ObservableObject {
         case .editBead(let id, _, _, _), .reopen(let id, _, _): [id]
         case .followUp(_, let of, _, _, _): [of]
         }
+    }
+
+    // MARK: - Announcements
+
+    /// What VoiceOver hears when a tape moves (spec §14): a round landed, or failed. Nil for the
+    /// first read — that is the app opening onto a tape, not a change — and for everything else
+    /// a tick brings (heartbeats, a round starting, pauses), which would be chatter.
+    static func announcement(from old: Tape?, to new: Tape) -> String? {
+        guard let old else { return nil }
+        if new.status == .failed, old.status != .failed {
+            guard let round = new.roundInProgress ?? old.roundInProgress else { return "A planning round failed" }
+            return "\(BoardModel.name(stage: round.stage, round: round.round)) failed"
+        }
+        // The last round landing at review is said once, by the intake's own move to `.review`
+        // ("ready for review") — two announcements in one tick cut each other off.
+        if let head = new.head, head.id != old.head?.id, new.status != .reachedReview {
+            return "\(BoardModel.name(stage: head.stage, round: head.round)) landed"
+        }
+        return nil
+    }
+
+    /// What VoiceOver hears when an intake changes state (spec §14): it needs you (questions,
+    /// a plan to review) or it failed. Nothing for the states a human started themselves.
+    static func announcement(from old: IntakeState?, to new: IntakeState) -> String? {
+        guard let old, old != new else { return nil }
+        switch new {
+        case .needsAnswers: return "Triage has questions for you"
+        case .review: return "The plan is ready for review"
+        case .failed: return "The intake failed"
+        default: return nil
+        }
+    }
+
+    /// The app's announcer: a high-priority `announcementRequested` on the key window, so it
+    /// interrupts nothing less urgent but is not queued behind the per-second clocks it never
+    /// reads out (those are only labels, spec §14).
+    static func postAnnouncement(_ text: String) {
+        guard let element = NSApp?.keyWindow ?? NSApp?.mainWindow else { return }
+        NSAccessibility.post(element: element, notification: .announcementRequested,
+                             userInfo: [.announcement: text, .priority: NSAccessibilityPriorityLevel.high.rawValue])
     }
 
     // MARK: - Triage
@@ -1236,7 +1345,7 @@ final class IntakeService: ObservableObject {
                     cs2.graphObservedAt = observedAt
                     if case .failure(let errs2) = ChangeSetValidator.validate(cs2, against: graph) {
                         return fail(id, "The change set failed validation twice: "
-                                    + errs2.errors.map(\.message).joined(separator: "; "), raw: second.raw)
+                                    + errs2.errors.map(\.userMessage).joined(separator: "; "), raw: second.raw)
                     }
                     result.triage = .recommendation(preset: p2, reason: r2, changeSet: cs2)
                 }
@@ -1399,6 +1508,7 @@ final class IntakeService: ObservableObject {
     private func save(_ intake: Intake) {
         try? store.save(intake)
         if let n = intakes.firstIndex(where: { $0.id == intake.id }) {
+            if let words = Self.announcement(from: intakes[n].state, to: intake.state) { announce(words) }
             intakes[n] = intake
         } else {
             intakes.insert(intake, at: 0)
