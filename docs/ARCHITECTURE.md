@@ -1041,7 +1041,7 @@ the runner:
 | `commands.jsonl` | app (append-only) | ⏯ ⏭ ⏩ ⏸ ⏹ ＋ ✎ as `{seq, command}` lines; the runner acks by `seq` in the tape |
 | `tape.json` | runner | status, target, checkpoints, `roundInProgress`, pending annotations, extensions, heartbeat |
 | `checkpoints/<n>/` | runner | `drafts/<i>.md`, `plan.md`, `changeset.json` — each round's output |
-| `runs/<stage>-<round>-<role>[-i]/` | runner | per child: `run.json` (pid, session id, start/finish, exit), `stdout`, `stderr`, `schema.json` |
+| `runs/<stage>-<round>-<role>[-i]/` | runner | per child: `run.json` (pid, session id, start/finish, exit), `stdout` (appended live as the child writes it), `stderr`, `schema.json`, `activity.json` (live `SeatActivity`) |
 | `work/` | runner / integrator | scratch: `graph.json`, `plan.md` + `changes.json` for the integrator, `shadow/` and `bv-*.json` for polish |
 
 Every JSON write is atomic. A checkpoint's files are written before the tape entry that points
@@ -1074,6 +1074,16 @@ written only for a ⏹ read from `commands.jsonl`. On every clock tick — and o
 live. The controller builds the runner's environment from the login-shell PATH prewarmed off
 the main actor; until that lookup has landed it spawns nothing (`notReady`) and the next tick
 retries, rather than blocking the main actor on a login shell.
+
+*Live activity.* Every seat — and triage, which the app runs itself — streams (codex `exec
+--json`, claude `--output-format stream-json --verbose`), and `CommandRunner`'s `onStdout` sink
+hands each chunk over as it arrives: `RoundExecutor` appends it to `runs/<run>/stdout` and feeds
+an `ActivityPublisher`, whose `ActivityParser` folds it into a `SeatActivity` (latest
+reasoning headline, verb+object action, per-directory file footprint, todo steps, tokens,
+claude rate-limit and cost) written atomically to `runs/<run>/activity.json` at start, at most
+every 2 s, and at finish. The app never parses a stream: it reads a round's files with
+`TapeStore.activities(forRound:)`, and triage's `triage/activity.json` on the clock tick,
+mtime-gated (`IntakeService.triageActivity`).
 
 *Round execution* (`RoundExecutor`, no tape writes of its own — it hands back a checkpoint or a
 diagnosis). Drafters run in parallel; synthesis and refine have a seat propose `ProposedChange`s

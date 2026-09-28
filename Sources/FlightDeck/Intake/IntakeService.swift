@@ -118,6 +118,10 @@ final class IntakeService: ObservableObject {
     /// the state a runner is in the moment it reaches review or is told to stop — reaping once
     /// right then leaked the `fd-abduco` daemon forever. Every tick retries these instead.
     private var pendingReaps: Set<UUID> = []
+    /// Each triaging intake's live activity, and its file's mtime at the last read — see
+    /// `triageActivity(_:)`. Published so a view drawing it redraws when it moves.
+    @Published private(set) var triageActivities: [UUID: SeatActivity] = [:]
+    private var triageActivityDates: [UUID: Date] = [:]
     /// The deferred launch recovery, so tests (and nothing else) can await it.
     private(set) var launchRecovery: Task<Void, Never>?
 
@@ -408,6 +412,7 @@ final class IntakeService: ObservableObject {
             }
             if latestTapes[id]?.status == .reachedReview { finishShaping(id) } else { resumeIfStalled(id) }
         }
+        pollTriageActivity()
         if let runner {
             for id in pendingReaps where !runner.isRunning(id, tape: nil) {
                 runner.reap(id)
@@ -738,6 +743,33 @@ final class IntakeService: ObservableObject {
 
     // MARK: - Triage
 
+    /// What the triage agent is doing right now, or last did — `triage/activity.json` as of
+    /// the last clock tick that found it changed (`pollTriageActivity`), and the finished fold
+    /// the moment a turn ends. nil until a triage turn has started this session.
+    func triageActivity(_ id: UUID) -> SeatActivity? { triageActivities[id] }
+
+    /// Re-reads `triage/activity.json` for every intake mid-triage, gated on its mtime so an
+    /// idle tick costs one stat per triaging intake — same rule `pollTapes` holds `tape.json`
+    /// to. Only `.triaging` intakes are polled: any other intake's file is either a finished
+    /// turn, already published by `turnResult`, or one from before a relaunch.
+    private func pollTriageActivity() {
+        let live = Set(intakes.lazy.filter { $0.state != .discarded }.map(\.id))
+        for gone in Set(triageActivities.keys).union(triageActivityDates.keys).subtracting(live) {
+            triageActivities[gone] = nil
+            triageActivityDates[gone] = nil
+        }
+        for i in intakes where i.state == .triaging {
+            let file = triageDirectory(i.id).appendingPathComponent("activity.json")
+            guard let modified = (try? FileManager.default.attributesOfItem(atPath: file.path))?[.modificationDate] as? Date,
+                  modified != triageActivityDates[i.id] else { continue }
+            triageActivityDates[i.id] = modified
+            guard let data = try? Data(contentsOf: file),
+                  let activity = try? IntakeJSON.decoder.decode(SeatActivity.self, from: data),
+                  activity != triageActivities[i.id] else { continue }
+            triageActivities[i.id] = activity
+        }
+    }
+
     enum Turn {
         case initial
         case answers(questions: [String], answers: [String])
@@ -785,7 +817,7 @@ final class IntakeService: ObservableObject {
         // current defaults — a turn must not silently switch models mid-conversation.
         let session = i.triage.map { TriageSettings(harness: $0.harness, model: $0.model, effort: $0.effort) } ?? settings
 
-        var reply = await turnResult(prompt: prompt, resume: resume, settings: session, files: files, project: project)
+        var reply = await turnResult(id, prompt: prompt, resume: resume, settings: session, files: files, project: project)
         guard !Task.isCancelled else { return }
         guard case .success(var result) = reply else {
             if case .failure(let f) = reply { fail(id, f.message, raw: f.raw) }
@@ -800,7 +832,7 @@ final class IntakeService: ObservableObject {
                 // One automatic retry in the same session, errors listed (spec §11).
                 guard !Task.isCancelled else { return }
                 save(i)
-                reply = await turnResult(prompt: Triage.correctionPrompt(errors: errs.errors, observedAt: observedAt),
+                reply = await turnResult(id, prompt: Triage.correctionPrompt(errors: errs.errors, observedAt: observedAt),
                                          resume: result.sessionID, settings: session, files: files, project: project)
                 guard !Task.isCancelled else { return }
                 switch reply {
@@ -854,15 +886,30 @@ final class IntakeService: ObservableObject {
 
     /// One harness invocation, parsed and decoded — every way it can go wrong folded into a
     /// message plus the raw output, which is what `.failed` shows (spec §11).
-    private func turnResult(prompt: String, resume: String?, settings: TriageSettings,
+    private func turnResult(_ id: UUID, prompt: String, resume: String?, settings: TriageSettings,
                             files: TriageFiles, project: URL) async -> Result<TurnReply, TurnFailure> {
         let request = HarnessRequest(
             harness: settings.harness, model: settings.model, effort: settings.effort, cwd: project,
             readableDirs: [files.directory], prompt: prompt, schemaFile: files.schema,
             schemaJSON: Triage.schemaJSON, resumeSessionID: resume)
+        // The same fold and cadence as a round's seats (`RoundExecutor.attempt`), written beside
+        // triage's other files; the clock tick reads it back (`pollTriageActivity`), and the
+        // finished fold is published directly below so the last state never waits on a tick.
+        let activity = ActivityPublisher(harness: settings.harness, project: project,
+                                         destination: files.directory.appendingPathComponent("activity.json"),
+                                         now: { Date() })
+        activity.start()
         let out: (stdout: Data, stderr: String, exitCode: Int32)
-        do { out = try await headless.run(HarnessCommand.build(request), cwd: project) }
-        catch { return .failure(TurnFailure(message: "Could not run \(settings.harness.rawValue): \(error)", raw: nil)) }
+        do {
+            out = try await headless.run(HarnessCommand.build(request), cwd: project,
+                                         onStdout: { activity.feed($0) })
+        } catch {
+            activity.finish(exitCode: nil, error: Task.isCancelled ? nil : "Could not run \(settings.harness.rawValue)")
+            triageActivities[id] = activity.activity
+            return .failure(TurnFailure(message: "Could not run \(settings.harness.rawValue): \(error)", raw: nil))
+        }
+        activity.finish(exitCode: out.exitCode)
+        triageActivities[id] = activity.activity
         let stdout = String(decoding: out.stdout, as: UTF8.self)
         let raw = stdout.isEmpty ? out.stderr : stdout
         guard out.exitCode == 0 else {

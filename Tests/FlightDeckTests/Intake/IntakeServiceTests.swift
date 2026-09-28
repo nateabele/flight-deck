@@ -16,6 +16,28 @@ private final class FakeHeadlessRunner: HeadlessRunner, @unchecked Sendable {
     }
 }
 
+/// A triage harness that streams: holds until the test opens the gate, then hands the sink
+/// `first` and `output` as two chunks — so a test can look at the triage while it runs, with
+/// nothing fed yet that a trailing activity flush could land mid-test.
+private final class StreamingHeadlessRunner: HeadlessRunner, @unchecked Sendable {
+    let first: Data, output: Data
+    private let lock = NSLock()
+    private var open = false
+    init(first: Data, output: Data) { self.first = first; self.output = output }
+    func release() { lock.withLock { open = true } }
+    func run(_ command: (executable: String, arguments: [String], unsetEnvironment: [String]),
+             cwd: URL) async throws -> (stdout: Data, stderr: String, exitCode: Int32) {
+        (first + output, "", 0)
+    }
+    func run(_ command: (executable: String, arguments: [String], unsetEnvironment: [String]), cwd: URL,
+             onStdout: (@Sendable (Data) -> Void)?) async throws -> (stdout: Data, stderr: String, exitCode: Int32) {
+        while !lock.withLock({ open }) { try await Task.sleep(nanoseconds: 1_000_000) }
+        onStdout?(first)
+        onStdout?(output)
+        return (first + output, "", 0)
+    }
+}
+
 /// `RecordingRunner` (BeadWriterTests) with mutable replies, so a test can move the graph
 /// between triage and release review.
 private final class MutableRunner: FlywheelProcessRunner, @unchecked Sendable {
@@ -128,6 +150,54 @@ final class IntakeServiceTests: XCTestCase {
         }
         // Persisted, not just published.
         XCTAssertEqual(try IntakeStore(root: root).load(id: id).state, .needsAnswers)
+    }
+
+    /// Triage publishes `triage/activity.json` through the same parser and cadence as a round's
+    /// seats; the service reads it on the clock tick only when its mtime moved, and holds the
+    /// finished fold once the turn is over.
+    func testTriagePublishesActivityReadOnTheTickWhenItsMtimeMoves() async throws {
+        let command = Data((#"{"type":"item.started","item":{"type":"command_execution","command":"/bin/zsh -lc \"sed -n '1,9p' README.md\""}}"# + "\n").utf8)
+        let headless = StreamingHeadlessRunner(first: command, output: Self.codex(Self.questions))
+        let svc = IntakeService(store: IntakeStore(root: root), headless: headless,
+                                processRunner: MutableRunner(Self.brReplies(Self.openGraph)),
+                                triageSettings: TriageSettings(harness: .codex, model: "m1", effort: "high"),
+                                inject: { _, _, _, _ in true }, hasSession: { _, _ in false })
+        svc.capture(intent: "Add a note", project: "/p")
+        let id = svc.intakes[0].id
+        let file = IntakeStore(root: root).directory(for: id).appendingPathComponent("triage/activity.json")
+        try await until { FileManager.default.fileExists(atPath: file.path) }
+        XCTAssertNil(svc.triageActivity(id), "nothing is read until the tick")
+        // A whole-second mtime: `setAttributes` keeps less precision than a stat returns, so
+        // restoring an arbitrary one below would itself read as a change.
+        let mtime = Date(timeIntervalSince1970: 1_790_000_000)
+        try FileManager.default.setAttributes([.modificationDate: mtime], ofItemAtPath: file.path)
+
+        svc.pollTapes()
+        let started = try XCTUnwrap(svc.triageActivity(id))
+        XCTAssertEqual(started.harness, .codex)
+        XCTAssertFalse(started.finished)
+
+        // Same mtime, new bytes: the tick must not re-read.
+        var edited = started
+        edited.headline = "edited"
+        try IntakeJSON.encoder.encode(edited).write(to: file)
+        try FileManager.default.setAttributes([.modificationDate: mtime], ofItemAtPath: file.path)
+        svc.pollTapes()
+        XCTAssertNil(svc.triageActivity(id)?.headline, "an unchanged mtime costs a stat, not a read")
+        try FileManager.default.setAttributes([.modificationDate: mtime.addingTimeInterval(1)], ofItemAtPath: file.path)
+        svc.pollTapes()
+        XCTAssertEqual(svc.triageActivity(id)?.headline, "edited")
+
+        headless.release()
+        await svc.task(for: id)?.value
+        XCTAssertEqual(intake(svc, id).state, .needsAnswers)
+        let done = try XCTUnwrap(svc.triageActivity(id))
+        XCTAssertTrue(done.finished)
+        XCTAssertNil(done.error)
+        XCTAssertEqual(done.action, ActivityAction(verb: "Reading", object: "README.md"))
+        let onDisk = try IntakeJSON.decoder.decode(SeatActivity.self, from: Data(contentsOf: file))
+        XCTAssertTrue(onDisk.finished)
+        XCTAssertEqual(onDisk.action, done.action)
     }
 
     /// Unsent answers survive a relaunch (a release swap mid-answer) by coming back through a
