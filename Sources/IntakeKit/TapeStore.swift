@@ -5,8 +5,9 @@ import Foundation
 /// app writes and the runner drains), `checkpoints/<id>/` (the files each round produced),
 /// `work/` (a round's scratch) and `runs/<run>/`, one per harness child — `run.json` (pid and
 /// exit, see `RunRecord`), `schema.json`, `stdout` (the harness's JSONL, appended live by its
-/// single writer as the child runs), `stderr` (written at exit) and `activity.json` (the live
-/// `SeatActivity`, replaced atomically by `ActivityPublisher` — see `activities(forRound:)`).
+/// single writer as the child runs), `stderr` (written at exit), `activity.json` (the live
+/// `SeatActivity`, replaced atomically by `ActivityPublisher` — see `activities(forRound:)`) and
+/// `result.json` (the seat's `SeatResult`, once its output parses — see `seatResult(run:)`).
 /// Not a single index file — the directory is the unit, same rationale as `IntakeStore`.
 public struct TapeStore: Sendable {
     public let intakeDirectory: URL
@@ -40,6 +41,20 @@ public struct TapeStore: Sendable {
             out[name] = activity
         }
         return out
+    }
+
+    /// A seat's `runs/<run>/result.json` (see `SeatResult`) — nil until that seat's output has
+    /// parsed, and for a run that failed or a file that doesn't decode.
+    public func seatResult(run: String) -> SeatResult? {
+        guard let data = try? Data(contentsOf: runDirectory(run).appendingPathComponent("result.json")) else { return nil }
+        return try? IntakeJSON.decoder.decode(SeatResult.self, from: data)
+    }
+
+    /// Replaced atomically, like `activity.json`: the app's poller may read it at any moment.
+    func writeSeatResult(_ result: SeatResult, run: String) throws {
+        let dir = runDirectory(run)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try IntakeJSON.encoder.encode(result).write(to: dir.appendingPathComponent("result.json"), options: .atomic)
     }
 
     /// The `runs/` directory names one planned round's seats have created so far. Listed rather

@@ -390,6 +390,39 @@ final class IntakeServiceLiveTests: XCTestCase {
         let svc = await makeService()
         XCTAssertEqual(svc.seatActivities[i.id]?.keys.sorted(), ["refine-1-integrator", "refine-1-reviewer-fallback"])
         XCTAssertEqual(svc.runRecords[i.id]?.keys.sorted(), ["refine-1-reviewer-fallback"])
+        // Their results follow the same rule: the stale attempt's result.json is not this seat's.
+        let store = tapeStore(i.id)
+        try IntakeJSON.encoder.encode(SeatResult(kind: .reviewer, changeCount: 9))
+            .write(to: store.runDirectory("refine-1-reviewer").appendingPathComponent("result.json"))
+        try IntakeJSON.encoder.encode(SeatResult(kind: .reviewer, changeCount: 3))
+            .write(to: store.runDirectory("refine-1-reviewer-fallback").appendingPathComponent("result.json"))
+        svc.pollTapes()
+        XCTAssertEqual(svc.seatResults[i.id], ["refine-1-reviewer-fallback": SeatResult(kind: .reviewer, changeCount: 3)])
+    }
+
+    /// A seat's `result.json` is followed like its activity — same round-in-progress scope, same
+    /// per-file mtime gate — so its row shows the outcome as soon as the seat writes it.
+    func testSeatResultLoadsOnItsOwnMtime() async throws {
+        let i = try seed(.shaping)
+        try updateTape(i.id) { $0.status = .running; $0.roundInProgress = Self.refine1 }
+        try writeSeat(i.id, run: "refine-1-reviewer", activity: SeatActivity(harness: .codex, startedAt: clockNow),
+                      record: RunRecord(started: clockNow))
+        let svc = await makeService()
+        svc.pollTapes()
+        XCTAssertNil(svc.seatResults[i.id], "no result.json until the seat's output parses")
+
+        let file = tapeStore(i.id).runDirectory("refine-1-reviewer").appendingPathComponent("result.json")
+        try IntakeJSON.encoder.encode(SeatResult(kind: .reviewer, changeCount: 4)).write(to: file)
+        try setMTime(file, 1_790_000_000)
+        svc.pollTapes()
+        XCTAssertEqual(svc.seatResults[i.id], ["refine-1-reviewer": SeatResult(kind: .reviewer, changeCount: 4)])
+        let before = reads.count("result.json")
+        for _ in 0..<3 { svc.pollTapes() }
+        XCTAssertEqual(reads.count("result.json"), before, "an unchanged mtime costs a stat, not a read")
+
+        try updateTape(i.id) { $0.status = .paused; $0.roundInProgress = nil }
+        svc.pollTapes()
+        XCTAssertNil(svc.seatResults[i.id], "forgotten with the round's other seat files")
     }
 
     // MARK: convergence

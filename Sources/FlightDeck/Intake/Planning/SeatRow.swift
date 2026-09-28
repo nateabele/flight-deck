@@ -171,16 +171,22 @@ struct SeatRow: View {
                 .accessibilityValue(model.footprint.map { "\($0.dir) \($0.count)" }.joined(separator: ", "))
             }
             Spacer(minLength: 0)
-            if let fraction = model.contextFraction {
-                contextGauge(fraction)
+            if let fraction = model.contextFraction, let tokens = model.inputTokens, let window = model.contextWindow {
+                contextGauge(fraction, tokens: tokens, window: window)
             }
         }
     }
 
+    /// `SeatRowModel.footprint`'s last chip is `+N` (N more directories, its count their files)
+    /// when there are more than four — said in words, since "+2 3" read as two numbers.
     private func chip(_ dir: String, _ count: Int) -> some View {
         HStack(spacing: 4) {
-            Text(dir).foregroundStyle(.secondary)
-            Text("\(count)").fontWeight(.semibold).monospacedDigit()
+            if dir.hasPrefix("+") {
+                Text("\(dir) more").foregroundStyle(.secondary)
+            } else {
+                Text(dir).foregroundStyle(.secondary)
+                Text("\(count)").fontWeight(.semibold).monospacedDigit()
+            }
         }
         .font(.system(size: 11))
         .lineLimit(1)
@@ -214,10 +220,11 @@ struct SeatRow: View {
         .padding(.top, 2)
     }
 
-    /// Input tokens against the model's window — a real fraction, the one `SeatRowModel`
-    /// computes only for a model whose window it knows (spec §2's determinate-fraction rule).
-    private func contextGauge(_ fraction: Double) -> some View {
-        let percent = Int((min(max(fraction, 0), 1) * 100).rounded())
+    /// Input tokens against the model's window, both as numbers ("118k of 400k") — shown only
+    /// for a model whose window `SeatRowModel` knows (spec §2's determinate-fraction rule). The
+    /// numbers, not a percentage: they say how much room is left in the unit the model is sold in.
+    private func contextGauge(_ fraction: Double, tokens: Int, window: Int) -> some View {
+        let text = "\(Self.tokens(tokens)) of \(Self.tokens(window))"
         return HStack(spacing: 6) {
             Capsule().fill(Color.primary.opacity(0.1))
                 .overlay(alignment: .leading) {
@@ -226,7 +233,7 @@ struct SeatRow: View {
                     }
                 }
                 .frame(width: 54, height: 4)
-            Text("\(percent)%")
+            Text(text)
                 .font(.system(size: 11))
                 .monospacedDigit()
                 .foregroundStyle(.tertiary)
@@ -234,7 +241,17 @@ struct SeatRow: View {
         .help("Input tokens against the model's context window")
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Context used")
-        .accessibilityValue("\(percent) percent")
+        .accessibilityValue(text)
+    }
+
+    /// "850", "118k", "1M", "1.2M" — whole thousands below a million, since the gauge beside
+    /// it already carries the precision.
+    static func tokens(_ n: Int) -> String {
+        if n < 1_000 { return "\(n)" }
+        let k = Int((Double(n) / 1_000).rounded())
+        if k < 1_000 { return "\(k)k" }
+        let m = Double(n) / 1_000_000
+        return m == m.rounded() ? "\(Int(m))M" : String(format: "%.1fM", m)
     }
 
     // MARK: - Finished

@@ -7,17 +7,18 @@ import SwiftUI
 /// rows and the rounds already finished.
 ///
 /// The control bar and the departures board come in as view closures, not types: they are
-/// built separately (Tasks 6 and 7), and the card only decides where they sit.
+/// built separately (Tasks 6 and 7), and the card only decides where they sit — and hands
+/// them the card's `now`, so their ELAPSED and IN THE AIR tick on the same second as the rows.
 ///
-/// One 1 Hz `TimelineView` drives every clock in the card and every row's `DwellScheduler`;
-/// it stops while the window is occluded and while nothing on the card is live (spec §2 —
-/// a hidden window spent a redraw per second per intake on clocks nobody could see).
+/// One 1 Hz `TimelineView` drives every clock in the card — the bar's, the board's, the rows'
+/// — and every row's `DwellScheduler`; it stops while the window is occluded and while nothing
+/// on the card is counting (spec §2 — a hidden window spent a redraw per second per intake on
+/// clocks nobody could see, and one timeline per part drifted the parts apart).
 struct LiveCard: View {
     fileprivate enum Kind {
         case triage(activity: SeatActivity?)
-        case shaping(tape: Tape, activities: [String: SeatActivity], records: [String: RunRecord],
-                     editConflict: String?, selectedRound: Binding<Int?>,
-                     controlBar: () -> AnyView, board: () -> AnyView)
+        case shaping(tape: Tape, seats: SeatFiles, editConflict: String?, selectedRound: Binding<Int?>,
+                     controlBar: (Date) -> AnyView, board: (Date) -> AnyView)
     }
 
     fileprivate let intake: Intake
@@ -37,31 +38,42 @@ struct LiveCard: View {
     }
 
     /// - Parameters:
-    ///   - activities/records: `IntakeService.seatActivities[id]` / `runRecords[id]` — the round
-    ///     in progress's seats only.
+    ///   - activities/records/results: `IntakeService.seatActivities[id]` / `runRecords[id]` /
+    ///     `seatResults[id]` — the round in progress's seats only.
     ///   - editConflict: the banner text for plan edits a round couldn't carry forward — Task 11
     ///     supplies it; nil hides the banner.
     ///   - selectedRound: the checkpoint the plan viewer shows; nil follows the head.
     static func shaping(intake: Intake, tape: Tape, activities: [String: SeatActivity], records: [String: RunRecord],
-                        pending: PendingStart?, editConflict: String? = nil,
+                        results: [String: SeatResult] = [:], pending: PendingStart?, editConflict: String? = nil,
                         selectedRound: Binding<Int?> = .constant(nil),
-                        controlBar: @escaping () -> AnyView, board: @escaping () -> AnyView) -> LiveCard {
+                        controlBar: @escaping (Date) -> AnyView, board: @escaping (Date) -> AnyView) -> LiveCard {
         LiveCard(intake: intake,
-                 kind: .shaping(tape: tape, activities: activities, records: records, editConflict: editConflict,
-                                selectedRound: selectedRound, controlBar: controlBar, board: board),
+                 kind: .shaping(tape: tape, seats: SeatFiles(activities: activities, records: records, results: results),
+                                editConflict: editConflict, selectedRound: selectedRound,
+                                controlBar: controlBar, board: board),
                  pending: pending)
     }
 
     var body: some View {
+        TimelineView(LiveClockSchedule(ticking: visible && isLive)) { context in
+            content(now: context.date)
+        }
+        .padding(14)
+        .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color.primary.opacity(0.08)))
+        .background(WindowVisibilityReader(visible: $visible))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier(isTriage ? "live-card-triage" : "live-card-shaping")
+    }
+
+    private func content(now: Date) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             switch kind {
             case .triage:
-                TimelineView(LiveClockSchedule(ticking: visible && isLive)) { context in
-                    seatSection(now: context.date)
-                }
-            case .shaping(let tape, _, _, let editConflict, let selectedRound, let controlBar, let board):
-                controlBar()
-                board()
+                seatSection(now: now)
+            case .shaping(let tape, _, let editConflict, let selectedRound, let controlBar, let board):
+                controlBar(now)
+                board(now)
                 let model = ShapingModel(intake: intake, tape: tape)
                 if let banner = model.pauseBanner {
                     Self.banner(symbol: "exclamationmark.triangle.fill", title: banner.title, detail: banner.action,
@@ -78,33 +90,25 @@ struct LiveCard: View {
                         .foregroundStyle(.secondary)
                 }
                 if hasSeats(tape) {
-                    TimelineView(LiveClockSchedule(ticking: visible && isLive)) { context in
-                        seatSection(now: context.date)
-                    }
+                    seatSection(now: now)
                 }
                 if !model.roundCards.isEmpty {
                     FinishedRounds(cards: model.roundCards, tape: tape, selection: selectedRound)
                 }
             }
         }
-        .padding(14)
-        .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 10))
-        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color.primary.opacity(0.08)))
-        .background(WindowVisibilityReader(visible: $visible))
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier(isTriage ? "live-card-triage" : "live-card-shaping")
     }
 
     private var isTriage: Bool { if case .triage = kind { true } else { false } }
 
-    /// Anything on the card still counting: a start not yet heard from, triage mid-turn, or a
-    /// round the runner is executing. Everything else is settled, and a timeline ticking over
-    /// frozen clocks would only burn redraws.
+    /// Anything on the card still counting: a start not yet heard from, triage mid-turn, or any
+    /// shaping tape short of review — the board's PAUSED FOR / HALTED FOR count up while the
+    /// runner is idle too. A settled card ticking over frozen clocks would only burn redraws.
     private var isLive: Bool {
         if pending != nil { return true }
         switch kind {
         case .triage(let activity): return intake.state == .triaging && activity?.finished != true
-        case .shaping(let tape, _, _, _, _, _, _): return tape.status == .running
+        case .shaping(let tape, _, _, _, _, _): return tape.status != .reachedReview
         }
     }
 
@@ -164,7 +168,7 @@ struct LiveCard: View {
     private var sectionTitle: String {
         switch kind {
         case .triage: return "Triage"
-        case .shaping(let tape, _, _, _, _, _, _):
+        case .shaping(let tape, _, _, _, _, _):
             guard let round = tape.roundInProgress ?? pendingRound else { return "Seats" }
             return BoardModel.name(stage: round.stage, round: round.round)
         }
@@ -192,11 +196,10 @@ struct LiveCard: View {
             // Spec §3.1: "Reading the repo" until the first event says anything more specific.
             if model.glyph == .running, model.headline == nil { model.headline = "Reading the repo" }
             return [LiveSeat(id: "triage", model: model)]
-        case .shaping(let tape, let activities, let records, _, _, _, _):
+        case .shaping(let tape, let seats, _, _, _, _):
             guard let round = tape.roundInProgress ?? pendingRound else { return [] }
-            return LiveSeats.rows(round: round, config: intake.roundConfig,
-                                  activities: pending == nil ? activities : [:],
-                                  records: pending == nil ? records : [:], now: now)
+            return LiveSeats.rows(round: round, config: intake.roundConfig, seats: pending == nil ? seats : SeatFiles(),
+                                  now: now)
         }
     }
 
@@ -229,6 +232,14 @@ struct LiveCard: View {
 }
 
 // MARK: - Seat list
+
+/// What the service has read of one round's `runs/`, keyed by run name — bundled because every
+/// consumer takes all three together.
+struct SeatFiles {
+    var activities: [String: SeatActivity] = [:]
+    var records: [String: RunRecord] = [:]
+    var results: [String: SeatResult] = [:]
+}
 
 /// One row of the seat list, keyed by the seat — not the run: a fallback or correction attempt
 /// is a new `runs/` directory, and keying by it re-created the row mid-round, so the glyph's
@@ -266,8 +277,8 @@ enum LiveSeats {
         }
     }
 
-    static func rows(round: PlannedRound, config: RoundConfig?, activities: [String: SeatActivity],
-                     records: [String: RunRecord], now: Date) -> [LiveSeat] {
+    static func rows(round: PlannedRound, config: RoundConfig?, seats: SeatFiles, now: Date) -> [LiveSeat] {
+        let (activities, records) = (seats.activities, seats.records)
         let runs = Set(activities.keys).union(records.keys)
         var claimed = Set<String>()
         var out: [LiveSeat] = []
@@ -278,7 +289,7 @@ enum LiveSeats {
             // run it replaced.
             let run = mine.max { started($0, activities, records) < started($1, activities, records) } ?? seat.base
             let model = SeatRowModel.make(run: run, slot: nil, requested: seat.requested, activity: activities[run],
-                                          record: records[run], roundRecord: nil, now: now)
+                                          record: records[run], roundRecord: nil, seatResult: seats.results[run], now: now)
             out.append(LiveSeat(id: seat.base, model: model))
         }
         // A run the config doesn't predict (a config edited mid-round, a role added later) is
@@ -286,7 +297,8 @@ enum LiveSeats {
         for run in runs.subtracting(claimed).sorted() {
             out.append(LiveSeat(id: run, model: SeatRowModel.make(run: run, slot: nil, requested: nil,
                                                                   activity: activities[run], record: records[run],
-                                                                  roundRecord: nil, now: now)))
+                                                                  roundRecord: nil, seatResult: seats.results[run],
+                                                                  now: now)))
         }
         return out
     }

@@ -208,4 +208,20 @@ final class TapeStoreTests: XCTestCase {
         XCTAssertEqual(store.loadTape(), tape)
         XCTAssertTrue(store.loadTape().checkpoints.isEmpty)
     }
+
+    // MARK: - runs/<run>/result.json
+
+    func testSeatResultReadsWhatTheSeatWrote() throws {
+        let store = TapeStore(intakeDirectory: root)
+        XCTAssertNil(store.seatResult(run: "refine-1-reviewer"), "absent until the seat finishes")
+        let dir = store.runDirectory("refine-1-reviewer")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try Data(###"{"kind":"reviewer","changeCount":14,"sections":["## 2. Scope"]}"###.utf8)
+            .write(to: dir.appendingPathComponent("result.json"))
+        XCTAssertEqual(store.seatResult(run: "refine-1-reviewer"),
+                       SeatResult(kind: .reviewer, changeCount: 14, sections: ["## 2. Scope"]),
+                       "every field but kind is optional on disk")
+        try Data("{torn".utf8).write(to: dir.appendingPathComponent("result.json"))
+        XCTAssertNil(store.seatResult(run: "refine-1-reviewer"))
+    }
 }

@@ -543,6 +543,64 @@ final class RoundExecutorTests: XCTestCase {
     }
     let newBead = ChangeOp.createBead(NewBead(tempId: "t1", title: "New", description: "d"))
 
+    // MARK: - Seat results
+
+    /// Each seat leaves `runs/<run>/result.json` the moment its own output parses, so its row
+    /// shows what it did while the rest of the round is still running — not only once the whole
+    /// round's checkpoint lands.
+    func testDraftersWriteTheirResultAsTheyFinish() async throws {
+        let runner = ScriptedHarnessRunner { call in
+            call.model == "A" ? failed("Error: 401 Unauthorized") : ok(call, "s", json(DraftOutput(plan: "# P\n\nOne\nTwo\n")))
+        }
+        let cfg = config(drafters: [Slot(codexA, fallback: claudeB), Slot(claudeB)])
+        _ = try checkpoint(try await executor(runner).run(PlannedRound(stage: .draft, round: 0, major: true), inputs(cfg)))
+        XCTAssertNil(store.seatResult(run: "draft-0-drafter-0"), "the attempt that failed produced nothing")
+        XCTAssertEqual(store.seatResult(run: "draft-0-drafter-0-fallback"), SeatResult(kind: .draft, linesAdded: 4))
+        XCTAssertEqual(store.seatResult(run: "draft-0-drafter-1"), SeatResult(kind: .draft, linesAdded: 4))
+    }
+
+    func testReviewerAndIntegratorWriteTheirResults() async throws {
+        let runner = ScriptedHarnessRunner { [unowned self] call in
+            switch call.role {
+            case "synthesizer":
+                return ok(call, "syn", json(ReviewOutput(changes: [
+                    ProposedChange(section: "## 2. Scope", rationale: "r", edit: "e"),
+                    ProposedChange(section: "## 4. Dispatch", rationale: "r", edit: "e"),
+                    ProposedChange(section: "## 2. Scope", rationale: "r", edit: "e"),
+                ], summary: "three")))
+            default: return self.editingIntegrator(call)
+            }
+        }
+        let (cp, _) = try checkpoint(try await executor(runner).run(PlannedRound(stage: .synthesis, round: 0, major: true),
+                                                                    inputs(config(), tape: try synthesisTape())))
+        XCTAssertEqual(store.seatResult(run: "synthesis-0-synthesizer"),
+                       SeatResult(kind: .reviewer, changeCount: 3, sections: ["## 2. Scope", "## 4. Dispatch"]),
+                       "each section once, in the order proposed")
+        XCTAssertEqual(store.seatResult(run: "synthesis-0-integrator"),
+                       SeatResult(kind: .integrator, sections: cp.record.sectionsChanged, agree: 1, somewhat: 1, disagree: 0,
+                                  linesAdded: 3, linesRemoved: 0))
+    }
+
+    /// A change-set seat's result sits on the run whose change set was accepted — the
+    /// correction when there was one — and counts what the checkpoint counts.
+    func testChangeSetSeatsWriteTheirOpCount() async throws {
+        let encoder = ScriptedHarnessRunner { [unowned self] call in
+            call.role == "encoder" ? ok(call, "enc-1", self.changeSetReply(pre: Precondition(status: "closed", assignee: nil)))
+                : ok(call, "enc-1", self.changeSetReply(pre: self.existingPre, extra: [self.newBead]))
+        }
+        _ = try checkpoint(try await executor(encoder).run(PlannedRound(stage: .encode, round: 0, major: true),
+                                                           inputs(config(), tape: try refineTape())))
+        XCTAssertNil(store.seatResult(run: "encode-0-encoder"), "its change set failed validation")
+        XCTAssertEqual(store.seatResult(run: "encode-0-encoder-correction"), SeatResult(kind: .changeSet, ops: 2))
+
+        let polisher = ScriptedHarnessRunner { [unowned self] call in
+            ok(call, "pol", self.changeSetReply(pre: self.existingPre, extra: [self.newBead]))
+        }
+        let (cp, _) = try checkpoint(try await executor(polisher).run(PlannedRound(stage: .polish, round: 1, major: true),
+                                                                      inputs(config(), tape: try polishTape())))
+        XCTAssertEqual(store.seatResult(run: "polish-1-polisher"), SeatResult(kind: .changeSet, ops: cp.record.changeCount))
+    }
+
     func testEncodeValidatesAndRetriesOnce() async throws {
         let runner = ScriptedHarnessRunner { [unowned self] call in
             call.role == "encoder" ? ok(call, "enc-1", self.changeSetReply(pre: Precondition(status: "closed", assignee: nil)))
