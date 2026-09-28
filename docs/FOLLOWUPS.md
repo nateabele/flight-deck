@@ -1986,8 +1986,10 @@ seat, 2026-09-27 — it reached review first time, 277 s, ~452k input / ~19k out
   `SessionSidebar`'s `List` only renders rows for an expanded project, so landing
   `selectedSessionID` on a session whose project is collapsed changes the terminal pane but
   leaves the sidebar showing no highlighted row at all — no visible feedback that the jump
-  happened. Two options, both touching `fi-tab-nav`'s cycling too since it has the same gap:
-  un-collapse the owning project as part of the traversal (`goBack`/`goForward` would need
-  `setCollapsed(false, forProjectAt:)` alongside the selection write), or treat it the way
-  cycling treats a collapsed project — landing on the project's own header row instead of the
-  session inside it. Left to Nate's call rather than picked here.
+  happened. `fi-tab-nav`'s cycling does not have this gap: it already treats a collapsed
+  project's header row as standing in for a selected session hidden inside it (see
+  `collapsedHomeID` in `cycleSelection`). Two options for Back/Forward: un-collapse the owning
+  project as part of the traversal (`goBack`/`goForward` would need
+  `setCollapsed(false, forProjectAt:)` alongside the selection write), or land on the collapsed
+  project's header, as cycling does, instead of the session inside it. Left to Nate's call
+  rather than picked here.

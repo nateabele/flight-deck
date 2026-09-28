@@ -4068,6 +4068,11 @@ final class SessionStore: ObservableObject {
             guard selectedProjectID == nil, let sid = selectedSessionID, let at = locate(sid) else { return nil }
             return repos[at.repo].isCollapsed ? repos[at.repo].id : nil
         }()
+        // With only one collapsed project on the board, `collapsedHomeID` both matches the
+        // "current position" test below AND is the only other stop, so cycling in either
+        // direction re-selects that same header and opens its project view. That is intended,
+        // not a wrap-in-place bug: the hidden session has no row of its own, so stepping onto
+        // the header standing in for it is the only visible move left.
         let index = stops.firstIndex { row in
             switch row {
             case .project(let id): return selectedProjectID == id || collapsedHomeID == id
