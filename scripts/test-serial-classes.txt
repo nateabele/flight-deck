@@ -10,3 +10,5 @@
 CodexPinReconcileTests   # orders concurrent passes via Task.yield()/withCheckedContinuation; parallel CPU contention perturbs the interleaving its assertions depend on
 FleetSocketLoopbackTests # a real TLS-PSK handshake + WebSocket loopback with wall-clock deadlines as low as 0.5s (authDeadline/handshakeDeadline tests) and wait(for:) timeouts
 PairingDiscoveryTests    # drives real Bonjour advertise/browse against the one shared system mDNSResponder daemon, which every other pairing-listener test in a sibling shard is also touching
+PlanEditorKeystrokeTests # wall-clock keystroke budget (8 ms) on a 2,000-line plan; parallel shards' CPU load pushed it to 10 ms in a merged-branch run
+MarkdownStylerTests      # wall-clock caret restyle budget (16 ms) on a 2,000-line plan
