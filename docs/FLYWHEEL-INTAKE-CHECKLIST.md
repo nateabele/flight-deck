@@ -195,13 +195,13 @@ The round engine: a fidelity above Bead, run in the detached `flightdeck intake 
 driven from the shaping view's transport bar. `RoundsLiveProbeTests` proved the engine reaches
 review against real models in-process (Sketch, codex `gpt-5.6-luna`/`low`); nothing but this
 section exercises the app spawning the runner under fd-abduco with the isolation flags on its
-claude and codex seats, the tape watcher, the transport buttons, or a runner dying mid-round.
+claude and codex agents, the tape watcher, the transport buttons, or a runner dying mid-round.
 Use the same real, non-temp project as above. Each round is a real model turn at the preset's
 default models — budget minutes per round, and real tokens.
 
 1. **Type an intent, choose Feature plan, and look at the Rounds editor.** Once triage
    recommends, pick **Feature plan** and open the **Rounds** disclosure.
-   **Expect:** one row per seat — two drafters (arbiter, realist), synthesizer, reviewer,
+   **Expect:** one row per agent — two drafters (arbiter, realist), synthesizer, reviewer,
    integrator, encoder, polisher — each with harness, model, effort (`low`…`max`, **no**
    `ultra`) and fallback, the Fallback pickers left-aligned in their column; refinement cap 3,
    polish cap 2, fresh-eyes + dedup off, default play ⏭. Changing any field relabels it
@@ -245,7 +245,7 @@ default models — budget minutes per round, and real tokens.
 9. **No MCP side effects in the work dir.** Once step 5 reaches review, search the intake's
    directory, `work/` included: `find "$HOME/Library/Application Support/Flight Deck/intakes/<id>"
    -name .qartez` (under `$FLIGHT_DECK_STATE_DIR/intakes/<id>` if that is set).
-   **Expect:** nothing. A `.qartez/` there means a seat started the user's MCP servers — the
+   **Expect:** nothing. A `.qartez/` there means an agent started the user's MCP servers — the
    isolation flags (`--ignore-user-config` for codex, `--restricted --strict-mcp-config` for
    claude) did not hold.
 10. **Release review, then release.** From step 5's intake, open the release review and Release,
@@ -262,8 +262,8 @@ Repeat steps 1–2 and 5 with **Full plan** on a fresh intake. It is the most ex
 **Expect:** the Rounds editor shows four drafters (arbiter, realist, coverage, stressTest)
 alternating codex and claude, polish cap 6 and fresh eyes + dedup **on**. ⏩ runs draft,
 synthesis, refine, encode, polish, then fresh eyes and dedup before review; the draft card
-lists all four drafters, and mixed codex/claude seats all complete (or substitute with a
-diagnosis) — no seat pauses on authentication or a missing proxy. Step 9's `.qartez/` check
+lists all four drafters, and mixed codex/claude agents all complete (or substitute with a
+diagnosis) — no agent pauses on authentication or a missing proxy. Step 9's `.qartez/` check
 holds here too.
 
 ## Planning UI
@@ -315,7 +315,7 @@ from scratch" above, paused mid-round where an item needs that.
 - Read the LCD's `STOPS AT`/`CALLING AT` field labels. **Expect:** readable words (PAUSED / IN
   AIR / STOPS / CALLING), never a cryptic 3-letter code, and no value subtitle truncates
   mid-word (e.g. "since Enco…").
-- Watch `SEATS DONE`/the live slot's elapsed reading while a round runs. **Expect:** it reads
+- Watch `AGENTS DONE`/the live slot's elapsed reading while a round runs. **Expect:** it reads
   the *current* round's elapsed time, not the run's total — the two must not be ambiguous next
   to each other.
 - Resize the pane to ~700 pt. **Expect:** the compact bar (transport + ROUND + ELAPSED +
@@ -369,15 +369,15 @@ from scratch" above, paused mid-round where an item needs that.
 - Before starting, choose Feature plan, hover **Edit in Inspector**. **Expect:** help says the
   round counts change there. Set Refinement cap to 0. **Expect:** "refine ×3" leaves the summary
   line, and Start Planning shows a board with no REFINE bracket.
-- Look at a seat's context gauge and an overflowed footprint chip. **Expect:** the gauge reads
+- Look at an agent's context gauge and an overflowed footprint chip. **Expect:** the gauge reads
   as tokens ("118k of 400k"), not a bare percent; the chip reads "+2 more", not "+2 2".
 
-### Live seat activity
+### Live agent activity
 
-- Let a seat finish with a structured result (spec-shaped output). **Expect:** its row shows the
+- Let an agent finish with a structured result (spec-shaped output). **Expect:** its row shows the
   result string immediately; "Finished · files" appears only as a fallback with no structured
   result.
-- Turn on VoiceOver and read a board slot, an LCD cell, and a seat row. **Expect:** full words,
+- Turn on VoiceOver and read a board slot, an LCD cell, and an agent row. **Expect:** full words,
   never a code (e.g. "paused", not "PSD").
 
 ### Finished rounds
@@ -464,7 +464,7 @@ scrollers for one text).
 - Click into the notes rail's draft field, then click back into the plan. **Expect:** focus
   moves to the draft field; clicking back into the plan commits the draft.
 - Scroll the page. **Expect:** the notes rail tracks the scroll live. Click into the editor:
-  the rail swaps to show the notes; click a seat: it swaps back to the seat inspector.
+  the rail swaps to show the notes; click an agent: it swaps back to the agent inspector.
 - Add many detached/unanchored notes. **Expect:** note whether the rail's top stack pushes the
   aligned lane down enough that cards drift below their source lines — flag if this needs a cap
   or its own scroll.
@@ -531,7 +531,7 @@ scrollers for one text).
 - [ ] Step 9 — the orange "needs you" icon shows collapsed AND expanded while an intake
   needs attention, and clears on its own once resolved (Discard, or Dismiss for a partial)
 - [ ] Step 10 — quitting mid-triage leaves the intake interrupted; Retry starts fresh
-- [ ] Plan from scratch (Feature plan) — the Rounds editor shows every Feature plan seat and
+- [ ] Plan from scratch (Feature plan) — the Rounds editor shows every Feature plan agent and
   relabels on edit (Sketch greys out polish/fresh eyes); Start pauses after draft and ⏭ after
   synthesis; the plan and its diff read correctly; an annotation shapes the next refine round;
   ⏩ lands in review; a `kill -9`'d runner is respawned within ~30 s and the round reruns with
@@ -550,11 +550,11 @@ scrollers for one text).
   tape, and only fade under Reduce Motion; round cards escape scroll clipping; finished-round cards are one size and their detail panel
   resizes smoothly on switching, its caret follows the card and the strip's scroll, a long detail
   scrolls inside the cap, Esc closes it, Reduce Motion makes it instant; auto-scroll follows the live
-  target only; wheel/trackpad scroll works over the pinned block; seat rows show a structured
-  result immediately; VoiceOver reads full words everywhere (board, LCD, seat rows, plan syntax,
+  target only; wheel/trackpad scroll works over the pinned block; agent rows show a structured
+  result immediately; VoiceOver reads full words everywhere (board, LCD, agent rows, plan syntax,
   churn markers); the editor's undo/IME/retarget-on-landed-round paths hold; the plan scrolls
   with the page (one scroller, caret kept on screen and clear of the pinned block, bands on
-  their text); the notes rail tracks the scroll and swaps with the seat inspector; the
+  their text); the notes rail tracks the scroll and swaps with the agent inspector; the
   heatmap's click lands on its section's hunk, its hover,
   chevron and Esc-from-anywhere all work; the release review shows the as-built title/sections/
   button and its footer-vs-button count difference doesn't read as a bug

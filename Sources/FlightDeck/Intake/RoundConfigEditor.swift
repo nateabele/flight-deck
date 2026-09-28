@@ -201,7 +201,7 @@ struct RoundConfigEditor: View {
     /// Why those controls are greyed out, or an empty string (no tooltip) when they aren't.
     static func polishControlsHelp(_ config: RoundConfig) -> String {
         polishControlsEnabled(config) ? ""
-            : "This fidelity has no polisher, and polish, fresh eyes and dedup all run on the polisher's seat. Choose Feature plan or Full plan to use them."
+            : "This fidelity has no polisher, and polish, fresh eyes and dedup all run on the polisher's agent. Choose Feature plan or Full plan to use them."
     }
 
     /// "<Preset>, customized" once any field has been edited — the panel's title. Wording lives in `UIText.presetName` — a single source
