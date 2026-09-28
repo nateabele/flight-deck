@@ -147,4 +147,16 @@ enum DetailLayout {
         guard let barTop else { return false }
         return barTop < pinnedInset
     }
+
+    /// The gap between the pinned bar and the board under it — the card's own spacing.
+    static let pinnedGap: CGFloat = 12
+
+    /// How tall the pinned block draws, from the card's measured bar and board; nil before the
+    /// first measurement. The heatmap is left out: the pinned copy of the board never carries it
+    /// — a heatmap cell's jump to the plan pinned the block, and the opaque map in the pinned
+    /// copy then covered the very section it had jumped to.
+    static func pinnedBlockHeight(bar: CGFloat, board: CGFloat, heatmap: CGFloat) -> CGFloat? {
+        guard bar > 0 else { return nil }
+        return pinnedInset + bar + pinnedGap + max(0, board - heatmap) + 10
+    }
 }
