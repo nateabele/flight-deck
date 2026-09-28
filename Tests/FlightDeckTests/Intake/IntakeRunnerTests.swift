@@ -607,6 +607,33 @@ final class IntakeRunnerTests: XCTestCase {
         XCTAssertEqual(tape.checkpoints.filter { $0.stage == .refine }.map(\.major), [false, false, true])
     }
 
+    /// A trim that lands while the stage's round is in flight, taking the stage down to exactly
+    /// that round, makes it the stage's last — and so its major checkpoint, where ⏭ stops. The
+    /// round was planned minor when it started; the board already shows it major (it replays
+    /// the planner), so a checkpoint keeping the stale flag would run past the stop on screen.
+    func testTrimDuringTheLastRemainingRoundMakesItTheMajorStop() async throws {
+        let gate = Gate()
+        let commands = AsyncScriptedRunner { call in
+            if call.role == "reviewer" { try await gate.wait() }
+            return Self.answer(call)
+        }
+        _ = try store.appendCommand(.step)
+        _ = await runner(commands).run() // Draft
+        _ = try store.appendCommand(.nextMajor)
+        let run = Task { await runner(commands).run() }
+        try await eventually("refine 1 to start") { gate.entered == 1 }
+        let seq = try store.appendCommand(.trim(.refine, by: 5))
+        try await eventually("the watcher to ack the trim") { self.store.loadTape().ackedCommandSeq == seq }
+        gate.open()
+
+        let status = await run.value
+        XCTAssertEqual(status, .paused)
+        let tape = store.loadTape()
+        XCTAssertEqual(tape.checkpoints.map(\.stage), [.draft, .refine], "⏭ stopped at the trimmed stage's last round")
+        XCTAssertEqual(tape.head?.major, true)
+        XCTAssertEqual(tape.extraRefinement, -1, "Sketch's two refine rounds, clamped to the one in flight")
+    }
+
     // MARK: - Failure
 
     func testFailedRoundSetsFailedWithDiagnosis() async throws {

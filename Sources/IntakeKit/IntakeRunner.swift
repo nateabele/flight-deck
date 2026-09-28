@@ -119,7 +119,7 @@ public struct IntakeRunner: Sendable {
         var rerunNote = await keeper.recoverInterruptedRound()
         while true {
             if Task.isCancelled { return await keeper.abandon() }
-            if await keeper.applyCommands() { return await keeper.finish(.stopped) }
+            if await keeper.applyCommands(config: config) { return await keeper.finish(.stopped) }
             let tape = await keeper.tape
             switch tape.status {
             // Only a fresh ▶/⏭/⏩ clears these (`TapePlanner.apply`); a runner relaunched
@@ -144,7 +144,7 @@ public struct IntakeRunner: Sendable {
                     if Task.isCancelled { return }
                     // The heartbeat rides on every poll, so it keeps moving through a round of
                     // any length — the app calls a runner dead once it is 10 s stale.
-                    if await keeper.applyCommands(heartbeat: true) {
+                    if await keeper.applyCommands(config: config, heartbeat: true) {
                         round.cancel()
                         return
                     }
@@ -285,7 +285,8 @@ private actor TapeKeeper {
 
     /// Folds every command after `ackedCommandSeq` into the tape and acks it, in one save.
     /// Returns true when one of them was ⏹ — the caller decides what stopping means where it is.
-    func applyCommands(heartbeat: Bool = false) -> Bool {
+    /// `config` is what a trim is clamped against (`TapePlanner.apply`).
+    func applyCommands(config: RoundConfig, heartbeat: Bool = false) -> Bool {
         let fresh = store.commands(after: tape.ackedCommandSeq)
         var stop = false
         for envelope in fresh {
@@ -297,8 +298,8 @@ private actor TapeKeeper {
                 // ⏹ then a fresh ▶ in the same batch: the later command wins.
                 stop = false
                 TapePlanner.apply(envelope.command, to: &tape)
-            case .pause, .note, .removeNote, .extend:
-                TapePlanner.apply(envelope.command, to: &tape)
+            case .pause, .note, .removeNote, .extend, .trim:
+                TapePlanner.apply(envelope.command, to: &tape, config: config)
             case .editPlan(let checkpoint, let markdown):
                 applyEdit(checkpoint: checkpoint, markdown: markdown)
             }
@@ -351,6 +352,10 @@ private actor TapeKeeper {
     func writeCheckpoint(_ cp: Checkpoint, files: [String: Data], config: RoundConfig) throws {
         var cp = cp
         cp.startedAt = cp.startedAt ?? tape.roundStartedAt
+        // Major as the tape plans the round now, not as it did when the round started: an
+        // extend or trim mid-round moved the stage's last round, and ⏭ must stop where the
+        // board says it will.
+        cp.major = TapePlanner.planned(stage: cp.stage, round: cp.round, tape: tape, config: config)?.major ?? cp.major
         var next = tape
         for used in cp.record.annotations {
             if let i = next.pendingNotes.firstIndex(where: { $0.id == used.id }) { next.pendingNotes.remove(at: i) }

@@ -89,7 +89,7 @@ public struct TapeStore: Sendable {
     /// this write mid-flight.
     public func appendCommand(_ c: TapeCommand) throws -> Int {
         try FileManager.default.createDirectory(at: intakeDirectory, withIntermediateDirectories: true)
-        let seq = (readCommandLines().map(\.seq).max() ?? 0) + 1
+        let seq = (commandLines().compactMap { try? Self.lineDecoder.decode(SeqOnly.self, from: $0).seq }.max() ?? 0) + 1
         var line = try Self.lineEncoder.encode(CommandEnvelope(seq: seq, command: c))
         line.append(0x0A) // "\n" — one line per command, never a multi-line pretty-print.
 
@@ -120,15 +120,23 @@ public struct TapeStore: Sendable {
         readCommandLines().filter { $0.seq > seq }
     }
 
+    /// A line whose command kind this build doesn't know (one a newer build queued) is dropped
+    /// here like a torn line — never fatal to the read.
     private func readCommandLines() -> [CommandEnvelope] {
+        commandLines().compactMap { try? Self.lineDecoder.decode(CommandEnvelope.self, from: $0) }
+    }
+
+    private func commandLines() -> [Data] {
         guard let data = try? Data(contentsOf: commandsURL), let text = String(data: data, encoding: .utf8) else {
             return []
         }
-        return text.split(separator: "\n", omittingEmptySubsequences: true).compactMap { line in
-            guard let lineData = line.data(using: .utf8) else { return nil }
-            return try? Self.lineDecoder.decode(CommandEnvelope.self, from: lineData)
-        }
+        return text.split(separator: "\n", omittingEmptySubsequences: true).compactMap { $0.data(using: .utf8) }
     }
+
+    /// Just a line's `seq`, so a command `readCommandLines` can't decode still counts toward the
+    /// next one: reused, the new command would sit at or below a seq the runner already acked
+    /// past, and never be read.
+    private struct SeqOnly: Decodable { let seq: Int }
 
     /// Writes the round's files into `checkpoints/<id>/` first, and only then appends the
     /// checkpoint and saves the tape. A crash between those two steps leaves an orphan

@@ -107,7 +107,9 @@ At the top edge of the live card (in the content, not the window toolbar — it 
   `ROUND · OF N` · `ELAPSED` · `SEATS DONE` · `SO FAR` (+/−) · `BILLED` · **`CONVERGENCE`** (§8.1) ·
   `STOPS AT`. States recolour only the relevant cell (PAUSED; FAILED red with the diagnosis replacing
   SO FAR; REVIEW amber "ready for you").
-- **Round tools** at the trailing end: Extend (⌘=) and Annotate (⌥⌘A).
+- **Round tools** at the trailing end: Extend (⌘=) and Annotate (⌥⌘A). The Run menu also carries
+  Extend's mirror, **Remove a Round** (⌘-, unbound in `GhosttyDefaults.conf`), with no bar key of its
+  own: it takes one unstarted round off the current cycle and is dark when no cycle has one (§5.2).
 - **Width:** cells drop in a fixed order as space runs out — BILLED, then SO FAR, then STOPS AT (the
   board repeats it) — and every remaining cell applies the full-name/short-code rule. A narrow pane
   gets the compact bar (transport + ROUND + ELAPSED + CONVERGENCE).
@@ -125,12 +127,31 @@ Directly under the control bar, in the same glass.
 ### 5.2 The tape
 
 A row of stage slots, departure `DEP · CLR` to arrival `ARR · REV`: Clarify 1…n, Draft, Synthesis,
-Refine 1…N (bracketed "REFINE ×N" with a + extend handle), Encode, Polish 1…N (bracketed, + handle),
+Refine 1…N (bracketed "REFINE ×N" with − and + handles), Encode, Polish 1…N (bracketed, − and +),
 Fresh eyes, Dedup, Review. Each finished slot shows its duration; the live slot shows the playhead
 and grows; future slots are empty frames; major checkpoints carry taller ruler ticks; flags mark
 annotated rounds; the stop target is outlined in accent. A failed round is red with its duration.
 Clicking a finished slot selects that checkpoint (the plan below shows it); hover shows a card with
 the round's result.
+
+**Adding and removing rounds.** The bracket's **+** (`TapeCommand.extend(stage, by: 1)`, "Add another
+Refine round") lengthens the cycle while the head hasn't moved past it; the **−** beside it
+(`TapeCommand.trim(stage, by: 1)`, "Remove a Refine round") takes one off the end while the cycle has
+a *scheduled* round — not landed, not in the air, and not a failed one the next play reruns. Same
+16 pt box, hover help and keyboard reach as +; VoiceOver hears the help text in words. Neither asks
+first: an unrun round costs nothing, and the other handle undoes it.
+
+`trim` is its own command kind rather than a negative `by`, so an older build reading
+`commands.jsonl` drops it as an unknown kind (as it does a torn line) instead of folding it
+unclamped; the unknown line's `seq` still counts when the next command is numbered. The runner folds
+it against `RoundConfig` (`TapePlanner.apply(_:to:config:)`), storing the result as a negative
+`extraRefinement`/`extraPolish`, clamped so the cycle never plans fewer rounds than have landed plus
+the one in flight. Trimming to exactly that count ends the cycle after the current round; trimming a
+cycle to zero before it starts drops it from the sequence (refine → Encode; polish → Fresh eyes, else
+Review), and its bracket leaves the board. Because the board replays the planner, STOPS AT and CALLING
+AT move off a trimmed round on their own; the runner matches that by taking a landing checkpoint's
+`major` from the sequence as it stands (`TapePlanner.planned`), not as it was when the round started —
+so ⏭ stops at the round the board marks as the new last, after an extend or a trim mid-round.
 
 ### 5.3 Names, codes and the split-flap card
 
@@ -258,8 +279,10 @@ section and switches to *Diff vs Previous* at that round. Closes with the same c
 The awaiting-choice body shows the recommendation and a segmented fidelity picker. The Rounds
 configuration lives in the inspector as the existing aligned grid (Role · Harness · Model · Effort ·
 Fallback; leading-aligned fallback column), caps and default play; the body shows a one-line summary
-("Full plan · 4 drafters · refine ×5 · polish ×6 · customized") and **Edit in Inspector**. Fresh eyes
-+ dedup and the polish cap are disabled with an explanation when there is no polisher.
+("Full plan · 4 drafters · refine ×5 · polish ×6 · customized") and **Edit in Inspector**, whose help
+says that is where a stage's round count changes. A cap of 0 is the pre-run way to remove refine or
+polish: the stage drops out of the summary line and of the board. Fresh eyes + dedup and the polish
+cap are disabled with an explanation when there is no polisher.
 
 ## 10. Release review
 

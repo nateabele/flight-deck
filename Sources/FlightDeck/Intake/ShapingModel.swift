@@ -4,7 +4,7 @@ import IntakeKit
 /// A transport-bar button. `rewind` (⏮) is deliberately absent: it needs branching, which
 /// this plan doesn't build (spec §6.4), and a dimmed button that can never light up is noise.
 enum TransportButton: CaseIterable, Hashable {
-    case step, nextMajor, toReview, pause, stop, extend, annotate
+    case step, nextMajor, toReview, pause, stop, extend, trim, annotate
 }
 
 /// One mark on the tape strip — a checkpoint already on the tape (`done`) or a round the
@@ -75,7 +75,7 @@ struct ShapingModel {
     var enabled: Set<TransportButton> {
         switch tape.status {
         case .running: [.pause, .stop, .annotate]
-        case .paused, .idle, .stopped: [.step, .nextMajor, .toReview, .extend, .annotate]
+        case .paused, .idle, .stopped: [.step, .nextMajor, .toReview, .extend, .trim, .annotate]
         // ⏯ re-runs the round that failed; ⏭ is withheld because after a failure the human
         // should see one round succeed before committing to a whole stage again.
         case .failed: [.step, .toReview, .annotate]
@@ -86,6 +86,10 @@ struct ShapingModel {
     /// Stages ＋ can lengthen — `BoardModel.extendableStages`, shared so the strip's + and the
     /// board's bracket handle can't disagree.
     var extendStages: [Stage] { BoardModel.extendableStages(tape: tape, config: intake.roundConfig) }
+
+    /// Stages − can shorten — `BoardModel.trimmableStages`, shared with the bracket's − for the
+    /// same reason.
+    var trimStages: [Stage] { BoardModel.trimmableStages(tape: tape, config: intake.roundConfig) }
 
     // MARK: - Status line
 

@@ -36,7 +36,8 @@ struct PlanningActions: Equatable {
 
     /// The live card's actions for intake `id`. Extend lengthens the current cycle by one
     /// round — the stage the tape is in when that stage can still grow, else the next one that
-    /// can — and is withheld when nothing can (`TapePlanner` would ignore it). `annotate` starts a
+    /// can — and is withheld when nothing can (`TapePlanner` would ignore it). Trim is its mirror:
+    /// one unstarted round off the same cycle, withheld when no cycle has one. `annotate` starts a
     /// note in the notes rail — on the plan's selection if there is one (`PlanNotesController.annotate`).
     ///
     /// Stop only ASKS (`confirmStop`): it discards the round in flight, work already paid for,
@@ -48,8 +49,10 @@ struct PlanningActions: Equatable {
                         annotate: @escaping () -> Void, confirmStop: @escaping () -> Void) -> PlanningActions {
         let current = model.tape.roundInProgress?.stage ?? model.tape.head?.stage
         let extendStage = model.extendStages.first { $0 == current } ?? model.extendStages.first
+        let trimStage = model.trimStages.first { $0 == current } ?? model.trimStages.first
         var enabled = model.enabled
         if extendStage == nil { enabled.remove(.extend) }
+        if trimStage == nil { enabled.remove(.trim) }
         return PlanningActions(enabled: enabled, intakeID: id) { button in
             switch button {
             case .step: service.send(id, .step)
@@ -58,6 +61,7 @@ struct PlanningActions: Equatable {
             case .pause: service.send(id, .pause)
             case .stop: confirmStop()
             case .extend: if let extendStage { service.send(id, .extend(extendStage, by: 1)) }
+            case .trim: if let trimStage { service.send(id, .trim(trimStage, by: 1)) }
             case .annotate: annotate()
             }
         }
@@ -95,7 +99,8 @@ extension FocusedValues {
 /// before the main menu and swallows any chord libghostty binds `performable`
 /// (`MenuKeyEquivalents`). None of these is in libghostty's macOS defaults
 /// (`vendor/ghostty/src/config/Config.zig`): ⌘' ⇧⌘' ⌥⌘' ⇧⌘. ⌘. and ⌥⌘A are unbound, and
-/// ⌘= (`increase_font_size`) is already unbound in `GhosttyDefaults.conf`. An unbound chord
+/// ⌘= (`increase_font_size`) and ⌘- (`decrease_font_size`) are already unbound in
+/// `GhosttyDefaults.conf`. An unbound chord
 /// falls through the surface to the menu. The spec's ⇧⌘A for Annotate is taken in-app by
 /// File ▸ Add Project…, so Annotate is ⌥⌘A.
 ///
@@ -116,6 +121,8 @@ struct PlanningCommands: Commands {
             item("Stop", .stop, ".", [.command])
             Divider()
             item("Extend", .extend, "=", [.command])
+            // Extend's mirror, on the key beside it: takes back an unstarted round.
+            item("Remove a Round", .trim, "-", [.command])
             item("Annotate", .annotate, "a", [.command, .option])
             Divider()
             // No chord: ⌥⌘H is Hide Others and ⇧⌘H is taken in terminals; the item is how the
