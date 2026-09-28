@@ -734,10 +734,10 @@ final class ChurnLaneView: NSView {
         }
         (hit == nil ? NSCursor.arrow : NSCursor.pointingHand).set()
         guard let (marker, rect) = hit, marker.model.hot, let input else { return card.present(nil) }
-        // Beside the text, off the plan's measure (`PlanGutter.readableWidth`) and top-aligned
-        // with the heading: below the marker, the card sat over the very section it explains,
-        // and beside the marker it still covered the start of every line. A pane narrower
-        // than the measure has no room there, and `CardPlacement` flips it back over the text.
+        // Past the text's trailing edge and top-aligned with the heading: below the marker, the
+        // card sat over the very section it explains, and beside the marker it still covered
+        // the start of every line. The plan wraps to the pane (`PlanGutter.textWidth`), so there
+        // is rarely room past it, and `CardPlacement` then flips the card back over the text.
         card.placement = .trailing
         card.frame = NSRect(x: textEnd - frame.minX, y: rect.minY, width: 0, height: rect.height)
         card.present(AnyView(SectionVersionsCard(section: marker.section, model: marker.model,
