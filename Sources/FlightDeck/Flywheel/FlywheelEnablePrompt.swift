@@ -26,8 +26,8 @@ enum FlywheelEnableResolution {
 }
 
 /// The two confirmation dialogs behind every "make this project flywheel" action, shared so
-/// the header's context menu item and the intake empty state's "Enable Flywheel…" button run
-/// the literal same flow rather than two copies that could drift on wording or on which of
+/// the header's context menu item and the intake empty state's "Enable Flight Control…" button
+/// run the literal same flow rather than two copies that could drift on wording or on which of
 /// `enableFlywheel`/`setupFlywheel` a given repo actually needs. The caller decides which
 /// binding to flip, based on `status.isFlywheelProject`.
 struct FlywheelEnableDialogs: ViewModifier {
@@ -42,7 +42,7 @@ struct FlywheelEnableDialogs: ViewModifier {
             // Confirmation-gated: `enableFlywheel` shells out to `am guard install` and writes
             // a git hook, so the user sees exactly what it is about to do before it runs.
             .confirmationDialog(
-                "Enable Flywheel for \"\(repo.displayName)\"?",
+                "Enable Flight Control for \"\(repo.displayName)\"?",
                 isPresented: $showingEnableConfirmation
             ) {
                 Button("Enable") { Task { await store.enableFlywheel(for: repo.url) } }
@@ -54,7 +54,7 @@ struct FlywheelEnableDialogs: ViewModifier {
             // `br init`/`br agents --add`/`am projects discovery-init` before `enable`'s own
             // steps, so the confirmation lists the bootstrap alongside the install.
             .confirmationDialog(
-                "Setup Flywheel for \"\(repo.displayName)\"?",
+                "Set Up Flight Control for \"\(repo.displayName)\"?",
                 isPresented: $showingSetupConfirmation
             ) {
                 Button("Setup") { Task { await store.setupFlywheel(for: repo.url) } }
@@ -70,9 +70,9 @@ struct FlywheelEnableDialogs: ViewModifier {
     private var setupStepsDescription: String {
         var steps: [String] = []
         if !status.guardInstalled { steps.append("Agent Mail commit guard") }
-        if !status.beadsSyncHooksInstalled { steps.append("beads sync hook") }
+        if !status.beadsSyncHooksInstalled { steps.append("task sync hook") }
         guard !steps.isEmpty else {
-            return "Setup is already complete; this only marks the project as Flywheel-enabled."
+            return "Setup is already complete; this only marks the project as Flight Control-enabled."
         }
         return "Will install: " + steps.joined(separator: ", ") + "."
     }
@@ -81,7 +81,7 @@ struct FlywheelEnableDialogs: ViewModifier {
     /// bootstrap `FlywheelSetup.initialize` performs on a plain repo, ahead of the same
     /// guard/hook install `setupStepsDescription` lists.
     private var initializeStepsDescription: String {
-        "Will initialize: beads, agent-mail marker, AGENTS.md. Will install: Agent Mail commit guard, beads sync hook."
+        "Will initialize: tasks, agent-mail marker, AGENTS.md. Will install: Agent Mail commit guard, task sync hook."
     }
 }
 

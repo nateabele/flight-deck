@@ -13,7 +13,7 @@ enum FlywheelError: Error, LocalizedError {
     case guardInstall(exitCode: Int32, output: String)
     /// One of `FlywheelSetup.initialize`'s bootstrap steps (`br init`, `br agents --add`,
     /// `am projects discovery-init`) exited non-zero before `enable` ever ran. `step` names
-    /// which one, so a plain-repo "Setup Flywheel…" failure reads as specifically as an
+    /// which one, so a plain-repo "Set Up Flight Control…" failure reads as specifically as an
     /// already-flywheel project's `enable` failure does.
     case initializeStep(step: String, exitCode: Int32, output: String)
 
@@ -29,7 +29,7 @@ enum FlywheelError: Error, LocalizedError {
         case .guardInstall(let exitCode, let output):
             "Agent Mail guard install failed (exit \(exitCode)): \(Self.firstLine(of: output))"
         case .initializeStep(let step, let exitCode, let output):
-            "Flywheel setup step `\(step)` failed (exit \(exitCode)): \(Self.firstLine(of: output))"
+            "Flight Control setup step `\(step)` failed (exit \(exitCode)): \(Self.firstLine(of: output))"
         }
     }
 

@@ -1,0 +1,207 @@
+import XCTest
+import IntakeKit
+@testable import FlightDeck
+
+/// A lightweight, comment-and-interpolation-aware scanner over every `"…"` literal in
+/// `Sources/FlightDeck/**/*.swift` — the guard behind spec §2's "tasks, never beads" and the
+/// Flight Control rename. Deliberately not a real Swift lexer: it tracks just enough state
+/// (quotes, `\"` escapes, `\(…)` interpolation depth, `"""` blocks, and `//` comments) to find
+/// every literal without one.
+enum TerminologyScan {
+    /// `\bbeads?\b` or `\bflywheel\b`, case-insensitive. `agent-flywheel` (the external
+    /// methodology's proper name) and any URL are masked out before this runs — see `offense`.
+    private static let bannedWord = try! NSRegularExpression(
+        pattern: "\\b(beads?|flywheel)\\b", options: [.caseInsensitive]
+    )
+    private static let agentFlywheel = try! NSRegularExpression(
+        pattern: "agent[- ]flywheel(\\.com)?", options: [.caseInsensitive]
+    )
+    private static let url = try! NSRegularExpression(pattern: "https?://\\S+")
+
+    /// True internals that legitimately say "bead"/"beads"/"flywheel" in a string literal —
+    /// argv, on-disk paths, thread ids, and agent-facing prompt text. Spec §2 names `br`,
+    /// `.beads/`, `BeadWriter`, schemas, agent prompts and logs as internals that keep the
+    /// word; these are the literals that say it but land somewhere the line-level skips in
+    /// `isExempt(line:)` don't reach (mainly: a continuation line of a multi-line array/`+`
+    /// concatenation, where the line itself never mentions `argv`/`args`/a path call).
+    ///
+    /// Each key is the literal's *template*: every `\(…)` interpolation collapsed to a single
+    /// `$`, so an entry matches regardless of the interpolated expression's exact spelling.
+    static let internalAllowList: Set<String> = [
+        // SessionStore.observeWatchPaths: the on-disk `.beads` store the file watcher polls —
+        // a path, never rendered. (Also caught by `isExempt(line:)`'s path-component rule;
+        // kept here too since the brief calls these out as the allow list's first entries.)
+        ".beads",
+        "beads.db",
+        "beads.db-wal",
+
+        // IntakeDelivery.deliver: the Agent-Mail `--thread-id` value groups a bead's mail
+        // thread by its internal id — a wire key, never rendered as prose. It's a standalone
+        // array element, so the same-line `argv` skip (the array's `var argv = [...]` is a
+        // different physical line) never reaches it.
+        "bead:$",
+        // IntakeDelivery.reclaimFailedInjectText: text injected into an AGENT's own session
+        // (`inject(...)`), never shown to the human user — spec §2 exempts agent prompts.
+        "or reply on the Agent Mail thread bead:$.",
+
+        // BeadWriter.run(.recheck) formats `br`'s own step failure — spec §2 names BeadWriter
+        // itself as a kept internal.
+        "$: bead not found: $",
+
+        // ObserveLaneModel.unavailableKeys: "beads" is FlywheelProjection's own snapshot-field
+        // key (mirrors `lanesUnavailable.insert("beads")`, itself exempt via the `.beads`
+        // line-component skip below) — an internal correlation key, never displayed.
+        "beads",
+    ]
+
+    static func offenders(under root: URL, allow: Set<String>) throws -> [String] {
+        var offenses: [String] = []
+        for file in try swiftFiles(under: root) {
+            offenses += try scan(file: file, allow: allow)
+        }
+        return offenses
+    }
+
+    private static func swiftFiles(under root: URL) throws -> [URL] {
+        guard let enumerator = FileManager.default.enumerator(
+            at: root, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]
+        ) else { return [] }
+        var files: [URL] = []
+        for case let url as URL in enumerator where url.pathExtension == "swift" {
+            files.append(url)
+        }
+        return files
+    }
+
+    /// A line-level reason to skip every literal on it entirely, before even extracting them —
+    /// the brief's own skip list: `Logger`/`logger.` calls, accessibility identifiers, argv
+    /// construction, and the `br` executable name. Deliberately does NOT include `.beads`/
+    /// `beads.db` here: those are path fragments that belong to one specific literal, not the
+    /// whole line, and a whole-line substring check on them false-positives on unrelated code
+    /// that merely mentions a `beads`-prefixed property (e.g. `status.beadsSyncHooksInstalled`)
+    /// while a genuine, renamable literal sits right next to it on the same line — see
+    /// `isPathFragment(_:)`, which checks the literal itself instead.
+    private static func isExempt(line: String) -> Bool {
+        let needles = ["Logger", "logger.", "accessibilityIdentifier(", "argv", "args", "\"br\""]
+        let lowered = line.lowercased()
+        return needles.contains { lowered.contains($0.lowercased()) }
+    }
+
+    /// True for a literal that IS an on-disk path fragment (SessionStore's `.beads` watch path,
+    /// `beads.db`/`beads.db-wal`, or anything built via `.appendingPathComponent(`) — checked
+    /// against the literal's own text, not the surrounding line, so it can't be tripped by an
+    /// unrelated identifier elsewhere on the same line.
+    private static func isPathFragment(_ normalized: String, line: String) -> Bool {
+        if line.contains(".appendingPathComponent(") { return true }
+        return normalized.contains(".beads") || normalized.contains("beads.db")
+    }
+
+    private static func scan(file: URL, allow: Set<String>) throws -> [String] {
+        let contents = try String(contentsOf: file, encoding: .utf8)
+        var offenses: [String] = []
+        var inTripleQuote = false
+
+        for (index, rawLine) in contents.components(separatedBy: "\n").enumerated() {
+            let lineNumber = index + 1
+            let trimmed = rawLine.trimmingCharacters(in: .whitespaces)
+
+            if inTripleQuote {
+                // A `"""` block's own lines are all literal text (no further `\(…)` handling
+                // needed here — none of this codebase's multi-line strings interpolate), so
+                // just look for the closer and otherwise scan the whole line as one literal.
+                if let range = rawLine.range(of: "\"\"\"") {
+                    inTripleQuote = false
+                    offenses += codeLineOffenses(String(rawLine[range.upperBound...]),
+                                                  file: file, lineNumber: lineNumber, allow: allow)
+                } else {
+                    offenses += offense(rawLiteral: rawLine, normalized: rawLine, line: rawLine,
+                                         file: file, lineNumber: lineNumber, allow: allow)
+                }
+                continue
+            }
+
+            if trimmed.hasPrefix("//") { continue } // a whole-line (or `///`) comment
+
+            if let start = rawLine.range(of: "\"\"\"") {
+                inTripleQuote = true
+                offenses += codeLineOffenses(String(rawLine[..<start.lowerBound]),
+                                              file: file, lineNumber: lineNumber, allow: allow)
+                continue
+            }
+
+            offenses += codeLineOffenses(rawLine, file: file, lineNumber: lineNumber, allow: allow)
+        }
+        return offenses
+    }
+
+    /// Extracts every `"…"` literal from one line of ordinary code, honoring `\"`/`\\` escapes
+    /// and `\(…)` interpolation (walked with a paren counter, since an interpolation can itself
+    /// contain nested parens or strings — e.g. `\(Int(x))`), and stops at an un-quoted `//`
+    /// trailing comment.
+    private static func codeLineOffenses(_ line: String, file: URL, lineNumber: Int, allow: Set<String>) -> [String] {
+        var offenses: [String] = []
+        let chars = Array(line)
+        var i = 0
+        while i < chars.count {
+            if chars[i] == "/" && i + 1 < chars.count && chars[i + 1] == "/" { break }
+            guard chars[i] == "\"" else { i += 1; continue }
+            var raw = "", normalized = ""
+            i += 1
+            while i < chars.count && chars[i] != "\"" {
+                if chars[i] == "\\" && i + 1 < chars.count {
+                    if chars[i + 1] == "(" {
+                        i += 2
+                        var depth = 1
+                        while i < chars.count && depth > 0 {
+                            if chars[i] == "(" { depth += 1 } else if chars[i] == ")" { depth -= 1 }
+                            i += 1
+                        }
+                        normalized += "$"
+                        continue
+                    }
+                    let decoded: Character = chars[i + 1] == "\"" ? "\"" : (chars[i + 1] == "\\" ? "\\" : chars[i + 1])
+                    raw.append(decoded); normalized.append(decoded)
+                    i += 2
+                    continue
+                }
+                raw.append(chars[i]); normalized.append(chars[i])
+                i += 1
+            }
+            i += 1 // closing quote
+            offenses += offense(rawLiteral: raw, normalized: normalized, line: line,
+                                 file: file, lineNumber: lineNumber, allow: allow)
+        }
+        return offenses
+    }
+
+    private static func offense(
+        rawLiteral: String, normalized: String, line: String,
+        file: URL, lineNumber: Int, allow: Set<String>
+    ) -> [String] {
+        guard !isExempt(line: line), !isPathFragment(normalized, line: line), !allow.contains(normalized) else { return [] }
+        var masked = normalized as NSString
+        for pattern in [agentFlywheel, url] {
+            masked = pattern.stringByReplacingMatches(in: masked as String, range: NSRange(location: 0, length: masked.length),
+                                                        withTemplate: "") as NSString
+        }
+        guard bannedWord.firstMatch(in: masked as String, range: NSRange(location: 0, length: masked.length)) != nil else {
+            return []
+        }
+        return ["\(file.lastPathComponent):\(lineNumber): \"\(rawLiteral)\""]
+    }
+}
+
+final class TerminologyGuardTests: XCTestCase {
+    func testNoUserVisibleStringSaysBead() throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()   // …/Tests/FlightDeckTests/Intake/Planning
+            .appendingPathComponent("../../../../Sources/FlightDeck").standardized
+        let offenders = try TerminologyScan.offenders(under: root, allow: TerminologyScan.internalAllowList)
+        XCTAssertEqual(offenders, [], offenders.joined(separator: "\n"))
+    }
+
+    func testUIText() {
+        XCTAssertEqual(UIText.presetName(.bead), "Single task")
+        XCTAssertEqual(UIText.releaseButton(1), "Release 1 Task")
+        XCTAssertEqual(UIText.releaseButton(14), "Release 14 Tasks")
+    }
+}

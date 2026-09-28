@@ -167,14 +167,14 @@ struct IntakeDetailView: View {
     private var awaitingChoiceBody: some View {
         VStack(alignment: .leading, spacing: 12) {
             if let recommended = intake.recommended {
-                Text("Recommended: \(Self.presetLabel(recommended))").font(.callout.weight(.semibold))
+                Text("Recommended: \(UIText.presetName(recommended))").font(.callout.weight(.semibold))
             }
             if let reason = intake.recommendationReason {
                 Text(reason).foregroundStyle(.secondary)
             }
             Picker("Fidelity", selection: $selectedPreset) {
                 ForEach(Self.allPresets, id: \.self) { preset in
-                    Text(Self.presetLabel(preset)).tag(preset)
+                    Text(UIText.presetName(preset)).tag(preset)
                 }
             }
             .pickerStyle(.menu)
@@ -377,7 +377,7 @@ struct IntakeDetailView: View {
             Button("Discard", role: .destructive) { service.discard(intake.id) }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("It leaves the list. Nothing already written to beads is undone.")
+            Text("It leaves the list. Nothing already written to tasks is undone.")
         }
     }
 
@@ -434,15 +434,6 @@ struct IntakeDetailView: View {
     }
 
     private static let allPresets: [Preset] = [.bead, .sketch, .featurePlan, .fullPlan]
-
-    private static func presetLabel(_ preset: Preset) -> String {
-        switch preset {
-        case .bead: return "Bead"
-        case .sketch: return "Sketch"
-        case .featurePlan: return "Feature plan"
-        case .fullPlan: return "Full plan"
-        }
-    }
 }
 
 /// A macOS grouped-form section without `Form`: `Form(.grouped)` is its own scroll view, and

@@ -2373,7 +2373,7 @@ final class SessionStore: ObservableObject {
         }
     }
 
-    /// The "Setup Flywheel…" menu action's target — `enableFlywheel`'s sibling for a project
+    /// The "Set Up Flight Control…" menu action's target — `enableFlywheel`'s sibling for a project
     /// the probe found neither `.beads/` nor `.agent-mail.yaml` in. Bootstraps those markers
     /// first (`FlywheelSetup.initialize`, which also runs `enable`'s own steps), then marks
     /// the project flywheel-enabled on success. Same failure handling as `enableFlywheel`:

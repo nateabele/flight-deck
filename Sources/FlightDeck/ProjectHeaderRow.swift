@@ -246,12 +246,12 @@ struct ProjectHeaderRow: View {
             // already-enabled project shows a disabled label instead of a redundant action.
             // Placed directly above "Configure…" by request.
             if isFlywheelEnabled {
-                Button("Flywheel coordination enabled") {}
+                Button("Flight Control coordination enabled") {}
                     .disabled(true)
             } else if flywheelStatus.isFlywheelProject {
-                Button("Enable Flywheel…") { showingFlywheelConfirmation = true }
+                Button("Enable Flight Control…") { showingFlywheelConfirmation = true }
             } else {
-                Button("Setup Flywheel…") { showingFlywheelSetupConfirmation = true }
+                Button("Set Up Flight Control…") { showingFlywheelSetupConfirmation = true }
             }
             // Ellipsis because it opens a window, matching "Configure Tools…". Last rather
             // than above Close Project by request.
@@ -269,7 +269,7 @@ struct ProjectHeaderRow: View {
         .accessibilityIdentifier("project-header")
         // The two confirmation dialogs themselves live in `FlywheelEnableDialogs`, shared
         // with `ProjectView`'s empty state so the header menu and that button's "Enable
-        // Flywheel…" run the literal same flow.
+        // Flight Control…" run the literal same flow.
         .flywheelEnableConfirmations(
             repo: repo, store: store, status: flywheelStatus,
             showingEnableConfirmation: $showingFlywheelConfirmation,
@@ -305,7 +305,7 @@ struct ProjectHeaderRow: View {
     /// project `insertSession` found to already be a flywheel project at add-time — a plain
     /// repo never gets an entry, since the cache exists to drive what to *suggest*, not to
     /// remember every non-hit. The context menu needs the detection either way to choose
-    /// between "Enable Flywheel…" and "Setup Flywheel…", so a miss falls back to
+    /// between "Enable Flight Control…" and "Set Up Flight Control…", so a miss falls back to
     /// `probedFlywheelStatus` — this row's own memoized on-demand probe, populated once by
     /// `.onAppear` (see `probeFlywheelStatusIfNeeded`) rather than re-run here. The live probe
     /// is kept as a last-resort fallback for the brief window before that `.onAppear` fires
