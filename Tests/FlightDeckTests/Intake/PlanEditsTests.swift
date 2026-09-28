@@ -248,6 +248,30 @@ final class PlanEditsTests: XCTestCase {
         XCTAssertNil(NoteAnchor(checkpoint: 1, quote: "").locate(in: generated))
     }
 
+    /// W4 review: a short quote whose own text was deleted must stay detached — not jump to
+    /// the next place the same two words happen to appear.
+    func testShortQuoteWhoseTextWasDeletedStaysDetached() {
+        let doc = "## Dispatch\nA dispatcher assigns the job by hand.\n\n## Billing\nInvoices go out when the job closes.\n"
+        let a = anchor(doc, "the job", occurrence: 0)
+        XCTAssertEqual(a.section, "## Dispatch")
+        let deleted = doc.replacingOccurrences(of: "A dispatcher assigns the job by hand.", with: "Dispatch is automatic.")
+        XCTAssertNil(a.locate(in: deleted), "the only remaining \"the job\" is in another section with other context")
+    }
+
+    /// …while a short quote that is still there is found: by its context, or — its context
+    /// rewritten — by its section.
+    func testShortQuoteStillLocatesByContextOrSection() throws {
+        let doc = "## Dispatch\nA dispatcher assigns the job by hand.\n\n## Billing\nInvoices go out when the job closes.\n"
+        let first = anchor(doc, "the job", occurrence: 0), second = anchor(doc, "the job", occurrence: 1)
+        XCTAssertEqual(first.locate(in: doc)?.lowerBound, doc.range(of: "the job by")?.lowerBound)
+        XCTAssertEqual(second.locate(in: doc)?.lowerBound, doc.range(of: "the job closes")?.lowerBound)
+
+        // Both sides of the quote reworded: no context left, but it is still in its section.
+        let reworded = doc.replacingOccurrences(of: "A dispatcher assigns the job by hand.", with: "Someone picks the job, always.")
+        let r = try XCTUnwrap(first.locate(in: reworded))
+        XCTAssertEqual(r.lowerBound, reworded.range(of: "the job, always")?.lowerBound)
+    }
+
     // MARK: - Notes on the tape
 
     func testNotesListsConsumedThenPending() {
