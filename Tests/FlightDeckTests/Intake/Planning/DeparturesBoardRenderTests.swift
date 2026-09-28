@@ -68,6 +68,46 @@ final class DeparturesBoardRenderTests: XCTestCase {
         }
     }
 
+    /// The bracket handles: − beside + while a cycle has a scheduled round, + alone once the
+    /// only round left is the one in flight, and both over a cycle trimmed down to one round.
+    /// Writes `trim-<state>-<width>.png` under the same `FD_INTAKE_RENDER_DIR`.
+    func testRenderTrimHandles() throws {
+        guard let dir = ProcessInfo.processInfo.environment["FD_INTAKE_RENDER_DIR"] else {
+            throw XCTSkip("set FD_INTAKE_RENDER_DIR to render the departures board PNGs")
+        }
+        var intake = Intake(projectPath: "/tmp/project", intent: "per-project font size")
+        intake.state = .shaping
+        let config = try XCTUnwrap(PresetExpansion.config(for: .featurePlan, available: .defaults))
+        intake.roundConfig = config
+        intake.exchanges = [TriageExchange(questions: ["Q?"], answers: ["A"])]
+        let draft = cp(1, .draft, major: true, at: 0, started: -400)
+        let syn = cp(2, .synthesis, major: true, at: 182)
+        let rf1 = cp(3, .refine, 1, major: false, at: 470)
+
+        let fresh = Tape()
+        var lastInFlight = Tape(checkpoints: [draft, syn, rf1], target: .nextMajor, status: .running,
+                                roundInProgress: PlannedRound(stage: .refine, round: 2, major: false),
+                                roundStartedAt: t0.addingTimeInterval(470))
+        lastInFlight.extraRefinement = -1
+        var oneRound = Tape(checkpoints: [draft], status: .paused)
+        oneRound.extraRefinement = -2
+        oneRound.extraPolish = -1
+
+        for (name, tape) in [("fresh", fresh), ("last-in-flight", lastInFlight), ("one-round", oneRound)] {
+            let model = BoardModel(intake: intake, tape: tape, config: config, now: t0.addingTimeInterval(724),
+                                   selected: nil, preview: nil)
+            for width in [1100, 700] as [CGFloat] {
+                let policy = FlapPolicy()
+                for (surface, text) in model.flapTexts { policy.seed(surface: surface, text: text) }
+                let board = DeparturesBoard(model: model, policy: policy, preview: .constant(nil),
+                                            onSelect: { _ in }, onExtend: { _ in }, onTrim: { _ in })
+                    .padding(16)
+                try PlanningRender.write(board, size: NSSize(width: width, height: 300),
+                                         to: URL(fileURLWithPath: dir).appendingPathComponent("trim-\(name)-\(Int(width)).png"))
+            }
+        }
+    }
+
     /// Checkpoint `id` landing `at` seconds after `t0`, started `started` seconds after it.
     private func cp(_ id: Int, _ stage: Stage, _ round: Int = 0, major: Bool, at seconds: TimeInterval,
                     started: TimeInterval? = nil) -> Checkpoint {

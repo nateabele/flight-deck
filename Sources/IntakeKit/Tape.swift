@@ -2,7 +2,8 @@ import Foundation
 
 /// A stop the round engine can land on. `draft`/`synthesis`/`encode`/`freshEyes`/`dedup` each
 /// run exactly once per tape (round 0); `refine` and `polish` repeat 1...N, capped by
-/// `RoundConfig.refinementCap`/`polishCap` plus whatever `.extend` has added on top.
+/// `RoundConfig.refinementCap`/`polishCap` plus whatever `.extend` has added on top (or `.trim`
+/// taken off).
 public enum Stage: String, Codable, Sendable { case draft, synthesis, refine, encode, polish, freshEyes, dedup }
 
 /// How a review round's verdicts split, for the summary a human sees before deciding whether
@@ -197,7 +198,10 @@ public struct Tape: Codable, Equatable, Sendable {
     public var status: RunnerStatus
     public var pauseDiagnosis: Diagnosis?
     public var ackedCommandSeq: Int
+    /// Rounds `.extend` added to `refinementCap` — negative once `.trim` has taken rounds off
+    /// (`TapePlanner.apply` clamps it so the stage never plans fewer rounds than it has run).
     public var extraRefinement: Int
+    /// `extraRefinement`, for `polishCap`.
     public var extraPolish: Int
     /// Notes queued for the next round (✎ and anchored highlights alike); the round that runs
     /// next consumes them all, and its record lists them.
@@ -290,12 +294,15 @@ public struct Tape: Codable, Equatable, Sendable {
 /// the compiler happens to generate.
 ///
 /// - `note` queues a `PlanNote` for the next round; `removeNote` withdraws a still-pending one.
+/// - `extend` adds rounds to a refine or polish cycle; `trim` removes ones that haven't started
+///   (a separate kind rather than a negative `by`: a build without `trim` drops the line as an
+///   unknown kind, where it would fold a negative extend unclamped, below rounds already run).
 /// - `editPlan` carries the human's WHOLE edited markdown for one checkpoint (not a patch — the
 ///   runner never has to reconstruct it) and the runner stores it as that checkpoint's
 ///   `plan.user.md`. Markdown identical to the generated plan clears the layer. Send it on a
 ///   save, not per keystroke: every command is a line the runner re-reads.
 public enum TapeCommand: Codable, Equatable, Sendable {
-    case step, nextMajor, toReview, pause, stop, extend(Stage, by: Int)
+    case step, nextMajor, toReview, pause, stop, extend(Stage, by: Int), trim(Stage, by: Int)
     case note(PlanNote), removeNote(UUID), editPlan(checkpoint: Int, markdown: String)
 
     /// The old free-text ✎ — now an unanchored comment. Its id is derived from the text (see
@@ -303,7 +310,7 @@ public enum TapeCommand: Codable, Equatable, Sendable {
     public static func annotate(_ text: String) -> TapeCommand { .note(.legacy(text)) }
 
     /// `annotate` is decode-only: a `commands.jsonl` written before `PlanNote` may still hold one.
-    private enum Kind: String, Codable { case step, nextMajor, toReview, pause, stop, annotate, extend, note, removeNote, editPlan }
+    private enum Kind: String, Codable { case step, nextMajor, toReview, pause, stop, annotate, extend, trim, note, removeNote, editPlan }
     private enum CodingKeys: String, CodingKey { case kind, text, stage, by, note, id, checkpoint, markdown }
 
     public init(from decoder: Decoder) throws {
@@ -322,6 +329,8 @@ public enum TapeCommand: Codable, Equatable, Sendable {
                              markdown: try c.decode(String.self, forKey: .markdown))
         case .extend:
             self = .extend(try c.decode(Stage.self, forKey: .stage), by: try c.decode(Int.self, forKey: .by))
+        case .trim:
+            self = .trim(try c.decode(Stage.self, forKey: .stage), by: try c.decode(Int.self, forKey: .by))
         }
     }
 
@@ -345,6 +354,10 @@ public enum TapeCommand: Codable, Equatable, Sendable {
             try c.encode(markdown, forKey: .markdown)
         case .extend(let stage, let by):
             try c.encode(Kind.extend, forKey: .kind)
+            try c.encode(stage, forKey: .stage)
+            try c.encode(by, forKey: .by)
+        case .trim(let stage, let by):
+            try c.encode(Kind.trim, forKey: .kind)
             try c.encode(stage, forKey: .stage)
             try c.encode(by, forKey: .by)
         }

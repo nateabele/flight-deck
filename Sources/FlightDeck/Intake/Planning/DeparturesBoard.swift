@@ -17,6 +17,8 @@ struct DeparturesBoard: View {
     @Binding var preview: PlayMode?
     let onSelect: (Int) -> Void
     let onExtend: (Stage) -> Void
+    /// The bracket's −: takes an unstarted round off the cycle (`TapeCommand.trim`).
+    let onTrim: (Stage) -> Void
     /// Opens one slot's card without a hover — for offscreen renders, which can't hover.
     var openCardSlotID: String?
     /// Drawn in the board's glass under the tape: the convergence heatmap (spec §8.3), whose
@@ -24,13 +26,14 @@ struct DeparturesBoard: View {
     var disclosure: AnyView?
 
     init(model: BoardModel, policy: FlapPolicy, preview: Binding<PlayMode?>,
-         onSelect: @escaping (Int) -> Void, onExtend: @escaping (Stage) -> Void, openCardSlotID: String? = nil,
-         disclosure: AnyView? = nil) {
+         onSelect: @escaping (Int) -> Void, onExtend: @escaping (Stage) -> Void,
+         onTrim: @escaping (Stage) -> Void = { _ in }, openCardSlotID: String? = nil, disclosure: AnyView? = nil) {
         self.model = model
         self.policy = policy
         self._preview = preview
         self.onSelect = onSelect
         self.onExtend = onExtend
+        self.onTrim = onTrim
         self.openCardSlotID = openCardSlotID
         self.disclosure = disclosure
     }
@@ -437,7 +440,9 @@ struct DeparturesBoard: View {
     }
 
     /// "REFINE ×3" brackets over each cycle — "REFINE 2 OF 3" while one of its rounds is in
-    /// flight or failed — with the + that extends it while the head hasn't moved past it.
+    /// flight or failed — with the + that extends it while the head hasn't moved past it, and
+    /// beside it the − that takes back a round the runner hasn't started. Neither asks first: an
+    /// unrun round costs nothing, and the other handle undoes it.
     private func brackets(_ widths: [CGFloat]) -> some View {
         let edges = widths.reduce(into: [CGFloat(0)]) { $0.append($0.last! + $1) }
         let y: CGFloat = 8
@@ -445,7 +450,10 @@ struct DeparturesBoard: View {
             ForEach(model.groups, id: \.name) { group in
                 let x0 = edges[group.range.lowerBound] + 6
                 let x1 = edges[group.range.upperBound + 1] - 6
-                let end = group.extendable == nil ? x1 : x1 - 22
+                let handles = [group.trimmable, group.extendable].compactMap { $0 }.count
+                // A one-round cycle is narrower than two handles: they spill left over the bracket
+                // row of the one-off stage before it (never bracketed), and the line shrinks to a tick.
+                let end = max(x0, x1 - CGFloat(handles) * Self.handleStride)
                 Path { p in
                     p.move(to: CGPoint(x: x0, y: y + 6))
                     p.addLine(to: CGPoint(x: x0, y: y))
@@ -453,7 +461,7 @@ struct DeparturesBoard: View {
                     p.addLine(to: CGPoint(x: end, y: y + 6))
                 }
                 .stroke(Palette.ph.opacity(0.3), lineWidth: 1)
-                // Between the bracket's start and its + handle: the title shortens before the
+                // Between the bracket's start and its handles: the title shortens before a
                 // handle is ever drawn over it (`BoardModel.bracketTitles`), and goes last.
                 Text(Self.fittedBracketTitle(model.bracketTitles(group), width: end - x0 - 18))
                     .font(Font(Self.bracketNS))
@@ -463,23 +471,37 @@ struct DeparturesBoard: View {
                     .padding(.horizontal, 6)
                     .background(Palette.glass0)
                     .offset(x: x0 + 6, y: y - 7)
+                if let stage = group.trimmable {
+                    handle("minus", help: "Remove a \(group.name.capitalized) round") { onTrim(stage) }
+                        .offset(x: x1 - 16 - (group.extendable == nil ? 0 : Self.handleStride), y: y - 8)
+                }
                 if let stage = group.extendable {
-                    Button { onExtend(stage) } label: {
-                        Image(systemName: "plus")
-                            .font(.system(size: 9, weight: .bold))
-                            .foregroundStyle(Palette.ph2)
-                            .frame(width: 16, height: 16)
-                            .background(RoundedRectangle(cornerRadius: 4).strokeBorder(Palette.ph3, lineWidth: 1))
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .help("Add another \(group.name.capitalized) round")
-                    .accessibilityLabel("Extend \(group.name.capitalized)")
-                    .offset(x: x1 - 16, y: y - 8)
+                    handle("plus", help: "Add another \(group.name.capitalized) round",
+                           label: "Extend \(group.name.capitalized)") { onExtend(stage) }
+                        .offset(x: x1 - 16, y: y - 8)
                 }
             }
         }
         .frame(width: edges.last ?? 0, height: Style.bracketRow, alignment: .topLeading)
+    }
+
+    /// A bracket handle's 16 pt box plus the gap to its neighbour (or to the bracket's end).
+    private static let handleStride: CGFloat = 22
+
+    /// A bracket's + or −: one look, one hit target, reachable by keyboard like any button.
+    /// VoiceOver hears `label`, in words — the help text unless the handle has its own.
+    private func handle(_ symbol: String, help: String, label: String? = nil, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 9, weight: .bold))
+                .foregroundStyle(Palette.ph2)
+                .frame(width: 16, height: 16)
+                .background(RoundedRectangle(cornerRadius: 4).strokeBorder(Palette.ph3, lineWidth: 1))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(help)
+        .accessibilityLabel(label ?? help)
     }
 
     private static let bracketNS = NSFont.monospacedSystemFont(ofSize: 10.5, weight: .semibold)
