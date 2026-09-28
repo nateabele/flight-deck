@@ -375,7 +375,7 @@ The menu items are the *mechanism*, not decoration. AppKit gives the Ghostty sur
 feature the keys were claimed by the surface and the resulting `previous_tab`/`next_tab` action
 went nowhere.
 
-Back (⌃⌘←) and Forward (⌃⌘→) navigate a persisted selection history of up to 50 entries per stack, recalled by `SessionStore.goBack()` / `goForward()` and never landing on the row already showing. The history persists across relaunches in `SessionSnapshot` and is populated each time a session is manually selected or new sessions select themselves.
+Back (⌃⌘←) and Forward (⌃⌘→) navigate a persisted selection history of up to 50 entries per stack, recalled by `SessionStore.goBack()` / `goForward()` and never landing on the row already showing. The history persists across relaunches in `SessionSnapshot` and is populated by every visible selection change — a manual click, a new session selecting itself, the sibling `closeSession` falls back to, and ⌘⇧[ / ⌘⇧] cycling included. Only `restore()` and Back/Forward's own traversal are silent: replaying where you already were, or where the app already had you, is not a new place to record.
 
 ⌘⇧/ (Help ▸ Keyboard Shortcuts) opens a filterable overlay listing every one of these chords
 plus the rest of the main menu's, derived from the live menu bar rather than a hand-kept list

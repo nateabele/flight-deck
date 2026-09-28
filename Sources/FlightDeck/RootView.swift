@@ -102,6 +102,12 @@ struct RootView: View {
             if shortcutGroups == nil { shortcutGroups = ShortcutCatalog.currentGroups() }
             else { dismissShortcuts() }
         }
+        // ⌃⌘←/→, ⌘⇧], ⌘W, and ⌘⇧T all change the selection without going through this view at
+        // all — they act on `store` directly — so without this the overlay stays open, scrim and
+        // all, while the tab underneath it has already switched.
+        .onChange(of: store.selectedSessionID) {
+            if shortcutGroups != nil { dismissShortcuts() }
+        }
     }
 
     /// Hands focus back to the terminal: the filter field held it, and without this the next
