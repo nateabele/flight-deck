@@ -19,7 +19,6 @@ struct ProjectView: View {
     /// makes triage/release progress redraw the list and detail pane live.
     @ObservedObject private var intakeService: IntakeService
     @State private var intent = ""
-    @State private var selection: UUID?
     /// Both the sheet's presentation and its content, same shape as
     /// `DevicesSettingsTab.pairingWindow` — see the `.sheet(item:)` below.
     @State private var reviewIntakeID: UUID?
@@ -42,6 +41,17 @@ struct ProjectView: View {
     private var projectPath: String { repo.url.standardizedFileURL.path }
 
     private var intakes: [Intake] { intakeService.intakes(forProject: projectPath) }
+
+    /// Binds the List's selection through `IntakeService` instead of local `@State` — the bug
+    /// this fixes is that `@State`: switching to another project's row and back gives this
+    /// view a fresh identity (it's keyed by `Repo`), so SwiftUI reset the selection along with
+    /// it. The service is per-project already and outlives the view, so it doesn't.
+    private var selectionBinding: Binding<UUID?> {
+        Binding(
+            get: { intakeService.selection(forProject: projectPath) },
+            set: { intakeService.select($0, inProject: projectPath) }
+        )
+    }
 
     /// Same predicate `ProjectHeaderRow`'s context-menu item reads — `FlywheelEnablement`
     /// is the one place that answers "has this project opted in", so the empty-state switch
@@ -120,7 +130,7 @@ struct ProjectView: View {
             VStack(alignment: .leading, spacing: 8) {
                 Text(repo.displayName).font(.title3.weight(.semibold))
                 Text("Intakes").font(.headline).foregroundStyle(.secondary)
-                List(selection: $selection) {
+                List(selection: selectionBinding) {
                     ForEach(intakes) { intake in
                         HStack(spacing: 8) {
                             IntakeStatePill(intake: intake, tape: intakeService.tapes[intake.id])
@@ -148,7 +158,7 @@ struct ProjectView: View {
             .frame(minWidth: 280, idealWidth: 320, maxWidth: 420)
 
             Group {
-                if let id = selection, let intake = intakes.first(where: { $0.id == id }) {
+                if let id = selectionBinding.wrappedValue, let intake = intakes.first(where: { $0.id == id }) {
                     // Keyed on the intake's id, not just present: selecting a different row
                     // must reset `IntakeDetailView`'s own `@State` (answer drafts, the chosen
                     // preset), which a same-identity re-render would otherwise carry over.

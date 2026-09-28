@@ -85,6 +85,18 @@ struct ReleaseReview {
 @MainActor
 final class IntakeService: ObservableObject {
     @Published private(set) var intakes: [Intake]
+    /// Which intake each project's Intakes list has selected, keyed by `projectKey`. Lives
+    /// here rather than `ProjectView`'s `@State`, because `ProjectView` is keyed by `Repo` —
+    /// SwiftUI gives it a fresh identity, and resets its `@State`, on every project switch. A
+    /// service already scoped per-project outlives that: it's what made the selection survive
+    /// switching to another project and back, which `@State` did not.
+    ///
+    /// Not on `SessionStore`: it has no map of per-project UI state to fold into (its
+    /// per-project reads are all identity/config — `flywheelSuggestion`, `intakeService`
+    /// itself — not view state), so there is nothing there this would be joining rather than
+    /// duplicating. This service is already the per-project owner for everything else about
+    /// an intake, so its selection joins that, not a new home on the store.
+    @Published private(set) var selectedIntake: [String: UUID] = [:]
     /// Each `.shaping` intake's `tape.json` as last read — what `ShapingView` draws and what
     /// `attentionCount` consults. Refreshed on the shared clock (`pollTapes`).
     @Published private(set) var tapes: [UUID: Tape] = [:]
@@ -104,6 +116,10 @@ final class IntakeService: ObservableObject {
     private let inject: (_ project: String, _ agent: String, _ text: String, _ token: UUID) -> Bool
     private let hasSession: (_ project: String, _ agent: String) -> Bool
     private let now: () -> Date
+    private let defaults: UserDefaults
+    /// `UserDefaults` key for `selectedIntake`, persisted as `[path: uuidString]` since
+    /// `UserDefaults` plists can't hold `UUID` values directly.
+    private static let selectionDefaultsKey = "IntakeSelectionByProject"
     /// Filled off the main actor by a detached probe started in `init` (the login-shell PATH
     /// lookup behind it can take seconds on first use); nil until that lands.
     private var availableModelsCache: AvailableModels?
@@ -142,7 +158,8 @@ final class IntakeService: ObservableObject {
         runner: IntakeRunnerControlling? = nil,
         inject: @escaping (String, String, String, UUID) -> Bool,
         hasSession: @escaping (String, String) -> Bool,
-        now: @escaping () -> Date = Date.init
+        now: @escaping () -> Date = Date.init,
+        defaults: UserDefaults = .standard
     ) {
         self.store = store
         self.headless = headless
@@ -154,6 +171,14 @@ final class IntakeService: ObservableObject {
         self.inject = inject
         self.hasSession = hasSession
         self.now = now
+        self.defaults = defaults
+        // Cheap-to-lose UI state, same durability class `UserDefaultsPreferencesPersistence`
+        // argues for — unlike the session graph (`FileSessionPersistence`'s doc comment has
+        // the fuller case for why THAT needs a file instead). Stored as path -> uuidString
+        // since `UserDefaults` can't hold a `UUID` value directly.
+        if let raw = defaults.dictionary(forKey: Self.selectionDefaultsKey) as? [String: String] {
+            selectedIntake = raw.compactMapValues(UUID.init(uuidString:))
+        }
 
         // Launch recovery: a turn or release in flight when FD quit has no process left to
         // finish it. Saying "triaging" forever would hide that; `.interrupted` asks the human.
@@ -219,6 +244,18 @@ final class IntakeService: ObservableObject {
         intakes(forProject: path).filter { $0.state.needsAttention || shapingNeedsAttention($0) }.count
     }
 
+    /// `project`'s selected intake, or nil when nothing is selected there OR the selection
+    /// points at an intake that's gone — deleted from disk, or discarded (`intakes(forProject:)`
+    /// already excludes those). Without the second check, discarding the selected intake would
+    /// leave `selectedIntake` pointing at a row the list no longer draws, so the detail pane
+    /// would keep showing a discarded intake instead of falling back to "Select an intake".
+    func selection(forProject path: String) -> UUID? {
+        guard let id = selectedIntake[Self.projectKey(path)],
+              intakes(forProject: path).contains(where: { $0.id == id })
+        else { return nil }
+        return id
+    }
+
     /// A shaping intake whose runner has stopped and is waiting for the human. `.idle` counts
     /// only with no target: an idle tape WITH one is queued work a runner is about to pick up
     /// (the same "unfinished work" test launch recovery uses), and lighting the badge for the
@@ -244,6 +281,15 @@ final class IntakeService: ObservableObject {
 
     /// The live task for `id`, if any — so tests (and nothing else) can await a turn.
     func task(for id: UUID) -> Task<Void, Never>? { tasks[id]?.task }
+
+    /// Records `project`'s selected intake (nil clears it) and persists it, so a relaunch
+    /// reopens each project on the intake the human was last looking at. `ProjectView` binds
+    /// its List selection through this instead of local `@State` — see `selectedIntake`'s doc
+    /// comment for the bug that state lost: SwiftUI resets `@State` on every project switch.
+    func select(_ id: UUID?, inProject project: String) {
+        selectedIntake[Self.projectKey(project)] = id
+        defaults.set(selectedIntake.mapValues(\.uuidString), forKey: Self.selectionDefaultsKey)
+    }
 
     // MARK: - Pipeline
 
