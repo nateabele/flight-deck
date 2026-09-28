@@ -127,7 +127,7 @@ final class SessionStore: ObservableObject {
     //       the two places `SessionStore.surfaces` is populated.
     //     - Every `selectionChangeReason = "..."` tag-site: `select(_:selecting:)`, `restore()`,
     //       `selectSession(_:)`, `cycleSelection(forward:)`, `closeSession`'s selected-session
-    //       fallback, and `reopenLastClosed(project:)`.
+    //       fallback, `reopenLastClosed(project:)`, and `traverseHistory`.
     //   In `SessionSidebar.swift`:
     //     - `beginRename()`'s `store.tagNextSelectionChange("beginRename()")` call.
     //     - `SessionSidebar.body`'s `#if DEBUG` comment block and the custom `selectionBinding`
@@ -171,10 +171,20 @@ final class SessionStore: ObservableObject {
     /// cannot recurse.
     @Published var selectedSessionID: UUID? {
         didSet {
+            // `List(selection:)` can write nil on a deselect between two real clicks
+            // (X -> nil -> Y): `oldValue` is nil by the time Y lands, so using it alone as
+            // `from` would record nothing and Back from Y would skip X entirely.
+            // `lastSelectedSession` remembers the most recent non-nil selection across that
+            // gap; it is updated below unconditionally, not just when this change is actually
+            // recorded, because it tracks "what was last shown", a fact that is true whether
+            // or not the current change happens to be suppressed.
             noteSelectionChange(
-                from: oldValue.map(SelectionTarget.session),
-                to: selectedSessionID.map(SelectionTarget.session)
+                from: (oldValue ?? lastSelectedSession).map { SelectionTarget.session(id: $0) },
+                to: selectedSessionID.map { SelectionTarget.session(id: $0) }
             )
+            if let selectedSessionID {
+                lastSelectedSession = selectedSessionID
+            }
             #if DEBUG
             Self.selectionDebugLogger.debug(
                 "selectedSessionID old=\(oldValue?.uuidString ?? "nil", privacy: .public) new=\(self.selectedSessionID?.uuidString ?? "nil", privacy: .public) reason=\(self.selectionChangeReason, privacy: .public) t=\(Date().timeIntervalSince1970, privacy: .public)"
@@ -214,6 +224,11 @@ final class SessionStore: ObservableObject {
     /// every selection change passes through, the sidebar's `List(selection:)` binding
     /// included, which is why recording in `selectSession(_:)` would miss every click.
     private(set) var selectionHistory = SelectionHistory()
+
+    /// The last non-nil value `selectedSessionID` held, kept across an intervening nil write —
+    /// see the comment in `selectedSessionID`'s `didSet` for why a deselect would otherwise
+    /// erase the "from" side of the next real transition.
+    private var lastSelectedSession: UUID?
 
     /// Set while `goBack`/`goForward` or `restore` assign the selection: a traversal is not a
     /// new place to record, and restoring last run's selection is not a navigation either. A
@@ -3596,7 +3611,7 @@ final class SessionStore: ObservableObject {
     private func traverseHistory(
         _ step: (inout SelectionHistory, SelectionTarget?, (SelectionTarget) -> Bool) -> SelectionTarget?
     ) {
-        let current = selectedSessionID.map(SelectionTarget.session)
+        let current = selectedSessionID.map { SelectionTarget.session(id: $0) }
         let destination = step(&selectionHistory, current) { [self] target in
             switch target {
             case .session(let id):
@@ -4522,11 +4537,25 @@ final class SessionStore: ObservableObject {
                 )
             }
         )))
+        // Same one-entry argument, for `selectionHistory` rather than `closedSessions`: if the
+        // selected tab lives in this project, each child close below lets `selectionAfterClosing`
+        // pick a sibling, and — unsuppressed — every one of those picks would push its own Back
+        // entry, turning one ⌘W-on-a-project into a stack of history hops that all point inside
+        // a project which no longer exists. Captured before the loop and recorded once after,
+        // from wherever the selection actually started to wherever it lands once every child
+        // (and any cascade among them) is gone.
+        let selectionBeforeClose = selectedSessionID
+        isSuppressingHistory = true
         // Snapshot the ids first: `closeSession` mutates `repos`, so iterating the live
         // array would walk off the end.
         for sessionID in repos[index].sessions.map(\.id) {
             closeSession(sessionID, recordingHistory: false)
         }
+        isSuppressingHistory = false
+        noteSelectionChange(
+            from: selectionBeforeClose.map { SelectionTarget.session(id: $0) },
+            to: selectedSessionID.map { SelectionTarget.session(id: $0) }
+        )
         // Re-found rather than reusing `index`: every `closeSession` above rewrote `repos`.
         repos.removeAll { $0.id == id }
         emit(.projectRemoved(id: id))
