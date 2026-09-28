@@ -42,9 +42,9 @@ final class ShapingModelTests: XCTestCase {
             ShapingModel(intake: intake, tape: pausedAtR2(status: status)).enabled
         }
         XCTAssertEqual(enabled(.running), [.pause, .stop, .annotate])
-        XCTAssertEqual(enabled(.paused), [.step, .nextMajor, .toReview, .extend, .annotate])
-        XCTAssertEqual(enabled(.idle), [.step, .nextMajor, .toReview, .extend, .annotate])
-        XCTAssertEqual(enabled(.stopped), [.step, .nextMajor, .toReview, .extend, .annotate])
+        XCTAssertEqual(enabled(.paused), [.step, .nextMajor, .toReview, .extend, .trim, .annotate])
+        XCTAssertEqual(enabled(.idle), [.step, .nextMajor, .toReview, .extend, .trim, .annotate])
+        XCTAssertEqual(enabled(.stopped), [.step, .nextMajor, .toReview, .extend, .trim, .annotate])
         XCTAssertEqual(enabled(.failed), [.step, .toReview, .annotate])
         XCTAssertEqual(enabled(.reachedReview), [])
     }

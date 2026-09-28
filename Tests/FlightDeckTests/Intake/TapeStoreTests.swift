@@ -114,6 +114,30 @@ final class TapeStoreTests: XCTestCase {
         XCTAssertEqual(commands, [.annotate("watch the schema"), .extend(.refine, by: 2)])
     }
 
+    func testTrimRoundTripsThroughCommandsFile() throws {
+        let store = TapeStore(intakeDirectory: root)
+        _ = try store.appendCommand(.trim(.polish, by: 1))
+        _ = try store.appendCommand(.extend(.refine, by: 1))
+        XCTAssertEqual(store.commands(after: 0).map(\.command), [.trim(.polish, by: 1), .extend(.refine, by: 1)])
+        let line = try String(contentsOf: store.commandsURL, encoding: .utf8).split(separator: "\n").first.map(String.init)
+        XCTAssertEqual(line.flatMap { $0.contains("\"kind\":\"trim\"") }, true, "a flat kind, like every other command")
+    }
+
+    /// A kind this build doesn't know — what an older build sees when a newer one queued a trim
+    /// — is skipped like a torn line rather than failing the read, and its seq still counts, so
+    /// the next append can't reuse it (a runner that acked past it would never read the reuse).
+    func testUnknownCommandKindIsSkippedAndItsSeqIsNotReused() throws {
+        let store = TapeStore(intakeDirectory: root)
+        _ = try store.appendCommand(.step)
+        let handle = try FileHandle(forWritingTo: store.commandsURL)
+        handle.seekToEndOfFile()
+        handle.write(Data("{\"seq\":2,\"command\":{\"kind\":\"teleport\",\"stage\":\"refine\"}}\n".utf8))
+        try handle.close()
+        XCTAssertEqual(store.commands(after: 0).map(\.command), [.step])
+        XCTAssertEqual(try store.appendCommand(.pause), 3)
+        XCTAssertEqual(store.commands(after: 0).map(\.seq), [1, 3])
+    }
+
     func testTornFinalLineIsSkippedNotFatal() throws {
         let store = TapeStore(intakeDirectory: root)
         _ = try store.appendCommand(.step)

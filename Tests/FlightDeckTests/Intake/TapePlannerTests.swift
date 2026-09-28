@@ -147,6 +147,96 @@ final class TapePlannerTests: XCTestCase {
         ])
     }
 
+    // MARK: - trim
+
+    /// Runs `count` planned rounds onto `tape`, as the runner would.
+    private func run(_ count: Int, _ tape: inout Tape, _ cfg: RoundConfig) {
+        for _ in 0..<count {
+            guard let round = TapePlanner.next(after: tape, config: cfg) else { return }
+            tape.checkpoints.append(Checkpoint(id: tape.checkpoints.count + 1, parent: tape.head?.id, stage: round.stage,
+                                               round: round.round, major: round.major, createdAt: Date()))
+        }
+    }
+
+    /// The rounds `tape` still plans to run from here, in order.
+    private func remaining(_ tape: Tape, _ cfg: RoundConfig) -> [PlannedRound] {
+        var scratch = tape
+        scratch.roundInProgress = nil
+        var rounds: [PlannedRound] = []
+        while let round = TapePlanner.next(after: scratch, config: cfg) {
+            rounds.append(round)
+            scratch.checkpoints.append(Checkpoint(id: scratch.checkpoints.count + 1, stage: round.stage, round: round.round,
+                                                  major: round.major, createdAt: Date()))
+        }
+        return rounds
+    }
+
+    func testTrimRemovesUnrunRoundsAndMovesTheMajorToTheNewLastRound() throws {
+        let cfg = try XCTUnwrap(PresetExpansion.config(for: .featurePlan, available: .defaults)) // refinementCap 3
+        var tape = Tape()
+        run(3, &tape, cfg) // draft, synthesis, refine 1
+        TapePlanner.apply(.trim(.refine, by: 1), to: &tape, config: cfg)
+        XCTAssertEqual(tape.extraRefinement, -1)
+        XCTAssertEqual(remaining(tape, cfg).filter { $0.stage == .refine }, [PlannedRound(stage: .refine, round: 2, major: true)])
+    }
+
+    /// A trim can't take back work: the stage never plans fewer rounds than already landed plus
+    /// the one in flight — trimming to exactly that ends the stage after the current round.
+    func testTrimIsClampedToLandedRoundsPlusTheOneInFlight() throws {
+        let cfg = try XCTUnwrap(PresetExpansion.config(for: .fullPlan, available: .defaults)) // refinementCap 5
+        var tape = Tape()
+        run(3, &tape, cfg) // draft, synthesis, refine 1
+        tape.roundInProgress = PlannedRound(stage: .refine, round: 2, major: false)
+        TapePlanner.apply(.trim(.refine, by: 10), to: &tape, config: cfg)
+        XCTAssertEqual(cfg.refinementCap + tape.extraRefinement, 2, "refine 1 landed, refine 2 is in flight")
+
+        // The round in flight lands; the stage is over and the sequence moves on to Encode.
+        tape.roundInProgress = nil
+        run(1, &tape, cfg)
+        XCTAssertEqual(tape.head?.round, 2)
+        XCTAssertEqual(TapePlanner.next(after: tape, config: cfg), PlannedRound(stage: .encode, round: 0, major: true))
+        XCTAssertEqual(TapePlanner.planned(stage: .refine, round: 2, tape: tape, config: cfg)?.major, true,
+                       "the in-flight round is the stage's last, so its checkpoint is the major one")
+
+        // Idempotent under a re-read: the same trim again (or another) removes nothing more.
+        TapePlanner.apply(.trim(.refine, by: 1), to: &tape, config: cfg)
+        XCTAssertEqual(cfg.refinementCap + tape.extraRefinement, 2)
+    }
+
+    func testTrimRefineToZeroBeforeItStartsSkipsTheStage() throws {
+        let cfg = try XCTUnwrap(PresetExpansion.config(for: .featurePlan, available: .defaults))
+        var tape = Tape()
+        run(1, &tape, cfg) // draft
+        TapePlanner.apply(.trim(.refine, by: 3), to: &tape, config: cfg)
+        XCTAssertEqual(remaining(tape, cfg).map(\.stage), [.synthesis, .encode, .polish, .polish])
+        // + brings a round back.
+        TapePlanner.apply(.extend(.refine, by: 1), to: &tape)
+        XCTAssertEqual(remaining(tape, cfg).filter { $0.stage == .refine }, [PlannedRound(stage: .refine, round: 1, major: true)])
+    }
+
+    func testTrimPolishToZeroMovesOnToFreshEyesOrReview() throws {
+        let full = try XCTUnwrap(PresetExpansion.config(for: .fullPlan, available: .defaults))
+        var tape = Tape()
+        TapePlanner.apply(.trim(.polish, by: 6), to: &tape, config: full)
+        XCTAssertEqual(remaining(tape, full).suffix(3).map(\.stage), [.encode, .freshEyes, .dedup])
+
+        let feature = try XCTUnwrap(PresetExpansion.config(for: .featurePlan, available: .defaults))
+        var short = Tape()
+        TapePlanner.apply(.trim(.polish, by: 2), to: &short, config: feature)
+        XCTAssertEqual(remaining(short, feature).last, PlannedRound(stage: .encode, round: 0, major: true),
+                       "no polish and no fresh eyes: encode is the last round before review")
+    }
+
+    func testTrimIgnoresOtherStagesAndAMissingConfig() throws {
+        let cfg = try XCTUnwrap(PresetExpansion.config(for: .featurePlan, available: .defaults))
+        var tape = Tape()
+        TapePlanner.apply(.trim(.encode, by: 1), to: &tape, config: cfg)
+        TapePlanner.apply(.trim(.refine, by: 1), to: &tape)
+        TapePlanner.apply(.trim(.refine, by: -2), to: &tape, config: cfg)
+        XCTAssertEqual(tape.extraRefinement, 0)
+        XCTAssertEqual(tape.extraPolish, 0)
+    }
+
     func testNextFailsSafeToReviewWhenHeadIsNoLongerInTheRebuiltSequence() throws {
         var cfg = try XCTUnwrap(PresetExpansion.config(for: .featurePlan, available: .defaults)) // polishCap 2
         var tape = Tape()

@@ -31,11 +31,13 @@ struct TapeSlot: Identifiable, Equatable {
 }
 
 /// A bracketed cycle on the tape ("REFINE ×5"), with the stage its + handle extends — nil once
-/// the head is past it, since `TapePlanner` ignores an extend for a finished stage.
+/// the head is past it, since `TapePlanner` ignores an extend for a finished stage — and the
+/// stage its − handle trims, nil while the cycle has no scheduled round left to remove.
 struct TapeGroup: Equatable {
     let name: String
     let range: ClosedRange<Int>
     let extendable: Stage?
+    var trimmable: Stage? = nil
 
     /// The group's short form, from the same code table as its slots ("RF" for RF1…RF5), for a
     /// bracket too narrow for the name (`BoardModel.bracketTitles`).
@@ -126,6 +128,7 @@ struct BoardModel: Equatable {
         self.slots = slots
 
         let extendable = Self.extendableStages(tape: tape, config: config)
+        let trimmable = Self.trimmableStages(tape: tape, config: config)
         self.groups = ["CLARIFY", "REFINE", "POLISH"].compactMap { name in
             guard let first = slots.firstIndex(where: { $0.group == name }),
                   let last = slots.lastIndex(where: { $0.group == name }) else { return nil }
@@ -134,7 +137,8 @@ struct BoardModel: Equatable {
             case "POLISH": .polish
             default: nil
             }
-            return TapeGroup(name: name, range: first...last, extendable: stage.flatMap { extendable.contains($0) ? $0 : nil })
+            return TapeGroup(name: name, range: first...last, extendable: stage.flatMap { extendable.contains($0) ? $0 : nil },
+                             trimmable: stage.flatMap { trimmable.contains($0) ? $0 : nil })
         }
 
         // Placeholders so `self` is whole before the fields below read `slots` through it.
@@ -360,6 +364,18 @@ struct BoardModel: Equatable {
         if config.reviewer != nil, headRank <= rank(.refine) { stages.append(.refine) }
         if config.polisher != nil, headRank <= rank(.polish) { stages.append(.polish) }
         return stages
+    }
+
+    /// Stages − can shorten: ones with a round still scheduled — not landed, not in the air, and
+    /// not the failed one, which the next play reruns. From the same replay as the tape's slots,
+    /// so − is offered exactly while the bracket shows a round it would take away.
+    static func trimmableStages(tape: Tape, config: RoundConfig?) -> [Stage] {
+        let markers = stages(tape: tape, config: config)
+        let pending = markers.firstIndex { !$0.done }
+        let started = tape.status == .running || tape.status == .failed ? pending : nil
+        return [Stage.refine, .polish].filter { stage in
+            markers.indices.contains { markers[$0].stage == stage && !markers[$0].done && $0 != started }
+        }
     }
 
     /// Stage order in the planned sequence — `Stage` is declared in that order but isn't

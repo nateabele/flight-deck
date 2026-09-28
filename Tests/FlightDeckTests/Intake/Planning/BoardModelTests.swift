@@ -244,6 +244,75 @@ final class BoardModelTests: XCTestCase {
         XCTAssertEqual(past.groups.first { $0.name == "POLISH" }?.extendable, .polish)
     }
 
+    /// − removes a round only the runner hasn't started: offered while the cycle has a scheduled
+    /// slot, withheld once the only rounds left are landed, in the air, or the failed one.
+    func testTrimIsOfferedOnlyWhileTheCycleHasAScheduledRound() throws {
+        let fresh = try board(try intake(.featurePlan), .empty)
+        XCTAssertEqual(fresh.groups.map(\.trimmable), [nil, .refine, .polish])
+
+        // Refine 2 in the air, Refine 3 still scheduled: − is there.
+        var flying = pausedAfterR1(status: .running)
+        flying.roundInProgress = PlannedRound(stage: .refine, round: 2, major: false)
+        XCTAssertEqual(try board(try intake(.featurePlan), flying).groups.first { $0.name == "REFINE" }?.trimmable, .refine)
+
+        // Trimmed down to the round in flight: nothing unstarted is left to remove.
+        flying.extraRefinement = -1
+        let last = try board(try intake(.featurePlan), flying)
+        XCTAssertEqual(last.slots.filter { $0.group == "REFINE" }.map(\.state), [.done, .live])
+        XCTAssertNil(last.groups.first { $0.name == "REFINE" }?.trimmable)
+        XCTAssertEqual(last.groups.first { $0.name == "REFINE" }?.extendable, .refine, "+ still grows it")
+
+        // A failed round reruns on the next play — it isn't an unrun round to drop.
+        var failed = pausedAfterR1(status: .failed)
+        failed.extraRefinement = -1
+        XCTAssertEqual(try board(try intake(.featurePlan), failed).slots.filter { $0.group == "REFINE" }.map(\.state),
+                       [.done, .failed])
+        XCTAssertNil(try board(try intake(.featurePlan), failed).groups.first { $0.name == "REFINE" }?.trimmable)
+
+        // Past the stage: nothing of it is left to trim.
+        var encoded = pausedAfterR1()
+        encoded.checkpoints += [cp(4, .refine, 2, major: false, at: 700), cp(5, .refine, 3, major: true, at: 800),
+                                cp(6, .encode, major: true, at: 900)]
+        XCTAssertNil(try board(try intake(.featurePlan), encoded).groups.first { $0.name == "REFINE" }?.trimmable)
+    }
+
+    /// STOPS AT pointed at Refine 3 (the major); trimming it away moves the stop to the new last
+    /// round, and trimming the whole remaining stage moves it past the stage altogether.
+    func testTrimMovesTheStopTarget() throws {
+        var tape = pausedAfterR1()
+        XCTAssertEqual(try board(try intake(.featurePlan), tape).stopsAt.value, "Refine 3")
+        tape.extraRefinement = -1
+        let one = try board(try intake(.featurePlan), tape)
+        XCTAssertEqual(one.slots.filter { $0.group == "REFINE" }.map(\.code), ["RF1", "RF2"])
+        XCTAssertEqual(one.stopsAt.value, "Refine 2")
+        XCTAssertEqual(one.stopSlotID, "refine-2")
+        XCTAssertTrue(try XCTUnwrap(one.slots.first { $0.id == "refine-2" }).major)
+        tape.extraRefinement = -2
+        let done = try board(try intake(.featurePlan), tape)
+        XCTAssertEqual(done.slots.filter { $0.group == "REFINE" }.map(\.code), ["RF1"])
+        XCTAssertEqual(done.stopsAt.value, "Encode")
+
+        // A stage trimmed to zero before it starts leaves the board — no bracket, no slots.
+        var skip = Tape()
+        skip.extraPolish = -2
+        let noPolish = try board(try intake(.featurePlan), skip)
+        XCTAssertFalse(noPolish.slots.contains { $0.group == "POLISH" })
+        XCTAssertEqual(noPolish.groups.map(\.name), ["CLARIFY", "REFINE"])
+    }
+
+    /// A cap of zero in the Rounds editor is the pre-run removal: the stage drops out of both the
+    /// board and the awaiting-choice summary line.
+    func testZeroCapRemovesTheStageFromTheBoardAndTheSummary() throws {
+        var zero = try intake(.featurePlan)
+        zero.roundConfig?.refinementCap = 0
+        let model = try board(zero, .empty)
+        XCTAssertEqual(model.groups.map(\.name), ["CLARIFY", "POLISH"])
+        XCTAssertFalse(model.slots.contains { $0.group == "REFINE" })
+        let summary = RoundConfigEditor.summary(preset: .featurePlan, config: try XCTUnwrap(zero.roundConfig))
+        XCTAssertFalse(summary.contains("refine"), summary)
+        XCTAssertTrue(summary.contains("polish ×2"), summary)
+    }
+
     // MARK: - Selection and flags
 
     func testSelectedCheckpoint() throws {

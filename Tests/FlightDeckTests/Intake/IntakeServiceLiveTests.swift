@@ -359,6 +359,34 @@ final class IntakeServiceLiveTests: XCTestCase {
         XCTAssertEqual(tapeStore(shaping.id).commands(after: 0).map(\.command), [.pause])
     }
 
+    /// Remove a Round mirrors Extend on the Run menu: it trims the cycle the tape is in (else the
+    /// next one that has an unstarted round), and is dark when no cycle has one to remove.
+    func testRemoveARoundTrimsTheCurrentCycleAndIsDarkWithNothingToRemove() async throws {
+        let shaping = try seed(.shaping)
+        try updateTape(shaping.id) {
+            $0.status = .paused
+            $0.checkpoints = [Checkpoint(id: 1, stage: .draft, round: 0, major: true, createdAt: self.clockNow),
+                              Checkpoint(id: 2, stage: .synthesis, round: 0, major: true, createdAt: self.clockNow),
+                              Checkpoint(id: 3, stage: .refine, round: 1, major: false, createdAt: self.clockNow)]
+        }
+        let svc = await makeService()
+        svc.pollTapes()
+        let intake = try XCTUnwrap(svc.intakes.first { $0.id == shaping.id })
+        var tape = tapeStore(shaping.id).loadTape()
+        let actions = PlanningActions.shaping(shaping.id, service: svc, model: ShapingModel(intake: intake, tape: tape),
+                                              annotate: {}, confirmStop: {})
+        XCTAssertTrue(actions.enabled.contains(.trim))
+        actions.perform(.trim)
+        XCTAssertEqual(tapeStore(shaping.id).commands(after: 0).map(\.command), [.trim(.refine, by: 1)])
+
+        // Every refine and polish round already trimmed away: nothing unstarted is left.
+        tape.extraRefinement = -2
+        tape.extraPolish = -2
+        let none = PlanningActions.shaping(shaping.id, service: svc, model: ShapingModel(intake: intake, tape: tape),
+                                           annotate: {}, confirmStop: {})
+        XCTAssertFalse(none.enabled.contains(.trim))
+    }
+
     /// The confirmation names what Stop throws away: the round in flight, by name — or says
     /// nothing is lost when no round is running.
     func testStopConfirmationNamesTheRoundInFlight() {
