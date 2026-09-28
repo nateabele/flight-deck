@@ -3980,38 +3980,41 @@ final class SessionStore: ObservableObject {
         persist()
     }
 
-    /// The order is `repos.flatMap(\.sessions)` — the sidebar top to bottom, crossing project
-    /// sections. Flattening is not a convenience: both `closeSession` and `moveSession`
-    /// deliberately leave an emptied project standing rather than pruning it, so the first repo
-    /// can hold no sessions while live tabs sit in a later section, and anything reading through
-    /// `repos.first` would walk off the live list.
+    /// The order is `sidebarRows` — exactly what the sidebar draws, top to bottom: each project
+    /// row, then its sessions unless the project is collapsed. A project row is a stop because a
+    /// project is selectable (its per-project view); a collapsed project's sessions are not,
+    /// since landing on a row the user cannot see was the old behaviour's one surprise.
+    /// `.empty` placeholder rows are never stops.
     ///
-    /// No-ops on an empty list, and a lone session wraps to itself. A `selectedSessionID` that
-    /// names no live session is treated as no selection at all, which lands on the first
-    /// session going forward and the last going backward — the same place a nil selection goes.
-    ///
-    /// Assigning `selectedSessionID` is the whole effect: its `didSet` persists the change and
-    /// updates `lastActiveProjectURL`, so ⌘N after a tab switch already targets the newly
-    /// active session's project.
+    /// The current position is the project view when one is up, else the selected session. An
+    /// unknown position lands on the first stop going forward and the last going backward.
     private func cycleSelection(forward: Bool) {
-        let ordered = repos.flatMap(\.sessions)
-        guard !ordered.isEmpty else { return }
+        let stops: [SidebarRow] = sidebarRows.filter {
+            if case .empty = $0 { return false } else { return true }
+        }
+        guard !stops.isEmpty else { return }
 
         #if DEBUG
         selectionChangeReason = "cycleSelection(forward: \(forward))"
         #endif
-        guard
-            let current = selectedSessionID,
-            let index = ordered.firstIndex(where: { $0.id == current })
-        else {
-            selectedSessionID = forward ? ordered.first?.id : ordered.last?.id
-            return
+        let index = stops.firstIndex { row in
+            switch row {
+            case .project(let id): return selectedProjectID == id
+            case .session(let id, _): return selectedProjectID == nil && selectedSessionID == id
+            case .empty: return false
+            }
         }
-
-        let destination = forward
-            ? ordered.indexWrapping(after: index)
-            : ordered.indexWrapping(before: index)
-        selectedSessionID = ordered[destination].id
+        let destination: SidebarRow
+        if let index {
+            destination = stops[forward ? stops.indexWrapping(after: index) : stops.indexWrapping(before: index)]
+        } else {
+            destination = forward ? stops.first! : stops.last!
+        }
+        switch destination {
+        case .project(let id): selectProject(id)
+        case .session(let id, _): selectedSessionID = id
+        case .empty: break
+        }
     }
 
     /// - Parameter recordingHistory: whether this close is offered to ⌘⇧T. Only
