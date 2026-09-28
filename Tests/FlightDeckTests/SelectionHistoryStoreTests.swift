@@ -44,9 +44,10 @@ final class SelectionHistoryStoreTests: XCTestCase {
         let (store, ids) = makeStore()
         store.selectedSessionID = ids[0]
         store.selectedSessionID = ids[1]
+        let before = store.selectionHistory.back
         store.goBack()
+        XCTAssertEqual(store.selectionHistory.back, Array(before.dropLast()))
         XCTAssertEqual(store.selectionHistory.forward, [.session(ids[1])])
-        XCTAssertEqual(store.selectionHistory.back, [])
     }
 
     func testBackSkipsAClosedSession() {
@@ -65,9 +66,33 @@ final class SelectionHistoryStoreTests: XCTestCase {
         store.selectedSessionID = ids[0]
         store.selectedSessionID = ids[1]
         store.closeSession(ids[0])
-        store.selectedSessionID = ids[1]
+        store.closeSession(ids[2])
+        // The only live entry left is the current row itself, which Back must never land on.
         store.goBack()
         XCTAssertEqual(store.selectedSessionID, ids[1])
+    }
+
+    func testANewSelectedSessionIsRecorded() {
+        let (store, ids) = makeStore()
+        store.selectedSessionID = ids[0]
+        let created = store.newSession(in: foo)   // selects it, same as `selecting: true`
+        XCTAssertEqual(store.selectedSessionID, created.id)
+        store.goBack()
+        XCTAssertEqual(store.selectedSessionID, ids[0])
+    }
+
+    func testBackSkipsTheCurrentSession() {
+        let (store, ids) = makeStore()
+        store.selectedSessionID = ids[0]
+        store.selectedSessionID = ids[1]
+        store.selectedSessionID = ids[0]   // the stack's top entry is now the current session
+        store.closeSession(ids[1])
+        store.goBack()
+        // Must skip past the dead `ids[1]` entry and the live-but-current `ids[0]` entry to
+        // land on `ids[2]`, never staying on `ids[0]` while still consuming history.
+        XCTAssertEqual(store.selectedSessionID, ids[2])
+        XCTAssertEqual(store.selectionHistory.back, [.session(ids[0]), .session(ids[1])])
+        XCTAssertEqual(store.selectionHistory.forward, [.session(ids[0])])
     }
 
     func testReopenedSessionIsReachableAgain() {
