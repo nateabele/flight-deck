@@ -16,6 +16,14 @@ struct LCDCell: Equatable, Identifiable {
     var shortValue: String
     var caption: String
     var tone: Tone
+
+    /// The cell for VoiceOver, in full words (spec §14): the value first, then what it is, the
+    /// caption's " · " read as a pause. "—" (nothing to show yet) is said as "none" rather
+    /// than read out as a dash.
+    var accessibilityLabel: String {
+        let spoken = value == "—" ? "none" : value
+        return "\(spoken), \(caption.replacingOccurrences(of: " · ", with: ", "))"
+    }
 }
 
 /// Everything the LCD shows, derived from the tape, its config, the board (which already knows
