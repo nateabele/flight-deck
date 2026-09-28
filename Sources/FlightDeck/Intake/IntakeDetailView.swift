@@ -614,9 +614,10 @@ struct IntakeDetailView: View {
     private var reviewBody: some View {
         VStack(alignment: .leading, spacing: 6) {
             // A refused release comes back here with its reason — without this line the only
-            // trace of the refusal was the sheet having closed.
+            // trace of the refusal was the sheet having closed. Red: it is a failure, and amber
+            // is for attention (spec §2).
             if let failure = intake.failure {
-                Text(failure).foregroundStyle(.orange).padding(.bottom, 6)
+                Text(failure).foregroundStyle(.red).padding(.bottom, 6)
             }
             Text("Change set").font(.headline)
             Text(DetailLayout.reviewCounts(intake.changeSet?.ops ?? []))
@@ -649,7 +650,7 @@ struct IntakeDetailView: View {
             if let record = intake.release {
                 Text("\(record.appliedSteps) step\(record.appliedSteps == 1 ? "" : "s") applied")
                 if let error = record.error {
-                    Text(error).foregroundStyle(.orange)
+                    Text(error).foregroundStyle(.red)
                 }
                 if !record.warnings.isEmpty {
                     DisclosureGroup("Delivery warnings (\(record.warnings.count))") {
@@ -667,7 +668,7 @@ struct IntakeDetailView: View {
     private var failedBody: some View {
         VStack(alignment: .leading, spacing: 12) {
             if let failure = intake.failure {
-                Text(failure).foregroundStyle(.orange)
+                Text(failure).foregroundStyle(.red)
             }
             if let raw = intake.rawFailureOutput {
                 DisclosureGroup("Raw output") {

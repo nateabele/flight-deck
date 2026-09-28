@@ -42,6 +42,9 @@ anything is happening, what it is, or whether another round is worth it.
   default, always confirmed; no controls or critical information only at a window's bottom; panels,
   not sheets, for repeated input (Rounds editor, notes); no labelled spinners; count up, never an ETA;
   colour only for exceptions (accent = live/selected, amber = attention/fallback, red = failure).
+  A transitional acknowledgement of the human's own click — §4's "Pausing…"/"Stopping…" until the
+  runner reaches its safe point — is exempt from "no labelled spinners": it is not a progress
+  indicator, it says the press was heard (final-review ruling #18).
 - **Honest data only.** No invented percentages, ETAs or live cost estimates. A determinate fraction
   appears only where it is real: seats done/total, the agent's own plan steps, round N of M.
 - **Motion:** every animation respects Reduce Motion (cross-fade or none). Clocks tick at 1 Hz from a
