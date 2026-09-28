@@ -340,6 +340,15 @@ public enum RoundPrompts {
         """
     }
 
+    /// How plan text is laid out, in the same words for every seat that writes any — a draft,
+    /// an `edit` another seat will apply, or the integrated plan itself. The seats hard-wrap
+    /// prose at ~80–100 columns out of habit, and a wrapped paragraph edits badly in the plan
+    /// editor (it soft-wraps again at its own width, leaving ragged half-lines). The engine
+    /// also unwraps whatever comes back (`MarkdownUnwrap`); this keeps the text that way at the
+    /// source, including inside an `edit` hunk, which is applied by hand before any unwrap.
+    static let planTextRule = "Write each paragraph and each list item as ONE line; never hard-wrap prose at a fixed width. " +
+        "Keep a blank line between blocks. Code blocks and tables keep their own line breaks."
+
     private static func lens(for persona: DrafterPersona) -> String {
         switch persona {
         case .general:
@@ -366,7 +375,7 @@ public enum RoundPrompts {
     public static func draft(_ c: RoundContext, persona: DrafterPersona) -> String {
         var s = """
         You are drafting a plan for this project intake. Write a complete, detailed, \
-        granular markdown plan — not an outline, not a summary.
+        granular markdown plan — not an outline, not a summary. \(planTextRule)
 
         \(intakeText(c))
 
@@ -405,7 +414,8 @@ public enum RoundPrompts {
         to it (\(ownDraft)) — not a rewrite of the competing drafts — as `changes[]`. Each \
         change names the `section` it touches, the `rationale` (what a competing draft got \
         right that this one didn't), and `edit`: a git-diff-style hunk or exact replacement \
-        instructions precise enough that another agent could apply it without guessing.
+        instructions precise enough that another agent could apply it without guessing. For \
+        any plan text in an `edit`: \(planTextRule)
 
         Return only JSON matching the provided schema: `{"changes": [...], "summary": "..."}`.
         """
@@ -429,7 +439,7 @@ public enum RoundPrompts {
         Return your proposed revisions as `changes[]` — each with `section`, `rationale`, \
         and `edit` (a git-diff-style hunk or exact replacement instructions) — plus a \
         one-line `summary` of what you found. Do not edit \(planFile) yourself; Integrate \
-        applies these.
+        applies these. For any plan text in an `edit`: \(planTextRule)
 
         Return only JSON matching the provided schema.
         """
@@ -442,7 +452,8 @@ public enum RoundPrompts {
     public static func integrate(planFile: String, changesFile: String, humanEdits: String? = nil) -> String {
         """
         Integrate these revisions into `\(planFile)` in place; be meticulous; edit only \
-        that file. The proposed changes are in \(changesFile).\(humanEditsBlock(humanEdits))
+        that file. The proposed changes are in \(changesFile). For any text you add or \
+        rewrite: \(planTextRule)\(humanEditsBlock(humanEdits))
 
         For each proposed change, decide whether you wholeheartedly agree with it, somewhat \
         agree (and apply a modified version of it), or disagree (and leave it out — a \

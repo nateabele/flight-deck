@@ -171,8 +171,8 @@ final class ConvergenceSeriesTests: XCTestCase {
     /// is the methodology's oscillation, read off the stored plans with no schema change.
     func testReopenedSectionIsDiverging() throws {
         let head = "# Plan\n## 1. Scope\nkeep this\n## 4. Rollout\n"
-        let a = head + "ship behind a flag\nroll out to staff\nthen to everyone\n"
-        let b = head + "ship to everyone at once\nno flag needed\nwatch the dashboards\n"
+        let a = head + "- ship behind a flag\n- roll out to staff\n- then to everyone\n"
+        let b = head + "- ship to everyone at once\n- no flag needed\n- watch the dashboards\n"
         var t = TapeFixture()
         t.add(.synthesis, changes: 5, tally: tally(0.8), plan: head + "tbd\n")
         t.add(.refine, round: 1, changes: 12, tally: tally(0.8), model: model("A"), plan: a)
@@ -248,13 +248,13 @@ final class ConvergenceSeriesTests: XCTestCase {
     /// A draft checkpoint's plan is its first surviving draft.
     func testSectionChurnAttributesLinesToHeadingsAcrossCheckpoints() {
         var t = TapeFixture()
-        let draft = t.add(.draft, files: ["drafts/1.md": "## A\na\n## B\nb\n"])
+        let draft = t.add(.draft, files: ["drafts/1.md": "## A\n- a\n## B\n- b\n"])
         t.checkpoints[draft - 1].record.slots = [
             SlotOutcome(role: "drafter", used: model("X"), requested: model("X"), status: .failed),
             SlotOutcome(role: "drafter", used: model("Y"), requested: model("Y"), status: .ok),
         ]
-        let syn = t.add(.synthesis, plan: "## A\na2\n## B\nb\n", files: ["plan.user.md": "## A\na2\n## B\nb\nmine\n"])
-        let r1 = t.add(.refine, round: 1, plan: "## A\na2\n## Bee\nb\nmine\nmore\n")
+        let syn = t.add(.synthesis, plan: "## A\n- a2\n## B\n- b\n", files: ["plan.user.md": "## A\n- a2\n## B\n- b\n- mine\n"])
+        let r1 = t.add(.refine, round: 1, plan: "## A\n- a2\n## Bee\n- b\n- mine\n- more\n")
         let churn = ConvergenceSeries.sectionChurn(t.checkpoints, loadFile: t.loadFile)
         XCTAssertNil(churn[draft], "nothing before the first plan")
         XCTAssertEqual(churn[syn], ["## A": 2])

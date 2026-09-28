@@ -182,9 +182,11 @@ public struct TapeStore: Sendable {
         checkpointDirectory(checkpoint).appendingPathComponent(PlanLayers.userName)
     }
 
-    /// The human's edited markdown for `checkpoint`, or nil when they haven't edited it.
+    /// The human's edited markdown for `checkpoint`, or nil when they haven't edited it —
+    /// unwrapped, like every plan read (`PlanLayers.readPlan`), so a layer saved wrapped before
+    /// plans were stored unwrapped still diffs cleanly against its generated plan.
     public func userEdits(checkpoint: Int) -> String? {
-        try? String(contentsOf: userEditsURL(checkpoint: checkpoint), encoding: .utf8)
+        (try? Data(contentsOf: userEditsURL(checkpoint: checkpoint))).map(PlanLayers.readPlan)
     }
 
     /// What the human sees, and what the next round reads when this checkpoint is the head.
@@ -205,8 +207,13 @@ public struct TapeStore: Sendable {
     /// generated plan removes the layer instead — a human who reverted every hunk has no
     /// edits, and an empty diff must not reach the next prompt as "the human edited this".
     /// `plan.md` itself is never touched.
+    ///
+    /// Stored unwrapped (`MarkdownUnwrap`), and compared with the generated plan unwrapped: on a
+    /// checkpoint recorded wrapped, an editor that loaded it unwrapped sends back a reflow of
+    /// the generated plan, and that alone must read as no edit, not as every paragraph edited.
     public func writeUserEdits(checkpoint: Int, markdown: String) throws {
         let url = userEditsURL(checkpoint: checkpoint)
+        let markdown = MarkdownUnwrap.unwrap(markdown)
         if markdown == PlanLayers.generatedPlan(checkpointDirectory(checkpoint)) {
             if FileManager.default.fileExists(atPath: url.path) { try FileManager.default.removeItem(at: url) }
             return
