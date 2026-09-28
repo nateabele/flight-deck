@@ -403,35 +403,43 @@ final class EditGhosts: NSObject {
 
 // MARK: - Gutter
 
-/// The plan editor's left margin, split into lanes left to right: EDIT (the human's edits,
-/// green bars — this layer) and CHURN (the agents' per-round churn per section, spec §8.2).
-/// One type so every lane agrees on where the others are, and the text on where it starts.
+/// The plan editor's left margin, split into lanes left to right: CHURN (the agents' per-round
+/// churn per section, spec §8.2 — `ChurnLaneView`) and EDIT (the human's edits, green bars —
+/// this layer). One type so every lane agrees on where the others are, and the text on where it
+/// starts.
+///
+/// EDIT sits against the text, where a bar reads as marking the line beside it; CHURN is outside
+/// it and takes room only while it has markers (`churn`): its captions ("still since R2") need
+/// a real column, and a plan with no cycle to describe shouldn't be indented for one.
 enum PlanGutter {
-    enum Lane { case edit, churn }
+    enum Lane { case churn, edit }
 
     /// View edge to the first lane.
     static let leading: CGFloat = 6
     static let editWidth: CGFloat = 3
     static let laneGap: CGFloat = 5
-    /// Room for one small bar per round of a cycle.
-    static let churnWidth: CGFloat = 18
+    /// A caption and one small bar per round of a cycle.
+    static let churnWidth: CGFloat = ChurnLaneView.width
     /// Last lane to the text.
     static let textGap: CGFloat = 8
 
     /// Where the text begins, from the text view's leading edge.
-    static var width: CGFloat { leading + editWidth + laneGap + churnWidth + textGap }
+    static func width(churn: Bool) -> CGFloat {
+        leading + (churn ? churnWidth + laneGap : 0) + editWidth + textGap
+    }
 
     /// A lane's horizontal extent in the text view's coordinates.
-    static func span(_ lane: Lane) -> (x: CGFloat, width: CGFloat) {
+    static func span(_ lane: Lane, churn: Bool) -> (x: CGFloat, width: CGFloat) {
         switch lane {
-        case .edit: (leading, editWidth)
-        case .churn: (leading + editWidth + laneGap, churnWidth)
+        case .churn: (leading, churn ? churnWidth : 0)
+        case .edit: (width(churn: churn) - textGap - editWidth, editWidth)
         }
     }
 
     /// A lane's x relative to the text's own leading edge (the text container's origin) —
-    /// negative; what a layout fragment, which knows only its own geometry, draws at.
-    static func offset(_ lane: Lane) -> CGFloat { span(lane).x - width }
+    /// negative; what a layout fragment, which knows only its own geometry, draws at. The same
+    /// with or without the churn column, which is outside the edit lane.
+    static func offset(_ lane: Lane) -> CGFloat { span(lane, churn: true).x - width(churn: true) }
 }
 
 // MARK: - Drawing

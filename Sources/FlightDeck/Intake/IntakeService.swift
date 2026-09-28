@@ -701,7 +701,13 @@ final class IntakeService: ObservableObject {
             }
             await MainActor.run { [weak self] in
                 guard let self, self.convergenceKeys[id] == key, self.convergence[id] != cycles else { return }
+                let first = self.convergence[id] == nil
                 self.convergence[id] = cycles
+                // The first series is not news: it was true before anyone looked, and the board
+                // was seeded without it (it is folded after). Later ones flap as they change.
+                if first, self.flapSeeded.contains(id), let word = ConvergenceCellModel(cycles: cycles)?.word {
+                    self.flapPolicies[id]?.seed(surface: "lcd.convergence", text: word)
+                }
             }
         }
     }
@@ -718,9 +724,10 @@ final class IntakeService: ObservableObject {
         flapSeeded.insert(i.id)
         let tape = latestTapes[i.id] ?? tapeStore(i.id).loadTape()
         let board = BoardModel(intake: i, tape: tape, config: config, now: now(), selected: nil, preview: nil)
-        // The LCD's text values too. Its CONVERGENCE word isn't seeded yet: the series is
-        // folded just after this, and the cell's model from it arrives with Task 13.
-        let lcd = LCDModel(tape: tape, config: config, board: board, seats: [], convergence: nil, preview: nil, now: now())
+        // The LCD's text values too, the CONVERGENCE word included once the series is known;
+        // a series folded after this is seeded as it lands (`refreshConvergence`).
+        let lcd = LCDModel(tape: tape, config: config, board: board, seats: [],
+                           convergence: convergence[i.id].flatMap { ConvergenceCellModel(cycles: $0) }, preview: nil, now: now())
         for (surface, text) in board.flapTexts.merging(lcd.flapTexts, uniquingKeysWith: { a, _ in a }) {
             policy.seed(surface: surface, text: text)
         }

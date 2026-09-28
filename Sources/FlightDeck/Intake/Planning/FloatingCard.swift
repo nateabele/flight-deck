@@ -7,9 +7,15 @@ import SwiftUI
 ///
 /// `prefersAbove` is the selection toolbar's mirror image: over the selection, where it doesn't
 /// cover the lines being read next, flipped below only when the top edge leaves no room.
+///
+/// `side: .trailing` opens beside the anchor instead, top edges aligned — for an anchor in a
+/// margin (the churn lane's marker), whose card hung below it over the very section it explains.
 enum CardPlacement {
+    enum Side { case below, trailing }
+
     static func frame(for card: CGSize, anchor: CGRect, within bounds: CGRect, gap: CGFloat,
-                      prefersAbove: Bool = false) -> CGRect {
+                      prefersAbove: Bool = false, side: Side = .below) -> CGRect {
+        if side == .trailing { return trailing(card, anchor: anchor, within: bounds, gap: gap) }
         let below = anchor.minY - gap - card.height
         let above = anchor.maxY + gap
         // Below is the reading direction; flip only when that runs off the bottom AND above fits,
@@ -18,6 +24,17 @@ enum CardPlacement {
             ? (above + card.height > bounds.maxY && below >= bounds.minY ? below : above)
             : (below < bounds.minY && above + card.height <= bounds.maxY ? above : below)
         let x = min(max(anchor.minX, bounds.minX), max(bounds.minX, bounds.maxX - card.width))
+        return CGRect(x: x, y: y, width: card.width, height: card.height)
+    }
+
+    /// Beside the anchor, flipped to its leading side when the trailing one runs out of window
+    /// (never slid back over the anchor itself), and moved up only as far as it takes to stay
+    /// inside the window.
+    private static func trailing(_ card: CGSize, anchor: CGRect, within bounds: CGRect, gap: CGFloat) -> CGRect {
+        let after = anchor.maxX + gap
+        let before = anchor.minX - gap - card.width
+        let x = after + card.width <= bounds.maxX || before < bounds.minX ? after : before
+        let y = max(bounds.minY, min(anchor.maxY, bounds.maxY) - card.height)
         return CGRect(x: x, y: y, width: card.width, height: card.height)
     }
 
@@ -77,6 +94,8 @@ final class FloatingCardAnchor: NSView {
     /// opens above its anchor. Set before the first `present`.
     var interactive = false
     var prefersAbove = false
+    /// Which side of this view the card opens on (`CardPlacement.Side`).
+    var placement: CardPlacement.Side = .below
 
     private var card: AnyView?
     private var dismissed = false
@@ -130,7 +149,8 @@ final class FloatingCardAnchor: NSView {
         let size = CGSize(width: fitting.width - 2 * room, height: fitting.height - 2 * room)
         let anchor = window.convertToScreen(convert(bounds, to: nil))
         let within = CardPlacement.bounds(window: window.frame, screen: window.screen?.visibleFrame)
-        let frame = CardPlacement.frame(for: size, anchor: anchor, within: within, gap: Self.gap, prefersAbove: prefersAbove)
+        let frame = CardPlacement.frame(for: size, anchor: anchor, within: within, gap: Self.gap, prefersAbove: prefersAbove,
+                                        side: placement)
             .insetBy(dx: -room, dy: -room)
         guard frame != placed || panel.parent == nil else { return }
         placed = frame

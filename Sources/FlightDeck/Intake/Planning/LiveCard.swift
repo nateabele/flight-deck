@@ -373,6 +373,8 @@ private struct FinishedRounds: View {
     let tape: Tape
     @Binding var selection: Int?
 
+    private static let fade: CGFloat = 24
+
     var body: some View {
         let selected = selection ?? tape.head?.id
         VStack(alignment: .leading, spacing: 6) {
@@ -392,8 +394,16 @@ private struct FinishedRounds: View {
                                 }
                         }
                     }
-                    .padding(.horizontal, 2)
+                    // As wide as the fade, so a card at either end of the strip sits clear of it.
+                    .padding(.horizontal, Self.fade)
                 }
+                // Soft edges: scrolled to the newest round, the strip cuts an older card at its
+                // leading edge, and a hard cut read as a clipping bug rather than "more this way".
+                .mask(HStack(spacing: 0) {
+                    LinearGradient(colors: [.clear, .black], startPoint: .leading, endPoint: .trailing).frame(width: Self.fade)
+                    Color.black
+                    LinearGradient(colors: [.black, .clear], startPoint: .leading, endPoint: .trailing).frame(width: Self.fade)
+                })
                 // The newest round is the one worth seeing; a long run's first cards are history.
                 .onAppear { proxy.scrollTo(cards.last?.checkpointID, anchor: .trailing) }
                 .onChange(of: cards.last?.checkpointID) { _, id in proxy.scrollTo(id, anchor: .trailing) }

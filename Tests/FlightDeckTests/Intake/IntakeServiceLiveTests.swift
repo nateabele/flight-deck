@@ -604,4 +604,53 @@ final class IntakeServiceLiveTests: XCTestCase {
         svc.pollTapes()
         XCTAssertTrue(policy.shouldFlap(surface: "board.now", text: "Synthesis", reduceMotion: false))
     }
+
+    /// The CONVERGENCE word is folded off the main actor after the board is seeded, so it is
+    /// seeded when the series first arrives: showing the intake must not flap a word that was
+    /// already true before anyone looked. A word that changes while observed still flaps.
+    func testConvergenceWordIsSeededOnceKnown() async throws {
+        let i = try seed(.shaping)
+        let store = tapeStore(i.id)
+        var tape = Tape.empty
+        tape.status = .paused
+        for round in [1, 2] {
+            try store.writeCheckpoint(Checkpoint(id: round, stage: .refine, round: round, major: false, createdAt: clockNow,
+                                                 record: RoundRecord(changeCount: round == 1 ? 40 : 10)),
+                                      files: ["plan.md": Data("# Plan\n\nround \(round)\n".utf8)], into: &tape)
+        }
+        let svc = await makeService(awaitRecovery: false)
+        // Asked for before the fold lands: the board is seeded, the word can't be yet.
+        let policy = svc.flapPolicy(for: i.id)
+        await svc.launchRecovery?.value
+        await svc.convergenceFold(for: i.id)?.value
+        let word = try XCTUnwrap(ConvergenceCellModel(cycles: svc.convergence[i.id] ?? [])).word
+        XCTAssertEqual(word, "CONVERGING ↘")
+        XCTAssertFalse(policy.shouldFlap(surface: "lcd.convergence", text: word, reduceMotion: false))
+
+        // A round lands while observed and the verdict moves: the new word is news, and flaps.
+        try store.writeCheckpoint(Checkpoint(id: 3, stage: .refine, round: 3, major: true, createdAt: clockNow,
+                                             record: RoundRecord(changeCount: 30)),
+                                  files: ["plan.md": Data("# Plan\n\nround 3\n".utf8)], into: &tape)
+        svc.pollTapes()
+        await svc.convergenceFold(for: i.id)?.value
+        let next = try XCTUnwrap(ConvergenceCellModel(cycles: svc.convergence[i.id] ?? [])).word
+        XCTAssertEqual(next, "DIVERGING ↗")
+        XCTAssertTrue(policy.shouldFlap(surface: "lcd.convergence", text: next, reduceMotion: false))
+    }
+
+    /// A policy first asked for after the series is known seeds the word with the board.
+    func testConvergenceWordIsSeededWithTheBoardWhenAlreadyKnown() async throws {
+        let i = try seed(.shaping)
+        let store = tapeStore(i.id)
+        var tape = Tape.empty
+        tape.status = .paused
+        for round in [1, 2] {
+            try store.writeCheckpoint(Checkpoint(id: round, stage: .refine, round: round, major: false, createdAt: clockNow,
+                                                 record: RoundRecord(changeCount: round == 1 ? 40 : 10)),
+                                      files: ["plan.md": Data("# Plan\n\nround \(round)\n".utf8)], into: &tape)
+        }
+        let svc = await makeService()
+        let word = try XCTUnwrap(ConvergenceCellModel(cycles: svc.convergence[i.id] ?? [])).word
+        XCTAssertFalse(svc.flapPolicy(for: i.id).shouldFlap(surface: "lcd.convergence", text: word, reduceMotion: false))
+    }
 }
