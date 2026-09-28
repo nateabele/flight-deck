@@ -81,4 +81,37 @@ final class ShortcutCatalogTests: XCTestCase {
         XCTAssertEqual(ShortcutCatalog.filter(groups, query: "find").map(\.title), ["Edit"])
         XCTAssertEqual(ShortcutCatalog.filter(groups, query: "  "), groups)
     }
+
+    /// The application menu's `NSMenuItem` carries no title of its own — AppKit draws the bar
+    /// from its submenu's title instead — so a top-level node built the same way as a nested one
+    /// would head the overlay's first group with a blank string.
+    func testTopLevelNodeFallsBackToTheSubmenuTitle() {
+        let appMenuItem = NSMenuItem()
+        // Explicit, not asserted-and-assumed: bare `NSMenuItem()`'s own default title is an
+        // AppKit implementation detail, not something this test is about — in this headless
+        // xctest host it is occasionally the class name `"NSMenuItem"` rather than `""`
+        // (order-dependent, seen flaking under the full suite), which made an assertion on the
+        // untouched default read as a false failure of the fallback logic below.
+        appMenuItem.title = ""
+        let appMenu = NSMenu(title: "Flight Deck")
+        appMenu.addItem(withTitle: "Quit Flight Deck", action: nil, keyEquivalent: "q")
+        appMenuItem.submenu = appMenu
+
+        let node = ShortcutCatalog.MenuNode(topLevel: appMenuItem)
+
+        XCTAssertEqual(node.title, "Flight Deck")
+        XCTAssertEqual(node.children.map(\.title), ["Quit Flight Deck"])
+    }
+
+    /// No submenu, or a submenu with no title of its own (an empty string, not merely absent):
+    /// the item's own title is all there is, so it wins.
+    func testTopLevelNodeFallsBackToItsOwnTitleWhenTheSubmenuHasNone() {
+        let plain = NSMenuItem()
+        plain.title = "File"
+
+        XCTAssertEqual(ShortcutCatalog.MenuNode(topLevel: plain).title, "File")
+
+        plain.submenu = NSMenu(title: "")
+        XCTAssertEqual(ShortcutCatalog.MenuNode(topLevel: plain).title, "File")
+    }
 }
