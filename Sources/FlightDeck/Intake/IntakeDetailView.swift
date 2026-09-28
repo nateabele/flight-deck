@@ -42,7 +42,10 @@ struct IntakeDetailView: View {
     /// The play button being hovered, shared by the control bar and the board so both preview
     /// the same stop.
     @State private var preview: PlayMode?
-    @State private var annotating = false
+    /// The plan's notes (spec §7.3), shared by the editor, its selection toolbar and the rail.
+    /// `@State`, not `@StateObject`: this body must not re-render on every draft keystroke or
+    /// scroll beat — only the views that draw notes observe it.
+    @State private var notes = PlanNotesController()
     /// Whether the control bar and board have scrolled above the document's top edge and are
     /// drawn pinned under the toolbar instead — see `pinnedBar`.
     @State private var pinned = false
@@ -114,11 +117,11 @@ struct IntakeDetailView: View {
                 .inspectorColumnWidth(min: 300, ideal: 440, max: 640)
         }
         .modifier(PublishesPlanningActions(actions: planningActions))
-        .sheet(isPresented: $annotating) {
-            AnnotateSheet(onSend: { [service, id = intake.id] in service.send(id, .annotate($0)) },
-                          onClose: { annotating = false })
-        }
         .onChange(of: derivedKey, initial: true) { refreshDerived() }
+        .onChange(of: intake.id, initial: true) { bindNotes() }
+        .onChange(of: service.notes(intake.id), initial: true) { _, onTape in notes.tapeNotes = onTape }
+        // Choosing a seat is asking the inspector about the run, not the plan.
+        .onChange(of: selectedSeat) { _, seat in if seat != nil { notes.planFocused = false } }
     }
 
     // MARK: - Header
@@ -250,7 +253,7 @@ struct IntakeDetailView: View {
                        halting: service.halts[intake.id]?.label(for: tape), policy: service.flapPolicy(for: intake.id),
                        preview: $preview,
                        setDefaultPlay: { [service, id = intake.id] in service.setDefaultPlay(id, $0) },
-                       onBack: backAction(tape))
+                       onBack: backAction(tape), nextRound: notes.summary.tooltip)
                 .clipShape(RoundedRectangle(cornerRadius: 10))
         }
     }
@@ -300,7 +303,14 @@ struct IntakeDetailView: View {
     private var planningActions: PlanningActions? {
         guard intake.state == .shaping, let tape else { return nil }
         return PlanningActions.shaping(intake.id, service: service, model: ShapingModel(intake: intake, tape: tape),
-                                       annotate: { annotating = true })
+                                       annotate: { [notes] in notes.annotate() })
+    }
+
+    /// A different intake starts with a clean slate of notes, sending to itself.
+    private func bindNotes() {
+        notes.reset()
+        notes.send = { [service, id = intake.id] in service.send(id, $0) }
+        notes.showRail = { [$showsInspector] in $showsInspector.wrappedValue = true }
     }
 
     // MARK: - Plan
@@ -311,13 +321,20 @@ struct IntakeDetailView: View {
         let pinnedHeight = barHeight > 0
             ? DetailLayout.pinnedInset + barHeight + Metrics.barGap + boardHeight + 10 : Metrics.pinnedEstimate
         return VStack(alignment: .leading, spacing: 8) {
-            Text("Plan").font(.headline)
+            HStack(spacing: 8) {
+                Text("Plan").font(.headline)
+                Spacer(minLength: 0)
+                NotesChip(controller: notes) {
+                    notes.planFocused = true
+                    showsInspector = true
+                }
+            }
             PlanSection(intakeID: intake.id, tape: tape ?? .empty,
                         loadFile: { [service, id = intake.id] checkpoint, path in
                             service.checkpointFile(id, checkpoint: checkpoint, path)
                         },
                         onSend: { [service, id = intake.id] command in service.send(id, command) },
-                        selection: $selectedCheckpoint)
+                        selection: $selectedCheckpoint, notes: notes)
                 .editHooks(PlanEditHooks(noteShown: service.editNoteShown.contains(intake.id),
                                          onNoteShown: { [service, id = intake.id] in service.markEditNoteShown(id) },
                                          onConflict: { [service, id = intake.id] in service.recordEditConflict(id, $0) }))
@@ -591,21 +608,29 @@ struct IntakeDetailView: View {
 
     // MARK: - Inspector
 
-    @ViewBuilder
+    /// The rail fills the column edge to edge and scrolls with the editor, not on its own, so it
+    /// sits outside the ScrollView every other inspector shares.
     private var inspector: some View {
-        ScrollView {
-            Group {
-                switch DetailLayout.inspector(for: intake.state, preset: selectedPreset) {
-                case .roundsEditor: roundsEditor
-                case .seat: seatInspector
-                case .notesRail: notesRailSlot
-                case .nothing:
-                    InspectorPlaceholder(title: "Nothing to Inspect",
-                                         message: "The rounds for a plan, and the seats of a running round, show here.")
+        PlanFocusReader(notes: notes) { planFocused in
+            let content = DetailLayout.inspector(for: intake.state, preset: selectedPreset, planFocused: planFocused)
+            if content == .notesRail {
+                notesRailSlot
+            } else {
+                ScrollView {
+                    Group {
+                        switch content {
+                        case .roundsEditor: roundsEditor
+                        case .seat: seatInspector
+                        case .notesRail: EmptyView()
+                        case .nothing:
+                            InspectorPlaceholder(title: "Nothing to Inspect",
+                                                 message: "The rounds for a plan, and the seats of a running round, show here.")
+                        }
+                    }
+                    .padding(16)
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
                 }
             }
-            .padding(16)
-            .frame(maxWidth: .infinity, alignment: .topLeading)
         }
         .accessibilityIdentifier("intake-inspector")
     }
@@ -634,9 +659,12 @@ struct IntakeDetailView: View {
         }
     }
 
-    /// Task 12's notes rail takes the inspector while the plan is focused
-    /// (`DetailLayout.InspectorContent.notesRail`); nothing selects it until then.
-    private var notesRailSlot: some View { EmptyView() }
+    /// The notes rail, while the plan is focused (`DetailLayout.InspectorContent.notesRail`).
+    private var notesRailSlot: some View {
+        NotesRail(controller: notes, roundName: { [tape] id in
+            tape?.checkpoints.first { $0.id == id }.map(PlanSection.checkpointName)
+        })
+    }
 
     // MARK: - Action bar
 
@@ -753,6 +781,38 @@ private struct PublishesPlanningActions: ViewModifier {
     }
 }
 
+/// Re-reads only whether the plan is focused, so the inspector switches to the rail and back
+/// without the detail pane observing every note keystroke.
+private struct PlanFocusReader<Content: View>: View {
+    @ObservedObject var notes: PlanNotesController
+    @ViewBuilder let content: (Bool) -> Content
+
+    var body: some View { content(notes.planFocused) }
+}
+
+/// "4 notes for the next round" beside the plan's heading; opens the rail. Absent with no
+/// pending notes (`NotesRailModel.summary`).
+private struct NotesChip: View {
+    @ObservedObject var controller: PlanNotesController
+    let onOpen: () -> Void
+
+    var body: some View {
+        if let chip = controller.summary.chip {
+            Button(action: onOpen) {
+                Text(chip)
+                    .font(.system(size: 12))
+                    .padding(.horizontal, 9)
+                    .frame(height: 22)
+                    .background(Color.yellow.opacity(0.13), in: Capsule())
+                    .foregroundStyle(Color.yellow.opacity(0.9))
+            }
+            .buttonStyle(.plain)
+            .help("Show the notes (⌥⌘I)")
+            .accessibilityIdentifier("plan-notes-chip")
+        }
+    }
+}
+
 /// Lays its children out left to right and wraps to a new line when the next one doesn't fit —
 /// the header's summary, which at a narrow pane would otherwise truncate the phase it ends on.
 private struct WrappingRow: Layout {
@@ -800,45 +860,6 @@ private struct WrappingRow: Layout {
             x += size.width + spacing
         }
         return rows
-    }
-}
-
-// MARK: - Annotate
-
-/// Its own view so the draft lives in its own `@State`: held on the detail view, every
-/// keystroke re-evaluated the whole document. A sheet until Task 12's notes rail replaces it.
-private struct AnnotateSheet: View {
-    let onSend: (String) -> Void
-    let onClose: () -> Void
-    @State private var annotation = ""
-
-    var body: some View {
-        let trimmed = annotation.trimmingCharacters(in: .whitespacesAndNewlines)
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Annotate the next round").font(.headline)
-            Text("The runner hands this note to the next round's agents.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            TextEditor(text: $annotation)
-                .font(.body)
-                .frame(minHeight: 120)
-                .overlay(RoundedRectangle(cornerRadius: 4).strokeBorder(Color.secondary.opacity(0.3)))
-                .accessibilityIdentifier("annotate-text")
-            HStack {
-                Spacer()
-                Button("Cancel", action: onClose)
-                    .keyboardShortcut(.cancelAction)
-                Button("Send") {
-                    onSend(trimmed)
-                    onClose()
-                }
-                .keyboardShortcut(.defaultAction)
-                .disabled(trimmed.isEmpty)
-                .accessibilityIdentifier("annotate-send")
-            }
-        }
-        .padding(16)
-        .frame(width: 420)
     }
 }
 

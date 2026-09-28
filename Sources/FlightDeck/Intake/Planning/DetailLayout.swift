@@ -11,9 +11,8 @@ enum DetailLayout {
     /// in the same slot — a form, a choice, a summary — with nothing ticking.
     enum Section: Equatable { case header, clarifications, liveCard, stageBody, plan, actionBar }
 
-    /// What the trailing inspector shows (spec §3). `notesRail` is Task 12's: the rail takes the
-    /// inspector while the plan is focused. Nothing selects it yet — it is named here so that
-    /// task adds a condition, not a new shape.
+    /// What the trailing inspector shows (spec §3). `notesRail` takes it while the plan is
+    /// focused (spec §7.3).
     enum InspectorContent: Equatable { case roundsEditor, seat, notesRail, nothing }
 
     static func sections(for state: IntakeState, hasClarifications: Bool) -> [Section] {
@@ -60,12 +59,13 @@ enum DetailLayout {
         }
     }
 
-    /// The Rounds editor while a fidelity with rounds is being chosen, the selected seat while
-    /// shaping; nothing to inspect otherwise.
-    static func inspector(for state: IntakeState, preset: Preset) -> InspectorContent {
+    /// The Rounds editor while a fidelity with rounds is being chosen; while shaping, the notes
+    /// rail when the human is working in the plan, else the selected seat; nothing to inspect
+    /// otherwise.
+    static func inspector(for state: IntakeState, preset: Preset, planFocused: Bool = false) -> InspectorContent {
         switch state {
         case .awaitingChoice, .parked: preset == .bead ? .nothing : .roundsEditor
-        case .shaping: .seat
+        case .shaping: planFocused ? .notesRail : .seat
         case .triaging, .needsAnswers, .review, .releasing, .released, .partiallyReleased, .failed, .interrupted,
              .discarded:
             .nothing

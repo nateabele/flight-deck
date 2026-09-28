@@ -569,6 +569,12 @@ final class IntakeService: ObservableObject {
         tapeStore(id).runDirectory(run)
     }
 
+    /// Every note on `id`'s published tape — consumed ones with the round that read them, then
+    /// the pending ones — for the notes rail and the plan's highlights. In memory, no file read.
+    func notes(_ id: UUID) -> [TapeNote] {
+        tapes[id].map { tapeStore(id).notes(in: $0) } ?? []
+    }
+
     /// One clock beat: re-read the tape of every `.shaping` intake whose `tape.json` changed
     /// since the last read (one stat each when nothing did), publish it, move a tape that
     /// reached review into release review, bring back a runner that died mid-work, and collect
