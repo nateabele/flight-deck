@@ -15,10 +15,11 @@ This suite is the same idea at the scope of a whole adapter: `capabilities.py` d
 **row** per claim `AgentAdapter` makes, and `run.py` derives a **verdict** for each row against
 both `claude` and `codex` — sometimes against a checked-in corpus (cheap, no agent spawned),
 sometimes against a live agent driven through a real pty inside a throwaway sandbox (`full`,
-spends real API tokens). The output is a matrix: 26 rows (most checked against both agents,
+spends real API tokens). The output is a matrix: 27 rows (most checked against both agents,
 five — `askUserQuestionShape`, `escapeDeniesPermission`, `agentAsyncLaunchMarker`,
-`agentCompletionNotification`, `codexPasteDetectsSameBurstReturn` —
-checked against only the one they claim something about) = 47 cells, refreshed on demand rather
+`agentCompletionNotification`, `agentNotificationSites`,
+`codexPasteDetectsSameBurstReturn` —
+checked against only the one they claim something about) = 48 cells, refreshed on demand rather
 than trusted forever.
 
 ## Verdict vocabulary
