@@ -233,8 +233,15 @@ final class SelectionHistoryStoreTests: XCTestCase {
         store.selectedSessionID = ids[0]
         store.selectProject(projectID(foo, in: store))
         store.selectedSessionID = ids[1]
+        let backBefore = store.selectionHistory.back.count
+        let forwardBefore = store.selectionHistory.forward.count
         store.goBack()
         XCTAssertEqual(store.selectedProjectID, projectID(foo, in: store))
+        // Exactly one hop moved between the stacks. `selectProject` records on its own, so
+        // landing on a project view through it must still be suppressed — otherwise Back
+        // pushes the session it left and wipes Forward, and Forward can never return.
+        XCTAssertEqual(store.selectionHistory.back.count, backBefore - 1)
+        XCTAssertEqual(store.selectionHistory.forward.count, forwardBefore + 1)
         store.goBack()
         XCTAssertNil(store.selectedProjectID)
         XCTAssertEqual(store.selectedSessionID, ids[0])
@@ -248,6 +255,31 @@ final class SelectionHistoryStoreTests: XCTestCase {
         XCTAssertNil(store.selectedProjectID)
         store.goForward()
         XCTAssertEqual(store.selectedProjectID, projectID(foo, in: store))
+    }
+
+    /// `selectProject` is the one recording path that does not go through `selectedSessionID`'s
+    /// persisting `didSet`, so it persists itself. Without that, what it recorded lives only in
+    /// memory and a relaunch restores the stacks as they were before the project view opened.
+    ///
+    /// Shaped so the loss is visible after a relaunch: project views are not restored, so the
+    /// relaunched store sits on `ids[0]`, the very session `selectProject` pushed, and a
+    /// `goBack()` to it is skipped either way. What differs is the step before — a Back that
+    /// left `ids[1]` on Forward. Opening the project view is a new navigation and clears
+    /// Forward; unpersisted, the stale Forward comes back and ⌃⌘→ jumps to `ids[1]`.
+    func testSelectProjectPersistsTheEntryItRecords() {
+        let persistence = FakePersistence()
+        let (store, ids) = makeProjectHistoryStore(persistence)
+        store.selectedSessionID = ids[0]
+        store.selectedSessionID = ids[1]
+        store.goBack()
+        store.selectProject(projectID(foo, in: store))
+
+        let relaunched = SessionStore(provider: StubProvider(), persistence: persistence)
+        _ = relaunched.restore(directoryExists: { _ in true })
+        XCTAssertEqual(relaunched.selectionHistory.back, [.session(id: ids[0])])
+        XCTAssertTrue(relaunched.selectionHistory.forward.isEmpty)
+        relaunched.goForward()
+        XCTAssertEqual(relaunched.selectedSessionID, ids[0])
     }
 
     func testAProjectEntrySurvivesARelaunchByPath() {

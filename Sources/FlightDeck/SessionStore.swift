@@ -3987,21 +3987,25 @@ final class SessionStore: ObservableObject {
         switch destination {
         case .session(let id):
             // The destination session is already `selectedSessionID` when a project view was
-            // covering it: reassigning the same id would be a no-op that skips the `didSet`
-            // logic that actually closes the project view, so this case goes through
-            // `deselectProject()` instead.
+            // covering it. Reassigning the same id would work — `didSet` runs on every
+            // assignment and clears `selectedProjectID` — but it would also do everything else
+            // a fresh selection does: move the session to the front of `activationOrder` (so a
+            // Back reorders ⌃Tab's recency) and drop a pending `renameRequest`. Closing the
+            // project view is the whole change here, and `deselectProject()` is exactly that
+            // and no more.
             if selectedProjectID != nil, selectedSessionID == id { deselectProject() }
             else { selectedSessionID = id }
         case .project(let path):
             if let repo = repos.first(where: { $0.url.standardizedFileURL.path == path }) {
                 selectProject(repo.id)
-                #if DEBUG
-                // Same leak `cycleSelection` has: `selectProject` never touches
-                // `selectedSessionID`, so nothing resets this after the debug log above reads it.
-                selectionChangeReason = "unknown"
-                #endif
             }
         }
+        #if DEBUG
+        // Same leak `cycleSelection` has: only a `selectedSessionID` assignment's `didSet` reads
+        // and resets this tag, and `selectProject`/`deselectProject` never make one — so
+        // without this reset "traverseHistory" would mislabel the next, unrelated change.
+        selectionChangeReason = "unknown"
+        #endif
     }
 
     /// Context-menu "Mark as Unread". `unreadIdle` is `private(set)`, so this is the sidebar's
