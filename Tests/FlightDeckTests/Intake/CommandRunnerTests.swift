@@ -68,6 +68,44 @@ final class CommandRunnerTests: XCTestCase {
         XCTAssertEqual(r.stdout.count, 2_000_000)
     }
 
+    /// `onStdout` sees each chunk as the child writes it — the whole point is a live
+    /// `runs/<run>/stdout` — so 'a' must arrive while the child is still sleeping, well before
+    /// `run` returns, on BOTH spawn paths. The returned stdout stays the whole of it.
+    func testStdoutSinkReceivesDataBeforeExitOnBothPaths() async throws {
+        final class Chunks: @unchecked Sendable {
+            let lock = NSLock(); var items: [(Data, Date)] = []
+            func add(_ d: Data) { lock.withLock { items.append((d, Date())) } }
+        }
+        for processGroup in [false, true] {
+            let chunks = Chunks()
+            let r = try await SystemCommandRunner().run(
+                executable: "sh", arguments: ["-c", "printf a; sleep 0.3; printf b"], cwd: URL(fileURLWithPath: "/tmp"),
+                environment: env, processGroup: processGroup, onSpawn: nil, onStdout: { chunks.add($0) })
+            let returned = Date()
+            XCTAssertEqual(String(decoding: r.stdout, as: UTF8.self), "ab", "processGroup \(processGroup)")
+            let first = try XCTUnwrap(chunks.items.first, "processGroup \(processGroup)")
+            XCTAssertEqual(String(decoding: first.0, as: UTF8.self), "a", "processGroup \(processGroup)")
+            XCTAssertGreaterThan(returned.timeIntervalSince(first.1), 0.2, "'a' arrived only at exit (processGroup \(processGroup))")
+            XCTAssertEqual(String(decoding: chunks.items.map(\.0).reduce(Data(), +), as: UTF8.self), "ab")
+        }
+    }
+
+    /// A runner with no streaming of its own (every test fake) still hands the sink the whole
+    /// stdout once, at exit — so a caller can always build its stream file through the sink.
+    func testNonStreamingRunnerDeliversStdoutToTheSinkAtExit() async throws {
+        struct Canned: CommandRunner {
+            func run(executable: String, arguments: [String], cwd: URL, environment: [String: String],
+                     processGroup: Bool, onSpawn: (@Sendable (Int32) -> Void)?) async throws -> CommandResult {
+                CommandResult(stdout: Data("whole".utf8), stderr: "", exitCode: 0)
+            }
+        }
+        final class Box: @unchecked Sendable { var data = Data() }
+        let box = Box()
+        _ = try await Canned().run(executable: "x", arguments: [], cwd: URL(fileURLWithPath: "/tmp"), environment: [:],
+                                   processGroup: false, onSpawn: nil, onStdout: { box.data.append($0) })
+        XCTAssertEqual(String(decoding: box.data, as: UTF8.self), "whole")
+    }
+
     /// The `posix_spawn` path (Task 7's ⏹): a shell that forks two background sleeps, both
     /// outliving the shell itself unless something reaches the whole group. Cancelling with
     /// `processGroup: true` must leave neither alive.
