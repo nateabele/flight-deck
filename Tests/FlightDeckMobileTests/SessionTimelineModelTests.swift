@@ -282,6 +282,111 @@ final class SessionTimelineModelTests: XCTestCase {
         XCTAssertEqual(model.rendered.map(\.id), ["1040#0", "1090#0", "1200#0"])
     }
 
+    // MARK: Observation
+
+    /// What `onChange` recorded, in a box because the closure `withObservationTracking` takes
+    /// is `@Sendable` and cannot capture a local `var`. `@unchecked` is honest here: `onChange`
+    /// runs synchronously inside the `willSet` that fires it, and every write to this model is
+    /// on the main actor, so the box is only ever touched from the thread running the test.
+    private final class Fired: @unchecked Sendable { var names: [String] = [] }
+
+    /// Every property the session screen draws from, each tracked on its own so a failure names
+    /// the one that fired rather than just "something did". `withObservationTracking` fires
+    /// `onChange` once, on the first `willSet` after the read — which is exactly the moment
+    /// SwiftUI would invalidate every view that read it.
+    private func notifications(
+        of model: SessionTimelineModel, during action: () -> Void
+    ) -> [String] {
+        let fired = Fired()
+        let reads: [(String, (SessionTimelineModel) -> Void)] = [
+            ("feed", { _ = $0.feed }),
+            ("phase", { _ = $0.phase }),
+            ("isLoadingOlder", { _ = $0.isLoadingOlder }),
+            ("olderFailure", { _ = $0.olderFailure }),
+            ("outbox", { _ = $0.outbox }),
+            ("rendered", { _ = $0.rendered }),
+            ("prefetchTriggerID", { _ = $0.prefetchTriggerID }),
+            ("blockedPrompt", { _ = $0.blockedPrompt }),
+            ("scrollTarget", { _ = $0.scrollTarget }),
+        ]
+        for (name, read) in reads {
+            withObservationTracking { read(model) } onChange: { fired.names.append(name) }
+        }
+        action()
+        return fired.names
+    }
+
+    /// **The poll that cost the phone its battery.** A busy session polls every 1.5s and almost
+    /// every poll lands an empty page — and `@Observable` notifies on every write and every
+    /// in-place mutation whether or not the value changed, so merging nothing into `feed`,
+    /// reconciling nothing in `outbox` and re-writing `phase = .idle` invalidated every visible
+    /// `TimelineRow` each tick. Profiled at ~3.6s of phone CPU per 104s with nothing arriving.
+    /// A page that moves nothing must notify nothing the screen reads.
+    func testAQuietPollNotifiesNothingTheScreenReads() {
+        let pager = StubPager()
+        let model = model(pager)
+        model.open()
+        pager.answer(tail(hasMore: false))
+        model.loadNewer()
+
+        let fired = notifications(of: model) {
+            pager.answer(page([], start: 1200, end: 1200))  // nothing new
+        }
+
+        XCTAssertEqual(fired, [], "a poll that changes nothing must not invalidate the screen")
+    }
+
+    /// The same quiet poll with an outbox entry in flight: `reconcile` runs over a non-empty
+    /// outbox, finds nothing to retire, and must still not count as a change.
+    func testAQuietPollWithAMessageInFlightNotifiesNothingTheScreenReads() {
+        let pager = StubPager()
+        let model = model(pager)
+        model.open()
+        pager.answer(tail(hasMore: false))
+        model.send("hello")
+        model.loadNewer()
+
+        let fired = notifications(of: model) {
+            pager.answer(page([], start: 1200, end: 1200))
+        }
+
+        XCTAssertEqual(fired, [], "an outbox reconcile that retires nothing is not a change")
+    }
+
+    /// The other half: the guard must not swallow a real change. A page that adds an item is
+    /// exactly what the screen has to redraw for.
+    func testAPollThatAddsAnItemStillNotifiesTheScreen() {
+        let pager = StubPager()
+        let model = model(pager)
+        model.open()
+        pager.answer(tail(hasMore: false))
+        model.loadNewer()
+
+        let fired = notifications(of: model) {
+            pager.answer(page([item(1200, "third")], start: 1200, end: 1260))
+        }
+
+        XCTAssertTrue(fired.contains("feed"), "the new item is in the feed: \(fired)")
+        XCTAssertTrue(fired.contains("rendered"), "and in what the list draws: \(fired)")
+        XCTAssertEqual(model.rendered.map(\.id), ["1040#0", "1090#0", "1200#0"])
+    }
+
+    /// A page that moves only a cursor — the file grew by a blank line, say — changes `feed`
+    /// even with no new items, and that must still reach the model: the next poll's anchor is
+    /// computed from it.
+    func testAPollThatMovesOnlyTheCursorStillUpdatesTheFeed() {
+        let pager = StubPager()
+        let model = model(pager)
+        model.open()
+        pager.answer(tail(hasMore: false))
+        model.loadNewer()
+
+        pager.answer(page([], start: 1200, end: 1210))
+        model.loadNewer()
+
+        XCTAssertEqual(pager.anchors.last, .after(1210))
+    }
+
     // MARK: A resumed link
 
     /// **The guard `linkResumed()` exists for.** `FleetModel.timelineModels` is never evicted

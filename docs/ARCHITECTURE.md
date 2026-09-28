@@ -219,7 +219,7 @@ is the one with the polled registry; codex reports its state over JSON-RPC and t
                                          keyed by sessionId)    │      [UUID: SessionStatus]
 <transcript>.jsonl ────────────────────> TranscriptWatcher ────┘             │
   (outstanding Agent tool_use ids,        (one per session)                  v
-   cleared at each turn boundary)                                   SessionStatusIcon
+   closed by <task-notification>)                                   SessionStatusIcon
                                                                      SessionNotifier
 ```
 
@@ -236,6 +236,14 @@ claude tab closes, so two logins' registries are never merged into one scan.
   compatibility boundary.
 - **`SessionStatusWatcher`** — polls rather than watching vnodes because `claude` rewrites
   the file in place with no create/rename, so a directory watch would never fire.
+- **`TranscriptWatcher`'s sub-agent count** — since claude 2.1.276 every `Agent` runs in the
+  background: its tool_result (`toolUseResult.isAsync`) only acknowledges the launch, and the
+  agent ends at a later `<task-notification>` — read from the `queue-operation` enqueue, the
+  `queued_command` attachment, or the delivered `user` record, whichever lands first, and matched
+  by `<tool-use-id>` or by the launch's agent id as `<task-id>`. Not cleared at turn end (the
+  agents outlive it); only held ids are removed, so a notification for an unseen launch is a
+  no-op. `agentAsyncLaunchMarker` / `agentCompletionNotification` in the adapter-probe matrix pin
+  both record shapes.
 - **`SessionStore`** — merges registry activity with transcript-derived sub-agent counts and
   drops sessions Flight Deck does not own. Each tick computes the edges once, as
   `[StatusTransition]` (`old`/`new` status per tab), and hands that same list to three
@@ -366,6 +374,16 @@ The menu items are the *mechanism*, not decoration. AppKit gives the Ghostty sur
 `consumed`-only bindings, which `MenuKeyEquivalents` routes to the main menu first. Before this
 feature the keys were claimed by the surface and the resulting `previous_tab`/`next_tab` action
 went nowhere.
+
+Back (⌃⌘←) and Forward (⌃⌘→) navigate a persisted selection history of up to 50 entries per stack, recalled by `SessionStore.goBack()` / `goForward()` and never landing on the row already showing. The history persists across relaunches in `SessionSnapshot` and is populated each time a session is manually selected or new sessions select themselves.
+
+⌘⇧/ (Help ▸ Keyboard Shortcuts) opens a filterable overlay listing every one of these chords
+plus the rest of the main menu's, derived from the live menu bar rather than a hand-kept list
+so it never drifts. `ShortcutCatalog` walks `NSApp.mainMenu` into groups keyed by top-level
+menu (`ShortcutCatalog+AppKit.swift` does the `NSMenuItem` adaptation; the catalog itself is
+pure so it tests without AppKit's menu machinery); `ShortcutOverlay` renders and filters them.
+Chords the terminal alone handles (⌘←/⌘→ line start/end, ⌘K clear) are not in the menu, so
+they are correctly absent from the overlay too.
 
 ## External tools
 
@@ -796,6 +814,53 @@ resolution, the runner that drives `FleetClient`) and `Sources/FlightDeckTool` (
 on case-insensitive APFS). The xcodegen target is `FlightDeckCLI`, its product is `flightdeck`,
 embedded at `Flight Deck.app/Contents/MacOS/flightdeck` — already on every tab's `PATH` as
 `GHOSTTY_BIN_DIR` — so running it never boots the app.
+
+**Codex tabs.** Codex runs every tool call in its own seatbelt sandbox, and its default
+`:workspace` profile refuses `connect()` on a unix socket with `EPERM`, so a codex agent cannot
+run `flightdeck` at all without a grant. The only narrow grant codex has is its managed network
+proxy: `CodexControlAccess` (`Sources/FlightDeck/Agents/Codex/`) appends
+`--enable network_proxy` and four `-c` overrides to every `codex`/`codex resume` line a codex tab
+types. They define a `flightdeck` permissions profile that extends `:workspace`, turns
+`network.enabled` on, and allows exactly one entry in `network.unix_sockets`: the control
+socket *file*. Codex writes each key into the seatbelt profile as `(subpath <key>)`, so a
+directory key would allow every socket in the state directory, including the unauthenticated
+`answer-trigger.sock`; the file key allows that one socket and nothing beside it. Probed on
+codex-cli 0.155.1 and re-checked on 0.157.1: the socket connects, a sibling socket in the same
+directory gets `EPERM`, and a direct TCP connect to the internet gets `EPERM` from the seatbelt.
+Codex's session header says "network access enabled" under this profile. Egress is not open:
+direct connects are refused, and codex points the child's `http_proxy`/`https_proxy`/… at its
+own proxy, which denies every host by default. What the proxy does with a denied host depends
+on the approval policy. Under `codex exec` with `approval: never` (the only live run) it
+returned 403. In a `codex resume` TUI tab the policy is not `never`, and codex 0.157.1's source
+sends the host to an approval decider, so a proxy-aware tool (curl, pip, npm, git over https)
+should raise a per-host "`<host>` is not in the allowed_domains" / `network-access <host>`
+approval dialog. **That TUI behaviour is read from the source and is unverified live** (see
+FOLLOWUPS). `CodexAdapter.controlSocket` carries the path, and `SessionStore` sets it on every
+codex stack, both ones built after `controlSocket` is set and ones that already exist.
+The flags are typed only when the probed codex is at least
+`CodexVersionProbe.controlAccessMinimumVersion` (0.155.1): `startCodex` sets
+`CodexAdapter.controlAccessSupported` beside `historyMode`, and the adapter needs both it and a
+socket. An older codex gets no flags, and its `flightdeck` exits 77. Claude tabs need none of
+this: Flight Deck does not sandbox claude, so its `flightdeck` reaches the socket directly.
+
+- **Experimental dependency.** `network_proxy` is an experimental codex feature. The guard is
+  `CodexIntegrationTests.testControlSocketGrantConnectsWithoutOpeningTheInternet`, run by
+  `./scripts/test-codex-live.sh` (no model turn, no tokens). It runs our exact argv through
+  `codex sandbox`, checks that `:workspace` alone refuses the socket, that the grant connects,
+  that a second socket beside it is refused with `EPERM`, that a direct connect to
+  1.1.1.1:443 is refused with the seatbelt's `EPERM` (an offline Mac's timeout does not pass),
+  and that an HTTP request through codex's own proxy is denied. Run it after a codex update.
+- **Sandbox-choice exception.** A user who picked a codex sandbox in Preferences
+  (`CodexThreadOptions.sandbox` set) gets no flags: codex refuses to start when both
+  `sandbox_mode` and `default_permissions` are set as overrides. That tab's agent cannot reach
+  `flightdeck`. A `sandbox_mode` in the user's `~/.codex/config.toml` does *not* conflict: the
+  command-line `default_permissions` wins (probed 2026-09-26, the active profile was
+  `flightdeck`).
+- **Exit 77.** When a sandbox still refuses the socket (a tab opened before this change, the
+  exception above, or a codex that dropped the mechanism), `flightdeck` exits `77`
+  (`EX_NOPERM`) with a message that names the sandbox, not `69` ("cannot reach"). The check is
+  `CLIRunner.isSandboxRefusal` (`EPERM`/`EACCES` from `NWConnection` or a raw `POSIXError`).
+  Verified with the real binary under `codex sandbox -P :workspace`.
 
 ## Search (`⌘K`, `Sources/FlightDeck/Search/`)
 
