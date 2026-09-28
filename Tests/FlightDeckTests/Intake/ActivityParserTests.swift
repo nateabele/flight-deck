@@ -239,3 +239,75 @@ final class ActivityParserTests: XCTestCase {
         XCTAssertEqual(try IntakeJSON.decoder.decode(SeatActivity.self, from: data), p.activity)
     }
 }
+
+/// `ActivityPublisher` owns a seat's `activity.json`: written at start, then at most every
+/// `interval` while events arrive, with a trailing write so the last event before a quiet
+/// spell (a long `swift build`) is never left unpublished, and once more at finish.
+final class ActivityPublisherTests: XCTestCase {
+    final class Clock: @unchecked Sendable {
+        var now = Date(timeIntervalSince1970: 1_790_000_000)
+        func advance(_ s: TimeInterval) { now = now.addingTimeInterval(s) }
+    }
+    /// Captures the trailing-flush timers instead of running them, so the test fires them.
+    final class Timers: @unchecked Sendable {
+        var pending: [(TimeInterval, @Sendable () -> Void)] = []
+        func fire() { let p = pending; pending = []; p.forEach { $0.1() } }
+    }
+
+    var dir: URL!
+    override func setUpWithError() throws {
+        dir = FileManager.default.temporaryDirectory.appendingPathComponent("ActivityPublisherTests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    }
+    override func tearDownWithError() throws { try? FileManager.default.removeItem(at: dir) }
+
+    private func read() throws -> SeatActivity {
+        try IntakeJSON.decoder.decode(SeatActivity.self, from: Data(contentsOf: dir.appendingPathComponent("activity.json")))
+    }
+    private func read(_ path: String) -> Data {
+        Data((#"{"type":"assistant","message":{"id":"m","content":[{"type":"tool_use","name":"Read","input":{"file_path":"\#(path)"}}]}}"# + "\n").utf8)
+    }
+
+    func testWritesAtStartThrottlesToTwoSecondsFlushesTrailingAndWritesAtFinish() throws {
+        let clock = Clock(), timers = Timers()
+        let pub = ActivityPublisher(harness: .claude, project: URL(fileURLWithPath: "/p"),
+                                    destination: dir.appendingPathComponent("activity.json"), now: { clock.now },
+                                    schedule: { delay, work in timers.pending.append((delay, work)) })
+        pub.start()
+        XCTAssertNil(try read().action, "start writes an empty activity at once")
+        XCTAssertEqual(try read().startedAt, clock.now)
+
+        clock.advance(0.5); pub.feed(read("/p/a"))
+        XCTAssertNil(try read().action, "0.5s after the last write: held back")
+        XCTAssertEqual(timers.pending.map(\.0), [1.5], "a trailing flush for the rest of the interval")
+        clock.advance(0.5); pub.feed(read("/p/b"))
+        XCTAssertNil(try read().action)
+        XCTAssertEqual(timers.pending.count, 1, "one pending flush at a time")
+
+        clock.advance(1.1); pub.feed(read("/p/c"))
+        XCTAssertEqual(try read().action?.object, "c", "2.1s since the last write: written now")
+        timers.fire()
+        XCTAssertEqual(try read().action?.object, "c", "a flush with nothing new writes nothing different")
+
+        clock.advance(0.2); pub.feed(read("/p/d"))
+        XCTAssertEqual(try read().action?.object, "c")
+        timers.fire()
+        XCTAssertEqual(try read().action?.object, "d", "the trailing flush publishes the held-back event")
+
+        clock.advance(0.1); pub.finish(exitCode: 0)
+        let final = try read()
+        XCTAssertTrue(final.finished)
+        XCTAssertEqual(final.footprint, [".": 4])
+        timers.fire()
+        XCTAssertTrue(try read().finished, "a late flush never rewrites a finished activity")
+    }
+
+    func testFinishCarriesASpawnFailure() throws {
+        let pub = ActivityPublisher(harness: .codex, project: URL(fileURLWithPath: "/p"),
+                                    destination: dir.appendingPathComponent("activity.json"), now: { Date() })
+        pub.start()
+        pub.finish(exitCode: nil, error: "Could not run codex")
+        XCTAssertEqual(try read().error, "Could not run codex")
+        XCTAssertTrue(try read().finished)
+    }
+}

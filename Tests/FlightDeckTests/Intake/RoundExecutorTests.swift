@@ -747,12 +747,60 @@ final class RoundExecutorTests: XCTestCase {
         XCTAssertTrue(runner.calls.filter { $0.executable != "br" }.allSatisfy(\.processGroup))
     }
 
+    /// `runs/<run>/stdout` grows while the child runs and `activity.json` exists from the start,
+    /// so the app can show a seat mid-turn; at exit the file is the whole stream exactly once
+    /// and the activity is the stream's fold, finished.
+    func testSeatStreamsStdoutAndActivityWhileItRuns() async throws {
+        final class Streaming: CommandRunner, @unchecked Sendable {
+            let inner: ScriptedHarnessRunner
+            var midStream: (stdout: String, activity: SeatActivity?)?
+            init(_ inner: ScriptedHarnessRunner) { self.inner = inner }
+            func run(executable: String, arguments: [String], cwd: URL, environment: [String: String],
+                     processGroup: Bool, onSpawn: (@Sendable (Int32) -> Void)?) async throws -> CommandResult {
+                try await inner.run(executable: executable, arguments: arguments, cwd: cwd, environment: environment,
+                                    processGroup: processGroup, onSpawn: onSpawn)
+            }
+            func run(executable: String, arguments: [String], cwd: URL, environment: [String: String],
+                     processGroup: Bool, onSpawn: (@Sendable (Int32) -> Void)?,
+                     onStdout: (@Sendable (Data) -> Void)?) async throws -> CommandResult {
+                let result = try await run(executable: executable, arguments: arguments, cwd: cwd,
+                                           environment: environment, processGroup: processGroup, onSpawn: onSpawn)
+                guard executable == "codex", let i = arguments.firstIndex(of: "--output-schema") else {
+                    if !result.stdout.isEmpty { onStdout?(result.stdout) }
+                    return result
+                }
+                let dir = URL(fileURLWithPath: arguments[i + 1]).deletingLastPathComponent()
+                let command = Data((#"{"type":"item.started","item":{"type":"command_execution","command":"/bin/zsh -lc \"sed -n '1,9p' README.md\""}}"# + "\n").utf8)
+                onStdout?(command)
+                midStream = (String(decoding: (try? Data(contentsOf: dir.appendingPathComponent("stdout"))) ?? Data(), as: UTF8.self),
+                             try? IntakeJSON.decoder.decode(SeatActivity.self, from: Data(contentsOf: dir.appendingPathComponent("activity.json"))))
+                onStdout?(result.stdout)
+                return CommandResult(stdout: command + result.stdout, stderr: result.stderr, exitCode: result.exitCode)
+            }
+        }
+        let runner = Streaming(ScriptedHarnessRunner { call in ok(call, "s", json(DraftOutput(plan: "# P"))) })
+        _ = try checkpoint(try await executor(runner).run(PlannedRound(stage: .draft, round: 0, major: true), inputs(config())))
+
+        let mid = try XCTUnwrap(runner.midStream)
+        XCTAssertTrue(mid.stdout.contains("sed -n"), "the first event is on disk before the child exits")
+        XCTAssertEqual(mid.activity?.finished, false, "activity.json is written at start")
+        let dir = store.runDirectory("draft-0-drafter-0")
+        let stdout = try Data(contentsOf: dir.appendingPathComponent("stdout"))
+        XCTAssertEqual(stdout.split(separator: 0x0A).count, 3, "command + thread.started + agent_message, each once")
+        let activity = try IntakeJSON.decoder.decode(SeatActivity.self, from: Data(contentsOf: dir.appendingPathComponent("activity.json")))
+        XCTAssertTrue(activity.finished)
+        XCTAssertNil(activity.error)
+        XCTAssertEqual(activity.action, ActivityAction(verb: "Reading", object: "README.md"))
+        XCTAssertEqual(activity.footprint, [".": 1])
+    }
+
     /// A stream that fails to write must not leave run.json looking like a child still alive.
+    /// (stdout is written live from before the spawn; stderr is still written at exit.)
     func testRunJSONIsFinishedEvenWhenAStreamWriteFails() async throws {
         let runner = ScriptedHarnessRunner { call in ok(call, "s", json(DraftOutput(plan: "# P"))) }
         runner.onCall = { call in
-            // A directory where the stdout file goes: the write after exit fails.
-            try? FileManager.default.createDirectory(at: call.runDirectory!.appendingPathComponent("stdout"),
+            // A directory where the stderr file goes: the write after exit fails.
+            try? FileManager.default.createDirectory(at: call.runDirectory!.appendingPathComponent("stderr"),
                                                      withIntermediateDirectories: true)
         }
         let (d, _) = try paused(try await executor(runner).run(PlannedRound(stage: .draft, round: 0, major: true), inputs(config())))

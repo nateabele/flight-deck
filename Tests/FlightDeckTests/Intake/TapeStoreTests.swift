@@ -33,6 +33,34 @@ final class TapeStoreTests: XCTestCase {
         XCTAssertEqual(store.loadTape(), .empty)
     }
 
+    // MARK: - runs/<run>/activity.json
+
+    /// Keyed by run directory name, and only this round's: `refine-1-` must not also pick up
+    /// `refine-10-…`, and a run with no (or a torn) activity.json is simply absent.
+    func testActivitiesForRoundReadsOnlyThatRoundsRuns() throws {
+        let store = TapeStore(intakeDirectory: root)
+        let at = Date(timeIntervalSince1970: 1000)
+        func put(_ run: String, _ activity: SeatActivity?) throws {
+            let dir = store.runDirectory(run)
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            if let activity { try IntakeJSON.encoder.encode(activity).write(to: dir.appendingPathComponent("activity.json")) }
+        }
+        var reviewer = SeatActivity(harness: .claude, startedAt: at)
+        reviewer.action = ActivityAction(verb: "Reading", object: "plan.md")
+        let integrator = SeatActivity(harness: .codex, startedAt: at)
+        try put("refine-1-reviewer", reviewer)
+        try put("refine-1-integrator", integrator)
+        try put("refine-10-reviewer", SeatActivity(harness: .codex, startedAt: at))
+        try put("draft-1-drafter-0", SeatActivity(harness: .codex, startedAt: at))
+        try put("refine-1-reviewer-correction", nil)
+        try Data("{".utf8).write(to: store.runDirectory("refine-1-reviewer-correction").appendingPathComponent("activity.json"))
+
+        let found = store.activities(forRound: PlannedRound(stage: .refine, round: 1, major: false))
+        XCTAssertEqual(found, ["refine-1-reviewer": reviewer, "refine-1-integrator": integrator])
+        XCTAssertEqual(TapeStore(intakeDirectory: root.appendingPathComponent("none"))
+            .activities(forRound: PlannedRound(stage: .draft, round: 0, major: true)), [:])
+    }
+
     // MARK: - commands.jsonl
 
     func testAppendCommandAssignsSequentialSeq() throws {
