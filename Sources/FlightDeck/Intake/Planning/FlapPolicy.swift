@@ -30,6 +30,14 @@ final class FlapPolicy: ObservableObject {
         return first && !reduceMotion
     }
 
+    /// Records `text` as already shown on `surface`, with no animation. The rule is keyed to data
+    /// ARRIVING, not a view mounting: `IntakeService` seeds whatever the board shows when it first
+    /// observes a tape, so a value that already existed doesn't flap just because the card
+    /// scrolled into view or the intake was selected. Only a value that changes while observed does.
+    func seed(surface: String, text: String) {
+        seen.insert(Key(surface: surface, text: text))
+    }
+
     /// Whether `text` has already appeared on `surface`, without recording anything. A view
     /// reads this while rendering so a text about to flap starts hidden rather than drawing
     /// once in full and then flipping away.

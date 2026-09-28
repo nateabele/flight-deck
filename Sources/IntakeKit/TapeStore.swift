@@ -32,16 +32,24 @@ public struct TapeStore: Sendable {
     /// process: `ActivityPublisher` only ever replaces the file atomically. A run with no
     /// activity yet, or one that fails to decode, is simply absent.
     public func activities(forRound planned: PlannedRound) -> [String: SeatActivity] {
-        let runs = intakeDirectory.appendingPathComponent("runs", isDirectory: true)
-        let names = (try? FileManager.default.contentsOfDirectory(atPath: runs.path)) ?? []
         var out: [String: SeatActivity] = [:]
-        for name in names where name.hasPrefix(planned.runNamePrefix) {
+        for name in runNames(forRound: planned) {
             let file = runDirectory(name).appendingPathComponent("activity.json")
             guard let data = try? Data(contentsOf: file),
                   let activity = try? IntakeJSON.decoder.decode(SeatActivity.self, from: data) else { continue }
             out[name] = activity
         }
         return out
+    }
+
+    /// The `runs/` directory names one planned round's seats have created so far. Listed rather
+    /// than derived from the config, because a fallback or a retry adds a run the config never
+    /// named — and the app's poller stats each one's files itself (`IntakeService`), so an idle
+    /// tick costs a stat per seat rather than the decode `activities(forRound:)` does.
+    public func runNames(forRound planned: PlannedRound) -> [String] {
+        let runs = intakeDirectory.appendingPathComponent("runs", isDirectory: true)
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: runs.path)) ?? []
+        return names.filter { $0.hasPrefix(planned.runNamePrefix) }.sorted()
     }
 
     /// `.empty` when the file is absent or fails to decode — a corrupt tape is never a crash,
