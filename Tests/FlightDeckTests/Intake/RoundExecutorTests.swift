@@ -550,7 +550,7 @@ final class RoundExecutorTests: XCTestCase {
     /// round's checkpoint lands.
     func testDraftersWriteTheirResultAsTheyFinish() async throws {
         let runner = ScriptedHarnessRunner { call in
-            call.model == "A" ? failed("Error: 401 Unauthorized") : ok(call, "s", json(DraftOutput(plan: "# P\n\nOne\nTwo\n")))
+            call.model == "A" ? failed("Error: 401 Unauthorized") : ok(call, "s", json(DraftOutput(plan: "# P\n\n- One\n- Two\n")))
         }
         let cfg = config(drafters: [Slot(codexA, fallback: claudeB), Slot(claudeB)])
         _ = try checkpoint(try await executor(runner).run(PlannedRound(stage: .draft, round: 0, major: true), inputs(cfg)))

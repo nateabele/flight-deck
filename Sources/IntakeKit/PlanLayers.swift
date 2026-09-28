@@ -57,11 +57,24 @@ public enum PlanLayers {
     }
 
     public static func generatedPlan(_ checkpointDir: URL) -> String? {
-        generatedURL(checkpointDir).flatMap { try? String(contentsOf: $0, encoding: .utf8) }
+        generatedURL(checkpointDir).flatMap { try? Data(contentsOf: $0) }.map(readPlan)
     }
 
     public static func effectivePlan(_ checkpointDir: URL) -> String? {
-        effectiveURL(checkpointDir).flatMap { try? String(contentsOf: $0, encoding: .utf8) }
+        effectiveURL(checkpointDir).flatMap { try? Data(contentsOf: $0) }.map(readPlan)
+    }
+
+    /// A plan file's text as everything that COMPARES plans reads it: unwrapped
+    /// (`MarkdownUnwrap`). Plans are stored unwrapped since the seats were told not to wrap,
+    /// but a tape already under way has hard-wrapped checkpoints on disk, and those are never
+    /// rewritten — so the wrap boundary is erased on read instead. Read raw, a wrapped base
+    /// against an unwrapped round diffs as every paragraph changed: the edit layer marks the
+    /// whole plan as the human's, churn reports every section hot, and the carry-forward merge
+    /// conflicts on lines nobody touched. Both sides of every comparison go through this (the
+    /// app's plan loaders too), which is what makes it safe; a file new since is already
+    /// unwrapped, and unwrapping is idempotent.
+    public static func readPlan(_ data: Data) -> String {
+        MarkdownUnwrap.unwrap(String(decoding: data, as: UTF8.self))
     }
 
     /// The human's edits as hunks over the generated plan — what the UI renders as "your edits".
@@ -108,9 +121,14 @@ public enum PlanLayers {
     /// rules are the ones every user already knows; the project is always a git repo, so it is
     /// always there — and when it isn't (or fails), `.conflicted` loses nothing, since the edit
     /// stays on its checkpoint. Exit 0 is a clean merge; any other exit, or a throw, is not.
+    ///
+    /// All three sides are unwrapped first (`readPlan`'s rule): on a tape recorded before plans
+    /// were stored unwrapped, the round read a wrapped base, the human edited that wrapped text,
+    /// and the round wrote back an unwrapped plan — a line merge of those raw texts sees both
+    /// sides change every paragraph and conflicts on all of them.
     public static func carryForward(ours: String, base: String, theirs: String, runner: CommandRunner,
                                     environment: [String: String], scratch: URL) async -> Carry {
-        let files = ["ours.md": ours, "base.md": base, "theirs.md": theirs]
+        let files = ["ours.md": ours, "base.md": base, "theirs.md": theirs].mapValues(MarkdownUnwrap.unwrap)
         do {
             try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
             for (name, text) in files { try Data(text.utf8).write(to: scratch.appendingPathComponent(name), options: .atomic) }

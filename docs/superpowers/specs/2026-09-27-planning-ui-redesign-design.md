@@ -281,6 +281,28 @@ version; the effective plan feeds the next round with an "edits are authoritativ
   banner on the new head — "Your edits to Refine 2 conflicted with this round · Open Refine 2" — from
   `PlanLayers.conflictedEdits`.
 
+**Plan text is stored unwrapped.** Every paragraph and every list item is ONE line; blank lines
+separate blocks. The seats hard-wrap prose at ~80–100 columns out of habit, and a wrapped paragraph
+edits badly (the editor soft-wraps it again at its own width, leaving ragged half-lines). Two
+layers keep it out: every prompt that writes plan text (draft, synthesis's and refine's `edit`s,
+the integrator) carries the same rule (`RoundPrompts.planTextRule`), and the engine joins whatever
+comes back anyway (`MarkdownUnwrap`) before a draft, an integrated plan, or an encode/polish copy
+is recorded — code blocks, tables, headings, HTML, front matter, hard breaks, link definitions and
+list structure keep their breaks. `plan.user.md` is stored unwrapped too.
+
+Checkpoints already recorded wrapped are never rewritten. Instead every *comparison* reads both
+sides unwrapped (`PlanLayers.readPlan` — the layer reads, the edit-layer base in the app,
+`writeUserEdits`' identity check, the carry-forward merge, section churn): so a reflow is never an
+edit, never churn, and never a merge conflict, and the first round over a wrapped checkpoint
+counts only what it changed. Notes quoted across a former line break still locate, since
+`NoteAnchor.locate` treats whitespace runs — and a blockquote's `>` opening a line — as one space.
+
+**What "lines" means.** Line counts (`+N −M`, a draft's "N lines", section churn, the heatmap) stay
+counts of Markdown source lines, now one per paragraph, list item, heading, table row or code line
+— i.e. roughly per block for prose. Nothing is converted: records written before this change keep
+the wrapped counts they were measured with, so an older intake's cards can show larger numbers
+for rounds before the change than after it. No UI label changes.
+
 ### 7.3 Highlight and annotate (Plannotator-style)
 
 - Selecting text shows a floating toolbar: **Comment · Question · Must change · Replace · Delete ·

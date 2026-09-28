@@ -1165,7 +1165,13 @@ generated → edited unified diff, capped at 200 lines. Anchored notes render as
 list. After a refine or synthesis round, any of the human's inserted lines missing from the new
 plan become a record note ("N of your edited lines were changed by this round") — a warning,
 never a pause. Encode and later rounds copy the effective plan into their own `plan.md`, so the
-edits carry forward as plan. For the UI: `PlanLayers.userDiff` gives the edit hunks,
+edits carry forward as plan. **Plan text is stored unwrapped** — one line per paragraph and list
+item (`MarkdownUnwrap`, applied to every draft, integrated plan and plan copy a round records, and
+to `plan.user.md`; the plan-writing prompts ask for the same via `RoundPrompts.planTextRule`).
+Checkpoints recorded wrapped before this are never rewritten; instead every plan read that feeds
+a comparison goes through `PlanLayers.readPlan`, which unwraps (idempotently), so the edit
+layer, carry-forward merge, `writeUserEdits`' identity check and section churn never see a reflow
+as a change. Line counts are Markdown source lines, so for prose they now count blocks. For the UI: `PlanLayers.userDiff` gives the edit hunks,
 `PlanLayers.revert` turns one hunk back into new edited markdown (sent as a fresh `editPlan`;
 nil if the hunk is stale), `TapeStore.userEdits`/`notes(in:)` read the layers and every note
 with the checkpoint that consumed it, and `NoteAnchor.locate` re-finds a quote after edits —

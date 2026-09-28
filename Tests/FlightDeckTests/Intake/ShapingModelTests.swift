@@ -252,12 +252,12 @@ final class ShapingModelTests: XCTestCase {
     /// (change set only) between two plans must be skipped, not diffed against as empty.
     func testDiffBaseSkipsCheckpointsWithoutAPlan() {
         let tape = pausedAtR2()
-        let load = files(["1/drafts/0.md": "a\nb\n", "2/plan.md": "a\nB\n", "4/plan.md": "a\nB\nc\n"])
+        let load = files(["1/drafts/0.md": "- a\n- b\n", "2/plan.md": "- a\n- B\n", "4/plan.md": "- a\n- B\n- c\n"])
         XCTAssertEqual(ShapingModel.previousPlanCheckpoint(before: 4, in: tape, loadFile: load), 2)
         XCTAssertEqual(ShapingModel.previousPlanCheckpoint(before: 2, in: tape, loadFile: load), 1)
         XCTAssertNil(ShapingModel.previousPlanCheckpoint(before: 1, in: tape, loadFile: load))
         XCTAssertEqual(ShapingModel.viewerText(.diff, checkpoint: 4, tape: tape, loadFile: load),
-                       PlanMetrics.unifiedDiff(from: "a\nB\n", to: "a\nB\nc\n"))
+                       PlanMetrics.unifiedDiff(from: "- a\n- B\n", to: "- a\n- B\n- c\n"))
         XCTAssertEqual(ShapingModel.viewerText(.diff, checkpoint: 1, tape: tape, loadFile: load),
                        "No earlier plan to compare with.")
     }
@@ -294,12 +294,12 @@ final class ShapingModelTests: XCTestCase {
 
     func testViewerContentFollowsTheKey() {
         let tape = pausedAtR2()
-        let load = files(["2/plan.md": "a\n", "4/plan.md": "a\nb\n"])
+        let load = files(["2/plan.md": "- a\n", "4/plan.md": "- a\n- b\n"])
         XCTAssertEqual(ShapingModel.viewerContent(ShapingModel.viewerKey(selected: nil, mode: .diff, tape: tape),
                                                   tape: tape, loadFile: load),
-                       PlanMetrics.unifiedDiff(from: "a\n", to: "a\nb\n"))
+                       PlanMetrics.unifiedDiff(from: "- a\n", to: "- a\n- b\n"))
         XCTAssertEqual(ShapingModel.viewerContent(ShapingModel.viewerKey(selected: 2, mode: .plan, tape: tape),
-                                                  tape: tape, loadFile: load), "a\n")
+                                                  tape: tape, loadFile: load), "- a\n")
         XCTAssertEqual(ShapingModel.viewerContent(ShapingModel.viewerKey(selected: nil, mode: .plan, tape: .empty),
                                                   tape: .empty, loadFile: load), "No rounds yet.")
     }
