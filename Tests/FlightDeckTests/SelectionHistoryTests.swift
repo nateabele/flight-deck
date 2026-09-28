@@ -2,9 +2,9 @@ import XCTest
 @testable import FlightDeck
 
 final class SelectionHistoryTests: XCTestCase {
-    private let a = SelectionTarget.session(UUID())
-    private let b = SelectionTarget.session(UUID())
-    private let c = SelectionTarget.session(UUID())
+    private let a = SelectionTarget.session(id: UUID())
+    private let b = SelectionTarget.session(id: UUID())
+    private let c = SelectionTarget.session(id: UUID())
     private let p = SelectionTarget.project(path: "/w/p")
     private let live: (SelectionTarget) -> Bool = { _ in true }
 
@@ -72,10 +72,10 @@ final class SelectionHistoryTests: XCTestCase {
 
     func testBackIsCappedAtTheLimit() {
         var h = SelectionHistory()
-        var prev = SelectionTarget.session(UUID())
+        var prev = SelectionTarget.session(id: UUID())
         let first = prev
         for _ in 0..<(SelectionHistory.limit + 5) {
-            let next = SelectionTarget.session(UUID())
+            let next = SelectionTarget.session(id: UUID())
             h.record(from: prev, to: next)
             prev = next
         }
