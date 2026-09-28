@@ -89,6 +89,42 @@ final class SubagentCountTests: XCTestCase {
         XCTAssertEqual(seen.last, 0)
     }
 
+    private func resumed(_ toolUseID: String, agent: String) -> String {
+        #"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"\#(toolUseID)"}]},"toolUseResult":{"success":true,"resumedAgentId":"\#(agent)"}}"# + "\n"
+    }
+
+    /// A stopped agent woken by `SendMessage` is working again until its next notification.
+    func testResumedAgentCountsUntilItStopsAgain() throws {
+        let url = dir.appendingPathComponent("t.jsonl")
+        var seen: [Int] = []
+        let w = start(url) { seen.append($0) }
+
+        var file = agentStart("a") + asyncLaunched("a") + notification("a")
+        try file.write(to: url, atomically: true, encoding: .utf8)
+        w.drain()
+        file += resumed("toolu_sm", agent: "agent-a")
+        try file.write(to: url, atomically: true, encoding: .utf8)
+        w.drain()
+        XCTAssertEqual(seen.last, 1)
+
+        file += notification("toolu_sm", task: "agent-a")
+        try file.write(to: url, atomically: true, encoding: .utf8)
+        w.drain()
+        XCTAssertEqual(seen.last, 0)
+    }
+
+    /// Messaging an agent that is still running is not a second agent.
+    func testResumingARunningAgentDoesNotDoubleCount() throws {
+        let url = dir.appendingPathComponent("t.jsonl")
+        var seen: [Int] = []
+        let w = start(url) { seen.append($0) }
+
+        try (agentStart("a") + asyncLaunched("a") + resumed("toolu_sm", agent: "agent-a"))
+            .write(to: url, atomically: true, encoding: .utf8)
+        w.drain()
+        XCTAssertEqual(seen.last, 1)
+    }
+
     /// A notification for an agent this watcher never saw launch — it attached after the
     /// launch, or compaction dropped it — must not push the count down for agents it did see.
     func testNotificationForUnseenLaunchChangesNothing() throws {

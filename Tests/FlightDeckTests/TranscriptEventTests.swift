@@ -85,6 +85,15 @@ final class TranscriptEventTests: XCTestCase {
         XCTAssertEqual(events(line), [.taskNotified(toolUseID: "toolu_1", taskID: "a8cc")])
     }
 
+    /// `SendMessage` to a stopped background agent wakes it; its result names the agent, and
+    /// the agent's next notification reports under this call's tool-use id.
+    func testSendMessageResumeIsAgentResumed() {
+        let line = #"""
+        {"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_sm","content":[{"type":"text","text":"ok"}]}]},"toolUseResult":{"success":true,"message":"Resuming agent a8cc","resumedAgentId":"a8cc"}}
+        """#
+        XCTAssertEqual(events(line), [.agentResumed(toolUseID: "toolu_sm", agentID: "a8cc"), .progressed])
+    }
+
     /// Only a record that IS a notification counts — a person pasting one mid-message is prose.
     func testTaskNotificationQuotedInProseIsIgnored() {
         let line = #"""
