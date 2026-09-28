@@ -24,10 +24,16 @@ final class SplitFlapTextRenderTests: XCTestCase {
             SplitFlapText(full: "Refine 2", code: "RF2", surface: "tape.refine-2", policy: policy, font: font, nsFont: nsFont,
                           detail: "landed 3:02", showsCardInitially: true)
                 .frame(width: 48)
+            Text("NOW with a failure diagnosis — the card wraps the full text").font(.caption).foregroundStyle(.secondary)
+                .padding(.top, 70)
+            SplitFlapText(full: "Refine 2", code: "RF2", surface: "board.now", policy: policy, font: font, nsFont: nsFont,
+                          detail: "2 of 4 seats failed after 3 retries: the API answered 529 overloaded every time",
+                          showsCardInitially: true, alwaysOffersCard: true)
+                .frame(width: 200)
             Spacer()
         }
         .padding(20)
-        try PlanningRender.write(view, size: NSSize(width: 360, height: 220),
+        try PlanningRender.write(view, size: NSSize(width: 460, height: 420),
                    to: URL(fileURLWithPath: dir).appendingPathComponent("pui-splitflap.png"))
     }
 }

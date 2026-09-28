@@ -1,3 +1,5 @@
+import AppKit
+import SwiftUI
 import XCTest
 @testable import FlightDeck
 
@@ -39,5 +41,127 @@ final class CardPlacementTests: XCTestCase {
         XCTAssertEqual(CardPlacement.frame(for: card, anchor: trailing, within: window, gap: 9).maxX, window.maxX)
         let leading = CGRect(x: 90, y: 450, width: 28, height: 18)
         XCTAssertEqual(CardPlacement.frame(for: card, anchor: leading, within: window, gap: 9).minX, window.minX)
+    }
+
+    /// A window partly off-screen (or under the Dock) clamps its card to what can be seen.
+    func testBoundsAreTheVisiblePartOfTheWindow() {
+        let screen = CGRect(x: 0, y: 80, width: 1440, height: 820)
+        XCTAssertEqual(CardPlacement.bounds(window: CGRect(x: 1000, y: 0, width: 800, height: 500), screen: screen),
+                       CGRect(x: 1000, y: 80, width: 440, height: 420))
+        XCTAssertEqual(CardPlacement.bounds(window: window, screen: nil), window, "no screen: the window alone")
+        XCTAssertEqual(CardPlacement.bounds(window: CGRect(x: 5000, y: 0, width: 100, height: 100), screen: screen),
+                       CGRect(x: 5000, y: 0, width: 100, height: 100), "wholly off-screen: nothing to clamp to, keep the window")
+    }
+
+    /// The card opens on keyboard focus only when a key moved the focus — never when a click
+    /// focused a label, or when AppKit handed the window's initial focus to it.
+    func testOnlyKeyboardFocusOpensTheCard() {
+        XCTAssertTrue(SplitFlapText.isKeyboardFocus(focused: true, event: .keyDown))
+        XCTAssertFalse(SplitFlapText.isKeyboardFocus(focused: true, event: .leftMouseDown))
+        XCTAssertFalse(SplitFlapText.isKeyboardFocus(focused: true, event: nil))
+        XCTAssertFalse(SplitFlapText.isKeyboardFocus(focused: false, event: .keyDown))
+    }
+}
+
+/// The card's panel lifecycle: it must not float over a board that has moved on under it.
+@MainActor
+final class FloatingCardAnchorTests: XCTestCase {
+    private var window: NSWindow!
+    private var scroll: NSScrollView!
+    private var anchor: FloatingCardAnchor!
+
+    override func setUp() async throws {
+        window = NSWindow(contentRect: NSRect(x: -10_000, y: -10_000, width: 400, height: 300),
+                          styleMask: [.borderless], backing: .buffered, defer: false)
+        scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 400, height: 300))
+        let document = NSView(frame: NSRect(x: 0, y: 0, width: 1200, height: 300))
+        anchor = FloatingCardAnchor(frame: NSRect(x: 20, y: 200, width: 40, height: 18))
+        document.addSubview(anchor)
+        scroll.documentView = document
+        window.contentView = scroll
+        window.orderFrontRegardless()
+    }
+
+    override func tearDown() async throws {
+        anchor.present(nil)
+        window.orderOut(nil)
+    }
+
+    private var card: AnyView { AnyView(Text("Refine 2").padding()) }
+    private var shown: Bool { !(window.childWindows ?? []).isEmpty }
+
+    func testPresentsAndReleasesThePanel() {
+        anchor.present(card)
+        XCTAssertTrue(shown)
+        XCTAssertTrue(anchor.hasPanel)
+        anchor.present(nil)
+        XCTAssertFalse(shown)
+        XCTAssertFalse(anchor.hasPanel, "closing releases the panel and its hosting view")
+    }
+
+    /// Scrolling the tape moves the label out from under its card: the card closes, and stays
+    /// closed (the latch) while the same presentation keeps arriving, until it is withdrawn.
+    func testScrollClosesAndLatchesUntilWithdrawn() {
+        anchor.present(card)
+        XCTAssertTrue(shown)
+        scroll.contentView.scroll(to: NSPoint(x: 200, y: 0))
+        XCTAssertFalse(shown, "scrolled: closed")
+        anchor.present(card)
+        XCTAssertFalse(shown, "latched: a re-render with the card still requested doesn't reopen it")
+        anchor.present(nil)
+        anchor.present(card)
+        XCTAssertTrue(shown, "a fresh presentation reopens it")
+    }
+
+    func testResignKeyMiniaturizeAndDeactivateClose() {
+        for name in [NSWindow.didResignKeyNotification, NSWindow.didMiniaturizeNotification] {
+            anchor.present(nil)
+            anchor.present(card)
+            XCTAssertTrue(shown)
+            NotificationCenter.default.post(name: name, object: window)
+            XCTAssertFalse(shown, name.rawValue)
+        }
+        anchor.present(nil)
+        anchor.present(card)
+        NotificationCenter.default.post(name: NSApplication.didResignActiveNotification, object: NSApp)
+        XCTAssertFalse(shown, "app deactivated")
+    }
+
+    /// The same close, through the real SwiftUI stack: a SwiftUI `ScrollView` on macOS is an
+    /// `NSScrollView` the anchor can find, so scrolling the tape really does close the card.
+    func testSwiftUIScrollViewClosesTheCard() throws {
+        let view = ScrollView(.horizontal) {
+            HStack(spacing: 0) {
+                Text("RF2").background(FloatingCard(isPresented: true, card: Text("Refine 2").padding()))
+                Color.clear.frame(width: 2000, height: 20)
+            }
+        }
+        let host = NSHostingView(rootView: view.frame(width: 400, height: 100))
+        host.frame = NSRect(x: 0, y: 0, width: 400, height: 100)
+        let window = NSWindow(contentRect: NSRect(x: -10_000, y: -10_000, width: 400, height: 100),
+                              styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = host
+        window.orderFrontRegardless()
+        defer { window.orderOut(nil) }
+        host.layoutSubtreeIfNeeded()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+        XCTAssertEqual(window.childWindows?.count, 1, "card open")
+
+        func scrollViews(_ view: NSView) -> [NSScrollView] {
+            (view as? NSScrollView).map { [$0] } ?? view.subviews.flatMap(scrollViews)
+        }
+        let scroll = try XCTUnwrap(scrollViews(host).first, "SwiftUI ScrollView is backed by an NSScrollView")
+        scroll.contentView.scroll(to: NSPoint(x: 300, y: 0))
+        XCTAssertEqual(window.childWindows?.count ?? 0, 0, "scrolled: closed")
+    }
+
+    /// Re-presenting at an unchanged spot doesn't re-set the frame or re-order the panel.
+    func testUnchangedPlacementIsSkipped() {
+        anchor.present(card)
+        let placements = anchor.placements
+        anchor.present(card)
+        anchor.needsLayout = true
+        anchor.layoutSubtreeIfNeeded()
+        XCTAssertEqual(anchor.placements, placements)
     }
 }
