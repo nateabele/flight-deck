@@ -68,7 +68,10 @@ enum ShortcutCatalog {
         case 0x1B: return "⎋"
         case 0x09: return "⇥"
         case 0x08, 0x7F: return "⌫"
+        case NSDeleteFunctionKey: return "⌦"
         case 0x20: return "Space"
+        case NSF1FunctionKey...NSF20FunctionKey:
+            return "F\(Int(scalar.value) - NSF1FunctionKey + 1)"
         default: return key.uppercased()
         }
     }

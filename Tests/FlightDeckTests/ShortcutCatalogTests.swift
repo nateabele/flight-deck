@@ -29,6 +29,23 @@ final class ShortcutCatalogTests: XCTestCase {
         XCTAssertEqual(ShortcutCatalog.chord(key: "?", modifiers: .command), "⌘?")
     }
 
+    func testReturnAndEscape() {
+        XCTAssertEqual(ShortcutCatalog.chord(key: "\r", modifiers: .command), "⌘↩")
+        XCTAssertEqual(ShortcutCatalog.chord(key: "\u{1B}", modifiers: .command), "⌘⎋")
+    }
+
+    func testForwardDelete() {
+        let delete = String(Character(UnicodeScalar(NSDeleteFunctionKey)!))
+        XCTAssertEqual(ShortcutCatalog.chord(key: delete, modifiers: .command), "⌘⌦")
+    }
+
+    func testFunctionKeys() {
+        let f1 = String(Character(UnicodeScalar(NSF1FunctionKey)!))
+        let f12 = String(Character(UnicodeScalar(NSF12FunctionKey)!))
+        XCTAssertEqual(ShortcutCatalog.chord(key: f1, modifiers: .command), "⌘F1")
+        XCTAssertEqual(ShortcutCatalog.chord(key: f12, modifiers: .command), "⌘F12")
+    }
+
     func testGroupsFollowTopLevelMenusAndFlattenSubmenus() {
         let groups = ShortcutCatalog.groups(from: [
             menu("File", [item("New Session", "n"), menu("Open Recent", [item("Clear", "k")])]),
