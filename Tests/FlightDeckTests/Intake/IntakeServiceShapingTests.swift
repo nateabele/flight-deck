@@ -229,6 +229,147 @@ final class IntakeServiceShapingTests: XCTestCase {
         XCTAssertNil(svc.halts[seeded.id], "a play after the pause supersedes it")
     }
 
+    // MARK: optimistic tape
+
+    /// What the runner writes: `mutate` applied to the tape on disk, with `tape.json`'s mtime
+    /// moved on explicitly so the service's mtime gate can't skip the read.
+    private func runnerWrites(_ id: UUID, _ mutate: (inout Tape) -> Void) throws {
+        let store = tapeStore(id)
+        var tape = store.loadTape()
+        mutate(&tape)
+        try store.saveTape(tape)
+        writes += 1
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSinceNow: TimeInterval(writes))],
+                                              ofItemAtPath: store.tapeURL.path)
+    }
+    private var writes = 0
+
+    /// The runner folding every queued command up to `seq`, exactly as `TapeKeeper.applyCommands` does.
+    private func runnerConsumes(_ id: UUID, through seq: Int, config: RoundConfig?) throws {
+        try runnerWrites(id) { tape in
+            for envelope in tapeStore(id).commands(after: tape.ackedCommandSeq) where envelope.seq <= seq {
+                TapePlanner.apply(envelope.command, to: &tape, config: config)
+                tape.ackedCommandSeq = envelope.seq
+            }
+        }
+    }
+
+    private func refineRounds(_ svc: IntakeService, _ id: UUID) -> Int? {
+        let i = intake(svc, id)
+        guard let tape = svc.tapes[id], let config = i.roundConfig else { return nil }
+        let board = BoardModel(intake: i, tape: tape, config: config, now: Date(), selected: nil, preview: nil)
+        return board.groups.first { $0.name == "REFINE" }?.range.count
+    }
+
+    /// Nate: "the +/- buttons … don't seem to respond right away". The board is drawn from
+    /// `tapes`, which only the runner's next write (up to its 1 s poll) and the service's next
+    /// tick (500 ms) used to move — 0.4–1.3 s measured. A click must show in its own turn.
+    func testExtendAndTrimShowOnTheBoardInTheSameTurn() async throws {
+        let seeded = try seed(.shaping)
+        try saveTape(seeded.id, .paused)
+        let svc = makeService()
+        await svc.launchRecovery?.value
+        runner.running = [seeded.id]
+        XCTAssertEqual(refineRounds(svc, seeded.id), 3)
+
+        svc.send(seeded.id, .extend(.refine, by: 1))
+        XCTAssertEqual(svc.tapes[seeded.id]?.extraRefinement, 1)
+        XCTAssertEqual(refineRounds(svc, seeded.id), 4, "the bracket grows before any tick or runner write")
+        svc.send(seeded.id, .trim(.refine, by: 1))
+        XCTAssertEqual(refineRounds(svc, seeded.id), 3)
+        XCTAssertEqual(tapeStore(seeded.id).loadTape().extraRefinement, 0, "the app never writes the runner's tape")
+    }
+
+    /// A tape the runner wrote before reading the click (a heartbeat, a round landing) must not
+    /// drag the board back to the old count: the command is re-applied until the tape acks it.
+    func testATapeReadBeforeTheRunnerConsumesDoesNotRevertTheClick() async throws {
+        let seeded = try seed(.shaping)
+        try saveTape(seeded.id, .running, target: .nextMajor)
+        let svc = makeService()
+        await svc.launchRecovery?.value
+        runner.running = [seeded.id]
+        svc.send(seeded.id, .extend(.polish, by: 1))
+        XCTAssertEqual(svc.tapes[seeded.id]?.extraPolish, 1)
+
+        try runnerWrites(seeded.id) { $0.heartbeat = Date() }
+        svc.pollTapes()
+        XCTAssertEqual(svc.tapes[seeded.id]?.extraPolish, 1, "no flicker back to the old count")
+        XCTAssertEqual(svc.tapes[seeded.id]?.heartbeat, nil, "a heartbeat alone still isn't republished")
+    }
+
+    /// + + + − each show at once, and whatever the runner has consumed so far is the base the
+    /// rest are replayed on — so the board ends exactly where the runner does.
+    func testRapidClicksEachShowAndConvergeOnTheRunner() async throws {
+        let seeded = try seed(.shaping)
+        try saveTape(seeded.id, .paused)
+        let svc = makeService()
+        await svc.launchRecovery?.value
+        runner.running = [seeded.id]
+        let config = intake(svc, seeded.id).roundConfig
+        var shown: [Int?] = []
+        for _ in 0..<3 {
+            svc.send(seeded.id, .extend(.refine, by: 1))
+            shown.append(svc.tapes[seeded.id]?.extraRefinement)
+        }
+        XCTAssertEqual(shown, [1, 2, 3])
+
+        try runnerConsumes(seeded.id, through: 1, config: config)
+        svc.pollTapes()
+        XCTAssertEqual(svc.tapes[seeded.id]?.extraRefinement, 3, "one consumed, two still replayed on top")
+        svc.send(seeded.id, .trim(.refine, by: 1))
+        XCTAssertEqual(svc.tapes[seeded.id]?.extraRefinement, 2)
+
+        try runnerConsumes(seeded.id, through: 4, config: config)
+        svc.pollTapes()
+        XCTAssertEqual(svc.tapes[seeded.id]?.extraRefinement, 2)
+        XCTAssertEqual(svc.tapes[seeded.id], tapeStore(seeded.id).loadTape(), "all consumed: the runner's tape, as is")
+    }
+
+    /// The runner folds a trim against ITS tape, which may have moved on (a round started) —
+    /// its clamp is the truth, and the click's guess must not outlive the ack.
+    func testAClampedTrimConvergesOnTheRunnerAndLeavesNoOverlay() async throws {
+        let seeded = try seed(.shaping)
+        try saveTape(seeded.id, .running, target: .review)
+        let svc = makeService()
+        await svc.launchRecovery?.value
+        runner.running = [seeded.id]
+        svc.send(seeded.id, .trim(.refine, by: 1))
+        XCTAssertEqual(svc.tapes[seeded.id]?.extraRefinement, -1, "shown at once")
+
+        // Refine 3 was already in flight when the runner read it: nothing to take off.
+        try runnerWrites(seeded.id) { tape in
+            tape.roundInProgress = PlannedRound(stage: .refine, round: 3, major: true)
+            tape.ackedCommandSeq = 1
+        }
+        svc.pollTapes()
+        XCTAssertEqual(svc.tapes[seeded.id]?.extraRefinement, 0, "the runner's clamp wins")
+
+        // A later runner write changes the count on its own: shown as written, nothing replayed.
+        try runnerWrites(seeded.id) { $0.extraRefinement = 2 }
+        svc.pollTapes()
+        XCTAssertEqual(svc.tapes[seeded.id]?.extraRefinement, 2, "no stale overlay left behind")
+    }
+
+    /// Play and pause move STOPS AT on a running tape (`BoardModel.mode(for: target)`), so they
+    /// have the same lag — but the pause's "Pausing…" must still wait for the runner's ack.
+    func testPlayAndPauseRetargetARunningTapeAtOnceButPausingStillWaits() async throws {
+        let seeded = try seed(.shaping)
+        try saveTape(seeded.id, .running, target: .nextMinor)
+        let svc = makeService()
+        await svc.launchRecovery?.value
+        runner.running = [seeded.id]
+        svc.send(seeded.id, .toReview)
+        XCTAssertEqual(svc.tapes[seeded.id]?.target, .review)
+        svc.send(seeded.id, .pause)
+        XCTAssertEqual(svc.tapes[seeded.id]?.target, TapeTarget.none)
+        let tape = try XCTUnwrap(svc.tapes[seeded.id])
+        XCTAssertEqual(svc.halts[seeded.id]?.label(for: tape), "Pausing…", "the ack is the runner's alone to give")
+        // Stop and notes are not folded ahead: the runner handles ⏹ itself, and the notes rail
+        // keeps its own optimistic copy.
+        svc.send(seeded.id, .annotate("n"))
+        XCTAssertEqual(svc.tapes[seeded.id]?.pendingNotes, [])
+    }
+
     /// Clicking a play button makes it the default (spec §4), kept on the intake's config so
     /// the dot is still under it after a relaunch.
     func testSetDefaultPlayPersists() throws {

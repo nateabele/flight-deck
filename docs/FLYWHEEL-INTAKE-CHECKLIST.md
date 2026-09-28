@@ -301,6 +301,12 @@ from scratch" above, paused mid-round where an item needs that.
   `performable` — see the repo's `ghostty-claims-menu-shortcuts` lesson).
 - Hover a play button (Pause/Step/Next Major/To Review). **Expect:** the board and LCD preview
   its stop (label becomes WOULD STOP) without actually pausing.
+- Click a REFINE or POLISH bracket's + and − quickly several times, both mid-round and on a paused
+  tape. **Expect:** every click changes the slot count, the bracket label ("REFINE 2 OF 3"), STOPS
+  AT/CALLING AT, the LCD's "of N" and the handles' enabled state at once — never a beat later, and
+  never springing back to the old count before settling; after the runner catches up the board
+  stays where the clicks left it (unless a round started in between took a − back). Likewise a play
+  button or Pause mid-round moves STOPS AT at once.
 - Click Pause or Stop mid-round. **Expect:** the button label swaps to "Pausing…"/"Stopping…"
   with an inline spinner until the safe point, then settles.
 - Read the LCD's `STOPS AT`/`CALLING AT` field labels. **Expect:** readable words (PAUSED / IN

@@ -164,9 +164,14 @@ final class IntakeService: ObservableObject {
     /// for the reason `selectedIntake` is: as `ProjectView` `@State` it reset on a switch to
     /// another project or tab and back — the notes rail closed itself behind the human.
     @Published private(set) var inspectorProjects: Set<String> = []
-    /// Each `.shaping` intake's `tape.json` as last read — what the detail pane draws and what
-    /// `attentionCount` consults. Refreshed on the shared clock (`pollTapes`).
+    /// Each `.shaping` intake's `tape.json` as last read, with the clicks the runner hasn't acked
+    /// yet folded on top (`overlays`) — what the detail pane draws and what `attentionCount`
+    /// consults. Refreshed on the shared clock (`pollTapes`), and by `send` in the click's turn.
     @Published private(set) var tapes: [UUID: Tape] = [:]
+    /// The tape-shaping commands `send` queued that no tape read has acked yet, in seq order —
+    /// see `TapeOverlay`. Only `tapes` shows them: `latestTapes` stays the runner's word, since
+    /// liveness, resumption and announcements are about what it has done, not what was asked.
+    private var overlays: [UUID: [CommandEnvelope]] = [:]
     /// The newest read of each tape, heartbeat and all — what the runner-liveness checks use.
     /// Kept apart from `tapes` because a running tape's heartbeat changes every second, and
     /// republishing for that alone re-rendered every view observing this service each second
@@ -601,11 +606,18 @@ final class IntakeService: ObservableObject {
     /// apply in order), and a note is consumed by whichever round runs next. A note, its
     /// removal and a plan edit spawn nothing here either: with no live runner they read as
     /// unacked commands, which the next tick's `resumeIfStalled` starts one to fold in.
+    ///
+    /// A command that shapes the tape (`TapeOverlay.folds`) is also published in this same turn,
+    /// ahead of the runner — before `startRunner`, which may block on a spawn.
     func send(_ id: UUID, _ command: TapeCommand) {
         guard intake(id)?.state == .shaping else { return }
         let seq: Int
         do { seq = try tapeStore(id).appendCommand(command) }
         catch { return fail(id, "Could not queue the command for the planning runner: \(error)") }
+        if TapeOverlay.folds(command) {
+            overlays[id, default: []].append(CommandEnvelope(seq: seq, command: command))
+            publishTape(id, read: latestTapes[id] ?? tapeStore(id).loadTape())
+        }
         switch command {
         case .note, .removeNote, .editPlan: return
         // A pause or stop withdraws the play that was starting: left pending, a runner that
@@ -710,8 +722,10 @@ final class IntakeService: ObservableObject {
         let tracked = Set(latestTapes.keys).union(tapes.keys).union(tapeDates.keys).union(seatRounds.keys)
             .union(seatActivities.keys).union(runRecords.keys).union(seatResults.keys).union(convergence.keys)
             .union(convergenceKeys.keys).union(halts.keys).union(editConflicts.keys).union(editRouters.keys)
+            .union(overlays.keys)
         for gone in tracked.subtracting(shaping) {
             tapes[gone] = nil
+            overlays[gone] = nil
             latestTapes[gone] = nil
             tapeDates[gone] = nil
             forgetSeats(gone)
@@ -730,7 +744,7 @@ final class IntakeService: ObservableObject {
                 let tape = store.loadTape()
                 if let words = Self.announcement(from: latestTapes[id], to: tape) { announce(words) }
                 latestTapes[id] = tape
-                if tapes[id].map({ !Self.sameIgnoringLiveness($0, tape) }) ?? true { tapes[id] = tape }
+                publishTape(id, read: tape)
             }
             // Already seeded (a view asked first) is skipped: the values since then were observed.
             if !flapSeeded.contains(id) { _ = flapPolicy(for: id) }
@@ -891,6 +905,16 @@ final class IntakeService: ObservableObject {
             }
             return seatActivities[id]?.values.contains { $0.startedAt >= after } ?? false
         }
+    }
+
+    /// Publishes `read` — the runner's tape — with the overlay commands it hasn't acked replayed
+    /// on top, dropping the ones it has. The one writer of `tapes` for a shaping intake, so a
+    /// click and a tick can't publish two different answers.
+    private func publishTape(_ id: UUID, read: Tape) {
+        let unacked = TapeOverlay.unconsumed(overlays[id] ?? [], by: read)
+        overlays[id] = unacked.isEmpty ? nil : unacked
+        let shown = TapeOverlay.applying(unacked, to: read, config: intake(id)?.roundConfig)
+        if tapes[id].map({ !Self.sameIgnoringLiveness($0, shown) }) ?? true { tapes[id] = shown }
     }
 
     /// Equal but for the runner's liveness fields, which change every poll of a running tape
