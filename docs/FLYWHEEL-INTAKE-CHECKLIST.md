@@ -272,6 +272,25 @@ VoiceOver and keyboard as Nate's to run. Grouped here by screen; every item belo
 agent flagged but could not itself exercise. Run it on the same **Feature plan** intake from "Plan
 from scratch" above, paused mid-round where an item needs that.
 
+### Intakes list and detail header
+
+- Look down the Intakes list with a few intakes of different lengths. **Expect:** each row is the
+  state pill as a caption over the request wrapped to at most three lines, its title (first
+  sentence or clause) in semibold running into the rest in secondary, tail-truncated with "…";
+  a one-line request makes a short row, never a padded one.
+- Select a row, with the window key and then not. **Expect:** the selected row's secondary text
+  follows the selection highlight (white-ish on the accent, not a fixed gray that reads as
+  disabled) — agents rendered only the unemphasized gray selection.
+- Open an intake whose request is a paragraph. **Expect:** the header's title is a short cut of it
+  (`.title3` semibold; a first sentence, else its first clause or last comma with "…", never a
+  mid-word cut) and a **Request** section under it, styled like Clarifications, collapsed to
+  "Full text · N words". Open it, select some of the text, switch to another intake and back.
+  **Expect:** the whole request in secondary, selectable; the section is collapsed again after
+  the round trip (kept per intake, the way Clarifications' rounds are). With Reduce Motion on,
+  the disclosure opens without its slide, same as Clarifications.
+- Open an intake whose request is one short sentence. **Expect:** that sentence as the title and
+  no Request section at all.
+
 ### Control bar and transport
 
 - Every Run menu chord fires its labeled action and none collides with an existing Ghostty/app
@@ -425,7 +444,9 @@ scrollers for one text).
   writes the change set and nothing reached `br` before it
 - [ ] Full plan variant — four mixed codex/claude drafters, polish, fresh eyes + dedup all run
   to review
-- [ ] Planning UI — every transport chord, hover-preview and pausing/stopping spinner works; LCD
+- [ ] Planning UI — intake rows wrap to three lines with a bold title lead-in and their selected
+  text follows the highlight; the header shows a short title over a collapsed Request section
+  (absent for a one-sentence request); every transport chord, hover-preview and pausing/stopping spinner works; LCD
   labels/values read in full words with no truncation; the compact bar at ~700 pt never
   code-truncates a state word; tape flap plays once per new text and never on first scroll-into-
   view, honoring Reduce Motion; round cards escape scroll clipping; auto-scroll follows the live

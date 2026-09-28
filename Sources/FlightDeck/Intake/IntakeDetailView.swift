@@ -36,6 +36,10 @@ struct IntakeDetailView: View {
     /// Indices into `intake.exchanges` whose Clarifications section is open. Collapsed by
     /// default: answered rounds are there to look back at, not to push the live work down.
     @State private var expandedRounds: Set<Int>
+    /// Whether the header's Request section shows the whole intent. Collapsed by default and
+    /// kept per intake the same way `expandedRounds` is: `ProjectView` keys this view on the
+    /// intake's id, so another row starts closed and coming back starts closed again.
+    @State private var requestExpanded: Bool
     @State private var confirmingDiscard = false
     /// Stop asks first (`PlanningActions.shaping`): set by the bar's key and ⌘. alike.
     @State private var confirmingStop = false
@@ -89,7 +93,8 @@ struct IntakeDetailView: View {
     private let opensConvergenceCard: Bool
 
     init(service: IntakeService, intake: Intake, onOpenReview: @escaping () -> Void,
-         showsInspector: Binding<Bool> = .constant(false), expandedRounds: Set<Int> = [], selectedSeat: String? = nil,
+         showsInspector: Binding<Bool> = .constant(false), expandedRounds: Set<Int> = [], requestExpanded: Bool = false,
+         selectedSeat: String? = nil,
          heatmap: HeatmapFocus? = nil, opensConvergenceCard: Bool = false) {
         _heatmap = State(initialValue: heatmap)
         self.opensConvergenceCard = opensConvergenceCard
@@ -98,6 +103,7 @@ struct IntakeDetailView: View {
         self.onOpenReview = onOpenReview
         _showsInspector = showsInspector
         _expandedRounds = State(initialValue: expandedRounds)
+        _requestExpanded = State(initialValue: requestExpanded)
         _selectedSeat = State(initialValue: selectedSeat)
     }
 
@@ -120,6 +126,13 @@ struct IntakeDetailView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 20) {
                         DetailHeader(state: intake.state, intent: intake.intent, summary: summary).equatable()
+                        // Gated here, not inside: an empty section still took the stack's spacing,
+                        // doubling the gap under a one-sentence title.
+                        if !IntakeTitle(intent: intake.intent).isWhole {
+                            RequestSection(intent: intake.intent, expanded: requestExpanded,
+                                           setExpanded: { requestExpanded = $0 })
+                                .equatable()
+                        }
                         if sections.contains(.clarifications) {
                             ClarificationsSection(exchanges: intake.exchanges, expanded: expandedRounds,
                                                   setExpanded: { index, open in
@@ -905,8 +918,10 @@ private struct SeatReader<Content: View>: View {
     var body: some View { content(feed.files(id)) }
 }
 
-/// The eyebrow ("INTAKE · SHAPING"), the intent, and the phases done so far. Plain values, so
-/// it redraws only when one of them changes.
+/// The eyebrow ("INTAKE · SHAPING"), a title cut from the intent (`IntakeTitle`), and the phases
+/// done so far. Plain values, so it redraws only when one of them changes. The title, not the
+/// intent: an intent is often a paragraph, and set as a bold title it towered over the page and
+/// pushed the live work below the fold. The whole of it is in `RequestSection`, under this.
 private struct DetailHeader: View, Equatable {
     let state: IntakeState
     let intent: String
@@ -922,10 +937,15 @@ private struct DetailHeader: View, Equatable {
                 .textCase(.uppercase)
                 .foregroundStyle(.tertiary)
                 .accessibilityIdentifier("intake-state-eyebrow")
-            Text(intent)
-                .font(.title2.weight(.bold))
-                .fixedSize(horizontal: false, vertical: true)
-                .textSelection(.enabled)
+            let title = IntakeTitle(intent: intent).title
+            if !title.isEmpty {
+                Text(title)
+                    .font(.title3.weight(.semibold))
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+                    .accessibilityAddTraits(.isHeader)
+                    .accessibilityIdentifier("intake-title")
+            }
             if !summary.isEmpty {
                 WrappingRow(spacing: 18, lineSpacing: 4) {
                     ForEach(summary) { item in
@@ -942,6 +962,42 @@ private struct DetailHeader: View, Equatable {
                 .accessibilityIdentifier("intake-progress-summary")
             }
         }
+    }
+}
+
+/// The intent in full, as a collapsed disclosure styled like `ClarificationsSection` — the
+/// header's title is only its first sentence or clause. The caller leaves it out when that title
+/// already is the whole intent: a Request that only repeats the title is noise. Equal while the
+/// intent and the open state are; `setExpanded` is not compared.
+private struct RequestSection: View, Equatable {
+    let intent: String
+    let expanded: Bool
+    let setExpanded: (Bool) -> Void
+
+    static func == (a: Self, b: Self) -> Bool { a.intent == b.intent && a.expanded == b.expanded }
+
+    var body: some View {
+        let words = IntakeTitle.wordCount(intent)
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Request").font(.headline)
+            GroupedRows(count: 1) { _ in
+                DisclosureGroup(isExpanded: Binding(get: { expanded }, set: setExpanded)) {
+                    // Secondary, like a Clarifications question: the title above is the
+                    // headline; this is the reference copy under it.
+                    Text(intent.trimmingCharacters(in: .whitespacesAndNewlines))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.leading, 18)
+                        .padding(.top, 8)
+                        .accessibilityIdentifier("intake-request-text")
+                } label: {
+                    Text("Full text · \(words) word\(words == 1 ? "" : "s")")
+                }
+            }
+        }
+        .accessibilityIdentifier("intake-request")
     }
 }
 
