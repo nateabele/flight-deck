@@ -73,8 +73,8 @@ extension PlanningActions {
     /// flight's work — and what it keeps.
     static func stopMessage(tape: Tape) -> String {
         let kept = "Every round that already landed stays in the plan."
-        guard let round = tape.roundInProgress else { return "No round is running, so nothing is discarded. \(kept)" }
-        return "\(BoardModel.name(stage: round.stage, round: round.round))'s work so far is discarded. \(kept)"
+        guard let round = tape.roundInProgress else { return "No round is running, so nothing will be discarded. \(kept)" }
+        return "\(BoardModel.name(stage: round.stage, round: round.round))'s work so far will be discarded. \(kept)"
     }
 }
 
