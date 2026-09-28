@@ -77,4 +77,11 @@ private extension Intake {
         copy.state = state
         return copy
     }
+
+    /// The detail header's eyebrow names the stage only, in words — never a code or "bead".
+    func testStateNameForTheHeaderEyebrow() {
+        XCTAssertEqual(IntakeStatePill.stateName(.shaping), "Shaping")
+        XCTAssertEqual(IntakeStatePill.stateName(.awaitingChoice), "Choose fidelity")
+        XCTAssertEqual(IntakeStatePill.stateName(.partiallyReleased), "Partially released")
+    }
 }

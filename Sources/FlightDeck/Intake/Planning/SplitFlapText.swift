@@ -75,10 +75,15 @@ struct SplitFlapText: View {
         GeometryReader { geo in
             let shown = LabelFit.choose(full: full, code: code, width: geo.size.width, measure: measure)
             let abbreviated = shown != full
+            // A code that still overflows shrinks as a whole. Left to the HStack, each glyph was
+            // squeezed and clipped on its own and the row read as broken letters ("EИC").
+            let overflow = min(1, geo.size.width / max(1, measure(shown)))
             FlapRow(text: shown, key: full, surface: surface, policy: policy, style: .inline(font, tracking: tracking))
+                .fixedSize()
                 .overlay(alignment: .bottom) {
                     if abbreviated { DottedRule().offset(y: 3) }
                 }
+                .scaleEffect(overflow, anchor: .leading)
                 .background(FloatingCard(
                     isPresented: (abbreviated || alwaysOffersCard) && (hovering || keyboardFocused || showsCardInitially),
                     card: SplitFlapCard(full: full, detail: detail, surface: "card.\(surface)", policy: policy).fixedSize()))

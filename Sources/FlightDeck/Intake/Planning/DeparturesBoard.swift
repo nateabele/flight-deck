@@ -361,14 +361,20 @@ struct DeparturesBoard: View {
                 shape.strokeBorder(Palette.ph.opacity(0.13), lineWidth: 1)
             }
             if let text {
-                Text(text)
+                let label = Text(text)
                     .font(.system(size: 12, weight: isReview ? .bold : .semibold, design: .monospaced))
                     .tracking(isReview ? 1 : 0)
                     .monospacedDigit()
                     .foregroundStyle(barTextColor(slot, isReview: isReview))
                     .lineLimit(1)
-                    .minimumScaleFactor(0.7)
                     .padding(.horizontal, 3)
+                if isReview {
+                    // The word only repeats the label above it, so a bar too narrow for it goes
+                    // without rather than reading "REVI…".
+                    ViewThatFits(in: .horizontal) { label.fixedSize(); Color.clear }
+                } else {
+                    label.minimumScaleFactor(0.7)
+                }
             }
         }
         .overlay {
@@ -424,9 +430,11 @@ struct DeparturesBoard: View {
                     p.addLine(to: CGPoint(x: end, y: y + 6))
                 }
                 .stroke(Palette.ph.opacity(0.3), lineWidth: 1)
-                Text(bracketTitle(group))
-                    .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
-                    .tracking(1.2)
+                // Between the bracket's start and its + handle: the name goes before the handle
+                // is ever drawn over it ("REFINE 2 OF 3" → "2 OF 3"), and the title goes last.
+                Text(Self.fittedBracketTitle(bracketTitle(group), name: group.name, width: end - x0 - 18))
+                    .font(Font(Self.bracketNS))
+                    .tracking(Self.bracketTracking)
                     .foregroundStyle(bracketIsActive(group) ? Palette.ph : Palette.ph3)
                     .fixedSize()
                     .padding(.horizontal, 6)
@@ -449,6 +457,17 @@ struct DeparturesBoard: View {
             }
         }
         .frame(width: edges.last ?? 0, height: Style.bracketRow, alignment: .topLeading)
+    }
+
+    private static let bracketNS = NSFont.monospacedSystemFont(ofSize: 10.5, weight: .semibold)
+    private static let bracketTracking: CGFloat = 1.2
+
+    /// `title`, or it without the group's name, or nothing — whichever first fits `width` (the
+    /// title's own 6 pt padding either side is already taken out by the caller).
+    static func fittedBracketTitle(_ title: String, name: String, width: CGFloat) -> String {
+        let measure = { (s: String) in LabelFit.measureWith(bracketNS)(s) + bracketTracking * CGFloat(s.count) }
+        let short = title.hasPrefix(name + " ") ? String(title.dropFirst(name.count + 1)) : title
+        return [title, short].first { measure($0) <= width } ?? ""
     }
 
     private func bracketTitle(_ group: TapeGroup) -> String {

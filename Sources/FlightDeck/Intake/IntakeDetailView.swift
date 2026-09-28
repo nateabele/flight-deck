@@ -1,18 +1,22 @@
 import IntakeKit
 import SwiftUI
 
-/// The right-hand pane of `ProjectView`'s Intakes split, one selected `Intake` at a time.
-/// Entirely state-driven off `Intake.state` — see the table in
-/// `.superpowers/sdd/2026-09-26-flywheel-intake-phase1-3/task-17-brief.md`.
+/// The right-hand pane of `ProjectView`'s Intakes split, one selected `Intake` at a time: one
+/// calm scrolling document (spec §3, Direction D) — the header, the answered Clarifications, the
+/// stage's live card or body, the plan while shaping — over a pinned action bar, with the
+/// inspector on the trailing edge. `DetailLayout` decides which parts show and what the action
+/// bar says; this view lays them out and wires them to the service.
 struct IntakeDetailView: View {
     /// Observed, not just held: a tape advancing changes `service.tapes` without changing
     /// `intake`, and a plain `let` would let SwiftUI skip this body on exactly that update.
     @ObservedObject var service: IntakeService
     let intake: Intake
     /// Opens `ProjectView`'s release-review sheet; the sheet's own state (`reviewIntakeID`)
-    /// lives on `ProjectView`, not here, because `Task 18`'s `ReleaseReviewView` loads its
-    /// review model independently in a `.task` keyed on the id ProjectView hands it.
+    /// lives on `ProjectView`, not here, because `ReleaseReviewView` loads its review model
+    /// independently in a `.task` keyed on the id ProjectView hands it.
     let onOpenReview: () -> Void
+    /// Owned by `ProjectView`, whose toolbar button (⌥⌘I) toggles it; Edit in Inspector opens it.
+    @Binding var showsInspector: Bool
 
     /// Answer drafts for `.needsAnswers`, indexed the same as the current exchange's
     /// questions. Reloaded via `.task(id:)` below whenever the question set changes — the
@@ -26,76 +30,311 @@ struct IntakeDetailView: View {
     /// default: answered rounds are there to look back at, not to push the live work down.
     @State private var expandedRounds: Set<Int>
     @State private var confirmingDiscard = false
+    /// The config `startShaping` hands to `beginShaping` — `nil` until the preset's expansion
+    /// seeds it. `beginShaping` rather than `choose` so the edited config is what actually runs.
+    @State private var editedConfig: RoundConfig?
+
+    /// The checkpoint the plan section shows; nil follows the plan head. The board, the round
+    /// cards and the control bar's Back all move it.
+    @State private var selectedCheckpoint: Int?
+    /// The seat the inspector details (`LiveSeat.id`).
+    @State private var selectedSeat: String?
+    /// The play button being hovered, shared by the control bar and the board so both preview
+    /// the same stop.
+    @State private var preview: PlayMode?
+    @State private var annotating = false
+    /// Whether the control bar and board have scrolled above the document's top edge and are
+    /// drawn pinned under the toolbar instead — see `pinnedBar`.
+    @State private var pinned = false
+    /// The bar-and-board block's height as last laid out in the card, so the card can hold
+    /// exactly that much room while the block is pinned.
+    @State private var barHeight: CGFloat = 0
+    @State private var boardHeight: CGFloat = 0
+    /// Derived from files, so kept rather than re-read on every service publish (a running
+    /// round publishes about once a second): see `refreshDerived`.
+    @State private var summary: [ProgressItem] = []
+    @State private var planHead: Int?
 
     init(service: IntakeService, intake: Intake, onOpenReview: @escaping () -> Void,
-         expandedRounds: Set<Int> = []) {
+         showsInspector: Binding<Bool> = .constant(false), expandedRounds: Set<Int> = [], selectedSeat: String? = nil) {
         self.service = service
         self.intake = intake
         self.onOpenReview = onOpenReview
+        _showsInspector = showsInspector
         _expandedRounds = State(initialValue: expandedRounds)
+        _selectedSeat = State(initialValue: selectedSeat)
+    }
+
+    private static let scrollSpace = "intake-document"
+
+    private enum Metrics {
+        static let margin: CGFloat = 20
+        /// `LiveCard`'s own padding: the pinned copy of the bar sits at the card's inset, so it
+        /// lands exactly where the card's copy left off.
+        static let cardInset: CGFloat = 14
+        static let barGap: CGFloat = 12
+        /// Room the plan section keeps below the pinned block before its first measurement.
+        static let pinnedEstimate: CGFloat = 300
     }
 
     var body: some View {
+        let sections = DetailLayout.sections(for: intake.state, hasClarifications: !answeredRounds.isEmpty)
         VStack(spacing: 0) {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
-                    VStack(alignment: .leading, spacing: 8) {
-                        IntakeStatePill(intake: intake, tape: service.tapes[intake.id])
-                        Text(intake.intent)
-                            .font(.title3)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .textSelection(.enabled)
+            GeometryReader { viewport in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 20) {
+                        header
+                        if sections.contains(.clarifications) { clarifications }
+                        if sections.contains(.liveCard) { liveCard }
+                        if sections.contains(.stageBody) { stageBody }
+                        if sections.contains(.plan) { planSection(viewport: viewport.size.height) }
                     }
-                    Divider()
-                    clarifications
-                    content
+                    .padding(.horizontal, Metrics.margin)
+                    .padding(.vertical, 18)
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
                 }
-                .padding(16)
-                .frame(maxWidth: .infinity, alignment: .topLeading)
+                .coordinateSpace(name: Self.scrollSpace)
+                .onPreferenceChange(BarGeometryKey.self, perform: barMoved)
+                // An overlay, not `.safeAreaInset`: an inset changes the scroll view's content
+                // insets, which moves the very geometry the pin is decided from — pinning would
+                // unpin it, and the block would flicker at the threshold.
+                .overlay(alignment: .top) { pinnedBar }
             }
             // Pinned outside the ScrollView so the way forward (and out) is always in reach,
-            // however long the questions or the shaping tape run.
-            if Self.primaryAction(for: intake.state, preset: selectedPreset) != nil
-                || Self.closeAction(for: intake.state) != nil {
+            // however long the questions or the plan run.
+            if sections.contains(.actionBar) {
                 Divider()
                 actionBar
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .accessibilityIdentifier("intake-detail")
+        .inspector(isPresented: $showsInspector) {
+            inspector
+                .inspectorColumnWidth(min: 300, ideal: 440, max: 640)
+        }
+        .modifier(PublishesPlanningActions(actions: planningActions))
+        .sheet(isPresented: $annotating) {
+            AnnotateSheet(onSend: { [service, id = intake.id] in service.send(id, .annotate($0)) },
+                          onClose: { annotating = false })
+        }
+        .onChange(of: derivedKey, initial: true) { refreshDerived() }
+    }
+
+    // MARK: - Header
+
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            (Text("Intake · ") + Text(IntakeStatePill.stateName(intake.state))
+                .foregroundColor(intake.state.needsAttention ? .orange : nil))
+                .font(.system(size: 11, weight: .semibold))
+                .tracking(0.8)
+                .textCase(.uppercase)
+                .foregroundStyle(.tertiary)
+                .accessibilityIdentifier("intake-state-eyebrow")
+            Text(intake.intent)
+                .font(.title2.weight(.bold))
+                .fixedSize(horizontal: false, vertical: true)
+                .textSelection(.enabled)
+            if !summary.isEmpty {
+                WrappingRow(spacing: 18, lineSpacing: 4) {
+                    ForEach(summary) { item in
+                        HStack(spacing: 5) {
+                            Image(systemName: "checkmark.circle.fill").foregroundStyle(.tertiary)
+                            Text(item.label).fontWeight(.semibold)
+                            if !item.detail.isEmpty { Text(item.detail).foregroundStyle(.secondary) }
+                        }
+                        .accessibilityElement(children: .combine)
+                    }
+                }
+                .font(.callout)
+                .padding(.top, 6)
+                .accessibilityIdentifier("intake-progress-summary")
+            }
+        }
+    }
+
+    /// Everything the header summary and Back's "plan head" depend on — what re-derives them.
+    private var derivedKey: DerivedKey {
+        DerivedKey(state: intake.state, exchanges: intake.exchanges.count,
+                   checkpoints: tape?.checkpoints.map(\.id) ?? [],
+                   triageFinished: service.triageActivity(intake.id)?.finished ?? false)
+    }
+
+    private func refreshDerived() {
+        let tape = tape ?? .empty
+        let load: (Int, String) -> Data? = { [service, id = intake.id] in service.checkpointFile(id, checkpoint: $0, $1) }
+        summary = ProgressSummary.line(intake: intake, tape: tape, triage: service.triageActivity(intake.id), loadFile: load)
+            .map { ProgressItem(label: $0.label, detail: $0.detail) }
+        planHead = PlanSection.planHead(tape: tape, loadFile: load)
+    }
+
+    // MARK: - Live card
+
+    private var tape: Tape? { service.tapes[intake.id] }
+
+    @ViewBuilder
+    private var liveCard: some View {
+        switch intake.state {
+        case .triaging:
+            LiveCard.triage(intake: intake, activity: service.triageActivity(intake.id), pending: service.pending[intake.id])
+        case .shaping:
+            let tape = tape ?? .empty
+            LiveCard.shaping(intake: intake, tape: tape, activities: service.seatActivities[intake.id] ?? [:],
+                             records: service.runRecords[intake.id] ?? [:], results: service.seatResults[intake.id] ?? [:],
+                             pending: service.pending[intake.id], selectedRound: $selectedCheckpoint,
+                             selectedSeat: $selectedSeat,
+                             controlBar: { now in AnyView(inCard(.bar, height: barHeight) { controlBar(tape, now: now) }) },
+                             board: { now in AnyView(inCard(.board, height: boardHeight) { board(tape, now: now) }) })
+        default:
+            EmptyView()
+        }
+    }
+
+    /// The card's copy of the bar or board, or — while the block is pinned — a clear stand-in
+    /// of the same height, so exactly one copy is ever live: two would each play the split-flap
+    /// for a new value, and the one scrolled out of sight could spend the flap the visible one
+    /// should have shown. Both report where they are, which is what decides the pin.
+    private func inCard(_ part: BarGeometryKey.Part, height: CGFloat, @ViewBuilder content: () -> some View) -> some View {
+        Group {
+            if pinned { Color.clear.frame(height: height) } else { content() }
+        }
+        .background(GeometryReader { geo in
+            let frame = geo.frame(in: .named(Self.scrollSpace))
+            Color.clear.preference(key: BarGeometryKey.self,
+                                   value: part == .bar ? BarFrames(bar: frame) : BarFrames(board: frame))
+        })
+    }
+
+    private func barMoved(_ geometry: BarFrames) {
+        let pins = DetailLayout.pinsBar(barTop: geometry.bar?.minY)
+        if pins != pinned { pinned = pins }
+        // Only the live copies measure their content; a stand-in reports back what it was given.
+        if !pinned {
+            if let bar = geometry.bar, abs(bar.height - barHeight) > 0.5 { barHeight = bar.height }
+            if let board = geometry.board, abs(board.height - boardHeight) > 0.5 { boardHeight = board.height }
+        }
+    }
+
+    /// The bar and board, pinned under the toolbar once the card's copy scrolls out (spec §3).
+    /// Its own `LiveClock` — the card's clock is scrolled away with the card — on the same whole
+    /// seconds as the card's (`LiveClockSchedule`), so it never reads a second apart from the
+    /// rows still visible below it.
+    @ViewBuilder
+    private var pinnedBar: some View {
+        if pinned, intake.state == .shaping, let tape {
+            LiveClock(ticking: tape.status != .reachedReview) { now in
+                VStack(spacing: Metrics.barGap) {
+                    controlBar(tape, now: now)
+                    board(tape, now: now)
+                }
+            }
+            .padding(.horizontal, Metrics.margin + Metrics.cardInset)
+            .padding(.top, DetailLayout.pinnedInset)
+            .padding(.bottom, 10)
+            .background(Color(nsColor: .windowBackgroundColor).shadow(.drop(color: .black.opacity(0.35), radius: 6, y: 2)))
+            .accessibilityIdentifier("intake-pinned-bar")
+        }
     }
 
     @ViewBuilder
-    private var content: some View {
+    private func controlBar(_ tape: Tape, now: Date) -> some View {
+        if let config = intake.roundConfig {
+            let board = boardModel(tape, config: config, now: now)
+            let lcd = LCDModel(tape: tape, config: config, board: board, seats: seatModels(tape, config: config, now: now),
+                               convergence: nil, preview: preview, now: now)
+            ControlBar(lcd: lcd, convergence: nil, actions: planningActions ?? PlanningActions(enabled: [], perform: { _ in }),
+                       status: tape.status, defaultPlay: config.defaultPlay,
+                       halting: service.halts[intake.id]?.label(for: tape), policy: service.flapPolicy(for: intake.id),
+                       preview: $preview,
+                       setDefaultPlay: { [service, id = intake.id] in service.setDefaultPlay(id, $0) },
+                       onBack: backAction(tape))
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+        }
+    }
+
+    @ViewBuilder
+    private func board(_ tape: Tape, now: Date) -> some View {
+        if let config = intake.roundConfig {
+            DeparturesBoard(model: boardModel(tape, config: config, now: now), policy: service.flapPolicy(for: intake.id),
+                            preview: $preview,
+                            onSelect: { select($0) },
+                            onExtend: { [service, id = intake.id] in service.send(id, .extend($0, by: 1)) })
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+        }
+    }
+
+    private func boardModel(_ tape: Tape, config: RoundConfig, now: Date) -> BoardModel {
+        BoardModel(intake: intake, tape: tape, config: config, now: now, selected: selectedCheckpoint, preview: preview)
+    }
+
+    /// The round in progress's seats, as the card's rows draw them — SEATS DONE and BILLED count
+    /// the same seats the rows below show. A start not yet heard from shows none, as the card does.
+    private func seatModels(_ tape: Tape, config: RoundConfig, now: Date) -> [SeatRowModel] {
+        guard let round = tape.roundInProgress, service.pending[intake.id] == nil else { return [] }
+        return LiveSeats.rows(round: round, config: config, seats: seatFiles, now: now).map(\.model)
+    }
+
+    private var seatFiles: SeatFiles {
+        SeatFiles(activities: service.seatActivities[intake.id] ?? [:], records: service.runRecords[intake.id] ?? [:],
+                  results: service.seatResults[intake.id] ?? [:])
+    }
+
+    /// Back is navigation in the plan viewer (the `ControlBar.onBack` contract): one checkpoint
+    /// before the one shown, which is the plan head while following. Nil dims the key.
+    private func backAction(_ tape: Tape) -> (() -> Void)? {
+        guard let previous = DetailLayout.previousCheckpoint(before: selectedCheckpoint ?? planHead, in: tape) else { return nil }
+        return { select(previous) }
+    }
+
+    /// Choosing the plan head goes back to following it, so the next round's plan arrives
+    /// without a second click — the same rule the round cards follow.
+    private func select(_ checkpoint: Int) {
+        selectedCheckpoint = checkpoint == planHead ? nil : checkpoint
+    }
+
+    /// What the Run menu and the bar's keys press (`PlanningActions`); nil outside shaping, which
+    /// leaves every Run item disabled.
+    private var planningActions: PlanningActions? {
+        guard intake.state == .shaping, let tape else { return nil }
+        return PlanningActions.shaping(intake.id, service: service, model: ShapingModel(intake: intake, tape: tape),
+                                       annotate: { annotating = true })
+    }
+
+    // MARK: - Plan
+
+    /// Tall enough to read a plan in under the pinned bar and board — a short box scrolling
+    /// inside a long document is two scroll bars for one text.
+    private func planSection(viewport: CGFloat) -> some View {
+        let pinnedHeight = barHeight > 0
+            ? DetailLayout.pinnedInset + barHeight + Metrics.barGap + boardHeight + 10 : Metrics.pinnedEstimate
+        return VStack(alignment: .leading, spacing: 8) {
+            Text("Plan").font(.headline)
+            PlanSection(intakeID: intake.id, tape: tape ?? .empty,
+                        loadFile: { [service, id = intake.id] checkpoint, path in
+                            service.checkpointFile(id, checkpoint: checkpoint, path)
+                        },
+                        onSend: { [service, id = intake.id] command in service.send(id, command) },
+                        selection: $selectedCheckpoint)
+                .frame(height: max(360, viewport - pinnedHeight - 24))
+        }
+    }
+
+    // MARK: - Stage bodies
+
+    @ViewBuilder
+    private var stageBody: some View {
         switch intake.state {
-        case .triaging: triagingBody
         case .needsAnswers: needsAnswersBody
         case .awaitingChoice: awaitingChoiceBody
-        case .shaping: shapingBody
         case .parked: parkedBody
         case .review: reviewBody
         case .releasing: releasingBody
         case .released, .partiallyReleased: releasedBody
         case .failed, .interrupted: failedBody
-        // `intakeService.intakes(forProject:)` already filters discarded intakes out of
-        // the list this view is selected from, so this arm exists only for exhaustiveness.
-        case .discarded: EmptyView()
+        // Triage and shaping draw a live card instead; a discarded intake is never listed.
+        case .triaging, .shaping, .discarded: EmptyView()
         }
-    }
-
-    private var triagingBody: some View {
-        HStack(spacing: 8) {
-            ProgressView().controlSize(.small)
-            // Only a resumed turn has a `HarnessSession` yet — the very first turn's
-            // harness/model is decided inside `IntakeService` and isn't published back
-            // onto the intake until that turn completes.
-            if let session = intake.triage {
-                Text("Triaging with \(session.harness.rawValue) · \(session.model)")
-            } else {
-                Text("Triaging…")
-            }
-        }
-        .foregroundStyle(.secondary)
     }
 
     private var openQuestions: [String] {
@@ -164,45 +403,52 @@ struct IntakeDetailView: View {
         !answers.isEmpty && !answers.contains { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
     }
 
+    /// Spec §9: the recommendation, the fidelity as a segmented choice, and the rounds it will
+    /// run in one line — the grid itself lives in the inspector, where it can be as wide as it
+    /// needs without pushing Start Planning off screen.
     private var awaitingChoiceBody: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 14) {
             if let recommended = intake.recommended {
-                Text("Recommended: \(UIText.presetName(recommended))").font(.callout.weight(.semibold))
-            }
-            if let reason = intake.recommendationReason {
-                Text(reason).foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Recommended: \(UIText.presetName(recommended))").font(.callout.weight(.semibold))
+                    if let reason = intake.recommendationReason {
+                        Text(reason)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
             }
             Picker("Fidelity", selection: $selectedPreset) {
                 ForEach(Self.allPresets, id: \.self) { preset in
                     Text(UIText.presetName(preset)).tag(preset)
                 }
             }
-            .pickerStyle(.menu)
-            if selectedPreset != .bead {
-                roundsEditor
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .fixedSize()
+            .accessibilityIdentifier("intake-fidelity-picker")
+            if selectedPreset == .bead {
+                Text("Writes one task straight from triage, with no planning rounds.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            } else if let config = editedConfig {
+                HStack(alignment: .firstTextBaseline, spacing: 10) {
+                    Text(RoundConfigEditor.summary(preset: selectedPreset, config: config))
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button("Edit in Inspector") { showsInspector = true }
+                        .buttonStyle(.link)
+                        .accessibilityIdentifier("intake-edit-in-inspector")
+                }
             }
         }
         .task(id: intake.id) { selectedPreset = intake.recommended ?? .bead; seedConfig() }
         .onChange(of: selectedPreset) { seedConfig() }
     }
 
-    /// The Rounds disclosure: the selected preset's expansion, editable before Start Planning. Re-seeded
-    /// whenever the preset changes, so an edit to Full plan's config never leaks into Sketch's.
-    @ViewBuilder
-    private var roundsEditor: some View {
-        if let config = editedConfig {
-            RoundConfigEditor(
-                preset: selectedPreset,
-                config: Binding(get: { config }, set: { editedConfig = $0 }),
-                available: service.availableModels()
-            )
-        }
-    }
-
-    /// The config `startShaping` hands to `beginShaping` — `nil` until the preset's expansion
-    /// seeds it. `beginShaping` rather than `choose` so the edited config is what actually runs.
-    @State private var editedConfig: RoundConfig?
-
+    /// Re-seeded whenever the preset changes, so an edit to Full plan's config never leaks
+    /// into Sketch's.
     private func seedConfig() {
         editedConfig = PresetExpansion.config(for: selectedPreset, available: service.availableModels())
     }
@@ -216,17 +462,9 @@ struct IntakeDetailView: View {
     /// Chosen before planning rounds existed; the same choice as `.awaitingChoice` resumes it.
     private var parkedBody: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Parked before planning rounds existed — choose a fidelity to continue.").foregroundStyle(.secondary)
+            Text("Parked before planning rounds existed. Choose a fidelity to continue.").foregroundStyle(.secondary)
             awaitingChoiceBody
         }
-    }
-
-    private var shapingBody: some View {
-        ShapingView(intake: intake, tape: service.tapes[intake.id] ?? .empty,
-                    loadFile: { [service, id = intake.id] checkpoint, path in
-                        service.checkpointFile(id, checkpoint: checkpoint, path)
-                    },
-                    onSend: { [service, id = intake.id] command in service.send(id, command) })
     }
 
     private var reviewBody: some View {
@@ -294,7 +532,7 @@ struct IntakeDetailView: View {
     /// Q&A that shaped a recommendation, a plan or a review can be read back from there.
     @ViewBuilder
     private var clarifications: some View {
-        let answered = intake.exchanges.indices.filter { intake.exchanges[$0].answers != nil }
+        let answered = answeredRounds
         if !answered.isEmpty {
             VStack(alignment: .leading, spacing: 6) {
                 Text("Clarifications").font(.headline)
@@ -346,28 +584,72 @@ struct IntakeDetailView: View {
         return "Round \(index + 1) · \(n) question\(n == 1 ? "" : "s")"
     }
 
+    // MARK: - Inspector
+
+    @ViewBuilder
+    private var inspector: some View {
+        ScrollView {
+            Group {
+                switch DetailLayout.inspector(for: intake.state, preset: selectedPreset) {
+                case .roundsEditor: roundsEditor
+                case .seat: seatInspector
+                case .notesRail: notesRailSlot
+                case .nothing:
+                    InspectorPlaceholder(title: "Nothing to Inspect",
+                                         message: "The rounds for a plan, and the seats of a running round, show here.")
+                }
+            }
+            .padding(16)
+            .frame(maxWidth: .infinity, alignment: .topLeading)
+        }
+        .accessibilityIdentifier("intake-inspector")
+    }
+
+    @ViewBuilder
+    private var roundsEditor: some View {
+        if let config = editedConfig {
+            RoundConfigEditor(preset: selectedPreset, config: Binding(get: { config }, set: { editedConfig = $0 }),
+                              available: service.availableModels(), collapsible: false)
+        }
+    }
+
+    /// Resolved on each draw rather than held: a seat's row model is re-derived from the service
+    /// each second, and the inspector follows it (a fallback starting, a result landing).
+    @ViewBuilder
+    private var seatInspector: some View {
+        if let tape, let round = tape.roundInProgress, let selectedSeat,
+           let seat = LiveSeats.rows(round: round, config: intake.roundConfig, seats: seatFiles, now: Date())
+            .first(where: { $0.id == selectedSeat }) {
+            SeatInspector(model: seat.model, activity: service.seatActivities[intake.id]?[seat.model.id],
+                          runDirectory: service.runDirectory(intake.id, run: seat.model.id))
+        } else if tape?.roundInProgress == nil {
+            InspectorPlaceholder(title: "No Round Running", message: "Seats show here while a round is at work.")
+        } else {
+            InspectorPlaceholder(title: "No Seat Selected", message: "Click a seat in the round to see its details.")
+        }
+    }
+
+    /// Task 12's notes rail takes the inspector while the plan is focused
+    /// (`DetailLayout.InspectorContent.notesRail`); nothing selects it until then.
+    private var notesRailSlot: some View { EmptyView() }
+
     // MARK: - Action bar
 
     /// macOS HIG button placement: the destructive Discard alone on the leading edge, where it
     /// can't be hit in place of the primary; the primary on the trailing edge as the default
-    /// button. "Dismiss" (released intakes) is not destructive, so it sits trailing with no
-    /// confirmation. Every state has a way off the list except `.releasing`, which
-    /// `IntakeService.discard` refuses (beads half-written, no record yet). Before that an
+    /// button. Every state has a way off the list except `.releasing`, which
+    /// `IntakeService.discard` refuses (tasks half-written, no record yet). Before that an
     /// intake stuck at a question, a choice or the review had no exit, and a
     /// `.partiallyReleased` one — which counts as needing attention — kept its project's
     /// orange badge lit forever.
     private var actionBar: some View {
-        let close = Self.closeAction(for: intake.state)
-        return HStack(spacing: 8) {
-            if close == "Discard" {
+        HStack(spacing: 8) {
+            if DetailLayout.closeAction(for: intake.state) != nil {
                 Button("Discard", role: .destructive) { confirmingDiscard = true }
                     .accessibilityIdentifier("intake-discard")
             }
             Spacer()
-            if close == "Dismiss" {
-                Button("Dismiss") { service.discard(intake.id) }
-            }
-            if let title = Self.primaryAction(for: intake.state, preset: selectedPreset) {
+            if let title = DetailLayout.primaryAction(for: intake.state, preset: selectedPreset) {
                 primaryButton(title)
             }
         }
@@ -405,35 +687,154 @@ struct IntakeDetailView: View {
         case .awaitingChoice, .parked:
             if selectedPreset == .bead { service.choose(intake.id, preset: .bead) } else { startShaping() }
         case .review: onOpenReview()
+        // Not destructive: `discard` only hides a released intake; its record stays on disk.
+        case .released, .partiallyReleased: service.discard(intake.id)
         case .failed, .interrupted: service.retry(intake.id)
-        case .triaging, .shaping, .releasing, .released, .partiallyReleased, .discarded: break
+        case .triaging, .shaping, .releasing, .discarded: break
         }
     }
 
-    /// The trailing, default action per state, title-cased per the HIG. Nil where the state
-    /// has nothing to press: triage and release are running, and shaping has its own transport.
-    static func primaryAction(for state: IntakeState, preset: Preset) -> String? {
-        switch state {
-        case .needsAnswers: "Send Answers"
-        case .awaitingChoice, .parked: preset == .bead ? "Continue" : "Start Planning"
-        case .review: "Open Release Review"
-        case .failed, .interrupted: "Retry"
-        case .triaging, .shaping, .releasing, .released, .partiallyReleased, .discarded: nil
-        }
-    }
-
-    /// "Dismiss" once released: nothing is thrown away — `discard` only hides the intake, its
-    /// `ReleaseRecord` stays in `intake.json` — so "Discard" would misdescribe it. Nil for
-    /// `.releasing` (see `actionBar`) and `.discarded` (never listed).
-    static func closeAction(for state: IntakeState) -> String? {
-        switch state {
-        case .triaging, .needsAnswers, .awaitingChoice, .shaping, .parked, .review, .failed, .interrupted: "Discard"
-        case .released, .partiallyReleased: "Dismiss"
-        case .releasing, .discarded: nil
-        }
-    }
+    private var answeredRounds: [Int] { intake.exchanges.indices.filter { intake.exchanges[$0].answers != nil } }
 
     private static let allPresets: [Preset] = [.bead, .sketch, .featurePlan, .fullPlan]
+}
+
+// MARK: - Support
+
+/// One finished phase in the header's summary line.
+private struct ProgressItem: Identifiable, Equatable {
+    var id: String { label }
+    let label: String
+    let detail: String
+}
+
+private struct DerivedKey: Equatable {
+    let state: IntakeState
+    let exchanges: Int
+    let checkpoints: [Int]
+    let triageFinished: Bool
+}
+
+/// Where the card's copies of the control bar and the board sit in the document's viewport.
+private struct BarFrames: Equatable {
+    var bar: CGRect?
+    var board: CGRect?
+}
+
+private struct BarGeometryKey: PreferenceKey {
+    enum Part { case bar, board }
+    static let defaultValue = BarFrames()
+
+    static func reduce(value: inout BarFrames, nextValue: () -> BarFrames) {
+        let next = nextValue()
+        value.bar = next.bar ?? value.bar
+        value.board = next.board ?? value.board
+    }
+}
+
+/// Publishes the Run menu's actions for the scene, not only while focus is inside the pane:
+/// nothing in the document takes focus on a click (the transport keys are plain buttons), so a
+/// focus-scoped value left ⌘' and ⌘. dark the whole time a run was on screen. No terminal
+/// shares the window's detail column while an intake is shown, so no surface competes for them.
+private struct PublishesPlanningActions: ViewModifier {
+    let actions: PlanningActions?
+
+    func body(content: Content) -> some View {
+        if let actions {
+            content.focusedSceneValue(\.planningActions, actions)
+        } else {
+            content
+        }
+    }
+}
+
+/// Lays its children out left to right and wraps to a new line when the next one doesn't fit —
+/// the header's summary, which at a narrow pane would otherwise truncate the phase it ends on.
+private struct WrappingRow: Layout {
+    var spacing: CGFloat
+    var lineSpacing: CGFloat
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        var size = CGSize.zero
+        for (i, row) in rows(width: proposal.width ?? .infinity, subviews: subviews).enumerated() {
+            var rowWidth: CGFloat = 0
+            var rowHeight: CGFloat = 0
+            for (j, item) in row.enumerated() {
+                rowWidth += item.size.width + (j > 0 ? spacing : 0)
+                rowHeight = max(rowHeight, item.size.height)
+            }
+            size.width = max(size.width, rowWidth)
+            size.height += rowHeight + (i > 0 ? lineSpacing : 0)
+        }
+        return size
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        var y = bounds.minY
+        for row in rows(width: bounds.width, subviews: subviews) {
+            var x = bounds.minX
+            let height = row.map(\.size.height).max() ?? 0
+            for item in row {
+                item.view.place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(item.size))
+                x += item.size.width + spacing
+            }
+            y += height + lineSpacing
+        }
+    }
+
+    private func rows(width: CGFloat, subviews: Subviews) -> [[(view: LayoutSubview, size: CGSize)]] {
+        var rows: [[(view: LayoutSubview, size: CGSize)]] = [[]]
+        var x: CGFloat = 0
+        for view in subviews {
+            let size = view.sizeThatFits(.unspecified)
+            if x > 0, x + size.width > width {
+                rows.append([])
+                x = 0
+            }
+            rows[rows.count - 1].append((view, size))
+            x += size.width + spacing
+        }
+        return rows
+    }
+}
+
+// MARK: - Annotate
+
+/// Its own view so the draft lives in its own `@State`: held on the detail view, every
+/// keystroke re-evaluated the whole document. A sheet until Task 12's notes rail replaces it.
+private struct AnnotateSheet: View {
+    let onSend: (String) -> Void
+    let onClose: () -> Void
+    @State private var annotation = ""
+
+    var body: some View {
+        let trimmed = annotation.trimmingCharacters(in: .whitespacesAndNewlines)
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Annotate the next round").font(.headline)
+            Text("The runner hands this note to the next round's agents.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            TextEditor(text: $annotation)
+                .font(.body)
+                .frame(minHeight: 120)
+                .overlay(RoundedRectangle(cornerRadius: 4).strokeBorder(Color.secondary.opacity(0.3)))
+                .accessibilityIdentifier("annotate-text")
+            HStack {
+                Spacer()
+                Button("Cancel", action: onClose)
+                    .keyboardShortcut(.cancelAction)
+                Button("Send") {
+                    onSend(trimmed)
+                    onClose()
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(trimmed.isEmpty)
+                .accessibilityIdentifier("annotate-send")
+            }
+        }
+        .padding(16)
+        .frame(width: 420)
+    }
 }
 
 /// A macOS grouped-form section without `Form`: `Form(.grouped)` is its own scroll view, and

@@ -11,7 +11,9 @@ import XCTest
 /// would silently leave every card out.
 @MainActor
 enum PlanningRender {
-    static func write(_ view: some View, size: NSSize, to url: URL) throws {
+    /// `prepare` runs once the view has laid out and settled, before the picture is taken — to
+    /// scroll it, say — and gets the hosting view.
+    static func write(_ view: some View, size: NSSize, to url: URL, prepare: ((NSView) -> Void)? = nil) throws {
         let root = view.frame(width: size.width, height: size.height, alignment: .topLeading)
             .background(Color(nsColor: .windowBackgroundColor))
             .environment(\.controlActiveState, .key)
@@ -26,6 +28,11 @@ enum PlanningRender {
         // Long enough for the first-appearance flaps (≤ 0.32 s + stagger) to land.
         RunLoop.current.run(until: Date().addingTimeInterval(1.5))
         host.layoutSubtreeIfNeeded()
+        if let prepare {
+            prepare(host)
+            RunLoop.current.run(until: Date().addingTimeInterval(1))
+            host.layoutSubtreeIfNeeded()
+        }
 
         let scale: CGFloat = 2
         let rep = try XCTUnwrap(NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(size.width * scale),

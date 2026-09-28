@@ -109,7 +109,7 @@ final class IntakeService: ObservableObject {
     /// duplicating. This service is already the per-project owner for everything else about
     /// an intake, so its selection joins that, not a new home on the store.
     @Published private(set) var selectedIntake: [String: UUID] = [:]
-    /// Each `.shaping` intake's `tape.json` as last read — what `ShapingView` draws and what
+    /// Each `.shaping` intake's `tape.json` as last read — what the detail pane draws and what
     /// `attentionCount` consults. Refreshed on the shared clock (`pollTapes`).
     @Published private(set) var tapes: [UUID: Tape] = [:]
     /// The newest read of each tape, heartbeat and all — what the runner-liveness checks use.
@@ -534,11 +534,17 @@ final class IntakeService: ObservableObject {
         availableModelsCache ?? .defaults
     }
 
-    /// A file a round wrote into `checkpoints/<checkpoint>/` — `ShapingView`'s `loadFile`.
+    /// A file a round wrote into `checkpoints/<checkpoint>/` — the plan section's `loadFile`.
     /// A synchronous read on the main actor: fine at plan sizes (a plan, a change set, a
-    /// graph — kilobytes), and `ShapingView` only calls it when its viewer key changes.
+    /// graph — kilobytes), and `PlanSection` only calls it when its viewer key changes.
     func checkpointFile(_ id: UUID, checkpoint: Int, _ path: String) -> Data? {
         readFile(tapeStore(id).checkpointDirectory(checkpoint).appendingPathComponent(path))
+    }
+
+    /// `runs/<run>/` for one of `id`'s seats — what the inspector's seat detail shows and
+    /// reveals in the Finder.
+    func runDirectory(_ id: UUID, run: String) -> URL {
+        tapeStore(id).runDirectory(run)
     }
 
     /// One clock beat: re-read the tape of every `.shaping` intake whose `tape.json` changed
