@@ -18,14 +18,13 @@ struct LiveCard: View {
     fileprivate enum Kind {
         case triage(activity: SeatActivity?)
         case shaping(tape: Tape, seats: SeatFiles, editConflict: String?, selectedRound: Binding<Int?>,
-                     controlBar: (Date) -> AnyView, board: (Date) -> AnyView)
+                     selectedSeat: Binding<String?>, controlBar: (Date) -> AnyView, board: (Date) -> AnyView)
     }
 
     fileprivate let intake: Intake
     fileprivate let kind: Kind
     fileprivate let pending: PendingStart?
 
-    @State private var visible = true
     /// Not observed: the schedulers are consulted from inside the timeline's content on every
     /// tick (their contract — `offer` each tick with the current values), and the returned
     /// values are what the rows draw. Observing them as well would redraw the card a second
@@ -43,25 +42,26 @@ struct LiveCard: View {
     ///   - editConflict: the banner text for plan edits a round couldn't carry forward — Task 11
     ///     supplies it; nil hides the banner.
     ///   - selectedRound: the checkpoint the plan viewer shows; nil follows the head.
+    ///   - selectedSeat: the seat (`LiveSeat.id`) the inspector details; clicking a row selects
+    ///     it, clicking it again clears it.
     static func shaping(intake: Intake, tape: Tape, activities: [String: SeatActivity], records: [String: RunRecord],
                         results: [String: SeatResult] = [:], pending: PendingStart?, editConflict: String? = nil,
-                        selectedRound: Binding<Int?> = .constant(nil),
+                        selectedRound: Binding<Int?> = .constant(nil), selectedSeat: Binding<String?> = .constant(nil),
                         controlBar: @escaping (Date) -> AnyView, board: @escaping (Date) -> AnyView) -> LiveCard {
         LiveCard(intake: intake,
                  kind: .shaping(tape: tape, seats: SeatFiles(activities: activities, records: records, results: results),
-                                editConflict: editConflict, selectedRound: selectedRound,
+                                editConflict: editConflict, selectedRound: selectedRound, selectedSeat: selectedSeat,
                                 controlBar: controlBar, board: board),
                  pending: pending)
     }
 
     var body: some View {
-        TimelineView(LiveClockSchedule(ticking: visible && isLive)) { context in
-            content(now: context.date)
+        LiveClock(ticking: isLive) { now in
+            content(now: now)
         }
         .padding(14)
         .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 10))
         .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color.primary.opacity(0.08)))
-        .background(WindowVisibilityReader(visible: $visible))
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier(isTriage ? "live-card-triage" : "live-card-shaping")
     }
@@ -71,7 +71,7 @@ struct LiveCard: View {
             switch kind {
             case .triage:
                 seatSection(now: now)
-            case .shaping(let tape, _, let editConflict, let selectedRound, let controlBar, let board):
+            case .shaping(let tape, _, let editConflict, let selectedRound, _, let controlBar, let board):
                 controlBar(now)
                 board(now)
                 let model = ShapingModel(intake: intake, tape: tape)
@@ -108,7 +108,7 @@ struct LiveCard: View {
         if pending != nil { return true }
         switch kind {
         case .triage(let activity): return intake.state == .triaging && activity?.finished != true
-        case .shaping(let tape, _, _, _, _, _): return tape.status != .reachedReview
+        case .shaping(let tape, _, _, _, _, _, _): return tape.status != .reachedReview
         }
     }
 
@@ -128,7 +128,7 @@ struct LiveCard: View {
             VStack(spacing: 0) {
                 ForEach(Array(seats.enumerated()), id: \.element.id) { index, seat in
                     if index > 0 { Divider().padding(.leading, 40) }
-                    SeatRow(model: seat.model, queuedText: queuedText(now: now))
+                    seatRow(seat, now: now)
                 }
             }
             .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: seats.map(\.model.glyph))
@@ -136,6 +136,24 @@ struct LiveCard: View {
     }
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    /// A shaping row is selectable — the inspector shows the selected seat's whole footprint,
+    /// tokens and run directory (spec §3). Triage's one seat has no inspector detail.
+    @ViewBuilder
+    private func seatRow(_ seat: LiveSeat, now: Date) -> some View {
+        let row = SeatRow(model: seat.model, queuedText: queuedText(now: now))
+        if case .shaping(_, _, _, _, let selectedSeat, _, _) = kind {
+            let selected = selectedSeat.wrappedValue == seat.id
+            row
+                .background(selected ? Color.accentColor.opacity(0.14) : .clear, in: RoundedRectangle(cornerRadius: 7))
+                .contentShape(Rectangle())
+                .onTapGesture { selectedSeat.wrappedValue = selected ? nil : seat.id }
+                .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
+                .accessibilityAction { selectedSeat.wrappedValue = selected ? nil : seat.id }
+        } else {
+            row
+        }
+    }
 
     private func sectionHeader(seats: [LiveSeat], now: Date) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
@@ -168,7 +186,7 @@ struct LiveCard: View {
     private var sectionTitle: String {
         switch kind {
         case .triage: return "Triage"
-        case .shaping(let tape, _, _, _, _, _):
+        case .shaping(let tape, _, _, _, _, _, _):
             guard let round = tape.roundInProgress ?? pendingRound else { return "Seats" }
             return BoardModel.name(stage: round.stage, round: round.round)
         }
@@ -196,7 +214,7 @@ struct LiveCard: View {
             // Spec §3.1: "Reading the repo" until the first event says anything more specific.
             if model.glyph == .running, model.headline == nil { model.headline = "Reading the repo" }
             return [LiveSeat(id: "triage", model: model)]
-        case .shaping(let tape, let seats, _, _, _, _):
+        case .shaping(let tape, let seats, _, _, _, _, _):
             guard let round = tape.roundInProgress ?? pendingRound else { return [] }
             return LiveSeats.rows(round: round, config: intake.roundConfig, seats: pending == nil ? seats : SeatFiles(),
                                   now: now)
@@ -435,6 +453,23 @@ private struct FinishedRounds: View {
 
 // MARK: - Clock
 
+/// The 1 Hz clock a live surface draws from, suspended while its window is occluded (spec §2)
+/// and while `ticking` is false. The card runs one; the detail pane's pinned control bar runs
+/// the other while the card's copy is scrolled away — `LiveClockSchedule` puts both on the same
+/// whole seconds, so the pinned ELAPSED and the rows still visible below it never read apart.
+struct LiveClock<Content: View>: View {
+    var ticking: Bool
+    @ViewBuilder var content: (Date) -> Content
+    @State private var visible = true
+
+    var body: some View {
+        TimelineView(LiveClockSchedule(ticking: visible && ticking)) { context in
+            content(context.date)
+        }
+        .background(WindowVisibilityReader(visible: $visible))
+    }
+}
+
 /// `.periodic(from:by: 1)` while `ticking`, one frame and then nothing while not — the card's
 /// timeline is suspended rather than torn down, so the rows keep their identity (and their
 /// chips' expansion) across an occlusion.
@@ -443,7 +478,11 @@ struct LiveClockSchedule: TimelineSchedule {
 
     func entries(from startDate: Date, mode: TimelineScheduleMode) -> AnyIterator<Date> {
         guard ticking else { return AnyIterator(CollectionOfOne(startDate).makeIterator()) }
-        var periodic = PeriodicTimelineSchedule(from: startDate, by: 1).entries(from: startDate, mode: mode).makeIterator()
+        // Anchored on a whole second, not on whenever this timeline mounted: two clocks on
+        // screen at once (the card, and the pinned bar above it) then tick on the same second
+        // instead of up to a second apart.
+        let anchor = Date(timeIntervalSinceReferenceDate: startDate.timeIntervalSinceReferenceDate.rounded(.down))
+        var periodic = PeriodicTimelineSchedule(from: anchor, by: 1).entries(from: startDate, mode: mode).makeIterator()
         return AnyIterator { periodic.next() }
     }
 }

@@ -5,7 +5,7 @@ import SwiftUI
 /// editable in place as live-preview Markdown on the head checkpoint and read-only on any
 /// earlier one.
 ///
-/// Inputs are injected like `ShapingView`'s: `loadFile(checkpointID, relativePath)` reads out
+/// Inputs are injected: `loadFile(checkpointID, relativePath)` reads out
 /// of `checkpoints/<id>/`, and `onSend` queues a `TapeCommand` (the caller binds the intake).
 /// `selection` is the checkpoint the human picked on the timeline, nil to follow the head.
 struct PlanSection: View {
@@ -46,6 +46,20 @@ struct PlanSection: View {
     /// would leave nothing editable once encoding starts.
     static func planHead(tape: Tape, loadFile: (Int, String) -> Data?) -> Int? {
         tape.checkpoints.last { ShapingModel.planText(checkpoint: $0.id, in: tape, loadFile: loadFile) != nil }?.id
+    }
+
+    /// Green/red per line, as in the mockup's hunk pane. A single `AttributedString` rather
+    /// than one `Text` per line so a long diff stays one text view (and one selection).
+    static func coloredDiff(_ diff: String) -> AttributedString {
+        var out = AttributedString()
+        for (i, line) in diff.split(separator: "\n", omittingEmptySubsequences: false).enumerated() {
+            var piece = AttributedString((i == 0 ? "" : "\n") + line)
+            if line.hasPrefix("+") { piece.foregroundColor = .green }
+            else if line.hasPrefix("-") { piece.foregroundColor = .red }
+            else if line.hasPrefix("@@") { piece.foregroundColor = .secondary }
+            out += piece
+        }
+        return out
     }
 
     /// "Refine 2" — the full name for the read-only bar, where there is room for it.
@@ -183,7 +197,7 @@ private struct PlanSectionBody: View {
         guard key.mode == .plan else {
             message = nil
             let raw = ShapingModel.viewerText(key.mode, checkpoint: checkpoint, tape: tape, loadFile: loadFile)
-            otherText = key.mode == .diff ? ShapingView.coloredDiff(raw) : AttributedString(raw)
+            otherText = key.mode == .diff ? PlanSection.coloredDiff(raw) : AttributedString(raw)
             return
         }
         // Following the head, the plan follows the newest checkpoint WITH a plan: an encode or

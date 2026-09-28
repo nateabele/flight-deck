@@ -22,6 +22,9 @@ struct ProjectView: View {
     /// Both the sheet's presentation and its content, same shape as
     /// `DevicesSettingsTab.pairingWindow` — see the `.sheet(item:)` below.
     @State private var reviewIntakeID: UUID?
+    /// The detail pane's trailing inspector (spec §3): hidden by default, toggled from the
+    /// toolbar or ⌥⌘I, and opened by the awaiting-choice body's Edit in Inspector.
+    @State private var showsInspector = false
     // Mirrors `ProjectHeaderRow`'s two confirmation flags and drives the same
     // `.flywheelEnableConfirmations` modifier — see that row's `flywheelStatus` doc comment
     // for why the probe result these gate on is memoized rather than read live.
@@ -179,7 +182,8 @@ struct ProjectView: View {
                     // Keyed on the intake's id, not just present: selecting a different row
                     // must reset `IntakeDetailView`'s own `@State` (answer drafts, the chosen
                     // preset), which a same-identity re-render would otherwise carry over.
-                    IntakeDetailView(service: intakeService, intake: intake, onOpenReview: { reviewIntakeID = id })
+                    IntakeDetailView(service: intakeService, intake: intake, onOpenReview: { reviewIntakeID = id },
+                                     showsInspector: $showsInspector)
                         .id(intake.id)
                 } else {
                     Text("Select an intake").foregroundStyle(.secondary)
@@ -187,6 +191,24 @@ struct ProjectView: View {
                 }
             }
             .frame(minWidth: 320)
+        }
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                // ⌥⌘I is Ghostty's terminal-inspector chord, but only while a terminal has
+                // focus — and none is on screen here: `RootView` shows this view in place of
+                // the terminal. So a toolbar shortcut, live only while this view is, rather
+                // than a menu item, whose key equivalent `MenuKeyEquivalents` would offer ahead
+                // of Ghostty's binding (it is not `performable`) and take the chord from every
+                // terminal in the app.
+                Button {
+                    showsInspector.toggle()
+                } label: {
+                    Label(showsInspector ? "Hide Inspector" : "Show Inspector", systemImage: "sidebar.trailing")
+                }
+                .keyboardShortcut("i", modifiers: [.command, .option])
+                .help(showsInspector ? "Hide the inspector (⌥⌘I)" : "Show the inspector (⌥⌘I)")
+                .accessibilityIdentifier("intake-inspector-toggle")
+            }
         }
     }
 }

@@ -47,6 +47,26 @@ struct IntakeStatePill: View {
         }
     }
 
+    /// The state as the detail header's eyebrow names it ("INTAKE · SHAPING", spec §3): the
+    /// stage in a word or two. The pill's `label` says where inside the stage things are; the
+    /// header has the live card for that, so it names the stage only.
+    static func stateName(_ state: IntakeState) -> String {
+        switch state {
+        case .triaging: "Triaging"
+        case .needsAnswers: "Needs answers"
+        case .awaitingChoice: "Choose fidelity"
+        case .shaping: "Shaping"
+        case .parked: "Parked"
+        case .review: "Review"
+        case .releasing: "Releasing"
+        case .released: "Released"
+        case .partiallyReleased: "Partially released"
+        case .failed: "Failed"
+        case .interrupted: "Interrupted"
+        case .discarded: "Discarded"
+        }
+    }
+
     static func tint(for state: IntakeState) -> Color {
         switch state {
         case .needsAnswers, .awaitingChoice, .review, .partiallyReleased, .failed, .interrupted:

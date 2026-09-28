@@ -16,14 +16,16 @@ public enum SlotKeyPath: Hashable {
     case polisher
 }
 
-/// Lets the human tune a chosen preset's expanded `RoundConfig` before shaping starts — the
-/// "Rounds" disclosure under the fidelity picker in `.awaitingChoice`. Task 11 wires this into
-/// `IntakeDetailView` and the Start button; this file only needs to compile and render on its
-/// own, against the `RoundConfig`/`AvailableModels` shapes Task 10 already landed.
+/// Lets the human tune a chosen preset's expanded `RoundConfig` before shaping starts. Its home
+/// is the detail pane's inspector (spec §9): the awaiting-choice body shows only `summary` and
+/// an Edit in Inspector button, since a five-column grid pushed the way forward off screen.
 struct RoundConfigEditor: View {
     let preset: Preset
     @Binding var config: RoundConfig
     let available: AvailableModels
+    /// In the inspector the grid is the whole panel, under a plain title; a disclosure there
+    /// would be a second way to hide what the panel was opened to show.
+    var collapsible = true
 
     /// Starts open: choosing anything above Bead means the human is about to look at (or
     /// tune) exactly this, not something they need to go find behind a second click.
@@ -40,12 +42,58 @@ struct RoundConfigEditor: View {
     }
 
     var body: some View {
-        DisclosureGroup(Self.label(preset: preset, config: config), isExpanded: $isExpanded) {
+        if collapsible {
+            DisclosureGroup(Self.label(preset: preset, config: config), isExpanded: $isExpanded) {
+                editor.padding(.top, 6)
+            }
+        } else {
             VStack(alignment: .leading, spacing: 14) {
-                slotsGrid
+                Text(Self.label(preset: preset, config: config)).font(.headline)
+                stackedSlots
+                Divider()
                 capsForm
             }
-            .padding(.top, 6)
+        }
+    }
+
+    /// The inspector's form of the seats: one block per seat, its controls on two lines. The
+    /// five-column grid needs ~530 pt, and an inspector column is narrower than that — the
+    /// Model field collapsed to nothing and the Fallback picker ran off the panel's edge.
+    private var stackedSlots: some View {
+        let rows = Self.slots(of: config)
+        return VStack(alignment: .leading, spacing: 12) {
+            ForEach(Array(rows.enumerated()), id: \.element.keyPath) { index, row in
+                if let choice = Self.choice(for: row.keyPath, in: config) {
+                    if index > 0 { Divider() }
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(alignment: .firstTextBaseline, spacing: 6) {
+                            Text(row.role.capitalized).font(.callout.weight(.semibold))
+                            if let persona = row.persona, persona != .general {
+                                Text(persona.rawValue).font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                        HStack(spacing: 8) {
+                            harnessPicker(for: row.keyPath).fixedSize()
+                            modelField(for: row.keyPath)
+                            effortPicker(for: row.keyPath).fixedSize()
+                        }
+                        if Self.supportsFallback(row.keyPath) {
+                            HStack(spacing: 8) {
+                                Text("Fallback").foregroundStyle(.secondary)
+                                fallbackPicker(for: row.keyPath, choice: choice).fixedSize()
+                            }
+                            .font(.callout)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private var editor: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            slotsGrid
+            capsForm
         }
     }
 
@@ -105,28 +153,54 @@ struct RoundConfigEditor: View {
                     }
                 }
                 .frame(width: ColumnWidth.role, alignment: .leading)
-                Picker("Harness", selection: harnessBinding(for: keyPath)) {
-                    ForEach(Self.harnesses(in: available), id: \.self) { harness in
-                        Text(harness.rawValue).tag(harness)
-                    }
-                }
-                .labelsHidden()
-                .pickerStyle(.menu)
-                .frame(width: ColumnWidth.harness)
-                TextField("Model", text: modelBinding(for: keyPath))
-                    .textFieldStyle(.roundedBorder)
-                    .frame(maxWidth: .infinity)
-                Picker("Effort", selection: effortBinding(for: keyPath)) {
-                    ForEach(Self.effortChoices, id: \.self) { effort in
-                        Text(effort).tag(effort)
-                    }
-                }
-                .labelsHidden()
-                .pickerStyle(.menu)
-                .frame(width: ColumnWidth.effort)
+                harnessPicker(for: keyPath).frame(width: ColumnWidth.harness)
+                modelField(for: keyPath)
+                effortPicker(for: keyPath).frame(width: ColumnWidth.effort)
                 fallbackCell(for: keyPath, choice: choice)
             }
         }
+    }
+
+    private func harnessPicker(for keyPath: SlotKeyPath) -> some View {
+        Picker("Harness", selection: harnessBinding(for: keyPath)) {
+            ForEach(Self.harnesses(in: available), id: \.self) { harness in
+                Text(harness.rawValue).tag(harness)
+            }
+        }
+        .labelsHidden()
+        .pickerStyle(.menu)
+    }
+
+    private func modelField(for keyPath: SlotKeyPath) -> some View {
+        TextField("Model", text: modelBinding(for: keyPath))
+            .textFieldStyle(.roundedBorder)
+            .frame(maxWidth: .infinity)
+    }
+
+    private func effortPicker(for keyPath: SlotKeyPath) -> some View {
+        Picker("Effort", selection: effortBinding(for: keyPath)) {
+            ForEach(Self.effortChoices, id: \.self) { effort in
+                Text(effort).tag(effort)
+            }
+        }
+        .labelsHidden()
+        .pickerStyle(.menu)
+    }
+
+    /// "none" or the other available model. `ModelChoice` isn't `Hashable` (its `.effort` is a
+    /// free-text `String` that never needs set/dictionary membership elsewhere), so the Picker's
+    /// selection is the two-way "has a fallback at all" toggle ("none" or the other model), not
+    /// the choice itself.
+    private func fallbackPicker(for keyPath: SlotKeyPath, choice: ModelChoice) -> some View {
+        let other = Self.otherModel(for: choice, available: available)
+        return Picker("Fallback", selection: fallbackBinding(for: keyPath, other: other)) {
+            Text("none").tag(false)
+            if let other {
+                Text("\(other.harness.rawValue) \(other.model)").tag(true)
+            }
+        }
+        .labelsHidden()
+        .pickerStyle(.menu)
     }
 
     /// "none" or the other available model on a `Slot` seat; an em dash on the three bare-
@@ -134,19 +208,7 @@ struct RoundConfigEditor: View {
     @ViewBuilder
     private func fallbackCell(for keyPath: SlotKeyPath, choice: ModelChoice) -> some View {
         if Self.supportsFallback(keyPath) {
-            let other = Self.otherModel(for: choice, available: available)
-            // `ModelChoice` isn't `Hashable` (its `.effort` is a free-text `String` that never
-            // needs set/dictionary membership elsewhere), so the Picker's selection is the
-            // two-way "has a fallback at all" toggle the brief actually asks for ("none" or
-            // the other model), not the choice itself.
-            Picker("Fallback", selection: fallbackBinding(for: keyPath, other: other)) {
-                Text("none").tag(false)
-                if let other {
-                    Text("\(other.harness.rawValue) \(other.model)").tag(true)
-                }
-            }
-            .labelsHidden()
-            .pickerStyle(.menu)
+            fallbackPicker(for: keyPath, choice: choice)
             // Sized to its content and pinned leading: a menu picker centred in the fixed
             // column sat at a different x on every row ("none" vs "codex gpt-…").
             .fixedSize()
@@ -256,6 +318,19 @@ struct RoundConfigEditor: View {
     static func label(preset: Preset, config: RoundConfig) -> String {
         let base = UIText.presetName(preset)
         return config.customized ? "\(base), customized" : base
+    }
+
+    /// The awaiting-choice body's one line (spec §9): "Full plan · 4 drafters · refine ×5 ·
+    /// polish ×6 · customized". Counts only rounds the planner will actually run — refine needs
+    /// a reviewer, polish a polisher (`TapePlanner.sequence`) — so the line never promises a
+    /// cycle the grid below has no seat for.
+    static func summary(preset: Preset, config: RoundConfig) -> String {
+        let drafters = config.drafters.count
+        var parts = [UIText.presetName(preset), "\(drafters) drafter\(drafters == 1 ? "" : "s")"]
+        if config.reviewer != nil, config.refinementCap > 0 { parts.append("refine ×\(config.refinementCap)") }
+        if config.polisher != nil, config.polishCap > 0 { parts.append("polish ×\(config.polishCap)") }
+        if config.customized { parts.append("customized") }
+        return parts.joined(separator: " · ")
     }
 
     /// `ultra` enables delegation and isn't Pro, so it's excluded even though `effort` is a

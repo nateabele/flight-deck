@@ -397,4 +397,13 @@ final class BoardModelTests: XCTestCase {
                         measure: (String) -> CGFloat) -> String {
         measure(full) + padding <= width ? full : code
     }
+
+    /// A bracket's title gives up the group's name before the + handle would sit on it, and
+    /// disappears rather than be overlapped when even the count doesn't fit.
+    func testBracketTitleShortensBeforeTheHandle() {
+        XCTAssertEqual(DeparturesBoard.fittedBracketTitle("REFINE 2 OF 3", name: "REFINE", width: 400), "REFINE 2 OF 3")
+        XCTAssertEqual(DeparturesBoard.fittedBracketTitle("REFINE 2 OF 3", name: "REFINE", width: 70), "2 OF 3")
+        XCTAssertEqual(DeparturesBoard.fittedBracketTitle("POLISH ×2", name: "POLISH", width: 30), "×2")
+        XCTAssertEqual(DeparturesBoard.fittedBracketTitle("POLISH ×2", name: "POLISH", width: 5), "")
+    }
 }
