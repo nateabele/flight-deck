@@ -343,7 +343,7 @@ struct IntakeDetailView: View {
                 planFocus = PlanFocus(checkpoint: checkpoint, section: section, seq: (planFocus?.seq ?? 0) + 1)
                 planScroll += 1
             },
-            onAnnotate: { [notes] _ in notes.annotate() },
+            onAnnotate: { [notes] section in notes.annotate(section: section) },
             onClose: { self.heatmap = nil }))
     }
 
@@ -977,7 +977,8 @@ private struct DocumentPlan: View, Equatable {
                         selection: select, notes: notes)
                 .editHooks(PlanEditHooks(noteShown: noteShown,
                                          onNoteShown: { [service, intakeID] in service.markEditNoteShown(intakeID) },
-                                         onConflict: { [service, intakeID] in service.recordEditConflict(intakeID, $0) }))
+                                         onConflict: { [service, intakeID] in service.recordEditConflict(intakeID, $0) },
+                                         liveTape: { [service, intakeID] in service.tapes[intakeID] }))
                 .churnLane(churn)
                 .focus(focus)
                 .readOnly(final)
@@ -1114,8 +1115,7 @@ private struct NotesChip: View {
                     .font(.system(size: 12))
                     .padding(.horizontal, 9)
                     .frame(height: 22)
-                    .background(Color.yellow.opacity(0.13), in: Capsule())
-                    .foregroundStyle(Color.yellow.opacity(0.9))
+                    .notesChipStyle()
             }
             .buttonStyle(.plain)
             .help("Show the notes (⌥⌘I)")
