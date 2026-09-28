@@ -173,9 +173,10 @@ struct BoardModel: Equatable {
         }
         self.stopsAt = BoardField(label: preview == nil ? "STOPS AT" : "WOULD STOP",
                                   shortLabel: preview == nil ? "STOP" : "WOULD",
-                                  value: stop.map { slots[$0].name } ?? "You’re here",
+                                  // At review the run has arrived: it stops at Review, where it is.
+                                  value: stop.map { slots[$0].name } ?? "Review",
                                   detail: stop.map { (slots[$0].major ? "major · " : "minor · ") + modeName }
-                                      ?? "Nothing left to run")
+                                      ?? "ready for you")
         // The spec's shape: how many major stops remain, then their names ("2 · Dedup · Review").
         let after = stop.map { slots[($0 + 1)...].filter(\.major).map(\.name) } ?? []
         self.callingAt = BoardField(label: "CALLING AT", shortLabel: "CALL",

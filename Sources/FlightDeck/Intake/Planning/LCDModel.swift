@@ -26,7 +26,8 @@ struct LCDCell: Equatable, Identifiable {
 /// passes the same `preview` to both: STOPS AT here and on the board must never disagree.
 struct LCDModel: Equatable {
     /// Full order: round, elapsed, seatsDone, soFar, billed, convergence, stopsAt. Convergence
-    /// is absent until a Refine/Polish cycle has a series (`convergence == nil`).
+    /// is absent until a Refine/Polish cycle has a series (`convergence == nil`); STOPS AT is
+    /// absent at review, where nothing is left to run and ROUND already says "ready for you".
     var cells: [LCDCell]
     /// The mode STOPS AT describes — the hovered button's while previewing — so the cell can
     /// draw that button's glyph beside the stop. Nil once there's nothing left to run.
@@ -50,16 +51,18 @@ struct LCDModel: Equatable {
             Self.billed(seats),
         ]
         if let convergence {
-            cells.append(LCDCell(kind: .convergence, value: convergence.word, shortValue: Self.shortWord(convergence.word),
+            cells.append(LCDCell(kind: .convergence, value: convergence.word,
+                                 shortValue: Self.arrowAndCount(convergence.word, latest: convergence.latest),
                                  caption: "\(convergence.latest) change\(convergence.latest == 1 ? "" : "s")",
                                  tone: convergence.tone))
         }
-        // At review no mode goes anywhere, so the caption names none ("You’re here").
-        cells.append(LCDCell(kind: .stopsAt, value: board.stopsAt.value, shortValue: stop?.code ?? "HERE",
-                             caption: (preview == nil ? "stops at" : "would stop") + (stop == nil ? "" : " · " + Self.modeName(mode)),
-                             // White while previewing, as the mockup has it: the accent marks the
-                             // live target, and a hovered "what if" isn't it yet.
-                             tone: preview == nil ? .accent : .normal))
+        if let stop {
+            cells.append(LCDCell(kind: .stopsAt, value: board.stopsAt.value, shortValue: stop.code,
+                                 caption: (preview == nil ? "stops at" : "would stop") + " · " + Self.modeName(mode),
+                                 // White while previewing, as the mockup has it: the accent marks the
+                                 // live target, and a hovered "what if" isn't it yet.
+                                 tone: preview == nil ? .accent : .normal))
+        }
         self.cells = cells
     }
 
@@ -196,11 +199,14 @@ struct LCDModel: Equatable {
         }
     }
 
-    /// "CONV ↘" for "CONVERGING ↘": the word's first four letters, keeping its arrow.
-    private static func shortWord(_ word: String) -> String {
-        let parts = word.split(separator: " ")
-        guard let first = parts.first, first.count > 4 else { return word }
-        return ([String(first.prefix(4))] + parts.dropFirst().map(String.init)).joined(separator: " ")
+    /// "↘ 5" for "CONVERGING ↘" with 5 changes: what a squeezed CONVERGENCE cell shows. A state
+    /// word is never cut short — "CONV" and "DIVE" read as other words — so the fallback is the
+    /// word's own arrow and the count, with the whole word on the flap card and in the
+    /// accessibility label. "TOO EARLY" has no arrow, so it falls back to the count alone.
+    private static func arrowAndCount(_ word: String, latest: Int) -> String {
+        let arrows: Set<Character> = ["↘", "→", "↗", "↓", "↑"]
+        guard let arrow = word.last(where: { arrows.contains($0) }) else { return "\(latest)" }
+        return "\(arrow) \(latest)"
     }
 
     private static func code(_ category: DiagnosisCategory) -> String {
