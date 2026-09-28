@@ -1959,15 +1959,6 @@ seat, 2026-09-27 — it reached review first time, 277 s, ~452k input / ~19k out
   fire there even though it closes the heatmap correctly with focus anywhere else (T9b). If this
   turns out to matter in the GUI checklist, `PlanNSTextView` could forward Esc while the heatmap
   is open.
-- **The plan's height is TextKit 2's estimate until it is read.** The plan is part of the detail
-  page (no scroller of its own, `PlanEditorContainer`), and its height below the laid-out part
-  is `usageBoundsForTextContainer`'s estimate — deliberately, since measuring it exactly means
-  laying out the whole plan on every change. The estimate runs short for wrapped paragraphs
-  (a 250-line plan of two-line paragraphs took six scroll-to-ends in the offscreen render to
-  reach its real end), so the page's end, and its scroller's thumb, move as the human scrolls
-  down. The boxed editor's own scroller did the same. If it reads as a jump in the GUI checklist,
-  the fix is a background `ensureLayout` of the whole plan once per load (off the keystroke
-  path), not per edit.
 
 - **Typing flushed as the plan reaches review can be dropped (final review #15, recorded, not
   fixed).** `PlanTextView.dismantleNSView` commits the last idle-debounce window of typing when

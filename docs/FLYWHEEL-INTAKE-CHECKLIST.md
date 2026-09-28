@@ -330,8 +330,8 @@ scrollers for one text).
 - Open a shaping intake with a long plan and wheel/trackpad-scroll with the pointer over the
   plan. **Expect:** the page scrolls, all the way to the plan's end, with exactly one scroller
   (the pane's) — no box scrolling inside it, and no blank text as the page brings lines in.
-  The end may arrive a little later than the scroller first suggests (TextKit 2 estimates the
-  unread part's height and firms it up as it lays it out); flag it if the thumb visibly jumps.
+  One scroll to the bottom reaches the plan's last line, and the scroller's thumb doesn't jump
+  or shrink as you read down (the plan is laid out whole once after it loads).
 - Click at the plan's last line and type, including pasting several lines. **Expect:** the
   caret stays on screen while the page grows under it.
 - With the control bar and board pinned, click in a line just below them and type, then arrow
