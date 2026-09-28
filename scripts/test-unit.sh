@@ -30,6 +30,12 @@ cd "$(dirname "$0")/.."
 #   FD_TEST_SHARDS=N                    parallel xctest processes for a full run (default 6;
 #                                       1 = the old serial run).
 #   FD_SKIP_BUILD=1                     reuse the last build-for-testing as is.
+#
+# scripts/test-serial-classes.txt lists classes that flake under parallel shards (a wall-clock
+# deadline, a Task-scheduling interleaving, or the shared mDNSResponder daemon — see its header).
+# They are pulled out of every shard and run together in one extra xctest process after the
+# parallel shards finish, so shard contention never touches them. FD_TEST_FILTER bypasses this
+# list entirely — it always runs in one process regardless of which classes it names.
 
 CONFIG=Debug
 PRODUCTS="DerivedData/Build/Products/${CONFIG}"
@@ -76,22 +82,51 @@ run_xctest() {  # $1: an -XCTest selector, or empty for the whole bundle
     "$XCTEST" "$@" "$BUNDLE"
 }
 
+# A crashed process aborts mid-test with no "failed (" line for the usual grep to find — the
+# log just stops. Falling back to the last "started" line names what it was running when it
+# died, instead of a bare "FAILED" with nothing to go on.
+report_failure() {  # $1: a shard or serial-lane log
+  local log="$1" hits
+  hits="$(rg -N 'error:|\) failed \(' "$log" || true)"
+  if [ -n "$hits" ]; then
+    printf '%s\n' "$hits"
+  else
+    local started
+    started="$(rg -o "Test Case '-\[[^]]+\]' started" "$log" | tail -1)"
+    echo "  no error/failed line captured — looks crashed; last test that started: ${started:-(none captured)}"
+  fi
+}
+
 # The class list comes from source, not the binary. It matched the executed set exactly
 # (342/342) when this was written. A class declared some other way (with an attribute on the same line,
 # or via a base class other than XCTestCase) would be silently skipped
 # by a sharded or filtered run, so keep test classes to the plain form.
-CLASSES="$(rg -o --no-filename '^\s*(?:final\s+)?class\s+(\w+)\s*:\s*XCTestCase' -r '$1' \
+ALL_CLASSES="$(rg -o --no-filename '^\s*(?:final\s+)?class\s+(\w+)\s*:\s*XCTestCase' -r '$1' \
   Tests/FlightDeckTests | sort -u)"
 
 if [ -n "${FD_TEST_FILTER:-}" ]; then
   for sel in ${FD_TEST_FILTER//,/ }; do
     cls="${sel%%/*}"; cls="${cls#FlightDeckTests.}"
-    printf '%s\n' "$CLASSES" | rg -qx "$cls" \
+    printf '%s\n' "$ALL_CLASSES" | rg -qx "$cls" \
       || { echo "error: FD_TEST_FILTER names unknown test class '$cls'" >&2; exit 2; }
   done
   run_xctest "$FD_TEST_FILTER"
   exit
 fi
+
+SERIAL_FILE="scripts/test-serial-classes.txt"
+SERIAL_CLASSES=""
+if [ -f "$SERIAL_FILE" ]; then
+  SERIAL_CLASSES="$(sed -E 's/#.*//; s/^[[:space:]]+//; s/[[:space:]]+$//' "$SERIAL_FILE" \
+    | sed '/^$/d' | sort -u)"
+fi
+if [ -n "$SERIAL_CLASSES" ]; then
+  unknown="$(comm -13 <(printf '%s\n' "$ALL_CLASSES") <(printf '%s\n' "$SERIAL_CLASSES"))"
+  [ -z "$unknown" ] \
+    || { echo "error: $SERIAL_FILE names unknown test class(es): $(printf '%s\n' "$unknown" | tr '\n' ' ')" >&2; exit 2; }
+fi
+# The parallel shards never see a serial-lane class; it runs once, on its own, below.
+CLASSES="$(comm -23 <(printf '%s\n' "$ALL_CLASSES") <(printf '%s\n' "$SERIAL_CLASSES"))"
 
 if [ "$SHARDS" -le 1 ]; then
   run_xctest ""
@@ -133,12 +168,26 @@ for entry in "${pids[@]}"; do
   if ! wait "${entry#*:}"; then
     rc=1
     echo "=== shard $i FAILED ($LOGDIR/shard$i.log)" >&2
-    rg -N 'error:|\) failed \(' "$LOGDIR/shard$i.log" >&2 || true
+    report_failure "$LOGDIR/shard$i.log" >&2
   fi
 done
 
+# The serial lane: everything scripts/test-serial-classes.txt names, in one xctest process,
+# after every parallel shard has finished — so nothing it runs ever shares a CPU-contended
+# process, a socket, or the Bonjour daemon with a sibling shard.
+SERIAL_LOG="$LOGDIR/serial.log"
+: > "$SERIAL_LOG"
+if [ -n "$SERIAL_CLASSES" ]; then
+  selector="$(printf '%s\n' "$SERIAL_CLASSES" | paste -sd, -)"
+  if ! run_xctest "$selector" > "$SERIAL_LOG" 2>&1; then
+    rc=1
+    echo "=== serial lane FAILED ($SERIAL_LOG)" >&2
+    report_failure "$SERIAL_LOG" >&2
+  fi
+fi
+
 # Refresh the per-class timings the next run balances with, and report one total.
-cat "$LOGDIR"/shard*.log | python3 -c '
+cat "$LOGDIR"/shard*.log "$SERIAL_LOG" | python3 -c '
 import re, sys, collections
 t = collections.Counter(); n = 0
 for l in sys.stdin:
@@ -147,4 +196,6 @@ for l in sys.stdin:
 open(sys.argv[1], "w").write("".join(f"{c}\t{v:.3f}\n" for c, v in sorted(t.items())))
 print(f"Executed {n} test cases across all shards")
 ' "$TIMINGS_CACHE"
-echo "** SHARDED UNIT RUN $([ "$rc" = 0 ] && echo PASSED || echo FAILED) ($SHARDS shards; logs in $LOGDIR) **"
+serial_note=""
+if [ -n "$SERIAL_CLASSES" ]; then serial_note=" + serial lane"; fi
+echo "** SHARDED UNIT RUN $([ "$rc" = 0 ] && echo PASSED || echo FAILED) ($SHARDS shards$serial_note; logs in $LOGDIR) **"

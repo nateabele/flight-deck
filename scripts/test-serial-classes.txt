@@ -1,0 +1,12 @@
+# Test classes that flake under scripts/test-unit.sh's parallel shards and run instead in one
+# serial lane, after the parallel shards finish. Each depends on real wall-clock scheduling —
+# a socket deadline, a Task-scheduling interleaving, or the host's shared mDNSResponder daemon —
+# and CPU contention from N sibling xctest processes perturbs exactly that. They all pass alone;
+# see docs/superpowers/plans for the investigation that put them here.
+#
+# Format: one class name per line, rest-of-line comment starting with `#` is the reason. Blank
+# lines and comment-only lines are ignored. A name here that is not a real XCTestCase subclass
+# fails the run loudly (same guard FD_TEST_FILTER gets) rather than silently running nothing.
+CodexPinReconcileTests   # orders concurrent passes via Task.yield()/withCheckedContinuation; parallel CPU contention perturbs the interleaving its assertions depend on
+FleetSocketLoopbackTests # a real TLS-PSK handshake + WebSocket loopback with wall-clock deadlines as low as 0.5s (authDeadline/handshakeDeadline tests) and wait(for:) timeouts
+PairingDiscoveryTests    # drives real Bonjour advertise/browse against the one shared system mDNSResponder daemon, which every other pairing-listener test in a sibling shard is also touching
