@@ -1923,3 +1923,52 @@ seat, 2026-09-27 — it reached review first time, 277 s, ~452k input / ~19k out
 - **No views.** The UI (Obsidian-style editor, diff overlay, per-hunk Revert, highlight-to-note)
   is still being designed; every engine seam it needs is in `PlanLayers`, `NoteAnchor`,
   `TapeStore.userEdits`/`notes(in:)` and the three new `TapeCommand`s.
+
+## From the planning UI redesign (2026-09-28), the views landed on top of the round engine
+
+**Not yet tuned:**
+
+- **Quiet/stall/convergence thresholds are named constants, not tuned values.**
+  `SeatRowModel.Thresholds` (quiet 30s, stalled 90s) and `ConvergenceSeries.Thresholds`
+  (`convergingRatio` 0.6, `agreeDrop` 5, `growRatio`/`growMin` for the "growing" diverging
+  reason) ship at spec-picked defaults — spec §12 calls this out by name as next-plan scope,
+  deliberately not tuned against real runs here.
+
+**Known gaps in the as-built views:**
+
+- **Convergence fold is O(rounds) per redraw, not incremental.** T5's fix report measured it at
+  1.46s off-main per landed round on a 30-checkpoint/17.5KB tape — folded once per round landed,
+  not per keystroke, so it doesn't cost a running UI anything today, but it re-walks every prior
+  checkpoint each time. Worth an incremental fold (carry the running tallies forward from the
+  last cycle) once tapes regularly run longer than 30 rounds.
+- **The live slot doesn't grow.** Spec §5 says "the live slot shows the playhead and grows";
+  `BoardModel` gives every slot an equal share of the tape's width instead, and there is no
+  honest progress fraction to grow it by (T7, deferred as ruled — the seats-done fraction lives
+  with T6/T8's work, not T7's).
+- **The heatmap can't align to a scrolled tape.** At a narrow pane where the departures board's
+  own tape is wider than the pane and scrolls, `slotColumns` returns nil, so the heatmap packs
+  its own columns after the name column instead of tracking the tape's actual scroll position
+  (T13).
+- **`BILLED` covers only the round in flight.** `LCDModel.billed` sums `SeatRowModel.cost`
+  across the *current* round's finished seats — the only place a cost is known, since only
+  claude states one and only once a seat finishes. Checkpoints record no cost, so there is no
+  run-total figure to fall back to across rounds; a dash means "nobody in this round has said
+  yet", not "free".
+- **Esc inside the plan editor may not reach the heatmap.** `NSTextView` binds Esc to
+  `complete:`, not `cancelOperation:`, while the editor has focus, so `.onExitCommand` may never
+  fire there even though it closes the heatmap correctly with focus anywhere else (T9b). If this
+  turns out to matter in the GUI checklist, `PlanNSTextView` could forward Esc while the heatmap
+  is open.
+
+**Accepted residual (pre-existing, not part of this redesign's scope):**
+
+- **The release review's footer and its Release button can disagree on the task count.**
+  `ReleaseSummary.text`'s "N tasks" counts only `isCreate` ops (new tasks); the button's "Release
+  N Tasks" (`ReleaseReviewView.releaseCount`) counts every op that will actually write,
+  including follow-ups, edits and edges. A change set with a follow-up alongside creates shows
+  two different N's in the same sheet. `ReleaseSummary` lives in `Sources/IntakeKit`, so its
+  wording is right (it says "task", never "bead" — guarded by
+  `TerminologyGuardTests.testReleaseSheetHasNoBeadWording`), but its *count* predates T14 and
+  T14's brief covered wording/grouping/buttons only, not this counting semantics. Worth
+  reconciling — either make the footer count every releasing op too, or label it "N new tasks"
+  so the two numbers stop looking like a bug.

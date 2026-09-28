@@ -610,6 +610,13 @@ final class IntakeService: ObservableObject {
         tapes[id].map { tapeStore(id).notes(in: $0) } ?? []
     }
 
+    /// How many notes a round consumed on `id`'s tape, once shaping has ended too
+    /// (`storedTape`'s disk fallback, unlike `notes(_:)` above) — the release review's "N
+    /// notes carried into task notes" (spec §10).
+    func consumedNotesCount(_ id: UUID) -> Int {
+        tapeStore(id).notes(in: storedTape(id)).lazy.filter { $0.consumedBy != nil }.count
+    }
+
     /// One clock beat: re-read the tape of every `.shaping` intake whose `tape.json` changed
     /// since the last read (one stat each when nothing did), publish it, move a tape that
     /// reached review into release review, bring back a runner that died mid-work, and collect

@@ -49,7 +49,11 @@ public enum ReleaseSummary {
             ChangeSet(graphObservedAt: .distantPast, ops: keptOps), ratings: keptRatings, hasSession: hasSession)
 
         var parts: [String] = []
-        if beads > 0 { parts.append("\(beads) \(plural(beads, "bead"))") }
+        // "task", never "bead": this reaches the release-review sheet's footer verbatim, and
+        // the planning-UI redesign renames everything the human reads (spec §2) — the
+        // terminology guard can't reach IntakeKit's own literals, so this one has to hold the
+        // line itself.
+        if beads > 0 { parts.append("\(beads) \(plural(beads, "task"))") }
         if heldEdges > 0 { parts.append("\(heldEdges) held \(plural(heldEdges, "edge"))") }
         // Spec §8.4's format is "N notices (x inject, y mail)" — a `reclaim` is a graph
         // write IntakeDelivery makes on the holder's behalf, not a notice sent *to* them, so

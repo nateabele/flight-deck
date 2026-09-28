@@ -24,19 +24,33 @@ struct ReleaseReviewView: View {
     /// work already rendered.
     @State private var refreshWarning: String?
 
-    init(store: SessionStore, intakeID: UUID, onClose: @escaping () -> Void) {
+    /// `previewReview` seeds `review` directly rather than waiting on `.task`'s own
+    /// `refresh()` — only `PlanningRenderTests` passes one. A real `reviewModel()` call hops
+    /// off `IntakeService`'s `@MainActor` isolation for its `br` reads and back again, and an
+    /// offscreen render's manual `RunLoop.run(until:)` pumping never redelivers that hop-back
+    /// (GCD's main-queue drain doesn't reenter itself mid-frame), so the sheet would otherwise
+    /// render its permanent spinner. Every real call site leaves this nil and loads normally.
+    init(store: SessionStore, intakeID: UUID, onClose: @escaping () -> Void, previewReview: ReleaseReview? = nil) {
         self.store = store
         self.intakeID = intakeID
         self.onClose = onClose
+        _review = State(initialValue: previewReview)
+        _hasLoadedOnce = State(initialValue: previewReview != nil)
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text("Release Review").font(.headline)
+                Text(UIText.releaseSheetTitle).font(.headline)
                 Spacer()
-                Button("Close") { onClose() }
-                    .keyboardShortcut(.cancelAction)
+                // Absent while still loading (there is nothing to count yet) or after a
+                // failed load — the retry state below has its own message.
+                if let review {
+                    Text(UIText.selectedCount(releaseCount(review), of: ops(review).count))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("release-review-selected-count")
+                }
             }
 
             if let review {
@@ -64,28 +78,6 @@ struct ReleaseReviewView: View {
                 // started — the sheet is the only guard, so every row control (and the
                 // Release button below) has to freeze together while releasing.
                 .disabled(releasing || review.intake.state == .releasing)
-
-                Divider()
-
-                HStack {
-                    Text(footerSummary(review))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    Button(UIText.releaseButton(releaseCount(review))) {
-                        // Synchronous, before the Task: SwiftUI runs button actions one at a
-                        // time on the main actor, so a second click landing before this
-                        // state change re-renders the (now-disabled) button still sees
-                        // `releasing == true` here and bails — it can never start a second
-                        // Task, so `release()` itself can never be entered twice.
-                        guard !releasing else { return }
-                        releasing = true
-                        Task { await release() }
-                    }
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(!review.canRelease || releasing || review.intake.state == .releasing)
-                    .accessibilityIdentifier("release-review-release")
-                }
             } else if hasLoadedOnce {
                 VStack(spacing: 8) {
                     Text("Couldn't load the review").foregroundStyle(.secondary)
@@ -96,6 +88,49 @@ struct ReleaseReviewView: View {
             } else {
                 ProgressView()
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+
+            Divider()
+
+            // The footer's own reads (the summary line, the carried-notes line) only make
+            // sense once a review is loaded; Cancel stays reachable in every state below —
+            // loading or a failed load still needs a way out of the sheet.
+            VStack(alignment: .leading, spacing: 4) {
+                if let review {
+                    Text(footerSummary(review))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    if let carried = notesCarriedLine(review) {
+                        Text(carried)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .accessibilityIdentifier("release-review-notes-carried")
+                    }
+                }
+                HStack {
+                    Spacer()
+                    // Cancel leading, Release trailing and default (spec §10) — the pair
+                    // reads left-to-right as "back out" then "go", HIG's own sheet-button
+                    // order.
+                    Button("Cancel") { onClose() }
+                        .keyboardShortcut(.cancelAction)
+                        .accessibilityIdentifier("release-review-cancel")
+                    if let review {
+                        Button(UIText.releaseButton(releaseCount(review))) {
+                            // Synchronous, before the Task: SwiftUI runs button actions one
+                            // at a time on the main actor, so a second click landing before
+                            // this state change re-renders the (now-disabled) button still
+                            // sees `releasing == true` here and bails — it can never start a
+                            // second Task, so `release()` itself can never be entered twice.
+                            guard !releasing else { return }
+                            releasing = true
+                            Task { await release() }
+                        }
+                        .keyboardShortcut(.defaultAction)
+                        .disabled(!review.canRelease || releasing || review.intake.state == .releasing)
+                        .accessibilityIdentifier("release-review-release")
+                    }
+                }
             }
         }
         .padding(16)
@@ -109,22 +144,18 @@ struct ReleaseReviewView: View {
     @ViewBuilder
     private func sections(for review: ReleaseReview) -> some View {
         let ops = self.ops(review)
-        let creates = ops.indices.filter { isCreate(ops[$0]) }
-        let edges = ops.indices.filter { isEdge(ops[$0]) }
-        let edits = ops.indices.filter { isEdit(ops[$0]) }
-        let followUps = ops.indices.filter { isReopenOrFollowUp(ops[$0]) }
+        let creates = ops.indices.filter { isNewTask(ops[$0]) }
+        let edits = ops.indices.filter { isEditLike(ops[$0]) }
+        let dependencies = ops.indices.filter { isEdge(ops[$0]) }
 
         if !creates.isEmpty {
             Section(UIText.newTasksSection) { ForEach(creates, id: \.self) { row($0, review) } }
         }
-        if !edges.isEmpty {
-            Section("Edges") { ForEach(edges, id: \.self) { row($0, review) } }
-        }
         if !edits.isEmpty {
-            Section("Edits") { ForEach(edits, id: \.self) { row($0, review) } }
+            Section(UIText.editsSection) { ForEach(edits, id: \.self) { row($0, review) } }
         }
-        if !followUps.isEmpty {
-            Section("Reopens & follow-ups") { ForEach(followUps, id: \.self) { row($0, review) } }
+        if !dependencies.isEmpty {
+            Section(UIText.dependenciesSection) { ForEach(dependencies, id: \.self) { row($0, review) } }
         }
     }
 
@@ -260,6 +291,13 @@ struct ReleaseReviewView: View {
             hasSession: { [review] agent in hasSession(review, agent) })
     }
 
+    /// "1 note carried into task notes" (spec §10) — absent when the round consumed none, so
+    /// the footer doesn't claim a hand-off that didn't happen.
+    private func notesCarriedLine(_ review: ReleaseReview) -> String? {
+        let n = store.intakeService.consumedNotesCount(intakeID)
+        return n > 0 ? UIText.notesCarried(n) : nil
+    }
+
     /// No FD session means no way to inject or reclaim — mail is the only channel, whatever
     /// the rating. Matches `DeliveryPlanner.plan`'s own gate exactly.
     private func plannedDelivery(id: String, assignee: String, rating: DeliveryRating, reason: String, hasSession: Bool) -> String {
@@ -351,21 +389,23 @@ struct ReleaseReviewView: View {
         return false
     }
 
-    private func isCreate(_ op: ChangeOp) -> Bool {
-        if case .createBead = op { return true }
-        return false
+    /// New tasks section (spec §10): a follow-up is a new bead too, just one that names the
+    /// bead it follows — it belongs beside `createBead`, not with the edit it was raised from.
+    private func isNewTask(_ op: ChangeOp) -> Bool {
+        switch op {
+        case .createBead, .followUp: true
+        default: false
+        }
     }
     private func isEdge(_ op: ChangeOp) -> Bool {
         if case .addEdge = op { return true }
         return false
     }
-    private func isEdit(_ op: ChangeOp) -> Bool {
-        if case .editBead = op { return true }
-        return false
-    }
-    private func isReopenOrFollowUp(_ op: ChangeOp) -> Bool {
+    /// Edits section (spec §10): a reopen changes an existing bead's status exactly like an
+    /// `editBead` changes its fields, so the two read as one group.
+    private func isEditLike(_ op: ChangeOp) -> Bool {
         switch op {
-        case .reopen, .followUp: true
+        case .editBead, .reopen: true
         default: false
         }
     }
