@@ -129,7 +129,7 @@ final class SessionStore: ObservableObject {
     //       the two places `SessionStore.surfaces` is populated.
     //     - Every `selectionChangeReason = "..."` tag-site: `select(_:selecting:)`, `restore()`,
     //       `selectSession(_:)`, `cycleSelection(forward:)`, `closeSession`'s selected-session
-    //       fallback, and `reopenLastClosed(project:)`.
+    //       fallback, `reopenLastClosed(project:)`, and `traverseHistory`.
     //   In `SessionSidebar.swift`:
     //     - `beginRename()`'s `store.tagNextSelectionChange("beginRename()")` call.
     //     - `SessionSidebar.body`'s custom `selectionBinding` now also routes project vs.
@@ -178,6 +178,20 @@ final class SessionStore: ObservableObject {
             // comment above), so a session reselected onto itself still clears a stray project
             // selection rather than leaving `RootView` showing both a project and a session.
             if selectedSessionID != nil { selectedProjectID = nil }
+            // `List(selection:)` can write nil on a deselect between two real clicks
+            // (X -> nil -> Y): `oldValue` is nil by the time Y lands, so using it alone as
+            // `from` would record nothing and Back from Y would skip X entirely.
+            // `lastSelectedSession` remembers the most recent non-nil selection across that
+            // gap; it is updated below unconditionally, not just when this change is actually
+            // recorded, because it tracks "what was last shown", a fact that is true whether
+            // or not the current change happens to be suppressed.
+            noteSelectionChange(
+                from: (oldValue ?? lastSelectedSession).map { SelectionTarget.session(id: $0) },
+                to: selectedSessionID.map { SelectionTarget.session(id: $0) }
+            )
+            if let selectedSessionID {
+                lastSelectedSession = selectedSessionID
+            }
             #if DEBUG
             Self.selectionDebugLogger.debug(
                 "selectedSessionID old=\(oldValue?.uuidString ?? "nil", privacy: .public) new=\(self.selectedSessionID?.uuidString ?? "nil", privacy: .public) reason=\(self.selectionChangeReason, privacy: .public) t=\(Date().timeIntervalSince1970, privacy: .public)"
@@ -248,6 +262,27 @@ final class SessionStore: ObservableObject {
         selectedProjectID = nil
         if let id = selectedSessionID { setUnread(id, false) }
         persist()
+    }
+
+    /// See `SelectionHistory`. Recorded from `selectedSessionID`'s `didSet` — the one funnel
+    /// every selection change passes through, the sidebar's `List(selection:)` binding
+    /// included, which is why recording in `selectSession(_:)` would miss every click.
+    private(set) var selectionHistory = SelectionHistory()
+
+    /// The last non-nil value `selectedSessionID` held, kept across an intervening nil write —
+    /// see the comment in `selectedSessionID`'s `didSet` for why a deselect would otherwise
+    /// erase the "from" side of the next real transition.
+    private var lastSelectedSession: UUID?
+
+    /// Set while `goBack`/`goForward` or `restore` assign the selection: a traversal is not a
+    /// new place to record, and restoring last run's selection is not a navigation either. A
+    /// session created, reopened, or resumed through `select(_:selecting:)` is NOT suppressed —
+    /// the user sees that selection happen, so it belongs in history like any other.
+    private var isSuppressingHistory = false
+
+    private func noteSelectionChange(from: SelectionTarget?, to: SelectionTarget?) {
+        guard !isSuppressingHistory else { return }
+        selectionHistory.record(from: from, to: to)
     }
 
     /// Sessions that finished while the user was not looking at them, rendered as the unread
@@ -582,6 +617,12 @@ final class SessionStore: ObservableObject {
                     .first { $0.pinnedConversationID == conversationID }?.transcriptDirectory
             }
         )
+        // Picked up at construction, not left to `controlSocket`'s own `didSet`: that observer
+        // only fires on a value already set by the time this stack is built. Without this line,
+        // a stack built AFTER `FlightDeckApp` already set `controlSocket` (the common case — the
+        // app wires its socket up before a user opens any codex tab) would carry a `nil` adapter
+        // forever, since nothing would ever assign to `controlSocket` again to trigger `didSet`.
+        stack.adapter.controlSocket = controlSocket
         // Composed on top of the stack's own hook rather than replacing it: failing every
         // in-flight request is the stack's job, forgetting the stack is the store's, and both
         // have to happen for the same event.
@@ -1148,7 +1189,19 @@ final class SessionStore: ObservableObject {
     /// socket is off. `FlightDeckApp` sets this (with `controlSecret`) when
     /// `ControlEnvironment.isEnabled()`; left nil under a UITest reset so a GUI test's tabs
     /// never learn a live socket. Read at launch time only, like `preferences`.
-    var controlSocket: URL?
+    ///
+    /// `didSet` pushes a late-arriving value onto every codex stack that already exists —
+    /// the other order from `makeCodexStackIfNeeded`'s own assignment (a stack built AFTER
+    /// this is set). Without both, whichever order happens to occur leaves that order's
+    /// stacks with a `nil` adapter forever: this property changes at most once in practice
+    /// (`FlightDeckApp` sets it once, at launch), so there is no second chance later.
+    var controlSocket: URL? {
+        didSet {
+            for stack in codexStacks.values {
+                stack.adapter.controlSocket = controlSocket
+            }
+        }
+    }
     /// The key each tab's `FLIGHT_DECK_CALLER` token is minted under — `FleetService`'s own
     /// `controlSecret`, which `FlightDeckApp` copies here so the token a tab carries is one the
     /// server that judges it can verify. Only consulted when `controlSocket` is also set.
@@ -2634,6 +2687,9 @@ final class SessionStore: ObservableObject {
         #if DEBUG
         selectionChangeReason = "select(_:selecting:)"
         #endif
+        // Recorded like any other selection: the user sees a new tab open, get reopened, or
+        // get resumed, so ⌃⌘← returning to whatever they had open before is exactly what they
+        // expect — only `restore()`'s silent launch-time selection is not a navigation.
         selectedSessionID = id
     }
 
@@ -2720,6 +2776,10 @@ final class SessionStore: ObservableObject {
             // observe the stack with the probe done but the mode unset.
             let version = try await CodexVersionProbe.checkOffMainActor()
             stack.adapter.historyMode = CodexVersionProbe.supportsHistoryMode(version) ? "legacy" : nil
+            // Same timing and reason as `historyMode`: set before any launch line can be typed.
+            // `controlSocket` reaches the adapter separately (its `didSet` and the stack
+            // builder); the flags need both, and neither write depends on the other's order.
+            stack.adapter.controlAccessSupported = CodexVersionProbe.supportsControlAccess(version)
             try stack.transport.start()
             try await CodexProcessTransport.verifyHandshake(stack.rpc)
         }
@@ -3298,9 +3358,14 @@ final class SessionStore: ObservableObject {
         #if DEBUG
         selectionChangeReason = "restore()"
         #endif
+        // Loaded BEFORE the assignment below: its `didSet` persists, and with the history
+        // still empty that save would overwrite last run's stacks on every launch.
+        selectionHistory = snapshot.selectionHistory ?? SelectionHistory()
+        isSuppressingHistory = true
         selectedSessionID = snapshot.selectedSessionID.flatMap {
             restoredIDs.contains($0) ? $0 : nil
         } ?? restoredIDs.first
+        isSuppressingHistory = false
         persist()
         // Started only when a codex tab actually came back, which is what keeps the app-server
         // lazy: a user who restores nothing but claude tabs must never have `codex` spawned
@@ -3842,6 +3907,7 @@ final class SessionStore: ObservableObject {
         // Stamped on every save so the next launch can tell "this run is still going" from
         // "this run died and left its children behind".
         snapshot.owner = Self.selfIdentity
+        snapshot.selectionHistory = selectionHistory.isEmpty ? nil : selectionHistory
         persistence?.save(snapshot)
     }
 
@@ -3864,6 +3930,35 @@ final class SessionStore: ObservableObject {
 
     /// ⌘⇧[. See `selectNextSession()`.
     func selectPreviousSession() { cycleSelection(forward: false) }
+
+    /// ⌃⌘←. No-op when nothing earlier is still open.
+    func goBack() { traverseHistory { $0.goBack(from: $1, isLive: $2) } }
+
+    /// ⌃⌘→. See `goBack()`.
+    func goForward() { traverseHistory { $0.goForward(from: $1, isLive: $2) } }
+
+    private func traverseHistory(
+        _ step: (inout SelectionHistory, SelectionTarget?, (SelectionTarget) -> Bool) -> SelectionTarget?
+    ) {
+        let current = selectedSessionID.map { SelectionTarget.session(id: $0) }
+        let destination = step(&selectionHistory, current) { [self] target in
+            switch target {
+            case .session(let id):
+                // `id != selectedSessionID` too: without it, Back can land on the row already
+                // showing — a keypress that visibly does nothing but still eats a history entry.
+                return locate(id) != nil && id != selectedSessionID
+            case .project: return false  // master has no project selection; see fi-tab-nav
+            }
+        }
+        guard case .session(let id)? = destination else { return }
+        #if DEBUG
+        selectionChangeReason = "traverseHistory"
+        #endif
+        isSuppressingHistory = true
+        defer { isSuppressingHistory = false }
+        // The `didSet` persists, which also writes the stacks `step` just mutated.
+        selectedSessionID = id
+    }
 
     /// Context-menu "Mark as Unread". `unreadIdle` is `private(set)`, so this is the sidebar's
     /// only way in.
@@ -4778,11 +4873,25 @@ final class SessionStore: ObservableObject {
                 )
             }
         )))
+        // Same one-entry argument, for `selectionHistory` rather than `closedSessions`: if the
+        // selected tab lives in this project, each child close below lets `selectionAfterClosing`
+        // pick a sibling, and — unsuppressed — every one of those picks would push its own Back
+        // entry, turning one ⌘W-on-a-project into a stack of history hops that all point inside
+        // a project which no longer exists. Captured before the loop and recorded once after,
+        // from wherever the selection actually started to wherever it lands once every child
+        // (and any cascade among them) is gone.
+        let selectionBeforeClose = selectedSessionID
+        isSuppressingHistory = true
         // Snapshot the ids first: `closeSession` mutates `repos`, so iterating the live
         // array would walk off the end.
         for sessionID in repos[index].sessions.map(\.id) {
             closeSession(sessionID, recordingHistory: false)
         }
+        isSuppressingHistory = false
+        noteSelectionChange(
+            from: selectionBeforeClose.map { SelectionTarget.session(id: $0) },
+            to: selectedSessionID.map { SelectionTarget.session(id: $0) }
+        )
         // Re-found rather than reusing `index`: every `closeSession` above rewrote `repos`.
         repos.removeAll { $0.id == id }
         // A view of a project that no longer exists. Left set, it also made `isViewed` false
@@ -7394,8 +7503,8 @@ final class SessionStore: ObservableObject {
             guard let anchor = anchors[session.id], let entry = rows[anchor.pid] else {
                 continue
             }
-            next[session.id] = SessionStatus(
-                activity: entry.activity,
+            next[session.id] = SessionStatus.tree(
+                agent: entry.activity,
                 waitingFor: entry.waitingFor,
                 subagentCount: subagentCounts[session.id] ?? 0
             )
@@ -8120,6 +8229,20 @@ final class SessionStore: ObservableObject {
         guard subagentCounts[id] != count else { return }
         subagentCounts[id] = count
         guard var status = statuses[id] else { return }
+        // The count is part of the session's activity (see `SessionStatus.tree`), so a change
+        // that flips it is a real transition: routed through `commitStatuses`, where unread,
+        // notifications and the fleet event are decided — the last subagent finishing under an
+        // idle agent IS the session finishing. Waiting for the next registry tick instead
+        // would hold the sidebar wrong for up to a poll.
+        let tree = SessionStatus.tree(
+            agent: status.agentActivity, waitingFor: status.waitingFor, subagentCount: count
+        )
+        if tree.activity != status.activity {
+            var next = statuses
+            next[id] = tree
+            commitStatuses(next, backgroundWork: backgroundWorkSessions)
+            return
+        }
         status.subagentCount = count
         statuses[id] = status
         emit(.activityChanged(
@@ -8243,10 +8366,10 @@ final class SessionStore: ObservableObject {
         repos[at.repo].sessions[at.session].transcriptDirectory = directory
 
         // Same reasoning as `repin`, and for the same reason it is only the backing count:
-        // the new watcher starts with an empty `outstandingAgents`, so an `agentFinished`
-        // for an id the old one was tracking is a no-op and `countChanged` never fires. The
-        // badge would sit at its pre-retarget value until some later turn boundary with a
-        // non-empty set, which for a tab that entered a worktree mid-turn may be never.
+        // the new watcher starts with an empty `outstandingAgents`, so an `agentFinished` or
+        // task notification for an id the old one was tracking is a no-op and `countChanged`
+        // never fires. The badge would sit at its pre-retarget value until the new watcher
+        // happens to count something itself, which may be never.
         subagentCounts[tabID] = 0
 
         stopWatching(tabID)
@@ -8446,8 +8569,8 @@ final class SessionStore: ObservableObject {
     private func applyActivity(_ activity: SessionActivity, to tabID: UUID) {
         guard session(for: tabID) != nil else { return }
         var next = statuses
-        next[tabID] = SessionStatus(
-            activity: activity,
+        next[tabID] = SessionStatus.tree(
+            agent: activity,
             // Not carried over from the previous status: `waitingFor` describes *this*
             // report's block, and keeping a stale reason on a tab that has moved on would
             // put the wrong sentence in the sidebar and in the notification body.

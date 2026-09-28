@@ -165,6 +165,13 @@ struct SessionSnapshot: Codable, Equatable {
     /// decodes an optional with `decodeIfPresent`, so every existing `sessions.json` still
     /// decodes instead of throwing and wiping every tab.
     var terminalSize: TerminalSize?
+
+    /// ⌃⌘← / ⌃⌘→'s stacks, so Back after a relaunch goes where it would have gone before it.
+    ///
+    /// Optional for the same load-bearing reason as `processes` above: synthesized `Codable`
+    /// decodes an optional with `decodeIfPresent`, so every existing `sessions.json` still
+    /// decodes. Written `nil` when both stacks are empty, so the common file stays readable.
+    var selectionHistory: SelectionHistory?
 }
 
 @MainActor

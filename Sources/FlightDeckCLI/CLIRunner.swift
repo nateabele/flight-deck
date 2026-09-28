@@ -1,5 +1,6 @@
 import FleetKit
 import Foundation
+import Network
 
 /// What the process around the runner knows that the command line does not.
 struct CLIContext {
@@ -44,9 +45,12 @@ final class CLIRunner {
     private var fleet = FleetSnapshot.empty
     private var lastSeq = 0
     /// The socket reached `.ready`, or any frame arrived. Before that, a disconnect is an
-    /// unreachable Mac (69); after it, a dropped connection. `onReady` is needed as well as
-    /// frames: a caught-up `tail --since` resume is answered with an empty replay, so a quiet
-    /// fleet sends nothing at all, and judging by frames alone turned an app restart into 69.
+    /// unreachable Mac (69) — unless the agent's sandbox refused the `connect()` itself, which
+    /// `disconnected` checks first and reports as 77 whatever this says, because "start Flight
+    /// Deck" is the wrong advice for a tab that cannot reach a running one. After it, a dropped
+    /// connection. `onReady` is needed as well as frames: a caught-up `tail --since` resume is
+    /// answered with an empty replay, so a quiet fleet sends nothing at all, and judging by
+    /// frames alone turned an app restart into 69.
     private var reachedMac = false
     private var dispatched = false
     /// Every exit path goes through `finish`, and this makes a second one a no-op — a late
@@ -153,6 +157,10 @@ final class CLIRunner {
 
     private func disconnected(_ error: Error?) {
         guard !finished else { return }
+        // Checked before `reachedMac`: the sandbox refuses the `connect()` syscall itself, so
+        // this fires on the very first attempt, and it means something a retry cannot fix —
+        // unlike an ordinary drop, `tail`/`wait` must not schedule a reconnect against it either.
+        if Self.isSandboxRefusal(error) { return finish(77) }
         // The 69 message names the socket path, which only the main program knows.
         guard reachedMac else { return finish(69) }
         switch invocation.command {
@@ -169,6 +177,18 @@ final class CLIRunner {
         default:
             fail("disconnected")
         }
+    }
+
+    /// EPERM/EACCES on the control socket's `connect()` is the agent's own sandbox denying the
+    /// syscall, not Flight Deck being unreachable — the two are indistinguishable by symptom
+    /// (both surface as a disconnect with no frame ever received) but need different advice, so
+    /// this is the one place both possible shapes of "it's the sandbox" are recognized: the
+    /// `NWError` `FleetClient` hands back from `NWConnection`'s own state, and a `POSIXError`
+    /// in case a future transport surfaces the raw syscall error instead.
+    private static func isSandboxRefusal(_ error: Error?) -> Bool {
+        if case .posix(let code)? = error as? NWError { return code == .EPERM || code == .EACCES }
+        if let posixError = error as? POSIXError { return posixError.code == .EPERM || posixError.code == .EACCES }
+        return false
     }
 
     private func dispatch() {

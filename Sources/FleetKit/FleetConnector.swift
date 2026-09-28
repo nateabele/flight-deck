@@ -564,9 +564,13 @@ public final class FleetConnector: @unchecked Sendable {
             // time, and never refreshed. Here it covers snapshot and replay alike, once per
             // connection, because this block only runs when `winner` is installed.
             //
-            // (Nor is this "the same hook the New Session menu hangs off", as the comment in
-            // the `.snapshot` arm also claimed. That menu hangs off `onFleet`, which fires on
-            // snapshots *and* on every event.)
+            // (Nor is this literally "the same hook the New Session menu hangs off", as the
+            // comment in the `.snapshot` arm once claimed — this fires from inside `accept()`;
+            // the menu's own refresh lives downstream in `FleetModel.refreshNewSessionOptions`.
+            // But that menu no longer hangs off `onFleet` either: it, and the reopen stack's
+            // initial ask, are anchored on this same `.connected` report now, same as this
+            // block — see `refreshNewSessionOptions`'s own comment. Only the reopen stack's
+            // `sessionAdded`/`sessionRemoved` topups still ride `onEvent`.)
             //
             // Two orderings inside this block are load-bearing. After `winner = client`, or
             // `requestMacEndpoints` no-ops on its own `guard let winner`. After `promote()`,

@@ -110,6 +110,8 @@ before or after operands, but never after `--`.
 
 Full command table, wire mapping, and the `--help` output: **[design spec](superpowers/specs/2026-09-24-flightdeck-cli-design.md)**. What each tab is allowed to reach — any session, only its own, or nothing — is set per-Mac in Preferences → Devices → "Command Line"; see **[ARCHITECTURE.md](ARCHITECTURE.md)**, "Local control socket".
 
+Codex tabs (codex 0.155.1 or newer) reach `flightdeck` through a narrow sandbox grant, for the control socket file only, that Flight Deck adds to their launch line (not when you chose a codex sandbox in Preferences); a blocked agent gets exit `77`. After a codex update, run `./scripts/test-codex-live.sh` to check the grant still holds — see ARCHITECTURE.md, "Codex tabs".
+
 ## How the code is laid out
 
 The spine is `FlightDeckApp → RootWindow → TerminalPane → GhosttyApp → Ghostty.SurfaceView`. Flight Deck's own code is small; the terminal surface is adapt-copied from Ghostty and decoupled from its app shell. Component map and key files: **[ARCHITECTURE.md](ARCHITECTURE.md)**.

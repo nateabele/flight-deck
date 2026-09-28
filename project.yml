@@ -285,6 +285,15 @@ targets:
   # APFS, the same directory entry as `Sources/FlightDeck` (the app's own source tree) — files
   # written there landed inside the live app sources instead of a new folder, and this
   # `sources:` list then pulled the whole 75-file app tree into this target along with them.
+  #
+  # PRODUCT_MODULE_NAME below is the same fix again, one knob over: PRODUCT_NAME alone leaves
+  # the module name defaulting to `$(PRODUCT_NAME:c99extidentifier)`, i.e. still lowercase
+  # `flightdeck` — which collides with the app's `FlightDeck.swiftmodule` in the shared
+  # `Products/Debug/` directory on case-insensitive APFS, the same way the target name once
+  # collided in the intermediates directory above. That renders `FlightDeck.swiftmodule` (correct
+  # case) unable to land in Products/Debug at all, so `@testable import FlightDeck` in
+  # FlightDeckTests fails with "unable to resolve module dependency: 'FlightDeck'" on any clean
+  # build. The earlier target rename fixed only the intermediates collision, not this one.
   FlightDeckCLI:
     type: tool
     platform: macOS
@@ -302,11 +311,7 @@ targets:
     settings:
       base:
         PRODUCT_NAME: flightdeck
-        # The module name otherwise defaults to PRODUCT_NAME ("flightdeck"), which on this
-        # case-insensitive APFS volume is the same DerivedData path as the app's "FlightDeck"
-        # module: the two builds overwrite each other's .swiftdoc/.abi.json and
-        # `@testable import FlightDeck` stops compiling. The binary keeps its name.
-        PRODUCT_MODULE_NAME: FlightDeckCLITool
+        PRODUCT_MODULE_NAME: FlightDeckCLI
         LD_RUNPATH_SEARCH_PATHS: "@executable_path/../Frameworks"
         HEADER_SEARCH_PATHS: $(SRCROOT)/vendor/boringssl-artifacts/include
         DEVELOPMENT_TEAM: 2T9E3N27J8

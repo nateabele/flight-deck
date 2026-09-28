@@ -703,6 +703,30 @@ final class SessionTimelineScreenTests: XCTestCase {
         XCTAssertNil(SessionTimelineScreen.elapsedText(since: "not-a-date"))
     }
 
+    /// **The pure half of the quiet-poll regression fix.** This banner used to refresh only as
+    /// a side effect of the timeline model's per-poll invalidation; once that stopped firing on
+    /// a quiet connection, "Started N ago" would freeze until something else redrew the row.
+    /// The fix wraps just this `Text` in `TimelineView(.periodic(from: .now, by: 30))`, feeding
+    /// it `context.date` through `elapsedText`'s new `at:` parameter — what this file's own note
+    /// at the top says a unit test cannot reach is that `TimelineView` actually keeps firing, so
+    /// this pins the half it can: that a later `at`, held apart from the wall clock, really does
+    /// advance the wording. Both timestamps are fixed rather than `Date()`-relative, so this has
+    /// none of the bucket-boundary flakiness the tests above guard against.
+    func testElapsedTextAdvancesWithALaterAtIndependentOfTheWallClock() {
+        let startedAt = "2026-01-01T00:00:00Z"
+        let anHourLater = ISO8601DateFormatter().date(from: "2026-01-01T01:00:00Z")!
+        let twoHoursLater = ISO8601DateFormatter().date(from: "2026-01-01T02:00:00Z")!
+
+        XCTAssertEqual(
+            SessionTimelineScreen.elapsedText(since: startedAt, at: anHourLater),
+            "Started 1 hour ago"
+        )
+        XCTAssertEqual(
+            SessionTimelineScreen.elapsedText(since: startedAt, at: twoHoursLater),
+            "Started 2 hours ago"
+        )
+    }
+
     // MARK: A search jump's fading highlight
 
     /// The ordinary case: the timer fires for the row it was armed for, and nothing else has

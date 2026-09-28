@@ -276,6 +276,7 @@ struct FlightDeckApp: App {
                 TabNavigationCommands(store: store)
                 SearchCommands()
                 PlanningCommands()
+                ShortcutOverlayCommands()
             }
 
         // A `Settings` scene gives ⌘, and the standard Preferences window for free.

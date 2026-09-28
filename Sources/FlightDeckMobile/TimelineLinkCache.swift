@@ -24,6 +24,17 @@ final class TimelineLinkCache {
     }
 
     func linked(for item: TimelineItem) -> AttributedString {
+        // A spilled item rehydrates with a placeholder body (see `TimelineItemBody
+        // .isPlaceholder`) before the real one lands — caching that placeholder's text under
+        // the item's permanent id would keep serving it after rehydration replaces the body,
+        // since nothing evicts an entry just because the item it was keyed on changed
+        // underneath it. Recompute every call instead of storing it: a placeholder is rare and
+        // brief next to steady-state scrolling, so the repeat detector cost is cheaper than the
+        // staleness bug.
+        guard !item.body.isPlaceholder else {
+            computeCount += 1
+            return TimelineStyle.linkedPlainText(item.body.text)
+        }
         if let hit = store[item.id] {
             touch(item.id)
             return hit

@@ -99,6 +99,20 @@ enum CodexVersionProbe {
         isAtLeast(version, minimum: historyModeMinimumVersion)
     }
 
+    /// The floor for typing `CodexControlAccess`'s flags on a codex tab's launch line — a
+    /// capability gate like `historyModeMinimumVersion`. The grant needs the experimental
+    /// `network_proxy` feature and a permission profile's `network.unix_sockets` map, and was
+    /// verified live only on 0.155.1 and 0.157.1. An experimental feature has no stability
+    /// promise, so an older codex gets no flags: its `flightdeck` exits 77 with the sandbox
+    /// message, rather than the tab failing to launch on a flag that codex does not accept.
+    static let controlAccessMinimumVersion = "0.155.1"
+
+    /// Whether `version` is new enough for `CodexControlAccess`'s flags. See
+    /// `controlAccessMinimumVersion` for why the floor sits where it does.
+    static func supportsControlAccess(_ version: String) -> Bool {
+        isAtLeast(version, minimum: controlAccessMinimumVersion)
+    }
+
     /// How long any single step of the probe may take before it is treated as a failure.
     ///
     /// Matches `CodexProcessTransport.verifyHandshake`'s default, and for the same reason:

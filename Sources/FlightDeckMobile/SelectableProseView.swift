@@ -76,20 +76,43 @@ struct SelectableProseView: UIViewRepresentable {
         /// Invalidates the cache when the text size changes, since the base font is baked in.
         private var cachedCategory: UIContentSizeCategory?
 
+        /// Whether `cachedAttributed` has already been handed to `view`, tracked explicitly
+        /// rather than by reading `view.attributedText` back and comparing. `UITextView`
+        /// normalizes what it is handed on the way into its text storage, so the getter can
+        /// hand back a copy that is not `isEqual` to what was just set — confirmed unequal for
+        /// link/code-bearing prose, the shape of the 3.7K-character message this was measured
+        /// against, though simple prose can round-trip equal. A guard keyed on that comparison
+        /// is therefore unreliable rather than merely slow: on the prose that matters it never
+        /// short-circuits, so `sizeThatFits` measuring a scrolling row several times a frame was
+        /// reassigning `attributedText` and forcing a relayout before the measurement it was
+        /// there to speed up (3.54ms vs 2.09ms measure-only). Cleared whenever the cache above
+        /// is invalidated, which is every case that legitimately needs a reassignment.
+        private var appliedCachedAttributed = false
+
+        /// How many times `apply` has actually assigned `attributedText`, kept only so a test
+        /// can see the guard above short-circuit without timing anything.
+        private(set) var assignmentCount = 0
+
         init(onReply: @escaping (String) -> Void) {
             self.onReply = onReply
         }
 
-        /// Put `markdown` into `view`, parsing only when it is genuinely new.
+        /// Put `markdown` into `view`, parsing only when it is genuinely new, and assigning
+        /// only when what would be assigned has not already been.
         func apply(_ markdown: String, to view: UITextView) {
             let category = view.traitCollection.preferredContentSizeCategory
             if cachedMarkdown != markdown || cachedCategory != category || cachedAttributed == nil {
                 cachedAttributed = TimelineProseText.attributed(markdown)
                 cachedMarkdown = markdown
                 cachedCategory = category
+                appliedCachedAttributed = false
             }
-            guard let attributed = cachedAttributed else { return }
-            if view.attributedText != attributed { view.attributedText = attributed }
+            guard let attributed = cachedAttributed, !appliedCachedAttributed else { return }
+            // See `appliedCachedAttributed` above for why this can't be a `view.attributedText
+            // != attributed` comparison instead.
+            view.attributedText = attributed
+            appliedCachedAttributed = true
+            assignmentCount += 1
         }
 
         /// **Reply is appended, not spliced in beside Copy.** The suggested actions arrive as an
