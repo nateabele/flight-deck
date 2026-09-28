@@ -63,6 +63,8 @@ final class IntakeServiceLiveTests: XCTestCase {
     private var runner: FakeRunnerController!
     private var reads: ReadLog!
     private var clockNow = Date(timeIntervalSince1970: 1_800_000_000)
+    /// What the service asked VoiceOver to say (`IntakeService.announce`).
+    private var announced: [String] = []
 
     override func setUp() {
         super.setUp()
@@ -94,7 +96,8 @@ final class IntakeServiceLiveTests: XCTestCase {
                                 availableModels: .defaults, runner: runner,
                                 inject: { _, _, _, _ in true }, hasSession: { _, _ in false },
                                 now: { [unowned self] in self.clockNow },
-                                readFile: { reads.read($0) })
+                                readFile: { reads.read($0) },
+                                announce: { [unowned self] in self.announced.append($0) })
         // Launch recovery runs one tick of its own; let it land (and any convergence fold it
         // started), and unless the test is about that first read, count from zero after it.
         guard awaitRecovery else { return svc }
@@ -260,6 +263,61 @@ final class IntakeServiceLiveTests: XCTestCase {
         XCTAssertNotNil(svc.pending[i.id])
         svc.send(i.id, .stop)
         XCTAssertNil(svc.pending[i.id])
+    }
+
+    // MARK: announcements
+
+    /// Spec §14: live regions announce state changes — a round landed, failed, reached review,
+    /// needs you — and nothing else: never the first read of a tape (that is the app opening,
+    /// not a change), never a heartbeat or a clock.
+    func testAnnouncesOnlyTheStateChangesTheSpecNames() {
+        func tape(_ checkpoints: [(Stage, Int)], _ status: RunnerStatus, running: PlannedRound? = nil) -> Tape {
+            var t = Tape()
+            t.checkpoints = checkpoints.enumerated().map { n, c in
+                Checkpoint(id: n + 1, stage: c.0, round: c.1, major: false, createdAt: .distantPast)
+            }
+            t.status = status
+            t.roundInProgress = running
+            return t
+        }
+        let one = tape([(.draft, 0)], .running, running: Self.refine1)
+        XCTAssertNil(IntakeService.announcement(from: nil, to: one), "the first read is not a change")
+        var beat = one
+        beat.heartbeat = .distantFuture
+        XCTAssertNil(IntakeService.announcement(from: one, to: beat), "a heartbeat is not a state change")
+        XCTAssertEqual(IntakeService.announcement(from: one, to: tape([(.draft, 0), (.refine, 1)], .running)), "Refine 1 landed")
+        XCTAssertEqual(IntakeService.announcement(from: one, to: tape([(.draft, 0)], .failed, running: Self.refine1)),
+                       "Refine 1 failed")
+        XCTAssertNil(IntakeService.announcement(from: one, to: tape([(.draft, 0), (.encode, 0)], .reachedReview)),
+                     "the last round landing is said once, as the intake's move to review")
+
+        XCTAssertEqual(IntakeService.announcement(from: .triaging, to: .needsAnswers), "Triage has questions for you")
+        XCTAssertEqual(IntakeService.announcement(from: .shaping, to: .review), "The plan is ready for review")
+        XCTAssertEqual(IntakeService.announcement(from: .triaging, to: .failed), "The intake failed")
+        XCTAssertNil(IntakeService.announcement(from: .needsAnswers, to: .triaging))
+        XCTAssertNil(IntakeService.announcement(from: .review, to: .review), "a save that changes nothing says nothing")
+        XCTAssertNil(IntakeService.announcement(from: nil, to: .triaging))
+    }
+
+    /// Wired through the tick: a checkpoint landing on the tape is announced once.
+    func testARoundLandingOnTheTapeIsAnnounced() async throws {
+        let shaping = try seed(.shaping)
+        try updateTape(shaping.id) {
+            $0.status = .running
+            $0.roundInProgress = Self.refine1
+            $0.checkpoints = [Checkpoint(id: 1, stage: .draft, round: 0, major: true, createdAt: self.clockNow)]
+        }
+        let svc = await makeService()
+        svc.pollTapes()
+        XCTAssertEqual(announced, [])
+
+        try updateTape(shaping.id) {
+            $0.checkpoints.append(Checkpoint(id: 2, stage: .refine, round: 1, major: false, createdAt: self.clockNow))
+            $0.roundInProgress = nil
+        }
+        svc.pollTapes()
+        svc.pollTapes()
+        XCTAssertEqual(announced, ["Refine 1 landed"])
     }
 
     /// Stop discards the round in flight — paid work — so it goes through a confirmation, from
