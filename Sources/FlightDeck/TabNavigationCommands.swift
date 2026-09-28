@@ -12,8 +12,10 @@ import SwiftUI
 ///
 /// **Back and Forward shortcuts (⌃⌘← and ⌃⌘→).** libghostty's defaults bind ⌃⌘← and ⌃⌘→
 /// to `resize_split` — a no-op in Flight Deck (no splits). They are registered `consumed`-only
-/// and take precedence over the terminal; ⌘← and ⌘→ were rejected because libghostty binds
-/// them to line start/end (`text:\x01` / `text:\x05`) and taking them would break every prompt.
+/// bindings too, the same mechanism as ⌘⇧[ / ⌘⇧] above: `MenuKeyEquivalents` offers them to the
+/// menu first, and libghostty never gets a chance to swallow them; ⌘← and ⌘→ were rejected
+/// because libghostty binds them to line start/end (`text:\x01` / `text:\x05`) and taking them
+/// would break every prompt.
 struct TabNavigationCommands: Commands {
     // Plain `let`, not `@ObservedObject`, for the same reason as `SessionCommands`: no
     // published property is read here, so observing would invalidate and rebuild the menu on
