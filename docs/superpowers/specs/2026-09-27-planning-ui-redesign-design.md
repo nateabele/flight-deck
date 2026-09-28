@@ -29,9 +29,15 @@ anything is happening, what it is, or whether another round is worth it.
 ## 2. Global rules
 
 - **"Tasks", never "beads".** No user-visible string says bead or beads — labels, buttons, status
-  lines, in-app error text, empty states, the Enable Flywheel copy, Observe lanes, the release review.
+  lines, in-app error text, empty states, the Enable Flight Control copy, Observe lanes, the release review.
   Internals (`br`, `.beads/`, `BeadWriter`, schemas, agent prompts, logs) keep the word. The Bead
   fidelity preset is shown as **Single task**. A test scans the view layer's string literals.
+- **"Flight Control", never "Flywheel".** The feature is rebranded (Nate, 2026-09-27): every
+  user-visible string says Flight Control ("Enable Flight Control…", "Set Up Flight Control…",
+  "Flight Control Not Enabled"). Kept as flywheel: Swift type/file/folder names, branch names,
+  persisted keys and on-disk paths (renaming them would orphan existing state), accessibility
+  identifiers, and the external methodology's proper name (agent-flywheel.com). The same guard test
+  covers both rules.
 - **HIG:** primary action at the trailing edge and the default button; destructive actions never
   default, always confirmed; no controls or critical information only at a window's bottom; panels,
   not sheets, for repeated input (Rounds editor, notes); no labelled spinners; count up, never an ETA;

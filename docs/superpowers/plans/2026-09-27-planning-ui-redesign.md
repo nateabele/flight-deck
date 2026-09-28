@@ -21,9 +21,10 @@
 
 ## Global Constraints
 
-- **"Tasks", never "beads", in any user-visible string.** This covers labels, buttons, status lines, in-app error text, empty states, the Enable Flywheel copy, Observe lanes and the release review.
+- **"Tasks", never "beads", in any user-visible string.** This covers labels, buttons, status lines, in-app error text, empty states, the Enable Flight Control copy, Observe lanes and the release review.
   - Internals keep the word: `br`, `.beads/`, `BeadWriter`, schemas, agent prompts, logs, accessibility *identifiers*.
   - The `.bead` preset is displayed as **Single task**.
+- **"Flight Control", never "Flywheel", in any user-visible string** (rebrand, 2026-09-27). Keep `flywheel` in Swift identifiers, file/folder/branch names, persisted keys and paths, accessibility identifiers, and the external methodology's proper name (agent-flywheel.com). Task 1's guard covers both words.
 - **HIG placement.**
   - The primary action sits at the trailing edge and is the default button.
   - A destructive action is never the default and is always confirmed.
@@ -86,7 +87,7 @@ Remove `TapeStrip.swift` once `DeparturesBoard` replaces it (Task 9).
 
 ---
 
-## Task 1: "Tasks, never beads" pass and guard test
+## Task 1: Terminology pass ("tasks" not "beads"; "Flight Control" not "Flywheel") and guard test
 
 **Files:**
 - Create: `Tests/FlightDeckTests/Intake/Planning/TerminologyGuardTests.swift`
@@ -114,7 +115,7 @@ enum UIText {
   - lines containing `Logger`, `logger.`, `accessibilityIdentifier(`, `argv`, `args`, `"br"`, `".beads"`, `beads.db`, or a path component;
   - literals that are only a command token.
 
-  Fail on any remaining literal matching `\bbeads?\b` (case-insensitive), and list them. Keep an explicit allow list for true internals. Its first entries are the `SessionStore.swift` `.beads` path literals and `IntakeDelivery` argv/thread-id literals, each with a comment giving the reason.
+  Fail on any remaining literal matching `\bbeads?\b` or `\bflywheel\b` (case-insensitive; `agent-flywheel` and URLs allowed), and list them. Keep an explicit allow list for true internals. Its first entries are the `SessionStore.swift` `.beads` path literals and `IntakeDelivery` argv/thread-id literals, each with a comment giving the reason.
 ```swift
 final class TerminologyGuardTests: XCTestCase {
     func testNoUserVisibleStringSaysBead() throws {
@@ -136,7 +137,9 @@ final class TerminologyGuardTests: XCTestCase {
   - `IntakeService`'s "some beads may already be written — check `br list`" becomes "some tasks may already be written — check `br list`";
   - "Could not read the bead graph" becomes "Could not read the task graph".
 - [ ] **Step 4: Run the suite and confirm it passes.** Run the full `./scripts/test-unit.sh` once.
-- [ ] **Step 5: Commit.** `fix: call them tasks everywhere the user can see, and guard it`
+- [ ] **Step 5: Commit.** `fix: say tasks and Flight Control everywhere the user can see, and guard it`
+
+**Docs:** a separate agent renames Flywheel → Flight Control in current docs prose (ARCHITECTURE, HANDOFF, README, FOLLOWUPS, the FLYWHEEL-* checklists, the active specs/plans); file names and older executed plans stay as the historical record.
 
 ## Task 2: Board model
 
