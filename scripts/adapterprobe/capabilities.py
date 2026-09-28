@@ -1036,12 +1036,49 @@ def _codex_paste_detects_same_burst_return(ctx, agent):
     )
 
 
+_AgentRecords = namedtuple(
+    "_AgentRecords",
+    "launches async_results sync_results notified agent_ids notified_tasks sites")
+
+
+def _notification_site(rec):
+    """Which of the three shapes carried this notification, for the row that pins them."""
+    if isinstance(rec.get("attachment"), dict):
+        return rec["attachment"].get("type") or "attachment"
+    return (rec.get("message") or {}).get("role") or rec.get("type") or "unknown"
+
+
+def _notification_texts(rec):
+    """Every place a `<task-notification>` is known to appear. Written as a list rather than a
+    single lookup because the sites are NOT equivalent and missing one silently under-counts:
+    a user record's plain string content, a content block's `text`/`content`, and an
+    `attachment` whose `type` is `queued_command` and whose payload is in `prompt`.
+    """
+    out = []
+    content = (rec.get("message") or {}).get("content")
+    if isinstance(content, str):
+        out.append(content)
+    elif isinstance(content, list):
+        for block in content:
+            if isinstance(block, dict):
+                for key in ("text", "content"):
+                    if isinstance(block.get(key), str):
+                        out.append(block[key])
+    attachment = rec.get("attachment")
+    if isinstance(attachment, dict):
+        for key in ("prompt", "text", "content"):
+            if isinstance(attachment.get(key), str):
+                out.append(attachment[key])
+    return out
+
+
 def _agent_launch_records(path):
     """The three records the subagent-count claims are about, pulled out of a transcript tail:
     Agent `tool_use` ids, the `tool_result`s that close the CALL, and the `<tool-use-id>`s named
     by `<task-notification>` records. Shared by both rows below so neither re-derives it.
     """
     launches, async_results, sync_results, notified = {}, set(), set(), set()
+    agent_ids, notified_tasks, sites = {}, set(), set()
     with open(path, errors="replace") as f:
         for line in f:
             if not line.strip():
@@ -1064,12 +1101,23 @@ def _agent_launch_records(path):
                         tur = rec.get("toolUseResult")
                         if isinstance(tur, dict) and tur.get("isAsync") is True:
                             async_results.add(block["tool_use_id"])
+                            if tur.get("agentId"):
+                                agent_ids[block["tool_use_id"]] = tur["agentId"]
                         else:
                             sync_results.add(block["tool_use_id"])
-            text = content if isinstance(content, str) else ""
-            if "<task-notification>" in text and "<status>" in text:
+            # THREE sites, not one, and reading only the first is a measurement error this row
+            # has already made: a scan that looked only at a user record's string content put
+            # the unclosed-launch rate at 1.8-10.7% depending on sample, when reading the
+            # attachment site as well and allowing the task-id fallback puts it at 0.5%.
+            # 98 notifications in a 40-transcript sweep lived at the attachment site alone.
+            for text in _notification_texts(rec):
+                if "<task-notification>" not in text or "<status>" not in text:
+                    continue
+                sites.add(_notification_site(rec))
                 notified.update(re.findall(r"<tool-use-id>([^<]+)</tool-use-id>", text))
-    return launches, async_results, sync_results, notified
+                notified_tasks.update(re.findall(r"<task-id>([^<]+)</task-id>", text))
+    return _AgentRecords(launches, async_results, sync_results, notified,
+                         agent_ids, notified_tasks, sites)
 
 
 def _agent_async_launch_marker(ctx, agent):
@@ -1095,7 +1143,8 @@ def _agent_async_launch_marker(ctx, agent):
     (version drift), not this cell. A live version needs `tier="full"` and a real subagent run,
     which costs tokens on every matrix run.
     """
-    launches, async_results, sync_results, _ = _agent_launch_records(_CLAUDE_AGENT_ASYNC_FIXTURE)
+    rec = _agent_launch_records(_CLAUDE_AGENT_ASYNC_FIXTURE)
+    launches, async_results, sync_results = rec.launches, rec.async_results, rec.sync_results
     if not launches:
         return Observation(
             declared=True, observed=None,
@@ -1112,28 +1161,68 @@ def _agent_async_launch_marker(ctx, agent):
     )
 
 
+def _agent_notification_sites(ctx, agent):
+    """**Pins the notification site that a one-site reader silently misses.** A
+    `<task-notification>` does not only arrive as a user record's string content; it also arrives
+    as `{"type": "attachment", "attachment": {"type": "queued_command", "prompt": "<task-
+    notification>..."}}`. Flight Deck leaked 8 completions in a single file by not reading that
+    shape, and my own first measurement of the unclosed-launch rate was wrong for the same
+    reason -- see `_agent_completion_notification`.
+
+    So this row asserts the capture still contains a notification at the ATTACHMENT site
+    specifically, carrying the elements a consumer keys on (`<tool-use-id>` and `<status>`). If
+    claude stops emitting that shape the cell turns; more usefully, if someone "simplifies"
+    `_notification_texts` back to a single site, the fixture stops matching and this turns too.
+
+    Distinct from `agentCompletionNotification`, which asks whether a launch got closed at all.
+    This one asks WHERE, because the where is what was actually broken.
+    """
+    rec = _agent_launch_records(_CLAUDE_AGENT_ASYNC_FIXTURE)
+    if not rec.sites:
+        return Observation(
+            declared=True, observed=None,
+            detail="no <task-notification> with a <status> anywhere in the capture, so the row "
+                   "cannot establish which sites exist",
+        )
+    attachment_sites = {s for s in rec.sites if "queued" in s or "attachment" in s}
+    return Observation(
+        declared=True, observed=bool(attachment_sites),
+        detail=f"notification sites present: {sorted(rec.sites)}; attachment/queued_command "
+               f"site present: {bool(attachment_sites)}",
+    )
+
+
 def _agent_completion_notification(ctx, agent):
     """The OTHER half of the subagent count: completion now arrives later, as a user record whose
     string content is `<task-notification>` naming the launch's `<tool-use-id>` and a `<status>`.
     Flight Deck decrements on that, so this pins that the record still parses and still names the
     id it closes.
 
-    **Deliberately asserts SHAPE, not LIVENESS, and that is a measured decision rather than
-    caution.** The invariant originally proposed for this row was "every top-level Agent launch
-    is eventually closed in the same transcript". It is FALSE: across the same 177 launches,
-    **19 (10.7%) are never closed**, and they are not in flight -- in one 4680-line transcript
-    the unclosed launches sit at 17%, 39%, 43%, 76% and 83% through the file, while closed ones
-    close 7-15 lines later. The mirror also occurs: 11 notification ids in that file name a
-    launch that is not in the file at all (one transcript had 4 such ids and zero launches).
-    Pinning the absolute would have produced a permanently red cell that somebody later
-    "fixes" by weakening the assertion -- the exact failure this suite exists to prevent.
+    **Asserts SHAPE, not LIVENESS** -- but NOT for the reason first recorded here, and the
+    correction matters more than the row.
 
-    Consequences a consumer must handle, recorded here because they are the reason this row is
-    narrow: decrementing only on a notification LEAKS about one launch in ten, and decrementing
-    on any id can fire for work never counted. Floor the count at zero, only decrement ids you
-    are holding, and reap stale ids.
+    This docstring previously claimed that "every launch is eventually closed" is false, citing
+    19 of 177 launches (10.7%) never closing plus 11 orphan notifications. **That measurement was
+    wrong, and wrong because the scan behind it read only ONE of the three sites a notification
+    can occupy** and matched only on `<tool-use-id>`. Re-measured properly over 40 transcripts /
+    739 launches: the original method leaves 13 unclosed (1.8%), while reading every site and
+    allowing the `<task-id>` == `toolUseResult.agentId` fallback leaves **4 (0.5%)** -- and those
+    are in-flight, in files still being written. The "orphans" were largely ordering, not
+    absence: claude can write the queue-operation enqueue BEFORE the launch record it closes, so
+    file order is not timestamp order. Credit to the peer session that re-measured and pushed
+    back; `_notification_texts` exists because of it.
+
+    So liveness is very nearly true, and is left unpinned only because it is a property of a
+    WHOLE SESSION -- "closed unless the session ended while it was in flight" -- which a
+    three-record fixture cannot carry. It wants a corpus-wide replay row, not this one.
+
+    What a consumer must still handle: match on EITHER the launch's tool-use-id OR its
+    `agentId` as `<task-id>` (an agent continued via a follow-up message reports under the
+    continuing call's id), read all three sites, decrement only ids you are holding, and floor
+    at zero -- an enqueue that precedes its launch otherwise decrements work never counted.
     """
-    launches, _, _, notified = _agent_launch_records(_CLAUDE_AGENT_ASYNC_FIXTURE)
+    rec = _agent_launch_records(_CLAUDE_AGENT_ASYNC_FIXTURE)
+    launches, notified = rec.launches, rec.notified
     if not launches:
         return Observation(
             declared=True, observed=None,
@@ -1210,6 +1299,8 @@ ROWS = [
         _agent_async_launch_marker),
     Row("agentCompletionNotification", "grammars", ("claude",), "cheap", (),
         _agent_completion_notification),
+    Row("agentNotificationSites", "grammars", ("claude",), "cheap", (),
+        _agent_notification_sites),
 ]
 
-assert len(ROWS) == 26, f"expected exactly 26 rows, found {len(ROWS)}"
+assert len(ROWS) == 27, f"expected exactly 27 rows, found {len(ROWS)}"

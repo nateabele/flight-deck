@@ -6,7 +6,7 @@
   "claudeVersion": "2.1.283 (Claude Code)",
   "capturedOn": "2026-09-27",
   "sha256": {
-    "agent-async-launch.captured.jsonl": "9356ea47460ae1682d2e872d6644d5d771a171cccb0796782d25878d00e17d19"
+    "agent-async-launch.captured.jsonl": "d104d8af582198741b130e6cb3ddbaadc5f23c2b1779d4ae32d2ba4e1ab45b06"
   },
   "whatTheseAre": [
     "Three consecutive records from a REAL working session's transcript, spanning one async",
@@ -16,7 +16,8 @@
     "carries the launch's <tool-use-id>.",
     "Captured because claude 2.1.276+ made Agent launches ASYNC, which silently broke Flight",
     "Deck's sidebar subagent count: the count went +1 on the tool_use and -1 on the launch",
-    "result inside one poll, so it read 1 then 0 while the agent was still running."
+    "result inside one poll, so it read 1 then 0 while the agent was still running.",
+    "FOURTH record added 2026-09-27: a real attachment/queued_command notification, the SECOND site a <task-notification> occupies. It closes a DIFFERENT launch, not the one above, and its ids are left real and unedited -- so the fixture also carries a genuine 'orphan' notification, which is the realistic case."
   ],
   "editingRule": [
     "DELIBERATELY NOT VERBATIM, unlike dialogs.captured.provenance.json's batch, whose rule is",
@@ -43,22 +44,32 @@
       "177 Agent launches, 177 tool_results with toolUseResult.isAsync true. No exceptions."
     ],
     "everyAgentLaunchIsEventuallyClosedByANotification": [
-      "FALSE -- do NOT pin this. 19 of those same 177 launches (10.7%) are never closed by a",
-      "task-notification carrying their id, and they are not merely in flight: in one 4680-line",
-      "transcript the 5 unclosed launches sit at 17%, 39%, 43%, 76% and 83% through the file,",
-      "while launches that DO close are closed 7-15 lines later. A consumer that decrements only",
-      "on a notification therefore LEAKS about one in ten launches.",
-      "The mirror also happens: 11 notification ids in that file have no launch in the file at",
-      "all (one transcript had 4 notification ids and zero launches), so a bare decrement can",
-      "fire for work never counted. Compaction is the obvious suspect; NOT established."
+      "CORRECTED 2026-09-27. This entry previously said FALSE, citing 19 of 177 launches (10.7%)",
+      "never closing plus 11 orphan notifications. **That was a measurement error, not a finding.**",
+      "The scan behind it read only ONE of the three sites a notification occupies and matched only",
+      "on <tool-use-id>. Re-measured over 40 transcripts / 739 launches: the original method leaves",
+      "13 unclosed (1.8%); reading every site and allowing <task-id> == toolUseResult.agentId leaves",
+      "4 (0.5%), and those are in flight in files still being written. The 'orphans' were largely",
+      "ORDERING: claude can write the queue-operation enqueue BEFORE the launch record it closes, so",
+      "file order is not timestamp order. Found by a peer session that re-measured and pushed back.",
+      "Still not pinned as a row, but now for an honest reason: it is a whole-session liveness",
+      "property ('closed unless the session ended while in flight') that a four-record fixture",
+      "cannot carry. It wants a corpus-wide replay row."
+    ],
+    "aNotificationOccupiesMoreThanOneSite": [
+      "CONFIRMED and load-bearing. 98 of the notifications in a 40-transcript sweep were found at",
+      "the attachment/queued_command site alone. A reader that knows only the user-string site",
+      "under-counts completions -- Flight Deck leaked 8 in one file that way, and my own first",
+      "measurement of the unclosed rate was wrong for exactly the same reason.",
+      "Pinned by `agentNotificationSites`."
     ]
   },
   "notCaptured": [
     "A SYNCHRONOUS Agent launch -- a tool_result for an Agent call WITHOUT isAsync. Every one of",
     "the 177 launches measured was async, so the synchronous arm of the proposed invariant could",
     "not be captured and is not asserted by any row.",
-    "A launch whose notification never arrives, and an orphan notification whose launch is",
     "absent. Both are known to occur (see verdicts) but are a LIVENESS property over a whole",
-    "session, not a shape a three-record fixture can carry."
+    "session, not a shape a three-record fixture can carry.",
+    "A launch closed ONLY by <task-id> (agentId) and not by its own tool-use-id -- known to occur (an agent continued via a follow-up message reports under the continuing call's id) but not present in these four records, so no row asserts that fallback yet."
   ]
 }
