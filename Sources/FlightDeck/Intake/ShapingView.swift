@@ -18,11 +18,10 @@ struct ShapingView: View {
     /// nil means "follow the head", so a new checkpoint landing moves the viewer with it
     /// unless the human has deliberately picked an older round.
     @State private var selectedCheckpoint: Int?
-    @State private var viewerMode: ShapingModel.ViewerMode = .plan
+    /// The plan section's initial segment — a render test opens it on the diff.
+    private let viewerMode: ShapingModel.ViewerMode
     @State private var annotating = false
     @State private var extending = false
-    /// The rendered viewer text, recomputed only when `ShapingModel.ViewerKey` changes.
-    @State private var viewerText = AttributedString()
 
     init(intake: Intake, tape: Tape, loadFile: @escaping (Int, String) -> Data?,
          onSend: @escaping (TapeCommand) -> Void, viewerMode: ShapingModel.ViewerMode = .plan) {
@@ -30,7 +29,7 @@ struct ShapingView: View {
         self.tape = tape
         self.loadFile = loadFile
         self.onSend = onSend
-        _viewerMode = State(initialValue: viewerMode)
+        self.viewerMode = viewerMode
     }
 
     var body: some View {
@@ -208,37 +207,11 @@ struct ShapingView: View {
 
     // MARK: - Plan viewer
 
+    /// The live-preview editor on the head checkpoint, read-only on an older one; the round
+    /// cards above drive which checkpoint it shows.
     private var planViewer: some View {
-        let key = ShapingModel.viewerKey(selected: selectedCheckpoint, mode: viewerMode, tape: tape)
-        return VStack(alignment: .leading, spacing: 6) {
-            Picker("View", selection: $viewerMode) {
-                Text("Plan").tag(ShapingModel.ViewerMode.plan)
-                Text("Diff vs previous").tag(ShapingModel.ViewerMode.diff)
-                Text("Change set").tag(ShapingModel.ViewerMode.changeSet)
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .fixedSize()
-
-            // Vertical only: a horizontal axis gives the text infinite width, which centred it.
-            ScrollView(.vertical) {
-                Text(viewerText)
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(key.checkpoint == nil ? .secondary : .primary)
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .topLeading)
-                    .padding(8)
-            }
-            .frame(minHeight: 240, maxHeight: .infinity)
-            .background(Color.secondary.opacity(0.06), in: RoundedRectangle(cornerRadius: 6))
-        }
-        .accessibilityIdentifier("plan-viewer")
-        // `initial: true` is the `.onAppear` half: it computes the text once on first render,
-        // then again only when the key changes.
-        .onChange(of: key, initial: true) { _, key in
-            let text = ShapingModel.viewerContent(key, tape: tape, loadFile: loadFile)
-            viewerText = key.mode == .diff ? Self.coloredDiff(text) : AttributedString(text)
-        }
+        PlanSection(intakeID: intake.id, tape: tape, loadFile: loadFile, onSend: onSend,
+                    selection: $selectedCheckpoint, mode: viewerMode)
     }
 
     /// Green/red per line, as in the mockup's hunk pane. A single `AttributedString` rather
