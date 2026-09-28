@@ -1,0 +1,64 @@
+{
+  "files": [
+    "agent-async-launch.captured.jsonl"
+  ],
+  "isVerbatimCapturedOutput": false,
+  "claudeVersion": "2.1.283 (Claude Code)",
+  "capturedOn": "2026-09-27",
+  "sha256": {
+    "agent-async-launch.captured.jsonl": "504205a66e7f2aed6329e96b0927e23d806bcc9974ebf38ededcf9e93e712e2a"
+  },
+  "whatTheseAre": [
+    "Three consecutive records from a REAL working session's transcript, spanning one async",
+    "subagent launch: the assistant `tool_use` (name Agent), the `tool_result` that closes the",
+    "CALL but not the work (toolUseResult.isAsync true, status async_launched), and the later",
+    "user record whose string content is the <task-notification> that reports completion and",
+    "carries the launch's <tool-use-id>.",
+    "Captured because claude 2.1.276+ made Agent launches ASYNC, which silently broke Flight",
+    "Deck's sidebar subagent count: the count went +1 on the tool_use and -1 on the launch",
+    "result inside one poll, so it read 1 then 0 while the agent was still running."
+  ],
+  "editingRule": [
+    "DELIBERATELY NOT VERBATIM, unlike dialogs.captured.provenance.json's batch, whose rule is",
+    "'lines may be DROPPED, never EDITED'. That rule fits a synthetic dialog capture; it does",
+    "not fit three records lifted out of a real working session, which carry absolute home",
+    "paths, a subagent prompt and an agent's full prose result. Kept in its own provenance file",
+    "rather than added to that batch, so the batch's verbatim guarantee stays true.",
+    "Edits applied, and nothing else: absolute /Users/... paths -> /REDACTED; the Agent",
+    "tool_use `input` -> {description, prompt} both 'REDACTED'; the tool_result content string",
+    "-> a fixed 'Async agent launched successfully.'; toolUseResult reduced to the marker keys",
+    "(isAsync, status, agentId, agentType); the notification's <summary>/<result> -> 'REDACTED'.",
+    "Every field the rows actually assert on is UNEDITED: the tool_use id and name, the",
+    "toolUseResult isAsync/status markers, and the notification's <task-id>/<tool-use-id>/",
+    "<status> element structure."
+  ],
+  "capturedBy": [
+    "Lifted from ~/.claude/projects by scripts run in the session that added the rows, then",
+    "redacted as above. Chosen as the first launch in the file whose result AND notification",
+    "were both present, so the triple is genuinely consecutive rather than assembled."
+  ],
+  "verdicts": {
+    "everyAgentLaunchCarriesTheAsyncMarker": [
+      "CONFIRMED and strong. Measured over 4 real transcripts spanning claude 2.1.278-2.1.283:",
+      "177 Agent launches, 177 tool_results with toolUseResult.isAsync true. No exceptions."
+    ],
+    "everyAgentLaunchIsEventuallyClosedByANotification": [
+      "FALSE -- do NOT pin this. 19 of those same 177 launches (10.7%) are never closed by a",
+      "task-notification carrying their id, and they are not merely in flight: in one 4680-line",
+      "transcript the 5 unclosed launches sit at 17%, 39%, 43%, 76% and 83% through the file,",
+      "while launches that DO close are closed 7-15 lines later. A consumer that decrements only",
+      "on a notification therefore LEAKS about one in ten launches.",
+      "The mirror also happens: 11 notification ids in that file have no launch in the file at",
+      "all (one transcript had 4 notification ids and zero launches), so a bare decrement can",
+      "fire for work never counted. Compaction is the obvious suspect; NOT established."
+    ]
+  },
+  "notCaptured": [
+    "A SYNCHRONOUS Agent launch -- a tool_result for an Agent call WITHOUT isAsync. Every one of",
+    "the 177 launches measured was async, so the synchronous arm of the proposed invariant could",
+    "not be captured and is not asserted by any row.",
+    "A launch whose notification never arrives, and an orphan notification whose launch is",
+    "absent. Both are known to occur (see verdicts) but are a LIVENESS property over a whole",
+    "session, not a shape a three-record fixture can carry."
+  ]
+}

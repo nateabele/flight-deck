@@ -22,6 +22,7 @@ from — that keeps "cheap" rows free of any live agent, per the design's §3.5 
 """
 import json
 import os
+import re
 import time
 import uuid
 from collections import namedtuple
@@ -62,6 +63,10 @@ _CLAUDE_APPROVAL_SCREEN = os.path.join(_FIX, "Claude", "permission-bash.captured
 # it expects — see `_ask_user_question_shape` below, which re-derives that claim instead of
 # leaving it a version number nothing checks.
 _CLAUDE_QUESTION_SHAPE_FIXTURE = os.path.join(_FIX, "Claude", "question-single.captured.jsonl")
+# One async subagent launch, lifted from a real transcript and REDACTED -- see its own
+# `agent-async-launch.captured.provenance.json`, which is separate precisely because it is not
+# verbatim and the dialogs batch guarantees that it is.
+_CLAUDE_AGENT_ASYNC_FIXTURE = os.path.join(_FIX, "Claude", "agent-async-launch.captured.jsonl")
 _CODEX_ROLLOUT = os.path.join(_FIX, "Codex", "rollout.captured.jsonl")
 _CODEX_IDLE_SCREEN = os.path.join(_FIX, "Codex", "tui-idle.captured.txt")
 _CODEX_APPROVAL_SCREEN = os.path.join(_FIX, "Codex", "approval-command.captured.txt")
@@ -1031,6 +1036,118 @@ def _codex_paste_detects_same_burst_return(ctx, agent):
     )
 
 
+def _agent_launch_records(path):
+    """The three records the subagent-count claims are about, pulled out of a transcript tail:
+    Agent `tool_use` ids, the `tool_result`s that close the CALL, and the `<tool-use-id>`s named
+    by `<task-notification>` records. Shared by both rows below so neither re-derives it.
+    """
+    launches, async_results, sync_results, notified = {}, set(), set(), set()
+    with open(path, errors="replace") as f:
+        for line in f:
+            if not line.strip():
+                continue
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            content = (rec.get("message") or {}).get("content")
+            if isinstance(content, list):
+                for block in content:
+                    if not isinstance(block, dict):
+                        continue
+                    # `Task` as well as `Agent`: the tool has been spelled both ways across
+                    # harnesses, and a row that knew only one name would read a rename as "no
+                    # launches" -- a green cell for a capability it never looked at.
+                    if block.get("type") == "tool_use" and block.get("name") in ("Agent", "Task"):
+                        launches[block.get("id")] = block.get("name")
+                    if block.get("type") == "tool_result" and block.get("tool_use_id"):
+                        tur = rec.get("toolUseResult")
+                        if isinstance(tur, dict) and tur.get("isAsync") is True:
+                            async_results.add(block["tool_use_id"])
+                        else:
+                            sync_results.add(block["tool_use_id"])
+            text = content if isinstance(content, str) else ""
+            if "<task-notification>" in text and "<status>" in text:
+                notified.update(re.findall(r"<tool-use-id>([^<]+)</tool-use-id>", text))
+    return launches, async_results, sync_results, notified
+
+
+def _agent_async_launch_marker(ctx, agent):
+    """**claude 2.1.276+ made `Agent` launches ASYNC, and that silently broke Flight Deck's
+    sidebar subagent count.** The `tool_result` now lands ~40ms after the `tool_use` carrying
+    `toolUseResult.isAsync == true` / `status == "async_launched"` -- it closes the CALL, not the
+    WORK. A watcher that counted +1 on the launch and -1 on any `tool_result` for that id went
+    1 -> 0 inside a single poll, so the count read zero while the agent was still running.
+
+    This row pins the marker Flight Deck now depends on to tell those apart: every Agent launch
+    in the capture must have a `tool_result` carrying `isAsync`, and none may be closed by a
+    plain result. If claude ever drops the marker, the consumer silently reverts to treating a
+    launch acknowledgement as completion -- the original bug, reintroduced invisibly. Here it
+    goes `broken` instead.
+
+    Measured before pinning, over 4 real transcripts spanning 2.1.278-2.1.283: **177 launches,
+    177 async markers, no exceptions.** That is why this is asserted and the "every launch is
+    eventually closed" half is NOT -- see `_agent_completion_notification`.
+
+    **What this row cannot do**, stated because the row above it learned this the hard way: it
+    reads a frozen capture, so it can only catch OUR reader regressing, never a NEWER claude
+    changing the marker again. The compensating controls are `corpus_staleness` and exit code 6
+    (version drift), not this cell. A live version needs `tier="full"` and a real subagent run,
+    which costs tokens on every matrix run.
+    """
+    launches, async_results, sync_results, _ = _agent_launch_records(_CLAUDE_AGENT_ASYNC_FIXTURE)
+    if not launches:
+        return Observation(
+            declared=True, observed=None,
+            detail=f"no Agent/Task tool_use in {os.path.basename(_CLAUDE_AGENT_ASYNC_FIXTURE)} -- "
+                   f"the fixture cannot establish the claim, so this is not a verdict about claude",
+        )
+    marked = {i for i in launches if i in async_results}
+    plain = {i for i in launches if i in sync_results}
+    return Observation(
+        declared=True, observed=bool(marked) and not plain,
+        detail=f"{len(launches)} launch(es); {len(marked)} carried toolUseResult.isAsync; "
+               f"{len(plain)} were closed by a PLAIN tool_result (must be 0 -- a plain result "
+               f"for an Agent id is what a counter mistakes for completion)",
+    )
+
+
+def _agent_completion_notification(ctx, agent):
+    """The OTHER half of the subagent count: completion now arrives later, as a user record whose
+    string content is `<task-notification>` naming the launch's `<tool-use-id>` and a `<status>`.
+    Flight Deck decrements on that, so this pins that the record still parses and still names the
+    id it closes.
+
+    **Deliberately asserts SHAPE, not LIVENESS, and that is a measured decision rather than
+    caution.** The invariant originally proposed for this row was "every top-level Agent launch
+    is eventually closed in the same transcript". It is FALSE: across the same 177 launches,
+    **19 (10.7%) are never closed**, and they are not in flight -- in one 4680-line transcript
+    the unclosed launches sit at 17%, 39%, 43%, 76% and 83% through the file, while closed ones
+    close 7-15 lines later. The mirror also occurs: 11 notification ids in that file name a
+    launch that is not in the file at all (one transcript had 4 such ids and zero launches).
+    Pinning the absolute would have produced a permanently red cell that somebody later
+    "fixes" by weakening the assertion -- the exact failure this suite exists to prevent.
+
+    Consequences a consumer must handle, recorded here because they are the reason this row is
+    narrow: decrementing only on a notification LEAKS about one launch in ten, and decrementing
+    on any id can fire for work never counted. Floor the count at zero, only decrement ids you
+    are holding, and reap stale ids.
+    """
+    launches, _, _, notified = _agent_launch_records(_CLAUDE_AGENT_ASYNC_FIXTURE)
+    if not launches:
+        return Observation(
+            declared=True, observed=None,
+            detail="fixture carries no Agent/Task launch to close",
+        )
+    closed = {i for i in launches if i in notified}
+    return Observation(
+        declared=True, observed=bool(closed),
+        detail=f"{len(closed)}/{len(launches)} launch(es) closed by a <task-notification> naming "
+               f"their <tool-use-id> alongside a <status>; {len(notified)} notification id(s) in "
+               f"the capture",
+    )
+
+
 BOTH = ("claude", "codex")
 
 ROWS = [
@@ -1085,6 +1202,14 @@ ROWS = [
     # "typed but never sent" apart from "sent".
     Row("codexPasteDetectsSameBurstReturn", "live", ("codex",), "full", (),
         _codex_paste_detects_same_burst_return),
+    # Capability rows, not `kind="fact"`: these assert that a SHAPE IS PRESENT, and its absence
+    # is a defect in the thing being measured -- not "the other value a symmetric claim can
+    # take", which is what the four fact rows above are. `test_exactly_the_four_symmetric_facts`
+    # pins that distinction on purpose.
+    Row("agentAsyncLaunchMarker", "grammars", ("claude",), "cheap", (),
+        _agent_async_launch_marker),
+    Row("agentCompletionNotification", "grammars", ("claude",), "cheap", (),
+        _agent_completion_notification),
 ]
 
-assert len(ROWS) == 24, f"expected exactly 24 rows, found {len(ROWS)}"
+assert len(ROWS) == 26, f"expected exactly 26 rows, found {len(ROWS)}"
