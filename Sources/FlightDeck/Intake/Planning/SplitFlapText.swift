@@ -112,6 +112,12 @@ struct SplitFlapCard: View {
     let detail: String?
     let surface: String
     let policy: FlapPolicy
+    /// The detail line's colour when it reports an exception (amber for a diverging cycle);
+    /// phosphor otherwise.
+    var tint: Color?
+    /// More of the instrument's say under the detail — the convergence card's numbers and
+    /// suggested action. Drawn inside the same glass, so it reads as one card.
+    var accessory: AnyView?
 
     static let phosphor = Color(red: 219 / 255, green: 230 / 255, blue: 247 / 255)
     private static let detailFont = NSFont.monospacedSystemFont(ofSize: 12, weight: .semibold)
@@ -132,7 +138,7 @@ struct SplitFlapCard: View {
                 Text(text)
                     .font(Font(Self.detailFont))
                     .tracking(Self.detailTracking)
-                    .foregroundStyle(Self.phosphor.opacity(0.66))
+                    .foregroundStyle(tint ?? Self.phosphor.opacity(0.66))
                     // A free-text detail (a failure diagnosis) wraps inside a bounded card rather
                     // than being cut: the card is where its full text is read. The wrap width is
                     // definite, measured with the real font — a flexible frame under the card's
@@ -140,6 +146,7 @@ struct SplitFlapCard: View {
                     .frame(width: Self.wrapWidth(text), alignment: .leading)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            if let accessory { accessory }
         }
         .padding(.horizontal, 12)
         .padding(.top, 10)

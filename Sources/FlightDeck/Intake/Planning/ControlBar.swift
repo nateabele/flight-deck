@@ -33,6 +33,12 @@ struct ControlBar: View {
     /// (`NotesRailModel.summary`) — added to every play key's tooltip, since any of them starts
     /// that round. Nil when there is nothing to send.
     var nextRound: String?
+    /// Whether the section heatmap is open under the board — the cell's chevron points up.
+    var heatmapOpen = false
+    /// Clicking the CONVERGENCE cell toggles the heatmap (spec §8.1); nil leaves it inert.
+    var onConvergence: (() -> Void)?
+    /// Opens the cell's card without a hover — for offscreen renders, which can't hover.
+    var opensConvergenceCard = false
 
     static let barHeight: CGFloat = 78
 
@@ -44,7 +50,8 @@ struct ControlBar: View {
             HStack(spacing: Metrics.gap) {
                 transport
                 LCDView(cells: shown, widths: LCDMetrics.widths(shown, available: lcdWidth),
-                        convergence: convergence, stopMode: lcd.stopMode, policy: policy)
+                        convergence: convergence, stopMode: lcd.stopMode, policy: policy,
+                        heatmap: CellHeatmap(open: heatmapOpen, toggle: onConvergence, opensCard: opensConvergenceCard))
                 tools(compact: compact)
             }
             .padding(.horizontal, Metrics.padding)
@@ -296,6 +303,8 @@ enum LCDMetrics {
     static let captionTracking: CGFloat = 1.1
     static let cellPadding: CGFloat = 12
     static let sparkWidth: CGFloat = 54
+    /// The CONVERGENCE caption's disclosure chevron and its gap — the heatmap's affordance.
+    static let chevronWidth: CGFloat = 14
     static let lcdHeight: CGFloat = 58
 
     static func isClock(_ kind: LCDCell.Kind) -> Bool {
@@ -322,7 +331,7 @@ enum LCDMetrics {
         // here a cell sized to its name would still be handed its code.
         let breathing: CGFloat = LCDModel.flapSurface(cell.kind) == nil ? 0 : 8
         let value = LabelFit.measureWith(valueFont(cell.kind))(cell.value) + (cell.kind == .stopsAt ? 24 : 0) + breathing
-        return ceil(max(value, captionWidth(cell.caption)) + 2 * cellPadding)
+        return ceil(max(value, captionWidth(cell.caption) + (cell.kind == .convergence ? chevronWidth : 0)) + 2 * cellPadding)
     }
 
     /// The narrowest a cell may be squeezed once the compact set still doesn't fit: a text
@@ -385,12 +394,13 @@ private struct LCDView: View {
     let convergence: ConvergenceCellModel?
     let stopMode: PlayMode?
     let policy: FlapPolicy
+    let heatmap: CellHeatmap
 
     var body: some View {
         HStack(spacing: 0) {
             ForEach(Array(cells.enumerated()), id: \.element.id) { index, cell in
                 LCDCellView(cell: cell, width: widths[index], convergence: cell.kind == .convergence ? convergence : nil,
-                            stopMode: stopMode, policy: policy)
+                            stopMode: stopMode, policy: policy, heatmap: heatmap)
                 if index < cells.count - 1 {
                     Rectangle().fill(Color.white.opacity(0.05)).frame(width: 1)
                 }
@@ -411,19 +421,48 @@ private struct LCDView: View {
     }
 }
 
+/// The CONVERGENCE cell's link to the heatmap: whether it is open, and what a click does.
+private struct CellHeatmap {
+    var open: Bool
+    var toggle: (() -> Void)?
+    var opensCard: Bool
+}
+
 private struct LCDCellView: View {
     let cell: LCDCell
     let width: CGFloat
     let convergence: ConvergenceCellModel?
     let stopMode: PlayMode?
     let policy: FlapPolicy
+    let heatmap: CellHeatmap
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var hovering = false
 
     var body: some View {
+        if let convergence, cell.kind == .convergence {
+            // The whole cell is the control: hover for the verdict's card, click for the heatmap.
+            content
+                .contentShape(Rectangle())
+                .background(FloatingCard(isPresented: hovering || heatmap.opensCard,
+                                         card: ConvergenceCard(model: convergence, policy: policy).fixedSize()))
+                .onHover { hovering = $0 }
+                .onTapGesture { heatmap.toggle?() }
+                .accessibilityAddTraits(.isButton)
+                .accessibilityHint(heatmap.open ? "Closes the section heatmap" : "Opens the section heatmap")
+                .accessibilityAction { heatmap.toggle?() }
+        } else {
+            content
+        }
+    }
+
+    private var content: some View {
         HStack(spacing: 10) {
             // The sparkline is the first thing a squeezed cell gives up; the word stays.
-            if let convergence, width >= LCDMetrics.cellWidth(cell) { Sparkline(points: convergence.spark, tone: cell.tone) }
+            if let convergence, width >= LCDMetrics.cellWidth(cell) {
+                ConvergenceSparkline(points: convergence.spark, tone: cell.tone, discontinuities: convergence.discontinuities,
+                                     floor: convergence.settledFloor)
+            }
             VStack(alignment: .leading, spacing: 5) {
                 HStack(spacing: 6) {
                     if cell.kind == .stopsAt, let stopGlyph {
@@ -432,9 +471,15 @@ private struct LCDCellView: View {
                     value
                 }
                 .foregroundStyle(LCDMetrics.color(cell.tone))
-                ViewThatFits(in: .horizontal) {
-                    caption(cell.caption)
-                    caption(LCDMetrics.shortCaption(cell))
+                HStack(spacing: 4) {
+                    ViewThatFits(in: .horizontal) {
+                        caption(cell.caption)
+                        caption(LCDMetrics.shortCaption(cell))
+                    }
+                    if convergence != nil, heatmap.toggle != nil {
+                        Image(systemName: heatmap.open ? "chevron.up" : "chevron.down")
+                            .font(.system(size: 8, weight: .bold))
+                    }
                 }
                 .foregroundStyle(cell.kind == .convergence ? LCDMetrics.color(cell.tone) : LCDMetrics.phosphor.opacity(0.45))
             }
@@ -483,33 +528,5 @@ private struct LCDCellView: View {
             case .toReview: "forward.fill"
             }
         }
-    }
-}
-
-/// Changes per round in the current cycle as a phosphor line ending in a lit point (spec §8.1).
-/// A minimal drawing: Task 13's cell adds the discontinuity marks and the hover card.
-private struct Sparkline: View {
-    let points: [Double]
-    let tone: LCDCell.Tone
-
-    var body: some View {
-        Canvas { context, size in
-            guard points.count > 0, let top = points.max(), top > 0 else { return }
-            let step = points.count > 1 ? size.width / CGFloat(points.count - 1) : 0
-            let at = { (i: Int) in
-                CGPoint(x: points.count > 1 ? CGFloat(i) * step : size.width,
-                        y: size.height - 2 - CGFloat(points[i] / top) * (size.height - 4))
-            }
-            var line = Path()
-            line.move(to: at(0))
-            for i in points.indices.dropFirst() { line.addLine(to: at(i)) }
-            let color = LCDMetrics.color(tone)
-            context.addFilter(.shadow(color: color.opacity(0.45), radius: 2.5))
-            context.stroke(line, with: .color(color), style: StrokeStyle(lineWidth: 1.7, lineCap: .round, lineJoin: .round))
-            let last = at(points.count - 1)
-            context.fill(Path(ellipseIn: CGRect(x: last.x - 3, y: last.y - 3, width: 6, height: 6)), with: .color(color))
-        }
-        .frame(width: LCDMetrics.sparkWidth, height: 24)
-        .accessibilityHidden(true)
     }
 }

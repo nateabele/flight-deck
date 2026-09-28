@@ -112,6 +112,8 @@ struct PlanTextView: NSViewRepresentable {
     /// Highlight-and-annotate (spec §7.3): note highlights, the selection toolbar and the
     /// rail's line positions, all in `PlanNotesBridge`. Nil leaves the editor as a plain editor.
     var notes: PlanNotesController?
+    /// The convergence churn lane beside the headings (spec §8.2); nil hides it.
+    var churn: ChurnLaneInput?
 
     init(text: Binding<String>, editable: Bool, onCommit: @escaping (String) -> Void, incoming: String?,
          onShowIncoming: @escaping () -> Void, incomingIsNavigation: Bool = false) {
@@ -128,6 +130,14 @@ struct PlanTextView: NSViewRepresentable {
         var copy = self
         copy.generated = generated
         return copy
+    }
+
+    /// This view with the churn lane showing `input` — a modifier rather than an init
+    /// parameter, so the lane is one line at the call site.
+    func churnLane(_ input: ChurnLaneInput?) -> PlanTextView {
+        var view = self
+        view.churn = input
+        return view
     }
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
@@ -164,6 +174,8 @@ struct PlanTextView: NSViewRepresentable {
         coordinator.layEditLayer(over: generated)
         container.revert.enabled = editable
         coordinator.notesBridge.attach(notes, to: container.textView)
+        container.churnLane.update(churn)
+        coordinator.churnChanged()
     }
 
     static func dismantleNSView(_ container: PlanEditorContainer, coordinator: Coordinator) {
@@ -210,6 +222,14 @@ struct PlanTextView: NSViewRepresentable {
         private(set) var hunks: [PlanHunk] = []
         /// The insertion tint, as its own decoration layer (`DecorationLayer`).
         let editTint = DecorationLayer(key: "edits")
+        /// The amber highlight on the sentences a hot section keeps rewriting (spec §8.2), its
+        /// own layer. Both layers paint `.backgroundColor`, and removing a rendering attribute
+        /// removes it whoever set it, so the two must never share a character: the churn ranges
+        /// are cut around every insertion and laid first, then the edit tint — the insertion wins.
+        let churnTint = DecorationLayer(key: "churn")
+        /// Each hot section's proposals for the cycle the tint was found from — read from the
+        /// checkpoints' files once per cycle, not on every keystroke.
+        private var churnVersions: (cycle: ConvergenceCycle, bySection: [String: [SectionVersion]])?
 
         init(_ parent: PlanTextView) { self.parent = parent }
 
@@ -332,7 +352,7 @@ struct PlanTextView: NSViewRepresentable {
             let old = marks
             (marks, hunks) = base.map { EditLayer.marks(generated: $0, edited: text) } ?? ([], [])
             revertButton?.spans = EditLayer.spans(hunks, edited: text)
-            if let layout = textView?.textLayoutManager { editTint.apply(EditLayer.tints(marks, in: text), to: layout) }
+            layTints(text)
             func key(_ m: EditMark, moved: Bool) -> String {
                 var r = m.range
                 if moved, let shift, r.location >= shift.at { r.location += shift.by }
@@ -347,6 +367,34 @@ struct PlanTextView: NSViewRepresentable {
             } + marks.filter { !before.contains(key($0, moved: false)) }.map { $0.range.location }
             let length = (text as NSString).length
             return Set(changed.map { min($0, max(length - 1, 0)) }.compactMap { MarkdownStyler.blockIndex(at: $0, in: blocks) }).sorted()
+        }
+
+        /// Lays the churn highlight and then the edit tint over `text` — see `churnTint`.
+        func layTints(_ text: String) {
+            guard let layout = textView?.textLayoutManager else { return }
+            let edits = EditLayer.tints(marks, in: text)
+            churnTint.apply(churnRanges(text, avoiding: edits.map(\.0)).map { ($0, [.backgroundColor: Self.churnColor]) }, to: layout)
+            editTint.apply(edits, to: layout)
+        }
+
+        /// The churn lane's input changed (a round landed): re-find the flipping sentences.
+        func churnChanged() {
+            guard let textView, churnVersions?.cycle != parent.churn?.cycle else { return }
+            layTints(textView.string)
+        }
+
+        static let churnColor = NSColor(LCDMetrics.color(.amber)).withAlphaComponent(0.16)
+
+        private func churnRanges(_ text: String, avoiding insertions: [NSRange]) -> [NSRange] {
+            guard let churn = parent.churn else { churnVersions = nil; return [] }
+            if churnVersions?.cycle != churn.cycle {
+                let hot = HeatmapModel.hotSections(churn.cycle)
+                churnVersions = (churn.cycle, Dictionary(uniqueKeysWithValues: hot.map { ($0, churn.versions($0)) }))
+            }
+            let found = churnVersions?.bySection.flatMap { section, versions in
+                ChurnLaneModel.flippingSentences(in: text, section: section, versions: versions)
+            } ?? []
+            return ChurnLaneModel.subtracting(found, insertions)
         }
 
         /// The parent's agents' plan changed under the same text (a checkpoint with the same
@@ -461,6 +509,9 @@ final class PlanEditorContainer: NSView {
     /// The edit layer's drawing (every paragraph an `EditLayerFragment`) and its hover Revert.
     let editLayout = EditLayerLayout()
     let revert = EditRevertButton()
+    /// Beside the scroll view, flush with its top; it follows the text on its own
+    /// (`ChurnLaneView.attach`) and hides itself when there is nothing to mark.
+    let churnLane = ChurnLaneView()
     private let scroll = NSScrollView()
     private let banner: NSHostingView<IncomingBanner>
     private let stack = NSStackView()
@@ -482,7 +533,7 @@ final class PlanEditorContainer: NSView {
         textView.isAutomaticTextReplacementEnabled = false
         // The gutter lanes sit left of the text (`PlanGutter`, and `textContainerOrigin`
         // below); the inset is half the two margins, since the text view splits it evenly.
-        textView.textContainerInset = NSSize(width: (PlanGutter.width + 8) / 2, height: 8)
+        textView.textContainerInset = NSSize(width: (PlanGutter.width(churn: false) + 8) / 2, height: 8)
         textView.textLayoutManager?.delegate = editLayout
         revert.textView = textView
         textView.isVerticallyResizable = true
@@ -500,6 +551,10 @@ final class PlanEditorContainer: NSView {
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 6
+        // The churn lane lives in the gutter's CHURN column, inside the text view, so it
+        // scrolls with the text; the column opens only while the lane has markers.
+        churnLane.attach(to: textView)
+        churnLane.onShown = { [weak textView] shown in textView?.showsChurn = shown }
         stack.addArrangedSubview(banner)
         stack.addArrangedSubview(scroll)
         stack.translatesAutoresizingMaskIntoConstraints = false
@@ -532,7 +587,17 @@ class PlanNSTextView: NSTextView {
     /// The text starts after the gutter lanes: the margin is all on the leading side, where
     /// an even `textContainerInset` would split it.
     override var textContainerOrigin: NSPoint {
-        NSPoint(x: PlanGutter.width, y: super.textContainerOrigin.y)
+        NSPoint(x: PlanGutter.width(churn: showsChurn), y: super.textContainerOrigin.y)
+    }
+
+    /// Whether the gutter's CHURN column is open (`ChurnLaneView` has markers): the text moves
+    /// over for it, and the container narrows to match so lines rewrap rather than clip.
+    var showsChurn = false {
+        didSet {
+            guard showsChurn != oldValue else { return }
+            textContainerInset = NSSize(width: (PlanGutter.width(churn: showsChurn) + 8) / 2, height: textContainerInset.height)
+            needsDisplay = true
+        }
     }
 
     override func updateTrackingAreas() {

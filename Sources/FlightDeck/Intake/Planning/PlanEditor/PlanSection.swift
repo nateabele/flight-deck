@@ -18,6 +18,10 @@ struct PlanSection: View {
     var editHooks = PlanEditHooks()
     /// Highlight-and-annotate (spec §7.3); nil leaves the plan unannotatable.
     var notes: PlanNotesController?
+    /// The convergence churn lane for the head plan (spec §8.2) — see `churnLane(_:)`.
+    var churn: ChurnLaneInput?
+    /// A request to show one round's Diff vs Previous at a section — see `focus(_:)`.
+    var focus: PlanFocus?
 
     init(intakeID: UUID, tape: Tape, loadFile: @escaping (Int, String) -> Data?, onSend: @escaping (TapeCommand) -> Void,
          selection: Binding<Int?> = .constant(nil), mode: ShapingModel.ViewerMode = .plan, notes: PlanNotesController? = nil) {
@@ -34,7 +38,7 @@ struct PlanSection: View {
         // Keyed on the intake so switching intakes starts a fresh editor, instead of offering
         // the other intake's plan as "a new round landed".
         PlanSectionBody(tape: tape, loadFile: loadFile, onSend: onSend, selection: $selection, mode: initialMode,
-                        hooks: editHooks, notes: notes)
+                        hooks: editHooks, notes: notes, churn: churn, focus: focus)
             .id(intakeID)
     }
 
@@ -43,6 +47,62 @@ struct PlanSection: View {
         var copy = self
         copy.editHooks = hooks
         return copy
+    }
+
+    /// Shows the churn lane beside the head plan's headings.
+    func churnLane(_ input: ChurnLaneInput?) -> PlanSection {
+        var view = self
+        view.churn = input
+        return view
+    }
+
+    /// Switches to Diff vs Previous and scrolls it to `focus.section` whenever `focus` changes —
+    /// how a heatmap cell shows that round's change to that section (spec §8.3). The caller
+    /// selects the round itself, through `selection`.
+    func focus(_ focus: PlanFocus?) -> PlanSection {
+        var view = self
+        view.focus = focus
+        return view
+    }
+
+    /// The unified diff cut at its hunks, each named by the heading it changes in `plan` (the
+    /// newer side) — so Diff vs Previous can scroll to a section. Text before the first hunk,
+    /// or a message instead of a diff, is one unnamed chunk.
+    static func diffChunks(_ diff: String, plan: String) -> [DiffChunk] {
+        let planLines = plan.components(separatedBy: "\n")
+        var headingAt: [String?] = []
+        var current: String?
+        for line in planLines {
+            if line.hasPrefix("#") { current = line.trimmingCharacters(in: .whitespaces) }
+            headingAt.append(current)
+        }
+        var chunks: [DiffChunk] = []
+        for line in diff.components(separatedBy: "\n") {
+            if line.hasPrefix("@@") || chunks.isEmpty {
+                chunks.append(DiffChunk(id: chunks.count, section: nil, lines: [line],
+                                        newLine: line.hasPrefix("@@") ? Self.newStart(line) : 0))
+                continue
+            }
+            var chunk = chunks.removeLast()
+            chunk.lines.append(line)
+            if chunk.section == nil, line.hasPrefix("+") || line.hasPrefix("-") {
+                let at = line.hasPrefix("-") ? chunk.newLine - 1 : chunk.newLine
+                chunk.section = headingAt.isEmpty ? nil : headingAt[max(0, min(at, headingAt.count - 1))]
+            }
+            if line.hasPrefix(" ") || line.hasPrefix("+") { chunk.newLine += 1 }
+            chunks.append(chunk)
+        }
+        return chunks
+    }
+
+    /// The 0-based index of the first new-side line a hunk header ("@@ -a,b +c,d @@") covers.
+    private static func newStart(_ header: String) -> Int {
+        guard let plus = header.split(separator: " ").first(where: { $0.hasPrefix("+") }) else { return 0 }
+        let parts = plus.dropFirst().split(separator: ",")
+        let start = Int(parts.first ?? "") ?? 1
+        let count = parts.count > 1 ? Int(parts[1]) ?? 1 : 1
+        // A zero-length side names the line BEFORE the change (unified-diff convention).
+        return count == 0 ? start : max(0, start - 1)
     }
 
     /// What the plan tab shows for a checkpoint: the effective plan (`plan.user.md` if the
@@ -82,6 +142,16 @@ struct PlanSection: View {
         return out
     }
 
+    /// One hunk of Diff vs Previous and the section it changes.
+    struct DiffChunk: Equatable, Identifiable {
+        let id: Int
+        var section: String?
+        var lines: [String]
+        /// Where the walk through the hunk has reached on the new side (a parsing cursor).
+        var newLine: Int
+        var text: String { lines.joined(separator: "\n") }
+    }
+
     /// "Refine 2" — the full name for the read-only bar, where there is room for it.
     static func checkpointName(_ checkpoint: Checkpoint) -> String {
         switch checkpoint.stage {
@@ -118,6 +188,11 @@ private struct PlanSectionBody: View {
     /// before then would offer the pre-edit plan back as if it were news.
     @State private var sent: [Int: String] = [:]
     @State private var otherText = AttributedString()
+    @State private var diffChunks: [PlanSection.DiffChunk] = []
+    /// The chunk a heatmap cell asked Diff vs Previous to scroll to, tagged with the request's
+    /// `seq` so a repeat of the same cell still scrolls.
+    @State private var diffTarget: [Int]?
+    @State private var pendingFocus: PlanFocus?
     @State private var message: String?
     let hooks: PlanEditHooks
     /// Each checkpoint's generated plan — the edit layer's base. Written once per checkpoint
@@ -133,6 +208,8 @@ private struct PlanSectionBody: View {
     /// one before it left it.
     @State private var retargeting: Task<Void, Never>?
     let notes: PlanNotesController?
+    let churn: ChurnLaneInput?
+    let focus: PlanFocus?
 
     struct Loaded: Equatable {
         var checkpoint: Int
@@ -142,7 +219,9 @@ private struct PlanSectionBody: View {
 
     init(tape: Tape, loadFile: @escaping (Int, String) -> Data?, onSend: @escaping (TapeCommand) -> Void,
          selection: Binding<Int?>, mode: ShapingModel.ViewerMode, hooks: PlanEditHooks,
-         notes: PlanNotesController? = nil) {
+         notes: PlanNotesController? = nil, churn: ChurnLaneInput? = nil, focus: PlanFocus? = nil) {
+        self.churn = churn
+        self.focus = focus
         self.tape = tape
         self.loadFile = loadFile
         self.onSend = onSend
@@ -189,6 +268,11 @@ private struct PlanSectionBody: View {
         // past round's edits are not what the next round is sent.
         .onChange(of: shown?.editable == true ? hunks.count : nil, initial: true) { _, count in
             if let count { notes?.setEdits(count) }
+        }
+        .onChange(of: focus, initial: true) { _, focus in
+            guard let focus else { return }
+            pendingFocus = focus
+            if mode == .diff { reload(ShapingModel.viewerKey(selected: selection, mode: mode, tape: tape)) } else { mode = .diff }
         }
     }
 
@@ -317,8 +401,27 @@ private struct PlanSectionBody: View {
                          },
                          incomingIsNavigation: incomingIsNavigation)
                 .editLayer(generated: generated[shown.checkpoint])
+                .churnLane(shown.editable ? churn : nil)
                 .annotating(notes)
                 .onChange(of: shown.checkpoint, initial: true) { _, checkpoint in notes?.checkpoint = checkpoint }
+        } else if mode == .diff {
+            ScrollViewReader { proxy in
+                ScrollView(.vertical) {
+                    VStack(alignment: .leading, spacing: 0) {
+                        ForEach(diffChunks) { chunk in
+                            Text(PlanSection.coloredDiff(chunk.text))
+                                .font(.system(.caption, design: .monospaced))
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .topLeading)
+                                .id(chunk.id)
+                        }
+                    }
+                    .padding(8)
+                }
+                .onChange(of: diffTarget, initial: true) { _, target in
+                    if let chunk = target?.first { proxy.scrollTo(chunk, anchor: .top) }
+                }
+            }
         } else {
             // Vertical only: a horizontal axis gives the text infinite width, which centred it.
             ScrollView(.vertical) {
@@ -357,6 +460,15 @@ private struct PlanSectionBody: View {
             message = nil
             let raw = ShapingModel.viewerText(key.mode, checkpoint: checkpoint, tape: tape, loadFile: loadFile)
             otherText = key.mode == .diff ? PlanSection.coloredDiff(raw) : AttributedString(raw)
+            if key.mode == .diff {
+                let plan = ShapingModel.planText(checkpoint: checkpoint, in: tape, loadFile: loadFile) ?? ""
+                diffChunks = PlanSection.diffChunks(raw, plan: plan)
+                // A section the round didn't touch has no hunk; the diff then opens at its top.
+                if let focus = pendingFocus {
+                    diffTarget = [diffChunks.first { $0.section == focus.section }?.id ?? 0, focus.seq]
+                }
+                pendingFocus = nil
+            }
             return
         }
         // Following the head, the plan follows the newest checkpoint WITH a plan: an encode or
@@ -387,4 +499,12 @@ private struct PlanSectionBody: View {
             incoming = loaded
         }
     }
+}
+
+/// A request to show `checkpoint`'s Diff vs Previous scrolled to `section` — sent by a heatmap
+/// cell. `seq` makes a second click on the same cell a new request, so it scrolls back there.
+struct PlanFocus: Equatable {
+    var checkpoint: Int
+    var section: String?
+    var seq: Int
 }

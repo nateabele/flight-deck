@@ -439,7 +439,8 @@ public enum ConvergenceSeries {
     // MARK: - Words
 
     /// "§4" for a numbered heading ("## 4. Rollout"), else the heading without its `#` marks.
-    static func label(_ heading: String) -> String {
+    /// Public so the app's heatmap and churn lane name a section exactly as the verdict does.
+    public static func label(_ heading: String) -> String {
         let text = heading.drop { $0 == "#" }.trimmingCharacters(in: .whitespaces)
         let number = text.prefix { $0.isNumber || $0 == "." }.trimmingCharacters(in: CharacterSet(charactersIn: "."))
         return number.isEmpty || number.first?.isNumber != true ? text : "§" + number

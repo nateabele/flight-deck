@@ -19,15 +19,38 @@ struct DeparturesBoard: View {
     let onExtend: (Stage) -> Void
     /// Opens one slot's card without a hover — for offscreen renders, which can't hover.
     var openCardSlotID: String?
+    /// Drawn in the board's glass under the tape: the convergence heatmap (spec §8.3), whose
+    /// columns line up under the tape's slots via `slotColumns`.
+    var disclosure: AnyView?
 
     init(model: BoardModel, policy: FlapPolicy, preview: Binding<PlayMode?>,
-         onSelect: @escaping (Int) -> Void, onExtend: @escaping (Stage) -> Void, openCardSlotID: String? = nil) {
+         onSelect: @escaping (Int) -> Void, onExtend: @escaping (Stage) -> Void, openCardSlotID: String? = nil,
+         disclosure: AnyView? = nil) {
         self.model = model
         self.policy = policy
         self._preview = preview
         self.onSelect = onSelect
         self.onExtend = onExtend
         self.openCardSlotID = openCardSlotID
+        self.disclosure = disclosure
+    }
+
+    /// Where each of `slotIDs` sits across a board `width` points wide, measured from the board's
+    /// leading edge exactly as the tape lays its slots out — so what is drawn under the tape can
+    /// line up with it. Nil when the tape is wider than the board and scrolls: nothing under it
+    /// can follow a scroll, so the caller lays itself out instead of lining up with a moving tape.
+    static func slotColumns(_ model: BoardModel, slotIDs: [String], width: CGFloat) -> [ClosedRange<CGFloat>]? {
+        let available = width - 2 * Style.inset
+        let widths = model.slotWidths(available: available, measure: Style.slotMeasure)
+        guard widths.reduce(0, +) <= available + 0.5 else { return nil }
+        var edges: [String: ClosedRange<CGFloat>] = [:]
+        var x = Style.inset
+        for (slot, w) in zip(model.slots, widths) {
+            edges[slot.id] = x...(x + w)
+            x += w
+        }
+        let found = slotIDs.compactMap { edges[$0] }
+        return found.count == slotIDs.count ? found : nil
     }
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -52,6 +75,10 @@ struct DeparturesBoard: View {
             .padding(.horizontal, Style.inset)
             .padding(.bottom, 12)
             .accessibilityHidden(true)
+            if let disclosure {
+                Rectangle().fill(Palette.ph.opacity(0.08)).frame(height: 1)
+                disclosure
+            }
         }
         .background(Glass())
     }

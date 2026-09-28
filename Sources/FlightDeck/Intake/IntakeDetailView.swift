@@ -57,9 +57,18 @@ struct IntakeDetailView: View {
     /// round publishes about once a second): see `refreshDerived`.
     @State private var summary: [ProgressItem] = []
     @State private var planHead: Int?
+    /// The section heatmap under the board (spec §8.3): nil while closed.
+    @State private var heatmap: HeatmapFocus?
+    /// What the plan was last asked to show by a heatmap cell (`PlanSection.focus`).
+    @State private var planFocus: PlanFocus?
+    /// Opens the CONVERGENCE cell's card without a hover — for offscreen renders.
+    private let opensConvergenceCard: Bool
 
     init(service: IntakeService, intake: Intake, onOpenReview: @escaping () -> Void,
-         showsInspector: Binding<Bool> = .constant(false), expandedRounds: Set<Int> = [], selectedSeat: String? = nil) {
+         showsInspector: Binding<Bool> = .constant(false), expandedRounds: Set<Int> = [], selectedSeat: String? = nil,
+         heatmap: HeatmapFocus? = nil, opensConvergenceCard: Bool = false) {
+        _heatmap = State(initialValue: heatmap)
+        self.opensConvergenceCard = opensConvergenceCard
         self.service = service
         self.intake = intake
         self.onOpenReview = onOpenReview
@@ -246,14 +255,17 @@ struct IntakeDetailView: View {
     private func controlBar(_ tape: Tape, now: Date) -> some View {
         if let config = intake.roundConfig {
             let board = boardModel(tape, config: config, now: now)
+            let cell = convergenceCell
             let lcd = LCDModel(tape: tape, config: config, board: board, seats: seatModels(tape, config: config, now: now),
-                               convergence: nil, preview: preview, now: now)
-            ControlBar(lcd: lcd, convergence: nil, actions: planningActions ?? PlanningActions(enabled: [], perform: { _ in }),
+                               convergence: cell, preview: preview, now: now)
+            ControlBar(lcd: lcd, convergence: cell, actions: planningActions ?? PlanningActions(enabled: [], perform: { _ in }),
                        status: tape.status, defaultPlay: config.defaultPlay,
                        halting: service.halts[intake.id]?.label(for: tape), policy: service.flapPolicy(for: intake.id),
                        preview: $preview,
                        setDefaultPlay: { [service, id = intake.id] in service.setDefaultPlay(id, $0) },
-                       onBack: backAction(tape), nextRound: notes.summary.tooltip)
+                       onBack: backAction(tape), nextRound: notes.summary.tooltip, heatmapOpen: heatmap != nil,
+                       onConvergence: { heatmap = heatmap == nil ? HeatmapFocus() : nil },
+                       opensConvergenceCard: opensConvergenceCard)
                 .clipShape(RoundedRectangle(cornerRadius: 10))
         }
     }
@@ -261,12 +273,59 @@ struct IntakeDetailView: View {
     @ViewBuilder
     private func board(_ tape: Tape, now: Date) -> some View {
         if let config = intake.roundConfig {
-            DeparturesBoard(model: boardModel(tape, config: config, now: now), policy: service.flapPolicy(for: intake.id),
+            let model = boardModel(tape, config: config, now: now)
+            DeparturesBoard(model: model, policy: service.flapPolicy(for: intake.id),
                             preview: $preview,
                             onSelect: { select($0) },
-                            onExtend: { [service, id = intake.id] in service.send(id, .extend($0, by: 1)) })
+                            onExtend: { [service, id = intake.id] in service.send(id, .extend($0, by: 1)) },
+                            disclosure: heatmapView(tape, board: model))
                 .clipShape(RoundedRectangle(cornerRadius: 10))
         }
+    }
+
+    // MARK: - Convergence
+
+    private var cycles: [ConvergenceCycle] { service.convergence[intake.id] ?? [] }
+
+    /// The CONVERGENCE cell: the current cycle, with the rounds past its planned length marked.
+    private var convergenceCell: ConvergenceCellModel? { cell(cycles) }
+
+    /// The cell for the last of `cycles`, told how many rounds its stage was planned to run.
+    private func cell(_ cycles: [ConvergenceCycle]) -> ConvergenceCellModel? {
+        let planned = cycles.last.flatMap { cycle in
+            intake.roundConfig.map { cycle.stage == .refine ? $0.refinementCap : $0.polishCap }
+        }
+        return ConvergenceCellModel(cycles: cycles, plannedRounds: planned)
+    }
+
+    /// The cycle the heatmap and the churn lane describe: the latest with per-section numbers.
+    /// Polish edits the change set, not the plan, so its cycle has none, and the refine cycle
+    /// before it is the plan's latest word on which sections moved.
+    private var sectionCycle: ConvergenceCycle? {
+        cycles.last { cycle in cycle.points.contains { !$0.sectionChurn.isEmpty } } ?? cycles.last
+    }
+
+    private func heatmapView(_ tape: Tape, board: BoardModel) -> AnyView? {
+        guard let heatmap, let cycle = sectionCycle else { return nil }
+        let map = HeatmapModel(cycle: cycle)
+        return AnyView(ConvergenceHeatmap(
+            model: map, cell: cell([cycle]),
+            columns: { DeparturesBoard.slotColumns(board, slotIDs: map.slotIDs, width: $0) },
+            focusSection: heatmap.section, selectedCheckpoint: selectedCheckpoint ?? tape.head?.id,
+            onSelect: { checkpoint, section in
+                select(checkpoint)
+                planFocus = PlanFocus(checkpoint: checkpoint, section: section, seq: (planFocus?.seq ?? 0) + 1)
+            },
+            onAnnotate: { [notes] _ in notes.annotate() },
+            onClose: { self.heatmap = nil }))
+    }
+
+    private func churnLane() -> ChurnLaneInput? {
+        guard let cycle = sectionCycle else { return nil }
+        let load: (Int, String) -> Data? = { [service, id = intake.id] in service.checkpointFile(id, checkpoint: $0, $1) }
+        return ChurnLaneInput(cycle: cycle,
+                              versions: { ChurnLaneModel.versions(cycle: cycle, section: $0, loadFile: load) },
+                              onOpen: { heatmap = HeatmapFocus(section: $0) })
     }
 
     private func boardModel(_ tape: Tape, config: RoundConfig, now: Date) -> BoardModel {
@@ -338,6 +397,8 @@ struct IntakeDetailView: View {
                 .editHooks(PlanEditHooks(noteShown: service.editNoteShown.contains(intake.id),
                                          onNoteShown: { [service, id = intake.id] in service.markEditNoteShown(id) },
                                          onConflict: { [service, id = intake.id] in service.recordEditConflict(id, $0) }))
+                .churnLane(churnLane())
+                .focus(planFocus)
                 .frame(height: max(360, viewport - pinnedHeight - 24))
         }
     }

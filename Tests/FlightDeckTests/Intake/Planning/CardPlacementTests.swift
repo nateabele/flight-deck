@@ -72,6 +72,40 @@ final class CardPlacementTests: XCTestCase {
         XCTAssertFalse(SplitFlapText.isKeyboardFocus(focused: true, event: nil))
         XCTAssertFalse(SplitFlapText.isKeyboardFocus(focused: false, event: .keyDown))
     }
+
+    // MARK: - Trailing
+
+    /// `.trailing`: beside the anchor, a gap off its trailing edge, top edges aligned — the churn
+    /// lane's versions card, which below its marker sat over the section it explains.
+    func testTrailingOpensBesideTheAnchorTopAligned() {
+        let marker = CGRect(x: 120, y: 400, width: 132, height: 20)
+        let frame = CardPlacement.frame(for: card, anchor: marker, within: window, gap: 9, side: .trailing)
+        XCTAssertEqual(frame, CGRect(x: 120 + 132 + 9, y: 420 - 70, width: 180, height: 70))
+    }
+
+    /// No room past the trailing edge: it opens on the leading side instead of sliding back
+    /// over the anchor.
+    func testTrailingFlipsToLeadingAtTheRightEdge() {
+        let marker = CGRect(x: 700, y: 400, width: 132, height: 20)
+        let frame = CardPlacement.frame(for: card, anchor: marker, within: window, gap: 9, side: .trailing)
+        XCTAssertEqual(frame.maxX, 700 - 9)
+        XCTAssertEqual(frame.maxY, 420)
+    }
+
+    /// Near the window's bottom the card slides up to stay inside it, still beside the anchor.
+    func testTrailingSlidesUpInsideTheWindow() {
+        let marker = CGRect(x: 120, y: 130, width: 132, height: 20)
+        let frame = CardPlacement.frame(for: card, anchor: marker, within: window, gap: 9, side: .trailing)
+        XCTAssertEqual(frame.minY, window.minY)
+        XCTAssertEqual(frame.minX, 120 + 132 + 9)
+    }
+
+    /// Below stays the default, so every existing card is unchanged.
+    func testBelowIsTheDefaultSide() {
+        let label = CGRect(x: 300, y: 450, width: 40, height: 18)
+        XCTAssertEqual(CardPlacement.frame(for: card, anchor: label, within: window, gap: 9),
+                       CardPlacement.frame(for: card, anchor: label, within: window, gap: 9, side: .below))
+    }
 }
 
 /// The card's panel lifecycle: it must not float over a board that has moved on under it.
