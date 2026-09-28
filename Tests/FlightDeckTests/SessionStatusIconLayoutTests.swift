@@ -52,6 +52,30 @@ final class SessionStatusIconLayoutTests: XCTestCase {
         )
     }
 
+    /// The sub-agent count moved to the row's trailing edge, so it no longer widens the
+    /// leading column — a busy row with sub-agents keeps its title aligned with every other row.
+    func testSubagentCountDoesNotShiftTheTitle() {
+        XCTAssertEqual(
+            titleOffset(SessionStatus(activity: .busy, subagentCount: 12)),
+            titleOffset(SessionStatus(activity: .idle)), accuracy: 0.5,
+            "the sub-agent count widened the leading status column"
+        )
+    }
+
+    private func countWidth(_ status: SessionStatus?) -> CGFloat {
+        let host = NSHostingView(rootView: SubagentCount(status: status))
+        host.layoutSubtreeIfNeeded()
+        return host.fittingSize.width
+    }
+
+    /// The trailing count draws only where the old inline one did: busy, with sub-agents.
+    func testTrailingCountRendersOnlyForBusyWithSubagents() {
+        XCTAssertGreaterThan(countWidth(SessionStatus(activity: .busy, subagentCount: 3)), 0)
+        XCTAssertEqual(countWidth(SessionStatus(activity: .busy)), 0)
+        XCTAssertEqual(countWidth(SessionStatus(activity: .waiting, subagentCount: 3)), 0)
+        XCTAssertEqual(countWidth(nil), 0)
+    }
+
     func testEveryStateReservesTheColumn() {
         let states: [(String, CGFloat)] = [
             ("nil, read", columnWidth(nil)),

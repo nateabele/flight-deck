@@ -109,11 +109,10 @@ private struct SessionRow: View {
             // arrived. `Color.clear` is a real subview at every status, so the slot and its
             // spacing always exist. `SessionStatusIconLayoutTests` measures both facts.
             //
-            // A ZStack rather than a fixed width: a busy session with sub-agents draws its
-            // count beside the glyph, and a hard width would overlap it onto the title. The
-            // stack takes the wider of the two, so that row's title shifts right by the width
-            // of the numeral — the one case where alignment gives, deliberately, since
-            // clipping the count would be worse.
+            // A ZStack rather than a fixed width, so a glyph wider than the column is never
+            // clipped. The sub-agent count used to be that case — drawn beside the glyph, it
+            // shifted its row's title right — and now lives at the trailing edge instead (see
+            // `SubagentCount` below), so every row's title starts at the same x.
             ZStack(alignment: .leading) {
                 Color.clear.frame(width: 16, height: 0)
                 SessionStatusIcon(
@@ -193,6 +192,9 @@ private struct SessionRow: View {
                     .help("Another tab is on this conversation")
                     .accessibilityIdentifier("session-pin-conflict")
             }
+            // Last before the close button on purpose: flush right at rest, and the button
+            // appearing on hover is what slides it left — no offset or hover state of its own.
+            SubagentCount(status: store.status(for: session.id))
             // Absent rather than hidden until hover, as it always was — but the reason has
             // changed with the status icon's move. It used to be that inserting the button is
             // what pushed the status icon left, so no manual offset was needed. The icon is on

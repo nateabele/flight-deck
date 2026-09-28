@@ -1038,7 +1038,7 @@ def _codex_paste_detects_same_burst_return(ctx, agent):
 
 _AgentRecords = namedtuple(
     "_AgentRecords",
-    "launches async_results sync_results notified agent_ids notified_tasks sites")
+    "launches async_results sync_results notified agent_ids notified_tasks sites resumes")
 
 
 def _notification_site(rec):
@@ -1058,17 +1058,30 @@ def _notification_texts(rec):
     content = (rec.get("message") or {}).get("content")
     if isinstance(content, str):
         out.append(content)
-    elif isinstance(content, list):
-        for block in content:
-            if isinstance(block, dict):
-                for key in ("text", "content"):
-                    if isinstance(block.get(key), str):
-                        out.append(block[key])
+    # A content BLOCK's text/content is deliberately NOT read, and this is the opposite of the
+    # mistake made elsewhere in this reader: it is notification text QUOTED INSIDE another
+    # payload, not a notification delivery. Measured over 40 transcripts: all 20 such
+    # occurrences were quotations -- 6 in `assistant`/`text` (the model writing ABOUT
+    # notifications) and 14 in `user`/`tool_result` (a file read, a transcript dump, a log echo
+    # whose bytes happen to contain the markup). Reading them would close an agent because
+    # somebody grepped for a notification, which is a FALSE POSITIVE, not extra coverage.
+    #
+    # `ClaudeSession.swift` reads exactly three sites for the same reason (user string,
+    # `attachment` of type queued_command, and `queue-operation`/`enqueue`), and a probe reader
+    # more permissive than the consumer it pins is worse than useless: its rows would stay green
+    # on transcripts the real reader chokes on.
     attachment = rec.get("attachment")
     if isinstance(attachment, dict):
         for key in ("prompt", "text", "content"):
             if isinstance(attachment.get(key), str):
                 out.append(attachment[key])
+    # The fourth site, and the one this reader missed TWICE: a `queue-operation` record carries
+    # the notification in a TOP-LEVEL `content` string, with no `message` and no `attachment`.
+    # It is the dominant site by volume -- 1363 of them in a 40-transcript sweep, against 98 at
+    # the attachment site -- and a reader that stops at `message`/`attachment` sees none of them.
+    for key in ("content", "prompt", "text"):
+        if isinstance(rec.get(key), str):
+            out.append(rec[key])
     return out
 
 
@@ -1078,7 +1091,7 @@ def _agent_launch_records(path):
     by `<task-notification>` records. Shared by both rows below so neither re-derives it.
     """
     launches, async_results, sync_results, notified = {}, set(), set(), set()
-    agent_ids, notified_tasks, sites = {}, set(), set()
+    agent_ids, notified_tasks, sites, resumes = {}, set(), set(), {}
     with open(path, errors="replace") as f:
         for line in f:
             if not line.strip():
@@ -1105,6 +1118,12 @@ def _agent_launch_records(path):
                                 agent_ids[block["tool_use_id"]] = tur["agentId"]
                         else:
                             sync_results.add(block["tool_use_id"])
+                        # A SendMessage that RESUMES an agent reopens work under the continuing
+                        # call's id, and reports the agent it resumed. FD keys the count on this
+                        # tool_use_id and remembers the agent id, because the closing
+                        # notification may name either one.
+                        if isinstance(tur, dict) and isinstance(tur.get("resumedAgentId"), str):
+                            resumes[block["tool_use_id"]] = tur["resumedAgentId"]
             # THREE sites, not one, and reading only the first is a measurement error this row
             # has already made: a scan that looked only at a user record's string content put
             # the unclosed-launch rate at 1.8-10.7% depending on sample, when reading the
@@ -1117,7 +1136,7 @@ def _agent_launch_records(path):
                 notified.update(re.findall(r"<tool-use-id>([^<]+)</tool-use-id>", text))
                 notified_tasks.update(re.findall(r"<task-id>([^<]+)</task-id>", text))
     return _AgentRecords(launches, async_results, sync_results, notified,
-                         agent_ids, notified_tasks, sites)
+                         agent_ids, notified_tasks, sites, resumes)
 
 
 def _agent_async_launch_marker(ctx, agent):
@@ -1161,6 +1180,42 @@ def _agent_async_launch_marker(ctx, agent):
     )
 
 
+def _agent_resume_closes_by_either_id(ctx, agent):
+    """**An agent resumed by a follow-up message reopens work, and closes under EITHER id.** The
+    `tool_result` for the resuming `SendMessage` call carries `toolUseResult.resumedAgentId`;
+    Flight Deck reopens the count keyed on that call's `tool_use_id` and remembers the agent id,
+    because the closing `<task-notification>` may name the call (`<tool-use-id>`) OR the agent
+    (`<task-id>`). FD accepts either, so only one has to hold -- and this row asserts exactly
+    that disjunction rather than the stronger "both match", so a claude that stops emitting one
+    of them does not fail a cell for a contract FD never depended on.
+
+    Verified against the source transcript before pinning, not taken on report: all three
+    resume/notification pairs offered were checked at their stated lines, and part (a) --
+    `resumedAgentId` a string, on a `tool_result` whose `tool_use_id` is the SendMessage call --
+    held 3/3. (The notification LINE numbers in that report were mostly off, which is how the
+    fourth notification site turned up; see `_notification_texts`.)
+
+    Not asserting "both ids match" even though the captured sample shows both: FD documents that
+    it accepts either, and a row should pin the contract a consumer relies on, not the strongest
+    coincidence the sample happens to support.
+    """
+    rec = _agent_launch_records(_CLAUDE_AGENT_ASYNC_FIXTURE)
+    if not rec.resumes:
+        return Observation(
+            declared=True, observed=None,
+            detail="no tool_result carrying toolUseResult.resumedAgentId in the capture, so the "
+                   "row cannot establish the claim",
+        )
+    unclosed = {call: aid for call, aid in rec.resumes.items()
+                if call not in rec.notified and aid not in rec.notified_tasks}
+    return Observation(
+        declared=True, observed=not unclosed,
+        detail=f"{len(rec.resumes)} resume(s); closed by tool-use-id or task-id=="
+               f"resumedAgentId: {len(rec.resumes) - len(unclosed)}/{len(rec.resumes)}"
+               + (f"; unclosed {sorted(unclosed)}" if unclosed else ""),
+    )
+
+
 def _agent_notification_sites(ctx, agent):
     """**Pins the notification site that a one-site reader silently misses.** A
     `<task-notification>` does not only arrive as a user record's string content; it also arrives
@@ -1185,10 +1240,12 @@ def _agent_notification_sites(ctx, agent):
                    "cannot establish which sites exist",
         )
     attachment_sites = {s for s in rec.sites if "queued" in s or "attachment" in s}
+    queue_sites = {s for s in rec.sites if "queue-operation" in s}
     return Observation(
-        declared=True, observed=bool(attachment_sites),
-        detail=f"notification sites present: {sorted(rec.sites)}; attachment/queued_command "
-               f"site present: {bool(attachment_sites)}",
+        declared=True, observed=bool(attachment_sites) and bool(queue_sites),
+        detail=f"notification sites present: {sorted(rec.sites)}; attachment/queued_command: "
+               f"{bool(attachment_sites)}; queue-operation (top-level content): "
+               f"{bool(queue_sites)}",
     )
 
 
@@ -1301,6 +1358,8 @@ ROWS = [
         _agent_completion_notification),
     Row("agentNotificationSites", "grammars", ("claude",), "cheap", (),
         _agent_notification_sites),
+    Row("agentResumeClosesByEitherId", "grammars", ("claude",), "cheap", (),
+        _agent_resume_closes_by_either_id),
 ]
 
-assert len(ROWS) == 27, f"expected exactly 27 rows, found {len(ROWS)}"
+assert len(ROWS) == 28, f"expected exactly 28 rows, found {len(ROWS)}"
