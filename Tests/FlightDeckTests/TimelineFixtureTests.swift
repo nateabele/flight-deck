@@ -243,10 +243,27 @@ final class TimelineFixtureTests: XCTestCase {
             Self.provenance("transcript.captured", in: "Claude")["files"] as? [String],
             "the transcript's provenance must list the files it covers"
         )
-        XCTAssertEqual(present.subtracting(transcript), Set(files),
-                       "every capture in Fixtures/Claude must be covered by one of the two "
-                       + "provenance files; a new one goes in dialogs.captured.provenance.json "
-                       + "with its digest, never in unguarded")
+        // The async-Agent records have their own provenance on purpose: they are redacted, not
+        // verbatim, and adding them to the dialogs batch would make that batch's "never edited"
+        // claim false. They are still digest-guarded — here — so a separate file is not a way in
+        // unguarded; without this the rule below rejected them and the suite was red on master.
+        let asyncLaunch = try Self.provenance("agent-async-launch.captured", in: "Claude")
+        let asyncFiles = try XCTUnwrap(asyncLaunch["files"] as? [String])
+        let asyncDigests = try XCTUnwrap(asyncLaunch["sha256"] as? [String: String])
+        XCTAssertEqual(Set(asyncDigests.keys), Set(asyncFiles))
+        for file in asyncFiles {
+            let url = try XCTUnwrap(bundle.url(
+                forResource: (file as NSString).deletingPathExtension,
+                withExtension: (file as NSString).pathExtension, subdirectory: "Fixtures/Claude"
+            ), "Fixtures/Claude/\(file) not found in the test bundle")
+            let digest = SHA256.hash(data: try Data(contentsOf: url))
+            XCTAssertEqual(digest.map { String(format: "%02x", $0) }.joined(), asyncDigests[file],
+                           "\(file) no longer matches the digest in its provenance file")
+        }
+        XCTAssertEqual(present.subtracting(transcript).subtracting(asyncFiles), Set(files),
+                       "every capture in Fixtures/Claude must be covered by a provenance file; "
+                       + "a new one goes in dialogs.captured.provenance.json with its digest, "
+                       + "never in unguarded")
 
         for file in files {
             let url = try XCTUnwrap(bundle.url(
