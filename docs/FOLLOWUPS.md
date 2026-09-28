@@ -2038,18 +2038,10 @@ different things — `ReleaseCounts` is the one count ("Release 3 New Tasks" ove
   `SessionSidebar`'s `List` only renders rows for an expanded project, so landing
   `selectedSessionID` on a session whose project is collapsed changes the terminal pane but
   leaves the sidebar showing no highlighted row at all — no visible feedback that the jump
-  happened. Two options, both touching `fi-tab-nav`'s cycling too since it has the same gap:
-  un-collapse the owning project as part of the traversal (`goBack`/`goForward` would need
-  `setCollapsed(false, forProjectAt:)` alongside the selection write), or treat it the way
-  cycling treats a collapsed project — landing on the project's own header row instead of the
-  session inside it. Left to Nate's call rather than picked here.
-
-## Back/Forward and the project view (merge of master into flywheel-intake, 2026-09-28)
-
-- **History does not know about the project view.** master's `SelectionHistory` records
-  sessions only (`traverseHistory` skips `.project` — "see fi-tab-nav"), while this branch
-  adds `selectedProjectID`. Opening a project view records nothing, and ⌃⌘← from a project
-  view steps back from the session hidden *behind* it. Landing on a session still closes the
-  project view (the `selectedSessionID` didSet clears it), so nothing shows two things at once.
-  Recording `.project(path:)` on `selectProject` and resolving it in `traverseHistory` is the
-  fix, and belongs with the `fi-tab-nav` project-row work.
+  happened. `fi-tab-nav`'s cycling does not have this gap: it already treats a collapsed
+  project's header row as standing in for a selected session hidden inside it (see
+  `collapsedHomeID` in `cycleSelection`). Two options for Back/Forward: un-collapse the owning
+  project as part of the traversal (`goBack`/`goForward` would need
+  `setCollapsed(false, forProjectAt:)` alongside the selection write), or land on the collapsed
+  project's header, as cycling does, instead of the session inside it. Left to Nate's call
+  rather than picked here.

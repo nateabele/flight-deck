@@ -15,10 +15,26 @@ final class SelectionHistoryStoreTests: XCTestCase {
     }
 
     private let foo = URL(fileURLWithPath: "/work/foo", isDirectory: true)
+    private let bar = URL(fileURLWithPath: "/work/bar", isDirectory: true)
 
     private func makeStore(_ persistence: FakePersistence? = nil) -> (SessionStore, [UUID]) {
         let store = SessionStore(provider: StubProvider(), persistence: persistence)
         let ids = (0..<3).map { _ in store.newSession(in: foo).id }
+        return (store, ids)
+    }
+
+    private func projectID(_ url: URL, in store: SessionStore) -> UUID {
+        store.repos.first { $0.url.standardizedFileURL == url.standardizedFileURL }!.id
+    }
+
+    /// Two sessions in `foo` and a second project's (`bar`) own session, none of them selected
+    /// at construction (`selecting: false`) — unlike `makeStore()` above, which auto-selects
+    /// the last one created. These tests assert the exact shape of `back`, and that auto-select
+    /// would record a spurious entry before the test's own first assignment ever runs.
+    private func makeProjectHistoryStore(_ persistence: FakePersistence? = nil) -> (SessionStore, [UUID]) {
+        let store = SessionStore(provider: StubProvider(), persistence: persistence)
+        let ids = (0..<2).map { _ in store.newSession(in: foo, selecting: false).id }
+        store.newSession(in: bar, selecting: false)
         return (store, ids)
     }
 
@@ -88,6 +104,21 @@ final class SelectionHistoryStoreTests: XCTestCase {
         store.closeProject(project)
 
         XCTAssertEqual(store.selectionHistory.back, backBefore + [.session(id: ids[0])])
+    }
+
+    /// Closing the project whose own view is up: the user was looking at the project, so that
+    /// is the one entry recorded — not the session that sat hidden underneath the view.
+    func testClosingAProjectWithItsViewUpRecordsTheProject() {
+        let (store, ids) = makeProjectHistoryStore()
+        store.selectedSessionID = ids[0]
+        store.selectProject(projectID(foo, in: store))
+        let backBefore = store.selectionHistory.back
+
+        store.closeProject(projectID(foo, in: store))
+
+        XCTAssertNil(store.selectedProjectID)
+        XCTAssertEqual(store.selectionHistory.back,
+                       backBefore + [.project(path: foo.standardizedFileURL.path)])
     }
 
     /// `List(selection:)` can write nil on a deselect between two real clicks. `oldValue` alone
@@ -186,6 +217,94 @@ final class SelectionHistoryStoreTests: XCTestCase {
         let store = SessionStore(provider: StubProvider(), persistence: persistence)
         store.newSession(in: foo)
         XCTAssertNil(persistence.stored?.selectionHistory)
+    }
+
+    func testSessionToProjectToSessionRecordsTwoEntries() {
+        let (store, ids) = makeProjectHistoryStore()
+        store.selectedSessionID = ids[0]
+        store.selectProject(projectID(foo, in: store))
+        store.selectedSessionID = ids[1]
+        XCTAssertEqual(store.selectionHistory.back,
+                       [.session(id: ids[0]), .project(path: foo.standardizedFileURL.path)])
+    }
+
+    /// `cycleSelection` lands on a project row through `selectProject`, the same recording path
+    /// as a manual click — it must not have its own bypass. `ids[1]` is `foo`'s second (and
+    /// last) session, so the next stop forward is `bar`'s project row.
+    func testCyclingOntoAProjectRowRecordsHistory() {
+        let (store, ids) = makeProjectHistoryStore()
+        store.selectedSessionID = ids[1]
+        store.selectNextSession()
+        XCTAssertEqual(store.selectedProjectID, projectID(bar, in: store))
+        XCTAssertEqual(store.selectionHistory.back.last, .session(id: ids[1]))
+        store.goBack()
+        XCTAssertEqual(store.selectedSessionID, ids[1])
+        XCTAssertNil(store.selectedProjectID)
+    }
+
+    func testBackReopensAProjectView() {
+        let (store, ids) = makeProjectHistoryStore()
+        store.selectedSessionID = ids[0]
+        store.selectProject(projectID(foo, in: store))
+        store.selectedSessionID = ids[1]
+        let backBefore = store.selectionHistory.back.count
+        let forwardBefore = store.selectionHistory.forward.count
+        store.goBack()
+        XCTAssertEqual(store.selectedProjectID, projectID(foo, in: store))
+        // Exactly one hop moved between the stacks. `selectProject` records on its own, so
+        // landing on a project view through it must still be suppressed — otherwise Back
+        // pushes the session it left and wipes Forward, and Forward can never return.
+        XCTAssertEqual(store.selectionHistory.back.count, backBefore - 1)
+        XCTAssertEqual(store.selectionHistory.forward.count, forwardBefore + 1)
+        store.goBack()
+        XCTAssertNil(store.selectedProjectID)
+        XCTAssertEqual(store.selectedSessionID, ids[0])
+    }
+
+    func testForwardFromAProjectViewReturnsToTheSession() {
+        let (store, ids) = makeProjectHistoryStore()
+        store.selectedSessionID = ids[0]
+        store.selectProject(projectID(foo, in: store))
+        store.goBack()
+        XCTAssertNil(store.selectedProjectID)
+        store.goForward()
+        XCTAssertEqual(store.selectedProjectID, projectID(foo, in: store))
+    }
+
+    /// `selectProject` is the one recording path that does not go through `selectedSessionID`'s
+    /// persisting `didSet`, so it persists itself. Without that, what it recorded lives only in
+    /// memory and a relaunch restores the stacks as they were before the project view opened.
+    ///
+    /// Shaped so the loss is visible after a relaunch: project views are not restored, so the
+    /// relaunched store sits on `ids[0]`, the very session `selectProject` pushed, and a
+    /// `goBack()` to it is skipped either way. What differs is the step before — a Back that
+    /// left `ids[1]` on Forward. Opening the project view is a new navigation and clears
+    /// Forward; unpersisted, the stale Forward comes back and ⌃⌘→ jumps to `ids[1]`.
+    func testSelectProjectPersistsTheEntryItRecords() {
+        let persistence = FakePersistence()
+        let (store, ids) = makeProjectHistoryStore(persistence)
+        store.selectedSessionID = ids[0]
+        store.selectedSessionID = ids[1]
+        store.goBack()
+        store.selectProject(projectID(foo, in: store))
+
+        let relaunched = SessionStore(provider: StubProvider(), persistence: persistence)
+        _ = relaunched.restore(directoryExists: { _ in true })
+        XCTAssertEqual(relaunched.selectionHistory.back, [.session(id: ids[0])])
+        XCTAssertTrue(relaunched.selectionHistory.forward.isEmpty)
+        relaunched.goForward()
+        XCTAssertEqual(relaunched.selectedSessionID, ids[0])
+    }
+
+    func testAProjectEntrySurvivesARelaunchByPath() {
+        let persistence = FakePersistence()
+        let (store, ids) = makeProjectHistoryStore(persistence)
+        store.selectProject(projectID(foo, in: store))
+        store.selectedSessionID = ids[1]
+        let relaunched = SessionStore(provider: StubProvider(), persistence: persistence)
+        _ = relaunched.restore(directoryExists: { _ in true })
+        relaunched.goBack()
+        XCTAssertEqual(relaunched.selectedProjectID, projectID(foo, in: relaunched))
     }
 
     /// A malformed `selectionHistory` (an unknown case, a wrong-shaped stack) must not throw
