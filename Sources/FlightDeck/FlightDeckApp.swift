@@ -275,6 +275,7 @@ struct FlightDeckApp: App {
                 FontSizeCommands(store: store, preferences: preferences)
                 TabNavigationCommands(store: store)
                 SearchCommands()
+                PlanningCommands()
             }
 
         // A `Settings` scene gives ⌘, and the standard Preferences window for free.

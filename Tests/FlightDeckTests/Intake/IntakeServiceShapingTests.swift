@@ -205,6 +205,43 @@ final class IntakeServiceShapingTests: XCTestCase {
         XCTAssertEqual(commands(seeded.id), [.stop, .pause])
     }
 
+    /// A pause or stop is remembered with its sequence number until the runner acknowledges
+    /// it — what "Pausing…"/"Stopping…" wait on — and a play sent after it supersedes it.
+    func testHaltIsHeldUntilAcked() async throws {
+        let seeded = try seed(.shaping)
+        let svc = makeService()
+        await svc.launchRecovery?.value
+        runner.running = [seeded.id]
+        svc.send(seeded.id, .pause)
+        XCTAssertEqual(svc.halts[seeded.id], HaltRequest(kind: .pause, seq: 1))
+        svc.send(seeded.id, .stop)
+        XCTAssertEqual(svc.halts[seeded.id], HaltRequest(kind: .stop, seq: 2))
+
+        var tape = tapeStore(seeded.id).loadTape()
+        tape.status = .running
+        tape.ackedCommandSeq = 2
+        try tapeStore(seeded.id).saveTape(tape)
+        svc.pollTapes()
+        XCTAssertNil(svc.halts[seeded.id], "acknowledged: nothing left to wait on")
+
+        svc.send(seeded.id, .pause)
+        svc.send(seeded.id, .step)
+        XCTAssertNil(svc.halts[seeded.id], "a play after the pause supersedes it")
+    }
+
+    /// Clicking a play button makes it the default (spec §4), kept on the intake's config so
+    /// the dot is still under it after a relaunch.
+    func testSetDefaultPlayPersists() throws {
+        let seeded = try seed(.shaping)
+        let svc = makeService()
+        XCTAssertEqual(intake(svc, seeded.id).roundConfig?.defaultPlay, .nextMajor)
+        svc.setDefaultPlay(seeded.id, .step)
+        XCTAssertEqual(intake(svc, seeded.id).roundConfig?.defaultPlay, .step)
+        XCTAssertEqual(try IntakeStore(root: root).load(id: seeded.id).roundConfig?.defaultPlay, .step)
+        XCTAssertEqual(intake(svc, seeded.id).roundConfig?.customized, true, "an edit like any other in the Rounds editor")
+        XCTAssertTrue(commands(seeded.id).isEmpty, "choosing a default runs nothing")
+    }
+
     /// A runner that dies mid-run while the app stays open is brought back on the next tick,
     /// and one that is still alive is left alone.
     func testTickRespawnsARunnerThatDiedMidRun() async throws {

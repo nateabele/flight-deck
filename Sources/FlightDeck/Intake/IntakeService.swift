@@ -163,6 +163,10 @@ final class IntakeService: ObservableObject {
     /// the first sign of that work, and by `save` the moment the intake leaves the state the
     /// work runs in (a turn that failed before writing anything, a discard).
     @Published private(set) var pending: [UUID: PendingStart] = [:]
+    /// The latest pause or stop `send` queued, until the runner acknowledges it — what the
+    /// control bar's "Pausing…"/"Stopping…" wait on (`HaltRequest.label`). Kept here rather
+    /// than in the view so the Run menu and the bar's buttons share one answer.
+    @Published private(set) var halts: [UUID: HaltRequest] = [:]
     /// How long a pending start may stay silent before it reads as queued rather than starting.
     static let queuedAfter: TimeInterval = 15
     /// Each seat file's mtime at its last read, per intake, keyed by path — the same stat-first
@@ -487,21 +491,36 @@ final class IntakeService: ObservableObject {
     /// unacked commands, which the next tick's `resumeIfStalled` starts one to fold in.
     func send(_ id: UUID, _ command: TapeCommand) {
         guard intake(id)?.state == .shaping else { return }
-        do { _ = try tapeStore(id).appendCommand(command) }
+        let seq: Int
+        do { seq = try tapeStore(id).appendCommand(command) }
         catch { return fail(id, "Could not queue the command for the planning runner: \(error)") }
         switch command {
         case .note, .removeNote, .editPlan: return
         // A pause or stop withdraws the play that was starting: left pending, a runner that
         // reads the stop first and exits without a beat would leave "starting" up for good.
-        case .pause: pending[id] = nil
+        case .pause:
+            pending[id] = nil
+            halts[id] = HaltRequest(kind: .pause, seq: seq)
         case .stop:
             pending[id] = nil
+            halts[id] = HaltRequest(kind: .stop, seq: seq)
             if runner?.isRunning(id, tape: nil) != true { startRunner(id) }
         case .step, .nextMajor, .toReview:
+            // A play queued after a pause overrides it (commands apply in order), so the bar
+            // must stop saying "Pausing…" the moment the human changes their mind.
+            halts[id] = nil
             pending[id] = PendingStart(kind: .round(upcomingRound(id, config: intake(id)?.roundConfig)), since: now())
             startRunner(id)
         case .extend: startRunner(id)
         }
+    }
+
+    /// Makes `mode` the intake's default play — what clicking a play button does besides
+    /// playing (spec §4), and what the button's dot marks. Routed through
+    /// `RoundConfigEditor.setting` like every Rounds-editor edit, so it flags `customized`.
+    func setDefaultPlay(_ id: UUID, _ mode: PlayMode) {
+        guard let config = intake(id)?.roundConfig, config.defaultPlay != mode else { return }
+        mutate(id) { $0.roundConfig = RoundConfigEditor.setting(config) { $0.defaultPlay = mode } }
     }
 
     /// Which models planning rounds can seat: the PATH probe triage uses, run off the main
@@ -530,6 +549,7 @@ final class IntakeService: ObservableObject {
         let shaping = Set(intakes.lazy.filter { $0.state == .shaping }.map(\.id))
         let tracked = Set(latestTapes.keys).union(tapes.keys).union(tapeDates.keys).union(seatRounds.keys)
             .union(seatActivities.keys).union(runRecords.keys).union(convergence.keys).union(convergenceKeys.keys)
+            .union(halts.keys)
         for gone in tracked.subtracting(shaping) {
             tapes[gone] = nil
             latestTapes[gone] = nil
@@ -538,6 +558,7 @@ final class IntakeService: ObservableObject {
             convergence[gone] = nil
             convergenceKeys[gone] = nil
             convergenceFolds[gone] = nil
+            halts[gone] = nil
         }
         for id in shaping {
             let store = tapeStore(id)
@@ -552,6 +573,7 @@ final class IntakeService: ObservableObject {
             if !flapSeeded.contains(id) { _ = flapPolicy(for: id) }
             refreshConvergence(id)
             pollSeats(id)
+            if let halt = halts[id], let acked = latestTapes[id]?.ackedCommandSeq, acked >= halt.seq { halts[id] = nil }
             if latestTapes[id]?.status == .reachedReview { finishShaping(id) } else { resumeIfStalled(id) }
         }
         pollTriageActivity()
@@ -650,7 +672,12 @@ final class IntakeService: ObservableObject {
         flapSeeded.insert(i.id)
         let tape = latestTapes[i.id] ?? tapeStore(i.id).loadTape()
         let board = BoardModel(intake: i, tape: tape, config: config, now: now(), selected: nil, preview: nil)
-        for (surface, text) in board.flapTexts { policy.seed(surface: surface, text: text) }
+        // The LCD's text values too. Its CONVERGENCE word isn't seeded yet: the series is
+        // folded just after this, and the cell's model from it arrives with Task 13.
+        let lcd = LCDModel(tape: tape, config: config, board: board, seats: [], convergence: nil, preview: nil, now: now())
+        for (surface, text) in board.flapTexts.merging(lcd.flapTexts, uniquingKeysWith: { a, _ in a }) {
+            policy.seed(surface: surface, text: text)
+        }
     }
 
     /// Clears every pending start whose work has shown a sign of life, and turns one silent for
