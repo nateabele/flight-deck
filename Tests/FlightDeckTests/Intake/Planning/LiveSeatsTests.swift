@@ -69,4 +69,34 @@ final class LiveSeatsTests: XCTestCase {
                                   now: t0.addingTimeInterval(300))
         XCTAssertEqual(rows[1].model.result, "Draft · 212 lines")
     }
+
+    /// A pending start's seat files are the PREVIOUS round's, still on disk: the card, the LCD
+    /// and the seat inspector all draw none of them (`LiveSeats.files`). The inspector once read
+    /// them straight, and said "Running" beside a row that said the seat had not started.
+    func testPendingStartHidesTheOldSeatFilesEverywhere() {
+        var files = SeatFiles()
+        files.activities["refine-2-reviewer"] = SeatActivity(harness: .codex, startedAt: t0)
+        XCTAssertEqual(LiveSeats.files(files, pending: nil).activities.count, 1)
+        XCTAssertTrue(LiveSeats.files(files, pending: PendingStart(kind: .round(nil), since: t0)).activities.isEmpty)
+    }
+
+    /// The seat inspector reads the row's held headline (`DwellBank.peek`) rather than the raw
+    /// one, so the two never disagree mid-dwell — and peeking never drops the other seats'
+    /// schedulers, as `settle` over a one-seat list would.
+    @MainActor
+    func testPeekShowsTheRowsHeldValueWithoutDisturbingIt() {
+        let bank = DwellBank()
+        func seat(_ id: String, _ headline: String) -> LiveSeat {
+            var model = LiveSeats.rows(round: PlannedRound(stage: .refine, round: 2, major: false), config: config,
+                                       seats: SeatFiles(), now: t0)[0].model
+            model.headline = headline
+            return LiveSeat(id: id, model: model)
+        }
+        _ = bank.settle([seat("a", "Reading"), seat("b", "Writing")])
+        _ = bank.settle([seat("a", "Editing"), seat("b", "Writing")])
+        XCTAssertEqual(bank.peek(seat("a", "Editing")).model.headline, "Reading", "held for its dwell, as the row is")
+        XCTAssertEqual(bank.peek(seat("c", "New")).model.headline, "New", "an unknown seat shows as it is")
+        XCTAssertEqual(bank.settle([seat("a", "Editing"), seat("b", "Writing")]).map(\.model.headline),
+                       ["Reading", "Writing"], "peek left both schedulers in place")
+    }
 }

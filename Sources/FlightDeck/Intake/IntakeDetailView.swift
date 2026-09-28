@@ -48,6 +48,9 @@ struct IntakeDetailView: View {
     @State private var selectedCheckpoint: Int?
     /// The seat the inspector details (`LiveSeat.id`).
     @State private var selectedSeat: String?
+    /// The seat rows' headline holds, shared with the seat inspector so it never says what the
+    /// row is still holding back (`DwellBank.peek`). A fresh bank per intake (`bindNotes`).
+    @State private var dwell = DwellBank()
     /// The play button being hovered, shared by the control bar and the board so both preview
     /// the same stop.
     @State private var preview: PlayMode?
@@ -234,6 +237,7 @@ struct IntakeDetailView: View {
                                  editConflict: service.editConflictNotice(intake.id, tape: tape, head: planHead),
                                  selectedRound: $selectedCheckpoint,
                                  selectedSeat: $selectedSeat,
+                                 dwell: dwell,
                                  controlBar: { now in
                                      AnyView(inCard(.bar, height: barHeight) { controlBar(tape, now: now, seats: seats) })
                                  },
@@ -428,6 +432,7 @@ struct IntakeDetailView: View {
 
     /// A different intake starts with a clean slate of notes, sending to itself.
     private func bindNotes() {
+        dwell = DwellBank()
         notes.reset()
         notes.send = { [service, id = intake.id] in service.send(id, $0) }
         notes.showRail = { [$showsInspector] in $showsInspector.wrappedValue = true }
@@ -724,18 +729,25 @@ struct IntakeDetailView: View {
         }
     }
 
-    /// Resolved on each draw rather than held: a seat's row model is re-derived from the service
-    /// each second, and the inspector follows it (a fallback starting, a result landing).
+    /// Resolved on each tick rather than held: a seat's row model is re-derived from the service
+    /// each second, and the inspector follows it (a fallback starting, a result landing). On its
+    /// own `LiveClock`, on the card's whole seconds, and through the card's own reads — the
+    /// pending substitution and the row's dwell hold. With `Date()` and the raw files it froze
+    /// between seat writes, and could say "Running" beside a row that said the seat had stalled.
     @ViewBuilder
     private var seatInspector: some View {
         if let tape, let round = tape.roundInProgress, let selectedSeat {
+            let pending = service.pending[intake.id]
             SeatReader(feed: service.seats, id: intake.id) { seats in
-                if let seat = LiveSeats.rows(round: round, config: intake.roundConfig, seats: seats, now: Date())
-                    .first(where: { $0.id == selectedSeat }) {
-                    SeatInspector(model: seat.model, activity: seats.activities[seat.model.id],
-                                  runDirectory: service.runDirectory(intake.id, run: seat.model.id))
-                } else {
-                    InspectorPlaceholder(title: "No Seat Selected", message: "Click a seat in the round to see its details.")
+                LiveClock(mode: .shaping(tape: tape, pending: pending)) { now in
+                    let files = LiveSeats.files(seats, pending: pending)
+                    if let seat = LiveSeats.rows(round: round, config: intake.roundConfig, seats: files, now: now)
+                        .first(where: { $0.id == selectedSeat }).map(dwell.peek) {
+                        SeatInspector(model: seat.model, activity: files.activities[seat.model.id],
+                                      runDirectory: service.runDirectory(intake.id, run: seat.model.id))
+                    } else {
+                        InspectorPlaceholder(title: "No Seat Selected", message: "Click a seat in the round to see its details.")
+                    }
                 }
             }
         } else if tape?.roundInProgress == nil {
