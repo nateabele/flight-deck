@@ -96,7 +96,24 @@ struct ProjectView: View {
     /// rather than the split intake layout, since there is nothing here to split.
     private var disabledEmptyState: some View {
         ContentUnavailableView {
-            Label("Flight Control Not Enabled", systemImage: "arrow.triangle.2.circlepath")
+            // The splash art (`Assets.xcassets/FlightControlSplash`) replaces the refresh
+            // glyph the SF Symbol initializer would draw here — `ContentUnavailableView`
+            // applies its own big-icon-over-title layout to whatever `Label` it's handed, so
+            // swapping the icon view is enough; the title keeps the same styling as before.
+            // `bundle: Bundle(for: SessionStore.self)` rather than the default `Bundle.main`:
+            // under `scripts/test-unit.sh` the main bundle is the `xctest` tool, not
+            // "Flight Deck.app" — same seam `ClaudePluginLocation` and `SessionDaemon.bundledBinary`
+            // exist for — and `Bundle(for:)` on a class this module compiles resolves to the
+            // real app bundle either way, so this is correct in the shipped app too.
+            Label {
+                Text("Flight Control Not Enabled")
+            } icon: {
+                Image("FlightControlSplash", bundle: Bundle(for: SessionStore.self))
+                    .resizable()
+                    .scaledToFit()
+                    .frame(maxWidth: 200, maxHeight: 200)
+                    .accessibilityLabel("Flight Control")
+            }
         } description: {
             Text("Enable Flight Control to describe work here, triage it against the task graph, and release tasks to the swarm.")
         } actions: {
