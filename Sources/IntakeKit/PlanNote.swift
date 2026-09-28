@@ -55,24 +55,39 @@ public struct NoteAnchor: Codable, Equatable, Sendable {
     ///
     /// nil when the quote is gone (or empty): the note is then unanchored in practice, and the
     /// UI should show it detached rather than highlight a guess.
+    ///
+    /// A short quote (under `shortQuote` characters) must also prove it is the same spot: at
+    /// least `shortContext` characters of its recorded prefix or suffix around it, or the same
+    /// section. "the job" or "offline" occurs all over a plan, so without that a note whose
+    /// words were deleted jumped to the next instance of them instead of showing detached.
     public func locate(in markdown: String) -> Range<String.Index>? {
         guard !quote.isEmpty else { return nil }
-        if let exact = best(of: occurrences(of: quote, in: markdown), in: markdown, prefix: prefix, suffix: suffix) {
-            return exact
-        }
+        let short = quote.count < Self.shortQuote
+        let exact = best(of: occurrences(of: quote, in: markdown), in: markdown, prefix: prefix, suffix: suffix,
+                         confirmed: short ? { self.section == Self.heading(before: $0.lowerBound, in: markdown) } : nil)
+        if let exact { return exact }
         let (normalized, map) = Self.collapsingWhitespace(markdown)
         let needle = Self.collapsingWhitespace(quote).text.trimmingCharacters(in: .whitespaces)
         guard !needle.isEmpty else { return nil }
         let candidates = occurrences(of: needle, in: normalized)
-        guard let hit = best(of: candidates, in: normalized,
-                             prefix: Self.collapsingWhitespace(prefix).text,
-                             suffix: Self.collapsingWhitespace(suffix).text) else { return nil }
-        let lower = normalized.distance(from: normalized.startIndex, to: hit.lowerBound)
-        let upper = normalized.distance(from: normalized.startIndex, to: hit.upperBound)
         // `map[i]` is where normalized character i came from; the last character's own end is
         // the character after it in the original.
-        return map[lower]..<markdown.index(after: map[upper - 1])
+        func original(_ hit: Range<String.Index>) -> Range<String.Index> {
+            let lower = normalized.distance(from: normalized.startIndex, to: hit.lowerBound)
+            let upper = normalized.distance(from: normalized.startIndex, to: hit.upperBound)
+            return map[lower]..<markdown.index(after: map[upper - 1])
+        }
+        return best(of: candidates, in: normalized,
+                    prefix: Self.collapsingWhitespace(prefix).text,
+                    suffix: Self.collapsingWhitespace(suffix).text,
+                    confirmed: short ? { self.section == Self.heading(before: original($0).lowerBound, in: markdown) } : nil)
+            .map(original)
     }
+
+    /// Below this many characters a quote needs its context or section to confirm a match.
+    public static let shortQuote = 20
+    /// How much of the recorded prefix or suffix a short quote's match must keep.
+    public static let shortContext = 8
 
     private func occurrences(of needle: String, in haystack: String) -> [Range<String.Index>] {
         var found: [Range<String.Index>] = []
@@ -86,21 +101,26 @@ public struct NoteAnchor: Codable, Equatable, Sendable {
 
     /// The candidate whose surroundings agree most with the recorded context. Ties go to the
     /// first in document order, the only stable answer when the context says nothing.
-    private func best(of candidates: [Range<String.Index>], in text: String, prefix: String,
-                      suffix: String) -> Range<String.Index>? {
-        guard candidates.count > 1 else { return candidates.first }
-        func score(_ r: Range<String.Index>) -> Int {
+    ///
+    /// `confirmed`, for a short quote, is its section check: the winner must then keep
+    /// `shortContext` characters of the prefix or of the suffix (or all of a shorter one — a
+    /// quote at the very start or end of the plan), or be confirmed; otherwise nil.
+    private func best(of candidates: [Range<String.Index>], in text: String, prefix: String, suffix: String,
+                      confirmed: ((Range<String.Index>) -> Bool)? = nil) -> Range<String.Index>? {
+        func score(_ r: Range<String.Index>) -> (p: Int, s: Int) {
             let before = text[..<r.lowerBound], after = text[r.upperBound...]
-            let p = zip(before.reversed(), prefix.reversed()).prefix { $0 == $1 }.count
-            let s = zip(after, suffix).prefix { $0 == $1 }.count
-            return p + s
+            return (zip(before.reversed(), prefix.reversed()).prefix { $0 == $1 }.count,
+                    zip(after, suffix).prefix { $0 == $1 }.count)
         }
-        var winner = candidates[0], top = score(winner)
+        guard var winner = candidates.first else { return nil }
+        var top = score(winner)
         for r in candidates.dropFirst() {
             let s = score(r)
-            if s > top { winner = r; top = s }
+            if s.p + s.s > top.p + top.s { winner = r; top = s }
         }
-        return winner
+        guard let confirmed else { return winner }
+        func kept(_ n: Int, of context: String) -> Bool { n >= Self.shortContext || (!context.isEmpty && n == context.count) }
+        return kept(top.p, of: prefix) || kept(top.s, of: suffix) || confirmed(winner) ? winner : nil
     }
 
     /// `text` with every whitespace run (newlines included) collapsed to a single space, plus
