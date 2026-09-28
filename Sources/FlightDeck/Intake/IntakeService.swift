@@ -485,6 +485,9 @@ final class IntakeService: ObservableObject {
             i.state = .review
             save(i)
         } else {
+            // The same optimistic start `answer` sets: without it the card drew the previous
+            // turn's finished activity, clock stopped, until this turn wrote its first event.
+            pending[id] = PendingStart(kind: .triage, since: now())
             start(id) { await $0.runTriage(id, turn: .encodeNow) }
         }
     }
@@ -912,6 +915,12 @@ final class IntakeService: ObservableObject {
         i.changeSet = nil; i.failure = nil; i.rawFailureOutput = nil
         i.ratingOverrides = [:]; i.droppedOps = []; i.confirmedDrift = []
         save(i)
+        // After the save, which drops a triage start for any state but `.triaging`; the turn's
+        // own `.triaging` save keeps it. The failed turn's activity goes with it — it is not
+        // this turn's, and the card would otherwise draw it as a finished seat.
+        pending[id] = PendingStart(kind: .triage, since: now())
+        triageActivities[id] = nil
+        triageActivityDates[id] = nil
         start(id) { await $0.runTriage(id, turn: .initial) }
     }
 
