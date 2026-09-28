@@ -483,7 +483,7 @@ each button would run.
 - Collapse returns to the single tape.
 - Abandoned branches are dimmed.
 
-Each round card shows its change count, `+/-` lines, verdict tally, and slot outcomes.
+Each round card shows its change count, `+/-` lines, verdict tally, and slot outcomes. (Plan markdown is stored one line per paragraph and list item, so for prose a "line" is a block — see the planning-UI redesign spec §7.2, "Plan text is stored unwrapped".)
 A substituted slot is marked, and hovering the mark shows the diagnosis.
 
 ### 8.4 Release review
