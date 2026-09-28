@@ -28,14 +28,20 @@ struct SplitFlapText: View {
     /// Offer the card even when the full name fits: a tape slot's card carries the round's
     /// result, which the label alone never shows.
     var alwaysOffersCard = false
+    /// False where an enclosing control owns keyboard focus (a tape slot's column), so the label
+    /// isn't a second tab stop inside it.
+    var isFocusable = true
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var hovering = false
     @FocusState private var focused: Bool
+    /// Focus that a key moved here. Only this opens the card: a click that focused the label, or
+    /// the window handing it initial focus, would otherwise pop a card nobody asked for.
+    @State private var keyboardFocused = false
 
     init(full: String, code: String, surface: String, policy: FlapPolicy, font: Font, nsFont: NSFont,
          detail: String? = nil, showsCardInitially: Bool = false, tracking: CGFloat = 0,
-         alwaysOffersCard: Bool = false) {
+         alwaysOffersCard: Bool = false, isFocusable: Bool = true) {
         self.full = full
         self.code = code
         self.surface = surface
@@ -46,6 +52,13 @@ struct SplitFlapText: View {
         self.showsCardInitially = showsCardInitially
         self.tracking = tracking
         self.alwaysOffersCard = alwaysOffersCard
+        self.isFocusable = isFocusable
+    }
+
+    /// Whether a focus change came from the keyboard — read from the event being handled at the
+    /// moment focus moves, since SwiftUI's focus state doesn't say what moved it.
+    static func isKeyboardFocus(focused: Bool, event: NSEvent.EventType?) -> Bool {
+        focused && event == .keyDown
     }
 
     /// Width as drawn: the font's advance plus `tracking` after every character.
@@ -67,10 +80,15 @@ struct SplitFlapText: View {
                     if abbreviated { DottedRule().offset(y: 3) }
                 }
                 .background(FloatingCard(
-                    isPresented: (abbreviated || alwaysOffersCard) && (hovering || focused || showsCardInitially),
+                    isPresented: (abbreviated || alwaysOffersCard) && (hovering || keyboardFocused || showsCardInitially),
                     card: SplitFlapCard(full: full, detail: detail, surface: "card.\(surface)", policy: policy).fixedSize()))
-                .focusable(abbreviated)
+                // `.activate`: reachable by Tab under Full Keyboard Access, but never the window's
+                // initial focus or a click's focus target.
+                .focusable(abbreviated && isFocusable, interactions: .activate)
                 .focused($focused)
+                .onChange(of: focused) { _, now in
+                    keyboardFocused = Self.isKeyboardFocus(focused: now, event: NSApp.currentEvent?.type)
+                }
                 .onHover { hovering = $0 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
         }
@@ -91,16 +109,31 @@ struct SplitFlapCard: View {
     let policy: FlapPolicy
 
     static let phosphor = Color(red: 219 / 255, green: 230 / 255, blue: 247 / 255)
+    private static let detailFont = NSFont.monospacedSystemFont(ofSize: 12, weight: .semibold)
+    private static let detailTracking: CGFloat = 1.2
+    private static let maxDetailWidth: CGFloat = 340
+
+    /// The detail's own width when it fits on one line, else the card's wrap width.
+    private static func wrapWidth(_ text: String) -> CGFloat? {
+        let width = ceil(LabelFit.measureWith(detailFont)(text) + detailTracking * CGFloat(text.count))
+        return width > maxDetailWidth ? maxDetailWidth : nil
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             FlapRow(text: full.uppercased(), key: full, surface: surface, policy: policy, style: .tiles)
             if let detail {
-                Text(detail.uppercased())
-                    .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                    .tracking(1.2)
+                let text = detail.uppercased()
+                Text(text)
+                    .font(Font(Self.detailFont))
+                    .tracking(Self.detailTracking)
                     .foregroundStyle(Self.phosphor.opacity(0.66))
-                    .lineLimit(1)
+                    // A free-text detail (a failure diagnosis) wraps inside a bounded card rather
+                    // than being cut: the card is where its full text is read. The wrap width is
+                    // definite, measured with the real font — a flexible frame under the card's
+                    // `fixedSize` sized the glass for fewer lines than the text drew.
+                    .frame(width: Self.wrapWidth(text), alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .padding(.horizontal, 12)

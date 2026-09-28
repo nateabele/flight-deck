@@ -32,6 +32,10 @@ struct DeparturesBoard: View {
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var hoveredSlot: String?
+    @FocusState private var focusedSlot: String?
+    /// The slot a key moved focus to — the only focus that opens its card (see
+    /// `SplitFlapText.isKeyboardFocus`).
+    @State private var keyboardSlot: String?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -58,16 +62,19 @@ struct DeparturesBoard: View {
         GeometryReader { geo in
             let unit = geo.size.width / 4.75
             HStack(spacing: 0) {
-                cell(width: unit * 1.45, detail: model.now.detail, divider: true) {
+                cell(model.now, width: unit * 1.45, divider: true) { _ in
                     Text(model.now.label)
                 } value: {
                     HStack(spacing: 10) {
-                        flap(model.now.value, code: model.now.valueCode, surface: "board.now", font: Style.nowFont)
+                        // A failure's diagnosis is free text with no short form: two lines under
+                        // NOW, and the whole of it on NOW's card.
+                        flap(model.now.value, code: model.now.valueCode, surface: "board.now", font: Style.nowFont,
+                             detail: model.now.shortDetail == nil ? model.now.detail : nil)
                             .foregroundStyle(.white)
                         chip
                     }
                 }
-                cell(width: unit * 0.8, detail: model.inTheAir.detail, divider: true) {
+                cell(model.inTheAir, width: unit * 0.8, divider: true) { _ in
                     // Only the label flaps (IN THE AIR ↔ PAUSED FOR ↔ HALTED FOR); the value
                     // below is a clock ticking every second and never flaps — see `flapTexts`.
                     SplitFlapText(full: model.inTheAir.label, code: model.inTheAir.shortLabel, surface: "board.inTheAir",
@@ -81,34 +88,46 @@ struct DeparturesBoard: View {
                         // Shrink rather than truncate: "34:…" hides the minutes that matter.
                         .minimumScaleFactor(0.5)
                 }
-                cell(width: unit * 1.05, detail: model.stopsAt.detail, divider: true) {
+                cell(model.stopsAt, width: unit * 1.05, divider: true) { caption in
                     HStack(spacing: 5) {
                         if let preview {
                             Image(systemName: Self.glyph(preview)).foregroundStyle(Palette.blue2)
                         }
-                        Text(model.stopsAt.label)
+                        Text(caption(preview == nil ? 0 : Style.glyphWidth))
                     }
                 } value: {
                     flap(model.stopsAt.value, code: model.stopsAt.valueCode, surface: "board.stopsAt", font: Style.stopFont)
                         .foregroundStyle(preview == nil ? Palette.blue2 : .white)
                 }
-                cell(width: unit * 1.45, detail: nil, divider: false) {
-                    Text(model.callingAt.label)
+                cell(model.callingAt, width: unit * 1.45, divider: false) { caption in
+                    Text(caption(0))
                 } value: {
                     flap(model.callingAt.value, code: model.callingAt.valueCode, surface: "board.callingAt", font: Style.callingFont)
                         .foregroundStyle(model.callingAt.valueCode == nil ? Palette.ph3 : Palette.ph)
                 }
             }
         }
-        .frame(height: 104)
+        .frame(height: Style.fieldsHeight)
         .background(LinearGradient(colors: [.white.opacity(0.025), .clear], startPoint: .top, endPoint: .bottom))
         .overlay(alignment: .bottom) { Rectangle().fill(Palette.ph.opacity(0.08)).frame(height: 1) }
     }
 
-    private func cell(width: CGFloat, detail: String?, divider: Bool,
-                      @ViewBuilder label: () -> some View, @ViewBuilder value: () -> some View) -> some View {
-        VStack(alignment: .leading, spacing: 0) {
-            label()
+    /// One board field. `label` is handed the field's caption as a function of the room other
+    /// marks take from it, so it can say "STOPS AT" or "STOPS" by measurement. The detail line
+    /// is likewise the sentence when it fits and the coded form ("since ENC") when it doesn't —
+    /// never a sentence cut mid-word. Either form wraps onto a second line rather than truncating.
+    private func cell(_ field: BoardField, width: CGFloat, divider: Bool,
+                      @ViewBuilder label: ((CGFloat) -> String) -> some View,
+                      @ViewBuilder value: () -> some View) -> some View {
+        let inner = width - 2 * Style.inset
+        let caption = { (taken: CGFloat) in
+            LabelFit.choose(full: field.label, code: field.shortLabel, width: inner - taken, padding: 0, measure: Style.captionMeasure)
+        }
+        let detail = field.detail.map {
+            LabelFit.choose(full: $0, code: field.shortDetail ?? $0, width: inner, padding: 0, measure: Style.detailMeasure)
+        }
+        return VStack(alignment: .leading, spacing: 0) {
+            label(caption)
                 .font(Style.caption)
                 .tracking(Style.captionTracking)
                 .foregroundStyle(Palette.ph3)
@@ -118,16 +137,19 @@ struct DeparturesBoard: View {
                 .padding(.top, 8)
             if let detail {
                 Text(detail)
-                    .font(.system(size: 12.5))
-                    .foregroundStyle(model.nowChip == "FAILED" && detail == model.now.detail ? Palette.red : Palette.ph2)
-                    .lineLimit(1)
+                    .font(Font(Style.detailNS))
+                    .foregroundStyle(model.nowChip == "FAILED" && field.detail == model.now.detail ? Palette.red : Palette.ph2)
+                    // Two lines, wrapped at word boundaries: in the narrowest cells even the coded
+                    // form ("since RF2 failed") needs them, and a tail cut would split a word.
+                    .lineLimit(2)
                     .truncationMode(.tail)
+                    .fixedSize(horizontal: false, vertical: true)
                     .padding(.top, 5)
             }
         }
         .padding(.horizontal, Style.inset)
         .padding(.top, 14)
-        .frame(width: width, height: 104, alignment: .topLeading)
+        .frame(width: width, height: Style.fieldsHeight, alignment: .topLeading)
         .overlay(alignment: .trailing) {
             if divider { Rectangle().fill(Palette.ph.opacity(0.07)).frame(width: 1) }
         }
@@ -135,10 +157,12 @@ struct DeparturesBoard: View {
     }
 
     /// A board value as a split-flap label no wider than its full name, so the chip beside NOW
-    /// sits against the name instead of being pushed to the cell's far edge.
-    private func flap(_ full: String, code: String?, surface: String, font: NSFont) -> some View {
-        SplitFlapText(full: full, code: code ?? full, surface: surface, policy: policy, font: Font(font), nsFont: font)
-            .frame(maxWidth: LabelFit.measureWith(font)(full) + 8)
+    /// sits against the name instead of being pushed to the cell's far edge. `detail` puts a
+    /// card on the value even when its name fits — how NOW carries a diagnosis too long to show.
+    private func flap(_ full: String, code: String?, surface: String, font: NSFont, detail: String? = nil) -> some View {
+        SplitFlapText(full: full, code: code ?? full, surface: surface, policy: policy, font: Font(font), nsFont: font,
+                      detail: detail, alwaysOffersCard: detail != nil)
+            .frame(maxWidth: LabelFit.fitWidth(full: full, measure: LabelFit.measureWith(font)))
     }
 
     /// Colour only for exceptions (spec §2): red for a failure, amber for "needs you", a light
@@ -190,12 +214,18 @@ struct DeparturesBoard: View {
                     }
                     .overlay(alignment: .topLeading) { brackets(widths) }
                     .padding(.horizontal, Style.inset)
+                    // A scroll slides the hovered slot out from under a pointer that never
+                    // moved, so no hover-exit arrives: forget the hover, or its card would reopen.
+                    .background(ScrollWatcher { hoveredSlot = nil })
                 }
                 .scrollIndicators(.never)
                 // Follows the live slot only when WHICH slot it is changes, never on a tick or
                 // a re-render: a user who scrolled away to read an old round isn't yanked back
                 // every second, and the tape catches up the moment a new round takes off.
                 .onAppear { if let id = followID { proxy.scrollTo(id, anchor: .center) } }
+                .onChange(of: focusedSlot) { _, id in
+                    keyboardSlot = SplitFlapText.isKeyboardFocus(focused: id != nil, event: NSApp.currentEvent?.type) ? id : nil
+                }
                 .onChange(of: followID) { _, id in
                     guard let id else { return }
                     withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.35)) { proxy.scrollTo(id, anchor: .center) }
@@ -240,6 +270,15 @@ struct DeparturesBoard: View {
             }
         }
         .contentShape(Rectangle())
+        // Keyboard access (spec §14): Tab reaches each slot under Full Keyboard Access, with the
+        // system focus ring; Return or Space selects a landed one, as a click does.
+        .focusable(interactions: .activate)
+        .focused($focusedSlot, equals: slot.id)
+        .onKeyPress(keys: [.return, .space]) { _ in
+            guard let id = slot.checkpointID else { return .ignored }
+            onSelect(id)
+            return .handled
+        }
         .onHover { inside in
             if inside { hoveredSlot = slot.id } else if hoveredSlot == slot.id { hoveredSlot = nil }
         }
@@ -255,8 +294,8 @@ struct DeparturesBoard: View {
     private func label(_ slot: TapeSlot, width: CGFloat) -> some View {
         let paused = slot.id == model.pausedAtSlotID
         let glyphs: CGFloat = (paused ? 12 : 0) + (slot.flagged ? 12 : 0)
-        let full = Style.slotMeasure(slot.name) + 8
-        let code = Style.slotMeasure(slot.code) + 8
+        let full = LabelFit.fitWidth(full: slot.name, measure: Style.slotMeasure)
+        let code = LabelFit.fitWidth(full: slot.code, measure: Style.slotMeasure)
         // The live round's clock rides beside its name only while even the code still fits next
         // to it; a narrower slot drops it rather than drawing the two over each other — the same
         // count is in IN THE AIR and on the slot's card.
@@ -269,8 +308,8 @@ struct DeparturesBoard: View {
             if paused { Image(systemName: "pause.fill").font(.system(size: 8, weight: .bold)) }
             SplitFlapText(full: slot.name, code: slot.code, surface: slot.id, policy: policy,
                           font: Font(Style.slotNS), nsFont: Style.slotNS, detail: model.cardDetail(for: slot),
-                          showsCardInitially: hoveredSlot == slot.id || openCardSlotID == slot.id,
-                          alwaysOffersCard: true)
+                          showsCardInitially: hoveredSlot == slot.id || keyboardSlot == slot.id || openCardSlotID == slot.id,
+                          alwaysOffersCard: true, isFocusable: false)
                 // Exactly the width it will draw at, so the HStack can centre a code too.
                 .frame(width: full <= room ? full : min(room, code))
             if let clock {
@@ -439,6 +478,12 @@ private enum Style {
     static let captionNS = NSFont.monospacedSystemFont(ofSize: 10.5, weight: .bold)
     static let caption = Font(captionNS)
     static let captionTracking: CGFloat = 1.5
+    static let captionMeasure: (String) -> CGFloat = { LabelFit.measureWith(captionNS)($0) + captionTracking * CGFloat($0.count) }
+    static let glyphWidth: CGFloat = 19
+    static let detailNS = NSFont.systemFont(ofSize: 12.5)
+    static let detailMeasure = LabelFit.measureWith(detailNS)
+    /// Tall enough for NOW's two-line diagnosis under a 32 pt value.
+    static let fieldsHeight: CGFloat = 116
     static let nowFont = NSFont.systemFont(ofSize: 24, weight: .bold)
     static let stopFont = NSFont.systemFont(ofSize: 21, weight: .bold)
     static let callingFont = NSFont.systemFont(ofSize: 17, weight: .medium)

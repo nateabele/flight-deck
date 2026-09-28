@@ -14,6 +14,15 @@ enum CardPlacement {
         let x = min(max(anchor.minX, bounds.minX), max(bounds.minX, bounds.maxX - card.width))
         return CGRect(x: x, y: y, width: card.width, height: card.height)
     }
+
+    /// The area a card may occupy: the part of the window that's actually visible on its screen
+    /// (not off the display's edge, not under the Dock or the menu bar), or the window itself
+    /// when there's no screen or no overlap to clamp to.
+    static func bounds(window: CGRect, screen: CGRect?) -> CGRect {
+        guard let screen else { return window }
+        let visible = window.intersection(screen)
+        return visible.isNull || visible.isEmpty ? window : visible
+    }
 }
 
 /// Presents `card` beside the view it backs, in a borderless child panel of that view's window.
@@ -26,7 +35,7 @@ enum CardPlacement {
 /// panel that ignores the mouse draws nothing but the card, never takes key, never eats the
 /// hover that opened it (a card appearing under the pointer would otherwise end the hover and
 /// flicker), and moves with its window because it is a child window. The price is placing it
-/// ourselves — `CardPlacement`.
+/// ourselves — `CardPlacement` — and closing it ourselves — see `FloatingCardAnchor`.
 struct FloatingCard<Card: View>: NSViewRepresentable {
     let isPresented: Bool
     let card: Card
@@ -44,6 +53,13 @@ struct FloatingCard<Card: View>: NSViewRepresentable {
 
 /// The AppKit half of `FloatingCard`: a view that never takes a hit, whose frame is the
 /// anchor, and which owns the panel.
+///
+/// A panel outlives the SwiftUI state that asked for it unless something closes it: scrolling
+/// the tape slides the label away from a card left hanging in place, and a card over a window
+/// that lost key, was minimised or whose app went to the background floats over whatever the
+/// user moved on to. Each of those closes the card and latches it shut; a re-render that still
+/// asks for the card (the pointer never "left") doesn't reopen it — only withdrawing the
+/// request (`present(nil)`) and making a fresh one does.
 final class FloatingCardAnchor: NSView {
     /// Transparent margin around the card inside the panel, so `SplitFlapCard`'s own shadow
     /// (radius 17, offset 14) isn't cut off at the panel's edge.
@@ -51,13 +67,25 @@ final class FloatingCardAnchor: NSView {
     private static let gap: CGFloat = 9
 
     private var card: AnyView?
+    private var dismissed = false
     private var panel: NSPanel?
     private var host: NSHostingView<AnyView>?
+    /// The panel frame last applied, so a re-render at the same spot doesn't re-set the frame
+    /// and re-order the panel on every update.
+    private var placed: CGRect?
+    private var observers: [NSObjectProtocol] = []
+    private weak var observedWindow: NSWindow?
+    private weak var observedClip: NSClipView?
+
+    /// How many times the panel has actually been moved — for tests of the skip.
+    private(set) var placements = 0
+    var hasPanel: Bool { panel != nil }
 
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
     func present(_ card: AnyView?) {
         self.card = card
+        if card == nil { dismissed = false }
         place()
     }
 
@@ -71,8 +99,13 @@ final class FloatingCardAnchor: NSView {
         place()
     }
 
+    deinit {
+        observers.forEach(NotificationCenter.default.removeObserver)
+    }
+
     private func place() {
-        guard let card, let window else { return close() }
+        observe()
+        guard let card, !dismissed, let window, !window.isMiniaturized else { return close() }
         let room = Self.shadowRoom
         let content = AnyView(card.padding(room).accessibilityHidden(true))
         let host = self.host ?? NSHostingView(rootView: content)
@@ -84,10 +117,48 @@ final class FloatingCardAnchor: NSView {
         let fitting = host.fittingSize
         let size = CGSize(width: fitting.width - 2 * room, height: fitting.height - 2 * room)
         let anchor = window.convertToScreen(convert(bounds, to: nil))
-        let frame = CardPlacement.frame(for: size, anchor: anchor, within: window.frame, gap: Self.gap)
-        panel.setFrame(frame.insetBy(dx: -room, dy: -room), display: true)
+        let within = CardPlacement.bounds(window: window.frame, screen: window.screen?.visibleFrame)
+        let frame = CardPlacement.frame(for: size, anchor: anchor, within: within, gap: Self.gap).insetBy(dx: -room, dy: -room)
+        guard frame != placed || panel.parent == nil else { return }
+        placed = frame
+        placements += 1
+        panel.setFrame(frame, display: true)
         if panel.parent == nil { window.addChildWindow(panel, ordered: .above) }
         panel.orderFront(nil)
+    }
+
+    /// (Re)subscribes to the events that must close the card whenever the window or the
+    /// enclosing scroll view changes. Delivered synchronously (`queue: nil`) on the posting
+    /// thread — all of these post on main — so the card is gone before the next frame draws.
+    private func observe() {
+        let clip = enclosingScrollView?.contentView
+        guard window !== observedWindow || clip !== observedClip else { return }
+        observers.forEach(NotificationCenter.default.removeObserver)
+        observers = []
+        observedWindow = window
+        observedClip = clip
+        guard let window else { return }
+        let center = NotificationCenter.default
+        let dismiss: @Sendable (Notification) -> Void = { [weak self] _ in
+            MainActor.assumeIsolated { self?.dismiss() }
+        }
+        observers = [
+            center.addObserver(forName: NSWindow.didResignKeyNotification, object: window, queue: nil, using: dismiss),
+            center.addObserver(forName: NSWindow.didMiniaturizeNotification, object: window, queue: nil, using: dismiss),
+            center.addObserver(forName: NSApplication.didResignActiveNotification, object: nil, queue: nil, using: dismiss),
+        ]
+        if let clip {
+            clip.postsBoundsChangedNotifications = true
+            observers.append(center.addObserver(forName: NSView.boundsDidChangeNotification, object: clip, queue: nil, using: dismiss))
+        }
+    }
+
+    /// Latches only a card that is actually requested: an event with nothing showing must not
+    /// block the next hover.
+    private func dismiss() {
+        guard card != nil else { return }
+        dismissed = true
+        close()
     }
 
     private func makePanel(_ host: NSHostingView<AnyView>) -> NSPanel {
@@ -97,14 +168,53 @@ final class FloatingCardAnchor: NSView {
         panel.backgroundColor = .clear
         panel.hasShadow = false        // the card draws its own
         panel.ignoresMouseEvents = true
+        panel.isReleasedWhenClosed = false
         host.wantsLayer = true
         panel.contentView = host
         return panel
     }
 
+    /// Takes the panel down and lets it go: a board with dozens of slots would otherwise keep a
+    /// window and a hosting view alive per slot ever hovered.
     private func close() {
         guard let panel else { return }
         panel.parent?.removeChildWindow(panel)
         panel.orderOut(nil)
+        self.panel = nil
+        host = nil
+        placed = nil
+    }
+}
+
+/// Calls `onScroll` whenever the enclosing scroll view scrolls — how the board forgets a hover
+/// the pointer never got to end (the slot slid out from under it). macOS 14 has no SwiftUI
+/// scroll-offset callback, so this reads the clip view's bounds like `FloatingCardAnchor` does.
+struct ScrollWatcher: NSViewRepresentable {
+    let onScroll: () -> Void
+
+    func makeNSView(context: Context) -> WatcherView { WatcherView() }
+    func updateNSView(_ view: WatcherView, context: Context) { view.onScroll = onScroll }
+
+    final class WatcherView: NSView {
+        var onScroll: (() -> Void)?
+        private var observer: NSObjectProtocol?
+
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if let observer { NotificationCenter.default.removeObserver(observer) }
+            observer = nil
+            guard window != nil, let clip = enclosingScrollView?.contentView else { return }
+            clip.postsBoundsChangedNotifications = true
+            observer = NotificationCenter.default.addObserver(forName: NSView.boundsDidChangeNotification, object: clip,
+                                                              queue: nil) { [weak self] _ in
+                MainActor.assumeIsolated { self?.onScroll?() }
+            }
+        }
+
+        deinit {
+            if let observer { NotificationCenter.default.removeObserver(observer) }
+        }
     }
 }

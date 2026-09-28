@@ -23,9 +23,6 @@ enum PlanningRender {
         window.contentView = host
         window.orderFrontRegardless()
         host.layoutSubtreeIfNeeded()
-        // AppKit hands initial keyboard focus to the first focusable view, and a focused
-        // abbreviated label opens its card — a render would show a card nobody asked for.
-        window.makeFirstResponder(nil)
         // Long enough for the first-appearance flaps (≤ 0.32 s + stagger) to land.
         RunLoop.current.run(until: Date().addingTimeInterval(1.5))
         host.layoutSubtreeIfNeeded()

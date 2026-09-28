@@ -24,6 +24,17 @@ final class LabelFitTests: XCTestCase {
         XCTAssertEqual(LabelFit.choose(full: "Refine 2", code: "RF2", width: 80, padding: 0, measure: tenPerChar), "Refine 2")
     }
 
+    /// A slot sized to exactly the name's fit width comes back from layout pixel-rounded, a hair
+    /// narrower than the fractional measurement. Rounding both sides up keeps it on the full name
+    /// instead of dropping NOW to its code with room to spare.
+    func testFitWidthSurvivesPixelRounding() {
+        let fractional: (String) -> CGFloat = { _ in 91.3 }
+        let fit = LabelFit.fitWidth(full: "Refine 2", measure: fractional)
+        XCTAssertEqual(fit, 100)
+        XCTAssertEqual(LabelFit.choose(full: "Refine 2", code: "RF2", width: 99.25, measure: fractional), "Refine 2")
+        XCTAssertEqual(LabelFit.choose(full: "Refine 2", code: "RF2", width: 98.9, measure: fractional), "RF2")
+    }
+
     func testMeasureWithRealFont() {
         let width = LabelFit.measureWith(.monospacedSystemFont(ofSize: 13, weight: .semibold))("Synthesis")
         XCTAssertGreaterThan(width, 60)

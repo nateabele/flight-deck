@@ -38,8 +38,9 @@ struct TapeGroup: Equatable {
     let extendable: Stage?
 }
 
-/// One cell of the board row. `shortLabel` is the label's code (spec §5.3), used when the label
-/// itself doesn't fit its cell.
+/// One cell of the board row. `shortLabel` is the label's short form (spec §5.3), used when the
+/// label itself doesn't fit its cell — a readable word ("PAUSED", "IN AIR"), never a cryptic
+/// abbreviation, because a caption nobody can decode is worse than none.
 struct BoardField: Equatable {
     let label: String
     let shortLabel: String
@@ -48,6 +49,10 @@ struct BoardField: Equatable {
     /// `value`'s short form ("RF2", "5 · RF5 · ENC · …") for a cell too narrow for the names;
     /// nil where the value has no code (a clock, "Not started").
     var valueCode: String? = nil
+    /// `detail` said with slot codes ("since ENC", "since RF2 failed"), for a cell where the
+    /// sentence would be cut mid-word; nil where `detail` is free text (a failure diagnosis)
+    /// that has no shorter honest form.
+    var shortDetail: String? = nil
 }
 
 /// Everything the departures board (spec §5) shows, derived from an intake, its tape and a clock
@@ -138,37 +143,41 @@ struct BoardModel: Equatable {
         switch tape.status {
         case .running:
             let live = slots.first { $0.state == .live }
-            let position = slots.firstIndex { $0.state == .live }.map { "Leg \($0 + 1) of \(slots.count)" }
-            self.now = BoardField(label: "NOW", shortLabel: "NOW", value: live?.name ?? head ?? "—", detail: position)
+            let leg = slots.firstIndex { $0.state == .live }.map { $0 + 1 }
+            self.now = BoardField(label: "NOW", shortLabel: "NOW", value: live?.name ?? head ?? "—",
+                                  detail: leg.map { "Leg \($0) of \(slots.count)" }, shortDetail: leg.map { "Leg \($0)/\(slots.count)" })
             self.nowChip = "ON COURSE"
-            let flown = slots.compactMap(\.duration).reduce(0, +)
-            self.inTheAir = BoardField(label: "IN THE AIR", shortLabel: "AIR", value: Self.clock(flown), detail: nil)
+            // How long the round in flight has been up — the live slot's own clock, not the run's
+            // total, which would read as this round having flown for eighteen minutes.
+            self.inTheAir = BoardField(label: "IN THE AIR", shortLabel: "IN AIR",
+                                       value: live?.duration.map(Self.clock) ?? "—", detail: nil)
         case .failed:
             self.now = BoardField(label: "NOW", shortLabel: "NOW", value: next?.name ?? head ?? "—",
                                   detail: tape.pauseDiagnosis?.detail ?? "Round failed")
             self.nowChip = "FAILED"
             if let failedAt = tape.failedAt, let failed = next {
-                self.inTheAir = BoardField(label: "HALTED FOR", shortLabel: "HLT",
+                self.inTheAir = BoardField(label: "HALTED FOR", shortLabel: "HALTED",
                                            value: Self.clock(max(0, now.timeIntervalSince(failedAt))),
-                                           detail: "since \(failed.name) failed")
+                                           detail: "since \(failed.name) failed", shortDetail: "since \(failed.code) failed")
             } else {
                 // A failure written before `failedAt` existed: the head's landing is the last time on record.
-                self.inTheAir = Self.sinceHead(tape, head: head, label: "HALTED FOR", short: "HLT", now: now)
+                self.inTheAir = Self.sinceHead(tape, label: "HALTED FOR", short: "HALTED", now: now)
             }
         case .reachedReview:
-            self.now = BoardField(label: "NOW", shortLabel: "NOW", value: "Review", detail: "Landed · ready for review")
+            self.now = BoardField(label: "NOW", shortLabel: "NOW", value: "Review", detail: "Landed · ready for review",
+                                  shortDetail: "Ready for review")
             self.nowChip = "NEEDS YOU"
             let total = slots.compactMap(\.duration).reduce(0, +)
-            self.inTheAir = BoardField(label: "TOTAL", shortLabel: "TOT", value: Self.clock(total), detail: nil)
+            self.inTheAir = BoardField(label: "TOTAL", shortLabel: "TOTAL", value: Self.clock(total), detail: nil)
         case .idle, .paused, .stopped:
             let notes = tape.pendingNotes.count
-            let detail: String? = next.map { next in
-                notes == 0 ? "Next: \(next.name)" : "\(notes) note\(notes == 1 ? "" : "s") will go to \(next.name)"
-            }
-            self.now = BoardField(label: "NOW", shortLabel: "NOW", value: head ?? "Not started", detail: detail)
+            let noted = "\(notes) note\(notes == 1 ? "" : "s")"
+            self.now = BoardField(label: "NOW", shortLabel: "NOW", value: head ?? "Not started",
+                                  detail: next.map { notes == 0 ? "Next: \($0.name)" : "\(noted) will go to \($0.name)" },
+                                  shortDetail: next.map { notes == 0 ? "Next: \($0.code)" : "\(noted) → \($0.code)" })
             self.pausedAtSlotID = tape.head.flatMap { head in slots.first { $0.checkpointID == head.id }?.id }
             self.nowChip = tape.status == .stopped ? "STOPPED" : head == nil ? "READY" : "PAUSED"
-            self.inTheAir = Self.sinceHead(tape, head: head, label: "PAUSED FOR", short: "PSD", now: now)
+            self.inTheAir = Self.sinceHead(tape, label: "PAUSED FOR", short: "PAUSED", now: now)
         }
 
         // STOPS AT answers "where does play go from here": the hovered button's stop while
@@ -182,15 +191,16 @@ struct BoardModel: Equatable {
         case .toReview: "to review"
         }
         self.stopsAt = BoardField(label: preview == nil ? "STOPS AT" : "WOULD STOP",
-                                  shortLabel: preview == nil ? "STOP" : "WOULD",
+                                  shortLabel: preview == nil ? "STOPS" : "WOULD",
                                   // At review the run has arrived: it stops at Review, where it is.
                                   value: stop.map { slots[$0].name } ?? "Review",
                                   detail: stop.map { (slots[$0].major ? "major · " : "minor · ") + modeName }
-                                      ?? "ready for you")
+                                      ?? "ready for you",
+                                  shortDetail: stop.map { slots[$0].major ? "major" : "minor" } ?? "ready")
         // The spec's shape: how many major stops remain, then their names ("2 · Dedup · Review").
         let after = stop.map { Array(slots[($0 + 1)...].filter(\.major)) } ?? []
         let calling = { (words: [String]) in (["\(after.count)"] + words).joined(separator: " · ") }
-        self.callingAt = BoardField(label: "CALLING AT", shortLabel: "CALL",
+        self.callingAt = BoardField(label: "CALLING AT", shortLabel: "CALLING",
                                     value: after.isEmpty ? "Release tasks · done" : calling(after.map(\.name)),
                                     detail: nil,
                                     valueCode: after.isEmpty ? nil : calling(after.map(\.code)))
@@ -419,12 +429,13 @@ struct BoardModel: Equatable {
 
     /// PAUSED FOR (and HALTED FOR on a tape without `failedAt`): time since the head landed,
     /// said as such in `detail`.
-    private static func sinceHead(_ tape: Tape, head: String?, label: String, short: String, now: Date) -> BoardField {
-        guard let checkpoint = tape.head, let head else {
+    private static func sinceHead(_ tape: Tape, label: String, short: String, now: Date) -> BoardField {
+        guard let head = tape.head else {
             return BoardField(label: label, shortLabel: short, value: "—", detail: nil)
         }
-        return BoardField(label: label, shortLabel: short, value: clock(max(0, now.timeIntervalSince(checkpoint.createdAt))),
-                          detail: "since \(head) landed")
+        return BoardField(label: label, shortLabel: short, value: clock(max(0, now.timeIntervalSince(head.createdAt))),
+                          detail: "since \(name(stage: head.stage, round: head.round)) landed",
+                          shortDetail: "since \(code(stage: head.stage, round: head.round))")
     }
 
     /// "4:48", or "1:02:03" past the hour — counting up, never an ETA (spec §2).

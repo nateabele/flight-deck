@@ -102,7 +102,10 @@ final class BoardModelTests: XCTestCase {
         XCTAssertEqual(model.now.value, "Refine 3")
         XCTAssertEqual(model.nowChip, "ON COURSE")
         XCTAssertEqual(model.inTheAir.label, "IN THE AIR")
-        XCTAssertEqual(model.inTheAir.value, "15:00", "180 + 288 + 288 landed, plus 144 live")
+        XCTAssertEqual(model.inTheAir.value, "2:24", "the live round's own clock, not the run's 15:00 total")
+        XCTAssertEqual(model.inTheAir.shortLabel, "IN AIR")
+        XCTAssertEqual(model.now.detail, "Leg 6 of 10")
+        XCTAssertEqual(model.now.shortDetail, "Leg 6/10")
         XCTAssertEqual(model.stopsAt.label, "STOPS AT")
         XCTAssertEqual(model.stopsAt.value, "Review", "a running tape stops where its target says")
     }
@@ -115,9 +118,15 @@ final class BoardModelTests: XCTestCase {
         XCTAssertEqual(model.nowChip, "PAUSED")
         XCTAssertEqual(model.now.detail, "1 note will go to Refine 2")
         XCTAssertEqual(model.inTheAir.label, "PAUSED FOR")
-        XCTAssertEqual(model.inTheAir.shortLabel, "PSD")
+        XCTAssertEqual(model.inTheAir.shortLabel, "PAUSED")
         XCTAssertEqual(model.inTheAir.value, "2:12")
         XCTAssertEqual(model.inTheAir.detail, "since Refine 1 landed")
+        XCTAssertEqual(model.inTheAir.shortDetail, "since RF1")
+        XCTAssertEqual(model.now.shortDetail, "1 note → RF2")
+        XCTAssertEqual(model.stopsAt.shortLabel, "STOPS")
+        XCTAssertEqual(model.stopsAt.detail, "major · next major")
+        XCTAssertEqual(model.stopsAt.shortDetail, "major")
+        XCTAssertEqual(model.callingAt.shortLabel, "CALLING")
 
         var idle = pausedAfterR1(status: .idle)
         idle.checkpoints.removeAll()
@@ -150,6 +159,8 @@ final class BoardModelTests: XCTestCase {
         XCTAssertEqual(model.slots.first { $0.state == .failed }?.duration, 30)
         XCTAssertEqual(model.inTheAir.value, "1:10")
         XCTAssertEqual(model.inTheAir.detail, "since Refine 2 failed")
+        XCTAssertEqual(model.inTheAir.shortLabel, "HALTED")
+        XCTAssertEqual(model.inTheAir.shortDetail, "since RF2 failed")
 
         tape.failedAt = nil
         let old = try board(try intake(.featurePlan), tape, now: 600)
@@ -199,6 +210,9 @@ final class BoardModelTests: XCTestCase {
         XCTAssertEqual(arrived.inTheAir.label, "TOTAL")
         XCTAssertEqual(arrived.stopsAt.value, "Review", "the run has arrived: it stops where it is")
         XCTAssertEqual(arrived.stopsAt.detail, "ready for you")
+        XCTAssertEqual(arrived.inTheAir.shortLabel, "TOTAL")
+        XCTAssertEqual(arrived.inTheAir.value, "18:20", "at review TOTAL stays the whole run: 180 + 288 + 232 + 4 × 100")
+        XCTAssertEqual(arrived.stopsAt.shortDetail, "ready")
     }
 
     func testCallingAtListsRemainingMajors() throws {
