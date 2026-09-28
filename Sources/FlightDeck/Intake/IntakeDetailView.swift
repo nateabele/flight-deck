@@ -265,7 +265,7 @@ struct IntakeDetailView: View {
     private var pinnedBar: some View {
         if pinned, intake.state == .shaping, let tape {
             SeatReader(feed: service.seats, id: intake.id) { seats in
-                LiveClock(ticking: tape.status != .reachedReview) { now in
+                LiveClock(mode: .shaping(tape: tape, pending: service.pending[intake.id])) { now in
                     VStack(spacing: Metrics.barGap) {
                         controlBar(tape, now: now, seats: seats)
                         board(tape, now: now)
