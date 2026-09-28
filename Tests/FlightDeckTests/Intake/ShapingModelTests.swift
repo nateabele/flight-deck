@@ -280,7 +280,7 @@ final class ShapingModelTests: XCTestCase {
         var churned = tape
         churned.status = .running
         churned.heartbeat = Date(timeIntervalSince1970: 1_790_000_100)
-        churned.pendingAnnotations = ["no plugin system"]
+        churned.pendingNotes = [PlanNote(note: "no plugin system")]
         XCTAssertEqual(ShapingModel.viewerKey(selected: nil, mode: .plan, tape: churned), key)
 
         var advanced = tape

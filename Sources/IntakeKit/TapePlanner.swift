@@ -76,7 +76,7 @@ public enum TapePlanner {
         }
     }
 
-    /// Fold one command into the tape (target / pause / extend / annotations). `.stop` is
+    /// Fold one command into the tape (target / pause / extend / notes). `.stop` is
     /// handled by the runner, not here — folding it into the tape would race the runner's own
     /// shutdown write.
     public static func apply(_ c: TapeCommand, to tape: inout Tape) {
@@ -96,8 +96,16 @@ public enum TapePlanner {
             tape.target = .none
         case .stop:
             break
-        case .annotate(let text):
-            tape.pendingAnnotations.append(text)
+        case .note(let note):
+            tape.pendingNotes.append(note)
+        case .removeNote(let id):
+            // Only a pending note can be withdrawn: one a round already consumed is part of
+            // that round's record, and the prompt it shaped can't be taken back.
+            tape.pendingNotes.removeAll { $0.id == id }
+        case .editPlan:
+            // A file, not tape state: the runner writes it (`TapeStore.writeUserEdits`), since
+            // this function only folds a command into the tape value.
+            break
         case .extend(let stage, let by):
             switch stage {
             case .refine: tape.extraRefinement += by

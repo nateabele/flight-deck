@@ -201,6 +201,9 @@ private actor TapeKeeper {
     private let hooks: IntakeRunner.Hooks
     private(set) var tape: Tape
     private(set) var stopRequested = false
+    /// Checkpoints the human edited while a round was in flight that had already read them —
+    /// so the round landing next says their edits missed it (see `writeCheckpoint`).
+    private var editedDuringRound = Set<Int>()
 
     init(store: TapeStore, now: @escaping @Sendable () -> Date, hooks: IntakeRunner.Hooks) {
         self.store = store
@@ -260,8 +263,10 @@ private actor TapeKeeper {
                 // ⏹ then a fresh ▶ in the same batch: the later command wins.
                 stop = false
                 TapePlanner.apply(envelope.command, to: &tape)
-            case .pause, .annotate, .extend:
+            case .pause, .note, .removeNote, .extend:
                 TapePlanner.apply(envelope.command, to: &tape)
+            case .editPlan(let checkpoint, let markdown):
+                applyEdit(checkpoint: checkpoint, markdown: markdown)
             }
             tape.ackedCommandSeq = envelope.seq
         }
@@ -271,7 +276,21 @@ private actor TapeKeeper {
         return stop
     }
 
+    /// Stores the human's edit as the checkpoint's `plan.user.md` — the runner writes it because
+    /// the runner owns `checkpoints/`. Applied the moment it's read, even mid-round: the round
+    /// in flight already read its plan and is unaffected, and the edit is on disk for the app
+    /// to show at once. An edit naming a checkpoint that isn't on the tape (one a ⏹ discarded,
+    /// or never written) has nowhere to go and is dropped. Best effort, like `save`: a failed
+    /// write can't pause anything from inside the command watcher; the app sees no layer and
+    /// the human can save again.
+    private func applyEdit(checkpoint: Int, markdown: String) {
+        guard tape.checkpoints.contains(where: { $0.id == checkpoint }) else { return }
+        guard (try? store.writeUserEdits(checkpoint: checkpoint, markdown: markdown)) != nil else { return }
+        if tape.roundInProgress != nil, checkpoint == tape.head?.id { editedDuringRound.insert(checkpoint) }
+    }
+
     func startRound(_ next: PlannedRound) -> Tape {
+        editedDuringRound = []
         tape.status = .running
         tape.pauseDiagnosis = nil
         tape.roundInProgress = next
@@ -280,13 +299,26 @@ private actor TapeKeeper {
         return tape
     }
 
-    /// Appends the checkpoint, consumes the annotations the round used, clears
-    /// `roundInProgress` and spends a reached target — all in `writeCheckpoint`'s single tape
-    /// save, so a crash leaves either the whole round recorded or none of it.
+    /// Appends the checkpoint, consumes the notes the round used, clears `roundInProgress`
+    /// and spends a reached target — all in `writeCheckpoint`'s single tape save, so a crash
+    /// leaves either the whole round recorded or none of it.
+    ///
+    /// An edit to the head that landed while this round ran is stored on that checkpoint, but
+    /// this round read the plan before it and the new checkpoint becomes the head — so only the
+    /// head's effective plan feeding the next round would drop the edit without a word. The
+    /// record says so instead; carrying the edit forward onto the new plan is a merge this
+    /// doesn't attempt.
     func writeCheckpoint(_ cp: Checkpoint, files: [String: Data], config: RoundConfig) throws {
+        var cp = cp
+        if !editedDuringRound.isEmpty {
+            let ids = editedDuringRound.sorted().map(String.init).joined(separator: ", ")
+            let missed = "Your edits to checkpoint \(ids) arrived while this round was running, so it did not see them. " +
+                "They are kept on that checkpoint; re-apply them here for the next round to use them."
+            cp.record.note = [cp.record.note, missed].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "\n\n")
+        }
         var next = tape
         for used in cp.record.annotations {
-            if let i = next.pendingAnnotations.firstIndex(of: used) { next.pendingAnnotations.remove(at: i) }
+            if let i = next.pendingNotes.firstIndex(where: { $0.id == used.id }) { next.pendingNotes.remove(at: i) }
         }
         next.roundInProgress = nil
         next.heartbeat = now()
@@ -297,6 +329,7 @@ private actor TapeKeeper {
         }
         try store.writeCheckpoint(cp, files: files, into: &next, beforeSave: hooks.beforeCheckpointSave)
         tape = next
+        editedDuringRound = []
     }
 
     /// The runner's last write: the final status, with `runnerPID` and `heartbeat` cleared so

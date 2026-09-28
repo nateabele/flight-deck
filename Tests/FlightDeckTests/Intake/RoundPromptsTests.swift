@@ -6,7 +6,7 @@ final class RoundPromptsTests: XCTestCase {
 
     private func context(annotations: [String] = [], qa: [TriageExchange] = []) -> RoundContext {
         RoundContext(intent: "Ship the thing", qa: qa, graphFile: "/i/graph.json",
-                     agentsFile: "/p/AGENTS.md", readmeFile: nil, annotations: annotations,
+                     agentsFile: "/p/AGENTS.md", readmeFile: nil, notes: annotations.map { PlanNote(note: $0) },
                      observedAt: observedAt)
     }
 
@@ -171,7 +171,7 @@ final class RoundPromptsTests: XCTestCase {
             XCTAssertTrue(p.contains("Reread the project's agent instructions at /p/AGENTS.md"), p)
         }
         let none = RoundContext(intent: "x", qa: [], graphFile: "/g", agentsFile: nil, readmeFile: nil,
-                                annotations: [], observedAt: observedAt)
+                                observedAt: observedAt)
         XCTAssertFalse(RoundPrompts.polish(none, planFile: "/i/plan.md", changeSetFile: "/i/cs.json", round: 1)
             .contains("AGENTS.md"))
     }

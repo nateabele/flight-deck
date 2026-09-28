@@ -69,10 +69,12 @@ public struct RoundRecord: Codable, Equatable, Sendable {
     public var linesRemoved: Int
     public var sectionsChanged: [String]
     public var tally: VerdictTally?
-    public var annotations: [String]    // consumed by this round
+    /// The human's notes this round consumed — every one pending when it started, since every
+    /// stage's prompt carries them all.
+    public var annotations: [PlanNote]
     public var note: String?
     public init(slots: [SlotOutcome] = [], changeCount: Int? = nil, linesAdded: Int = 0, linesRemoved: Int = 0,
-                sectionsChanged: [String] = [], tally: VerdictTally? = nil, annotations: [String] = [], note: String? = nil) {
+                sectionsChanged: [String] = [], tally: VerdictTally? = nil, annotations: [PlanNote] = [], note: String? = nil) {
         self.slots = slots
         self.changeCount = changeCount
         self.linesAdded = linesAdded
@@ -82,6 +84,32 @@ public struct RoundRecord: Codable, Equatable, Sendable {
         self.annotations = annotations
         self.note = note
     }
+
+    private enum CodingKeys: String, CodingKey {
+        case slots, changeCount, linesAdded, linesRemoved, sectionsChanged, tally, annotations, note
+    }
+
+    /// Synthesized but for `annotations`, which a tape written before `PlanNote` holds as bare
+    /// strings — those come back as the unanchored comments they were.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        slots = try c.decode([SlotOutcome].self, forKey: .slots)
+        changeCount = try c.decodeIfPresent(Int.self, forKey: .changeCount)
+        linesAdded = try c.decode(Int.self, forKey: .linesAdded)
+        linesRemoved = try c.decode(Int.self, forKey: .linesRemoved)
+        sectionsChanged = try c.decode([String].self, forKey: .sectionsChanged)
+        tally = try c.decodeIfPresent(VerdictTally.self, forKey: .tally)
+        annotations = try decodeNotes(c, .annotations) ?? []
+        note = try c.decodeIfPresent(String.self, forKey: .note)
+    }
+}
+
+/// `[PlanNote]` under `key`, or the pre-`PlanNote` `[String]` shape mapped through
+/// `PlanNote.legacy`; nil when the key is absent.
+private func decodeNotes<K: CodingKey>(_ c: KeyedDecodingContainer<K>, _ key: K) throws -> [PlanNote]? {
+    guard c.contains(key) else { return nil }
+    if let notes = try? c.decode([PlanNote].self, forKey: key) { return notes }
+    return try c.decode([String].self, forKey: key).enumerated().map { PlanNote.legacy($1, index: $0) }
 }
 
 /// One entry on the tape. `id` is sequential starting at 1 and `parent` is the head it grew
@@ -150,14 +178,16 @@ public struct Tape: Codable, Equatable, Sendable {
     public var ackedCommandSeq: Int
     public var extraRefinement: Int
     public var extraPolish: Int
-    public var pendingAnnotations: [String]
+    /// Notes queued for the next round (✎ and anchored highlights alike); the round that runs
+    /// next consumes them all, and its record lists them.
+    public var pendingNotes: [PlanNote]
     public var runnerPID: Int32?
     public var heartbeat: Date?
     public var roundInProgress: PlannedRound?
 
     public init(checkpoints: [Checkpoint] = [], target: TapeTarget = .none, status: RunnerStatus = .idle,
                 pauseDiagnosis: Diagnosis? = nil, ackedCommandSeq: Int = 0, extraRefinement: Int = 0,
-                extraPolish: Int = 0, pendingAnnotations: [String] = [], runnerPID: Int32? = nil,
+                extraPolish: Int = 0, pendingNotes: [PlanNote] = [], runnerPID: Int32? = nil,
                 heartbeat: Date? = nil, roundInProgress: PlannedRound? = nil) {
         self.checkpoints = checkpoints
         self.target = target
@@ -166,10 +196,50 @@ public struct Tape: Codable, Equatable, Sendable {
         self.ackedCommandSeq = ackedCommandSeq
         self.extraRefinement = extraRefinement
         self.extraPolish = extraPolish
-        self.pendingAnnotations = pendingAnnotations
+        self.pendingNotes = pendingNotes
         self.runnerPID = runnerPID
         self.heartbeat = heartbeat.map(millisecondRounded)
         self.roundInProgress = roundInProgress
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case checkpoints, target, status, pauseDiagnosis, ackedCommandSeq, extraRefinement, extraPolish,
+             pendingNotes, runnerPID, heartbeat, roundInProgress
+        /// Read-only: what `pendingNotes` was called when notes were bare strings.
+        case pendingAnnotations
+    }
+
+    /// Synthesized but for the notes: a tape written before `PlanNote` has `pendingAnnotations`
+    /// strings instead, migrated to unanchored comments — and saved back as `pendingNotes` by
+    /// the runner's next write, since `encode` never writes the old key.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        checkpoints = try c.decode([Checkpoint].self, forKey: .checkpoints)
+        target = try c.decode(TapeTarget.self, forKey: .target)
+        status = try c.decode(RunnerStatus.self, forKey: .status)
+        pauseDiagnosis = try c.decodeIfPresent(Diagnosis.self, forKey: .pauseDiagnosis)
+        ackedCommandSeq = try c.decode(Int.self, forKey: .ackedCommandSeq)
+        extraRefinement = try c.decode(Int.self, forKey: .extraRefinement)
+        extraPolish = try c.decode(Int.self, forKey: .extraPolish)
+        pendingNotes = try decodeNotes(c, .pendingNotes) ?? decodeNotes(c, .pendingAnnotations) ?? []
+        runnerPID = try c.decodeIfPresent(Int32.self, forKey: .runnerPID)
+        heartbeat = try c.decodeIfPresent(Date.self, forKey: .heartbeat)
+        roundInProgress = try c.decodeIfPresent(PlannedRound.self, forKey: .roundInProgress)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(checkpoints, forKey: .checkpoints)
+        try c.encode(target, forKey: .target)
+        try c.encode(status, forKey: .status)
+        try c.encodeIfPresent(pauseDiagnosis, forKey: .pauseDiagnosis)
+        try c.encode(ackedCommandSeq, forKey: .ackedCommandSeq)
+        try c.encode(extraRefinement, forKey: .extraRefinement)
+        try c.encode(extraPolish, forKey: .extraPolish)
+        try c.encode(pendingNotes, forKey: .pendingNotes)
+        try c.encodeIfPresent(runnerPID, forKey: .runnerPID)
+        try c.encodeIfPresent(heartbeat, forKey: .heartbeat)
+        try c.encodeIfPresent(roundInProgress, forKey: .roundInProgress)
     }
 
     public static let empty = Tape()
@@ -179,14 +249,27 @@ public struct Tape: Codable, Equatable, Sendable {
 
 /// A control message the app sends to a detached runner via `commands.jsonl`. Custom
 /// `Codable` (not synthesized) because the wire shape is a flat `{"kind", "text"?, "stage"?,
-/// "by"?}` object rather than Swift's associated-value enum encoding — the runner and app are
-/// separate processes and this is the only channel between them, so the shape is fixed on
-/// purpose rather than left to whatever the compiler happens to generate.
+/// "by"?, "note"?, "id"?, "checkpoint"?, "markdown"?}` object rather than Swift's
+/// associated-value enum encoding — the runner and app are separate processes and this is the
+/// only channel between them, so the shape is fixed on purpose rather than left to whatever
+/// the compiler happens to generate.
+///
+/// - `note` queues a `PlanNote` for the next round; `removeNote` withdraws a still-pending one.
+/// - `editPlan` carries the human's WHOLE edited markdown for one checkpoint (not a patch — the
+///   runner never has to reconstruct it) and the runner stores it as that checkpoint's
+///   `plan.user.md`. Markdown identical to the generated plan clears the layer. Send it on a
+///   save, not per keystroke: every command is a line the runner re-reads.
 public enum TapeCommand: Codable, Equatable, Sendable {
-    case step, nextMajor, toReview, pause, stop, annotate(String), extend(Stage, by: Int)
+    case step, nextMajor, toReview, pause, stop, extend(Stage, by: Int)
+    case note(PlanNote), removeNote(UUID), editPlan(checkpoint: Int, markdown: String)
 
-    private enum Kind: String, Codable { case step, nextMajor, toReview, pause, stop, annotate, extend }
-    private enum CodingKeys: String, CodingKey { case kind, text, stage, by }
+    /// The old free-text ✎ — now an unanchored comment. Its id is derived from the text (see
+    /// `PlanNote.legacy`), so it equals itself however many times it is built or decoded.
+    public static func annotate(_ text: String) -> TapeCommand { .note(.legacy(text)) }
+
+    /// `annotate` is decode-only: a `commands.jsonl` written before `PlanNote` may still hold one.
+    private enum Kind: String, Codable { case step, nextMajor, toReview, pause, stop, annotate, extend, note, removeNote, editPlan }
+    private enum CodingKeys: String, CodingKey { case kind, text, stage, by, note, id, checkpoint, markdown }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -197,6 +280,11 @@ public enum TapeCommand: Codable, Equatable, Sendable {
         case .pause: self = .pause
         case .stop: self = .stop
         case .annotate: self = .annotate(try c.decode(String.self, forKey: .text))
+        case .note: self = .note(try c.decode(PlanNote.self, forKey: .note))
+        case .removeNote: self = .removeNote(try c.decode(UUID.self, forKey: .id))
+        case .editPlan:
+            self = .editPlan(checkpoint: try c.decode(Int.self, forKey: .checkpoint),
+                             markdown: try c.decode(String.self, forKey: .markdown))
         case .extend:
             self = .extend(try c.decode(Stage.self, forKey: .stage), by: try c.decode(Int.self, forKey: .by))
         }
@@ -210,9 +298,16 @@ public enum TapeCommand: Codable, Equatable, Sendable {
         case .toReview: try c.encode(Kind.toReview, forKey: .kind)
         case .pause: try c.encode(Kind.pause, forKey: .kind)
         case .stop: try c.encode(Kind.stop, forKey: .kind)
-        case .annotate(let text):
-            try c.encode(Kind.annotate, forKey: .kind)
-            try c.encode(text, forKey: .text)
+        case .note(let note):
+            try c.encode(Kind.note, forKey: .kind)
+            try c.encode(note, forKey: .note)
+        case .removeNote(let id):
+            try c.encode(Kind.removeNote, forKey: .kind)
+            try c.encode(id, forKey: .id)
+        case .editPlan(let checkpoint, let markdown):
+            try c.encode(Kind.editPlan, forKey: .kind)
+            try c.encode(checkpoint, forKey: .checkpoint)
+            try c.encode(markdown, forKey: .markdown)
         case .extend(let stage, let by):
             try c.encode(Kind.extend, forKey: .kind)
             try c.encode(stage, forKey: .stage)

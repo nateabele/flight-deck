@@ -123,16 +123,21 @@ public struct RoundContext: Sendable {
     public var graphFile: String
     public var agentsFile: String?
     public var readmeFile: String?
-    public var annotations: [String]
+    /// The pending notes this round consumes.
+    public var notes: [PlanNote]
+    /// The generated → edited diff of the head checkpoint's plan, already capped
+    /// (`PlanLayers.promptDiff`); nil when the human hasn't edited it.
+    public var humanEdits: String?
     public var observedAt: Date
     public init(intent: String, qa: [TriageExchange], graphFile: String, agentsFile: String?,
-                readmeFile: String?, annotations: [String], observedAt: Date) {
+                readmeFile: String?, notes: [PlanNote] = [], humanEdits: String? = nil, observedAt: Date) {
         self.intent = intent
         self.qa = qa
         self.graphFile = graphFile
         self.agentsFile = agentsFile
         self.readmeFile = readmeFile
-        self.annotations = annotations
+        self.notes = notes
+        self.humanEdits = humanEdits
         self.observedAt = observedAt
     }
 }
@@ -176,14 +181,72 @@ public enum RoundPrompts {
         return s
     }
 
-    /// The human's annotations, in the same words for every stage that takes them — draft,
-    /// synthesis, refine, encode, polish, fresh-eyes and dedup. An annotation is consumed by
-    /// whichever round runs next, so a stage that silently dropped it would lose the note
-    /// for good. Empty when there is nothing to say, so no stage gets a bare header.
+    /// Everything the human said, in the same words for every stage that takes it — draft,
+    /// synthesis, refine, encode, polish, fresh-eyes and dedup: their direct edits to the plan
+    /// (as authoritative), their plan-wide notes, then their notes on specific passages. A note
+    /// is consumed by whichever round runs next, so a stage that silently dropped it would lose
+    /// it for good; one helper for all of them is what keeps that from happening per stage.
+    /// Empty when there is nothing to say, so no stage gets a bare header.
     private static func steering(_ c: RoundContext) -> String {
-        guard !c.annotations.isEmpty else { return "" }
-        let notes = c.annotations.map { "- \($0)" }.joined(separator: "\n")
-        return "\n\nThe human steering this plan says:\n\(notes)"
+        var s = humanEditsBlock(c.humanEdits)
+        let general = c.notes.filter { $0.anchor == nil }
+        if !general.isEmpty {
+            let lines = general.map { note in
+                note.kind == .comment ? "- \(note.note)" : "- (\(label(note.kind))) \(note.note)"
+            }
+            s += "\n\nThe human steering this plan says:\n" + lines.joined(separator: "\n")
+        }
+        let anchored = c.notes.compactMap { note in note.anchor.map { (note, $0) } }
+        if !anchored.isEmpty {
+            let items = anchored.enumerated().map { i, pair in anchoredNote(i + 1, pair.0, pair.1) }
+            s += "\n\nThe human's notes on specific passages of the plan:\n" + items.joined(separator: "\n\n")
+        }
+        return s
+    }
+
+    /// The direct-edit block: the words that make the edits authoritative, and the diff that
+    /// shows which lines they are. The plan file the seat reads already has the edits in it —
+    /// without this block they read as just more plan, free to be "improved" away.
+    private static func humanEditsBlock(_ diff: String?) -> String {
+        guard let diff, !diff.isEmpty else { return "" }
+        return """
+
+
+        The human edited this plan directly. These edits are authoritative: keep them unless a \
+        note explicitly asks otherwise. The plan file already contains them; this diff shows \
+        the generated plan (-) against the human's edited plan (+):
+        ```diff
+        \(diff)
+        ```
+        """
+    }
+
+    private static func label(_ kind: NoteKind) -> String {
+        switch kind {
+        case .comment: "comment"
+        case .question: "question"
+        case .mustChange: "must change"
+        case .delete: "delete"
+        case .replace: "replace"
+        }
+    }
+
+    /// `n. [kind] in <section>:`, the quoted passage as a `>` block, then what to do with it.
+    private static func anchoredNote(_ n: Int, _ note: PlanNote, _ anchor: NoteAnchor) -> String {
+        let indent = "   "
+        var s = "\(n). [\(label(note.kind))]" + (anchor.section.map { " in section \"\($0)\"" } ?? "") + ":"
+        s += planLines(anchor.quote).map { "\n\(indent)> \($0)" }.joined()
+        let body = note.note.trimmingCharacters(in: .whitespacesAndNewlines)
+        switch note.kind {
+        case .comment: if !body.isEmpty { s += "\n\(indent)\(body)" }
+        case .question: s += "\n\(indent)Question (answer it in the plan): \(body)"
+        case .mustChange: s += "\n\(indent)This must change: \(body)"
+        case .delete: s += "\n\(indent)Delete this passage." + (body.isEmpty ? "" : " Why: \(body)")
+        case .replace:
+            s += "\n\(indent)Replace this passage with:"
+            s += planLines(note.note).map { "\n\(indent)\(indent)\($0)" }.joined()
+        }
+        return s
     }
 
     /// Points a polish-family seat at the project's agent instructions by path — only when FD
@@ -324,10 +387,13 @@ public enum RoundPrompts {
         return s
     }
 
-    public static func integrate(planFile: String, changesFile: String) -> String {
+    /// `humanEdits` is the head's capped edit diff, the same one the proposing seat saw: the
+    /// integrator is the seat that actually rewrites the plan, so it is the one that has to
+    /// know which lines were the human's.
+    public static func integrate(planFile: String, changesFile: String, humanEdits: String? = nil) -> String {
         """
         Integrate these revisions into `\(planFile)` in place; be meticulous; edit only \
-        that file. The proposed changes are in \(changesFile).
+        that file. The proposed changes are in \(changesFile).\(humanEditsBlock(humanEdits))
 
         For each proposed change, decide whether you wholeheartedly agree with it, somewhat \
         agree (and apply a modified version of it), or disagree (and leave it out — a \
