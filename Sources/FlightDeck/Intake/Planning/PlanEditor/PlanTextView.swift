@@ -114,6 +114,8 @@ struct PlanTextView: NSViewRepresentable {
     var notes: PlanNotesController?
     /// The convergence churn lane beside the headings (spec §8.2); nil hides it.
     var churn: ChurnLaneInput?
+    /// The parent's way to act through the editor — see `PlanEditorHandle`.
+    var handle: PlanEditorHandle?
 
     init(text: Binding<String>, editable: Bool, onCommit: @escaping (String) -> Void, incoming: String?,
          onShowIncoming: @escaping () -> Void, incomingIsNavigation: Bool = false) {
@@ -140,6 +142,13 @@ struct PlanTextView: NSViewRepresentable {
         return view
     }
 
+    /// Lets the parent act through the editor (Revert all) — see `PlanEditorHandle`.
+    func handle(_ handle: PlanEditorHandle?) -> PlanTextView {
+        var view = self
+        view.handle = handle
+        return view
+    }
+
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
     func annotating(_ notes: PlanNotesController?) -> PlanTextView {
@@ -155,7 +164,10 @@ struct PlanTextView: NSViewRepresentable {
         container.textView.onFocusChange = { [weak coordinator] in coordinator?.focusChanged() }
         container.textView.delegate = coordinator
         container.textView.textStorage?.delegate = coordinator
-        container.textView.onHover = { [weak container] in container?.revert.hover(at: $0) }
+        container.textView.onHover = { [weak container, weak coordinator] point in
+            container?.revert.hover(at: point)
+            MainActor.assumeIsolated { coordinator?.notesBridge.hover(at: point) }
+        }
         container.revert.onRevert = { [weak coordinator] in coordinator?.revert(hunk: $0) }
         coordinator.revertButton = container.revert
         coordinator.load(text)
@@ -176,6 +188,7 @@ struct PlanTextView: NSViewRepresentable {
         coordinator.notesBridge.attach(notes, to: container.textView)
         container.churnLane.update(churn)
         coordinator.churnChanged()
+        handle?.coordinator = coordinator
     }
 
     static func dismantleNSView(_ container: PlanEditorContainer, coordinator: Coordinator) {
@@ -230,8 +243,29 @@ struct PlanTextView: NSViewRepresentable {
         /// Each hot section's proposals for the cycle the tint was found from — read from the
         /// checkpoints' files once per cycle, not on every keystroke.
         private var churnVersions: (cycle: ConvergenceCycle, bySection: [String: [SectionVersion]])?
+        /// Where the hot sections were when the churn tint was last laid, moved with each edit
+        /// since. A keystroke outside them leaves the tint as it is (rendering attributes move
+        /// with the text): finding the flipping sentences is a pass over the whole plan.
+        private var churnSpans: [NSRange]?
 
-        init(_ parent: PlanTextView) { self.parent = parent }
+        private var undoObservers: [NSObjectProtocol] = []
+
+        init(_ parent: PlanTextView) {
+            self.parent = parent
+            super.init()
+            // ⌘Z and ⇧⌘Z change the text without a `textDidChange` (measured: NSTextView's
+            // undo of a replacement posts no NSText change), which left the edit layer, the
+            // notes and the idle commit on the text from before the undo — an undone Revert
+            // all showed the plan with no edits marked and never sent it.
+            undoObservers = [NSNotification.Name.NSUndoManagerDidUndoChange, .NSUndoManagerDidRedoChange].map { name in
+                NotificationCenter.default.addObserver(forName: name, object: undo, queue: nil) { [weak self] _ in
+                    guard let self, let textView = self.textView, textView.string != self.session.current else { return }
+                    self.textDidChange(Notification(name: NSText.didChangeNotification, object: textView))
+                }
+            }
+        }
+
+        deinit { undoObservers.forEach(NotificationCenter.default.removeObserver) }
 
         func load(_ text: String) {
             lastBound = text
@@ -347,12 +381,12 @@ struct PlanTextView: NSViewRepresentable {
         /// the way the storage moved their attributes, so marks the edit didn't touch compare
         /// equal and cost nothing.
         @discardableResult
-        private func diffEditLayer(base: String?, text: String, shift: (at: Int, by: Int)? = nil) -> [Int] {
+        private func diffEditLayer(base: String?, text: String, shift: (at: Int, by: Int)? = nil, edit: TextEdit? = nil) -> [Int] {
             layerBase = base
             let old = marks
             (marks, hunks) = base.map { EditLayer.marks(generated: $0, edited: text) } ?? ([], [])
             revertButton?.spans = EditLayer.spans(hunks, edited: text)
-            layTints(text)
+            layTints(text, edit: edit)
             func key(_ m: EditMark, moved: Bool) -> String {
                 var r = m.range
                 if moved, let shift, r.location >= shift.at { r.location += shift.by }
@@ -369,11 +403,17 @@ struct PlanTextView: NSViewRepresentable {
             return Set(changed.map { min($0, max(length - 1, 0)) }.compactMap { MarkdownStyler.blockIndex(at: $0, in: blocks) }).sorted()
         }
 
-        /// Lays the churn highlight and then the edit tint over `text` — see `churnTint`.
-        func layTints(_ text: String) {
+        /// Lays the churn highlight and then the edit tint over `text` — see `churnTint`. After
+        /// one keystroke (`edit`) the churn highlight is re-found only if the edit is in a hot
+        /// section or on a heading.
+        func layTints(_ text: String, edit: TextEdit? = nil) {
             guard let layout = textView?.textLayoutManager else { return }
             let edits = EditLayer.tints(marks, in: text)
-            churnTint.apply(churnRanges(text, avoiding: edits.map(\.0)).map { ($0, [.backgroundColor: Self.churnColor]) }, to: layout)
+            if let edit, let spans = churnSpans, !touchesChurn(edit, spans: spans, in: text as NSString) {
+                churnSpans = spans.map(edit.stretch)
+            } else {
+                churnTint.apply(churnRanges(text, avoiding: edits.map(\.0)).map { ($0, [.backgroundColor: Self.churnColor]) }, to: layout)
+            }
             editTint.apply(edits, to: layout)
         }
 
@@ -383,14 +423,42 @@ struct PlanTextView: NSViewRepresentable {
             layTints(textView.string)
         }
 
+        /// Whether `edit` lands in (or at an edge of) a hot section, or on a heading line.
+        private func touchesChurn(_ edit: TextEdit, spans: [NSRange], in ns: NSString) -> Bool {
+            let moved = spans.map(edit.stretch)
+            if moved.contains(where: { edit.range.location <= NSMaxRange($0) && NSMaxRange(edit.range) >= $0.location }) { return true }
+            let line = ns.lineRange(for: NSRange(location: min(edit.range.location, ns.length), length: 0))
+            return ns.substring(with: line).trimmingCharacters(in: .whitespaces).hasPrefix("#")
+        }
+
         static let churnColor = NSColor(LCDMetrics.color(.amber)).withAlphaComponent(0.16)
 
+        /// Each of `sections` (heading lines, trimmed) from its heading to the next one.
+        static func sectionSpans(_ sections: Set<String>, in ns: NSString) -> [NSRange] {
+            guard !sections.isEmpty else { return [] }
+            var out: [NSRange] = []
+            var open: Int?
+            var location = 0
+            while location < ns.length {
+                let line = ns.lineRange(for: NSRange(location: location, length: 0))
+                // `hasPrefix` on the raw line first: only a heading line is worth a substring.
+                if ns.character(at: line.location) == 35 {
+                    if let start = open { out.append(NSRange(location: start, length: line.location - start)); open = nil }
+                    if sections.contains(ns.substring(with: line).trimmingCharacters(in: .whitespacesAndNewlines)) { open = line.location }
+                }
+                location = NSMaxRange(line)
+            }
+            if let start = open { out.append(NSRange(location: start, length: ns.length - start)) }
+            return out
+        }
+
         private func churnRanges(_ text: String, avoiding insertions: [NSRange]) -> [NSRange] {
-            guard let churn = parent.churn else { churnVersions = nil; return [] }
+            guard let churn = parent.churn else { churnVersions = nil; churnSpans = []; return [] }
             if churnVersions?.cycle != churn.cycle {
                 let hot = HeatmapModel.hotSections(churn.cycle)
                 churnVersions = (churn.cycle, Dictionary(uniqueKeysWithValues: hot.map { ($0, churn.versions($0)) }))
             }
+            churnSpans = Self.sectionSpans(Set(churnVersions?.bySection.keys.map { $0 } ?? []), in: text as NSString)
             let found = churnVersions?.bySection.flatMap { section, versions in
                 ChurnLaneModel.flippingSentences(in: text, section: section, versions: versions)
             } ?? []
@@ -408,9 +476,24 @@ struct PlanTextView: NSViewRepresentable {
         /// Hover Revert: that hunk goes back to the agents' text as an ordinary edit — undoable,
         /// restyled like typing — and is committed at once, being an explicit action.
         func revert(hunk index: Int) {
-            guard let textView, let storage = textView.textStorage, let base = layerBase, hunks.indices.contains(index),
+            guard let textView, let base = layerBase, hunks.indices.contains(index),
                   let reverted = PlanLayers.revert(hunks[index], generated: base, edited: textView.string) else { return }
-            let old = textView.string as NSString, new = reverted as NSString
+            replace(with: reverted, actionName: "Revert Edit")
+        }
+
+        /// "Revert all": every hunk back to the agents' plan as ONE undoable change — ⌘Z brings
+        /// every edit back, and the typing before it stays on the stack under it. Through the
+        /// editor, never a load: a load empties the undo stack, which made Revert all final.
+        func revertAll() {
+            guard let textView, let base = layerBase, textView.string != base else { return }
+            replace(with: base, actionName: "Revert All Edits")
+        }
+
+        /// Replaces the text with `new` as the smallest single edit — undoable as one step named
+        /// `actionName`, restyled like typing — and commits it at once.
+        private func replace(with new: String, actionName: String) {
+            guard let textView, let storage = textView.textStorage else { return }
+            let old = textView.string as NSString, new = new as NSString
             var front = 0
             while front < old.length, front < new.length, old.character(at: front) == new.character(at: front) { front += 1 }
             var back = 0
@@ -418,9 +501,14 @@ struct PlanTextView: NSViewRepresentable {
                   old.character(at: old.length - 1 - back) == new.character(at: new.length - 1 - back) { back += 1 }
             let range = NSRange(location: front, length: old.length - front - back)
             let replacement = new.substring(with: NSRange(location: front, length: new.length - front - back))
+            // Its own undo step: typing just before it would otherwise coalesce with it, and ⌘Z
+            // would take back the typing and the revert together.
+            textView.breakUndoCoalescing()
             guard textView.shouldChangeText(in: range, replacementString: replacement) else { return }
             storage.replaceCharacters(in: range, with: replacement)
             textView.didChangeText()
+            undo.setActionName(actionName)
+            textView.breakUndoCoalescing()
             timer?.invalidate()
             if let text = session.flush() { commit(text) }
         }
@@ -444,13 +532,16 @@ struct PlanTextView: NSViewRepresentable {
             session.type(textView.string, at: Date())
             // Marked text (an input method mid-composition) is restyled once it is committed.
             if !textView.hasMarkedText() {
-                let fresh = MarkdownStyler.blocks(textView.string)
+                let single = editCount == 1 ? pendingEdit : nil
+                let fresh = single.map { MarkdownStyler.blocks(textView.string, after: blocks, edited: $0.range, delta: $0.delta) }
+                    ?? MarkdownStyler.blocks(textView.string)
                 let next = textView.isFocused ? MarkdownStyler.blockIndex(at: textView.selectedRange().location, in: fresh) : nil
-                if editCount == 1, let edit = pendingEdit {
+                if let edit = single {
                     let changed = MarkdownStyler.changedBlocks(old: blocks, new: fresh, edited: edit.range, delta: edit.delta)
                     blocks = fresh
                     let layered = diffEditLayer(base: layerBase, text: textView.string,
-                                                shift: (edit.range.location + max(edit.range.length - edit.delta, 0), edit.delta))
+                                                shift: (edit.range.location + max(edit.range.length - edit.delta, 0), edit.delta),
+                                                edit: TextEdit(range: edit.range, delta: edit.delta))
                     style(storage, indices: changed + layered + [revealed, next].compactMap { $0 }, reveal: next)
                 } else {
                     blocks = fresh
@@ -677,4 +768,18 @@ struct IncomingBanner: View {
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("plan-incoming-banner")
     }
+}
+
+/// The plan section's way to act through its editor, rather than around it: an action that
+/// changes the text must go through the editor's own change path to be undoable — setting the
+/// parent's `text` is a load, and a load empties the undo stack. Held by the parent, filled in
+/// by the editor on each update.
+@MainActor
+final class PlanEditorHandle {
+    weak var coordinator: PlanTextView.Coordinator?
+
+    nonisolated init() {}
+
+    /// Every edit back to the agents' plan, as one undoable change ("Revert All Edits").
+    func revertAll() { coordinator?.revertAll() }
 }

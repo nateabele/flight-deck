@@ -27,9 +27,18 @@ enum NotesRailModel {
     /// quote: that is how the human recognises what it was about.
     static func cards(notes: [TapeNote], plan: String,
                       lineY: (Range<String.Index>) -> CGFloat?) -> [NoteCardModel] {
+        cards(notes: notes, located: { entry in entry.note.anchor?.locate(in: plan).map { NSRange($0, in: plan) } },
+              lineY: { range in Range(range, in: plan).flatMap(lineY) })
+    }
+
+    /// The same, with each note's quote already found (`located`, nil when it can't be) — the
+    /// rail's own form: it redraws on every scroll beat, and finding every quote in a long plan
+    /// on each one was most of the cost of a scroll.
+    static func cards(notes: [TapeNote], located: (TapeNote) -> NSRange?,
+                      lineY: (NSRange) -> CGFloat?) -> [NoteCardModel] {
         func group(_ notes: [TapeNote], consumed: Bool) -> [NoteCardModel] {
             var detached: [NoteCardModel] = [], unanchored: [NoteCardModel] = []
-            var anchored: [(at: String.Index, card: NoteCardModel)] = []
+            var anchored: [(at: Int, card: NoteCardModel)] = []
             for entry in notes {
                 let note = entry.note
                 guard let anchor = note.anchor else {
@@ -37,12 +46,12 @@ enum NotesRailModel {
                                                     anchorY: nil, detached: false, consumed: consumed))
                     continue
                 }
-                guard let range = anchor.locate(in: plan) else {
+                guard let range = located(entry) else {
                     detached.append(NoteCardModel(id: note.id, kind: note.kind, quote: anchor.quote, note: note.note,
                                                   anchorY: nil, detached: true, consumed: consumed))
                     continue
                 }
-                anchored.append((range.lowerBound,
+                anchored.append((range.location,
                                  NoteCardModel(id: note.id, kind: note.kind, quote: anchor.quote, note: note.note,
                                                anchorY: lineY(range), detached: false, consumed: consumed)))
             }
@@ -89,8 +98,10 @@ enum NotesRailModel {
     }
 }
 
-/// The words, symbols and tints each kind wears — shared by the selection toolbar, the cards
-/// and the editor's highlights, so a Question is the same blue everywhere.
+/// The words and symbols each kind wears — shared by the selection toolbar, the cards and the
+/// band's hover. Kinds are told apart by these alone, never by colour (HIG ruling, W4): every
+/// note's band is the one system highlight, so a plan with five kinds of note doesn't read as
+/// five competing colour codes, and Delete isn't the red of an error or of a deletion ghost.
 enum NoteStyle {
     static let kinds: [NoteKind] = [.comment, .question, .mustChange, .replace, .delete]
 
@@ -124,15 +135,29 @@ enum NoteStyle {
         }
     }
 
-    /// Comment wears the system's find-highlight yellow; the others the mockup's hues.
-    static func tint(_ kind: NoteKind) -> NSColor {
-        switch kind {
-        case .comment: .findHighlightColor
-        case .question: .systemTeal
-        case .mustChange: .systemPink
-        case .replace: .systemPurple
-        case .delete: .systemRed
-        }
+    /// Every note's highlight: the system's find-highlight yellow, at a subtle strength under
+    /// the text (dimmer once a round has read the note).
+    static let highlight = NSColor.findHighlightColor
+    static let highlightAlpha: CGFloat = 0.3
+    static let consumedAlpha: CGFloat = 0.16
+
+    /// The "4 notes for the next round" chip: neutral, like any other count in the header —
+    /// yellow read as a warning, and as one more kind colour.
+    static let chipForeground = NSColor.secondaryLabelColor
+    static let chipFill = NSColor.labelColor.withAlphaComponent(0.07)
+
+    /// What the band says under the pointer: the kind, then the note.
+    static func hover(kind: NoteKind, note: String) -> String {
+        note.isEmpty ? (kind == .comment ? "Highlight" : label(kind)) : "\(label(kind)): \(note)"
+    }
+}
+
+extension View {
+    /// The notes chip's neutral capsule (`NoteStyle.chipFill`), matching the plan header's
+    /// other chips in size.
+    func notesChipStyle() -> some View {
+        background(Color(nsColor: NoteStyle.chipFill), in: Capsule())
+            .foregroundStyle(Color(nsColor: NoteStyle.chipForeground))
     }
 }
 
@@ -156,10 +181,29 @@ struct NoteDraft: Equatable {
 
 /// Scroll, resize and edit beats — its own object so only the rail's aligned lane redraws on
 /// every scroll event, not the inspector or the detail pane around it.
+///
+/// At most one beat a frame: a trackpad scroll posts a bounds change for every clip view it
+/// moves, several per frame, and each beat re-lays the whole rail.
 @MainActor
 final class NotesGeometry: ObservableObject {
     @Published private(set) var beat = 0
-    func bump() { beat &+= 1 }
+    static let frame: TimeInterval = 1.0 / 60
+    private var scheduled = false
+    private var last = Date.distantPast
+
+    func bump() {
+        guard !scheduled else { return }
+        scheduled = true
+        let wait = max(0, Self.frame - Date().timeIntervalSince(last))
+        DispatchQueue.main.asyncAfter(deadline: .now() + wait) { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.scheduled = false
+                self.last = Date()
+                self.beat &+= 1
+            }
+        }
+    }
 }
 
 /// The state the editor, the selection toolbar and the rail share for one intake. The detail
@@ -198,6 +242,12 @@ final class PlanNotesController: ObservableObject {
     var lineTop: ((NSRange) -> CGFloat?)?
     /// The editor re-tints when the marks change.
     var onMarksChanged: (() -> Void)?
+    /// Where each mark's quote is in `plan` (absent: can't be found) — found by the editor,
+    /// which keeps them across keystrokes, so the rail never searches the plan itself.
+    private(set) var located: [UUID: NSRange] = [:]
+    /// The editor's undo stack: adding and removing a note are undoable where the human is
+    /// working (⌘Z in the plan), each undo sending the command that reverses it.
+    weak var undoManager: UndoManager?
 
     /// Every note to show: the tape's, minus the ones withdrawn, plus the ones sent that the
     /// tape doesn't hold yet.
@@ -248,6 +298,31 @@ final class PlanNotesController: ObservableObject {
         begin(NoteDraft(kind: .comment, anchor: nil))
     }
 
+    /// The heatmap's "Annotate §N…": a comment anchored on that section's heading line, so the
+    /// note sits beside the section and the next round is told which one — rather than on
+    /// whatever happened to be selected. `section` is the heading line, trimmed (the heatmap's
+    /// key); a heading no longer in the plan falls back to a note about the whole plan.
+    func annotate(section: String) {
+        let ns = plan as NSString
+        var location = 0
+        while location < ns.length {
+            let line = ns.lineRange(for: NSRange(location: location, length: 0))
+            let content = ns.substring(with: line).trimmingCharacters(in: .whitespacesAndNewlines)
+            if content.hasPrefix("#"), content == section || HeatmapModel.label(content) == HeatmapModel.label(section),
+               let checkpoint,
+               let heading = Range(NSRange(location: line.location, length: (content as NSString).length), in: plan) {
+                // The trimmed line starts where the line does: a heading has no leading space.
+                var anchor = NoteAnchor(checkpoint: checkpoint, selecting: heading, in: plan)
+                // Its section is the one it heads — the constructor's "heading above the
+                // quote" would name the section before it, and tell the round the wrong one.
+                anchor.section = content
+                return begin(NoteDraft(kind: .comment, anchor: anchor))
+            }
+            location = NSMaxRange(line)
+        }
+        begin(NoteDraft(kind: .comment, anchor: nil))
+    }
+
     private func begin(_ next: NoteDraft) {
         commitDraft()
         draft = next
@@ -268,20 +343,33 @@ final class PlanNotesController: ObservableObject {
     func cancelDraft() { draft = nil }
 
     func remove(_ id: UUID) {
+        let note = notes.first { $0.id == id }?.note
         removed.insert(id)
+        // Not only hidden: an optimistic note the tape never held would otherwise come back
+        // the moment `prune` forgets the removal (it keeps only removals the tape still holds).
+        sent.removeAll { $0.id == id }
         marksChanged()
         send(.removeNote(id))
+        guard let note, let undoManager else { return }
+        undoManager.registerUndo(withTarget: self) { $0.submit(note) }
+        // Undoing an add registers this as its redo, which is still "Add Note".
+        undoManager.setActionName(undoManager.isUndoing ? "Add Note" : "Remove Note")
     }
 
     private func submit(_ note: PlanNote) {
-        sent.append(note)
+        removed.remove(note.id)
+        if !sent.contains(where: { $0.id == note.id }) { sent.append(note) }
         marksChanged()
         send(.note(note))
+        guard let undoManager else { return }
+        undoManager.registerUndo(withTarget: self) { $0.remove(note.id) }
+        undoManager.setActionName(undoManager.isUndoing ? "Remove Note" : "Add Note")
     }
 
-    /// The editor loaded or changed its text.
-    func editorChanged(_ text: String) {
+    /// The editor loaded or changed its text; `located` is where each mark's quote now is.
+    func editorChanged(_ text: String, located: [UUID: NSRange] = [:]) {
         plan = text
+        self.located = located
         geometry.bump()
     }
 
@@ -406,10 +494,10 @@ private struct NotesLane: View {
             notes.append(TapeNote(note: PlanNote(id: draft.id, kind: draft.kind, note: draft.text, anchor: draft.anchor),
                                   consumedBy: nil))
         }
-        let plan = controller.plan
         let lineTop = controller.lineTop
-        return NotesRailModel.cards(notes: notes, plan: plan) { range in
-            guard let laneTop, let lineTop, let y = lineTop(NSRange(range, in: plan)) else { return nil }
+        let located = controller.located
+        return NotesRailModel.cards(notes: notes, located: { located[$0.id] }) { range in
+            guard let laneTop, let lineTop, let y = lineTop(range) else { return nil }
             return laneTop - y
         }
     }
@@ -438,7 +526,7 @@ private struct CardHeightKey: PreferenceKey {
     }
 }
 
-/// The quoted text with a bar in its kind's tint, clipped to one line.
+/// The quoted text with a bar in the highlight's colour, clipped to one line.
 private struct QuoteLine: View {
     let quote: String
     let kind: NoteKind
@@ -451,7 +539,7 @@ private struct QuoteLine: View {
             .truncationMode(.tail)
             .padding(.leading, 7)
             .overlay(alignment: .leading) {
-                Rectangle().fill(Color(nsColor: NoteStyle.tint(kind))).frame(width: 3)
+                Rectangle().fill(Color(nsColor: NoteStyle.highlight)).frame(width: 3)
             }
     }
 }
@@ -461,14 +549,15 @@ private struct KindTag: View {
     /// A Highlight is an empty comment; it says what the human did.
     var highlight = false
 
+    /// The kind's symbol and word on a neutral capsule — the only place a card says its kind.
     var body: some View {
-        let tint = Color(nsColor: NoteStyle.tint(kind))
-        Text(highlight ? "Highlight" : NoteStyle.label(kind))
+        Label(highlight ? "Highlight" : NoteStyle.label(kind), systemImage: highlight ? "highlighter" : NoteStyle.symbol(kind))
+            .labelStyle(.titleAndIcon)
             .font(.system(size: 10.5, weight: .semibold))
-            .foregroundStyle(tint)
+            .foregroundStyle(.secondary)
             .padding(.horizontal, 7)
             .padding(.vertical, 1)
-            .background(tint.opacity(0.16), in: Capsule())
+            .background(Color.primary.opacity(0.07), in: Capsule())
     }
 }
 

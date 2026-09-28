@@ -83,7 +83,7 @@ final class NotesRailRenderTests: XCTestCase {
                     Spacer()
                     if let chip = controller.summary.chip {
                         Text(chip).font(.system(size: 12)).padding(.horizontal, 9).frame(height: 22)
-                            .background(Color.yellow.opacity(0.13), in: Capsule()).foregroundStyle(Color.yellow.opacity(0.9))
+                            .notesChipStyle()
                     }
                 }
                 PlanSection(intakeID: UUID(), tape: tape, loadFile: load, onSend: { _ in }, notes: controller)
