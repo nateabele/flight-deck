@@ -75,6 +75,11 @@ private struct PlanSectionBody: View {
     @State private var shown: Loaded?
     @State private var text = ""
     @State private var incoming: Loaded?
+    /// `incoming` is the human's own choice of round, not a head that landed — see `reload`.
+    @State private var incomingIsNavigation = false
+    /// The selection the last reload saw, to tell a round chosen on the timeline apart from
+    /// a new head arriving while the view follows the head.
+    @State private var loadedSelection: Int??
     /// Edits sent but maybe not yet applied by the runner: reloading the checkpoint from disk
     /// before then would offer the pre-edit plan back as if it were news.
     @State private var sent: [Int: String] = [:]
@@ -138,7 +143,9 @@ private struct PlanSectionBody: View {
                              self.shown = incoming
                              text = incoming.text
                              self.incoming = nil
-                         })
+                             incomingIsNavigation = false
+                         },
+                         incomingIsNavigation: incomingIsNavigation)
         } else {
             // Vertical only: a horizontal axis gives the text infinite width, which centred it.
             ScrollView(.vertical) {
@@ -167,7 +174,9 @@ private struct PlanSectionBody: View {
     }
 
     private func reload(_ key: ShapingModel.ViewerKey) {
-        guard let checkpoint = key.checkpoint else {
+        let navigated = loadedSelection.map { $0 != selection } ?? false
+        loadedSelection = .some(selection)
+        guard var checkpoint = key.checkpoint else {
             message = "No rounds yet."
             return
         }
@@ -177,6 +186,10 @@ private struct PlanSectionBody: View {
             otherText = key.mode == .diff ? ShapingView.coloredDiff(raw) : AttributedString(raw)
             return
         }
+        // Following the head, the plan follows the newest checkpoint WITH a plan: an encode or
+        // polish checkpoint carries a change set, and resolving to it literally made the
+        // editor vanish into "No plan at this checkpoint" the moment encoding began.
+        if selection == nil, let head = PlanSection.planHead(tape: tape, loadFile: loadFile) { checkpoint = head }
         guard let plan = sent[checkpoint] ?? PlanSection.effectivePlan(checkpoint: checkpoint, tape: tape, loadFile: loadFile) else {
             message = "No plan at this checkpoint."
             return
@@ -191,8 +204,10 @@ private struct PlanSectionBody: View {
             shown = loaded
             incoming = nil
         } else {
-            // The editor decides whether it can take this now (`EditPolicy`) or must hold it
-            // behind the banner.
+            // A new head: the editor decides whether it can take it now (`EditPolicy`) or must
+            // hold it behind the banner. A round the human chose is never held — the editor
+            // commits their edit to its own checkpoint and loads the choice.
+            incomingIsNavigation = navigated
             incoming = loaded
         }
     }

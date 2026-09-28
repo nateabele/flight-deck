@@ -91,22 +91,29 @@ struct PlanEditSession {
 /// load. `incoming` is a newer text the parent would like shown (a round landed); the view
 /// takes it only when `EditPolicy` allows and otherwise shows "A new round landed · Show it".
 /// Either way it calls `onShowIncoming` when it takes it, and the parent moves `incoming`
-/// into `text`.
+/// into `text`. An `incoming` the human asked for (`incomingIsNavigation`: they chose another
+/// round) is never held: their edit is committed and the chosen text loads at once.
+///
+/// VoiceOver reads the raw Markdown, hidden syntax included: the hiding is a font and a
+/// colour, which accessibility ignores. Accepted — the text VoiceOver reads is exactly the
+/// text the human edits, and "hash hash Settings" is honest about what is stored.
 struct PlanTextView: NSViewRepresentable {
     @Binding var text: String
     let editable: Bool
     let onCommit: (String) -> Void
     let incoming: String?
     let onShowIncoming: () -> Void
+    var incomingIsNavigation = false
     var theme: PlanTheme = .standard
 
     init(text: Binding<String>, editable: Bool, onCommit: @escaping (String) -> Void, incoming: String?,
-         onShowIncoming: @escaping () -> Void) {
+         onShowIncoming: @escaping () -> Void, incomingIsNavigation: Bool = false) {
         _text = text
         self.editable = editable
         self.onCommit = onCommit
         self.incoming = incoming
         self.onShowIncoming = onShowIncoming
+        self.incomingIsNavigation = incomingIsNavigation
     }
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
@@ -115,6 +122,7 @@ struct PlanTextView: NSViewRepresentable {
         let container = PlanEditorContainer(onShow: { [weak coordinator = context.coordinator] in coordinator?.showHeld() })
         let coordinator = context.coordinator
         coordinator.textView = container.textView
+        container.textView.onFocusChange = { [weak coordinator] in coordinator?.focusChanged() }
         container.textView.delegate = coordinator
         container.textView.textStorage?.delegate = coordinator
         coordinator.load(text)
@@ -128,7 +136,7 @@ struct PlanTextView: NSViewRepresentable {
         // While a commit's binding write is still queued, `text` is the pre-commit value; loading
         // it would put back the text the human just replaced.
         if coordinator.inFlight == 0, text != coordinator.lastBound { coordinator.load(text) }
-        coordinator.receive(incoming)
+        coordinator.receive(incoming, navigation: incomingIsNavigation)
         container.bannerVisible = coordinator.session.held != nil
     }
 
@@ -136,6 +144,7 @@ struct PlanTextView: NSViewRepresentable {
         // Switching to the diff, or away from the intake, must not drop the last two seconds
         // of typing.
         coordinator.timer?.invalidate()
+        coordinator.undo.removeAllActions()
         if let text = coordinator.session.endEditing() { coordinator.commit(text) }
     }
 
@@ -145,8 +154,13 @@ struct PlanTextView: NSViewRepresentable {
         /// The last `text` binding value seen or written, so `updateNSView` can tell a load
         /// from the parent apart from its own commit echoing back.
         var lastBound = ""
-        weak var textView: NSTextView?
+        weak var textView: PlanNSTextView?
         var timer: Timer?
+        /// The editor's own undo stack, via `undoManager(for:)`, rather than the window's. It
+        /// is emptied on every load: its actions are ranges into the text they were typed
+        /// into, so ⌘Z after a new head loaded would splice stale edits into it — and the idle
+        /// timer would then commit the corrupted plan.
+        let undo = UndoManager()
         /// Commits whose binding write hasn't run yet — see `commit`.
         private(set) var inFlight = 0
         /// The incoming text already handed to `onShowIncoming`, so a second view update
@@ -166,6 +180,7 @@ struct PlanTextView: NSViewRepresentable {
             session.load(text)
             guard let textView, let storage = textView.textStorage else { return }
             if textView.string != text { textView.string = text }
+            undo.removeAllActions()
             blocks = MarkdownStyler.blocks(text)
             revealed = caretBlock()
             MarkdownStyler.apply(to: storage, blocks: blocks, revealBlock: revealed, theme: parent.theme)
@@ -174,9 +189,18 @@ struct PlanTextView: NSViewRepresentable {
             taking = nil
         }
 
-        func receive(_ incoming: String?) {
+        func receive(_ incoming: String?, navigation: Bool) {
             guard let incoming else { return session.dropHeld() }
-            guard incoming != taking, incoming != session.held else { return }
+            guard incoming != taking else { return }
+            if navigation {
+                // The human chose another round: that is not news to hold back. Their edit is
+                // committed to the checkpoint it was typed on, then the choice loads.
+                timer?.invalidate()
+                session.dropHeld()
+                if let text = session.flush() { commit(text) }
+                return takeIncoming(incoming)
+            }
+            guard incoming != session.held else { return }
             session.editing = isFirstResponder
             // Typed text identical to the new head loses nothing by being replaced by it.
             if incoming == session.current || EditPolicy.shouldReplace(editing: session.editing, dirty: session.dirty) {
@@ -219,14 +243,25 @@ struct PlanTextView: NSViewRepresentable {
             }
         }
 
-        private var isFirstResponder: Bool {
-            guard let textView else { return false }
-            return textView.window?.firstResponder === textView
+        func undoManager(for view: NSTextView) -> UndoManager? { undo }
+
+        private var isFirstResponder: Bool { textView?.isFocused ?? false }
+
+        /// The block whose syntax shows: the caret's, and only while the editor has focus — an
+        /// unfocused plan reads fully rendered, with no stray `##` where the caret last was.
+        private func caretBlock() -> Int? {
+            guard let textView, textView.isFocused else { return nil }
+            return MarkdownStyler.blockIndex(at: textView.selectedRange().location, in: blocks)
         }
 
-        private func caretBlock() -> Int? {
-            guard let textView else { return nil }
-            return MarkdownStyler.blockIndex(at: textView.selectedRange().location, in: blocks)
+        /// Focus came or went: reveal or re-hide the caret block's syntax.
+        func focusChanged() {
+            guard let storage = textView?.textStorage else { return }
+            let next = caretBlock()
+            guard next != revealed else { return }
+            MarkdownStyler.restyle(storage, blocks: blocks, indices: [revealed, next].compactMap { $0 },
+                                   revealBlock: next, theme: parent.theme)
+            revealed = next
         }
 
         // MARK: Editing
@@ -249,7 +284,7 @@ struct PlanTextView: NSViewRepresentable {
             // Marked text (an input method mid-composition) is restyled once it is committed.
             if !textView.hasMarkedText() {
                 let fresh = MarkdownStyler.blocks(textView.string)
-                let next = MarkdownStyler.blockIndex(at: textView.selectedRange().location, in: fresh)
+                let next = textView.isFocused ? MarkdownStyler.blockIndex(at: textView.selectedRange().location, in: fresh) : nil
                 if editCount == 1, let edit = pendingEdit {
                     let changed = MarkdownStyler.changedBlocks(old: blocks, new: fresh, edited: edit.range, delta: edit.delta)
                     blocks = fresh
@@ -285,12 +320,18 @@ struct PlanTextView: NSViewRepresentable {
         private func scheduleIdleCommit() {
             timer?.invalidate()
             let timer = Timer(timeInterval: EditPolicy.idle, repeats: false) { [weak self] _ in
-                guard let self, let text = self.session.commitIfIdle(now: Date()) else { return }
-                self.commit(text)
+                self?.idleFired(now: Date())
             }
             // `.common`, so a commit still lands while the human is scrolling.
             RunLoop.main.add(timer, forMode: .common)
             self.timer = timer
+        }
+
+        /// The idle window elapsed. An input method mid-composition (marked text) waits another
+        /// window: committing now would send a half-composed character as the plan.
+        func idleFired(now: Date) {
+            if textView?.hasMarkedText() == true { return scheduleIdleCommit() }
+            if let text = session.commitIfIdle(now: now) { commit(text) }
         }
     }
 }
@@ -300,7 +341,7 @@ struct PlanTextView: NSViewRepresentable {
 /// head was held back — a SwiftUI banner keyed on `incoming` alone would flash for one frame
 /// on every head the view takes at once.
 final class PlanEditorContainer: NSView {
-    let textView = NSTextView(usingTextLayoutManager: true)
+    let textView = PlanNSTextView(usingTextLayoutManager: true)
     private let scroll = NSScrollView()
     private let banner: NSHostingView<IncomingBanner>
     private let stack = NSStackView()
@@ -352,6 +393,36 @@ final class PlanEditorContainer: NSView {
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+}
+
+/// Reports focus changes, which `NSTextViewDelegate` doesn't: `textDidBeginEditing` waits for
+/// the first keystroke, so the caret block's syntax would stay hidden on a click and linger
+/// after focus left. `isFocused` is settable so a test can stub focus on a detached view.
+class PlanNSTextView: NSTextView {
+    var isFocused = false
+    var onFocusChange: (() -> Void)?
+
+    /// The delegate's `undoManager(for:)` first. Measured: a plain `NSTextView` never
+    /// consulted it (its `undoManager` came back nil in a window), so without this ⌘Z and
+    /// typing fell through to whatever stack the responder chain found — one that outlives a
+    /// load.
+    override var undoManager: UndoManager? {
+        delegate?.undoManager?(for: self) ?? super.undoManager
+    }
+
+    override func becomeFirstResponder() -> Bool {
+        guard super.becomeFirstResponder() else { return false }
+        isFocused = true
+        onFocusChange?()
+        return true
+    }
+
+    override func resignFirstResponder() -> Bool {
+        guard super.resignFirstResponder() else { return false }
+        isFocused = false
+        onFocusChange?()
+        return true
+    }
 }
 
 /// Review Focus 3's banner: a round landed while the human was typing, so it waits.
