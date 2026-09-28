@@ -197,6 +197,8 @@ final class BoardModelTests: XCTestCase {
         XCTAssertEqual(arrived.slots.last?.state, .done)
         XCTAssertEqual(arrived.now.value, "Review")
         XCTAssertEqual(arrived.inTheAir.label, "TOTAL")
+        XCTAssertEqual(arrived.stopsAt.value, "Review", "the run has arrived: it stops where it is")
+        XCTAssertEqual(arrived.stopsAt.detail, "ready for you")
     }
 
     func testCallingAtListsRemainingMajors() throws {

@@ -51,7 +51,7 @@ extension FocusedValues {
 /// **The chords, checked against Ghostty.** `Ghostty.SurfaceView.performKeyEquivalent` runs
 /// before the main menu and swallows any chord libghostty binds `performable`
 /// (`MenuKeyEquivalents`). None of these is in libghostty's macOS defaults
-/// (`vendor/ghostty/src/config/Config.zig`): ⌘' ⇧⌘' ⌥⌘' ⌘. ⇧⌘. and ⌥⌘A are unbound, and
+/// (`vendor/ghostty/src/config/Config.zig`): ⌘' ⇧⌘' ⌥⌘' ⇧⌘. ⌘. and ⌥⌘A are unbound, and
 /// ⌘= (`increase_font_size`) is already unbound in `GhosttyDefaults.conf`. An unbound chord
 /// falls through the surface to the menu. The spec's ⇧⌘A for Annotate is taken in-app by
 /// File ▸ Add Project…, so Annotate is ⌥⌘A.
@@ -68,8 +68,9 @@ struct PlanningCommands: Commands {
             item("Next Major", .nextMajor, "'", [.command, .shift])
             item("To Review", .toReview, "'", [.command, .option])
             Divider()
-            item("Pause", .pause, ".", [.command])
-            item("Stop", .stop, ".", [.command, .shift])
+            // Stop takes ⌘., the Mac's "stop the operation" chord; Pause is its shifted neighbour.
+            item("Pause", .pause, ".", [.command, .shift])
+            item("Stop", .stop, ".", [.command])
             Divider()
             item("Extend", .extend, "=", [.command])
             item("Annotate", .annotate, "a", [.command, .option])

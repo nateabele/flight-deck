@@ -23,8 +23,11 @@ struct ControlBar: View {
     @Binding var preview: PlayMode?
     /// Clicking a play button also makes it the default (spec §4) — `IntakeService.setDefaultPlay`.
     let setDefaultPlay: (PlayMode) -> Void
-    /// "Back to the last checkpoint" — shows the head in the plan viewer. Nil disables it: the
-    /// engine has no rewind (it needs branching), so Back never moves the tape.
+    /// "Back to the last checkpoint". The contract: the caller (the detail pane) passes a
+    /// closure that moves the plan viewer's selection back one checkpoint, and passes nil when
+    /// there is nowhere to go back to — before the first checkpoint lands, or with the first
+    /// one already selected — which dims the key. It never moves the tape: the engine has no
+    /// rewind (that needs branching), so Back is navigation, not a transport command.
     var onBack: (() -> Void)?
 
     static let barHeight: CGFloat = 78
@@ -44,6 +47,11 @@ struct ControlBar: View {
             .frame(width: geo.size.width, height: geo.size.height)
         }
         .frame(height: Self.barHeight)
+        // A button that goes dark under the pointer gets no exit hover, so its preview would
+        // otherwise outlive it.
+        .onChange(of: actions.enabled) {
+            if let preview, !actions.enabled.contains(button(for: preview)) { self.preview = nil }
+        }
         .background(
             LinearGradient(colors: [Color(white: 0.184), Color(white: 0.165)], startPoint: .top, endPoint: .bottom)
                 .overlay(alignment: .top) { Rectangle().fill(Color.white.opacity(0.05)).frame(height: 1) }
@@ -60,7 +68,7 @@ struct ControlBar: View {
             haltable(.pause) {
                 // Pressed-in while the tape isn't moving; clicking it then resumes with the
                 // default play, as Logic's pause does.
-                TransportKey(glyph: .symbol("pause.fill"), help: status == .running ? "Pause after this round (⌘.)" : "Paused · resume with the default play",
+                TransportKey(glyph: .symbol("pause.fill"), help: status == .running ? "Pause after this round (⇧⌘.)" : "Paused · resume with the default play",
                              enabled: status == .running ? actions.enabled.contains(.pause) : actions.enabled.contains(button(for: defaultPlay)),
                              on: status != .running) {
                     status == .running ? actions.perform(.pause) : play(defaultPlay)
@@ -72,7 +80,7 @@ struct ControlBar: View {
             playKey(.toReview, glyph: .toReview, help: "To review: run every remaining round (⌥⌘')")
             ClusterStyle.separator
             haltable(.stop) {
-                TransportKey(glyph: .symbol("stop.fill"), help: "Stop the run (⇧⌘.)",
+                TransportKey(glyph: .symbol("stop.fill"), help: "Stop the run (⌘.)",
                              enabled: actions.enabled.contains(.stop)) { actions.perform(.stop) }
             }
         }
@@ -100,8 +108,17 @@ struct ControlBar: View {
         TransportKey(glyph: glyph, help: help, enabled: actions.enabled.contains(button(for: mode)),
                      defaultMark: mode == defaultPlay) { play(mode) }
             .onHover { inside in
-                if inside { preview = mode } else if preview == mode { preview = nil }
+                preview = Self.hoverPreview(mode: mode, inside: inside, enabled: actions.enabled.contains(button(for: mode)),
+                                            current: preview)
             }
+    }
+
+    /// The preview after the pointer enters or leaves `mode`'s key. A dark key previews
+    /// nothing: it can't be pressed, so showing where it would stop is a promise the bar can't
+    /// keep. Leaving clears only the preview this key set, never a neighbour's.
+    static func hoverPreview(mode: PlayMode, inside: Bool, enabled: Bool, current: PlayMode?) -> PlayMode? {
+        if inside && enabled { return mode }
+        return current == mode ? nil : current
     }
 
     private func play(_ mode: PlayMode) {
@@ -291,12 +308,17 @@ enum LCDMetrics {
     }
 
     static func cellWidth(_ cell: LCDCell) -> CGFloat {
+        wordWidth(cell) + (cell.kind == .convergence ? sparkWidth + 10 : 0)
+    }
+
+    /// The cell with its whole value and caption but no sparkline — the first thing a squeezed
+    /// CONVERGENCE cell gives up (`widths`), so its word survives longest.
+    static func wordWidth(_ cell: LCDCell) -> CGFloat {
         // `SplitFlapText` keeps 8 pt of breathing room before it calls a name a fit; without it
         // here a cell sized to its name would still be handed its code.
         let breathing: CGFloat = LCDModel.flapSurface(cell.kind) == nil ? 0 : 8
         let value = LabelFit.measureWith(valueFont(cell.kind))(cell.value) + (cell.kind == .stopsAt ? 24 : 0) + breathing
-        let text = max(value, captionWidth(cell.caption) + (cell.kind == .convergence ? 12 : 0))
-        return ceil(text + (cell.kind == .convergence ? sparkWidth + 10 : 0) + 2 * cellPadding)
+        return ceil(max(value, captionWidth(cell.caption)) + 2 * cellPadding)
     }
 
     /// The narrowest a cell may be squeezed once the compact set still doesn't fit: a text
@@ -305,12 +327,16 @@ enum LCDMetrics {
     static func minWidth(_ cell: LCDCell) -> CGFloat {
         guard LCDModel.flapSurface(cell.kind) != nil else { return cellWidth(cell) }
         let value = LabelFit.measureWith(valueNS)(cell.shortValue) + (cell.kind == .stopsAt ? 24 : 0) + 8
-        return ceil(max(value, captionWidth(shortCaption(cell.caption))) + 2 * cellPadding)
+        return ceil(max(value, captionWidth(shortCaption(cell))) + 2 * cellPadding)
     }
 
-    /// "running" for "running · of 3": what a squeezed cell's caption falls back to.
-    static func shortCaption(_ caption: String) -> String {
-        caption.components(separatedBy: " · ").first ?? caption
+    /// What a squeezed cell's caption falls back to: "running" for "running · of 3", and
+    /// "changes" for CONVERGENCE's "5 changes", whose count its short value already shows.
+    static func shortCaption(_ cell: LCDCell) -> String {
+        if cell.kind == .convergence {
+            return cell.caption.split(separator: " ").dropFirst().joined(separator: " ")
+        }
+        return cell.caption.components(separatedBy: " · ").first ?? cell.caption
     }
 
     /// Each visible cell's width in `available` points (less the hairlines between them): its
@@ -320,13 +346,21 @@ enum LCDMetrics {
     static func widths(_ cells: [LCDCell], available: CGFloat) -> [CGFloat] {
         let full = cells.map(cellWidth)
         let room = available - CGFloat(max(cells.count - 1, 0))
-        let over = full.reduce(0, +) - room
+        var widths = full
+        var over = full.reduce(0, +) - room
         guard over > 0 else { return full }
-        let give = zip(full, cells.map(minWidth)).map { max($0 - $1, 0) }
+        // First the sparkline, and only the sparkline: the convergence word outlives it.
+        if let conv = cells.firstIndex(where: { $0.kind == .convergence }) {
+            let spark = full[conv] - wordWidth(cells[conv])
+            widths[conv] -= min(over, spark)
+            over -= min(over, spark)
+        }
+        guard over > 0 else { return widths }
+        let give = zip(widths, cells.map(minWidth)).map { max($0 - $1, 0) }
         let canGive = give.reduce(0, +)
-        guard canGive > 0 else { return full }
+        guard canGive > 0 else { return widths }
         let taken = min(over, canGive)
-        return zip(full, give).map { $0 - $1 / canGive * taken }
+        return zip(widths, give).map { $0 - $1 / canGive * taken }
     }
 
     static func color(_ tone: LCDCell.Tone) -> Color {
@@ -396,7 +430,7 @@ private struct LCDCellView: View {
                 .foregroundStyle(LCDMetrics.color(cell.tone))
                 ViewThatFits(in: .horizontal) {
                     caption(cell.caption)
-                    caption(LCDMetrics.shortCaption(cell.caption))
+                    caption(LCDMetrics.shortCaption(cell))
                 }
                 .foregroundStyle(cell.kind == .convergence ? LCDMetrics.color(cell.tone) : LCDMetrics.phosphor.opacity(0.45))
             }

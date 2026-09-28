@@ -76,9 +76,11 @@ final class ControlBarRenderTests: XCTestCase {
             bar("Running · 600 pt (compact)", running, seats: seats, convergence: converging, width: 600)
             bar("Paused · 600 pt (compact)", paused, convergence: converging, width: 600)
             bar("Failed · 600 pt (compact)", failed, convergence: diverging, width: 600)
+            bar("Failed · 760 pt (compact)", failed, convergence: diverging, width: 760)
+            bar("Failed · 700 pt (compact)", failed, convergence: diverging, width: 700)
         }
         .padding(20)
-        try render(view, size: NSSize(width: 1140, height: 960),
+        try render(view, size: NSSize(width: 1140, height: 1160),
                    to: URL(fileURLWithPath: dir).appendingPathComponent("pui-controlbar.png"))
     }
 

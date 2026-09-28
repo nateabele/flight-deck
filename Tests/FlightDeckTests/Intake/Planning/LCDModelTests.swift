@@ -75,7 +75,7 @@ final class LCDModelTests: XCTestCase {
         XCTAssertEqual(try cell(model, .soFar).value, "+42 −17", "the draft wrote the plan; it didn't change it")
         XCTAssertEqual(try cell(model, .billed).value, "$0.61")
         let conv = try cell(model, .convergence)
-        XCTAssertEqual([conv.value, conv.shortValue, conv.caption], ["CONVERGING ↘", "CONV ↘", "14 changes"])
+        XCTAssertEqual([conv.value, conv.shortValue, conv.caption], ["CONVERGING ↘", "↘ 14", "14 changes"])
         let stop = try cell(model, .stopsAt)
         XCTAssertEqual([stop.value, stop.shortValue, stop.caption], ["Refine 3", "RF3", "stops at · next major"])
         XCTAssertEqual(stop.tone, .accent)
@@ -126,11 +126,10 @@ final class LCDModelTests: XCTestCase {
         let reviewRound = try cell(review, .round)
         XCTAssertEqual([reviewRound.value, reviewRound.caption], ["REVIEW", "ready for you"])
         XCTAssertEqual(reviewRound.tone, .amber)
-        let here = try cell(review, .stopsAt)
-        XCTAssertEqual([here.value, here.caption], ["You’re here", "stops at"], "no mode goes anywhere from review")
+        XCTAssertFalse(review.cells.contains { $0.kind == .stopsAt }, "ROUND already says ready for you; nothing is left to stop at")
         XCTAssertNil(review.stopMode)
         XCTAssertEqual(try cell(review, .elapsed).caption, "total")
-        XCTAssertEqual(Set(review.cells.filter { $0.kind != .round && $0.kind != .stopsAt }.map(\.tone)), [.normal])
+        XCTAssertEqual(Set(review.cells.filter { $0.kind != .round }.map(\.tone)), [.normal])
     }
 
     /// Hovering a play button: the stop cell says WOULD STOP and where that button would land,
@@ -148,6 +147,53 @@ final class LCDModelTests: XCTestCase {
 
         let step = try cell(try lcd(feature, afterR1(.paused), preview: .step, now: 600), .stopsAt)
         XCTAssertEqual([step.value, step.caption], ["Refine 2", "would stop · step"])
+    }
+
+    /// A state word is never cut short ("CONV", "DIVE" read as different words): squeezed, the
+    /// cell falls back to its arrow and count, and the whole word stays the flap card's text and
+    /// the accessibility label (`SplitFlapText` keys both on `value`).
+    func testConvergenceWordIsWholeOrReplacedByArrowAndCount() throws {
+        let words: [(String, Int, String)] = [("CONVERGING ↘", 5, "↘ 5"), ("PLATEAU →", 13, "→ 13"),
+                                              ("DIVERGING ↗", 29, "↗ 29"), ("TOO EARLY", 41, "41")]
+        for (word, latest, short) in words {
+            let cellModel = ConvergenceCellModel(word: word, latest: latest, spark: [41, Double(latest)], tone: .normal)
+            let model = try lcd(try intake(.featurePlan), afterR1(.paused), convergence: cellModel, now: 600)
+            let conv = try cell(model, .convergence)
+            XCTAssertEqual(conv.value, word)
+            XCTAssertEqual(conv.shortValue, short)
+        }
+    }
+
+    /// Squeezing the compact CONVERGENCE cell gives up the sparkline before anything else: its
+    /// narrowest width still holds the whole word, just no line.
+    @MainActor
+    func testSqueezedConvergenceDropsTheSparklineBeforeTheWord() throws {
+        let model = try lcd(try intake(.featurePlan), afterR1(.paused), convergence: converging, now: 600)
+        let conv = try cell(model, .convergence)
+        let wordOnly = LCDMetrics.wordWidth(conv)
+        XCTAssertLessThan(wordOnly, LCDMetrics.cellWidth(conv), "the full cell includes the sparkline")
+        XCTAssertLessThan(LCDMetrics.minWidth(conv), wordOnly, "past the word, it falls back to arrow and count")
+        let compact = model.visible(width: 0, cellWidth: LCDMetrics.cellWidth)
+        let full = compact.map(LCDMetrics.cellWidth).reduce(0, +)
+        // Room for everything but the sparkline: the word must survive.
+        let widths = LCDMetrics.widths(compact, available: full - (LCDMetrics.cellWidth(conv) - wordOnly) + CGFloat(compact.count - 1))
+        let convWidth = try XCTUnwrap(zip(compact, widths).first { $0.0.kind == .convergence }?.1)
+        XCTAssertGreaterThanOrEqual(convWidth, wordOnly - 0.5)
+        XCTAssertLessThan(convWidth, LCDMetrics.cellWidth(conv))
+    }
+
+    // MARK: - Hover
+
+    /// Hovering a play button previews its stop — unless the button is dark, when there is no
+    /// stop to preview; leaving clears only the preview that button set.
+    func testHoverPreviewOnlyForEnabledButtons() {
+        XCTAssertEqual(ControlBar.hoverPreview(mode: .step, inside: true, enabled: true, current: nil), .step)
+        XCTAssertNil(ControlBar.hoverPreview(mode: .step, inside: true, enabled: false, current: nil))
+        XCTAssertNil(ControlBar.hoverPreview(mode: .step, inside: true, enabled: false, current: .step),
+                     "a button that went dark under the pointer stops previewing")
+        XCTAssertNil(ControlBar.hoverPreview(mode: .step, inside: false, enabled: true, current: .step))
+        XCTAssertEqual(ControlBar.hoverPreview(mode: .step, inside: false, enabled: true, current: .toReview), .toReview,
+                       "leaving one button doesn't clear another's preview")
     }
 
     // MARK: - Width (Review Focus 1)
