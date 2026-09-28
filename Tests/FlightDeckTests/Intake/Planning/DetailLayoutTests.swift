@@ -131,6 +131,15 @@ final class DetailLayoutTests: XCTestCase {
         XCTAssertFalse(DetailLayout.pinsBar(barTop: nil), "no bar on screen, nothing to pin")
     }
 
+    /// The room the plan leaves for the pinned block is the bar and the board WITHOUT the
+    /// heatmap: the pinned copy never carries it (a heatmap cell's jump pinned the block, and the
+    /// opaque map then sat over the very section it had jumped to).
+    func testPinnedBlockHeightLeavesTheHeatmapOut() {
+        XCTAssertEqual(DetailLayout.pinnedBlockHeight(bar: 78, board: 400, heatmap: 220), 8 + 78 + 12 + 180 + 10)
+        XCTAssertEqual(DetailLayout.pinnedBlockHeight(bar: 78, board: 180, heatmap: 0), 8 + 78 + 12 + 180 + 10)
+        XCTAssertNil(DetailLayout.pinnedBlockHeight(bar: 0, board: 0, heatmap: 0), "not measured yet")
+    }
+
     /// Shaping's plan is the live, editable one; from review on it is the final plan, read-only
     /// — edits after encode would change nothing that is written.
     func testPlanIsFinalFromReviewOn() {

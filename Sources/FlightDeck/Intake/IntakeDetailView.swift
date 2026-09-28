@@ -62,6 +62,10 @@ struct IntakeDetailView: View {
     /// exactly that much room while the block is pinned.
     @State private var barHeight: CGFloat = 0
     @State private var boardHeight: CGFloat = 0
+    /// The open heatmap's share of `boardHeight` — the pinned copy never draws it, so the room
+    /// the plan leaves for the pinned block leaves it out (`DetailLayout.pinnedBlockHeight`).
+    @State private var heatmapHeight: CGFloat = 0
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// Derived from files, so kept rather than re-read on every service publish (a running
     /// round publishes about once a second): see `refreshDerived`.
     @State private var summary: [ProgressItem] = []
@@ -103,7 +107,6 @@ struct IntakeDetailView: View {
         /// `LiveCard`'s own padding: the pinned copy of the bar sits at the card's inset, so it
         /// lands exactly where the card's copy left off.
         static let cardInset: CGFloat = 14
-        static let barGap: CGFloat = 12
         /// Room the plan section keeps below the pinned block before its first measurement.
         static let pinnedEstimate: CGFloat = 300
     }
@@ -124,7 +127,7 @@ struct IntakeDetailView: View {
                                                       })
                                     .equatable()
                             }
-                            if sections.contains(.liveCard) { liveCard }
+                            if sections.contains(.liveCard) { liveCard.id(Self.cardAnchor) }
                             if sections.contains(.stageBody) { stageBody }
                             if sections.contains(.plan) {
                                 planSection(viewport: viewport.size.height).id(Self.planAnchor)
@@ -143,7 +146,16 @@ struct IntakeDetailView: View {
                     .overlay(alignment: .top) { pinnedBar }
                     // Bottom-anchored: the plan is sized to the room under the pinned block, so
                     // its bottom at the viewport's puts its top just under the block.
-                    .onChange(of: planScroll) { withAnimation { proxy.scrollTo(Self.planAnchor, anchor: .bottom) } }
+                    .onChange(of: planScroll) {
+                        withAnimation(reduceMotion ? nil : .default) { proxy.scrollTo(Self.planAnchor, anchor: .bottom) }
+                    }
+                    // The heatmap lives in the card's board, never the pinned copy's: opened
+                    // while the block is pinned (the cell on the pinned bar, the Run menu), it
+                    // would open out of sight, so the document brings the card to it.
+                    .onChange(of: heatmap == nil) { _, closed in
+                        guard !closed, pinned else { return }
+                        withAnimation(reduceMotion ? nil : .default) { proxy.scrollTo(Self.cardAnchor, anchor: .top) }
+                    }
                 }
             }
             // Pinned outside the ScrollView so the way forward (and out) is always in reach,
@@ -225,7 +237,7 @@ struct IntakeDetailView: View {
                                  controlBar: { now in
                                      AnyView(inCard(.bar, height: barHeight) { controlBar(tape, now: now, seats: seats) })
                                  },
-                                 board: { now in AnyView(inCard(.board, height: boardHeight) { board(tape, now: now) }) })
+                                 board: { now in AnyView(inCard(.board, height: boardHeight) { board(tape, now: now, pinned: false) }) })
             }
         default:
             EmptyView()
@@ -254,6 +266,8 @@ struct IntakeDetailView: View {
         if !pinned {
             if let bar = geometry.bar, abs(bar.height - barHeight) > 0.5 { barHeight = bar.height }
             if let board = geometry.board, abs(board.height - boardHeight) > 0.5 { boardHeight = board.height }
+            let map = geometry.heatmap?.height ?? 0
+            if abs(map - heatmapHeight) > 0.5 { heatmapHeight = map }
         }
     }
 
@@ -266,9 +280,9 @@ struct IntakeDetailView: View {
         if pinned, intake.state == .shaping, let tape {
             SeatReader(feed: service.seats, id: intake.id) { seats in
                 LiveClock(mode: .shaping(tape: tape, pending: service.pending[intake.id])) { now in
-                    VStack(spacing: Metrics.barGap) {
+                    VStack(spacing: DetailLayout.pinnedGap) {
                         controlBar(tape, now: now, seats: seats)
-                        board(tape, now: now)
+                        board(tape, now: now, pinned: true)
                     }
                 }
             }
@@ -306,15 +320,23 @@ struct IntakeDetailView: View {
         }
     }
 
+    /// `pinned`: the pinned copy has no heatmap. Carried there, a cell's jump to the plan pinned
+    /// the block and the opaque map covered the very section it had jumped to; the card's copy
+    /// keeps it, and reports its height so the pinned room can leave it out.
     @ViewBuilder
-    private func board(_ tape: Tape, now: Date) -> some View {
+    private func board(_ tape: Tape, now: Date, pinned: Bool) -> some View {
         if let config = intake.roundConfig {
             let model = boardModel(tape, config: config, now: now)
             DeparturesBoard(model: model, policy: service.flapPolicy(for: intake.id),
                             preview: $preview,
                             onSelect: { select($0) },
                             onExtend: { [service, id = intake.id] in service.send(id, .extend($0, by: 1)) },
-                            disclosure: heatmapView(tape, board: model))
+                            disclosure: pinned ? nil : heatmapView(tape, board: model).map { map in
+                                AnyView(map.background(GeometryReader { geo in
+                                    Color.clear.preference(key: BarGeometryKey.self,
+                                                           value: BarFrames(heatmap: geo.frame(in: .named(Self.scrollSpace))))
+                                }))
+                            })
                 .clipShape(RoundedRectangle(cornerRadius: 10))
         }
     }
@@ -418,8 +440,8 @@ struct IntakeDetailView: View {
     /// no pinned block over it.
     private func planSection(viewport: CGFloat) -> some View {
         let final = DetailLayout.planIsFinal(for: intake.state)
-        let pinnedHeight = final ? 0 : barHeight > 0
-            ? DetailLayout.pinnedInset + barHeight + Metrics.barGap + boardHeight + 10 : Metrics.pinnedEstimate
+        let pinnedHeight = final ? 0
+            : DetailLayout.pinnedBlockHeight(bar: barHeight, board: boardHeight, heatmap: heatmapHeight) ?? Metrics.pinnedEstimate
         return DocumentPlan(service: service, intakeID: intake.id, title: DetailLayout.planTitle(for: intake.state),
                             tape: planTape ?? .empty, final: final,
                             selection: final ? nil : selectedCheckpoint, select: final ? .constant(nil) : $selectedCheckpoint,
@@ -797,6 +819,7 @@ struct IntakeDetailView: View {
     private static let allPresets: [Preset] = [.bead, .sketch, .featurePlan, .fullPlan]
 
     private static let planAnchor = "intake-plan"
+    private static let cardAnchor = "intake-live-card"
 
     /// The document scroller's width in the current scroller style — zero-width overlay
     /// scrollers still draw over the content's trailing edge while scrolling.
@@ -825,6 +848,8 @@ private struct DerivedKey: Equatable {
 private struct BarFrames: Equatable {
     var bar: CGRect?
     var board: CGRect?
+    /// The card's open heatmap, inside `board`.
+    var heatmap: CGRect?
 }
 
 private struct BarGeometryKey: PreferenceKey {
@@ -835,6 +860,7 @@ private struct BarGeometryKey: PreferenceKey {
         let next = nextValue()
         value.bar = next.bar ?? value.bar
         value.board = next.board ?? value.board
+        value.heatmap = next.heatmap ?? value.heatmap
     }
 }
 
