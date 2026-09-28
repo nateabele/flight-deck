@@ -28,9 +28,14 @@ struct PlanningActions: Equatable {
     /// round — the stage the tape is in when that stage can still grow, else the next one that
     /// can — and is withheld when nothing can (`TapePlanner` would ignore it). `annotate` starts a
     /// note in the notes rail — on the plan's selection if there is one (`PlanNotesController.annotate`).
+    ///
+    /// Stop only ASKS (`confirmStop`): it discards the round in flight, work already paid for,
+    /// and one ⌘. did that with no way back (spec §2: destructive actions are always confirmed).
+    /// The caller's dialog sends the stop. Both the bar's key and the Run menu press this, so
+    /// neither can skip the question. Pause loses nothing and still acts at once.
     @MainActor
     static func shaping(_ id: UUID, service: IntakeService, model: ShapingModel,
-                        annotate: @escaping () -> Void) -> PlanningActions {
+                        annotate: @escaping () -> Void, confirmStop: @escaping () -> Void) -> PlanningActions {
         let current = model.tape.roundInProgress?.stage ?? model.tape.head?.stage
         let extendStage = model.extendStages.first { $0 == current } ?? model.extendStages.first
         var enabled = model.enabled
@@ -41,11 +46,21 @@ struct PlanningActions: Equatable {
             case .nextMajor: service.send(id, .nextMajor)
             case .toReview: service.send(id, .toReview)
             case .pause: service.send(id, .pause)
-            case .stop: service.send(id, .stop)
+            case .stop: confirmStop()
             case .extend: if let extendStage { service.send(id, .extend(extendStage, by: 1)) }
             case .annotate: annotate()
             }
         }
+    }
+}
+
+extension PlanningActions {
+    /// The Stop confirmation's message: what stopping throws away, named — the round in
+    /// flight's work — and what it keeps.
+    static func stopMessage(tape: Tape) -> String {
+        let kept = "Every round that already landed stays in the plan."
+        guard let round = tape.roundInProgress else { return "No round is running, so nothing is discarded. \(kept)" }
+        return "\(BoardModel.name(stage: round.stage, round: round.round))'s work so far is discarded. \(kept)"
     }
 }
 

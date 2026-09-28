@@ -37,6 +37,8 @@ struct IntakeDetailView: View {
     /// default: answered rounds are there to look back at, not to push the live work down.
     @State private var expandedRounds: Set<Int>
     @State private var confirmingDiscard = false
+    /// Stop asks first (`PlanningActions.shaping`): set by the bar's key and ⌘. alike.
+    @State private var confirmingStop = false
     /// The config `startShaping` hands to `beginShaping` — `nil` until the preset's expansion
     /// seeds it. `beginShaping` rather than `choose` so the edited config is what actually runs.
     @State private var editedConfig: RoundConfig?
@@ -167,6 +169,14 @@ struct IntakeDetailView: View {
         // Esc closes the heatmap from anywhere in the pane, not only while it holds focus: a
         // click into the plan moves focus to the editor, and the map stayed open under it.
         .onExitCommand(perform: heatmap == nil ? nil : { heatmap = nil })
+        // Stop is destructive, so neither its key nor ⌘. acts without this (spec §2). Cancel is
+        // the default: a Return on a reflex ⌘. must not throw the round away.
+        .confirmationDialog("Stop the run?", isPresented: $confirmingStop, titleVisibility: .visible) {
+            Button("Stop", role: .destructive) { [service, id = intake.id] in service.send(id, .stop) }
+            Button("Cancel", role: .cancel) {}.keyboardShortcut(.defaultAction)
+        } message: {
+            Text(PlanningActions.stopMessage(tape: tape ?? .empty))
+        }
         .onChange(of: derivedKey, initial: true) { refreshDerived() }
         .onChange(of: intake.id, initial: true) { bindNotes() }
         .onChange(of: service.notes(intake.id), initial: true) { _, onTape in notes.tapeNotes = onTape }
@@ -384,7 +394,8 @@ struct IntakeDetailView: View {
     private var planningActions: PlanningActions? {
         guard intake.state == .shaping, let tape else { return nil }
         return PlanningActions.shaping(intake.id, service: service, model: ShapingModel(intake: intake, tape: tape),
-                                       annotate: { [notes] in notes.annotate() })
+                                       annotate: { [notes] in notes.annotate() },
+                                       confirmStop: { [$confirmingStop] in $confirmingStop.wrappedValue = true })
     }
 
     /// A different intake starts with a clean slate of notes, sending to itself.
