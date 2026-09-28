@@ -393,9 +393,15 @@ struct IntakeDetailView: View {
     /// leaves every Run item disabled.
     private var planningActions: PlanningActions? {
         guard intake.state == .shaping, let tape else { return nil }
-        return PlanningActions.shaping(intake.id, service: service, model: ShapingModel(intake: intake, tape: tape),
-                                       annotate: { [notes] in notes.annotate() },
-                                       confirmStop: { [$confirmingStop] in $confirmingStop.wrappedValue = true })
+        var actions = PlanningActions.shaping(intake.id, service: service, model: ShapingModel(intake: intake, tape: tape),
+                                              annotate: { [notes] in notes.annotate() },
+                                              confirmStop: { [$confirmingStop] in $confirmingStop.wrappedValue = true })
+        if sectionCycle != nil {
+            actions.heatmap = PlanningActions.HeatmapToggle(open: heatmap != nil) { [$heatmap] in
+                $heatmap.wrappedValue = $heatmap.wrappedValue == nil ? HeatmapFocus() : nil
+            }
+        }
+        return actions
     }
 
     /// A different intake starts with a clean slate of notes, sending to itself.

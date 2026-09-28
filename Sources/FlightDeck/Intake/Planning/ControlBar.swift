@@ -438,16 +438,27 @@ private struct LCDCellView: View {
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var hovering = false
+    @FocusState private var focused: Bool
 
     var body: some View {
         if let convergence, cell.kind == .convergence {
             // The whole cell is the control: hover for the verdict's card, click for the heatmap.
+            // Focus stands in for the hover (spec §14 — every interaction by keyboard: the card
+            // and the heatmap were reachable only by pointer), Return or Space for the click,
+            // the same as the tape's slots.
             content
                 .contentShape(Rectangle())
-                .background(FloatingCard(isPresented: hovering || heatmap.opensCard,
+                .background(FloatingCard(isPresented: hovering || focused || heatmap.opensCard,
                                          card: ConvergenceCard(model: convergence, policy: policy).fixedSize()))
                 .onHover { hovering = $0 }
                 .onTapGesture { heatmap.toggle?() }
+                .focusable(heatmap.toggle != nil, interactions: .activate)
+                .focused($focused)
+                .onKeyPress(keys: [.return, .space]) { _ in
+                    guard let toggle = heatmap.toggle else { return .ignored }
+                    toggle()
+                    return .handled
+                }
                 .accessibilityAddTraits(.isButton)
                 .accessibilityHint(heatmap.open ? "Closes the section heatmap" : "Opens the section heatmap")
                 .accessibilityAction { heatmap.toggle?() }
