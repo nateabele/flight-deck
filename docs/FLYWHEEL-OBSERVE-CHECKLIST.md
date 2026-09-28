@@ -1,4 +1,4 @@
-# Flywheel Observe (Level 1) GUI verification checklist
+# Flight Control Observe (Level 1) GUI verification checklist
 
 > Agents cannot drive the real Flight Deck app (AGENTS.md rule 2: no headless host for an
 > AppKit/SwiftUI surface). Every Observe view (`ObserveDrawer`, `DependencyDAGOverlay`) is
@@ -8,12 +8,12 @@
 ## Purpose
 
 Confirm the Level 1 Observe drawer and DAG overlay behave correctly against a real,
-running flywheel project — real `am`/`br` shell-outs, real `WatchClock` polling, real
+running Flight Control project — real `am`/`br` shell-outs, real `WatchClock` polling, real
 SwiftUI mounting — the parts no unit test can reach.
 
 ## Prerequisites
 
-- A scratch repo with flywheel markers (`.beads/`, `.agent-mail.yaml`) and **at least two**
+- A scratch repo with Flight Control markers (`.beads/`, `.agent-mail.yaml`) and **at least two**
   agent-mail identities that have run `am macros start-session`, so at least one bead is
   `in_progress` and assigned, and at least one file reservation exists with a waiter (needed
   for steps 6–7 below; reservations currently only come from a real `am reservations`
@@ -26,16 +26,16 @@ SwiftUI mounting — the parts no unit test can reach.
 
 ## Steps
 
-### 1. Enable Flywheel; drawer appears only under an identity tab
+### 1. Enable Flight Control; drawer appears only under an identity tab
 
-Right-click the project row in the sidebar. If the repo has no flywheel markers yet, the
-item reads **"Setup Flywheel…"**; if markers already exist, it reads **"Enable Flywheel…"**
+Right-click the project row in the sidebar. If the repo has no Flight Control markers yet, the
+item reads **"Set Up Flight Control…"**; if markers already exist, it reads **"Enable Flight Control…"**
 (`ProjectHeaderRow.swift`, the two are deliberately distinct entry points — confirm the
 right one is offered for the scratch repo's state). Confirm, then:
 
-- Open a tab that booted as a registered flywheel identity (via `am macros start-session`).
+- Open a tab that booted as a registered Flight Control identity (via `am macros start-session`).
   The Observe drawer should appear directly under the terminal, expanded by default.
-- Open (or create) a tab in the same project that is **not** a flywheel identity (a plain
+- Open (or create) a tab in the same project that is **not** a Flight Control identity (a plain
   shell tab). Confirm the drawer is **absent** — not collapsed, not empty, simply not
   mounted. The drawer is gated on the *tab's own* `Session.flywheelIdentity`, not on the
   project being enabled (`SessionStore.focusedObserveAgent()`).
@@ -73,7 +73,7 @@ Collapse the drawer (chevron). Confirm it renders as the compact one-line bar
 (`observe-drawer-collapsed`). Quit and relaunch Flight Deck (not `-FlightDeckResetState`).
 Reopen the same project/tab and confirm the drawer is still collapsed. Expand it, relaunch
 again, confirm it comes back expanded. This is stored in `ProjectSettings.drawerCollapsed`
-via `UserDefaults`, keyed per standardized project path — confirm a **different** flywheel
+via `UserDefaults`, keyed per standardized project path — confirm a **different** Flight Control
 project's drawer state is independent (collapse one, leave the other expanded).
 
 **Expect:** collapsed/expanded state survives a full app relaunch, independently per
@@ -158,11 +158,11 @@ which was used when running this step.
 
 **Expect:** stalled/dead-holder collision notifies; active-holder collision stays silent.
 
-### 8. Disable Flywheel
+### 8. Disable Flight Control
 
 **Not yet testable — there is no disable control anywhere in the app.** Once a project's
-`flywheelEnabled` is set `true` (via "Enable Flywheel…"/"Setup Flywheel…"), the same context
-menu item becomes a disabled, non-interactive label ("Flywheel coordination enabled") with
+`flywheelEnabled` is set `true` (via "Enable Flight Control…"/"Set Up Flight Control…"), the same context
+menu item becomes a disabled, non-interactive label ("Flight Control coordination enabled") with
 an empty action — it cannot be clicked, and nothing else in the UI flips
 `flywheelEnabled` back to `false` or calls `FlywheelObserveService.disable(project:)` (which
 exists and is unit-tested, but has no call site). See FOLLOWUPS for this as a known

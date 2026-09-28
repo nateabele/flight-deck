@@ -1,4 +1,4 @@
-# Flywheel integration — spike findings & architecture verdict
+# Flight Control integration — spike findings & architecture verdict
 
 *Evidence-based follow-up to [FLYWHEEL-INTEGRATION.md](FLYWHEEL-INTEGRATION.md) and
 [FLYWHEEL-FLEET-MANAGEMENT.md](FLYWHEEL-FLEET-MANAGEMENT.md). Four technical spikes
@@ -121,7 +121,7 @@ long-lived helper needed for `br`/`bv`; one optional `am serve-http` for Agent M
   (read tmux + filesystem live) — the only usable NTM read surface, and only for
   NTM's own tmux world.
 
-**Consequence:** do not build FD's flywheel integration on `ntm serve`. (Caveat: this
+**Consequence:** do not build FD's Flight Control integration on `ntm serve`. (Caveat: this
 is the *installed* build; a cgo-enabled rebuild would fix `serve`, but the tmux-scope
 limitation would remain, so the conclusion holds.)
 

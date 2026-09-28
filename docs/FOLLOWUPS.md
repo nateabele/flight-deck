@@ -89,7 +89,7 @@ carried forward on trust.
   by *QR* still gets one endpoint, from the code. If typed pairing ever needs to survive leaving
   the LAN, the fix is the phone recording the address it actually connected on — not widening
   the seal.
-- **Flywheel Observe polls on `WatchClock`-registered, mtime-gated `stat`s, not FSEvents,**
+- **Flight Control Observe polls on `WatchClock`-registered, mtime-gated `stat`s, not FSEvents,**
   though the design spec called for FSEvents. `FlywheelWatcher`
   (`Sources/FlightDeck/Flywheel/Observe/FlywheelWatcher.swift`) mirrors
   `SessionStatusWatcher`'s own documented stance against vnode/FSEvents watches
@@ -1502,9 +1502,9 @@ rather than by design:
   malformed multi-key payload — not in the published schema today, but nothing parses it away
   — would pick a `kind` non-deterministically rather than failing loudly.
 
-## Flywheel setup/enable (2026-09-22) — a known-corrupted repo from before `66fa004`
+## Flight Control setup/enable (2026-09-22) — a known-corrupted repo from before `66fa004`
 
-- **A repo that ran "Enable/Setup Flywheel" during the window when `FlywheelSetup` appended
+- **A repo that ran "Enable/Set Up Flight Control" during the window when `FlywheelSetup` appended
   shell lines to `.git/hooks/pre-commit` has a permanently broken `pre-commit` — deliberately
   not auto-repaired.** Before `66fa004`, `installBeadsSyncHook` appended `br sync
   --flush-only` / `git add -A .beads` directly to `pre-commit`, which `am guard install`
@@ -1574,11 +1574,11 @@ recorded rather than fixed in this pass.
   channels. AGENTS.md's "a feature shipped for one adapter is a defect" rule applies, but the
   window is two renames in flight inside ~600ms, and it predates this branch.
 
-## From Flywheel Observe Level 1 (2026-09-25)
+## From Flight Control Observe Level 1 (2026-09-25)
 
-- **There is no UI path to disable Flywheel once enabled.** `ProjectSettings.flywheelEnabled`
+- **There is no UI path to disable Flight Control once enabled.** `ProjectSettings.flywheelEnabled`
   is only ever set `true` — `ProjectHeaderRow.swift:161`'s enabled-state menu item is
-  `Button("Flywheel coordination enabled") {}.disabled(true)`, a genuinely inert label, not a
+  `Button("Flight Control coordination enabled") {}.disabled(true)`, a genuinely inert label, not a
   toggle. `FlywheelObserveService.disable(project:)` (`FlywheelObserveService.swift:72-77`)
   is fully implemented and unit-tested but has zero call sites in `Sources/`. No runtime
   defect follows from this — a project can only ever be enabled, and enabled works — but it
@@ -1795,7 +1795,7 @@ feasibility unknown.
   unloaded fetch alone exceeds 10 s, or only fetches that queue behind each other on the main
   thread, which decides whether `askDeadline` needs raising too.
 
-## From flywheel intake, phases 1–3 (2026-09-26)
+## From Flight Control intake, phases 1–3 (2026-09-26)
 
 - **In-process triage and release are lost on quit.** `IntakeService` runs triage and release
   as an in-process `Task`, tracked only in its own `tasks: [UUID: Task<Void, Never>]`
@@ -1850,7 +1850,7 @@ feasibility unknown.
   question would recover that, at the cost of trusting stale context more than today's design
   wants to.
 
-## From flywheel intake, the round engine (2026-09-27)
+## From Flight Control intake, the round engine (2026-09-27)
 
 **Next** — designed in the spec, deliberately not in the round-engine plan:
 
