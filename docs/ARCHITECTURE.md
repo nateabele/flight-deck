@@ -375,6 +375,8 @@ The menu items are the *mechanism*, not decoration. AppKit gives the Ghostty sur
 feature the keys were claimed by the surface and the resulting `previous_tab`/`next_tab` action
 went nowhere.
 
+Back (⌃⌘←) and Forward (⌃⌘→) navigate a persisted selection history of up to 50 entries per stack, recalled by `SessionStore.goBack()` / `goForward()` and never landing on the row already showing. The history persists across relaunches in `SessionSnapshot` and is populated each time a session is manually selected or new sessions select themselves.
+
 ## External tools
 
 `Sources/FlightDeck/Tools/` runs a shell command template — an editor, a terminal, a git
