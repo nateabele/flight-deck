@@ -92,7 +92,11 @@ A new optional field `selectionHistory: SelectionHistory?`, written as `nil` whe
 are empty (the file is meant to stay human-readable, as with `unread`). Synthesized `Codable`
 decodes a missing key as `nil`, so older files load with empty history, and older builds reading
 a newer file ignore the unknown key. `SelectionTarget` encodes as
-`{"session":"<uuid>"}` / `{"project":{"path":"…"}}` (synthesized enum coding).
+`{"session":{"id":"<uuid>"}}` / `{"project":{"path":"…"}}` (synthesized enum coding, with the
+associated value labeled so the payload nests under a named key rather than `_0`).
+`SelectionHistory` itself has a hand-written, non-throwing `init(from:)`: a malformed entry
+(an unknown case, a wrong-shaped value) is dropped rather than failing the whole
+`SessionSnapshot` decode, which would otherwise wipe every tab.
 
 ### Commands — `TabNavigationCommands`
 

@@ -4,8 +4,21 @@ import Foundation
 /// `Repo.id`: repo ids are minted fresh on every launch (`SessionSnapshot.Project` stores only
 /// the path), so an id-keyed entry would be dead after the first relaunch.
 enum SelectionTarget: Codable, Hashable {
-    case session(UUID)
+    case session(id: UUID)
     case project(path: String)
+}
+
+/// Decodes one array element independently of its siblings, swallowing its own failure rather
+/// than the array's. Plain `[SelectionTarget]` fails the WHOLE array the moment one element is
+/// an unknown shape (an old build's `{"session":{"_0":...}}`, a hand-edited file, a future
+/// case this build has never heard of) — exactly the all-or-nothing throw `SelectionHistory`
+/// exists to avoid. `wrapped` is `nil` for an element that failed; callers drop those with
+/// `compactMap`.
+private struct Lossy<T: Decodable>: Decodable {
+    let wrapped: T?
+    init(from decoder: Decoder) {
+        wrapped = try? T(from: decoder)
+    }
 }
 
 /// ⌃⌘← / ⌃⌘→, browser-style: selecting somewhere new pushes where you were and clears
@@ -18,6 +31,39 @@ enum SelectionTarget: Codable, Hashable {
 struct SelectionHistory: Codable, Equatable {
     private(set) var back: [SelectionTarget] = []
     private(set) var forward: [SelectionTarget] = []
+
+    private enum CodingKeys: String, CodingKey { case back, forward }
+
+    init() {}
+
+    /// Hand-written, and never throws — the synthesized version this replaces let one bad
+    /// value (an unknown enum case, `"selectionHistory":7`) throw all the way up through
+    /// `SessionSnapshot`'s decode, which `load()` then reports as nil: the app starts with
+    /// every tab gone, and the next save overwrites `sessions.json` with that emptiness. A
+    /// non-object value at this key falls back to empty history via `try?` on the keyed
+    /// container itself; a malformed *element* inside `back`/`forward` is dropped by `Lossy`
+    /// without disturbing its siblings.
+    init(from decoder: Decoder) {
+        guard let container = try? decoder.container(keyedBy: CodingKeys.self) else {
+            back = []
+            forward = []
+            return
+        }
+        back = Self.decodeStack(container, key: .back)
+        forward = Self.decodeStack(container, key: .forward)
+    }
+
+    private static func decodeStack(
+        _ container: KeyedDecodingContainer<CodingKeys>, key: CodingKeys
+    ) -> [SelectionTarget] {
+        // `try?` on `decodeIfPresent` covers both a missing key (returns nil, no throw) and a
+        // present-but-wrong-shaped value (`"forward":7` throws a type mismatch) with the same
+        // empty-array fallback; a present, array-shaped value still runs each element through
+        // `Lossy` before this ever gets the chance to matter.
+        guard let lossy = try? container.decodeIfPresent([Lossy<SelectionTarget>].self, forKey: key)
+        else { return [] }
+        return lossy.compactMap(\.wrapped)
+    }
 
     /// Per stack. Bounds `sessions.json` growth for a user who never relaunches.
     static let limit = 50
