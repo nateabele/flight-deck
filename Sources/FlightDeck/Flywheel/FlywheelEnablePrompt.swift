@@ -72,7 +72,7 @@ struct FlywheelEnableDialogs: ViewModifier {
         if !status.guardInstalled { steps.append("Agent Mail commit guard") }
         if !status.beadsSyncHooksInstalled { steps.append("task sync hook") }
         guard !steps.isEmpty else {
-            return "Setup is already complete; this only marks the project as Flight Control-enabled."
+            return "Setup is already complete; this only marks the project as Flight Control–enabled."
         }
         return "Will install: " + steps.joined(separator: ", ") + "."
     }
@@ -81,7 +81,7 @@ struct FlywheelEnableDialogs: ViewModifier {
     /// bootstrap `FlywheelSetup.initialize` performs on a plain repo, ahead of the same
     /// guard/hook install `setupStepsDescription` lists.
     private var initializeStepsDescription: String {
-        "Will initialize: tasks, agent-mail marker, AGENTS.md. Will install: Agent Mail commit guard, task sync hook."
+        "Will initialize: task workspace, agent-mail marker, AGENTS.md. Will install: Agent Mail commit guard, task sync hook."
     }
 }
 
