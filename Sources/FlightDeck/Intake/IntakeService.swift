@@ -170,6 +170,13 @@ final class IntakeService: ObservableObject {
     /// control bar's "Pausing…"/"Stopping…" wait on (`HaltRequest.label`). Kept here rather
     /// than in the view so the Run menu and the bar's buttons share one answer.
     @Published private(set) var halts: [UUID: HaltRequest] = [:]
+    /// Plan edits the app could not carry onto a newer head (`EditLayer.retarget`) — the
+    /// runner records its own in the tape (`PlanLayers.conflictedEdits`); these are the ones
+    /// only the app saw. Behind the live card's conflict banner, with the tape's.
+    @Published private(set) var editConflicts: [UUID: [EditConflict]] = [:]
+    /// Intakes whose plan has already shown "Your edits are kept…" — once per plan, so it
+    /// lives here rather than in the plan section, which is rebuilt on every visit.
+    private(set) var editNoteShown: Set<UUID> = []
     /// How long a pending start may stay silent before it reads as queued rather than starting.
     static let queuedAfter: TimeInterval = 15
     /// Each seat file's mtime at its last read, per intake, keyed by path — the same stat-first
@@ -534,6 +541,21 @@ final class IntakeService: ObservableObject {
         availableModelsCache ?? .defaults
     }
 
+    func markEditNoteShown(_ id: UUID) { editNoteShown.insert(id) }
+
+    func recordEditConflict(_ id: UUID, _ conflict: EditConflict) {
+        editConflicts[id, default: []].append(conflict)
+    }
+
+    /// The live card's conflict banner for `id`'s plan head `head`: the runner's conflicts
+    /// and the app's, newest last.
+    func editConflictNotice(_ id: UUID, tape: Tape, head: Int?) -> EditConflictNotice? {
+        let names = { (checkpoint: Int) in
+            tape.checkpoints.first { $0.id == checkpoint }.map(PlanSection.checkpointName) ?? "checkpoint \(checkpoint)"
+        }
+        return EditLayer.conflictNotice(PlanLayers.conflictedEdits(tape) + (editConflicts[id] ?? []), head: head, names: names)
+    }
+
     /// A file a round wrote into `checkpoints/<checkpoint>/` — the plan section's `loadFile`.
     /// A synchronous read on the main actor: fine at plan sizes (a plan, a change set, a
     /// graph — kilobytes), and `PlanSection` only calls it when its viewer key changes.
@@ -558,7 +580,7 @@ final class IntakeService: ObservableObject {
         let shaping = Set(intakes.lazy.filter { $0.state == .shaping }.map(\.id))
         let tracked = Set(latestTapes.keys).union(tapes.keys).union(tapeDates.keys).union(seatRounds.keys)
             .union(seatActivities.keys).union(runRecords.keys).union(seatResults.keys).union(convergence.keys)
-            .union(convergenceKeys.keys).union(halts.keys)
+            .union(convergenceKeys.keys).union(halts.keys).union(editConflicts.keys)
         for gone in tracked.subtracting(shaping) {
             tapes[gone] = nil
             latestTapes[gone] = nil
@@ -568,6 +590,7 @@ final class IntakeService: ObservableObject {
             convergenceKeys[gone] = nil
             convergenceFolds[gone] = nil
             halts[gone] = nil
+            editConflicts[gone] = nil
         }
         for id in shaping {
             let store = tapeStore(id)

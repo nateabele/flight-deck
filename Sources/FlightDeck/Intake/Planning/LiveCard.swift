@@ -17,7 +17,7 @@ import SwiftUI
 struct LiveCard: View {
     fileprivate enum Kind {
         case triage(activity: SeatActivity?)
-        case shaping(tape: Tape, seats: SeatFiles, editConflict: String?, selectedRound: Binding<Int?>,
+        case shaping(tape: Tape, seats: SeatFiles, editConflict: EditConflictNotice?, selectedRound: Binding<Int?>,
                      selectedSeat: Binding<String?>, controlBar: (Date) -> AnyView, board: (Date) -> AnyView)
     }
 
@@ -39,13 +39,14 @@ struct LiveCard: View {
     /// - Parameters:
     ///   - activities/records/results: `IntakeService.seatActivities[id]` / `runRecords[id]` /
     ///     `seatResults[id]` — the round in progress's seats only.
-    ///   - editConflict: the banner text for plan edits a round couldn't carry forward — Task 11
-    ///     supplies it; nil hides the banner.
+    ///   - editConflict: the banner for plan edits a round couldn't carry forward
+    ///     (`IntakeService.editConflictNotice`); nil hides it. Its Open selects the checkpoint
+    ///     still holding the edits.
     ///   - selectedRound: the checkpoint the plan viewer shows; nil follows the head.
     ///   - selectedSeat: the seat (`LiveSeat.id`) the inspector details; clicking a row selects
     ///     it, clicking it again clears it.
     static func shaping(intake: Intake, tape: Tape, activities: [String: SeatActivity], records: [String: RunRecord],
-                        results: [String: SeatResult] = [:], pending: PendingStart?, editConflict: String? = nil,
+                        results: [String: SeatResult] = [:], pending: PendingStart?, editConflict: EditConflictNotice? = nil,
                         selectedRound: Binding<Int?> = .constant(nil), selectedSeat: Binding<String?> = .constant(nil),
                         controlBar: @escaping (Date) -> AnyView, board: @escaping (Date) -> AnyView) -> LiveCard {
         LiveCard(intake: intake,
@@ -80,8 +81,9 @@ struct LiveCard: View {
                                 identifier: "shaping-pause-banner")
                 }
                 if let editConflict {
-                    Self.banner(symbol: "arrow.triangle.merge", title: editConflict, detail: nil,
-                                identifier: "shaping-edit-conflict-banner")
+                    Self.banner(symbol: "arrow.triangle.merge", title: editConflict.title, detail: nil,
+                                identifier: "shaping-edit-conflict-banner",
+                                action: (editConflict.openLabel, { selectedRound.wrappedValue = editConflict.open }))
                 }
                 if !tape.pendingNotes.isEmpty {
                     let n = tape.pendingNotes.count
@@ -232,7 +234,9 @@ struct LiveCard: View {
     // MARK: - Banners
 
     /// Amber, the only colour a banner gets (spec §2: amber is attention).
-    static func banner(symbol: String, title: String, detail: String?, identifier: String) -> some View {
+    /// `action`, when given, is a link-style button after the text ("Open Refine 2").
+    static func banner(symbol: String, title: String, detail: String?, identifier: String,
+                       action: (String, () -> Void)? = nil) -> some View {
         HStack(alignment: .top, spacing: 8) {
             Image(systemName: symbol).foregroundStyle(.orange)
             VStack(alignment: .leading, spacing: 2) {
@@ -240,6 +244,13 @@ struct LiveCard: View {
                 if let detail { Text(detail).font(.callout).foregroundStyle(.secondary) }
             }
             .textSelection(.enabled)
+            if let action {
+                Text("·").font(.callout).foregroundStyle(.tertiary)
+                Button(action.0, action: action.1)
+                    .buttonStyle(.link)
+                    .font(.callout)
+                    .accessibilityIdentifier("\(identifier)-open")
+            }
             Spacer(minLength: 0)
         }
         .padding(10)
