@@ -62,7 +62,7 @@ struct ShapingModel {
         self.intake = intake
         self.tape = tape
         self.nextRound = intake.roundConfig.flatMap { TapePlanner.next(after: tape, config: $0) }
-        self.stages = Self.markers(tape: tape, config: intake.roundConfig)
+        self.stages = BoardModel.stages(tape: tape, config: intake.roundConfig)
     }
 
     /// Index into `stages` of the head checkpoint, or nil before the first round finishes.
@@ -81,17 +81,9 @@ struct ShapingModel {
         }
     }
 
-    /// Stages ＋ can lengthen: ones the config actually runs and the head hasn't moved past.
-    /// `TapePlanner` silently ignores an extend for a finished stage, so offering it would be a
-    /// menu item that does nothing.
-    var extendStages: [Stage] {
-        guard let config = intake.roundConfig else { return [] }
-        let headRank = tape.head.map { Self.rank($0.stage) } ?? -1
-        var stages: [Stage] = []
-        if config.reviewer != nil, headRank <= Self.rank(.refine) { stages.append(.refine) }
-        if config.polisher != nil, headRank <= Self.rank(.polish) { stages.append(.polish) }
-        return stages
-    }
+    /// Stages ＋ can lengthen — `BoardModel.extendableStages`, shared so the strip's + and the
+    /// board's bracket handle can't disagree.
+    var extendStages: [Stage] { BoardModel.extendableStages(tape: tape, config: intake.roundConfig) }
 
     // MARK: - Status line
 
@@ -381,37 +373,4 @@ struct ShapingModel {
     }
 
     private static func modelName(_ m: ModelChoice) -> String { "\(m.harness.rawValue) \(m.model)" }
-
-    /// Stage order in the planned sequence — `Stage` is declared in that order but isn't
-    /// `CaseIterable`, and IntakeKit is out of scope here.
-    private static func rank(_ s: Stage) -> Int {
-        [Stage.draft, .synthesis, .refine, .encode, .polish, .freshEyes, .dedup].firstIndex(of: s) ?? 0
-    }
-
-    // MARK: - Markers
-
-    /// The tape's checkpoints, then whatever `TapePlanner` would run after them, found by
-    /// replaying `next` on a scratch copy — the planner's sequence is private, and replaying it
-    /// means the strip can never disagree with what the runner will actually do (extensions
-    /// included).
-    private static func markers(tape: Tape, config: RoundConfig?) -> [StageMarker] {
-        var markers = tape.checkpoints.enumerated().map { i, cp in
-            StageMarker(order: i, stage: cp.stage, round: cp.round, label: label(stage: cp.stage, round: cp.round),
-                        major: cp.major, done: true, inProgress: false, checkpointID: cp.id)
-        }
-        guard let config else { return markers }
-        var scratch = tape
-        // Bounded so a planner bug can't hang the main thread; no real config comes close.
-        while markers.count < 200, let next = TapePlanner.next(after: scratch, config: config) {
-            markers.append(StageMarker(order: markers.count, stage: next.stage, round: next.round,
-                                       label: label(stage: next.stage, round: next.round), major: next.major,
-                                       done: false, inProgress: false, checkpointID: nil))
-            scratch.checkpoints.append(Checkpoint(id: (scratch.head?.id ?? 0) + 1, stage: next.stage, round: next.round,
-                                                  major: next.major, createdAt: Date(timeIntervalSince1970: 0)))
-        }
-        if tape.status == .running, let first = markers.firstIndex(where: { !$0.done }) {
-            markers[first].inProgress = true
-        }
-        return markers
-    }
 }
