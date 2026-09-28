@@ -428,6 +428,29 @@ enum PlanGutter {
         leading + (churn ? churnWidth + laneGap : 0) + editWidth + textGap
     }
 
+    /// The plan's measure. Full-pane lines on a wide window ran to 150 characters, past what
+    /// reads comfortably, and left no room beside the text: the versions card and note cards
+    /// could only open over it. Capped, the text keeps a column and the rest is trailing room.
+    static let readableWidth: CGFloat = 720
+    /// Text to the view's trailing edge, when the pane is narrower than the measure.
+    static let trailingMargin: CGFloat = 8
+    /// Room kept past the text for a card opened beside it (`SectionVersionsCard` is 320 wide,
+    /// plus its gap to the text and to the window's edge).
+    static let sideRoom: CGFloat = 340
+    /// The narrowest the measure gets to make that room. Below it the text takes the width and
+    /// a card opens over it: a column of a few words is worse than a covered line.
+    static let minimumMeasure: CGFloat = 480
+
+    /// The text container's width in a text view `viewWidth` wide: the readable measure, less
+    /// what it takes to leave `sideRoom` beside it — measured at a 1100 pt window with the churn
+    /// column open, a 720 pt measure left 180 pt, and the versions card flipped back over the
+    /// text — unless that would squeeze the text under `minimumMeasure`.
+    static func textWidth(viewWidth: CGFloat, churn: Bool) -> CGFloat {
+        let available = viewWidth - width(churn: churn) - trailingMargin
+        let beside = available - sideRoom
+        return max(0, min(readableWidth, beside >= minimumMeasure ? beside : available))
+    }
+
     /// A lane's horizontal extent in the text view's coordinates.
     static func span(_ lane: Lane, churn: Bool) -> (x: CGFloat, width: CGFloat) {
         switch lane {
