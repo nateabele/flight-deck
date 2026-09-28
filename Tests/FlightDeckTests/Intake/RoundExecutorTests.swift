@@ -631,6 +631,28 @@ final class RoundExecutorTests: XCTestCase {
         XCTAssertTrue(polisher.prompt.contains(work.appendingPathComponent("graph.json").path))
     }
 
+    /// A polish round's size is its ops changed; the dependency-edge share of that is kept on
+    /// its own, since "dependencies stabilizing" is the signal polish convergence leans on most.
+    func testPolishRecordsEdgeChurnSeparatelyFromOpsChanged() async throws {
+        let edge = ChangeOp.addEdge(from: .new("t1"), to: .existing("fd-1"), kind: .blocks)
+        let runner = ScriptedHarnessRunner { [unowned self] call in
+            ok(call, "pol", self.changeSetReply(pre: self.existingPre, extra: [self.newBead, edge]))
+        }
+        let (cp, _) = try checkpoint(try await executor(runner).run(PlannedRound(stage: .polish, round: 1, major: true),
+                                                                    inputs(config(), tape: try polishTape())))
+        XCTAssertEqual(cp.record.changeCount, 2, "the new bead and the new edge")
+        XCTAssertEqual(cp.record.edgesChanged, 1)
+    }
+
+    /// A record written before `edgesChanged` existed decodes with none, and one that has it
+    /// round-trips.
+    func testRoundRecordEdgesChangedIsOptionalOnDisk() throws {
+        let old = Data(#"{"slots":[],"changeCount":3,"linesAdded":0,"linesRemoved":0,"sectionsChanged":[],"annotations":[]}"#.utf8)
+        XCTAssertNil(try IntakeJSON.decoder.decode(RoundRecord.self, from: old).edgesChanged)
+        let rec = RoundRecord(changeCount: 3, edgesChanged: 2)
+        XCTAssertEqual(try IntakeJSON.decoder.decode(RoundRecord.self, from: IntakeJSON.encoder.encode(rec)), rec)
+    }
+
     func testPolishKeepsExistingOpPreconditionsOrFails() async throws {
         // Keeps `pre` and adds one bead: accepted, one op changed.
         let good = ScriptedHarnessRunner { [unowned self] call in

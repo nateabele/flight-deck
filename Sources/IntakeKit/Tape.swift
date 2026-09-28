@@ -64,7 +64,7 @@ public struct SlotOutcome: Codable, Equatable, Sendable {
 /// so the shape stays uniform across the tape.
 public struct RoundRecord: Codable, Equatable, Sendable {
     public var slots: [SlotOutcome]
-    public var changeCount: Int?        // proposed changes (review/synthesis), ops.count (encode), or ops changed (polish/freshEyes/dedup)
+    public var changeCount: Int?        // proposed changes (review/synthesis), ops.count (encode), or ops changed (polish/freshEyes/dedup, edges included)
     public var linesAdded: Int
     public var linesRemoved: Int
     public var sectionsChanged: [String]
@@ -77,9 +77,13 @@ public struct RoundRecord: Codable, Equatable, Sendable {
     /// (a merge conflict, or a merge tool that failed) — they are still there, unapplied. See
     /// `PlanLayers.conflictedEdits`.
     public var editConflict: Int?
+    /// Polish, fresh-eyes and dedup: the dependency-edge share of `changeCount`
+    /// (`PlanMetrics.edgesChanged`). nil for every other stage, and on a record written before
+    /// it existed.
+    public var edgesChanged: Int?
     public init(slots: [SlotOutcome] = [], changeCount: Int? = nil, linesAdded: Int = 0, linesRemoved: Int = 0,
                 sectionsChanged: [String] = [], tally: VerdictTally? = nil, annotations: [PlanNote] = [], note: String? = nil,
-                editConflict: Int? = nil) {
+                editConflict: Int? = nil, edgesChanged: Int? = nil) {
         self.slots = slots
         self.changeCount = changeCount
         self.linesAdded = linesAdded
@@ -89,10 +93,12 @@ public struct RoundRecord: Codable, Equatable, Sendable {
         self.annotations = annotations
         self.note = note
         self.editConflict = editConflict
+        self.edgesChanged = edgesChanged
     }
 
     private enum CodingKeys: String, CodingKey {
-        case slots, changeCount, linesAdded, linesRemoved, sectionsChanged, tally, annotations, note, editConflict
+        case slots, changeCount, linesAdded, linesRemoved, sectionsChanged, tally, annotations, note, editConflict,
+             edgesChanged
     }
 
     /// Synthesized but for `annotations`, which a tape written before `PlanNote` holds as bare
@@ -108,6 +114,7 @@ public struct RoundRecord: Codable, Equatable, Sendable {
         annotations = try decodeNotes(c, .annotations) ?? []
         note = try c.decodeIfPresent(String.self, forKey: .note)
         editConflict = try c.decodeIfPresent(Int.self, forKey: .editConflict)
+        edgesChanged = try c.decodeIfPresent(Int.self, forKey: .edgesChanged)
     }
 }
 
