@@ -1733,3 +1733,15 @@ feasibility unknown.
   - `CodexIntegrationTests.testARestoredCodexTabReattachesAfterAStartCodexFailure` types a bare
     `codex` instead of `codex resume <id>`. Its fixture's rollout path does not exist, so
     `coldCreateCommand` falls back to a fresh launch, which it has done since 443bdc5.
+
+## From tab history and the shortcut overlay (2026-09-27)
+
+- **Back/Forward into a session inside a collapsed project selects a row that isn't drawn.**
+  `SessionSidebar`'s `List` only renders rows for an expanded project, so landing
+  `selectedSessionID` on a session whose project is collapsed changes the terminal pane but
+  leaves the sidebar showing no highlighted row at all — no visible feedback that the jump
+  happened. Two options, both touching `fi-tab-nav`'s cycling too since it has the same gap:
+  un-collapse the owning project as part of the traversal (`goBack`/`goForward` would need
+  `setCollapsed(false, forProjectAt:)` alongside the selection write), or treat it the way
+  cycling treats a collapsed project — landing on the project's own header row instead of the
+  session inside it. Left to Nate's call rather than picked here.
