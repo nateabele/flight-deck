@@ -251,8 +251,16 @@ Fallback; leading-aligned fallback column), caps and default play; the body show
 ## 10. Release review
 
 The existing sheet, renamed throughout to tasks: "Release plan as tasks", sections **New tasks /
-Edits / Dependencies**, "14 of 14 selected", primary **Release 14 Tasks** (default, trailing),
-Cancel leading. It carries forward the notes a round consumed ("1 note carried into task notes").
+Edits / Dependencies**, primary **Release 3 New Tasks** (default, trailing), Cancel leading. It
+carries forward the notes a round consumed ("1 note carried into task notes").
+
+As built (final review): the button, the summary line and the header count the same things, from
+one rule (`ReleaseCounts` over the ops not dropped or impossible). The summary reads "3 new tasks ·
+2 edits · 2 dependencies · 2 notices (1 session message, 1 mail)" and the button carries its new-task
+count ("Release Changes" when there is none). The header says "2 dropped" once something is left
+out, in place of "14 of 14 selected" — rows can only be dropped, never selected. Rows name tasks by
+title (the id is in the help tag); an existing task waiting on a new one is badged "waits for
+release", never "held".
 
 ## 11. What is already built vs. what this adds
 
