@@ -176,7 +176,7 @@ struct PlanSection: View {
     }
 }
 
-private struct PlanSectionBody: View {
+struct PlanSectionBody: View {
     let tape: Tape
     let loadFile: (Int, String) -> Data?
     let onSend: (TapeCommand) -> Void
@@ -194,9 +194,13 @@ private struct PlanSectionBody: View {
     /// The selection the last reload saw, to tell a round chosen on the timeline apart from
     /// a new head arriving while the view follows the head.
     @State private var loadedSelection: Int??
-    /// Edits sent but maybe not yet applied by the runner: reloading the checkpoint from disk
-    /// before then would offer the pre-edit plan back as if it were news.
-    @State private var sent: [Int: String] = [:]
+    /// Where commits go, and the edits sent but maybe not yet applied by the runner
+    /// (`PlanEditRouter.sent`): reloading the checkpoint from disk before then would offer the
+    /// pre-edit plan back as if it were news.
+    @State private var router = PlanEditRouter()
+    /// Revert all acts through the editor, so it is one undoable change.
+    @State private var editor = PlanEditorHandle()
+    @State private var confirmingRevertAll = false
     @State private var otherText = AttributedString()
     @State private var diffChunks: [PlanSection.DiffChunk] = []
     /// The chunk a heatmap cell asked Diff vs Previous to scroll to, tagged with the request's
@@ -210,13 +214,6 @@ private struct PlanSectionBody: View {
     @State private var generated: [Int: String] = [:]
     /// "Your edits are kept…", up in this section since it first showed (`PlanEditHooks`).
     @State private var showKeptNote = false
-    /// Checkpoints whose edit could not be carried onto a newer head: later commits of the
-    /// same edit stay with it, rather than merging a remainder onto the head without the part
-    /// that conflicted.
-    @State private var stuck: Set<Int> = []
-    /// The last stale-edit merge, so the next waits for it: each merges onto the head as the
-    /// one before it left it.
-    @State private var retargeting: Task<Void, Never>?
     let notes: PlanNotesController?
     let churn: ChurnLaneInput?
     let focus: PlanFocus?
@@ -281,6 +278,7 @@ private struct PlanSectionBody: View {
         .onChange(of: shown?.editable == true ? hunks.count : nil, initial: true) { _, count in
             if let count { notes?.setEdits(count) }
         }
+        .onChange(of: tape, initial: true) { _, tape in bindRouter(tape) }
         .onChange(of: focus, initial: true) { _, focus in
             guard let focus else { return }
             pendingFocus = focus
@@ -303,10 +301,15 @@ private struct PlanSectionBody: View {
             Text(chip)
             if shown?.editable == true {
                 Text("·").foregroundStyle(.secondary)
-                Button("Revert all", action: revertAll)
+                Button("Revert all") { confirmingRevertAll = true }
                     .buttonStyle(.plain)
                     .fontWeight(.semibold)
                     .accessibilityIdentifier("plan-edit-revert-all")
+                    .popover(isPresented: $confirmingRevertAll, arrowEdge: .bottom) {
+                        RevertAllConfirmation(prompt: EditLayer.revertAllPrompt(userHunks.count),
+                                              onRevert: { confirmingRevertAll = false; editor.revertAll() },
+                                              onCancel: { confirmingRevertAll = false })
+                    }
             }
         }
         .font(.caption)
@@ -341,56 +344,43 @@ private struct PlanSectionBody: View {
         .accessibilityIdentifier("plan-edit-kept-note")
     }
 
-    /// Every hunk back to the agents' text: the runner stores a plan identical to the
-    /// generated one as "no edits" (`TapeStore.writeUserEdits`).
-    private func revertAll() {
-        guard let shown, shown.editable, let base = generated[shown.checkpoint] else { return }
-        commitEdit(base, to: shown)
-        text = base
+    /// Sends an edit — for the checkpoint it was typed on, or merged onto a newer head
+    /// (`PlanEditRouter`).
+    private func commitEdit(_ markdown: String, to loaded: Loaded) {
+        bindRouter(tape)
+        router.commit(markdown, typedOn: loaded.checkpoint, loaded: loaded.text, editable: loaded.editable)
     }
 
-    /// Sends an edit for the checkpoint it was typed on — unless a newer head has landed since
-    /// (Task 10's open end). Then the edit, kept there, would feed no round, so it is merged
-    /// onto the head by the runner's own rule (`EditLayer.retarget`) and sent for the head; a
-    /// conflict keeps it where it was typed and raises the banner.
-    private func commitEdit(_ markdown: String, to loaded: Loaded) {
-        let checkpoint = loaded.checkpoint
-        let head = PlanSection.planHead(tape: tape, loadFile: loadFile)
-        guard let head, head != checkpoint, loaded.editable, !stuck.contains(checkpoint) else {
-            sent[checkpoint] = markdown
-            return onSend(.editPlan(checkpoint: checkpoint, markdown: markdown))
+    /// Points the router at this intake: the live tape (the service's, else the latest this
+    /// view was handed), where to send, and how a merged plan reaches the editor.
+    private func bindRouter(_ latest: Tape) {
+        let live = hooks.liveTape
+        router.env = PlanEditRouter.Env(tape: { live?() ?? latest }, loadFile: loadFile, send: onSend,
+                                        onConflict: hooks.onConflict,
+                                        deliver: { checkpoint, plan in deliver(plan, to: checkpoint) },
+                                        runner: hooks.runner)
+    }
+
+    /// A merge's plan for `checkpoint`: offered to the editor as `incoming` — never written
+    /// into `text`, which is a load and would replace whatever the human is typing. The
+    /// editor's own rule (`EditPolicy`) then shows it at once or holds it behind the banner.
+    private func deliver(_ plan: String, to checkpoint: Int) {
+        if let next = PlanSectionBody.offer(plan, for: checkpoint, shown: shown, incoming: incoming) {
+            incomingIsNavigation = false
+            incoming = next
         }
-        // The runner already failed to carry this checkpoint's edits into the head; merging
-        // more of them onto it would land the rest without the part that conflicted.
-        if tape.checkpoints.first(where: { $0.id == head })?.record.editConflict == checkpoint {
-            stuck.insert(checkpoint)
-            sent[checkpoint] = markdown
-            return onSend(.editPlan(checkpoint: checkpoint, markdown: markdown))
+    }
+
+    /// What `incoming` becomes when a merge wrote `plan` for `checkpoint`: the new text for a
+    /// head waiting behind the banner, or for the head on screen; nil when neither shows it
+    /// (the human is on an earlier round — the head's reload picks up the merge).
+    static func offer(_ plan: String, for checkpoint: Int, shown: Loaded?, incoming: Loaded?) -> Loaded? {
+        if var waiting = incoming, waiting.checkpoint == checkpoint {
+            waiting.text = plan
+            return waiting
         }
-        // What the edit was typed on: the checkpoint's text before the head moved. Commits since
-        // then went to the head, so this is still the last one sent for it (or the load).
-        let base = sent[checkpoint] ?? loaded.text
-        let previous = retargeting
-        retargeting = Task { @MainActor in
-            await previous?.value
-            guard let ours = sent[head] ?? PlanSection.effectivePlan(checkpoint: head, tape: tape, loadFile: loadFile) else { return }
-            let outcome = await EditLayer.retarget(markdown: markdown, typedOn: checkpoint, base: base, head: head,
-                                                   headPlan: ours, runner: hooks.runner)
-            guard case .editPlan(let target, let plan) = outcome.command else { return }
-            sent[target] = plan
-            onSend(outcome.command)
-            if let conflict = outcome.conflict {
-                stuck.insert(checkpoint)
-                return hooks.onConflict(conflict)
-            }
-            // The head's text on screen or waiting behind the banner predates the merge.
-            if shown?.checkpoint == head, text == ours {
-                shown?.text = plan
-                text = plan
-            } else if incoming?.checkpoint == head {
-                incoming?.text = plan
-            }
-        }
+        guard let shown, shown.checkpoint == checkpoint else { return nil }
+        return Loaded(checkpoint: checkpoint, text: plan, editable: shown.editable)
     }
 
     @ViewBuilder private var content: some View {
@@ -413,6 +403,7 @@ private struct PlanSectionBody: View {
                          },
                          incomingIsNavigation: incomingIsNavigation)
                 .editLayer(generated: generated[shown.checkpoint])
+                .handle(editor)
                 .churnLane(shown.editable ? churn : nil)
                 .annotating(notes)
                 .onChange(of: shown.checkpoint, initial: true) { _, checkpoint in notes?.checkpoint = checkpoint }
@@ -487,7 +478,7 @@ private struct PlanSectionBody: View {
         // polish checkpoint carries a change set, and resolving to it literally made the
         // editor vanish into "No plan at this checkpoint" the moment encoding began.
         if selection == nil, let head = PlanSection.planHead(tape: tape, loadFile: loadFile) { checkpoint = head }
-        guard let plan = sent[checkpoint] ?? PlanSection.effectivePlan(checkpoint: checkpoint, tape: tape, loadFile: loadFile) else {
+        guard let plan = router.sent[checkpoint] ?? PlanSection.effectivePlan(checkpoint: checkpoint, tape: tape, loadFile: loadFile) else {
             message = "No plan at this checkpoint."
             return
         }
@@ -519,4 +510,29 @@ struct PlanFocus: Equatable {
     var checkpoint: Int
     var section: String?
     var seq: Int
+}
+
+/// "Revert all 3 edits?" under the chip — Revert destructive and deliberately not the default
+/// button, so Return can't throw away a plan's worth of edits; Esc cancels.
+private struct RevertAllConfirmation: View {
+    let prompt: String
+    let onRevert: () -> Void
+    let onCancel: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(prompt).font(.callout.weight(.semibold))
+            Text("⌘Z brings them back.").font(.caption).foregroundStyle(.secondary)
+            HStack(spacing: 8) {
+                Spacer(minLength: 0)
+                Button("Cancel", role: .cancel, action: onCancel)
+                    .keyboardShortcut(.cancelAction)
+                Button("Revert", role: .destructive, action: onRevert)
+                    .accessibilityIdentifier("plan-edit-revert-all-confirm")
+            }
+            .controlSize(.small)
+        }
+        .padding(12)
+        .frame(width: 220)
+    }
 }
