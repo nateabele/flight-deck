@@ -14,11 +14,13 @@ struct ShortcutOverlayCommands: Commands {
             Button("Keyboard Shortcuts") {
                 NotificationCenter.default.post(name: .flightDeckToggleShortcuts, object: nil)
             }
-            // ⌘⇧/ spelled as ⌘? — the spelling macOS uses for its own Help-search chord, which
-            // AppKit matches against shift+/ on a US layout. `"/"` + `.shift` is not reliably
-            // matched, because the event's shifted character is "?". This shadows Help search
-            // on purpose (spec, 2026-09-27).
-            .keyboardShortcut("?", modifiers: .command)
+            // Spelled `"/"` + ⇧⌘, NOT `"?"` + ⌘. The `"?"` spelling is the exact key equivalent
+            // of the system's Help-menu search field, which AppKit inserts when the Help menu
+            // opens — and with that twin present, this item was drawn with no shortcut at all.
+            // `"/"` + shift is a distinct key equivalent, so it draws as ⇧⌘/, and AppKit still
+            // matches the physical ⌘⇧/ press: `TabNavigationCommands`' `"["` + ⇧⌘ items rely on
+            // the same shift-on-punctuation matching and fire today.
+            .keyboardShortcut("/", modifiers: [.command, .shift])
         }
     }
 }
