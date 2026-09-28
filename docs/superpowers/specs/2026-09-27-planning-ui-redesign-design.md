@@ -202,10 +202,24 @@ so ⏭ stops at the round the board marks as the new last, after an extend or a 
 - An abbreviated label is focusable and carries a subtle dotted underline. Hover or keyboard focus
   shows a **split-flap card** styled as part of the board (phosphor mono): full name, status and
   duration ("Synthesis · landed 3:02").
+- **The card stays out of the way** (revised 2026-09-28 — it covered neighbouring slots and got in
+  the way of moving the pointer along the tape). Hover opens it tooltip-style: only after the
+  pointer rests on an item ~350 ms, never while it is just passing across the tape; once a card is
+  up, the next item's card opens at once, until ~500 ms after the pointer leaves the last one.
+  Keyboard focus opens it at once. It opens **above** its label, centred, with a small nub pointing
+  at it and a ~7 pt gap, clamped inside the window's visible frame with an 8 pt margin; it flips
+  below only when there is no room above, and opens below a field (NOW) rather than over the
+  pinned control bar. It never takes the mouse, and closes on pointer exit, scroll, click, Esc,
+  and the window losing key or minimising. The LCD's CONVERGENCE card keeps opening below (the
+  bar is at the top of the live card), and the churn lane's versions card beside its marker.
 - **The split-flap animation plays once, when the text first appears** — a board value changing to
-  new text (NOW moving to Refine 3), or a card's text the first time that card is shown. It never
-  replays on re-render, scroll, resize, re-hover of the same card, or an unchanged value. Reduce
-  Motion: no flap.
+  new text (NOW moving to Refine 3). It never replays on re-render, scroll, resize, or an unchanged
+  value. Reduce Motion: no flap.
+- **The hover card is the exception** (revised 2026-09-28; it was "the first time that card is
+  shown", and in practice never animated — the board seeded every slot's card as already shown).
+  Opening a card is a reveal, so its full name flips in as tiles **every time it opens**: quick,
+  ~250–320 ms end to end, staggered left to right, with the card fading and scaling in over
+  ~120 ms and fading out on close. Reduce Motion: no flap and no scale, a plain fade.
 
 ## 6. Live seat activity
 
