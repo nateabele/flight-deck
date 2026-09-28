@@ -1058,12 +1058,18 @@ def _notification_texts(rec):
     content = (rec.get("message") or {}).get("content")
     if isinstance(content, str):
         out.append(content)
-    elif isinstance(content, list):
-        for block in content:
-            if isinstance(block, dict):
-                for key in ("text", "content"):
-                    if isinstance(block.get(key), str):
-                        out.append(block[key])
+    # A content BLOCK's text/content is deliberately NOT read, and this is the opposite of the
+    # mistake made elsewhere in this reader: it is notification text QUOTED INSIDE another
+    # payload, not a notification delivery. Measured over 40 transcripts: all 20 such
+    # occurrences were quotations -- 6 in `assistant`/`text` (the model writing ABOUT
+    # notifications) and 14 in `user`/`tool_result` (a file read, a transcript dump, a log echo
+    # whose bytes happen to contain the markup). Reading them would close an agent because
+    # somebody grepped for a notification, which is a FALSE POSITIVE, not extra coverage.
+    #
+    # `ClaudeSession.swift` reads exactly three sites for the same reason (user string,
+    # `attachment` of type queued_command, and `queue-operation`/`enqueue`), and a probe reader
+    # more permissive than the consumer it pins is worse than useless: its rows would stay green
+    # on transcripts the real reader chokes on.
     attachment = rec.get("attachment")
     if isinstance(attachment, dict):
         for key in ("prompt", "text", "content"):
