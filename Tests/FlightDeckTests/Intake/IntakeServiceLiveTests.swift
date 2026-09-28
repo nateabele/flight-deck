@@ -772,7 +772,7 @@ final class IntakeServiceLiveTests: XCTestCase {
         let svc = await makeService(awaitRecovery: false)
         let policy = svc.flapPolicy(for: i.id)
         XCTAssertFalse(policy.shouldFlap(surface: "board.now", text: "Draft", reduceMotion: false))
-        XCTAssertFalse(policy.shouldFlap(surface: "card.refine-1", text: "Refine 1", reduceMotion: false))
+        XCTAssertFalse(policy.shouldFlap(surface: "refine-1", text: "Refine 1", reduceMotion: false))
 
         // Observed from here: a new head lands before recovery's tick, and still flaps after it.
         try store.writeCheckpoint(Checkpoint(id: 2, stage: .synthesis, round: 0, major: true, createdAt: clockNow),
@@ -804,7 +804,7 @@ final class IntakeServiceLiveTests: XCTestCase {
             XCTAssertFalse(policy.shouldFlap(surface: surface, text: text, reduceMotion: false), surface)
         }
         XCTAssertTrue(policy.hasShown(surface: "board.now", text: "Draft"))
-        XCTAssertTrue(policy.hasShown(surface: "card.refine-1", text: "Refine 1"))
+        XCTAssertTrue(policy.hasShown(surface: "refine-1", text: "Refine 1"))
 
         // Observed from here on: a new head is new text, and flaps.
         try store.writeCheckpoint(Checkpoint(id: 2, stage: .synthesis, round: 0, major: true, createdAt: clockNow),

@@ -328,7 +328,21 @@ from scratch" above, paused mid-round where an item needs that.
 - Scroll a slot that has never been on screen into view. **Expect:** it does **not** flap (play
   its reveal once) on that first appearance — only newly-arrived text flaps.
 - Toggle Reduce Motion (System Settings → Accessibility) and repeat. **Expect:** with it on, no
-  card reveal or flap animates; with it off, they do.
+  card reveal or flap animates (a card only fades in and out); with it off, they do.
+- Sweep the pointer steadily along the tape. **Expect:** no card opens on the way. Rest on one
+  abbreviated slot. **Expect:** after a short beat (~⅓ s) its card opens. Then slide to the next
+  slot. **Expect:** that slot's card replaces it at once, with no delay; leave the tape for a
+  second and come back, and the delay applies again.
+- With a card open over a mid-tape slot, and again at the first and last slots. **Expect:** it
+  sits above the slot, centred on it (slid in from the window's side at the edges) with a small
+  nub pointing at the label, never over the slot, its neighbours or the tape row; the pointer can
+  move along the tape, click a slot, and hover the next without the card ever blocking it.
+- Open the same slot's card several times, then other slots' and a field's (NOW/CALLING AT as
+  codes). **Expect:** every open flips the full name in as tiles, quickly (about ⅓ s), and the
+  card fades/scales in and fades out on close.
+- Hover NOW's code at a narrow width. **Expect:** its card opens below NOW, not over the control
+  bar above the board.
+- With a card open: click, press Esc, scroll the tape, switch apps. **Expect:** each closes it.
 - Open a round's result card near the tape's edge. **Expect:** it is a panel/popover that
   escapes the tape's scroll clipping and flips to stay on-screen near an edge, not an `.overlay`
   cut off by the ScrollView.
@@ -504,7 +518,9 @@ scrollers for one text).
   (no chevron for a one-sentence request); every transport chord, hover-preview and pausing/stopping spinner works; LCD
   labels/values read in full words with no truncation; the compact bar at ~700 pt never
   code-truncates a state word; tape flap plays once per new text and never on first scroll-into-
-  view, honoring Reduce Motion; round cards escape scroll clipping; finished-round cards are one size and their detail panel
+  view, honoring Reduce Motion; hover cards wait out the intent delay, switch at once between
+  neighbours, open above the slot with a nub, flip their name in on every open, never block the
+  tape, and only fade under Reduce Motion; round cards escape scroll clipping; finished-round cards are one size and their detail panel
   resizes smoothly on switching, its caret follows the card and the strip's scroll, a long detail
   scrolls inside the cap, Esc closes it, Reduce Motion makes it instant; auto-scroll follows the live
   target only; wheel/trackpad scroll works over the pinned block; seat rows show a structured
