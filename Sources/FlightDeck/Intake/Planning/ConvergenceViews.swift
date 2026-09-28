@@ -77,17 +77,15 @@ struct ConvergenceSparkline: View {
 // MARK: - Hover card
 
 /// The CONVERGENCE cell's card: the word in flap tiles and the count with the verdict's reason
-/// (the board's own card, `SplitFlapCard`, on surface `card.convergence`), then the numbers, any
+/// (the board's own card, `SplitFlapCard`, flipping in on every open), then the numbers, any
 /// discontinuity, and the suggested action — always "a signal, not a promise".
 struct ConvergenceCard: View {
     let model: ConvergenceCellModel
-    let policy: FlapPolicy
 
     private static let width: CGFloat = 340
 
     var body: some View {
-        SplitFlapCard(full: model.word, detail: model.detail, surface: "card.convergence", policy: policy,
-                      tint: model.tone == .amber ? Tone.amber : nil, accessory: AnyView(accessory))
+        SplitFlapCard(full: model.word, detail: model.detail, tint: model.tone == .amber ? Tone.amber : nil, accessory: AnyView(accessory))
     }
 
     private var accessory: some View {

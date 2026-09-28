@@ -404,7 +404,7 @@ final class BoardModelTests: XCTestCase {
         XCTAssertEqual(a.flapTexts, b.flapTexts, "a clock tick is not new flap text")
         XCTAssertEqual(a.flapTexts["board.inTheAir"], "IN THE AIR")
         XCTAssertEqual(a.flapTexts["refine-2"], "Refine 2")
-        XCTAssertEqual(a.flapTexts["card.refine-2"], "Refine 2")
+        XCTAssertNil(a.flapTexts["card.refine-2"], "a hover card flips in on every open; nothing seeds it")
 
         tape.status = .paused
         XCTAssertEqual(try board(try intake(.featurePlan), tape).flapTexts["board.inTheAir"], "PAUSED FOR")

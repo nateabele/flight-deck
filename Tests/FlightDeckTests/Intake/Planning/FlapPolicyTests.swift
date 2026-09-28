@@ -52,10 +52,12 @@ final class FlapPolicyTests: XCTestCase {
         XCTAssertFalse(policy.shouldFlap(surface: "board.now", text: "Refine 3", reduceMotion: false))
     }
 
-    func testHoverCardFlapsOnceThenNot() {
+    /// A tape slot's label: flips in once, and a re-hover or a recreated slot doesn't replay it.
+    /// (Its hover card is the exception and never asks the policy — `CardRevealTests`.)
+    func testTapeLabelFlapsOnceThenNot() {
         let policy = FlapPolicy()
-        XCTAssertTrue(policy.shouldFlap(surface: "card.refine-2", text: "Refine 2", reduceMotion: false))
-        XCTAssertFalse(policy.shouldFlap(surface: "card.refine-2", text: "Refine 2", reduceMotion: false))
+        XCTAssertTrue(policy.shouldFlap(surface: "refine-2", text: "Refine 2", reduceMotion: false))
+        XCTAssertFalse(policy.shouldFlap(surface: "refine-2", text: "Refine 2", reduceMotion: false))
     }
 
     /// A seeded text was on the data before anyone looked: it reads as shown and never flaps,

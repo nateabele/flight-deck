@@ -58,6 +58,9 @@ struct ControlBar: View {
             .frame(width: geo.size.width, height: geo.size.height)
         }
         .frame(height: Self.barHeight)
+        // The board's hover cards open above their labels; this keeps one over NOW from
+        // landing on the bar (it opens below NOW instead).
+        .background(FloatingCardObstacle())
         // A button that goes dark under the pointer gets no exit hover, so its preview would
         // otherwise outlive it.
         .onChange(of: actions.enabled) {
@@ -437,7 +440,9 @@ private struct LCDCellView: View {
     let heatmap: CellHeatmap
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var hovering = false
+    @ObservedObject private var intent = HoverCardIntent.shared
+    /// This cell's key in the app-wide hover intent — the board's cards' tooltip rules.
+    @State private var hoverID = UUID().uuidString
     @FocusState private var focused: Bool
 
     var body: some View {
@@ -448,9 +453,12 @@ private struct LCDCellView: View {
             // the same as the tape's slots.
             content
                 .contentShape(Rectangle())
-                .background(FloatingCard(isPresented: hovering || focused || heatmap.opensCard,
-                                         card: ConvergenceCard(model: convergence, policy: policy).fixedSize()))
-                .onHover { hovering = $0 }
+                // Below, as ever: the bar is pinned at the top of the live card, so above would
+                // hang the card over the window's toolbar.
+                .background(FloatingCard(isPresented: intent.shown == hoverID || focused || heatmap.opensCard,
+                                         card: ConvergenceCard(model: convergence).fixedSize(),
+                                         onDismiss: { intent.dismiss() }))
+                .onHover { intent.hover(hoverID, $0) }
                 .onTapGesture { heatmap.toggle?() }
                 .focusable(heatmap.toggle != nil, interactions: .activate)
                 .focused($focused)
