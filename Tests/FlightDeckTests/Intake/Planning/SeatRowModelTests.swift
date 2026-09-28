@@ -181,6 +181,19 @@ final class SeatRowModelTests: XCTestCase {
         XCTAssertEqual(row.footprint.map(\.dir), ["workspace"], "\"work\" is the intake's own scratch, dropped entirely")
     }
 
+    func testFootprintAllExposesEveryDirectoryUncollapsed() {
+        // Same raw shape as testFootprintTopFourPlusMore, which collapses this to 4 chips + "+2" —
+        // the expand interaction needs the dirs the "+2" folded away, not just their sum.
+        let raw = ["Dispatch": 7, "Core": 4, "docs": 2, "Tests": 2, "Scripts": 1, ".": 3, "work": 2, "drafts": 4,
+                   "checkpoints": 1]
+        let a = activity(.codex, startedAt: epoch, footprint: raw)
+        let row = SeatRowModel.make(run: "draft-0-drafter-0", slot: nil, requested: Slot(codex), activity: a,
+                                    record: nil, roundRecord: nil, now: epoch)
+        XCTAssertEqual(row.footprintAll.map(\.dir), ["Dispatch", "Core", "root", "docs", "Tests", "Scripts"],
+                       "the full list, mapped and scratch-dropped like the chips but never collapsed")
+        XCTAssertEqual(row.footprintAll.map(\.count), [7, 4, 3, 2, 2, 1])
+    }
+
     // MARK: - Cost
 
     func testCostOnlyWhenReported() {
@@ -290,5 +303,86 @@ final class SeatRowModelTests: XCTestCase {
         let shown = scheduler.offer(headline: nil, action: "Reading Board.swift")
         XCTAssertNil(shown.headline)
         XCTAssertEqual(shown.action, "Reading Board.swift")
+    }
+
+    // Regression: releasing a hold must restart that channel's own dwell clock. Without the
+    // reset, the NEXT transition inherits the already-expired `changedAt` and shows with ~0s
+    // dwell instead of a fresh one.
+    @MainActor
+    func testDwellReleaseResetsClockForAction() {
+        var now = epoch
+        let scheduler = DwellScheduler(clock: { now })
+
+        _ = scheduler.offer(headline: nil, action: "A") // t=0: first value, shows immediately
+
+        now = epoch.addingTimeInterval(0.5)
+        _ = scheduler.offer(headline: nil, action: "A2") // held: 0.5s < 1.5s dwell since t=0
+
+        now = epoch.addingTimeInterval(1.5)
+        var shown = scheduler.offer(headline: nil, action: "A2") // 1.5s since t=0 — releases
+        XCTAssertEqual(shown.action, "A2")
+
+        now = epoch.addingTimeInterval(1.6)
+        shown = scheduler.offer(headline: nil, action: "A3")
+        XCTAssertEqual(shown.action, "A2", "the release at t=1.5 must restart A2's own dwell, or A3 shows with ~0s dwell")
+
+        now = epoch.addingTimeInterval(2.9)
+        shown = scheduler.offer(headline: nil, action: "A3")
+        XCTAssertEqual(shown.action, "A2", "still under 1.5s since A2 was released at t=1.5 — A3 must not show before t=3.0")
+
+        now = epoch.addingTimeInterval(3.1)
+        shown = scheduler.offer(headline: nil, action: "A3")
+        XCTAssertEqual(shown.action, "A3", "1.5s after the t=1.5 release — a fresh dwell has now elapsed")
+    }
+
+    @MainActor
+    func testDwellReleaseResetsClockForHeadline() {
+        var now = epoch
+        let scheduler = DwellScheduler(clock: { now })
+
+        _ = scheduler.offer(headline: "H", action: nil) // t=0: first value, shows immediately
+
+        now = epoch.addingTimeInterval(1)
+        _ = scheduler.offer(headline: "H2", action: nil) // held: 1s < 3s dwell since t=0
+
+        now = epoch.addingTimeInterval(3)
+        var shown = scheduler.offer(headline: "H2", action: nil) // 3s since t=0 — releases
+        XCTAssertEqual(shown.headline, "H2")
+
+        now = epoch.addingTimeInterval(3.1)
+        shown = scheduler.offer(headline: "H3", action: nil)
+        XCTAssertEqual(shown.headline, "H2", "the release at t=3 must restart H2's own dwell, or H3 shows with ~0s dwell")
+
+        now = epoch.addingTimeInterval(5.9)
+        shown = scheduler.offer(headline: "H3", action: nil)
+        XCTAssertEqual(shown.headline, "H2", "still under 3s since H2 was released at t=3 — H3 must not show before t=6.0")
+
+        now = epoch.addingTimeInterval(6.1)
+        shown = scheduler.offer(headline: "H3", action: nil)
+        XCTAssertEqual(shown.headline, "H3", "3s after the t=3 release — a fresh dwell has now elapsed")
+    }
+
+    /// The implicit contract `offer`'s doc comment names: there is no separate "flush" call, so a
+    /// held value is released only by the caller keeping the SAME latest value on every tick
+    /// until its dwell elapses — this is exactly how the board's 1Hz refresh is expected to drive
+    /// this scheduler.
+    @MainActor
+    func testDwellRepeatedOfferOfSameLatestValueReleasesStaleHold() {
+        var now = epoch
+        let scheduler = DwellScheduler(clock: { now })
+
+        _ = scheduler.offer(headline: "H1", action: nil)
+
+        now = epoch.addingTimeInterval(1)
+        var shown = scheduler.offer(headline: "H2", action: nil)
+        XCTAssertEqual(shown.headline, "H1", "under dwell — held")
+
+        now = epoch.addingTimeInterval(2)
+        shown = scheduler.offer(headline: "H2", action: nil) // same value offered again, still under dwell
+        XCTAssertEqual(shown.headline, "H1", "still held — re-offering the same value doesn't shortcut the dwell")
+
+        now = epoch.addingTimeInterval(3)
+        shown = scheduler.offer(headline: "H2", action: nil) // same value, dwell now elapsed
+        XCTAssertEqual(shown.headline, "H2", "dwell elapsed — the repeated offer is what releases the hold")
     }
 }

@@ -29,6 +29,13 @@ struct SeatRowModel: Equatable, Identifiable {
     var headline: String?
     var action: String?
     var footprint: [(dir: String, count: Int)]
+    /// The same mapping as `footprint` (`.` → `root`, FD's own scratch dirs dropped) but never
+    /// collapsed to a top-4-plus-`+N` chip row — the expand interaction (spec §6, a chip row
+    /// "expands to the file list") shows exactly this: the directories and their counts, sorted
+    /// by count descending. The engine's `SeatActivity.footprint` only ever counts files per
+    /// directory, never lists their names, so this is the file-level detail there is to show —
+    /// `make` never invents file names to go further than that.
+    var footprintAll: [(dir: String, count: Int)]
     var steps: String?
     var contextFraction: Double?
     var elapsed: TimeInterval
@@ -40,6 +47,7 @@ struct SeatRowModel: Equatable, Identifiable {
         lhs.id == rhs.id && lhs.glyph == rhs.glyph && lhs.role == rhs.role && lhs.identity == rhs.identity
             && lhs.headline == rhs.headline && lhs.action == rhs.action
             && lhs.footprint.elementsEqual(rhs.footprint) { $0.dir == $1.dir && $0.count == $1.count }
+            && lhs.footprintAll.elementsEqual(rhs.footprintAll) { $0.dir == $1.dir && $0.count == $1.count }
             && lhs.steps == rhs.steps && lhs.contextFraction == rhs.contextFraction && lhs.elapsed == rhs.elapsed
             && lhs.exception == rhs.exception && lhs.result == rhs.result && lhs.cost == rhs.cost
     }
@@ -98,6 +106,7 @@ struct SeatRowModel: Equatable, Identifiable {
             exception = nil
         }
 
+        let allDirs = footprintAll(activity?.footprint ?? [:])
         return SeatRowModel(
             id: run,
             glyph: glyph,
@@ -105,7 +114,8 @@ struct SeatRowModel: Equatable, Identifiable {
             identity: identity(slot: slot, requested: requested, activityHarness: activityHarness),
             headline: headline,
             action: action,
-            footprint: footprint(activity?.footprint ?? [:]),
+            footprint: footprintChips(allDirs),
+            footprintAll: allDirs,
             steps: activity?.steps.map(stepsText),
             contextFraction: contextFraction(inputTokens: activity?.inputTokens,
                                              model: currentChoice(slot: slot, requested: requested,
@@ -272,7 +282,7 @@ struct SeatRowModel: Equatable, Identifiable {
     /// Chips by top-level directory, largest first, capped at four plus a `+N` for the rest —
     /// `N` counts the remaining DIRECTORIES, not their combined file count, matching
     /// `ShapingModel.sectionList`'s "+N more items" convention elsewhere in this pipeline.
-    private static func footprint(_ raw: [String: Int]) -> [(dir: String, count: Int)] {
+    private static func footprintAll(_ raw: [String: Int]) -> [(dir: String, count: Int)] {
         var mapped: [String: Int] = [:]
         for (key, count) in raw where !ownScratchDirs.contains(key) {
             mapped[key == "." ? "root" : key, default: 0] += count
@@ -280,13 +290,18 @@ struct SeatRowModel: Equatable, Identifiable {
         // Case-insensitive tie-break: directory names mix `Dispatch`-style and `docs`-style
         // casing, and a plain `<` would sort every capitalized name ahead of every lowercase one
         // regardless of what it says, which reads as broken rather than alphabetical.
-        let sorted = mapped.sorted {
+        return mapped.sorted {
             $0.value != $1.value ? $0.value > $1.value : $0.key.lowercased() < $1.key.lowercased()
         }
             .map { (dir: $0.key, count: $0.value) }
-        guard sorted.count > 4 else { return sorted }
-        let rest = sorted[4...]
-        return Array(sorted.prefix(4)) + [(dir: "+\(rest.count)", count: rest.reduce(0) { $0 + $1.count })]
+    }
+
+    /// The chip row: the same list, collapsed to its top 4 plus one `+N` chip whose count is the
+    /// sum of everything past the fourth — never a distinct count of its own.
+    private static func footprintChips(_ all: [(dir: String, count: Int)]) -> [(dir: String, count: Int)] {
+        guard all.count > 4 else { return all }
+        let rest = all[4...]
+        return Array(all.prefix(4)) + [(dir: "+\(rest.count)", count: rest.reduce(0) { $0 + $1.count })]
     }
 
     // MARK: - Context
@@ -376,6 +391,11 @@ final class DwellScheduler: ObservableObject {
         self.clock = clock
     }
 
+    /// Offering the SAME value repeatedly (the common case: the engine hasn't moved on) is how a
+    /// hold gets released once its dwell expires — the first call after a change starts the
+    /// dwell clock, and a later call with that value already past `dwell` old is what lets a
+    /// still-different `offered` win. There is no separate "flush" entry point; callers just
+    /// keep calling `offer` on every tick with whatever the source currently says.
     @discardableResult
     func offer(headline: String?, action: String?) -> (headline: String?, action: String?) {
         let now = clock()
@@ -389,12 +409,16 @@ final class DwellScheduler: ObservableObject {
     private static func settle(current: String?, changedAt: inout Date?, offered: String?, dwell: TimeInterval,
                                 now: Date) -> String? {
         guard offered != current else { return current }
-        guard let changedAt else {
+        guard let since = changedAt else {
             // Nothing shown yet on this channel — adopt the first value with no wait.
             changedAt = now
             return offered
         }
-        guard now.timeIntervalSince(changedAt) >= dwell else { return current }
+        guard now.timeIntervalSince(since) >= dwell else { return current }
+        // Releasing the hold IS a change of displayed value — reset the clock here too, or the
+        // very next transition inherits this one's already-expired `changedAt` and shows with
+        // zero dwell instead of a fresh one.
+        changedAt = now
         return offered
     }
 }
