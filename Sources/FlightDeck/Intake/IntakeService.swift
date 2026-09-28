@@ -1,4 +1,4 @@
-import Foundation
+import AppKit
 import IntakeKit
 
 /// Which harness, model and effort run triage.
@@ -231,6 +231,9 @@ final class IntakeService: ObservableObject {
     /// count reads and prove a tick that found nothing changed read nothing.
     /// `@Sendable` because the convergence fold reads through it off the main actor.
     private let readFile: @Sendable (URL) -> Data?
+    /// Speaks a state change to VoiceOver (spec §14's live regions) — `postAnnouncement` in the
+    /// app, a recorder in tests. Called only with `announcement(from:to:)`'s words.
+    private let announce: (String) -> Void
     /// The deferred launch recovery, so tests (and nothing else) can await it.
     private(set) var launchRecovery: Task<Void, Never>?
 
@@ -253,7 +256,8 @@ final class IntakeService: ObservableObject {
         hasSession: @escaping (String, String) -> Bool,
         now: @escaping () -> Date = Date.init,
         defaults: UserDefaults = .standard,
-        readFile: @escaping @Sendable (URL) -> Data? = { try? Data(contentsOf: $0) }
+        readFile: @escaping @Sendable (URL) -> Data? = { try? Data(contentsOf: $0) },
+        announce: @escaping (String) -> Void = IntakeService.postAnnouncement
     ) {
         self.store = store
         self.headless = headless
@@ -267,6 +271,7 @@ final class IntakeService: ObservableObject {
         self.now = now
         self.defaults = defaults
         self.readFile = readFile
+        self.announce = announce
         // Cheap-to-lose UI state, same durability class `UserDefaultsPreferencesPersistence`
         // argues for — unlike the session graph (`FileSessionPersistence`'s doc comment has
         // the fuller case for why THAT needs a file instead). Stored as path -> uuidString
@@ -652,6 +657,7 @@ final class IntakeService: ObservableObject {
             if latestTapes[id] == nil || modified != tapeDates[id] {
                 tapeDates[id] = modified
                 let tape = store.loadTape()
+                if let words = Self.announcement(from: latestTapes[id], to: tape) { announce(words) }
                 latestTapes[id] = tape
                 if tapes[id].map({ !Self.sameIgnoringLiveness($0, tape) }) ?? true { tapes[id] = tape }
             }
@@ -1147,6 +1153,46 @@ final class IntakeService: ObservableObject {
         }
     }
 
+    // MARK: - Announcements
+
+    /// What VoiceOver hears when a tape moves (spec §14): a round landed, or failed. Nil for the
+    /// first read — that is the app opening onto a tape, not a change — and for everything else
+    /// a tick brings (heartbeats, a round starting, pauses), which would be chatter.
+    static func announcement(from old: Tape?, to new: Tape) -> String? {
+        guard let old else { return nil }
+        if new.status == .failed, old.status != .failed {
+            guard let round = new.roundInProgress ?? old.roundInProgress else { return "A planning round failed" }
+            return "\(BoardModel.name(stage: round.stage, round: round.round)) failed"
+        }
+        // The last round landing at review is said once, by the intake's own move to `.review`
+        // ("ready for review") — two announcements in one tick cut each other off.
+        if let head = new.head, head.id != old.head?.id, new.status != .reachedReview {
+            return "\(BoardModel.name(stage: head.stage, round: head.round)) landed"
+        }
+        return nil
+    }
+
+    /// What VoiceOver hears when an intake changes state (spec §14): it needs you (questions,
+    /// a plan to review) or it failed. Nothing for the states a human started themselves.
+    static func announcement(from old: IntakeState?, to new: IntakeState) -> String? {
+        guard let old, old != new else { return nil }
+        switch new {
+        case .needsAnswers: return "Triage has questions for you"
+        case .review: return "The plan is ready for review"
+        case .failed: return "The intake failed"
+        default: return nil
+        }
+    }
+
+    /// The app's announcer: a high-priority `announcementRequested` on the key window, so it
+    /// interrupts nothing less urgent but is not queued behind the per-second clocks it never
+    /// reads out (those are only labels, spec §14).
+    static func postAnnouncement(_ text: String) {
+        guard let element = NSApp?.keyWindow ?? NSApp?.mainWindow else { return }
+        NSAccessibility.post(element: element, notification: .announcementRequested,
+                             userInfo: [.announcement: text, .priority: NSAccessibilityPriorityLevel.high.rawValue])
+    }
+
     // MARK: - Triage
 
     /// What the triage agent is doing right now, or last did — `triage/activity.json` as of
@@ -1414,6 +1460,7 @@ final class IntakeService: ObservableObject {
     private func save(_ intake: Intake) {
         try? store.save(intake)
         if let n = intakes.firstIndex(where: { $0.id == intake.id }) {
+            if let words = Self.announcement(from: intakes[n].state, to: intake.state) { announce(words) }
             intakes[n] = intake
         } else {
             intakes.insert(intake, at: 0)
