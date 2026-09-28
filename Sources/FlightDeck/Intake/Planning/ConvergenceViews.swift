@@ -448,6 +448,11 @@ struct ChurnLaneInput {
 /// scrolls with the text, spanning the document's height at the column's x. It finds each
 /// heading's line with TextKit 2, redraws as the text reflows or changes, and reports through
 /// `onShown` whether it has anything to mark — the column opens and closes on that.
+///
+/// Cheap per keystroke and per scroll: an edit that touches no heading line only moves the
+/// offsets after it (a rescan is a pass over every line of the plan), and drawing measures
+/// only the markers on screen — measuring an off-screen heading forces TextKit 2 to lay out
+/// the plan down to it.
 final class ChurnLaneView: NSView {
     static let width: CGFloat = 132
     /// Whether any heading has a marker — the text view opens the CHURN column for it.
@@ -458,14 +463,18 @@ final class ChurnLaneView: NSView {
     private var markers: [Marker] = []
     /// UTF-16 offsets of every heading line, so a marked section's rule ends at the next heading.
     private var headingOffsets: [Int] = []
-    /// What the markers were last found from, so a view update that changed neither doesn't
+    /// The cycle the markers were last found for, so a view update that changed nothing doesn't
     /// rescan the plan (the pane re-renders on every service publish, about once a second).
-    private var scanned: (text: String, cycle: ConvergenceCycle?)?
+    private var scannedCycle: ConvergenceCycle??
+    /// Character edits since the last scan (`TextEdit`); nil after one that must rescan.
+    private var edits: [TextEdit]? = []
+    /// Rescans since attach — for tests, which pin that typing in a body doesn't cause one.
+    private(set) var rescans = 0
     private var hovered: String?
     private let card = FloatingCardAnchor()
     private var observers: [NSObjectProtocol] = []
 
-    private struct Marker {
+    struct Marker {
         let section: String
         let offset: Int
         let model: ChurnLaneModel
@@ -498,13 +507,17 @@ final class ChurnLaneView: NSView {
         frame = NSRect(x: column.x, y: 0, width: column.width, height: textView.bounds.height)
         observers.forEach(NotificationCenter.default.removeObserver)
         let redraw: @Sendable (Notification) -> Void = { [weak self] _ in MainActor.assumeIsolated { self?.needsDisplay = true } }
-        let edited: @Sendable (Notification) -> Void = { [weak self] _ in MainActor.assumeIsolated { self?.reread() } }
+        let edited: @Sendable (Notification) -> Void = { [weak self] _ in MainActor.assumeIsolated { self?.textEdited() } }
         let center = NotificationCenter.default
         textView.postsFrameChangedNotifications = true
         observers = [
             center.addObserver(forName: NSView.frameDidChangeNotification, object: textView, queue: nil, using: redraw),
             center.addObserver(forName: NSText.didChangeNotification, object: textView, queue: nil, using: edited),
         ]
+        if let storage = textView.textStorage {
+            observers.append(TextEdit.observe(storage) { [weak self] edit in self?.edits?.append(edit) })
+        }
+        edits = nil
         reread()
     }
 
@@ -516,16 +529,50 @@ final class ChurnLaneView: NSView {
 
     /// New input from the view update; nil hides the lane.
     func update(_ input: ChurnLaneInput?) {
+        let cycleChanged = scannedCycle.map { $0 != input?.cycle } ?? true
         self.input = input
-        guard scanned?.text != textView?.string || scanned?.cycle != input?.cycle else { return }
-        reread()
+        if cycleChanged { return reread() }
+        // A load replaces the text without an NSText change notification; its edit is pending.
+        if edits?.isEmpty != false { textEdited() }
+    }
+
+    /// The text changed: rescan only if an edit touched a heading line — before it or after —
+    /// and otherwise move the offsets past the edits.
+    private func textEdited() {
+        guard let edits, let textView else { return reread() }
+        let ns = textView.string as NSString
+        for edit in edits {
+            if touchesHeading(edit, in: ns) { return reread() }
+            headingOffsets = headingOffsets.map { $0 >= edit.oldEnd ? $0 + edit.delta : $0 }
+            markers = markers.map { $0.offset >= edit.oldEnd ? Marker(section: $0.section, offset: $0.offset + edit.delta, model: $0.model) : $0 }
+        }
+        self.edits = []
+        needsDisplay = true
+    }
+
+    /// Whether `edit` changed a heading: a line it left in `ns` (the text after it — earlier
+    /// edits in a batch only move later text, so their lines still read true) starts with `#`,
+    /// or a heading began on a line it touched before it.
+    private func touchesHeading(_ edit: TextEdit, in ns: NSString) -> Bool {
+        let at = min(edit.range.location, ns.length)
+        let lines = ns.lineRange(for: NSRange(location: at, length: min(edit.range.length, ns.length - at)))
+        if headingOffsets.contains(where: { $0 >= lines.location && $0 <= edit.oldEnd }) { return true }
+        var location = lines.location
+        while location < NSMaxRange(lines) {
+            let line = ns.lineRange(for: NSRange(location: location, length: 0))
+            if ns.substring(with: line).trimmingCharacters(in: .whitespaces).hasPrefix("#") { return true }
+            location = NSMaxRange(line)
+        }
+        return false
     }
 
     /// The headings the cycle changed, found in the text as it is now. Keys match
     /// `PlanMetrics`'s: a heading line, trimmed.
     private func reread() {
         let text = textView?.string ?? ""
-        scanned = (text, input?.cycle)
+        scannedCycle = .some(input?.cycle)
+        edits = []
+        rescans += 1
         var offsets: [Int] = []
         var found: [Marker] = []
         let ns = text as NSString
@@ -550,12 +597,14 @@ final class ChurnLaneView: NSView {
         setAccessibilityChildren(found.map { MarkerElement(marker: $0, lane: self) })
     }
 
-    /// A heading line's rect in this view, from the text view's TextKit 2 layout.
-    private func lineRect(at offset: Int) -> NSRect? {
+    /// A heading line's rect in this view, from the text view's TextKit 2 layout. Laid out on
+    /// demand only when `ensuringLayout` — the draw pass measures only what is on screen, which
+    /// is laid out already.
+    private func lineRect(at offset: Int, ensuringLayout: Bool = false) -> NSRect? {
         guard let textView, let layout = textView.textLayoutManager, let content = layout.textContentManager,
               let location = content.location(content.documentRange.location, offsetBy: offset) else { return nil }
         var frame: CGRect?
-        layout.enumerateTextLayoutFragments(from: location, options: [.ensuresLayout]) { fragment in
+        layout.enumerateTextLayoutFragments(from: location, options: ensuringLayout ? [.ensuresLayout] : []) { fragment in
             frame = fragment.layoutFragmentFrame
             return false
         }
@@ -564,14 +613,42 @@ final class ChurnLaneView: NSView {
         return convert(frame.offsetBy(dx: origin.x, dy: origin.y), from: textView)
     }
 
-    private func markerRects() -> [(Marker, NSRect)] {
-        markers.compactMap { m in lineRect(at: m.offset).map { (m, NSRect(x: 0, y: $0.minY, width: bounds.width, height: $0.height)) } }
+    /// The laid-out characters of the text view (TextKit 2's viewport), nil before its first
+    /// layout — then every marker is measured, laying out as needed.
+    private func viewport() -> NSRange? {
+        guard let layout = textView?.textLayoutManager, let content = layout.textContentManager,
+              let viewport = layout.textViewportLayoutController.viewportRange else { return nil }
+        let start = content.offset(from: content.documentRange.location, to: viewport.location)
+        return NSRange(location: start, length: content.offset(from: viewport.location, to: viewport.endLocation))
+    }
+
+    /// The markers on screen and their rows. `all` measures every marker, laying the plan out
+    /// down to each — VoiceOver's frames only, which may ask about any of them.
+    func markerRects(all: Bool = false) -> [(Marker, NSRect)] {
+        let visible = all ? nil : viewport()
+        return markers.compactMap { m in
+            if let visible, m.offset < visible.location || m.offset > NSMaxRange(visible) { return nil }
+            return lineRect(at: m.offset, ensuringLayout: visible == nil).map { (m, NSRect(x: 0, y: $0.minY, width: bounds.width, height: $0.height)) }
+        }
     }
 
     override func draw(_ dirtyRect: NSRect) {
         let amber = NSColor(LCDMetrics.color(.amber))
         let barsRight = bounds.width - 12
-        for (marker, rect) in markerRects() where rect.intersects(dirtyRect.insetBy(dx: 0, dy: -24)) {
+        let shown = markerRects()
+        // A hot section whose heading is scrolled above the screen still has its rule down
+        // the part of it that shows.
+        if let visible = viewport() {
+            for marker in markers where marker.model.hot && marker.offset < visible.location
+                && (headingOffsets.first { $0 > marker.offset } ?? .max) > visible.location {
+                let end = headingOffsets.first { $0 > marker.offset && $0 <= NSMaxRange(visible) }.flatMap { lineRect(at: $0) }?.minY
+                    ?? visibleRect.maxY + 24
+                amber.withAlphaComponent(0.85).setFill()
+                NSBezierPath(roundedRect: NSRect(x: bounds.width - 4, y: visibleRect.minY, width: 2, height: max(0, end - visibleRect.minY - 8)),
+                             xRadius: 1, yRadius: 1).fill()
+            }
+        }
+        for (marker, rect) in shown where rect.intersects(dirtyRect.insetBy(dx: 0, dy: -24)) {
             let model = marker.model
             let hot = model.hot
             let baseline = rect.midY + 6
@@ -600,8 +677,12 @@ final class ChurnLaneView: NSView {
             }
             if hot {
                 // The section the verdict names: a rule down its whole length, to the next heading.
-                let end = headingOffsets.first { $0 > marker.offset }.flatMap(lineRect(at:))?.minY
-                    ?? (textView.map { convert($0.bounds, from: $0).maxY } ?? rect.maxY)
+                // The next heading if it is on screen; off it, the rule runs past the screen's
+                // bottom (measuring it would lay the plan out down to it).
+                let next = headingOffsets.first { $0 > marker.offset }
+                let end = next.flatMap { offset in viewport().map { offset <= NSMaxRange($0) } ?? true ? lineRect(at: offset) : nil }?.minY
+                    ?? (next == nil ? textView.map { convert($0.bounds, from: $0).maxY } : nil)
+                    ?? visibleRect.maxY + 24
                 amber.withAlphaComponent(0.85).setFill()
                 NSBezierPath(roundedRect: NSRect(x: bounds.width - 4, y: rect.minY + 2, width: 2, height: max(rect.height, end - rect.minY - 8)),
                              xRadius: 1, yRadius: 1).fill()
@@ -686,7 +767,7 @@ final class ChurnLaneView: NSView {
         }
 
         override func accessibilityFrame() -> NSRect {
-            guard let lane, let rect = lane.markerRects().first(where: { $0.0.section == section })?.1,
+            guard let lane, let rect = lane.markerRects(all: true).first(where: { $0.0.section == section })?.1,
                   let window = lane.window else { return .zero }
             return window.convertToScreen(lane.convert(rect, to: nil))
         }

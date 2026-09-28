@@ -75,34 +75,74 @@ enum MarkdownStyler {
     // MARK: - Blocks
 
     static func blocks(_ text: String) -> [MarkdownBlock] {
-        let u = Array(text.utf16)
-        var lines: [(start: Int, end: Int)] = []
-        var start = 0
-        var i = 0
-        // Plain index loops here and in `lineKind`: `enumerated()` and friends run
-        // unspecialised in a Debug build, which alone cost most of a frame on a long plan.
-        while i < u.count {
-            if u[i] == 10 {
-                lines.append((start, i > start && u[i - 1] == 13 ? i - 1 : i))
-                start = i + 1
-            }
-            i += 1
-        }
-        if start < u.count { lines.append((start, u.count)) }
+        let u = units(text)
+        return parse(u, from: 0) { _ in false }.blocks
+    }
 
+    /// The same blocks `blocks(text)` gives, re-parsed only around one edit: `old` were the
+    /// blocks before it, `edited` and `delta` the edit as the text storage reported it. Parsing
+    /// restarts two blocks before the edit and stops at the first new block that starts where
+    /// an old one past the edit did — from a block start the parse depends only on the text
+    /// from there on, which the edit didn't change, so the rest is the old blocks moved by
+    /// `delta`. On a 2,000-line plan a whole re-parse was the largest part of a keystroke.
+    static func blocks(_ text: String, after old: [MarkdownBlock], edited: NSRange, delta: Int) -> [MarkdownBlock] {
+        let u = units(text)
+        let oldEnd = NSMaxRange(edited) - delta
+        let containing = old.lastIndex { $0.range.location <= edited.location } ?? 0
+        let first = max(containing - 2, 0)
+        guard first < old.count else { return parse(u, from: 0) { _ in false }.blocks }
+        // Old block starts past the edit, by where they start now.
+        var resume: [Int: Int] = [:]
+        for i in (first + 1)..<old.count where old[i].range.location > oldEnd { resume[old[i].range.location + delta] = i }
+        let (fresh, stoppedAt) = parse(u, from: old[first].range.location) { resume[$0] != nil }
+        let tail = stoppedAt.map { at in old[resume[at]!...].map { $0.shifted(by: delta) } } ?? []
+        return Array(old[..<first]) + fresh + tail
+    }
+
+    private static func units(_ text: String) -> [UInt16] {
+        // `getCharacters`, not `Array(text.utf16)`: the editor's text is NSString-backed, and
+        // the UTF-16 view walked it through the bridge one character at a time.
+        let ns = text as NSString
+        var u = [UInt16](repeating: 0, count: ns.length)
+        u.withUnsafeMutableBufferPointer { if let base = $0.baseAddress { ns.getCharacters(base, range: NSRange(location: 0, length: ns.length)) } }
+        return u
+    }
+
+    /// The blocks from `start` (a line start) on, stopping before a block that would start at
+    /// an offset `stop` accepts; `stopped` is that offset, nil at the end of the text. Lines
+    /// are scanned as the parse reaches them, so a parse that stops early reads only its part.
+    private static func parse(_ u: [UInt16], from start: Int, stop: (Int) -> Bool) -> (blocks: [MarkdownBlock], stopped: Int?) {
+        var lines: [(start: Int, end: Int)] = []
         // Once per line: the fence, table and paragraph scans look ahead at the next lines' kinds.
         var kinds: [LineKind] = []
-        kinds.reserveCapacity(lines.count)
-        for line in lines { kinds.append(lineKind(u, line.start, line.end)) }
+        var next = start
+        /// Whether line `li` exists, scanning up to it. Plain index loops here and in
+        /// `lineKind`: `enumerated()` and friends run unspecialised in a Debug build, which
+        /// alone cost most of a frame on a long plan.
+        func has(_ li: Int) -> Bool {
+            while lines.count <= li, next < u.count {
+                var i = next
+                while i < u.count, u[i] != 10 { i += 1 }
+                let end = i > next && i <= u.count && u[i - 1] == 13 ? i - 1 : i
+                lines.append((next, end))
+                kinds.append(lineKind(u, next, end))
+                next = i + 1
+            }
+            return li < lines.count
+        }
+
         var out: [MarkdownBlock] = []
         var li = 0
-        while li < lines.count {
+        while has(li) {
             let (s, e) = lines[li]
+            if !out.isEmpty || s != start, stop(s) { return (out, s) }
             switch kinds[li] {
             case .fence:
                 // An unclosed fence runs to the end: un-fencing the rest would style code as
                 // headings the moment the human types the opening ```.
-                let close = (li + 1..<lines.count).first { kinds[$0] == .fence }
+                var close: Int?
+                var j = li + 1
+                while has(j) { if kinds[j] == .fence { close = j; break }; j += 1 }
                 let last = close ?? lines.count - 1
                 // The opening fence's newline is syntax too, so a hidden fence collapses to a
                 // hairline instead of leaving an empty code line.
@@ -121,7 +161,7 @@ enum MarkdownStyler {
                 li += 1
             case .table:
                 var last = li
-                while last + 1 < lines.count, kinds[last + 1] == .table { last += 1 }
+                while has(last + 1), kinds[last + 1] == .table { last += 1 }
                 out.append(MarkdownBlock(kind: .table, range: NSRange(location: s, length: lines[last].end - s), syntaxRanges: []))
                 li = last + 1
             case .listItem(let contentStart):
@@ -135,7 +175,7 @@ enum MarkdownStyler {
                 li += 1
             case .plain:
                 var last = li
-                while last + 1 < lines.count, kinds[last + 1] == .plain { last += 1 }
+                while has(last + 1), kinds[last + 1] == .plain { last += 1 }
                 var syntax: [NSRange] = []
                 var spans: [MarkdownSpan] = []
                 for l in li...last { inline(u, lines[l].start, lines[l].end, spans: &spans, syntax: &syntax) }
@@ -143,7 +183,7 @@ enum MarkdownStyler {
                 li = last + 1
             }
         }
-        return out
+        return (out, nil)
     }
 
     private static func block(_ kind: MarkdownBlock.Kind, _ s: Int, _ e: Int, _ syntax: [NSRange], _ spans: [MarkdownSpan]) -> MarkdownBlock {
