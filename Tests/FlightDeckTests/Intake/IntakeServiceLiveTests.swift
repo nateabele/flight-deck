@@ -262,6 +262,41 @@ final class IntakeServiceLiveTests: XCTestCase {
         XCTAssertNil(svc.pending[i.id])
     }
 
+    /// Every way into a fresh triage turn answers the click at once — not only Send Answers.
+    /// Continue with Single task (`.encodeNow`) and Retry once left `pending` unset, so while
+    /// the turn read the graph the card drew the PREVIOUS turn's finished activity with its
+    /// clock stopped: a finished, frozen seat right after the click.
+    func testEveryTriageRestartSetsPendingAndDropsTheOldActivity() async throws {
+        let failed = try seed(.needsAnswers)
+        let choosing = try seed(.awaitingChoice)
+        let br = ScriptedProcessRunner(Self.brReplies)
+        let headless = HeldHeadlessRunner()
+        headless.release()
+        let svc = await makeService(processRunner: br, headless: headless)
+
+        // A turn that reaches the harness and fails leaves its finished activity published.
+        svc.answer(failed.id, answers: ["x"])
+        await svc.task(for: failed.id)?.value
+        XCTAssertEqual(svc.intakes.first { $0.id == failed.id }?.state, .failed)
+        XCTAssertEqual(svc.triageActivity(failed.id)?.finished, true)
+
+        br.slow["br list"] = 300_000_000
+        clockNow += 5
+        svc.retry(failed.id)
+        XCTAssertEqual(svc.pending[failed.id], PendingStart(kind: .triage, since: clockNow))
+        XCTAssertNil(svc.triageActivity(failed.id), "the failed turn's finished seat is not this turn's")
+
+        svc.choose(choosing.id, preset: .bead)
+        XCTAssertEqual(svc.pending[choosing.id], PendingStart(kind: .triage, since: clockNow))
+
+        // Both survive the turn's own `.triaging` save.
+        for _ in 0..<2000 where svc.intakes.first(where: { $0.id == choosing.id })?.state != .triaging {
+            try await Task.sleep(nanoseconds: 1_000_000)
+        }
+        XCTAssertNotNil(svc.pending[failed.id])
+        XCTAssertNotNil(svc.pending[choosing.id])
+    }
+
     /// Triage's pending clears on `triage/activity.json` from THIS turn, never on the previous
     /// turn's file still on disk, and a turn that fails before any activity drops it too.
     func testTriagePendingClearsOnThisTurnsActivityOnly() async throws {
