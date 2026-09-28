@@ -398,12 +398,33 @@ final class BoardModelTests: XCTestCase {
         measure(full) + padding <= width ? full : code
     }
 
-    /// A bracket's title gives up the group's name before the + handle would sit on it, and
-    /// disappears rather than be overlapped when even the count doesn't fit.
-    func testBracketTitleShortensBeforeTheHandle() {
-        XCTAssertEqual(DeparturesBoard.fittedBracketTitle("REFINE 2 OF 3", name: "REFINE", width: 400), "REFINE 2 OF 3")
-        XCTAssertEqual(DeparturesBoard.fittedBracketTitle("REFINE 2 OF 3", name: "REFINE", width: 70), "2 OF 3")
-        XCTAssertEqual(DeparturesBoard.fittedBracketTitle("POLISH ×2", name: "POLISH", width: 30), "×2")
-        XCTAssertEqual(DeparturesBoard.fittedBracketTitle("POLISH ×2", name: "POLISH", width: 5), "")
+    /// A bracket's title, longest first: the full title, then the group's code with its count
+    /// ("RF 2 OF 3", "PL ×2"), then the group's name alone, then nothing — so a narrow bracket
+    /// still says which cycle it is, where "2 OF 3" or "×2" alone said only how far. A one-round
+    /// group has no count to give: "×1" told nobody anything.
+    func testBracketTitleCandidates() throws {
+        var tape = pausedAfterR1(status: .running)
+        tape.roundInProgress = PlannedRound(stage: .refine, round: 2, major: false)
+        let model = try board(try intake(.featurePlan, answered: 1), tape)
+        let byName = Dictionary(uniqueKeysWithValues: model.groups.map { ($0.name, $0) })
+        let clarify = try XCTUnwrap(byName["CLARIFY"]), refine = try XCTUnwrap(byName["REFINE"])
+        XCTAssertEqual(model.bracketTitles(clarify), ["CLARIFY", "CLR", ""], "one round: never ×1")
+        let rounds = refine.range.count
+        XCTAssertEqual(model.bracketTitles(refine), ["REFINE 2 OF \(rounds)", "RF 2 OF \(rounds)", "REFINE", ""])
+
+        let idle = try board(try intake(.featurePlan, answered: 2), pausedAfterR1())
+        let polish = try XCTUnwrap(idle.groups.first { $0.name == "POLISH" })
+        XCTAssertEqual(idle.bracketTitles(polish), ["POLISH ×\(polish.range.count)", "PL ×\(polish.range.count)", "POLISH", ""])
+        let twoClarify = try XCTUnwrap(idle.groups.first { $0.name == "CLARIFY" })
+        XCTAssertEqual(idle.bracketTitles(twoClarify), ["CLARIFY ×2", "CLR ×2", "CLARIFY", ""])
+    }
+
+    /// The first candidate that fits the room before the + handle.
+    func testBracketTitleFitsTheFirstCandidateThatFits() {
+        let candidates = ["REFINE 2 OF 3", "RF 2 OF 3", "REFINE", ""]
+        XCTAssertEqual(DeparturesBoard.fittedBracketTitle(candidates, width: 400), "REFINE 2 OF 3")
+        XCTAssertEqual(DeparturesBoard.fittedBracketTitle(candidates, width: 90), "RF 2 OF 3")
+        XCTAssertEqual(DeparturesBoard.fittedBracketTitle(candidates, width: 60), "REFINE")
+        XCTAssertEqual(DeparturesBoard.fittedBracketTitle(candidates, width: 5), "")
     }
 }

@@ -36,6 +36,17 @@ struct TapeGroup: Equatable {
     let name: String
     let range: ClosedRange<Int>
     let extendable: Stage?
+
+    /// The group's short form, from the same code table as its slots ("RF" for RF1…RF5), for a
+    /// bracket too narrow for the name (`BoardModel.bracketTitles`).
+    var code: String {
+        switch name {
+        case "CLARIFY": "CLR"
+        case "REFINE": "RF"
+        case "POLISH": "PL"
+        default: name
+        }
+    }
 }
 
 /// One cell of the board row. `shortLabel` is the label's short form (spec §5.3), used when the
@@ -350,6 +361,19 @@ struct BoardModel: Equatable {
     /// `CaseIterable`, and IntakeKit is out of scope here.
     private static func rank(_ s: Stage) -> Int {
         [Stage.draft, .synthesis, .refine, .encode, .polish, .freshEyes, .dedup].firstIndex(of: s) ?? 0
+    }
+
+    /// `group`'s bracket title, longest first, for `DeparturesBoard.fittedBracketTitle` to take
+    /// the first that fits: "REFINE 2 OF 3" while one of its rounds is in flight or failed, else
+    /// "REFINE ×3"; then the code with the same count ("RF 2 OF 3"); then the name alone; then
+    /// nothing. The count goes before the name does: a bare "2 OF 3" or "×2" named no cycle. A
+    /// one-round group has no count at all — "CLARIFY ×1" read as a tally of nothing.
+    func bracketTitles(_ group: TapeGroup) -> [String] {
+        let members = slots[group.range]
+        guard members.count > 1 else { return [group.name, group.code, ""] }
+        let count = members.firstIndex { $0.state == .live || $0.state == .failed }
+            .map { "\($0 - group.range.lowerBound + 1) OF \(members.count)" } ?? "×\(members.count)"
+        return ["\(group.name) \(count)", "\(group.code) \(count)", group.name, ""]
     }
 
     // MARK: - Names
