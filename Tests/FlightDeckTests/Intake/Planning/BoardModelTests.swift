@@ -267,14 +267,13 @@ final class BoardModelTests: XCTestCase {
 
     // MARK: - Card and accessibility
 
-    /// The hover card says what the round did, in the board's own words: the full name, then
-    /// its status and duration. The name is the part that flaps; the rest is static.
-    func testHoverCardText() throws {
+    /// The hover card says what the round did, in the board's own words: under the full name
+    /// (the part that flaps), its status and duration as static text.
+    func testHoverCardDetail() throws {
         let tape = Tape(checkpoints: [cp(1, .draft, major: true, at: 0), cp(2, .synthesis, major: true, at: 182)],
                         status: .paused)
         let model = try board(try intake(.featurePlan), tape, now: 300)
         let syn = try XCTUnwrap(model.slots.first { $0.code == "SYN" })
-        XCTAssertEqual(model.hoverCardText(for: syn), "Synthesis · landed 3:02")
         XCTAssertEqual(model.cardDetail(for: syn), "landed 3:02")
         let draft = try XCTUnwrap(model.slots.first { $0.code == "DRFT" })
         XCTAssertEqual(model.cardDetail(for: draft), "landed", "no honest duration: say nothing rather than 0:00")
@@ -285,16 +284,14 @@ final class BoardModelTests: XCTestCase {
         running.status = .running
         running.roundStartedAt = t0.addingTimeInterval(200)
         let live = try board(try intake(.featurePlan), running, now: 272)
-        XCTAssertEqual(live.hoverCardText(for: try XCTUnwrap(live.slots.first { $0.state == .live })),
-                       "Refine 1 · in the air 1:12")
+        XCTAssertEqual(live.cardDetail(for: try XCTUnwrap(live.slots.first { $0.state == .live })), "in the air 1:12")
 
         var failed = tape
         failed.status = .failed
         failed.roundStartedAt = t0.addingTimeInterval(200)
         failed.failedAt = t0.addingTimeInterval(230)
         let halted = try board(try intake(.featurePlan), failed)
-        XCTAssertEqual(halted.hoverCardText(for: try XCTUnwrap(halted.slots.first { $0.state == .failed })),
-                       "Refine 1 · failed 0:30")
+        XCTAssertEqual(halted.cardDetail(for: try XCTUnwrap(halted.slots.first { $0.state == .failed })), "failed 0:30")
     }
 
     /// VoiceOver reads every slot in full words (spec §14) — never a code, never "4:48".
