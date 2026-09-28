@@ -72,7 +72,7 @@ struct ReleaseReviewView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Spacer()
-                    Button("Release") {
+                    Button(UIText.releaseButton(releaseCount(review))) {
                         // Synchronous, before the Task: SwiftUI runs button actions one at a
                         // time on the main actor, so a second click landing before this
                         // state change re-renders the (now-disabled) button still sees
@@ -115,7 +115,7 @@ struct ReleaseReviewView: View {
         let followUps = ops.indices.filter { isReopenOrFollowUp(ops[$0]) }
 
         if !creates.isEmpty {
-            Section("New beads") { ForEach(creates, id: \.self) { row($0, review) } }
+            Section(UIText.newTasksSection) { ForEach(creates, id: \.self) { row($0, review) } }
         }
         if !edges.isEmpty {
             Section("Edges") { ForEach(edges, id: \.self) { row($0, review) } }
@@ -372,6 +372,16 @@ struct ReleaseReviewView: View {
     private func isImpossible(_ drift: OpDrift) -> Bool {
         if case .impossible = drift { return true }
         return false
+    }
+
+    /// The count `UIText.releaseButton` puts on the primary action: every op release will
+    /// actually write, i.e. not dropped and not `.impossible` (that op's own row already
+    /// disables its confirm control, so it can never leave `.review` any other way).
+    private func releaseCount(_ review: ReleaseReview) -> Int {
+        let ops = self.ops(review)
+        let impossible = Set(ops.indices.filter { i in i < review.drift.count && isImpossible(review.drift[i]) })
+        let skip = review.intake.droppedOps.union(impossible)
+        return ops.indices.filter { !skip.contains($0) }.count
     }
 
     private func rowBackground(drift: OpDrift, dropped: Bool) -> Color {

@@ -297,7 +297,7 @@ struct ShapingModel {
     static func describe(_ op: ChangeOp) -> String {
         switch op {
         case .createBead(let bead):
-            return "New bead new:\(bead.tempId) — \(bead.title)"
+            return "New task new:\(bead.tempId) — \(bead.title)"
         case .addEdge(let from, let to, let kind):
             return "Edge \(from.wireValue) → \(to.wireValue) (\(kind.rawValue))"
         case .editBead(let id, let set, _, _):

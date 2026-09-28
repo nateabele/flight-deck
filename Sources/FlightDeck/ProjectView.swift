@@ -96,11 +96,11 @@ struct ProjectView: View {
     /// rather than the split intake layout, since there is nothing here to split.
     private var disabledEmptyState: some View {
         ContentUnavailableView {
-            Label("Flywheel Not Enabled", systemImage: "arrow.triangle.2.circlepath")
+            Label("Flight Control Not Enabled", systemImage: "arrow.triangle.2.circlepath")
         } description: {
-            Text("Enable Flywheel to describe work here, triage it against the bead graph, and release beads to the swarm.")
+            Text("Enable Flight Control to describe work here, triage it against the task graph, and release tasks to the swarm.")
         } actions: {
-            Button("Enable Flywheel…") {
+            Button("Enable Flight Control…") {
                 if flywheelStatus.isFlywheelProject {
                     showingFlywheelConfirmation = true
                 } else {

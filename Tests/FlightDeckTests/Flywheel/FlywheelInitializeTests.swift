@@ -70,11 +70,11 @@ final class FlywheelInitializeTests: XCTestCase {
             atPath: repo.appendingPathComponent(".git/hooks/hooks.d/pre-commit/60-beads-sync.sh").path
         ))
 
-        XCTAssertTrue(steps.contains("beads workspace (br init)"))
+        XCTAssertTrue(steps.contains("task workspace (br init)"))
         XCTAssertTrue(steps.contains("AGENTS.md (br agents --add)"))
         XCTAssertTrue(steps.contains("agent-mail marker (am projects discovery-init)"))
         XCTAssertTrue(steps.contains("am guard install"))
-        XCTAssertTrue(steps.contains("beads sync hook"))
+        XCTAssertTrue(steps.contains("task sync hook"))
     }
 
     func testSkipsBootstrapWhenMarkersAlreadyPresent() async throws {
@@ -207,7 +207,7 @@ final class FlywheelInitializeTests: XCTestCase {
         // The two bootstrap steps ahead of the failing one did run...
         XCTAssertTrue(FileManager.default.fileExists(atPath: repo.appendingPathComponent(".beads").path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: repo.appendingPathComponent("AGENTS.md").path))
-        // ...but `enable` (am guard install, beads sync hook) never started.
+        // ...but `enable` (am guard install, task sync hook) never started.
         XCTAssertFalse(fake.argv.contains { $0.first == "am" && $0.dropFirst().first == "guard" })
         XCTAssertFalse(FileManager.default.fileExists(
             atPath: repo.appendingPathComponent(".git/hooks/hooks.d/pre-commit/60-beads-sync.sh").path

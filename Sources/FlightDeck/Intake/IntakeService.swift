@@ -187,7 +187,7 @@ final class IntakeService: ObservableObject {
             let was = loaded[i].state
             loaded[i].state = .interrupted
             loaded[i].failure = was == .releasing
-                ? "Flight Deck quit during release; some beads may already be written — check `br list` before retrying."
+                ? "Flight Deck quit during release; some tasks may already be written — check `br list` before retrying."
                 : "Flight Deck quit while triage was running."
             try? store.save(loaded[i])
         }
@@ -655,7 +655,7 @@ final class IntakeService: ObservableObject {
         guard let i = intake(id), let cs = i.changeSet else { return }
         let current: GraphSnapshot
         do { current = try await graphReader.read(project: i.projectPath) }
-        catch { return fail(id, backTo: .review, "Could not read the bead graph before release: \(error)") }
+        catch { return fail(id, backTo: .review, "Could not read the task graph before release: \(error)") }
         guard let triaged = triageGraph(id), case .success(let v) = ChangeSetValidator.validate(cs, against: triaged) else {
             return fail(id, backTo: .review, "The triage-time graph for this change set is missing or no longer validates; retry triage.")
         }
@@ -842,7 +842,7 @@ final class IntakeService: ObservableObject {
         let observedAt = now()
         let graph: GraphSnapshot
         do { graph = try await graphReader.read(project: i.projectPath) }
-        catch { return fail(id, "Could not read the bead graph: \(error)") }
+        catch { return fail(id, "Could not read the task graph: \(error)") }
         guard !Task.isCancelled else { return }
         let files: TriageFiles
         do { files = try await writeInputs(id, graph: graph, project: i.projectPath) }
@@ -908,7 +908,7 @@ final class IntakeService: ObservableObject {
             i.state = .needsAnswers
         case .recommendation(let preset, let reason, let cs):
             if case .encodeNow = turn, cs == nil {
-                return fail(id, "Asked to encode at Bead fidelity, but the reply carried no change set.", raw: result.raw)
+                return fail(id, "Asked to encode at \(UIText.presetName(.bead)) fidelity, but the reply carried no change set.", raw: result.raw)
             }
             if case .encodeNow = turn {} else {
                 i.recommended = preset

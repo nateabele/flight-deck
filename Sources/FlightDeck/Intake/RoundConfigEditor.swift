@@ -251,19 +251,11 @@ struct RoundConfigEditor: View {
     }
 
     /// "<Preset>, customized" once any field has been edited — the label the brief specifies
-    /// for the disclosure's own title.
+    /// for the disclosure's own title. Wording lives in `UIText.presetName` — a single source
+    /// of truth also shared by `IntakeDetailView`.
     static func label(preset: Preset, config: RoundConfig) -> String {
-        let base = presetLabel(preset)
+        let base = UIText.presetName(preset)
         return config.customized ? "\(base), customized" : base
-    }
-
-    private static func presetLabel(_ preset: Preset) -> String {
-        switch preset {
-        case .bead: "Bead"
-        case .sketch: "Sketch"
-        case .featurePlan: "Feature plan"
-        case .fullPlan: "Full plan"
-        }
     }
 
     /// `ultra` enables delegation and isn't Pro, so it's excluded even though `effort` is a

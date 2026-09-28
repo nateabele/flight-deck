@@ -38,7 +38,7 @@ struct FlywheelSetup {
 
         if !status.beadsSyncHooksInstalled {
             try installBeadsSyncHook(repo: repo)
-            steps.append("beads sync hook")
+            steps.append("task sync hook")
         }
 
         return steps
@@ -50,7 +50,7 @@ struct FlywheelSetup {
     /// `br agents --add`, `am projects discovery-init`) rather than shelling out to
     /// `flywheel-new` itself, which also runs `git init` (wrong here — the project already is
     /// a repo), `ntm init` (NTM hooks this app doesn't use) and `cm init --repo` (unrelated
-    /// repo memory) — none of which "Setup Flywheel…" asked for. Idempotent the same way
+    /// repo memory) — none of which "Set Up Flight Control…" asked for. Idempotent the same way
     /// `enable` is, but NOT on one shared gate: `br init` is gated on `status.hasBeads`, `am
     /// projects discovery-init` on `status.hasAgentMailMarker`, and `br agents --add` on its
     /// OWN marker (`hasAgentsSection`, below) rather than reusing `hasBeads`. Sharing `hasBeads`
@@ -72,7 +72,7 @@ struct FlywheelSetup {
             guard exitCode == 0 else {
                 throw FlywheelError.initializeStep(step: "br init", exitCode: exitCode, output: stdout)
             }
-            steps.append("beads workspace (br init)")
+            steps.append("task workspace (br init)")
         }
 
         if !Self.hasAgentsSection(repo: repo) {

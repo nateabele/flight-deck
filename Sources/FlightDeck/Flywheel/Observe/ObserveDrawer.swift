@@ -65,7 +65,7 @@ struct ObserveLaneModel {
     }
 
     private static func workingOnDetail(_ agent: FlywheelProjection.Agent) -> String {
-        guard let bead = agent.bead else { return "no assigned bead" }
+        guard let bead = agent.bead else { return "no assigned task" }
         return "\(bead.id) · \(bead.title)"
     }
 

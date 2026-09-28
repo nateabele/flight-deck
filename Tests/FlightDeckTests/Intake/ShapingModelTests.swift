@@ -317,7 +317,7 @@ final class ShapingModelTests: XCTestCase {
         let text = ShapingModel.viewerText(.changeSet, checkpoint: 6, tape: pausedAtR2(),
                                            loadFile: { id, path in id == 6 && path == "changeset.json" ? data : nil })
         XCTAssertEqual(text, """
-            1. New bead new:t1 — Store font size per project
+            1. New task new:t1 — Store font size per project
             2. Edge new:t1 → fd-12 (blocks)
             3. Edit fd-9 — title: Resolve font at surface init; priority: 1
             4. Reopen fd-3 — regressed
