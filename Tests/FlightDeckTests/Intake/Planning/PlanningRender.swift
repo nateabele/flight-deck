@@ -12,8 +12,9 @@ import XCTest
 @MainActor
 enum PlanningRender {
     /// `prepare` runs once the view has laid out and settled, before the picture is taken — to
-    /// scroll it, say — and gets the hosting view.
-    static func write(_ view: some View, size: NSSize, to url: URL, prepare: ((NSView) -> Void)? = nil) throws {
+    /// scroll it, say — and gets the hosting view. Dark unless `appearance` says otherwise.
+    static func write(_ view: some View, size: NSSize, to url: URL, appearance: NSAppearance.Name = .darkAqua,
+                      prepare: ((NSView) -> Void)? = nil) throws {
         let root = view.frame(width: size.width, height: size.height, alignment: .topLeading)
             .background(Color(nsColor: .windowBackgroundColor))
             .environment(\.controlActiveState, .key)
@@ -21,7 +22,7 @@ enum PlanningRender {
         host.frame = NSRect(origin: .zero, size: size)
         let window = NSWindow(contentRect: NSRect(x: -10_000, y: -10_000, width: size.width, height: size.height),
                               styleMask: [.borderless], backing: .buffered, defer: false)
-        window.appearance = NSAppearance(named: .darkAqua)
+        window.appearance = NSAppearance(named: appearance)
         window.contentView = host
         window.orderFrontRegardless()
         host.layoutSubtreeIfNeeded()

@@ -36,6 +36,10 @@ struct IntakeDetailView: View {
     /// Indices into `intake.exchanges` whose Clarifications section is open. Collapsed by
     /// default: answered rounds are there to look back at, not to push the live work down.
     @State private var expandedRounds: Set<Int>
+    /// Whether the header's Request section shows the whole intent. Collapsed by default and
+    /// kept per intake the same way `expandedRounds` is: `ProjectView` keys this view on the
+    /// intake's id, so another row starts closed and coming back starts closed again.
+    @State private var requestExpanded: Bool
     @State private var confirmingDiscard = false
     /// Stop asks first (`PlanningActions.shaping`): set by the bar's key and ⌘. alike.
     @State private var confirmingStop = false
@@ -65,8 +69,8 @@ struct IntakeDetailView: View {
     /// exactly that much room while the block is pinned.
     @State private var barHeight: CGFloat = 0
     @State private var boardHeight: CGFloat = 0
-    /// The open heatmap's share of `boardHeight` — the pinned copy never draws it, so the room
-    /// the plan leaves for the pinned block leaves it out (`DetailLayout.pinnedBlockHeight`).
+    /// The open heatmap's share of `boardHeight` — the pinned copy never draws it, so the height
+    /// the pinned block covers leaves it out (`DetailLayout.pinnedBlockHeight`).
     @State private var heatmapHeight: CGFloat = 0
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// Derived from files, so kept rather than re-read on every service publish (a running
@@ -75,11 +79,9 @@ struct IntakeDetailView: View {
     @State private var planHead: Int?
     /// The section heatmap under the board (spec §8.3): nil while closed.
     @State private var heatmap: HeatmapFocus?
-    /// What the plan was last asked to show by a heatmap cell (`PlanSection.focus`).
+    /// What the plan was last asked to show by a heatmap cell (`PlanSection.focus`): the diff it
+    /// opens scrolls the document to the section's hunk (`PageJump`).
     @State private var planFocus: PlanFocus?
-    /// Bumped by a heatmap cell: the document scrolls the plan into view, since the diff it
-    /// opened is otherwise below the fold.
-    @State private var planScroll = 0
     /// The tape read from disk once the intake is past shaping (`service.tapes` drops it), for
     /// the read-only final plan. Re-read with the other derived values.
     @State private var finalTape: Tape?
@@ -91,7 +93,8 @@ struct IntakeDetailView: View {
     private let opensConvergenceCard: Bool
 
     init(service: IntakeService, intake: Intake, onOpenReview: @escaping () -> Void,
-         showsInspector: Binding<Bool> = .constant(false), expandedRounds: Set<Int> = [], selectedSeat: String? = nil,
+         showsInspector: Binding<Bool> = .constant(false), expandedRounds: Set<Int> = [], requestExpanded: Bool = false,
+         selectedSeat: String? = nil,
          heatmap: HeatmapFocus? = nil, opensConvergenceCard: Bool = false) {
         _heatmap = State(initialValue: heatmap)
         self.opensConvergenceCard = opensConvergenceCard
@@ -100,6 +103,7 @@ struct IntakeDetailView: View {
         self.onOpenReview = onOpenReview
         _showsInspector = showsInspector
         _expandedRounds = State(initialValue: expandedRounds)
+        _requestExpanded = State(initialValue: requestExpanded)
         _selectedSeat = State(initialValue: selectedSeat)
     }
 
@@ -110,7 +114,7 @@ struct IntakeDetailView: View {
         /// `LiveCard`'s own padding: the pinned copy of the bar sits at the card's inset, so it
         /// lands exactly where the card's copy left off.
         static let cardInset: CGFloat = 14
-        /// Room the plan section keeps below the pinned block before its first measurement.
+        /// How much the pinned block is taken to cover before its first measurement.
         static let pinnedEstimate: CGFloat = 300
     }
 
@@ -118,47 +122,51 @@ struct IntakeDetailView: View {
         let _ = RenderProbe.hit("detail")
         let sections = DetailLayout.sections(for: intake.state, hasClarifications: !answeredRounds.isEmpty)
         VStack(spacing: 0) {
-            GeometryReader { viewport in
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: 20) {
-                            DetailHeader(state: intake.state, intent: intake.intent, summary: summary).equatable()
-                            if sections.contains(.clarifications) {
-                                ClarificationsSection(exchanges: intake.exchanges, expanded: expandedRounds,
-                                                      setExpanded: { index, open in
-                                                          if open { expandedRounds.insert(index) } else { expandedRounds.remove(index) }
-                                                      })
-                                    .equatable()
-                            }
-                            if sections.contains(.liveCard) { liveCard.id(Self.cardAnchor) }
-                            if sections.contains(.stageBody) { stageBody }
-                            if sections.contains(.plan) {
-                                planSection(viewport: viewport.size.height).id(Self.planAnchor)
-                            }
+            ScrollViewReader { proxy in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 20) {
+                        DetailHeader(state: intake.state, intent: intake.intent, summary: summary).equatable()
+                        // Gated here, not inside: an empty section still took the stack's spacing,
+                        // doubling the gap under a one-sentence title.
+                        if !IntakeTitle(intent: intake.intent).isWhole {
+                            RequestSection(intent: intake.intent, expanded: requestExpanded,
+                                           setExpanded: { requestExpanded = $0 })
+                                .equatable()
                         }
-                        .padding(.horizontal, Metrics.margin)
-                        .padding(.vertical, 18)
-                        .frame(maxWidth: .infinity, alignment: .topLeading)
-                        .background(DocumentScrollAnchor(scroll: documentScroll))
+                        if sections.contains(.clarifications) {
+                            ClarificationsSection(exchanges: intake.exchanges, expanded: expandedRounds,
+                                                  setExpanded: { index, open in
+                                                      if open { expandedRounds.insert(index) } else { expandedRounds.remove(index) }
+                                                  })
+                                .equatable()
+                        }
+                        if sections.contains(.liveCard) { liveCard.id(Self.cardAnchor) }
+                        if sections.contains(.stageBody) { stageBody }
+                        if sections.contains(.plan) { planSection }
                     }
-                    .coordinateSpace(name: Self.scrollSpace)
-                    .onPreferenceChange(BarGeometryKey.self, perform: barMoved)
-                    // An overlay, not `.safeAreaInset`: an inset changes the scroll view's content
-                    // insets, which moves the very geometry the pin is decided from — pinning would
-                    // unpin it, and the block would flicker at the threshold.
-                    .overlay(alignment: .top) { pinnedBar }
-                    // Bottom-anchored: the plan is sized to the room under the pinned block, so
-                    // its bottom at the viewport's puts its top just under the block.
-                    .onChange(of: planScroll) {
-                        withAnimation(reduceMotion ? nil : .default) { proxy.scrollTo(Self.planAnchor, anchor: .bottom) }
-                    }
-                    // The heatmap lives in the card's board, never the pinned copy's: opened
-                    // while the block is pinned (the cell on the pinned bar, the Run menu), it
-                    // would open out of sight, so the document brings the card to it.
-                    .onChange(of: heatmap == nil) { _, closed in
-                        guard !closed, pinned else { return }
-                        withAnimation(reduceMotion ? nil : .default) { proxy.scrollTo(Self.cardAnchor, anchor: .top) }
-                    }
+                    .padding(.horizontal, Metrics.margin)
+                    .padding(.vertical, 18)
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                    .background(DocumentScrollAnchor(scroll: documentScroll))
+                    // The plan is part of this document, so its jumps (a heatmap cell's
+                    // section) scroll this scroll view, which only this reader can reach.
+                    .environment(\.pageJump, PageJump { [reduceMotion, documentScroll] id, below in
+                        let anchor = PageJump.anchor(below: below, height: documentScroll.view?.contentView.bounds.height ?? 0)
+                        withAnimation(reduceMotion ? nil : .default) { proxy.scrollTo(id, anchor: anchor) }
+                    })
+                }
+                .coordinateSpace(name: Self.scrollSpace)
+                .onPreferenceChange(BarGeometryKey.self, perform: barMoved)
+                // An overlay, not `.safeAreaInset`: an inset changes the scroll view's content
+                // insets, which moves the very geometry the pin is decided from — pinning would
+                // unpin it, and the block would flicker at the threshold.
+                .overlay(alignment: .top) { pinnedBar }
+                // The heatmap lives in the card's board, never the pinned copy's: opened
+                // while the block is pinned (the cell on the pinned bar, the Run menu), it
+                // would open out of sight, so the document brings the card to it.
+                .onChange(of: heatmap == nil) { _, closed in
+                    guard !closed, pinned else { return }
+                    withAnimation(reduceMotion ? nil : .default) { proxy.scrollTo(Self.cardAnchor, anchor: .top) }
                 }
             }
             // Pinned outside the ScrollView so the way forward (and out) is always in reach,
@@ -377,7 +385,6 @@ struct IntakeDetailView: View {
             onSelect: { checkpoint, section in
                 select(checkpoint)
                 planFocus = PlanFocus(checkpoint: checkpoint, section: section, seq: (planFocus?.seq ?? 0) + 1)
-                planScroll += 1
             },
             onAnnotate: { [notes] section in notes.annotate(section: section) },
             onClose: { self.heatmap = nil }))
@@ -440,10 +447,11 @@ struct IntakeDetailView: View {
 
     // MARK: - Plan
 
-    /// Tall enough to read a plan in under the pinned bar and board — a short box scrolling
-    /// inside a long document is two scroll bars for one text. The final plan (review on) has
-    /// no pinned block over it.
-    private func planSection(viewport: CGFloat) -> some View {
+    /// The plan as part of the document: as tall as its text, scrolled by the document's one
+    /// scroller, under the pinned bar and board like everything else. The block's height is
+    /// what the editor keeps clear above its caret and a heatmap jump lands below
+    /// (`pageObscuredTop`). The final plan (review on) has no pinned block over it.
+    private var planSection: some View {
         let final = DetailLayout.planIsFinal(for: intake.state)
         let pinnedHeight = final ? 0
             : DetailLayout.pinnedBlockHeight(bar: barHeight, board: boardHeight, heatmap: heatmapHeight) ?? Metrics.pinnedEstimate
@@ -452,12 +460,12 @@ struct IntakeDetailView: View {
                             selection: final ? nil : selectedCheckpoint, select: final ? .constant(nil) : $selectedCheckpoint,
                             focus: final ? nil : planFocus, churn: final ? nil : churnLane(),
                             noteShown: service.editNoteShown.contains(intake.id), notes: final ? nil : notes,
-                            height: max(360, viewport - pinnedHeight - 24),
                             onOpenNotes: {
                                 notes.planFocused = true
                                 showsInspector = true
                             })
             .equatable()
+            .environment(\.pageObscuredTop, pinnedHeight)
     }
 
     // MARK: - Stage bodies
@@ -831,7 +839,6 @@ struct IntakeDetailView: View {
 
     private static let allPresets: [Preset] = [.bead, .sketch, .featurePlan, .fullPlan]
 
-    private static let planAnchor = "intake-plan"
     private static let cardAnchor = "intake-live-card"
 
     /// The document scroller's width in the current scroller style — zero-width overlay
@@ -911,8 +918,10 @@ private struct SeatReader<Content: View>: View {
     var body: some View { content(feed.files(id)) }
 }
 
-/// The eyebrow ("INTAKE · SHAPING"), the intent, and the phases done so far. Plain values, so
-/// it redraws only when one of them changes.
+/// The eyebrow ("INTAKE · SHAPING"), a title cut from the intent (`IntakeTitle`), and the phases
+/// done so far. Plain values, so it redraws only when one of them changes. The title, not the
+/// intent: an intent is often a paragraph, and set as a bold title it towered over the page and
+/// pushed the live work below the fold. The whole of it is in `RequestSection`, under this.
 private struct DetailHeader: View, Equatable {
     let state: IntakeState
     let intent: String
@@ -928,10 +937,15 @@ private struct DetailHeader: View, Equatable {
                 .textCase(.uppercase)
                 .foregroundStyle(.tertiary)
                 .accessibilityIdentifier("intake-state-eyebrow")
-            Text(intent)
-                .font(.title2.weight(.bold))
-                .fixedSize(horizontal: false, vertical: true)
-                .textSelection(.enabled)
+            let title = IntakeTitle(intent: intent).title
+            if !title.isEmpty {
+                Text(title)
+                    .font(.title3.weight(.semibold))
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+                    .accessibilityAddTraits(.isHeader)
+                    .accessibilityIdentifier("intake-title")
+            }
             if !summary.isEmpty {
                 WrappingRow(spacing: 18, lineSpacing: 4) {
                     ForEach(summary) { item in
@@ -948,6 +962,42 @@ private struct DetailHeader: View, Equatable {
                 .accessibilityIdentifier("intake-progress-summary")
             }
         }
+    }
+}
+
+/// The intent in full, as a collapsed disclosure styled like `ClarificationsSection` — the
+/// header's title is only its first sentence or clause. The caller leaves it out when that title
+/// already is the whole intent: a Request that only repeats the title is noise. Equal while the
+/// intent and the open state are; `setExpanded` is not compared.
+private struct RequestSection: View, Equatable {
+    let intent: String
+    let expanded: Bool
+    let setExpanded: (Bool) -> Void
+
+    static func == (a: Self, b: Self) -> Bool { a.intent == b.intent && a.expanded == b.expanded }
+
+    var body: some View {
+        let words = IntakeTitle.wordCount(intent)
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Request").font(.headline)
+            GroupedRows(count: 1) { _ in
+                DisclosureGroup(isExpanded: Binding(get: { expanded }, set: setExpanded)) {
+                    // Secondary, like a Clarifications question: the title above is the
+                    // headline; this is the reference copy under it.
+                    Text(intent.trimmingCharacters(in: .whitespacesAndNewlines))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.leading, 18)
+                        .padding(.top, 8)
+                        .accessibilityIdentifier("intake-request-text")
+                } label: {
+                    Text("Full text · \(words) word\(words == 1 ? "" : "s")")
+                }
+            }
+        }
+        .accessibilityIdentifier("intake-request")
     }
 }
 
@@ -1001,8 +1051,7 @@ private struct ClarificationsSection: View, Equatable {
 }
 
 /// The plan section of the document: its heading, the notes chip, and `PlanSection`. Equal on
-/// what it shows — the tape, the round selected, the focus request, the churn cycle, its height
-/// — and never on its closures or the service, so an unrelated publish doesn't rebuild the
+/// what it shows — the tape, the round selected, the focus request, the churn cycle — and never on its closures or the service, so an unrelated publish doesn't rebuild the
 /// editor's inputs. The notes controller compares by identity: its changes redraw the views
 /// observing it, not this one.
 private struct DocumentPlan: View, Equatable {
@@ -1017,13 +1066,12 @@ private struct DocumentPlan: View, Equatable {
     let churn: ChurnLaneInput?
     let noteShown: Bool
     let notes: PlanNotesController?
-    let height: CGFloat
     let onOpenNotes: () -> Void
 
     static func == (a: Self, b: Self) -> Bool {
         a.intakeID == b.intakeID && a.title == b.title && a.tape == b.tape && a.final == b.final
             && a.selection == b.selection && a.focus == b.focus && a.churn?.cycle == b.churn?.cycle
-            && a.noteShown == b.noteShown && a.notes === b.notes && a.height == b.height
+            && a.noteShown == b.noteShown && a.notes === b.notes
     }
 
     var body: some View {
@@ -1048,7 +1096,6 @@ private struct DocumentPlan: View, Equatable {
                 .churnLane(churn)
                 .focus(focus)
                 .readOnly(final)
-                .frame(height: height)
         }
     }
 }
@@ -1067,8 +1114,8 @@ final class DocumentScroll {
 }
 
 /// Sits inside the document and records its enclosing scroll view — the one the pinned block
-/// hands wheel events to. Found from inside rather than searched for: the plan editor is a
-/// scroll view in the same document, and a search could land on it.
+/// hands wheel events to. Found from inside rather than searched for: the board's tape is a
+/// scroll view in the same pane, and a search could land on it.
 private struct DocumentScrollAnchor: NSViewRepresentable {
     let scroll: DocumentScroll
 

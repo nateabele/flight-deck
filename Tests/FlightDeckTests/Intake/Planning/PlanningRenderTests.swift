@@ -371,16 +371,64 @@ final class PlanningRenderTests: XCTestCase {
         }
     }
 
+    /// A shaping intake whose plan runs to ~250 lines, drawn at the document's top, scrolled so
+    /// the plan's middle is under the pinned block, and at the document's end — the pictures for
+    /// "the plan is part of the page": one scroller, the plan's text rendered wherever the page
+    /// is scrolled to, nothing clipped under the pinned block. Files are `onescroll-*`.
+    func testRenderLongPlanScrollsAsOneDocument() throws {
+        guard let dir = ProcessInfo.processInfo.environment["FD_PLANNING_RENDER_DIR"] else {
+            throw XCTSkip("set FD_PLANNING_RENDER_DIR to render the planning PNGs")
+        }
+        let out = URL(fileURLWithPath: dir)
+        try FileManager.default.createDirectory(at: out, withIntermediateDirectories: true)
+        let store = IntakeStore(root: root)
+        let config = RoundConfig(
+            drafters: [Slot(codex, persona: .arbiter), Slot(claude, persona: .realist)], synthesizer: Slot(claude),
+            reviewer: Slot(codex), integrator: codex, encoder: codex, polisher: codex,
+            refinementCap: 3, polishCap: 2, freshEyesAndDedup: true, defaultPlay: .nextMajor, customized: false)
+        var intake = Intake(projectPath: "/tmp/project", intent: "Build a field-service scheduling platform: technicians, jobs, a dispatch board and mobile check-in",
+                            createdAt: now.addingTimeInterval(-3600))
+        intake.state = .shaping
+        intake.exchanges = [round1]
+        intake.chosenPreset = .fullPlan
+        intake.roundConfig = config
+        try store.save(intake)
+        try writeTape(for: intake.id, store: store, running: true, plan: Self.longPlan)
+        let service = IntakeService(store: store, triageSettings: TriageSettings(harness: .codex, model: "gpt-6-sol", effort: "high"),
+                                    availableModels: .defaults, inject: { _, _, _, _ in true }, hasSession: { _, _ in false })
+        service.pollTapes()
+        for (name, y) in [("top", 0), ("plan", 2400), ("end", .infinity)] as [(String, CGFloat)] {
+            try PlanningRender.write(IntakeDetailView(service: service, intake: intake, onOpenReview: {}),
+                                     size: NSSize(width: 1100, height: 900),
+                                     to: out.appendingPathComponent("onescroll-\(name)-1100.png"),
+                                     // One scroll, even to the end: the plan was laid out whole after
+                                     // it loaded, so the page's end is where it will stay.
+                                     prepare: y == 0 ? nil : { host in Self.scroll(host, to: y) })
+        }
+    }
+
+    /// `plan` followed by thirty more sections — long enough that the page, not a box, is what
+    /// has to scroll to reach its end.
+    private static let longPlan = plan + (8...37).map { i in
+        """
+
+
+        ## \(i). Section \(i)
+        Section \(i) of the plan. Dispatchers see every technician's next job, and the board re-ranks within a second of a change.
+        - Rule \(i).a: a job keeps its technician once en route.
+        - Rule \(i).b: an override needs a reason, which is kept with the job.
+        """
+    }.joined()
+
     // MARK: - Fixtures
 
     /// Draft, synthesis and refine 1 landed; refine 2 running with a finished reviewer and a
     /// working integrator — or, `running: false`, paused after refine 1.
-    private func writeTape(for id: UUID, store: IntakeStore, running: Bool) throws {
+    private func writeTape(for id: UUID, store: IntakeStore, running: Bool, plan: String = PlanningRenderTests.plan) throws {
         let tapes = TapeStore(intakeDirectory: store.directory(for: id))
         let slot = { (role: String, used: ModelChoice) in SlotOutcome(role: role, used: used, requested: used, status: .ok) }
         var tape = Tape()
         try tapes.saveTape(tape)
-        let plan = Self.plan
         try tapes.writeCheckpoint(
             Checkpoint(id: 1, stage: .draft, round: 0, major: true, createdAt: now.addingTimeInterval(-1500),
                        record: RoundRecord(slots: [slot("drafter", codex), slot("drafter", claude), slot("drafter", claude)],
@@ -434,13 +482,15 @@ final class PlanningRenderTests: XCTestCase {
         try IntakeJSON.encoder.encode(value).write(to: url)
     }
 
-    /// Scrolls the document — the outermost vertical scroll view in the pane — to `y`.
+    /// Scrolls the document — the outermost vertical scroll view in the pane — to `y`, or to its
+    /// end for `.infinity`.
     private static func scroll(_ host: NSView, to y: CGFloat) {
         var queue: [NSView] = [host]
         while !queue.isEmpty {
             let view = queue.removeFirst()
             if let scroll = view as? NSScrollView, scroll.hasVerticalScroller || scroll.documentView?.frame.height ?? 0 > scroll.frame.height {
-                scroll.contentView.scroll(to: NSPoint(x: 0, y: y))
+                let end = max(0, (scroll.documentView?.frame.height ?? 0) - scroll.contentView.bounds.height)
+                scroll.contentView.scroll(to: NSPoint(x: 0, y: min(y, end)))
                 scroll.reflectScrolledClipView(scroll.contentView)
                 return
             }

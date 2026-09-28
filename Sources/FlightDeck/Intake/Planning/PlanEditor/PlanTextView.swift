@@ -174,10 +174,18 @@ struct PlanTextView: NSViewRepresentable {
         return container
     }
 
+    /// As tall as its text (`PlanEditorContainer.contentHeight`), at whatever width it is
+    /// offered: the plan is part of the page, which scrolls it.
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView container: PlanEditorContainer, context: Context) -> CGSize? {
+        let width = proposal.width.flatMap { $0.isFinite ? $0 : nil } ?? container.frame.width
+        return CGSize(width: width, height: container.contentHeight)
+    }
+
     func updateNSView(_ container: PlanEditorContainer, context: Context) {
         let coordinator = context.coordinator
         coordinator.parent = self
         container.textView.isEditable = editable
+        container.textView.obscuredTop = context.environment.pageObscuredTop
         // While a commit's binding write is still queued, `text` is the pre-commit value; loading
         // it would put back the text the human just replaced.
         if coordinator.inFlight == 0, text != coordinator.lastBound { coordinator.load(text) }
@@ -281,6 +289,7 @@ struct PlanTextView: NSViewRepresentable {
             editCount = 0
             taking = nil
             MainActor.assumeIsolated { notesBridge.textChanged() }
+            textView.layOutWholePlan()
         }
 
         func receive(_ incoming: String?, navigation: Bool) {
@@ -591,25 +600,61 @@ struct PlanTextView: NSViewRepresentable {
     }
 }
 
-/// The scroll view and text view, with the "A new round landed" banner above them. The
-/// banner lives here rather than in SwiftUI because only the coordinator knows whether a
-/// head was held back — a SwiftUI banner keyed on `incoming` alone would flash for one frame
-/// on every head the view takes at once.
+/// The text view, with the "A new round landed" banner above it. The banner lives here rather
+/// than in SwiftUI because only the coordinator knows whether a head was held back — a SwiftUI
+/// banner keyed on `incoming` alone would flash for one frame on every head the view takes at once.
+///
+/// **No scroll view of its own.** The plan is part of the detail pane's document: the text view
+/// is as tall as its text, this view as tall as the banner and the text together
+/// (`contentHeight`), and the pane's one scroll view scrolls all of it. A box scrolling inside a
+/// scrolling page was two scrollers for one text — a wheel over the plan scrolled the box, and
+/// the page only once the box hit its end. What an inner scroll view used to do for the text is
+/// now done against the pane's:
+/// - **Height.** The text view sizes itself to TextKit 2's `usageBoundsForTextContainer` (it is
+///   vertically resizable). That is an estimate below the laid-out part, so after a load or a
+///   re-wrap the whole plan is laid out once, in slices off the keystroke path
+///   (`PlanNSTextView.layOutWholePlan`), and the height is exact; a keystroke never lays out the
+///   whole plan. This view passes the height on to SwiftUI (`sizeThatFits`) — only a change of a
+///   point or more, once a runloop turn (`heightChanged`), since each one relays out the pane.
+/// - **Viewport.** TextKit 2 lays out only what the text view's `visibleRect` shows, which AppKit
+///   clips through every enclosing clip view, so the pane's scroll bounds it and a scroll of the
+///   pane re-lays it on the next display — measured (`PlanEditorOneScrollTests`), so nothing
+///   here follows the pane's clip view for it. The notes' bands already do, for their own
+///   redraw (`PlanNotesBridge.observeScrolls`).
+/// - **Caret.** AppKit's reveal scrolls only the text view's own clip view, which it no longer
+///   has, so `PlanNSTextView.scrollRangeToVisible` reveals through the page.
 final class PlanEditorContainer: NSView {
     let textView = PlanNSTextView(usingTextLayoutManager: true)
     /// The edit layer's drawing (every paragraph an `EditLayerFragment`) and its hover Revert.
     let editLayout = EditLayerLayout()
     let revert = EditRevertButton()
-    /// Beside the scroll view, flush with its top; it follows the text on its own
-    /// (`ChurnLaneView.attach`) and hides itself when there is nothing to mark.
+    /// In the text view's gutter; it follows the text on its own (`ChurnLaneView.attach`) and
+    /// hides itself when there is nothing to mark.
     let churnLane = ChurnLaneView()
-    private let scroll = NSScrollView()
     private let banner: NSHostingView<IncomingBanner>
-    private let stack = NSStackView()
+
+    /// The shortest the text runs, so an empty or two-line plan is still a place to type into
+    /// rather than a sliver — the height the boxed editor had as its minimum.
+    static let minimumTextHeight: CGFloat = 240
+    static let bannerGap: CGFloat = 6
+
+    /// The height last handed to SwiftUI, and whether a hand-over is already queued this turn.
+    private(set) var publishedHeight: CGFloat = 0
+    private var heightQueued = false
+    /// How many heights have been handed to SwiftUI — for tests of the coalescing.
+    private(set) var heightPublishes = 0
+    private var observers: [NSObjectProtocol] = []
+
+    override var isFlipped: Bool { true }
 
     var bannerVisible: Bool {
         get { !banner.isHidden }
-        set { banner.isHidden = !newValue }
+        set {
+            guard newValue == banner.isHidden else { return }
+            banner.isHidden = !newValue
+            needsLayout = true
+            heightChanged()
+        }
     }
 
     init(onShow: @escaping () -> Void) {
@@ -627,42 +672,103 @@ final class PlanEditorContainer: NSView {
         textView.textContainerInset = NSSize(width: (PlanGutter.width(churn: false) + 8) / 2, height: 8)
         textView.textLayoutManager?.delegate = editLayout
         revert.textView = textView
+        // Grows to its text (see the type's comment); the width is this view's, set in `layout`.
         textView.isVerticallyResizable = true
         textView.isHorizontallyResizable = false
-        textView.autoresizingMask = [.width]
+        textView.minSize = NSSize(width: 0, height: Self.minimumTextHeight)
         textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: .greatestFiniteMagnitude)
+        textView.frame.size.height = Self.minimumTextHeight
         // Sized by the text view itself (`PlanNSTextView.fitContainer`), to the readable measure.
         textView.textContainer?.widthTracksTextView = false
         textView.setAccessibilityIdentifier("plan-editor")
-
-        scroll.documentView = textView
-        scroll.hasVerticalScroller = true
-        scroll.drawsBackground = false
         banner.isHidden = true
 
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 6
         // The churn lane lives in the gutter's CHURN column, inside the text view, so it
         // scrolls with the text; the column opens only while the lane has markers.
         churnLane.attach(to: textView)
         churnLane.onShown = { [weak textView] shown in textView?.showsChurn = shown }
-        stack.addArrangedSubview(banner)
-        stack.addArrangedSubview(scroll)
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(stack)
-        NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: trailingAnchor),
-            stack.topAnchor.constraint(equalTo: topAnchor),
-            stack.bottomAnchor.constraint(equalTo: bottomAnchor),
-            banner.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            scroll.widthAnchor.constraint(equalTo: stack.widthAnchor),
-        ])
+        addSubview(banner)
+        addSubview(textView)
+        textView.postsFrameChangedNotifications = true
+        observers = [
+            NotificationCenter.default.addObserver(forName: NSView.frameDidChangeNotification, object: textView,
+                                                   queue: nil) { [weak self] _ in
+                MainActor.assumeIsolated { self?.heightChanged() }
+            },
+            NotificationCenter.default.addObserver(forName: NSText.didChangeNotification, object: textView,
+                                                   queue: nil) { [weak self] _ in
+                MainActor.assumeIsolated { self?.editedAt = CACurrentMediaTime() }
+            },
+        ]
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+    deinit { observers.forEach(NotificationCenter.default.removeObserver) }
+
+    /// The banner (when shown) and the text, stacked: what this view needs to show all of it.
+    var contentHeight: CGFloat {
+        (banner.isHidden ? 0 : banner.fittingSize.height + Self.bannerGap) + max(textView.frame.height, Self.minimumTextHeight)
+    }
+
+    override var intrinsicContentSize: NSSize { NSSize(width: NSView.noIntrinsicMetric, height: contentHeight) }
+
+    override func layout() {
+        super.layout()
+        var top: CGFloat = 0
+        if !banner.isHidden {
+            let height = banner.fittingSize.height
+            banner.frame = NSRect(x: 0, y: 0, width: bounds.width, height: height)
+            top = height + Self.bannerGap
+        }
+        if textView.frame.origin != NSPoint(x: 0, y: top) { textView.setFrameOrigin(NSPoint(x: 0, y: top)) }
+        // Width only: the height is the text's own. A width change re-wraps it, and the text
+        // view's resize to the new usage bounds comes back through `heightChanged`.
+        if textView.frame.width != bounds.width { textView.setFrameSize(NSSize(width: bounds.width, height: textView.frame.height)) }
+    }
+
+    /// The text's height moved (it grew or shrank a line, re-wrapped, or its estimate firmed up
+    /// as layout reached further down): hand SwiftUI the new height, at most once a runloop turn
+    /// and only for a change of a point or more. Every hand-over relays out the pane, and a burst
+    /// of estimate refinements while scrolling or a paste would otherwise each pay for one.
+    func heightChanged() {
+        guard !heightQueued, abs(contentHeight - publishedHeight) >= 1 else { return }
+        heightQueued = true
+        RunLoop.main.perform(inModes: [.common]) { [weak self] in
+            MainActor.assumeIsolated { self?.publishHeight() }
+        }
+    }
+
+    private func publishHeight() {
+        heightQueued = false
+        let height = contentHeight
+        guard abs(height - publishedHeight) >= 1 else { return }
+        // Grown by typing: the keystroke's own reveal ran while the page was still the old
+        // height, so a new last line sat below the page's end, out of reach — until the page
+        // has grown (`setFrameSize`), when the caret is revealed again. Only just after an edit:
+        // an estimate firming up while the human scrolls must not yank the page to the caret.
+        revealPending = height > publishedHeight && CACurrentMediaTime() - editedAt < Self.revealWindow
+        publishedHeight = height
+        heightPublishes += 1
+        invalidateIntrinsicContentSize()
+    }
+
+    /// When the text last changed, and how long after it a growth still counts as the edit's.
+    private var editedAt: CFTimeInterval = -.infinity
+    private static let revealWindow: CFTimeInterval = 0.5
+    private var revealPending = false
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        guard revealPending, newSize.height >= publishedHeight - 0.5 else { return }
+        revealPending = false
+        // Next turn: the page's own frame may be set after this view's in the same pass.
+        DispatchQueue.main.async { [weak textView] in
+            guard let textView, textView.window?.firstResponder === textView else { return }
+            textView.scrollRangeToVisible(textView.selectedRange())
+        }
+    }
 }
 
 /// Reports focus changes, which `NSTextViewDelegate` doesn't: `textDidBeginEditing` waits for
@@ -671,6 +777,10 @@ final class PlanEditorContainer: NSView {
 class PlanNSTextView: NSTextView {
     var isFocused = false
     var onFocusChange: (() -> Void)?
+    /// How much of the page's top edge something is drawn over — the pinned control bar and
+    /// board. A caret there is "visible" to AppKit and hidden from the human, so a reveal keeps
+    /// this much room above it (`scrollRangeToVisible`).
+    var obscuredTop: CGFloat = 0
     /// The pointer over the text (view coordinates), nil when it leaves — the edit layer's
     /// hover Revert.
     var onHover: ((NSPoint?) -> Void)?
@@ -699,13 +809,81 @@ class PlanNSTextView: NSTextView {
     }
 
     /// The container at the readable measure (`PlanGutter.textWidth`) rather than tracking the
-    /// view's width: the view still spans the pane, so the scroller stays at its edge and the
-    /// room past the text is part of the editor.
+    /// view's width: the view still spans the pane, so the room past the text is part of the
+    /// editor (a click there places the caret, the hover Revert sits at its trailing edge).
     private func fitContainer() {
         guard let container = textContainer else { return }
         let width = PlanGutter.textWidth(viewWidth: frame.width, churn: showsChurn)
         guard container.size.width != width else { return }
         container.size = NSSize(width: width, height: container.size.height)
+        // Every line re-wraps: the height is an estimate again until it is all laid out.
+        layOutWholePlan()
+    }
+
+    // MARK: Whole-plan layout
+
+    /// The plan is part of the page, so its height is the page's end. TextKit 2 knows it
+    /// exactly only for what it has laid out — the rest is an estimate, which ran short for
+    /// wrapped paragraphs: the page's end moved down as the human read, six scrolls to the
+    /// bottom before it stayed put. So after a load or a re-wrap the whole plan is laid out
+    /// once, off the keystroke path: from the next runloop turn, in slices of
+    /// `fullLayoutSlice`, a newer load or width starting it over. Typing keeps TextKit 2's
+    /// incremental layout: an edit changes the height only by what its paragraph changed.
+    private var fullLayoutGeneration = 0
+    /// Where the pass has reached, nil when none is running.
+    private var fullLayoutNext: NSTextLocation?
+    /// Main-thread time the last completed pass took, all slices together, and in how many.
+    private(set) var lastFullLayout: (time: Duration, slices: Int)?
+    private var fullLayoutSpent: (time: Duration, slices: Int) = (.zero, 0)
+    /// Under a frame at 60 Hz, so a slice never costs the human a frame of scrolling.
+    static var fullLayoutSlice: Duration = .milliseconds(8)
+
+    /// Whether a pass is still running — for tests.
+    var layingOutWholePlan: Bool { fullLayoutNext != nil }
+
+    func layOutWholePlan() {
+        guard let content = textLayoutManager?.textContentManager else { return }
+        fullLayoutGeneration += 1
+        fullLayoutNext = content.documentRange.location
+        fullLayoutSpent = (.zero, 0)
+        scheduleLayoutSlice(fullLayoutGeneration)
+    }
+
+    private func scheduleLayoutSlice(_ generation: Int) {
+        // `.default` only: a slice waits out a live scroll (`.eventTracking`) rather than
+        // stealing its frames.
+        RunLoop.main.perform(inModes: [.default]) { [weak self] in
+            MainActor.assumeIsolated { self?.layOutSlice(generation) }
+        }
+    }
+
+    private func layOutSlice(_ generation: Int) {
+        guard generation == fullLayoutGeneration, let start = fullLayoutNext, let layout = textLayoutManager else { return }
+        let clock = ContinuousClock()
+        let began = clock.now
+        var next: NSTextLocation?
+        layout.enumerateTextLayoutFragments(from: start, options: [.ensuresLayout]) { fragment in
+            guard clock.now - began < Self.fullLayoutSlice else {
+                next = fragment.rangeInElement.endLocation
+                return false
+            }
+            return true
+        }
+        fullLayoutSpent = (fullLayoutSpent.time + (clock.now - began), fullLayoutSpent.slices + 1)
+        fullLayoutNext = next
+        guard next == nil else { return scheduleLayoutSlice(generation) }
+        lastFullLayout = fullLayoutSpent
+        // The frame takes the now-exact usage bounds at once; the container passes it on.
+        // Not `sizeToFit()`: measured, it left the frame at the estimate until a later layout.
+        let height = max(minSize.height, layout.usageBoundsForTextContainer.height + 2 * textContainerInset.height)
+        if abs(height - frame.height) >= 0.5 { setFrameSize(NSSize(width: frame.width, height: height)) }
+    }
+
+    /// An edit made while a pass was running may have replaced the text it was walking:
+    /// start over (what is laid out stays laid out, so the restart is quick).
+    override func didChangeText() {
+        super.didChangeText()
+        if fullLayoutNext != nil { layOutWholePlan() }
     }
 
     override func updateTrackingAreas() {
@@ -736,6 +914,35 @@ class PlanNSTextView: NSTextView {
         delegate?.undoManager?(for: self) ?? super.undoManager
     }
 
+    /// Typing, moving the caret and Find all reveal through here. AppKit's own reveal scrolls
+    /// only a clip view the text view is the document of — measured: typing at the end of a
+    /// plan in the page never moved the page — so the range's first line is revealed here, with
+    /// `scrollToVisible`, which walks up to the page's clip view. With `obscuredTop` of room
+    /// above it, so typing near the top of the page doesn't go on under the pinned block.
+    override func scrollRangeToVisible(_ range: NSRange) {
+        super.scrollRangeToVisible(range)
+        guard let line = caretRect(at: range.location) else { return }
+        scrollToVisible(NSRect(x: line.minX, y: line.minY - obscuredTop, width: max(line.width, 1), height: line.height + obscuredTop))
+    }
+
+    /// The insertion point at `location`, in this view's coordinates — laid out on demand, for
+    /// that one line. `firstRect(forCharacterRange:)` answers an empty rect for an empty range
+    /// on TextKit 2.
+    func caretRect(at location: Int) -> NSRect? {
+        guard let layout = textLayoutManager, let content = layout.textContentManager,
+              let at = content.location(content.documentRange.location, offsetBy: location) else { return nil }
+        let range = NSTextRange(location: at)
+        layout.ensureLayout(for: range)
+        var caret: CGRect?
+        layout.enumerateTextSegments(in: range, type: .selection, options: []) { _, frame, _, _ in
+            caret = frame
+            return false
+        }
+        guard let caret else { return nil }
+        let origin = textContainerOrigin
+        return caret.offsetBy(dx: origin.x, dy: origin.y)
+    }
+
     override func becomeFirstResponder() -> Bool {
         guard super.becomeFirstResponder() else { return false }
         isFocused = true
@@ -748,6 +955,31 @@ class PlanNSTextView: NSTextView {
         isFocused = false
         onFocusChange?()
         return true
+    }
+}
+
+extension EnvironmentValues {
+    /// How much of the top of the page (the detail pane's document) is drawn over while it
+    /// scrolls — the pinned control bar and board. The editor reveals its caret below it, and
+    /// Diff vs Previous lands a section's hunk under it rather than behind it.
+    @Entry var pageObscuredTop: CGFloat = 0
+    /// Scrolls the page to a view by its `.id`; nil outside the detail pane.
+    @Entry var pageJump: PageJump?
+}
+
+/// Scrolls the detail pane's document — the one scroller the plan is part of — to put a view
+/// (by its `.id`) a given distance below the page's top edge: under the pinned block, not
+/// behind it. A view inside the document can't use its own `ScrollViewReader`: a proxy only
+/// scrolls the scroll views INSIDE its reader, and the page's is outside.
+struct PageJump {
+    let scroll: (_ id: AnyHashable, _ below: CGFloat) -> Void
+
+    /// The `scrollTo` anchor that lands a point-high target `below` points under the top of a
+    /// viewport `height` tall: the anchor is a point in BOTH the target and the viewport, so a
+    /// fraction `below / height` puts the target's top there. (An id'd marker nudged up with an
+    /// alignment guide was measured to land at the top regardless.)
+    static func anchor(below: CGFloat, height: CGFloat) -> UnitPoint {
+        height > 0 ? UnitPoint(x: 0, y: min(max(below / height, 0), 1)) : .top
     }
 }
 
