@@ -116,6 +116,9 @@ struct PlanTextView: NSViewRepresentable {
     var churn: ChurnLaneInput?
     /// The parent's way to act through the editor — see `PlanEditorHandle`.
     var handle: PlanEditorHandle?
+    /// Where the folded sections are kept — the intake's (`IntakeService.planFolds`), so they
+    /// outlive this view; nil keeps them in the editor for as long as it lives.
+    var folds: PlanFoldStore?
 
     init(text: Binding<String>, editable: Bool, onCommit: @escaping (String) -> Void, incoming: String?,
          onShowIncoming: @escaping () -> Void, incomingIsNavigation: Bool = false) {
@@ -149,6 +152,13 @@ struct PlanTextView: NSViewRepresentable {
         return view
     }
 
+    /// Keeps the folded sections in `store` — see `folds`.
+    func folds(_ store: PlanFoldStore?) -> PlanTextView {
+        var view = self
+        view.folds = store
+        return view
+    }
+
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
     func annotating(_ notes: PlanNotesController?) -> PlanTextView {
@@ -162,10 +172,12 @@ struct PlanTextView: NSViewRepresentable {
         let coordinator = context.coordinator
         coordinator.textView = container.textView
         container.textView.onFocusChange = { [weak coordinator] in coordinator?.focusChanged() }
+        if let folds { coordinator.foldStore = folds }
         container.textView.delegate = coordinator
         container.textView.textStorage?.delegate = coordinator
         container.textView.onHover = { [weak container, weak coordinator] point in
             container?.revert.hover(at: point)
+            coordinator?.hoverFold(at: point)
             MainActor.assumeIsolated { coordinator?.notesBridge.hover(at: point) }
         }
         container.revert.onRevert = { [weak coordinator] in coordinator?.revert(hunk: $0) }
@@ -194,6 +206,7 @@ struct PlanTextView: NSViewRepresentable {
         coordinator.layEditLayer(over: generated)
         container.revert.enabled = editable
         coordinator.notesBridge.attach(notes, to: container.textView)
+        coordinator.reading = context.environment.planReading
         container.churnLane.update(churn)
         coordinator.churnChanged()
         handle?.coordinator = coordinator
@@ -214,7 +227,9 @@ struct PlanTextView: NSViewRepresentable {
         /// The last `text` binding value seen or written, so `updateNSView` can tell a load
         /// from the parent apart from its own commit echoing back.
         var lastBound = ""
-        weak var textView: PlanNSTextView?
+        weak var textView: PlanNSTextView? {
+            didSet { if textView !== oldValue { attachFolding() } }
+        }
         weak var revertButton: EditRevertButton?
         var timer: Timer?
         /// The editor's own undo stack, via `undoManager(for:)`, rather than the window's. It
@@ -282,6 +297,11 @@ struct PlanTextView: NSViewRepresentable {
             if textView.string != text { textView.string = text }
             undo.removeAllActions()
             blocks = MarkdownStyler.blocks(text)
+            outline = nil
+            // A new text (a round landed): folds follow their headings by text, and a fold
+            // whose heading is gone is dropped.
+            foldStore.folds.reconcile(with: headings)
+            applyFolds(relayout: true)
             revealed = caretBlock()
             diffEditLayer(base: parent.generated, text: text)
             style(storage, indices: nil, reveal: revealed)
@@ -522,6 +542,216 @@ struct PlanTextView: NSViewRepresentable {
             if let text = session.flush() { commit(text) }
         }
 
+        // MARK: Folding
+
+        /// Where this editor's folds live — the parent's store when it hands one in.
+        var foldStore = PlanFoldStore()
+        let foldFilter = PlanFoldFilter()
+        let foldGutter = PlanFoldGutter()
+        /// Where the pane shows the section being read; set from the environment.
+        var reading: PlanReadingPosition? {
+            didSet {
+                guard reading !== oldValue else { return }
+                MainActor.assumeIsolated { reading?.jump = { [weak self] in self?.jumpToReadingHeading() } }
+                readingMoved()
+            }
+        }
+        /// The headings of the text in the view, found on demand and dropped on every change.
+        private var outline: [PlanHeading]?
+
+        var headings: [PlanHeading] {
+            if let outline { return outline }
+            let found = PlanOutline.headings(blocks, in: (textView?.string ?? "") as NSString)
+            outline = found
+            return found
+        }
+
+        /// Hooks the hiding filter, the chevrons and the text view's fold actions to a new view.
+        private func attachFolding() {
+            guard let textView else { return }
+            (textView.textLayoutManager?.textContentManager as? NSTextContentStorage)?.delegate = foldFilter
+            textView.onFoldClick = { [weak self] point in self?.clickFold(at: point) ?? false }
+            textView.onFoldKey = { [weak self] fold in self?.foldCaretSection(fold) ?? false }
+            textView.visibleProxy = { [weak self] range in self?.visibleProxy(range) ?? range }
+            textView.outline = { [weak self] in self?.headings ?? [] }
+            textView.onScroll = { [weak self] in self?.layOutFoldGutter() }
+            foldGutter.measure = { [weak self] in self?.foldMarks() ?? [] }
+            textView.addSubview(foldGutter, positioned: .below, relativeTo: nil)
+
+            layOutFoldGutter()
+        }
+
+        /// Hides exactly the folded bodies. `relayout` re-lays the plan: needed when what is
+        /// folded changed; an edit that only moved the hidden ranges moves the laid-out
+        /// paragraphs with it.
+        func applyFolds(relayout: Bool) {
+            let hidden = foldStore.folds.hidden(in: headings)
+            guard relayout || hidden != foldFilter.hidden else { return }
+            let changed = hidden.count != foldFilter.hidden.count
+            foldFilter.hidden = hidden
+            if relayout || changed, let textView, let layout = textView.textLayoutManager {
+                layout.invalidateLayout(for: layout.documentRange)
+                textView.needsLayout = true
+                textView.needsDisplay = true
+                textView.layOutWholePlan()
+            }
+            layOutFoldGutter()
+        }
+
+        /// A keystroke: the folds follow their headings through it (a folded heading retyped
+        /// stays folded), and the hidden ranges move with the text.
+        private func foldsFollowEdit() {
+            let old = outline
+            outline = nil
+            if foldStore.folds.isEmpty { return layOutFoldGutter() }
+            let before = foldStore.folds
+            if let old { foldStore.folds.carry(from: old, to: headings) } else { foldStore.folds.reconcile(with: headings) }
+            applyFolds(relayout: before.folded.count != foldStore.folds.folded.count)
+        }
+
+        func toggleFold(_ key: PlanFoldKey) {
+            guard let index = headings.firstIndex(where: { $0.key == key }) else { return }
+            setFold(index, !foldStore.folds.isFolded(key))
+        }
+
+        /// Folds or opens heading `index`'s section. Folding with the caret inside it moves the
+        /// caret to the end of the heading first: a caret left in hidden text would open it again.
+        private func setFold(_ index: Int, _ fold: Bool) {
+            guard let textView, headings.indices.contains(index) else { return }
+            let heading = headings[index]
+            guard !fold || heading.body.length > 0 else { return }
+            let caret = textView.selectedRange()
+            if fold, NSLocationInRange(caret.location, heading.body) || (caret.location == NSMaxRange(heading.body) && caret.location > heading.body.location) {
+                textView.setSelectedRange(NSRange(location: NSMaxRange(heading.line), length: 0))
+            }
+            foldStore.folds.set(heading.key, folded: fold)
+            applyFolds(relayout: true)
+        }
+
+        /// ⌥⌘← / ⌥⌘→: fold or open the section holding the caret. Opening also works on a
+        /// folded heading's own line.
+        func foldCaretSection(_ fold: Bool) -> Bool {
+            guard let textView, let index = PlanOutline.innermost(containing: textView.selectedRange().location, in: headings) else { return false }
+            // Folding an already-folded section, or with nothing under it, folds its parent.
+            var target = index
+            if fold {
+                while foldStore.folds.isFolded(headings[target].key) || headings[target].body.length == 0 {
+                    guard let parent = headings[..<target].lastIndex(where: { $0.level < headings[target].level }) else { return true }
+                    target = parent
+                }
+            }
+            setFold(target, fold)
+            return true
+        }
+
+        /// Opens every folded section hiding any of `range`.
+        func unfold(containing range: NSRange) {
+            guard !foldStore.folds.isEmpty, foldFilter.hidden.contains(where: { NSLocationInRange(range.location, $0) }) else { return }
+            for heading in headings where foldStore.folds.isFolded(heading.key)
+                && NSLocationInRange(range.location, heading.body) {
+                foldStore.folds.set(heading.key, folded: false)
+            }
+            applyFolds(relayout: true)
+        }
+
+        /// A range as far as the page can show it: inside a folded section, its heading line —
+        /// where a note on hidden words sits in the rail, instead of among the detached ones.
+        func visibleProxy(_ range: NSRange) -> NSRange {
+            guard foldFilter.contains(range.location) else { return range }
+            return headings.last { foldStore.folds.isFolded($0.key) && NSLocationInRange(range.location, $0.body) }?.line ?? range
+        }
+
+        private func clickFold(at point: NSPoint) -> Bool {
+            guard let mark = foldGutter.hit(point) else { return false }
+            toggleFold(mark.key)
+            return true
+        }
+
+        func hoverFold(at point: NSPoint?) {
+            foldGutter.hovered = point.flatMap { p in foldGutter.marks.first { p.y >= $0.line.minY && p.y < $0.line.maxY }?.key }
+        }
+
+        /// The chevrons and the reading position follow the text: sized to it, redrawn over what is
+        /// on screen.
+        func layOutFoldGutter() {
+            guard let textView else { return }
+            if foldGutter.frame != textView.bounds { foldGutter.frame = textView.bounds }
+            readingMoved()
+            foldGutter.chevronX = textView.textContainerOrigin.x + PlanGutter.chevronCenter
+            foldGutter.refresh(textView.visibleRect)
+        }
+
+        /// The page's reading line — just under the pinned block — in text-container
+        /// coordinates; nil outside a scroll view.
+        private var readingLine: CGFloat? {
+            guard let textView, let clip = textView.enclosingScrollView?.contentView else { return nil }
+            return textView.convert(clip.bounds, from: clip).minY + textView.obscuredTop - textView.textContainerOrigin.y
+        }
+
+        /// The section being read: the heading of the section at the reading line, when that
+        /// heading has scrolled above it; nil while it is on screen, or above the first heading.
+        /// Found by position, not from TextKit's viewport range, which trails a scroll until the
+        /// next layout; and from the one or two headings around the reading line, never all:
+        /// measuring every heading of a long plan was a layout lookup each per keystroke.
+        func readingHeading() -> (heading: PlanHeading, top: CGFloat)? {
+            guard let readY = readingLine, let layout = textView?.textLayoutManager, let content = layout.textContentManager else { return nil }
+            let at = layout.textLayoutFragment(for: CGPoint(x: 1, y: max(readY, 0)))
+                .map { content.offset(from: content.documentRange.location, to: $0.rangeInElement.location) } ?? 0
+            let visible = headings.filter { !foldFilter.contains($0.line.location) }
+            guard let index = visible.lastIndex(where: { $0.line.location <= at }) else { return nil }
+            func top(_ h: PlanHeading) -> CGFloat? {
+                guard let start = content.location(content.documentRange.location, offsetBy: h.line.location),
+                      let fragment = layout.textLayoutFragment(for: start) else { return nil }
+                return fragment.layoutFragmentFrame.minY + (fragment.textLineFragments.first?.typographicBounds.minY ?? 0)
+            }
+            // The next heading may already be just under the reading line's slack.
+            let candidates = [index, index + 1].filter(visible.indices.contains).compactMap { i in top(visible[i]).map { (visible[i], $0) } }
+            guard let i = PlanOutline.current(tops: candidates.map(\.1), probe: readY + 12), candidates[i].1 < readY else { return nil }
+            return candidates[i]
+        }
+
+        /// The page scrolled or the text moved: tell the pane what is being read. Async, as a
+        /// frame change can arrive inside a SwiftUI update, where publishing is not allowed.
+        func readingMoved() {
+            guard let reading else { return }
+            let title = readingHeading()?.heading.title
+            guard title != MainActor.assumeIsolated({ reading.section }) else { return }
+            DispatchQueue.main.async { [weak reading] in MainActor.assumeIsolated { reading?.set(title) } }
+        }
+
+        /// The crumb was clicked: the heading back just under the pinned block. Scrolling up to a
+        /// point-high rect there puts it at the viewport's top, the block's height above it.
+        func jumpToReadingHeading() {
+            guard let textView, let (_, top) = readingHeading() else { return }
+            let y = top + textView.textContainerOrigin.y
+            textView.scrollToVisible(NSRect(x: 0, y: y - textView.obscuredTop - 12, width: 1, height: 1))
+            readingMoved()
+        }
+
+        /// The visible foldable headings' lines, from what is laid out — nothing is laid out
+        /// for this (it runs while drawing).
+        private func foldMarks() -> [PlanFoldGutter.Mark] {
+            guard let textView, let layout = textView.textLayoutManager, let content = layout.textContentManager,
+                  let viewport = layout.textViewportLayoutController.viewportRange else { return [] }
+            let origin = textView.textContainerOrigin
+            let ns = textView.string as NSString
+            let first = content.offset(from: content.documentRange.location, to: viewport.location)
+            let last = content.offset(from: content.documentRange.location, to: viewport.endLocation)
+            var marks: [PlanFoldGutter.Mark] = []
+            for heading in headings where heading.body.length > 0 && heading.line.location >= first && heading.line.location <= last {
+                guard let at = content.location(content.documentRange.location, offsetBy: heading.line.location),
+                      let fragment = layout.textLayoutFragment(for: at), let line = fragment.textLineFragments.first,
+                      let final = fragment.textLineFragments.last else { continue }
+                let frame = fragment.layoutFragmentFrame
+                let bounds = line.typographicBounds.offsetBy(dx: frame.minX + origin.x, dy: frame.minY + origin.y)
+                let end = frame.minX + origin.x + final.typographicBounds.minX + final.typographicBounds.width
+                let folded = foldStore.folds.isFolded(heading.key)
+                marks.append(.init(key: heading.key, line: bounds, textEnd: end, folded: folded,
+                                   lines: folded ? PlanOutline.lineCount(heading.body, in: ns) : 0))
+            }
+            return marks
+        }
+
         // MARK: Editing
 
         func textStorage(_ textStorage: NSTextStorage, didProcessEditing editedMask: NSTextStorageEditActions,
@@ -560,6 +790,7 @@ struct PlanTextView: NSViewRepresentable {
                 revealed = next
                 pendingEdit = nil
                 editCount = 0
+                foldsFollowEdit()
             }
             MainActor.assumeIsolated { notesBridge.textChanged() }
             scheduleIdleCommit()
@@ -571,6 +802,11 @@ struct PlanTextView: NSViewRepresentable {
         }
 
         func textViewDidChangeSelection(_ notification: Notification) {
+            // The caret or a Find match landed in a folded section: it opens, rather than the
+            // selection sitting in text nobody can see. Not mid-edit: the hidden ranges are the
+            // text's before the keystroke until `textDidChange` moves them, and the caret after
+            // text typed at a folded heading's end read as inside its old body.
+            if editCount == 0, let textView { unfold(containing: textView.selectedRange()) }
             MainActor.assumeIsolated { notesBridge.selectionChanged() }
             // Mid-edit selection changes arrive before `textDidChange` re-parses; that pass
             // restyles the caret block itself.
@@ -678,7 +914,7 @@ final class PlanEditorContainer: NSView {
         textView.minSize = NSSize(width: 0, height: Self.minimumTextHeight)
         textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: .greatestFiniteMagnitude)
         textView.frame.size.height = Self.minimumTextHeight
-        // Sized by the text view itself (`PlanNSTextView.fitContainer`), to the readable measure.
+        // Sized by the text view itself (`PlanNSTextView.fitContainer`), to the pane less the gutter.
         textView.textContainer?.widthTracksTextView = false
         textView.setAccessibilityIdentifier("plan-editor")
         banner.isHidden = true
@@ -785,6 +1021,20 @@ class PlanNSTextView: NSTextView {
     /// hover Revert.
     var onHover: ((NSPoint?) -> Void)?
     private var hoverArea: NSTrackingArea?
+    /// A click at a point (view coordinates): true when it hit a fold chevron or pill and was
+    /// handled, so the text doesn't also take it as a caret placement.
+    var onFoldClick: ((NSPoint) -> Bool)?
+    /// ⌥⌘← (true, fold) / ⌥⌘→ (false, open) on the caret's section; true when handled.
+    var onFoldKey: ((Bool) -> Bool)?
+    /// A range as far as the page shows it — inside a folded section, its heading
+    /// (`Coordinator.visibleProxy`). The notes rail places a card by this.
+    var visibleProxy: ((NSRange) -> NSRange)?
+    /// The plan's headings — the VoiceOver rotor.
+    var outline: (() -> [PlanHeading])?
+    /// The page scrolled (any enclosing clip view): what is drawn against the viewport follows.
+    var onScroll: (() -> Void)?
+    private var scrollObservers: [NSObjectProtocol] = []
+    private var observedClips: [ObjectIdentifier] = []
 
     /// The text starts after the gutter lanes: the margin is all on the leading side, where
     /// an even `textContainerInset` would split it.
@@ -806,11 +1056,18 @@ class PlanNSTextView: NSTextView {
     override func setFrameSize(_ newSize: NSSize) {
         super.setFrameSize(newSize)
         fitContainer()
+        // The chevrons and the outline cue span the text view.
+        onScroll?()
     }
 
-    /// The container at the readable measure (`PlanGutter.textWidth`) rather than tracking the
-    /// view's width: the view still spans the pane, so the room past the text is part of the
-    /// editor (a click there places the caret, the hover Revert sits at its trailing edge).
+    /// The container at the pane's width less the gutter lanes and the trailing margin
+    /// (`PlanGutter.textWidth`): the plan wraps to the pane and reflows as it is resized.
+    ///
+    /// A resize tick costs only the lines on screen: the new width takes at once, TextKit 2
+    /// re-lays the viewport on the next display, and the whole-plan pass (`layOutWholePlan`)
+    /// only restarts — a tick bumps its generation, so any number of ticks in a turn leave one
+    /// pass, and its slices run in `.default` mode, which a live resize (event tracking) holds
+    /// off until the drag ends. Measured in `PlanEditorKeystrokeTests.testResizeReflowIsUnderAFrame`.
     private func fitContainer() {
         guard let container = textContainer else { return }
         let width = PlanGutter.textWidth(viewWidth: frame.width, churn: showsChurn)
@@ -838,6 +1095,8 @@ class PlanNSTextView: NSTextView {
     /// Under a frame at 60 Hz, so a slice never costs the human a frame of scrolling.
     static var fullLayoutSlice: Duration = .milliseconds(8)
 
+    /// Passes run to the end — for tests of the coalescing.
+    private(set) var fullLayoutPasses = 0
     /// Whether a pass is still running — for tests.
     var layingOutWholePlan: Bool { fullLayoutNext != nil }
 
@@ -873,6 +1132,7 @@ class PlanNSTextView: NSTextView {
         fullLayoutNext = next
         guard next == nil else { return scheduleLayoutSlice(generation) }
         lastFullLayout = fullLayoutSpent
+        fullLayoutPasses += 1
         // The frame takes the now-exact usage bounds at once; the container passes it on.
         // Not `sizeToFit()`: measured, it left the frame at the estimate until a later layout.
         let height = max(minSize.height, layout.usageBoundsForTextContainer.height + 2 * textContainerInset.height)
@@ -884,6 +1144,77 @@ class PlanNSTextView: NSTextView {
     override func didChangeText() {
         super.didChangeText()
         if fullLayoutNext != nil { layOutWholePlan() }
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        observeScrolls()
+    }
+
+    /// Every clip view the page scrolls this view in — observed on exactly those, re-subscribed
+    /// when the chain changes (as `PlanNotesBridge.observeScrolls`).
+    private func observeScrolls() {
+        let clips = PlanNotesBridge.enclosingClips(of: self)
+        let ids = clips.map(ObjectIdentifier.init)
+        guard ids != observedClips else { return }
+        scrollObservers.forEach(NotificationCenter.default.removeObserver)
+        observedClips = ids
+        scrollObservers = clips.map { clip in
+            clip.postsBoundsChangedNotifications = true
+            return NotificationCenter.default.addObserver(forName: NSView.boundsDidChangeNotification, object: clip, queue: nil) { [weak self] _ in
+                MainActor.assumeIsolated { self?.onScroll?() }
+            }
+        }
+    }
+
+    deinit { scrollObservers.forEach(NotificationCenter.default.removeObserver) }
+
+    // MARK: VoiceOver
+
+    /// The plan's outline for VoiceOver: a Headings rotor that steps through the sections and
+    /// lands the caret on each — the outline cue's content, reachable without the pointer. A
+    /// folded section's heading is still listed; landing inside it is a selection change,
+    /// which opens it.
+    override func accessibilityCustomRotors() -> [NSAccessibilityCustomRotor] {
+        [NSAccessibilityCustomRotor(rotorType: .heading, itemSearchDelegate: headingRotor)]
+    }
+
+    private lazy var headingRotor = HeadingRotor(view: self)
+
+    final class HeadingRotor: NSObject, NSAccessibilityCustomRotorItemSearchDelegate {
+        weak var view: PlanNSTextView?
+        init(view: PlanNSTextView) { self.view = view }
+
+        func rotor(_ rotor: NSAccessibilityCustomRotor,
+                   resultFor search: NSAccessibilityCustomRotor.SearchParameters) -> NSAccessibilityCustomRotor.ItemResult? {
+            guard let view, let headings = view.outline?(), !headings.isEmpty else { return nil }
+            let from = search.currentItem?.targetRange.location ?? (search.searchDirection == .next ? -1 : Int.max)
+            let pick = search.searchDirection == .next
+                ? headings.first { $0.line.location > from }
+                : headings.last { $0.line.location < from }
+            guard let heading = pick else { return nil }
+            let item = NSAccessibilityCustomRotor.ItemResult(targetElement: view)
+            item.targetRange = heading.line
+            item.customLabel = heading.title
+            return item
+        }
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        if onFoldClick?(convert(event.locationInWindow, from: nil)) == true { return }
+        super.mouseDown(with: event)
+    }
+
+    /// ⌥⌘← folds the caret's section and ⌥⌘→ opens it — only while this view has focus. No
+    /// menu item uses the chord, and Ghostty's own ⌥⌘← (goto_split) only acts in a focused
+    /// terminal surface (`SurfaceView.performKeyEquivalent` returns early unfocused).
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask).subtracting([.numericPad, .function])
+        if window?.firstResponder === self, mods == [.command, .option], let key = event.specialKey,
+           key == .leftArrow || key == .rightArrow, onFoldKey?(key == .leftArrow) == true {
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
     }
 
     override func updateTrackingAreas() {
@@ -965,6 +1296,8 @@ extension EnvironmentValues {
     @Entry var pageObscuredTop: CGFloat = 0
     /// Scrolls the page to a view by its `.id`; nil outside the detail pane.
     @Entry var pageJump: PageJump?
+    /// Where the pane shows the plan section being read (`PlanReadingPosition`); nil outside it.
+    @Entry var planReading: PlanReadingPosition?
 }
 
 /// Scrolls the detail pane's document — the one scroller the plan is part of — to put a view

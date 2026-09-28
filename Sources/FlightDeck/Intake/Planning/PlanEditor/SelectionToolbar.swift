@@ -304,9 +304,11 @@ final class PlanNotesBridge {
 
     // MARK: Geometry
 
-    /// The top edge of `range`'s first line in window coordinates (y up) — the rail's anchor Y.
+    /// The top edge of `range`'s first line in window coordinates (y up) — the rail's anchor Y;
+    /// for a range inside a folded section, its heading's line.
     private func lineTop(_ range: NSRange) -> CGFloat? {
-        guard let textView, textView.window != nil, let rect = firstLineRect(range) else { return nil }
+        // A quote in a folded section sits beside its heading, not among the detached notes.
+        guard let textView, textView.window != nil, let rect = firstLineRect(textView.visibleProxy?(range) ?? range) else { return nil }
         return textView.convert(rect, to: nil).maxY
     }
 

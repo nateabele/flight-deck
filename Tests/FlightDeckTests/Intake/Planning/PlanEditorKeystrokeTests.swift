@@ -121,4 +121,42 @@ final class PlanEditorKeystrokeTests: XCTestCase {
         print("PlanEditor keystroke timing: median \(median) over \(keys) (2000 lines, 10 notes, hot §4)")
         XCTAssertLessThan(median, .milliseconds(16))
     }
+
+    /// Dragging the window's edge reflows the plan live: each tick re-wraps what is on screen at
+    /// the new width, within a frame, and a burst of ticks leaves ONE whole-plan pass behind it
+    /// rather than one per tick.
+    @MainActor
+    func testResizeReflowIsUnderAFrame() {
+        let (coordinator, container, _, window) = Self.editor()
+        defer { coordinator.timer?.invalidate(); window.close() }
+        let view = container.textView
+        let settle = { let until = Date().addingTimeInterval(3); while view.layingOutWholePlan, Date() < until { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) } }
+        settle()
+        let passes = view.fullLayoutPasses
+        let clock = ContinuousClock()
+        var samples: [Duration] = []
+        for i in 0..<30 {
+            let width: CGFloat = 900 - CGFloat(i % 10) * 20
+            samples.append(clock.measure {
+                view.setFrameSize(NSSize(width: width, height: view.frame.height))
+                // The viewport re-laid at the new width explicitly: `displayIfNeeded` alone
+                // measured 0.2 ms, too cheap to have re-wrapped anything.
+                view.textLayoutManager?.textViewportLayoutController.layoutViewport()
+                view.displayIfNeeded()
+            })
+        }
+        let median = samples.sorted()[samples.count / 2]
+        print("PlanEditor resize tick timing: median \(median) over \(samples.count) (2000 lines)")
+        XCTAssertLessThan(median, .milliseconds(16))
+        settle()
+        XCTAssertEqual(view.fullLayoutPasses, passes + 1, "thirty ticks in one turn leave one whole-plan pass")
+        XCTAssertEqual(view.textContainer?.size.width, PlanGutter.textWidth(viewWidth: view.frame.width, churn: view.showsChurn))
+        let layout = view.textLayoutManager!
+        var widest: CGFloat = 0
+        layout.enumerateTextLayoutFragments(from: layout.documentRange.location, options: [.ensuresLayout]) { fragment in
+            widest = max(widest, fragment.textLineFragments.map { $0.typographicBounds.maxX }.max() ?? 0)
+            return true
+        }
+        XCTAssertLessThanOrEqual(widest, view.textContainer!.size.width + 0.5, "every line wrapped to the final width")
+    }
 }
