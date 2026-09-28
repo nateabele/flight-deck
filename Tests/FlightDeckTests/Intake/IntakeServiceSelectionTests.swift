@@ -79,4 +79,35 @@ final class IntakeServiceSelectionTests: XCTestCase {
         let relaunched = makeService()
         XCTAssertEqual(relaunched.selection(forProject: "/a"), id)
     }
+
+    // MARK: - Inspector
+
+    /// The inspector's open/closed state is per project and survives a switch away and back —
+    /// it was `@State` on `ProjectView`, which SwiftUI resets on a switch away and back (see
+    /// `selectedIntake`), so the notes rail closed itself behind the human.
+    func testInspectorShownIsPerProjectAndSurvivesSwitch() {
+        let svc = makeService()
+        XCTAssertFalse(svc.inspectorShown(forProject: "/a"), "hidden by default (spec §3)")
+        svc.setInspectorShown(true, inProject: "/a")
+        XCTAssertTrue(svc.inspectorShown(forProject: "/a"))
+        XCTAssertFalse(svc.inspectorShown(forProject: "/b"), "opening it in one project must not open it in another")
+        // Same key normalization as the selection: a trailing slash is the same project.
+        XCTAssertTrue(svc.inspectorShown(forProject: "/a/"))
+    }
+
+    /// Closing sticks — the original report was an inspector that could not be closed.
+    func testInspectorCloses() {
+        let svc = makeService()
+        svc.setInspectorShown(true, inProject: "/a")
+        svc.setInspectorShown(false, inProject: "/a")
+        XCTAssertFalse(svc.inspectorShown(forProject: "/a"))
+        XCTAssertFalse(makeService().inspectorShown(forProject: "/a"), "a relaunch must not reopen a closed inspector")
+    }
+
+    func testInspectorShownPersistsAcrossServiceInstances() {
+        makeService().setInspectorShown(true, inProject: "/a")
+        let relaunched = makeService()
+        XCTAssertTrue(relaunched.inspectorShown(forProject: "/a"))
+        XCTAssertFalse(relaunched.inspectorShown(forProject: "/b"))
+    }
 }

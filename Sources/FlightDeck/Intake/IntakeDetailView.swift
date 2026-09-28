@@ -22,7 +22,8 @@ struct IntakeDetailView: View {
     /// lives on `ProjectView`, not here, because `ReleaseReviewView` loads its review model
     /// independently in a `.task` keyed on the id ProjectView hands it.
     let onOpenReview: () -> Void
-    /// Owned by `ProjectView`, whose toolbar button (⌥⌘I) toggles it; Edit in Inspector opens it.
+    /// Per project, held by `IntakeService` (`inspectorShown(forProject:)`); `ProjectView`'s
+    /// toolbar button (⌥⌘I) toggles it, and Edit in Inspector and the notes open it.
     @Binding var showsInspector: Bool
 
     /// Answer drafts for `.needsAnswers`, indexed the same as the current exchange's
@@ -170,7 +171,7 @@ struct IntakeDetailView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .accessibilityIdentifier("intake-detail")
-        .inspector(isPresented: $showsInspector) {
+        .inspector(isPresented: inspectorPresented) {
             inspector
                 .inspectorColumnWidth(min: 300, ideal: 440, max: 640)
         }
@@ -197,6 +198,23 @@ struct IntakeDetailView: View {
         .onChange(of: service.notes(intake.id), initial: true) { _, onTape in notes.tapeNotes = onTape }
         // Choosing a seat is asking the inspector about the run, not the plan.
         .onChange(of: selectedSeat) { _, seat in if seat != nil { notes.planFocused = false } }
+    }
+
+    /// `showsInspector` as the column is handed it. The column writes back when AppKit's
+    /// collapse animation completes, and a close pressed while the column is still opening is
+    /// lost: AppKit finishes the open, and the write-back says `true` over the human's close —
+    /// ⌥⌘I or the toolbar hid the inspector and it came straight back. The open took about a
+    /// second with the plan relaying out beside it (`ProjectViewInspectorLiveTests`, offscreen),
+    /// so the window is wide. Nothing but this pane's
+    /// own openers has a reason to open the column, so an open it reports while closed is that
+    /// lost close: accept what it says, then close again, now that nothing is animating. A drag
+    /// that collapses the column is a real close and lands as is.
+    private var inspectorPresented: Binding<Bool> {
+        Binding(get: { showsInspector }, set: { [$showsInspector] shown in
+            let reopenedItself = shown && !$showsInspector.wrappedValue
+            $showsInspector.wrappedValue = shown
+            if reopenedItself { DispatchQueue.main.async { $showsInspector.wrappedValue = false } }
+        })
     }
 
     // MARK: - Header
