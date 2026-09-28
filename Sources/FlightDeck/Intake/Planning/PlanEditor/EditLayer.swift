@@ -431,35 +431,29 @@ enum PlanGutter {
     static let laneGap: CGFloat = 5
     /// A caption and one small bar per round of a cycle.
     static let churnWidth: CGFloat = ChurnLaneView.width
-    /// Last lane to the text.
-    static let textGap: CGFloat = 8
+    /// Last lane to the text — and the column a heading's fold chevron sits in
+    /// (`PlanFoldGutter`), between the edit bars and the words, only on a hovered or folded
+    /// heading.
+    static let textGap: CGFloat = 18
+    /// The chevron column's centre, from the text's leading edge (negative: left of it).
+    static let chevronCenter: CGFloat = -9
 
     /// Where the text begins, from the text view's leading edge.
     static func width(churn: Bool) -> CGFloat {
         leading + (churn ? churnWidth + laneGap : 0) + editWidth + textGap
     }
 
-    /// The plan's measure. Full-pane lines on a wide window ran to 150 characters, past what
-    /// reads comfortably, and left no room beside the text: the versions card and note cards
-    /// could only open over it. Capped, the text keeps a column and the rest is trailing room.
-    static let readableWidth: CGFloat = 720
-    /// Text to the view's trailing edge, when the pane is narrower than the measure.
-    static let trailingMargin: CGFloat = 8
-    /// Room kept past the text for a card opened beside it (`SectionVersionsCard` is 320 wide,
-    /// plus its gap to the text and to the window's edge).
-    static let sideRoom: CGFloat = 340
-    /// The narrowest the measure gets to make that room. Below it the text takes the width and
-    /// a card opens over it: a column of a few words is worse than a covered line.
-    static let minimumMeasure: CGFloat = 480
+    /// Text to the view's trailing edge: a margin that reads as one rather than words running
+    /// into the pane's edge.
+    static let trailingMargin: CGFloat = 32
 
-    /// The text container's width in a text view `viewWidth` wide: the readable measure, less
-    /// what it takes to leave `sideRoom` beside it — measured at a 1100 pt window with the churn
-    /// column open, a 720 pt measure left 180 pt, and the versions card flipped back over the
-    /// text — unless that would squeeze the text under `minimumMeasure`.
+    /// The text container's width in a text view `viewWidth` wide: the pane's width, less the
+    /// gutter lanes and the trailing margin. The plan wraps to the pane like any text editor —
+    /// a fixed 720 pt measure broke every long paragraph at the same column however wide the
+    /// window was, which read as hard line breaks in the plan (Nate: "arbitrary fixed-width
+    /// line breaks"). Resizing reflows it (`PlanNSTextView.fitContainer`).
     static func textWidth(viewWidth: CGFloat, churn: Bool) -> CGFloat {
-        let available = viewWidth - width(churn: churn) - trailingMargin
-        let beside = available - sideRoom
-        return max(0, min(readableWidth, beside >= minimumMeasure ? beside : available))
+        max(0, viewWidth - width(churn: churn) - trailingMargin)
     }
 
     /// A lane's horizontal extent in the text view's coordinates.
@@ -479,10 +473,32 @@ enum PlanGutter {
 // MARK: - Drawing
 
 /// Every paragraph of the plan is laid out as one of these (`EditLayerLayout`): it draws the
-/// edit lane's bars and the deletion ghosts into the room `EditLayer.apply` made for them.
-/// Drawing, not text, is what keeps the stored plan byte-identical to `plan.user.md`.
+/// edit lane's bars and the deletion ghosts into the room `EditLayer.apply` made for them, and
+/// behind the text a fenced block's box and a quote's bar (`MarkdownStyler`'s `.planCodeBox`,
+/// `.planQuote`). Drawing, not text, is what keeps the stored plan byte-identical to
+/// `plan.user.md`.
 final class EditLayerFragment: NSTextLayoutFragment {
     private var paragraphText: NSAttributedString? { (textElement as? NSTextParagraph)?.attributedString }
+
+    private var codeBox: CodeBox? {
+        guard let text = paragraphText, text.length > 0, let raw = text.attribute(.planCodeBox, at: 0, effectiveRange: nil) as? Int
+        else { return nil }
+        return CodeBox(rawValue: raw)
+    }
+
+    private var isQuote: Bool {
+        guard let text = paragraphText, text.length > 0 else { return false }
+        return text.attribute(.planQuote, at: 0, effectiveRange: nil) != nil
+    }
+
+    /// The box behind a fenced block's line, in this fragment's coordinates: the text
+    /// container's full width, and the fragment's full height — its spacing included, which is
+    /// where the fences' padding is — so consecutive lines' bands meet with no seam.
+    private var codeBand: CGRect? {
+        guard codeBox != nil else { return nil }
+        let width = textLayoutManager?.textContainer?.size.width ?? layoutFragmentFrame.width
+        return CGRect(x: -layoutFragmentFrame.minX, y: 0, width: width, height: layoutFragmentFrame.height)
+    }
 
     private var ghosts: [(index: Int, ghost: EditGhost)] {
         guard let text = paragraphText else { return [] }
@@ -498,6 +514,7 @@ final class EditLayerFragment: NSTextLayoutFragment {
     /// own bounds: both must be inside the surface, or they are clipped away.
     override var renderingSurfaceBounds: CGRect {
         var bounds = super.renderingSurfaceBounds
+        if let band = codeBand { bounds = bounds.union(band) }
         let gutterX = PlanGutter.offset(.edit) - layoutFragmentFrame.minX - 1
         bounds = bounds.union(CGRect(x: gutterX, y: bounds.minY, width: 1, height: bounds.height))
         for (_, ghost) in ghosts where ghost.placement == .above || ghost.placement == .below {
@@ -509,6 +526,7 @@ final class EditLayerFragment: NSTextLayoutFragment {
     }
 
     override func draw(at point: CGPoint, in context: CGContext) {
+        drawBlockDecoration(at: point, in: context)
         super.draw(at: point, in: context)
         guard let text = paragraphText, !textLineFragments.isEmpty else { return }
         let ghosts = ghosts
@@ -579,6 +597,33 @@ final class EditLayerFragment: NSTextLayoutFragment {
             case (true, false): bar(b.minY, b.maxY, EditLayer.barColor)
             default: bar(b.minY, b.maxY, EditLayer.deletedColor)
             }
+        }
+    }
+
+    /// A code line's share of its block's rounded box, or a quote line's bar — under the text.
+    private func drawBlockDecoration(at point: CGPoint, in context: CGContext) {
+        let theme = PlanTheme.standard
+        if let band = codeBand, let box = codeBox {
+            let radius: CGFloat = 6
+            // Rounded only where the box ends: a middle line's band runs past its own edges by
+            // the radius, and the clip cuts the overrun off square.
+            var rect = band.offsetBy(dx: point.x, dy: point.y)
+            if !box.contains(.first) { rect.origin.y -= radius; rect.size.height += radius }
+            if !box.contains(.last) { rect.size.height += radius }
+            context.saveGState()
+            context.clip(to: band.offsetBy(dx: point.x, dy: point.y))
+            context.addPath(CGPath(roundedRect: rect, cornerWidth: radius, cornerHeight: radius, transform: nil))
+            context.setFillColor(theme.codeBlockBackground.cgColor)
+            context.fillPath()
+            context.restoreGState()
+        }
+        if isQuote, let first = textLineFragments.first, let last = textLineFragments.last {
+            let top = first.typographicBounds.minY, bottom = last.typographicBounds.maxY
+            context.setFillColor(theme.quoteBar.cgColor)
+            context.addPath(CGPath(roundedRect: CGRect(x: point.x - layoutFragmentFrame.minX + 2, y: point.y + top,
+                                                       width: 3, height: max(bottom - top, 1)),
+                                   cornerWidth: 1.5, cornerHeight: 1.5, transform: nil))
+            context.fillPath()
         }
     }
 
@@ -707,6 +752,9 @@ struct PlanEditHooks {
     /// The intake's own router (`IntakeService.editRouter`), which outlives the section; nil
     /// gives the section one of its own (renders, tests).
     var router: PlanEditRouter?
+    /// The intake's folded sections (`IntakeService.planFolds`), which outlive the section; nil
+    /// keeps them in the editor for as long as it lives.
+    var folds: PlanFoldStore?
 }
 
 /// `PlanLayers.userDiff`'s hunks, found without splitting and hashing the whole plan on every
