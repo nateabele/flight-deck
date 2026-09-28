@@ -171,6 +171,13 @@ final class SessionStore: ObservableObject {
     /// cannot recurse.
     @Published var selectedSessionID: UUID? {
         didSet {
+            let target = selectedSessionID.map(SelectionTarget.session)
+            noteSelectionChange(from: recordableSelection, to: target)
+            // Not simply `!isSuppressingHistory` folded into the call above: `recordableSelection`
+            // must stay stale across a suppressed change too, or a tab that only exists because
+            // it was just created, reopened, or resumed would still become the `from` the very
+            // next real click records — see `recordableSelection`'s own doc comment.
+            if !isSuppressingHistory { recordableSelection = target }
             #if DEBUG
             Self.selectionDebugLogger.debug(
                 "selectedSessionID old=\(oldValue?.uuidString ?? "nil", privacy: .public) new=\(self.selectedSessionID?.uuidString ?? "nil", privacy: .public) reason=\(self.selectionChangeReason, privacy: .public) t=\(Date().timeIntervalSince1970, privacy: .public)"
@@ -204,6 +211,29 @@ final class SessionStore: ObservableObject {
             renameRequest = nil
             persist()
         }
+    }
+
+    /// See `SelectionHistory`. Recorded from `selectedSessionID`'s `didSet` — the one funnel
+    /// every selection change passes through, the sidebar's `List(selection:)` binding
+    /// included, which is why recording in `selectSession(_:)` would miss every click.
+    private(set) var selectionHistory = SelectionHistory()
+
+    /// Set while `goBack`/`goForward`, `restore`, or `select(_:selecting:)` assign the
+    /// selection: a traversal is not a new place, restoring last run's selection is not a
+    /// navigation, and neither is landing on a tab that was just created, reopened, or resumed.
+    private var isSuppressingHistory = false
+
+    /// `noteSelectionChange`'s `from` on the next call, which is deliberately NOT simply
+    /// `selectedSessionID`'s previous value. A tab arrived at through a suppressed change (see
+    /// `isSuppressingHistory`) was never a place the user chose to be, so it must not become
+    /// somewhere ⌃⌘← can return to — left stale exactly when `isSuppressingHistory` is true, so
+    /// three `newSession(in:)` calls in a row seed no dead-weight Back entries before the user
+    /// has clicked anything.
+    private var recordableSelection: SelectionTarget?
+
+    private func noteSelectionChange(from: SelectionTarget?, to: SelectionTarget?) {
+        guard !isSuppressingHistory else { return }
+        selectionHistory.record(from: from, to: to)
     }
 
     /// Sessions that finished while the user was not looking at them, rendered as the unread
@@ -2323,7 +2353,13 @@ final class SessionStore: ObservableObject {
         #if DEBUG
         selectionChangeReason = "select(_:selecting:)"
         #endif
+        // A tab this method creates, reopens or resumes is where the user is *arriving*, not
+        // somewhere they chose to leave — recording it would mean ⌘N and ⌘⇧T silently grew
+        // the Back stack on every use, and three tabs opened in a row would make ⌃⌘← cycle
+        // through them instead of returning to whatever the user actually had open before.
+        isSuppressingHistory = true
         selectedSessionID = id
+        isSuppressingHistory = false
     }
 
     /// The tail every creation shares: file the tab, reveal it, select it, save.
@@ -2991,9 +3027,14 @@ final class SessionStore: ObservableObject {
         #if DEBUG
         selectionChangeReason = "restore()"
         #endif
+        // Loaded BEFORE the assignment below: its `didSet` persists, and with the history
+        // still empty that save would overwrite last run's stacks on every launch.
+        selectionHistory = snapshot.selectionHistory ?? SelectionHistory()
+        isSuppressingHistory = true
         selectedSessionID = snapshot.selectedSessionID.flatMap {
             restoredIDs.contains($0) ? $0 : nil
         } ?? restoredIDs.first
+        isSuppressingHistory = false
         persist()
         // Started only when a codex tab actually came back, which is what keeps the app-server
         // lazy: a user who restores nothing but claude tabs must never have `codex` spawned
@@ -3535,6 +3576,7 @@ final class SessionStore: ObservableObject {
         // Stamped on every save so the next launch can tell "this run is still going" from
         // "this run died and left its children behind".
         snapshot.owner = Self.selfIdentity
+        snapshot.selectionHistory = selectionHistory.isEmpty ? nil : selectionHistory
         persistence?.save(snapshot)
     }
 
@@ -3557,6 +3599,32 @@ final class SessionStore: ObservableObject {
 
     /// ⌘⇧[. See `selectNextSession()`.
     func selectPreviousSession() { cycleSelection(forward: false) }
+
+    /// ⌃⌘←. No-op when nothing earlier is still open.
+    func goBack() { traverseHistory { $0.goBack(from: $1, isLive: $2) } }
+
+    /// ⌃⌘→. See `goBack()`.
+    func goForward() { traverseHistory { $0.goForward(from: $1, isLive: $2) } }
+
+    private func traverseHistory(
+        _ step: (inout SelectionHistory, SelectionTarget?, (SelectionTarget) -> Bool) -> SelectionTarget?
+    ) {
+        let current = selectedSessionID.map(SelectionTarget.session)
+        let destination = step(&selectionHistory, current) { [self] target in
+            switch target {
+            case .session(let id): return locate(id) != nil
+            case .project: return false  // master has no project selection; see fi-tab-nav
+            }
+        }
+        guard case .session(let id)? = destination else { return }
+        #if DEBUG
+        selectionChangeReason = "traverseHistory"
+        #endif
+        isSuppressingHistory = true
+        defer { isSuppressingHistory = false }
+        // The `didSet` persists, which also writes the stacks `step` just mutated.
+        selectedSessionID = id
+    }
 
     /// Context-menu "Mark as Unread". `unreadIdle` is `private(set)`, so this is the sidebar's
     /// only way in.
