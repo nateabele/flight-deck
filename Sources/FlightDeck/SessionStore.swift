@@ -173,15 +173,18 @@ final class SessionStore: ObservableObject {
     /// cannot recurse.
     @Published var selectedSessionID: UUID? {
         didSet {
+            // Computed before the project-clearing line below, on purpose: what the detail
+            // column showed a moment ago is what belongs in history, and if a project view was
+            // up, that was the project, not whatever session `oldValue` names underneath it.
+            noteSelectionChange(
+                from: displayedTarget(session: oldValue),
+                to: selectedSessionID.map(SelectionTarget.session)
+            )
             // A session and a project are mutually exclusive detail-column contents: selecting
             // one implicitly deselects the other. `didSet` fires on every assignment (see the
             // comment above), so a session reselected onto itself still clears a stray project
             // selection rather than leaving `RootView` showing both a project and a session.
             if selectedSessionID != nil { selectedProjectID = nil }
-            noteSelectionChange(
-                from: oldValue.map(SelectionTarget.session),
-                to: selectedSessionID.map(SelectionTarget.session)
-            )
             #if DEBUG
             Self.selectionDebugLogger.debug(
                 "selectedSessionID old=\(oldValue?.uuidString ?? "nil", privacy: .public) new=\(self.selectedSessionID?.uuidString ?? "nil", privacy: .public) reason=\(self.selectionChangeReason, privacy: .public) t=\(Date().timeIntervalSince1970, privacy: .public)"
@@ -221,7 +224,14 @@ final class SessionStore: ObservableObject {
     /// what every existing restore path expects.
     @Published private(set) var selectedProjectID: UUID?
 
-    func selectProject(_ id: UUID) { selectedProjectID = id }
+    func selectProject(_ id: UUID) {
+        let from = displayedTarget(session: selectedSessionID)
+        selectedProjectID = id
+        noteSelectionChange(from: from, to: displayedTarget(session: selectedSessionID))
+        // Project selection is not persisted, but the history is — and nothing else here
+        // persists, so without this a relaunch would lose the entry just recorded.
+        persist()
+    }
 
     /// The session ⌘R and Return-to-rename act on: the selected one, but only while its
     /// terminal is what the detail column shows. Behind a project view it is still selected
@@ -248,7 +258,9 @@ final class SessionStore: ObservableObject {
     /// Mirrors the `didSet`'s own clear exactly — same helper, same lack of an `appIsActive()`
     /// gate — so returning to a session reads as "viewed" the same way selecting it fresh does.
     func deselectProject() {
+        let from = displayedTarget(session: selectedSessionID)
         selectedProjectID = nil
+        noteSelectionChange(from: from, to: selectedSessionID.map(SelectionTarget.session))
         if let id = selectedSessionID { setUnread(id, false) }
         persist()
     }
@@ -267,6 +279,16 @@ final class SessionStore: ObservableObject {
     private func noteSelectionChange(from: SelectionTarget?, to: SelectionTarget?) {
         guard !isSuppressingHistory else { return }
         selectionHistory.record(from: from, to: to)
+    }
+
+    /// What the detail column shows: the project view when one is up, else the session. The
+    /// history records what the user saw, so a session hidden behind a project view is not a
+    /// place they were.
+    private func displayedTarget(session: UUID?) -> SelectionTarget? {
+        if let pid = selectedProjectID, let repo = repos.first(where: { $0.id == pid }) {
+            return .project(path: repo.url.standardizedFileURL.path)
+        }
+        return session.map(SelectionTarget.session)
     }
 
     /// Sessions that finished while the user was not looking at them, rendered as the unread
@@ -3925,24 +3947,45 @@ final class SessionStore: ObservableObject {
     private func traverseHistory(
         _ step: (inout SelectionHistory, SelectionTarget?, (SelectionTarget) -> Bool) -> SelectionTarget?
     ) {
-        let current = selectedSessionID.map(SelectionTarget.session)
+        let current = displayedTarget(session: selectedSessionID)
         let destination = step(&selectionHistory, current) { [self] target in
+            // Never land back on the row already showing — a keypress that visibly does
+            // nothing but still eats a history entry. A session hidden behind its own project
+            // view counts as "already showing" too, since `current` is the project in that
+            // case, not the session underneath it — this one comparison covers both a session
+            // and a project without a separate `selectedProjectID` check in each branch below.
+            guard target != current else { return false }
             switch target {
-            case .session(let id):
-                // `id != selectedSessionID` too: without it, Back can land on the row already
-                // showing — a keypress that visibly does nothing but still eats a history entry.
-                return locate(id) != nil && id != selectedSessionID
-            case .project: return false  // master has no project selection; see fi-tab-nav
+            case .session(let id): return locate(id) != nil
+            case .project(let path): return repos.contains { $0.url.standardizedFileURL.path == path }
             }
         }
-        guard case .session(let id)? = destination else { return }
+        guard let destination else { return }
         #if DEBUG
         selectionChangeReason = "traverseHistory"
         #endif
         isSuppressingHistory = true
         defer { isSuppressingHistory = false }
-        // The `didSet` persists, which also writes the stacks `step` just mutated.
-        selectedSessionID = id
+        // The `didSet`/`selectProject`/`deselectProject` each persist on their own, which also
+        // writes the stacks `step` just mutated.
+        switch destination {
+        case .session(let id):
+            // The destination session is already `selectedSessionID` when a project view was
+            // covering it: reassigning the same id would be a no-op that skips the `didSet`
+            // logic that actually closes the project view, so this case goes through
+            // `deselectProject()` instead.
+            if selectedProjectID != nil, selectedSessionID == id { deselectProject() }
+            else { selectedSessionID = id }
+        case .project(let path):
+            if let repo = repos.first(where: { $0.url.standardizedFileURL.path == path }) {
+                selectProject(repo.id)
+                #if DEBUG
+                // Same leak `cycleSelection` has: `selectProject` never touches
+                // `selectedSessionID`, so nothing resets this after the debug log above reads it.
+                selectionChangeReason = "unknown"
+                #endif
+            }
+        }
     }
 
     /// Context-menu "Mark as Unread". `unreadIdle` is `private(set)`, so this is the sidebar's
