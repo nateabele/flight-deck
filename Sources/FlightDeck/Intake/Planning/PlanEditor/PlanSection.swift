@@ -16,22 +16,25 @@ struct PlanSection: View {
     @Binding var selection: Int?
     var initialMode: ShapingModel.ViewerMode = .plan
     var editHooks = PlanEditHooks()
+    /// Highlight-and-annotate (spec §7.3); nil leaves the plan unannotatable.
+    var notes: PlanNotesController?
 
     init(intakeID: UUID, tape: Tape, loadFile: @escaping (Int, String) -> Data?, onSend: @escaping (TapeCommand) -> Void,
-         selection: Binding<Int?> = .constant(nil), mode: ShapingModel.ViewerMode = .plan) {
+         selection: Binding<Int?> = .constant(nil), mode: ShapingModel.ViewerMode = .plan, notes: PlanNotesController? = nil) {
         self.intakeID = intakeID
         self.tape = tape
         self.loadFile = loadFile
         self.onSend = onSend
         _selection = selection
         initialMode = mode
+        self.notes = notes
     }
 
     var body: some View {
         // Keyed on the intake so switching intakes starts a fresh editor, instead of offering
         // the other intake's plan as "a new round landed".
         PlanSectionBody(tape: tape, loadFile: loadFile, onSend: onSend, selection: $selection, mode: initialMode,
-                        hooks: editHooks)
+                        hooks: editHooks, notes: notes)
             .id(intakeID)
     }
 
@@ -129,6 +132,7 @@ private struct PlanSectionBody: View {
     /// The last stale-edit merge, so the next waits for it: each merges onto the head as the
     /// one before it left it.
     @State private var retargeting: Task<Void, Never>?
+    let notes: PlanNotesController?
 
     struct Loaded: Equatable {
         var checkpoint: Int
@@ -137,13 +141,15 @@ private struct PlanSectionBody: View {
     }
 
     init(tape: Tape, loadFile: @escaping (Int, String) -> Data?, onSend: @escaping (TapeCommand) -> Void,
-         selection: Binding<Int?>, mode: ShapingModel.ViewerMode, hooks: PlanEditHooks) {
+         selection: Binding<Int?>, mode: ShapingModel.ViewerMode, hooks: PlanEditHooks,
+         notes: PlanNotesController? = nil) {
         self.tape = tape
         self.loadFile = loadFile
         self.onSend = onSend
         _selection = selection
         _mode = State(initialValue: mode)
         self.hooks = hooks
+        self.notes = notes
     }
 
     var body: some View {
@@ -178,6 +184,11 @@ private struct PlanSectionBody: View {
             guard edited, !hooks.noteShown, !showKeptNote else { return }
             showKeptNote = true
             hooks.onNoteShown()
+        }
+        // The next-round tooltip's "3 edits" is the chip's count, taken only on the head: a
+        // past round's edits are not what the next round is sent.
+        .onChange(of: shown?.editable == true ? hunks.count : nil, initial: true) { _, count in
+            if let count { notes?.setEdits(count) }
         }
     }
 
@@ -306,6 +317,8 @@ private struct PlanSectionBody: View {
                          },
                          incomingIsNavigation: incomingIsNavigation)
                 .editLayer(generated: generated[shown.checkpoint])
+                .annotating(notes)
+                .onChange(of: shown.checkpoint, initial: true) { _, checkpoint in notes?.checkpoint = checkpoint }
         } else {
             // Vertical only: a horizontal axis gives the text infinite width, which centred it.
             ScrollView(.vertical) {

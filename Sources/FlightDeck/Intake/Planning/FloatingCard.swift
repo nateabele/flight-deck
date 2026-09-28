@@ -4,13 +4,19 @@ import SwiftUI
 /// Where a label's card goes, in AppKit screen coordinates (y up): under the label with leading
 /// edges aligned, flipped above it when the window's bottom edge leaves no room below, and slid
 /// back inside the window's sides. Pure, so `CardPlacementTests` pins the flip without a window.
+///
+/// `prefersAbove` is the selection toolbar's mirror image: over the selection, where it doesn't
+/// cover the lines being read next, flipped below only when the top edge leaves no room.
 enum CardPlacement {
-    static func frame(for card: CGSize, anchor: CGRect, within bounds: CGRect, gap: CGFloat) -> CGRect {
+    static func frame(for card: CGSize, anchor: CGRect, within bounds: CGRect, gap: CGFloat,
+                      prefersAbove: Bool = false) -> CGRect {
         let below = anchor.minY - gap - card.height
         let above = anchor.maxY + gap
         // Below is the reading direction; flip only when that runs off the bottom AND above fits,
         // so a squat window doesn't trade one clipped card for a card covering its own row.
-        let y = below < bounds.minY && above + card.height <= bounds.maxY ? above : below
+        let y = prefersAbove
+            ? (above + card.height > bounds.maxY && below >= bounds.minY ? below : above)
+            : (below < bounds.minY && above + card.height <= bounds.maxY ? above : below)
         let x = min(max(anchor.minX, bounds.minX), max(bounds.minX, bounds.maxX - card.width))
         return CGRect(x: x, y: y, width: card.width, height: card.height)
     }
@@ -66,6 +72,12 @@ final class FloatingCardAnchor: NSView {
     private static let shadowRoom: CGFloat = 34
     private static let gap: CGFloat = 9
 
+    /// The selection toolbar's variant: its panel takes clicks (still non-activating, and a
+    /// borderless panel never becomes key, so the editor keeps focus and its selection), and it
+    /// opens above its anchor. Set before the first `present`.
+    var interactive = false
+    var prefersAbove = false
+
     private var card: AnyView?
     private var dismissed = false
     private var panel: NSPanel?
@@ -108,7 +120,7 @@ final class FloatingCardAnchor: NSView {
         guard let card, !dismissed, let window, !window.isMiniaturized else { return close() }
         let room = Self.shadowRoom
         let content = AnyView(card.padding(room).accessibilityHidden(true))
-        let host = self.host ?? NSHostingView(rootView: content)
+        let host = self.host ?? FirstMouseHostingView(rootView: content)
         host.rootView = content
         let panel = self.panel ?? makePanel(host)
         self.host = host
@@ -118,7 +130,8 @@ final class FloatingCardAnchor: NSView {
         let size = CGSize(width: fitting.width - 2 * room, height: fitting.height - 2 * room)
         let anchor = window.convertToScreen(convert(bounds, to: nil))
         let within = CardPlacement.bounds(window: window.frame, screen: window.screen?.visibleFrame)
-        let frame = CardPlacement.frame(for: size, anchor: anchor, within: within, gap: Self.gap).insetBy(dx: -room, dy: -room)
+        let frame = CardPlacement.frame(for: size, anchor: anchor, within: within, gap: Self.gap, prefersAbove: prefersAbove)
+            .insetBy(dx: -room, dy: -room)
         guard frame != placed || panel.parent == nil else { return }
         placed = frame
         placements += 1
@@ -130,6 +143,10 @@ final class FloatingCardAnchor: NSView {
     /// (Re)subscribes to the events that must close the card whenever the window or the
     /// enclosing scroll view changes. Delivered synchronously (`queue: nil`) on the posting
     /// thread — all of these post on main — so the card is gone before the next frame draws.
+    ///
+    /// Every enclosing scroll view, not just the nearest: the plan editor scrolls inside the
+    /// detail document, which scrolls too, and either one slides the text out from under a
+    /// toolbar left hanging in place.
     private func observe() {
         let clip = enclosingScrollView?.contentView
         guard window !== observedWindow || clip !== observedClip else { return }
@@ -147,9 +164,12 @@ final class FloatingCardAnchor: NSView {
             center.addObserver(forName: NSWindow.didMiniaturizeNotification, object: window, queue: nil, using: dismiss),
             center.addObserver(forName: NSApplication.didResignActiveNotification, object: nil, queue: nil, using: dismiss),
         ]
-        if let clip {
+        var scroll = enclosingScrollView
+        while let current = scroll {
+            let clip = current.contentView
             clip.postsBoundsChangedNotifications = true
             observers.append(center.addObserver(forName: NSView.boundsDidChangeNotification, object: clip, queue: nil, using: dismiss))
+            scroll = current.superview?.enclosingScrollView
         }
     }
 
@@ -167,7 +187,7 @@ final class FloatingCardAnchor: NSView {
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = false        // the card draws its own
-        panel.ignoresMouseEvents = true
+        panel.ignoresMouseEvents = !interactive
         panel.isReleasedWhenClosed = false
         host.wantsLayer = true
         panel.contentView = host
@@ -184,6 +204,12 @@ final class FloatingCardAnchor: NSView {
         host = nil
         placed = nil
     }
+}
+
+/// Takes the click that lands on an interactive card even though its panel never becomes key —
+/// without it the first click on a toolbar button would only try to activate the panel.
+private final class FirstMouseHostingView: NSHostingView<AnyView> {
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
 
 /// Calls `onScroll` whenever the enclosing scroll view scrolls — how the board forgets a hover

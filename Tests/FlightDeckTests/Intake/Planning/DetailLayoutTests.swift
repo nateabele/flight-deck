@@ -91,6 +91,16 @@ final class DetailLayoutTests: XCTestCase {
         XCTAssertEqual(DetailLayout.inspector(for: .review, preset: .fullPlan), I.nothing)
     }
 
+    /// Spec §7.3: the notes rail is the inspector while the plan is focused — only while
+    /// shaping, the one state with a plan to annotate.
+    func testInspectorHostsTheNotesRailWhileThePlanIsFocused() {
+        typealias I = DetailLayout.InspectorContent
+        XCTAssertEqual(DetailLayout.inspector(for: .shaping, preset: .fullPlan, planFocused: true), I.notesRail)
+        XCTAssertEqual(DetailLayout.inspector(for: .shaping, preset: .fullPlan, planFocused: false), I.seat)
+        XCTAssertEqual(DetailLayout.inspector(for: .awaitingChoice, preset: .fullPlan, planFocused: true), I.roundsEditor)
+        XCTAssertEqual(DetailLayout.inspector(for: .review, preset: .fullPlan, planFocused: true), I.nothing)
+    }
+
     /// Back is navigation in the plan viewer, never a tape command (the `ControlBar.onBack`
     /// contract): one checkpoint earlier than the one shown, and nowhere from the first.
     func testBackSelectsThePreviousCheckpoint() {

@@ -29,6 +29,10 @@ struct ControlBar: View {
     /// one already selected — which dims the key. It never moves the tape: the engine has no
     /// rewind (that needs branching), so Back is navigation, not a transport command.
     var onBack: (() -> Void)?
+    /// What the next round is sent of the human's — "Sends your 3 edits and 4 notes"
+    /// (`NotesRailModel.summary`) — added to every play key's tooltip, since any of them starts
+    /// that round. Nil when there is nothing to send.
+    var nextRound: String?
 
     static let barHeight: CGFloat = 78
 
@@ -105,7 +109,7 @@ struct ControlBar: View {
     }
 
     private func playKey(_ mode: PlayMode, glyph: TransportKey.Glyph, help: String) -> some View {
-        TransportKey(glyph: glyph, help: help, enabled: actions.enabled.contains(button(for: mode)),
+        TransportKey(glyph: glyph, help: nextRound.map { "\(help) · \($0)" } ?? help, enabled: actions.enabled.contains(button(for: mode)),
                      defaultMark: mode == defaultPlay) { play(mode) }
             .onHover { inside in
                 preview = Self.hoverPreview(mode: mode, inside: inside, enabled: actions.enabled.contains(button(for: mode)),

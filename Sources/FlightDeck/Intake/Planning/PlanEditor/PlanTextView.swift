@@ -109,6 +109,9 @@ struct PlanTextView: NSViewRepresentable {
     /// The agents' plan under `text` — set, the human's edits over it draw as a layer
     /// (`EditLayer`); nil draws none.
     var generated: String?
+    /// Highlight-and-annotate (spec §7.3): note highlights, the selection toolbar and the
+    /// rail's line positions, all in `PlanNotesBridge`. Nil leaves the editor as a plain editor.
+    var notes: PlanNotesController?
 
     init(text: Binding<String>, editable: Bool, onCommit: @escaping (String) -> Void, incoming: String?,
          onShowIncoming: @escaping () -> Void, incomingIsNavigation: Bool = false) {
@@ -128,6 +131,12 @@ struct PlanTextView: NSViewRepresentable {
     }
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    func annotating(_ notes: PlanNotesController?) -> PlanTextView {
+        var view = self
+        view.notes = notes
+        return view
+    }
 
     func makeNSView(context: Context) -> PlanEditorContainer {
         let container = PlanEditorContainer(onShow: { [weak coordinator = context.coordinator] in coordinator?.showHeld() })
@@ -154,6 +163,7 @@ struct PlanTextView: NSViewRepresentable {
         container.bannerVisible = coordinator.session.held != nil
         coordinator.layEditLayer(over: generated)
         container.revert.enabled = editable
+        coordinator.notesBridge.attach(notes, to: container.textView)
     }
 
     static func dismantleNSView(_ container: PlanEditorContainer, coordinator: Coordinator) {
@@ -162,6 +172,7 @@ struct PlanTextView: NSViewRepresentable {
         coordinator.timer?.invalidate()
         coordinator.undo.removeAllActions()
         if let text = coordinator.session.endEditing() { coordinator.commit(text) }
+        coordinator.notesBridge.detach()
     }
 
     final class Coordinator: NSObject, NSTextViewDelegate, NSTextStorageDelegate {
@@ -178,6 +189,9 @@ struct PlanTextView: NSViewRepresentable {
         /// into, so ⌘Z after a new head loaded would splice stale edits into it — and the idle
         /// timer would then commit the corrupted plan.
         let undo = UndoManager()
+        /// The editor's notes seam (spec §7.3). Main-actor like everything the delegate
+        /// callbacks it is called from do; hence `assumeIsolated` at each call.
+        let notesBridge = PlanNotesBridge()
         /// Commits whose binding write hasn't run yet — see `commit`.
         private(set) var inFlight = 0
         /// The incoming text already handed to `onShowIncoming`, so a second view update
@@ -212,6 +226,7 @@ struct PlanTextView: NSViewRepresentable {
             pendingEdit = nil
             editCount = 0
             taking = nil
+            MainActor.assumeIsolated { notesBridge.textChanged() }
         }
 
         func receive(_ incoming: String?, navigation: Bool) {
@@ -281,6 +296,7 @@ struct PlanTextView: NSViewRepresentable {
 
         /// Focus came or went: reveal or re-hide the caret block's syntax.
         func focusChanged() {
+            MainActor.assumeIsolated { notesBridge.focusChanged() }
             guard let storage = textView?.textStorage else { return }
             let next = caretBlock()
             guard next != revealed else { return }
@@ -397,6 +413,7 @@ struct PlanTextView: NSViewRepresentable {
                 pendingEdit = nil
                 editCount = 0
             }
+            MainActor.assumeIsolated { notesBridge.textChanged() }
             scheduleIdleCommit()
         }
 
@@ -406,6 +423,7 @@ struct PlanTextView: NSViewRepresentable {
         }
 
         func textViewDidChangeSelection(_ notification: Notification) {
+            MainActor.assumeIsolated { notesBridge.selectionChanged() }
             // Mid-edit selection changes arrive before `textDidChange` re-parses; that pass
             // restyles the caret block itself.
             guard editCount == 0, let storage = textView?.textStorage else { return }

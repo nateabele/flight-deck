@@ -10,8 +10,8 @@ struct PlanningActions {
 
     /// The live card's actions for intake `id`. Extend lengthens the current cycle by one
     /// round — the stage the tape is in when that stage can still grow, else the next one that
-    /// can — and is withheld when nothing can (`TapePlanner` would ignore it). `annotate` opens
-    /// the note editor, which the card owns.
+    /// can — and is withheld when nothing can (`TapePlanner` would ignore it). `annotate` starts a
+    /// note in the notes rail — on the plan's selection if there is one (`PlanNotesController.annotate`).
     @MainActor
     static func shaping(_ id: UUID, service: IntakeService, model: ShapingModel,
                         annotate: @escaping () -> Void) -> PlanningActions {

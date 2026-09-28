@@ -34,6 +34,17 @@ final class CardPlacementTests: XCTestCase {
         XCTAssertEqual(frame.maxY, 140 - 9)
     }
 
+    /// The selection toolbar opens over the selection, and flips under it only when the
+    /// window's top edge leaves no room.
+    func testPrefersAboveFlipsBelowAtTheTop() {
+        let middle = CGRect(x: 300, y: 300, width: 40, height: 18)
+        XCTAssertEqual(CardPlacement.frame(for: card, anchor: middle, within: window, gap: 9, prefersAbove: true).minY,
+                       300 + 18 + 9)
+        let top = CGRect(x: 300, y: 560, width: 40, height: 18)
+        XCTAssertEqual(CardPlacement.frame(for: card, anchor: top, within: window, gap: 9, prefersAbove: true).maxY,
+                       560 - 9, "no room above: under the selection")
+    }
+
     /// A label at the trailing edge slides its card back inside the window rather than
     /// hanging it off the side; one at the leading edge stays put.
     func testClampsHorizontallyInsideTheWindow() {
