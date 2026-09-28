@@ -56,11 +56,20 @@ anything is happening, what it is, or whether another round is worth it.
 
 ## 3. Layout (Direction D)
 
-The project view keeps its Intakes list on the leading side. The selected intake's detail pane is one
+The project view keeps its Intakes list on the leading side. Each row (`IntakeRow`) is the state
+pill as a caption over the intent wrapped to three lines, `IntakeTitle.lead` in semibold running
+into the rest in secondary — Mail's subject-into-preview, one flowing paragraph. The selected intake's detail pane is one
 calm scrolling document, top to bottom:
 
-1. **Header** — "INTAKE · <state>", the intent as the title, and a one-line **progress summary** of
+1. **Header** — "INTAKE · <state>", a short title cut from the intent (`IntakeTitle`: its first
+   sentence; a long one cut at its first clause break, else its last comma in reach, else a word,
+   those two with "…" — never mid-word; `.title3` semibold), and a one-line **progress summary** of
    finished phases (`✓ Triage 3:40 · 41 files   ✓ Draft & Synthesis 9:42 · 412 lines   ✓ Refine ×3`).
+   Under it, unless the title already is the whole intent, a **Request** section styled like
+   Clarifications: one collapsed "Full text · N words" disclosure holding the intent verbatim in
+   secondary, selectable; its open state is kept per intake like the Clarifications rounds. (As
+   built: the whole intent as a `.title2` bold title towered over the page once it ran to a
+   paragraph.)
 2. **Clarifications** — each answered Q&A round is a collapsed "Round N · k questions" disclosure
    (question in secondary semibold, answer in primary, selectable). Present in every later state.
 3. **The live card** — the stage-specific body (below). While shaping, it opens with the control bar

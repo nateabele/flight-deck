@@ -152,12 +152,9 @@ struct ProjectView: View {
                 Text("Intakes").font(.headline).foregroundStyle(.secondary)
                 List(selection: selectionBinding) {
                     ForEach(intakes) { intake in
-                        HStack(spacing: 8) {
-                            IntakeStatePill(intake: intake, tape: intakeService.tapes[intake.id])
-                            Text(intake.intent).lineLimit(1).truncationMode(.tail)
-                        }
-                        .tag(intake.id)
-                        .accessibilityIdentifier("intake-row")
+                        IntakeRow(intake: intake, tape: intakeService.tapes[intake.id])
+                            .tag(intake.id)
+                            .accessibilityIdentifier("intake-row")
                     }
                 }
                 Divider()
