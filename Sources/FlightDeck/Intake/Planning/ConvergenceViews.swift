@@ -653,12 +653,21 @@ final class ChurnLaneView: NSView {
         }
         (hit == nil ? NSCursor.arrow : NSCursor.pointingHand).set()
         guard let (marker, rect) = hit, marker.model.hot, let input else { return card.present(nil) }
-        // Beside the marker, off the gutter's trailing edge and top-aligned with the heading —
-        // below it, the card sat over the very section it explains.
+        // Beside the text, off the plan's measure (`PlanGutter.readableWidth`) and top-aligned
+        // with the heading: below the marker, the card sat over the very section it explains,
+        // and beside the marker it still covered the start of every line. A pane narrower
+        // than the measure has no room there, and `CardPlacement` flips it back over the text.
         card.placement = .trailing
-        card.frame = rect
+        card.frame = NSRect(x: textEnd - frame.minX, y: rect.minY, width: 0, height: rect.height)
         card.present(AnyView(SectionVersionsCard(section: marker.section, model: marker.model,
                                                  versions: input.versions(marker.section)).fixedSize()))
+    }
+
+    /// Where the plan's lines end, in the text view's coordinates — the text container's
+    /// trailing edge, the lane's own trailing edge if there is no text view.
+    private var textEnd: CGFloat {
+        guard let textView, let container = textView.textContainer else { return frame.maxX }
+        return textView.textContainerOrigin.x + container.size.width
     }
 
     /// One marker for VoiceOver: its section and caption, pressable like a click.

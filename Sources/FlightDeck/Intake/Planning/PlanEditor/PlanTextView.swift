@@ -540,7 +540,8 @@ final class PlanEditorContainer: NSView {
         textView.isHorizontallyResizable = false
         textView.autoresizingMask = [.width]
         textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: .greatestFiniteMagnitude)
-        textView.textContainer?.widthTracksTextView = true
+        // Sized by the text view itself (`PlanNSTextView.fitContainer`), to the readable measure.
+        textView.textContainer?.widthTracksTextView = false
         textView.setAccessibilityIdentifier("plan-editor")
 
         scroll.documentView = textView
@@ -596,8 +597,24 @@ class PlanNSTextView: NSTextView {
         didSet {
             guard showsChurn != oldValue else { return }
             textContainerInset = NSSize(width: (PlanGutter.width(churn: showsChurn) + 8) / 2, height: textContainerInset.height)
+            fitContainer()
             needsDisplay = true
         }
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        fitContainer()
+    }
+
+    /// The container at the readable measure (`PlanGutter.textWidth`) rather than tracking the
+    /// view's width: the view still spans the pane, so the scroller stays at its edge and the
+    /// room past the text is part of the editor.
+    private func fitContainer() {
+        guard let container = textContainer else { return }
+        let width = PlanGutter.textWidth(viewWidth: frame.width, churn: showsChurn)
+        guard container.size.width != width else { return }
+        container.size = NSSize(width: width, height: container.size.height)
     }
 
     override func updateTrackingAreas() {
