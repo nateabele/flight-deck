@@ -160,6 +160,10 @@ final class IntakeService: ObservableObject {
     /// duplicating. This service is already the per-project owner for everything else about
     /// an intake, so its selection joins that, not a new home on the store.
     @Published private(set) var selectedIntake: [String: UUID] = [:]
+    /// The projects whose detail pane shows its trailing inspector, keyed by `projectKey`. Here
+    /// for the reason `selectedIntake` is: as `ProjectView` `@State` it reset on a switch to
+    /// another project or tab and back — the notes rail closed itself behind the human.
+    @Published private(set) var inspectorProjects: Set<String> = []
     /// Each `.shaping` intake's `tape.json` as last read — what the detail pane draws and what
     /// `attentionCount` consults. Refreshed on the shared clock (`pollTapes`).
     @Published private(set) var tapes: [UUID: Tape] = [:]
@@ -183,6 +187,8 @@ final class IntakeService: ObservableObject {
     /// `UserDefaults` key for `selectedIntake`, persisted as `[path: uuidString]` since
     /// `UserDefaults` plists can't hold `UUID` values directly.
     private static let selectionDefaultsKey = "IntakeSelectionByProject"
+    /// `UserDefaults` key for `inspectorProjects`, persisted as an array of paths.
+    private static let inspectorDefaultsKey = "IntakeInspectorByProject"
     /// Filled off the main actor by a detached probe started in `init` (the login-shell PATH
     /// lookup behind it can take seconds on first use); nil until that lands.
     private var availableModelsCache: AvailableModels?
@@ -318,6 +324,7 @@ final class IntakeService: ObservableObject {
         if let raw = defaults.dictionary(forKey: Self.selectionDefaultsKey) as? [String: String] {
             selectedIntake = raw.compactMapValues(UUID.init(uuidString:))
         }
+        inspectorProjects = Set(defaults.stringArray(forKey: Self.inspectorDefaultsKey) ?? [])
 
         // Launch recovery: a turn or release in flight when FD quit has no process left to
         // finish it. Saying "triaging" forever would hide that; `.interrupted` asks the human.
@@ -444,6 +451,22 @@ final class IntakeService: ObservableObject {
     func select(_ id: UUID?, inProject project: String) {
         selectedIntake[Self.projectKey(project)] = id
         defaults.set(selectedIntake.mapValues(\.uuidString), forKey: Self.selectionDefaultsKey)
+    }
+
+    /// Whether `project`'s detail pane shows its inspector — hidden until the human opens it
+    /// (spec §3).
+    func inspectorShown(forProject project: String) -> Bool {
+        inspectorProjects.contains(Self.projectKey(project))
+    }
+
+    /// Opens or closes `project`'s inspector and persists it, alongside the selection and for
+    /// the same reason — see `inspectorProjects`. A write that changes nothing is dropped, so the
+    /// inspector re-asserting its own state doesn't republish every view observing this service.
+    func setInspectorShown(_ shown: Bool, inProject project: String) {
+        let key = Self.projectKey(project)
+        guard inspectorProjects.contains(key) != shown else { return }
+        if shown { inspectorProjects.insert(key) } else { inspectorProjects.remove(key) }
+        defaults.set(inspectorProjects.sorted(), forKey: Self.inspectorDefaultsKey)
     }
 
     // MARK: - Pipeline

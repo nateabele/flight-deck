@@ -400,6 +400,16 @@ scrollers for one text).
   or its own scroll.
 - Open the Revert-all confirmation popover and press Esc; hover a highlight band's tooltip.
   **Expect:** Esc dismisses the popover without reverting; the tooltip appears on hover.
+- Open the notes rail (select plan text → Comment, or the notes chip), then close it with ⌥⌘I
+  while the plan editor has focus, then with the toolbar's Hide Inspector button — each both
+  right after opening and after it has settled. **Expect:** the inspector closes every time and
+  stays closed, the toolbar button reads Show Inspector, and ⌥⌘I reopens it. (Unit-pinned by
+  `ProjectViewInspectorLiveTests` in an offscreen window; the real window's animation timing is
+  not.)
+- Open the inspector in one Flight Control project, switch to a second project, then to a
+  terminal tab, then back to the first; quit and relaunch. **Expect:** the second project's
+  inspector stays as it was left there (closed if never opened), and the first comes back open —
+  across the switches and the relaunch.
 - With the plan editor focused, open the heatmap and press Esc. **Expect:** note whether Esc
   reaches the pane and closes the heatmap — `NSTextView` binds Esc to `complete:`, not
   `cancelOperation:`, while focused, so this may only work with focus outside the editor.
