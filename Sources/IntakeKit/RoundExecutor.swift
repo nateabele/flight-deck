@@ -119,6 +119,7 @@ public struct RoundExecutor: Sendable {
                     }
                     switch try await attemptDraft(slot.choice, name) {
                     case .ok(let out, let session):
+                        publish(SeatResult(kind: .draft, linesAdded: lineCount(out.plan)), run: name, inputs)
                         return (i, SlotOutcome(role: "drafter", persona: slot.persona, used: slot.choice, requested: slot.choice,
                                                status: .ok, sessionID: session), out.plan)
                     case .failed(let firstDiagnosis, _):
@@ -128,6 +129,7 @@ public struct RoundExecutor: Sendable {
                         }
                         switch try await attemptDraft(fallback, name + "-fallback") {
                         case .ok(let out, let session):
+                            publish(SeatResult(kind: .draft, linesAdded: lineCount(out.plan)), run: name + "-fallback", inputs)
                             return (i, SlotOutcome(role: "drafter", persona: slot.persona, used: fallback, requested: slot.choice,
                                                    status: .substituted, sessionID: session), out.plan)
                         case .failed(let diagnosis, _):
@@ -164,6 +166,7 @@ public struct RoundExecutor: Sendable {
         let review = try await seat(ReviewOutput.self, planned, "synthesizer", persona: synthesizer.persona,
                                     synthesizer.choice, prompt: prompt, schema: RoundSchemas.review, cwd: inputs.project,
                                     readable: [base.deletingLastPathComponent(), work], inputs: inputs, &record)
+        publishReview(review, run: runName(planned, "synthesizer"), inputs)
         return try await integrate(review, base: base, ctx: ctx, planned, inputs, &record)
     }
 
@@ -178,6 +181,7 @@ public struct RoundExecutor: Sendable {
                                     prompt: RoundPrompts.review(ctx, planFile: plan.path, round: planned.round),
                                     schema: RoundSchemas.review, cwd: inputs.project,
                                     readable: [plan.deletingLastPathComponent(), work], inputs: inputs, &record)
+        publishReview(review, run: runName(planned, "reviewer"), inputs)
         return try await integrate(review, base: plan, ctx: ctx, planned, inputs, &record)
     }
 
@@ -245,6 +249,11 @@ public struct RoundExecutor: Sendable {
         record.linesAdded = delta.added
         record.linesRemoved = delta.removed
         record.sectionsChanged = delta.sectionsChanged
+        // Written after the did-it-edit check above: an integrator that claimed changes it never
+        // made has paused the round, and its row must not report a tally it didn't apply.
+        publish(SeatResult(kind: .integrator, sections: delta.sectionsChanged, agree: tally.agree, somewhat: tally.somewhat,
+                           disagree: tally.disagree, linesAdded: delta.added, linesRemoved: delta.removed),
+                run: runName(planned, "integrator"), inputs)
         var files = ["plan.md": after, "changes.json": changes]
         // Only a real list is kept: an integrator that answered in the counts-only shape has no
         // verdict per change, and an empty file would read as "judged nothing".
@@ -258,11 +267,12 @@ public struct RoundExecutor: Sendable {
         let plan = try currentPlan(inputs)
         let (graph, graphFile, observedAt) = try await readGraph(inputs)
         let ctx = context(inputs, graphFile: graphFile, observedAt: observedAt)
-        let cs = try await changeSetSeat(planned, "encoder", inputs.config.encoder,
+        let (cs, run) = try await changeSetSeat(planned, "encoder", inputs.config.encoder,
                                          prompt: RoundPrompts.encode(ctx, planFile: plan.path),
                                          readable: [plan.deletingLastPathComponent(), inputs.store.workDirectory()],
                                          graph: graph, observedAt: observedAt, inputs: inputs, &record)
         record.changeCount = cs.ops.count
+        publish(SeatResult(kind: .changeSet, ops: cs.ops.count), run: run, inputs)
         return ["changeset.json": try cs.encoded(), "plan.md": try Data(contentsOf: plan),
                 "graph.json": try IntakeJSON.encoder.encode(graph)]
     }
@@ -319,10 +329,11 @@ public struct RoundExecutor: Sendable {
             prompt = RoundPrompts.polish(ctx, planFile: plan.path, changeSetFile: changeSetFile.path, round: planned.round,
                                          analytics: analytics)
         }
-        let cs = try await changeSetSeat(planned, "polisher", polisher, prompt: prompt,
+        let (cs, run) = try await changeSetSeat(planned, "polisher", polisher, prompt: prompt,
                                          readable: [plan.deletingLastPathComponent(), work],
                                          graph: graph, observedAt: observedAt, inputs: inputs, &record)
         record.changeCount = PlanMetrics.opsChanged(from: old, to: cs)
+        publish(SeatResult(kind: .changeSet, ops: record.changeCount), run: run, inputs)
         record.edgesChanged = PlanMetrics.edgesChanged(from: old, to: cs)
         // Both notes are independent aids, not gates, and either or both can be nil: the graph
         // snapshot fallback (no encode checkpoint to carry one) and the shadow/bv analytics
@@ -389,13 +400,13 @@ public struct RoundExecutor: Sendable {
     /// words that ask for a `{changeSet, summary}` rather than triage's "recommendation".
     private func changeSetSeat(_ planned: PlannedRound, _ role: String, _ choice: ModelChoice, prompt: String,
                                readable: [URL], graph: GraphSnapshot, observedAt: Date,
-                               inputs: RoundInputs, _ record: inout RoundRecord) async throws -> ChangeSet {
+                               inputs: RoundInputs, _ record: inout RoundRecord) async throws -> (ChangeSet, run: String) {
         var first = try await seat(ChangeSetOutput.self, planned, role, choice, prompt: prompt, schema: RoundSchemas.changeSet,
                                    cwd: inputs.project, readable: readable, inputs: inputs, &record)
         first.changeSet.graphObservedAt = observedAt
         record.note = first.summary
         guard case .failure(let errors) = ChangeSetValidator.validate(first.changeSet, against: graph) else {
-            return first.changeSet
+            return (first.changeSet, run: runName(planned, role))
         }
         let slot = record.slots.count - 1
         let correction = RoundPrompts.changeSetCorrection(errors: errors.errors, observedAt: observedAt)
@@ -419,8 +430,24 @@ public struct RoundExecutor: Sendable {
                 record.slots[slot].diagnosis = diagnosis
                 throw Pause(diagnosis: diagnosis)
             }
-            return second.changeSet
+            return (second.changeSet, run: runName(planned, role) + "-correction")
         }
+    }
+
+    // MARK: - Seat results
+
+    /// `runs/<run>/result.json` — what the seat's row says the moment it finishes (`SeatResult`).
+    /// Best effort: the checkpoint is the durable record, and a result that couldn't be written
+    /// only leaves the row saying what files it touched until the round lands.
+    private func publish(_ result: SeatResult, run: String, _ inputs: RoundInputs) {
+        try? inputs.store.writeSeatResult(result, run: run)
+    }
+
+    /// The proposals and the sections they touch, each section once, in the order proposed.
+    private func publishReview(_ review: ReviewOutput, run: String, _ inputs: RoundInputs) {
+        var seen = Set<String>()
+        let sections = review.changes.map(\.section).filter { seen.insert($0).inserted }
+        publish(SeatResult(kind: .reviewer, changeCount: review.changes.count, sections: sections), run: run, inputs)
     }
 
     // MARK: - Seats
@@ -641,6 +668,13 @@ public struct RoundExecutor: Sendable {
 }
 
 /// `<stage>-<round>-<role>[-<i>]`, the `runs/` directory name for one harness child.
+/// Lines as an editor numbers them: a trailing newline ends the last line, it doesn't start another.
+private func lineCount(_ text: String) -> Int {
+    guard !text.isEmpty else { return 0 }
+    let n = text.split(separator: "\n", omittingEmptySubsequences: false).count
+    return text.hasSuffix("\n") ? n - 1 : n
+}
+
 private func runName(_ planned: PlannedRound, _ role: String, _ index: Int? = nil) -> String {
     planned.runNamePrefix + role + (index.map { "-\($0)" } ?? "")
 }

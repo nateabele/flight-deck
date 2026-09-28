@@ -194,6 +194,45 @@ final class SeatRowModelTests: XCTestCase {
         XCTAssertEqual(row.footprintAll.map(\.count), [7, 4, 3, 2, 2, 1])
     }
 
+    // MARK: - Seat result (runs/<run>/result.json)
+
+    /// A seat's own result.json gives its row the spec's outcome text the moment it finishes —
+    /// before the round's checkpoint exists (`roundRecord` nil throughout).
+    func testResultTextComesFromTheSeatsOwnResult() {
+        let done = activity(.codex, startedAt: epoch, finished: true)
+        func result(_ run: String, _ r: SeatResult?, activity a: SeatActivity? = nil) -> String? {
+            SeatRowModel.make(run: run, slot: nil, requested: Slot(codex), activity: a ?? done, record: nil,
+                              roundRecord: nil, seatResult: r, now: epoch).result
+        }
+        XCTAssertEqual(result("refine-1-reviewer", SeatResult(kind: .reviewer, changeCount: 14,
+                                                              sections: ["## 2. Scope", "## 4. Dispatch", "## 7. Rollout"])),
+                       "14 changes across §2 §4 §7")
+        XCTAssertEqual(result("refine-1-reviewer", SeatResult(kind: .reviewer, changeCount: 0)), "No changes proposed")
+        XCTAssertEqual(result("refine-1-integrator", SeatResult(kind: .integrator, sections: ["## 2", "## 4", "## 7"],
+                                                                agree: 11, somewhat: 2, disagree: 1,
+                                                                linesAdded: 42, linesRemoved: 17)),
+                       "agreed 11 · somewhat 2 · declined 1 · +42 −17 in 3 sections")
+        XCTAssertEqual(result("encode-0-encoder", SeatResult(kind: .changeSet, ops: 12)), "12 task changes")
+        XCTAssertEqual(result("polish-1-polisher", SeatResult(kind: .changeSet, ops: 1)), "1 task change")
+        XCTAssertEqual(result("draft-0-drafter-0", SeatResult(kind: .draft, linesAdded: 212)), "Draft · 212 lines")
+        XCTAssertNil(result("draft-0-drafter-0", SeatResult(kind: .draft, linesAdded: 212),
+                            activity: activity(.codex, startedAt: epoch)), "a running seat has no result yet")
+        XCTAssertNil(result("draft-0-drafter-0", nil), "no result.json and no checkpoint: nothing to say")
+    }
+
+    // MARK: - Context
+
+    func testContextTokensAndWindowAreExposed() {
+        let a = activity(.codex, startedAt: epoch, inputTokens: 118_000)
+        let row = SeatRowModel.make(run: "refine-1-reviewer", slot: nil, requested: Slot(codex), activity: a,
+                                    record: nil, roundRecord: nil, now: epoch)
+        XCTAssertEqual(row.inputTokens, 118_000)
+        XCTAssertEqual(row.contextWindow, 400_000)
+        let unknown = SeatRowModel.make(run: "refine-1-reviewer", slot: nil, requested: nil, activity: a,
+                                        record: nil, roundRecord: nil, now: epoch)
+        XCTAssertNil(unknown.contextWindow, "no model, no window — the row shows no gauge")
+    }
+
     // MARK: - Cost
 
     func testCostOnlyWhenReported() {

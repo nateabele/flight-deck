@@ -58,8 +58,8 @@ final class LiveCardRenderTests: XCTestCase {
         try render(view, to: out.appendingPathComponent("pui-livecard-triage.png"))
     }
 
-    /// Draft round: one seat running, one fallen back (amber), one finished. A draft round has
-    /// no finished rounds before it, so the cards are in the refine render below.
+    /// Draft round: one seat running, one fallen back (amber), one finished with its result. A
+    /// draft round has no finished rounds before it, so the cards are in the refine render below.
     func testRenderShapingDraftSeats() throws {
         let out = try dir()
         let intake = try shapingIntake()
@@ -83,14 +83,16 @@ final class LiveCardRenderTests: XCTestCase {
         ]
         let records = ["draft-0-drafter-2": RunRecord(started: now.addingTimeInterval(-250), finished: now.addingTimeInterval(-39),
                                                       exitCode: 0)]
-        let view = LiveCard.shaping(intake: intake, tape: tape, activities: activities, records: records, pending: nil,
-                                    controlBar: { AnyView(self.placeholder("Control bar", height: 44)) },
-                                    board: { AnyView(self.placeholder("Departures board", height: 120)) })
+        let results = ["draft-0-drafter-2": SeatResult(kind: .draft, linesAdded: 212)]
+        let view = LiveCard.shaping(intake: intake, tape: tape, activities: activities, records: records, results: results,
+                                    pending: nil,
+                                    controlBar: { _ in AnyView(self.placeholder("Control bar", height: 44)) },
+                                    board: { _ in AnyView(self.placeholder("Departures board", height: 120)) })
         try render(view.padding(20), to: out.appendingPathComponent("pui-livecard-shaping.png"))
     }
 
-    /// Refine 1 after draft and synthesis landed: a finished reviewer, a running integrator,
-    /// the two finished rounds as cards, the pause banner's absence and a queued note.
+    /// Refine 1 after draft and synthesis landed: a finished reviewer with its result, a running
+    /// integrator (quiet), the two finished rounds as cards and a queued note.
     func testRenderShapingRefineWithFinishedRounds() throws {
         let out = try dir()
         let intake = try shapingIntake()
@@ -120,9 +122,12 @@ final class LiveCardRenderTests: XCTestCase {
         ]
         let records = ["refine-1-reviewer": RunRecord(started: now.addingTimeInterval(-200), finished: now.addingTimeInterval(-44),
                                                       exitCode: 0)]
-        let view = LiveCard.shaping(intake: intake, tape: tape, activities: activities, records: records, pending: nil,
-                                    controlBar: { AnyView(self.placeholder("Control bar", height: 44)) },
-                                    board: { AnyView(self.placeholder("Departures board", height: 120)) })
+        let results = ["refine-1-reviewer": SeatResult(kind: .reviewer, changeCount: 14,
+                                                       sections: ["## 2. Scope", "## 4. Dispatch", "## 7. Rollout"])]
+        let view = LiveCard.shaping(intake: intake, tape: tape, activities: activities, records: records, results: results,
+                                    pending: nil,
+                                    controlBar: { _ in AnyView(self.placeholder("Control bar", height: 44)) },
+                                    board: { _ in AnyView(self.placeholder("Departures board", height: 120)) })
         try render(view.padding(20), to: out.appendingPathComponent("pui-livecard-shaping-refine.png"))
     }
 

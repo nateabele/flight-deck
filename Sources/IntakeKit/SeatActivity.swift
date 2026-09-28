@@ -48,6 +48,57 @@ public struct SeatActivity: Codable, Equatable, Sendable {
     public init(harness: Harness, startedAt: Date) { self.harness = harness; self.startedAt = startedAt }
 }
 
+/// What one seat produced, written to `runs/<run>/result.json` the moment that seat's own
+/// structured output parses — so its row can say what it did while the rest of the round is
+/// still running, instead of waiting for the whole round's `RoundRecord` (which lands only
+/// with the checkpoint, by which time the app has stopped following the round's seats).
+/// Every field but `kind` is filled only by the seats it describes, and is optional on disk.
+public struct SeatResult: Codable, Equatable, Sendable {
+    public enum Kind: String, Codable, Sendable {
+        /// A reviewer or synthesizer: `changeCount` proposals touching `sections`.
+        case reviewer
+        /// `agree`/`somewhat`/`disagree` plus the plan delta it actually made
+        /// (`linesAdded`/`linesRemoved` across `sections`).
+        case integrator
+        /// An encoder, polisher, fresh-eyes or dedup seat: `ops`, counted as its checkpoint's
+        /// `changeCount` is.
+        case changeSet
+        /// A drafter: the draft's length, in `linesAdded` (a draft is written from nothing).
+        case draft
+    }
+    public var kind: Kind
+    public var changeCount: Int?
+    public var sections: [String]
+    public var agree: Int?, somewhat: Int?, disagree: Int?
+    public var linesAdded: Int?, linesRemoved: Int?
+    public var ops: Int?
+
+    public init(kind: Kind, changeCount: Int? = nil, sections: [String] = [], agree: Int? = nil, somewhat: Int? = nil,
+                disagree: Int? = nil, linesAdded: Int? = nil, linesRemoved: Int? = nil, ops: Int? = nil) {
+        self.kind = kind; self.changeCount = changeCount; self.sections = sections
+        self.agree = agree; self.somewhat = somewhat; self.disagree = disagree
+        self.linesAdded = linesAdded; self.linesRemoved = linesRemoved; self.ops = ops
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case kind, changeCount, sections, agree, somewhat, disagree, linesAdded, linesRemoved, ops
+    }
+
+    /// `sections` may be absent on disk too — a change-set or draft result has none to write.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        kind = try c.decode(Kind.self, forKey: .kind)
+        changeCount = try c.decodeIfPresent(Int.self, forKey: .changeCount)
+        sections = try c.decodeIfPresent([String].self, forKey: .sections) ?? []
+        agree = try c.decodeIfPresent(Int.self, forKey: .agree)
+        somewhat = try c.decodeIfPresent(Int.self, forKey: .somewhat)
+        disagree = try c.decodeIfPresent(Int.self, forKey: .disagree)
+        linesAdded = try c.decodeIfPresent(Int.self, forKey: .linesAdded)
+        linesRemoved = try c.decodeIfPresent(Int.self, forKey: .linesRemoved)
+        ops = try c.decodeIfPresent(Int.self, forKey: .ops)
+    }
+}
+
 /// An incremental fold from one harness's stream (`codex exec --json` or `claude -p
 /// --output-format stream-json --verbose`) into a `SeatActivity`. `feed` takes raw chunks as
 /// a pipe hands them over — a line split across chunks is buffered until its newline — and

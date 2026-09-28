@@ -38,6 +38,10 @@ struct SeatRowModel: Equatable, Identifiable {
     var footprintAll: [(dir: String, count: Int)]
     var steps: String?
     var contextFraction: Double?
+    /// The two numbers behind `contextFraction`, for a gauge that says "118k of 400k" rather
+    /// than a percentage. `contextWindow` is nil whenever `contextFraction` is.
+    var inputTokens: Int?
+    var contextWindow: Int?
     var elapsed: TimeInterval
     var exception: Exception?
     var result: String?
@@ -48,7 +52,8 @@ struct SeatRowModel: Equatable, Identifiable {
             && lhs.headline == rhs.headline && lhs.action == rhs.action
             && lhs.footprint.elementsEqual(rhs.footprint) { $0.dir == $1.dir && $0.count == $1.count }
             && lhs.footprintAll.elementsEqual(rhs.footprintAll) { $0.dir == $1.dir && $0.count == $1.count }
-            && lhs.steps == rhs.steps && lhs.contextFraction == rhs.contextFraction && lhs.elapsed == rhs.elapsed
+            && lhs.steps == rhs.steps && lhs.contextFraction == rhs.contextFraction
+            && lhs.inputTokens == rhs.inputTokens && lhs.contextWindow == rhs.contextWindow && lhs.elapsed == rhs.elapsed
             && lhs.exception == rhs.exception && lhs.result == rhs.result && lhs.cost == rhs.cost
     }
 
@@ -64,13 +69,15 @@ struct SeatRowModel: Equatable, Identifiable {
     ///   - record: this run's `run.json` — carries the process exit even when `activity.finished`
     ///     never got set (the stream ended mid-line; spec §6 "a row whose activity.json says
     ///     unfinished while its run.json shows an exit is treated as finished").
+    ///   - seatResult: this run's own `runs/<run>/result.json`, written the moment the seat's output
+    ///     parsed — preferred over `roundRecord`, which only exists once the WHOLE round lands.
     ///   - roundRecord: the checkpoint's `RoundRecord`, once the WHOLE round (not just this seat)
     ///     has landed — the source `result` reads from. This parameter is not in the brief's
     ///     sketch: `result` needs `changeCount`/`tally`/`sectionsChanged`, which live on
     ///     `RoundRecord`, not on `SlotOutcome` or the brief's `record: RunRecord?` (that type is
     ///     just the process's pid/exit code). See the task report for this deviation.
     static func make(run: String, slot: SlotOutcome?, requested: Slot?, activity: SeatActivity?, record: RunRecord?,
-                      roundRecord: RoundRecord?, now: Date, thresholds: SeatThresholds = .default) -> SeatRowModel {
+                      roundRecord: RoundRecord?, seatResult: SeatResult? = nil, now: Date, thresholds: SeatThresholds = .default) -> SeatRowModel {
         let activityHarness = activity?.harness
         // A slot with a checkpoint is settled regardless of what its own stream/process say —
         // `slot != nil` means a `RoundRecord` already landed for it.
@@ -107,6 +114,7 @@ struct SeatRowModel: Equatable, Identifiable {
         }
 
         let allDirs = footprintAll(activity?.footprint ?? [:])
+        let model = currentChoice(slot: slot, requested: requested, activityHarness: activityHarness)?.model
         return SeatRowModel(
             id: run,
             glyph: glyph,
@@ -117,12 +125,13 @@ struct SeatRowModel: Equatable, Identifiable {
             footprint: footprintChips(allDirs),
             footprintAll: allDirs,
             steps: activity?.steps.map(stepsText),
-            contextFraction: contextFraction(inputTokens: activity?.inputTokens,
-                                             model: currentChoice(slot: slot, requested: requested,
-                                                                  activityHarness: activityHarness)?.model),
+            contextFraction: contextFraction(inputTokens: activity?.inputTokens, model: model),
+            inputTokens: activity?.inputTokens,
+            contextWindow: activity?.inputTokens == nil ? nil : contextWindow(for: model),
             elapsed: elapsed(activity: activity, record: record, now: now),
             exception: exception,
-            result: processFinished ? result(rawRole: rawRole, roundRecord: roundRecord) : nil,
+            result: processFinished
+                ? (seatResult.flatMap(result) ?? result(rawRole: rawRole, roundRecord: roundRecord)) : nil,
             cost: processFinished ? activity?.costUSD : nil)
     }
 
@@ -346,6 +355,36 @@ struct SeatRowModel: Equatable, Identifiable {
             return "\(n) task change\(n == 1 ? "" : "s")"
         default:
             return nil
+        }
+    }
+
+    /// A finished seat's outcome from its own `SeatResult` (spec §6 "results as they land"): the
+    /// same wording `result(rawRole:roundRecord:)` uses, so a row reads the same before and
+    /// after its round's checkpoint lands. An integrator says both what it judged and what it
+    /// changed, since the tally alone can't show a "somewhat" that rewrote half a section.
+    private static func result(_ r: SeatResult) -> String? {
+        switch r.kind {
+        case .reviewer:
+            guard let n = r.changeCount else { return nil }
+            guard n > 0 else { return "No changes proposed" }
+            let sections = r.sections.isEmpty ? "" : " across " + r.sections.map(sectionChip).joined(separator: " ")
+            return "\(n) change\(n == 1 ? "" : "s")\(sections)"
+        case .integrator:
+            var parts: [String] = []
+            if let a = r.agree, let s = r.somewhat, let d = r.disagree {
+                parts.append("agreed \(a) · somewhat \(s) · declined \(d)")
+            }
+            if let added = r.linesAdded, let removed = r.linesRemoved {
+                let n = r.sections.count
+                parts.append("+\(added) −\(removed)" + (n > 0 ? " in \(n) section\(n == 1 ? "" : "s")" : ""))
+            }
+            return parts.isEmpty ? nil : parts.joined(separator: " · ")
+        case .changeSet:
+            guard let n = r.ops else { return nil }
+            return "\(n) task change\(n == 1 ? "" : "s")"
+        case .draft:
+            guard let n = r.linesAdded else { return nil }
+            return "Draft · \(n) line\(n == 1 ? "" : "s")"
         }
     }
 

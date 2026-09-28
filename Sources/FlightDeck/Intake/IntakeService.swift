@@ -156,6 +156,9 @@ final class IntakeService: ObservableObject {
     /// The same seats' `run.json` — what says a seat exited even when its activity never got
     /// to write `finished`.
     @Published private(set) var runRecords: [UUID: [String: RunRecord]] = [:]
+    /// The same seats' `result.json` — each seat's outcome from the moment its own output
+    /// parsed, well before the round's checkpoint lands (`SeatResult`).
+    @Published private(set) var seatResults: [UUID: [String: SeatResult]] = [:]
     /// Each shaping intake's refine/polish convergence series (spec §8).
     @Published private(set) var convergence: [UUID: [ConvergenceCycle]] = [:]
     /// A start the human asked for that hasn't shown any sign of life yet — see `PendingStart`.
@@ -548,8 +551,8 @@ final class IntakeService: ObservableObject {
     func pollTapes() {
         let shaping = Set(intakes.lazy.filter { $0.state == .shaping }.map(\.id))
         let tracked = Set(latestTapes.keys).union(tapes.keys).union(tapeDates.keys).union(seatRounds.keys)
-            .union(seatActivities.keys).union(runRecords.keys).union(convergence.keys).union(convergenceKeys.keys)
-            .union(halts.keys)
+            .union(seatActivities.keys).union(runRecords.keys).union(seatResults.keys).union(convergence.keys)
+            .union(convergenceKeys.keys).union(halts.keys)
         for gone in tracked.subtracting(shaping) {
             tapes[gone] = nil
             latestTapes[gone] = nil
@@ -586,7 +589,7 @@ final class IntakeService: ObservableObject {
         }
     }
 
-    /// Re-reads the round in progress's `runs/<run>/activity.json` and `run.json`, each gated on
+    /// Re-reads the round in progress's `runs/<run>/activity.json`, `run.json` and `result.json`, each gated on
     /// its own mtime. Nothing is read while the tape has no round in progress: every run on disk
     /// then belongs to a round that already landed (or was thrown away), which the finished
     /// cards draw from the checkpoint instead.
@@ -597,7 +600,7 @@ final class IntakeService: ObservableObject {
             seatRounds[id] = round
         }
         let store = tapeStore(id)
-        var activities = seatActivities[id] ?? [:], records = runRecords[id] ?? [:]
+        var activities = seatActivities[id] ?? [:], records = runRecords[id] ?? [:], results = seatResults[id] ?? [:]
         for run in store.runNames(forRound: round) {
             let dir = store.runDirectory(run)
             if let activity: SeatActivity = readIfModified(id, dir.appendingPathComponent("activity.json")) {
@@ -606,6 +609,9 @@ final class IntakeService: ObservableObject {
             if let record: RunRecord = readIfModified(id, dir.appendingPathComponent("run.json")) {
                 records[run] = record
             }
+            if let result: SeatResult = readIfModified(id, dir.appendingPathComponent("result.json")) {
+                results[run] = result
+            }
         }
         // A retried round keeps its `PlannedRound`, so the failed attempt's seats are still under
         // the same run names (a fallback seat's own directory is never overwritten). Anything
@@ -613,10 +619,14 @@ final class IntakeService: ObservableObject {
         if let floor = latestTapes[id]?.roundStartedAt?.addingTimeInterval(-1) {
             activities = activities.filter { $0.value.startedAt >= floor }
             records = records.filter { $0.value.started >= floor }
+            // A result carries no clock of its own; it belongs to this attempt only if its run
+            // does — else the failed attempt's outcome would sit on the retried seat's row.
+            results = results.filter { activities[$0.key] != nil || records[$0.key] != nil }
         }
         // Compared first: republishing an unchanged map would redraw every observer each tick.
         if activities != seatActivities[id] ?? [:] { seatActivities[id] = activities }
         if records != runRecords[id] ?? [:] { runRecords[id] = records }
+        if results != seatResults[id] ?? [:] { seatResults[id] = results }
     }
 
     /// `file` decoded, only when its mtime moved since the last read; nil otherwise (unchanged,
@@ -631,6 +641,7 @@ final class IntakeService: ObservableObject {
     private func forgetSeats(_ id: UUID) {
         if seatActivities[id] != nil { seatActivities[id] = nil }
         if runRecords[id] != nil { runRecords[id] = nil }
+        if seatResults[id] != nil { seatResults[id] = nil }
         seatFileDates[id] = nil
         seatRounds[id] = nil
     }
