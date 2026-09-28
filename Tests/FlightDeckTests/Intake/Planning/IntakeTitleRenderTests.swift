@@ -4,7 +4,7 @@ import SwiftUI
 import XCTest
 @testable import FlightDeck
 
-/// Renders the detail header (title over the collapsed/expanded Request section) and the
+/// Renders the detail header (the request title as a disclosure, collapsed and expanded) and the
 /// Intakes list rows, light and dark, for design review. Skipped unless `FD_PLANNING_RENDER_DIR`
 /// names an output directory — pictures, not assertions (AGENTS.md rule 2).
 @MainActor

@@ -25,7 +25,7 @@ final class IntakeTitleTests: XCTestCase {
         let t = IntakeTitle(intent: "  Add a contributor note to the README.  ")
         XCTAssertEqual(t.title, "Add a contributor note to the README")
         XCTAssertEqual(t.rest, "")
-        XCTAssertTrue(t.isWhole, "one short sentence needs no Request section — the title already says it all")
+        XCTAssertTrue(t.isWhole, "one short sentence needs no disclosure — the title already says it all")
     }
 
     func testAbbreviationsDoNotEndASentence() {
@@ -130,8 +130,4 @@ final class IntakeTitleTests: XCTestCase {
         XCTAssertEqual(title("Fix   the\tflicker"), "Fix the flicker")
     }
 
-    func testWordCount() {
-        XCTAssertEqual(IntakeTitle.wordCount("Add a  note\nto the README."), 6)
-        XCTAssertEqual(IntakeTitle.wordCount("   "), 0)
-    }
 }
