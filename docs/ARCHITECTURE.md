@@ -240,9 +240,15 @@ claude tab closes, so two logins' registries are never merged into one scan.
   background: its tool_result (`toolUseResult.isAsync`) only acknowledges the launch, and the
   agent ends at a later `<task-notification>` — read from the `queue-operation` enqueue, the
   `queued_command` attachment, or the delivered `user` record, whichever lands first, and matched
-  by `<tool-use-id>` or by the launch's agent id as `<task-id>`. Not cleared at turn end (the
-  agents outlive it); only held ids are removed, so a notification for an unseen launch is a
-  no-op. `agentAsyncLaunchMarker` / `agentCompletionNotification` in the adapter-probe matrix pin
+  by `<tool-use-id>` or by the launch's agent id as `<task-id>`. A `SendMessage` whose result
+  carries `resumedAgentId` woke a stopped agent and counts it again, keyed by that call's id.
+  Not cleared at turn end (the agents outlive it); only held ids are removed, so a notification
+  for an unseen launch is a no-op.
+- **A session's activity is its tree's** — `SessionStatus.tree`: an agent reporting `idle` with a
+  subagent still working shows `busy`, so the unread dot and "finished" notification wait for the
+  last subagent. `waiting` is never lifted (it means the user must act). The agent's own report
+  rides along as `agentActivity`, so `applySubagentCount` can re-derive the activity between
+  registry ticks and commit a flip through `commitStatuses` like any other transition. `agentAsyncLaunchMarker` / `agentCompletionNotification` in the adapter-probe matrix pin
   both record shapes.
 - **`SessionStore`** — merges registry activity with transcript-derived sub-agent counts and
   drops sessions Flight Deck does not own. Each tick computes the edges once, as

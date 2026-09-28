@@ -165,6 +165,9 @@ enum ClaudeSession {
         /// agent continued by `SendMessage` names the continuing call's tool-use id, and only
         /// its `<task-id>` still identifies the launch.
         case agentLaunched(toolUseID: String, agentID: String)
+        /// `SendMessage` woke a stopped background agent. It works until its next notification,
+        /// which names this call's tool-use id and the agent's id as `<task-id>`.
+        case agentResumed(toolUseID: String, agentID: String)
         /// A background agent stopped. Either id may be what matches an outstanding launch.
         case taskNotified(toolUseID: String?, taskID: String?)
         /// This record IS a failed turn: `claude` asked the API, the API refused, and the retry
@@ -260,11 +263,15 @@ enum ClaudeSession {
             let launch = obj["toolUseResult"] as? [String: Any]
             let launchedAgent = launch?["isAsync"] as? Bool == true
                 ? launch?["agentId"] as? String : nil
+            // `SendMessage`'s result when it woke a stopped agent. Absent when the agent was
+            // still running — the message is queued to it, and nothing new started.
+            let resumedAgent = launch?["resumedAgentId"] as? String
             var events: [TranscriptEvent] = contentBlocks(obj).compactMap { block in
                 guard block["type"] as? String == "tool_result",
                       let id = block["tool_use_id"] as? String
                 else { return nil }
                 if let launchedAgent { return .agentLaunched(toolUseID: id, agentID: launchedAgent) }
+                if let resumedAgent { return .agentResumed(toolUseID: id, agentID: resumedAgent) }
                 return .agentFinished(id)
             }
             // Including tool results: a result arriving means the turn is alive. Ordering is what

@@ -32,8 +32,13 @@ struct SessionStatus: Equatable {
     /// Why the session is blocked, when `activity == .waiting`. Values come from
     /// `claude` verbatim: "permission prompt", "input needed", "dialog open", …
     var waitingFor: String?
-    /// Outstanding top-level `Agent` tool calls. Only meaningful while `busy`.
+    /// Top-level subagents still working. Only meaningful while `busy`, which it forces — see
+    /// `tree(agent:waitingFor:subagentCount:)`.
     var subagentCount: Int
+    /// What the agent itself reported, before `activity` folds its subagents in. Kept so a
+    /// count change can re-derive `activity` between registry ticks: once `activity` has been
+    /// lifted to `busy`, it no longer says whether the agent alone was idle.
+    var agentActivity: SessionActivity
     /// This Mac's own verdict that `waitingFor` is describing nothing a person can act on.
     ///
     /// `claude`'s own background-Task-subagent status reporting has no distinct value for
@@ -53,12 +58,28 @@ struct SessionStatus: Equatable {
 
     init(
         activity: SessionActivity, waitingFor: String? = nil, subagentCount: Int = 0,
-        answerless: Bool = false
+        answerless: Bool = false, agentActivity: SessionActivity? = nil
     ) {
+        self.agentActivity = agentActivity ?? activity
         self.activity = activity
         self.waitingFor = waitingFor
         self.subagentCount = subagentCount
         self.answerless = answerless
+    }
+
+    /// A session's activity is its whole tree's: `busy` if the agent is busy OR any of its
+    /// subagents is still working. Background subagents outlive the turn that launched them,
+    /// so an agent reporting `idle` can still have work running that the user is waiting on.
+    ///
+    /// `waiting` is left alone: it means the user must act, which is more urgent than
+    /// "something is running" — lifting it to `busy` would hide a permission prompt.
+    static func tree(
+        agent: SessionActivity, waitingFor: String?, subagentCount: Int
+    ) -> SessionStatus {
+        SessionStatus(
+            activity: agent == .idle && subagentCount > 0 ? .busy : agent,
+            waitingFor: waitingFor, subagentCount: subagentCount, agentActivity: agent
+        )
     }
 
     /// Tooltip and accessibility label. Kept on the model rather than in the view so

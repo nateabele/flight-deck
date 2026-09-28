@@ -7144,8 +7144,8 @@ final class SessionStore: ObservableObject {
             guard let anchor = anchors[session.id], let entry = rows[anchor.pid] else {
                 continue
             }
-            next[session.id] = SessionStatus(
-                activity: entry.activity,
+            next[session.id] = SessionStatus.tree(
+                agent: entry.activity,
                 waitingFor: entry.waitingFor,
                 subagentCount: subagentCounts[session.id] ?? 0
             )
@@ -7865,6 +7865,20 @@ final class SessionStore: ObservableObject {
         guard subagentCounts[id] != count else { return }
         subagentCounts[id] = count
         guard var status = statuses[id] else { return }
+        // The count is part of the session's activity (see `SessionStatus.tree`), so a change
+        // that flips it is a real transition: routed through `commitStatuses`, where unread,
+        // notifications and the fleet event are decided — the last subagent finishing under an
+        // idle agent IS the session finishing. Waiting for the next registry tick instead
+        // would hold the sidebar wrong for up to a poll.
+        let tree = SessionStatus.tree(
+            agent: status.agentActivity, waitingFor: status.waitingFor, subagentCount: count
+        )
+        if tree.activity != status.activity {
+            var next = statuses
+            next[id] = tree
+            commitStatuses(next, backgroundWork: backgroundWorkSessions)
+            return
+        }
         status.subagentCount = count
         statuses[id] = status
         emit(.activityChanged(
@@ -8191,8 +8205,8 @@ final class SessionStore: ObservableObject {
     private func applyActivity(_ activity: SessionActivity, to tabID: UUID) {
         guard session(for: tabID) != nil else { return }
         var next = statuses
-        next[tabID] = SessionStatus(
-            activity: activity,
+        next[tabID] = SessionStatus.tree(
+            agent: activity,
             // Not carried over from the previous status: `waitingFor` describes *this*
             // report's block, and keeping a stale reason on a tab that has moved on would
             // put the wrong sentence in the sidebar and in the notification body.
