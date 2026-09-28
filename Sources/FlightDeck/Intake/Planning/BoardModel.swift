@@ -308,7 +308,7 @@ struct BoardModel: Equatable {
 
     /// The play mode a running tape's target amounts to. `.none` (a pause is pending) stops
     /// after the round in flight, which is where step stops too.
-    private static func mode(for target: TapeTarget) -> PlayMode {
+    static func mode(for target: TapeTarget) -> PlayMode {
         switch target {
         case .none, .nextMinor: .step
         case .nextMajor: .nextMajor
