@@ -357,6 +357,28 @@ from scratch" above, paused mid-round where an item needs that.
 - Turn on VoiceOver and read a board slot, an LCD cell, and a seat row. **Expect:** full words,
   never a code (e.g. "paused", not "PSD").
 
+### Finished rounds
+
+Renders: `FD_PLANNING_RENDER_DIR=<dir> FD_TEST_FILTER=FinishedRoundsRenderTests ./scripts/test-unit.sh`
+writes `rounds-*.png` (closed, open first/long/short, long with the strip scrolled; light and
+dark; 1100 and 700 pt). What only a live run can show:
+
+- With three or more rounds finished, look along the strip. **Expect:** every card the same
+  width and height, the same four rows in the same places; a missing value reads "—".
+- Click a card, then a card of a very different detail length. **Expect:** the panel's height
+  changes smoothly from one to the other (no jump, no flicker), and the caret slides to the new
+  card in the same motion. The plan below follows the clicked round.
+- Scroll the strip sideways with the panel open. **Expect:** the caret stays under its card,
+  and pins to the panel's edge once the card is scrolled past it.
+- Open a round with a long note. **Expect:** the panel stops at about 360 pt and the note
+  scrolls inside it; the page below doesn't move while you scroll it.
+- Press Esc (focus anywhere in the pane), click the open card, and click the panel's ✕.
+  **Expect:** each closes the panel. Tab to a card, Space opens it, ←/→ walk the rounds.
+- Leave the panel open while a round runs for a minute. **Expect:** no flicker or re-measure on
+  the 1 Hz tick; the open round stays open.
+- VoiceOver on a card. **Expect:** "button", the full values, "collapsed"/"expanded".
+- Reduce Motion on, switch cards and open/close. **Expect:** instant changes, no slide.
+
 ### Plan viewer and editor
 
 The plan is part of the page: the editor has no scroller of its own and is as tall as its text,
@@ -476,7 +498,9 @@ scrollers for one text).
   (no chevron for a one-sentence request); every transport chord, hover-preview and pausing/stopping spinner works; LCD
   labels/values read in full words with no truncation; the compact bar at ~700 pt never
   code-truncates a state word; tape flap plays once per new text and never on first scroll-into-
-  view, honoring Reduce Motion; round cards escape scroll clipping; auto-scroll follows the live
+  view, honoring Reduce Motion; round cards escape scroll clipping; finished-round cards are one size and their detail panel
+  resizes smoothly on switching, its caret follows the card and the strip's scroll, a long detail
+  scrolls inside the cap, Esc closes it, Reduce Motion makes it instant; auto-scroll follows the live
   target only; wheel/trackpad scroll works over the pinned block; seat rows show a structured
   result immediately; VoiceOver reads full words everywhere (board, LCD, seat rows, plan syntax,
   churn markers); the editor's undo/IME/retarget-on-landed-round paths hold; the plan scrolls
