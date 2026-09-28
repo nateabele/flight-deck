@@ -99,7 +99,14 @@ public enum HarnessCommand {
     /// so losing the config's model defaults changes nothing a round depends on. The one
     /// setting that IS carried over is `service_tier` (`CodexUserConfig`), which `build`
     /// appends right after these.
-    public static let codexIsolation = ["--ignore-user-config", "--ignore-rules", "--disable", "hooks"]
+    ///
+    /// `model_reasoning_summary=detailed` is not isolation but has to ride with it: without the
+    /// user config codex emits NO `reasoning` items at all, so every seat's live headline
+    /// (`ActivityParser`) would stay blank. Probed on 0.157.1, 2026-09-27, at medium effort: the
+    /// same prompt produced zero reasoning items without it and a `**Planning file inspection
+    /// using built-ins**` summary with it.
+    public static let codexIsolation = ["--ignore-user-config", "--ignore-rules", "--disable", "hooks",
+                                        "-c", "model_reasoning_summary=detailed"]
 
     /// Write mode's workspace-write sandbox, narrowed to the work dir alone. By default codex
     /// also makes `$TMPDIR` and `/tmp` writable — shared scratch another process (or a later
