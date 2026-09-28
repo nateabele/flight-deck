@@ -57,4 +57,15 @@ final class FlapPolicyTests: XCTestCase {
         XCTAssertTrue(policy.shouldFlap(surface: "card.refine-2", text: "Refine 2", reduceMotion: false))
         XCTAssertFalse(policy.shouldFlap(surface: "card.refine-2", text: "Refine 2", reduceMotion: false))
     }
+
+    /// A seeded text was on the data before anyone looked: it reads as shown and never flaps,
+    /// while a text that arrives afterwards on the same surface still flaps once.
+    func testSeededTextNeverFlaps() {
+        let policy = FlapPolicy()
+        policy.seed(surface: "board.now", text: "Refine 2")
+        XCTAssertTrue(policy.hasShown(surface: "board.now", text: "Refine 2"))
+        XCTAssertFalse(policy.shouldFlap(surface: "board.now", text: "Refine 2", reduceMotion: false))
+        XCTAssertFalse(policy.hasShown(surface: "board.stopsAt", text: "Refine 2"), "seeding is per surface")
+        XCTAssertTrue(policy.shouldFlap(surface: "board.now", text: "Refine 3", reduceMotion: false))
+    }
 }

@@ -78,6 +78,18 @@ struct ReleaseReview {
     }
 }
 
+/// The optimistic "starting" state a start button leaves behind (spec §3.1, "No dead moments"):
+/// set in the same main-actor turn as the click, so the card answers in well under 100 ms even
+/// though the process behind it takes seconds to say anything.
+struct PendingStart: Equatable {
+    let kind: Kind
+    let since: Date
+    /// Nothing for `IntakeService.queuedAfter` since the click: still expected, but the card
+    /// stops saying "starting" and shows a quiet queued row instead of a spinner that lies.
+    var queued = false
+    enum Kind: Equatable { case triage, round(PlannedRound?) }
+}
+
 /// Orchestrates intakes end to end (spec §4): capture → headless triage (with clarifying
 /// Q&A) → recommendation/choice → release review → release (write to `br`, then deliver
 /// notices). Every state change is persisted through `save(_:)` before it is published, so a
@@ -138,6 +150,33 @@ final class IntakeService: ObservableObject {
     /// `triageActivity(_:)`. Published so a view drawing it redraws when it moves.
     @Published private(set) var triageActivities: [UUID: SeatActivity] = [:]
     private var triageActivityDates: [UUID: Date] = [:]
+    /// The round in progress's seats (spec §6), keyed by `runs/` directory name — only while a
+    /// tape has `roundInProgress`, so a paused tape's finished runs are never re-read.
+    @Published private(set) var seatActivities: [UUID: [String: SeatActivity]] = [:]
+    /// The same seats' `run.json` — what says a seat exited even when its activity never got
+    /// to write `finished`.
+    @Published private(set) var runRecords: [UUID: [String: RunRecord]] = [:]
+    /// Each shaping intake's refine/polish convergence series (spec §8).
+    @Published private(set) var convergence: [UUID: [ConvergenceCycle]] = [:]
+    /// A start the human asked for that hasn't shown any sign of life yet — see `PendingStart`.
+    /// Set by `answer`, `beginShaping` and `send`'s play commands; cleared by `settlePending` on
+    /// the first sign of that work, and by `save` the moment the intake leaves the state the
+    /// work runs in (a turn that failed before writing anything, a discard).
+    @Published private(set) var pending: [UUID: PendingStart] = [:]
+    /// How long a pending start may stay silent before it reads as queued rather than starting.
+    static let queuedAfter: TimeInterval = 15
+    /// Each seat file's mtime at its last read, per intake, keyed by path — the same stat-first
+    /// rule `tapeDates` holds `tape.json` to, per file, so an idle tick decodes nothing.
+    private var seatFileDates: [UUID: [String: Date]] = [:]
+    /// The round `seatActivities` belongs to; a different one starts the seat maps afresh.
+    private var seatRounds: [UUID: PlannedRound] = [:]
+    /// The checkpoint count `convergence` was folded at. The fold reads every refine/polish
+    /// checkpoint's plan and proposals, so it runs when a round lands — never on a heartbeat.
+    private var convergenceCounts: [UUID: Int] = [:]
+    private var flapPolicies: [UUID: FlapPolicy] = [:]
+    /// Every file this service polls for live state goes through here — a seam so a test can
+    /// count reads and prove a tick that found nothing changed read nothing.
+    private let readFile: (URL) -> Data?
     /// The deferred launch recovery, so tests (and nothing else) can await it.
     private(set) var launchRecovery: Task<Void, Never>?
 
@@ -159,7 +198,8 @@ final class IntakeService: ObservableObject {
         inject: @escaping (String, String, String, UUID) -> Bool,
         hasSession: @escaping (String, String) -> Bool,
         now: @escaping () -> Date = Date.init,
-        defaults: UserDefaults = .standard
+        defaults: UserDefaults = .standard,
+        readFile: @escaping (URL) -> Data? = { try? Data(contentsOf: $0) }
     ) {
         self.store = store
         self.headless = headless
@@ -172,6 +212,7 @@ final class IntakeService: ObservableObject {
         self.hasSession = hasSession
         self.now = now
         self.defaults = defaults
+        self.readFile = readFile
         // Cheap-to-lose UI state, same durability class `UserDefaultsPreferencesPersistence`
         // argues for — unlike the session graph (`FileSessionPersistence`'s doc comment has
         // the fuller case for why THAT needs a file instead). Stored as path -> uuidString
@@ -279,6 +320,15 @@ final class IntakeService: ObservableObject {
         !tapeStore(id).commands(after: tape.ackedCommandSeq).isEmpty
     }
 
+    /// The one split-flap memory for `id`'s screens — see `FlapPolicy` for why it can't live in
+    /// the view. Created on first ask; seeded when the service first observes the tape.
+    func flapPolicy(for id: UUID) -> FlapPolicy {
+        if let policy = flapPolicies[id] { return policy }
+        let policy = FlapPolicy()
+        flapPolicies[id] = policy
+        return policy
+    }
+
     /// The live task for `id`, if any — so tests (and nothing else) can await a turn.
     func task(for id: UUID) -> Task<Void, Never>? { tasks[id]?.task }
 
@@ -304,6 +354,7 @@ final class IntakeService: ObservableObject {
         guard var i = intake(id), i.state == .needsAnswers, !i.exchanges.isEmpty else { return }
         i.exchanges[i.exchanges.count - 1].answers = answers
         save(i)
+        pending[id] = PendingStart(kind: .triage, since: now())
         clearAnswerDrafts(id)
         let questions = i.exchanges[i.exchanges.count - 1].questions
         start(id) { await $0.runTriage(id, turn: .answers(questions: questions, answers: answers)) }
@@ -397,7 +448,15 @@ final class IntakeService: ObservableObject {
         }
         do { _ = try tapeStore(id).appendCommand(play) }
         catch { return fail(id, "Could not queue the first planning round: \(error)") }
+        // Before `startRunner`: a refusal fails the intake, and `save` then drops this again.
+        pending[id] = PendingStart(kind: .round(upcomingRound(id, config: config)), since: now())
         startRunner(id)
+    }
+
+    /// The round a play is about to run: the one already in flight, else the planner's next.
+    private func upcomingRound(_ id: UUID, config: RoundConfig?) -> PlannedRound? {
+        let tape = latestTapes[id] ?? tapeStore(id).loadTape()
+        return tape.roundInProgress ?? config.flatMap { TapePlanner.next(after: tape, config: $0) }
     }
 
     /// Queues `command` for the runner, then relaunches it for anything that asks for more
@@ -418,7 +477,10 @@ final class IntakeService: ObservableObject {
         switch command {
         case .pause, .note, .removeNote, .editPlan: return
         case .stop: if runner?.isRunning(id, tape: nil) != true { startRunner(id) }
-        case .step, .nextMajor, .toReview, .extend: startRunner(id)
+        case .step, .nextMajor, .toReview:
+            pending[id] = PendingStart(kind: .round(upcomingRound(id, config: intake(id)?.roundConfig)), since: now())
+            startRunner(id)
+        case .extend: startRunner(id)
         }
     }
 
@@ -434,38 +496,139 @@ final class IntakeService: ObservableObject {
     /// A synchronous read on the main actor: fine at plan sizes (a plan, a change set, a
     /// graph — kilobytes), and `ShapingView` only calls it when its viewer key changes.
     func checkpointFile(_ id: UUID, checkpoint: Int, _ path: String) -> Data? {
-        try? Data(contentsOf: tapeStore(id).checkpointDirectory(checkpoint).appendingPathComponent(path))
+        readFile(tapeStore(id).checkpointDirectory(checkpoint).appendingPathComponent(path))
     }
 
     /// One clock beat: re-read the tape of every `.shaping` intake whose `tape.json` changed
     /// since the last read (one stat each when nothing did), publish it, move a tape that
     /// reached review into release review, bring back a runner that died mid-work, and collect
-    /// any daemon queued in `pendingReaps` that has stopped running. Also run once by launch
-    /// recovery, which is what makes a relaunch resume.
+    /// any daemon queued in `pendingReaps` that has stopped running. The same beat follows the
+    /// round in progress's seats (`pollSeats`), refolds convergence when a round lands, and
+    /// settles pending starts — one clock for all of it, never a second timer. Also run once by
+    /// launch recovery, which is what makes a relaunch resume.
     func pollTapes() {
         let shaping = Set(intakes.lazy.filter { $0.state == .shaping }.map(\.id))
-        for gone in Set(latestTapes.keys).union(tapes.keys).union(tapeDates.keys).subtracting(shaping) {
+        let tracked = Set(latestTapes.keys).union(tapes.keys).union(tapeDates.keys).union(seatRounds.keys)
+            .union(seatActivities.keys).union(runRecords.keys).union(convergence.keys).union(convergenceCounts.keys)
+        for gone in tracked.subtracting(shaping) {
             tapes[gone] = nil
             latestTapes[gone] = nil
             tapeDates[gone] = nil
+            forgetSeats(gone)
+            convergence[gone] = nil
+            convergenceCounts[gone] = nil
         }
         for id in shaping {
             let store = tapeStore(id)
             let modified = (try? FileManager.default.attributesOfItem(atPath: store.tapeURL.path))?[.modificationDate] as? Date
             if latestTapes[id] == nil || modified != tapeDates[id] {
+                let firstSight = latestTapes[id] == nil
                 tapeDates[id] = modified
                 let tape = store.loadTape()
                 latestTapes[id] = tape
                 if tapes[id].map({ !Self.sameIgnoringLiveness($0, tape) }) ?? true { tapes[id] = tape }
+                if firstSight { seedFlaps(id, tape) }
+                refreshConvergence(id, tape)
             }
+            pollSeats(id)
             if latestTapes[id]?.status == .reachedReview { finishShaping(id) } else { resumeIfStalled(id) }
         }
         pollTriageActivity()
+        settlePending()
         if let runner {
             for id in pendingReaps where !runner.isRunning(id, tape: nil) {
                 runner.reap(id)
                 pendingReaps.remove(id)
             }
+        }
+    }
+
+    /// Re-reads the round in progress's `runs/<run>/activity.json` and `run.json`, each gated on
+    /// its own mtime. Nothing is read while the tape has no round in progress: every run on disk
+    /// then belongs to a round that already landed (or was thrown away), which the finished
+    /// cards draw from the checkpoint instead.
+    private func pollSeats(_ id: UUID) {
+        guard let round = latestTapes[id]?.roundInProgress else { return forgetSeats(id) }
+        if seatRounds[id] != round {
+            forgetSeats(id)
+            seatRounds[id] = round
+        }
+        let store = tapeStore(id)
+        var activities = seatActivities[id] ?? [:], records = runRecords[id] ?? [:]
+        for run in store.runNames(forRound: round) {
+            let dir = store.runDirectory(run)
+            if let activity: SeatActivity = readIfModified(id, dir.appendingPathComponent("activity.json")) {
+                activities[run] = activity
+            }
+            if let record: RunRecord = readIfModified(id, dir.appendingPathComponent("run.json")) {
+                records[run] = record
+            }
+        }
+        // Compared first: republishing an unchanged map would redraw every observer each tick.
+        if activities != seatActivities[id] ?? [:] { seatActivities[id] = activities }
+        if records != runRecords[id] ?? [:] { runRecords[id] = records }
+    }
+
+    /// `file` decoded, only when its mtime moved since the last read; nil otherwise (unchanged,
+    /// absent, or not decodable — a torn write is re-read when its replacement lands).
+    private func readIfModified<T: Decodable>(_ id: UUID, _ file: URL) -> T? {
+        guard let modified = (try? FileManager.default.attributesOfItem(atPath: file.path))?[.modificationDate] as? Date,
+              modified != seatFileDates[id]?[file.path] else { return nil }
+        seatFileDates[id, default: [:]][file.path] = modified
+        return readFile(file).flatMap { try? IntakeJSON.decoder.decode(T.self, from: $0) }
+    }
+
+    private func forgetSeats(_ id: UUID) {
+        if seatActivities[id] != nil { seatActivities[id] = nil }
+        if runRecords[id] != nil { runRecords[id] = nil }
+        seatFileDates[id] = nil
+        seatRounds[id] = nil
+    }
+
+    /// Refolds `convergence` when the checkpoint count moved — the only time its inputs can.
+    private func refreshConvergence(_ id: UUID, _ tape: Tape) {
+        guard convergenceCounts[id] != tape.checkpoints.count else { return }
+        convergenceCounts[id] = tape.checkpoints.count
+        let cycles = ConvergenceSeries.cycles(tape.checkpoints) { [unowned self] in checkpointFile(id, checkpoint: $0, $1) }
+        if convergence[id] != cycles { convergence[id] = cycles }
+    }
+
+    /// Marks everything the board shows for `tape` right now as already shown (see
+    /// `FlapPolicy.seed`), the first time this service sees the tape — at launch, or when the
+    /// intake starts shaping. Without it the first mount of the board flapped every field,
+    /// replaying values that had been sitting on the tape for hours.
+    private func seedFlaps(_ id: UUID, _ tape: Tape) {
+        guard let i = intake(id), let config = i.roundConfig else { return }
+        let board = BoardModel(intake: i, tape: tape, config: config, now: now(), selected: nil, preview: nil)
+        let policy = flapPolicy(for: id)
+        for (surface, text) in board.flapTexts { policy.seed(surface: surface, text: text) }
+    }
+
+    /// Clears every pending start whose work has shown a sign of life, and turns one silent for
+    /// `queuedAfter` into the quiet queued state.
+    private func settlePending() {
+        let clock = now()
+        for (id, start) in pending {
+            if heardFrom(id, since: start) {
+                pending[id] = nil
+            } else if !start.queued, clock.timeIntervalSince(start.since) >= Self.queuedAfter {
+                pending[id]?.queued = true
+            }
+        }
+    }
+
+    /// Activity or a heartbeat dated at or after the click. Dated, not merely present: the
+    /// previous turn's `activity.json` or a dead runner's last heartbeat is still on disk when
+    /// the click lands, and counting it would clear "starting" before anything started. A
+    /// second's grace absorbs the millisecond rounding those dates are stored with.
+    private func heardFrom(_ id: UUID, since start: PendingStart) -> Bool {
+        let after = start.since.addingTimeInterval(-1)
+        switch start.kind {
+        case .triage:
+            return (triageActivities[id]?.startedAt).map { $0 >= after } ?? false
+        case .round:
+            if let beat = latestTapes[id]?.heartbeat, beat >= after { return true }
+            return seatActivities[id]?.values.contains { $0.startedAt >= after } ?? false
         }
     }
 
@@ -586,6 +749,7 @@ final class IntakeService: ObservableObject {
         }
         i.state = .discarded
         save(i)
+        flapPolicies[id] = nil
         return true
     }
 
@@ -811,7 +975,7 @@ final class IntakeService: ObservableObject {
             guard let modified = (try? FileManager.default.attributesOfItem(atPath: file.path))?[.modificationDate] as? Date,
                   modified != triageActivityDates[i.id] else { continue }
             triageActivityDates[i.id] = modified
-            guard let data = try? Data(contentsOf: file),
+            guard let data = readFile(file),
                   let activity = try? IntakeJSON.decoder.decode(SeatActivity.self, from: data),
                   activity != triageActivities[i.id] else { continue }
             triageActivities[i.id] = activity
@@ -1049,12 +1213,23 @@ final class IntakeService: ObservableObject {
 
     /// Disk first, then publish: a published state that never reached disk would be lost on
     /// the next launch without anyone having seen it fail.
+    ///
+    /// Also where a pending start ends when its work never began: a triage turn that failed
+    /// before writing any activity, a runner that refused to start, a discard. Only `.triaging`
+    /// keeps a triage start (`answer` saves before it sets one), only `.shaping` a round's.
     private func save(_ intake: Intake) {
         try? store.save(intake)
         if let n = intakes.firstIndex(where: { $0.id == intake.id }) {
             intakes[n] = intake
         } else {
             intakes.insert(intake, at: 0)
+        }
+        if let start = pending[intake.id] {
+            let keeps = switch start.kind {
+            case .triage: intake.state == .triaging
+            case .round: intake.state == .shaping
+            }
+            if !keeps { pending[intake.id] = nil }
         }
     }
 }

@@ -183,6 +183,17 @@ struct BoardModel: Equatable {
                                     detail: nil)
     }
 
+    /// Every split-flap surface the board draws (spec §5.3) and the text on it now — the one list
+    /// both the board and `IntakeService`'s seeding read, so a value the service seeds as "already
+    /// shown" is exactly the text the board later asks `FlapPolicy` about. Seeding a text the board
+    /// never draws would leave the drawn one unseeded, and it would flap on first mount.
+    var flapTexts: [String: String] {
+        var texts = ["board.now": now.value, "board.inTheAir": inTheAir.value,
+                     "board.stopsAt": stopsAt.value, "board.callingAt": callingAt.value]
+        for slot in slots { texts["card.\(slot.id)"] = slot.name }
+        return texts
+    }
+
     /// The slot `mode` would stop on if pressed now, or nil once the tape has reached review.
     /// Step stops after the next round (the live one, when running — the runner finishes it
     /// first); next major at the first major round from there; to review at Review.
