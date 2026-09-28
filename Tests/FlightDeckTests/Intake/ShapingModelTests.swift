@@ -139,7 +139,7 @@ final class ShapingModelTests: XCTestCase {
         XCTAssertEqual(card.title, "R1")
         XCTAssertEqual(card.changes, "41 changes")
         XCTAssertEqual(card.lines, "+620/−180")
-        XCTAssertEqual(card.tally, "agree 33 / some 6 / no 2")
+        XCTAssertEqual(card.tally, "agreed 33 · somewhat 6 · declined 2", "the seat row's wording, so the two never disagree")
     }
 
     /// The record's `note` (reviewer summary, integrator notes, a fallback remark) and the
@@ -172,7 +172,8 @@ final class ShapingModelTests: XCTestCase {
         ]
         let card = try XCTUnwrap(ShapingModel(intake: try featureIntake(), tape: tape).roundCards.first)
         XCTAssertEqual(card.title, "drafts")
-        XCTAssertNil(card.changes)
+        XCTAssertEqual(card.changes, "2 drafts", "the drafters that produced one — the failed coverage seat did not")
+        XCTAssertNil(card.lines, "a draft is written from nothing, so +N/−0 against nothing says nothing")
         XCTAssertNil(card.tally)
         XCTAssertEqual(card.slots.map(\.status), [.ok, .substituted, .failed])
         XCTAssertEqual(card.slots.map(\.label), ["drafter · arbiter", "drafter · realist", "drafter · coverage"])

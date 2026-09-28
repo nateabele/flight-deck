@@ -34,7 +34,9 @@ struct RoundCard: Identifiable, Equatable {
     var checkpointID: Int
     var title: String
     var changes: String?
-    var lines: String
+    /// nil for a draft round: its drafts are written from nothing, so a "+N/−0" against
+    /// nothing measures nothing.
+    var lines: String?
     var tally: String?
     var slots: [SlotBadge]
     /// The record's note — reviewer summary, integrator notes, a fallback remark — shown
@@ -180,12 +182,19 @@ struct ShapingModel {
     var roundCards: [RoundCard] {
         tape.checkpoints.map { cp in
             let r = cp.record
+            let isDraft = cp.stage == .draft
+            // A draft round has no change count; what it made is drafts, one per drafter that
+            // produced one (a failed drafter's slot is still on the record).
+            let drafts = r.slots.filter { $0.status != .failed }.count
             return RoundCard(
                 checkpointID: cp.id,
                 title: Self.label(stage: cp.stage, round: cp.round),
-                changes: r.changeCount.map { "\($0) change\($0 == 1 ? "" : "s")" },
-                lines: "+\(r.linesAdded)/−\(r.linesRemoved)",
-                tally: r.tally.map { "agree \($0.agree) / some \($0.somewhat) / no \($0.disagree)" },
+                changes: isDraft ? "\(drafts) draft\(drafts == 1 ? "" : "s")"
+                    : r.changeCount.map { "\($0) change\($0 == 1 ? "" : "s")" },
+                lines: isDraft ? nil : "+\(r.linesAdded)/−\(r.linesRemoved)",
+                // The seat row's wording (`SeatRowModel.result`), so a round's card and the row
+                // that produced it never describe the same verdicts two ways.
+                tally: r.tally.map { "agreed \($0.agree) · somewhat \($0.somewhat) · declined \($0.disagree)" },
                 slots: r.slots.map(Self.badge),
                 note: r.note,
                 sections: Self.sectionList(r.sectionsChanged))
