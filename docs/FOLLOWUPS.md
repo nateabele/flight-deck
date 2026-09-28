@@ -1907,11 +1907,13 @@ seat, 2026-09-27 — it reached review first time, 277 s, ~452k input / ~19k out
 
 **From editable plans and anchored notes** (engine only, 2026-09-27):
 
-- **An edit that lands mid-round is not carried forward.** It is stored on the checkpoint it
-  names, but the landing round becomes the head and only the head's effective plan feeds the
-  next round, so the edit reaches no round; the landing round's record says so. Carrying it
-  forward means a three-way merge of the human's hunks onto the new `plan.md` — deferred until
-  the UI shows whether it's needed.
+- **A mid-round edit carries forward only on a clean merge.** `git merge-file` treats adjacent
+  changes as a conflict, so an edit on the line right next to one the round changed leaves the
+  new head clean and sets `editConflict`; the edit stays on its old checkpoint for the human to
+  reapply. The merge base is the plan the round actually read (the generated plan, or the edited
+  one when edits already existed at round start), so edits the round already built on are not
+  merged twice. An edit sent to the old head after the round has landed (a view that hadn't
+  switched yet) is stored there and feeds nothing — the UI should follow the head.
 - **`editPlan` carries the whole plan, and `commands.jsonl` never shrinks.** `appendCommand`
   re-reads every line to pick the next `seq`, so a UI that sends an edit per keystroke on a
   large plan makes each append slower. Send on save/blur; compacting acked lines is the fix if

@@ -16,6 +16,9 @@ public struct IntakeRunner: Sendable {
     private let pollInterval: Duration
     private let now: @Sendable () -> Date
     private let hooks: Hooks
+    /// Runs `git merge-file` for `carryEditsForward` — injectable so a test can make the merge
+    /// tool fail.
+    private let mergeRunner: CommandRunner
 
     /// Test seams, internal on purpose. Each exists because the moment it exposes can't be
     /// observed from outside without racing the runner: recovery's kill (ordering "adopt"
@@ -28,13 +31,16 @@ public struct IntakeRunner: Sendable {
     }
 
     public init(root: URL, intakeID: UUID, executor: RoundExecutor, environment: [String: String],
-                pollInterval: Duration = .seconds(1), now: @escaping @Sendable () -> Date = Date.init) {
+                pollInterval: Duration = .seconds(1), now: @escaping @Sendable () -> Date = Date.init,
+                mergeRunner: CommandRunner = SystemCommandRunner()) {
         self.init(root: root, intakeID: intakeID, executor: executor, environment: environment,
-                  pollInterval: pollInterval, now: now, hooks: Hooks())
+                  pollInterval: pollInterval, now: now, hooks: Hooks(), mergeRunner: mergeRunner)
     }
 
     init(root: URL, intakeID: UUID, executor: RoundExecutor, environment: [String: String],
-         pollInterval: Duration, now: @escaping @Sendable () -> Date, hooks: Hooks) {
+         pollInterval: Duration, now: @escaping @Sendable () -> Date, hooks: Hooks,
+         mergeRunner: CommandRunner = SystemCommandRunner()) {
+        self.mergeRunner = mergeRunner
         self.root = root
         self.intakeID = intakeID
         self.executor = executor
@@ -169,10 +175,11 @@ public struct IntakeRunner: Sendable {
                 if await keeper.stopRequested { return await keeper.finish(.stopped) }
                 if Task.isCancelled { return await keeper.abandon() }
                 return await keeper.finish(.failed, diagnosis: diagnosis)
-            case .success(.checkpoint(var cp, let files)):
+            case .success(.checkpoint(var cp, var files)):
                 if rerunNote {
                     cp.record.note = ["rerun after interruption", cp.record.note].compactMap { $0 }.joined(separator: "\n\n")
                 }
+                await carryEditsForward(&cp, &files, keeper)
                 do {
                     try await keeper.writeCheckpoint(cp, files: files, config: config)
                 } catch {
@@ -188,6 +195,31 @@ public struct IntakeRunner: Sendable {
         }
     }
 
+    /// Nate edits while agents work: an edit to the head that lands mid-round is on a
+    /// checkpoint this round's result is about to replace as head, and only the head feeds the
+    /// next round — so without this the edit would reach no round at all. It is three-way
+    /// merged (`PlanLayers.carryForward`) onto the new plan and rides in `files` as the new
+    /// checkpoint's `plan.user.md`, landing in the same atomic checkpoint write. A conflict, or
+    /// a merge tool that couldn't run, writes nothing to the new head: the edit stays where it
+    /// was, and the record's `editConflict` points the human back at it.
+    private func carryEditsForward(_ cp: inout Checkpoint, _ files: inout [String: Data], _ keeper: TapeKeeper) async {
+        guard let carry = await keeper.carryCandidate(), let ours = files[PlanLayers.generatedName] else { return }
+        let note: String
+        switch await PlanLayers.carryForward(ours: String(decoding: ours, as: UTF8.self), base: carry.base,
+                                             theirs: carry.theirs, runner: mergeRunner, environment: environment,
+                                             scratch: keeper.store.workDirectory().appendingPathComponent("carry", isDirectory: true)) {
+        case .merged(let plan):
+            guard Data(plan.utf8) != ours else { return }
+            files[PlanLayers.userName] = Data(plan.utf8)
+            let n = PlanLayers.userDiff(generated: carry.base, edited: carry.theirs).count
+            note = "Carried your \(n) edit\(n == 1 ? "" : "s") forward from checkpoint \(carry.checkpoint)."
+        case .conflicted:
+            cp.record.editConflict = carry.checkpoint
+            note = "Your edits to checkpoint \(carry.checkpoint) conflicted with this round; open \(carry.checkpoint) to reapply."
+        }
+        cp.record.note = [cp.record.note, note].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "\n\n")
+    }
+
     private struct MissingConfig: Error {}
 }
 
@@ -201,9 +233,9 @@ private actor TapeKeeper {
     private let hooks: IntakeRunner.Hooks
     private(set) var tape: Tape
     private(set) var stopRequested = false
-    /// Checkpoints the human edited while a round was in flight that had already read them —
-    /// so the round landing next says their edits missed it (see `writeCheckpoint`).
-    private var editedDuringRound = Set<Int>()
+    /// The head plan checkpoint the round in flight read, and the effective plan it read there
+    /// — the base a mid-round edit is carried forward from (see `carryCandidate`).
+    private var roundInput: (checkpoint: Int, plan: String)?
 
     init(store: TapeStore, now: @escaping @Sendable () -> Date, hooks: IntakeRunner.Hooks) {
         self.store = store
@@ -285,12 +317,11 @@ private actor TapeKeeper {
     /// the human can save again.
     private func applyEdit(checkpoint: Int, markdown: String) {
         guard tape.checkpoints.contains(where: { $0.id == checkpoint }) else { return }
-        guard (try? store.writeUserEdits(checkpoint: checkpoint, markdown: markdown)) != nil else { return }
-        if tape.roundInProgress != nil, checkpoint == tape.head?.id { editedDuringRound.insert(checkpoint) }
+        try? store.writeUserEdits(checkpoint: checkpoint, markdown: markdown)
     }
 
     func startRound(_ next: PlannedRound) -> Tape {
-        editedDuringRound = []
+        roundInput = store.headPlanCheckpoint(in: tape).flatMap { id in store.effectivePlan(checkpoint: id).map { (id, $0) } }
         tape.status = .running
         tape.pauseDiagnosis = nil
         tape.roundInProgress = next
@@ -299,23 +330,21 @@ private actor TapeKeeper {
         return tape
     }
 
+    /// The human's edits the landing round never saw: the checkpoint it read now has a
+    /// different effective plan than the one it read (an edit, or a revert, that landed while it
+    /// ran). nil when nothing changed. `base` is what the round read — for a head with no edits
+    /// at round start that is its generated `plan.md`; with edits, the edited plan the round
+    /// already built on, so only the NEW edits are merged in.
+    func carryCandidate() -> (checkpoint: Int, base: String, theirs: String)? {
+        guard let input = roundInput, let now = store.effectivePlan(checkpoint: input.checkpoint),
+              now != input.plan else { return nil }
+        return (input.checkpoint, input.plan, now)
+    }
+
     /// Appends the checkpoint, consumes the notes the round used, clears `roundInProgress`
     /// and spends a reached target — all in `writeCheckpoint`'s single tape save, so a crash
     /// leaves either the whole round recorded or none of it.
-    ///
-    /// An edit to the head that landed while this round ran is stored on that checkpoint, but
-    /// this round read the plan before it and the new checkpoint becomes the head — so only the
-    /// head's effective plan feeding the next round would drop the edit without a word. The
-    /// record says so instead; carrying the edit forward onto the new plan is a merge this
-    /// doesn't attempt.
     func writeCheckpoint(_ cp: Checkpoint, files: [String: Data], config: RoundConfig) throws {
-        var cp = cp
-        if !editedDuringRound.isEmpty {
-            let ids = editedDuringRound.sorted().map(String.init).joined(separator: ", ")
-            let missed = "Your edits to checkpoint \(ids) arrived while this round was running, so it did not see them. " +
-                "They are kept on that checkpoint; re-apply them here for the next round to use them."
-            cp.record.note = [cp.record.note, missed].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "\n\n")
-        }
         var next = tape
         for used in cp.record.annotations {
             if let i = next.pendingNotes.firstIndex(where: { $0.id == used.id }) { next.pendingNotes.remove(at: i) }
@@ -329,7 +358,7 @@ private actor TapeKeeper {
         }
         try store.writeCheckpoint(cp, files: files, into: &next, beforeSave: hooks.beforeCheckpointSave)
         tape = next
-        editedDuringRound = []
+        roundInput = nil
     }
 
     /// The runner's last write: the final status, with `runnerPID` and `heartbeat` cleared so
