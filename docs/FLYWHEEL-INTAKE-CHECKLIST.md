@@ -424,6 +424,30 @@ scrollers for one text).
   correctly in both cases — a second `textDidChange` after `NSUndoManagerDidUndoChange` must be
   a no-op, not a double-undo.
 - Press **Go to latest** after scrolling away mid-round. **Expect:** it jumps to the live head.
+- Read a long plan at a normal window, then drag the window from narrow to very wide and back.
+  **Expect:** a calm document — 15 pt body with air between lines, clear heading sizes, code in a
+  padded grey box — and paragraphs that reflow live to fill the pane (no fixed column), with the
+  drag staying smooth and the scroller's thumb settling once the drag ends.
+- Click in a wrapped body line and arrow up and down. **Expect:** the caret is the height of the
+  text, not the taller line pitch, and never sits low in the line.
+- Hover a heading. **Expect:** a small chevron appears in the gutter beside it; click it. **Expect:**
+  the section folds to the heading plus "⋯ N lines", the next section moves up, the edit/churn gutter
+  bars and note bands stay on their own lines. Click the pill (or chevron) to open it. Fold a section
+  whose code block holds a `#` line. **Expect:** it folds to the next real heading, not the comment.
+- Fold a section, then ⌘F for a word inside it, and separately click a notes-rail card whose quote
+  is inside it. **Expect:** the Find match opens the section; the card sits beside the folded
+  heading. Fold a section and type — **Expect:** nothing is committed or marked as an edit by the
+  fold itself (the edit chip count unchanged).
+- With the caret in a section, press ⌥⌘← then ⌥⌘→. **Expect:** it folds (a second ⌥⌘← folds the
+  parent) and opens; with a terminal tab focused the same chord still switches splits.
+- Fold two sections, switch to another intake and back, then let a round land that renames one of
+  the folded headings. **Expect:** both still folded after the switch; after the round only the
+  unrenamed one stays folded.
+- Scroll a long plan until the pinned block is up and a section's heading is under it. **Expect:**
+  its name in faint caps in the board's footer, between DEP · CLR and ARR · REV, changing as you
+  scroll past headings and gone when the heading is on screen; click it — the heading comes back just
+  under the block. Turn on VoiceOver and use the Headings rotor in the plan. **Expect:** it steps
+  through the plan's headings.
 - Look at a hidden code fence (collapsed to a hairline) and a dimmed list marker. **Expect:**
   both the opening and closing fence lines collapse, and it reads right, not just technically
   correct.

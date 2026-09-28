@@ -431,8 +431,12 @@ enum PlanGutter {
     static let laneGap: CGFloat = 5
     /// A caption and one small bar per round of a cycle.
     static let churnWidth: CGFloat = ChurnLaneView.width
-    /// Last lane to the text.
-    static let textGap: CGFloat = 8
+    /// Last lane to the text — and the column a heading's fold chevron sits in
+    /// (`PlanFoldGutter`), between the edit bars and the words, only on a hovered or folded
+    /// heading.
+    static let textGap: CGFloat = 18
+    /// The chevron column's centre, from the text's leading edge (negative: left of it).
+    static let chevronCenter: CGFloat = -9
 
     /// Where the text begins, from the text view's leading edge.
     static func width(churn: Bool) -> CGFloat {
@@ -748,6 +752,9 @@ struct PlanEditHooks {
     /// The intake's own router (`IntakeService.editRouter`), which outlives the section; nil
     /// gives the section one of its own (renders, tests).
     var router: PlanEditRouter?
+    /// The intake's folded sections (`IntakeService.planFolds`), which outlive the section; nil
+    /// keeps them in the editor for as long as it lives.
+    var folds: PlanFoldStore?
 }
 
 /// `PlanLayers.userDiff`'s hunks, found without splitting and hashing the whole plan on every

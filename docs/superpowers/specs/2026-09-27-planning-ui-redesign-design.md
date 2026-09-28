@@ -267,6 +267,41 @@ every keystroke already committed there is nothing to lose, and holding the head
 would only make the human click for a plan they would have taken anyway. With uncommitted typing,
 the head is held and offered.
 
+**Reading typography** (`PlanTheme`). Set for reading, not density: a 15 pt system body at a
+1.5 line pitch (`lineSpacing` 4.5 — not `lineHeightMultiple` or a minimum line height, which on
+TextKit 2 grow the caret to the padded line; the caret stays the text's own height), 6 pt after a
+paragraph, 4 pt between list items with a hanging indent; headings 24 bold / 20 / 17 semibold with
+24 pt above an H2 and 4 below; a Markdown blank line drawn as a ~9 pt gap, not a whole empty line.
+Code fences are a padded rounded box (13 pt mono), drawn behind the lines by the layout fragment;
+`>` quotes are indented with a quiet bar.
+
+**Wraps to the pane.** No readable-measure cap: the text runs from the gutter lanes to a 32 pt
+trailing margin at any width, and reflows live on resize — a fixed 720 pt measure broke every long
+single-line paragraph at the same column, which read as hard line breaks in the plan. A resize tick
+re-wraps only the viewport (~3 ms on 2,000 lines) and restarts the sliced whole-plan layout, which
+a burst of ticks coalesces into one pass.
+
+**Folding.** A disclosure chevron sits in the gutter beside each heading with something under it,
+shown while the pointer is on the heading's line and always while folded; a click folds the section
+(to the next heading of the same or a higher level; a `#` inside a code fence is not a heading), and
+a folded heading shows "⋯ N lines", which opens it again. ⌥⌘← folds the caret's section (again: its
+parent) and ⌥⌘→ opens it, only while the editor has focus — no menu item uses the chord, and
+Ghostty's ⌥⌘← (goto_split) acts only in a focused terminal. Folding is a **view state**: TextKit 2's
+content-storage delegate skips the folded paragraphs, so the stored plan, edits, note anchors and
+diffs are untouched (tested byte-identical). The caret or a Find match landing in a folded section
+opens it; a note anchored inside one sits in the rail beside its heading. Folds are kept per intake
+for the session (`IntakeService.planFolds`) by heading text plus occurrence, follow a heading
+through typing on it, and survive a new round by heading text (a fold whose heading vanished is
+dropped).
+
+**Where you are.** Once the section being read has scrolled its heading under the pinned block,
+its name shows in the pinned board's footer between DEP · CLR and ARR · REV, in the board's caption
+("§ 5. MOBILE CHECK-IN"); a click brings the heading back under the block. Nothing shows while the
+heading is on screen, nothing animates. Chosen over a trailing tick rail and a leading-margin bar
+(both rendered; the rail read as dashes beside the text, the bar said nothing without a label) and
+over the same breadcrumb drawn in the text (it covered the first line under the block). VoiceOver
+has a Headings rotor on the editor for the outline.
+
 ### 7.2 Your edits as a layer
 
 Built on `PlanLayers` (engine, landed): `plan.md` is the agents' plan, `plan.user.md` your edited

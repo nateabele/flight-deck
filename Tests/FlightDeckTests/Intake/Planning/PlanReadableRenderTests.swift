@@ -47,6 +47,45 @@ final class PlanReadableRenderTests: XCTestCase {
         }
     }
 
+    /// The outline cue: scrolled into §5, whose heading is under the pinned block, so the pinned
+    /// board's footer names it. (The rejected variants' pictures are kept beside these:
+    /// `readable-cue-rail-*`, `readable-cue-marker-*`, and the in-text `readable-cue-breadcrumb-*`.)
+    func testRenderOutlineCue() throws {
+        guard let dir = ProcessInfo.processInfo.environment["FD_PLANNING_RENDER_DIR"] else {
+            throw XCTSkip("set FD_PLANNING_RENDER_DIR to render the planning PNGs")
+        }
+        let out = URL(fileURLWithPath: dir)
+        let (service, intake) = try shapingIntake()
+        for (appearance, tone) in [(NSAppearance.Name.aqua, "light"), (.darkAqua, "dark")] {
+            try PlanningRender.write(IntakeDetailView(service: service, intake: intake, onOpenReview: {}),
+                                     size: NSSize(width: 1100, height: 900),
+                                     to: out.appendingPathComponent("readable-cue-footer-\(tone).png"),
+                                     appearance: appearance,
+                                     prepare: { host in Self.scrollToPlan(host, offset: 1250) })
+        }
+    }
+
+    /// Folds two sections through the editor itself, then renders them folded.
+    func testRenderFoldedSections() throws {
+        guard let dir = ProcessInfo.processInfo.environment["FD_PLANNING_RENDER_DIR"] else {
+            throw XCTSkip("set FD_PLANNING_RENDER_DIR to render the planning PNGs")
+        }
+        let out = URL(fileURLWithPath: dir)
+        let (service, intake) = try shapingIntake()
+        let store = service.planFolds(intake.id)
+        let headings = PlanOutline.headings(MarkdownStyler.blocks(Self.plan), in: Self.plan as NSString)
+        for line in ["## 2. Technicians", "## 3. Jobs"] {
+            store.folds.set(headings.first { $0.key.text == line }!.key, folded: true)
+        }
+        for (appearance, tone) in [(NSAppearance.Name.aqua, "light"), (.darkAqua, "dark")] {
+            try PlanningRender.write(IntakeDetailView(service: service, intake: intake, onOpenReview: {}),
+                                     size: NSSize(width: 1100, height: 900),
+                                     to: out.appendingPathComponent("readable-folded-\(tone).png"),
+                                     appearance: appearance,
+                                     prepare: { host in Self.scrollToPlan(host, offset: -330) })
+        }
+    }
+
     // MARK: - Fixture
 
     /// A shaping intake, paused after its first refine, whose plan is `Self.plan`.

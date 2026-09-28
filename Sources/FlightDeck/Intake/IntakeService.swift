@@ -259,6 +259,8 @@ final class IntakeService: ObservableObject {
     /// section's — as the section's `@State` it was lost on every intake switch, and an edit
     /// that had already conflicted was merged onto the head on the next commit.
     private var editRouters: [UUID: PlanEditRouter] = [:]
+    /// Each intake's folded plan sections, for the session: a view state, never written to disk.
+    private var planFoldStores: [UUID: PlanFoldStore] = [:]
     /// How long a pending start may stay silent before it reads as queued rather than starting.
     static let queuedAfter: TimeInterval = 15
     /// Each seat file's mtime at its last read, per intake, keyed by path — the same stat-first
@@ -665,6 +667,15 @@ final class IntakeService: ObservableObject {
         return router
     }
 
+    /// Intake `id`'s folded plan sections, made on first use and kept while it shapes — so an
+    /// intake switch, which rebuilds the editor, comes back to the plan folded as it was left.
+    func planFolds(_ id: UUID) -> PlanFoldStore {
+        if let store = planFoldStores[id] { return store }
+        let store = PlanFoldStore()
+        planFoldStores[id] = store
+        return store
+    }
+
     func recordEditConflict(_ id: UUID, _ conflict: EditConflict) {
         editConflicts[id, default: []].append(conflict)
     }
@@ -721,7 +732,7 @@ final class IntakeService: ObservableObject {
         let shaping = Set(intakes.lazy.filter { $0.state == .shaping }.map(\.id))
         let tracked = Set(latestTapes.keys).union(tapes.keys).union(tapeDates.keys).union(seatRounds.keys)
             .union(seatActivities.keys).union(runRecords.keys).union(seatResults.keys).union(convergence.keys)
-            .union(convergenceKeys.keys).union(halts.keys).union(editConflicts.keys).union(editRouters.keys)
+            .union(convergenceKeys.keys).union(halts.keys).union(editConflicts.keys).union(editRouters.keys).union(planFoldStores.keys)
             .union(overlays.keys)
         for gone in tracked.subtracting(shaping) {
             tapes[gone] = nil
@@ -735,6 +746,7 @@ final class IntakeService: ObservableObject {
             halts[gone] = nil
             editConflicts[gone] = nil
             editRouters[gone] = nil
+            planFoldStores[gone] = nil
         }
         for id in shaping {
             let store = tapeStore(id)
