@@ -110,6 +110,8 @@ final class FloatingCardAnchor: NSView {
 
     /// How many times the panel has actually been moved — for tests of the skip.
     private(set) var placements = 0
+    /// For tests: what this anchor is listening to right now.
+    var observerCount: Int { observers.count }
     var hasPanel: Bool { panel != nil }
 
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
@@ -135,8 +137,15 @@ final class FloatingCardAnchor: NSView {
     }
 
     private func place() {
+        // Observed only while a card is asked for: every split-flap label carries an anchor,
+        // and each kept its window, app and scroll observers for life — woken by every scroll
+        // for cards nobody had requested.
+        guard let card else {
+            stopObserving()
+            return close()
+        }
         observe()
-        guard let card, !dismissed, let window, !window.isMiniaturized else { return close() }
+        guard !dismissed, let window, !window.isMiniaturized else { return close() }
         let room = Self.shadowRoom
         let content = AnyView(card.padding(room).accessibilityHidden(true))
         let host = self.host ?? FirstMouseHostingView(rootView: content)
@@ -191,6 +200,13 @@ final class FloatingCardAnchor: NSView {
             observers.append(center.addObserver(forName: NSView.boundsDidChangeNotification, object: clip, queue: nil, using: dismiss))
             scroll = current.superview?.enclosingScrollView
         }
+    }
+
+    private func stopObserving() {
+        observers.forEach(NotificationCenter.default.removeObserver)
+        observers = []
+        observedWindow = nil
+        observedClip = nil
     }
 
     /// Latches only a card that is actually requested: an event with nothing showing must not

@@ -135,6 +135,33 @@ final class FloatingCardAnchorTests: XCTestCase {
     private var card: AnyView { AnyView(Text("Refine 2").padding()) }
     private var shown: Bool { !(window.childWindows ?? []).isEmpty }
 
+    /// An anchor with no card asked for listens to nothing. Every split-flap label carries an
+    /// anchor, and each one kept its window, app and scroll observers for as long as it lived —
+    /// a board's worth of observers woken by every scroll, for cards nobody had asked for.
+    func testAnIdleAnchorObservesNothing() {
+        anchor.layout()
+        XCTAssertEqual(anchor.observerCount, 0, "no card requested, nothing observed")
+        anchor.present(card)
+        XCTAssertGreaterThan(anchor.observerCount, 0)
+        anchor.present(nil)
+        XCTAssertEqual(anchor.observerCount, 0, "withdrawn: observers gone with it")
+    }
+
+    /// The plan's notes follow scrolling of the clip views around the editor — and only those,
+    /// not every clip view in the app (`object: nil` woke the bridge for every scroll anywhere).
+    func testNotesFollowOnlyTheirOwnEnclosingClips() {
+        let inner = NSScrollView(frame: NSRect(x: 0, y: 0, width: 200, height: 100))
+        let text = NSView(frame: NSRect(x: 0, y: 0, width: 200, height: 400))
+        inner.documentView = text
+        let outerDocument = NSView(frame: NSRect(x: 0, y: 0, width: 1200, height: 300))
+        outerDocument.addSubview(inner)
+        let outer = NSScrollView(frame: NSRect(x: 0, y: 0, width: 400, height: 300))
+        outer.documentView = outerDocument
+        XCTAssertEqual(PlanNotesBridge.enclosingClips(of: text).map(ObjectIdentifier.init),
+                       [inner.contentView, outer.contentView].map(ObjectIdentifier.init))
+        XCTAssertEqual(PlanNotesBridge.enclosingClips(of: NSView()), [])
+    }
+
     func testPresentsAndReleasesThePanel() {
         anchor.present(card)
         XCTAssertTrue(shown)

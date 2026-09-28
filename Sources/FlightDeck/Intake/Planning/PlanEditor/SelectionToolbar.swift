@@ -105,6 +105,10 @@ final class PlanNotesBridge {
     private weak var controller: PlanNotesController?
     private lazy var toolbar = SelectionToolbarPresenter()
     private var observers: [NSObjectProtocol] = []
+    /// The clip views around the editor that `scrollObservers` follow, to tell when the editor
+    /// has moved into a different scroll hierarchy.
+    private var observedClips: [ObjectIdentifier] = []
+    private var scrollObservers: [NSObjectProtocol] = []
 
     private lazy var bands = NoteBandView()
     /// Each mark's quote in the editor's text, nil when it can't be found; valid for `marks`.
@@ -118,13 +122,15 @@ final class PlanNotesBridge {
     nonisolated init() {}
 
     deinit {
-        observers.forEach(NotificationCenter.default.removeObserver)
+        (observers + scrollObservers).forEach(NotificationCenter.default.removeObserver)
     }
 
     /// Binds `controller` (nil: notes are off, as in the standalone editor) to `textView`.
-    /// Called on every view update; only a change of controller does any work.
+    /// Called on every view update; only a change of controller does any work, besides keeping
+    /// the scroll observers on the editor's current clip views.
     func attach(_ controller: PlanNotesController?, to textView: PlanNSTextView?) {
         self.textView = textView
+        if self.controller != nil { observeScrolls() }
         guard controller !== self.controller else { return }
         detach()
         self.controller = controller
@@ -133,16 +139,8 @@ final class PlanNotesBridge {
         controller.onMarksChanged = { [weak self] in self?.marksChanged() }
         controller.undoManager = textView.undoManager
         let center = NotificationCenter.default
-        // Any enclosing clip view scrolling — the editor's own, or the detail document it sits
-        // in — moves every anchor's line, and the rail's cards must follow.
+        observeScrolls()
         observers = [
-            center.addObserver(forName: NSView.boundsDidChangeNotification, object: nil, queue: nil) { [weak self] note in
-                MainActor.assumeIsolated {
-                    guard let clip = note.object as? NSClipView, let view = self?.textView, view.isDescendant(of: clip) else { return }
-                    self?.redrawBands()
-                    self?.controller?.geometry.bump()
-                }
-            },
             // A new width re-wraps the text: the bands move with it.
             center.addObserver(forName: NSView.frameDidChangeNotification, object: textView, queue: nil) { [weak self] _ in
                 MainActor.assumeIsolated {
@@ -160,8 +158,10 @@ final class PlanNotesBridge {
 
     func detach() {
         toolbar.hide()
-        observers.forEach(NotificationCenter.default.removeObserver)
+        (observers + scrollObservers).forEach(NotificationCenter.default.removeObserver)
         observers = []
+        scrollObservers = []
+        observedClips = []
         controller?.lineTop = nil
         controller?.onMarksChanged = nil
         controller = nil
@@ -169,6 +169,39 @@ final class PlanNotesBridge {
         bands.marks = []
         located = [:]
         marks = []
+    }
+
+    /// Any enclosing clip view scrolling — the editor's own, or the detail document it sits in —
+    /// moves every anchor's line, and the rail's cards must follow. Observed on exactly those
+    /// clips: with `object: nil` every clip-view scroll anywhere in the app woke the bridge.
+    /// Re-subscribed only when the chain of clips changes (the editor moved hierarchy).
+    private func observeScrolls() {
+        let clips = textView.map(Self.enclosingClips(of:)) ?? []
+        let ids = clips.map(ObjectIdentifier.init)
+        guard ids != observedClips else { return }
+        scrollObservers.forEach(NotificationCenter.default.removeObserver)
+        observedClips = ids
+        scrollObservers = clips.map { clip in
+            clip.postsBoundsChangedNotifications = true
+            return NotificationCenter.default.addObserver(forName: NSView.boundsDidChangeNotification, object: clip,
+                                                          queue: nil) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    self?.redrawBands()
+                    self?.controller?.geometry.bump()
+                }
+            }
+        }
+    }
+
+    /// Every clip view `view` scrolls inside, nearest first.
+    static func enclosingClips(of view: NSView) -> [NSClipView] {
+        var clips: [NSClipView] = []
+        var scroll = view.enclosingScrollView
+        while let current = scroll {
+            clips.append(current.contentView)
+            scroll = current.superview?.enclosingScrollView
+        }
+        return clips
     }
 
     /// The text was loaded or edited: anchors move with it.
@@ -247,8 +280,6 @@ final class PlanNotesBridge {
         if textView?.isFocused == true, let controller, !controller.planFocused { controller.planFocused = true }
         selectionChanged()
     }
-
-    var isShowingToolbar: Bool { toolbar.isShowing }
 
     /// What the band under `point` (text-view coordinates) says — its kind, then the note —
     /// shown as the text view's tooltip. The kind is never a colour, so this is where the band
