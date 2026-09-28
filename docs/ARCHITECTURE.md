@@ -1038,9 +1038,9 @@ the runner:
 | File | Writer | What |
 |---|---|---|
 | `intake.json` | app | intent, Q&A, `chosenPreset`, `roundConfig`, state, the final change set |
-| `commands.jsonl` | app (append-only) | ⏯ ⏭ ⏩ ⏸ ⏹ ＋ ✎ as `{seq, command}` lines; the runner acks by `seq` in the tape |
-| `tape.json` | runner | status, target, checkpoints, `roundInProgress`, pending annotations, extensions, heartbeat |
-| `checkpoints/<n>/` | runner | `drafts/<i>.md`, `plan.md`, `changeset.json` — each round's output |
+| `commands.jsonl` | app (append-only) | ⏯ ⏭ ⏩ ⏸ ⏹ ＋, notes (`note`/`removeNote`) and plan edits (`editPlan`, the whole edited markdown) as `{seq, command}` lines; the runner acks by `seq` in the tape |
+| `tape.json` | runner | status, target, checkpoints (each record lists the notes its round consumed), `roundInProgress`, `pendingNotes`, extensions, heartbeat |
+| `checkpoints/<n>/` | runner | `drafts/<i>.md`, `plan.md`, `changeset.json` — each round's output, never modified after; `plan.user.md` — the human's edited plan, written when the runner applies an `editPlan` |
 | `runs/<stage>-<round>-<role>[-i]/` | runner | per child: `run.json` (pid, session id, start/finish, exit), `stdout` (appended live as the child writes it), `stderr`, `schema.json`, `activity.json` (live `SeatActivity`) |
 | `work/` | runner / integrator | scratch: `graph.json`, `plan.md` + `changes.json` for the integrator, `shadow/` and `bv-*.json` for polish |
 
@@ -1056,9 +1056,37 @@ in flight finishes and is kept. ⏹ cancels the round task: every child was spaw
 process-group leader (`SystemCommandRunner`, `posix_spawn` + `POSIX_SPAWN_SETPGROUP`), so
 cancellation `killpg`s the whole subtree, and nothing from the round is checkpointed. A fresh
 ▶/⏭/⏩ is the only thing that clears `.failed`/`.stopped`; a runner relaunched without one
-won't quietly retry a failure or undo a ⏹. ✎ annotations queue on the tape and are consumed by
-the next round of any stage — every stage's prompt carries them — and recorded in that round's
-record. There is no ⏮ (rewind) yet — see FOLLOWUPS.
+won't quietly retry a failure or undo a ⏹. Notes (`PlanNote`: comment, question, must-change,
+delete or replace; unanchored, or anchored to a quote) queue on the tape as `pendingNotes` and
+are consumed by the next round of any stage — every stage's prompt carries them — and listed in
+that round's record; `removeNote` withdraws one still pending. There is no ⏮ (rewind) yet — see
+FOLLOWUPS.
+
+*Human edits and notes* (`PlanLayers`, `PlanNote`, engine only — no views yet). A checkpoint's
+plan is two layers: the generated `plan.md` (a draft checkpoint: its first surviving
+`drafts/<i>.md`), never modified, and `plan.user.md`, the human's whole edited copy. The
+**effective plan** is the edited layer when there is one. The app sends `editPlan(checkpoint,
+markdown)`; the runner (the only writer of `checkpoints/`) stores it atomically on applying it —
+immediately, even mid-round — and markdown identical to the generated plan removes the layer.
+Each round reads the effective plan of the **head plan checkpoint** (the newest with a plan),
+fresh at round start: the round in flight is never affected, and an edit to an older checkpoint
+is stored and shown but feeds nothing. An edit to the head that lands while a round is reading it
+therefore misses that round *and* the next (the new checkpoint becomes the head); the landing
+round's record says so rather than merge it forward. When the head has edits, every
+plan-reading prompt (synthesis, refine and its integrator, encode, polish, fresh-eyes, dedup)
+gets one shared block from `RoundPrompts.steering`: "These edits are authoritative…" plus the
+generated → edited unified diff, capped at 200 lines. Anchored notes render as a numbered list
+(kind, `> quote`, section, then the note or replacement); unanchored ones as the old bullet
+list. After a refine or synthesis round, any of the human's inserted lines missing from the new
+plan become a record note ("N of your edited lines were changed by this round") — a warning,
+never a pause. Encode and later rounds copy the effective plan into their own `plan.md`, so the
+edits carry forward as plan. For the UI: `PlanLayers.userDiff` gives the edit hunks,
+`PlanLayers.revert` turns one hunk back into new edited markdown (sent as a fresh `editPlan`;
+nil if the hunk is stale), `TapeStore.userEdits`/`notes(in:)` read the layers and every note
+with the checkpoint that consumed it, and `NoteAnchor.locate` re-finds a quote after edits —
+exact match ranked by the recorded ~32-character prefix/suffix, then a whitespace-collapsed
+fallback, else nil. Old tapes' `pendingAnnotations` strings and old `annotate` command lines
+decode as unanchored comments with text-derived (stable) ids.
 
 *Crash, quit and signals.* Quitting FD doesn't touch the runner. If the runner itself died
 mid-round, the tape still has `roundInProgress`: the next runner kills any child whose
