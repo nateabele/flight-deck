@@ -3,10 +3,10 @@
     "agent-async-launch.captured.jsonl"
   ],
   "isVerbatimCapturedOutput": false,
-  "claudeVersion": "2.1.283 (Claude Code)",
+  "claudeVersion": "2.1.283 (Claude Code); resume records from a session at 2.1.281",
   "capturedOn": "2026-09-27",
   "sha256": {
-    "agent-async-launch.captured.jsonl": "d104d8af582198741b130e6cb3ddbaadc5f23c2b1779d4ae32d2ba4e1ab45b06"
+    "agent-async-launch.captured.jsonl": "e636a2092a443b7fc6f80b6e18fc8424a6bb50d13f5c4092773c9c6b68545a53"
   },
   "whatTheseAre": [
     "Three consecutive records from a REAL working session's transcript, spanning one async",
@@ -17,7 +17,8 @@
     "Captured because claude 2.1.276+ made Agent launches ASYNC, which silently broke Flight",
     "Deck's sidebar subagent count: the count went +1 on the tool_use and -1 on the launch",
     "result inside one poll, so it read 1 then 0 while the agent was still running.",
-    "FOURTH record added 2026-09-27: a real attachment/queued_command notification, the SECOND site a <task-notification> occupies. It closes a DIFFERENT launch, not the one above, and its ids are left real and unedited -- so the fixture also carries a genuine 'orphan' notification, which is the realistic case."
+    "FOURTH record added 2026-09-27: a real attachment/queued_command notification, the SECOND site a <task-notification> occupies. It closes a DIFFERENT launch, not the one above, and its ids are left real and unedited -- so the fixture also carries a genuine 'orphan' notification, which is the realistic case.",
+    "RECORDS 5-7 added 2026-09-28, from a different real session: a SendMessage tool_result whose toolUseResult.resumedAgentId reopens an agent's work, the queue-operation record that reports it, and the user-site notification that closes it. Ids are REAL and unedited, so the resume call id and the resumed agent id can both be matched against the notification."
   ],
   "editingRule": [
     "DELIBERATELY NOT VERBATIM, unlike dialogs.captured.provenance.json's batch, whose rule is",
@@ -44,24 +45,44 @@
       "177 Agent launches, 177 tool_results with toolUseResult.isAsync true. No exceptions."
     ],
     "everyAgentLaunchIsEventuallyClosedByANotification": [
-      "CORRECTED 2026-09-27. This entry previously said FALSE, citing 19 of 177 launches (10.7%)",
-      "never closing plus 11 orphan notifications. **That was a measurement error, not a finding.**",
-      "The scan behind it read only ONE of the three sites a notification occupies and matched only",
-      "on <tool-use-id>. Re-measured over 40 transcripts / 739 launches: the original method leaves",
-      "13 unclosed (1.8%); reading every site and allowing <task-id> == toolUseResult.agentId leaves",
-      "4 (0.5%), and those are in flight in files still being written. The 'orphans' were largely",
-      "ORDERING: claude can write the queue-operation enqueue BEFORE the launch record it closes, so",
-      "file order is not timestamp order. Found by a peer session that re-measured and pushed back.",
-      "Still not pinned as a row, but now for an honest reason: it is a whole-session liveness",
-      "property ('closed unless the session ended while in flight') that a four-record fixture",
-      "cannot carry. It wants a corpus-wide replay row."
+      "RE-MEASURED 2026-09-28 with all four sites and the task-id fallback: 5 of 780 launches",
+      "(0.64%) unclosed, and those are in flight in files still being written. Adding the",
+      "queue-operation site changed the unclosed count NOT AT ALL (5 either way) -- it duplicates",
+      "notifications that also appear elsewhere -- so it matters for volume and for any consumer that",
+      "reads only it, not for closure.",
+      "History, kept because the error is the lesson: this entry first said FALSE at 10.7%, from a",
+      "scan that read one site and matched one id. A peer session re-measured and pushed back. Both",
+      "the 10.7% and the later 0.5% were computed with an incomplete reader.",
+      "Still unpinned as a row: it is a whole-session liveness property ('closed unless the session",
+      "ended while in flight') that no small fixture can carry, and the peer's ad-hoc replay covers",
+      "it for the current fix."
     ],
     "aNotificationOccupiesMoreThanOneSite": [
-      "CONFIRMED and load-bearing. 98 of the notifications in a 40-transcript sweep were found at",
-      "the attachment/queued_command site alone. A reader that knows only the user-string site",
-      "under-counts completions -- Flight Deck leaked 8 in one file that way, and my own first",
-      "measurement of the unclosed rate was wrong for exactly the same reason.",
-      "Pinned by `agentNotificationSites`."
+      "CONFIRMED: THREE delivery sites, corrected DOWN from four on 2026-09-28. (1) a user record's",
+      "string content, (2) an `attachment` of type queued_command with the payload in `prompt`, and",
+      "(3) a `queue-operation` record with `operation: enqueue` carrying it in a TOP-LEVEL `content`",
+      "string, with no `message` and no `attachment`.",
+      "Volume over a 40-transcript sweep: 1513 at the queue-operation site, 984 at the user string,",
+      "100 at the attachment site. A reader that stops at message/attachment misses the majority.",
+      "A FOURTH candidate -- a content BLOCK's text/content -- was read for a while and has been",
+      "REMOVED. All 20 occurrences of it were notification text QUOTED INSIDE another payload: 6 in",
+      "assistant/text (the model writing about notifications) and 14 in user/tool_result (a file",
+      "read, a transcript dump, a log echo). Reading them closes an agent because somebody grepped",
+      "for a notification. `ClaudeSession.swift` reads exactly the three real sites, and a probe",
+      "reader more permissive than the consumer it pins would stay green on transcripts the real",
+      "reader chokes on.",
+      "History worth keeping: this reader first missed site (2), then still missed site (3) after",
+      "being told it existed, then briefly over-read a fourth that is not a site at all. The row",
+      "`agentNotificationSites` requires (2) AND (3) to be present so it cannot be narrowed again."
+    ],
+    "aResumedAgentClosesUnderEitherId": [
+      "CONFIRMED for part (a), 3/3: in every offered pair the tool_result carried a STRING",
+      "toolUseResult.resumedAgentId, on a block whose tool_use_id was the SendMessage call.",
+      "Part (b) is pinned as a DISJUNCTION -- closed by <tool-use-id> OR <task-id>==resumedAgentId --",
+      "because that is what Flight Deck documents it accepts. All three samples happen to show BOTH",
+      "ids matching, and pinning that stronger coincidence would fail a cell for a contract no",
+      "consumer depends on.",
+      "Pinned by `agentResumeClosesByEitherId`."
     ]
   },
   "notCaptured": [

@@ -1,7 +1,8 @@
 import FleetKit
 import SwiftUI
 
-/// The status glyph at the trailing edge of a sidebar row.
+/// The status glyph at the leading edge of a sidebar row (a busy row's sub-agent count is
+/// drawn separately, at the trailing edge — see `SubagentCount`).
 ///
 /// Each state gets a distinct SF Symbol as well as a distinct tint: Apple's HIG warns
 /// against carrying meaning in colour alone, and the tooltip needs a deliberate hover
@@ -47,15 +48,9 @@ struct SessionStatusIcon: View {
                 .accessibilityLabel(apiError.label)
                 .accessibilityIdentifier("session-status")
         } else if let status {
-            HStack(spacing: 2) {
-                glyph(for: status.activity)
-                if status.activity == .busy, status.subagentCount > 0 {
-                    Text("\(status.subagentCount)")
-                        .font(.caption2)
-                        .monospacedDigit()
-                        .foregroundStyle(.tint)
-                }
-            }
+            // The sub-agent count is not drawn here any more — see `SubagentCount`, which the
+            // session row places at its trailing edge. The label below still names it.
+            glyph(for: status.activity)
             .help(status.tooltip(unread: unread, backgroundWork: hasBackgroundWork))
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(status.tooltip(unread: unread, backgroundWork: hasBackgroundWork))
@@ -111,5 +106,27 @@ struct SessionStatusIcon: View {
         Image(systemName: name)
             .imageScale(.small)
             .symbolRenderingMode(.hierarchical)
+    }
+}
+
+/// A busy session's sub-agent count, drawn at the row's trailing edge.
+///
+/// Trailing rather than beside the status glyph: inline, the numeral widened the leading
+/// status column and pushed that one row's title right of every other. Placed immediately
+/// before the hover-only close button, it rests flush right and slides left when the button
+/// appears. Hidden from accessibility — `SessionStatusIcon`'s label already says
+/// "Working — N subagents", and a bare numeral read after the title would say it twice.
+struct SubagentCount: View {
+    let status: SessionStatus?
+
+    var body: some View {
+        if let status, status.activity == .busy, status.subagentCount > 0 {
+            Text("\(status.subagentCount)")
+                .font(.caption2)
+                .monospacedDigit()
+                .foregroundStyle(.tint)
+                .help(status.tooltip)
+                .accessibilityHidden(true)
+        }
     }
 }
