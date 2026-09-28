@@ -28,6 +28,8 @@ struct SlotBadge: Equatable {
     var status: SlotStatus
     /// Hover text for a substituted or failed seat; nil for one that ran as asked.
     var diagnosis: String?
+    /// The model that actually ran ("codex gpt-6-sol"), for the round's detail panel.
+    var model: String = ""
 }
 
 struct RoundCard: Identifiable, Equatable {
@@ -44,6 +46,17 @@ struct RoundCard: Identifiable, Equatable {
     var note: String?
     /// The sections the round touched, short: the first three and a count of the rest.
     var sections: String?
+    /// The board's name for the round ("Refine 1") and its stage group ("REFINE") — the strip's
+    /// cards and the detail panel say what the board says.
+    var name: String = ""
+    var stageTitle: String = ""
+    /// `createdAt − startedAt`, by the board's rule (`BoardModel`'s finished slots): the gap since
+    /// the previous checkpoint on a tape from before round timestamps, nil with neither.
+    var duration: TimeInterval?
+    /// Every section the round touched, `#` marks dropped — the panel has room for all of them.
+    var allSections: [String] = []
+    /// The human's notes the round consumed, as written.
+    var notesApplied: [String] = []
     var id: Int { checkpointID }
 }
 
@@ -184,7 +197,7 @@ struct ShapingModel {
     // MARK: - Round cards
 
     var roundCards: [RoundCard] {
-        tape.checkpoints.map { cp in
+        tape.checkpoints.enumerated().map { index, cp in
             let r = cp.record
             let isDraft = cp.stage == .draft
             // A draft round has no change count; what it made is drafts, one per drafter that
@@ -201,15 +214,25 @@ struct ShapingModel {
                 tally: r.tally.map { "agreed \($0.agree) · somewhat \($0.somewhat) · declined \($0.disagree)" },
                 slots: r.slots.map(Self.badge),
                 note: r.note,
-                sections: Self.sectionList(r.sectionsChanged))
+                sections: Self.sectionList(r.sectionsChanged),
+                name: BoardModel.name(stage: cp.stage, round: cp.round),
+                stageTitle: Self.stageTitle(cp.stage),
+                duration: (cp.startedAt ?? (index > 0 ? tape.checkpoints[index - 1].createdAt : nil))
+                    .map { max(0, cp.createdAt.timeIntervalSince($0)) },
+                allSections: r.sectionsChanged.map(Self.heading),
+                notesApplied: r.annotations.map(\.note))
         }
+    }
+
+    private static func heading(_ section: String) -> String {
+        section.drop { $0 == "#" }.trimmingCharacters(in: .whitespaces)
     }
 
     /// "Scope, Rollout, Risks +1": a card is a few lines wide, and the full list is one click
     /// away in the diff. Headings lose their `#` marks — the card already says it's a plan.
     private static func sectionList(_ sections: [String]) -> String? {
         guard !sections.isEmpty else { return nil }
-        let names = sections.prefix(3).map { $0.drop { $0 == "#" }.trimmingCharacters(in: .whitespaces) }
+        let names = sections.prefix(3).map(heading)
         let rest = sections.count - names.count
         return names.joined(separator: ", ") + (rest > 0 ? " +\(rest)" : "")
     }
@@ -223,7 +246,7 @@ struct ShapingModel {
         case .substituted: "Ran \(modelName(slot.used)) instead of \(modelName(slot.requested))" + reason
         case .failed: "Failed" + reason
         }
-        return SlotBadge(label: label, status: slot.status, diagnosis: diagnosis)
+        return SlotBadge(label: label, status: slot.status, diagnosis: diagnosis, model: modelName(slot.used))
     }
 
     // MARK: - Pill

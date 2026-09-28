@@ -89,7 +89,7 @@ the selected seat's details. The notes rail (§7.3) occupies it while the plan i
 | Triaging | Triage live card: one seat row (§6), elapsed, "Reading the repo" until the first event | — |
 | Needs answers | The open round as a numbered form; multi-line answers; drafts persist | **Send Answers** ⌘↩ |
 | Awaiting choice | Recommendation + reason; fidelity picker (**Single task** / Sketch / Feature plan / Full plan); the Rounds editor summary with "Edit in Inspector" | **Continue** / **Start Planning** |
-| Shaping | Control bar + departures board + seat rows for the round in progress; finished rounds as cards | (transport) |
+| Shaping | Control bar + departures board + seat rows for the round in progress; finished rounds as cards with a detail panel (§3.2) | (transport) |
 | Review | Summary of the change set; drift status | **Review Tasks…** ⌘↩ |
 | Releasing / Released | Progress line; result + delivery warnings | **Dismiss** |
 | Failed / Interrupted | Reason + raw output disclosure | **Retry** |
@@ -98,6 +98,36 @@ the selected seat's details. The notes rail (§7.3) occupies it while the plan i
 Answers collapses the round, opens the triage live card with its clock at 0:00 and a queued seat row,
 and updates the intake pill and the sidebar in the same state change. Start Planning and every
 transport command do the same for the next round.
+
+### 3.2 Finished rounds
+
+The rounds already on the tape sit under the seat rows as a horizontal strip of cards (soft
+leading/trailing fade), with a detail panel that opens below it — the Finder Quick Look strip's
+shape (`FinishedRounds`, pure parts in `FinishedRoundsModel`).
+
+- **Every card one size, the same fields in the same places**, whatever kind of round:
+  stage group and duration; round name and one outcome glyph (the worst seat: failed ✕ red,
+  fell back ⇄ amber, ran ✓); what it made ("14 changes" / "3 drafts") and lines; Verdicts as
+  agreed · somewhat · declined numbers. A field the round has no value for shows a quiet "—"
+  (a draft's lines and verdicts, a round without timestamps' duration) — never omitted, never
+  invented. The full values are the card's hover text and VoiceOver label, which says missing
+  fields in words, never a dash.
+- **Click a card** → the panel opens below the strip, spanning the section, with a caret on its
+  top edge pointing at the card; the round also shows in the plan, as a card click always has.
+  The open card again, the panel's ✕, or Esc closes it; another card switches it in place. With
+  the panel open, ←/→ step to the neighbouring round (stopping at the ends). An open panel
+  follows the plan's round when the board or Back moves it; a round that leaves the tape closes
+  it. Open state is per intake and held by the pane, so the live card's 1 Hz redraws never
+  touch it (`FinishedRounds` is an `Equatable` boundary).
+- **Panel content**: the facts (Duration, Changes, Lines, Verdicts in words — the same four for
+  every round), the whole note, every seat with the model that ran and what went wrong, every
+  section changed, and the notes the round consumed. Two columns (note | seats + sections) once
+  the section is 760 pt wide; one column below that.
+- **Height**: the panel is its content's height up to 360 pt; beyond that the content scrolls
+  inside the panel. Switching cards animates the height from the old content's to the new
+  (the window onto the content animates, not a re-layout) and slides the caret to the new card
+  in the same beat; the caret tracks the strip's horizontal scroll unanimated, clamped clear of
+  the panel's corners. Open/close animate. Reduce Motion: every change is instant.
 
 ## 4. Control bar (from Direction B)
 

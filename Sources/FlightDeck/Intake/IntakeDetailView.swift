@@ -51,6 +51,10 @@ struct IntakeDetailView: View {
     /// The checkpoint the plan section shows; nil follows the plan head. The board, the round
     /// cards and the control bar's Back all move it.
     @State private var selectedCheckpoint: Int?
+    /// The finished round whose detail panel is open under the round cards (`FinishedRounds`);
+    /// nil for none. Here rather than in the strip so it outlives the live card's 1 Hz redraws,
+    /// and per intake like the rest: `ProjectView` keys this view on the intake's id.
+    @State private var openRound: Int?
     /// The seat the inspector details (`LiveSeat.id`).
     @State private var selectedSeat: String?
     /// The seat rows' headline holds, shared with the seat inspector so it never says what the
@@ -187,7 +191,10 @@ struct IntakeDetailView: View {
         .focusedSceneValue(\.planningActions, planningActions)
         // Esc closes the heatmap from anywhere in the pane, not only while it holds focus: a
         // click into the plan moves focus to the editor, and the map stayed open under it.
-        .onExitCommand(perform: heatmap == nil ? nil : { heatmap = nil })
+        // The round panel likewise, once no heatmap is open over it.
+        .onExitCommand(perform: heatmap != nil ? { heatmap = nil }
+                       : openRound != nil ? { withAnimation(reduceMotion ? nil : .smooth(duration: 0.3)) { openRound = nil } }
+                       : nil)
         // Stop is destructive, so neither its key nor ⌘. acts without this (spec §2). Cancel is
         // the default: a Return on a reflex ⌘. must not throw the round away.
         .confirmationDialog("Stop the run?", isPresented: $confirmingStop, titleVisibility: .visible) {
@@ -201,6 +208,12 @@ struct IntakeDetailView: View {
         .onChange(of: service.notes(intake.id), initial: true) { _, onTape in notes.tapeNotes = onTape }
         // Choosing a seat is asking the inspector about the run, not the plan.
         .onChange(of: selectedSeat) { _, seat in if seat != nil { notes.planFocused = false } }
+        // An open round panel follows the plan's round when the board, ⌘[ or a banner moves
+        // it: a panel describing one round over a plan showing another reads as a stale pane.
+        .onChange(of: selectedCheckpoint) { _, checkpoint in
+            guard openRound != nil, let round = checkpoint ?? tape?.head?.id, round != openRound else { return }
+            withAnimation(reduceMotion ? nil : .smooth(duration: 0.3)) { openRound = round }
+        }
     }
 
     /// `showsInspector` as the column is handed it. The column writes back when AppKit's
@@ -257,6 +270,7 @@ struct IntakeDetailView: View {
                                  results: seats.results, pending: service.pending[intake.id],
                                  editConflict: service.editConflictNotice(intake.id, tape: tape, head: planHead),
                                  selectedRound: $selectedCheckpoint,
+                                 openRound: $openRound,
                                  selectedSeat: $selectedSeat,
                                  dwell: dwell,
                                  controlBar: { now in
