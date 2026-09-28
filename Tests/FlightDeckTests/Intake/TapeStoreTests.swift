@@ -21,6 +21,32 @@ final class TapeStoreTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: store.tapeURL.path))
     }
 
+    /// The round timestamps survive a save/load, and are left out of the JSON when nil — so a
+    /// tape written before they existed, and one that never set them, read back identically.
+    func testRoundTimestampsRoundTripAndAreOmittedWhenNil() throws {
+        let store = TapeStore(intakeDirectory: root)
+        // Sub-millisecond inputs through `init`, which rounds them as it does `heartbeat`, or
+        // the loaded tape (ISO8601, milliseconds) would not equal the saved one.
+        let tape = Tape(checkpoints: [Checkpoint(id: 1, stage: .draft, round: 0, major: true,
+                                                 createdAt: Date(timeIntervalSince1970: 1000),
+                                                 startedAt: Date(timeIntervalSince1970: 900.123_456))],
+                        roundStartedAt: Date(timeIntervalSince1970: 1100.000_4),
+                        failedAt: Date(timeIntervalSince1970: 1200))
+        try store.saveTape(tape)
+        XCTAssertEqual(store.loadTape(), tape)
+
+        try store.saveTape(Tape(checkpoints: [Checkpoint(id: 1, stage: .draft, round: 0, major: true,
+                                                         createdAt: Date(timeIntervalSince1970: 1000))]))
+        let json = try String(contentsOf: store.tapeURL, encoding: .utf8)
+        for key in ["roundStartedAt", "failedAt", "startedAt"] {
+            XCTAssertFalse(json.contains(key), "\(key) written as null rather than omitted")
+        }
+        let loaded = store.loadTape()
+        XCTAssertNil(loaded.roundStartedAt)
+        XCTAssertNil(loaded.failedAt)
+        XCTAssertNil(loaded.checkpoints.first?.startedAt)
+    }
+
     func testCorruptTapeLoadsAsEmpty() throws {
         let store = TapeStore(intakeDirectory: root)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

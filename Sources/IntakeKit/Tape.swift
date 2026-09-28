@@ -138,7 +138,13 @@ public struct Checkpoint: Codable, Equatable, Sendable, Identifiable {
     public var major: Bool
     public var createdAt: Date
     public var record: RoundRecord
-    public init(id: Int, parent: Int? = nil, stage: Stage, round: Int, major: Bool, createdAt: Date, record: RoundRecord = RoundRecord()) {
+    /// When the round that produced this checkpoint started — `Tape.roundStartedAt`, copied in by
+    /// the runner as it writes the checkpoint. Without it a round's duration could only be the
+    /// gap since the previous checkpoint, which silently counts any time the tape sat paused
+    /// before the round ran. nil on a checkpoint written before it existed.
+    public var startedAt: Date?
+    public init(id: Int, parent: Int? = nil, stage: Stage, round: Int, major: Bool, createdAt: Date, record: RoundRecord = RoundRecord(),
+                startedAt: Date? = nil) {
         self.id = id
         self.parent = parent
         self.stage = stage
@@ -147,14 +153,15 @@ public struct Checkpoint: Codable, Equatable, Sendable, Identifiable {
         // Round to milliseconds — see `millisecondRounded`'s doc comment.
         self.createdAt = millisecondRounded(createdAt)
         self.record = record
+        self.startedAt = startedAt.map(millisecondRounded)
     }
 }
 
 /// `IntakeJSON`'s date strategy (ISO8601 with fractional seconds) only preserves millisecond
 /// precision, so an unrounded `Date()` — which carries sub-millisecond precision on this
 /// platform — would not equal itself after a save/load round trip through `TapeStore`. Same
-/// fix as `Intake.init`'s createdAt rounding, applied here to `Checkpoint.createdAt` and
-/// `Tape.heartbeat`, the two `Date` fields that go through `TapeStore`.
+/// fix as `Intake.init`'s createdAt rounding, applied here to every `Date` on `Checkpoint` and
+/// `Tape`, since they all go through `TapeStore`.
 private func millisecondRounded(_ date: Date) -> Date {
     let interval = date.timeIntervalSince1970
     return Date(timeIntervalSince1970: (interval * 1000).rounded() / 1000)
@@ -198,11 +205,19 @@ public struct Tape: Codable, Equatable, Sendable {
     public var runnerPID: Int32?
     public var heartbeat: Date?
     public var roundInProgress: PlannedRound?
+    /// When the runner started `roundInProgress` — set in the same save, cleared when the round
+    /// lands (copied onto its checkpoint as `startedAt`) or is thrown away. Kept through a
+    /// failure, so the failed round's duration is `failedAt − roundStartedAt`. `heartbeat` can't
+    /// stand in: it is rewritten on every beat, so it means "last seen", never "round began".
+    public var roundStartedAt: Date?
+    /// When the last round failed; cleared when the next one starts.
+    public var failedAt: Date?
 
     public init(checkpoints: [Checkpoint] = [], target: TapeTarget = .none, status: RunnerStatus = .idle,
                 pauseDiagnosis: Diagnosis? = nil, ackedCommandSeq: Int = 0, extraRefinement: Int = 0,
                 extraPolish: Int = 0, pendingNotes: [PlanNote] = [], runnerPID: Int32? = nil,
-                heartbeat: Date? = nil, roundInProgress: PlannedRound? = nil) {
+                heartbeat: Date? = nil, roundInProgress: PlannedRound? = nil, roundStartedAt: Date? = nil,
+                failedAt: Date? = nil) {
         self.checkpoints = checkpoints
         self.target = target
         self.status = status
@@ -214,11 +229,13 @@ public struct Tape: Codable, Equatable, Sendable {
         self.runnerPID = runnerPID
         self.heartbeat = heartbeat.map(millisecondRounded)
         self.roundInProgress = roundInProgress
+        self.roundStartedAt = roundStartedAt.map(millisecondRounded)
+        self.failedAt = failedAt.map(millisecondRounded)
     }
 
     private enum CodingKeys: String, CodingKey {
         case checkpoints, target, status, pauseDiagnosis, ackedCommandSeq, extraRefinement, extraPolish,
-             pendingNotes, runnerPID, heartbeat, roundInProgress
+             pendingNotes, runnerPID, heartbeat, roundInProgress, roundStartedAt, failedAt
         /// Read-only: what `pendingNotes` was called when notes were bare strings.
         case pendingAnnotations
     }
@@ -239,6 +256,8 @@ public struct Tape: Codable, Equatable, Sendable {
         runnerPID = try c.decodeIfPresent(Int32.self, forKey: .runnerPID)
         heartbeat = try c.decodeIfPresent(Date.self, forKey: .heartbeat)
         roundInProgress = try c.decodeIfPresent(PlannedRound.self, forKey: .roundInProgress)
+        roundStartedAt = try c.decodeIfPresent(Date.self, forKey: .roundStartedAt)
+        failedAt = try c.decodeIfPresent(Date.self, forKey: .failedAt)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -254,6 +273,8 @@ public struct Tape: Codable, Equatable, Sendable {
         try c.encodeIfPresent(runnerPID, forKey: .runnerPID)
         try c.encodeIfPresent(heartbeat, forKey: .heartbeat)
         try c.encodeIfPresent(roundInProgress, forKey: .roundInProgress)
+        try c.encodeIfPresent(roundStartedAt, forKey: .roundStartedAt)
+        try c.encodeIfPresent(failedAt, forKey: .failedAt)
     }
 
     public static let empty = Tape()

@@ -63,6 +63,15 @@ final class BoardModelTests: XCTestCase {
         XCTAssertNil(model.slots[2].group)
     }
 
+    /// Sketch has no synthesizer and no polisher: the tape goes straight from Draft to refine,
+    /// then Encode, then Review.
+    func testSketchSlotsAndMajors() throws {
+        let model = try board(try intake(.sketch, answered: 1), .empty)
+        XCTAssertEqual(model.slots.map(\.code), ["CLR1", "DRFT", "RF1", "RF2", "ENC", "REV"])
+        XCTAssertEqual(model.slots.filter(\.major).map(\.code), ["DRFT", "RF2", "ENC", "REV"])
+        XCTAssertEqual(model.groups.map(\.name), ["CLARIFY", "REFINE"])
+    }
+
     /// An exchange still waiting on answers isn't a finished Clarify round.
     func testUnansweredExchangeIsNotASlot() throws {
         var intake = try intake(.sketch, answered: 1)
@@ -116,6 +125,39 @@ final class BoardModelTests: XCTestCase {
         XCTAssertEqual(try board(try intake(.featurePlan), idle).inTheAir.value, "—")
     }
 
+    /// The engine's round timestamps win over checkpoint gaps: a round that started long after
+    /// the previous checkpoint (the tape sat paused) is timed from its own start.
+    func testDurationsUseRecordedRoundStarts() throws {
+        var tape = pausedAfterR1(status: .running)
+        tape.checkpoints[0].startedAt = t0.addingTimeInterval(-240)   // Draft: 4:00, where the gap rule gave nothing
+        tape.checkpoints[2].startedAt = t0.addingTimeInterval(400)    // Refine 1 started after a pause
+        tape.checkpoints.append(cp(4, .refine, 2, major: false, at: 756))
+        tape.roundInProgress = PlannedRound(stage: .refine, round: 3, major: true)
+        tape.roundStartedAt = t0.addingTimeInterval(850)
+        let byCode = Dictionary(uniqueKeysWithValues: try board(try intake(.featurePlan), tape, now: 900).slots.map { ($0.code, $0) })
+        XCTAssertEqual(byCode["DRFT"]?.duration, 240)
+        XCTAssertEqual(byCode["SYN"]?.duration, 180, "no startedAt: falls back to the gap since Draft")
+        XCTAssertEqual(byCode["RF1"]?.duration, 68)
+        XCTAssertEqual(byCode["RF2"]?.duration, 288, "no startedAt: falls back to the gap since Refine 1")
+        XCTAssertEqual(byCode["RF3"]?.duration, 50, "live: since roundStartedAt, not since Refine 2 landed")
+    }
+
+    func testFailedRoundDurationAndHaltedFor() throws {
+        var tape = pausedAfterR1(status: .failed)
+        tape.roundStartedAt = t0.addingTimeInterval(500)
+        tape.failedAt = t0.addingTimeInterval(530)
+        let model = try board(try intake(.featurePlan), tape, now: 600)
+        XCTAssertEqual(model.slots.first { $0.state == .failed }?.duration, 30)
+        XCTAssertEqual(model.inTheAir.value, "1:10")
+        XCTAssertEqual(model.inTheAir.detail, "since Refine 2 failed")
+
+        tape.failedAt = nil
+        let old = try board(try intake(.featurePlan), tape, now: 600)
+        XCTAssertNil(old.slots.first { $0.state == .failed }?.duration, "no failure time on record: no duration")
+        XCTAssertEqual(old.inTheAir.value, "2:12")
+        XCTAssertEqual(old.inTheAir.detail, "since Refine 1 landed")
+    }
+
     func testFailedRoundIsRed() throws {
         var tape = pausedAfterR1(status: .failed)
         tape.pauseDiagnosis = Diagnosis(category: .rateLimited, detail: "429 from codex", action: "Wait")
@@ -160,7 +202,9 @@ final class BoardModelTests: XCTestCase {
     func testCallingAtListsRemainingMajors() throws {
         let model = try board(try intake(.fullPlan), pausedAfterR1(), preview: .step)
         // Step stops at RF2; the majors still to call at after it:
-        XCTAssertEqual(model.callingAt.value, "Refine 5 · Encode · Polish 6 · Dedup · Review")
+        XCTAssertEqual(model.callingAt.value, "5 · Refine 5 · Encode · Polish 6 · Dedup · Review")
+        let nextMajor = try board(try intake(.fullPlan), pausedAfterR1(), preview: .nextMajor)
+        XCTAssertEqual(nextMajor.callingAt.value, "4 · Encode · Polish 6 · Dedup · Review")
         let toReview = try board(try intake(.fullPlan), pausedAfterR1(), preview: .toReview)
         XCTAssertEqual(toReview.callingAt.value, "Release tasks · done")
         XCTAssertFalse(toReview.callingAt.value.lowercased().contains("bead"))

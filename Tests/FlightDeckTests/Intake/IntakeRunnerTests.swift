@@ -60,6 +60,15 @@ private final class TapeBox: @unchecked Sendable {
     }
 }
 
+/// A clock that moves 10 s on every read, so "started" and "landed" can never share an instant
+/// by accident and a test can tell which read set which field.
+private final class TickingClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var reads = 0
+    let origin = Date(timeIntervalSince1970: 1_790_000_000)
+    func now() -> Date { lock.withLock { reads += 1; return origin.addingTimeInterval(TimeInterval(reads * 10)) } }
+}
+
 private final class PIDCell: @unchecked Sendable {
     private let lock = NSLock()
     private var pid: Int32?
@@ -94,10 +103,11 @@ final class IntakeRunnerTests: XCTestCase {
 
     fileprivate func runner(_ commands: CommandRunner, id: UUID? = nil, poll: Duration = .milliseconds(20),
                             hooks: IntakeRunner.Hooks = .init(),
-                            mergeRunner: CommandRunner = SystemCommandRunner()) -> IntakeRunner {
+                            mergeRunner: CommandRunner = SystemCommandRunner(),
+                            now: @escaping @Sendable () -> Date = Date.init) -> IntakeRunner {
         IntakeRunner(root: intakes, intakeID: id ?? intake.id,
                      executor: RoundExecutor(runner: commands, graphReader: GraphReader(runner: commands, environment: [:])),
-                     environment: ["PATH": "/usr/bin:/bin"], pollInterval: poll, now: Date.init, hooks: hooks,
+                     environment: ["PATH": "/usr/bin:/bin"], pollInterval: poll, now: now, hooks: hooks,
                      mergeRunner: mergeRunner)
     }
 
@@ -777,5 +787,98 @@ extension IntakeRunnerTests {
         XCTAssertEqual(tape.checkpoints.first?.record.annotations, [kept])
         XCTAssertEqual(tape.pendingNotes, [])
         XCTAssertEqual(store.notes(in: tape), [TapeNote(note: kept, consumedBy: 1)])
+    }
+}
+
+// MARK: - Round timestamps
+
+extension IntakeRunnerTests {
+    /// `roundStartedAt` is set with `roundInProgress`, copied onto the checkpoint as `startedAt`
+    /// when the round lands, then cleared — so a board times the round from its real start, not
+    /// from the previous checkpoint, which would count any pause before it.
+    func testRoundStartIsRecordedCopiedAndCleared() async throws {
+        let gate = Gate()
+        let commands = AsyncScriptedRunner { call in
+            if call.role == "drafter" { try await gate.wait() }
+            return Self.answer(call)
+        }
+        let clock = TickingClock()
+        _ = try store.appendCommand(.step)
+        let run = Task { await runner(commands, now: { clock.now() }).run() }
+        try await eventually("the draft round to start") { gate.entered == 1 }
+
+        let mid = store.loadTape()
+        XCTAssertEqual(mid.roundInProgress?.stage, .draft)
+        let started = try XCTUnwrap(mid.roundStartedAt, "set in the same save as roundInProgress")
+        XCTAssertNil(mid.failedAt)
+        gate.open()
+        let status = await run.value
+        XCTAssertEqual(status, .paused)
+
+        let tape = store.loadTape()
+        let cp = try XCTUnwrap(tape.checkpoints.first)
+        XCTAssertEqual(cp.startedAt, started)
+        XCTAssertLessThan(started, cp.createdAt)
+        XCTAssertNil(tape.roundStartedAt, "cleared once the round lands")
+        XCTAssertNil(tape.failedAt)
+    }
+
+    /// A failed round keeps its start and gains `failedAt`, so its duration survives the
+    /// runner exiting — and survives a relaunch that re-finishes the stale failure. The next
+    /// round's start clears `failedAt`.
+    func testFailedRoundKeepsItsStartAndRecordsTheFailure() async throws {
+        let clock = TickingClock()
+        _ = try store.appendCommand(.toReview)
+        let status = await runner(AsyncScriptedRunner { _ in failed("Error: 401 Unauthorized") }, now: { clock.now() }).run()
+        XCTAssertEqual(status, .failed)
+
+        let tape = store.loadTape()
+        let started = try XCTUnwrap(tape.roundStartedAt)
+        let failedAt = try XCTUnwrap(tape.failedAt)
+        XCTAssertLessThan(started, failedAt)
+
+        _ = await runner(scripted(), now: { clock.now() }).run()
+        XCTAssertEqual(store.loadTape().failedAt, failedAt, "a relaunch without ▶ leaves the failure as written")
+        XCTAssertEqual(store.loadTape().roundStartedAt, started)
+
+        let gate = Gate()
+        let retry = AsyncScriptedRunner { call in
+            if call.role == "drafter" { try await gate.wait() }
+            return Self.answer(call)
+        }
+        _ = try store.appendCommand(.step)
+        let run = Task { await runner(retry, now: { clock.now() }).run() }
+        try await eventually("the retry to start") { gate.entered == 1 }
+        let mid = store.loadTape()
+        XCTAssertNil(mid.failedAt, "cleared when the next round starts")
+        XCTAssertGreaterThan(try XCTUnwrap(mid.roundStartedAt), failedAt)
+        gate.open()
+        _ = await run.value
+    }
+
+    /// A round ⏹ discarded, and an interrupted round recovery throws away, leave no start
+    /// behind for a later round to inherit.
+    func testDiscardedRoundsClearTheirStart() async throws {
+        try store.saveTape(Tape(target: .nextMinor, status: .running, runnerPID: 999_999,
+                                heartbeat: Date(timeIntervalSinceNow: -60),
+                                roundInProgress: PlannedRound(stage: .draft, round: 0, major: true),
+                                roundStartedAt: Date(timeIntervalSince1970: 1)))
+        let clock = TickingClock()
+        _ = await runner(scripted(), now: { clock.now() }).run()
+        let rerun = try XCTUnwrap(store.loadTape().checkpoints.first)
+        XCTAssertGreaterThan(try XCTUnwrap(rerun.startedAt), clock.origin, "timed from the rerun, not the dead runner's start")
+
+        let gate = Gate()
+        let held = AsyncScriptedRunner { call in
+            if call.role == "reviewer" { try await gate.wait() }
+            return Self.answer(call)
+        }
+        _ = try store.appendCommand(.step)
+        let run = Task { await runner(held).run() }
+        try await eventually("refine 1 to start") { gate.entered == 1 }
+        _ = try store.appendCommand(.stop)
+        let stopped = await run.value
+        XCTAssertEqual(stopped, .stopped)
+        XCTAssertNil(store.loadTape().roundStartedAt)
     }
 }
