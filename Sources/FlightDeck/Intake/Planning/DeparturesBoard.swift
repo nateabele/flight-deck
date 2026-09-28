@@ -457,9 +457,9 @@ struct DeparturesBoard: View {
                     p.addLine(to: CGPoint(x: end, y: y + 6))
                 }
                 .stroke(Palette.ph.opacity(0.3), lineWidth: 1)
-                // Between the bracket's start and its + handle: the name goes before the handle
-                // is ever drawn over it ("REFINE 2 OF 3" → "2 OF 3"), and the title goes last.
-                Text(Self.fittedBracketTitle(bracketTitle(group), name: group.name, width: end - x0 - 18))
+                // Between the bracket's start and its + handle: the title shortens before the
+                // handle is ever drawn over it (`BoardModel.bracketTitles`), and goes last.
+                Text(Self.fittedBracketTitle(model.bracketTitles(group), width: end - x0 - 18))
                     .font(Font(Self.bracketNS))
                     .tracking(Self.bracketTracking)
                     .foregroundStyle(bracketIsActive(group) ? Palette.ph : Palette.ph3)
@@ -489,20 +489,11 @@ struct DeparturesBoard: View {
     private static let bracketNS = NSFont.monospacedSystemFont(ofSize: 10.5, weight: .semibold)
     private static let bracketTracking: CGFloat = 1.2
 
-    /// `title`, or it without the group's name, or nothing — whichever first fits `width` (the
-    /// title's own 6 pt padding either side is already taken out by the caller).
-    static func fittedBracketTitle(_ title: String, name: String, width: CGFloat) -> String {
+    /// The first of `candidates` (longest first, `BoardModel.bracketTitles`) that fits `width`,
+    /// or nothing — the title's own 6 pt padding either side is already taken out by the caller.
+    static func fittedBracketTitle(_ candidates: [String], width: CGFloat) -> String {
         let measure = { (s: String) in LabelFit.measureWith(bracketNS)(s) + bracketTracking * CGFloat(s.count) }
-        let short = title.hasPrefix(name + " ") ? String(title.dropFirst(name.count + 1)) : title
-        return [title, short].first { measure($0) <= width } ?? ""
-    }
-
-    private func bracketTitle(_ group: TapeGroup) -> String {
-        let members = model.slots[group.range]
-        if let k = members.firstIndex(where: { $0.state == .live || $0.state == .failed }) {
-            return "\(group.name) \(k - group.range.lowerBound + 1) OF \(members.count)"
-        }
-        return "\(group.name) ×\(members.count)"
+        return candidates.first { measure($0) <= width } ?? ""
     }
 
     private func bracketIsActive(_ group: TapeGroup) -> Bool {
