@@ -505,18 +505,25 @@ final class IntakeServiceLiveTests: XCTestCase {
     /// service — the whole detail pane, the project view, and through `SessionStore`'s forward
     /// every view of the store — about once a second of a run, for values only the live card
     /// draws.
+    ///
+    /// And only on THIS intake's channel: one feed for every intake had two shaping intakes
+    /// redraw each other's live cards on every beat.
     func testSeatBeatPublishesOnlyOnTheSeatFeed() async throws {
         let i = try seed(.shaping)
-        try updateTape(i.id) { $0.status = .running; $0.roundInProgress = Self.refine1 }
-        try writeSeat(i.id, run: "refine-1-reviewer", activity: SeatActivity(harness: .codex, startedAt: clockNow),
-                      record: RunRecord(started: clockNow))
+        let other = try seed(.shaping)
+        for id in [i.id, other.id] {
+            try updateTape(id) { $0.status = .running; $0.roundInProgress = Self.refine1 }
+            try writeSeat(id, run: "refine-1-reviewer", activity: SeatActivity(harness: .codex, startedAt: clockNow),
+                          record: RunRecord(started: clockNow))
+            try setMTime(tapeStore(id).runDirectory("refine-1-reviewer").appendingPathComponent("activity.json"), 1_790_000_000)
+        }
         let activity = tapeStore(i.id).runDirectory("refine-1-reviewer").appendingPathComponent("activity.json")
-        try setMTime(activity, 1_790_000_000)
         let svc = await makeService()
-        var servicePublishes = 0, seatPublishes = 0
+        var servicePublishes = 0, seatPublishes = 0, otherPublishes = 0
         let a = svc.objectWillChange.sink { servicePublishes += 1 }
-        let b = svc.seats.objectWillChange.sink { seatPublishes += 1 }
-        defer { a.cancel(); b.cancel() }
+        let b = svc.seats.channel(i.id).objectWillChange.sink { seatPublishes += 1 }
+        let c = svc.seats.channel(other.id).objectWillChange.sink { otherPublishes += 1 }
+        defer { a.cancel(); b.cancel(); c.cancel() }
 
         var moved = SeatActivity(harness: .codex, startedAt: clockNow)
         moved.headline = "Reading the board"
@@ -526,6 +533,7 @@ final class IntakeServiceLiveTests: XCTestCase {
         XCTAssertEqual(svc.seatActivities[i.id]?["refine-1-reviewer"]?.headline, "Reading the board")
         XCTAssertEqual(svc.seats.files(i.id).activities["refine-1-reviewer"]?.headline, "Reading the board")
         XCTAssertGreaterThan(seatPublishes, 0)
+        XCTAssertEqual(otherPublishes, 0, "another intake's live card is not redrawn by this one's beat")
         XCTAssertEqual(servicePublishes, 0, "a seat beat must not redraw the service's observers")
     }
 
