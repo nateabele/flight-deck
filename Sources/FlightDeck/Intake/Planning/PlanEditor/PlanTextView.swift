@@ -1,4 +1,5 @@
 import AppKit
+import IntakeKit
 import SwiftUI
 
 enum EditPolicy {
@@ -105,6 +106,9 @@ struct PlanTextView: NSViewRepresentable {
     let onShowIncoming: () -> Void
     var incomingIsNavigation = false
     var theme: PlanTheme = .standard
+    /// The agents' plan under `text` — set, the human's edits over it draw as a layer
+    /// (`EditLayer`); nil draws none.
+    var generated: String?
 
     init(text: Binding<String>, editable: Bool, onCommit: @escaping (String) -> Void, incoming: String?,
          onShowIncoming: @escaping () -> Void, incomingIsNavigation: Bool = false) {
@@ -116,6 +120,13 @@ struct PlanTextView: NSViewRepresentable {
         self.incomingIsNavigation = incomingIsNavigation
     }
 
+    /// Draws the human's edits over `generated`, the agents' plan for the same checkpoint.
+    func editLayer(generated: String?) -> PlanTextView {
+        var copy = self
+        copy.generated = generated
+        return copy
+    }
+
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
     func makeNSView(context: Context) -> PlanEditorContainer {
@@ -125,6 +136,9 @@ struct PlanTextView: NSViewRepresentable {
         container.textView.onFocusChange = { [weak coordinator] in coordinator?.focusChanged() }
         container.textView.delegate = coordinator
         container.textView.textStorage?.delegate = coordinator
+        container.textView.onHover = { [weak container] in container?.revert.hover(at: $0) }
+        container.revert.onRevert = { [weak coordinator] in coordinator?.revert(hunk: $0) }
+        coordinator.revertButton = container.revert
         coordinator.load(text)
         return container
     }
@@ -138,6 +152,8 @@ struct PlanTextView: NSViewRepresentable {
         if coordinator.inFlight == 0, text != coordinator.lastBound { coordinator.load(text) }
         coordinator.receive(incoming, navigation: incomingIsNavigation)
         container.bannerVisible = coordinator.session.held != nil
+        coordinator.layEditLayer(over: generated)
+        container.revert.enabled = editable
     }
 
     static func dismantleNSView(_ container: PlanEditorContainer, coordinator: Coordinator) {
@@ -155,6 +171,7 @@ struct PlanTextView: NSViewRepresentable {
         /// from the parent apart from its own commit echoing back.
         var lastBound = ""
         weak var textView: PlanNSTextView?
+        weak var revertButton: EditRevertButton?
         var timer: Timer?
         /// The editor's own undo stack, via `undoManager(for:)`, rather than the window's. It
         /// is emptied on every load: its actions are ranges into the text they were typed
@@ -172,6 +189,13 @@ struct PlanTextView: NSViewRepresentable {
         /// (a paste-and-undo in one event), which falls back to a full restyle.
         private var pendingEdit: (range: NSRange, delta: Int)?
         private var editCount = 0
+        /// The edit layer: the agents' plan it was diffed against, the marks drawn, and the
+        /// hunks Revert puts back — all as of the text in the view.
+        private var layerBase: String?
+        private var marks: [EditMark] = []
+        private(set) var hunks: [PlanHunk] = []
+        /// The insertion tint, as its own decoration layer (`DecorationLayer`).
+        let editTint = DecorationLayer(key: "edits")
 
         init(_ parent: PlanTextView) { self.parent = parent }
 
@@ -183,7 +207,8 @@ struct PlanTextView: NSViewRepresentable {
             undo.removeAllActions()
             blocks = MarkdownStyler.blocks(text)
             revealed = caretBlock()
-            MarkdownStyler.apply(to: storage, blocks: blocks, revealBlock: revealed, theme: parent.theme)
+            diffEditLayer(base: parent.generated, text: text)
+            style(storage, indices: nil, reveal: revealed)
             pendingEdit = nil
             editCount = 0
             taking = nil
@@ -259,9 +284,81 @@ struct PlanTextView: NSViewRepresentable {
             guard let storage = textView?.textStorage else { return }
             let next = caretBlock()
             guard next != revealed else { return }
-            MarkdownStyler.restyle(storage, blocks: blocks, indices: [revealed, next].compactMap { $0 },
-                                   revealBlock: next, theme: parent.theme)
+            style(storage, indices: [revealed, next].compactMap { $0 }, reveal: next)
             revealed = next
+        }
+
+        /// Every styler pass goes through here, so the edit layer is laid back over exactly
+        /// the blocks the styler just reset (`EditLayer.apply`'s contract).
+        private func style(_ storage: NSTextStorage, indices: [Int]?, reveal: Int?) {
+            if let indices {
+                MarkdownStyler.restyle(storage, blocks: blocks, indices: indices, revealBlock: reveal, theme: parent.theme)
+                let ranges = Set(indices).filter(blocks.indices.contains).map { i -> NSRange in
+                    let r = blocks[i].range
+                    return NSRange(location: r.location, length: min(r.length + 1, storage.length - r.location))
+                }
+                EditLayer.apply(marks, to: storage, within: ranges, theme: parent.theme)
+            } else {
+                MarkdownStyler.apply(to: storage, blocks: blocks, revealBlock: reveal, theme: parent.theme)
+                EditLayer.apply(marks, to: storage, within: nil, theme: parent.theme)
+            }
+        }
+
+        // MARK: Edit layer
+
+        /// Re-diffs the layer; returns the blocks whose marks changed, which must be restyled
+        /// to take the new marks (and shed the old). `shift` moves the old marks past an edit
+        /// the way the storage moved their attributes, so marks the edit didn't touch compare
+        /// equal and cost nothing.
+        @discardableResult
+        private func diffEditLayer(base: String?, text: String, shift: (at: Int, by: Int)? = nil) -> [Int] {
+            layerBase = base
+            let old = marks
+            (marks, hunks) = base.map { EditLayer.marks(generated: $0, edited: text) } ?? ([], [])
+            revertButton?.spans = EditLayer.spans(hunks, edited: text)
+            if let layout = textView?.textLayoutManager { editTint.apply(EditLayer.tints(marks, in: text), to: layout) }
+            func key(_ m: EditMark, moved: Bool) -> String {
+                var r = m.range
+                if moved, let shift, r.location >= shift.at { r.location += shift.by }
+                return "\(m.kind)|\(r.location)|\(r.length)|\(m.inline)|\(m.ghost)"
+            }
+            let before = Set(old.map { key($0, moved: true) })
+            let after = Set(marks.map { key($0, moved: false) })
+            let changed = old.filter { !after.contains(key($0, moved: true)) }.map { m -> Int in
+                var r = m.range
+                if let shift, r.location >= shift.at { r.location += shift.by }
+                return r.location
+            } + marks.filter { !before.contains(key($0, moved: false)) }.map { $0.range.location }
+            let length = (text as NSString).length
+            return Set(changed.map { min($0, max(length - 1, 0)) }.compactMap { MarkdownStyler.blockIndex(at: $0, in: blocks) }).sorted()
+        }
+
+        /// The parent's agents' plan changed under the same text (a checkpoint with the same
+        /// words): re-diff and restyle what moved.
+        func layEditLayer(over generated: String?) {
+            guard generated != layerBase, let textView, let storage = textView.textStorage else { return }
+            let changed = diffEditLayer(base: generated, text: textView.string)
+            style(storage, indices: changed + [revealed].compactMap { $0 }, reveal: revealed)
+        }
+
+        /// Hover Revert: that hunk goes back to the agents' text as an ordinary edit — undoable,
+        /// restyled like typing — and is committed at once, being an explicit action.
+        func revert(hunk index: Int) {
+            guard let textView, let storage = textView.textStorage, let base = layerBase, hunks.indices.contains(index),
+                  let reverted = PlanLayers.revert(hunks[index], generated: base, edited: textView.string) else { return }
+            let old = textView.string as NSString, new = reverted as NSString
+            var front = 0
+            while front < old.length, front < new.length, old.character(at: front) == new.character(at: front) { front += 1 }
+            var back = 0
+            while back < old.length - front, back < new.length - front,
+                  old.character(at: old.length - 1 - back) == new.character(at: new.length - 1 - back) { back += 1 }
+            let range = NSRange(location: front, length: old.length - front - back)
+            let replacement = new.substring(with: NSRange(location: front, length: new.length - front - back))
+            guard textView.shouldChangeText(in: range, replacementString: replacement) else { return }
+            storage.replaceCharacters(in: range, with: replacement)
+            textView.didChangeText()
+            timer?.invalidate()
+            if let text = session.flush() { commit(text) }
         }
 
         // MARK: Editing
@@ -288,11 +385,13 @@ struct PlanTextView: NSViewRepresentable {
                 if editCount == 1, let edit = pendingEdit {
                     let changed = MarkdownStyler.changedBlocks(old: blocks, new: fresh, edited: edit.range, delta: edit.delta)
                     blocks = fresh
-                    MarkdownStyler.restyle(storage, blocks: blocks, indices: changed + [revealed, next].compactMap { $0 },
-                                           revealBlock: next, theme: parent.theme)
+                    let layered = diffEditLayer(base: layerBase, text: textView.string,
+                                                shift: (edit.range.location + max(edit.range.length - edit.delta, 0), edit.delta))
+                    style(storage, indices: changed + layered + [revealed, next].compactMap { $0 }, reveal: next)
                 } else {
                     blocks = fresh
-                    MarkdownStyler.apply(to: storage, blocks: blocks, revealBlock: next, theme: parent.theme)
+                    diffEditLayer(base: layerBase, text: textView.string)
+                    style(storage, indices: nil, reveal: next)
                 }
                 revealed = next
                 pendingEdit = nil
@@ -312,8 +411,7 @@ struct PlanTextView: NSViewRepresentable {
             guard editCount == 0, let storage = textView?.textStorage else { return }
             let next = caretBlock()
             guard next != revealed else { return }
-            MarkdownStyler.restyle(storage, blocks: blocks, indices: [revealed, next].compactMap { $0 },
-                                   revealBlock: next, theme: parent.theme)
+            style(storage, indices: [revealed, next].compactMap { $0 }, reveal: next)
             revealed = next
         }
 
@@ -342,6 +440,9 @@ struct PlanTextView: NSViewRepresentable {
 /// on every head the view takes at once.
 final class PlanEditorContainer: NSView {
     let textView = PlanNSTextView(usingTextLayoutManager: true)
+    /// The edit layer's drawing (every paragraph an `EditLayerFragment`) and its hover Revert.
+    let editLayout = EditLayerLayout()
+    let revert = EditRevertButton()
     private let scroll = NSScrollView()
     private let banner: NSHostingView<IncomingBanner>
     private let stack = NSStackView()
@@ -361,7 +462,11 @@ final class PlanEditorContainer: NSView {
         textView.isAutomaticQuoteSubstitutionEnabled = false
         textView.isAutomaticDashSubstitutionEnabled = false
         textView.isAutomaticTextReplacementEnabled = false
-        textView.textContainerInset = NSSize(width: 8, height: 8)
+        // The gutter lanes sit left of the text (`PlanGutter`, and `textContainerOrigin`
+        // below); the inset is half the two margins, since the text view splits it evenly.
+        textView.textContainerInset = NSSize(width: (PlanGutter.width + 8) / 2, height: 8)
+        textView.textLayoutManager?.delegate = editLayout
+        revert.textView = textView
         textView.isVerticallyResizable = true
         textView.isHorizontallyResizable = false
         textView.autoresizingMask = [.width]
@@ -401,6 +506,36 @@ final class PlanEditorContainer: NSView {
 class PlanNSTextView: NSTextView {
     var isFocused = false
     var onFocusChange: (() -> Void)?
+    /// The pointer over the text (view coordinates), nil when it leaves — the edit layer's
+    /// hover Revert.
+    var onHover: ((NSPoint?) -> Void)?
+    private var hoverArea: NSTrackingArea?
+
+    /// The text starts after the gutter lanes: the margin is all on the leading side, where
+    /// an even `textContainerInset` would split it.
+    override var textContainerOrigin: NSPoint {
+        NSPoint(x: PlanGutter.width, y: super.textContainerOrigin.y)
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if hoverArea == nil {
+            let area = NSTrackingArea(rect: .zero, options: [.mouseMoved, .mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+                                      owner: self, userInfo: nil)
+            addTrackingArea(area)
+            hoverArea = area
+        }
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        super.mouseMoved(with: event)
+        onHover?(convert(event.locationInWindow, from: nil))
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        super.mouseExited(with: event)
+        if event.trackingArea === hoverArea { onHover?(nil) }
+    }
 
     /// The delegate's `undoManager(for:)` first. Measured: a plain `NSTextView` never
     /// consulted it (its `undoManager` came back nil in a window), so without this ⌘Z and

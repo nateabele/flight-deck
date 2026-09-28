@@ -15,6 +15,7 @@ struct PlanSection: View {
     let onSend: (TapeCommand) -> Void
     @Binding var selection: Int?
     var initialMode: ShapingModel.ViewerMode = .plan
+    var editHooks = PlanEditHooks()
 
     init(intakeID: UUID, tape: Tape, loadFile: @escaping (Int, String) -> Data?, onSend: @escaping (TapeCommand) -> Void,
          selection: Binding<Int?> = .constant(nil), mode: ShapingModel.ViewerMode = .plan) {
@@ -29,8 +30,16 @@ struct PlanSection: View {
     var body: some View {
         // Keyed on the intake so switching intakes starts a fresh editor, instead of offering
         // the other intake's plan as "a new round landed".
-        PlanSectionBody(tape: tape, loadFile: loadFile, onSend: onSend, selection: $selection, mode: initialMode)
+        PlanSectionBody(tape: tape, loadFile: loadFile, onSend: onSend, selection: $selection, mode: initialMode,
+                        hooks: editHooks)
             .id(intakeID)
+    }
+
+    /// Where the edit layer reports to the intake (`PlanEditHooks`).
+    func editHooks(_ hooks: PlanEditHooks) -> PlanSection {
+        var copy = self
+        copy.editHooks = hooks
+        return copy
     }
 
     /// What the plan tab shows for a checkpoint: the effective plan (`plan.user.md` if the
@@ -48,15 +57,23 @@ struct PlanSection: View {
         tape.checkpoints.last { ShapingModel.planText(checkpoint: $0.id, in: tape, loadFile: loadFile) != nil }?.id
     }
 
-    /// Green/red per line, as in the mockup's hunk pane. A single `AttributedString` rather
-    /// than one `Text` per line so a long diff stays one text view (and one selection).
+    /// The agents' round-to-round changes, in a neutral treatment (spec §7.2): green and red
+    /// belong to the human's own edits in the plan, and a diff in the same colours would read
+    /// as "you changed this". Added lines are full-strength on a grey wash, removed lines
+    /// quieter, hunk headers quieter still. A single `AttributedString` rather than one
+    /// `Text` per line so a long diff stays one text view (and one selection).
     static func coloredDiff(_ diff: String) -> AttributedString {
         var out = AttributedString()
         for (i, line) in diff.split(separator: "\n", omittingEmptySubsequences: false).enumerated() {
             var piece = AttributedString((i == 0 ? "" : "\n") + line)
-            if line.hasPrefix("+") { piece.foregroundColor = .green }
-            else if line.hasPrefix("-") { piece.foregroundColor = .red }
-            else if line.hasPrefix("@@") { piece.foregroundColor = .secondary }
+            if line.hasPrefix("+") {
+                piece.foregroundColor = .primary
+                piece.backgroundColor = Color.primary.opacity(0.08)
+            } else if line.hasPrefix("-") {
+                piece.foregroundColor = .secondary
+            } else if line.hasPrefix("@@") {
+                piece.foregroundColor = Color.secondary.opacity(0.7)
+            }
             out += piece
         }
         return out
@@ -99,6 +116,19 @@ private struct PlanSectionBody: View {
     @State private var sent: [Int: String] = [:]
     @State private var otherText = AttributedString()
     @State private var message: String?
+    let hooks: PlanEditHooks
+    /// Each checkpoint's generated plan — the edit layer's base. Written once per checkpoint
+    /// and never modified, so it is read once.
+    @State private var generated: [Int: String] = [:]
+    /// "Your edits are kept…", up in this section since it first showed (`PlanEditHooks`).
+    @State private var showKeptNote = false
+    /// Checkpoints whose edit could not be carried onto a newer head: later commits of the
+    /// same edit stay with it, rather than merging a remainder onto the head without the part
+    /// that conflicted.
+    @State private var stuck: Set<Int> = []
+    /// The last stale-edit merge, so the next waits for it: each merges onto the head as the
+    /// one before it left it.
+    @State private var retargeting: Task<Void, Never>?
 
     struct Loaded: Equatable {
         var checkpoint: Int
@@ -107,25 +137,32 @@ private struct PlanSectionBody: View {
     }
 
     init(tape: Tape, loadFile: @escaping (Int, String) -> Data?, onSend: @escaping (TapeCommand) -> Void,
-         selection: Binding<Int?>, mode: ShapingModel.ViewerMode) {
+         selection: Binding<Int?>, mode: ShapingModel.ViewerMode, hooks: PlanEditHooks) {
         self.tape = tape
         self.loadFile = loadFile
         self.onSend = onSend
         _selection = selection
         _mode = State(initialValue: mode)
+        self.hooks = hooks
     }
 
     var body: some View {
         let key = ShapingModel.viewerKey(selected: selection, mode: mode, tape: tape)
+        let hunks = userHunks
         VStack(alignment: .leading, spacing: 6) {
-            Picker("View", selection: $mode) {
-                Text("Plan").tag(ShapingModel.ViewerMode.plan)
-                Text("Diff vs Previous").tag(ShapingModel.ViewerMode.diff)
-                Text("Change set").tag(ShapingModel.ViewerMode.changeSet)
+            HStack(spacing: 10) {
+                Picker("View", selection: $mode) {
+                    Text("Plan").tag(ShapingModel.ViewerMode.plan)
+                    Text("Diff vs Previous").tag(ShapingModel.ViewerMode.diff)
+                    Text("Change set").tag(ShapingModel.ViewerMode.changeSet)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .fixedSize()
+                if mode == .plan, let chip = EditLayer.chip(hunks) { editChip(chip) }
+                Spacer(minLength: 0)
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .fixedSize()
+            if mode == .plan, showKeptNote, !hunks.isEmpty { keptNote }
 
             if mode == .plan, let shown, !shown.editable {
                 pastBar(shown.checkpoint)
@@ -136,6 +173,117 @@ private struct PlanSectionBody: View {
         }
         .accessibilityIdentifier("plan-viewer")
         .onChange(of: key, initial: true) { _, key in reload(key) }
+        .onChange(of: !hunks.isEmpty, initial: true) { _, edited in
+            // Once per plan: the first time it carries edits, and never again for this intake.
+            guard edited, !hooks.noteShown, !showKeptNote else { return }
+            showKeptNote = true
+            hooks.onNoteShown()
+        }
+    }
+
+    // MARK: - Edit layer
+
+    /// The human's edits on the checkpoint shown, as of the last commit (the editor's own
+    /// marks follow every keystroke; the chip catches up within `EditPolicy.idle`).
+    private var userHunks: [PlanHunk] {
+        guard let shown, let base = generated[shown.checkpoint] else { return [] }
+        return PlanLayers.userDiff(generated: base, edited: text)
+    }
+
+    /// "3 edits by you · Revert all" (spec §7.2), green like the edits it counts.
+    private func editChip(_ chip: String) -> some View {
+        HStack(spacing: 5) {
+            Text(chip)
+            if shown?.editable == true {
+                Text("·").foregroundStyle(.secondary)
+                Button("Revert all", action: revertAll)
+                    .buttonStyle(.plain)
+                    .fontWeight(.semibold)
+                    .accessibilityIdentifier("plan-edit-revert-all")
+            }
+        }
+        .font(.caption)
+        .foregroundStyle(Color(nsColor: EditLayer.barColor))
+        .padding(.horizontal, 9)
+        .frame(height: 22)
+        .background(Color(nsColor: EditLayer.barColor).opacity(0.12), in: Capsule())
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("plan-edit-chip")
+    }
+
+    private var keptNote: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "pin").foregroundStyle(.secondary)
+            Text(EditLayer.keptNote)
+            HStack(spacing: 4) {
+                RoundedRectangle(cornerRadius: 1.5).fill(Color(nsColor: EditLayer.barColor)).frame(width: 3, height: 11)
+                Text("you").foregroundStyle(.tertiary)
+            }
+            .padding(.leading, 4)
+            Spacer(minLength: 0)
+            Button { showKeptNote = false } label: { Image(systemName: "xmark") }
+                .buttonStyle(.borderless)
+                .help("Hide")
+        }
+        .font(.caption)
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background(Color.primary.opacity(0.03), in: RoundedRectangle(cornerRadius: 6))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("plan-edit-kept-note")
+    }
+
+    /// Every hunk back to the agents' text: the runner stores a plan identical to the
+    /// generated one as "no edits" (`TapeStore.writeUserEdits`).
+    private func revertAll() {
+        guard let shown, shown.editable, let base = generated[shown.checkpoint] else { return }
+        commitEdit(base, to: shown)
+        text = base
+    }
+
+    /// Sends an edit for the checkpoint it was typed on — unless a newer head has landed since
+    /// (Task 10's open end). Then the edit, kept there, would feed no round, so it is merged
+    /// onto the head by the runner's own rule (`EditLayer.retarget`) and sent for the head; a
+    /// conflict keeps it where it was typed and raises the banner.
+    private func commitEdit(_ markdown: String, to loaded: Loaded) {
+        let checkpoint = loaded.checkpoint
+        let head = PlanSection.planHead(tape: tape, loadFile: loadFile)
+        guard let head, head != checkpoint, loaded.editable, !stuck.contains(checkpoint) else {
+            sent[checkpoint] = markdown
+            return onSend(.editPlan(checkpoint: checkpoint, markdown: markdown))
+        }
+        // The runner already failed to carry this checkpoint's edits into the head; merging
+        // more of them onto it would land the rest without the part that conflicted.
+        if tape.checkpoints.first(where: { $0.id == head })?.record.editConflict == checkpoint {
+            stuck.insert(checkpoint)
+            sent[checkpoint] = markdown
+            return onSend(.editPlan(checkpoint: checkpoint, markdown: markdown))
+        }
+        // What the edit was typed on: the checkpoint's text before the head moved. Commits since
+        // then went to the head, so this is still the last one sent for it (or the load).
+        let base = sent[checkpoint] ?? loaded.text
+        let previous = retargeting
+        retargeting = Task { @MainActor in
+            await previous?.value
+            guard let ours = sent[head] ?? PlanSection.effectivePlan(checkpoint: head, tape: tape, loadFile: loadFile) else { return }
+            let outcome = await EditLayer.retarget(markdown: markdown, typedOn: checkpoint, base: base, head: head,
+                                                   headPlan: ours, runner: hooks.runner)
+            guard case .editPlan(let target, let plan) = outcome.command else { return }
+            sent[target] = plan
+            onSend(outcome.command)
+            if let conflict = outcome.conflict {
+                stuck.insert(checkpoint)
+                return hooks.onConflict(conflict)
+            }
+            // The head's text on screen or waiting behind the banner predates the merge.
+            if shown?.checkpoint == head, text == ours {
+                shown?.text = plan
+                text = plan
+            } else if incoming?.checkpoint == head {
+                incoming?.text = plan
+            }
+        }
     }
 
     @ViewBuilder private var content: some View {
@@ -147,10 +295,7 @@ private struct PlanSectionBody: View {
                 .padding(8)
         } else if mode == .plan, let shown {
             PlanTextView(text: $text, editable: shown.editable,
-                         onCommit: { markdown in
-                             sent[shown.checkpoint] = markdown
-                             onSend(.editPlan(checkpoint: shown.checkpoint, markdown: markdown))
-                         },
+                         onCommit: { markdown in commitEdit(markdown, to: shown) },
                          incoming: incoming?.text,
                          onShowIncoming: {
                              guard let incoming else { return }
@@ -160,6 +305,7 @@ private struct PlanSectionBody: View {
                              incomingIsNavigation = false
                          },
                          incomingIsNavigation: incomingIsNavigation)
+                .editLayer(generated: generated[shown.checkpoint])
         } else {
             // Vertical only: a horizontal axis gives the text infinite width, which centred it.
             ScrollView(.vertical) {
@@ -209,6 +355,9 @@ private struct PlanSectionBody: View {
             return
         }
         message = nil
+        if generated[checkpoint] == nil {
+            generated[checkpoint] = ShapingModel.planText(checkpoint: checkpoint, in: tape, loadFile: loadFile)
+        }
         let loaded = Loaded(checkpoint: checkpoint, text: plan,
                             editable: checkpoint == PlanSection.planHead(tape: tape, loadFile: loadFile))
         if shown == nil {

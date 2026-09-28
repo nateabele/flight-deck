@@ -182,7 +182,9 @@ struct IntakeDetailView: View {
             let tape = tape ?? .empty
             LiveCard.shaping(intake: intake, tape: tape, activities: service.seatActivities[intake.id] ?? [:],
                              records: service.runRecords[intake.id] ?? [:], results: service.seatResults[intake.id] ?? [:],
-                             pending: service.pending[intake.id], selectedRound: $selectedCheckpoint,
+                             pending: service.pending[intake.id],
+                             editConflict: service.editConflictNotice(intake.id, tape: tape, head: planHead),
+                             selectedRound: $selectedCheckpoint,
                              selectedSeat: $selectedSeat,
                              controlBar: { now in AnyView(inCard(.bar, height: barHeight) { controlBar(tape, now: now) }) },
                              board: { now in AnyView(inCard(.board, height: boardHeight) { board(tape, now: now) }) })
@@ -316,6 +318,9 @@ struct IntakeDetailView: View {
                         },
                         onSend: { [service, id = intake.id] command in service.send(id, command) },
                         selection: $selectedCheckpoint)
+                .editHooks(PlanEditHooks(noteShown: service.editNoteShown.contains(intake.id),
+                                         onNoteShown: { [service, id = intake.id] in service.markEditNoteShown(id) },
+                                         onConflict: { [service, id = intake.id] in service.recordEditConflict(id, $0) }))
                 .frame(height: max(360, viewport - pinnedHeight - 24))
         }
     }
