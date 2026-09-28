@@ -403,7 +403,7 @@ private struct RoundDetailView: View {
     @ViewBuilder
     private var seats: some View {
         VStack(alignment: .leading, spacing: 5) {
-            heading("Seats")
+            heading("Agents")
             if detail.seats.isEmpty {
                 Text(FinishedRoundsModel.missing).font(.system(size: 12)).foregroundStyle(.tertiary)
             }

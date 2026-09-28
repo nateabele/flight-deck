@@ -42,7 +42,7 @@ struct LCDModel: Equatable {
     var stopMode: PlayMode?
 
     /// The order cells leave as the bar narrows (spec §4): BILLED, then SO FAR, then STOPS AT,
-    /// which the board directly below repeats. SEATS DONE goes last, leaving the compact set.
+    /// which the board directly below repeats. AGENTS DONE goes last, leaving the compact set.
     static let dropOrder: [LCDCell.Kind] = [.billed, .soFar, .stopsAt]
     private static let compactDrop: [LCDCell.Kind] = [.seatsDone]
 
@@ -163,12 +163,12 @@ struct LCDModel: Equatable {
         return LCDCell(kind: .elapsed, value: value, shortValue: value, caption: caption, tone: .normal)
     }
 
-    /// Seats done over seats in the round — one of the few honest fractions (spec §2). A
+    /// Agents done over agents in the round — one of the few honest fractions (spec §2). A
     /// failed seat has finished too; it counts, and its row says how.
     private static func seatsDone(_ seats: [SeatRowModel]) -> LCDCell {
         let done = seats.filter { $0.glyph == .done || $0.glyph == .failed }.count
         let value = seats.isEmpty ? "—" : "\(done)/\(seats.count)"
-        return LCDCell(kind: .seatsDone, value: value, shortValue: value, caption: "seats done", tone: .normal)
+        return LCDCell(kind: .seatsDone, value: value, shortValue: value, caption: "agents done", tone: .normal)
     }
 
     /// Lines the rounds have changed in the plan so far. The draft is left out: it wrote the

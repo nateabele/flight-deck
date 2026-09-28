@@ -189,9 +189,9 @@ struct LiveCard: View {
                 .foregroundStyle(.secondary)
                 .textCase(.uppercase)
             if pending == nil, seats.count > 1 {
-                // Seats done out of seats: the one progress fraction a round honestly has.
+                // Agents done out of agents: the one progress fraction a round honestly has.
                 let done = seats.filter { $0.model.glyph == .done }.count
-                Text("\(done) of \(seats.count) seats done")
+                Text("\(done) of \(seats.count) agents done")
                     .font(.system(size: 11))
                     .monospacedDigit()
                     .foregroundStyle(.tertiary)
@@ -214,7 +214,7 @@ struct LiveCard: View {
         switch kind {
         case .triage: return "Triage"
         case .shaping(let tape, _, _, _, _, _, _, _):
-            guard let round = tape.roundInProgress ?? pendingRound else { return "Seats" }
+            guard let round = tape.roundInProgress ?? pendingRound else { return "Agents" }
             return BoardModel.name(stage: round.stage, round: round.round)
         }
     }

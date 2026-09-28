@@ -98,12 +98,12 @@ enum FinishedRoundsModel {
 
     private static func outcomeText(_ slots: [SlotBadge], _ outcome: Outcome) -> String {
         let n = slots.count
-        let seats = "seat\(n == 1 ? "" : "s")"
+        let agents = "agent\(n == 1 ? "" : "s")"
         switch outcome {
         case .unknown: return missing
-        case .ran: return "\(n) \(seats) ran as asked"
-        case .fellBack: return "\(slots.filter { $0.status == .substituted }.count) of \(n) \(seats) fell back"
-        case .failed: return "\(slots.filter { $0.status == .failed }.count) of \(n) \(seats) failed"
+        case .ran: return "\(n) \(agents) ran as asked"
+        case .fellBack: return "\(slots.filter { $0.status == .substituted }.count) of \(n) \(agents) fell back"
+        case .failed: return "\(slots.filter { $0.status == .failed }.count) of \(n) \(agents) failed"
         }
     }
 

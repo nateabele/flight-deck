@@ -38,6 +38,14 @@ anything is happening, what it is, or whether another round is worth it.
   persisted keys and on-disk paths (renaming them would orphan existing state), accessibility
   identifiers, and the external methodology's proper name (agent-flywheel.com). The same guard test
   covers both rules.
+- **"Agent", never "seat".** A seat is one model run doing one role in a round (e.g. "reviewer ·
+  codex gpt-6"); every user-visible string calls it an agent instead — labels, LCD cells ("SEATS
+  DONE" → "AGENTS DONE"), inspector placeholders ("No Seat Selected" → "No Agent Selected"), the
+  finished-round detail panel's "SEATS" header, help text, failure/diagnosis text, accessibility
+  labels/values/hints and VoiceOver announcements. Kept as seat: Swift type/property names
+  (`SeatRow`, `SeatActivity`…), file names, persisted keys/paths (`runs/<run>`, `seatResults`),
+  accessibility IDENTIFIERS, test names, and IntakeKit's agent-facing prompts. The same guard test
+  covers this rule too.
 - **HIG:** primary action at the trailing edge and the default button; destructive actions never
   default, always confirmed; no controls or critical information only at a window's bottom; panels,
   not sheets, for repeated input (Rounds editor, notes); no labelled spinners; count up, never an ETA;
@@ -46,7 +54,7 @@ anything is happening, what it is, or whether another round is worth it.
   runner reaches its safe point — is exempt from "no labelled spinners": it is not a progress
   indicator, it says the press was heard (final-review ruling #18).
 - **Honest data only.** No invented percentages, ETAs or live cost estimates. A determinate fraction
-  appears only where it is real: seats done/total, the agent's own plan steps, round N of M.
+  appears only where it is real: agents done/total, the agent's own plan steps, round N of M.
 - **Motion:** every animation respects Reduce Motion (cross-fade or none). Clocks tick at 1 Hz from a
   local timer, independent of agent events; 1 Hz timers suspend when the window is occluded. Once
   nothing is running (paused, stopped, failed), the idle clocks (PAUSED FOR, HALTED FOR) tick at 1 Hz
@@ -144,7 +152,7 @@ At the top edge of the live card (in the content, not the window toolbar — it 
   Annotate is ⌥⌘A, since ⇧⌘A was already claimed by Add Project (T6 ruling). The Run menu also
   carries Show/Hide Section Heatmap (no chord), the keyboard's way to §8.3.
 - **LCD readout**, one dark-glass instrument, monospaced phosphor values, tabular numerals, cells:
-  `ROUND · OF N` · `ELAPSED` · `SEATS DONE` · `SO FAR` (+/−) · `BILLED` · **`CONVERGENCE`** (§8.1) ·
+  `ROUND · OF N` · `ELAPSED` · `AGENTS DONE` · `SO FAR` (+/−) · `BILLED` · **`CONVERGENCE`** (§8.1) ·
   `STOPS AT`. States recolour only the relevant cell (PAUSED; FAILED red with the diagnosis replacing
   SO FAR; REVIEW amber "ready for you").
 - **Round tools** at the trailing end: Extend (⌘=) and Annotate (⌥⌘A). The Run menu also carries
