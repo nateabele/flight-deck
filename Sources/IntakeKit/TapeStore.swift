@@ -2,7 +2,11 @@ import Foundation
 
 /// The on-disk shape of one intake's shaping run, shared by the app process and the detached
 /// runner: `tape.json` (the authoritative state), `commands.jsonl` (an append-only queue the
-/// app writes and the runner drains) and `checkpoints/<id>/` (the files each round produced).
+/// app writes and the runner drains), `checkpoints/<id>/` (the files each round produced),
+/// `work/` (a round's scratch) and `runs/<run>/`, one per harness child — `run.json` (pid and
+/// exit, see `RunRecord`), `schema.json`, `stdout` (the harness's JSONL, appended live by its
+/// single writer as the child runs), `stderr` (written at exit) and `activity.json` (the live
+/// `SeatActivity`, replaced atomically by `ActivityPublisher` — see `activities(forRound:)`).
 /// Not a single index file — the directory is the unit, same rationale as `IntakeStore`.
 public struct TapeStore: Sendable {
     public let intakeDirectory: URL
@@ -21,6 +25,23 @@ public struct TapeStore: Sendable {
     }
     public func runDirectory(_ name: String) -> URL {
         intakeDirectory.appendingPathComponent("runs", isDirectory: true).appendingPathComponent(name, isDirectory: true)
+    }
+
+    /// Every seat's `runs/<run>/activity.json` for one planned round, keyed by run directory
+    /// name (`refine-1-reviewer`, `draft-0-drafter-1-fallback`, …). A pure read, safe from any
+    /// process: `ActivityPublisher` only ever replaces the file atomically. A run with no
+    /// activity yet, or one that fails to decode, is simply absent.
+    public func activities(forRound planned: PlannedRound) -> [String: SeatActivity] {
+        let runs = intakeDirectory.appendingPathComponent("runs", isDirectory: true)
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: runs.path)) ?? []
+        var out: [String: SeatActivity] = [:]
+        for name in names where name.hasPrefix(planned.runNamePrefix) {
+            let file = runDirectory(name).appendingPathComponent("activity.json")
+            guard let data = try? Data(contentsOf: file),
+                  let activity = try? IntakeJSON.decoder.decode(SeatActivity.self, from: data) else { continue }
+            out[name] = activity
+        }
+        return out
     }
 
     /// `.empty` when the file is absent or fails to decode — a corrupt tape is never a crash,

@@ -28,7 +28,8 @@ public enum RoundResult: Sendable {
 
 /// `runs/<name>/run.json`: written before the child spawns (pid nil), rewritten with the pid
 /// the moment it exists, and again on exit — so a runner that crashed mid-round leaves behind
-/// a pid a restart can check for (and reap) instead of an orphan nobody knows about.
+/// a pid a restart can check for (and reap) instead of an orphan nobody knows about. Its
+/// siblings (`stdout`, `stderr`, `activity.json`) are described on `TapeStore`.
 public struct RunRecord: Codable, Equatable, Sendable {
     public var pid: Int32?
     public var sessionID: String?
@@ -455,6 +456,20 @@ public struct RoundExecutor: Sendable {
         let command = HarnessCommand.build(request, home: userHome)
         let environment = HarnessCommand.environment(for: command, base: inputs.environment, home: userHome)
 
+        // stdout is appended live, chunk by chunk as the child writes it, so the stream on disk
+        // is never more than a pipe read behind the child — the runner's reader thread is the
+        // file's single writer, and nothing ever rewrites it. The same chunks feed the seat's
+        // `activity.json` (see `ActivityPublisher`).
+        let stdoutFile = dir.appendingPathComponent("stdout")
+        guard fm.createFile(atPath: stdoutFile.path, contents: nil) else {
+            throw CocoaError(.fileWriteUnknown, userInfo: [NSFilePathErrorKey: stdoutFile.path])
+        }
+        let stream = try FileHandle(forWritingTo: stdoutFile)
+        defer { try? stream.close() }
+        let activity = ActivityPublisher(harness: choice.harness, project: inputs.project, cwd: cwd,
+                                         destination: dir.appendingPathComponent("activity.json"), now: inputs.now)
+        activity.start()
+
         let runFile = dir.appendingPathComponent("run.json")
         let started = inputs.now()
         let pid = PIDBox()
@@ -466,15 +481,22 @@ public struct RoundExecutor: Sendable {
                                           onSpawn: { spawned in
                                               pid.set(spawned)
                                               try? Self.write(RunRecord(pid: spawned, started: started), to: runFile)
+                                          },
+                                          onStdout: { chunk in
+                                              try? stream.write(contentsOf: chunk)
+                                              activity.feed(chunk)
                                           })
         } catch is CancellationError {
             try? Self.write(RunRecord(pid: pid.value, started: started, finished: inputs.now()), to: runFile)
+            activity.finish(exitCode: nil)
             throw CancellationError()
         } catch {
             try? Self.write(RunRecord(pid: pid.value, started: started, finished: inputs.now()), to: runFile)
+            activity.finish(exitCode: nil, error: "Could not run \(command.executable)")
             return .failed(Diagnosis(category: .harnessError, detail: "Could not run \(command.executable): \(error)",
                                      action: "Check that \(command.executable) is installed, then retry."), sessionID: nil)
         }
+        activity.finish(exitCode: result.exitCode)
         var session: String?
         var outcome: Attempt<T>
         do {
@@ -494,12 +516,11 @@ public struct RoundExecutor: Sendable {
                                                         parseError: error is NonZeroExit ? nil : error, harness: choice.harness),
                               sessionID: nil)
         }
-        // The finished record goes down BEFORE the streams: a stream write that fails would
-        // otherwise leave a pid with no `finished`, which a restart's reaper reads as a child
-        // still alive — and might signal whatever process has since reused that pid.
+        // The finished record goes down BEFORE stderr: a write that fails would otherwise
+        // leave a pid with no `finished`, which a restart's reaper reads as a child still
+        // alive — and might signal whatever process has since reused that pid.
         try Self.write(RunRecord(pid: pid.value, sessionID: session, started: started, finished: inputs.now(),
                                  exitCode: result.exitCode), to: runFile)
-        try result.stdout.write(to: dir.appendingPathComponent("stdout"), options: .atomic)
         try Data(result.stderr.utf8).write(to: dir.appendingPathComponent("stderr"), options: .atomic)
         return outcome
     }
@@ -577,7 +598,14 @@ public struct RoundExecutor: Sendable {
 
 /// `<stage>-<round>-<role>[-<i>]`, the `runs/` directory name for one harness child.
 private func runName(_ planned: PlannedRound, _ role: String, _ index: Int? = nil) -> String {
-    "\(planned.stage.rawValue)-\(planned.round)-\(role)" + (index.map { "-\($0)" } ?? "")
+    planned.runNamePrefix + role + (index.map { "-\($0)" } ?? "")
+}
+
+extension PlannedRound {
+    /// What every one of this round's `runs/` directory names starts with — shared by
+    /// `runName` and `TapeStore.activities(forRound:)` so the two can't disagree. The trailing
+    /// dash keeps round 1 from also matching round 10.
+    var runNamePrefix: String { "\(stage.rawValue)-\(round)-" }
 }
 
 /// Internal control flow: a seat failed in a way the human has to see. Caught in `run` and

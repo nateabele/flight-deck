@@ -87,11 +87,14 @@ public struct ActivityParser: Sendable {
     }
 
     /// The process exited: fold a final line that never got its newline, and mark the seat
-    /// finished. `exitCode` nil means it was stopped before it could exit on its own.
-    public mutating func finish(exitCode: Int32?) {
+    /// finished. `exitCode` nil means it was stopped before it could exit on its own; `error`
+    /// is the caller's own reason when the stream can't have one (the child never spawned).
+    /// An error the stream already reported wins over both — it is the more specific.
+    public mutating func finish(exitCode: Int32?, error: String? = nil) {
         if !pending.isEmpty { fold(pending); pending.removeAll() }
         activity.finished = true
         guard activity.error == nil else { return }
+        if let error { activity.error = error; return }
         switch exitCode {
         case nil: activity.error = "stopped"
         case 0?: break
