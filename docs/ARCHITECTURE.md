@@ -377,6 +377,14 @@ went nowhere.
 
 Back (⌃⌘←) and Forward (⌃⌘→) navigate a persisted selection history of up to 50 entries per stack, recalled by `SessionStore.goBack()` / `goForward()` and never landing on the row already showing. The history persists across relaunches in `SessionSnapshot` and is populated each time a session is manually selected or new sessions select themselves.
 
+⌘⇧/ (Help ▸ Keyboard Shortcuts) opens a filterable overlay listing every one of these chords
+plus the rest of the main menu's, derived from the live menu bar rather than a hand-kept list
+so it never drifts. `ShortcutCatalog` walks `NSApp.mainMenu` into groups keyed by top-level
+menu (`ShortcutCatalog+AppKit.swift` does the `NSMenuItem` adaptation; the catalog itself is
+pure so it tests without AppKit's menu machinery); `ShortcutOverlay` renders and filters them.
+Chords the terminal alone handles (⌘←/⌘→ line start/end, ⌘K clear) are not in the menu, so
+they are correctly absent from the overlay too.
+
 ## External tools
 
 `Sources/FlightDeck/Tools/` runs a shell command template — an editor, a terminal, a git

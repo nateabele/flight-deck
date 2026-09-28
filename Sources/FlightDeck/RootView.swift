@@ -13,6 +13,7 @@ struct RootView: View {
 
     @StateObject private var overlayModel = ToolOverlayModel()
     @StateObject private var overlayMonitor = ToolOverlayInputMonitorBox()
+    @State private var shortcutGroups: [ShortcutGroup]?
 
     var body: some View {
         NavigationSplitView {
@@ -56,5 +57,25 @@ struct RootView: View {
         // and nothing to keep in sync. Applied to the `NavigationSplitView` itself rather than
         // to either column, which is the placement SwiftUI resolves to the window.
         .navigationTitle(WindowTitle.text(project: store.currentProjectName))
+        // Over the whole window, not the detail column: the scrim has to cover the sidebar too,
+        // or a click there would change the selection behind an overlay the user is reading.
+        .overlay {
+            if let groups = shortcutGroups {
+                ShortcutOverlay(groups: groups, dismiss: dismissShortcuts)
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .flightDeckToggleShortcuts)) { _ in
+            if shortcutGroups == nil { shortcutGroups = ShortcutCatalog.currentGroups() }
+            else { dismissShortcuts() }
+        }
+    }
+
+    /// Hands focus back to the terminal: the filter field held it, and without this the next
+    /// keystroke after Esc goes nowhere visible instead of to the prompt the user came from.
+    private func dismissShortcuts() {
+        shortcutGroups = nil
+        if let id = store.selectedSessionID, let surface = store.surface(for: id) {
+            surface.window?.makeFirstResponder(surface)
+        }
     }
 }
