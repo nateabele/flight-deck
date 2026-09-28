@@ -254,6 +254,74 @@ final class PlanMetricsTests: XCTestCase {
         XCTAssertEqual(PlanMetrics.opsChanged(from: old, to: new), 1)
     }
 
+    /// Polish's top-weighted convergence signal is "dependencies stabilizing", which
+    /// `opsChanged` folds in with every bead edit. `edgesChanged` is the edge share alone, by
+    /// the same matching rules: added, removed, and a kind flip as one modification.
+    func testEdgesChangedCountsOnlyDependencyEdges() {
+        let old = ChangeSet(graphObservedAt: t0, ops: [
+            .createBead(NewBead(tempId: "n1", title: "t", description: "d")),
+            .addEdge(from: .existing("br-1"), to: .existing("br-2"), kind: .related),
+            .addEdge(from: .existing("br-1"), to: .existing("br-3"), kind: .blocks),
+        ])
+        let new = ChangeSet(graphObservedAt: t0, ops: [
+            .createBead(NewBead(tempId: "n1", title: "t, revised", description: "d")),
+            .addEdge(from: .existing("br-1"), to: .existing("br-2"), kind: .blocks),
+            .addEdge(from: .new("n1"), to: .existing("br-1"), kind: .blocks),
+        ])
+        // Edges: br-1→br-2 kind flip (1), br-1→br-3 removed (1), n1→br-1 added (1). The bead
+        // edit is not an edge.
+        XCTAssertEqual(PlanMetrics.edgesChanged(from: old, to: new), 3)
+        XCTAssertEqual(PlanMetrics.opsChanged(from: old, to: new), 4)
+        XCTAssertEqual(PlanMetrics.edgesChanged(from: new, to: new), 0)
+    }
+
+    // MARK: - sectionChurn
+
+    /// How much each section moved, not just which: lines added plus removed, attributed to
+    /// the heading they sit under.
+    func testSectionChurnCountsChangedLinesPerHeading() {
+        let old = """
+        # Plan
+        ## 1. Scope
+        a
+        b
+        ## 4. Rollout
+        x
+        y
+        z
+        """
+        let new = """
+        # Plan
+        ## 1. Scope
+        a
+        b2
+        ## 4. Rollout
+        x2
+        y2
+        z
+        w
+        """
+        XCTAssertEqual(PlanMetrics.sectionChurn(from: old, to: new), ["## 1. Scope": 2, "## 4. Rollout": 5])
+        XCTAssertEqual(PlanMetrics.sectionChurn(from: old, to: old), [:])
+    }
+
+    /// Same rename rule `sectionsChanged` follows: a renamed heading's churn lands on the new
+    /// name, and a section removed outright keeps its old one.
+    func testSectionChurnFollowsARenameAndKeepsARemovedSection() {
+        let old = """
+        ## Foo
+        foo body
+        ## Gone
+        g1
+        g2
+        """
+        let new = """
+        ## Bar
+        foo body
+        """
+        XCTAssertEqual(PlanMetrics.sectionChurn(from: old, to: new), ["## Bar": 2, "## Gone": 3])
+    }
+
     // MARK: - performance
 
     func testDeltaOnLargePlanFinishesUnderTwoSeconds() {

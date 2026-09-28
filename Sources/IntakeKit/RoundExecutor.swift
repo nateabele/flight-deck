@@ -323,6 +323,7 @@ public struct RoundExecutor: Sendable {
                                          readable: [plan.deletingLastPathComponent(), work],
                                          graph: graph, observedAt: observedAt, inputs: inputs, &record)
         record.changeCount = PlanMetrics.opsChanged(from: old, to: cs)
+        record.edgesChanged = PlanMetrics.edgesChanged(from: old, to: cs)
         // Both notes are independent aids, not gates, and either or both can be nil: the graph
         // snapshot fallback (no encode checkpoint to carry one) and the shadow/bv analytics
         // failure note (Task 7b) can each fire on their own round.

@@ -98,26 +98,42 @@ public enum PlanMetrics {
         }
     }
 
+    /// Lines changed (added + removed) per `#` section — the magnitude `sectionsChanged` leaves
+    /// out, which convergence needs to tell "one section keeps moving" from "every section
+    /// moved a little". Attributed the same way: an inserted line to the heading it sits under
+    /// in `new`, a deleted one to the heading its section survived as (so a renamed heading's
+    /// churn lands on the new name), or its own old heading when the whole section is gone.
+    /// Sections that did not change are absent.
+    public static func sectionChurn(from old: String, to new: String) -> [String: Int] {
+        let oldLines = planLines(old)
+        let newLines = planLines(new)
+        let ops = lineDiff(oldLines, newLines)
+        let oldHeadings = headingPerLine(oldLines)
+        let newHeadings = headingPerLine(newLines)
+        let survivors = survivingHeadings(ops, oldHeadings: oldHeadings, newHeadings: newHeadings)
+        var churn: [String: Int] = [:]
+        for op in ops {
+            switch op {
+            case .insert(let ni): churn[newHeadings[ni], default: 0] += 1
+            case .delete(let oi): churn[survivors[oldHeadings[oi]] ?? oldHeadings[oi], default: 0] += 1
+            case .equal: continue
+            }
+        }
+        return churn
+    }
+
     /// Ops changed between two change sets: added + removed + modified, matched by the rules
     /// task-6-brief hands down — a created bead by its `tempId`, everything else (edits,
     /// reopens, follow-ups, dependency edges) by the existing bead id (or edge endpoints) plus
     /// op kind. `ChangeOp` is already `Equatable`, so "modified" is just "matched but unequal".
     public static func opsChanged(from old: ChangeSet, to new: ChangeSet) -> Int {
-        let oldByKey = keyedOps(old.ops)
-        let newByKey = keyedOps(new.ops)
+        changedKeys(from: old, to: new).count
+    }
 
-        var changed = 0
-        for (key, oldOp) in oldByKey {
-            if let newOp = newByKey[key] {
-                if newOp != oldOp { changed += 1 }
-            } else {
-                changed += 1 // removed
-            }
-        }
-        for key in newByKey.keys where oldByKey[key] == nil {
-            changed += 1 // added
-        }
-        return changed
+    /// The dependency-edge share of `opsChanged`, by the same matching rules — polish's
+    /// "dependencies stabilizing" signal, which the total folds in with every bead edit.
+    public static func edgesChanged(from old: ChangeSet, to new: ChangeSet) -> Int {
+        changedKeys(from: old, to: new).filter { if case .edge = $0.base { true } else { false } }.count
     }
 }
 
@@ -155,6 +171,15 @@ private func baseOpKey(_ op: ChangeOp) -> BaseOpKey {
     case .reopen(let id, _, _): .reopen(id)
     case .followUp(_, let of, _, _, _): .followUp(of)
     }
+}
+
+/// Every op key that was added, removed, or modified between two change sets.
+private func changedKeys(from old: ChangeSet, to new: ChangeSet) -> [OpKey] {
+    let oldByKey = keyedOps(old.ops)
+    let newByKey = keyedOps(new.ops)
+    // Removed or modified, then added.
+    return oldByKey.compactMap { key, oldOp in newByKey[key] == oldOp ? nil : key }
+        + newByKey.keys.filter { oldByKey[$0] == nil }
 }
 
 private func keyedOps(_ ops: [ChangeOp]) -> [OpKey: ChangeOp] {
@@ -368,15 +393,7 @@ private func headingPerLine(_ lines: [Substring]) -> [String] {
 /// by `documentOrder` afterward is what actually guarantees "new document's order" rather than
 /// just usually matching it — exercised by `testSectionsChangedOrderSurvivesAMovedSection`.
 private func sectionsChanged(_ ops: [LineEditOp], oldHeadings: [String], newHeadings: [String]) -> [String] {
-    var oldToNewHeading: [String: String] = [:]
-    for op in ops {
-        if case .equal(let oi, let ni) = op {
-            let oldHeading = oldHeadings[oi]
-            if oldToNewHeading[oldHeading] == nil {
-                oldToNewHeading[oldHeading] = newHeadings[ni]
-            }
-        }
-    }
+    let oldToNewHeading = survivingHeadings(ops, oldHeadings: oldHeadings, newHeadings: newHeadings)
 
     // A heading text that also occurs in the new document — most obviously the pseudo-heading
     // "(preamble)", which exists in every document whether or not it changed — is never "old
@@ -408,6 +425,19 @@ private func sectionsChanged(_ ops: [LineEditOp], oldHeadings: [String], newHead
     let sortedNew = changedNew.sorted { newOrder[$0]! < newOrder[$1]! }
     let sortedOldOnly = changedOldOnly.sorted { oldOrder[$0]! < oldOrder[$1]! }
     return sortedNew + sortedOldOnly
+}
+
+/// Old heading -> the new heading its first surviving (`equal`-matched) line now sits under;
+/// a heading with no surviving line is absent. `sectionsChanged` and `sectionChurn` both route
+/// a deleted line through this — see `sectionsChanged`'s doc comment for why.
+private func survivingHeadings(_ ops: [LineEditOp], oldHeadings: [String], newHeadings: [String]) -> [String: String] {
+    var map: [String: String] = [:]
+    for op in ops {
+        if case .equal(let oi, let ni) = op, map[oldHeadings[oi]] == nil {
+            map[oldHeadings[oi]] = newHeadings[ni]
+        }
+    }
+    return map
 }
 
 /// Maps each distinct heading (as produced by `headingPerLine`) to the line index of its FIRST
