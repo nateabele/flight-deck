@@ -1275,6 +1275,13 @@ none of it is engine state, all of it is a view or the service glue that feeds o
   `objectWillChange`, views that show no seat at all — for values only the live card and the seat
   inspector read. Those two observe `seats` (the `SeatFeed`) alone; everything else observes
   `IntakeService` and is untouched by a seat beat.
+- **Clicks show before the runner does.** A tape-shaping command (▶ ⏭ ⏩ ⏸ ＋ −) is folded into
+  the published tape in the click's own turn (`TapeOverlay`, through the runner's own
+  `TapePlanner.apply`) and kept as an overlay keyed by its `seq`; every tape read replays the
+  overlay commands it hasn't acked (`ackedCommandSeq`) and drops the rest. Without it a ＋/− waited
+  on the runner's 1 s command poll plus the 500 ms tick — 0.4–1.3 s, a different wait every click.
+  The published `ackedCommandSeq` is never advanced by the overlay, so "Pausing…" still waits on
+  the runner; ⏹, notes and plan edits are not overlaid.
 - **File map**, `Sources/FlightDeck/Intake/`:
   - `IntakeDetailView.swift` — the intake's whole detail pane for every state; for `.shaping` it
     assembles the header progress summary (`ProgressSummary.swift`), Clarifications, the pinned
