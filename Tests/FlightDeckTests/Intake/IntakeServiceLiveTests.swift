@@ -41,15 +41,15 @@ private final class HeldHeadlessRunner: HeadlessRunner, @unchecked Sendable {
 }
 
 /// Every file read the service routes through its `readFile` seam, so a test can prove a tick
-/// that found nothing changed read nothing.
-@MainActor
-private final class ReadLog {
-    private(set) var paths: [String] = []
-    func count(_ suffix: String) -> Int { paths.filter { $0.hasSuffix(suffix) }.count }
-    func count(containing part: String) -> Int { paths.filter { $0.contains(part) }.count }
-    func reset() { paths = [] }
-    nonisolated func read(_ url: URL) -> Data? {
-        MainActor.assumeIsolated { paths.append(url.path) }
+/// that found nothing changed read nothing. Locked: the convergence fold reads off the main actor.
+private final class ReadLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var paths: [String] = []
+    func count(_ suffix: String) -> Int { lock.withLock { paths.filter { $0.hasSuffix(suffix) }.count } }
+    func count(containing part: String) -> Int { lock.withLock { paths.filter { $0.contains(part) }.count } }
+    func reset() { lock.withLock { paths = [] } }
+    func read(_ url: URL) -> Data? {
+        lock.withLock { paths.append(url.path) }
         return try? Data(contentsOf: url)
     }
 }
@@ -87,7 +87,7 @@ final class IntakeServiceLiveTests: XCTestCase {
 
     private func makeService(processRunner: ScriptedProcessRunner = ScriptedProcessRunner([:]),
                              headless: HeadlessRunner = HeldHeadlessRunner(),
-                             countRecovery: Bool = false) async -> IntakeService {
+                             countRecovery: Bool = false, awaitRecovery: Bool = true) async -> IntakeService {
         let reads = self.reads!
         let svc = IntakeService(store: IntakeStore(root: root), headless: headless, processRunner: processRunner,
                                 triageSettings: TriageSettings(harness: .codex, model: "m1", effort: "high"),
@@ -95,9 +95,11 @@ final class IntakeServiceLiveTests: XCTestCase {
                                 inject: { _, _, _, _ in true }, hasSession: { _, _ in false },
                                 now: { [unowned self] in self.clockNow },
                                 readFile: { reads.read($0) })
-        // Launch recovery runs one tick of its own; let it land, and (unless the test is about
-        // that first read) start the counts from zero after it.
+        // Launch recovery runs one tick of its own; let it land (and any convergence fold it
+        // started), and unless the test is about that first read, count from zero after it.
+        guard awaitRecovery else { return svc }
         await svc.launchRecovery?.value
+        for i in svc.intakes { await svc.convergenceFold(for: i.id)?.value }
         if !countRecovery { reads.reset() }
         return svc
     }
@@ -208,6 +210,56 @@ final class IntakeServiceLiveTests: XCTestCase {
         try updateTape(b.id) { $0.heartbeat = self.clockNow }
         svc.pollTapes()
         XCTAssertNil(svc.pending[b.id])
+    }
+
+    /// A runner that adopts the play, runs the round and pauses — all between two ticks —
+    /// leaves no heartbeat (its exit clears it) and no round in progress. The tape it rewrote
+    /// after the click is the sign of life; without it the start stuck at "queued".
+    func testPendingClearsWhenARunnerAdoptsAndFinishesBetweenTicks() async throws {
+        let i = try seed(.shaping)
+        try updateTape(i.id) { $0.status = .paused }
+        try setMTime(tapeStore(i.id).tapeURL, clockNow.timeIntervalSince1970 - 60)
+        let svc = await makeService()
+        svc.send(i.id, .step)
+        svc.pollTapes()
+        XCTAssertNotNil(svc.pending[i.id], "the old paused tape is no sign of life")
+
+        clockNow += 20
+        svc.pollTapes()
+        XCTAssertEqual(svc.pending[i.id]?.queued, true)
+
+        // Between ticks: adopted, a checkpoint landed, paused again with no heartbeat.
+        let store = tapeStore(i.id)
+        var tape = store.loadTape()
+        try store.writeCheckpoint(Checkpoint(id: 1, stage: .draft, round: 0, major: true, createdAt: clockNow),
+                                  files: ["plan.md": Data("# Plan\n".utf8)], into: &tape)
+        tape.status = .paused
+        tape.heartbeat = nil
+        try store.saveTape(tape)
+        try setMTime(store.tapeURL, clockNow.timeIntervalSince1970)
+        svc.pollTapes()
+        XCTAssertNil(svc.pending[i.id])
+
+        // An idle tape rewritten after the click is not yet the runner working.
+        svc.send(i.id, .step)
+        try updateTape(i.id) { $0.status = .idle; $0.target = .nextMinor }
+        try setMTime(store.tapeURL, clockNow.timeIntervalSince1970 + 1)
+        svc.pollTapes()
+        XCTAssertNotNil(svc.pending[i.id])
+    }
+
+    /// Pause and stop withdraw the play that was starting.
+    func testStopAndPauseClearARoundsPendingStart() async throws {
+        let i = try seed(.shaping)
+        let svc = await makeService()
+        svc.send(i.id, .nextMajor)
+        XCTAssertNotNil(svc.pending[i.id])
+        svc.send(i.id, .pause)
+        XCTAssertNil(svc.pending[i.id])
+        svc.send(i.id, .toReview)
+        XCTAssertNotNil(svc.pending[i.id])
+        svc.send(i.id, .stop)
+        XCTAssertNil(svc.pending[i.id])
     }
 
     /// Triage's pending clears on `triage/activity.json` from THIS turn, never on the previous
@@ -321,6 +373,25 @@ final class IntakeServiceLiveTests: XCTestCase {
         XCTAssertEqual(svc.seatActivities[i.id]?["refine-1-reviewer"]?.headline, "Reading the board")
     }
 
+    /// A retried round keeps its name, so the failed attempt's seats sit beside the new ones;
+    /// anything that started before this attempt (less a second's grace) is not shown.
+    func testSeatsFromAnEarlierAttemptAreHidden() async throws {
+        let i = try seed(.shaping)
+        let attempt = clockNow
+        try updateTape(i.id) {
+            $0.status = .running; $0.roundInProgress = Self.refine1; $0.roundStartedAt = attempt
+        }
+        try writeSeat(i.id, run: "refine-1-reviewer", activity: SeatActivity(harness: .codex, startedAt: attempt - 120),
+                      record: RunRecord(pid: 1, started: attempt - 120, finished: attempt - 60, exitCode: 1))
+        try writeSeat(i.id, run: "refine-1-reviewer-fallback", activity: SeatActivity(harness: .claude, startedAt: attempt + 2),
+                      record: RunRecord(pid: 2, started: attempt + 2))
+        try writeSeat(i.id, run: "refine-1-integrator", activity: SeatActivity(harness: .codex, startedAt: attempt - 0.5),
+                      record: nil)
+        let svc = await makeService()
+        XCTAssertEqual(svc.seatActivities[i.id]?.keys.sorted(), ["refine-1-integrator", "refine-1-reviewer-fallback"])
+        XCTAssertEqual(svc.runRecords[i.id]?.keys.sorted(), ["refine-1-reviewer-fallback"])
+    }
+
     // MARK: convergence
 
     /// The series is folded from checkpoint files, so it is recomputed only when the tape's
@@ -343,23 +414,131 @@ final class IntakeServiceLiveTests: XCTestCase {
 
         // A heartbeat: tape.json is rewritten, but no checkpoint landed.
         try updateTape(i.id) { $0.heartbeat = self.clockNow.addingTimeInterval(5) }
+        let beforeBeat = svc.convergenceFold(for: i.id)
         svc.pollTapes()
+        XCTAssertTrue(svc.convergenceFold(for: i.id) == beforeBeat, "no new checkpoint, no new fold")
         XCTAssertEqual(reads.count(containing: "/checkpoints/"), firstReads, "no new checkpoint, no recompute")
 
         try store.writeCheckpoint(Checkpoint(id: 3, stage: .refine, round: 3, major: true, createdAt: clockNow),
                                   files: ["plan.md": Data("# Plan\n\nround 3\n".utf8)], into: &tape)
         svc.pollTapes()
+        await svc.convergenceFold(for: i.id)?.value
         XCTAssertGreaterThan(reads.count(containing: "/checkpoints/"), firstReads)
         XCTAssertEqual(svc.convergence[i.id]?.first?.points.count, 3)
+
+        // The human edits the head plan: no checkpoint, but the base of the next round's churn
+        // moved, so the series is refolded.
+        let afterRound = reads.count(containing: "/checkpoints/")
+        try Data("# Plan\n\nmine\n".utf8).write(to: store.userEditsURL(checkpoint: 3))
+        svc.pollTapes()
+        await svc.convergenceFold(for: i.id)?.value
+        XCTAssertGreaterThan(reads.count(containing: "/checkpoints/"), afterRound, "a head plan edit refolds")
+        let afterEdit = reads.count(containing: "/checkpoints/")
+        svc.pollTapes()
+        await svc.convergenceFold(for: i.id)?.value
+        XCTAssertEqual(reads.count(containing: "/checkpoints/"), afterEdit, "an unchanged edit doesn't")
+    }
+
+    /// The fold runs off the main actor; one that finishes after a newer checkpoint landed is
+    /// dropped, never published over the newer series.
+    func testSupersededConvergenceFoldIsDropped() async throws {
+        let i = try seed(.shaping)
+        let store = tapeStore(i.id)
+        var tape = Tape.empty
+        for round in [1, 2] {
+            try store.writeCheckpoint(Checkpoint(id: round, stage: .refine, round: round, major: false, createdAt: clockNow),
+                                      files: ["plan.md": Data("# Plan\n\nround \(round)\n".utf8)], into: &tape)
+        }
+        let svc = await makeService(awaitRecovery: false)
+        svc.pollTapes()
+        let stale = try XCTUnwrap(svc.convergenceFold(for: i.id))
+        // Both ticks run before either fold can publish: publishing needs the main actor.
+        try store.writeCheckpoint(Checkpoint(id: 3, stage: .refine, round: 3, major: true, createdAt: clockNow),
+                                  files: ["plan.md": Data("# Plan\n\nround 3\n".utf8)], into: &tape)
+        svc.pollTapes()
+        let fresh = try XCTUnwrap(svc.convergenceFold(for: i.id))
+        XCTAssertTrue(stale != fresh)
+        await stale.value
+        XCTAssertNil(svc.convergence[i.id], "the 2-checkpoint fold landed after the 3-checkpoint tick")
+        await fresh.value
+        await svc.launchRecovery?.value
+        await svc.convergenceFold(for: i.id)?.value
+        XCTAssertEqual(svc.convergence[i.id]?.first?.points.count, 3)
+    }
+
+    /// The fold's cost on a long tape: 30 refine checkpoints with ~20 KB plans. Loosely bounded
+    /// (it runs detached, so this is about not being pathological, not about a frame budget);
+    /// the measured numbers are printed for the report.
+    func testConvergenceFoldTimingOnALongTape() async throws {
+        let i = try seed(.shaping)
+        let store = tapeStore(i.id)
+        var tape = Tape.empty
+        for n in 1...30 {
+            var plan = ""
+            for section in 1...20 {
+                plan += "# Section \(section)\n\n"
+                for line in 1...20 { plan += "Line \(line) of section \(section), revised in round \(n - (line % 3 == 0 ? 0 : 1)).\n" }
+            }
+            try store.writeCheckpoint(Checkpoint(id: n, stage: .refine, round: n, major: n == 30, createdAt: clockNow),
+                                      files: ["plan.md": Data(plan.utf8)], into: &tape)
+        }
+        let planBytes = try Data(contentsOf: store.checkpointDirectory(15).appendingPathComponent("plan.md")).count
+        XCTAssertGreaterThan(planBytes, 15_000)
+        let svc = await makeService(awaitRecovery: false)
+        let tickStart = Date()
+        svc.pollTapes()
+        let tick = Date().timeIntervalSince(tickStart)
+        await svc.convergenceFold(for: i.id)?.value
+        let fold = Date().timeIntervalSince(tickStart)
+        print("CONVERGENCE-TIMING plan=\(planBytes)B checkpoints=30 mainActorTick=\(Int(tick * 1000))ms foldTotal=\(Int(fold * 1000))ms")
+        XCTAssertEqual(svc.convergence[i.id]?.first?.points.count, 30)
+        XCTAssertLessThan(fold, 10)
     }
 
     // MARK: flap policy
 
     func testFlapPolicyIsStablePerIntake() async throws {
+        let a = try seed(.shaping), b = try seed(.review)
         let svc = await makeService()
-        let a = UUID(), b = UUID()
-        XCTAssertTrue(svc.flapPolicy(for: a) === svc.flapPolicy(for: a))
-        XCTAssertFalse(svc.flapPolicy(for: a) === svc.flapPolicy(for: b))
+        XCTAssertTrue(svc.flapPolicy(for: a.id) === svc.flapPolicy(for: a.id))
+        XCTAssertTrue(svc.flapPolicy(for: b.id) === svc.flapPolicy(for: b.id))
+        XCTAssertFalse(svc.flapPolicy(for: a.id) === svc.flapPolicy(for: b.id))
+    }
+
+    /// Nothing is kept for an intake nothing will show: an unknown or discarded one gets a
+    /// fresh policy every time.
+    func testFlapPolicyForADiscardedOrMissingIntakeIsNotStored() async throws {
+        let i = try seed(.shaping)
+        let svc = await makeService()
+        let missing = UUID()
+        XCTAssertFalse(svc.flapPolicy(for: missing) === svc.flapPolicy(for: missing))
+        let live = svc.flapPolicy(for: i.id)
+        svc.discard(i.id)
+        XCTAssertFalse(svc.flapPolicy(for: i.id) === live)
+        XCTAssertFalse(svc.flapPolicy(for: i.id) === svc.flapPolicy(for: i.id))
+    }
+
+    /// A view that asks for the policy before launch recovery's first tick still gets it seeded
+    /// from the tape on disk, and the tick that follows doesn't reseed what the view has since
+    /// observed changing.
+    func testFlapPolicyAskedBeforeLaunchRecoveryIsSeeded() async throws {
+        let i = try seed(.shaping)
+        let store = tapeStore(i.id)
+        var tape = Tape.empty
+        tape.status = .paused
+        try store.writeCheckpoint(Checkpoint(id: 1, stage: .draft, round: 0, major: true, createdAt: clockNow),
+                                  files: ["plan.md": Data("# Plan\n".utf8)], into: &tape)
+        let svc = await makeService(awaitRecovery: false)
+        let policy = svc.flapPolicy(for: i.id)
+        XCTAssertFalse(policy.shouldFlap(surface: "board.now", text: "Draft", reduceMotion: false))
+        XCTAssertFalse(policy.shouldFlap(surface: "card.refine-1", text: "Refine 1", reduceMotion: false))
+
+        // Observed from here: a new head lands before recovery's tick, and still flaps after it.
+        try store.writeCheckpoint(Checkpoint(id: 2, stage: .synthesis, round: 0, major: true, createdAt: clockNow),
+                                  files: ["plan.md": Data("# Plan 2\n".utf8)], into: &tape)
+        await svc.launchRecovery?.value
+        XCTAssertTrue(svc.flapPolicy(for: i.id) === policy)
+        XCTAssertTrue(policy.shouldFlap(surface: "board.now", text: "Synthesis", reduceMotion: false))
     }
 
     /// The maintainer's rule is keyed to data arriving, not a view mounting: every value the board shows

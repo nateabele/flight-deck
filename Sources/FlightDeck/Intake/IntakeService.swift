@@ -170,13 +170,21 @@ final class IntakeService: ObservableObject {
     private var seatFileDates: [UUID: [String: Date]] = [:]
     /// The round `seatActivities` belongs to; a different one starts the seat maps afresh.
     private var seatRounds: [UUID: PlannedRound] = [:]
-    /// The checkpoint count `convergence` was folded at. The fold reads every refine/polish
-    /// checkpoint's plan and proposals, so it runs when a round lands — never on a heartbeat.
-    private var convergenceCounts: [UUID: Int] = [:]
+    /// What `convergence` was last folded at: the checkpoint count, and the head plan's
+    /// `plan.user.md` mtime (a human edit changes the plan the next round's churn is measured
+    /// from without adding a checkpoint). The fold reads every refine/polish checkpoint's plan and
+    /// proposals, so it runs when one of those moves — never on a heartbeat.
+    private var convergenceKeys: [UUID: ConvergenceKey] = [:]
+    private struct ConvergenceKey: Equatable { let count: Int; let userEdits: Date? }
+    /// The fold in flight per intake, so tests (and nothing else) can await it.
+    private var convergenceFolds: [UUID: Task<Void, Never>] = [:]
     private var flapPolicies: [UUID: FlapPolicy] = [:]
+    /// Intakes whose policy has been seeded from a tape (see `seedFlapsIfNeeded`).
+    private var flapSeeded: Set<UUID> = []
     /// Every file this service polls for live state goes through here — a seam so a test can
     /// count reads and prove a tick that found nothing changed read nothing.
-    private let readFile: (URL) -> Data?
+    /// `@Sendable` because the convergence fold reads through it off the main actor.
+    private let readFile: @Sendable (URL) -> Data?
     /// The deferred launch recovery, so tests (and nothing else) can await it.
     private(set) var launchRecovery: Task<Void, Never>?
 
@@ -199,7 +207,7 @@ final class IntakeService: ObservableObject {
         hasSession: @escaping (String, String) -> Bool,
         now: @escaping () -> Date = Date.init,
         defaults: UserDefaults = .standard,
-        readFile: @escaping (URL) -> Data? = { try? Data(contentsOf: $0) }
+        readFile: @escaping @Sendable (URL) -> Data? = { try? Data(contentsOf: $0) }
     ) {
         self.store = store
         self.headless = headless
@@ -321,11 +329,18 @@ final class IntakeService: ObservableObject {
     }
 
     /// The one split-flap memory for `id`'s screens — see `FlapPolicy` for why it can't live in
-    /// the view. Created on first ask; seeded when the service first observes the tape.
+    /// the view. Created on first ask and seeded right then from the tape as it stands, so the
+    /// answer can't depend on whether a view asked before or after launch recovery's first tick.
+    /// A discarded or unknown intake gets a throwaway policy: storing one would keep memory for
+    /// an intake nothing will show again.
     func flapPolicy(for id: UUID) -> FlapPolicy {
-        if let policy = flapPolicies[id] { return policy }
-        let policy = FlapPolicy()
-        flapPolicies[id] = policy
+        guard let i = intake(id), i.state != .discarded else { return FlapPolicy() }
+        let policy: FlapPolicy
+        if let existing = flapPolicies[id] { policy = existing } else {
+            policy = FlapPolicy()
+            flapPolicies[id] = policy
+        }
+        seedFlapsIfNeeded(i, policy)
         return policy
     }
 
@@ -475,8 +490,13 @@ final class IntakeService: ObservableObject {
         do { _ = try tapeStore(id).appendCommand(command) }
         catch { return fail(id, "Could not queue the command for the planning runner: \(error)") }
         switch command {
-        case .pause, .note, .removeNote, .editPlan: return
-        case .stop: if runner?.isRunning(id, tape: nil) != true { startRunner(id) }
+        case .note, .removeNote, .editPlan: return
+        // A pause or stop withdraws the play that was starting: left pending, a runner that
+        // reads the stop first and exits without a beat would leave "starting" up for good.
+        case .pause: pending[id] = nil
+        case .stop:
+            pending[id] = nil
+            if runner?.isRunning(id, tape: nil) != true { startRunner(id) }
         case .step, .nextMajor, .toReview:
             pending[id] = PendingStart(kind: .round(upcomingRound(id, config: intake(id)?.roundConfig)), since: now())
             startRunner(id)
@@ -509,27 +529,28 @@ final class IntakeService: ObservableObject {
     func pollTapes() {
         let shaping = Set(intakes.lazy.filter { $0.state == .shaping }.map(\.id))
         let tracked = Set(latestTapes.keys).union(tapes.keys).union(tapeDates.keys).union(seatRounds.keys)
-            .union(seatActivities.keys).union(runRecords.keys).union(convergence.keys).union(convergenceCounts.keys)
+            .union(seatActivities.keys).union(runRecords.keys).union(convergence.keys).union(convergenceKeys.keys)
         for gone in tracked.subtracting(shaping) {
             tapes[gone] = nil
             latestTapes[gone] = nil
             tapeDates[gone] = nil
             forgetSeats(gone)
             convergence[gone] = nil
-            convergenceCounts[gone] = nil
+            convergenceKeys[gone] = nil
+            convergenceFolds[gone] = nil
         }
         for id in shaping {
             let store = tapeStore(id)
             let modified = (try? FileManager.default.attributesOfItem(atPath: store.tapeURL.path))?[.modificationDate] as? Date
             if latestTapes[id] == nil || modified != tapeDates[id] {
-                let firstSight = latestTapes[id] == nil
                 tapeDates[id] = modified
                 let tape = store.loadTape()
                 latestTapes[id] = tape
                 if tapes[id].map({ !Self.sameIgnoringLiveness($0, tape) }) ?? true { tapes[id] = tape }
-                if firstSight { seedFlaps(id, tape) }
-                refreshConvergence(id, tape)
             }
+            // Already seeded (a view asked first) is skipped: the values since then were observed.
+            if !flapSeeded.contains(id) { _ = flapPolicy(for: id) }
+            refreshConvergence(id)
             pollSeats(id)
             if latestTapes[id]?.status == .reachedReview { finishShaping(id) } else { resumeIfStalled(id) }
         }
@@ -564,6 +585,13 @@ final class IntakeService: ObservableObject {
                 records[run] = record
             }
         }
+        // A retried round keeps its `PlannedRound`, so the failed attempt's seats are still under
+        // the same run names (a fallback seat's own directory is never overwritten). Anything
+        // that started before this attempt did is history, not a seat at work.
+        if let floor = latestTapes[id]?.roundStartedAt?.addingTimeInterval(-1) {
+            activities = activities.filter { $0.value.startedAt >= floor }
+            records = records.filter { $0.value.started >= floor }
+        }
         // Compared first: republishing an unchanged map would redraw every observer each tick.
         if activities != seatActivities[id] ?? [:] { seatActivities[id] = activities }
         if records != runRecords[id] ?? [:] { runRecords[id] = records }
@@ -585,22 +613,43 @@ final class IntakeService: ObservableObject {
         seatRounds[id] = nil
     }
 
-    /// Refolds `convergence` when the checkpoint count moved — the only time its inputs can.
-    private func refreshConvergence(_ id: UUID, _ tape: Tape) {
-        guard convergenceCounts[id] != tape.checkpoints.count else { return }
-        convergenceCounts[id] = tape.checkpoints.count
-        let cycles = ConvergenceSeries.cycles(tape.checkpoints) { [unowned self] in checkpointFile(id, checkpoint: $0, $1) }
-        if convergence[id] != cycles { convergence[id] = cycles }
+    /// Refolds `convergence` when its key moved (see `convergenceKeys`) — one stat a tick
+    /// otherwise. The fold itself runs detached: it diffs every refine/polish plan pair, which
+    /// on a long tape is real work to do on the main actor every time a round lands. A result
+    /// whose key has since moved on is dropped rather than published over a newer one.
+    private func refreshConvergence(_ id: UUID) {
+        guard let tape = latestTapes[id] else { return }
+        let store = tapeStore(id)
+        let edits = store.headPlanCheckpoint(in: tape).flatMap {
+            (try? FileManager.default.attributesOfItem(atPath: store.userEditsURL(checkpoint: $0).path))?[.modificationDate] as? Date
+        }
+        let key = ConvergenceKey(count: tape.checkpoints.count, userEdits: edits)
+        guard convergenceKeys[id] != key else { return }
+        convergenceKeys[id] = key
+        let checkpoints = tape.checkpoints, readFile = readFile
+        convergenceFolds[id] = Task.detached(priority: .utility) { [weak self] in
+            let cycles = ConvergenceSeries.cycles(checkpoints) {
+                readFile(store.checkpointDirectory($0).appendingPathComponent($1))
+            }
+            await MainActor.run { [weak self] in
+                guard let self, self.convergenceKeys[id] == key, self.convergence[id] != cycles else { return }
+                self.convergence[id] = cycles
+            }
+        }
     }
 
-    /// Marks everything the board shows for `tape` right now as already shown (see
-    /// `FlapPolicy.seed`), the first time this service sees the tape — at launch, or when the
-    /// intake starts shaping. Without it the first mount of the board flapped every field,
-    /// replaying values that had been sitting on the tape for hours.
-    private func seedFlaps(_ id: UUID, _ tape: Tape) {
-        guard let i = intake(id), let config = i.roundConfig else { return }
+    /// The convergence fold in flight for `id`, if any — so tests (and nothing else) can await it.
+    func convergenceFold(for id: UUID) -> Task<Void, Never>? { convergenceFolds[id] }
+
+    /// Marks everything the board shows right now as already shown (see `FlapPolicy.seed`), once
+    /// per intake, from the tape as last read or straight off disk. Without it the first mount of
+    /// the board flapped every field, replaying values that had been on the tape for hours. Not
+    /// marked seeded until the intake is shaping: before then there is no board to seed.
+    private func seedFlapsIfNeeded(_ i: Intake, _ policy: FlapPolicy) {
+        guard !flapSeeded.contains(i.id), i.state == .shaping, let config = i.roundConfig else { return }
+        flapSeeded.insert(i.id)
+        let tape = latestTapes[i.id] ?? tapeStore(i.id).loadTape()
         let board = BoardModel(intake: i, tape: tape, config: config, now: now(), selected: nil, preview: nil)
-        let policy = flapPolicy(for: id)
         for (surface, text) in board.flapTexts { policy.seed(surface: surface, text: text) }
     }
 
@@ -617,10 +666,14 @@ final class IntakeService: ObservableObject {
         }
     }
 
-    /// Activity or a heartbeat dated at or after the click. Dated, not merely present: the
+    /// Activity or a heartbeat dated at or after the click — or, for a round, a tape the runner
+    /// rewrote since the click into anything but `.idle`. Dated, not merely present: the
     /// previous turn's `activity.json` or a dead runner's last heartbeat is still on disk when
-    /// the click lands, and counting it would clear "starting" before anything started. A
-    /// second's grace absorbs the millisecond rounding those dates are stored with.
+    /// the click lands, and counting it would clear "starting" before anything started. The
+    /// tape rule catches a runner that adopted the play and already finished (paused, stopped,
+    /// failed, reached review) between two ticks: its exit clears the heartbeat and the round's
+    /// seats are gone with `roundInProgress`, so without it "queued" stuck for good. A second's
+    /// grace absorbs the millisecond rounding those dates are stored with.
     private func heardFrom(_ id: UUID, since start: PendingStart) -> Bool {
         let after = start.since.addingTimeInterval(-1)
         switch start.kind {
@@ -628,6 +681,9 @@ final class IntakeService: ObservableObject {
             return (triageActivities[id]?.startedAt).map { $0 >= after } ?? false
         case .round:
             if let beat = latestTapes[id]?.heartbeat, beat >= after { return true }
+            if let written = tapeDates[id], written >= after, let status = latestTapes[id]?.status, status != .idle {
+                return true
+            }
             return seatActivities[id]?.values.contains { $0.startedAt >= after } ?? false
         }
     }
@@ -750,6 +806,7 @@ final class IntakeService: ObservableObject {
         i.state = .discarded
         save(i)
         flapPolicies[id] = nil
+        flapSeeded.remove(id)
         return true
     }
 
