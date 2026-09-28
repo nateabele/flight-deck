@@ -24,9 +24,27 @@ public protocol CommandRunner: Sendable {
     /// exits.
     func run(executable: String, arguments: [String], cwd: URL, environment: [String: String],
              processGroup: Bool, onSpawn: (@Sendable (Int32) -> Void)?) async throws -> CommandResult
+
+    /// The same, with `onStdout` called with each chunk of stdout as the child writes it —
+    /// serially, from one reader thread, in order — so a caller can keep a live copy of a
+    /// long run's stream on disk. The returned `CommandResult.stdout` is still the whole of it.
+    func run(executable: String, arguments: [String], cwd: URL, environment: [String: String],
+             processGroup: Bool, onSpawn: (@Sendable (Int32) -> Void)?,
+             onStdout: (@Sendable (Data) -> Void)?) async throws -> CommandResult
 }
 
 extension CommandRunner {
+    /// A runner that can't stream (every test fake) hands the sink the whole stdout once, at
+    /// exit: a caller that builds its stream file through the sink then still gets the file.
+    public func run(executable: String, arguments: [String], cwd: URL, environment: [String: String],
+                    processGroup: Bool, onSpawn: (@Sendable (Int32) -> Void)?,
+                    onStdout: (@Sendable (Data) -> Void)?) async throws -> CommandResult {
+        let result = try await run(executable: executable, arguments: arguments, cwd: cwd, environment: environment,
+                                   processGroup: processGroup, onSpawn: onSpawn)
+        if let onStdout, !result.stdout.isEmpty { onStdout(result.stdout) }
+        return result
+    }
+
     /// The common case: no process group, nobody needs the pid while it runs.
     public func run(executable: String, arguments: [String], cwd: URL,
                      environment: [String: String]) async throws -> CommandResult {
@@ -47,19 +65,46 @@ public struct SystemCommandRunner: CommandRunner {
 
     public func run(executable: String, arguments: [String], cwd: URL, environment: [String: String],
                      processGroup: Bool, onSpawn: (@Sendable (Int32) -> Void)?) async throws -> CommandResult {
-        if processGroup {
-            return try await runInNewProcessGroup(executable: executable, arguments: arguments, cwd: cwd,
-                                                  environment: environment, onSpawn: onSpawn)
-        }
-        return try await runViaFoundationProcess(executable: executable, arguments: arguments, cwd: cwd,
-                                                  environment: environment, onSpawn: onSpawn)
+        try await run(executable: executable, arguments: arguments, cwd: cwd, environment: environment,
+                      processGroup: processGroup, onSpawn: onSpawn, onStdout: nil)
     }
 
-    // MARK: - Foundation.Process path (moved from the app's SystemHeadlessRunner, unchanged)
+    public func run(executable: String, arguments: [String], cwd: URL, environment: [String: String],
+                    processGroup: Bool, onSpawn: (@Sendable (Int32) -> Void)?,
+                    onStdout: (@Sendable (Data) -> Void)?) async throws -> CommandResult {
+        if processGroup {
+            return try await runInNewProcessGroup(executable: executable, arguments: arguments, cwd: cwd,
+                                                  environment: environment, onSpawn: onSpawn, onStdout: onStdout)
+        }
+        return try await runViaFoundationProcess(executable: executable, arguments: arguments, cwd: cwd,
+                                                  environment: environment, onSpawn: onSpawn, onStdout: onStdout)
+    }
+
+    /// Reads `handle` to EOF on the calling thread, handing each chunk to `sink` as it lands.
+    /// `readDataToEndOfFile` returns only at EOF — i.e. at exit — which is exactly what a live
+    /// stream file can't wait for. Raw `read(2)`, not `FileHandle.read(upToCount:)`: on a
+    /// `Pipe`'s handle that blocks until the full count or EOF (observed: the Process path's
+    /// sink got "ab" at exit while the posix_spawn path's got "a" at once).
+    private static func drain(_ handle: FileHandle, _ sink: (@Sendable (Data) -> Void)?) -> Data {
+        guard let sink else { return handle.readDataToEndOfFile() }
+        var all = Data()
+        var buffer = [UInt8](repeating: 0, count: 65_536)
+        while true {
+            let n = buffer.withUnsafeMutableBytes { read(handle.fileDescriptor, $0.baseAddress, $0.count) }
+            if n < 0, errno == EINTR { continue }
+            guard n > 0 else { break }
+            let chunk = Data(buffer[0..<n])
+            all.append(chunk)
+            sink(chunk)
+        }
+        return all
+    }
+
+    // MARK: - Foundation.Process path (moved from the app's SystemHeadlessRunner)
 
     private func runViaFoundationProcess(
         executable: String, arguments: [String], cwd: URL, environment: [String: String],
-        onSpawn: (@Sendable (Int32) -> Void)?
+        onSpawn: (@Sendable (Int32) -> Void)?, onStdout: (@Sendable (Data) -> Void)?
     ) async throws -> CommandResult {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
@@ -96,7 +141,7 @@ public struct SystemCommandRunner: CommandRunner {
                 let out = Buffer(), err = Buffer()
                 group.enter()
                 DispatchQueue.global().async {
-                    out.data = stdoutPipe.fileHandleForReading.readDataToEndOfFile(); group.leave()
+                    out.data = Self.drain(stdoutPipe.fileHandleForReading, onStdout); group.leave()
                 }
                 group.enter()
                 DispatchQueue.global().async {
@@ -149,7 +194,7 @@ public struct SystemCommandRunner: CommandRunner {
 
     private func runInNewProcessGroup(
         executable: String, arguments: [String], cwd: URL, environment: [String: String],
-        onSpawn: (@Sendable (Int32) -> Void)?
+        onSpawn: (@Sendable (Int32) -> Void)?, onStdout: (@Sendable (Data) -> Void)?
     ) async throws -> CommandResult {
         try Task.checkCancellation()
 
@@ -224,7 +269,7 @@ public struct SystemCommandRunner: CommandRunner {
                 let out = Buffer(), err = Buffer()
                 group.enter()
                 DispatchQueue.global().async {
-                    out.data = FileHandle(fileDescriptor: outPipe.readFD, closeOnDealloc: true).readDataToEndOfFile()
+                    out.data = Self.drain(FileHandle(fileDescriptor: outPipe.readFD, closeOnDealloc: true), onStdout)
                     group.leave()
                 }
                 group.enter()
