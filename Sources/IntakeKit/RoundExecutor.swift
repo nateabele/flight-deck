@@ -424,7 +424,7 @@ public struct RoundExecutor: Sendable {
             if case .failure(let again) = ChangeSetValidator.validate(second.changeSet, against: graph) {
                 let diagnosis = Diagnosis(
                     category: .invalidOutput,
-                    detail: "The change set failed validation twice: " + again.errors.map(\.message).joined(separator: "; "),
+                    detail: "The change set failed validation twice: " + again.errors.map(\.userMessage).joined(separator: "; "),
                     action: "Retry the round, or switch this slot's model.")
                 record.slots[slot].status = .failed
                 record.slots[slot].diagnosis = diagnosis
@@ -592,7 +592,7 @@ public struct RoundExecutor: Sendable {
         do { graph = try await graphReader.read(project: inputs.project.path) }
         catch is CancellationError { throw CancellationError() }
         catch {
-            throw Pause(diagnosis: Diagnosis(category: .harnessError, detail: "Could not read the bead graph: \(error)",
+            throw Pause(diagnosis: Diagnosis(category: .harnessError, detail: "Could not read the task graph: \(error)",
                                              action: "Check that `br` works in the project, then retry the round."))
         }
         let file = inputs.store.workDirectory().appendingPathComponent("graph.json")

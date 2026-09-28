@@ -45,11 +45,11 @@ struct ReleaseReviewView: View {
                 Spacer()
                 // Absent while still loading (there is nothing to count yet) or after a
                 // failed load — the retry state below has its own message.
-                if let review {
-                    Text(UIText.selectedCount(releaseCount(review), of: ops(review).count))
+                if let review, let header = model(review).header {
+                    Text(header)
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                        .accessibilityIdentifier("release-review-selected-count")
+                        .accessibilityIdentifier("release-review-dropped-count")
                 }
             }
 
@@ -60,7 +60,7 @@ struct ReleaseReviewView: View {
                 if let failure = review.intake.failure {
                     Text(failure)
                         .font(.callout)
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(.red)
                         .accessibilityIdentifier("release-review-failure")
                 }
                 if let refreshWarning {
@@ -70,10 +70,14 @@ struct ReleaseReviewView: View {
                 }
 
                 // Graph view: next plan (spec §8.4, phase 4).
+                // Plain, with the rows' own insets: `.inset` added a trailing inset of its own
+                // inside the sheet's padding, so rows stopped short of the section rules and
+                // left a gutter down the trailing edge.
                 List {
                     sections(for: review)
                 }
-                .listStyle(.inset)
+                .listStyle(.plain)
+                .scrollContentBackground(.hidden)
                 // IntakeService still accepts setRating/drop/confirmDrift once release has
                 // started — the sheet is the only guard, so every row control (and the
                 // Release button below) has to freeze together while releasing.
@@ -116,7 +120,7 @@ struct ReleaseReviewView: View {
                         .keyboardShortcut(.cancelAction)
                         .accessibilityIdentifier("release-review-cancel")
                     if let review {
-                        Button(UIText.releaseButton(releaseCount(review))) {
+                        Button(model(review).releaseButton) {
                             // Synchronous, before the Task: SwiftUI runs button actions one
                             // at a time on the main actor, so a second click landing before
                             // this state change re-renders the (now-disabled) button still
@@ -127,14 +131,16 @@ struct ReleaseReviewView: View {
                             Task { await release() }
                         }
                         .keyboardShortcut(.defaultAction)
-                        .disabled(!review.canRelease || releasing || review.intake.state == .releasing)
+                        .disabled(!review.canRelease || model(review).counts.isEmpty || releasing || review.intake.state == .releasing)
                         .accessibilityIdentifier("release-review-release")
                     }
                 }
             }
         }
         .padding(16)
-        .frame(width: 620, height: 520)
+        // Sized by its content, from a floor: a fixed 520 pt left dead space under the buttons
+        // for a short change set, and a sheet is resizable by the window it hangs from anyway.
+        .frame(minWidth: 620, idealWidth: 620, minHeight: 420, idealHeight: 520)
         .accessibilityIdentifier("release-review")
         .task(id: intakeID) { await refresh() }
     }
@@ -194,20 +200,24 @@ struct ReleaseReviewView: View {
             }
         }
         .padding(.vertical, 2)
+        .listRowInsets(EdgeInsets(top: 4, leading: 8, bottom: 4, trailing: 8))
         .listRowBackground(rowBackground(drift: drift, dropped: dropped))
     }
 
     @ViewBuilder
     private func detail(for op: ChangeOp, at i: Int, review: ReleaseReview) -> some View {
+        let sheet = model(review)
+        let line = sheet.line(op)
         switch op {
-        case .createBead(let bead):
-            Text("\(bead.title)  (new:\(bead.tempId))")
+        case .createBead, .followUp, .reopen:
+            // Titles, not ids: the id is only in the help tag, for whoever needs to find it in `br`.
+            Text(line.text).help(line.help)
 
-        case .addEdge(let from, let to, _):
+        case .addEdge:
             HStack(spacing: 6) {
-                Text("\(from.wireValue) → \(to.wireValue)")
-                if isHeld(op) {
-                    Text("held")
+                Text(line.text).help(line.help)
+                if ReleaseSheetModel.waitsForRelease(op) {
+                    Text(UIText.waitsForRelease)
                         .font(.caption2)
                         .padding(.horizontal, 5).padding(.vertical, 1)
                         // Dashed, per spec §8.4 ("Held edges are dashed") — the graph view will
@@ -217,33 +227,27 @@ struct ReleaseReviewView: View {
                 }
             }
 
-        case .editBead(let id, let set, _, let delivery):
+        case .editBead(_, let set, _, let delivery):
             VStack(alignment: .leading, spacing: 2) {
-                Text(id).bold()
+                Text(line.text).bold().help(line.help)
                 ForEach(fieldDiff(set), id: \.self) { line in
                     Text(line).font(.caption)
                 }
                 // Gated on the LIVE state for a drifted op, not the triage-time `pre`: a
-                // confirmed drift releases against the bead as it is now, so an edit to a
-                // bead someone claimed since triage gets a holder, a rating and a delivery —
+                // confirmed drift releases against the task as it is now, so an edit to a
+                // task someone claimed since triage gets a holder, a rating and a delivery —
                 // and this is the only place the human sees or chooses them.
                 if let pre = review.effectivePre(i), pre.status == "in_progress", let assignee = pre.assignee {
-                    inProgressDetail(id: id, assignee: assignee, delivery: delivery, i: i, review: review)
+                    inProgressDetail(assignee: assignee, delivery: delivery, i: i, review: review)
                 }
             }
-
-        case .reopen(let id, let reason, _):
-            Text("Reopen \(id): \(reason)")
-
-        case .followUp(let tempId, let of, let title, _, _):
-            Text("Follow-up on \(of): \(title)  (new:\(tempId))")
         }
     }
 
     /// The holder, an editable rating, and what release will actually do about it — mail
     /// always, plus an inject or reclaim when the holder has a live session.
     @ViewBuilder
-    private func inProgressDetail(id: String, assignee: String, delivery: Delivery?, i: Int, review: ReleaseReview) -> some View {
+    private func inProgressDetail(assignee: String, delivery: Delivery?, i: Int, review: ReleaseReview) -> some View {
         // The fallback release itself uses: a user override wins, then the agent's own rating
         // from triage, then — for an edit that only became in-progress after triage — the
         // rating drift suggests (`IntakeService.refreshing`).
@@ -267,8 +271,9 @@ struct ReleaseReviewView: View {
             .frame(width: 140)
             .accessibilityIdentifier("release-review-rating-\(i)")
         }
-        Text(plannedDelivery(id: id, assignee: assignee, rating: effective,
-                             reason: delivery?.reason ?? driftReason(review, i) ?? "", hasSession: holderHasSession))
+        Text(ReleaseSheetModel.plannedDelivery(assignee: assignee, rating: effective,
+                                               reason: delivery?.reason ?? driftReason(review, i) ?? "",
+                                               hasSession: holderHasSession))
             .font(.caption2)
             .foregroundStyle(.secondary)
     }
@@ -277,16 +282,15 @@ struct ReleaseReviewView: View {
 
     private func footerSummary(_ review: ReleaseReview) -> String {
         // Drifted ops counted as release will write them — against the live state — or a
-        // bead claimed since triage would add a notice here that the footer never mentions.
+        // task claimed since triage would add a notice here that the footer never mentions.
         var ops = self.ops(review)
         for (n, live) in review.livePre where n < ops.count {
             ops[n] = IntakeService.refreshing(ops[n], to: live,
                                               rating: review.intake.ratingOverrides[n] ?? suggestedRating(review, n),
                                               reason: driftReason(review, n) ?? "")
         }
-        let held = Set(ops.indices.filter { isHeld(ops[$0]) })
         return ReleaseSummary.text(
-            ops, heldOpIndices: held, drift: review.drift, dropped: review.intake.droppedOps,
+            ops, drift: review.drift, dropped: review.intake.droppedOps,
             ratings: review.intake.ratingOverrides,
             hasSession: { [review] agent in hasSession(review, agent) })
     }
@@ -296,18 +300,6 @@ struct ReleaseReviewView: View {
     private func notesCarriedLine(_ review: ReleaseReview) -> String? {
         let n = store.intakeService.consumedNotesCount(intakeID)
         return n > 0 ? UIText.notesCarried(n) : nil
-    }
-
-    /// No FD session means no way to inject or reclaim — mail is the only channel, whatever
-    /// the rating. Matches `DeliveryPlanner.plan`'s own gate exactly.
-    private func plannedDelivery(id: String, assignee: String, rating: DeliveryRating, reason: String, hasSession: Bool) -> String {
-        guard hasSession else { return "no FD session — mail only" }
-        let op = ChangeOp.editBead(id: id, set: FieldSet(),
-                                   pre: Precondition(status: "in_progress", assignee: assignee),
-                                   delivery: Delivery(rating: rating, reason: reason))
-        let actions = DeliveryPlanner.plan(ChangeSet(graphObservedAt: .distantPast, ops: [op]),
-                                           ratings: [:], hasSession: { _ in true })
-        return "\(assignee): " + actions.map(\.kindName).joined(separator: " + ")
     }
 
     // MARK: - Actions
@@ -380,17 +372,8 @@ struct ReleaseReviewView: View {
         store.session(project: review.intake.projectPath, agentName: agent) != nil
     }
 
-    /// The same rule `ChangeSetValidator` uses for `ValidatedChangeSet.heldOpIndices` — an
-    /// `addEdge` from an existing bead to a new one blocks a live bead the moment it's
-    /// written, so it waits for release. Computed directly off the op because the sheet has
-    /// no live graph to hand a validator (see `ReleaseSummary`'s doc comment).
-    private func isHeld(_ op: ChangeOp) -> Bool {
-        if case .addEdge(let from, let to, _) = op, case .existing = from, case .new = to { return true }
-        return false
-    }
-
-    /// New tasks section (spec §10): a follow-up is a new bead too, just one that names the
-    /// bead it follows — it belongs beside `createBead`, not with the edit it was raised from.
+    /// New tasks section (spec §10): a follow-up is a new task too, just one that names the
+    /// task it follows — it belongs beside `createBead`, not with the edit it was raised from.
     private func isNewTask(_ op: ChangeOp) -> Bool {
         switch op {
         case .createBead, .followUp: true
@@ -401,7 +384,7 @@ struct ReleaseReviewView: View {
         if case .addEdge = op { return true }
         return false
     }
-    /// Edits section (spec §10): a reopen changes an existing bead's status exactly like an
+    /// Edits section (spec §10): a reopen changes an existing task's status exactly like an
     /// `editBead` changes its fields, so the two read as one group.
     private func isEditLike(_ op: ChangeOp) -> Bool {
         switch op {
@@ -414,14 +397,10 @@ struct ReleaseReviewView: View {
         return false
     }
 
-    /// The count `UIText.releaseButton` puts on the primary action: every op release will
-    /// actually write, i.e. not dropped and not `.impossible` (that op's own row already
-    /// disables its confirm control, so it can never leave `.review` any other way).
-    private func releaseCount(_ review: ReleaseReview) -> Int {
-        let ops = self.ops(review)
-        let impossible = Set(ops.indices.filter { i in i < review.drift.count && isImpossible(review.drift[i]) })
-        let skip = review.intake.droppedOps.union(impossible)
-        return ops.indices.filter { !skip.contains($0) }.count
+    /// The button's, header's and rows' words (`ReleaseSheetModel`), off the same skip rule
+    /// as the summary line.
+    private func model(_ review: ReleaseReview) -> ReleaseSheetModel {
+        ReleaseSheetModel(ops: ops(review), drift: review.drift, dropped: review.intake.droppedOps, titles: review.titles)
     }
 
     private func rowBackground(drift: OpDrift, dropped: Bool) -> Color {

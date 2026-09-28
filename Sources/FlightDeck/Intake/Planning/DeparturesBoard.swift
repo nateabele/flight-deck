@@ -222,11 +222,7 @@ struct DeparturesBoard: View {
 
     // MARK: - Tape
 
-    /// The slot the tape keeps in view: the round in flight (or the one that failed), else
-    /// where the run is paused, else where play would stop.
-    private var followID: String? {
-        model.slots.first { $0.state == .live || $0.state == .failed }?.id ?? model.pausedAtSlotID ?? model.stopSlotID
-    }
+    private var followID: String? { model.followSlotID }
 
     private var tape: some View {
         GeometryReader { geo in

@@ -704,6 +704,9 @@ struct PlanEditHooks {
     /// the plan head from (`PlanEditRouter`). Nil falls back to the last tape the section was
     /// handed, which trails the service by a view update.
     var liveTape: (() -> Tape?)?
+    /// The intake's own router (`IntakeService.editRouter`), which outlives the section; nil
+    /// gives the section one of its own (renders, tests).
+    var router: PlanEditRouter?
 }
 
 /// `PlanLayers.userDiff`'s hunks, found without splitting and hashing the whole plan on every

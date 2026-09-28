@@ -196,8 +196,10 @@ struct PlanSectionBody: View {
     @State private var loadedSelection: Int??
     /// Where commits go, and the edits sent but maybe not yet applied by the runner
     /// (`PlanEditRouter.sent`): reloading the checkpoint from disk before then would offer the
-    /// pre-edit plan back as if it were news.
-    @State private var router = PlanEditRouter()
+    /// pre-edit plan back as if it were news. The intake's own (`PlanEditHooks.router`) when
+    /// the pane hands one in, so an intake switch doesn't forget what is stuck or sent.
+    @State private var ownRouter = PlanEditRouter()
+    private var router: PlanEditRouter { hooks.router ?? ownRouter }
     /// Revert all acts through the editor, so it is one undoable change.
     @State private var editor = PlanEditorHandle()
     @State private var confirmingRevertAll = false

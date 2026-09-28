@@ -77,18 +77,8 @@ enum DetailLayout {
     /// The review body's count of what will be written: "3 new tasks · 2 edits · 1 dependency".
     /// A follow-up is a new task (of an existing one); a reopen is an edit to one.
     static func reviewCounts(_ ops: [ChangeOp]) -> String {
-        var created = 0, edited = 0, edges = 0
-        for op in ops {
-            switch op {
-            case .createBead, .followUp: created += 1
-            case .editBead, .reopen: edited += 1
-            case .addEdge: edges += 1
-            }
-        }
-        let parts = [(created, "new task", "new tasks"), (edited, "edit", "edits"), (edges, "dependency", "dependencies")]
-            .filter { $0.0 > 0 }
-            .map { "\($0.0) \($0.0 == 1 ? $0.1 : $0.2)" }
-        return parts.isEmpty ? "Nothing to write" : parts.joined(separator: " · ")
+        let counts = ReleaseCounts(ops)
+        return counts.isEmpty ? "Nothing to write" : counts.phrase
     }
 
     /// Whether the graph moved since triage, as the review sheet will ask about it (`drift` is
@@ -156,5 +146,17 @@ enum DetailLayout {
     static func pinsBar(barTop: CGFloat?) -> Bool {
         guard let barTop else { return false }
         return barTop < pinnedInset
+    }
+
+    /// The gap between the pinned bar and the board under it — the card's own spacing.
+    static let pinnedGap: CGFloat = 12
+
+    /// How tall the pinned block draws, from the card's measured bar and board; nil before the
+    /// first measurement. The heatmap is left out: the pinned copy of the board never carries it
+    /// — a heatmap cell's jump to the plan pinned the block, and the opaque map in the pinned
+    /// copy then covered the very section it had jumped to.
+    static func pinnedBlockHeight(bar: CGFloat, board: CGFloat, heatmap: CGFloat) -> CGFloat? {
+        guard bar > 0 else { return nil }
+        return pinnedInset + bar + pinnedGap + max(0, board - heatmap) + 10
     }
 }

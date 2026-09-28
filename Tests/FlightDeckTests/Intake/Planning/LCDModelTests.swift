@@ -265,4 +265,14 @@ final class LCDModelTests: XCTestCase {
         XCTAssertNil(HaltRequest(kind: .pause, seq: 4).label(for: idle), "no runner reads a pause until the next play")
         XCTAssertEqual(HaltRequest(kind: .stop, seq: 4).label(for: idle), "Stopping…", "a runner is started to consume a stop")
     }
+
+    /// VoiceOver reads the value first, then what it is, in words: "running · of 4: REFINE 2"
+    /// put the caption's fragments ahead of the thing they describe, and "paused: —" read a
+    /// dash aloud.
+    func testAccessibilityLabelReadsValueFirstInWords() {
+        let round = LCDCell(kind: .round, value: "REFINE 2", shortValue: "RF2", caption: "running · of 4", tone: .normal)
+        XCTAssertEqual(round.accessibilityLabel, "REFINE 2, running, of 4")
+        let empty = LCDCell(kind: .elapsed, value: "—", shortValue: "—", caption: "paused", tone: .normal)
+        XCTAssertEqual(empty.accessibilityLabel, "none, paused")
+    }
 }

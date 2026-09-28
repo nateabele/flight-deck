@@ -42,10 +42,15 @@ anything is happening, what it is, or whether another round is worth it.
   default, always confirmed; no controls or critical information only at a window's bottom; panels,
   not sheets, for repeated input (Rounds editor, notes); no labelled spinners; count up, never an ETA;
   colour only for exceptions (accent = live/selected, amber = attention/fallback, red = failure).
+  A transitional acknowledgement of the human's own click — §4's "Pausing…"/"Stopping…" until the
+  runner reaches its safe point — is exempt from "no labelled spinners": it is not a progress
+  indicator, it says the press was heard (final-review ruling #18).
 - **Honest data only.** No invented percentages, ETAs or live cost estimates. A determinate fraction
   appears only where it is real: seats done/total, the agent's own plan steps, round N of M.
 - **Motion:** every animation respects Reduce Motion (cross-fade or none). Clocks tick at 1 Hz from a
-  local timer, independent of agent events; 1 Hz timers suspend when the window is occluded.
+  local timer, independent of agent events; 1 Hz timers suspend when the window is occluded. Once
+  nothing is running (paused, stopped, failed), the idle clocks (PAUSED FOR, HALTED FOR) tick at 1 Hz
+  for 60 s and then once a minute, on their own whole minutes (final-review ruling #9).
 - **Full names first.** Every label renders its proper name when it fits its measured slot and falls
   back to a short code otherwise (§5.3).
 
@@ -93,9 +98,11 @@ At the top edge of the live card (in the content, not the window toolbar — it 
   Hovering a play button previews its stop on the board and in the LCD (label becomes WOULD STOP).
   Each has a Run menu command: Step ⌘', Next Major ⇧⌘', To Review ⌥⌘', Pause ⇧⌘., Stop ⌘..
   "Pausing…"/"Stopping…" swap the button label with an inline spinner until the safe point.
-  As built, Pause and Stop are swapped from the pairing above and Annotate moved off ⇧⌘A: Stop ⌘.
-  matches the OS-wide "period stops" convention, and ⇧⌘A was already claimed by Add Project, so
-  Annotate landed on ⌥⌘A instead (T6 ruling).
+  Stop ⌘. follows the OS-wide "period stops" convention. Stop discards the round in flight, so the
+  key and ⌘. both ask first — "Stop the run?", naming the round whose work is discarded, Stop
+  destructive and never the default (final-review ruling #6); Pause loses nothing and acts at once.
+  Annotate is ⌥⌘A, since ⇧⌘A was already claimed by Add Project (T6 ruling). The Run menu also
+  carries Show/Hide Section Heatmap (no chord), the keyboard's way to §8.3.
 - **LCD readout**, one dark-glass instrument, monospaced phosphor values, tabular numerals, cells:
   `ROUND · OF N` · `ELAPSED` · `SEATS DONE` · `SO FAR` (+/−) · `BILLED` · **`CONVERGENCE`** (§8.1) ·
   `STOPS AT`. States recolour only the relevant cell (PAUSED; FAILED red with the diagnosis replacing
@@ -179,6 +186,12 @@ wrapped for SwiftUI — styling by attributes over the source text, so the store
 Markdown. Edits are sent as `editPlan` when the field ends editing or after 2 s idle, never per
 keystroke (`commands.jsonl` never compacts).
 
+A new head arriving while the editor is focused replaces the text only when nothing is uncommitted
+(`EditPolicy.shouldReplace(editing: true, dirty: false) == true`, final-review ruling #20): with
+every keystroke already committed there is nothing to lose, and holding the head behind a banner
+would only make the human click for a plan they would have taken anyway. With uncommitted typing,
+the head is held and offered.
+
 ### 7.2 Your edits as a layer
 
 Built on `PlanLayers` (engine, landed): `plan.md` is the agents' plan, `plan.user.md` your edited
@@ -251,8 +264,16 @@ Fallback; leading-aligned fallback column), caps and default play; the body show
 ## 10. Release review
 
 The existing sheet, renamed throughout to tasks: "Release plan as tasks", sections **New tasks /
-Edits / Dependencies**, "14 of 14 selected", primary **Release 14 Tasks** (default, trailing),
-Cancel leading. It carries forward the notes a round consumed ("1 note carried into task notes").
+Edits / Dependencies**, primary **Release 3 New Tasks** (default, trailing), Cancel leading. It
+carries forward the notes a round consumed ("1 note carried into task notes").
+
+As built (final review): the button, the summary line and the header count the same things, from
+one rule (`ReleaseCounts` over the ops not dropped or impossible). The summary reads "3 new tasks ·
+2 edits · 2 dependencies · 2 notices (1 session message, 1 mail)" and the button carries its new-task
+count ("Release Changes" when there is none). The header says "2 dropped" once something is left
+out, in place of "14 of 14 selected" — rows can only be dropped, never selected. Rows name tasks by
+title (the id is in the help tag); an existing task waiting on a new one is badged "waits for
+release", never "held".
 
 ## 11. What is already built vs. what this adds
 

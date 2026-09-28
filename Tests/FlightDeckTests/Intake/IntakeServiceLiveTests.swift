@@ -63,6 +63,8 @@ final class IntakeServiceLiveTests: XCTestCase {
     private var runner: FakeRunnerController!
     private var reads: ReadLog!
     private var clockNow = Date(timeIntervalSince1970: 1_800_000_000)
+    /// What the service asked VoiceOver to say (`IntakeService.announce`).
+    private var announced: [String] = []
 
     override func setUp() {
         super.setUp()
@@ -94,7 +96,8 @@ final class IntakeServiceLiveTests: XCTestCase {
                                 availableModels: .defaults, runner: runner,
                                 inject: { _, _, _, _ in true }, hasSession: { _, _ in false },
                                 now: { [unowned self] in self.clockNow },
-                                readFile: { reads.read($0) })
+                                readFile: { reads.read($0) },
+                                announce: { [unowned self] in self.announced.append($0) })
         // Launch recovery runs one tick of its own; let it land (and any convergence fold it
         // started), and unless the test is about that first read, count from zero after it.
         guard awaitRecovery else { return svc }
@@ -262,6 +265,147 @@ final class IntakeServiceLiveTests: XCTestCase {
         XCTAssertNil(svc.pending[i.id])
     }
 
+    /// The plan editor's router — `stuck` (edits that must stay on their own round) and `sent`
+    /// (edits not yet applied) — is the intake's, kept by the service like `editNoteShown`. As
+    /// the plan section's `@State` it was lost on every intake switch, and an edit that had
+    /// already conflicted was merged onto the head on the next commit after coming back.
+    func testEditRouterSurvivesAnIntakeSwitch() async throws {
+        let a = try seed(.shaping), b = try seed(.shaping)
+        let svc = await makeService()
+        let router = svc.editRouter(a.id)
+        XCTAssertTrue(svc.editRouter(a.id) === router, "the same router every time the plan comes back")
+        XCTAssertFalse(svc.editRouter(b.id) === router, "one per intake")
+
+        svc.discard(a.id)
+        svc.pollTapes()
+        XCTAssertFalse(svc.editRouter(a.id) === router, "gone once the intake stops shaping")
+    }
+
+    // MARK: announcements
+
+    /// Spec §14: live regions announce state changes — a round landed, failed, reached review,
+    /// needs you — and nothing else: never the first read of a tape (that is the app opening,
+    /// not a change), never a heartbeat or a clock.
+    func testAnnouncesOnlyTheStateChangesTheSpecNames() {
+        func tape(_ checkpoints: [(Stage, Int)], _ status: RunnerStatus, running: PlannedRound? = nil) -> Tape {
+            var t = Tape()
+            t.checkpoints = checkpoints.enumerated().map { n, c in
+                Checkpoint(id: n + 1, stage: c.0, round: c.1, major: false, createdAt: .distantPast)
+            }
+            t.status = status
+            t.roundInProgress = running
+            return t
+        }
+        let one = tape([(.draft, 0)], .running, running: Self.refine1)
+        XCTAssertNil(IntakeService.announcement(from: nil, to: one), "the first read is not a change")
+        var beat = one
+        beat.heartbeat = .distantFuture
+        XCTAssertNil(IntakeService.announcement(from: one, to: beat), "a heartbeat is not a state change")
+        XCTAssertEqual(IntakeService.announcement(from: one, to: tape([(.draft, 0), (.refine, 1)], .running)), "Refine 1 landed")
+        XCTAssertEqual(IntakeService.announcement(from: one, to: tape([(.draft, 0)], .failed, running: Self.refine1)),
+                       "Refine 1 failed")
+        XCTAssertNil(IntakeService.announcement(from: one, to: tape([(.draft, 0), (.encode, 0)], .reachedReview)),
+                     "the last round landing is said once, as the intake's move to review")
+
+        XCTAssertEqual(IntakeService.announcement(from: .triaging, to: .needsAnswers), "Triage has questions for you")
+        XCTAssertEqual(IntakeService.announcement(from: .shaping, to: .review), "The plan is ready for review")
+        XCTAssertEqual(IntakeService.announcement(from: .triaging, to: .failed), "The intake failed")
+        XCTAssertNil(IntakeService.announcement(from: .needsAnswers, to: .triaging))
+        XCTAssertNil(IntakeService.announcement(from: .review, to: .review), "a save that changes nothing says nothing")
+        XCTAssertNil(IntakeService.announcement(from: nil, to: .triaging))
+    }
+
+    /// Wired through the tick: a checkpoint landing on the tape is announced once.
+    func testARoundLandingOnTheTapeIsAnnounced() async throws {
+        let shaping = try seed(.shaping)
+        try updateTape(shaping.id) {
+            $0.status = .running
+            $0.roundInProgress = Self.refine1
+            $0.checkpoints = [Checkpoint(id: 1, stage: .draft, round: 0, major: true, createdAt: self.clockNow)]
+        }
+        let svc = await makeService()
+        svc.pollTapes()
+        XCTAssertEqual(announced, [])
+
+        try updateTape(shaping.id) {
+            $0.checkpoints.append(Checkpoint(id: 2, stage: .refine, round: 1, major: false, createdAt: self.clockNow))
+            $0.roundInProgress = nil
+        }
+        svc.pollTapes()
+        svc.pollTapes()
+        XCTAssertEqual(announced, ["Refine 1 landed"])
+    }
+
+    /// Stop discards the round in flight — paid work — so it goes through a confirmation, from
+    /// the bar's key and ⌘. alike (both press `PlanningActions`). Pause, which loses nothing,
+    /// still acts at once.
+    func testStopAsksFirstAndPauseDoesNot() async throws {
+        let shaping = try seed(.shaping)
+        try updateTape(shaping.id) { $0.status = .running; $0.roundInProgress = Self.refine1 }
+        let svc = await makeService()
+        svc.pollTapes()
+        let intake = try XCTUnwrap(svc.intakes.first { $0.id == shaping.id })
+        let tape = tapeStore(shaping.id).loadTape()
+        var asked = 0
+        let actions = PlanningActions.shaping(shaping.id, service: svc, model: ShapingModel(intake: intake, tape: tape),
+                                              annotate: {}, confirmStop: { asked += 1 })
+
+        actions.perform(.stop)
+        XCTAssertEqual(asked, 1)
+        XCTAssertEqual(tapeStore(shaping.id).commands(after: 0).map(\.command), [], "nothing is stopped until confirmed")
+
+        actions.perform(.pause)
+        XCTAssertEqual(asked, 1)
+        XCTAssertEqual(tapeStore(shaping.id).commands(after: 0).map(\.command), [.pause])
+    }
+
+    /// The confirmation names what Stop throws away: the round in flight, by name — or says
+    /// nothing is lost when no round is running.
+    func testStopConfirmationNamesTheRoundInFlight() {
+        var tape = Tape()
+        tape.roundInProgress = Self.refine1
+        XCTAssertEqual(PlanningActions.stopMessage(tape: tape),
+                       "Refine 1's work so far is discarded. Every round that already landed stays in the plan.")
+        tape.roundInProgress = nil
+        XCTAssertEqual(PlanningActions.stopMessage(tape: tape),
+                       "No round is running, so nothing is discarded. Every round that already landed stays in the plan.")
+    }
+
+    /// Every way into a fresh triage turn answers the click at once — not only Send Answers.
+    /// Continue with Single task (`.encodeNow`) and Retry once left `pending` unset, so while
+    /// the turn read the graph the card drew the PREVIOUS turn's finished activity with its
+    /// clock stopped: a finished, frozen seat right after the click.
+    func testEveryTriageRestartSetsPendingAndDropsTheOldActivity() async throws {
+        let failed = try seed(.needsAnswers)
+        let choosing = try seed(.awaitingChoice)
+        let br = ScriptedProcessRunner(Self.brReplies)
+        let headless = HeldHeadlessRunner()
+        headless.release()
+        let svc = await makeService(processRunner: br, headless: headless)
+
+        // A turn that reaches the harness and fails leaves its finished activity published.
+        svc.answer(failed.id, answers: ["x"])
+        await svc.task(for: failed.id)?.value
+        XCTAssertEqual(svc.intakes.first { $0.id == failed.id }?.state, .failed)
+        XCTAssertEqual(svc.triageActivity(failed.id)?.finished, true)
+
+        br.slow["br list"] = 300_000_000
+        clockNow += 5
+        svc.retry(failed.id)
+        XCTAssertEqual(svc.pending[failed.id], PendingStart(kind: .triage, since: clockNow))
+        XCTAssertNil(svc.triageActivity(failed.id), "the failed turn's finished seat is not this turn's")
+
+        svc.choose(choosing.id, preset: .bead)
+        XCTAssertEqual(svc.pending[choosing.id], PendingStart(kind: .triage, since: clockNow))
+
+        // Both survive the turn's own `.triaging` save.
+        for _ in 0..<2000 where svc.intakes.first(where: { $0.id == choosing.id })?.state != .triaging {
+            try await Task.sleep(nanoseconds: 1_000_000)
+        }
+        XCTAssertNotNil(svc.pending[failed.id])
+        XCTAssertNotNil(svc.pending[choosing.id])
+    }
+
     /// Triage's pending clears on `triage/activity.json` from THIS turn, never on the previous
     /// turn's file still on disk, and a turn that fails before any activity drops it too.
     func testTriagePendingClearsOnThisTurnsActivityOnly() async throws {
@@ -377,18 +521,25 @@ final class IntakeServiceLiveTests: XCTestCase {
     /// service — the whole detail pane, the project view, and through `SessionStore`'s forward
     /// every view of the store — about once a second of a run, for values only the live card
     /// draws.
+    ///
+    /// And only on THIS intake's channel: one feed for every intake had two shaping intakes
+    /// redraw each other's live cards on every beat.
     func testSeatBeatPublishesOnlyOnTheSeatFeed() async throws {
         let i = try seed(.shaping)
-        try updateTape(i.id) { $0.status = .running; $0.roundInProgress = Self.refine1 }
-        try writeSeat(i.id, run: "refine-1-reviewer", activity: SeatActivity(harness: .codex, startedAt: clockNow),
-                      record: RunRecord(started: clockNow))
+        let other = try seed(.shaping)
+        for id in [i.id, other.id] {
+            try updateTape(id) { $0.status = .running; $0.roundInProgress = Self.refine1 }
+            try writeSeat(id, run: "refine-1-reviewer", activity: SeatActivity(harness: .codex, startedAt: clockNow),
+                          record: RunRecord(started: clockNow))
+            try setMTime(tapeStore(id).runDirectory("refine-1-reviewer").appendingPathComponent("activity.json"), 1_790_000_000)
+        }
         let activity = tapeStore(i.id).runDirectory("refine-1-reviewer").appendingPathComponent("activity.json")
-        try setMTime(activity, 1_790_000_000)
         let svc = await makeService()
-        var servicePublishes = 0, seatPublishes = 0
+        var servicePublishes = 0, seatPublishes = 0, otherPublishes = 0
         let a = svc.objectWillChange.sink { servicePublishes += 1 }
-        let b = svc.seats.objectWillChange.sink { seatPublishes += 1 }
-        defer { a.cancel(); b.cancel() }
+        let b = svc.seats.channel(i.id).objectWillChange.sink { seatPublishes += 1 }
+        let c = svc.seats.channel(other.id).objectWillChange.sink { otherPublishes += 1 }
+        defer { a.cancel(); b.cancel(); c.cancel() }
 
         var moved = SeatActivity(harness: .codex, startedAt: clockNow)
         moved.headline = "Reading the board"
@@ -398,6 +549,7 @@ final class IntakeServiceLiveTests: XCTestCase {
         XCTAssertEqual(svc.seatActivities[i.id]?["refine-1-reviewer"]?.headline, "Reading the board")
         XCTAssertEqual(svc.seats.files(i.id).activities["refine-1-reviewer"]?.headline, "Reading the board")
         XCTAssertGreaterThan(seatPublishes, 0)
+        XCTAssertEqual(otherPublishes, 0, "another intake's live card is not redrawn by this one's beat")
         XCTAssertEqual(servicePublishes, 0, "a seat beat must not redraw the service's observers")
     }
 

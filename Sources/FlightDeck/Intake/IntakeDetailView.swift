@@ -8,8 +8,8 @@ import SwiftUI
 /// bar says; this view lays them out and wires them to the service.
 ///
 /// **What redraws when.** The running round's seats change about once a second; they publish on
-/// `service.seats`, which only `SeatReader`s observe — the live card, the pinned block and the
-/// seat inspector. Everything else here re-evaluates on the service's own, rarer publishes, and
+/// this intake's channel of `service.seats`, which only `SeatReader`s observe — the live card,
+/// the pinned block and the seat inspector. Everything else here re-evaluates on the service's own, rarer publishes, and
 /// the header, the Clarifications and the plan are `Equatable` views on plain values, so even
 /// then they redraw only when what they show changed (`RenderProbe` counts it in tests).
 struct IntakeDetailView: View {
@@ -37,6 +37,8 @@ struct IntakeDetailView: View {
     /// default: answered rounds are there to look back at, not to push the live work down.
     @State private var expandedRounds: Set<Int>
     @State private var confirmingDiscard = false
+    /// Stop asks first (`PlanningActions.shaping`): set by the bar's key and ⌘. alike.
+    @State private var confirmingStop = false
     /// The config `startShaping` hands to `beginShaping` — `nil` until the preset's expansion
     /// seeds it. `beginShaping` rather than `choose` so the edited config is what actually runs.
     @State private var editedConfig: RoundConfig?
@@ -46,6 +48,9 @@ struct IntakeDetailView: View {
     @State private var selectedCheckpoint: Int?
     /// The seat the inspector details (`LiveSeat.id`).
     @State private var selectedSeat: String?
+    /// The seat rows' headline holds, shared with the seat inspector so it never says what the
+    /// row is still holding back (`DwellBank.peek`). A fresh bank per intake (`bindNotes`).
+    @State private var dwell = DwellBank()
     /// The play button being hovered, shared by the control bar and the board so both preview
     /// the same stop.
     @State private var preview: PlayMode?
@@ -60,6 +65,10 @@ struct IntakeDetailView: View {
     /// exactly that much room while the block is pinned.
     @State private var barHeight: CGFloat = 0
     @State private var boardHeight: CGFloat = 0
+    /// The open heatmap's share of `boardHeight` — the pinned copy never draws it, so the room
+    /// the plan leaves for the pinned block leaves it out (`DetailLayout.pinnedBlockHeight`).
+    @State private var heatmapHeight: CGFloat = 0
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// Derived from files, so kept rather than re-read on every service publish (a running
     /// round publishes about once a second): see `refreshDerived`.
     @State private var summary: [ProgressItem] = []
@@ -101,7 +110,6 @@ struct IntakeDetailView: View {
         /// `LiveCard`'s own padding: the pinned copy of the bar sits at the card's inset, so it
         /// lands exactly where the card's copy left off.
         static let cardInset: CGFloat = 14
-        static let barGap: CGFloat = 12
         /// Room the plan section keeps below the pinned block before its first measurement.
         static let pinnedEstimate: CGFloat = 300
     }
@@ -122,7 +130,7 @@ struct IntakeDetailView: View {
                                                       })
                                     .equatable()
                             }
-                            if sections.contains(.liveCard) { liveCard }
+                            if sections.contains(.liveCard) { liveCard.id(Self.cardAnchor) }
                             if sections.contains(.stageBody) { stageBody }
                             if sections.contains(.plan) {
                                 planSection(viewport: viewport.size.height).id(Self.planAnchor)
@@ -141,7 +149,16 @@ struct IntakeDetailView: View {
                     .overlay(alignment: .top) { pinnedBar }
                     // Bottom-anchored: the plan is sized to the room under the pinned block, so
                     // its bottom at the viewport's puts its top just under the block.
-                    .onChange(of: planScroll) { withAnimation { proxy.scrollTo(Self.planAnchor, anchor: .bottom) } }
+                    .onChange(of: planScroll) {
+                        withAnimation(reduceMotion ? nil : .default) { proxy.scrollTo(Self.planAnchor, anchor: .bottom) }
+                    }
+                    // The heatmap lives in the card's board, never the pinned copy's: opened
+                    // while the block is pinned (the cell on the pinned bar, the Run menu), it
+                    // would open out of sight, so the document brings the card to it.
+                    .onChange(of: heatmap == nil) { _, closed in
+                        guard !closed, pinned else { return }
+                        withAnimation(reduceMotion ? nil : .default) { proxy.scrollTo(Self.cardAnchor, anchor: .top) }
+                    }
                 }
             }
             // Pinned outside the ScrollView so the way forward (and out) is always in reach,
@@ -167,6 +184,14 @@ struct IntakeDetailView: View {
         // Esc closes the heatmap from anywhere in the pane, not only while it holds focus: a
         // click into the plan moves focus to the editor, and the map stayed open under it.
         .onExitCommand(perform: heatmap == nil ? nil : { heatmap = nil })
+        // Stop is destructive, so neither its key nor ⌘. acts without this (spec §2). Cancel is
+        // the default: a Return on a reflex ⌘. must not throw the round away.
+        .confirmationDialog("Stop the run?", isPresented: $confirmingStop, titleVisibility: .visible) {
+            Button("Stop", role: .destructive) { [service, id = intake.id] in service.send(id, .stop) }
+            Button("Cancel", role: .cancel) {}.keyboardShortcut(.defaultAction)
+        } message: {
+            Text(PlanningActions.stopMessage(tape: tape ?? .empty))
+        }
         .onChange(of: derivedKey, initial: true) { refreshDerived() }
         .onChange(of: intake.id, initial: true) { bindNotes() }
         .onChange(of: service.notes(intake.id), initial: true) { _, onTape in notes.tapeNotes = onTape }
@@ -212,10 +237,11 @@ struct IntakeDetailView: View {
                                  editConflict: service.editConflictNotice(intake.id, tape: tape, head: planHead),
                                  selectedRound: $selectedCheckpoint,
                                  selectedSeat: $selectedSeat,
+                                 dwell: dwell,
                                  controlBar: { now in
                                      AnyView(inCard(.bar, height: barHeight) { controlBar(tape, now: now, seats: seats) })
                                  },
-                                 board: { now in AnyView(inCard(.board, height: boardHeight) { board(tape, now: now) }) })
+                                 board: { now in AnyView(inCard(.board, height: boardHeight) { board(tape, now: now, pinned: false) }) })
             }
         default:
             EmptyView()
@@ -244,6 +270,8 @@ struct IntakeDetailView: View {
         if !pinned {
             if let bar = geometry.bar, abs(bar.height - barHeight) > 0.5 { barHeight = bar.height }
             if let board = geometry.board, abs(board.height - boardHeight) > 0.5 { boardHeight = board.height }
+            let map = geometry.heatmap?.height ?? 0
+            if abs(map - heatmapHeight) > 0.5 { heatmapHeight = map }
         }
     }
 
@@ -255,10 +283,10 @@ struct IntakeDetailView: View {
     private var pinnedBar: some View {
         if pinned, intake.state == .shaping, let tape {
             SeatReader(feed: service.seats, id: intake.id) { seats in
-                LiveClock(ticking: tape.status != .reachedReview) { now in
-                    VStack(spacing: Metrics.barGap) {
+                LiveClock(mode: .shaping(tape: tape, pending: service.pending[intake.id])) { now in
+                    VStack(spacing: DetailLayout.pinnedGap) {
                         controlBar(tape, now: now, seats: seats)
-                        board(tape, now: now)
+                        board(tape, now: now, pinned: true)
                     }
                 }
             }
@@ -296,15 +324,23 @@ struct IntakeDetailView: View {
         }
     }
 
+    /// `pinned`: the pinned copy has no heatmap. Carried there, a cell's jump to the plan pinned
+    /// the block and the opaque map covered the very section it had jumped to; the card's copy
+    /// keeps it, and reports its height so the pinned room can leave it out.
     @ViewBuilder
-    private func board(_ tape: Tape, now: Date) -> some View {
+    private func board(_ tape: Tape, now: Date, pinned: Bool) -> some View {
         if let config = intake.roundConfig {
             let model = boardModel(tape, config: config, now: now)
             DeparturesBoard(model: model, policy: service.flapPolicy(for: intake.id),
                             preview: $preview,
                             onSelect: { select($0) },
                             onExtend: { [service, id = intake.id] in service.send(id, .extend($0, by: 1)) },
-                            disclosure: heatmapView(tape, board: model))
+                            disclosure: pinned ? nil : heatmapView(tape, board: model).map { map in
+                                AnyView(map.background(GeometryReader { geo in
+                                    Color.clear.preference(key: BarGeometryKey.self,
+                                                           value: BarFrames(heatmap: geo.frame(in: .named(Self.scrollSpace))))
+                                }))
+                            })
                 .clipShape(RoundedRectangle(cornerRadius: 10))
         }
     }
@@ -383,12 +419,20 @@ struct IntakeDetailView: View {
     /// leaves every Run item disabled.
     private var planningActions: PlanningActions? {
         guard intake.state == .shaping, let tape else { return nil }
-        return PlanningActions.shaping(intake.id, service: service, model: ShapingModel(intake: intake, tape: tape),
-                                       annotate: { [notes] in notes.annotate() })
+        var actions = PlanningActions.shaping(intake.id, service: service, model: ShapingModel(intake: intake, tape: tape),
+                                              annotate: { [notes] in notes.annotate() },
+                                              confirmStop: { [$confirmingStop] in $confirmingStop.wrappedValue = true })
+        if sectionCycle != nil {
+            actions.heatmap = PlanningActions.HeatmapToggle(open: heatmap != nil) { [$heatmap] in
+                $heatmap.wrappedValue = $heatmap.wrappedValue == nil ? HeatmapFocus() : nil
+            }
+        }
+        return actions
     }
 
     /// A different intake starts with a clean slate of notes, sending to itself.
     private func bindNotes() {
+        dwell = DwellBank()
         notes.reset()
         notes.send = { [service, id = intake.id] in service.send(id, $0) }
         notes.showRail = { [$showsInspector] in $showsInspector.wrappedValue = true }
@@ -401,8 +445,8 @@ struct IntakeDetailView: View {
     /// no pinned block over it.
     private func planSection(viewport: CGFloat) -> some View {
         let final = DetailLayout.planIsFinal(for: intake.state)
-        let pinnedHeight = final ? 0 : barHeight > 0
-            ? DetailLayout.pinnedInset + barHeight + Metrics.barGap + boardHeight + 10 : Metrics.pinnedEstimate
+        let pinnedHeight = final ? 0
+            : DetailLayout.pinnedBlockHeight(bar: barHeight, board: boardHeight, heatmap: heatmapHeight) ?? Metrics.pinnedEstimate
         return DocumentPlan(service: service, intakeID: intake.id, title: DetailLayout.planTitle(for: intake.state),
                             tape: planTape ?? .empty, final: final,
                             selection: final ? nil : selectedCheckpoint, select: final ? .constant(nil) : $selectedCheckpoint,
@@ -570,9 +614,10 @@ struct IntakeDetailView: View {
     private var reviewBody: some View {
         VStack(alignment: .leading, spacing: 6) {
             // A refused release comes back here with its reason — without this line the only
-            // trace of the refusal was the sheet having closed.
+            // trace of the refusal was the sheet having closed. Red: it is a failure, and amber
+            // is for attention (spec §2).
             if let failure = intake.failure {
-                Text(failure).foregroundStyle(.orange).padding(.bottom, 6)
+                Text(failure).foregroundStyle(.red).padding(.bottom, 6)
             }
             Text("Change set").font(.headline)
             Text(DetailLayout.reviewCounts(intake.changeSet?.ops ?? []))
@@ -605,7 +650,7 @@ struct IntakeDetailView: View {
             if let record = intake.release {
                 Text("\(record.appliedSteps) step\(record.appliedSteps == 1 ? "" : "s") applied")
                 if let error = record.error {
-                    Text(error).foregroundStyle(.orange)
+                    Text(error).foregroundStyle(.red)
                 }
                 if !record.warnings.isEmpty {
                     DisclosureGroup("Delivery warnings (\(record.warnings.count))") {
@@ -623,7 +668,7 @@ struct IntakeDetailView: View {
     private var failedBody: some View {
         VStack(alignment: .leading, spacing: 12) {
             if let failure = intake.failure {
-                Text(failure).foregroundStyle(.orange)
+                Text(failure).foregroundStyle(.red)
             }
             if let raw = intake.rawFailureOutput {
                 DisclosureGroup("Raw output") {
@@ -685,18 +730,25 @@ struct IntakeDetailView: View {
         }
     }
 
-    /// Resolved on each draw rather than held: a seat's row model is re-derived from the service
-    /// each second, and the inspector follows it (a fallback starting, a result landing).
+    /// Resolved on each tick rather than held: a seat's row model is re-derived from the service
+    /// each second, and the inspector follows it (a fallback starting, a result landing). On its
+    /// own `LiveClock`, on the card's whole seconds, and through the card's own reads — the
+    /// pending substitution and the row's dwell hold. With `Date()` and the raw files it froze
+    /// between seat writes, and could say "Running" beside a row that said the seat had stalled.
     @ViewBuilder
     private var seatInspector: some View {
         if let tape, let round = tape.roundInProgress, let selectedSeat {
+            let pending = service.pending[intake.id]
             SeatReader(feed: service.seats, id: intake.id) { seats in
-                if let seat = LiveSeats.rows(round: round, config: intake.roundConfig, seats: seats, now: Date())
-                    .first(where: { $0.id == selectedSeat }) {
-                    SeatInspector(model: seat.model, activity: seats.activities[seat.model.id],
-                                  runDirectory: service.runDirectory(intake.id, run: seat.model.id))
-                } else {
-                    InspectorPlaceholder(title: "No Seat Selected", message: "Click a seat in the round to see its details.")
+                LiveClock(mode: .shaping(tape: tape, pending: pending)) { now in
+                    let files = LiveSeats.files(seats, pending: pending)
+                    if let seat = LiveSeats.rows(round: round, config: intake.roundConfig, seats: files, now: now)
+                        .first(where: { $0.id == selectedSeat }).map(dwell.peek) {
+                        SeatInspector(model: seat.model, activity: files.activities[seat.model.id],
+                                      runDirectory: service.runDirectory(intake.id, run: seat.model.id))
+                    } else {
+                        InspectorPlaceholder(title: "No Seat Selected", message: "Click a seat in the round to see its details.")
+                    }
                 }
             }
         } else if tape?.roundInProgress == nil {
@@ -780,6 +832,7 @@ struct IntakeDetailView: View {
     private static let allPresets: [Preset] = [.bead, .sketch, .featurePlan, .fullPlan]
 
     private static let planAnchor = "intake-plan"
+    private static let cardAnchor = "intake-live-card"
 
     /// The document scroller's width in the current scroller style — zero-width overlay
     /// scrollers still draw over the content's trailing edge while scrolling.
@@ -808,6 +861,8 @@ private struct DerivedKey: Equatable {
 private struct BarFrames: Equatable {
     var bar: CGRect?
     var board: CGRect?
+    /// The card's open heatmap, inside `board`.
+    var heatmap: CGRect?
 }
 
 private struct BarGeometryKey: PreferenceKey {
@@ -818,6 +873,7 @@ private struct BarGeometryKey: PreferenceKey {
         let next = nextValue()
         value.bar = next.bar ?? value.bar
         value.board = next.board ?? value.board
+        value.heatmap = next.heatmap ?? value.heatmap
     }
 }
 
@@ -839,9 +895,18 @@ enum RenderProbe {
 /// Re-reads only intake `id`'s seat files (`SeatFeed`), so a seat beat redraws what is drawn
 /// from them and not the pane around it.
 private struct SeatReader<Content: View>: View {
-    @ObservedObject var feed: SeatFeed
+    let feed: SeatFeed
     let id: UUID
+    /// This intake's channel only: another intake's beats never redraw this reader.
+    @ObservedObject private var channel: SeatChannel
     @ViewBuilder let content: (SeatFiles) -> Content
+
+    init(feed: SeatFeed, id: UUID, @ViewBuilder content: @escaping (SeatFiles) -> Content) {
+        self.feed = feed
+        self.id = id
+        self.channel = feed.channel(id)
+        self.content = content
+    }
 
     var body: some View { content(feed.files(id)) }
 }
@@ -978,7 +1043,8 @@ private struct DocumentPlan: View, Equatable {
                 .editHooks(PlanEditHooks(noteShown: noteShown,
                                          onNoteShown: { [service, intakeID] in service.markEditNoteShown(intakeID) },
                                          onConflict: { [service, intakeID] in service.recordEditConflict(intakeID, $0) },
-                                         liveTape: { [service, intakeID] in service.tapes[intakeID] }))
+                                         liveTape: { [service, intakeID] in service.tapes[intakeID] },
+                                         router: final ? nil : service.editRouter(intakeID)))
                 .churnLane(churn)
                 .focus(focus)
                 .readOnly(final)

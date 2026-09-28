@@ -109,6 +109,11 @@ final class ConvergenceCellModelTests: XCTestCase {
         XCTAssertTrue(cell.cardLines.contains("Reviewer changed at R3 (codex gpt-6-sol → claude opus); the trend restarts there"),
                       "\(cell.cardLines)")
         XCTAssertFalse(cell.cardLines[0].contains("changed at R3"), "the series line must not say it twice: \(cell.cardLines[0])")
+        // The verdict word survives the swap: the cell still says what the restarted trend is
+        // (judged from R3 on), and says it where the LCD reads it — never blank, never a
+        // verdict carried over from the other reviewer's rounds.
+        XCTAssertEqual(cell.word, "PLATEAU →", "R3–R4 alone are flat; R1–R2 under codex fell steeply")
+        XCTAssertTrue(cell.detail.hasSuffix("flat"), cell.detail)
     }
 
     /// An extend adds rounds past the ones the plan asked for; the card says which round was the
