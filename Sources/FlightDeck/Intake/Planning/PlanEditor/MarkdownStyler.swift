@@ -10,11 +10,11 @@ struct MarkdownSpan: Hashable {
 
 /// One Markdown block of the plan, in UTF-16 offsets of the source text (the units
 /// `NSTextStorage` counts in). `syntaxRanges` are the characters the rendered view hides —
-/// `## `, `**`, backticks, link brackets and URL, code fences. A list `marker` is kept apart:
+/// `## `, `**`, backticks, link brackets and URL, code fences, a quote's `> `. A list `marker` is kept apart:
 /// attributes can't draw a bullet in place of a hidden `- `, so hiding it would leave a list
 /// that reads as prose, and a hidden `1.` would lose the number.
 struct MarkdownBlock: Hashable {
-    enum Kind: Hashable { case heading(Int), paragraph, listItem, code, table, blank }
+    enum Kind: Hashable { case heading(Int), paragraph, listItem, code, table, quote, blank }
     let kind: Kind
     let range: NSRange
     let syntaxRanges: [NSRange]
@@ -31,35 +31,107 @@ struct MarkdownBlock: Hashable {
     }
 }
 
-/// Fonts and colours for the rendered plan. A struct rather than constants so a render test
-/// or a later density setting can swap it without touching the styler.
+/// Fonts, colours and spacing for the rendered plan. A struct rather than constants so a render
+/// test or a later density setting can swap it without touching the styler.
+///
+/// Set for reading, not for density: a 15 pt proportional body at a 1.5 line pitch, a clear
+/// heading scale with its room above, and a plan's blank lines drawn as gaps rather than full
+/// empty lines. The 13 pt body with every Markdown blank line a whole line tall read as a wall
+/// of text broken by random holes (the maintainer: "still really dense").
 struct PlanTheme {
-    var body = NSFont.systemFont(ofSize: 13)
-    var mono = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
-    var headingSizes: [CGFloat] = [22, 18, 15, 13, 13, 13]
+    /// 15 pt, not the body text style: macOS has no Dynamic Type, so `.body` is always 13 pt —
+    /// the size that read as dense.
+    var body = NSFont.systemFont(ofSize: 15)
+    var mono = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+    var headingSizes: [CGFloat] = [24, 20, 17, 15, 15, 15]
     var text = NSColor.labelColor
     /// Revealed syntax, list markers, table pipes: present but quieter than the words.
     var syntax = NSColor.tertiaryLabelColor
     var link = NSColor.linkColor
     var codeBackground = NSColor.secondaryLabelColor.withAlphaComponent(0.1)
+    /// A fenced block's box, drawn behind its lines by `EditLayerFragment`.
+    var codeBlockBackground = NSColor.secondaryLabelColor.withAlphaComponent(0.08)
+    var quoteText = NSColor.secondaryLabelColor
+    var quoteBar = NSColor.tertiaryLabelColor.withAlphaComponent(0.45)
     /// A point size small enough that hidden syntax takes no visible width; paired with a
     /// clear colour so nothing of it shows even where a glyph keeps a sliver of advance.
     var hidden = NSFont.systemFont(ofSize: 0.01)
+
+    // MARK: Spacing
+
+    /// Leading between wrapped lines, as `lineSpacing` — a 15 pt body's 18 pt line becomes a
+    /// 22.5 pt pitch. Not `lineHeightMultiple` or a minimum line height: measured on TextKit 2,
+    /// both grow the caret to the padded line (27 and 22 pt tall) with the glyphs sat at its
+    /// bottom, where `lineSpacing` keeps the caret the text's own 18 pt.
+    var lineSpacing: CGFloat = 4.5
+    /// After a paragraph, before whatever follows it.
+    var paragraphSpacing: CGFloat = 6
+    /// Between list items.
+    var itemSpacing: CGFloat = 4
+    /// A blank line's font: the gap between blocks the plan's blank lines make — about half a
+    /// line — rather than a whole empty line on top of the paragraph spacing. Its caret is as
+    /// short as the gap; typing into it makes it a paragraph at once.
+    var gap = NSFont.systemFont(ofSize: 7)
+    /// Room a heading keeps above and below itself, by level.
+    var headingSpaceBefore: [CGFloat] = [14, 24, 16, 12, 12, 12]
+    var headingSpaceAfter: CGFloat = 4
+    /// A list's items sit this far in; wrapped lines hang under the item's text.
+    var listIndent: CGFloat = 4
+    /// A fenced block's inner padding: side indent, and the room its (hidden) fences give it.
+    var codePadding: CGFloat = 12
+    var codeVerticalPadding: CGFloat = 8
+    var quoteIndent: CGFloat = 16
 
     static let standard = PlanTheme()
 
     var monoAdvance: CGFloat { ("0" as NSString).size(withAttributes: [.font: mono]).width }
 
     func heading(_ level: Int) -> NSFont {
-        .systemFont(ofSize: headingSizes[min(max(level, 1), 6) - 1], weight: .semibold)
+        .systemFont(ofSize: headingSizes[min(max(level, 1), 6) - 1], weight: level == 1 ? .bold : .semibold)
     }
 
     func font(for kind: MarkdownBlock.Kind) -> NSFont {
         switch kind {
         case .heading(let level): heading(level)
         case .code, .table: mono
-        case .paragraph, .listItem, .blank: body
+        case .blank: gap
+        case .paragraph, .listItem, .quote: body
         }
+    }
+
+    /// The paragraph style every line of a `kind` block starts from. A list item's hanging
+    /// indent and a code block's fence padding depend on the block's own text and are added
+    /// by the styler.
+    func paragraphStyle(for kind: MarkdownBlock.Kind) -> NSMutableParagraphStyle {
+        let para = NSMutableParagraphStyle()
+        switch kind {
+        case .heading(let level):
+            let index = min(max(level, 1), 6) - 1
+            para.lineSpacing = headingSizes[index] * 0.2
+            para.paragraphSpacingBefore = headingSpaceBefore[index]
+            para.paragraphSpacing = headingSpaceAfter
+        case .paragraph:
+            para.lineSpacing = lineSpacing
+            para.paragraphSpacing = paragraphSpacing
+        case .listItem:
+            para.lineSpacing = lineSpacing
+            para.paragraphSpacing = itemSpacing
+        case .quote:
+            para.lineSpacing = lineSpacing
+            para.paragraphSpacing = paragraphSpacing
+            para.firstLineHeadIndent = quoteIndent
+            para.headIndent = quoteIndent
+        case .code:
+            para.lineSpacing = 3
+            para.firstLineHeadIndent = codePadding
+            para.headIndent = codePadding
+            para.tailIndent = -codePadding
+        case .table:
+            para.lineSpacing = 3
+        case .blank:
+            break
+        }
+        return para
     }
 }
 
@@ -173,6 +245,19 @@ enum MarkdownStyler {
                 item.marker = NSRange(location: indent, length: contentStart - indent)
                 out.append(item)
                 li += 1
+            case .quote:
+                // Consecutive `>` lines are one quote, as consecutive prose lines are one paragraph.
+                var last = li
+                while has(last + 1), case .quote = kinds[last + 1] { last += 1 }
+                var syntax: [NSRange] = []
+                var spans: [MarkdownSpan] = []
+                for l in li...last {
+                    guard case .quote(let contentStart) = kinds[l] else { continue }
+                    syntax.append(NSRange(location: lines[l].start, length: contentStart - lines[l].start))
+                    inline(u, contentStart, lines[l].end, spans: &spans, syntax: &syntax)
+                }
+                out.append(block(.quote, s, lines[last].end, syntax, spans))
+                li = last + 1
             case .plain:
                 var last = li
                 while has(last + 1), kinds[last + 1] == .plain { last += 1 }
@@ -192,7 +277,7 @@ enum MarkdownStyler {
                       spans: spans.sorted { $0.range.location < $1.range.location })
     }
 
-    private enum LineKind: Equatable { case blank, fence, heading(Int, contentStart: Int), table, listItem(contentStart: Int), plain }
+    private enum LineKind: Equatable { case blank, fence, heading(Int, contentStart: Int), table, listItem(contentStart: Int), quote(contentStart: Int), plain }
 
     private static func lineKind(_ u: [UInt16], _ s: Int, _ e: Int) -> LineKind {
         var i = s
@@ -212,6 +297,7 @@ enum MarkdownStyler {
             }
         }
         if c == 124 { return .table }
+        if indent <= 3, c == 62 { return .quote(contentStart: i + 1 < e && u[i + 1] == 32 ? i + 2 : i + 1) }
         // `-`/`*`/`+` then a space; "---" and "**bold**" fail the space test and stay prose.
         if c == 45 || c == 42 || c == 43, i + 1 < e, u[i + 1] == 32 { return .listItem(contentStart: i + 2) }
         if c >= 48, c <= 57 {
@@ -380,28 +466,28 @@ enum MarkdownStyler {
         let font = theme.font(for: block.kind)
         let whole = paragraphRange(block, storage)
         storage.addAttribute(.font, value: font, range: whole)
+        let para = theme.paragraphStyle(for: block.kind)
         switch block.kind {
-        case .heading(let level):
-            let para = NSMutableParagraphStyle()
-            para.paragraphSpacingBefore = level <= 2 ? 10 : 6
-            para.paragraphSpacing = 4
+        case .heading, .paragraph, .blank, .table:
             storage.addAttribute(.paragraphStyle, value: para, range: whole)
+            if case .table = block.kind { styleTable(storage, block, theme) }
+        case .quote:
+            storage.addAttribute(.paragraphStyle, value: para, range: whole)
+            storage.addAttribute(.foregroundColor, value: theme.quoteText, range: block.range)
+            storage.addAttribute(.planQuote, value: true, range: whole)
         case .listItem:
             // A hanging indent, so a wrapped item lines up under its text, not its marker.
+            para.firstLineHeadIndent = theme.listIndent
+            para.headIndent = theme.listIndent
             if let marker = block.marker {
-                let para = NSMutableParagraphStyle()
                 let width = (storage.mutableString.substring(with: NSRange(location: block.range.location,
                                                                         length: NSMaxRange(marker) - block.range.location)) as NSString).size(withAttributes: [.font: font]).width
-                para.headIndent = width
-                storage.addAttribute(.paragraphStyle, value: para, range: whole)
+                para.headIndent += width
                 storage.addAttribute(.foregroundColor, value: theme.syntax, range: marker)
             }
+            storage.addAttribute(.paragraphStyle, value: para, range: whole)
         case .code:
-            storage.addAttribute(.backgroundColor, value: theme.codeBackground, range: block.range)
-        case .table:
-            styleTable(storage, block, theme)
-        case .paragraph, .blank:
-            break
+            styleCode(storage, block, whole: whole, para: para, theme)
         }
         for span in block.spans {
             switch span.kind {
@@ -421,6 +507,38 @@ enum MarkdownStyler {
             } else {
                 storage.addAttributes([.font: theme.hidden, .foregroundColor: NSColor.clear], range: range)
             }
+        }
+    }
+
+    /// A fenced block as a padded box: every line takes the block's indents, the first (the
+    /// opening fence, a hairline while hidden) carries the top padding as spacing after it and
+    /// the last the bottom padding before it, and each line is marked with its place in the box
+    /// (`CodeBox`) for `EditLayerFragment` to draw the background behind. `.backgroundColor`
+    /// alone paints only behind glyphs — a ragged run per line, not a block.
+    private static func styleCode(_ storage: NSTextStorage, _ block: MarkdownBlock, whole: NSRange, para: NSMutableParagraphStyle,
+                                  _ theme: PlanTheme) {
+        let ns = storage.mutableString
+        var lines: [NSRange] = []
+        var at = whole.location
+        while at < NSMaxRange(whole) {
+            let line = ns.lineRange(for: NSRange(location: at, length: 0))
+            lines.append(NSIntersectionRange(line, whole))
+            at = NSMaxRange(line)
+        }
+        let closed = block.syntaxRanges.count > 1
+        for (i, line) in lines.enumerated() {
+            let style = para.mutableCopy() as! NSMutableParagraphStyle
+            var place: CodeBox = []
+            if i == 0 {
+                place.insert(.first)
+                style.paragraphSpacing = theme.codeVerticalPadding
+            }
+            if i == lines.count - 1 {
+                place.insert(.last)
+                // An unclosed fence's last line is code, not a hidden fence to pad with.
+                if closed, lines.count > 1 { style.paragraphSpacingBefore = theme.codeVerticalPadding }
+            }
+            storage.addAttributes([.paragraphStyle: style, .planCodeBox: place.rawValue], range: line)
         }
     }
 
@@ -458,4 +576,19 @@ enum MarkdownStyler {
             }
         }
     }
+}
+
+/// A line's place in a fenced block's box: the first line draws the box's top corners, the
+/// last its bottom ones, the rest a plain band. Stored as the raw value of `.planCodeBox`.
+struct CodeBox: OptionSet {
+    let rawValue: Int
+    static let first = CodeBox(rawValue: 1)
+    static let last = CodeBox(rawValue: 2)
+}
+
+extension NSAttributedString.Key {
+    /// A fenced block's line (`CodeBox` raw value): `EditLayerFragment` draws the box behind it.
+    static let planCodeBox = NSAttributedString.Key("FlightDeck.planCodeBox")
+    /// A quote's line: `EditLayerFragment` draws the quiet bar beside it.
+    static let planQuote = NSAttributedString.Key("FlightDeck.planQuote")
 }

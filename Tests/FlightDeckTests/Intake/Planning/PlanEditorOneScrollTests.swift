@@ -200,6 +200,12 @@ final class PlanEditorOneScrollTests: XCTestCase {
             f.fit()
             drain()
         }
+        // SwiftUI keeps handing the editor the height it reports; the whole-plan pass, restarted
+        // by each keystroke, may still grow it after the last one, and that growth must reveal too.
+        for _ in 0..<3 where abs(f.page.frame.height - (PlanEditorOneScrollTests.header + f.container.contentHeight + 40)) >= 0.5 {
+            f.fit()
+            drain()
+        }
         let caret = f.rectInPage(view.selectedRange().location)
         let visible = f.outer.contentView.documentVisibleRect
         XCTAssertTrue(visible.contains(NSPoint(x: caret.midX, y: caret.maxY - 1)), "caret \(caret) off screen \(visible)")

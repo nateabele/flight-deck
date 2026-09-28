@@ -37,6 +37,56 @@ final class MarkdownStylerTests: XCTestCase {
         XCTAssertEqual(MarkdownStyler.blocks("```\n# not a heading").map(\.kind), [.code])
     }
 
+    /// Consecutive `>` lines are one quote; its `> ` markers are syntax (hidden off the caret),
+    /// and its words keep their inline styling.
+    func testQuoteIsOneBlockWithHiddenMarkers() {
+        let text = "> Out of **scope**\n> for now\nafter"
+        let blocks = MarkdownStyler.blocks(text)
+        XCTAssertEqual(blocks.map(\.kind), [.quote, .paragraph])
+        let ns = text as NSString
+        XCTAssertEqual(blocks[0].syntaxRanges.map { ns.substring(with: $0) }, ["> ", "**", "**", "> "])
+        XCTAssertEqual(blocks[0].spans.map { ns.substring(with: $0.range) }, ["scope"])
+    }
+
+    /// The reading typography: a 15 pt body whose leading is `lineSpacing`, so the caret is the
+    /// text's height and not the padded line's; a blank line is a gap, not a whole empty line;
+    /// a code block's lines are marked first/last for the box behind them.
+    @MainActor
+    func testReadingTypographyKeepsTheCaretToTheText() {
+        let theme = PlanTheme.standard
+        XCTAssertEqual(theme.body.pointSize, 15)
+        let text = "Para one that is long enough to wrap in a narrow view, several times over, yes.\n\n```\ncode\nmore\n```\nend"
+        let storage = NSTextStorage(string: text)
+        MarkdownStyler.apply(to: storage, blocks: MarkdownStyler.blocks(text), revealBlock: nil, theme: theme)
+        let para = storage.attribute(.paragraphStyle, at: 0, effectiveRange: nil) as? NSParagraphStyle
+        XCTAssertEqual(para?.lineSpacing, theme.lineSpacing)
+        XCTAssertEqual(para?.lineHeightMultiple, 0, "a line-height multiple pads the caret — measured")
+        XCTAssertEqual(para?.minimumLineHeight, 0)
+        let ns = text as NSString
+        XCTAssertLessThan((storage.attribute(.font, at: ns.range(of: "\n\n").location + 1, effectiveRange: nil) as? NSFont)?.pointSize ?? 99, 10,
+                          "the blank line is a gap")
+        let code = ns.range(of: "code").location, more = ns.range(of: "more").location, close = ns.range(of: "```\nend").location
+        XCTAssertEqual(storage.attribute(.planCodeBox, at: ns.range(of: "```").location, effectiveRange: nil) as? Int, CodeBox.first.rawValue)
+        XCTAssertEqual(storage.attribute(.planCodeBox, at: code, effectiveRange: nil) as? Int, 0)
+        XCTAssertEqual(storage.attribute(.planCodeBox, at: more, effectiveRange: nil) as? Int, 0)
+        XCTAssertEqual(storage.attribute(.planCodeBox, at: close, effectiveRange: nil) as? Int, CodeBox.last.rawValue)
+        XCTAssertNil(storage.attribute(.planCodeBox, at: ns.range(of: "end").location, effectiveRange: nil))
+
+        // In a real text view: the caret on a wrapped body line is the font's line, not the pitch.
+        let view = PlanNSTextView(usingTextLayoutManager: true)
+        view.frame = NSRect(x: 0, y: 0, width: 200, height: 400)
+        view.string = text
+        MarkdownStyler.apply(to: view.textStorage!, blocks: MarkdownStyler.blocks(text), revealBlock: nil, theme: theme)
+        let caret = view.caretRect(at: 30)!
+        let natural = ceil(theme.body.ascender - theme.body.descender + theme.body.leading)
+        XCTAssertEqual(caret.height, natural, accuracy: 1, "caret height = the text's line, not the padded 22.5 pt pitch")
+        let tops = Set((0..<78).compactMap { view.caretRect(at: $0)?.minY }).sorted()
+        XCTAssertGreaterThan(tops.count, 2, "the paragraph wraps")
+        for (a, b) in zip(tops, tops.dropFirst()) {
+            XCTAssertEqual(b - a, natural + theme.lineSpacing, accuracy: 1, "wrapped lines sit a 1.5 pitch apart")
+        }
+    }
+
     func testSyntaxRangesForBoldAndHeadings() {
         let text = "## Head **b**\nplain *i* `c` [t](u)"
         let blocks = MarkdownStyler.blocks(text)

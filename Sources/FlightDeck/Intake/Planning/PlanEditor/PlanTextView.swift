@@ -678,7 +678,7 @@ final class PlanEditorContainer: NSView {
         textView.minSize = NSSize(width: 0, height: Self.minimumTextHeight)
         textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: .greatestFiniteMagnitude)
         textView.frame.size.height = Self.minimumTextHeight
-        // Sized by the text view itself (`PlanNSTextView.fitContainer`), to the readable measure.
+        // Sized by the text view itself (`PlanNSTextView.fitContainer`), to the pane less the gutter.
         textView.textContainer?.widthTracksTextView = false
         textView.setAccessibilityIdentifier("plan-editor")
         banner.isHidden = true
@@ -808,9 +808,14 @@ class PlanNSTextView: NSTextView {
         fitContainer()
     }
 
-    /// The container at the readable measure (`PlanGutter.textWidth`) rather than tracking the
-    /// view's width: the view still spans the pane, so the room past the text is part of the
-    /// editor (a click there places the caret, the hover Revert sits at its trailing edge).
+    /// The container at the pane's width less the gutter lanes and the trailing margin
+    /// (`PlanGutter.textWidth`): the plan wraps to the pane and reflows as it is resized.
+    ///
+    /// A resize tick costs only the lines on screen: the new width takes at once, TextKit 2
+    /// re-lays the viewport on the next display, and the whole-plan pass (`layOutWholePlan`)
+    /// only restarts — a tick bumps its generation, so any number of ticks in a turn leave one
+    /// pass, and its slices run in `.default` mode, which a live resize (event tracking) holds
+    /// off until the drag ends. Measured in `PlanEditorKeystrokeTests.testResizeReflowIsUnderAFrame`.
     private func fitContainer() {
         guard let container = textContainer else { return }
         let width = PlanGutter.textWidth(viewWidth: frame.width, churn: showsChurn)
@@ -838,6 +843,8 @@ class PlanNSTextView: NSTextView {
     /// Under a frame at 60 Hz, so a slice never costs the human a frame of scrolling.
     static var fullLayoutSlice: Duration = .milliseconds(8)
 
+    /// Passes run to the end — for tests of the coalescing.
+    private(set) var fullLayoutPasses = 0
     /// Whether a pass is still running — for tests.
     var layingOutWholePlan: Bool { fullLayoutNext != nil }
 
@@ -873,6 +880,7 @@ class PlanNSTextView: NSTextView {
         fullLayoutNext = next
         guard next == nil else { return scheduleLayoutSlice(generation) }
         lastFullLayout = fullLayoutSpent
+        fullLayoutPasses += 1
         // The frame takes the now-exact usage bounds at once; the container passes it on.
         // Not `sizeToFit()`: measured, it left the frame at the estimate until a later layout.
         let height = max(minSize.height, layout.usageBoundsForTextContainer.height + 2 * textContainerInset.height)

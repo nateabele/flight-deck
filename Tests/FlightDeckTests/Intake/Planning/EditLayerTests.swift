@@ -256,28 +256,23 @@ extension EditLayerTests {
         coordinator.timer?.invalidate()
     }
 
-    /// The plan reads at a measure, not the pane's width: the text stops at ~720 pt and the
-    /// rest is trailing room, where the versions card and note cards open beside the text
-    /// instead of over it. Where the pane can't hold both, the measure gives way to the room —
-    /// down to a floor, below which the text takes the width. The churn column takes its room
-    /// from the text, not from past the edge.
+    /// The plan wraps to the pane: the text runs from the gutter lanes to a trailing margin at
+    /// any width, with no measure capping it, and the churn column takes its room from the text.
     @MainActor
-    func testPlanTextKeepsAReadableMeasure() {
+    func testPlanTextWrapsToThePane() {
         let full = { (w: CGFloat, churn: Bool) in w - PlanGutter.width(churn: churn) - PlanGutter.trailingMargin }
-        XCTAssertEqual(PlanGutter.textWidth(viewWidth: 1400, churn: false), PlanGutter.readableWidth)
-        XCTAssertEqual(PlanGutter.textWidth(viewWidth: 1060, churn: true), full(1060, true) - PlanGutter.sideRoom,
-                       "a 1100 pt window keeps room for the card beside the text")
-        XCTAssertEqual(PlanGutter.textWidth(viewWidth: 500, churn: false), full(500, false), "too narrow for both: the text wins")
-        XCTAssertEqual(PlanGutter.textWidth(viewWidth: 500, churn: true), full(500, true))
+        XCTAssertEqual(PlanGutter.textWidth(viewWidth: 1600, churn: false), full(1600, false), "no measure: a wide pane is filled")
+        XCTAssertEqual(PlanGutter.textWidth(viewWidth: 1060, churn: true), full(1060, true))
+        XCTAssertEqual(PlanGutter.textWidth(viewWidth: 500, churn: false), full(500, false))
         XCTAssertEqual(PlanGutter.textWidth(viewWidth: 10, churn: true), 0)
 
         let container = PlanEditorContainer(onShow: {})
-        container.textView.setFrameSize(NSSize(width: 1400, height: 300))
-        XCTAssertEqual(container.textView.textContainer?.size.width, PlanGutter.readableWidth)
+        container.textView.setFrameSize(NSSize(width: 1600, height: 300))
+        XCTAssertEqual(container.textView.textContainer?.size.width, full(1600, false))
         container.textView.setFrameSize(NSSize(width: 500, height: 300))
-        XCTAssertEqual(container.textView.textContainer?.size.width, PlanGutter.textWidth(viewWidth: 500, churn: false))
+        XCTAssertEqual(container.textView.textContainer?.size.width, full(500, false), "narrowing the pane reflows the text")
         container.textView.showsChurn = true
-        XCTAssertEqual(container.textView.textContainer?.size.width, PlanGutter.textWidth(viewWidth: 500, churn: true))
+        XCTAssertEqual(container.textView.textContainer?.size.width, full(500, true))
     }
 }
 
