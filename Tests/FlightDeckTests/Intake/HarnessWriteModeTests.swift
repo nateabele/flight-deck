@@ -17,7 +17,7 @@ final class HarnessWriteModeTests: XCTestCase {
         let c = HarnessCommand.build(req(.codex, access: .writeInWork(dir)), home: Self.noHome)
         XCTAssertEqual(c.executable, "codex")
         XCTAssertEqual(c.arguments, ["exec", "--json", "-m", "m", "-c", "model_reasoning_effort=high",
-                                     "--ignore-user-config", "--ignore-rules", "--disable", "hooks",
+                                     "--ignore-user-config", "--ignore-rules", "--disable", "hooks", "-c", "model_reasoning_summary=detailed",
                                      "-s", "workspace-write",
                                      "-c", "sandbox_workspace_write.exclude_tmpdir_env_var=true",
                                      "-c", "sandbox_workspace_write.exclude_slash_tmp=true",

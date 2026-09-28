@@ -56,14 +56,14 @@ final class HarnessTests: XCTestCase {
         let c = HarnessCommand.build(req(.codex), home: Self.noHome)
         XCTAssertEqual(c.executable, "codex")
         XCTAssertEqual(c.arguments, ["exec", "--json", "-m", "m", "-c", "model_reasoning_effort=high",
-                                     "--ignore-user-config", "--ignore-rules", "--disable", "hooks",
+                                     "--ignore-user-config", "--ignore-rules", "--disable", "hooks", "-c", "model_reasoning_summary=detailed",
                                      "-s", "read-only", "--skip-git-repo-check",
                                      "--output-schema", "/intake/schema.json", "P"])
     }
     func testCodexResumePinsModelAndSandbox() {
         let c = HarnessCommand.build(req(.codex, resume: "T1"), home: Self.noHome)
         XCTAssertEqual(c.arguments, ["exec", "resume", "--json", "-m", "m", "-c", "model_reasoning_effort=high",
-                                     "--ignore-user-config", "--ignore-rules", "--disable", "hooks",
+                                     "--ignore-user-config", "--ignore-rules", "--disable", "hooks", "-c", "model_reasoning_summary=detailed",
                                      "-c", "sandbox_mode=\"read-only\"", "--skip-git-repo-check",
                                      "--output-schema", "/intake/schema.json", "T1", "P"])
     }
@@ -158,8 +158,8 @@ final class HarnessTests: XCTestCase {
 
         XCTAssertEqual(CodexUserConfig.serviceTier(home: home), "fast")
         let fresh = HarnessCommand.build(req(.codex), home: home).arguments
-        XCTAssertEqual(Array(fresh.prefix(12)), ["exec", "--json", "-m", "m", "-c", "model_reasoning_effort=high",
-                                                 "--ignore-user-config", "--ignore-rules", "--disable", "hooks",
+        XCTAssertEqual(Array(fresh.prefix(14)), ["exec", "--json", "-m", "m", "-c", "model_reasoning_effort=high",
+                                                 "--ignore-user-config", "--ignore-rules", "--disable", "hooks", "-c", "model_reasoning_summary=detailed",
                                                  "-c", "service_tier=\"fast\""])
         let resumed = HarnessCommand.build(req(.codex, resume: "T1"), home: home).arguments
         XCTAssertEqual(resumed.filter { $0.hasPrefix("service_tier") }, ["service_tier=\"fast\""])
