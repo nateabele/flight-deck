@@ -22,9 +22,6 @@ struct ProjectView: View {
     /// Both the sheet's presentation and its content, same shape as
     /// `DevicesSettingsTab.pairingWindow` — see the `.sheet(item:)` below.
     @State private var reviewIntakeID: UUID?
-    /// The detail pane's trailing inspector (spec §3): hidden by default, toggled from the
-    /// toolbar or ⌥⌘I, and opened by the awaiting-choice body's Edit in Inspector.
-    @State private var showsInspector = false
     // Mirrors `ProjectHeaderRow`'s two confirmation flags and drives the same
     // `.flywheelEnableConfirmations` modifier — see that row's `flywheelStatus` doc comment
     // for why the probe result these gate on is memoized rather than read live.
@@ -53,6 +50,17 @@ struct ProjectView: View {
         Binding(
             get: { intakeService.selection(forProject: projectPath) },
             set: { intakeService.select($0, inProject: projectPath) }
+        )
+    }
+
+    /// The detail pane's trailing inspector (spec §3): hidden by default, toggled from the
+    /// toolbar or ⌥⌘I, and opened by the awaiting-choice body's Edit in Inspector and the notes.
+    /// Bound through `IntakeService` for the reason the selection is: as `@State` here it closed
+    /// whenever the human went to another project or tab and came back.
+    private var inspectorBinding: Binding<Bool> {
+        Binding(
+            get: { intakeService.inspectorShown(forProject: projectPath) },
+            set: { intakeService.setInspectorShown($0, inProject: projectPath) }
         )
     }
 
@@ -183,7 +191,7 @@ struct ProjectView: View {
                     // must reset `IntakeDetailView`'s own `@State` (answer drafts, the chosen
                     // preset), which a same-identity re-render would otherwise carry over.
                     IntakeDetailView(service: intakeService, intake: intake, onOpenReview: { reviewIntakeID = id },
-                                     showsInspector: $showsInspector)
+                                     showsInspector: inspectorBinding)
                         .id(intake.id)
                 } else {
                     Text("Select an intake").foregroundStyle(.secondary)
@@ -200,13 +208,16 @@ struct ProjectView: View {
                 // than a menu item, whose key equivalent `MenuKeyEquivalents` would offer ahead
                 // of Ghostty's binding (it is not `performable`) and take the chord from every
                 // terminal in the app.
+                let shown = inspectorBinding.wrappedValue
                 Button {
-                    showsInspector.toggle()
+                    // Read at the press, never `shown`: the chord's action is kept from an
+                    // earlier body pass, and a captured value re-opened on every ⌥⌘I.
+                    inspectorBinding.wrappedValue.toggle()
                 } label: {
-                    Label(showsInspector ? "Hide Inspector" : "Show Inspector", systemImage: "sidebar.trailing")
+                    Label(shown ? "Hide Inspector" : "Show Inspector", systemImage: "sidebar.trailing")
                 }
                 .keyboardShortcut("i", modifiers: [.command, .option])
-                .help(showsInspector ? "Hide the inspector (⌥⌘I)" : "Show the inspector (⌥⌘I)")
+                .help(shown ? "Hide the inspector (⌥⌘I)" : "Show the inspector (⌥⌘I)")
                 .accessibilityIdentifier("intake-inspector-toggle")
             }
         }
