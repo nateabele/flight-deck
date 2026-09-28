@@ -72,10 +72,14 @@ struct RootView: View {
 
     /// Hands focus back to the terminal: the filter field held it, and without this the next
     /// keystroke after Esc goes nowhere visible instead of to the prompt the user came from.
+    /// `Ghostty.moveFocus(to:)`, not a raw `makeFirstResponder`: it retries with backoff when
+    /// the surface isn't attached to a window yet, which is the established idiom for handing
+    /// focus back from a SwiftUI overlay — see `TerminalSearchBar.dismiss()` and the doc
+    /// comment on `moveFocus` in `SurfaceConfiguration.swift`.
     private func dismissShortcuts() {
         shortcutGroups = nil
         if let id = store.selectedSessionID, let surface = store.surface(for: id) {
-            surface.window?.makeFirstResponder(surface)
+            Ghostty.moveFocus(to: surface)
         }
     }
 }
