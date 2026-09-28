@@ -45,6 +45,9 @@ struct BoardField: Equatable {
     let shortLabel: String
     let value: String
     let detail: String?
+    /// `value`'s short form ("RF2", "5 · RF5 · ENC · …") for a cell too narrow for the names;
+    /// nil where the value has no code (a clock, "Not started").
+    var valueCode: String? = nil
 }
 
 /// Everything the departures board (spec §5) shows, derived from an intake, its tape and a clock
@@ -59,6 +62,10 @@ struct BoardModel: Equatable {
     var inTheAir: BoardField
     var stopsAt: BoardField
     var callingAt: BoardField
+    /// The slot the current (or previewed) play mode stops on — outlined in accent. Nil at review.
+    var stopSlotID: String?
+    /// The head slot while the tape sits paused, stopped or idle — outlined with a pause glyph.
+    var pausedAtSlotID: String?
 
     /// `now` is the caller's clock (a 1 Hz timer), not `Date()`, so the live slot's duration is
     /// testable and the board re-derives only when the view asks.
@@ -121,6 +128,8 @@ struct BoardModel: Equatable {
         self.inTheAir = blank
         self.stopsAt = blank
         self.callingAt = blank
+        self.stopSlotID = nil
+        self.pausedAtSlotID = nil
 
         let head = tape.head.map { Self.name(stage: $0.stage, round: $0.round) }
         // Clarify slots come first, so marker `i` is slot `i + clarifyCount`.
@@ -157,6 +166,7 @@ struct BoardModel: Equatable {
                 notes == 0 ? "Next: \(next.name)" : "\(notes) note\(notes == 1 ? "" : "s") will go to \(next.name)"
             }
             self.now = BoardField(label: "NOW", shortLabel: "NOW", value: head ?? "Not started", detail: detail)
+            self.pausedAtSlotID = tape.head.flatMap { head in slots.first { $0.checkpointID == head.id }?.id }
             self.nowChip = tape.status == .stopped ? "STOPPED" : head == nil ? "READY" : "PAUSED"
             self.inTheAir = Self.sinceHead(tape, head: head, label: "PAUSED FOR", short: "PSD", now: now)
         }
@@ -178,21 +188,80 @@ struct BoardModel: Equatable {
                                   detail: stop.map { (slots[$0].major ? "major · " : "minor · ") + modeName }
                                       ?? "ready for you")
         // The spec's shape: how many major stops remain, then their names ("2 · Dedup · Review").
-        let after = stop.map { slots[($0 + 1)...].filter(\.major).map(\.name) } ?? []
+        let after = stop.map { Array(slots[($0 + 1)...].filter(\.major)) } ?? []
+        let calling = { (words: [String]) in (["\(after.count)"] + words).joined(separator: " · ") }
         self.callingAt = BoardField(label: "CALLING AT", shortLabel: "CALL",
-                                    value: after.isEmpty ? "Release tasks · done" : (["\(after.count)"] + after).joined(separator: " · "),
-                                    detail: nil)
+                                    value: after.isEmpty ? "Release tasks · done" : calling(after.map(\.name)),
+                                    detail: nil,
+                                    valueCode: after.isEmpty ? nil : calling(after.map(\.code)))
+        self.stopSlotID = stop.map { slots[$0].id }
+        self.stopsAt.valueCode = stop.map { slots[$0].code }
+        self.now.valueCode = slots.first { $0.name == self.now.value }?.code
     }
 
     /// Every split-flap surface the board draws (spec §5.3) and the text on it now — the one list
     /// both the board and `IntakeService`'s seeding read, so a value the service seeds as "already
     /// shown" is exactly the text the board later asks `FlapPolicy` about. Seeding a text the board
     /// never draws would leave the drawn one unseeded, and it would flap on first mount.
+    ///
+    /// Clocks never flap: `board.inTheAir` carries IN THE AIR's LABEL, not its value. The value is
+    /// a duration that changes every second, so keyed on it every tick would be "new text" and
+    /// the clock would flip continuously; the label changes only when the run's state does
+    /// (IN THE AIR ↔ PAUSED FOR ↔ HALTED FOR). A tape label's surface is the slot's bare id —
+    /// what `SplitFlapText` is handed, so its card lands on `card.<id>` — seeded so a slot
+    /// scrolling into view doesn't flip in; only a newly added slot (an extend) does.
     var flapTexts: [String: String] {
-        var texts = ["board.now": now.value, "board.inTheAir": inTheAir.value,
+        var texts = ["board.now": now.value, "board.inTheAir": inTheAir.label,
                      "board.stopsAt": stopsAt.value, "board.callingAt": callingAt.value]
-        for slot in slots { texts["card.\(slot.id)"] = slot.name }
+        for slot in slots {
+            texts[slot.id] = slot.name
+            texts["card.\(slot.id)"] = slot.name
+        }
         return texts
+    }
+
+    // MARK: - Card and accessibility
+
+    /// The hover card's text as one line ("Synthesis · landed 3:02"): the card draws the name in
+    /// flap tiles and `cardDetail` under it as static text.
+    func hoverCardText(for slot: TapeSlot) -> String { "\(slot.name) · \(cardDetail(for: slot))" }
+
+    /// The card's status line: what the round did and for how long, in the clock's own format.
+    /// A round with no honest duration says only its status — never a made-up 0:00.
+    func cardDetail(for slot: TapeSlot) -> String {
+        let status = Self.status(slot.state)
+        return slot.duration.map { "\(status) \(Self.clock($0))" } ?? status
+    }
+
+    /// Every slot in full words for VoiceOver (spec §14): "Refine 2, landed, 4 minutes 48
+    /// seconds" — the proper name whatever the slot's width, the duration spoken rather than
+    /// "4:48", then what the board marks visually (major stop, notes, selection, stop target). The pause
+    /// marker isn't repeated here: NOW already says where the run is paused.
+    func accessibilityLabel(for slot: TapeSlot) -> String {
+        var parts = [slot.name, Self.status(slot.state)]
+        if let duration = slot.duration { parts.append(Self.spokenDuration(duration)) }
+        if slot.major { parts.append("major stop") }
+        if slot.flagged { parts.append("has notes") }
+        if slot.state == .selected { parts.append("selected") }
+        if slot.id == stopSlotID { parts.append("stops here") }
+        return parts.joined(separator: ", ")
+    }
+
+    private static func status(_ state: TapeSlot.State) -> String {
+        switch state {
+        case .done, .selected: "landed"
+        case .live: "in the air"
+        case .failed: "failed"
+        case .future: "scheduled"
+        }
+    }
+
+    /// "1 hour 2 minutes 3 seconds", dropping zero units; "0 seconds" for under a second.
+    static func spokenDuration(_ interval: TimeInterval) -> String {
+        let total = Int(interval.rounded(.down))
+        let units = [(total / 3600, "hour"), (total / 60 % 60, "minute"), (total % 60, "second")]
+        let words = units.filter { $0.0 > 0 }.map { "\($0.0) \($0.1)\($0.0 == 1 ? "" : "s")" }
+        return words.isEmpty ? "0 seconds" : words.joined(separator: " ")
     }
 
     /// The slot `mode` would stop on if pressed now, or nil once the tape has reached review.

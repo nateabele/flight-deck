@@ -251,6 +251,96 @@ final class BoardModelTests: XCTestCase {
                        "an unanchored pending note has nowhere in the plan to show, so the round taking it is flagged")
     }
 
+    // MARK: - Card and accessibility
+
+    /// The hover card says what the round did, in the board's own words: the full name, then
+    /// its status and duration. The name is the part that flaps; the rest is static.
+    func testHoverCardText() throws {
+        let tape = Tape(checkpoints: [cp(1, .draft, major: true, at: 0), cp(2, .synthesis, major: true, at: 182)],
+                        status: .paused)
+        let model = try board(try intake(.featurePlan), tape, now: 300)
+        let syn = try XCTUnwrap(model.slots.first { $0.code == "SYN" })
+        XCTAssertEqual(model.hoverCardText(for: syn), "Synthesis · landed 3:02")
+        XCTAssertEqual(model.cardDetail(for: syn), "landed 3:02")
+        let draft = try XCTUnwrap(model.slots.first { $0.code == "DRFT" })
+        XCTAssertEqual(model.cardDetail(for: draft), "landed", "no honest duration: say nothing rather than 0:00")
+        let rf1 = try XCTUnwrap(model.slots.first { $0.code == "RF1" })
+        XCTAssertEqual(model.cardDetail(for: rf1), "scheduled")
+
+        var running = tape
+        running.status = .running
+        running.roundStartedAt = t0.addingTimeInterval(200)
+        let live = try board(try intake(.featurePlan), running, now: 272)
+        XCTAssertEqual(live.hoverCardText(for: try XCTUnwrap(live.slots.first { $0.state == .live })),
+                       "Refine 1 · in the air 1:12")
+
+        var failed = tape
+        failed.status = .failed
+        failed.roundStartedAt = t0.addingTimeInterval(200)
+        failed.failedAt = t0.addingTimeInterval(230)
+        let halted = try board(try intake(.featurePlan), failed)
+        XCTAssertEqual(halted.hoverCardText(for: try XCTUnwrap(halted.slots.first { $0.state == .failed })),
+                       "Refine 1 · failed 0:30")
+    }
+
+    /// VoiceOver reads every slot in full words (spec §14) — never a code, never "4:48".
+    func testAccessibilityLabelsAreFullWords() throws {
+        var tape = pausedAfterR1()
+        tape.checkpoints.append(cp(4, .refine, 2, major: false, at: 756))
+        tape.checkpoints[2].record.annotations = [.legacy("more detail", index: 0)]
+        let model = try board(try intake(.featurePlan), tape, now: 900, selected: 2)
+        let byCode = Dictionary(uniqueKeysWithValues: model.slots.map { ($0.code, $0) })
+        func spoken(_ code: String) throws -> String { model.accessibilityLabel(for: try XCTUnwrap(byCode[code])) }
+
+        XCTAssertEqual(try spoken("RF2"), "Refine 2, landed, 4 minutes 48 seconds")
+        XCTAssertEqual(try spoken("RF1"), "Refine 1, landed, 4 minutes 48 seconds, has notes")
+        XCTAssertEqual(try spoken("SYN"), "Synthesis, landed, 3 minutes, major stop, selected")
+        XCTAssertEqual(try spoken("DRFT"), "Draft, landed, major stop")
+        XCTAssertEqual(try spoken("RF3"), "Refine 3, scheduled, major stop, stops here")
+        XCTAssertEqual(try spoken("CLR1"), "Clarify 1, landed")
+        XCTAssertEqual(BoardModel.spokenDuration(3723), "1 hour 2 minutes 3 seconds")
+        XCTAssertEqual(BoardModel.spokenDuration(61), "1 minute 1 second")
+        XCTAssertEqual(BoardModel.spokenDuration(0.4), "0 seconds")
+        for slot in model.slots {
+            let label = model.accessibilityLabel(for: slot)
+            XCTAssertFalse(label.contains(slot.code), "\(label) speaks a code")
+            XCTAssertNil(label.range(of: #"\d:\d"#, options: .regularExpression), "\(label) speaks a clock")
+        }
+    }
+
+    // MARK: - Flap surfaces
+
+    /// Clocks never flap (T5 ruling): IN THE AIR's value is a ticking duration, so its flap
+    /// surface carries the LABEL, which changes only between IN THE AIR, PAUSED FOR and HALTED
+    /// FOR. Keyed on the value, every tick would be new text and the seeding would be useless.
+    /// Tape labels are seeded too, under the slot's bare id, so a slot scrolling into view
+    /// doesn't flip in — only a slot that newly appears (an extend) does.
+    func testFlapTextsKeyTheClockOnItsLabelAndSeedTapeLabels() throws {
+        var tape = pausedAfterR1(status: .running)
+        tape.roundStartedAt = t0.addingTimeInterval(470)
+        let a = try board(try intake(.featurePlan), tape, now: 600)
+        let b = try board(try intake(.featurePlan), tape, now: 601)
+        XCTAssertNotEqual(a.inTheAir.value, b.inTheAir.value)
+        XCTAssertEqual(a.flapTexts, b.flapTexts, "a clock tick is not new flap text")
+        XCTAssertEqual(a.flapTexts["board.inTheAir"], "IN THE AIR")
+        XCTAssertEqual(a.flapTexts["refine-2"], "Refine 2")
+        XCTAssertEqual(a.flapTexts["card.refine-2"], "Refine 2")
+
+        tape.status = .paused
+        XCTAssertEqual(try board(try intake(.featurePlan), tape).flapTexts["board.inTheAir"], "PAUSED FOR")
+    }
+
+    /// The short form of each board value, for a field too narrow for the name.
+    func testBoardValueCodes() throws {
+        let model = try board(try intake(.fullPlan), pausedAfterR1(), preview: .step)
+        XCTAssertEqual(model.now.valueCode, "RF1")
+        XCTAssertEqual(model.stopsAt.valueCode, "RF2")
+        XCTAssertEqual(model.stopSlotID, "refine-2")
+        XCTAssertEqual(model.callingAt.valueCode, "5 · RF5 · ENC · PL6 · DDUP · REV")
+        XCTAssertEqual(model.pausedAtSlotID, "refine-1")
+        XCTAssertNil(try board(try intake(.fullPlan), pausedAfterR1(status: .running)).pausedAtSlotID)
+    }
+
     // MARK: - Fit
 
     /// 22 slots in 600 pt: every label falls back to its code, the tape scrolls rather than

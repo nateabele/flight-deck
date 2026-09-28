@@ -3,7 +3,8 @@ import SwiftUI
 
 /// A board label (spec §5.3): its full name when that fits the measured slot, its code otherwise.
 /// A code is focusable, carries a dotted underline, and opens a split-flap card with the full name
-/// (and `detail`, e.g. "landed 3:02") on hover or keyboard focus.
+/// (and `detail`, e.g. "landed 3:02") on hover or keyboard focus. The card is a `FloatingCard` —
+/// its own child panel — so a label inside the tape's ScrollView isn't clipped by it.
 ///
 /// The flap plays once per new (surface, text), as `FlapPolicy` decides: the label flips in when its
 /// value first appears (NOW moving to Refine 3), the card's tiles the first time that card is shown.
@@ -18,15 +19,23 @@ struct SplitFlapText: View {
     let nsFont: NSFont
     /// The card's second line — status and duration. Optional so a bare label needs none.
     var detail: String?
-    /// Opens the card without a hover, for offscreen renders that can't hover.
+    /// Opens the card without a hover of the label itself: offscreen renders that can't hover,
+    /// and a tape slot whose whole column (bar included) is the hover target.
     var showsCardInitially = false
+    /// Extra space between characters (the board's letter-spaced captions). Folded into the
+    /// fit measurement, or a tracked label would be judged to fit when it doesn't.
+    var tracking: CGFloat = 0
+    /// Offer the card even when the full name fits: a tape slot's card carries the round's
+    /// result, which the label alone never shows.
+    var alwaysOffersCard = false
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var hovering = false
     @FocusState private var focused: Bool
 
     init(full: String, code: String, surface: String, policy: FlapPolicy, font: Font, nsFont: NSFont,
-         detail: String? = nil, showsCardInitially: Bool = false) {
+         detail: String? = nil, showsCardInitially: Bool = false, tracking: CGFloat = 0,
+         alwaysOffersCard: Bool = false) {
         self.full = full
         self.code = code
         self.surface = surface
@@ -35,6 +44,15 @@ struct SplitFlapText: View {
         self.nsFont = nsFont
         self.detail = detail
         self.showsCardInitially = showsCardInitially
+        self.tracking = tracking
+        self.alwaysOffersCard = alwaysOffersCard
+    }
+
+    /// Width as drawn: the font's advance plus `tracking` after every character.
+    private var measure: (String) -> CGFloat {
+        let base = LabelFit.measureWith(nsFont)
+        let tracking = tracking
+        return { base($0) + tracking * CGFloat($0.count) }
     }
 
     /// One line of `nsFont`: the GeometryReader below would otherwise take all the height offered.
@@ -42,28 +60,21 @@ struct SplitFlapText: View {
 
     var body: some View {
         GeometryReader { geo in
-            let shown = LabelFit.choose(full: full, code: code, width: geo.size.width,
-                                        measure: LabelFit.measureWith(nsFont))
+            let shown = LabelFit.choose(full: full, code: code, width: geo.size.width, measure: measure)
             let abbreviated = shown != full
-            FlapRow(text: shown, key: full, surface: surface, policy: policy, style: .inline(font))
+            FlapRow(text: shown, key: full, surface: surface, policy: policy, style: .inline(font, tracking: tracking))
                 .overlay(alignment: .bottom) {
                     if abbreviated { DottedRule().offset(y: 3) }
                 }
-                .overlay(alignment: .topLeading) {
-                    if abbreviated && (hovering || focused || showsCardInitially) {
-                        SplitFlapCard(full: full, detail: detail, surface: "card.\(surface)", policy: policy)
-                            .fixedSize()
-                            .offset(y: lineHeight + 9)
-                            .allowsHitTesting(false)
-                    }
-                }
+                .background(FloatingCard(
+                    isPresented: (abbreviated || alwaysOffersCard) && (hovering || focused || showsCardInitially),
+                    card: SplitFlapCard(full: full, detail: detail, surface: "card.\(surface)", policy: policy).fixedSize()))
                 .focusable(abbreviated)
                 .focused($focused)
                 .onHover { hovering = $0 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
         }
         .frame(height: lineHeight)
-        .zIndex(hovering || focused || showsCardInitially ? 1 : 0)
         // Never the code: VoiceOver reads the proper name whatever width the slot has (spec §14).
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(full)
@@ -110,7 +121,7 @@ struct SplitFlapCard: View {
 /// A run of characters that flips in, one after another, the first time its (surface, key) appears.
 private struct FlapRow: View {
     enum Style {
-        case inline(Font)
+        case inline(Font, tracking: CGFloat)
         case tiles
     }
 
@@ -135,7 +146,7 @@ private struct FlapRow: View {
 
     var body: some View {
         let characters = Array(text)
-        HStack(spacing: style.isTiles ? 2 : 0) {
+        HStack(spacing: style.spacing) {
             ForEach(characters.indices, id: \.self) { k in
                 glyph(characters[k])
                     .rotation3DEffect(.degrees(isRevealed ? 0 : -90), axis: (x: 1, y: 0, z: 0), perspective: 0.6)
@@ -160,7 +171,7 @@ private struct FlapRow: View {
     @ViewBuilder
     private func glyph(_ ch: Character) -> some View {
         switch style {
-        case .inline(let font):
+        case .inline(let font, _):
             Text(String(ch)).font(font)
         case .tiles:
             if ch == " " {
@@ -184,9 +195,11 @@ private struct FlapRow: View {
 }
 
 private extension FlapRow.Style {
-    var isTiles: Bool {
-        if case .tiles = self { return true }
-        return false
+    var spacing: CGFloat {
+        switch self {
+        case .inline(_, let tracking): tracking
+        case .tiles: 2
+        }
     }
 }
 

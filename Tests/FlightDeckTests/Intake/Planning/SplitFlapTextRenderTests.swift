@@ -27,39 +27,7 @@ final class SplitFlapTextRenderTests: XCTestCase {
             Spacer()
         }
         .padding(20)
-        try render(view, size: NSSize(width: 360, height: 220),
+        try PlanningRender.write(view, size: NSSize(width: 360, height: 220),
                    to: URL(fileURLWithPath: dir).appendingPathComponent("pui-splitflap.png"))
-    }
-
-    /// Parked offscreen `NSHostingView` + `layer.render(in:)` — screencapture is denied here,
-    /// and `cacheDisplay` drops layer-backed SwiftUI content.
-    private func render(_ view: some View, size: NSSize, to url: URL) throws {
-        let root = view.frame(width: size.width, height: size.height, alignment: .topLeading)
-            .background(Color(nsColor: .windowBackgroundColor))
-            .environment(\.controlActiveState, .key)
-        let host = NSHostingView(rootView: root)
-        host.frame = NSRect(origin: .zero, size: size)
-        let window = NSWindow(contentRect: NSRect(x: -10_000, y: -10_000, width: size.width, height: size.height),
-                              styleMask: [.borderless], backing: .buffered, defer: false)
-        window.appearance = NSAppearance(named: .darkAqua)
-        window.contentView = host
-        window.orderFrontRegardless()
-        host.layoutSubtreeIfNeeded()
-        // Long enough for the first-appearance flaps (≤ 0.32 s + stagger) to land.
-        RunLoop.current.run(until: Date().addingTimeInterval(1.5))
-        host.layoutSubtreeIfNeeded()
-
-        let scale: CGFloat = 2
-        let rep = try XCTUnwrap(NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(size.width * scale),
-                                                 pixelsHigh: Int(size.height * scale), bitsPerSample: 8, samplesPerPixel: 4,
-                                                 hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB,
-                                                 bytesPerRow: 0, bitsPerPixel: 0))
-        let context = try XCTUnwrap(NSGraphicsContext(bitmapImageRep: rep)).cgContext
-        // Bitmap contexts are bottom-left origin and the hosting view is flipped.
-        context.translateBy(x: 0, y: size.height * scale)
-        context.scaleBy(x: scale, y: -scale)
-        try XCTUnwrap(host.layer).render(in: context)
-        window.orderOut(nil)
-        try XCTUnwrap(rep.representation(using: .png, properties: [:])).write(to: url)
     }
 }
