@@ -63,7 +63,7 @@ final class SelectionHistoryStoreTests: XCTestCase {
         let before = store.selectionHistory.back
         store.goBack()
         XCTAssertEqual(store.selectionHistory.back, Array(before.dropLast()))
-        XCTAssertEqual(store.selectionHistory.forward, [.session(ids[1])])
+        XCTAssertEqual(store.selectionHistory.forward, [.session(id: ids[1])])
     }
 
     func testBackSkipsAClosedSession() {
@@ -88,6 +88,51 @@ final class SelectionHistoryStoreTests: XCTestCase {
         XCTAssertEqual(store.selectedSessionID, ids[1])
     }
 
+    /// `closeSession`'s selected-session fallback (`selectionAfterClosing`) can reassign
+    /// `selectedSessionID` once per child as `closeProject` works through the tabs it owns —
+    /// unsuppressed, each of those reassignments would push its own Back entry, turning one
+    /// project close into a stack of hops that all point inside a project which no longer
+    /// exists.
+    func testClosingAProjectRecordsOneHistoryEntry() {
+        let (store, ids) = makeStore()
+        let bar = URL(fileURLWithPath: "/work/bar", isDirectory: true)
+        _ = store.newSession(in: bar)   // somewhere for the selection to land after the close
+        store.selectedSessionID = ids[0]
+        let backBefore = store.selectionHistory.back
+        let project = store.repos.first { $0.sessions.contains { $0.id == ids[0] } }!.id
+
+        store.closeProject(project)
+
+        XCTAssertEqual(store.selectionHistory.back, backBefore + [.session(id: ids[0])])
+    }
+
+    /// Closing the project whose own view is up: the user was looking at the project, so that
+    /// is the one entry recorded — not the session that sat hidden underneath the view.
+    func testClosingAProjectWithItsViewUpRecordsTheProject() {
+        let (store, ids) = makeProjectHistoryStore()
+        store.selectedSessionID = ids[0]
+        store.selectProject(projectID(foo, in: store))
+        let backBefore = store.selectionHistory.back
+
+        store.closeProject(projectID(foo, in: store))
+
+        XCTAssertNil(store.selectedProjectID)
+        XCTAssertEqual(store.selectionHistory.back,
+                       backBefore + [.project(path: foo.standardizedFileURL.path)])
+    }
+
+    /// `List(selection:)` can write nil on a deselect between two real clicks. `oldValue` alone
+    /// would be nil by the time Y lands, dropping the X->Y transition entirely and making Back
+    /// from Y skip straight past X.
+    func testADeselectBetweenTwoClicksStillRecordsTheTransition() {
+        let (store, ids) = makeStore()
+        store.selectedSessionID = ids[0]
+        store.selectedSessionID = nil
+        store.selectedSessionID = ids[1]
+        store.goBack()
+        XCTAssertEqual(store.selectedSessionID, ids[0])
+    }
+
     func testANewSelectedSessionIsRecorded() {
         let (store, ids) = makeStore()
         store.selectedSessionID = ids[0]
@@ -107,8 +152,8 @@ final class SelectionHistoryStoreTests: XCTestCase {
         // Must skip past the dead `ids[1]` entry and the live-but-current `ids[0]` entry to
         // land on `ids[2]`, never staying on `ids[0]` while still consuming history.
         XCTAssertEqual(store.selectedSessionID, ids[2])
-        XCTAssertEqual(store.selectionHistory.back, [.session(ids[0]), .session(ids[1])])
-        XCTAssertEqual(store.selectionHistory.forward, [.session(ids[0])])
+        XCTAssertEqual(store.selectionHistory.back, [.session(id: ids[0]), .session(id: ids[1])])
+        XCTAssertEqual(store.selectionHistory.forward, [.session(id: ids[0])])
     }
 
     func testReopenedSessionIsReachableAgain() {
@@ -180,7 +225,7 @@ final class SelectionHistoryStoreTests: XCTestCase {
         store.selectProject(projectID(foo, in: store))
         store.selectedSessionID = ids[1]
         XCTAssertEqual(store.selectionHistory.back,
-                       [.session(ids[0]), .project(path: foo.standardizedFileURL.path)])
+                       [.session(id: ids[0]), .project(path: foo.standardizedFileURL.path)])
     }
 
     func testBackReopensAProjectView() {
@@ -214,5 +259,44 @@ final class SelectionHistoryStoreTests: XCTestCase {
         _ = relaunched.restore(directoryExists: { _ in true })
         relaunched.goBack()
         XCTAssertEqual(relaunched.selectedProjectID, projectID(foo, in: relaunched))
+    }
+
+    /// A malformed `selectionHistory` (an unknown case, a wrong-shaped stack) must not throw
+    /// the whole `SessionSnapshot` decode — that is how `load()` used to return nil, starting
+    /// the app with every tab gone and letting the next save overwrite `sessions.json` with
+    /// that emptiness. `{"folder":{}}` stands in for an entry this build has never heard of
+    /// (an old `_0`-shaped value or a future case); it is dropped, and its live sibling is not.
+    func testMalformedSelectionHistoryDoesNotWipeTheSessions() throws {
+        let id = UUID()
+        let json = """
+        {"sessions":[{"id":"\(id.uuidString)","title":"a","workingDirectory":"/w"}],
+         "selectedSessionID":"\(id.uuidString)","sessionCounter":1,
+         "selectionHistory":{"back":[{"folder":{}},{"session":{"id":"\(UUID().uuidString)"}}],"forward":7}}
+        """
+        let snapshot = try JSONDecoder().decode(SessionSnapshot.self, from: Data(json.utf8))
+        let persistence = FakePersistence()
+        persistence.stored = snapshot
+        let store = SessionStore(provider: StubProvider(), persistence: persistence)
+        _ = store.restore(directoryExists: { _ in true })
+        XCTAssertEqual(store.selectedSessionID, id)
+        XCTAssertEqual(store.selectionHistory.back.count, 1)
+        XCTAssertTrue(store.selectionHistory.forward.isEmpty)
+    }
+
+    /// Same failure mode, but the whole field is the wrong type rather than one bad element.
+    func testNonObjectSelectionHistoryDoesNotWipeTheSessions() throws {
+        let id = UUID()
+        let json = """
+        {"sessions":[{"id":"\(id.uuidString)","title":"a","workingDirectory":"/w"}],
+         "selectedSessionID":"\(id.uuidString)","sessionCounter":1,
+         "selectionHistory":"garbage"}
+        """
+        let snapshot = try JSONDecoder().decode(SessionSnapshot.self, from: Data(json.utf8))
+        let persistence = FakePersistence()
+        persistence.stored = snapshot
+        let store = SessionStore(provider: StubProvider(), persistence: persistence)
+        _ = store.restore(directoryExists: { _ in true })
+        XCTAssertEqual(store.selectedSessionID, id)
+        XCTAssertTrue(store.selectionHistory.isEmpty)
     }
 }
