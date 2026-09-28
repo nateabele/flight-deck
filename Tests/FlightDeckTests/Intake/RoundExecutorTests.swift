@@ -314,10 +314,10 @@ final class RoundExecutorTests: XCTestCase {
             ok(call, "pol", self.changeSetReply(pre: self.existingPre, extra: [self.newBead]))
         }
         var tape = try polishTape()
-        tape.pendingAnnotations = ["split the auth bead"]
+        tape.pendingNotes = [PlanNote(note: "split the auth bead")]
         let (cp, _) = try checkpoint(try await executor(runner).run(PlannedRound(stage: .polish, round: 1, major: true),
                                                                     inputs(config(), tape: tape)))
-        XCTAssertEqual(cp.record.annotations, ["split the auth bead"])
+        XCTAssertEqual(cp.record.annotations.map(\.note), ["split the auth bead"])
         let polisher = try XCTUnwrap(runner.calls("polisher").first)
         XCTAssertTrue(polisher.prompt.contains("The human steering this plan says:\n- split the auth bead"), polisher.prompt)
     }
@@ -325,10 +325,10 @@ final class RoundExecutorTests: XCTestCase {
     func testDraftConsumesAnnotations() async throws {
         let runner = ScriptedHarnessRunner { call in ok(call, "d", json(DraftOutput(plan: "# P"))) }
         var tape = Tape()
-        tape.pendingAnnotations = ["web only"]
+        tape.pendingNotes = [PlanNote(note: "web only")]
         let (cp, _) = try checkpoint(try await executor(runner).run(PlannedRound(stage: .draft, round: 0, major: true),
                                                                     inputs(config(), tape: tape)))
-        XCTAssertEqual(cp.record.annotations, ["web only"])
+        XCTAssertEqual(cp.record.annotations.map(\.note), ["web only"])
         XCTAssertTrue(try XCTUnwrap(runner.calls("drafter").first).prompt.contains("- web only"))
     }
 
@@ -463,10 +463,10 @@ final class RoundExecutorTests: XCTestCase {
             call.role == "reviewer" ? ok(call, "rev", self.review(1)) : self.editingIntegrator(call)
         }
         var tape = try refineTape()
-        tape.pendingAnnotations = ["focus on auth"]
+        tape.pendingNotes = [PlanNote(note: "focus on auth")]
         let (cp, _) = try checkpoint(try await executor(runner).run(PlannedRound(stage: .refine, round: 1, major: false),
                                                                     inputs(config(), tape: tape)))
-        XCTAssertEqual(cp.record.annotations, ["focus on auth"])
+        XCTAssertEqual(cp.record.annotations.map(\.note), ["focus on auth"])
         XCTAssertTrue(try XCTUnwrap(runner.calls("reviewer").first).prompt.contains("focus on auth"))
     }
 
@@ -850,5 +850,113 @@ final class RoundExecutorTests: XCTestCase {
         XCTAssertEqual(kill(pid, 0), -1)
         XCTAssertEqual(errno, ESRCH)
         XCTAssertLessThan(Date().timeIntervalSince(cancelledAt), 1)
+    }
+}
+
+// MARK: - Human edits (plan.user.md)
+
+extension RoundExecutorTests {
+    var editedPlan: String { "# Plan\n\n## Scope\nOne, but only on macOS\n" }
+
+    func writeUserEdits(_ markdown: String, checkpoint: Int) throws {
+        try Data(markdown.utf8).write(to: store.userEditsURL(checkpoint: checkpoint))
+    }
+
+    /// The head's edited layer is the plan the reviewer is pointed at and the integrator
+    /// starts from, and both seats are told the edits are authoritative, with the diff.
+    func testRefineReadsTheHeadsEffectivePlanAndCarriesTheEdits() async throws {
+        let runner = ScriptedHarnessRunner { [unowned self] call in
+            call.role == "reviewer" ? ok(call, "rev", self.review(1)) : self.editingIntegrator(call)
+        }
+        let tape = try refineTape()
+        try writeUserEdits(editedPlan, checkpoint: 2)
+        let (cp, files) = try checkpoint(try await executor(runner).run(PlannedRound(stage: .refine, round: 1, major: false),
+                                                                        inputs(config(), tape: tape)))
+        XCTAssertEqual(text(files["plan.md"]), editedPlan + "\n## Added\nnew line\n", "built on the edited plan")
+        let reviewer = try XCTUnwrap(runner.calls("reviewer").first)
+        XCTAssertTrue(reviewer.prompt.contains(store.userEditsURL(checkpoint: 2).path), reviewer.prompt)
+        for p in [reviewer.prompt, try XCTUnwrap(runner.calls("integrator").first).prompt] {
+            XCTAssertTrue(p.contains("These edits are authoritative: keep them unless a note explicitly asks otherwise."), p)
+            XCTAssertTrue(p.contains("-One\n+One, but only on macOS"), p)
+        }
+        XCTAssertFalse(cp.record.note?.contains("edited lines") ?? false, "the integrator kept the edit")
+        XCTAssertEqual(try String(contentsOf: store.checkpointDirectory(2).appendingPathComponent("plan.md"), encoding: .utf8),
+                       draftPlan, "the generated layer is never modified")
+    }
+
+    /// An integrator that rewrites the human's line lands the round — warn, don't pause.
+    func testRoundThatChangesEditedLinesWarnsInItsRecord() async throws {
+        let runner = ScriptedHarnessRunner { [unowned self] call in
+            guard call.role == "integrator" else { return ok(call, "rev", self.review(1)) }
+            let plan = call.cwd.appendingPathComponent("plan.md")
+            try! "# Plan\n\n## Scope\nOne, everywhere\n".write(to: plan, atomically: true, encoding: .utf8)
+            return ok(call, "int", json(IntegrateOutput(agree: 1, somewhat: 0, disagree: 0, notes: "applied")))
+        }
+        let tape = try refineTape()
+        try writeUserEdits(editedPlan, checkpoint: 2)
+        let (cp, _) = try checkpoint(try await executor(runner).run(PlannedRound(stage: .refine, round: 1, major: false),
+                                                                    inputs(config(), tape: tape)))
+        XCTAssertTrue(cp.record.note?.contains("1 of your edited lines was changed by this round.") ?? false,
+                      cp.record.note ?? "nil")
+    }
+
+    /// Synthesis builds on the draft checkpoint's effective plan — the human's edit of the
+    /// first draft — and still sees the other drafts.
+    func testSynthesisBuildsOnTheEditedDraft() async throws {
+        let runner = ScriptedHarnessRunner { [unowned self] call in
+            call.role == "synthesizer" ? ok(call, "syn", self.review(1)) : self.editingIntegrator(call)
+        }
+        let tape = try synthesisTape()
+        try writeUserEdits(editedPlan, checkpoint: 1)
+        let (_, files) = try checkpoint(try await executor(runner).run(PlannedRound(stage: .synthesis, round: 0, major: true),
+                                                                       inputs(config(), tape: tape)))
+        XCTAssertEqual(text(files["plan.md"]), editedPlan + "\n## Added\nnew line\n")
+        let synth = try XCTUnwrap(runner.calls("synthesizer").first).prompt
+        XCTAssertTrue(synth.contains("The draft at \(store.userEditsURL(checkpoint: 1).path) (yours to revise)"), synth)
+        XCTAssertTrue(synth.contains(store.checkpointDirectory(1).appendingPathComponent("drafts/1.md").path))
+        XCTAssertTrue(synth.contains("These edits are authoritative"))
+    }
+
+    /// Encode copies the effective plan into its own checkpoint, so the edits become plan.
+    func testEncodeCarriesTheEditedPlanForward() async throws {
+        let runner = ScriptedHarnessRunner { [unowned self] call in ok(call, "enc", self.changeSetReply(pre: self.existingPre)) }
+        let tape = try refineTape()
+        try writeUserEdits(editedPlan, checkpoint: 2)
+        let (_, files) = try checkpoint(try await executor(runner).run(PlannedRound(stage: .encode, round: 0, major: true),
+                                                                       inputs(config(), tape: tape)))
+        XCTAssertEqual(text(files["plan.md"]), editedPlan)
+        XCTAssertTrue(try XCTUnwrap(runner.calls("encoder").first).prompt.contains("These edits are authoritative"))
+    }
+
+    /// Only the head's effective plan feeds a round: an edit to an older checkpoint is stored
+    /// but changes nothing.
+    func testEditToANonHeadCheckpointFeedsNothing() async throws {
+        let runner = ScriptedHarnessRunner { [unowned self] call in
+            call.role == "reviewer" ? ok(call, "rev", self.review(1)) : self.editingIntegrator(call)
+        }
+        let tape = try refineTape()
+        try writeUserEdits(editedPlan, checkpoint: 1)
+        let (_, files) = try checkpoint(try await executor(runner).run(PlannedRound(stage: .refine, round: 1, major: false),
+                                                                       inputs(config(), tape: tape)))
+        XCTAssertEqual(text(files["plan.md"]), draftPlan + "\n## Added\nnew line\n")
+        XCTAssertFalse(try XCTUnwrap(runner.calls("reviewer").first).prompt.contains("authoritative"))
+    }
+
+    /// Anchored notes reach the prompt as the numbered list, and the round records every note
+    /// it consumed — anchors included.
+    func testAnchoredNotesReachThePromptAndTheRecord() async throws {
+        let runner = ScriptedHarnessRunner { [unowned self] call in
+            call.role == "reviewer" ? ok(call, "rev", self.review(1)) : self.editingIntegrator(call)
+        }
+        var tape = try refineTape()
+        let note = PlanNote(kind: .mustChange, note: "say which platforms",
+                            anchor: NoteAnchor(checkpoint: 2, quote: "One", section: "## Scope", prefix: "## Scope\n", suffix: "\n"))
+        tape.pendingNotes = [note, PlanNote(note: "keep it small")]
+        let (cp, _) = try checkpoint(try await executor(runner).run(PlannedRound(stage: .refine, round: 1, major: false),
+                                                                    inputs(config(), tape: tape)))
+        XCTAssertEqual(cp.record.annotations, tape.pendingNotes)
+        let p = try XCTUnwrap(runner.calls("reviewer").first).prompt
+        XCTAssertTrue(p.contains("1. [must change] in section \"## Scope\":\n   > One\n   This must change: say which platforms"), p)
+        XCTAssertTrue(p.contains("The human steering this plan says:\n- keep it small"), p)
     }
 }

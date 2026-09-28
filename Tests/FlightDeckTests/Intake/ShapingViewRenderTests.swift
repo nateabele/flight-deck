@@ -55,7 +55,7 @@ final class ShapingViewRenderTests: XCTestCase {
 
         var running = Tape(checkpoints: base, target: .nextMajor, status: .running,
                            roundInProgress: PlannedRound(stage: .refine, round: 3, major: true))
-        running.pendingAnnotations = ["no plugin system"]
+        running.pendingNotes = [PlanNote(note: "no plugin system")]
         var failed = Tape(checkpoints: base, target: .none, status: .failed)
         failed.pauseDiagnosis = Diagnosis(category: .rateLimited, detail: "codex returned 429 after 3 attempts",
                                           action: "Wait about 5 minutes, then press ⏯ to retry R3")

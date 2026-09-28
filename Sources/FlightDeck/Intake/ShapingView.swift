@@ -46,8 +46,8 @@ struct ShapingView: View {
             if let banner = model.pauseBanner {
                 pauseBanner(banner)
             }
-            if !tape.pendingAnnotations.isEmpty {
-                let n = tape.pendingAnnotations.count
+            if !tape.pendingNotes.isEmpty {
+                let n = tape.pendingNotes.count
                 Text("✎ \(n) note\(n == 1 ? "" : "s") queued for the next round")
                     .font(.caption)
                     .foregroundStyle(.secondary)

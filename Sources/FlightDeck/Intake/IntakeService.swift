@@ -362,13 +362,15 @@ final class IntakeService: ObservableObject {
     /// unread until the next play spawned a runner, which then read the stop first and exited
     /// — the play the human just pressed did nothing. The runner applies it, writes `.stopped`
     /// and exits. `.pause` needs no such care (a later play overrides it, since commands
-    /// apply in order), and an annotation is consumed by whichever round runs next.
+    /// apply in order), and a note is consumed by whichever round runs next. A note, its
+    /// removal and a plan edit spawn nothing here either: with no live runner they read as
+    /// unacked commands, which the next tick's `resumeIfStalled` starts one to fold in.
     func send(_ id: UUID, _ command: TapeCommand) {
         guard intake(id)?.state == .shaping else { return }
         do { _ = try tapeStore(id).appendCommand(command) }
         catch { return fail(id, "Could not queue the command for the planning runner: \(error)") }
         switch command {
-        case .pause, .annotate: return
+        case .pause, .note, .removeNote, .editPlan: return
         case .stop: if runner?.isRunning(id, tape: nil) != true { startRunner(id) }
         case .step, .nextMajor, .toReview, .extend: startRunner(id)
         }

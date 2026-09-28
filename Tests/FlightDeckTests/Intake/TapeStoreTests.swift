@@ -15,7 +15,7 @@ final class TapeStoreTests: XCTestCase {
         tape.target = .nextMajor
         tape.status = .running
         tape.extraRefinement = 1
-        tape.pendingAnnotations = ["watch the schema"]
+        tape.pendingNotes = [PlanNote(note: "watch the schema")]
         try store.saveTape(tape)
         XCTAssertEqual(store.loadTape(), tape)
         XCTAssertTrue(FileManager.default.fileExists(atPath: store.tapeURL.path))

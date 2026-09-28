@@ -78,6 +78,26 @@ public enum PlanMetrics {
         return hunks.joined(separator: "\n")
     }
 
+    /// The changed regions between two revisions, without context lines — one `PlanHunk` per
+    /// maximal run of deleted/inserted lines, in document order. The shape `PlanLayers.userDiff`
+    /// hands the UI for "your edits", and the unit a per-hunk revert works on.
+    public static func hunks(from old: String, to new: String) -> [PlanHunk] {
+        let oldLines = planLines(old)
+        let newLines = planLines(new)
+        let newHeadings = headingPerLine(newLines)
+        let oldHeadings = headingPerLine(oldLines)
+        return opcodes(from: lineDiff(oldLines, newLines)).compactMap { code in
+            guard code.tag == .changed else { return nil }
+            // The section a hunk sits in, read from the edited side when it has lines there and
+            // from the generated side for a pure deletion; "(preamble)" is no section at all.
+            let heading = code.j2 > code.j1 ? newHeadings[code.j1]
+                : code.i2 > code.i1 ? oldHeadings[code.i1] : "(preamble)"
+            return PlanHunk(oldStart: code.i1, oldLines: oldLines[code.i1..<code.i2].map(String.init),
+                            newStart: code.j1, newLines: newLines[code.j1..<code.j2].map(String.init),
+                            section: heading == "(preamble)" ? nil : heading)
+        }
+    }
+
     /// Ops changed between two change sets: added + removed + modified, matched by the rules
     /// task-6-brief hands down — a created bead by its `tempId`, everything else (edits,
     /// reopens, follow-ups, dependency edges) by the existing bead id (or edge endpoints) plus

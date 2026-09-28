@@ -70,9 +70,9 @@ public struct RoundExecutor: Sendable {
     /// Throws only `CancellationError` (⏹); every other failure — a harness that died, prose
     /// where JSON belonged, a disk error — comes back as `.paused` so the human sees why.
     public func run(_ planned: PlannedRound, _ inputs: RoundInputs) async throws -> RoundResult {
-        // Every stage's prompt carries the pending annotations (see `context`), so every
-        // stage consumes them, and the runner can clear exactly what the checkpoint records.
-        var record = RoundRecord(annotations: inputs.tape.pendingAnnotations)
+        // Every stage's prompt carries the pending notes (see `context`), so every stage
+        // consumes them, and the runner can clear exactly what the checkpoint records.
+        var record = RoundRecord(annotations: inputs.tape.pendingNotes)
         let files: [String: Data]
         do {
             try FileManager.default.createDirectory(at: inputs.store.workDirectory(), withIntermediateDirectories: true)
@@ -156,14 +156,15 @@ public struct RoundExecutor: Sendable {
     private func synthesis(_ planned: PlannedRound, _ inputs: RoundInputs, _ record: inout RoundRecord) async throws -> [String: Data] {
         guard let synthesizer = inputs.config.synthesizer else { throw Pause.config("no synthesizer") }
         let drafts = try draftFiles(inputs)
-        let base = drafts[0]
+        // The draft checkpoint's effective plan: drafter 0's draft, or the human's edit of it.
+        let base = try currentPlan(inputs)
         let work = inputs.store.workDirectory()
         let ctx = context(inputs, graphFile: work.appendingPathComponent("graph.json"), observedAt: inputs.now())
         let prompt = RoundPrompts.synthesis(ctx, ownDraft: base.path, otherDrafts: drafts.dropFirst().map(\.path))
         let review = try await seat(ReviewOutput.self, planned, "synthesizer", persona: synthesizer.persona,
                                     synthesizer.choice, prompt: prompt, schema: RoundSchemas.review, cwd: inputs.project,
                                     readable: [base.deletingLastPathComponent(), work], inputs: inputs, &record)
-        return try await integrate(review, base: base, planned, inputs, &record)
+        return try await integrate(review, base: base, ctx: ctx, planned, inputs, &record)
     }
 
     /// A fresh reviewer every round — never a resume — so round N isn't anchored on what the
@@ -177,13 +178,13 @@ public struct RoundExecutor: Sendable {
                                     prompt: RoundPrompts.review(ctx, planFile: plan.path, round: planned.round),
                                     schema: RoundSchemas.review, cwd: inputs.project,
                                     readable: [plan.deletingLastPathComponent(), work], inputs: inputs, &record)
-        return try await integrate(review, base: plan, planned, inputs, &record)
+        return try await integrate(review, base: plan, ctx: ctx, planned, inputs, &record)
     }
 
     /// Shared tail of synthesis and refine: stage `base` and the proposed changes in `work/`,
     /// let the integrator edit `work/plan.md` in place, and measure what it actually did.
-    private func integrate(_ review: ReviewOutput, base: URL, _ planned: PlannedRound, _ inputs: RoundInputs,
-                           _ record: inout RoundRecord) async throws -> [String: Data] {
+    private func integrate(_ review: ReviewOutput, base: URL, ctx: RoundContext, _ planned: PlannedRound,
+                           _ inputs: RoundInputs, _ record: inout RoundRecord) async throws -> [String: Data] {
         let work = inputs.store.workDirectory()
         let planFile = work.appendingPathComponent("plan.md"), changesFile = work.appendingPathComponent("changes.json")
         let before = try Data(contentsOf: base)
@@ -201,7 +202,8 @@ public struct RoundExecutor: Sendable {
         // cwd IS the work dir — never the project: codex's workspace-write sandbox is rooted at
         // cwd, so a project cwd would let the integrator edit the user's repo.
         let tally = try await seat(IntegrateOutput.self, planned, "integrator", inputs.config.integrator,
-                                   prompt: RoundPrompts.integrate(planFile: planFile.path, changesFile: changesFile.path),
+                                   prompt: RoundPrompts.integrate(planFile: planFile.path, changesFile: changesFile.path,
+                                                                  humanEdits: ctx.humanEdits),
                                    schema: RoundSchemas.integrate, cwd: work, readable: [], access: .writeInWork(work),
                                    inputs: inputs, &record)
         let after = try Data(contentsOf: planFile)
@@ -213,6 +215,15 @@ public struct RoundExecutor: Sendable {
         let verdicts = tally.agree + tally.somewhat + tally.disagree
         if verdicts != review.changes.count {
             notes.append("The integrator tallied \(verdicts) verdicts for \(review.changes.count) proposed changes.")
+        }
+        // The human's edits were declared authoritative; a round that rewrote them anyway is
+        // worth a warning on the card, not a pause — the human decides whether to re-apply.
+        if let edits = userEdits(inputs) {
+            let lost = PlanLayers.lostEditedLines(generated: edits.generated, edited: edits.edited,
+                                                  in: String(decoding: after, as: UTF8.self))
+            if lost > 0 {
+                notes.append("\(lost) of your edited lines \(lost == 1 ? "was" : "were") changed by this round.")
+            }
         }
         record.note = notes.filter { !$0.isEmpty }.joined(separator: "\n\n")
         // An integrator that claims it applied changes but left the file untouched has either
@@ -559,7 +570,19 @@ public struct RoundExecutor: Sendable {
         }
         return RoundContext(intent: inputs.intake.intent, qa: inputs.intake.exchanges, graphFile: graphFile.path,
                             agentsFile: existing("AGENTS.md"), readmeFile: existing("README.md"),
-                            annotations: inputs.tape.pendingAnnotations, observedAt: observedAt)
+                            notes: inputs.tape.pendingNotes,
+                            humanEdits: userEdits(inputs).map { PlanLayers.promptDiff(generated: $0.generated, edited: $0.edited) },
+                            observedAt: observedAt)
+    }
+
+    /// The head plan checkpoint's two layers when the human has edited it — read fresh each
+    /// round, so an edit that landed between rounds is picked up by the next one. nil with no
+    /// edit, and on a draft round (no plan yet).
+    private func userEdits(_ inputs: RoundInputs) -> (generated: String, edited: String)? {
+        guard let head = inputs.store.headPlanCheckpoint(in: inputs.tape),
+              let edited = inputs.store.userEdits(checkpoint: head),
+              let generated = PlanLayers.generatedPlan(inputs.store.checkpointDirectory(head)) else { return nil }
+        return (generated, edited)
     }
 
     /// The newest checkpoint on the tape that has `relativePath` on disk.
@@ -590,9 +613,18 @@ public struct RoundExecutor: Sendable {
         return drafts
     }
 
-    /// The latest `plan.md`, or — with no synthesis on the tape (Sketch) — the draft itself.
+    /// The head plan checkpoint's EFFECTIVE plan (`PlanLayers`): its `plan.user.md` when the
+    /// human edited it, else its `plan.md`, else — a draft checkpoint, with no synthesis yet
+    /// (Sketch) — the first surviving draft. Only the head counts: an edit to an older
+    /// checkpoint is kept on disk but feeds nothing. Encode, polish, fresh-eyes and dedup copy
+    /// this file into their own checkpoint's `plan.md`, so the edits carry forward as plan.
     private func currentPlan(_ inputs: RoundInputs) throws -> URL {
-        try latestFile("plan.md", inputs) ?? draftFiles(inputs)[0]
+        guard let head = inputs.store.headPlanCheckpoint(in: inputs.tape),
+              let url = PlanLayers.effectiveURL(inputs.store.checkpointDirectory(head)) else {
+            throw Pause(diagnosis: Diagnosis(category: .harnessError, detail: "no plan on the tape",
+                                             action: "Run the draft round first."))
+        }
+        return url
     }
 }
 

@@ -144,6 +144,62 @@ public struct TapeStore: Sendable {
         tape = next
     }
 
+    // MARK: - Plan layers
+
+    /// The human's edited copy of a checkpoint's plan — see `PlanLayers`.
+    public func userEditsURL(checkpoint: Int) -> URL {
+        checkpointDirectory(checkpoint).appendingPathComponent(PlanLayers.userName)
+    }
+
+    /// The human's edited markdown for `checkpoint`, or nil when they haven't edited it.
+    public func userEdits(checkpoint: Int) -> String? {
+        try? String(contentsOf: userEditsURL(checkpoint: checkpoint), encoding: .utf8)
+    }
+
+    /// What the human sees, and what the next round reads when this checkpoint is the head.
+    public func effectivePlan(checkpoint: Int) -> String? {
+        PlanLayers.effectivePlan(checkpointDirectory(checkpoint))
+    }
+
+    /// The newest checkpoint on `tape` that has a plan (every one does today: a draft
+    /// checkpoint through its drafts, every later one through `plan.md`). Its EFFECTIVE plan is
+    /// the one the next round reads; an edit to any older checkpoint is kept, and shown, but
+    /// feeds nothing.
+    public func headPlanCheckpoint(in tape: Tape) -> Int? {
+        tape.checkpoints.last { PlanLayers.generatedURL(checkpointDirectory($0.id)) != nil }?.id
+    }
+
+    /// Runner-only (the runner applies `.editPlan`; the app never writes a checkpoint): stores
+    /// `markdown` as `checkpoint`'s `plan.user.md`, atomically. Markdown identical to the
+    /// generated plan removes the layer instead — a human who reverted every hunk has no
+    /// edits, and an empty diff must not reach the next prompt as "the human edited this".
+    /// `plan.md` itself is never touched.
+    public func writeUserEdits(checkpoint: Int, markdown: String) throws {
+        let url = userEditsURL(checkpoint: checkpoint)
+        if markdown == PlanLayers.generatedPlan(checkpointDirectory(checkpoint)) {
+            if FileManager.default.fileExists(atPath: url.path) { try FileManager.default.removeItem(at: url) }
+            return
+        }
+        try Data(markdown.utf8).write(to: url, options: .atomic)
+    }
+
+    /// Every note on `tape` for the app to list or highlight: the ones rounds already consumed,
+    /// oldest first, each with the checkpoint that consumed it, then the ones still pending
+    /// (`consumedBy` nil). A note that is somehow both is listed once, as consumed.
+    public func notes(in tape: Tape) -> [TapeNote] {
+        var seen = Set<UUID>()
+        var out: [TapeNote] = []
+        for cp in tape.checkpoints {
+            for note in cp.record.annotations where seen.insert(note.id).inserted {
+                out.append(TapeNote(note: note, consumedBy: cp.id))
+            }
+        }
+        for note in tape.pendingNotes where seen.insert(note.id).inserted {
+            out.append(TapeNote(note: note, consumedBy: nil))
+        }
+        return out
+    }
+
     // `commands.jsonl` has no dates to worry about, but it still must never be pretty-printed
     // — `IntakeJSON.encoder`'s `.prettyPrinted` would spread one command across several lines
     // and break the one-line-per-command contract `appendCommand`/`commands(after:)` share.
@@ -153,4 +209,16 @@ public struct TapeStore: Sendable {
         return e
     }()
     private static let lineDecoder = JSONDecoder()
+}
+
+/// One entry of `TapeStore.notes(in:)`: a note, and the checkpoint whose round consumed it
+/// (nil while it is still queued for the next round).
+public struct TapeNote: Equatable, Sendable, Identifiable {
+    public var note: PlanNote
+    public var consumedBy: Int?
+    public var id: UUID { note.id }
+    public init(note: PlanNote, consumedBy: Int?) {
+        self.note = note
+        self.consumedBy = consumedBy
+    }
 }

@@ -268,7 +268,7 @@ final class TapePlannerTests: XCTestCase {
         var tape = Tape()
         TapePlanner.apply(.annotate("watch the schema"), to: &tape)
         TapePlanner.apply(.annotate("and the fallback"), to: &tape)
-        XCTAssertEqual(tape.pendingAnnotations, ["watch the schema", "and the fallback"])
+        XCTAssertEqual(tape.pendingNotes.map(\.note), ["watch the schema", "and the fallback"])
     }
 
     func testApplyExtendRefineAddsToExtraRefinement() {

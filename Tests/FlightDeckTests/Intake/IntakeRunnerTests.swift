@@ -567,16 +567,16 @@ final class IntakeRunnerTests: XCTestCase {
         try await eventually("refine 1's reviewer to start") { gate.entered == 1 }
         let seq = try store.appendCommand(.annotate("late"))
         try await eventually("the watcher to ack the annotation") { self.store.loadTape().ackedCommandSeq == seq }
-        XCTAssertEqual(store.loadTape().pendingAnnotations, ["focus on auth", "late"])
+        XCTAssertEqual(store.loadTape().pendingNotes.map(\.note), ["focus on auth", "late"])
         gate.open()
         let status2 = await run.value
         XCTAssertEqual(status2, .paused)
 
         let tape = store.loadTape()
         XCTAssertEqual(tape.checkpoints.map(\.stage), [.draft, .refine, .refine])
-        XCTAssertEqual(tape.checkpoints[1].record.annotations, ["focus on auth"])
-        XCTAssertEqual(tape.checkpoints[2].record.annotations, ["late"])
-        XCTAssertEqual(tape.pendingAnnotations, [], "consumed annotations are removed")
+        XCTAssertEqual(tape.checkpoints[1].record.annotations.map(\.note), ["focus on auth"])
+        XCTAssertEqual(tape.checkpoints[2].record.annotations.map(\.note), ["late"])
+        XCTAssertEqual(tape.pendingNotes, [], "consumed notes are removed")
         let reviewers = commands.calls("reviewer")
         XCTAssertEqual(reviewers.count, 2)
         XCTAssertFalse(reviewers[1].prompt.contains("focus on auth"))
@@ -644,12 +644,86 @@ final class IntakeRunnerTests: XCTestCase {
         XCTAssertEqual(beforeFinal.checkpoints.map(\.stage), [.draft])
         XCTAssertEqual(beforeFinal.roundInProgress, PlannedRound(stage: .refine, round: 1, major: false),
                        "on disk, the round is still in progress")
-        XCTAssertEqual(beforeFinal.pendingAnnotations, ["focus on auth"])
+        XCTAssertEqual(beforeFinal.pendingNotes.map(\.note), ["focus on auth"])
 
         let tape = store.loadTape()
         XCTAssertEqual(tape.checkpoints.map(\.stage), [.draft])
-        XCTAssertEqual(tape.pendingAnnotations, ["focus on auth"], "not consumed by a round that never landed")
+        XCTAssertEqual(tape.pendingNotes.map(\.note), ["focus on auth"], "not consumed by a round that never landed")
         XCTAssertEqual(tape.target, .nextMinor, "not spent by a round that never landed")
         XCTAssertEqual(tape.status, .failed)
+    }
+}
+
+// MARK: - Human edits and notes
+
+extension IntakeRunnerTests {
+    /// `.editPlan` is applied by the runner (it owns `checkpoints/`): the edit lands as
+    /// `plan.user.md`, `drafts/0.md` stays as generated, and the next round reviews the edit.
+    func testEditPlanIsWrittenByTheRunnerAndFeedsTheNextRound() async throws {
+        _ = try store.appendCommand(.step)
+        let first = await runner(scripted()).run()
+        XCTAssertEqual(first, .paused)
+
+        let edited = "# Plan\n\n## Scope\nOne, Mac only\n"
+        _ = try store.appendCommand(.editPlan(checkpoint: 1, markdown: edited))
+        _ = try store.appendCommand(.editPlan(checkpoint: 99, markdown: "nowhere"))
+        _ = try store.appendCommand(.step)
+        let commands = scripted()
+        let status = await runner(commands).run()
+        XCTAssertEqual(status, .paused)
+
+        XCTAssertEqual(store.userEdits(checkpoint: 1), edited)
+        XCTAssertEqual(try String(contentsOf: store.checkpointDirectory(1).appendingPathComponent("drafts/0.md"), encoding: .utf8),
+                       Self.draftPlan, "the generated layer is never modified")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: store.checkpointDirectory(99).path),
+                       "an edit to a checkpoint not on the tape has nowhere to go")
+        let reviewer = try XCTUnwrap(commands.calls("reviewer").first)
+        XCTAssertTrue(reviewer.prompt.contains(store.userEditsURL(checkpoint: 1).path), reviewer.prompt)
+        XCTAssertTrue(reviewer.prompt.contains("+One, Mac only"), reviewer.prompt)
+        XCTAssertTrue(try String(contentsOf: store.checkpointDirectory(2).appendingPathComponent("plan.md"), encoding: .utf8)
+            .hasPrefix(edited))
+    }
+
+    /// An edit to the head that lands while a round is reading it is stored at once, but the
+    /// round in flight is unaffected — and its record says the edit missed it, since the new
+    /// checkpoint becomes the head.
+    func testEditDuringARoundIsStoredAndTheRoundSaysItMissedIt() async throws {
+        _ = try store.appendCommand(.step)
+        _ = await runner(scripted()).run()
+
+        let gate = Gate()
+        let commands = AsyncScriptedRunner { call in
+            if call.role == "reviewer" { try await gate.wait() }
+            return Self.answer(call)
+        }
+        _ = try store.appendCommand(.step)
+        let run = Task { await runner(commands).run() }
+        try await eventually("refine 1's reviewer to start") { gate.entered == 1 }
+        let seq = try store.appendCommand(.editPlan(checkpoint: 1, markdown: "# Plan\n\nlate edit\n"))
+        try await eventually("the watcher to apply the edit") { self.store.loadTape().ackedCommandSeq == seq }
+        XCTAssertEqual(store.userEdits(checkpoint: 1), "# Plan\n\nlate edit\n", "stored while the round runs")
+        gate.open()
+        _ = await run.value
+
+        let tape = store.loadTape()
+        XCTAssertEqual(tape.checkpoints.map(\.stage), [.draft, .refine])
+        XCTAssertFalse(try XCTUnwrap(commands.calls("reviewer").first).prompt.contains("late edit"), "the running round is unaffected")
+        let note = try XCTUnwrap(tape.checkpoints[1].record.note)
+        XCTAssertTrue(note.contains("Your edits to checkpoint 1 arrived while this round was running"), note)
+    }
+
+    /// A note withdrawn before any round ran is never consumed; the kept one is, with its anchor.
+    func testRemovedNoteIsNotConsumed() async throws {
+        let kept = PlanNote(kind: .question, note: "which DB?", anchor: NoteAnchor(checkpoint: 1, quote: "Scope"))
+        let dropped = PlanNote(note: "never mind")
+        _ = try store.appendCommand(.note(kept))
+        _ = try store.appendCommand(.note(dropped))
+        _ = try store.appendCommand(.removeNote(dropped.id))
+        _ = try store.appendCommand(.step)
+        _ = await runner(scripted()).run()
+        let tape = store.loadTape()
+        XCTAssertEqual(tape.checkpoints.first?.record.annotations, [kept])
+        XCTAssertEqual(tape.pendingNotes, [])
+        XCTAssertEqual(store.notes(in: tape), [TapeNote(note: kept, consumedBy: 1)])
     }
 }
