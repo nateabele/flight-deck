@@ -265,6 +265,22 @@ final class IntakeServiceLiveTests: XCTestCase {
         XCTAssertNil(svc.pending[i.id])
     }
 
+    /// The plan editor's router — `stuck` (edits that must stay on their own round) and `sent`
+    /// (edits not yet applied) — is the intake's, kept by the service like `editNoteShown`. As
+    /// the plan section's `@State` it was lost on every intake switch, and an edit that had
+    /// already conflicted was merged onto the head on the next commit after coming back.
+    func testEditRouterSurvivesAnIntakeSwitch() async throws {
+        let a = try seed(.shaping), b = try seed(.shaping)
+        let svc = await makeService()
+        let router = svc.editRouter(a.id)
+        XCTAssertTrue(svc.editRouter(a.id) === router, "the same router every time the plan comes back")
+        XCTAssertFalse(svc.editRouter(b.id) === router, "one per intake")
+
+        svc.discard(a.id)
+        svc.pollTapes()
+        XCTAssertFalse(svc.editRouter(a.id) === router, "gone once the intake stops shaping")
+    }
+
     // MARK: announcements
 
     /// Spec §14: live regions announce state changes — a round landed, failed, reached review,

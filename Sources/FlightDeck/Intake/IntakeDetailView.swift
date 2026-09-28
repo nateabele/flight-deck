@@ -1042,7 +1042,8 @@ private struct DocumentPlan: View, Equatable {
                 .editHooks(PlanEditHooks(noteShown: noteShown,
                                          onNoteShown: { [service, intakeID] in service.markEditNoteShown(intakeID) },
                                          onConflict: { [service, intakeID] in service.recordEditConflict(intakeID, $0) },
-                                         liveTape: { [service, intakeID] in service.tapes[intakeID] }))
+                                         liveTape: { [service, intakeID] in service.tapes[intakeID] },
+                                         router: final ? nil : service.editRouter(intakeID)))
                 .churnLane(churn)
                 .focus(focus)
                 .readOnly(final)
