@@ -7969,10 +7969,10 @@ final class SessionStore: ObservableObject {
         repos[at.repo].sessions[at.session].transcriptDirectory = directory
 
         // Same reasoning as `repin`, and for the same reason it is only the backing count:
-        // the new watcher starts with an empty `outstandingAgents`, so an `agentFinished`
-        // for an id the old one was tracking is a no-op and `countChanged` never fires. The
-        // badge would sit at its pre-retarget value until some later turn boundary with a
-        // non-empty set, which for a tab that entered a worktree mid-turn may be never.
+        // the new watcher starts with an empty `outstandingAgents`, so an `agentFinished` or
+        // task notification for an id the old one was tracking is a no-op and `countChanged`
+        // never fires. The badge would sit at its pre-retarget value until the new watcher
+        // happens to count something itself, which may be never.
         subagentCounts[tabID] = 0
 
         stopWatching(tabID)

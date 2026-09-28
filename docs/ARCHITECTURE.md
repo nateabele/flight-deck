@@ -219,7 +219,7 @@ is the one with the polled registry; codex reports its state over JSON-RPC and t
                                          keyed by sessionId)    │      [UUID: SessionStatus]
 <transcript>.jsonl ────────────────────> TranscriptWatcher ────┘             │
   (outstanding Agent tool_use ids,        (one per session)                  v
-   cleared at each turn boundary)                                   SessionStatusIcon
+   closed by <task-notification>)                                   SessionStatusIcon
                                                                      SessionNotifier
 ```
 
@@ -236,6 +236,14 @@ claude tab closes, so two logins' registries are never merged into one scan.
   compatibility boundary.
 - **`SessionStatusWatcher`** — polls rather than watching vnodes because `claude` rewrites
   the file in place with no create/rename, so a directory watch would never fire.
+- **`TranscriptWatcher`'s sub-agent count** — since claude 2.1.276 every `Agent` runs in the
+  background: its tool_result (`toolUseResult.isAsync`) only acknowledges the launch, and the
+  agent ends at a later `<task-notification>` — read from the `queue-operation` enqueue, the
+  `queued_command` attachment, or the delivered `user` record, whichever lands first, and matched
+  by `<tool-use-id>` or by the launch's agent id as `<task-id>`. Not cleared at turn end (the
+  agents outlive it); only held ids are removed, so a notification for an unseen launch is a
+  no-op. `agentAsyncLaunchMarker` / `agentCompletionNotification` in the adapter-probe matrix pin
+  both record shapes.
 - **`SessionStore`** — merges registry activity with transcript-derived sub-agent counts and
   drops sessions Flight Deck does not own. Each tick computes the edges once, as
   `[StatusTransition]` (`old`/`new` status per tab), and hands that same list to three

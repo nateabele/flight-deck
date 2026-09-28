@@ -152,11 +152,21 @@ enum ClaudeSession {
     /// the record does not name the tool it answers. `TranscriptWatcher` keeps a set
     /// of outstanding `Agent` ids, so an unrelated id is a harmless no-op there and
     /// this parser stays free of cross-record state.
+    ///
+    /// Since claude 2.1.276 every `Agent` runs in the background: its tool_result arrives
+    /// ~40ms after the tool_use and only says it launched (`agentLaunched`), and the agent's
+    /// real end is a later `<task-notification>` (`taskNotified`). Reading the launch result
+    /// as `agentFinished` is what zeroed the sidebar count inside a single poll.
     enum TranscriptEvent: Equatable, Sendable {
         case title(String)
         case agentStarted(String)
         case agentFinished(String)
-        case turnEnded
+        /// A background launch's result. Carries the agent id because a notification for an
+        /// agent continued by `SendMessage` names the continuing call's tool-use id, and only
+        /// its `<task-id>` still identifies the launch.
+        case agentLaunched(toolUseID: String, agentID: String)
+        /// A background agent stopped. Either id may be what matches an outstanding launch.
+        case taskNotified(toolUseID: String?, taskID: String?)
         /// This record IS a failed turn: `claude` asked the API, the API refused, and the retry
         /// loop gave up. One record per dead turn — the retries happen inside the request loop and
         /// never reach the transcript — so this needs no de-duplication.
@@ -193,8 +203,26 @@ enum ClaudeSession {
         case "custom-title":
             return customTitle(inObject: obj, sessionID: sessionID).map { [.title($0)] } ?? []
 
-        case "system":
-            return obj["subtype"] as? String == "turn_duration" ? [.turnEnded] : []
+        case "queue-operation":
+            // Enqueued the moment the agent stops — possibly long before a busy parent delivers
+            // the same text as a `user` record, which is why both are read. Closing twice is a
+            // no-op in the watcher.
+            guard obj["operation"] as? String == "enqueue",
+                  let content = obj["content"] as? String
+            else { return [] }
+            return taskNotification(in: content).map { [$0] } ?? []
+
+        case "attachment":
+            // The delivery of a notification that arrived while the parent was mid-response.
+            // Not optional: the enqueue above can be written to the file BEFORE the launch it
+            // closes (claude flushes the parent's assistant record later, timestamps intact),
+            // so that copy finds nothing outstanding and this one is what closes the agent.
+            // Without it, 8 of one real transcript's launches never closed.
+            guard let attachment = obj["attachment"] as? [String: Any],
+                  attachment["type"] as? String == "queued_command",
+                  let prompt = attachment["prompt"] as? String
+            else { return [] }
+            return taskNotification(in: prompt).map { [$0] } ?? []
 
         case "assistant":
             // The tool_use scan runs for error records too. An error message's content is a single
@@ -223,10 +251,20 @@ enum ClaudeSession {
             return events
 
         case "user":
+            if let text = (obj["message"] as? [String: Any])?["content"] as? String,
+               let notified = taskNotification(in: text) {
+                return [notified, .progressed]
+            }
+            // A background launch's result is the launch, not the end. The marker rides the
+            // record rather than the block, so a record carrying it is read as one launch.
+            let launch = obj["toolUseResult"] as? [String: Any]
+            let launchedAgent = launch?["isAsync"] as? Bool == true
+                ? launch?["agentId"] as? String : nil
             var events: [TranscriptEvent] = contentBlocks(obj).compactMap { block in
                 guard block["type"] as? String == "tool_result",
                       let id = block["tool_use_id"] as? String
                 else { return nil }
+                if let launchedAgent { return .agentLaunched(toolUseID: id, agentID: launchedAgent) }
                 return .agentFinished(id)
             }
             // Including tool results: a result arriving means the turn is alive. Ordering is what
@@ -238,6 +276,21 @@ enum ClaudeSession {
         default:
             return []
         }
+    }
+
+    /// The ids a `<task-notification>` names, when `text` IS one — not when it merely quotes
+    /// one, which is a person pasting it and must not close anything.
+    private static func taskNotification(in text: String) -> TranscriptEvent? {
+        guard text.hasPrefix("<task-notification>") else { return nil }
+        func field(_ label: String) -> String? {
+            guard let open = text.range(of: "<\(label)>"),
+                  let close = text.range(of: "</\(label)>", range: open.upperBound..<text.endIndex)
+            else { return nil }
+            return String(text[open.upperBound..<close.lowerBound])
+        }
+        let toolUseID = field("tool-use-id"), taskID = field("task-id")
+        guard toolUseID != nil || taskID != nil else { return nil }
+        return .taskNotified(toolUseID: toolUseID, taskID: taskID)
     }
 
     private static func contentBlocks(_ obj: [String: Any]) -> [[String: Any]] {
