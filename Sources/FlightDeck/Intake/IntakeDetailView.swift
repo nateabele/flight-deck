@@ -335,6 +335,7 @@ struct IntakeDetailView: View {
                             preview: $preview,
                             onSelect: { select($0) },
                             onExtend: { [service, id = intake.id] in service.send(id, .extend($0, by: 1)) },
+                            onTrim: { [service, id = intake.id] in service.send(id, .trim($0, by: 1)) },
                             disclosure: pinned ? nil : heatmapView(tape, board: model).map { map in
                                 AnyView(map.background(GeometryReader { geo in
                                     Color.clear.preference(key: BarGeometryKey.self,
@@ -579,6 +580,9 @@ struct IntakeDetailView: View {
                         .fixedSize(horizontal: false, vertical: true)
                     Button("Edit in Inspector") { showsInspector = true }
                         .buttonStyle(.link)
+                        // The only way to change a stage's round count before the run: say so,
+                        // since the summary line alone reads as a fixed description.
+                        .help("Change the seats and how many rounds each stage runs — a cap of 0 removes the stage")
                         .accessibilityIdentifier("intake-edit-in-inspector")
                 }
             }

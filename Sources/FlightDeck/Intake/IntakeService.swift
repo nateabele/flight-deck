@@ -600,7 +600,7 @@ final class IntakeService: ObservableObject {
             halts[id] = nil
             pending[id] = PendingStart(kind: .round(upcomingRound(id, config: intake(id)?.roundConfig)), since: now())
             startRunner(id)
-        case .extend: startRunner(id)
+        case .extend, .trim: startRunner(id)
         }
     }
 

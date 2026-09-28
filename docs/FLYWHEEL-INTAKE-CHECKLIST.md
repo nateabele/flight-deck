@@ -274,8 +274,9 @@ from scratch" above, paused mid-round where an item needs that.
 ### Control bar and transport
 
 - Every Run menu chord fires its labeled action and none collides with an existing Ghostty/app
-  binding: Step ⌘', Next Major ⇧⌘', To Review ⌥⌘', Pause ⇧⌘., Stop ⌘., Extend ⌘=, Annotate ⌥⌘A.
-  **Expect:** all seven fire; note any collision (ghostty can silently claim a chord as
+  binding: Step ⌘', Next Major ⇧⌘', To Review ⌥⌘', Pause ⇧⌘., Stop ⌘., Extend ⌘=, Remove a
+  Round ⌘-, Annotate ⌥⌘A.
+  **Expect:** all eight fire (⌘- must not shrink the terminal font instead); note any collision (ghostty can silently claim a chord as
   `performable` — see the repo's `ghostty-claims-menu-shortcuts` lesson).
 - Hover a play button (Pause/Step/Next Major/To Review). **Expect:** the board and LCD preview
   its stop (label becomes WOULD STOP) without actually pausing.
@@ -309,6 +310,21 @@ from scratch" above, paused mid-round where an item needs that.
   on a per-second tick — manual scrolling is never fought. Animated, unless Reduce Motion is on.
 - Trackpad-scroll and mouse-wheel over the pinned block, including a sideways scroll on the
   tape itself. **Expect:** the tape scrolls; momentum feels normal.
+- On a fresh Feature plan run, find the REFINE bracket. **Expect:** a − beside the +, the same
+  size, with hover help "Remove a Refine round". Click − once. **Expect:** the bracket reads
+  REFINE ×2, Refine 3 is gone, and STOPS AT (default next major) moves to Refine 2. Click +.
+  **Expect:** Refine 3 is back.
+- Tab (Full Keyboard Access on) to the − and press Space; turn on VoiceOver and land on it.
+  **Expect:** it acts like a click; VoiceOver says "Remove a Refine round".
+- Start refine with ⏭ and, while Refine N−1 is in the air, click − until it disappears.
+  **Expect:** the − vanishes once the live round is the last one left, the + stays; the live round
+  becomes the major (STOPS AT names it), and ⏭ stops there when it lands — Encode does not start.
+- Click − on POLISH until the bracket goes. **Expect:** Polish leaves the tape entirely; the run
+  goes Encode → Review (or Fresh eyes on Full plan). Run ▸ Remove a Round is dark once neither
+  cycle has a scheduled round.
+- Before starting, choose Feature plan, hover **Edit in Inspector**. **Expect:** help says the
+  round counts change there. Set Refinement cap to 0. **Expect:** "refine ×3" leaves the summary
+  line, and Start Planning shows a board with no REFINE bracket.
 - Look at a seat's context gauge and an overflowed footprint chip. **Expect:** the gauge reads
   as tokens ("118k of 400k"), not a bare percent; the chip reads "+2 more", not "+2 2".
 
