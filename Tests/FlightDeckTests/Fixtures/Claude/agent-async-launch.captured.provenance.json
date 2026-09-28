@@ -58,16 +58,22 @@
       "it for the current fix."
     ],
     "aNotificationOccupiesMoreThanOneSite": [
-      "CONFIRMED, and there are FOUR sites, not two. Corrected 2026-09-28 after a fifth was looked",
-      "for and a fourth was found: (1) a user record's string content, (2) a content block's",
-      "text/content, (3) an `attachment` of type queued_command with the payload in `prompt`, and",
-      "(4) a `queue-operation` record carrying it in a TOP-LEVEL `content` string, with no `message`",
-      "and no `attachment` at all.",
-      "Volume over a 40-transcript sweep: 1363 notifications at the queue-operation site against 98",
-      "at the attachment site. A reader that stops at message/attachment sees none of the 1363.",
-      "This reader missed site (3) first, then missed site (4) even after being told the queue",
-      "enqueue existed -- which is why `agentNotificationSites` now requires BOTH (3) and (4) to be",
-      "present in the capture, and fails if either is dropped."
+      "CONFIRMED: THREE delivery sites, corrected DOWN from four on 2026-09-28. (1) a user record's",
+      "string content, (2) an `attachment` of type queued_command with the payload in `prompt`, and",
+      "(3) a `queue-operation` record with `operation: enqueue` carrying it in a TOP-LEVEL `content`",
+      "string, with no `message` and no `attachment`.",
+      "Volume over a 40-transcript sweep: 1513 at the queue-operation site, 984 at the user string,",
+      "100 at the attachment site. A reader that stops at message/attachment misses the majority.",
+      "A FOURTH candidate -- a content BLOCK's text/content -- was read for a while and has been",
+      "REMOVED. All 20 occurrences of it were notification text QUOTED INSIDE another payload: 6 in",
+      "assistant/text (the model writing about notifications) and 14 in user/tool_result (a file",
+      "read, a transcript dump, a log echo). Reading them closes an agent because somebody grepped",
+      "for a notification. `ClaudeSession.swift` reads exactly the three real sites, and a probe",
+      "reader more permissive than the consumer it pins would stay green on transcripts the real",
+      "reader chokes on.",
+      "History worth keeping: this reader first missed site (2), then still missed site (3) after",
+      "being told it existed, then briefly over-read a fourth that is not a site at all. The row",
+      "`agentNotificationSites` requires (2) AND (3) to be present so it cannot be narrowed again."
     ],
     "aResumedAgentClosesUnderEitherId": [
       "CONFIRMED for part (a), 3/3: in every offered pair the tool_result carried a STRING",
