@@ -18,7 +18,8 @@ struct LiveCard: View {
     fileprivate enum Kind {
         case triage(activity: SeatActivity?)
         case shaping(tape: Tape, seats: SeatFiles, editConflict: EditConflictNotice?, selectedRound: Binding<Int?>,
-                     selectedSeat: Binding<String?>, controlBar: (Date) -> AnyView, board: (Date) -> AnyView)
+                     openRound: Binding<Int?>, selectedSeat: Binding<String?>, controlBar: (Date) -> AnyView,
+                     board: (Date) -> AnyView)
     }
 
     fileprivate let intake: Intake
@@ -47,16 +48,20 @@ struct LiveCard: View {
     ///     (`IntakeService.editConflictNotice`); nil hides it. Its Open selects the checkpoint
     ///     still holding the edits.
     ///   - selectedRound: the checkpoint the plan viewer shows; nil follows the head.
+    ///   - openRound: the finished round whose detail panel is open under the round cards; nil
+    ///     for none. Held by the pane, so it survives the card's redraws.
     ///   - selectedSeat: the seat (`LiveSeat.id`) the inspector details; clicking a row selects
     ///     it, clicking it again clears it.
     static func shaping(intake: Intake, tape: Tape, activities: [String: SeatActivity], records: [String: RunRecord],
                         results: [String: SeatResult] = [:], pending: PendingStart?, editConflict: EditConflictNotice? = nil,
-                        selectedRound: Binding<Int?> = .constant(nil), selectedSeat: Binding<String?> = .constant(nil),
+                        selectedRound: Binding<Int?> = .constant(nil), openRound: Binding<Int?> = .constant(nil),
+                        selectedSeat: Binding<String?> = .constant(nil),
                         dwell: DwellBank? = nil,
                         controlBar: @escaping (Date) -> AnyView, board: @escaping (Date) -> AnyView) -> LiveCard {
         LiveCard(intake: intake,
                  kind: .shaping(tape: tape, seats: SeatFiles(activities: activities, records: records, results: results),
-                                editConflict: editConflict, selectedRound: selectedRound, selectedSeat: selectedSeat,
+                                editConflict: editConflict, selectedRound: selectedRound, openRound: openRound,
+                                selectedSeat: selectedSeat,
                                 controlBar: controlBar, board: board),
                  pending: pending, sharedDwell: dwell)
     }
@@ -77,7 +82,7 @@ struct LiveCard: View {
             switch kind {
             case .triage:
                 seatSection(now: now)
-            case .shaping(let tape, _, let editConflict, let selectedRound, _, let controlBar, let board):
+            case .shaping(let tape, _, let editConflict, let selectedRound, let openRound, _, let controlBar, let board):
                 controlBar(now)
                 board(now)
                 let model = ShapingModel(intake: intake, tape: tape)
@@ -100,7 +105,14 @@ struct LiveCard: View {
                     seatSection(now: now)
                 }
                 if !model.roundCards.isEmpty {
-                    FinishedRounds(cards: model.roundCards, tape: tape, selection: selectedRound)
+                    let head = tape.head?.id
+                    FinishedRounds(cards: model.roundCards, planSelection: selectedRound.wrappedValue ?? head,
+                                   open: openRound.wrappedValue,
+                                   // Choosing the head goes back to following it, the same rule
+                                   // the board's slots follow.
+                                   select: { selectedRound.wrappedValue = $0 == head ? nil : $0 },
+                                   setOpen: { openRound.wrappedValue = $0 })
+                        .equatable()
                 }
             }
         }
@@ -116,7 +128,7 @@ struct LiveCard: View {
         switch kind {
         case .triage(let activity):
             return pending != nil || (intake.state == .triaging && activity?.finished != true) ? .live : .still
-        case .shaping(let tape, _, _, _, _, _, _):
+        case .shaping(let tape, _, _, _, _, _, _, _):
             return .shaping(tape: tape, pending: pending)
         }
     }
@@ -151,7 +163,7 @@ struct LiveCard: View {
     @ViewBuilder
     private func seatRow(_ seat: LiveSeat, now: Date) -> some View {
         let row = SeatRow(model: seat.model, queuedText: queuedText(now: now))
-        if case .shaping(_, _, _, _, let selectedSeat, _, _) = kind {
+        if case .shaping(_, _, _, _, _, let selectedSeat, _, _) = kind {
             let selected = selectedSeat.wrappedValue == seat.id
             let toggle = { selectedSeat.wrappedValue = selected ? nil : seat.id }
             row
@@ -201,7 +213,7 @@ struct LiveCard: View {
     private var sectionTitle: String {
         switch kind {
         case .triage: return "Triage"
-        case .shaping(let tape, _, _, _, _, _, _):
+        case .shaping(let tape, _, _, _, _, _, _, _):
             guard let round = tape.roundInProgress ?? pendingRound else { return "Seats" }
             return BoardModel.name(stage: round.stage, round: round.round)
         }
@@ -229,7 +241,7 @@ struct LiveCard: View {
             // Spec §3.1: "Reading the repo" until the first event says anything more specific.
             if model.glyph == .running, model.headline == nil { model.headline = "Reading the repo" }
             return [LiveSeat(id: "triage", model: model)]
-        case .shaping(let tape, let seats, _, _, _, _, _):
+        case .shaping(let tape, let seats, _, _, _, _, _, _):
             guard let round = tape.roundInProgress ?? pendingRound else { return [] }
             return LiveSeats.rows(round: round, config: intake.roundConfig, seats: LiveSeats.files(seats, pending: pending),
                                   now: now)
@@ -391,123 +403,6 @@ final class DwellBank {
         seat.model.headline = scheduler.headline
         seat.model.action = scheduler.action
         return seat
-    }
-}
-
-// MARK: - Finished rounds
-
-/// The rounds already on the tape, as cards (spec §3.1 "finished rounds as cards") —
-/// `ShapingModel.roundCards`' text in the seat rows' visual language. Clicking one shows its
-/// plan below; clicking the head again goes back to following the head.
-private struct FinishedRounds: View {
-    let cards: [RoundCard]
-    let tape: Tape
-    @Binding var selection: Int?
-
-    private static let fade: CGFloat = 24
-
-    var body: some View {
-        let selected = selection ?? tape.head?.id
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Finished rounds")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(.secondary)
-                .textCase(.uppercase)
-                .padding(.horizontal, 12)
-            ScrollViewReader { proxy in
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(alignment: .top, spacing: 8) {
-                        ForEach(cards) { card in
-                            cardView(card, selected: card.checkpointID == selected)
-                                .id(card.checkpointID)
-                                .onTapGesture { choose(card) }
-                                // Keyboard and VoiceOver reach a card as a click does (spec §14):
-                                // it carried the button trait with no action behind it.
-                                .focusable(interactions: .activate)
-                                .onKeyPress(keys: [.return, .space]) { _ in choose(card); return .handled }
-                                .accessibilityAction { choose(card) }
-                        }
-                    }
-                    // As wide as the fade, so a card at either end of the strip sits clear of it.
-                    .padding(.horizontal, Self.fade)
-                }
-                // Soft edges: scrolled to the newest round, the strip cuts an older card at its
-                // leading edge, and a hard cut read as a clipping bug rather than "more this way".
-                .mask(HStack(spacing: 0) {
-                    LinearGradient(colors: [.clear, .black], startPoint: .leading, endPoint: .trailing).frame(width: Self.fade)
-                    Color.black
-                    LinearGradient(colors: [.black, .clear], startPoint: .leading, endPoint: .trailing).frame(width: Self.fade)
-                })
-                // The newest round is the one worth seeing; a long run's first cards are history.
-                .onAppear { proxy.scrollTo(cards.last?.checkpointID, anchor: .trailing) }
-                .onChange(of: cards.last?.checkpointID) { _, id in proxy.scrollTo(id, anchor: .trailing) }
-            }
-        }
-    }
-
-    /// Choosing the head goes back to following it, the same rule the board's slots follow.
-    private func choose(_ card: RoundCard) {
-        selection = card.checkpointID == tape.head?.id ? nil : card.checkpointID
-    }
-
-    private func name(_ card: RoundCard) -> String {
-        guard let cp = tape.checkpoints.first(where: { $0.id == card.checkpointID }) else { return card.title }
-        return BoardModel.name(stage: cp.stage, round: cp.round)
-    }
-
-    private func cardView(_ card: RoundCard, selected: Bool) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
-            HStack(spacing: 6) {
-                Text(name(card)).font(.system(size: 12.5, weight: .semibold))
-                Spacer(minLength: 6)
-                HStack(spacing: 3) {
-                    ForEach(card.slots.indices, id: \.self) { i in slotGlyph(card.slots[i]) }
-                }
-            }
-            Text([card.changes, card.lines].compactMap { $0 }.joined(separator: " · "))
-                .font(.system(size: 12))
-                .monospacedDigit()
-                .foregroundStyle(.secondary)
-            if let tally = card.tally {
-                Text(tally).font(.system(size: 11.5)).foregroundStyle(.secondary)
-            }
-            if let sections = card.sections {
-                Text(sections).font(.system(size: 11.5)).foregroundStyle(.tertiary).lineLimit(1)
-            }
-            // The note only on the selected card: a row of cards each carrying a paragraph
-            // pushed the plan off screen. Every card keeps it as hover text.
-            if selected, let note = card.note {
-                Text(note).font(.system(size: 11.5)).foregroundStyle(.secondary).lineLimit(6)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-        // A horizontal scroll view proposes unlimited width; without a width the note would lay
-        // out as one line instead of wrapping.
-        .frame(width: 200, alignment: .leading)
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
-        .background(selected ? Color.accentColor.opacity(0.14) : Color.primary.opacity(0.045),
-                    in: RoundedRectangle(cornerRadius: 8))
-        .overlay(RoundedRectangle(cornerRadius: 8)
-            .strokeBorder(selected ? Color.accentColor.opacity(0.8) : Color.primary.opacity(0.08)))
-        .contentShape(Rectangle())
-        .help(card.note ?? "")
-        .accessibilityElement(children: .combine)
-        .accessibilityAddTraits(.isButton)
-        .accessibilityIdentifier("round-card-\(card.checkpointID)")
-    }
-
-    private func slotGlyph(_ slot: SlotBadge) -> some View {
-        let (symbol, color): (String, Color) = switch slot.status {
-        case .ok: ("checkmark.circle.fill", .secondary)
-        case .substituted: ("arrow.triangle.swap", .orange)
-        case .failed: ("xmark.octagon.fill", .red)
-        }
-        return Image(systemName: symbol)
-            .font(.system(size: 10, weight: .semibold))
-            .foregroundStyle(color)
-            .help(slot.diagnosis.map { "\(slot.label): \($0)" } ?? slot.label)
-            .accessibilityLabel(slot.diagnosis.map { "\(slot.label): \($0)" } ?? slot.label)
     }
 }
 
