@@ -500,7 +500,7 @@ private struct LCDCellView: View {
         .frame(maxHeight: .infinity)
         .accessibilityElement(children: .ignore)
         // Full words, never the code (spec §14).
-        .accessibilityLabel("\(cell.caption): \(cell.value)")
+        .accessibilityLabel(cell.accessibilityLabel)
     }
 
     private func caption(_ text: String) -> some View {
