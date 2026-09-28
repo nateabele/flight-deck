@@ -228,6 +228,20 @@ final class SelectionHistoryStoreTests: XCTestCase {
                        [.session(id: ids[0]), .project(path: foo.standardizedFileURL.path)])
     }
 
+    /// `cycleSelection` lands on a project row through `selectProject`, the same recording path
+    /// as a manual click — it must not have its own bypass. `ids[1]` is `foo`'s second (and
+    /// last) session, so the next stop forward is `bar`'s project row.
+    func testCyclingOntoAProjectRowRecordsHistory() {
+        let (store, ids) = makeProjectHistoryStore()
+        store.selectedSessionID = ids[1]
+        store.selectNextSession()
+        XCTAssertEqual(store.selectedProjectID, projectID(bar, in: store))
+        XCTAssertEqual(store.selectionHistory.back.last, .session(id: ids[1]))
+        store.goBack()
+        XCTAssertEqual(store.selectedSessionID, ids[1])
+        XCTAssertNil(store.selectedProjectID)
+    }
+
     func testBackReopensAProjectView() {
         let (store, ids) = makeProjectHistoryStore()
         store.selectedSessionID = ids[0]

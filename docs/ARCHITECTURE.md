@@ -364,10 +364,19 @@ in [FOLLOWUPS.md](FOLLOWUPS.md) for the codex allowlist and its fail-closed defa
 
 ## Tab navigation
 
-⌘⇧[ / ⌘⇧] move the selection along `repos.flatMap(\.sessions)` — the sidebar's session order
-crossing every project — wrapping at both ends. This does not skip a collapsed project's
-sessions; they are still selectable, just not currently drawn. `SessionStore.selectNextSession()` /
-`selectPreviousSession()` are the entry points; the wraparound algorithm lives in the private `cycleSelection(forward:)`. `TabNavigationCommands` supplies the Window-menu items.
+⌘⇧[ / ⌘⇧] move the selection along `sidebarRows` — exactly what the sidebar draws, top to
+bottom, wrapping at both ends. A project row is a stop of its own (selecting it opens that
+project's view), and a collapsed project's sessions are skipped rather than selected invisibly.
+If the selected session is hidden inside a collapsed project, that project's header row stands
+in for the current position, so cycling still moves one row from where the user actually is
+instead of jumping to an end. `SessionStore.selectNextSession()` / `selectPreviousSession()` are
+the entry points; the wraparound algorithm lives in the private `cycleSelection(forward:)`.
+`TabNavigationCommands` supplies the Window-menu items.
+
+A project's own view counts as a place the user was: `selectProject` records a
+`.project(path:)` history entry from `displayedTarget`, the project's standardized path, so
+Back and Forward reopen it — by that path, so it survives a relaunch — the same way they reopen
+a session.
 
 The menu items are the *mechanism*, not decoration. AppKit gives the Ghostty surface's
 `performKeyEquivalent` first refusal, and libghostty binds both shortcuts by default — but as
