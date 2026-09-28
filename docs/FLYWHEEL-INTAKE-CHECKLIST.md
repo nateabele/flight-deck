@@ -262,6 +262,124 @@ lists all four drafters, and mixed codex/claude seats all complete (or substitut
 diagnosis) — no seat pauses on authentication or a missing proxy. Step 9's `.qartez/` check
 holds here too.
 
+## Planning UI
+
+The redesigned shaping screen (spec `docs/superpowers/specs/2026-09-27-planning-ui-redesign-design.md`),
+built and offscreen-rendered by agents but never driven live — spec §13 names a real Feature/Full
+plan end to end (covered above), editing mid-round, annotating, the heatmap, Reduce Motion,
+VoiceOver and keyboard as Nate's to run. Grouped here by screen; every item below is something an
+agent flagged but could not itself exercise. Run it on the same **Feature plan** intake from "Plan
+from scratch" above, paused mid-round where an item needs that.
+
+### Control bar and transport
+
+- Every Run menu chord fires its labeled action and none collides with an existing Ghostty/app
+  binding: Step ⌘', Next Major ⇧⌘', To Review ⌥⌘', Pause ⇧⌘., Stop ⌘., Extend ⌘=, Annotate ⌥⌘A.
+  **Expect:** all seven fire; note any collision (ghostty can silently claim a chord as
+  `performable` — see the repo's `ghostty-claims-menu-shortcuts` lesson).
+- Hover a play button (Pause/Step/Next Major/To Review). **Expect:** the board and LCD preview
+  its stop (label becomes WOULD STOP) without actually pausing.
+- Click Pause or Stop mid-round. **Expect:** the button label swaps to "Pausing…"/"Stopping…"
+  with an inline spinner until the safe point, then settles.
+- Read the LCD's `STOPS AT`/`CALLING AT` field labels. **Expect:** readable words (PAUSED / IN
+  AIR / STOPS / CALLING), never a cryptic 3-letter code, and no value subtitle truncates
+  mid-word (e.g. "since Enco…").
+- Watch `SEATS DONE`/the live slot's elapsed reading while a round runs. **Expect:** it reads
+  the *current* round's elapsed time, not the run's total — the two must not be ambiguous next
+  to each other.
+- Resize the pane to ~700 pt. **Expect:** the compact bar (transport + ROUND + ELAPSED +
+  CONVERGENCE); every state word (CONVERGING/PLATEAU/DIVERGING) stays whole — never truncates to
+  a fragment like "CONV" or "DIVE".
+- Tab to a tape slot column. **Expect:** a visible system focus ring; Return/Space activates it
+  the same as a click; losing key window (or minimizing) closes any open card.
+- Press ⌥⌘A with a plan selection, then again with none. **Expect:** Annotate opens scoped to
+  the selected section, and to the whole plan with nothing selected.
+
+### Departures board and tape
+
+- Scroll a slot that has never been on screen into view. **Expect:** it does **not** flap (play
+  its reveal once) on that first appearance — only newly-arrived text flaps.
+- Toggle Reduce Motion (System Settings → Accessibility) and repeat. **Expect:** with it on, no
+  card reveal or flap animates; with it off, they do.
+- Open a round's result card near the tape's edge. **Expect:** it is a panel/popover that
+  escapes the tape's scroll clipping and flips to stay on-screen near an edge, not an `.overlay`
+  cut off by the ScrollView.
+- Let a round run, watching the tape auto-scroll. **Expect:** it follows the live slot (else the
+  failed slot, else the paused head, else the stop target) only when that target changes, never
+  on a per-second tick — manual scrolling is never fought. Animated, unless Reduce Motion is on.
+- Trackpad-scroll and mouse-wheel over the pinned block, including a sideways scroll on the
+  tape itself. **Expect:** the tape scrolls; momentum feels normal.
+- Look at a seat's context gauge and an overflowed footprint chip. **Expect:** the gauge reads
+  as tokens ("118k of 400k"), not a bare percent; the chip reads "+2 more", not "+2 2".
+
+### Live seat activity
+
+- Let a seat finish with a structured result (spec-shaped output). **Expect:** its row shows the
+  result string immediately; "Finished · files" appears only as a fallback with no structured
+  result.
+- Turn on VoiceOver and read a board slot, an LCD cell, and a seat row. **Expect:** full words,
+  never a code (e.g. "paused", not "PSD").
+
+### Plan viewer and editor
+
+- Type in the plan, pause 2s. **Expect:** the edit reaches `commands.jsonl` on disk.
+- Type an edit, then let a round land mid-edit. **Expect:** a banner appears; on the retarget
+  path (a round lands, then you commit) your edit re-targets onto the new head via a 3-way
+  merge, or (on a real conflict) stays on the old checkpoint with the banner explaining why.
+- Undo/redo through a Revert all, and while an IME composition is active. **Expect:** ⌘Z behaves
+  correctly in both cases — a second `textDidChange` after `NSUndoManagerDidUndoChange` must be
+  a no-op, not a double-undo.
+- Press **Go to latest** after scrolling away mid-round. **Expect:** it jumps to the live head.
+- Look at a hidden code fence (collapsed to a hairline) and a dimmed list marker. **Expect:**
+  both the opening and closing fence lines collapse, and it reads right, not just technically
+  correct.
+- Turn on VoiceOver over the rendered plan. **Expect:** it reads the raw Markdown syntax, not a
+  silently-rendered glyph.
+- Hover a note/edit highlight band with a real mouse, then Revert it. **Expect:** the gutter and
+  ghost markers track correctly while scrolling and at other pane widths; an inline ghost that
+  wraps at a line's end still reads correctly; Undo after Revert restores the text.
+- Click a toolbar button in the (non-activating) selection toolbar as the very first click.
+  **Expect:** it fires immediately (`acceptsFirstMouse`), not swallowed as a focus click.
+- Click into the notes rail's draft field, then click back into the plan. **Expect:** focus
+  moves to the draft field; clicking back into the plan commits the draft.
+- Scroll the document and the editor independently. **Expect:** the notes rail tracks both
+  scrolls live. Click into the editor: the rail swaps to show the seat inspector; click a seat:
+  it swaps back.
+- Add many detached/unanchored notes. **Expect:** note whether the rail's top stack pushes the
+  aligned lane down enough that cards drift below their source lines — flag if this needs a cap
+  or its own scroll.
+- Open the Revert-all confirmation popover and press Esc; hover a highlight band's tooltip.
+  **Expect:** Esc dismisses the popover without reverting; the tooltip appears on hover.
+- With the plan editor focused, open the heatmap and press Esc. **Expect:** note whether Esc
+  reaches the pane and closes the heatmap — `NSTextView` binds Esc to `complete:`, not
+  `cancelOperation:`, while focused, so this may only work with focus outside the editor.
+
+### Convergence — LCD sparkline, churn lane, heatmap
+
+- Click a heatmap cell. **Expect:** the page scrolls to that section of the plan.
+- Hover a lane marker, click it, press the chevron, then Esc from anywhere in the pane.
+  **Expect:** each responds, and Esc closes the heatmap regardless of where focus is.
+- Turn on VoiceOver over a churn-lane marker. **Expect:** a full-word label, not a symbol alone.
+- Toggle Reduce Motion and open/close the heatmap. **Expect:** no animated expand/collapse with
+  it on.
+- Look at the finished-rounds strip's first card and an open versions card. **Expect:** the
+  first card is not clipped at the left edge; the versions card sits beside its marker, not on
+  top of the plan text.
+- At a narrow pane where the tape itself scrolls, open the churn lane. **Expect:** note whether
+  the amber "flipping" marker and heatmap columns visibly drift out of alignment with the tape —
+  a known gap, see `docs/FOLLOWUPS.md`.
+
+### Release review
+
+- Open the release review on a real released-eligible intake (not the offscreen render).
+  **Expect:** "Release plan as tasks", "N of M selected", three sections (New tasks / Edits /
+  Dependencies), Cancel leading and **Release N Tasks** trailing as the default button, and "N
+  notes carried into task notes" when a round consumed a note.
+- If the change set has a follow-up op alongside creates, compare the footer's "Release N
+  tasks" count against the button's "Release M Tasks" count. **Expect:** they can legitimately
+  differ (the footer counts only new tasks; the button counts every op that will actually
+  write) — confirm this doesn't read as a bug in the room; see `docs/FOLLOWUPS.md`.
+
 ## Pass criteria (summary)
 
 - [ ] Step 1 — chevron collapses without selecting; row click selects + opens the project
@@ -290,3 +408,13 @@ holds here too.
   writes the change set and nothing reached `br` before it
 - [ ] Full plan variant — four mixed codex/claude drafters, polish, fresh eyes + dedup all run
   to review
+- [ ] Planning UI — every transport chord, hover-preview and pausing/stopping spinner works; LCD
+  labels/values read in full words with no truncation; the compact bar at ~700 pt never
+  code-truncates a state word; tape flap plays once per new text and never on first scroll-into-
+  view, honoring Reduce Motion; round cards escape scroll clipping; auto-scroll follows the live
+  target only; wheel/trackpad scroll works over the pinned block; seat rows show a structured
+  result immediately; VoiceOver reads full words everywhere (board, LCD, seat rows, plan syntax,
+  churn markers); the editor's undo/IME/retarget-on-landed-round paths hold; the notes rail
+  tracks both scrolls and swaps with the seat inspector; the heatmap's click-to-scroll, hover,
+  chevron and Esc-from-anywhere all work; the release review shows the as-built title/sections/
+  button and its footer-vs-button count difference doesn't read as a bug

@@ -16,7 +16,7 @@ final class ReleaseSummaryTests: XCTestCase {
         let drift: [OpDrift] = [.holds, .holds, .holds]
         let text = ReleaseSummary.text(ops, heldOpIndices: [1], drift: drift, dropped: [],
                                        ratings: [:], hasSession: { _ in true })
-        XCTAssertEqual(text, "Release 1 bead · 1 held edge · 2 notices (1 inject, 1 mail)")
+        XCTAssertEqual(text, "Release 1 task · 1 held edge · 2 notices (1 inject, 1 mail)")
     }
 
     func testEntirelyDroppedIsNothingToRelease() {
@@ -42,7 +42,7 @@ final class ReleaseSummaryTests: XCTestCase {
         // Invalidating with a session plans reclaim+inject+mail (`DeliveryPlanner.plan`),
         // but a reclaim is a graph write, not a notice sent to the holder — spec §8.4's
         // format counts only inject/mail, so this is 2 notices, not 3.
-        XCTAssertEqual(text, "Release 2 beads · 2 held edges · 2 notices (1 inject, 1 mail)")
+        XCTAssertEqual(text, "Release 2 tasks · 2 held edges · 2 notices (1 inject, 1 mail)")
     }
 
     func testImpossibleOpIsExcludedLikeADrop() {
@@ -55,7 +55,7 @@ final class ReleaseSummaryTests: XCTestCase {
         let drift: [OpDrift] = [.holds, .impossible(reason: "gone no longer exists")]
         let text = ReleaseSummary.text(ops, heldOpIndices: [], drift: drift, dropped: [],
                                        ratings: [:], hasSession: { _ in true })
-        XCTAssertEqual(text, "Release 1 bead")
+        XCTAssertEqual(text, "Release 1 task")
     }
 
     func testZeroCountSegmentsAreOmittedIndividually() {

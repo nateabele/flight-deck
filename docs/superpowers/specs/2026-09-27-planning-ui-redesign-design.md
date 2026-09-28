@@ -91,13 +91,16 @@ At the top edge of the live card (in the content, not the window toolbar — it 
 - **Transport**, three clusters: Back · Pause | Step ▶| · Next major ▶▶| · To review ▶▶◇ | Stop ■.
   A dot under a play button marks the default play mode; clicking a play button makes it the default.
   Hovering a play button previews its stop on the board and in the LCD (label becomes WOULD STOP).
-  Each has a Run menu command: Step ⌘', Next Major ⇧⌘', To Review ⌥⌘', Pause ⌘., Stop ⇧⌘..
+  Each has a Run menu command: Step ⌘', Next Major ⇧⌘', To Review ⌥⌘', Pause ⇧⌘., Stop ⌘..
   "Pausing…"/"Stopping…" swap the button label with an inline spinner until the safe point.
+  As built, Pause and Stop are swapped from the pairing above and Annotate moved off ⇧⌘A: Stop ⌘.
+  matches the OS-wide "period stops" convention, and ⇧⌘A was already claimed by Add Project, so
+  Annotate landed on ⌥⌘A instead (T6 ruling).
 - **LCD readout**, one dark-glass instrument, monospaced phosphor values, tabular numerals, cells:
   `ROUND · OF N` · `ELAPSED` · `SEATS DONE` · `SO FAR` (+/−) · `BILLED` · **`CONVERGENCE`** (§8.1) ·
   `STOPS AT`. States recolour only the relevant cell (PAUSED; FAILED red with the diagnosis replacing
   SO FAR; REVIEW amber "ready for you").
-- **Round tools** at the trailing end: Extend (⌘=) and Annotate (⇧⌘A).
+- **Round tools** at the trailing end: Extend (⌘=) and Annotate (⌥⌘A).
 - **Width:** cells drop in a fixed order as space runs out — BILLED, then SO FAR, then STOPS AT (the
   board repeats it) — and every remaining cell applies the full-name/short-code rule. A narrow pane
   gets the compact bar (transport + ROUND + ELAPSED + CONVERGENCE).

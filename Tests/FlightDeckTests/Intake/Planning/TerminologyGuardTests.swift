@@ -204,4 +204,31 @@ final class TerminologyGuardTests: XCTestCase {
         XCTAssertEqual(UIText.releaseButton(1), "Release 1 Task")
         XCTAssertEqual(UIText.releaseButton(14), "Release 14 Tasks")
     }
+
+    /// The release review sheet's title, sections, and the button it defaults to (spec §10).
+    func testReleaseButtonTitle() {
+        XCTAssertEqual(UIText.releaseSheetTitle, "Release plan as tasks")
+        XCTAssertEqual(UIText.newTasksSection, "New tasks")
+        XCTAssertEqual(UIText.editsSection, "Edits")
+        XCTAssertEqual(UIText.dependenciesSection, "Dependencies")
+        XCTAssertEqual(UIText.selectedCount(3, of: 5), "3 of 5 selected")
+        XCTAssertEqual(UIText.releaseButton(3), "Release 3 Tasks")
+        XCTAssertEqual(UIText.notesCarried(1), "1 note carried into task notes")
+        XCTAssertEqual(UIText.notesCarried(2), "2 notes carried into task notes")
+    }
+
+    /// Guards the exact defect T14 found: `ReleaseSummary` lives in `Sources/IntakeKit`, outside
+    /// `TerminologyScan`'s `Sources/FlightDeck` sweep, so its footer text once said "bead" with
+    /// nothing to catch it — this pins the sheet's actual runtime string, not just `UIText`'s.
+    func testReleaseSheetHasNoBeadWording() {
+        let ops: [ChangeOp] = [.createBead(NewBead(tempId: "n1", title: "n", description: "d"))]
+        let footer = ReleaseSummary.text(
+            ops, heldOpIndices: [], drift: [.holds], dropped: [], ratings: [:], hasSession: { _ in true })
+        XCTAssertFalse(footer.lowercased().contains("bead"), "release footer must say task, not bead: \(footer)")
+
+        for s in [UIText.releaseSheetTitle, UIText.newTasksSection, UIText.editsSection,
+                  UIText.dependenciesSection, UIText.notesCarried(1)] {
+            XCTAssertFalse(s.lowercased().contains("bead"), "\(s) must say task, not bead")
+        }
+    }
 }

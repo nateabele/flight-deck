@@ -152,6 +152,163 @@ final class PlanningRenderTests: XCTestCase {
         }
     }
 
+    /// Renders the release review sheet (spec §10) against a REAL `br` scratch repo — the sheet
+    /// loads its own `ReleaseReview` through `SessionStore.intakeService.reviewModel`, which
+    /// shells to `br list`/`br graph` with no seam `SessionStore` exposes for a fake runner, so
+    /// a picture of the real layout needs the real binary. Skipped when `br` isn't resolvable,
+    /// same as `BeadWriterLiveTests`. The scratch project lives under `$HOME`, never `/tmp` —
+    /// AGENTS.md / the task brief.
+    func testRenderReleaseReview() async throws {
+        guard let dir = ProcessInfo.processInfo.environment["FD_PLANNING_RENDER_DIR"] else {
+            throw XCTSkip("set FD_PLANNING_RENDER_DIR to render the planning PNGs")
+        }
+        guard let brPath = Self.resolveBrPath() else {
+            throw XCTSkip("br not found at ~/.local/bin/br or on PATH")
+        }
+        let out = URL(fileURLWithPath: dir)
+        try FileManager.default.createDirectory(at: out, withIntermediateDirectories: true)
+
+        let runner = SystemFlywheelProcessRunner()
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let projectDir = "\(home)/.fd-planning-render-\(UUID().uuidString)"
+        try FileManager.default.createDirectory(atPath: projectDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: projectDir) }
+        let (initOut, initCode) = try await runner.run(brPath, ["init"], cwd: projectDir)
+        XCTAssertEqual(initCode, 0, "br init failed to set up the scratch repo: \(initOut)")
+
+        func create(_ title: String) async throws -> String {
+            let (createOut, code) = try await runner.run(brPath, ["q", title], cwd: projectDir)
+            XCTAssertEqual(code, 0, "br q failed: \(createOut)")
+            return createOut.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        let skillMatch = try await create("Skill match is a soft constraint")
+        let dispatchBoard = try await create("Dispatch board v1")
+
+        let store = SessionStore(provider: nil, persistence: FakePersistence(), intakesRoot: root)
+        var intake = Intake(projectPath: projectDir,
+                            intent: "Build a field-service scheduling platform: technicians, jobs, a dispatch board and mobile check-in",
+                            createdAt: now.addingTimeInterval(-3600))
+        intake.state = .review
+        let pre = Precondition(status: "open", assignee: nil)
+        // One of each grouping (spec §10): New tasks (a create, a follow-up), Edits (an edit, a
+        // reopen), Dependencies (two edges) — every section on screen at once for review.
+        intake.changeSet = ChangeSet(graphObservedAt: now, ops: [
+            .createBead(NewBead(tempId: "t1", title: "Technician skills", description: "Skill tags with an expiry date.")),
+            .createBead(NewBead(tempId: "t2", title: "Offline check-in", description: "Queue check-ins while offline.")),
+            .followUp(tempId: "t3", of: dispatchBoard, title: "Add a v2 auto-assignment mode",
+                     description: "Dispatchers asked for this after the pilot.", pre: pre),
+            .editBead(id: skillMatch, set: FieldSet(description: "Skill match is soft; a dispatcher may override it with a reason."),
+                     pre: pre, delivery: Delivery(rating: .clarifying, reason: "wording only")),
+            .reopen(id: dispatchBoard, reason: "Needs one more pass after the dispatch-scoring change.", pre: pre),
+            .addEdge(from: .new("t2"), to: .new("t1"), kind: .blocks),
+            .addEdge(from: .existing(skillMatch), to: .new("t1"), kind: .blocks),
+        ])
+        try IntakeStore(root: root).save(intake)
+
+        // The graph the change set was validated against at triage — `reviewModel` refuses to
+        // build a `ReleaseReview` without one (`IntakeService.triageGraph`, private, file-only:
+        // no injection seam either), so this writes the real `br` read straight to where it
+        // looks. Nothing has changed since, so it's also the drift baseline: every op holds.
+        let triageGraph = try await IntakeGraphReader(runner: runner, brPath: brPath).read(project: projectDir)
+        let triageDir = IntakeStore(root: root).directory(for: intake.id).appendingPathComponent("triage", isDirectory: true)
+        try FileManager.default.createDirectory(at: triageDir, withIntermediateDirectories: true)
+        try IntakeJSON.encoder.encode(triageGraph).write(to: triageDir.appendingPathComponent("graph.json"))
+
+        // A checkpoint whose annotation the round consumed, so "N notes carried into task
+        // notes" (spec §10) actually shows: `consumedNotesCount` counts a `TapeNote` only once
+        // some checkpoint's `record.annotations` names it.
+        let tapes = TapeStore(intakeDirectory: IntakeStore(root: root).directory(for: intake.id))
+        var tape = Tape()
+        try tapes.saveTape(tape)
+        try tapes.writeCheckpoint(
+            Checkpoint(id: 1, stage: .synthesis, round: 0, major: true, createdAt: now.addingTimeInterval(-900),
+                       record: RoundRecord(slots: [], annotations: [PlanNote(note: "Confirm the travel buffer with the pilot region.")]),
+                       startedAt: now.addingTimeInterval(-1000)),
+            files: [:], into: &tape)
+        tape.status = .paused
+        try tapes.saveTape(tape)
+
+        // `reviewModel()` hops off `IntakeService`'s `@MainActor` isolation for its real `br`
+        // reads and back again; `PlanningRender.write`'s offscreen render only pumps
+        // `RunLoop.run(until:)` synchronously, which never redelivers that hop-back (GCD's
+        // main-queue drain doesn't reenter itself mid-frame), so the sheet's own `.task` would
+        // spin forever on screen. Loading it here, with a real `await`, and handing the result
+        // in as `previewReview` sidesteps that — `.task` still fires and reloads over it, but
+        // only after the snapshot is already taken.
+        let loaded = await store.intakeService.reviewModel(intake.id)
+        let review = try XCTUnwrap(loaded)
+
+        let view = ReleaseReviewView(store: store, intakeID: intake.id, onClose: {}, previewReview: review)
+        try PlanningRender.write(view, size: NSSize(width: 680, height: 620),
+                                 to: out.appendingPathComponent("planning-release-review.png"))
+    }
+
+    /// The shaping screen's three convergence states (`ConvergenceFixture`, shared with
+    /// `ConvergenceRenderTests`) at both control-bar widths — 1100 pt is `ConvergenceRenderTests`'
+    /// own focus, so this fills in the 700 pt the compact bar takes for converging and plateau
+    /// too (diverging's own 700 pt render already exists there).
+    func testRenderConvergenceStatesAtBothWidths() async throws {
+        guard let dir = ProcessInfo.processInfo.environment["FD_PLANNING_RENDER_DIR"] else {
+            throw XCTSkip("set FD_PLANNING_RENDER_DIR to render the planning PNGs")
+        }
+        let out = URL(fileURLWithPath: dir)
+        let store = IntakeStore(root: root)
+        let scenarios = ConvergenceFixture.standardScenarios(claude: claude)
+
+        var intakes: [String: Intake] = [:]
+        for scenario in scenarios {
+            var intake = Intake(projectPath: "/tmp/fieldOS",
+                                intent: "Build a field-service scheduling platform: technicians, jobs, a dispatch board and mobile check-in",
+                                createdAt: now.addingTimeInterval(-7200))
+            intake.state = .shaping
+            intake.chosenPreset = .featurePlan
+            intake.exchanges = [round1]
+            intake.roundConfig = RoundConfig(
+                drafters: [Slot(codex, persona: .arbiter), Slot(claude, persona: .realist)], synthesizer: Slot(claude),
+                reviewer: Slot(codex), integrator: codex, encoder: codex, polisher: codex,
+                refinementCap: 3, polishCap: 2, freshEyesAndDedup: true, defaultPlay: .nextMajor, customized: false)
+            try store.save(intake)
+            try ConvergenceFixture.writeTape(scenario, for: intake.id, store: store, now: now, codex: codex, claude: claude)
+            intakes[scenario.name] = intake
+        }
+
+        let service = IntakeService(store: store, triageSettings: TriageSettings(harness: .codex, model: "gpt-6-sol", effort: "high"),
+                                    availableModels: .defaults, inject: { _, _, _, _ in true }, hasSession: { _, _ in false })
+        await service.launchRecovery?.value
+        service.pollTapes()
+        for intake in intakes.values { await service.convergenceFold(for: intake.id)?.value }
+
+        for scenario in scenarios {
+            let intake = try XCTUnwrap(intakes[scenario.name])
+            for width in [1100, 700] as [CGFloat] {
+                try PlanningRender.write(IntakeDetailView(service: service, intake: intake, onOpenReview: {}),
+                                         size: NSSize(width: width, height: 1500),
+                                         to: out.appendingPathComponent("planning-convergence-\(scenario.name)-\(Int(width)).png"))
+            }
+        }
+    }
+
+    /// `~/.local/bin/br` first — where `br` actually lives in this environment, and a headless
+    /// `xcodebuild test` process's PATH is not guaranteed to include it — then the process's own
+    /// PATH, so a host with `br` installed conventionally still finds it. Same lookup as
+    /// `BeadWriterLiveTests`.
+    private static func resolveBrPath() -> String? {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let localBin = "\(home)/.local/bin/br"
+        if FileManager.default.isExecutableFile(atPath: localBin) { return localBin }
+        guard let path = ProcessInfo.processInfo.environment["PATH"] else { return nil }
+        for dir in path.split(separator: ":") {
+            let candidate = "\(dir)/br"
+            if FileManager.default.isExecutableFile(atPath: candidate) { return candidate }
+        }
+        return nil
+    }
+
+    private final class FakePersistence: SessionPersisting {
+        func load() -> SessionSnapshot? { nil }
+        func save(_ snapshot: SessionSnapshot) {}
+    }
+
     /// What a seat beat redraws, counted (`RenderProbe`) in a real pane over a real service: the
     /// live card, and not the pane, its header, its Clarifications or its plan. And a publish
     /// the pane does observe re-evaluates the pane, but not those three, whose inputs didn't

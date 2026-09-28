@@ -1178,19 +1178,61 @@ round fails only if no draft survives. Every other role fails the round with a `
 the shaping view shows — never a silent substitution. A failed round leaves the tape `.failed`
 with that diagnosis; only a fresh ▶/⏭/⏩ (or Retry) runs it again.
 
-*The app side.* `IntakeService` watches every `.shaping` intake's `tape.json` on the shared
-`WatchClock` (reloading only when its mtime moves) and publishes it to the shaping view:
-`TapeStrip`, the transport bar, the status line, the pause banner, round cards, and a plan viewer
-(Plan / Diff vs previous / Change set). A tape change that is only the runner's
-`heartbeat`/`runnerPID` is not republished (it would re-render every observer each second of a
-run); the latest read is kept for the liveness check instead. When the tape reaches review it
-copies the latest checkpoint's `changeset.json` into `intake.json` and that checkpoint's
-`graph.json` into `triage/graph.json` (release review measures drift from, and re-validates
-against, the graph the change set was validated against), moves the intake to `.review`, and
-reaps the runner. A `.shaping` intake counts toward the project's "needs you" rollup when its
-tape is paused, failed, stopped, or idle with **no** target — and in each case only with no
-commands pending (an unacked command is queued work, not a wait on the human); idle with a
-target is a runner about to start. Discard while shaping sends ⏹, reaps, then discards.
+*The app side — the planning UI.* Everything below lives under `Sources/FlightDeck/Intake/`,
+built on top of the engine files above (`tape.json`, `checkpoints/`, `runs/<…>/activity.json`);
+none of it is engine state, all of it is a view or the service glue that feeds one.
+
+- **Data flow, one clock.** `IntakeService.pollTapes()` is the single timer (`WatchClock`) behind
+  every `.shaping` intake: it re-reads a tape only when `tape.json`'s mtime moved (one `stat`
+  otherwise), republishes it unless the only change is the runner's `heartbeat`/`runnerPID` (that
+  would redraw every observer once a second for nothing), then in the same beat follows the
+  round-in-progress's seat files (`pollSeats`, from `runs/<…>/activity.json` and `result.json`),
+  refolds convergence when a round lands, and settles pending starts — "one clock for all of it,
+  never a second timer" (`pollTapes`'s own doc comment). Seat data is published on its own object,
+  `SeatFeed` (`IntakeService.swift`), not `IntakeService`'s own `@Published` properties: a running
+  round rewrites its seat files about once a second, and folding that into the service itself
+  would redraw every view observing it — including, through `SessionStore`'s forward of
+  `objectWillChange`, views that show no seat at all — for values only the live card and the seat
+  inspector read. Those two observe `seats` (the `SeatFeed`) alone; everything else observes
+  `IntakeService` and is untouched by a seat beat.
+- **File map**, `Sources/FlightDeck/Intake/`:
+  - `IntakeDetailView.swift` — the intake's whole detail pane for every state; for `.shaping` it
+    assembles the header progress summary (`ProgressSummary.swift`), Clarifications, the pinned
+    live block (`ControlBar` + `LCDModel` + `DetailInspector`), the departures board
+    (`DeparturesBoard.swift`, `BoardModel.swift`, `SplitFlapText.swift`, `FlapPolicy.swift`,
+    `LabelFit.swift`), finished-round cards (`LiveCard.swift`), the convergence cell and heatmap
+    (`ConvergenceViews.swift`, `ConvergenceCellModel.swift`), and the plan tab
+    (`PlanEditor/PlanSection.swift`).
+  - `PlanEditor/` — the Markdown editor: `PlanTextView.swift` (the `NSTextView` host and its
+    TextKit 2 layout), `MarkdownStyler.swift` (live-preview styling), `EditLayer.swift` +
+    `DecorationLayer.swift` (below), `SelectionToolbar.swift` (the floating annotate/highlight
+    toolbar), `NotesRail.swift` (the side rail of note/edit cards, tracking the editor's scroll).
+  - `IntakeService.swift` — the service described above, plus `ShapingModel.swift` (pure
+    view-model folds over a `Tape`) and `RoundConfigEditor.swift` (the Rounds inspector editor).
+  - `ReleaseReviewView.swift` — the release sheet (spec §10); `IntakeGraphReader.swift` and
+    `BeadWriter.swift`/`IntakeDelivery.swift` are release's engine-facing neighbors, not views.
+  - `Planning/FloatingCard.swift`, `Planning/UIText.swift` — shared across the above (see below).
+- **`DecorationLayer`** (`PlanEditor/DecorationLayer.swift`) is a shared, key-scoped helper: each
+  caller — the edit layer (inserted/deleted-line backgrounds) and the notes rail (underline bands)
+  — clears and redraws only the text-storage ranges it tagged with its own `key`, so two
+  decorators can share one `NSTextStorage` without one wiping the other's ranges on every redraw
+  (the merge-time ruling behind T11/T12's shared helper). A note's own highlight is a separate
+  overlay band *view*, not a `DecorationLayer` — TextKit 2 does not render `.underlineStyle` as a
+  paintable attribute, so a note's band is drawn by a plain `NSView` positioned over its anchor's
+  frame, recomputed on layout and scroll.
+- **The overlays**: the annotate/highlight `SelectionToolbar` and a note's card both float above
+  the text via `FloatingCard.swift` — a popover/panel, not a SwiftUI `.overlay`, specifically so
+  it escapes the plan `ScrollView`'s clip and flips to stay on-screen near an edge; it closes on
+  any enclosing scroll and accepts clicks even as a non-activating panel (`acceptsFirstMouse`).
+  The convergence heatmap and a round's result card use the same mechanism.
+- When the tape reaches review, `IntakeService` copies the latest checkpoint's `changeset.json`
+  into `intake.json` and that checkpoint's `graph.json` into `triage/graph.json` (release review
+  measures drift from, and re-validates against, the graph the change set was validated against),
+  moves the intake to `.review`, and reaps the runner. A `.shaping` intake counts toward the
+  project's "needs you" rollup when its tape is paused, failed, stopped, or idle with **no**
+  target — and in each case only with no commands pending (an unacked command is queued work, not
+  a wait on the human); idle with a target is a runner about to start. Discard while shaping sends
+  ⏹, reaps, then discards.
 
 **Held edges.** An edge from an *existing* bead onto a *new* one is always held — written last
 in a release, after every create, edit and reopen has landed and been rechecked — because
