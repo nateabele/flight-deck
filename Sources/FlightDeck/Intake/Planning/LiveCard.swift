@@ -29,7 +29,11 @@ struct LiveCard: View {
     /// tick (their contract — `offer` each tick with the current values), and the returned
     /// values are what the rows draw. Observing them as well would redraw the card a second
     /// time for every tick that released a hold.
-    @State private var dwell = DwellBank()
+    @State private var ownDwell = DwellBank()
+    /// The detail pane's bank, when it hands one in: the seat inspector peeks at the same holds
+    /// the rows show (`DwellBank.peek`). Triage and the renders keep their own.
+    fileprivate var sharedDwell: DwellBank?
+    private var dwell: DwellBank { sharedDwell ?? ownDwell }
 
     /// `activity` is `IntakeService.triageActivity(_:)`; `pending` its `pending[id]`.
     static func triage(intake: Intake, activity: SeatActivity?, pending: PendingStart?) -> LiveCard {
@@ -48,12 +52,13 @@ struct LiveCard: View {
     static func shaping(intake: Intake, tape: Tape, activities: [String: SeatActivity], records: [String: RunRecord],
                         results: [String: SeatResult] = [:], pending: PendingStart?, editConflict: EditConflictNotice? = nil,
                         selectedRound: Binding<Int?> = .constant(nil), selectedSeat: Binding<String?> = .constant(nil),
+                        dwell: DwellBank? = nil,
                         controlBar: @escaping (Date) -> AnyView, board: @escaping (Date) -> AnyView) -> LiveCard {
         LiveCard(intake: intake,
                  kind: .shaping(tape: tape, seats: SeatFiles(activities: activities, records: records, results: results),
                                 editConflict: editConflict, selectedRound: selectedRound, selectedSeat: selectedSeat,
                                 controlBar: controlBar, board: board),
-                 pending: pending)
+                 pending: pending, sharedDwell: dwell)
     }
 
     var body: some View {
@@ -226,7 +231,7 @@ struct LiveCard: View {
             return [LiveSeat(id: "triage", model: model)]
         case .shaping(let tape, let seats, _, _, _, _, _):
             guard let round = tape.roundInProgress ?? pendingRound else { return [] }
-            return LiveSeats.rows(round: round, config: intake.roundConfig, seats: pending == nil ? seats : SeatFiles(),
+            return LiveSeats.rows(round: round, config: intake.roundConfig, seats: LiveSeats.files(seats, pending: pending),
                                   now: now)
         }
     }
@@ -314,6 +319,13 @@ enum LiveSeats {
         }
     }
 
+    /// The seat files a round's rows draw from: none while a start is pending, because what is
+    /// on disk then is the PREVIOUS round's, and drawing it showed finished seats under a
+    /// "starting" clock. The card, the LCD and the seat inspector all read through this.
+    static func files(_ seats: SeatFiles, pending: PendingStart?) -> SeatFiles {
+        pending == nil ? seats : SeatFiles()
+    }
+
     static func rows(round: PlannedRound, config: RoundConfig?, seats: SeatFiles, now: Date) -> [LiveSeat] {
         let (activities, records) = (seats.activities, seats.records)
         let runs = Set(activities.keys).union(records.keys)
@@ -368,6 +380,17 @@ final class DwellBank {
             seat.model.action = held.action
             return seat
         }
+    }
+
+    /// `seat` as its row shows it — the headline and action its scheduler is holding — without
+    /// offering anything or dropping other seats' schedulers (which `settle` over a one-seat list
+    /// would). For the seat inspector, which must never say something the row isn't.
+    func peek(_ seat: LiveSeat) -> LiveSeat {
+        guard let scheduler = schedulers[seat.id] else { return seat }
+        var seat = seat
+        seat.model.headline = scheduler.headline
+        seat.model.action = scheduler.action
+        return seat
     }
 }
 
