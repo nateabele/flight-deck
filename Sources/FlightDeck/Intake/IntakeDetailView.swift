@@ -433,7 +433,7 @@ struct IntakeDetailView: View {
         BoardModel(intake: intake, tape: tape, config: config, now: now, selected: selectedCheckpoint, preview: preview)
     }
 
-    /// The round in progress's seats, as the card's rows draw them — SEATS DONE and BILLED count
+    /// The round in progress's seats, as the card's rows draw them — AGENTS DONE and BILLED count
     /// the same seats the rows below show. A start not yet heard from shows none, as the card does.
     private func seatModels(_ tape: Tape, config: RoundConfig, now: Date, seats: SeatFiles) -> [SeatRowModel] {
         guard let round = tape.roundInProgress, service.pending[intake.id] == nil else { return [] }
@@ -621,7 +621,7 @@ struct IntakeDetailView: View {
                         .buttonStyle(.link)
                         // The only way to change a stage's round count before the run: say so,
                         // since the summary line alone reads as a fixed description.
-                        .help("Change the seats and how many rounds each stage runs — a cap of 0 removes the stage")
+                        .help("Change the agents and how many rounds each stage runs — a cap of 0 removes the stage")
                         .accessibilityIdentifier("intake-edit-in-inspector")
                 }
             }
@@ -754,7 +754,7 @@ struct IntakeDetailView: View {
                         case .notesRail: EmptyView()
                         case .nothing:
                             InspectorPlaceholder(title: "Nothing to Inspect",
-                                                 message: "The rounds for a plan, and the seats of a running round, show here.")
+                                                 message: "The rounds for a plan, and the agents of a running round, show here.")
                         }
                     }
                     .padding(16)
@@ -790,14 +790,14 @@ struct IntakeDetailView: View {
                         SeatInspector(model: seat.model, activity: files.activities[seat.model.id],
                                       runDirectory: service.runDirectory(intake.id, run: seat.model.id))
                     } else {
-                        InspectorPlaceholder(title: "No Seat Selected", message: "Click a seat in the round to see its details.")
+                        InspectorPlaceholder(title: "No Agent Selected", message: "Click an agent in the round to see its details.")
                     }
                 }
             }
         } else if tape?.roundInProgress == nil {
-            InspectorPlaceholder(title: "No Round Running", message: "Seats show here while a round is at work.")
+            InspectorPlaceholder(title: "No Round Running", message: "Agents show here while a round is at work.")
         } else {
-            InspectorPlaceholder(title: "No Seat Selected", message: "Click a seat in the round to see its details.")
+            InspectorPlaceholder(title: "No Agent Selected", message: "Click an agent in the round to see its details.")
         }
     }
 

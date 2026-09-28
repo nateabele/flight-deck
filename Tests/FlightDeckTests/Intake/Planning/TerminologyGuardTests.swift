@@ -3,15 +3,21 @@ import IntakeKit
 @testable import FlightDeck
 
 /// A lightweight, comment-and-interpolation-aware scanner over every `"…"` literal in
-/// `Sources/FlightDeck/**/*.swift` — the guard behind spec §2's "tasks, never beads" and the
-/// Flight Control rename. Deliberately not a real Swift lexer: it tracks just enough state
-/// (quotes, `\"` escapes, `\(…)` interpolation depth, `"""` blocks, and `//` comments) to find
-/// every literal without one.
+/// `Sources/FlightDeck/**/*.swift` — the guard behind spec §2's "tasks, never beads", the
+/// Flight Control rename, and the "agent, never seat" rename. Deliberately not a real Swift
+/// lexer: it tracks just enough state (quotes, `\"` escapes, `\(…)` interpolation depth, `"""`
+/// blocks, and `//` comments) to find every literal without one.
 enum TerminologyScan {
-    /// `\bbeads?\b` or `\bflywheel\b`, case-insensitive. `agent-flywheel` (the external
-    /// methodology's proper name) and any URL are masked out before this runs — see `offense`.
+    /// `\bbeads?\b`, `\bflywheel\b` or `\bseats?\b`, case-insensitive. `agent-flywheel` (the
+    /// external methodology's proper name) and any URL are masked out before this runs — see
+    /// `offense`. `seat`/`seats` is the user-facing word for one model run doing one role in a
+    /// round; the type/property names (`SeatRow`, `seatActivities`…), file names, persisted
+    /// paths (`runs/<run>`), accessibility IDENTIFIERS, test names and IntakeKit's agent-facing
+    /// prompts all keep "seat" on purpose and never appear as a scanned string literal, so they
+    /// need no allow-list entry — see `isExempt(line:)`'s `accessibilityIdentifier(` skip and
+    /// `codeLineOffenses`'s `\(…)` interpolation collapse, which already erase both.
     private static let bannedWord = try! NSRegularExpression(
-        pattern: "\\b(beads?|flywheel)\\b", options: [.caseInsensitive]
+        pattern: "\\b(beads?|flywheel|seats?)\\b", options: [.caseInsensitive]
     )
     private static let agentFlywheel = try! NSRegularExpression(
         pattern: "agent[- ]flywheel(\\.com)?", options: [.caseInsensitive]

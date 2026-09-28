@@ -709,7 +709,7 @@ private struct Pause: Error {
         Pause(diagnosis: Diagnosis(category: .harnessError, detail: "the round config has \(missing)",
                                    // A `.shaping` intake's config is fixed, so "edit the
                                    // config" was an action nobody could take from here.
-                                   action: "Discard this intake and capture it again with a different fidelity, or with that seat filled in the Rounds editor."))
+                                   action: "Discard this intake and capture it again with a different fidelity, or with that agent filled in the Rounds editor."))
     }
 }
 

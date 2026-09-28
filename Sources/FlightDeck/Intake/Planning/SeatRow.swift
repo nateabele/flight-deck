@@ -166,7 +166,7 @@ struct SeatRow: View {
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .help("Files this seat has read or edited, by directory")
+                .help("Files this agent has read or edited, by directory")
                 .accessibilityLabel("Files by directory")
                 .accessibilityValue(model.footprint.map { "\($0.dir) \($0.count)" }.joined(separator: ", "))
             }
