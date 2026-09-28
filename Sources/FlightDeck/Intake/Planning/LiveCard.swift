@@ -146,12 +146,18 @@ struct LiveCard: View {
         let row = SeatRow(model: seat.model, queuedText: queuedText(now: now))
         if case .shaping(_, _, _, _, let selectedSeat, _, _) = kind {
             let selected = selectedSeat.wrappedValue == seat.id
+            let toggle = { selectedSeat.wrappedValue = selected ? nil : seat.id }
             row
                 .background(selected ? Color.accentColor.opacity(0.14) : .clear, in: RoundedRectangle(cornerRadius: 7))
                 .contentShape(Rectangle())
-                .onTapGesture { selectedSeat.wrappedValue = selected ? nil : seat.id }
+                .onTapGesture(perform: toggle)
+                // Keyboard access (spec §14), as the tape's slots have it: Tab reaches the row
+                // under Full Keyboard Access, Return or Space selects it as a click does. It was
+                // tap-only, so the seat inspector had no keyboard way in.
+                .focusable(interactions: .activate)
+                .onKeyPress(keys: [.return, .space]) { _ in toggle(); return .handled }
                 .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
-                .accessibilityAction { selectedSeat.wrappedValue = selected ? nil : seat.id }
+                .accessibilityAction { toggle() }
         } else {
             row
         }
@@ -389,9 +395,12 @@ private struct FinishedRounds: View {
                         ForEach(cards) { card in
                             cardView(card, selected: card.checkpointID == selected)
                                 .id(card.checkpointID)
-                                .onTapGesture {
-                                    selection = card.checkpointID == tape.head?.id ? nil : card.checkpointID
-                                }
+                                .onTapGesture { choose(card) }
+                                // Keyboard and VoiceOver reach a card as a click does (spec §14):
+                                // it carried the button trait with no action behind it.
+                                .focusable(interactions: .activate)
+                                .onKeyPress(keys: [.return, .space]) { _ in choose(card); return .handled }
+                                .accessibilityAction { choose(card) }
                         }
                     }
                     // As wide as the fade, so a card at either end of the strip sits clear of it.
@@ -409,6 +418,11 @@ private struct FinishedRounds: View {
                 .onChange(of: cards.last?.checkpointID) { _, id in proxy.scrollTo(id, anchor: .trailing) }
             }
         }
+    }
+
+    /// Choosing the head goes back to following it, the same rule the board's slots follow.
+    private func choose(_ card: RoundCard) {
+        selection = card.checkpointID == tape.head?.id ? nil : card.checkpointID
     }
 
     private func name(_ card: RoundCard) -> String {

@@ -13,6 +13,15 @@ struct PlanningActions: Equatable {
     /// The intake the actions press for; nil for a bar with nothing behind it.
     var intakeID: UUID?
     var perform: (TransportButton) -> Void
+    /// The section heatmap's Run-menu toggle; nil while the run has no per-section numbers yet
+    /// (the heatmap would open onto nothing).
+    var heatmap: HeatmapToggle?
+
+    /// Show or hide the heatmap under the board — the same toggle as a click on CONVERGENCE.
+    struct HeatmapToggle {
+        var open: Bool
+        var toggle: () -> Void
+    }
 
     init(enabled: Set<TransportButton>, intakeID: UUID? = nil, perform: @escaping (TransportButton) -> Void) {
         self.enabled = enabled
@@ -21,7 +30,8 @@ struct PlanningActions: Equatable {
     }
 
     static func == (a: PlanningActions, b: PlanningActions) -> Bool {
-        a.intakeID == b.intakeID && a.enabled == b.enabled
+        a.intakeID == b.intakeID && a.enabled == b.enabled && a.heatmap?.open == b.heatmap?.open
+            && (a.heatmap == nil) == (b.heatmap == nil)
     }
 
     /// The live card's actions for intake `id`. Extend lengthens the current cycle by one
@@ -107,8 +117,15 @@ struct PlanningCommands: Commands {
             Divider()
             item("Extend", .extend, "=", [.command])
             item("Annotate", .annotate, "a", [.command, .option])
+            Divider()
+            // No chord: ⌥⌘H is Hide Others and ⇧⌘H is taken in terminals; the item is how the
+            // keyboard (and VoiceOver) reaches the heatmap at all, not a shortcut to it.
+            Button(Self.heatmapTitle(open: actions?.heatmap?.open ?? false)) { actions?.heatmap?.toggle() }
+                .disabled(actions?.heatmap == nil)
         }
     }
+
+    static func heatmapTitle(open: Bool) -> String { open ? "Hide Section Heatmap" : "Show Section Heatmap" }
 
     private func item(_ title: String, _ button: TransportButton, _ key: KeyEquivalent,
                       _ modifiers: EventModifiers) -> some View {

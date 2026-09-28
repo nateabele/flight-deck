@@ -719,13 +719,15 @@ final class ChurnLaneView: NSView {
         input?.onOpen(marker.section)
     }
 
-    /// The versions card only for an amber marker (spec §8.2): a quiet section has nothing to
-    /// explain, and a card on every heading would be noise.
-    /// Opens `section`'s versions card as a hover would — for offscreen renders, which can't hover.
+    /// Opens `section`'s versions card as a hover would — for offscreen renders, which can't
+    /// hover, and for a marker's "Show Versions" accessibility action, which is the only way to
+    /// it without a pointer.
     func presentVersions(for section: String) {
-        hover(markerRects().first { $0.0.section == section })
+        hover(markerRects(all: true).first { $0.0.section == section })
     }
 
+    /// The versions card only for an amber marker (spec §8.2): a quiet section has nothing to
+    /// explain, and a card on every heading would be noise.
     private func hover(_ hit: (Marker, NSRect)?) {
         let section = hit?.0.section
         if section != hovered {
@@ -764,6 +766,14 @@ final class ChurnLaneView: NSView {
             let label = HeatmapModel.label(marker.section) + " " + HeatmapModel.name(marker.section)
             setAccessibilityLabel("\(label): \(marker.model.caption ?? "changed"). Opens the section heatmap.")
             setAccessibilityParent(lane)
+            // The versions card opened only on hover; a flagged section's round-by-round
+            // evidence needs a way in without a pointer too (spec §14).
+            if marker.model.hot {
+                setAccessibilityCustomActions([NSAccessibilityCustomAction(name: "Show Versions") { [weak lane, section] in
+                    lane?.presentVersions(for: section)
+                    return lane != nil
+                }])
+            }
         }
 
         override func accessibilityFrame() -> NSRect {
