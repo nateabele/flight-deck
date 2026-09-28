@@ -69,18 +69,18 @@ final class FinishedRoundsModelTests: XCTestCase {
     func testOutcomeIsTheWorstSeat() throws {
         let faces = try everyKind().map(FinishedRoundsModel.face)
         XCTAssertEqual(faces.map(\.outcome), [.ran, .fellBack, .failed, .ran, .unknown])
-        XCTAssertEqual(faces.map(\.outcomeText), ["3 seats ran as asked", "1 of 2 seats fell back",
-                                                  "1 of 2 seats failed", "1 seat ran as asked", "—"])
+        XCTAssertEqual(faces.map(\.outcomeText), ["3 agents ran as asked", "1 of 2 agents fell back",
+                                                  "1 of 2 agents failed", "1 agent ran as asked", "—"])
     }
 
     /// The card's short forms are shorthand; hover and VoiceOver get the whole thing.
     func testHelpAndAccessibilitySayTheFullValues() throws {
         let refine = FinishedRoundsModel.face(try everyKind()[2])
         XCTAssertEqual(refine.accessibilityLabel,
-                       "Refine 1, 4:50, 1 change, +3/−0, agreed 11 · somewhat 2 · declined 1, 1 of 2 seats failed")
-        XCTAssertEqual(refine.help, "Refine 1 · 4:50 · 1 change · +3/−0 · agreed 11 · somewhat 2 · declined 1 · 1 of 2 seats failed")
+                       "Refine 1, 4:50, 1 change, +3/−0, agreed 11 · somewhat 2 · declined 1, 1 of 2 agents failed")
+        XCTAssertEqual(refine.help, "Refine 1 · 4:50 · 1 change · +3/−0 · agreed 11 · somewhat 2 · declined 1 · 1 of 2 agents failed")
         let draft = FinishedRoundsModel.face(try everyKind()[0])
-        XCTAssertEqual(draft.accessibilityLabel, "Draft, duration unknown, 3 drafts, no verdicts, 3 seats ran as asked",
+        XCTAssertEqual(draft.accessibilityLabel, "Draft, duration unknown, 3 drafts, no verdicts, 3 agents ran as asked",
                        "VoiceOver never reads a dash")
     }
 
