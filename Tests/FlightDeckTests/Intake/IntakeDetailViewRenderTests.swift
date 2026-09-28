@@ -5,7 +5,7 @@ import XCTest
 @testable import FlightDeck
 
 /// Renders `IntakeDetailView` offscreen to PNGs for design review — skipped by default. Set
-/// `FD_INTAKE_RENDER_DIR` to an output directory to run it. Like `ShapingViewRenderTests`, a
+/// `FD_INTAKE_RENDER_DIR` to an output directory to run it. Like `PlanningRenderTests`, a
 /// picture rather than an assertion: layout can't be checked headlessly in any useful way,
 /// but it can be looked at without launching the app (AGENTS.md rule 2).
 @MainActor

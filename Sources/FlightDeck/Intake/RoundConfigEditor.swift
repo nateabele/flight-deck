@@ -23,42 +23,21 @@ struct RoundConfigEditor: View {
     let preset: Preset
     @Binding var config: RoundConfig
     let available: AvailableModels
-    /// In the inspector the grid is the whole panel, under a plain title; a disclosure there
-    /// would be a second way to hide what the panel was opened to show.
-    var collapsible = true
-
-    /// Starts open: choosing anything above Bead means the human is about to look at (or
-    /// tune) exactly this, not something they need to go find behind a second click.
-    @State private var isExpanded = true
-
-    /// Column widths shared by the header row and every data row — a Picker's intrinsic width
-    /// otherwise shifts with whichever value is selected (e.g. "codex" vs "claude"), which
-    /// would make the columns wander out of alignment row to row.
-    private enum ColumnWidth {
-        static let role: CGFloat = 92
-        static let harness: CGFloat = 76
-        static let effort: CGFloat = 70
-        static let fallback: CGFloat = 150
-    }
 
     var body: some View {
-        if collapsible {
-            DisclosureGroup(Self.label(preset: preset, config: config), isExpanded: $isExpanded) {
-                editor.padding(.top, 6)
-            }
-        } else {
-            VStack(alignment: .leading, spacing: 14) {
-                Text(Self.label(preset: preset, config: config)).font(.headline)
-                stackedSlots
-                Divider()
-                capsForm
-            }
+        // The whole inspector panel, under a plain title: a disclosure here would be a second
+        // way to hide what the panel was opened to show.
+        VStack(alignment: .leading, spacing: 14) {
+            Text(Self.label(preset: preset, config: config)).font(.headline)
+            stackedSlots
+            Divider()
+            capsForm
         }
     }
 
-    /// The inspector's form of the seats: one block per seat, its controls on two lines. The
-    /// five-column grid needs ~530 pt, and an inspector column is narrower than that — the
-    /// Model field collapsed to nothing and the Fallback picker ran off the panel's edge.
+    /// One block per seat, its controls on two lines. A five-column grid needed ~530 pt, and an
+    /// inspector column is narrower than that — the Model field collapsed to nothing and the
+    /// Fallback picker ran off the panel's edge.
     private var stackedSlots: some View {
         let rows = Self.slots(of: config)
         return VStack(alignment: .leading, spacing: 12) {
@@ -86,77 +65,6 @@ struct RoundConfigEditor: View {
                         }
                     }
                 }
-            }
-        }
-    }
-
-    private var editor: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            slotsGrid
-            capsForm
-        }
-    }
-
-    /// One `Grid` row per filled seat, drafters first (their persona is what distinguishes
-    /// them from each other), then a divider, then the singleton seats in run order — replaces
-    /// the two-line-per-slot `VStack` layout that made Full plan run to ~1000pt tall.
-    private var slotsGrid: some View {
-        let rows = Self.slots(of: config)
-        let drafterRows = rows.filter { if case .drafter = $0.keyPath { true } else { false } }
-        let seatRows = rows.filter { if case .drafter = $0.keyPath { false } else { true } }
-        return Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 6) {
-            GridRow {
-                columnHeader("Role", width: ColumnWidth.role)
-                columnHeader("Harness", width: ColumnWidth.harness)
-                columnHeader("Model", width: nil)
-                columnHeader("Effort", width: ColumnWidth.effort)
-                columnHeader("Fallback", width: ColumnWidth.fallback)
-            }
-            ForEach(drafterRows, id: \.keyPath) { row in
-                slotRow(role: row.role, persona: row.persona, keyPath: row.keyPath)
-            }
-            if !drafterRows.isEmpty, !seatRows.isEmpty {
-                GridRow { Divider().gridCellColumns(5) }
-            }
-            ForEach(seatRows, id: \.keyPath) { row in
-                slotRow(role: row.role, persona: row.persona, keyPath: row.keyPath)
-            }
-        }
-    }
-
-    /// `width: nil` (the Model column) gets `.frame(maxWidth: .infinity)` instead of a fixed
-    /// width — that's what tells `Grid` this is the one column that should absorb whatever
-    /// horizontal space the fixed columns don't need.
-    @ViewBuilder
-    private func columnHeader(_ title: String, width: CGFloat?) -> some View {
-        let label = Text(title).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-        if let width {
-            label.frame(width: width, alignment: .leading)
-        } else {
-            label.frame(maxWidth: .infinity, alignment: .leading)
-        }
-    }
-
-    @ViewBuilder
-    private func slotRow(role: String, persona: DrafterPersona?, keyPath: SlotKeyPath) -> some View {
-        // Every row in `slots(of:)` names a seat that's actually filled (it skips nil
-        // synthesizer/reviewer/polisher), so this only returns nil if config and keyPath have
-        // gone out of sync between render passes — nothing to show mid-edit.
-        if let choice = Self.choice(for: keyPath, in: config) {
-            GridRow {
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(role.capitalized).font(.callout.weight(.semibold))
-                    // `.general` is the only persona a single-drafter round ever uses and
-                    // says nothing a Sketch/Feature-plan reader doesn't already know.
-                    if let persona, persona != .general {
-                        Text(persona.rawValue).font(.caption2).foregroundStyle(.secondary)
-                    }
-                }
-                .frame(width: ColumnWidth.role, alignment: .leading)
-                harnessPicker(for: keyPath).frame(width: ColumnWidth.harness)
-                modelField(for: keyPath)
-                effortPicker(for: keyPath).frame(width: ColumnWidth.effort)
-                fallbackCell(for: keyPath, choice: choice)
             }
         }
     }
@@ -203,23 +111,7 @@ struct RoundConfigEditor: View {
         .pickerStyle(.menu)
     }
 
-    /// "none" or the other available model on a `Slot` seat; an em dash on the three bare-
-    /// `ModelChoice` seats, which have no fallback field to show a picker for at all.
-    @ViewBuilder
-    private func fallbackCell(for keyPath: SlotKeyPath, choice: ModelChoice) -> some View {
-        if Self.supportsFallback(keyPath) {
-            fallbackPicker(for: keyPath, choice: choice)
-            // Sized to its content and pinned leading: a menu picker centred in the fixed
-            // column sat at a different x on every row ("none" vs "codex gpt-…").
-            .fixedSize()
-            .frame(width: ColumnWidth.fallback, alignment: .leading)
-        } else {
-            Text("—").foregroundStyle(.secondary)
-                .frame(width: ColumnWidth.fallback, alignment: .leading)
-        }
-    }
-
-    /// The caps/toggle/default-play controls below the seat grid, as a compact label-left
+    /// The caps/toggle/default-play controls below the seats, as a compact label-left
     /// two-column form rather than each control spelling its own label out in full.
     private var capsForm: some View {
         Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 6) {
@@ -312,8 +204,7 @@ struct RoundConfigEditor: View {
             : "This fidelity has no polisher, and polish, fresh eyes and dedup all run on the polisher's seat. Choose Feature plan or Full plan to use them."
     }
 
-    /// "<Preset>, customized" once any field has been edited — the label the brief specifies
-    /// for the disclosure's own title. Wording lives in `UIText.presetName` — a single source
+    /// "<Preset>, customized" once any field has been edited — the panel's title. Wording lives in `UIText.presetName` — a single source
     /// of truth also shared by `IntakeDetailView`.
     static func label(preset: Preset, config: RoundConfig) -> String {
         let base = UIText.presetName(preset)
@@ -323,7 +214,7 @@ struct RoundConfigEditor: View {
     /// The awaiting-choice body's one line (spec §9): "Full plan · 4 drafters · refine ×5 ·
     /// polish ×6 · customized". Counts only rounds the planner will actually run — refine needs
     /// a reviewer, polish a polisher (`TapePlanner.sequence`) — so the line never promises a
-    /// cycle the grid below has no seat for.
+    /// cycle the inspector has no seat for.
     static func summary(preset: Preset, config: RoundConfig) -> String {
         let drafters = config.drafters.count
         var parts = [UIText.presetName(preset), "\(drafters) drafter\(drafters == 1 ? "" : "s")"]

@@ -55,7 +55,7 @@ final class SidebarTableIdentityLiveTests: XCTestCase {
         // Off-screen and never ordered front: materializing AppKit-backed SwiftUI content needs
         // a window that exists and has had layout passes, not one on screen. `.borderless` plus a
         // coordinate far outside any display keeps this from stealing focus or flashing on screen
-        // if a display is attached — see `ShapingViewRenderTests.render` for the sibling
+        // if a display is attached — see `PlanningRender.write` for the sibling
         // technique that DOES order front, because it needs `layer.render(in:)` to produce
         // pixels; this test only needs the AppKit view tree, so it does not.
         let window = NSWindow(

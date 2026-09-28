@@ -7,7 +7,7 @@ import XCTest
 /// Renders `RoundConfigEditor` offscreen to a PNG for design review — skipped by default. Set
 /// `FD_ROUNDS_RENDER_DIR` to an output directory to run it. Not an assertion test: layout
 /// can't be checked headlessly in any useful way, but a picture of it can be looked at without
-/// launching the app (AGENTS.md rule 2). Mirrors `ShapingViewRenderTests`'s technique.
+/// launching the app (AGENTS.md rule 2). The same technique as `PlanningRender`.
 final class RoundConfigEditorRenderTests: XCTestCase {
     @MainActor
     func testRenderFullPlanExpanded() throws {
@@ -22,9 +22,8 @@ final class RoundConfigEditorRenderTests: XCTestCase {
             to: URL(fileURLWithPath: dir).appendingPathComponent("rounds-editor.png")
         )
 
-        // Sketch: one drafter, no synthesizer, no polisher — the shortest a Grid this shape
-        // gets, and the case most likely to reveal a column that only "aligns" by accident
-        // when there happen to be several rows to average across.
+        // Sketch: one drafter, no synthesizer, no polisher — the shortest the panel gets, and
+        // the one whose polish controls are disabled.
         let sketch = try XCTUnwrap(PresetExpansion.config(for: .sketch, available: .defaults))
         try render(
             RoundConfigEditor(preset: .sketch, config: .constant(sketch), available: .defaults),
