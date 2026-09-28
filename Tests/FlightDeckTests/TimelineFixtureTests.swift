@@ -239,25 +239,66 @@ final class TimelineFixtureTests: XCTestCase {
         let present = Set(["txt", "jsonl"].flatMap {
             bundle.urls(forResourcesWithExtension: $0, subdirectory: "Fixtures/Claude") ?? []
         }.map(\.lastPathComponent))
-        let transcript = try XCTUnwrap(
-            Self.provenance("transcript.captured", in: "Claude")["files"] as? [String],
-            "the transcript's provenance must list the files it covers"
-        )
-        XCTAssertEqual(present.subtracting(transcript), Set(files),
-                       "every capture in Fixtures/Claude must be covered by one of the two "
-                       + "provenance files; a new one goes in dialogs.captured.provenance.json "
-                       + "with its digest, never in unguarded")
 
-        for file in files {
-            let url = try XCTUnwrap(bundle.url(
-                forResource: (file as NSString).deletingPathExtension,
-                withExtension: (file as NSString).pathExtension, subdirectory: "Fixtures/Claude"
-            ), "Fixtures/Claude/\(file) not found in the test bundle")
-            let digest = SHA256.hash(data: try Data(contentsOf: url))
-            XCTAssertEqual(digest.map { String(format: "%02x", $0) }.joined(), recorded[file],
-                           "\(file) no longer matches the digest in its provenance file — it "
-                           + "was edited, or it was recaptured without updating the provenance")
+        // Every provenance file in the directory, DISCOVERED rather than hardcoded. The
+        // invariant this test exists for is "no capture is unguarded by a digest" — it is not
+        // "there are exactly two provenance files", which is what the earlier version actually
+        // asserted and what broke when a third arrived.
+        //
+        // A third one was correct to add: `agent-async-launch.captured.jsonl` is REDACTED (real
+        // home paths, a subagent prompt and an agent's prose result, lifted out of a working
+        // session), so it cannot join the batch above without falsifying that batch's
+        // `isVerbatimCapturedOutput` — which this very test asserts two lines up. Forcing it in
+        // there would have meant lying in a provenance file to satisfy a test about provenance.
+        let provenanceFiles = (bundle.urls(forResourcesWithExtension: "json",
+                                           subdirectory: "Fixtures/Claude") ?? [])
+            .filter { $0.lastPathComponent.hasSuffix(".provenance.json") }
+        XCTAssertGreaterThanOrEqual(provenanceFiles.count, 2,
+                                    "Fixtures/Claude must keep its provenance files")
+
+        var covered = Set<String>()
+        for url in provenanceFiles {
+            let doc = try XCTUnwrap(
+                JSONSerialization.jsonObject(with: try Data(contentsOf: url)) as? [String: Any],
+                "\(url.lastPathComponent) is not a JSON object"
+            )
+            let listed = try XCTUnwrap(doc["files"] as? [String],
+                                       "\(url.lastPathComponent) must list the files it covers")
+            let digests = try XCTUnwrap(doc["sha256"] as? [String: String],
+                                        "\(url.lastPathComponent) must record a sha256 per file")
+            XCTAssertEqual(Set(digests.keys), Set(listed),
+                           "\(url.lastPathComponent) must record a digest for every file it "
+                           + "lists, and list every file it records one for")
+            // A capture that is not verbatim has to SAY what was done to it. Otherwise
+            // "isVerbatimCapturedOutput: false" becomes a way to check a capture in with no
+            // account of how it was altered, which is worse than not having the flag.
+            if doc["isVerbatimCapturedOutput"] as? Bool == false {
+                XCTAssertNotNil(doc["editingRule"],
+                                "\(url.lastPathComponent) says it is not verbatim, so it must "
+                                + "carry an editingRule saying exactly what was edited")
+            }
+            for file in listed {
+                let fileURL = try XCTUnwrap(bundle.url(
+                    forResource: (file as NSString).deletingPathExtension,
+                    withExtension: (file as NSString).pathExtension,
+                    subdirectory: "Fixtures/Claude"
+                ), "Fixtures/Claude/\(file) is listed by \(url.lastPathComponent) but is not in "
+                 + "the test bundle")
+                let digest = SHA256.hash(data: try Data(contentsOf: fileURL))
+                XCTAssertEqual(digest.map { String(format: "%02x", $0) }.joined(), digests[file],
+                               "\(file) no longer matches the digest in \(url.lastPathComponent) "
+                               + "— it was edited, or recaptured without updating provenance")
+            }
+            covered.formUnion(listed)
         }
+        XCTAssertEqual(present, covered,
+                       "every capture in Fixtures/Claude must be covered by SOME "
+                       + "*.provenance.json with its digest, never left unguarded. A capture "
+                       + "that cannot honestly join an existing batch gets its own provenance "
+                       + "file; it does not get to skip one")
+        // The dialogs batch's own digests are verified by the loop above, which now covers every
+        // provenance file rather than this one only — so the separate per-file loop that used to
+        // stand here would be a second, narrower copy of the same check.
     }
 
     func testEveryCapturedLineIsStillOneJSONRecord() throws {
