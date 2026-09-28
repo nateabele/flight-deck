@@ -15,10 +15,26 @@ final class SelectionHistoryStoreTests: XCTestCase {
     }
 
     private let foo = URL(fileURLWithPath: "/work/foo", isDirectory: true)
+    private let bar = URL(fileURLWithPath: "/work/bar", isDirectory: true)
 
     private func makeStore(_ persistence: FakePersistence? = nil) -> (SessionStore, [UUID]) {
         let store = SessionStore(provider: StubProvider(), persistence: persistence)
         let ids = (0..<3).map { _ in store.newSession(in: foo).id }
+        return (store, ids)
+    }
+
+    private func projectID(_ url: URL, in store: SessionStore) -> UUID {
+        store.repos.first { $0.url.standardizedFileURL == url.standardizedFileURL }!.id
+    }
+
+    /// Two sessions in `foo` and a second project's (`bar`) own session, none of them selected
+    /// at construction (`selecting: false`) — unlike `makeStore()` above, which auto-selects
+    /// the last one created. These tests assert the exact shape of `back`, and that auto-select
+    /// would record a spurious entry before the test's own first assignment ever runs.
+    private func makeProjectHistoryStore(_ persistence: FakePersistence? = nil) -> (SessionStore, [UUID]) {
+        let store = SessionStore(provider: StubProvider(), persistence: persistence)
+        let ids = (0..<2).map { _ in store.newSession(in: foo, selecting: false).id }
+        store.newSession(in: bar, selecting: false)
         return (store, ids)
     }
 
@@ -156,5 +172,47 @@ final class SelectionHistoryStoreTests: XCTestCase {
         let store = SessionStore(provider: StubProvider(), persistence: persistence)
         store.newSession(in: foo)
         XCTAssertNil(persistence.stored?.selectionHistory)
+    }
+
+    func testSessionToProjectToSessionRecordsTwoEntries() {
+        let (store, ids) = makeProjectHistoryStore()
+        store.selectedSessionID = ids[0]
+        store.selectProject(projectID(foo, in: store))
+        store.selectedSessionID = ids[1]
+        XCTAssertEqual(store.selectionHistory.back,
+                       [.session(ids[0]), .project(path: foo.standardizedFileURL.path)])
+    }
+
+    func testBackReopensAProjectView() {
+        let (store, ids) = makeProjectHistoryStore()
+        store.selectedSessionID = ids[0]
+        store.selectProject(projectID(foo, in: store))
+        store.selectedSessionID = ids[1]
+        store.goBack()
+        XCTAssertEqual(store.selectedProjectID, projectID(foo, in: store))
+        store.goBack()
+        XCTAssertNil(store.selectedProjectID)
+        XCTAssertEqual(store.selectedSessionID, ids[0])
+    }
+
+    func testForwardFromAProjectViewReturnsToTheSession() {
+        let (store, ids) = makeProjectHistoryStore()
+        store.selectedSessionID = ids[0]
+        store.selectProject(projectID(foo, in: store))
+        store.goBack()
+        XCTAssertNil(store.selectedProjectID)
+        store.goForward()
+        XCTAssertEqual(store.selectedProjectID, projectID(foo, in: store))
+    }
+
+    func testAProjectEntrySurvivesARelaunchByPath() {
+        let persistence = FakePersistence()
+        let (store, ids) = makeProjectHistoryStore(persistence)
+        store.selectProject(projectID(foo, in: store))
+        store.selectedSessionID = ids[1]
+        let relaunched = SessionStore(provider: StubProvider(), persistence: persistence)
+        _ = relaunched.restore(directoryExists: { _ in true })
+        relaunched.goBack()
+        XCTAssertEqual(relaunched.selectedProjectID, projectID(foo, in: relaunched))
     }
 }
