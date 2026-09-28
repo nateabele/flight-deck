@@ -1048,7 +1048,7 @@ final class IntakeService: ObservableObject {
                 let other = errs.errors.filter { if case .unknownBead = $0 { false } else { true } }
                 guard other.isEmpty, !gone.isEmpty else {
                     return fail(id, backTo: .review, "The change set no longer validates against the live graph: "
-                                + errs.errors.map(\.message).joined(separator: "; "))
+                                + errs.errors.map(\.userMessage).joined(separator: "; "))
                 }
                 skip.formUnion(ops.indices.filter { n in Self.references(ops[n]).contains { gone.contains($0) } })
                 continue
@@ -1251,7 +1251,7 @@ final class IntakeService: ObservableObject {
                     cs2.graphObservedAt = observedAt
                     if case .failure(let errs2) = ChangeSetValidator.validate(cs2, against: graph) {
                         return fail(id, "The change set failed validation twice: "
-                                    + errs2.errors.map(\.message).joined(separator: "; "), raw: second.raw)
+                                    + errs2.errors.map(\.userMessage).joined(separator: "; "), raw: second.raw)
                     }
                     result.triage = .recommendation(preset: p2, reason: r2, changeSet: cs2)
                 }

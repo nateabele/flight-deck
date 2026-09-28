@@ -128,7 +128,7 @@ struct BeadWriter {
                 guard let data = stdout.data(using: .utf8),
                       let replies = try? JSONDecoder().decode([Reply].self, from: data),
                       let match = replies.first else {
-                    return .failed("\(description): bead not found: \(stdout.firstLine)")
+                    return .failed("\(description): task not found: \(stdout.firstLine)")
                 }
                 if let pre, Precondition(status: match.status, assignee: match.assignee) != pre {
                     return .failed("\(description): precondition mismatch (status=\(match.status), assignee=\(match.assignee ?? "nil"))")

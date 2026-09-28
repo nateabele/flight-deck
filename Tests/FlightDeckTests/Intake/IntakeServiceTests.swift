@@ -288,7 +288,10 @@ final class IntakeServiceTests: XCTestCase {
         let id = await capture(svc)
         let i = intake(svc, id)
         XCTAssertEqual(i.state, .failed)
-        XCTAssertTrue(i.failure?.contains("new:ghost") == true, i.failure ?? "nil")
+        // The human's words (`ValidationError.userMessage`), not the schema's: the agent was
+        // told about `new:ghost`; the human reads what went wrong, in tasks.
+        XCTAssertTrue(i.failure?.contains("a dependency names a new task the plan never creates") == true, i.failure ?? "nil")
+        XCTAssertFalse(i.failure?.contains("new:") ?? true, i.failure ?? "nil")
         XCTAssertNotNil(i.rawFailureOutput)
         // Exactly one automatic retry, resuming the same session with the errors listed.
         XCTAssertEqual(headless.commands.count, 2)
