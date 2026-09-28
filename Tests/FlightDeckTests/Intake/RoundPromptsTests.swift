@@ -35,6 +35,57 @@ final class RoundPromptsTests: XCTestCase {
     func testDraftSchemaIsStrict() throws { assertStrict(try parse(RoundSchemas.draft)) }
     func testReviewSchemaIsStrict() throws { assertStrict(try parse(RoundSchemas.review)) }
     func testIntegrateSchemaIsStrict() throws { assertStrict(try parse(RoundSchemas.integrate)) }
+
+    /// Convergence needs to know WHICH proposals the integrator took, not just how many: a
+    /// re-proposed change it had rejected is the oscillation red flag. So the schema asks for a
+    /// verdict per change, each one of the three words the counts already use.
+    func testIntegrateSchemaAsksForAVerdictPerChange() throws {
+        let outer = try XCTUnwrap(try parse(RoundSchemas.integrate) as? [String: Any])
+        XCTAssertTrue((outer["required"] as? [String] ?? []).contains("verdicts"))
+        let props = try XCTUnwrap(outer["properties"] as? [String: Any])
+        let verdicts = try XCTUnwrap(props["verdicts"] as? [String: Any])
+        XCTAssertEqual(verdicts["type"] as? String, "array")
+        let item = try XCTUnwrap(verdicts["items"] as? [String: Any])
+        let itemProps = try XCTUnwrap(item["properties"] as? [String: Any])
+        XCTAssertEqual((itemProps["index"] as? [String: Any])?["type"] as? String, "integer")
+        let verdict = try XCTUnwrap(itemProps["verdict"] as? [String: Any])
+        XCTAssertEqual(verdict["enum"] as? [String], ["agree", "somewhat", "disagree"])
+    }
+
+    /// An integrate output written before per-change verdicts existed — a checkpoint's slot
+    /// replayed, a fixture, a model that ignored the new key — still decodes, with no verdicts.
+    func testIntegrateOutputWithoutVerdictsStillDecodes() throws {
+        let old = Data(#"{"agree":2,"somewhat":1,"disagree":0,"notes":"applied"}"#.utf8)
+        let out = try RoundPrompts.decode(IntegrateOutput.self, old)
+        XCTAssertNil(out.verdicts)
+        XCTAssertEqual(out.tally(forChanges: 3), VerdictTally(agree: 2, somewhat: 1, disagree: 0))
+        XCTAssertNil(out.verdicts(forChanges: 3))
+    }
+
+    /// With verdicts present the totals come from them, never from the integrator's own
+    /// arithmetic — the two can disagree, and the list is the one that names the changes.
+    /// Out-of-range and repeated indices are dropped (first one wins), so a sloppy list can
+    /// never count a change twice or count one that doesn't exist.
+    func testVerdictTotalsDeriveFromTheVerdictList() throws {
+        let data = Data(#"""
+        {"agree":9,"somewhat":9,"disagree":9,"notes":"n",
+         "verdicts":[{"index":2,"verdict":"disagree"},{"index":0,"verdict":"agree"},
+                     {"index":0,"verdict":"disagree"},{"index":7,"verdict":"agree"},
+                     {"index":1,"verdict":"somewhat"}]}
+        """#.utf8)
+        let out = try RoundPrompts.decode(IntegrateOutput.self, data)
+        XCTAssertEqual(out.tally(forChanges: 3), VerdictTally(agree: 1, somewhat: 1, disagree: 1))
+        XCTAssertEqual(out.verdicts(forChanges: 3), [ChangeVerdict(index: 0, verdict: .agree),
+                                                    ChangeVerdict(index: 1, verdict: .somewhat),
+                                                    ChangeVerdict(index: 2, verdict: .disagree)])
+    }
+
+    /// An empty list is no list: the counts are all there is to go on.
+    func testEmptyVerdictListFallsBackToTheCounts() {
+        let out = IntegrateOutput(agree: 1, somewhat: 0, disagree: 1, notes: "", verdicts: [])
+        XCTAssertEqual(out.tally(forChanges: 2), VerdictTally(agree: 1, somewhat: 0, disagree: 1))
+        XCTAssertNil(out.verdicts(forChanges: 2))
+    }
     func testChangeSetSchemaIsStrict() throws { assertStrict(try parse(RoundSchemas.changeSet)) }
 
     func testChangeSetSchemaEmbedsTriageFragmentExactly() throws {
@@ -183,6 +234,13 @@ final class RoundPromptsTests: XCTestCase {
         XCTAssertTrue(p.contains("/i/plan.md"))
         XCTAssertTrue(p.contains("/i/changes.json"))
         XCTAssertTrue(p.contains("edit only that file"))
+    }
+
+    func testIntegratePromptAsksForAVerdictPerChange() {
+        let p = RoundPrompts.integrate(planFile: "/i/plan.md", changesFile: "/i/changes.json")
+        XCTAssertTrue(p.contains("`verdicts`"), p)
+        XCTAssertTrue(p.contains("0-based"), p)
+        XCTAssertTrue(p.contains(#""verdicts": [{"index": 0, "verdict": "agree"}"#), p)
     }
 
     // MARK: - Encode

@@ -191,25 +191,30 @@ public struct RoundExecutor: Sendable {
         // Nothing proposed means nothing to apply: running an integrator anyway costs a model
         // turn and can only drift the plan. The round still lands, so the tape shows a
         // reviewer that found nothing — the signal refinement has converged.
+        // The proposals go into the checkpoint as well as `work/`: the next round overwrites
+        // `work/changes.json`, and "is this round repeating the last one" (`ConvergenceSeries`)
+        // can only be answered from the text of both rounds' proposals.
+        let changes = try IntakeJSON.encoder.encode(review.changes)
         guard !review.changes.isEmpty else {
             record.changeCount = 0
             record.note = review.summary.isEmpty ? nil : review.summary
-            return ["plan.md": before]
+            return ["plan.md": before, "changes.json": changes]
         }
-        try IntakeJSON.encoder.encode(review.changes).write(to: changesFile, options: .atomic)
+        try changes.write(to: changesFile, options: .atomic)
         try before.write(to: planFile, options: .atomic)
 
         // cwd IS the work dir — never the project: codex's workspace-write sandbox is rooted at
         // cwd, so a project cwd would let the integrator edit the user's repo.
-        let tally = try await seat(IntegrateOutput.self, planned, "integrator", inputs.config.integrator,
+        let integrated = try await seat(IntegrateOutput.self, planned, "integrator", inputs.config.integrator,
                                    prompt: RoundPrompts.integrate(planFile: planFile.path, changesFile: changesFile.path,
                                                                   humanEdits: ctx.humanEdits),
                                    schema: RoundSchemas.integrate, cwd: work, readable: [], access: .writeInWork(work),
                                    inputs: inputs, &record)
         let after = try Data(contentsOf: planFile)
         record.changeCount = review.changes.count
-        record.tally = VerdictTally(agree: tally.agree, somewhat: tally.somewhat, disagree: tally.disagree)
-        var notes = [review.summary, tally.notes]
+        let tally = integrated.tally(forChanges: review.changes.count)
+        record.tally = tally
+        var notes = [review.summary, integrated.notes]
         // A tally that doesn't add up is worth showing, not worth pausing over: the plan edit is
         // what matters, and the integrator's arithmetic is only a summary of it.
         let verdicts = tally.agree + tally.somewhat + tally.disagree
@@ -240,7 +245,13 @@ public struct RoundExecutor: Sendable {
         record.linesAdded = delta.added
         record.linesRemoved = delta.removed
         record.sectionsChanged = delta.sectionsChanged
-        return ["plan.md": after]
+        var files = ["plan.md": after, "changes.json": changes]
+        // Only a real list is kept: an integrator that answered in the counts-only shape has no
+        // verdict per change, and an empty file would read as "judged nothing".
+        if let list = integrated.verdicts(forChanges: review.changes.count) {
+            files["verdicts.json"] = try IntakeJSON.encoder.encode(list)
+        }
+        return files
     }
 
     private func encode(_ planned: PlannedRound, _ inputs: RoundInputs, _ record: inout RoundRecord) async throws -> [String: Data] {
