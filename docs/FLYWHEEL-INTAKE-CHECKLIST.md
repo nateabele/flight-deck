@@ -1,4 +1,4 @@
-# Flywheel Intake GUI verification checklist
+# Flight Control Intake GUI verification checklist
 
 > Agents cannot drive the real Flight Deck app (AGENTS.md rule 2: no headless host for an
 > AppKit/SwiftUI surface). Every piece of the intake pipeline is built on pure, unit-tested
@@ -10,21 +10,21 @@
 ## Purpose
 
 Confirm intake capture, headless triage, the release review, `br` release, and delivery to a
-bead's holder behave correctly end to end against a real flywheel project — plus the sidebar
+bead's holder behave correctly end to end against a real Flight Control project — plus the sidebar
 mechanics the project-row click depends on, and the collapsed/expanded rollup this plan adds
 to the project header. "Plan from scratch (Feature plan)" covers the round engine: planning rounds run by
 the detached runner and driven from the shaping view.
 
 ## Prerequisites
 
-- A **real, non-temp** flywheel project — e.g. `~/fw-functest` — not a `/tmp` scratch repo.
+- A **real, non-temp** Flight Control project — e.g. `~/fw-functest` — not a `/tmp` scratch repo.
   Spec §12: `br` integration is tested against repos under `$HOME`, "because `am` treats temp
   paths as ephemeral and silently skips enforcement" — a `/tmp` project would let a
   guard/reservation bug pass silently here too.
-- That project has flywheel markers (`.beads/`, `.agent-mail.yaml`) and at least one open bead
+- That project has Flight Control markers (`.beads/`, `.agent-mail.yaml`) and at least one open bead
   a change set could plausibly reference — add the project in Flight Deck, then use the
-  project header's context menu ("Setup Flywheel…" if the markers don't exist yet, "Enable
-  Flywheel…" if they do) as in `docs/FLYWHEEL-OBSERVE-CHECKLIST.md` step 1.
+  project header's context menu ("Set Up Flight Control…" if the markers don't exist yet, "Enable
+  Flight Control…" if they do) as in `docs/FLYWHEEL-OBSERVE-CHECKLIST.md` step 1.
 - A registered agent-mail identity for at least one tab in the project (`am macros
   start-session`), so step 10's inject/mail delivery has a real holder to land on.
 - Flight Deck built and run in place (never swap `/Applications` mid-session — see

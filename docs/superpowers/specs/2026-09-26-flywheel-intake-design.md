@@ -1,11 +1,11 @@
-# Flywheel intake and plan shaping — design
+# Flight Control intake and plan shaping — design
 
 **Status:** design, awaiting review · **Date:** 2026-09-26 · **Builds on:** the Level-1
 Observe branch (`worktree-flywheel-observe`, unmerged) and Level-0 run integration (merged).
 
 ## 1. Goal
 
-One intake process for every way work enters a flywheel project. It covers a one-line
+One intake process for every way work enters a Flight Control project. It covers a one-line
 tweak added to a swarm that is already running, a small feature, and a full project plan
 built with multiple models over many rounds. You describe what you want. Flight Deck (FD)
 triages it against the live bead graph, shapes it at the fidelity the work needs, encodes
@@ -535,7 +535,7 @@ identities. Messages use `--thread-id bead:<id>` and `--topic fd-intake`.
 | Violation in a polish round | The out-of-scope change is reverted and recorded, and the tape continues. If a round needs more than 3 reverts, the tape pauses. |
 | The runner dies | FD restarts it at launch (§7). While FD is running, a runner whose daemon disappears is restarted once; if it disappears again, the intake is *interrupted*. |
 | A `br` or `am` error at release | The release is recorded as partial (§5.5). |
-| The project is closed or its flywheel is disabled with intakes still open | The intakes are kept. Their runners pause, and the runners are reaped only when you discard the intakes. |
+| The project is closed or its Flight Control is disabled with intakes still open | The intakes are kept. Their runners pause, and the runners are reaped only when you discard the intakes. |
 
 ## 12. Testing
 

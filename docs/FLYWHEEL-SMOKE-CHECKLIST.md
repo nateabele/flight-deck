@@ -1,4 +1,4 @@
-# Flywheel real-agent smoke checklist
+# Flight Control real-agent smoke checklist
 
 > **⚠️ Consumes real tokens and steals GUI focus.** This drives two live `claude` tabs
 > inside Flight Deck. Run it deliberately, at a moment you can babysit it — never
@@ -6,7 +6,7 @@
 
 ## Purpose
 
-The Flywheel spike (`docs/FLYWHEEL-SPIKE-FINDINGS.md`) proved the coordination
+The Flight Control spike (`docs/FLYWHEEL-SPIKE-FINDINGS.md`) proved the coordination
 substrate works via direct CLI calls with synthetic identities. It did **not** prove
 that two agents FD actually spawns get distinct `AGENT_NAME`s, or that the
 reservation guard blocks a real conflicting commit between them. This checklist
@@ -36,20 +36,20 @@ it, installs the reservation guard (`am guard install`, which `flywheel-new` doe
 the scratch repo path, the two bead IDs, and the manual steps below with those IDs
 filled in — follow its printed output, it's the source of truth if this doc drifts.
 
-**Expect:** a `✅ Scratch flywheel repo ready` block naming the repo path and two bead
+**Expect:** a `✅ Scratch Flight Control repo ready` block naming the repo path and two bead
 IDs (`agent 1: <id>`, `agent 2: <id>`).
 
-### 2. Add the scratch repo to Flight Deck and enable Flywheel
+### 2. Add the scratch repo to Flight Deck and enable Flight Control
 
 - In Flight Deck: add the printed scratch repo path as a project.
 - Project header menu → since `flywheel-new` already ran in step 1, this project is
-  detected as a flywheel project, so the item reads **"Enable Flywheel…"** (a plain
-  repo with no `.beads`/`.agent-mail.yaml` instead shows **"Setup Flywheel…"**, which
+  detected as a Flight Control project, so the item reads **"Enable Flight Control…"** (a plain
+  repo with no `.beads`/`.agent-mail.yaml` instead shows **"Set Up Flight Control…"**, which
   additionally bootstraps those before installing the guard) → confirm the setup
   dialog.
 
 **Expect:** the confirm dialog appears and completes without error; the project now
-shows as Flywheel-enabled.
+shows as Flight Control-enabled.
 
 ### 3. Spawn two claude tabs in that project
 
