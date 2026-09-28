@@ -58,7 +58,7 @@ struct PlanSection: View {
         return view
     }
 
-    /// Switches to Diff vs Previous and scrolls it to `focus.section` whenever `focus` changes —
+    /// Switches to Diff vs Previous and scrolls the page to `focus.section` whenever `focus` changes —
     /// how a heatmap cell shows that round's change to that section (spec §8.3). The caller
     /// selects the round itself, through `selection`.
     func focus(_ focus: PlanFocus?) -> PlanSection {
@@ -162,6 +162,9 @@ struct PlanSection: View {
         var text: String { lines.joined(separator: "\n") }
     }
 
+    /// The page's `.id` for Diff vs Previous's hunk `chunk` — a heatmap cell's jump target.
+    static func diffAnchor(_ chunk: Int) -> String { "plan-diff-\(chunk)" }
+
     /// "Refine 2" — the full name for the read-only bar, where there is room for it.
     static func checkpointName(_ checkpoint: Checkpoint) -> String {
         switch checkpoint.stage {
@@ -220,6 +223,8 @@ struct PlanSectionBody: View {
     let churn: ChurnLaneInput?
     let focus: PlanFocus?
     let readOnly: Bool
+    @Environment(\.pageJump) private var pageJump
+    @Environment(\.pageObscuredTop) private var pageObscuredTop
 
     struct Loaded: Equatable {
         var checkpoint: Int
@@ -263,8 +268,10 @@ struct PlanSectionBody: View {
             if mode == .plan, let shown, !shown.editable, !readOnly {
                 pastBar(shown.checkpoint)
             }
+            // As tall as what it shows: the plan, the diff and the change set are all part of
+            // the page, which does the scrolling (`PlanEditorContainer`).
             content
-                .frame(minHeight: 240, maxHeight: .infinity)
+                .frame(minHeight: PlanEditorContainer.minimumTextHeight, alignment: .topLeading)
                 .background(Color.secondary.opacity(0.06), in: RoundedRectangle(cornerRadius: 6))
         }
         .accessibilityIdentifier("plan-viewer")
@@ -410,32 +417,28 @@ struct PlanSectionBody: View {
                 .annotating(notes)
                 .onChange(of: shown.checkpoint, initial: true) { _, checkpoint in notes?.checkpoint = checkpoint }
         } else if mode == .diff {
-            ScrollViewReader { proxy in
-                ScrollView(.vertical) {
-                    VStack(alignment: .leading, spacing: 0) {
-                        ForEach(diffChunks) { chunk in
-                            Text(PlanSection.coloredDiff(chunk.text))
-                                .font(.system(.caption, design: .monospaced))
-                                .textSelection(.enabled)
-                                .frame(maxWidth: .infinity, alignment: .topLeading)
-                                .id(chunk.id)
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(diffChunks) { chunk in
+                    Text(PlanSection.coloredDiff(chunk.text))
+                        .font(.system(.caption, design: .monospaced))
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .topLeading)
+                        // The jump's target: a point at the hunk's top, whatever the hunk's height.
+                        .background(alignment: .top) {
+                            Color.clear.frame(height: 1).id(PlanSection.diffAnchor(chunk.id))
                         }
-                    }
-                    .padding(8)
                 }
-                .onChange(of: diffTarget, initial: true) { _, target in
-                    if let chunk = target?.first { proxy.scrollTo(chunk, anchor: .top) }
-                }
+            }
+            .padding(8)
+            .onChange(of: diffTarget, initial: true) { _, target in
+                if let chunk = target?.first { pageJump?.scroll(PlanSection.diffAnchor(chunk), pageObscuredTop) }
             }
         } else {
-            // Vertical only: a horizontal axis gives the text infinite width, which centred it.
-            ScrollView(.vertical) {
-                Text(otherText)
-                    .font(.system(.caption, design: .monospaced))
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .topLeading)
-                    .padding(8)
-            }
+            Text(otherText)
+                .font(.system(.caption, design: .monospaced))
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+                .padding(8)
         }
     }
 
