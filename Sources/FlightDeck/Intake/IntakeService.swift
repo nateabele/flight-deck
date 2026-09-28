@@ -90,6 +90,20 @@ struct PendingStart: Equatable {
     enum Kind: Equatable { case triage, round(PlannedRound?) }
 }
 
+/// The running round's seat files (`IntakeService.seatActivities`, `runRecords`, `seatResults`),
+/// observable apart from the service: the only state that changes every second of a run.
+@MainActor
+final class SeatFeed: ObservableObject {
+    @Published fileprivate(set) var activities: [UUID: [String: SeatActivity]] = [:]
+    @Published fileprivate(set) var records: [UUID: [String: RunRecord]] = [:]
+    @Published fileprivate(set) var results: [UUID: [String: SeatResult]] = [:]
+
+    /// Intake `id`'s seats, as the live card and the seat inspector take them.
+    func files(_ id: UUID) -> SeatFiles {
+        SeatFiles(activities: activities[id] ?? [:], records: records[id] ?? [:], results: results[id] ?? [:])
+    }
+}
+
 /// Orchestrates intakes end to end (spec §4): capture → headless triage (with clarifying
 /// Q&A) → recommendation/choice → release review → release (write to `br`, then deliver
 /// notices). Every state change is persisted through `save(_:)` before it is published, so a
@@ -150,15 +164,30 @@ final class IntakeService: ObservableObject {
     /// `triageActivity(_:)`. Published so a view drawing it redraws when it moves.
     @Published private(set) var triageActivities: [UUID: SeatActivity] = [:]
     private var triageActivityDates: [UUID: Date] = [:]
+    /// The running round's seat files, published on their own object (`SeatFeed`). A running
+    /// round rewrites them about once a second; published here, every beat redrew every view
+    /// observing this service — and, through `SessionStore`'s forward of `objectWillChange`,
+    /// every view observing the store — for values only the live card and the seat inspector
+    /// draw. Those two observe `seats` alone.
+    let seats = SeatFeed()
     /// The round in progress's seats (spec §6), keyed by `runs/` directory name — only while a
     /// tape has `roundInProgress`, so a paused tape's finished runs are never re-read.
-    @Published private(set) var seatActivities: [UUID: [String: SeatActivity]] = [:]
+    private(set) var seatActivities: [UUID: [String: SeatActivity]] {
+        get { seats.activities }
+        set { seats.activities = newValue }
+    }
     /// The same seats' `run.json` — what says a seat exited even when its activity never got
     /// to write `finished`.
-    @Published private(set) var runRecords: [UUID: [String: RunRecord]] = [:]
+    private(set) var runRecords: [UUID: [String: RunRecord]] {
+        get { seats.records }
+        set { seats.records = newValue }
+    }
     /// The same seats' `result.json` — each seat's outcome from the moment its own output
     /// parsed, well before the round's checkpoint lands (`SeatResult`).
-    @Published private(set) var seatResults: [UUID: [String: SeatResult]] = [:]
+    private(set) var seatResults: [UUID: [String: SeatResult]] {
+        get { seats.results }
+        set { seats.results = newValue }
+    }
     /// Each shaping intake's refine/polish convergence series (spec §8).
     @Published private(set) var convergence: [UUID: [ConvergenceCycle]] = [:]
     /// A start the human asked for that hasn't shown any sign of life yet — see `PendingStart`.
@@ -561,6 +590,12 @@ final class IntakeService: ObservableObject {
     /// graph — kilobytes), and `PlanSection` only calls it when its viewer key changes.
     func checkpointFile(_ id: UUID, checkpoint: Int, _ path: String) -> Data? {
         readFile(tapeStore(id).checkpointDirectory(checkpoint).appendingPathComponent(path))
+    }
+
+    /// `id`'s tape as it stands: the polled copy while shaping, else read from disk — `tapes`
+    /// drops an intake once it leaves shaping, and the review's final plan still needs it.
+    func storedTape(_ id: UUID) -> Tape {
+        tapes[id] ?? latestTapes[id] ?? tapeStore(id).loadTape()
     }
 
     /// `runs/<run>/` for one of `id`'s seats — what the inspector's seat detail shows and

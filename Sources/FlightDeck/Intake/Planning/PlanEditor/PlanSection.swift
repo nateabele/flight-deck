@@ -22,6 +22,8 @@ struct PlanSection: View {
     var churn: ChurnLaneInput?
     /// A request to show one round's Diff vs Previous at a section — see `focus(_:)`.
     var focus: PlanFocus?
+    /// Every checkpoint read-only, the head included — see `readOnly(_:)`.
+    var readOnly = false
 
     init(intakeID: UUID, tape: Tape, loadFile: @escaping (Int, String) -> Data?, onSend: @escaping (TapeCommand) -> Void,
          selection: Binding<Int?> = .constant(nil), mode: ShapingModel.ViewerMode = .plan, notes: PlanNotesController? = nil) {
@@ -38,7 +40,7 @@ struct PlanSection: View {
         // Keyed on the intake so switching intakes starts a fresh editor, instead of offering
         // the other intake's plan as "a new round landed".
         PlanSectionBody(tape: tape, loadFile: loadFile, onSend: onSend, selection: $selection, mode: initialMode,
-                        hooks: editHooks, notes: notes, churn: churn, focus: focus)
+                        hooks: editHooks, notes: notes, churn: churn, focus: focus, readOnly: readOnly)
             .id(intakeID)
     }
 
@@ -62,6 +64,14 @@ struct PlanSection: View {
     func focus(_ focus: PlanFocus?) -> PlanSection {
         var view = self
         view.focus = focus
+        return view
+    }
+
+    /// The final plan (review and after): the head is shown like any other checkpoint, with no
+    /// "Viewing … · Go to latest" bar, since it IS the latest and there is nowhere to go.
+    func readOnly(_ readOnly: Bool) -> PlanSection {
+        var view = self
+        view.readOnly = readOnly
         return view
     }
 
@@ -210,6 +220,7 @@ private struct PlanSectionBody: View {
     let notes: PlanNotesController?
     let churn: ChurnLaneInput?
     let focus: PlanFocus?
+    let readOnly: Bool
 
     struct Loaded: Equatable {
         var checkpoint: Int
@@ -219,7 +230,8 @@ private struct PlanSectionBody: View {
 
     init(tape: Tape, loadFile: @escaping (Int, String) -> Data?, onSend: @escaping (TapeCommand) -> Void,
          selection: Binding<Int?>, mode: ShapingModel.ViewerMode, hooks: PlanEditHooks,
-         notes: PlanNotesController? = nil, churn: ChurnLaneInput? = nil, focus: PlanFocus? = nil) {
+         notes: PlanNotesController? = nil, churn: ChurnLaneInput? = nil, focus: PlanFocus? = nil, readOnly: Bool = false) {
+        self.readOnly = readOnly
         self.churn = churn
         self.focus = focus
         self.tape = tape
@@ -249,7 +261,7 @@ private struct PlanSectionBody: View {
             }
             if mode == .plan, showKeptNote, !hunks.isEmpty { keptNote }
 
-            if mode == .plan, let shown, !shown.editable {
+            if mode == .plan, let shown, !shown.editable, !readOnly {
                 pastBar(shown.checkpoint)
             }
             content
@@ -484,7 +496,7 @@ private struct PlanSectionBody: View {
             generated[checkpoint] = ShapingModel.planText(checkpoint: checkpoint, in: tape, loadFile: loadFile)
         }
         let loaded = Loaded(checkpoint: checkpoint, text: plan,
-                            editable: checkpoint == PlanSection.planHead(tape: tape, loadFile: loadFile))
+                            editable: !readOnly && checkpoint == PlanSection.planHead(tape: tape, loadFile: loadFile))
         if shown == nil {
             shown = loaded
             text = plan

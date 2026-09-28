@@ -16,11 +16,13 @@ final class DetailLayoutTests: XCTestCase {
             // Shaping is the only state with a plan to read and shape; its action bar is Discard
             // alone — the transport is its primary.
             .shaping: [.header, .clarifications, .liveCard, .plan, .actionBar],
-            .review: [.header, .clarifications, .stageBody, .actionBar],
+            // From review on, the plan stays in the document, read-only: the final plan is what
+            // the tasks were written from.
+            .review: [.header, .clarifications, .stageBody, .plan, .actionBar],
             // Releasing has nothing to press and can't be discarded mid-write: no action bar.
-            .releasing: [.header, .clarifications, .stageBody],
-            .released: [.header, .clarifications, .stageBody, .actionBar],
-            .partiallyReleased: [.header, .clarifications, .stageBody, .actionBar],
+            .releasing: [.header, .clarifications, .stageBody, .plan],
+            .released: [.header, .clarifications, .stageBody, .plan, .actionBar],
+            .partiallyReleased: [.header, .clarifications, .stageBody, .plan, .actionBar],
             .failed: [.header, .clarifications, .stageBody, .actionBar],
             .interrupted: [.header, .clarifications, .stageBody, .actionBar],
             .discarded: [.header, .clarifications],
@@ -127,5 +129,77 @@ final class DetailLayoutTests: XCTestCase {
         XCTAssertTrue(DetailLayout.pinsBar(barTop: 7.5))
         XCTAssertTrue(DetailLayout.pinsBar(barTop: -300))
         XCTAssertFalse(DetailLayout.pinsBar(barTop: nil), "no bar on screen, nothing to pin")
+    }
+
+    /// Shaping's plan is the live, editable one; from review on it is the final plan, read-only
+    /// — edits after encode would change nothing that is written.
+    func testPlanIsFinalFromReviewOn() {
+        for state in [IntakeState.review, .releasing, .released, .partiallyReleased] {
+            XCTAssertTrue(DetailLayout.planIsFinal(for: state), "\(state)")
+            XCTAssertEqual(DetailLayout.planTitle(for: state), "Final plan")
+        }
+        XCTAssertFalse(DetailLayout.planIsFinal(for: .shaping))
+        XCTAssertEqual(DetailLayout.planTitle(for: .shaping), "Plan")
+    }
+
+    /// Return presses the primary everywhere except where it would hide trouble: a partial
+    /// release's Dismiss must be clicked, not taken by a stray Return. Send Answers is ⌘↩,
+    /// since Return belongs to the multi-line answers.
+    func testPrimaryKey() {
+        XCTAssertEqual(DetailLayout.primaryKey(for: .needsAnswers), .commandReturn)
+        XCTAssertEqual(DetailLayout.primaryKey(for: .partiallyReleased), DetailLayout.PrimaryKey.none)
+        for state in [IntakeState.awaitingChoice, .parked, .review, .released, .failed, .interrupted] {
+            XCTAssertEqual(DetailLayout.primaryKey(for: state), .defaultAction, "\(state)")
+        }
+    }
+
+    /// The review body's summary: what will be written, in tasks, never the store's own word.
+    func testReviewCounts() {
+        let pre = Precondition(status: "open", assignee: nil)
+        let ops: [ChangeOp] = [
+            .createBead(NewBead(tempId: "a", title: "A", description: "")),
+            .createBead(NewBead(tempId: "b", title: "B", description: "")),
+            .followUp(tempId: "c", of: "fd-1", title: "C", description: "", pre: pre),
+            .editBead(id: "fd-2", set: FieldSet(title: "x"), pre: pre, delivery: nil),
+            .reopen(id: "fd-3", reason: "r", pre: pre),
+            .addEdge(from: .new("a"), to: .new("b"), kind: .blocks),
+        ]
+        XCTAssertEqual(DetailLayout.reviewCounts(ops), "3 new tasks · 2 edits · 1 dependency")
+        XCTAssertEqual(DetailLayout.reviewCounts([ops[3]]), "1 edit")
+        XCTAssertEqual(DetailLayout.reviewCounts([]), "Nothing to write")
+    }
+
+    /// Drift since triage, as the review sheet will ask about it.
+    func testDriftLine() {
+        let drifted = OpDrift.drifted(reason: "status changed", suggested: nil)
+        XCTAssertEqual(DetailLayout.driftLine([.holds, .holds], confirmed: [], dropped: []),
+                       "Nothing has changed in the task graph since triage.")
+        XCTAssertEqual(DetailLayout.driftLine([drifted, .holds, drifted], confirmed: [], dropped: []),
+                       "2 tasks changed since triage — confirm or drop them in the review.")
+        XCTAssertEqual(DetailLayout.driftLine([drifted, .holds], confirmed: [0], dropped: []),
+                       "1 task changed since triage, already confirmed.")
+        XCTAssertEqual(DetailLayout.driftLine([.impossible(reason: "gone"), .holds], confirmed: [], dropped: []),
+                       "1 change can't be written: its task no longer exists.")
+    }
+
+    /// A wheel over the pinned block scrolls the document it covers; a sideways one is the
+    /// board's tape; anything off the block is left to whatever is under it.
+    func testWheelOverThePinnedBlockGoesToTheDocument() {
+        XCTAssertTrue(WheelRouting.toDocument(overBlock: true, deltaX: 0, deltaY: -12))
+        XCTAssertTrue(WheelRouting.toDocument(overBlock: true, deltaX: 2, deltaY: 9))
+        XCTAssertTrue(WheelRouting.toDocument(overBlock: true, deltaX: 0, deltaY: 0), "a gesture's end reaches the document too")
+        XCTAssertFalse(WheelRouting.toDocument(overBlock: true, deltaX: -14, deltaY: 3), "the tape scrolls sideways")
+        XCTAssertFalse(WheelRouting.toDocument(overBlock: false, deltaX: 0, deltaY: -12))
+    }
+
+    /// The Run menu's value compares on the intake and the lit buttons, so republishing it on
+    /// every render of the pane is no change at all; the closure is never compared.
+    @MainActor
+    func testPlanningActionsCompareOnIntakeAndEnabledButtons() {
+        let a = UUID(), b = UUID()
+        XCTAssertEqual(PlanningActions(enabled: [.step, .stop], intakeID: a) { _ in },
+                       PlanningActions(enabled: [.stop, .step], intakeID: a) { _ in XCTFail("never called") })
+        XCTAssertNotEqual(PlanningActions(enabled: [.step], intakeID: a) { _ in }, PlanningActions(enabled: [.step], intakeID: b) { _ in })
+        XCTAssertNotEqual(PlanningActions(enabled: [.step], intakeID: a) { _ in }, PlanningActions(enabled: [.pause], intakeID: a) { _ in })
     }
 }
