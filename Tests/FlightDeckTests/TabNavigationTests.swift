@@ -78,6 +78,28 @@ final class TabNavigationTests: XCTestCase {
         XCTAssertEqual(store.selectedProjectID, projectID(bar, in: store))
     }
 
+    /// A session inside a collapsed project is still selected but has no rendered row — the
+    /// project's own header row stands in for it, so cycling forward moves one stop past that
+    /// header rather than treating the position as unknown and jumping to the first stop.
+    func testCyclingNextFromASessionInACollapsedProjectHoldingItGoesToTheNextRow() {
+        let (store, ids) = makeStore()
+        store.selectedSessionID = ids[0]
+        store.setCollapsed(true, forProjectAt: projectID(foo, in: store))
+        store.selectNextSession()
+        XCTAssertEqual(store.selectedProjectID, projectID(bar, in: store))
+    }
+
+    /// Mirror of the above going backward: the collapsed project's header is the current
+    /// position, so Previous lands on the row before it, not the last stop in the sidebar.
+    func testCyclingPreviousFromASessionInACollapsedProjectHoldingItGoesToThePriorRow() {
+        let (store, ids) = makeStore()
+        store.selectedSessionID = ids[2]
+        store.setCollapsed(true, forProjectAt: projectID(bar, in: store))
+        store.selectPreviousSession()
+        XCTAssertEqual(store.selectedSessionID, ids[1])
+        XCTAssertNil(store.selectedProjectID)
+    }
+
     func testAnEmptyProjectRowIsStillAStop() {
         let (store, _) = makeStore()
         let emptyURL = URL(fileURLWithPath: "/work/empty", isDirectory: true)
@@ -104,7 +126,7 @@ final class TabNavigationTests: XCTestCase {
 
     /// A lone session alternates with its own project row: cycling never gets stuck showing
     /// only the terminal when the project view is one stop away too.
-    func testASingleSessionStaysSelected() {
+    func testASingleSessionAlternatesWithItsProjectRow() {
         let store = SessionStore(provider: StubProvider())
         let only = store.newSession(in: foo)
         store.selectNextSession()

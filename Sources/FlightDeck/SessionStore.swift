@@ -205,13 +205,12 @@ final class SessionStore: ObservableObject {
             // Safety net against a stranded `renameRequest`: `SessionSidebar`'s Return
             // handler only sets it for a session with a rendered row, but the selection
             // it was issued for can still move out from under it afterward — collapsing
-            // the project that owns the selected session, `cycleSelection` (⌘⇧[/⌘⇧])
-            // landing on a session inside a collapsed project, or simply the user
-            // clicking a different row before the request is consumed. Any selection
-            // change, including one that reassigns the same id, clears the request, so
-            // it can never outlive the selection state it was issued for. Swift fires
-            // `didSet` on every assignment, not only on a change, which is exactly the
-            // guarantee this leans on.
+            // the project that owns the selected session, or simply the user clicking a
+            // different row before the request is consumed. Any selection change,
+            // including one that reassigns the same id, clears the request, so it can
+            // never outlive the selection state it was issued for. Swift fires `didSet`
+            // on every assignment, not only on a change, which is exactly the guarantee
+            // this leans on.
             renameRequest = nil
             persist()
         }
@@ -3909,8 +3908,9 @@ final class SessionStore: ObservableObject {
         selectedSessionID = id
     }
 
-    /// ⌘⇧] — moves the selection one session down the sidebar's visual order, wrapping to the
-    /// top. ⌘⇧[ is the mirror image.
+    /// ⌘⇧] — moves the selection one visible row down the sidebar's order (project rows
+    /// included, a collapsed project's hidden sessions are not), wrapping to the top. ⌘⇧[ is
+    /// the mirror image.
     func selectNextSession() { cycleSelection(forward: true) }
 
     /// ⌘⇧[. See `selectNextSession()`.
@@ -3986,8 +3986,12 @@ final class SessionStore: ObservableObject {
     /// since landing on a row the user cannot see was the old behaviour's one surprise.
     /// `.empty` placeholder rows are never stops.
     ///
-    /// The current position is the project view when one is up, else the selected session. An
-    /// unknown position lands on the first stop going forward and the last going backward.
+    /// The current position is the project view when one is up, else the selected session — with
+    /// one wrinkle: a selected session inside a *collapsed* project has no row of its own to be
+    /// (its project hides its sessions), so its collapsed project's header row stands in for it.
+    /// Without that, the position reads as unknown and every cycle jumps to the first or last
+    /// stop instead of moving one row from where the user actually is. An unknown position (no
+    /// selection at all) lands on the first stop going forward and the last going backward.
     private func cycleSelection(forward: Bool) {
         let stops: [SidebarRow] = sidebarRows.filter {
             if case .empty = $0 { return false } else { return true }
@@ -3997,9 +4001,13 @@ final class SessionStore: ObservableObject {
         #if DEBUG
         selectionChangeReason = "cycleSelection(forward: \(forward))"
         #endif
+        let collapsedHomeID: Repo.ID? = {
+            guard selectedProjectID == nil, let sid = selectedSessionID, let at = locate(sid) else { return nil }
+            return repos[at.repo].isCollapsed ? repos[at.repo].id : nil
+        }()
         let index = stops.firstIndex { row in
             switch row {
-            case .project(let id): return selectedProjectID == id
+            case .project(let id): return selectedProjectID == id || collapsedHomeID == id
             case .session(let id, _): return selectedProjectID == nil && selectedSessionID == id
             case .empty: return false
             }
@@ -4011,7 +4019,15 @@ final class SessionStore: ObservableObject {
             destination = forward ? stops.first! : stops.last!
         }
         switch destination {
-        case .project(let id): selectProject(id)
+        case .project(let id):
+            selectProject(id)
+            #if DEBUG
+            // `selectProject` assigns `selectedProjectID` directly, never `selectedSessionID`,
+            // so its `didSet` — the one place that normally resets this after logging — never
+            // runs. Without this the reason set above would leak into whatever the NEXT
+            // selection change logs, misattributing it to a cycle that already finished.
+            selectionChangeReason = "unknown"
+            #endif
         case .session(let id, _): selectedSessionID = id
         case .empty: break
         }

@@ -488,10 +488,11 @@ struct SessionSidebar: View {
         // the three that failed.
         //
         // The `renameSelected` guard is why a selected-but-invisible session cannot strand a
-        // request: a selected session need not be rendered, because collapsing its project
-        // (`SessionStore.setCollapsed`) does not clear selection and `cycleSelection` (⌘⇧[/⌘⇧])
-        // walks every session regardless of whether its project is collapsed. Returning false
-        // there also leaves the key unconsumed, so Return still reaches whatever else wants it.
+        // request: collapsing a session's project (`SessionStore.setCollapsed`) does not clear
+        // its selection, only hides its row, so the session named by `renamableSessionID` can
+        // still be one `cycleSelection` (⌘⇧[/⌘⇧]) no longer even visits — it stops on the
+        // collapsed project's own header row instead. Returning false there also leaves the
+        // key unconsumed, so Return still reaches whatever else wants it.
         .sidebarInputMonitor(
             input,
             renameRow: { index in
