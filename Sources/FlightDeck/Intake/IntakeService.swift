@@ -243,6 +243,11 @@ final class IntakeService: ObservableObject {
     /// Intakes whose plan has already shown "Your edits are kept…" — once per plan, so it
     /// lives here rather than in the plan section, which is rebuilt on every visit.
     private(set) var editNoteShown: Set<UUID> = []
+    /// Each shaping intake's plan-edit router (`PlanEditRouter`): which edits are stuck on
+    /// their own round and which were sent but not yet applied. The intake's, not the plan
+    /// section's — as the section's `@State` it was lost on every intake switch, and an edit
+    /// that had already conflicted was merged onto the head on the next commit.
+    private var editRouters: [UUID: PlanEditRouter] = [:]
     /// How long a pending start may stay silent before it reads as queued rather than starting.
     static let queuedAfter: TimeInterval = 15
     /// Each seat file's mtime at its last read, per intake, keyed by path — the same stat-first
@@ -617,6 +622,14 @@ final class IntakeService: ObservableObject {
 
     func markEditNoteShown(_ id: UUID) { editNoteShown.insert(id) }
 
+    /// Intake `id`'s plan-edit router, made on first use and kept while it shapes.
+    func editRouter(_ id: UUID) -> PlanEditRouter {
+        if let router = editRouters[id] { return router }
+        let router = PlanEditRouter()
+        editRouters[id] = router
+        return router
+    }
+
     func recordEditConflict(_ id: UUID, _ conflict: EditConflict) {
         editConflicts[id, default: []].append(conflict)
     }
@@ -673,7 +686,7 @@ final class IntakeService: ObservableObject {
         let shaping = Set(intakes.lazy.filter { $0.state == .shaping }.map(\.id))
         let tracked = Set(latestTapes.keys).union(tapes.keys).union(tapeDates.keys).union(seatRounds.keys)
             .union(seatActivities.keys).union(runRecords.keys).union(seatResults.keys).union(convergence.keys)
-            .union(convergenceKeys.keys).union(halts.keys).union(editConflicts.keys)
+            .union(convergenceKeys.keys).union(halts.keys).union(editConflicts.keys).union(editRouters.keys)
         for gone in tracked.subtracting(shaping) {
             tapes[gone] = nil
             latestTapes[gone] = nil
@@ -684,6 +697,7 @@ final class IntakeService: ObservableObject {
             convergenceFolds[gone] = nil
             halts[gone] = nil
             editConflicts[gone] = nil
+            editRouters[gone] = nil
         }
         for id in shaping {
             let store = tapeStore(id)
