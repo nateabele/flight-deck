@@ -71,7 +71,19 @@ final class PlanningRenderTests: XCTestCase {
             refinementCap: 3, polishCap: 2, freshEyesAndDedup: true, defaultPlay: .nextMajor, customized: false)
         let shaping = try intake(.shaping) { $0.chosenPreset = .fullPlan; $0.roundConfig = config }
         let paused = try intake(.shaping) { $0.chosenPreset = .fullPlan; $0.roundConfig = config }
-        let review = try intake(.review) { $0.chosenPreset = .fullPlan; $0.roundConfig = config }
+        let pre = Precondition(status: "open", assignee: nil)
+        let review = try intake(.review) {
+            $0.chosenPreset = .fullPlan
+            $0.roundConfig = config
+            $0.changeSet = ChangeSet(graphObservedAt: self.now, ops: [
+                .createBead(NewBead(tempId: "t1", title: "Technician skills", description: "")),
+                .createBead(NewBead(tempId: "t2", title: "Dispatch scoring", description: "")),
+                .createBead(NewBead(tempId: "t3", title: "Offline check-in", description: "")),
+                .editBead(id: "fd-12", set: FieldSet(description: "Skill match is soft."), pre: pre, delivery: nil),
+                .addEdge(from: .new("t2"), to: .new("t1"), kind: .blocks),
+                .addEdge(from: .new("t3"), to: .new("t1"), kind: .blocks),
+            ])
+        }
         let releasing = try intake(.releasing)
         let released = try intake(.released) {
             $0.release = ReleaseRecord(releasedAt: self.now, appliedSteps: 14, idMap: [:], error: nil,
@@ -84,6 +96,9 @@ final class PlanningRenderTests: XCTestCase {
 
         try writeTape(for: shaping.id, store: store, running: true)
         try writeTape(for: paused.id, store: store, running: false)
+        // Past shaping the tape stays on disk, and the pane reads the final plan from it.
+        try writeTape(for: review.id, store: store, running: false)
+        try writeTape(for: released.id, store: store, running: false)
 
         let service = IntakeService(store: store, triageSettings: TriageSettings(harness: .codex, model: "gpt-6-sol", effort: "high"),
                                     availableModels: .defaults, inject: { _, _, _, _ in true }, hasSession: { _, _ in false })
@@ -126,7 +141,7 @@ final class PlanningRenderTests: XCTestCase {
                                                 now: now).first)
         for width in [440, 300] as [CGFloat] {
             let panel = VStack(alignment: .leading, spacing: 28) {
-                RoundConfigEditor(preset: .fullPlan, config: .constant(edited), available: .defaults, collapsible: false)
+                RoundConfigEditor(preset: .fullPlan, config: .constant(edited), available: .defaults)
                 Divider()
                 SeatInspector(model: seat.model, activity: service.seatActivities[shaping.id]?[seat.model.id],
                               runDirectory: tapes.runDirectory(seat.model.id))
@@ -134,6 +149,68 @@ final class PlanningRenderTests: XCTestCase {
             .padding(16)
             try PlanningRender.write(panel, size: NSSize(width: width, height: 900),
                                      to: out.appendingPathComponent("planning-inspector-panel-\(Int(width)).png"))
+        }
+    }
+
+    /// What a seat beat redraws, counted (`RenderProbe`) in a real pane over a real service: the
+    /// live card, and not the pane, its header, its Clarifications or its plan. And a publish
+    /// the pane does observe re-evaluates the pane, but not those three, whose inputs didn't
+    /// change. Before the seat maps moved to `SeatFeed`, every beat re-evaluated all of it.
+    func testASeatBeatRedrawsTheLiveCardAlone() throws {
+        let store = IntakeStore(root: root)
+        let config = RoundConfig(
+            drafters: [Slot(codex, persona: .arbiter)], synthesizer: Slot(claude), reviewer: Slot(codex), integrator: codex,
+            encoder: codex, polisher: codex, refinementCap: 3, polishCap: 2, freshEyesAndDedup: true, defaultPlay: .nextMajor,
+            customized: false)
+        var intake = Intake(projectPath: "/tmp/project", intent: "Build the dispatch board", createdAt: now)
+        intake.state = .shaping
+        intake.exchanges = [round1]
+        intake.chosenPreset = .fullPlan
+        intake.roundConfig = config
+        try store.save(intake)
+        try writeTape(for: intake.id, store: store, running: true)
+        let service = IntakeService(store: store, triageSettings: TriageSettings(harness: .codex, model: "gpt-6-sol", effort: "high"),
+                                    availableModels: .defaults, inject: { _, _, _, _ in true }, hasSession: { _, _ in false })
+        service.pollTapes()
+
+        let size = NSSize(width: 1100, height: 900)
+        let host = NSHostingView(rootView: IntakeDetailView(service: service, intake: intake, onOpenReview: {})
+            .frame(width: size.width, height: size.height))
+        host.frame = NSRect(origin: .zero, size: size)
+        let window = NSWindow(contentRect: NSRect(x: -10_000, y: -10_000, width: size.width, height: size.height),
+                              styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = host
+        window.orderFrontRegardless()
+        defer { window.orderOut(nil) }
+        RunLoop.current.run(until: Date().addingTimeInterval(1))
+
+        // A seat beat: the integrator's activity file moves on.
+        let activity = TapeStore(intakeDirectory: store.directory(for: intake.id)).runDirectory("refine-2-integrator")
+            .appendingPathComponent("activity.json")
+        var moved = SeatActivity(harness: .codex, startedAt: now.addingTimeInterval(-41))
+        moved.headline = "Checking the ranking against §2"
+        try write(moved, to: activity)
+        try FileManager.default.setAttributes([.modificationDate: now.addingTimeInterval(30)], ofItemAtPath: activity.path)
+        RenderProbe.reset()
+        service.pollTapes()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.5))
+        host.layoutSubtreeIfNeeded()
+        let beat = RenderProbe.counts
+        XCTAssertEqual(service.seatActivities[intake.id]?["refine-2-integrator"]?.headline, "Checking the ranking against §2")
+        XCTAssertGreaterThan(beat["liveCard"] ?? 0, 0, "the card redraws with the seat: \(beat)")
+        for part in ["detail", "header", "clarifications", "plan"] {
+            XCTAssertEqual(beat[part] ?? 0, 0, "a seat beat redrew \(part): \(beat)")
+        }
+
+        // A publish the pane observes: the pane re-evaluates, its value-typed parts don't.
+        RenderProbe.reset()
+        service.select(intake.id, inProject: intake.projectPath)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.5))
+        host.layoutSubtreeIfNeeded()
+        let publish = RenderProbe.counts
+        XCTAssertGreaterThan(publish["detail"] ?? 0, 0, "the probe sees the pane redraw: \(publish)")
+        for part in ["header", "clarifications", "plan"] {
+            XCTAssertEqual(publish[part] ?? 0, 0, "unchanged inputs redrew \(part): \(publish)")
         }
     }
 

@@ -6,9 +6,16 @@ import SwiftUI
 /// stage's live card or body, the plan while shaping — over a pinned action bar, with the
 /// inspector on the trailing edge. `DetailLayout` decides which parts show and what the action
 /// bar says; this view lays them out and wires them to the service.
+///
+/// **What redraws when.** The running round's seats change about once a second; they publish on
+/// `service.seats`, which only `SeatReader`s observe — the live card, the pinned block and the
+/// seat inspector. Everything else here re-evaluates on the service's own, rarer publishes, and
+/// the header, the Clarifications and the plan are `Equatable` views on plain values, so even
+/// then they redraw only when what they show changed (`RenderProbe` counts it in tests).
 struct IntakeDetailView: View {
     /// Observed, not just held: a tape advancing changes `service.tapes` without changing
     /// `intake`, and a plain `let` would let SwiftUI skip this body on exactly that update.
+    /// Seat beats are not among its publishes (`SeatFeed`).
     @ObservedObject var service: IntakeService
     let intake: Intake
     /// Opens `ProjectView`'s release-review sheet; the sheet's own state (`reviewIntakeID`)
@@ -61,6 +68,16 @@ struct IntakeDetailView: View {
     @State private var heatmap: HeatmapFocus?
     /// What the plan was last asked to show by a heatmap cell (`PlanSection.focus`).
     @State private var planFocus: PlanFocus?
+    /// Bumped by a heatmap cell: the document scrolls the plan into view, since the diff it
+    /// opened is otherwise below the fold.
+    @State private var planScroll = 0
+    /// The tape read from disk once the intake is past shaping (`service.tapes` drops it), for
+    /// the read-only final plan. Re-read with the other derived values.
+    @State private var finalTape: Tape?
+    /// The review's drift sentence, once the task graph has been read (`reviewBody`).
+    @State private var drift: String?
+    /// The document's own scroll view, which the pinned block hands its wheel events to.
+    @State private var documentScroll = DocumentScroll()
     /// Opens the CONVERGENCE cell's card without a hover — for offscreen renders.
     private let opensConvergenceCard: Bool
 
@@ -90,27 +107,42 @@ struct IntakeDetailView: View {
     }
 
     var body: some View {
+        let _ = RenderProbe.hit("detail")
         let sections = DetailLayout.sections(for: intake.state, hasClarifications: !answeredRounds.isEmpty)
         VStack(spacing: 0) {
             GeometryReader { viewport in
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 20) {
-                        header
-                        if sections.contains(.clarifications) { clarifications }
-                        if sections.contains(.liveCard) { liveCard }
-                        if sections.contains(.stageBody) { stageBody }
-                        if sections.contains(.plan) { planSection(viewport: viewport.size.height) }
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 20) {
+                            DetailHeader(state: intake.state, intent: intake.intent, summary: summary).equatable()
+                            if sections.contains(.clarifications) {
+                                ClarificationsSection(exchanges: intake.exchanges, expanded: expandedRounds,
+                                                      setExpanded: { index, open in
+                                                          if open { expandedRounds.insert(index) } else { expandedRounds.remove(index) }
+                                                      })
+                                    .equatable()
+                            }
+                            if sections.contains(.liveCard) { liveCard }
+                            if sections.contains(.stageBody) { stageBody }
+                            if sections.contains(.plan) {
+                                planSection(viewport: viewport.size.height).id(Self.planAnchor)
+                            }
+                        }
+                        .padding(.horizontal, Metrics.margin)
+                        .padding(.vertical, 18)
+                        .frame(maxWidth: .infinity, alignment: .topLeading)
+                        .background(DocumentScrollAnchor(scroll: documentScroll))
                     }
-                    .padding(.horizontal, Metrics.margin)
-                    .padding(.vertical, 18)
-                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                    .coordinateSpace(name: Self.scrollSpace)
+                    .onPreferenceChange(BarGeometryKey.self, perform: barMoved)
+                    // An overlay, not `.safeAreaInset`: an inset changes the scroll view's content
+                    // insets, which moves the very geometry the pin is decided from — pinning would
+                    // unpin it, and the block would flicker at the threshold.
+                    .overlay(alignment: .top) { pinnedBar }
+                    // Bottom-anchored: the plan is sized to the room under the pinned block, so
+                    // its bottom at the viewport's puts its top just under the block.
+                    .onChange(of: planScroll) { withAnimation { proxy.scrollTo(Self.planAnchor, anchor: .bottom) } }
                 }
-                .coordinateSpace(name: Self.scrollSpace)
-                .onPreferenceChange(BarGeometryKey.self, perform: barMoved)
-                // An overlay, not `.safeAreaInset`: an inset changes the scroll view's content
-                // insets, which moves the very geometry the pin is decided from — pinning would
-                // unpin it, and the block would flicker at the threshold.
-                .overlay(alignment: .top) { pinnedBar }
             }
             // Pinned outside the ScrollView so the way forward (and out) is always in reach,
             // however long the questions or the plan run.
@@ -125,7 +157,16 @@ struct IntakeDetailView: View {
             inspector
                 .inspectorColumnWidth(min: 300, ideal: 440, max: 640)
         }
-        .modifier(PublishesPlanningActions(actions: planningActions))
+        // Scene-wide, not focus-scoped: nothing in the document takes focus on a click (the
+        // transport keys are plain buttons), so a focused value left ⌘' and ⌘. dark the whole
+        // time a run was on screen. No terminal shares the window's detail column while an
+        // intake is shown, so no surface competes for them. One modifier with an optional
+        // value, not one per branch: switching branches gave the pane a new identity each time
+        // the run started or stopped, resetting every piece of state below.
+        .focusedSceneValue(\.planningActions, planningActions)
+        // Esc closes the heatmap from anywhere in the pane, not only while it holds focus: a
+        // click into the plan moves focus to the editor, and the map stayed open under it.
+        .onExitCommand(perform: heatmap == nil ? nil : { heatmap = nil })
         .onChange(of: derivedKey, initial: true) { refreshDerived() }
         .onChange(of: intake.id, initial: true) { bindNotes() }
         .onChange(of: service.notes(intake.id), initial: true) { _, onTape in notes.tapeNotes = onTape }
@@ -135,37 +176,6 @@ struct IntakeDetailView: View {
 
     // MARK: - Header
 
-    private var header: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            (Text("Intake · ") + Text(IntakeStatePill.stateName(intake.state))
-                .foregroundColor(intake.state.needsAttention ? .orange : nil))
-                .font(.system(size: 11, weight: .semibold))
-                .tracking(0.8)
-                .textCase(.uppercase)
-                .foregroundStyle(.tertiary)
-                .accessibilityIdentifier("intake-state-eyebrow")
-            Text(intake.intent)
-                .font(.title2.weight(.bold))
-                .fixedSize(horizontal: false, vertical: true)
-                .textSelection(.enabled)
-            if !summary.isEmpty {
-                WrappingRow(spacing: 18, lineSpacing: 4) {
-                    ForEach(summary) { item in
-                        HStack(spacing: 5) {
-                            Image(systemName: "checkmark.circle.fill").foregroundStyle(.tertiary)
-                            Text(item.label).fontWeight(.semibold)
-                            if !item.detail.isEmpty { Text(item.detail).foregroundStyle(.secondary) }
-                        }
-                        .accessibilityElement(children: .combine)
-                    }
-                }
-                .font(.callout)
-                .padding(.top, 6)
-                .accessibilityIdentifier("intake-progress-summary")
-            }
-        }
-    }
-
     /// Everything the header summary and Back's "plan head" depend on — what re-derives them.
     private var derivedKey: DerivedKey {
         DerivedKey(state: intake.state, exchanges: intake.exchanges.count,
@@ -174,7 +184,8 @@ struct IntakeDetailView: View {
     }
 
     private func refreshDerived() {
-        let tape = tape ?? .empty
+        finalTape = DetailLayout.planIsFinal(for: intake.state) ? service.storedTape(intake.id) : nil
+        let tape = planTape ?? .empty
         let load: (Int, String) -> Data? = { [service, id = intake.id] in service.checkpointFile(id, checkpoint: $0, $1) }
         summary = ProgressSummary.line(intake: intake, tape: tape, triage: service.triageActivity(intake.id), loadFile: load)
             .map { ProgressItem(label: $0.label, detail: $0.detail) }
@@ -184,6 +195,8 @@ struct IntakeDetailView: View {
     // MARK: - Live card
 
     private var tape: Tape? { service.tapes[intake.id] }
+    /// The tape the plan section reads: the live one while shaping, the stored one after.
+    private var planTape: Tape? { DetailLayout.planIsFinal(for: intake.state) ? finalTape : tape }
 
     @ViewBuilder
     private var liveCard: some View {
@@ -192,14 +205,18 @@ struct IntakeDetailView: View {
             LiveCard.triage(intake: intake, activity: service.triageActivity(intake.id), pending: service.pending[intake.id])
         case .shaping:
             let tape = tape ?? .empty
-            LiveCard.shaping(intake: intake, tape: tape, activities: service.seatActivities[intake.id] ?? [:],
-                             records: service.runRecords[intake.id] ?? [:], results: service.seatResults[intake.id] ?? [:],
-                             pending: service.pending[intake.id],
-                             editConflict: service.editConflictNotice(intake.id, tape: tape, head: planHead),
-                             selectedRound: $selectedCheckpoint,
-                             selectedSeat: $selectedSeat,
-                             controlBar: { now in AnyView(inCard(.bar, height: barHeight) { controlBar(tape, now: now) }) },
-                             board: { now in AnyView(inCard(.board, height: boardHeight) { board(tape, now: now) }) })
+            SeatReader(feed: service.seats, id: intake.id) { seats in
+                let _ = RenderProbe.hit("liveCard")
+                LiveCard.shaping(intake: intake, tape: tape, activities: seats.activities, records: seats.records,
+                                 results: seats.results, pending: service.pending[intake.id],
+                                 editConflict: service.editConflictNotice(intake.id, tape: tape, head: planHead),
+                                 selectedRound: $selectedCheckpoint,
+                                 selectedSeat: $selectedSeat,
+                                 controlBar: { now in
+                                     AnyView(inCard(.bar, height: barHeight) { controlBar(tape, now: now, seats: seats) })
+                                 },
+                                 board: { now in AnyView(inCard(.board, height: boardHeight) { board(tape, now: now) }) })
+            }
         default:
             EmptyView()
         }
@@ -237,26 +254,35 @@ struct IntakeDetailView: View {
     @ViewBuilder
     private var pinnedBar: some View {
         if pinned, intake.state == .shaping, let tape {
-            LiveClock(ticking: tape.status != .reachedReview) { now in
-                VStack(spacing: Metrics.barGap) {
-                    controlBar(tape, now: now)
-                    board(tape, now: now)
+            SeatReader(feed: service.seats, id: intake.id) { seats in
+                LiveClock(ticking: tape.status != .reachedReview) { now in
+                    VStack(spacing: Metrics.barGap) {
+                        controlBar(tape, now: now, seats: seats)
+                        board(tape, now: now)
+                    }
                 }
             }
             .padding(.horizontal, Metrics.margin + Metrics.cardInset)
             .padding(.top, DetailLayout.pinnedInset)
             .padding(.bottom, 10)
             .background(Color(nsColor: .windowBackgroundColor).shadow(.drop(color: .black.opacity(0.35), radius: 6, y: 2)))
+            // Clear of the document's scroller, which the block would otherwise cover: the
+            // scroller is how the human sees where in the document they are.
+            .padding(.trailing, Self.scrollerWidth)
+            // The block is not inside the document's scroll view, so a wheel over it reached
+            // nothing that scrolls: hand it to the document instead.
+            .background(WheelToDocument(scroll: documentScroll))
             .accessibilityIdentifier("intake-pinned-bar")
         }
     }
 
     @ViewBuilder
-    private func controlBar(_ tape: Tape, now: Date) -> some View {
+    private func controlBar(_ tape: Tape, now: Date, seats: SeatFiles) -> some View {
         if let config = intake.roundConfig {
             let board = boardModel(tape, config: config, now: now)
             let cell = convergenceCell
-            let lcd = LCDModel(tape: tape, config: config, board: board, seats: seatModels(tape, config: config, now: now),
+            let lcd = LCDModel(tape: tape, config: config, board: board,
+                               seats: seatModels(tape, config: config, now: now, seats: seats),
                                convergence: cell, preview: preview, now: now)
             ControlBar(lcd: lcd, convergence: cell, actions: planningActions ?? PlanningActions(enabled: [], perform: { _ in }),
                        status: tape.status, defaultPlay: config.defaultPlay,
@@ -315,6 +341,7 @@ struct IntakeDetailView: View {
             onSelect: { checkpoint, section in
                 select(checkpoint)
                 planFocus = PlanFocus(checkpoint: checkpoint, section: section, seq: (planFocus?.seq ?? 0) + 1)
+                planScroll += 1
             },
             onAnnotate: { [notes] _ in notes.annotate() },
             onClose: { self.heatmap = nil }))
@@ -334,14 +361,9 @@ struct IntakeDetailView: View {
 
     /// The round in progress's seats, as the card's rows draw them — SEATS DONE and BILLED count
     /// the same seats the rows below show. A start not yet heard from shows none, as the card does.
-    private func seatModels(_ tape: Tape, config: RoundConfig, now: Date) -> [SeatRowModel] {
+    private func seatModels(_ tape: Tape, config: RoundConfig, now: Date, seats: SeatFiles) -> [SeatRowModel] {
         guard let round = tape.roundInProgress, service.pending[intake.id] == nil else { return [] }
-        return LiveSeats.rows(round: round, config: config, seats: seatFiles, now: now).map(\.model)
-    }
-
-    private var seatFiles: SeatFiles {
-        SeatFiles(activities: service.seatActivities[intake.id] ?? [:], records: service.runRecords[intake.id] ?? [:],
-                  results: service.seatResults[intake.id] ?? [:])
+        return LiveSeats.rows(round: round, config: config, seats: seats, now: now).map(\.model)
     }
 
     /// Back is navigation in the plan viewer (the `ControlBar.onBack` contract): one checkpoint
@@ -375,32 +397,23 @@ struct IntakeDetailView: View {
     // MARK: - Plan
 
     /// Tall enough to read a plan in under the pinned bar and board — a short box scrolling
-    /// inside a long document is two scroll bars for one text.
+    /// inside a long document is two scroll bars for one text. The final plan (review on) has
+    /// no pinned block over it.
     private func planSection(viewport: CGFloat) -> some View {
-        let pinnedHeight = barHeight > 0
+        let final = DetailLayout.planIsFinal(for: intake.state)
+        let pinnedHeight = final ? 0 : barHeight > 0
             ? DetailLayout.pinnedInset + barHeight + Metrics.barGap + boardHeight + 10 : Metrics.pinnedEstimate
-        return VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                Text("Plan").font(.headline)
-                Spacer(minLength: 0)
-                NotesChip(controller: notes) {
-                    notes.planFocused = true
-                    showsInspector = true
-                }
-            }
-            PlanSection(intakeID: intake.id, tape: tape ?? .empty,
-                        loadFile: { [service, id = intake.id] checkpoint, path in
-                            service.checkpointFile(id, checkpoint: checkpoint, path)
-                        },
-                        onSend: { [service, id = intake.id] command in service.send(id, command) },
-                        selection: $selectedCheckpoint, notes: notes)
-                .editHooks(PlanEditHooks(noteShown: service.editNoteShown.contains(intake.id),
-                                         onNoteShown: { [service, id = intake.id] in service.markEditNoteShown(id) },
-                                         onConflict: { [service, id = intake.id] in service.recordEditConflict(id, $0) }))
-                .churnLane(churnLane())
-                .focus(planFocus)
-                .frame(height: max(360, viewport - pinnedHeight - 24))
-        }
+        return DocumentPlan(service: service, intakeID: intake.id, title: DetailLayout.planTitle(for: intake.state),
+                            tape: planTape ?? .empty, final: final,
+                            selection: final ? nil : selectedCheckpoint, select: final ? .constant(nil) : $selectedCheckpoint,
+                            focus: final ? nil : planFocus, churn: final ? nil : churnLane(),
+                            noteShown: service.editNoteShown.contains(intake.id), notes: final ? nil : notes,
+                            height: max(360, viewport - pinnedHeight - 24),
+                            onOpenNotes: {
+                                notes.planFocused = true
+                                showsInspector = true
+                            })
+            .equatable()
     }
 
     // MARK: - Stage bodies
@@ -550,15 +563,32 @@ struct IntakeDetailView: View {
         }
     }
 
+    /// What the review will write, counted, and whether the task graph moved since triage —
+    /// so the pane says what Review Tasks… opens onto before it is opened. The drift needs the
+    /// graph read (`IntakeService.reviewModel`), so it follows a beat after the counts, once
+    /// per visit and again when a confirm or drop in the sheet changes the answer.
     private var reviewBody: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 6) {
             // A refused release comes back here with its reason — without this line the only
             // trace of the refusal was the sheet having closed.
             if let failure = intake.failure {
-                Text(failure).foregroundStyle(.orange)
+                Text(failure).foregroundStyle(.orange).padding(.bottom, 6)
             }
-            Text("The change set is ready. Review what will be written before releasing it.")
+            Text("Change set").font(.headline)
+            Text(DetailLayout.reviewCounts(intake.changeSet?.ops ?? []))
+                .accessibilityIdentifier("intake-review-counts")
+            Text(drift ?? "Checking the task graph for changes since triage…")
                 .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityIdentifier("intake-review-drift")
+        }
+        .task(id: ReviewKey(id: intake.id, confirmed: intake.confirmedDrift, dropped: intake.droppedOps)) {
+            drift = nil
+            guard let review = await service.reviewModel(intake.id) else {
+                drift = "The review checks the task graph for changes since triage."
+                return
+            }
+            drift = DetailLayout.driftLine(review.drift, confirmed: review.intake.confirmedDrift, dropped: review.intake.droppedOps)
         }
     }
 
@@ -611,55 +641,6 @@ struct IntakeDetailView: View {
 
     // MARK: - Answered rounds
 
-    /// Every answered exchange, in every state that has one, as a collapsed section — so the
-    /// Q&A that shaped a recommendation, a plan or a review can be read back from there.
-    @ViewBuilder
-    private var clarifications: some View {
-        let answered = answeredRounds
-        if !answered.isEmpty {
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Clarifications").font(.headline)
-                GroupedRows(count: answered.count) { n in
-                    let index = answered[n]
-                    DisclosureGroup(isExpanded: roundExpansion(index)) {
-                        answeredRound(intake.exchanges[index])
-                            .padding(.top, 8)
-                    } label: {
-                        Text(Self.roundLabel(index: index, exchange: intake.exchanges[index]))
-                    }
-                }
-            }
-        }
-    }
-
-    private func answeredRound(_ exchange: TriageExchange) -> some View {
-        let answers = exchange.answers ?? []
-        return VStack(alignment: .leading, spacing: 12) {
-            ForEach(exchange.questions.indices, id: \.self) { i in
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(exchange.questions[i])
-                        .font(.callout.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Text(i < answers.count ? answers[i] : "—")
-                        .fixedSize(horizontal: false, vertical: true)
-                        .textSelection(.enabled)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-        }
-        .padding(.leading, 18)
-    }
-
-    private func roundExpansion(_ index: Int) -> Binding<Bool> {
-        Binding(
-            get: { expandedRounds.contains(index) },
-            set: { open in
-                if open { expandedRounds.insert(index) } else { expandedRounds.remove(index) }
-            }
-        )
-    }
-
     /// "Round 1 · 3 questions" — numbered by position in `exchanges`, so a round keeps its
     /// number whichever state the intake is reviewed from.
     static func roundLabel(index: Int, exchange: TriageExchange) -> String {
@@ -700,7 +681,7 @@ struct IntakeDetailView: View {
     private var roundsEditor: some View {
         if let config = editedConfig {
             RoundConfigEditor(preset: selectedPreset, config: Binding(get: { config }, set: { editedConfig = $0 }),
-                              available: service.availableModels(), collapsible: false)
+                              available: service.availableModels())
         }
     }
 
@@ -708,11 +689,16 @@ struct IntakeDetailView: View {
     /// each second, and the inspector follows it (a fallback starting, a result landing).
     @ViewBuilder
     private var seatInspector: some View {
-        if let tape, let round = tape.roundInProgress, let selectedSeat,
-           let seat = LiveSeats.rows(round: round, config: intake.roundConfig, seats: seatFiles, now: Date())
-            .first(where: { $0.id == selectedSeat }) {
-            SeatInspector(model: seat.model, activity: service.seatActivities[intake.id]?[seat.model.id],
-                          runDirectory: service.runDirectory(intake.id, run: seat.model.id))
+        if let tape, let round = tape.roundInProgress, let selectedSeat {
+            SeatReader(feed: service.seats, id: intake.id) { seats in
+                if let seat = LiveSeats.rows(round: round, config: intake.roundConfig, seats: seats, now: Date())
+                    .first(where: { $0.id == selectedSeat }) {
+                    SeatInspector(model: seat.model, activity: seats.activities[seat.model.id],
+                                  runDirectory: service.runDirectory(intake.id, run: seat.model.id))
+                } else {
+                    InspectorPlaceholder(title: "No Seat Selected", message: "Click a seat in the round to see its details.")
+                }
+            }
         } else if tape?.roundInProgress == nil {
             InspectorPlaceholder(title: "No Round Running", message: "Seats show here while a round is at work.")
         } else {
@@ -757,19 +743,20 @@ struct IntakeDetailView: View {
         }
     }
 
-    /// Send Answers takes ⌘↩ rather than `.defaultAction`: the answers are multi-line fields,
-    /// and Return belongs to the text being typed, not to sending half of it.
+    /// The key per `DetailLayout.primaryKey`: ⌘↩ for Send Answers, whose multi-line fields own
+    /// Return; none for a partial release's Dismiss, so a stray Return can't hide it.
     @ViewBuilder
     private func primaryButton(_ title: String) -> some View {
         let button = Button(title) { performPrimary() }
             .buttonStyle(.borderedProminent)
             .accessibilityIdentifier("intake-primary-action")
-        if intake.state == .needsAnswers {
+        switch DetailLayout.primaryKey(for: intake.state) {
+        case .commandReturn:
             button
                 .keyboardShortcut(.return, modifiers: .command)
                 .disabled(!Self.canSendAnswers(answers))
-        } else {
-            button.keyboardShortcut(.defaultAction)
+        case .defaultAction: button.keyboardShortcut(.defaultAction)
+        case .none: button
         }
     }
 
@@ -791,6 +778,14 @@ struct IntakeDetailView: View {
     private var answeredRounds: [Int] { intake.exchanges.indices.filter { intake.exchanges[$0].answers != nil } }
 
     private static let allPresets: [Preset] = [.bead, .sketch, .featurePlan, .fullPlan]
+
+    private static let planAnchor = "intake-plan"
+
+    /// The document scroller's width in the current scroller style — zero-width overlay
+    /// scrollers still draw over the content's trailing edge while scrolling.
+    private static var scrollerWidth: CGFloat {
+        NSScroller.scrollerWidth(for: .regular, scrollerStyle: NSScroller.preferredScrollerStyle)
+    }
 }
 
 // MARK: - Support
@@ -826,18 +821,273 @@ private struct BarGeometryKey: PreferenceKey {
     }
 }
 
-/// Publishes the Run menu's actions for the scene, not only while focus is inside the pane:
-/// nothing in the document takes focus on a click (the transport keys are plain buttons), so a
-/// focus-scoped value left ⌘' and ⌘. dark the whole time a run was on screen. No terminal
-/// shares the window's detail column while an intake is shown, so no surface competes for them.
-private struct PublishesPlanningActions: ViewModifier {
-    let actions: PlanningActions?
+/// Counts body evaluations by name, in debug builds only — how a test proves a seat beat
+/// redraws the live card and nothing else in the pane. A no-op in release.
+@MainActor
+enum RenderProbe {
+    private(set) static var counts: [String: Int] = [:]
 
-    func body(content: Content) -> some View {
-        if let actions {
-            content.focusedSceneValue(\.planningActions, actions)
-        } else {
-            content
+    static func hit(_ name: String) {
+        #if DEBUG
+        counts[name, default: 0] += 1
+        #endif
+    }
+
+    static func reset() { counts = [:] }
+}
+
+/// Re-reads only intake `id`'s seat files (`SeatFeed`), so a seat beat redraws what is drawn
+/// from them and not the pane around it.
+private struct SeatReader<Content: View>: View {
+    @ObservedObject var feed: SeatFeed
+    let id: UUID
+    @ViewBuilder let content: (SeatFiles) -> Content
+
+    var body: some View { content(feed.files(id)) }
+}
+
+/// The eyebrow ("INTAKE · SHAPING"), the intent, and the phases done so far. Plain values, so
+/// it redraws only when one of them changes.
+private struct DetailHeader: View, Equatable {
+    let state: IntakeState
+    let intent: String
+    let summary: [ProgressItem]
+
+    var body: some View {
+        let _ = RenderProbe.hit("header")
+        VStack(alignment: .leading, spacing: 4) {
+            (Text("Intake · ") + Text(IntakeStatePill.stateName(state))
+                .foregroundColor(state.needsAttention ? .orange : nil))
+                .font(.system(size: 11, weight: .semibold))
+                .tracking(0.8)
+                .textCase(.uppercase)
+                .foregroundStyle(.tertiary)
+                .accessibilityIdentifier("intake-state-eyebrow")
+            Text(intent)
+                .font(.title2.weight(.bold))
+                .fixedSize(horizontal: false, vertical: true)
+                .textSelection(.enabled)
+            if !summary.isEmpty {
+                WrappingRow(spacing: 18, lineSpacing: 4) {
+                    ForEach(summary) { item in
+                        HStack(spacing: 5) {
+                            Image(systemName: "checkmark.circle.fill").foregroundStyle(.tertiary)
+                            Text(item.label).fontWeight(.semibold)
+                            if !item.detail.isEmpty { Text(item.detail).foregroundStyle(.secondary) }
+                        }
+                        .accessibilityElement(children: .combine)
+                    }
+                }
+                .font(.callout)
+                .padding(.top, 6)
+                .accessibilityIdentifier("intake-progress-summary")
+            }
+        }
+    }
+}
+
+/// Every answered exchange, in every state that has one, as a collapsed section — so the Q&A
+/// that shaped a recommendation, a plan or a review can be read back from there. Equal while
+/// the exchanges and which rounds are open are; `setExpanded` is not compared.
+private struct ClarificationsSection: View, Equatable {
+    let exchanges: [TriageExchange]
+    let expanded: Set<Int>
+    let setExpanded: (Int, Bool) -> Void
+
+    static func == (a: Self, b: Self) -> Bool { a.exchanges == b.exchanges && a.expanded == b.expanded }
+
+    var body: some View {
+        let _ = RenderProbe.hit("clarifications")
+        let answered = exchanges.indices.filter { exchanges[$0].answers != nil }
+        if !answered.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Clarifications").font(.headline)
+                GroupedRows(count: answered.count) { n in
+                    let index = answered[n]
+                    DisclosureGroup(isExpanded: Binding(get: { expanded.contains(index) }, set: { setExpanded(index, $0) })) {
+                        round(exchanges[index])
+                            .padding(.top, 8)
+                    } label: {
+                        Text(IntakeDetailView.roundLabel(index: index, exchange: exchanges[index]))
+                    }
+                }
+            }
+        }
+    }
+
+    private func round(_ exchange: TriageExchange) -> some View {
+        let answers = exchange.answers ?? []
+        return VStack(alignment: .leading, spacing: 12) {
+            ForEach(exchange.questions.indices, id: \.self) { i in
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(exchange.questions[i])
+                        .font(.callout.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text(i < answers.count ? answers[i] : "—")
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .padding(.leading, 18)
+    }
+}
+
+/// The plan section of the document: its heading, the notes chip, and `PlanSection`. Equal on
+/// what it shows — the tape, the round selected, the focus request, the churn cycle, its height
+/// — and never on its closures or the service, so an unrelated publish doesn't rebuild the
+/// editor's inputs. The notes controller compares by identity: its changes redraw the views
+/// observing it, not this one.
+private struct DocumentPlan: View, Equatable {
+    let service: IntakeService
+    let intakeID: UUID
+    let title: String
+    let tape: Tape
+    let final: Bool
+    let selection: Int?
+    let select: Binding<Int?>
+    let focus: PlanFocus?
+    let churn: ChurnLaneInput?
+    let noteShown: Bool
+    let notes: PlanNotesController?
+    let height: CGFloat
+    let onOpenNotes: () -> Void
+
+    static func == (a: Self, b: Self) -> Bool {
+        a.intakeID == b.intakeID && a.title == b.title && a.tape == b.tape && a.final == b.final
+            && a.selection == b.selection && a.focus == b.focus && a.churn?.cycle == b.churn?.cycle
+            && a.noteShown == b.noteShown && a.notes === b.notes && a.height == b.height
+    }
+
+    var body: some View {
+        let _ = RenderProbe.hit("plan")
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Text(title).font(.headline)
+                Spacer(minLength: 0)
+                if let notes { NotesChip(controller: notes, onOpen: onOpenNotes) }
+            }
+            PlanSection(intakeID: intakeID, tape: tape,
+                        loadFile: { [service, intakeID] checkpoint, path in
+                            service.checkpointFile(intakeID, checkpoint: checkpoint, path)
+                        },
+                        onSend: { [service, intakeID] command in service.send(intakeID, command) },
+                        selection: select, notes: notes)
+                .editHooks(PlanEditHooks(noteShown: noteShown,
+                                         onNoteShown: { [service, intakeID] in service.markEditNoteShown(intakeID) },
+                                         onConflict: { [service, intakeID] in service.recordEditConflict(intakeID, $0) }))
+                .churnLane(churn)
+                .focus(focus)
+                .readOnly(final)
+                .frame(height: height)
+        }
+    }
+}
+
+/// What re-reads the review's drift: another intake, or a confirm or drop in the sheet.
+private struct ReviewKey: Equatable {
+    let id: UUID
+    let confirmed: Set<Int>
+    let dropped: Set<Int>
+}
+
+/// The document's `NSScrollView`, found by `DocumentScrollAnchor` from inside it. A class held
+/// in `@State`, so setting it redraws nothing.
+final class DocumentScroll {
+    weak var view: NSScrollView?
+}
+
+/// Sits inside the document and records its enclosing scroll view — the one the pinned block
+/// hands wheel events to. Found from inside rather than searched for: the plan editor is a
+/// scroll view in the same document, and a search could land on it.
+private struct DocumentScrollAnchor: NSViewRepresentable {
+    let scroll: DocumentScroll
+
+    func makeNSView(context: Context) -> AnchorView { AnchorView(scroll: scroll) }
+    func updateNSView(_ view: AnchorView, context: Context) {}
+
+    final class AnchorView: NSView {
+        let scroll: DocumentScroll
+        init(scroll: DocumentScroll) {
+            self.scroll = scroll
+            super.init(frame: .zero)
+        }
+
+        @available(*, unavailable)
+        required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if let enclosing = enclosingScrollView { scroll.view = enclosing }
+        }
+    }
+}
+
+/// Where a wheel event over the pinned block goes (`WheelToDocument`).
+enum WheelRouting {
+    /// To the document when it is over the block and not mostly sideways — a sideways one is
+    /// the board's tape scrolling along its route. A still event goes too: a trackpad gesture
+    /// ends on one, and a scroll view that saw it begin but never end keeps its bounce open.
+    static func toDocument(overBlock: Bool, deltaX: CGFloat, deltaY: CGFloat) -> Bool {
+        overBlock && abs(deltaY) >= abs(deltaX)
+    }
+}
+
+/// The pinned block's wheel events, handed to the document's scroll view.
+///
+/// **Why a monitor, not a `scrollWheel` override.** The block is an overlay beside the document's
+/// scroll view, not inside it, and AppKit's hit test over it lands on the pane's hosting view
+/// (measured offscreen: every point over the block hit-tested to the `NSHostingView`, never to a
+/// view of this block), whose responder chain runs up through its superviews — never down into
+/// the scroll view it contains. So no view of the block ever receives the event to forward. A
+/// local monitor sees it before the hit test, whichever view it was bound for, and is installed
+/// only while the block is on screen.
+private struct WheelToDocument: NSViewRepresentable {
+    let scroll: DocumentScroll
+
+    func makeNSView(context: Context) -> Forwarder { Forwarder(scroll: scroll) }
+    func updateNSView(_ view: Forwarder, context: Context) {}
+    static func dismantleNSView(_ view: Forwarder, coordinator: ()) { view.stop() }
+
+    final class Forwarder: NSView {
+        let scroll: DocumentScroll
+        private var monitor: Any?
+
+        init(scroll: DocumentScroll) {
+            self.scroll = scroll
+            super.init(frame: .zero)
+        }
+
+        @available(*, unavailable)
+        required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            stop()
+            guard window != nil else { return }
+            monitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+                guard let self, let window = self.window, event.window === window, let document = self.scroll.view,
+                      WheelRouting.toDocument(overBlock: self.bounds.contains(self.convert(event.locationInWindow, from: nil)),
+                                              deltaX: event.scrollingDeltaX, deltaY: event.scrollingDeltaY)
+                else { return event }
+                document.scrollWheel(with: event)
+                return nil
+            }
+        }
+
+        func stop() {
+            if let monitor { NSEvent.removeMonitor(monitor) }
+            monitor = nil
+        }
+
+        deinit {
+            if let monitor { NSEvent.removeMonitor(monitor) }
         }
     }
 }

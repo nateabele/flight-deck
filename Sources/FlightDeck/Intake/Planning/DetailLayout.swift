@@ -21,8 +21,9 @@ enum DetailLayout {
         switch state {
         case .triaging: out.append(.liveCard)
         case .shaping: out += [.liveCard, .plan]
-        case .needsAnswers, .awaitingChoice, .parked, .review, .releasing, .released, .partiallyReleased,
-             .failed, .interrupted:
+        // The plan the tasks were written from stays readable under the review's summary.
+        case .review, .releasing, .released, .partiallyReleased: out += [.stageBody, .plan]
+        case .needsAnswers, .awaitingChoice, .parked, .failed, .interrupted:
             out.append(.stageBody)
         // Never listed (`intakes(forProject:)` filters it out); the arm exists for exhaustiveness.
         case .discarded: break
@@ -47,6 +48,71 @@ enum DetailLayout {
         case .failed, .interrupted: "Retry"
         case .triaging, .shaping, .releasing, .discarded: nil
         }
+    }
+
+    /// How the keyboard reaches the primary. Return everywhere it is safe; ⌘↩ for Send Answers,
+    /// whose multi-line fields own Return; and none for a partial release, whose Dismiss would
+    /// otherwise put a half-written release out of sight on a stray Return.
+    enum PrimaryKey: Equatable { case defaultAction, commandReturn, none }
+
+    static func primaryKey(for state: IntakeState) -> PrimaryKey {
+        switch state {
+        case .needsAnswers: .commandReturn
+        case .partiallyReleased: .none
+        default: .defaultAction
+        }
+    }
+
+    /// From review on, the plan section shows the final plan, read-only: the change set was
+    /// encoded from it, so an edit there would change nothing that gets written.
+    static func planIsFinal(for state: IntakeState) -> Bool {
+        switch state {
+        case .review, .releasing, .released, .partiallyReleased: true
+        default: false
+        }
+    }
+
+    static func planTitle(for state: IntakeState) -> String { planIsFinal(for: state) ? "Final plan" : "Plan" }
+
+    /// The review body's count of what will be written: "3 new tasks · 2 edits · 1 dependency".
+    /// A follow-up is a new task (of an existing one); a reopen is an edit to one.
+    static func reviewCounts(_ ops: [ChangeOp]) -> String {
+        var created = 0, edited = 0, edges = 0
+        for op in ops {
+            switch op {
+            case .createBead, .followUp: created += 1
+            case .editBead, .reopen: edited += 1
+            case .addEdge: edges += 1
+            }
+        }
+        let parts = [(created, "new task", "new tasks"), (edited, "edit", "edits"), (edges, "dependency", "dependencies")]
+            .filter { $0.0 > 0 }
+            .map { "\($0.0) \($0.0 == 1 ? $0.1 : $0.2)" }
+        return parts.isEmpty ? "Nothing to write" : parts.joined(separator: " · ")
+    }
+
+    /// Whether the graph moved since triage, as the review sheet will ask about it (`drift` is
+    /// parallel to the change set's ops; `confirmed`/`dropped` are the intake's own choices).
+    static func driftLine(_ drift: [OpDrift], confirmed: Set<Int>, dropped: Set<Int>) -> String {
+        var open = 0, kept = 0, left = 0, gone = 0
+        for (i, d) in drift.enumerated() {
+            switch d {
+            case .holds: break
+            case .impossible: gone += 1
+            case .drifted:
+                if dropped.contains(i) { left += 1 } else if confirmed.contains(i) { kept += 1 } else { open += 1 }
+            }
+        }
+        let tasks = { (n: Int) in n == 1 ? "1 task" : "\(n) tasks" }
+        var lines: [String] = []
+        if open > 0 { lines.append("\(tasks(open)) changed since triage — confirm or drop them in the review.") }
+        if kept > 0 { lines.append("\(tasks(kept)) changed since triage, already confirmed.") }
+        if left > 0 { lines.append("\(tasks(left)) changed since triage, already dropped.") }
+        if gone > 0 {
+            lines.append(gone == 1 ? "1 change can't be written: its task no longer exists."
+                                   : "\(gone) changes can't be written: their tasks no longer exist.")
+        }
+        return lines.isEmpty ? "Nothing has changed in the task graph since triage." : lines.joined(separator: " ")
     }
 
     /// The destructive, confirmed Discard on the leading edge — every state that can still be

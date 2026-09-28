@@ -373,6 +373,34 @@ final class IntakeServiceLiveTests: XCTestCase {
         XCTAssertEqual(svc.seatActivities[i.id]?["refine-1-reviewer"]?.headline, "Reading the board")
     }
 
+    /// A seat beat publishes on `seats` alone. On the service it redrew every observer of the
+    /// service — the whole detail pane, the project view, and through `SessionStore`'s forward
+    /// every view of the store — about once a second of a run, for values only the live card
+    /// draws.
+    func testSeatBeatPublishesOnlyOnTheSeatFeed() async throws {
+        let i = try seed(.shaping)
+        try updateTape(i.id) { $0.status = .running; $0.roundInProgress = Self.refine1 }
+        try writeSeat(i.id, run: "refine-1-reviewer", activity: SeatActivity(harness: .codex, startedAt: clockNow),
+                      record: RunRecord(started: clockNow))
+        let activity = tapeStore(i.id).runDirectory("refine-1-reviewer").appendingPathComponent("activity.json")
+        try setMTime(activity, 1_790_000_000)
+        let svc = await makeService()
+        var servicePublishes = 0, seatPublishes = 0
+        let a = svc.objectWillChange.sink { servicePublishes += 1 }
+        let b = svc.seats.objectWillChange.sink { seatPublishes += 1 }
+        defer { a.cancel(); b.cancel() }
+
+        var moved = SeatActivity(harness: .codex, startedAt: clockNow)
+        moved.headline = "Reading the board"
+        try IntakeJSON.encoder.encode(moved).write(to: activity)
+        try setMTime(activity, 1_790_000_001)
+        svc.pollTapes()
+        XCTAssertEqual(svc.seatActivities[i.id]?["refine-1-reviewer"]?.headline, "Reading the board")
+        XCTAssertEqual(svc.seats.files(i.id).activities["refine-1-reviewer"]?.headline, "Reading the board")
+        XCTAssertGreaterThan(seatPublishes, 0)
+        XCTAssertEqual(servicePublishes, 0, "a seat beat must not redraw the service's observers")
+    }
+
     /// A retried round keeps its name, so the failed attempt's seats sit beside the new ones;
     /// anything that started before this attempt (less a second's grace) is not shown.
     func testSeatsFromAnEarlierAttemptAreHidden() async throws {
