@@ -1904,3 +1904,20 @@ seat, 2026-09-27 — it reached review first time, 277 s, ~452k input / ~19k out
   the plan hedged with discovery/bootstrap beads. Not a schema problem; a prompt-calibration
   one worth watching at real fidelity before anyone reads the change count as a convergence
   signal.
+
+**From editable plans and anchored notes** (engine only, 2026-09-27):
+
+- **An edit that lands mid-round is not carried forward.** It is stored on the checkpoint it
+  names, but the landing round becomes the head and only the head's effective plan feeds the
+  next round, so the edit reaches no round; the landing round's record says so. Carrying it
+  forward means a three-way merge of the human's hunks onto the new `plan.md` — deferred until
+  the UI shows whether it's needed.
+- **`editPlan` carries the whole plan, and `commands.jsonl` never shrinks.** `appendCommand`
+  re-reads every line to pick the next `seq`, so a UI that sends an edit per keystroke on a
+  large plan makes each append slower. Send on save/blur; compacting acked lines is the fix if
+  that is not enough.
+- **The lost-edit check is line-exact.** A round that keeps an edited line but reflows it (or
+  moves one word) counts it as lost; the warning over-reports rather than under-reports.
+- **No views.** The UI (Obsidian-style editor, diff overlay, per-hunk Revert, highlight-to-note)
+  is still being designed; every engine seam it needs is in `PlanLayers`, `NoteAnchor`,
+  `TapeStore.userEdits`/`notes(in:)` and the three new `TapeCommand`s.
