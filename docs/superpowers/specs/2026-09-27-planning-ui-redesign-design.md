@@ -98,9 +98,11 @@ At the top edge of the live card (in the content, not the window toolbar — it 
   Hovering a play button previews its stop on the board and in the LCD (label becomes WOULD STOP).
   Each has a Run menu command: Step ⌘', Next Major ⇧⌘', To Review ⌥⌘', Pause ⇧⌘., Stop ⌘..
   "Pausing…"/"Stopping…" swap the button label with an inline spinner until the safe point.
-  As built, Pause and Stop are swapped from the pairing above and Annotate moved off ⇧⌘A: Stop ⌘.
-  matches the OS-wide "period stops" convention, and ⇧⌘A was already claimed by Add Project, so
-  Annotate landed on ⌥⌘A instead (T6 ruling).
+  Stop ⌘. follows the OS-wide "period stops" convention. Stop discards the round in flight, so the
+  key and ⌘. both ask first — "Stop the run?", naming the round whose work is discarded, Stop
+  destructive and never the default (final-review ruling #6); Pause loses nothing and acts at once.
+  Annotate is ⌥⌘A, since ⇧⌘A was already claimed by Add Project (T6 ruling). The Run menu also
+  carries Show/Hide Section Heatmap (no chord), the keyboard's way to §8.3.
 - **LCD readout**, one dark-glass instrument, monospaced phosphor values, tabular numerals, cells:
   `ROUND · OF N` · `ELAPSED` · `SEATS DONE` · `SO FAR` (+/−) · `BILLED` · **`CONVERGENCE`** (§8.1) ·
   `STOPS AT`. States recolour only the relevant cell (PAUSED; FAILED red with the diagnosis replacing
@@ -183,6 +185,12 @@ block stays rendered. There is no separate edit mode. Implemented on AppKit `NST
 wrapped for SwiftUI — styling by attributes over the source text, so the stored plan stays plain
 Markdown. Edits are sent as `editPlan` when the field ends editing or after 2 s idle, never per
 keystroke (`commands.jsonl` never compacts).
+
+A new head arriving while the editor is focused replaces the text only when nothing is uncommitted
+(`EditPolicy.shouldReplace(editing: true, dirty: false) == true`, final-review ruling #20): with
+every keystroke already committed there is nothing to lose, and holding the head behind a banner
+would only make the human click for a plan they would have taken anyway. With uncommitted typing,
+the head is held and offered.
 
 ### 7.2 Your edits as a layer
 
