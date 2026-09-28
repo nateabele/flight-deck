@@ -447,6 +447,7 @@ private struct NotesLane: View {
     /// card offset. Measured by an AppKit probe so both sides use the same coordinate system.
     @State private var laneTop: CGFloat?
     @State private var heights: [UUID: CGFloat] = [:]
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private static let gap: CGFloat = 8
     private static let inset: CGFloat = 10
@@ -484,7 +485,9 @@ private struct NotesLane: View {
             .clipped()
         }
         .onPreferenceChange(CardHeightKey.self) { if $0 != heights { heights = $0 } }
-        .animation(.easeOut(duration: 0.15), value: controller.draft?.id)
+        // The cards sliding to make room for a draft is motion, so Reduce Motion drops it (spec
+        // §2): they move into place at once.
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.15), value: controller.draft?.id)
     }
 
     /// The draft rides along as a pending note so it is placed and ordered like one.
