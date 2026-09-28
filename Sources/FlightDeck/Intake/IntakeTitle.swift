@@ -83,10 +83,6 @@ struct IntakeTitle: Equatable {
         self.rest = rest
     }
 
-    /// Words in the request, for the Request section's "Full text · N words" label.
-    static func wordCount(_ text: String) -> Int {
-        text.split(whereSeparator: { $0.isWhitespace }).count
-    }
 
     // MARK: - Cuts
 

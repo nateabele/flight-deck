@@ -281,15 +281,16 @@ from scratch" above, paused mid-round where an item needs that.
 - Select a row, with the window key and then not. **Expect:** the selected row's secondary text
   follows the selection highlight (white-ish on the accent, not a fixed gray that reads as
   disabled) — agents rendered only the unemphasized gray selection.
-- Open an intake whose request is a paragraph. **Expect:** the header's title is a short cut of it
-  (`.title3` semibold; a first sentence, else its first clause or last comma with "…", never a
-  mid-word cut) and a **Request** section under it, styled like Clarifications, collapsed to
-  "Full text · N words". Open it, select some of the text, switch to another intake and back.
-  **Expect:** the whole request in secondary, selectable; the section is collapsed again after
-  the round trip (kept per intake, the way Clarifications' rounds are). With Reduce Motion on,
-  the disclosure opens without its slide, same as Clarifications.
-- Open an intake whose request is one short sentence. **Expect:** that sentence as the title and
-  no Request section at all.
+- Open an intake whose request is a paragraph. **Expect:** under the eyebrow, a chevron beside
+  the request's short title (`.title3` semibold; a first sentence, else its first clause or last
+  comma with "…", never a mid-word cut) — no separate "Request" heading. Click the title.
+  **Expect:** the chevron turns and the same line runs on into the rest of the request in regular
+  secondary text (the first sentence is not repeated). Switch to another intake and back.
+  **Expect:** collapsed again (kept per intake, the way Clarifications' rounds are). With Reduce
+  Motion on, it opens without animating. VoiceOver reads the title as a button with
+  expanded/collapsed.
+- Open an intake whose request is one short sentence. **Expect:** that sentence as the title, with
+  no chevron.
 
 ### Control bar and transport
 
@@ -471,8 +472,8 @@ scrollers for one text).
 - [ ] Full plan variant — four mixed codex/claude drafters, polish, fresh eyes + dedup all run
   to review
 - [ ] Planning UI — intake rows wrap to three lines with a bold title lead-in and their selected
-  text follows the highlight; the header shows a short title over a collapsed Request section
-  (absent for a one-sentence request); every transport chord, hover-preview and pausing/stopping spinner works; LCD
+  text follows the highlight; the header's request title is itself a chevron toggle that runs on into the full request
+  (no chevron for a one-sentence request); every transport chord, hover-preview and pausing/stopping spinner works; LCD
   labels/values read in full words with no truncation; the compact bar at ~700 pt never
   code-truncates a state word; tape flap plays once per new text and never on first scroll-into-
   view, honoring Reduce Motion; round cards escape scroll clipping; auto-scroll follows the live
