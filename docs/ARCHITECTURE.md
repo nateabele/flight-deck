@@ -387,7 +387,10 @@ Back (⌃⌘←) and Forward (⌃⌘→) navigate a persisted selection history 
 plus the rest of the main menu's, derived from the live menu bar rather than a hand-kept list
 so it never drifts. `ShortcutCatalog` walks `NSApp.mainMenu` into groups keyed by top-level
 menu (`ShortcutCatalog+AppKit.swift` does the `NSMenuItem` adaptation; the catalog itself is
-pure so it tests without AppKit's menu machinery); `ShortcutOverlay` renders and filters them.
+pure so it tests without AppKit's menu machinery); `ShortcutOverlay` renders and filters them
+as a dark glass command sheet — one keycap per key (`ShortcutCatalog.keycaps`), groups split
+into two height-balanced columns in menu order (`twoColumns`), ↑↓ moving a highlight through a
+local key monitor because the focused filter field's editor eats arrow keys first.
 Chords the terminal alone handles (⌘←/⌘→ line start/end, ⌘K clear) are not in the menu, so
 they are correctly absent from the overlay too.
 

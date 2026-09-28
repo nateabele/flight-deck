@@ -114,4 +114,52 @@ final class ShortcutCatalogTests: XCTestCase {
         plain.submenu = NSMenu(title: "")
         XCTAssertEqual(ShortcutCatalog.MenuNode(topLevel: plain).title, "File")
     }
+
+    // MARK: - Glass overlay layout helpers
+
+    private func group(_ title: String, _ count: Int) -> ShortcutGroup {
+        ShortcutGroup(title: title, items: (0..<count).map { ShortcutItem(title: "\(title)\($0)", chord: "⌘\($0)") })
+    }
+
+    /// Each modifier is its own keycap and the key is one more, so "⌥⇧⌘V" draws as four caps.
+    func testKeycapsSplitModifiersFromTheKey() {
+        XCTAssertEqual(ShortcutCatalog.keycaps(for: "⌥⇧⌘V"), ["⌥", "⇧", "⌘", "V"])
+        XCTAssertEqual(ShortcutCatalog.keycaps(for: "⌃⌘←"), ["⌃", "⌘", "←"])
+    }
+
+    /// A multi-character key name stays one cap rather than splitting into letters.
+    func testKeycapsKeepAMultiCharacterKeyWhole() {
+        XCTAssertEqual(ShortcutCatalog.keycaps(for: "⌘F12"), ["⌘", "F12"])
+        XCTAssertEqual(ShortcutCatalog.keycaps(for: "⇧Space"), ["⇧", "Space"])
+    }
+
+    func testKeycapsOfABareModifierOrEmptyChord() {
+        XCTAssertEqual(ShortcutCatalog.keycaps(for: "⌘"), ["⌘"])
+        XCTAssertEqual(ShortcutCatalog.keycaps(for: ""), [])
+    }
+
+    /// Menu order is kept (left column reads first) and the split lands where the two columns'
+    /// heights are closest: [2, 6] | [3, 3] beats every other contiguous cut.
+    func testTwoColumnsBalanceHeightsWithoutReordering() {
+        let groups = [group("A", 2), group("B", 6), group("C", 3), group("D", 3)]
+        let columns = ShortcutCatalog.twoColumns(groups)
+        XCTAssertEqual(columns.map { $0.map(\.title) }, [["A", "B"], ["C", "D"]])
+    }
+
+    func testTwoColumnsWithOneGroupLeavesTheRightEmpty() {
+        let columns = ShortcutCatalog.twoColumns([group("A", 4)])
+        XCTAssertEqual(columns.map { $0.map(\.title) }, [["A"], []])
+    }
+
+    func testTwoColumnsOfNothing() {
+        XCTAssertEqual(ShortcutCatalog.twoColumns([]).map(\.count), [0, 0])
+    }
+
+    /// Known menus get a matching symbol; anything else (a new CommandMenu, the app menu under
+    /// whatever the app is called) gets the generic command glyph rather than no icon.
+    func testGroupSymbols() {
+        XCTAssertEqual(ShortcutCatalog.symbol(forGroup: "Edit"), "pencil")
+        XCTAssertEqual(ShortcutCatalog.symbol(forGroup: "Window"), "macwindow")
+        XCTAssertEqual(ShortcutCatalog.symbol(forGroup: "Something New"), "command")
+    }
 }

@@ -76,6 +76,50 @@ enum ShortcutCatalog {
         }
     }
 
+    private static let modifierGlyphs: Set<Character> = ["⌃", "⌥", "⇧", "⌘"]
+
+    /// A chord as the overlay draws it: one keycap per modifier, then one for the key. The key
+    /// stays whole because it can be several characters ("F12", "Space"); splitting the chord
+    /// per character would draw F, 1, 2 as three keys.
+    static func keycaps(for chord: String) -> [String] {
+        let modifiers = chord.prefix { modifierGlyphs.contains($0) }
+        let key = chord.dropFirst(modifiers.count)
+        return modifiers.map(String.init) + (key.isEmpty ? [] : [String(key)])
+    }
+
+    /// Splits the groups into two columns at the cut that best balances their heights, keeping
+    /// menu order so the left column still reads first. A fixed two-column grid instead pairs
+    /// groups row by row, so a long group leaves a hole beside every short one next to it.
+    /// Ties go to the fuller left column, which is where the eye starts.
+    static func twoColumns(_ groups: [ShortcutGroup]) -> [[ShortcutGroup]] {
+        // A header costs about a row, so it counts as one.
+        let heights = groups.map { $0.items.count + 1 }
+        let total = heights.reduce(0, +)
+        var best = 0
+        var bestHeight = Int.max
+        var left = 0
+        for cut in 0...groups.count {
+            if cut > 0 { left += heights[cut - 1] }
+            let tallest = max(left, total - left)
+            if tallest <= bestHeight { best = cut; bestHeight = tallest }
+        }
+        return [Array(groups[..<best]), Array(groups[best...])]
+    }
+
+    /// The SF Symbol drawn beside a group header. Keyed by the menu's title, so a menu nothing
+    /// here knows about still gets the generic glyph rather than a gap where the icon goes.
+    static func symbol(forGroup title: String) -> String {
+        switch title {
+        case "File": return "doc"
+        case "Edit": return "pencil"
+        case "View": return "eye"
+        case "Window": return "macwindow"
+        case "Help": return "questionmark.circle"
+        case "Tools": return "wrench.and.screwdriver"
+        default: return "command"
+        }
+    }
+
     static func filter(_ groups: [ShortcutGroup], query: String) -> [ShortcutGroup] {
         let needle = query.trimmingCharacters(in: .whitespaces)
         guard !needle.isEmpty else { return groups }
