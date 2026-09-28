@@ -245,6 +245,14 @@ struct BoardModel: Equatable {
 
     /// The hover card's text as one line ("Synthesis · landed 3:02"): the card draws the name in
     /// flap tiles and `cardDetail` under it as static text.
+    /// The slot the tape keeps in view: the round in flight (or the one that failed), else
+    /// where the run is paused, else where play would stop. The model's, not the view's, so a
+    /// test pins it — late in a run on a narrow pane the live slot is screens away from the
+    /// tape's start, and only this brings it into view.
+    var followSlotID: String? {
+        slots.first { $0.state == .live || $0.state == .failed }?.id ?? pausedAtSlotID ?? stopSlotID
+    }
+
     func hoverCardText(for slot: TapeSlot) -> String { "\(slot.name) · \(cardDetail(for: slot))" }
 
     /// The card's status line: what the round did and for how long, in the clock's own format.

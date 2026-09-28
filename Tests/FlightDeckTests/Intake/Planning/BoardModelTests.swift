@@ -371,7 +371,7 @@ final class BoardModelTests: XCTestCase {
         var frames: [ClosedRange<CGFloat>] = []
         for (slot, width) in zip(model.slots, widths) {
             XCTAssertGreaterThanOrEqual(width, slot.codeWidth(measure: measure), slot.code)
-            let label = choose(full: slot.name, code: slot.code, width: width, measure: measure)
+            let label = LabelFit.choose(full: slot.name, code: slot.code, width: width, measure: measure)
             XCTAssertEqual(label, slot.code, "\(slot.name) at \(width) pt")
             let labelWidth = measure(label)
             let origin = x + (width - labelWidth) / 2
@@ -387,15 +387,38 @@ final class BoardModelTests: XCTestCase {
         // Wide enough for every full name: slots get their full width and full names show.
         let wide = model.slotWidths(available: 4000, measure: measure)
         for (slot, width) in zip(model.slots, wide) {
-            XCTAssertEqual(choose(full: slot.name, code: slot.code, width: width, measure: measure), slot.name)
+            XCTAssertEqual(LabelFit.choose(full: slot.name, code: slot.code, width: width, measure: measure), slot.name)
         }
         XCTAssertEqual(wide.reduce(0, +), 4000, accuracy: 0.001)
     }
 
-    /// Stand-in for Task 3's `LabelFit.choose`, same contract: full name when it fits with padding.
-    private func choose(full: String, code: String, width: CGFloat, padding: CGFloat = 8,
-                        measure: (String) -> CGFloat) -> String {
-        measure(full) + padding <= width ? full : code
+    /// Review Focus 1's other half: at round 18+ in a 600 pt pane the live slot is far off the
+    /// tape's first screen, and the tape keeps it in view. The target is the model's, so this
+    /// pins what the view scrolls to — the empty tape above has no live slot to follow.
+    func testNarrowTapeFollowsTheLiveSlotLateInARun() throws {
+        let stages: [(Stage, Int, Bool)] = [(.draft, 0, true), (.synthesis, 0, true)]
+            + (1...5).map { (.refine, $0, $0 == 5) } + [(.encode, 0, true)] + (1...5).map { (.polish, $0, false) }
+        var tape = Tape(checkpoints: stages.enumerated().map { n, s in cp(n + 1, s.0, s.1, major: s.2, at: TimeInterval(n) * 300) },
+                        status: .running)
+        tape.roundInProgress = PlannedRound(stage: .polish, round: 6, major: true)
+        let model = try board(try intake(.fullPlan, answered: 5), tape, now: 4000)
+        let live = try XCTUnwrap(model.slots.firstIndex { $0.state == .live })
+        XCTAssertGreaterThanOrEqual(live, 18)
+        XCTAssertEqual(model.followSlotID, model.slots[live].id)
+
+        let measure: (String) -> CGFloat = { CGFloat($0.count) * 7.8 }
+        let widths = model.slotWidths(available: 600, measure: measure)
+        XCTAssertGreaterThan(widths.prefix(live).reduce(0, +), 600, "off the first screen: only following shows it")
+        XCTAssertEqual(LabelFit.choose(full: model.slots[live].name, code: model.slots[live].code, width: widths[live],
+                                       measure: measure), model.slots[live].code)
+
+        // Paused, it follows where the run is held; with nothing landed, where play would stop.
+        tape.status = .paused
+        tape.roundInProgress = nil
+        let paused = try board(try intake(.fullPlan, answered: 5), tape, now: 4000)
+        XCTAssertEqual(paused.followSlotID, paused.pausedAtSlotID)
+        let fresh = try board(try intake(.fullPlan, answered: 5), .empty)
+        XCTAssertEqual(fresh.followSlotID, fresh.stopSlotID)
     }
 
     /// A bracket's title, longest first: the full title, then the group's code with its count
