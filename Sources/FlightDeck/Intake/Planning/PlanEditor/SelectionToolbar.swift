@@ -171,8 +171,8 @@ final class PlanNotesBridge {
         marks = []
     }
 
-    /// Any enclosing clip view scrolling — the editor's own, or the detail document it sits in —
-    /// moves every anchor's line, and the rail's cards must follow. Observed on exactly those
+    /// Any enclosing clip view scrolling — the detail document the editor is part of, or any
+    /// other it is placed in — moves every anchor's line, and the rail's cards must follow. Observed on exactly those
     /// clips: with `object: nil` every clip-view scroll anywhere in the app woke the bridge.
     /// Re-subscribed only when the chain of clips changes (the editor moved hierarchy).
     private func observeScrolls() {

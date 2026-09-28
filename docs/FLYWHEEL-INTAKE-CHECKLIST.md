@@ -216,7 +216,8 @@ default models — budget minutes per round, and real tokens.
    the tape pauses after it, with its change count and verdict tally on the card.
 3. **Read the plan.** Click the synthesis card; the plan viewer shows its `plan.md`. Switch to
    **Diff vs previous**.
-   **Expect:** monospaced, scrollable, selectable text; the diff is against drafter 0's draft.
+   **Expect:** monospaced, selectable text that is part of the page (the page scrolls it, not a
+   box of its own); the diff is against drafter 0's draft.
 4. **✎ annotate, then ⏯ one refine round, and check that the annotation shaped it.** Annotate
    with something specific and checkable ("the plan must not add any new dependency"), then ⏯.
    **Expect:** exactly one refine round runs and the tape pauses again. Its card records your
@@ -322,6 +323,21 @@ from scratch" above, paused mid-round where an item needs that.
 
 ### Plan viewer and editor
 
+The plan is part of the page: the editor has no scroller of its own and is as tall as its text,
+and the detail pane's one scroller scrolls everything (a box scrolling inside the page was two
+scrollers for one text).
+
+- Open a shaping intake with a long plan and wheel/trackpad-scroll with the pointer over the
+  plan. **Expect:** the page scrolls, all the way to the plan's end, with exactly one scroller
+  (the pane's) — no box scrolling inside it, and no blank text as the page brings lines in.
+  The end may arrive a little later than the scroller first suggests (TextKit 2 estimates the
+  unread part's height and firms it up as it lays it out); flag it if the thumb visibly jumps.
+- Click at the plan's last line and type, including pasting several lines. **Expect:** the
+  caret stays on screen while the page grows under it.
+- With the control bar and board pinned, click in a line just below them and type, then arrow
+  up past the top. **Expect:** the page scrolls so the caret is never behind the pinned block.
+- Scroll the page with notes and edits on the plan. **Expect:** note highlight bands, the edit
+  tint and the churn lane stay on their text; the notes rail's cards follow their lines.
 - Type in the plan, pause 2s. **Expect:** the edit reaches `commands.jsonl` on disk.
 - Type an edit, then let a round land mid-edit. **Expect:** a banner appears; on the retarget
   path (a round lands, then you commit) your edit re-targets onto the new head via a 3-way
@@ -342,9 +358,8 @@ from scratch" above, paused mid-round where an item needs that.
   **Expect:** it fires immediately (`acceptsFirstMouse`), not swallowed as a focus click.
 - Click into the notes rail's draft field, then click back into the plan. **Expect:** focus
   moves to the draft field; clicking back into the plan commits the draft.
-- Scroll the document and the editor independently. **Expect:** the notes rail tracks both
-  scrolls live. Click into the editor: the rail swaps to show the seat inspector; click a seat:
-  it swaps back.
+- Scroll the page. **Expect:** the notes rail tracks the scroll live. Click into the editor:
+  the rail swaps to show the notes; click a seat: it swaps back to the seat inspector.
 - Add many detached/unanchored notes. **Expect:** note whether the rail's top stack pushes the
   aligned lane down enough that cards drift below their source lines — flag if this needs a cap
   or its own scroll.
@@ -356,7 +371,9 @@ from scratch" above, paused mid-round where an item needs that.
 
 ### Convergence — LCD sparkline, churn lane, heatmap
 
-- Click a heatmap cell. **Expect:** the page scrolls to that section of the plan.
+- Click a heatmap cell, pinned and unpinned, for a section high and low in the plan.
+  **Expect:** Diff vs Previous opens and the page scrolls so that section's hunk sits just under
+  the pinned block — not behind it, and not at the plan's top or bottom.
 - Hover a lane marker, click it, press the chevron, then Esc from anywhere in the pane.
   **Expect:** each responds, and Esc closes the heatmap regardless of where focus is.
 - Turn on VoiceOver over a churn-lane marker. **Expect:** a full-word label, not a symbol alone.
@@ -414,7 +431,9 @@ from scratch" above, paused mid-round where an item needs that.
   view, honoring Reduce Motion; round cards escape scroll clipping; auto-scroll follows the live
   target only; wheel/trackpad scroll works over the pinned block; seat rows show a structured
   result immediately; VoiceOver reads full words everywhere (board, LCD, seat rows, plan syntax,
-  churn markers); the editor's undo/IME/retarget-on-landed-round paths hold; the notes rail
-  tracks both scrolls and swaps with the seat inspector; the heatmap's click-to-scroll, hover,
+  churn markers); the editor's undo/IME/retarget-on-landed-round paths hold; the plan scrolls
+  with the page (one scroller, caret kept on screen and clear of the pinned block, bands on
+  their text); the notes rail tracks the scroll and swaps with the seat inspector; the
+  heatmap's click lands on its section's hunk, its hover,
   chevron and Esc-from-anywhere all work; the release review shows the as-built title/sections/
   button and its footer-vs-button count difference doesn't read as a bug
