@@ -370,6 +370,55 @@ final class RoundExecutorTests: XCTestCase {
         XCTAssertEqual(changes.count, 2)
     }
 
+    /// `work/changes.json` is overwritten by the next round, so the checkpoint keeps its own
+    /// copy — the proposals are what "is this round repeating the last one" is judged on — and
+    /// the integrator's per-change verdicts beside it.
+    func testReviewRoundKeepsItsProposedChangesAndVerdictsInTheCheckpoint() async throws {
+        let runner = ScriptedHarnessRunner { [unowned self] call in
+            guard call.role == "synthesizer" else {
+                _ = self.editingIntegrator(call)
+                // The counts say otherwise; the list is what the totals come from.
+                return ok(call, "int", json(IntegrateOutput(agree: 0, somewhat: 0, disagree: 2, notes: "applied",
+                                                            verdicts: [ChangeVerdict(index: 1, verdict: .somewhat),
+                                                                       ChangeVerdict(index: 0, verdict: .agree)])))
+            }
+            return ok(call, "syn", self.review(2))
+        }
+        let (cp, files) = try checkpoint(try await executor(runner).run(PlannedRound(stage: .synthesis, round: 0, major: true),
+                                                                        inputs(config(), tape: try synthesisTape())))
+        let changes = try IntakeJSON.decoder.decode([ProposedChange].self, from: try XCTUnwrap(files["changes.json"]))
+        XCTAssertEqual(changes.map(\.rationale), ["r0", "r1"])
+        let verdicts = try IntakeJSON.decoder.decode([ChangeVerdict].self, from: try XCTUnwrap(files["verdicts.json"]))
+        XCTAssertEqual(verdicts, [ChangeVerdict(index: 0, verdict: .agree), ChangeVerdict(index: 1, verdict: .somewhat)])
+        XCTAssertEqual(cp.record.tally, VerdictTally(agree: 1, somewhat: 1, disagree: 0))
+        XCTAssertFalse(cp.record.note?.contains("tallied") ?? false, cp.record.note ?? "nil")
+    }
+
+    /// An integrator that answers in the old shape (no verdicts) still lands its round: the
+    /// proposals are kept, the counts are the tally, and there is no verdicts file to mislead.
+    func testIntegratorWithoutVerdictsKeepsChangesButNoVerdictsFile() async throws {
+        let runner = ScriptedHarnessRunner { [unowned self] call in
+            call.role == "synthesizer" ? ok(call, "syn", self.review(2)) : self.editingIntegrator(call)
+        }
+        let (cp, files) = try checkpoint(try await executor(runner).run(PlannedRound(stage: .synthesis, round: 0, major: true),
+                                                                        inputs(config(), tape: try synthesisTape())))
+        XCTAssertNotNil(files["changes.json"])
+        XCTAssertNil(files["verdicts.json"])
+        XCTAssertEqual(cp.record.tally, VerdictTally(agree: 1, somewhat: 1, disagree: 0))
+    }
+
+    /// A reviewer that found nothing is the convergence signal; its empty list is kept too, so
+    /// "this round proposed nothing" is on disk rather than inferred from a missing file.
+    func testReviewWithNoChangesKeepsAnEmptyChangesFile() async throws {
+        let runner = ScriptedHarnessRunner { [unowned self] call in
+            call.role == "synthesizer" ? ok(call, "syn", self.review(0)) : failed("the integrator must not run")
+        }
+        let (_, files) = try checkpoint(try await executor(runner).run(PlannedRound(stage: .synthesis, round: 0, major: true),
+                                                                       inputs(config(), tape: try synthesisTape())))
+        XCTAssertEqual(try IntakeJSON.decoder.decode([ProposedChange].self, from: try XCTUnwrap(files["changes.json"])), [])
+        XCTAssertNil(files["verdicts.json"])
+    }
+
     func testIntegratorThatDidNotEditPausesWithDiagnosis() async throws {
         let runner = ScriptedHarnessRunner { [unowned self] call in
             call.role == "synthesizer" ? ok(call, "syn", self.review(2))

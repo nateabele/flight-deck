@@ -36,16 +36,59 @@ public struct ReviewOutput: Codable, Sendable {
 /// Integrate's report of what it did with the reviewer's proposed changes. `disagree`
 /// changes are NOT applied — this is also the signal `TapePlanner`'s caller uses to decide
 /// whether another refinement round is worth running.
+///
+/// `verdicts` names which change got which verdict (by 0-based index into the round's
+/// `changes.json`); nil from an integrator — or a stored output — that predates it. The
+/// counts stay in the schema beside it, and `tally(forChanges:)` is the one place that
+/// decides which of the two the totals come from.
 public struct IntegrateOutput: Codable, Sendable {
     public var agree: Int
     public var somewhat: Int
     public var disagree: Int
     public var notes: String
-    public init(agree: Int, somewhat: Int, disagree: Int, notes: String) {
+    public var verdicts: [ChangeVerdict]?
+    public init(agree: Int, somewhat: Int, disagree: Int, notes: String, verdicts: [ChangeVerdict]? = nil) {
         self.agree = agree
         self.somewhat = somewhat
         self.disagree = disagree
         self.notes = notes
+        self.verdicts = verdicts
+    }
+
+    /// The verdict list cleaned against a round of `count` changes: indices outside it are
+    /// dropped, a repeated index keeps its first verdict, and the result is in index order.
+    /// nil when there is no list (or an empty one) — the counts are then all there is.
+    public func verdicts(forChanges count: Int) -> [ChangeVerdict]? {
+        guard let verdicts, !verdicts.isEmpty else { return nil }
+        var seen = Set<Int>()
+        return verdicts.filter { (0..<count).contains($0.index) && seen.insert($0.index).inserted }
+            .sorted { $0.index < $1.index }
+    }
+
+    /// The round's totals: counted from the cleaned verdict list when there is one, else the
+    /// integrator's own counts. The list wins because the two can disagree and only the list
+    /// says which change each verdict belongs to.
+    public func tally(forChanges count: Int) -> VerdictTally {
+        guard let list = verdicts(forChanges: count) else {
+            return VerdictTally(agree: agree, somewhat: somewhat, disagree: disagree)
+        }
+        return VerdictTally(agree: list.filter { $0.verdict == .agree }.count,
+                            somewhat: list.filter { $0.verdict == .somewhat }.count,
+                            disagree: list.filter { $0.verdict == .disagree }.count)
+    }
+}
+
+/// How the integrator judged one proposed change — the methodology's graded answer.
+public enum Verdict: String, Codable, Sendable, CaseIterable { case agree, somewhat, disagree }
+
+/// One entry of `IntegrateOutput.verdicts` and of a checkpoint's `verdicts.json`: the verdict
+/// on the proposed change at `index` (0-based) in that round's `changes.json`.
+public struct ChangeVerdict: Codable, Equatable, Sendable {
+    public var index: Int
+    public var verdict: Verdict
+    public init(index: Int, verdict: Verdict) {
+        self.index = index
+        self.verdict = verdict
     }
 }
 
@@ -82,11 +125,17 @@ public enum RoundSchemas {
      "properties":{"changes":{"type":"array","items":\(proposedChange)},"summary":{"type":"string"}}}
     """
 
+    private static let changeVerdict = """
+    {"type":"object","additionalProperties":false,"required":["index","verdict"],
+     "properties":{"index":{"type":"integer"},"verdict":{"type":"string","enum":["agree","somewhat","disagree"]}}}
+    """
+
     public static let integrate = """
     {"type":"object","additionalProperties":false,
-     "required":["agree","somewhat","disagree","notes"],
+     "required":["agree","somewhat","disagree","notes","verdicts"],
      "properties":{"agree":{"type":"integer"},"somewhat":{"type":"integer"},
-                   "disagree":{"type":"integer"},"notes":{"type":"string"}}}
+                   "disagree":{"type":"integer"},"notes":{"type":"string"},
+                   "verdicts":{"type":"array","items":\(changeVerdict)}}}
     """
 
     /// Embeds `Triage.changeSetSchemaFragment` exactly, rather than a hand-copied twin that
@@ -397,11 +446,13 @@ public enum RoundPrompts {
 
         For each proposed change, decide whether you wholeheartedly agree with it, somewhat \
         agree (and apply a modified version of it), or disagree (and leave it out — a \
-        disagreed-with change is NOT applied). Report the counts, and a one-line `notes` on \
-        what you did and why anything was left out.
+        disagreed-with change is NOT applied). Report your verdict on every change in \
+        `verdicts`, one entry per change, where `index` is the change's 0-based position in \
+        \(changesFile). Also report the counts, which must match those verdicts, and a \
+        one-line `notes` on what you did and why anything was left out.
 
         Return only JSON matching the provided schema: `{"agree": N, "somewhat": N, \
-        "disagree": N, "notes": "..."}`.
+        "disagree": N, "notes": "...", "verdicts": [{"index": 0, "verdict": "agree"}, ...]}`.
         """
     }
 
