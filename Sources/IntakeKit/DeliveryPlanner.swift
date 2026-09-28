@@ -24,6 +24,16 @@ public enum DeliveryAction: Equatable, Sendable {
         case .reclaim: "reclaim"
         }
     }
+
+    /// What the release review calls this action (spec §2 — the human never reads the engine's
+    /// own words: "inject" is plumbing, and a reclaim is the task taken back off its holder).
+    public var displayName: String {
+        switch self {
+        case .mail: "mail"
+        case .inject: "session message"
+        case .reclaim: "task taken back"
+        }
+    }
 }
 
 /// What became of the side effect a mail body describes — the `inject` for a scope change,

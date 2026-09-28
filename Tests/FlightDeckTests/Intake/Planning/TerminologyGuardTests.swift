@@ -201,8 +201,8 @@ final class TerminologyGuardTests: XCTestCase {
 
     func testUIText() {
         XCTAssertEqual(UIText.presetName(.bead), "Single task")
-        XCTAssertEqual(UIText.releaseButton(1), "Release 1 Task")
-        XCTAssertEqual(UIText.releaseButton(14), "Release 14 Tasks")
+        XCTAssertEqual(UIText.releaseButton(ReleaseCounts([.createBead(NewBead(tempId: "a", title: "A", description: ""))])),
+                       "Release 1 New Task")
     }
 
     /// The release review sheet's title, sections, and the button it defaults to (spec §10).
@@ -211,8 +211,7 @@ final class TerminologyGuardTests: XCTestCase {
         XCTAssertEqual(UIText.newTasksSection, "New tasks")
         XCTAssertEqual(UIText.editsSection, "Edits")
         XCTAssertEqual(UIText.dependenciesSection, "Dependencies")
-        XCTAssertEqual(UIText.selectedCount(3, of: 5), "3 of 5 selected")
-        XCTAssertEqual(UIText.releaseButton(3), "Release 3 Tasks")
+        XCTAssertEqual(UIText.droppedCount(2), "2 dropped")
         XCTAssertEqual(UIText.notesCarried(1), "1 note carried into task notes")
         XCTAssertEqual(UIText.notesCarried(2), "2 notes carried into task notes")
     }
@@ -223,7 +222,7 @@ final class TerminologyGuardTests: XCTestCase {
     func testReleaseSheetHasNoBeadWording() {
         let ops: [ChangeOp] = [.createBead(NewBead(tempId: "n1", title: "n", description: "d"))]
         let footer = ReleaseSummary.text(
-            ops, heldOpIndices: [], drift: [.holds], dropped: [], ratings: [:], hasSession: { _ in true })
+            ops, drift: [.holds], dropped: [], ratings: [:], hasSession: { _ in true })
         XCTAssertFalse(footer.lowercased().contains("bead"), "release footer must say task, not bead: \(footer)")
 
         for s in [UIText.releaseSheetTitle, UIText.newTasksSection, UIText.editsSection,

@@ -65,6 +65,9 @@ struct ReleaseReview {
     /// in progress now gets a holder and a delivery, and gating the rating picker on the
     /// stale `pre` would hide exactly the notice release is about to send.
     var livePre: [Int: Precondition] = [:]
+    /// Every task the graph holds, id → title, as of this read — so the sheet names the tasks
+    /// an edit, reopen, follow-up or dependency touches by title instead of by raw id.
+    var titles: [String: String] = [:]
 
     /// What release will treat as op `i`'s precondition: the live state for a drifted op,
     /// the triage-time `pre` otherwise.
@@ -959,6 +962,9 @@ final class IntakeService: ObservableObject {
                   let live = current.beads[target]?.precondition else { continue }
             review.livePre[n] = live
         }
+        // The triage-time graph first, the live one over it: a task retitled since triage reads
+        // as it is now, and one deleted since still has a name on its (impossible) row.
+        review.titles = triaged.beads.mapValues(\.title).merging(current.beads.mapValues(\.title)) { _, now in now }
         return review
     }
 

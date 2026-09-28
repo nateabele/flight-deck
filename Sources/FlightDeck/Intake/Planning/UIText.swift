@@ -17,10 +17,14 @@ enum UIText {
         }
     }
 
-    /// The Release Review's primary action (spec §10): "Release 1 Task" / "Release 14 Tasks",
-    /// singular/plural on the count of ops release will actually write.
-    static func releaseButton(_ n: Int) -> String {
-        "Release \(n) Task" + (n == 1 ? "" : "s")
+    /// The Release Review's primary action (spec §10): "Release 3 New Tasks" — the same count
+    /// the summary line beside it opens with (`ReleaseCounts.phrase`), so the two can't read
+    /// different numbers. Counting every op here once put "Release 7 Tasks" over a summary of
+    /// 3 new tasks, 2 edits and 2 dependencies. With no new task it says what it does without
+    /// a zero; with nothing at all it is just "Release" (and disabled by the sheet).
+    static func releaseButton(_ counts: ReleaseCounts) -> String {
+        if counts.newTasks > 0 { return "Release \(counts.newTasks) New Task" + (counts.newTasks == 1 ? "" : "s") }
+        return counts.isEmpty ? "Release" : "Release Changes"
     }
 
     /// The Release Review's creates section (spec §10) — was "New beads".
@@ -37,12 +41,14 @@ enum UIText {
     /// The Release Review's sheet title (spec §10) — was "Release Review".
     static let releaseSheetTitle = "Release plan as tasks"
 
-    /// "N of M selected" (spec §10) — the caption beside the title, `n` the ops release will
-    /// actually write (ties to `releaseButton`'s own count), `of` every op the change set
-    /// holds, dropped or impossible ones included.
-    static func selectedCount(_ n: Int, of total: Int) -> String {
-        "\(n) of \(total) selected"
-    }
+    /// "2 dropped" — the header caption beside the title, shown only once something is left
+    /// out (dropped by hand, or impossible). It was "N of M selected", but rows can only be
+    /// dropped, never selected, so it claimed a selection the sheet doesn't have.
+    static func droppedCount(_ n: Int) -> String { "\(n) dropped" }
+
+    /// The badge on a dependency that is only written once its new task exists (an existing
+    /// task waiting on a new one — `ChangeSetValidator`'s held edge; "held" is the engine's word).
+    static let waitsForRelease = "waits for release"
 
     /// "1 note carried into task notes" (spec §10) — the round's own annotations, once a
     /// checkpoint consumes them, ride along into the tasks it produced.
