@@ -10,12 +10,24 @@ import SwiftUI
 ///
 /// `side: .trailing` opens beside the anchor instead, top edges aligned — for an anchor in a
 /// margin (the churn lane's marker), whose card hung below it over the very section it explains.
+///
+/// `side: .above` is the board's hover card: over the anchor and centred on it, with a nub
+/// pointing down at it. The tape runs along the board's bottom, so a card hung below a slot sat
+/// on the neighbouring slots and on the row the pointer was moving along; above is out of that
+/// path. It flips below only when there is no room above, and steers clear of `avoiding` (the
+/// pinned control bar) when the other side has room.
 enum CardPlacement {
-    enum Side { case below, trailing }
+    enum Side { case below, trailing, above }
+
+    /// How far an `.above` card keeps from the sides of its bounds.
+    static let edgeMargin: CGFloat = 8
+    /// How close to a card's corner its nub may sit — the corner radius plus half the nub.
+    static let nubInset: CGFloat = 16
 
     static func frame(for card: CGSize, anchor: CGRect, within bounds: CGRect, gap: CGFloat,
-                      prefersAbove: Bool = false, side: Side = .below) -> CGRect {
+                      prefersAbove: Bool = false, side: Side = .below, avoiding obstacles: [CGRect] = []) -> CGRect {
         if side == .trailing { return trailing(card, anchor: anchor, within: bounds, gap: gap) }
+        if side == .above { return above(card, anchor: anchor, within: bounds, gap: gap, avoiding: obstacles) }
         let below = anchor.minY - gap - card.height
         let above = anchor.maxY + gap
         // Below is the reading direction; flip only when that runs off the bottom AND above fits,
@@ -25,6 +37,31 @@ enum CardPlacement {
             : (below < bounds.minY && above + card.height <= bounds.maxY ? above : below)
         let x = min(max(anchor.minX, bounds.minX), max(bounds.minX, bounds.maxX - card.width))
         return CGRect(x: x, y: y, width: card.width, height: card.height)
+    }
+
+    /// Over the anchor, centred and slid inside the bounds' sides with a margin; below when
+    /// there is no room above. Either side must keep clear of every obstacle the anchor isn't
+    /// itself in; when neither can, above if it fits (over the control bar is better than over
+    /// the tape), else whichever side has more room — never slid back over the anchor.
+    private static func above(_ card: CGSize, anchor: CGRect, within bounds: CGRect, gap: CGFloat,
+                              avoiding obstacles: [CGRect]) -> CGRect {
+        let lo = bounds.minX + edgeMargin
+        let x = min(max(anchor.midX - card.width / 2, lo), max(lo, bounds.maxX - edgeMargin - card.width))
+        let up = CGRect(x: x, y: anchor.maxY + gap, width: card.width, height: card.height)
+        let down = CGRect(x: x, y: anchor.minY - gap - card.height, width: card.width, height: card.height)
+        let fits = { (r: CGRect) in r.minY >= bounds.minY && r.maxY <= bounds.maxY }
+        let blocking = obstacles.filter { !$0.intersects(anchor) }
+        let clear = { (r: CGRect) in !blocking.contains { $0.intersects(r) } }
+        if let open = [up, down].first(where: { fits($0) && clear($0) }) { return open }
+        if fits(up) { return up }
+        if fits(down) { return down }
+        return bounds.maxY - anchor.maxY >= anchor.minY - bounds.minY ? up : down
+    }
+
+    /// Where along a placed card's width its nub goes: under the anchor's centre, held off the
+    /// rounded corners when the card had to slide away from an anchor near the window's side.
+    static func nubX(card: CGRect, anchor: CGRect) -> CGFloat {
+        min(max(anchor.midX - card.minX, nubInset), max(nubInset, card.width - nubInset))
     }
 
     /// Beside the anchor, flipped to its leading side when the trailing one runs out of window
@@ -62,10 +99,17 @@ enum CardPlacement {
 struct FloatingCard<Card: View>: NSViewRepresentable {
     let isPresented: Bool
     let card: Card
+    /// Which side of the label the card opens on; the board's hover cards pass `.above`.
+    var side: CardPlacement.Side = .below
+    /// Told when the card closes itself (click, Esc, scroll, window change) — how the hover
+    /// intent learns the card it thinks is open is gone.
+    var onDismiss: (() -> Void)?
 
     func makeNSView(context: Context) -> FloatingCardAnchor { FloatingCardAnchor() }
 
     func updateNSView(_ anchor: FloatingCardAnchor, context: Context) {
+        anchor.placement = side
+        anchor.onDismiss = onDismiss
         anchor.present(isPresented ? AnyView(card) : nil)
     }
 
@@ -88,6 +132,9 @@ final class FloatingCardAnchor: NSView {
     /// (radius 17, offset 14) isn't cut off at the panel's edge.
     private static let shadowRoom: CGFloat = 34
     private static let gap: CGFloat = 9
+    /// `.above`'s tighter gap: just the nub's height and a hair, so the nub all but touches the
+    /// label it names.
+    private static let nubGap: CGFloat = 7
 
     /// The selection toolbar's variant: its panel takes clicks (still non-activating, and a
     /// borderless panel never becomes key, so the editor keeps focus and its selection), and it
@@ -96,6 +143,8 @@ final class FloatingCardAnchor: NSView {
     var prefersAbove = false
     /// Which side of this view the card opens on (`CardPlacement.Side`).
     var placement: CardPlacement.Side = .below
+    /// Called after the card closes itself — see `FloatingCard.onDismiss`.
+    var onDismiss: (() -> Void)?
 
     private var card: AnyView?
     private var dismissed = false
@@ -105,6 +154,11 @@ final class FloatingCardAnchor: NSView {
     /// and re-order the panel on every update.
     private var placed: CGRect?
     private var observers: [NSObjectProtocol] = []
+    /// Clicks, Esc and wheel events anywhere in the app while a hover card is up: the panel
+    /// ignores the mouse, so nothing else would tell it the user has moved on.
+    private var monitor: Any?
+    /// Where the `.above` card's nub points, as last placed.
+    private var nub: CardChrome.Nub?
     private weak var observedWindow: NSWindow?
     private weak var observedClip: NSClipView?
 
@@ -134,6 +188,7 @@ final class FloatingCardAnchor: NSView {
 
     deinit {
         observers.forEach(NotificationCenter.default.removeObserver)
+        if let monitor { NSEvent.removeMonitor(monitor) }
     }
 
     private func place() {
@@ -147,9 +202,11 @@ final class FloatingCardAnchor: NSView {
         observe()
         guard !dismissed, let window, !window.isMiniaturized else { return close() }
         let room = Self.shadowRoom
-        let content = AnyView(card.padding(room).accessibilityHidden(true))
-        let host = self.host ?? FirstMouseHostingView(rootView: content)
-        host.rootView = content
+        let content = { (nub: CardChrome.Nub?) in
+            AnyView(CardChrome(card: card, nub: nub, entrance: !self.interactive).padding(room).accessibilityHidden(true))
+        }
+        let host = self.host ?? FirstMouseHostingView(rootView: content(nub))
+        host.rootView = content(nub)
         let panel = self.panel ?? makePanel(host)
         self.host = host
         self.panel = panel
@@ -158,15 +215,55 @@ final class FloatingCardAnchor: NSView {
         let size = CGSize(width: fitting.width - 2 * room, height: fitting.height - 2 * room)
         let anchor = window.convertToScreen(convert(bounds, to: nil))
         let within = CardPlacement.bounds(window: window.frame, screen: window.screen?.visibleFrame)
-        let frame = CardPlacement.frame(for: size, anchor: anchor, within: within, gap: Self.gap, prefersAbove: prefersAbove,
-                                        side: placement)
-            .insetBy(dx: -room, dy: -room)
+        let spot = CardPlacement.frame(for: size, anchor: anchor, within: within,
+                                       gap: placement == .above ? Self.nubGap : Self.gap, prefersAbove: prefersAbove,
+                                       side: placement, avoiding: placement == .above ? FloatingCardObstacle.frames(in: window) : [])
+        // The nub never changes the card's size, so setting it after measuring is safe — and the
+        // view's structure is the same with or without one, so the card's reveal isn't restarted.
+        let pointing = placement == .above
+            ? CardChrome.Nub(x: CardPlacement.nubX(card: spot, anchor: anchor), pointsDown: spot.minY >= anchor.maxY) : nil
+        if pointing != nub {
+            nub = pointing
+            host.rootView = content(pointing)
+        }
+        let frame = spot.insetBy(dx: -room, dy: -room)
         guard frame != placed || panel.parent == nil else { return }
         placed = frame
         placements += 1
         panel.setFrame(frame, display: true)
-        if panel.parent == nil { window.addChildWindow(panel, ordered: .above) }
+        let opening = panel.parent == nil
+        if opening {
+            if !interactive { panel.alphaValue = 0 }
+            window.addChildWindow(panel, ordered: .above)
+        }
         panel.orderFront(nil)
+        if opening && !interactive {
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = CardReveal.fadeIn
+                panel.animator().alphaValue = 1
+            }
+            watchEvents()
+        }
+    }
+
+    /// Closes the card on a click anywhere, Esc, or a wheel event — the panel ignores the
+    /// mouse, so without this a card opened by hover stayed up through a click on the slot
+    /// under it. The event itself carries on to wherever it was going.
+    private func watchEvents() {
+        guard monitor == nil else { return }
+        monitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown,
+                                                              .keyDown, .scrollWheel]) { [weak self] event in
+            MainActor.assumeIsolated { _ = self?.closes(on: event) }
+            return event
+        }
+    }
+
+    /// Whether `event` closes the open card — and if so, closes it. Only Esc among keys: Tab
+    /// moving keyboard focus opens the next label's card through focus, not by closing this one.
+    func closes(on event: NSEvent) -> Bool {
+        guard panel != nil, event.type != .keyDown || event.keyCode == 53 else { return false }
+        dismiss()
+        return true
     }
 
     /// (Re)subscribes to the events that must close the card whenever the window or the
@@ -215,6 +312,7 @@ final class FloatingCardAnchor: NSView {
         guard card != nil else { return }
         dismissed = true
         close()
+        onDismiss?()
     }
 
     private func makePanel(_ host: NSHostingView<AnyView>) -> NSPanel {
@@ -232,13 +330,117 @@ final class FloatingCardAnchor: NSView {
 
     /// Takes the panel down and lets it go: a board with dozens of slots would otherwise keep a
     /// window and a hosting view alive per slot ever hovered.
+    ///
+    /// A hover card fades out: detached from its window at once (so it's gone as far as the
+    /// window, and a fresh card, are concerned), then ordered out when the fade lands.
     private func close() {
+        if let monitor { NSEvent.removeMonitor(monitor) }
+        monitor = nil
         guard let panel else { return }
         panel.parent?.removeChildWindow(panel)
-        panel.orderOut(nil)
+        if interactive {
+            panel.orderOut(nil)
+        } else {
+            NSAnimationContext.runAnimationGroup({ context in
+                context.duration = CardReveal.fadeOut
+                panel.animator().alphaValue = 0
+            }, completionHandler: { panel.orderOut(nil) })
+        }
         self.panel = nil
         host = nil
         placed = nil
+        nub = nil
+    }
+}
+
+/// The card inside its panel: the nub pointing at the anchor (`.above` only), and a hover card's
+/// entrance — a slight scale-in alongside the panel's fade, none under Reduce Motion.
+private struct CardChrome: View {
+    struct Nub: Equatable {
+        /// From the card's leading edge.
+        var x: CGFloat
+        /// The card is over its anchor, so the nub hangs from its bottom edge.
+        var pointsDown: Bool
+    }
+
+    let card: AnyView
+    let nub: Nub?
+    let entrance: Bool
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var entered = false
+
+    var body: some View {
+        card
+            .overlay(alignment: nub?.pointsDown == false ? .topLeading : .bottomLeading) {
+                if let nub {
+                    CardNub(pointsDown: nub.pointsDown)
+                        .frame(width: CardNub.width, height: CardNub.height + CardNub.tab)
+                        .offset(x: nub.x - CardNub.width / 2, y: nub.pointsDown ? CardNub.height : -CardNub.height)
+                }
+            }
+            .scaleEffect(entered || reduceMotion || !entrance ? 1 : 0.94, anchor: nub?.pointsDown == false ? .top : .bottom)
+            .onAppear {
+                withAnimation(.easeOut(duration: CardReveal.fadeIn)) { entered = true }
+            }
+    }
+}
+
+/// The small pointer from a card to the label it names, in the card's own glass: the edge
+/// colour of the side it hangs from, and the card's rim along its two slanted sides. A `tab`
+/// of fill reaches back into the card to paint over the rim where the two meet.
+private struct CardNub: View {
+    static let width: CGFloat = 14
+    static let height: CGFloat = 6
+    static let tab: CGFloat = 2
+
+    let pointsDown: Bool
+
+    var body: some View {
+        let fill = pointsDown ? Color(red: 0.059, green: 0.071, blue: 0.086) : Color(red: 0.102, green: 0.118, blue: 0.145)
+        Canvas { context, size in
+            let w = size.width, base = pointsDown ? Self.tab : size.height - Self.tab
+            let tip = pointsDown ? size.height : 0
+            var shape = Path()
+            shape.move(to: CGPoint(x: 0, y: base))
+            shape.addLine(to: CGPoint(x: w / 2, y: tip))
+            shape.addLine(to: CGPoint(x: w, y: base))
+            shape.closeSubpath()
+            context.fill(shape, with: .color(fill))
+            context.fill(Path(CGRect(x: 0.5, y: pointsDown ? 0 : base, width: w - 1, height: Self.tab)), with: .color(fill))
+            var rim = Path()
+            rim.move(to: CGPoint(x: 0, y: base))
+            rim.addLine(to: CGPoint(x: w / 2, y: tip))
+            rim.addLine(to: CGPoint(x: w, y: base))
+            context.stroke(rim, with: .color(SplitFlapCard.phosphor.opacity(0.16)), lineWidth: 1)
+        }
+    }
+}
+
+/// Marks a view hover cards should keep off — the pinned control bar over the board. An `.above`
+/// card opens below its label instead when that side has room (`CardPlacement`'s `avoiding`).
+/// A registry of live marker views, read only when a card is placed, so no card has to walk
+/// the window's view tree.
+struct FloatingCardObstacle: NSViewRepresentable {
+    func makeNSView(context: Context) -> Marker { Marker() }
+    func updateNSView(_ view: Marker, context: Context) {}
+
+    /// Every marked view's frame in `window`, in screen coordinates.
+    @MainActor static func frames(in window: NSWindow) -> [CGRect] {
+        Marker.live.allObjects.compactMap { marker in
+            marker.window === window ? window.convertToScreen(marker.convert(marker.bounds, to: nil)) : nil
+        }
+    }
+
+    final class Marker: NSView {
+        @MainActor static let live = NSHashTable<Marker>.weakObjects()
+
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if window == nil { Self.live.remove(self) } else { Self.live.add(self) }
+        }
     }
 }
 

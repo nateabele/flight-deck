@@ -100,6 +100,65 @@ final class CardPlacementTests: XCTestCase {
         XCTAssertEqual(frame.minX, 120 + 132 + 9)
     }
 
+    // MARK: - Above (the board's hover cards)
+
+    /// `.above`: over the anchor a small gap up, centred on it — out of the path of a pointer
+    /// moving along the tape, which is near the board's bottom.
+    func testAboveOpensOverTheAnchorCentred() {
+        let slot = CGRect(x: 400, y: 200, width: 40, height: 18)
+        let frame = CardPlacement.frame(for: card, anchor: slot, within: window, gap: 7, side: .above)
+        XCTAssertEqual(frame, CGRect(x: 420 - 90, y: 218 + 7, width: 180, height: 70))
+    }
+
+    /// No room above (the window's top edge): below, still centred, still clear of the anchor.
+    func testAboveFlipsBelowWhenClippedAtTheTop() {
+        let slot = CGRect(x: 400, y: 540, width: 40, height: 18)
+        let frame = CardPlacement.frame(for: card, anchor: slot, within: window, gap: 7, side: .above)
+        XCTAssertEqual(frame.maxY, 540 - 7)
+        XCTAssertEqual(frame.midX, 420)
+    }
+
+    /// Near a side the card slides back inside, an edge margin short of it — the nub, not the
+    /// card, keeps pointing at the anchor.
+    func testAboveClampsHorizontallyWithAMargin() {
+        let trailing = CGRect(x: 880, y: 200, width: 16, height: 18)
+        let t = CardPlacement.frame(for: card, anchor: trailing, within: window, gap: 7, side: .above)
+        XCTAssertEqual(t.maxX, window.maxX - CardPlacement.edgeMargin)
+        let leading = CGRect(x: 150, y: 200, width: 16, height: 18)
+        let l = CardPlacement.frame(for: card, anchor: leading, within: window, gap: 7, side: .above)
+        XCTAssertEqual(l.minX, window.minX + CardPlacement.edgeMargin)
+        XCTAssertEqual(CardPlacement.nubX(card: l, anchor: leading), leading.midX - l.minX)
+        XCTAssertEqual(CardPlacement.nubX(card: t, anchor: trailing), t.width - CardPlacement.nubInset,
+                       "an anchor past the card's corner: the nub stops at the corner's radius")
+    }
+
+    /// Whatever the anchor's spot in the window, the card never lands on it.
+    func testAboveNeverCoversTheAnchor() {
+        for x in stride(from: 90.0, through: 900.0, by: 37) {
+            for y in stride(from: 90.0, through: 600.0, by: 23) {
+                let anchor = CGRect(x: x, y: y, width: 36, height: 18)
+                let frame = CardPlacement.frame(for: card, anchor: anchor, within: window, gap: 7, side: .above)
+                XCTAssertFalse(frame.intersects(anchor), "\(anchor)")
+            }
+        }
+    }
+
+    /// The pinned control bar above the board: a card that would sit over it opens below
+    /// instead when there is room — and a bar the anchor itself sits in is no obstacle.
+    func testAboveAvoidsAnObstacle() {
+        let bar = CGRect(x: 100, y: 400, width: 800, height: 78)
+        let now = CGRect(x: 300, y: 360, width: 60, height: 20)
+        let frame = CardPlacement.frame(for: card, anchor: now, within: window, gap: 7, side: .above, avoiding: [bar])
+        XCTAssertEqual(frame.maxY, 360 - 7, "below NOW rather than over the bar")
+        let cell = CGRect(x: 300, y: 420, width: 60, height: 20)
+        XCTAssertEqual(CardPlacement.frame(for: card, anchor: cell, within: window, gap: 7, side: .above, avoiding: [bar]).minY,
+                       440 + 7, "inside the bar: the bar isn't in its way")
+        let low = CGRect(x: 300, y: 140, width: 60, height: 20)
+        let tall = CGRect(x: 100, y: 170, width: 800, height: 400)
+        XCTAssertEqual(CardPlacement.frame(for: card, anchor: low, within: window, gap: 7, side: .above, avoiding: [tall]).minY,
+                       160 + 7, "no clear side at all: above wins, over the bar rather than the tape")
+    }
+
     /// Below stays the default, so every existing card is unchanged.
     func testBelowIsTheDefaultSide() {
         let label = CGRect(x: 300, y: 450, width: 40, height: 18)
@@ -160,6 +219,36 @@ final class FloatingCardAnchorTests: XCTestCase {
         XCTAssertEqual(PlanNotesBridge.enclosingClips(of: text).map(ObjectIdentifier.init),
                        [inner.contentView, outer.contentView].map(ObjectIdentifier.init))
         XCTAssertEqual(PlanNotesBridge.enclosingClips(of: NSView()), [])
+    }
+
+    /// A hover card never takes the mouse: it can't eat the hover or the click on the board
+    /// under it.
+    func testTheHoverCardPanelIgnoresTheMouse() throws {
+        anchor.present(card)
+        let panel = try XCTUnwrap(window.childWindows?.first)
+        XCTAssertTrue(panel.ignoresMouseEvents)
+    }
+
+    /// A click anywhere, or Esc, closes a hover card and latches it like a scroll does.
+    func testClickAndEscapeClose() throws {
+        for event in [
+            NSEvent.mouseEvent(with: .leftMouseDown, location: .zero, modifierFlags: [], timestamp: 0,
+                               windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1),
+            NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber,
+                             context: nil, characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}", isARepeat: false, keyCode: 53),
+        ] {
+            anchor.present(nil)
+            anchor.present(card)
+            XCTAssertTrue(shown)
+            XCTAssertTrue(anchor.closes(on: try XCTUnwrap(event)))
+            XCTAssertFalse(shown)
+        }
+        let other = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber,
+                                     context: nil, characters: "a", charactersIgnoringModifiers: "a", isARepeat: false, keyCode: 0)
+        anchor.present(nil)
+        anchor.present(card)
+        XCTAssertFalse(anchor.closes(on: try XCTUnwrap(other)), "an ordinary key leaves it be")
+        XCTAssertTrue(shown)
     }
 
     func testPresentsAndReleasesThePanel() {

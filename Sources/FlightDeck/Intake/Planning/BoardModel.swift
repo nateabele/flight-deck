@@ -8,7 +8,7 @@ import IntakeKit
 struct TapeSlot: Identifiable, Equatable {
     enum State: Equatable { case done, live, future, failed, selected }
     /// "clarify-1", "draft-0", "refine-2", …, "review" — stable across a round finishing, so a
-    /// flap surface keyed on it (`card.<id>`) doesn't replay when the slot changes state.
+    /// label's flap surface keyed on it doesn't replay when the slot changes state.
     let id: String
     let name: String
     let code: String
@@ -233,15 +233,14 @@ struct BoardModel: Equatable {
     /// a duration that changes every second, so keyed on it every tick would be "new text" and
     /// the clock would flip continuously; the label changes only when the run's state does
     /// (IN THE AIR ↔ PAUSED FOR ↔ HALTED FOR). A tape label's surface is the slot's bare id —
-    /// what `SplitFlapText` is handed, so its card lands on `card.<id>` — seeded so a slot
-    /// scrolling into view doesn't flip in; only a newly added slot (an extend) does.
+    /// what `SplitFlapText` is handed — seeded so a slot scrolling into view doesn't flip in;
+    /// only a newly added slot (an extend) does. No card surface is here: a hover card flips its
+    /// name in on every open (`CardReveal`) and never asks the policy — seeding `card.<id>` was
+    /// exactly what kept every slot's card from ever animating.
     var flapTexts: [String: String] {
         var texts = ["board.now": now.value, "board.inTheAir": inTheAir.label,
                      "board.stopsAt": stopsAt.value, "board.callingAt": callingAt.value]
-        for slot in slots {
-            texts[slot.id] = slot.name
-            texts["card.\(slot.id)"] = slot.name
-        }
+        for slot in slots { texts[slot.id] = slot.name }
         return texts
     }
 

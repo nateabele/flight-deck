@@ -57,7 +57,13 @@ struct DeparturesBoard: View {
     }
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var hoveredSlot: String?
+    /// Which slot's card is open by hover: the app-wide tooltip rules (`HoverIntent`) — a
+    /// pointer passing along the tape opens nothing, resting on a slot does, and the next slot's
+    /// opens at once while one is up.
+    @ObservedObject private var intent = HoverCardIntent.shared
+    /// Prefixes this board's slot ids in the intent, so another board showing the same slot id
+    /// doesn't open its card too.
+    @State private var hoverToken = UUID().uuidString
     @FocusState private var focusedSlot: String?
     /// The slot a key moved focus to — the only focus that opens its card (see
     /// `SplitFlapText.isKeyboardFocus`).
@@ -242,7 +248,7 @@ struct DeparturesBoard: View {
                     .padding(.horizontal, Style.inset)
                     // A scroll slides the hovered slot out from under a pointer that never
                     // moved, so no hover-exit arrives: forget the hover, or its card would reopen.
-                    .background(ScrollWatcher { hoveredSlot = nil })
+                    .background(ScrollWatcher { intent.dismiss() })
                 }
                 .scrollIndicators(.never)
                 // Follows the live slot only when WHICH slot it is changes, never on a tick or
@@ -305,9 +311,7 @@ struct DeparturesBoard: View {
             onSelect(id)
             return .handled
         }
-        .onHover { inside in
-            if inside { hoveredSlot = slot.id } else if hoveredSlot == slot.id { hoveredSlot = nil }
-        }
+        .onHover { intent.hover(hoverKey(slot), $0) }
         .onTapGesture { if let id = slot.checkpointID { onSelect(id) } }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(model.accessibilityLabel(for: slot))
@@ -334,8 +338,9 @@ struct DeparturesBoard: View {
             if paused { Image(systemName: "pause.fill").font(.system(size: 8, weight: .bold)) }
             SplitFlapText(full: slot.name, code: slot.code, surface: slot.id, policy: policy,
                           font: Font(Style.slotNS), nsFont: Style.slotNS, detail: model.cardDetail(for: slot),
-                          showsCardInitially: hoveredSlot == slot.id || keyboardSlot == slot.id || openCardSlotID == slot.id,
-                          alwaysOffersCard: true, isFocusable: false)
+                          showsCardInitially: intent.shown == hoverKey(slot) || keyboardSlot == slot.id
+                              || openCardSlotID == slot.id,
+                          alwaysOffersCard: true, isFocusable: false, ownsHover: false)
                 // Exactly the width it will draw at, so the HStack can centre a code too.
                 .frame(width: full <= room ? full : min(room, code))
             if let clock {
@@ -348,6 +353,8 @@ struct DeparturesBoard: View {
         .foregroundStyle(labelColor(slot))
         .frame(maxWidth: .infinity)
     }
+
+    private func hoverKey(_ slot: TapeSlot) -> String { "\(hoverToken)/\(slot.id)" }
 
     private func labelColor(_ slot: TapeSlot) -> Color {
         switch slot.state {
