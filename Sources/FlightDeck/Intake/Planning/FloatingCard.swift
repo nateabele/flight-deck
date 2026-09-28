@@ -173,9 +173,9 @@ final class FloatingCardAnchor: NSView {
     /// enclosing scroll view changes. Delivered synchronously (`queue: nil`) on the posting
     /// thread — all of these post on main — so the card is gone before the next frame draws.
     ///
-    /// Every enclosing scroll view, not just the nearest: the plan editor scrolls inside the
-    /// detail document, which scrolls too, and either one slides the text out from under a
-    /// toolbar left hanging in place.
+    /// Every enclosing scroll view, not just the nearest: a card's anchor can sit in a scroll
+    /// view inside the detail document (the board's tape), which scrolls too, and either one
+    /// slides the anchor out from under a card left hanging in place.
     private func observe() {
         let clip = enclosingScrollView?.contentView
         guard window !== observedWindow || clip !== observedClip else { return }

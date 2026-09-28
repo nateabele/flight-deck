@@ -35,6 +35,9 @@ final class PlanEditorKeystrokeTests: XCTestCase {
 
     /// A full editor in a window: edit layer over a lightly edited plan, ten notes, and the
     /// churn lane with §4 hot and its sentence flipping (and one quiet marker far below the fold).
+    /// On a page, as in the detail pane: the editor has no scroll view of its own and is as tall
+    /// as its text, inside a scroll view's document — so each keystroke pays for the reveal
+    /// through the page and the height it hands on, as it does in the app.
     @MainActor
     static func editor() -> (PlanTextView.Coordinator, PlanEditorContainer, PlanNotesController, NSWindow) {
         let generated = plan()
@@ -62,7 +65,12 @@ final class PlanEditorKeystrokeTests: XCTestCase {
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 700), styleMask: [.titled],
                               backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
-        window.contentView = container
+        let page = FlippedView(frame: NSRect(x: 0, y: 0, width: 900, height: 700))
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 900, height: 700))
+        scroll.hasVerticalScroller = true
+        scroll.documentView = page
+        page.addSubview(container)
+        window.contentView = scroll
         coordinator.textView = container.textView
         coordinator.revertButton = container.revert
         container.textView.delegate = coordinator
@@ -71,10 +79,17 @@ final class PlanEditorKeystrokeTests: XCTestCase {
         coordinator.notesBridge.attach(notes, to: container.textView)
         container.churnLane.update(churn)
         coordinator.churnChanged()
+        // What SwiftUI does with the height the editor reports.
+        container.frame = NSRect(x: 0, y: 0, width: 900, height: container.contentHeight)
+        page.frame.size.height = container.contentHeight
         container.layoutSubtreeIfNeeded()
         window.makeFirstResponder(container.textView)
         container.textView.displayIfNeeded()
         return (coordinator, container, notes, window)
+    }
+
+    private final class FlippedView: NSView {
+        override var isFlipped: Bool { true }
     }
 
     /// Typed into the middle of a body line of a 2,000-line plan with every layer on. The gate is

@@ -86,7 +86,9 @@ final class ConvergenceRenderTests: XCTestCase {
                                      guard let text = views.compactMap({ $0 as? NSTextView }).first,
                                            let lane = views.compactMap({ $0 as? ChurnLaneView }).first else { return }
                                      let heading = (text.string as NSString).range(of: "## 4. Dispatch rules")
-                                     text.enclosingScrollView?.contentView.scroll(to: NSPoint(x: 0, y: max(0, Self.y(of: heading, in: text) - 40)))
+                                     // The page scrolls the plan: §4's heading just under the pinned block.
+                                     let covered = (text as? PlanNSTextView)?.obscuredTop ?? 0
+                                     text.scroll(NSPoint(x: 0, y: max(0, Self.y(of: heading, in: text) - 40 - covered)))
                                      lane.needsDisplay = true
                                      // Opened once the scroll has settled (a scroll closes an open card, by
                                      // design), then given time to draw: its panel's hosting view renders on
