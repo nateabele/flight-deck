@@ -1040,9 +1040,9 @@ the runner:
 | `intake.json` | app | intent, Q&A, `chosenPreset`, `roundConfig`, state, the final change set |
 | `commands.jsonl` | app (append-only) | ⏯ ⏭ ⏩ ⏸ ⏹ ＋, notes (`note`/`removeNote`) and plan edits (`editPlan`, the whole edited markdown) as `{seq, command}` lines; the runner acks by `seq` in the tape |
 | `tape.json` | runner | status, target, checkpoints (each record lists the notes its round consumed), `roundInProgress`, `pendingNotes`, extensions, heartbeat |
-| `checkpoints/<n>/` | runner | `drafts/<i>.md`, `plan.md`, `changeset.json` — each round's output, never modified after; `plan.user.md` — the human's edited plan, written when the runner applies an `editPlan` |
+| `checkpoints/<n>/` | runner | `drafts/<i>.md`, `plan.md`, `changeset.json` — each round's output, never modified after; refine and synthesis also keep `changes.json` (the proposals, `[]` when there were none) and `verdicts.json` (the integrator's per-change verdicts, only when it gave them); `plan.user.md` — the human's edited plan, written when the runner applies an `editPlan` |
 | `runs/<stage>-<round>-<role>[-i]/` | runner | per child: `run.json` (pid, session id, start/finish, exit), `stdout` (appended live as the child writes it), `stderr`, `schema.json`, `activity.json` (live `SeatActivity`) |
-| `work/` | runner / integrator | scratch: `graph.json`, `plan.md` + `changes.json` for the integrator, `shadow/` and `bv-*.json` for polish |
+| `work/` | runner / integrator | scratch: `graph.json`, `plan.md` + `changes.json` for the integrator (overwritten every round — the checkpoint's copy is the durable one), `shadow/` and `bv-*.json` for polish |
 
 Every JSON write is atomic. A checkpoint's files are written before the tape entry that points
 at them, so a crash leaves either the whole round recorded or none of it, and a rerun reusing
@@ -1138,8 +1138,13 @@ with cwd = `work/` and `codexWriteSandbox` (no `$TMPDIR`, no `/tmp`, no configur
 `writable_roots`), claude `acceptEdits` with `--tools`/`--allowedTools Read Edit Write`,
 `Bash WebFetch WebSearch Task NotebookEdit` denied and `--add-dir <work>`, never the project as
 cwd. The reviewer is a **fresh session every refine round**, so it never anchors on its own
-earlier verdicts. An integrator that reports changes but leaves `plan.md` byte-identical fails
-the round as `invalidOutput`. A change
+earlier verdicts. The integrator returns a verdict per proposed change (`verdicts: [{index,
+verdict: agree|somewhat|disagree}]`, by 0-based index into `changes.json`) beside the old counts;
+`IntegrateOutput.tally(forChanges:)` derives the record's tally from the list when there is one
+(out-of-range and repeated indices dropped) and from the counts otherwise, so a counts-only answer
+still lands. An integrator that reports changes but leaves `plan.md` byte-identical fails
+the round as `invalidOutput`. Polish, fresh-eyes and dedup record `changeCount` as ops changed
+(`PlanMetrics.opsChanged`) and, separately, `edgesChanged` — the dependency-edge share. A change
 set gets FD's own `graphObservedAt` (taken before the graph read), is validated, and on failure
 the same session is resumed once with the errors listed; a second failure fails the round.
 Encode validates against a fresh graph read and saves it as the checkpoint's `graph.json`;
@@ -1151,6 +1156,20 @@ set applied — and FD itself runs `bv --robot-*` against it into `work/bv-*.jso
 polish prompts point the seat at; no agent runs `bv` (a `Bash(bv …)` allow is a write path, so
 every seat's allow list omits it). A shadow that fails to build is recorded and the round runs
 without it. (This wiring lands from the sibling ShadowGraph branch.)
+
+*Convergence* (`ConvergenceSeries`, pure, no UI yet). A fold over `[Checkpoint]` and a
+checkpoint-file loader into one `ConvergenceCycle` per contiguous Refine or Polish run (draft,
+synthesis, encode, fresh-eyes and dedup never enter one; encode's `changeCount` is a different
+unit). Each point carries the round's changes, agreement ((agree + ½·somewhat) over the verdicts
+given), per-section churn (`PlanMetrics.sectionChurn` against the previous checkpoint's
+*effective* plan, so a human edit is not the round's churn), repeats and reopens of earlier
+proposals (normalized word/shingle overlap in the same section, from the stored `changes.json` /
+`verdicts.json`; nil on a tape that predates them), and sections a round reversed (it removed
+≥ 60% of what an earlier round added there, read off the stored plans). The verdict is
+`tooEarly` / `converging(settled:)` / `plateau` / `diverging(growing | agreementFell |
+hotSection | reopened)`, each with a one-line `explanation` and a `suggestedAction`; the trend
+restarts at a reviewer-model change. Every threshold is a named `ConvergenceThresholds` field
+and is a starting point, not a measurement — the verdict is a signal, never a percent-done.
 
 *Failure policy* (spec §6.3). A drafter that fails gets its slot's fallback once (recorded
 *substituted*), and without one the round goes on without that draft (recorded *failed*); the
