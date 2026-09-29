@@ -43,18 +43,18 @@ extension CoverageCellModel {
     init?(verdict: CoverageVerdict, crossChecks: Bool, readings: [CoverageReading]? = nil) {
         guard crossChecks || verdict.latest != nil else { return nil }
         let latest = verdict.latest
+        // A cross-reviewer that failed after the latest reading means the newest cross-check
+        // measured nothing: the older round's band beside "unmeasured" would read as current.
+        let failedSince = verdict.failedCrossCheckRound.map { $0 > (latest?.round ?? 0) } ?? false
         switch verdict.state {
         case .awaiting:
             (word, shortWord) = ("—", "—")
         case .stalled:
-            (word, shortWord) = ("STALLED", "STALL")
+            (word, shortWord) = failedSince ? ("—", "—") : ("STALLED", "STALL")
         case .reading(let band):
-            (word, shortWord) = Self.words(band)
+            (word, shortWord) = failedSince ? ("—", "—") : Self.words(band)
         }
         tone = word == "STALLED" || word == "NO OVERLAP" ? .amber : .normal
-        // A cross-reviewer that failed after the latest reading means the newest cross-check
-        // measured nothing: naming the older round would pass a stale reading off as current.
-        let failedSince = verdict.failedCrossCheckRound.map { $0 > (latest?.round ?? 0) } ?? false
         if failedSince || latest?.band == .sameFamily || latest?.band == .unmeasured {
             caption = "unmeasured"
         } else if let latest {
@@ -94,9 +94,11 @@ extension CoverageCellModel {
         }
     }
 
-    /// "Refine 1 · Codex 20 · Claude 18 · both 15 · ≈ 1 unfound (estimate)". A reading with no
-    /// estimate (unmeasured, same family) drops the estimate clause rather than printing a zero.
+    /// "Refine 1 · Codex 20 · Claude 18 · both 15 · ≈ 1 unfound (estimate)". A same-family
+    /// reading has no estimate and drops that clause. An unmeasured one (no per-change verdicts,
+    /// an older round) has no counts at all: its zeros are "not known", never "found nothing".
     private static func row(_ r: CoverageReading) -> String {
+        if r.band == .unmeasured { return "Refine \(r.round) · unmeasured (no per-change verdicts)" }
         var parts = ["Refine \(r.round)", "\(r.familyA.displayName) \(r.n1)", "\(r.familyB.displayName) \(r.n2)", "both \(r.both)"]
         if let unfound = r.unfound { parts.append("≈ \(unfound) unfound (estimate)") }
         if r.band == .sameFamily { parts.append("same family, not independent") }
@@ -107,6 +109,9 @@ extension CoverageCellModel {
         var out: [String] = []
         if r.rejectedA + r.rejectedB > 0 {
             out.append("Integrator declined: \(r.familyA.displayName) \(r.rejectedA) · \(r.familyB.displayName) \(r.rejectedB)")
+        }
+        if r.correlated {
+            out.append("\(r.familyA.displayName) and \(r.familyB.displayName) overlap on nearly every issue; the estimate may be low")
         }
         if r.matcher == .textSimilarity { out.append("Matched by text similarity: the integrator gave no groups") }
         if r.matchersDisagree, let text = r.textSimilarityBoth {

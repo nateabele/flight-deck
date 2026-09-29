@@ -260,7 +260,10 @@ extension CoverageSeries {
                 + "will cross-check again; if it stays short, the plan may need a third model family."
         }
         if let latest, latest.round == 1, targetMet == true, refineRoundsRemaining >= 2 {
-            return "Saturated at Refine 1. Consider removing the remaining \(refineRoundsRemaining) Refine rounds "
+            // FEW LEFT meets a Feature plan's target too; calling it "Saturated" contradicted the
+            // band word printed right above this line on the card.
+            let met = latest.band == .saturated ? "Saturated" : "Coverage target met"
+            return "\(met) at Refine 1. Consider removing the remaining \(refineRoundsRemaining) Refine rounds "
                 + "(Run ▸ Remove a Round, ⌘-)."
         }
         if let latest, latest.band == .noOverlap || latest.band == .manyLeft {

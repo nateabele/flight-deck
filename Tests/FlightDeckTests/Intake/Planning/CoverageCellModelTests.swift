@@ -63,7 +63,9 @@ final class CoverageCellModelTests: XCTestCase {
     func testFailedCrossCheckNewerThanTheReadingIsUnmeasured() throws {
         let stale = try XCTUnwrap(CoverageCellModel(verdict: verdict([reading(n1: 20, n2: 18, both: 15)], failed: 3),
                                                     crossChecks: true))
-        XCTAssertEqual(stale.caption, "unmeasured")
+        // No stale band beside "unmeasured": the older reading's SATURATED would read as current.
+        XCTAssertEqual([stale.word, stale.shortWord, stale.caption], ["—", "—", "unmeasured"])
+        XCTAssertEqual(stale.tone, .normal)
         XCTAssertEqual(stale.actionHeadline, "The cross-check agent failed at Refine 3, so coverage is unmeasured there")
         let none = try XCTUnwrap(CoverageCellModel(verdict: verdict([], failed: 1), crossChecks: true))
         XCTAssertEqual([none.word, none.caption], ["—", "unmeasured"])
@@ -85,6 +87,25 @@ final class CoverageCellModelTests: XCTestCase {
         XCTAssertEqual(m.notes, ["Integrator declined: Codex 2 · Claude 1",
                                  "Matched by text similarity: the integrator gave no groups",
                                  "Text matching finds 7 in common; the integrator found 2"])
+    }
+
+    /// Near-total overlap is flagged, not trusted: correlated reviewers make the estimate read low.
+    func testCorrelatedReadingGetsANote() throws {
+        let r = reading(n1: 20, n2: 18, both: 17)
+        XCTAssertTrue(r.correlated)
+        let m = try XCTUnwrap(CoverageCellModel(verdict: verdict([r]), crossChecks: true))
+        XCTAssertTrue(m.notes.contains("Codex and Claude overlap on nearly every issue; the estimate may be low"), "\(m.notes)")
+    }
+
+    /// A round with no per-change verdicts has no counts: its row must never read as zeros.
+    func testUnmeasuredRowSaysSoInsteadOfZeros() throws {
+        let r = CoverageSeries.reading(checkpoint: 5, round: 2,
+                                       record: CrossCheckRecord(proposers: [0, 1], families: [.codex, .claude],
+                                                                clusters: nil, blindOrderSeed: 1),
+                                       changes: nil, verdicts: nil)
+        XCTAssertEqual(r.band, .unmeasured)
+        let m = try XCTUnwrap(CoverageCellModel(verdict: verdict([r]), crossChecks: true))
+        XCTAssertEqual(m.rows, ["Refine 2 · unmeasured (no per-change verdicts)"])
     }
 
     /// Both cells split the engine's action at the same first ". " — one splitter, not two.

@@ -155,6 +155,17 @@ final class CoverageSeriesTests: XCTestCase {
                        "Saturated at Refine 1. Consider removing the remaining 4 Refine rounds (Run ▸ Remove a Round, ⌘-).")
     }
 
+    /// A FEW LEFT reading meets the Feature plan target at Refine 1 too, and the same trim is
+    /// suggested — but its headline must not call a FEW LEFT band "Saturated".
+    func testTargetMetEarlyNamesTheBandItReached() {
+        let r = reading(a: 6, b: 4, shared: 6)
+        XCTAssertEqual(r.band, .fewLeft)
+        let v = CoverageSeries.verdict(readings: [r], preset: .featurePlan,
+                                       convergence: .tooEarly, refineRoundsRemaining: 2, failedCrossCheckRound: nil)
+        XCTAssertEqual(v.suggestedAction,
+                       "Coverage target met at Refine 1. Consider removing the remaining 2 Refine rounds (Run ▸ Remove a Round, ⌘-).")
+    }
+
     func testSketchIsShownNeverJudged() {
         let v = CoverageSeries.verdict(readings: [reading(a: 16, b: 14, shared: 4)], preset: .sketch,
                                        convergence: .plateau, refineRoundsRemaining: 0, failedCrossCheckRound: nil)

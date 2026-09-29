@@ -485,6 +485,8 @@ private struct LCDCellView: View {
                 .onHover { intent.hover(hoverID, $0) }
                 .focusable()
                 .focused($focused)
+                // `content` already carries the cell's label in full words; this says what focus does.
+                .accessibilityHint("Shows the coverage estimate")
         } else {
             content
         }

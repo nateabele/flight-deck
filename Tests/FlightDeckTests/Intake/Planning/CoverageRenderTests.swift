@@ -29,6 +29,9 @@ final class CoverageRenderTests: XCTestCase {
             ("nooverlap", try model([reading(n1: 3, n2: 4, both: 0, round: 1)], remaining: 2)),
             ("samefamily", try model([reading(n1: 20, n2: 18, both: 15, round: 1, families: [.claude, .claude])], remaining: 2)),
             ("pending", try model([], remaining: 3)),
+            ("correlated", try model([reading(n1: 20, n2: 18, both: 17, round: 1)], remaining: 0)),
+            ("unmeasured", try model([unmeasured(round: 1), reading(n1: 12, n2: 10, both: 6, round: 3)], remaining: 0)),
+            ("failed", try model([reading(n1: 20, n2: 18, both: 15, round: 1)], remaining: 0, failed: 3)),
         ]
         for (name, card) in cards {
             try PlanningRender.write(CoverageCard(model: card).fixedSize().padding(16), size: NSSize(width: 540, height: 380),
@@ -81,10 +84,18 @@ final class CoverageRenderTests: XCTestCase {
         }
     }
 
-    private func model(_ readings: [CoverageReading], convergence: ConvergenceVerdict? = nil, remaining: Int = 0) throws -> CoverageCellModel {
+    private func model(_ readings: [CoverageReading], convergence: ConvergenceVerdict? = nil, remaining: Int = 0,
+                       failed: Int? = nil) throws -> CoverageCellModel {
         let verdict = CoverageSeries.verdict(readings: readings, preset: .featurePlan, convergence: convergence,
-                                             refineRoundsRemaining: remaining, failedCrossCheckRound: nil)
+                                             refineRoundsRemaining: remaining, failedCrossCheckRound: failed)
         return try XCTUnwrap(CoverageCellModel(verdict: verdict, crossChecks: true, readings: readings))
+    }
+
+    /// An older round with a cross-check record but no `verdicts.json`: no counts at all.
+    private func unmeasured(round: Int) -> CoverageReading {
+        CoverageSeries.reading(checkpoint: round + 2, round: round,
+                               record: CrossCheckRecord(proposers: [0, 1], families: [.codex, .claude], clusters: nil, blindOrderSeed: 1),
+                               changes: nil, verdicts: nil)
     }
 
     /// A reading folded from proposals and verdicts, as `CoverageCellModelTests` builds them.

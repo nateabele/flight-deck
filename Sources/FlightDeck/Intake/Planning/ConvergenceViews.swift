@@ -84,7 +84,8 @@ struct ConvergenceSparkline: View {
 struct ConvergenceCard: View {
     let model: ConvergenceCellModel
 
-    /// The accessory column's wrap width — the COVERAGE card uses the same, so the two read as one set.
+    /// The accessory column's wrap width. The COVERAGE card starts from it and widens (to 460 pt
+    /// at most) only to keep a reading's row on one line.
     static let width: CGFloat = 340
 
     var body: some View {
