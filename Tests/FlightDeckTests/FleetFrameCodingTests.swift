@@ -11,6 +11,23 @@ final class FleetFrameCodingTests: XCTestCase {
         return try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
     }
 
+    func testIntakeRepliesRoundTripCarryNoSeqAndDoNotLookLikeEvents() throws {
+        let frames: [ServerFrame] = [
+            .intakeDetail(cid: 3, nil),
+            .intakePlan(cid: 4, WireIntakePlan(checkpoint: 1, roundName: "Synthesis", editsVersion: "",
+                                               markdown: "# P", outline: [], notes: [])),
+        ]
+        for frame in frames {
+            let data = try JSONEncoder().encode(frame)
+            XCTAssertEqual(try JSONDecoder().decode(ServerFrame.self, from: data), frame)
+            let json = try fields(of: frame)
+            XCTAssertNil(json["seq"])
+            let tag = try XCTUnwrap(json["t"] as? String)
+            XCTAssertFalse(tag.contains("."))
+            XCTAssertNil(FleetEventTag(rawValue: tag))
+        }
+    }
+
     // MARK: Events carry a flat discriminator
 
     func testARenameEncodesFlatWithItsTypeTag() throws {

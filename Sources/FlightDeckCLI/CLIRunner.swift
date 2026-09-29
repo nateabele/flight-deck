@@ -504,6 +504,8 @@ final class CLIRunner {
             case .err(_, let code): return self.fail(code)
             case .page(_, let page): self.out(CLIOutput.json(page))
             case .newSessionOptions(_, let options): self.out(CLIOutput.json(options))
+            case .intakeDetail(_, let detail): self.out(CLIOutput.json(detail))
+            case .intakePlan(_, let plan): self.out(CLIOutput.json(plan))
             case .macEndpoints(_, let endpoints): self.out(CLIOutput.json(endpoints))
             case .recentlyClosed(_, let closed): self.out(CLIOutput.json(closed))
             case .conversations(_, let catalogue): self.out(CLIOutput.json(catalogue))

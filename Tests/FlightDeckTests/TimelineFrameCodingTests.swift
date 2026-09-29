@@ -341,6 +341,22 @@ final class TimelineFrameCodingTests: XCTestCase {
         XCTAssertNil(FleetEventTag(rawValue: tag))
     }
 
+    func testTheIntakeDetailRequestRoundTrips() throws {
+        let frame = ClientFrame.req(cid: 11, .intakeDetail(id: UUID(), ifNot: "abc"))
+        let data = try JSONEncoder().encode(frame)
+        XCTAssertEqual(try JSONDecoder().decode(ClientFrame.self, from: data), frame)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertEqual(json["op"] as? String, "intake.detail")
+    }
+
+    func testTheIntakePlanRequestRoundTripsWithAndWithoutACheckpoint() throws {
+        for request in [FleetRequest.intakePlan(id: UUID(), checkpoint: 3, changes: true),
+                        .intakePlan(id: UUID(), checkpoint: nil, changes: false)] {
+            let frame = ClientFrame.req(cid: 12, request)
+            XCTAssertEqual(try JSONDecoder().decode(ClientFrame.self, from: JSONEncoder().encode(frame)), frame)
+        }
+    }
+
     // MARK: The receive cap
     //
     // Not here. The cap is a socket behaviour and the option cannot be read back —

@@ -196,10 +196,16 @@ public enum FleetRequest: Codable, Equatable, Sendable {
     /// the Mac may since have removed that project, and a path handed back is what lets the
     /// Mac decide whether to open it under an existing project or refuse.
     case openConversation(conversationID: String, projectPath: String)
+    /// An intake's screen content (spec §6.2). `ifNot`: the etag the phone holds — the Mac
+    /// answers `nil` when it still matches, so an idle poll costs a few dozen bytes.
+    case intakeDetail(id: UUID, ifNot: String?)
+    /// A checkpoint's plan (nil: the head), with a block diff against its parent when `changes`.
+    case intakePlan(id: UUID, checkpoint: Int?, changes: Bool)
 
     enum CodingKeys: String, CodingKey {
         case op, session, anchor, cursor, limit, project
         case query, conversationID, projectPath
+        case intake, ifNot, checkpoint, changes
     }
 
     private enum Op: String, Codable {
@@ -210,6 +216,8 @@ public enum FleetRequest: Codable, Equatable, Sendable {
         case conversations = "search.conversations"
         case search = "search.query"
         case openConversation = "search.open"
+        case intakeDetail = "intake.detail"
+        case intakePlan = "intake.plan"
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -240,6 +248,15 @@ public enum FleetRequest: Codable, Equatable, Sendable {
             try c.encode(Op.openConversation, forKey: .op)
             try c.encode(conversationID, forKey: .conversationID)
             try c.encode(projectPath, forKey: .projectPath)
+        case .intakeDetail(let id, let ifNot):
+            try c.encode(Op.intakeDetail, forKey: .op)
+            try c.encode(id, forKey: .intake)
+            try c.encodeIfPresent(ifNot, forKey: .ifNot)
+        case .intakePlan(let id, let checkpoint, let changes):
+            try c.encode(Op.intakePlan, forKey: .op)
+            try c.encode(id, forKey: .intake)
+            try c.encodeIfPresent(checkpoint, forKey: .checkpoint)
+            try c.encode(changes, forKey: .changes)
         }
     }
 
@@ -282,6 +299,13 @@ public enum FleetRequest: Codable, Equatable, Sendable {
                 conversationID: try c.decode(String.self, forKey: .conversationID),
                 projectPath: try c.decode(String.self, forKey: .projectPath)
             )
+        case .intakeDetail:
+            self = .intakeDetail(id: try c.decode(UUID.self, forKey: .intake),
+                                 ifNot: try c.decodeIfPresent(String.self, forKey: .ifNot))
+        case .intakePlan:
+            self = .intakePlan(id: try c.decode(UUID.self, forKey: .intake),
+                               checkpoint: try c.decodeIfPresent(Int.self, forKey: .checkpoint),
+                               changes: try c.decodeIfPresent(Bool.self, forKey: .changes) ?? false)
         }
     }
 }

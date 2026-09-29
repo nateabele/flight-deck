@@ -113,7 +113,8 @@ enum ControlScope {
     /// rule (`.full` or `.human` only); every other request only reads and is always allowed.
     static func permits(_ request: FleetRequest, level: ControlScopeLevel, caller: ControlCaller) -> Bool {
         switch request {
-        case .timeline, .newSessionOptions, .recentlyClosed, .macEndpoints, .conversations, .search:
+        case .timeline, .newSessionOptions, .recentlyClosed, .macEndpoints, .conversations, .search,
+             .intakeDetail, .intakePlan:
             return true
         case .openConversation:
             return level == .full || caller == .human

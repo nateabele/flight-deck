@@ -546,6 +546,34 @@ final class FleetService: ObservableObject {
                 return reply(.err(cid: cid, code: "unknown_project"))
             }
             reply(.newSessionOptions(cid: cid, options))
+        case .intakeDetail(let id, let ifNot):
+            // Read from memory (IntakeService already holds tapes, seats and convergence);
+            // nothing is written and nothing enters `FleetSnapshot`.
+            let project = store.repos.first { repo in
+                store.intakeService.intakes(forProject: repo.url.path).contains { $0.id == id }
+            }?.id
+            guard let project,
+                  let detail = IntakeDetailProjection.detail(
+                      id, project: project, service: store.intakeService, servedAt: Date())
+            else {
+                Self.logger.info("check=unknown_intake intake=\(id, privacy: .public)")
+                return reply(.err(cid: cid, code: "unknown_intake"))
+            }
+            reply(.intakeDetail(cid: cid, detail.etag == ifNot ? nil : detail))
+        case .intakePlan(let id, let checkpoint, let changes):
+            // Two small file reads (the checkpoint's plan and, for `changes`, its parent's) —
+            // tens of KB, done here like the other synchronous arms.
+            guard store.intakeService.intakes.contains(where: { $0.id == id }) else {
+                Self.logger.info("check=unknown_intake intake=\(id, privacy: .public)")
+                return reply(.err(cid: cid, code: "unknown_intake"))
+            }
+            guard let plan = IntakePlanProjection.plan(
+                id, checkpoint: checkpoint, changes: changes, service: store.intakeService)
+            else {
+                Self.logger.info("check=unknown_checkpoint intake=\(id, privacy: .public)")
+                return reply(.err(cid: cid, code: "unknown_checkpoint"))
+            }
+            reply(.intakePlan(cid: cid, plan))
         case .recentlyClosed:
             // Answered synchronously, the same as `newSessionOptions` and `macEndpoints`:
             // the stack is in memory on this actor, so there is nothing to hop a `Task`
