@@ -18,6 +18,10 @@ struct BoardStrip: View {
         }
     }
 
+    /// The strip's secondary text. Fixed, never `.secondary`: the glass is near-black in BOTH
+    /// appearances, and light mode's `.secondary` is a dark grey that vanishes on it.
+    private static let dim = Color(white: 0.55)
+
     var body: some View {
         TimelineView(ClockSchedule(since: model.clockSince, offset: offset, frozenAt: frozenAt, idle: model.idle)) { context in
             let clock: String = model.clockText ?? model.clockSince.map {
@@ -29,25 +33,27 @@ struct BoardStrip: View {
                     Spacer()
                     HStack(spacing: 4) {
                         Text(clock).font(.system(.subheadline, design: .monospaced).monospacedDigit()).foregroundStyle(phosphor)
-                        if frozenAt != nil { Image(systemName: "wifi.slash").font(.caption2).foregroundStyle(.secondary) }
+                        if frozenAt != nil { Image(systemName: "wifi.slash").font(.caption2).foregroundStyle(Self.dim) }
                     }
                     .accessibilityElement(children: .combine)
                     .accessibilityLabel("\(model.clockCaption.lowercased()) \(clock)\(frozenAt != nil ? ", as of the last connection" : "")")
                 }
                 if !model.dots.isEmpty {
                     HStack(spacing: 3) {
-                        Text("CLR").font(.system(.caption2, design: .monospaced)).foregroundStyle(.secondary)
+                        // One line at every size: at AX5 these wrapped a letter per line.
+                        Text("CLR").font(.system(.caption2, design: .monospaced)).foregroundStyle(Self.dim).fixedSize()
                         ForEach(model.dots) { dot in dotView(dot) }
-                        Text("REV").font(.system(.caption2, design: .monospaced)).foregroundStyle(.secondary)
+                        Text("REV").font(.system(.caption2, design: .monospaced)).foregroundStyle(Self.dim).fixedSize()
                     }
                 }
                 if !model.stopText.isEmpty || model.convergence != nil {
                     HStack {
-                        Text(model.stopText).font(.system(.caption2, design: .monospaced)).foregroundStyle(.secondary)
+                        Text(model.stopText).font(.system(.caption2, design: .monospaced)).foregroundStyle(Self.dim)
                         Spacer()
                         if let word = model.convergence {
                             Text(word).font(.system(.caption2, design: .monospaced))
-                                .foregroundStyle(model.convergenceAmber ? .orange : .secondary)
+                                .foregroundStyle(model.convergenceAmber ? .orange : Self.dim)
+                                .fixedSize()
                         }
                     }
                 }
@@ -56,6 +62,8 @@ struct BoardStrip: View {
             .background(RoundedRectangle(cornerRadius: 12).fill(Color(red: 0.05, green: 0.07, blue: 0.09)))
             .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color(white: 0.2), lineWidth: 1))
             .padding(.horizontal, 12)
+            // A lost link dims the strip like the list below it: what it shows is as of then.
+            .opacity(frozenAt == nil ? 1 : 0.5)
         }
     }
 
@@ -69,7 +77,7 @@ struct BoardStrip: View {
         let shape = Capsule().fill(fill).frame(height: dot.state == "live" ? 6 : 4)
             .frame(maxWidth: .infinity)
             .overlay(dot.isStop ? Capsule().stroke(Color.accentColor, lineWidth: 1.5) : nil)
-            .shadow(color: dot.state == "live" && model.tone == .live && !reduceMotion ? .accentColor : .clear, radius: 3)
+            .shadow(color: dot.state == "live" && model.tone == .live && frozenAt == nil && !reduceMotion ? .accentColor : .clear, radius: 3)
         if dot.tappable, let checkpoint = dot.checkpoint {
             Button { onDot(checkpoint) } label: { shape.frame(minHeight: 22).contentShape(Rectangle()) }
                 .buttonStyle(.plain).accessibilityLabel(dot.label)
