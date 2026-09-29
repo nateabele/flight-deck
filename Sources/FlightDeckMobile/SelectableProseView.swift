@@ -14,7 +14,9 @@ import UIKit
 struct SelectableProseView: UIViewRepresentable {
     let markdown: String
     /// What Reply does with the highlighted text. The view knows nothing about composers.
-    let onReply: (String) -> Void
+    /// `nil` when nothing is behind the text to reply into (the plan reader): the menu is then
+    /// the system's own, with no Reply that does nothing.
+    let onReply: ((String) -> Void)?
 
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
@@ -65,7 +67,7 @@ struct SelectableProseView: UIViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator(onReply: onReply) }
 
     final class Coordinator: NSObject, UITextViewDelegate {
-        var onReply: (String) -> Void
+        var onReply: ((String) -> Void)?
 
         /// The last markdown parsed, and what it parsed to. `sizeThatFits` and `updateUIView`
         /// both need the attributed string and SwiftUI calls them in either order and more than
@@ -93,7 +95,7 @@ struct SelectableProseView: UIViewRepresentable {
         /// can see the guard above short-circuit without timing anything.
         private(set) var assignmentCount = 0
 
-        init(onReply: @escaping (String) -> Void) {
+        init(onReply: ((String) -> Void)?) {
             self.onReply = onReply
         }
 
@@ -125,11 +127,11 @@ struct SelectableProseView: UIViewRepresentable {
             editMenuForTextIn range: NSRange,
             suggestedActions: [UIMenuElement]
         ) -> UIMenu? {
-            guard range.length > 0 else { return nil }
+            guard range.length > 0, onReply != nil else { return nil }
             let selected = (textView.text as NSString).substring(with: range)
             let reply = UIAction(title: "Reply", image: UIImage(systemName: "arrowshape.turn.up.left")) {
                 [weak self] _ in
-                self?.onReply(selected)
+                self?.onReply?(selected)
             }
             return UIMenu(children: suggestedActions + [reply])
         }
