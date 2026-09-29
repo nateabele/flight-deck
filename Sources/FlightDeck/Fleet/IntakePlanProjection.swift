@@ -32,6 +32,25 @@ enum IntakePlanProjection {
         }
     }
 
+    /// The per-round churn and diverging section `outline` reads for `checkpoint`, both from ONE
+    /// cycle: the cycle containing `checkpoint` when it has per-section numbers — an older
+    /// checkpoint shows its own cycle, not a later one every point of which it would filter
+    /// out — else the cycle the Mac's heatmap and churn lane describe
+    /// (`HeatmapModel.sectionCycle`), so a polish cycle, whose points carry no section churn,
+    /// never zeroes the outline while the Mac's lane shows movement. Rounds after `checkpoint`
+    /// are dropped: the plan as it stood then had not seen them.
+    static func churnSource(_ cycles: [ConvergenceCycle], checkpoint: Int) -> (churn: [[String: Int]], diverging: String?) {
+        let hasSections = { (c: ConvergenceCycle) in c.points.contains { !$0.sectionChurn.isEmpty } }
+        let containing = cycles.last { c in c.points.contains { $0.checkpoint == checkpoint } }
+        guard let cycle = containing.flatMap({ hasSections($0) ? $0 : nil }) ?? HeatmapModel.sectionCycle(cycles)
+        else { return ([], nil) }
+        let diverging: String? = switch cycle.verdict {
+        case .diverging(.hotSection(let s)), .diverging(.reopened(let s)): s
+        default: nil
+        }
+        return (cycle.points.filter { $0.checkpoint <= checkpoint }.map(\.sectionChurn), diverging)
+    }
+
     /// Whitespace runs to one space and inline markers (`**`, `*`, `_`, `` ` ``, `[text](url)` →
     /// text) removed — how rendered text a person selected compares to the source it came from.
     static func normalized(_ s: String) -> String {
@@ -85,12 +104,7 @@ enum IntakePlanProjection {
               let markdown = PlanSection.effectivePlan(checkpoint: checkpointID, tape: tape, loadFile: load)
         else { return nil }
         let blocks = PlanBlocks.split(markdown)
-        let cycle = service.convergence[id]?.last
-        let churn = cycle?.points.filter { $0.checkpoint <= checkpointID }.map(\.sectionChurn) ?? []
-        let diverging: String? = switch cycle?.verdict {
-        case .diverging(.hotSection(let s))?, .diverging(.reopened(let s))?: s
-        default: nil
-        }
+        let (churn, diverging) = churnSource(service.convergence[id] ?? [], checkpoint: checkpointID)
         let notes = tape.checkpoints.flatMap(\.record.annotations).map { locate($0, consumed: true, in: blocks) }
             + tape.pendingNotes.map { locate($0, consumed: false, in: blocks) }
         var added: [Int]?, removed: [WireRemovedBlock]?

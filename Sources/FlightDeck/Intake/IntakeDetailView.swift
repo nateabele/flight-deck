@@ -399,12 +399,8 @@ struct IntakeDetailView: View {
         return ConvergenceCellModel(cycles: cycles, plannedRounds: planned)
     }
 
-    /// The cycle the heatmap and the churn lane describe: the latest with per-section numbers.
-    /// Polish edits the change set, not the plan, so its cycle has none, and the refine cycle
-    /// before it is the plan's latest word on which sections moved.
-    private var sectionCycle: ConvergenceCycle? {
-        cycles.last { cycle in cycle.points.contains { !$0.sectionChurn.isEmpty } } ?? cycles.last
-    }
+    /// The cycle the heatmap and the churn lane describe (`HeatmapModel.sectionCycle`).
+    private var sectionCycle: ConvergenceCycle? { HeatmapModel.sectionCycle(cycles) }
 
     private func heatmapView(_ tape: Tape, board: BoardModel) -> AnyView? {
         guard let heatmap, let cycle = sectionCycle else { return nil }

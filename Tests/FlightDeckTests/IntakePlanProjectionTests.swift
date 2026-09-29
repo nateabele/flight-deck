@@ -55,6 +55,43 @@ final class IntakePlanProjectionTests: XCTestCase {
         XCTAssertTrue(outline[1].diverging)
     }
 
+    /// A refine cycle (checkpoints 2, 3) then a polish cycle (5, 6). Polish edits the change set,
+    /// not the plan, so its points carry no section churn — reading the newest cycle, as the
+    /// first cut did, zeroed every row during polish while the Mac's churn lane showed movement.
+    private func refineThenPolish() -> [ConvergenceCycle] {
+        let refine = ConvergenceSeries.assess(.refine, [
+            ConvergencePoint(checkpoint: 2, stage: .refine, round: 1, changeCount: 12, linesChurned: 20,
+                             sectionChurn: ["## 7. Credential paths": 12, "## 1. Product contract": 3]),
+            ConvergencePoint(checkpoint: 3, stage: .refine, round: 2, changeCount: 9, linesChurned: 9,
+                             sectionChurn: ["## 7. Credential paths": 9]),
+        ])
+        let polish = ConvergenceSeries.assess(.polish, [
+            ConvergencePoint(checkpoint: 5, stage: .polish, round: 1, changeCount: 4, linesChurned: 0),
+            ConvergencePoint(checkpoint: 6, stage: .polish, round: 2, changeCount: 2, linesChurned: 0),
+        ])
+        return [refine, polish]
+    }
+
+    func testChurnDuringPolishReadsTheRefineCycleLikeTheMacsLane() {
+        let blocks = PlanBlocks.split(markdown)
+        let cycles = refineThenPolish()
+        let atHead = IntakePlanProjection.churnSource(cycles, checkpoint: 6)
+        let outline = IntakePlanProjection.outline(markdown: markdown, blocks: blocks, churn: atHead.churn,
+                                                   divergingSection: atHead.diverging)
+        XCTAssertEqual(outline[0].churn, [3, 0])
+        XCTAssertEqual(outline[1].churn, [12, 9])
+        XCTAssertEqual(outline[0].settledSince, "Round 1")
+    }
+
+    func testAnOlderCheckpointShowsItsOwnCycleUpToThatCheckpoint() {
+        let blocks = PlanBlocks.split(markdown)
+        let source = IntakePlanProjection.churnSource(refineThenPolish(), checkpoint: 2)
+        let outline = IntakePlanProjection.outline(markdown: markdown, blocks: blocks, churn: source.churn,
+                                                   divergingSection: source.diverging)
+        XCTAssertEqual(outline[0].churn, [3])
+        XCTAssertEqual(outline[1].churn, [12])
+    }
+
     func testNoteQuotesLocateAcrossInlineMarkup() {
         let blocks = PlanBlocks.split(markdown)
         let bold = PlanNote(kind: .comment, note: "x",
