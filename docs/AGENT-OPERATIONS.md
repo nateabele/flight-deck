@@ -75,12 +75,12 @@ convenience.
 Why this refusal exists: `SessionDaemon.defaultDirectory()`
 (`Sources/FlightDeck/SessionDaemon.swift:56`) keys the fd-abduco socket root on build flavor —
 Release `/tmp/flight-deck-<uid>`, Debug `/tmp/flight-deck-debug-<uid>` — deliberately, so a
-locally launched Debug build never reaps a released build's daemons. But `sessions.json` is
-shared by both flavors: a Debug bundle installed at `/Applications` restores the same sessions
-and attaches them to whatever is sitting in the *debug* root — typically stale leftovers from an
-earlier debug run. Every conversation looks like it lost its last several turns. Nothing is
-actually lost: the live daemons keep running in the release root, and reinstalling a genuine
-Release bundle restores them.
+locally launched Debug build never reaps a released build's daemons. Before 2026-09-29
+`sessions.json` was shared by both flavors too, so a Debug bundle installed at `/Applications`
+restored the live sessions and attached them to whatever sat in the *debug* root. It now reads
+`Flight Deck (Debug)/sessions.json` instead, so a Debug bundle there opens its own (usually
+empty) deck. Nothing is lost either way: the live daemons keep running in the release root,
+and reinstalling a genuine Release bundle restores them.
 
 This doesn't conflict with the `-FlightDeckStateDir` guidance below: that flag redirects
 `sessions.json` only, not the daemon root, so a Debug build launched in place with a scratch

@@ -143,7 +143,11 @@ that store restores inline) persists to `UserDefaults` behind `PreferencesPersis
 
 Sessions do **not** share that store. `SessionStore` persists through `SessionPersisting` to
 `~/Library/Application Support/Flight Deck/sessions.json` (`FileSessionPersistence`, atomic
-write, one-shot migration from the old `sessions.snapshot.v1` defaults key). The split is
+write, one-shot migration from the old `sessions.snapshot.v1` defaults key). A Debug build uses
+`~/Library/Application Support/Flight Deck (Debug)/` instead, never migrates, and refuses a
+`-FlightDeckStateDir` that names the live directory: `restore()` resumes an agent for every
+session it reads, so a Debug build that reads the live file forks the whole fleet
+(`FileSessionPersistence.defaultDirectory(debug:)`). The split is
 deliberate: `defaults delete <domain>` is a routine debugging gesture that used to take the
 whole session graph with it, `cfprefsd` coalesces writes so a `SIGKILL` could drop the last
 one, and the snapshot grows with sessions × projects. Preferences have none of those

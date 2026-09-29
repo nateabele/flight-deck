@@ -50,12 +50,37 @@ struct FlightDeckApp: App {
     /// Internal rather than private so `StateDirectoryOverrideTests` can exercise the parsing
     /// without launching an app; the `defaults` parameter is what lets those tests use a suite
     /// of their own instead of the real domain.
-    static func stateDirectory(_ defaults: UserDefaults = .standard) -> URL? {
+    ///
+    /// **A Debug build refuses an override naming the live directory** — by any spelling,
+    /// symlinks included — and gets its own `Flight Deck (Debug)` directory instead. That is
+    /// the only route left by which a Debug build could restore the live deck and resume a
+    /// duplicate agent per session (see `FileSessionPersistence.defaultDirectory(debug:)`).
+    @MainActor
+    static func stateDirectory(
+        _ defaults: UserDefaults = .standard,
+        debug: Bool = SessionDaemon.isDebugBuild
+    ) -> URL? {
         guard let path = defaults.string(forKey: "FlightDeckStateDir"), !path.isEmpty else {
             return nil
         }
-        return URL(
+        let url = URL(
             fileURLWithPath: (path as NSString).expandingTildeInPath, isDirectory: true)
+        guard debug else { return url }
+        let live = FileSessionPersistence.defaultDirectory(debug: false)
+        guard url.resolvingSymlinksInPath().standardizedFileURL.path
+                == live.resolvingSymlinksInPath().standardizedFileURL.path
+        else { return url }
+        logger.error("refusing -FlightDeckStateDir \(path, privacy: .public): a Debug build never opens the live deck")
+        return FileSessionPersistence.defaultDirectory(debug: true)
+    }
+
+    /// The defaults domain `FileSessionPersistence` may migrate the legacy
+    /// `sessions.snapshot.v1` blob out of, or nil for none. Debug and Release share one bundle
+    /// id and so one domain, and migration *removes* the key: a Debug store allowed to migrate
+    /// would move the live user's blob into the debug directory. An overridden store never
+    /// migrates for the same reason (see `fileSessionPersistence()`).
+    static func legacyMigrationDefaults(overridden: Bool, debug: Bool) -> UserDefaults? {
+        overridden || debug ? nil : .standard
     }
 
     /// `-FlightDeckDaemonDir <path>`. Overrides the fd-abduco socket/pidfile root
@@ -81,8 +106,11 @@ struct FlightDeckApp: App {
     /// user's `sessions.snapshot.v1` blob as a side effect of running a debug instance —
     /// isolation that mutates the very thing it is isolating from.
     private static func fileSessionPersistence() -> FileSessionPersistence {
-        guard let directory = stateDirectory() else { return FileSessionPersistence() }
-        return FileSessionPersistence(directory: directory, legacyDefaults: nil)
+        let directory = stateDirectory()
+        return FileSessionPersistence(
+            directory: directory,
+            legacyDefaults: legacyMigrationDefaults(
+                overridden: directory != nil, debug: SessionDaemon.isDebugBuild))
     }
 
     /// `-FlightDeckFixture <dir>`. Used by exactly one UI test, the one that produces the

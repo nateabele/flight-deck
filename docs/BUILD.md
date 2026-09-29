@@ -87,7 +87,9 @@ TCC grant, so subsequent `smoke.sh` runs (and CI, if the machine is pre-authoriz
   `smoke.sh` already does this before each run. **Do not `defaults delete` the whole domain** —
   preferences live there (`preferences.v1`), and it is how sessions used to get destroyed on
   every smoke run. Sessions themselves are now in
-  `~/Library/Application Support/Flight Deck/sessions.json`.
+  `~/Library/Application Support/Flight Deck/sessions.json` — or, for a Debug build,
+  `~/Library/Application Support/Flight Deck (Debug)/sessions.json`, so a Debug launch never
+  restores the live deck.
 - **`import GhosttyKit` fails / linker errors about `std::*`** — the xcframework isn't built
   (`./scripts/build-libghostty.sh`) or `OTHER_LDFLAGS: -lstdc++` was removed from `project.yml`.
 - **Swift 6 concurrency errors in `GhosttyEmbed/`** — `SWIFT_VERSION` must be `"5.0"` (see

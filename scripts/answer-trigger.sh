@@ -35,6 +35,7 @@ set -euo pipefail
 # `unsupported_peer` for a handset built before the feature existed — that phone is not sent
 # anything, because a frame it cannot decode would cost it its connection.
 
+# A Debug build's socket is in "Flight Deck (Debug)" instead; point FLIGHT_DECK_STATE_DIR there.
 STATE_DIR="${FLIGHT_DECK_STATE_DIR:-$HOME/Library/Application Support/Flight Deck}"
 SOCKET="$STATE_DIR/answer-trigger.sock"
 

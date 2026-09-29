@@ -1161,17 +1161,18 @@ rather than fixed alongside the daemon wiring.
     `if (c->state != STATE_ATTACHED) { c->state = STATE_ATTACHED; ... } else { c->state = STATE_ATTACHED; }`
     reassigns a value the `else` condition already guarantees. Cosmetic; safe to delete the
     `else` body's assignment when next touching that function.
-- **Debug and release builds share `/tmp/flight-deck-<uid>`, and therefore each other's
-  daemons.** `SessionDaemon`'s `directory` default is not affected by `-FlightDeckStateDir` the
-  way `sessions.json`'s path and `AnswerTriggerSocket`'s socket already are — a debug build
-  already reads and writes the same `sessions.json` as the real installed app for the identical
-  reason (no salting), and now its daemon sockets are shared the same way. A debug build attaches
-  to, and can `terminate()`, a session belonging to the real installed app's fleet, because both
-  resolve the identical `<uuid>.sock`. If isolating a debug run from the real fleet's daemons is
-  ever wanted, `SessionDaemon.init(directory:)` already takes the
-  override it needs; the missing piece is threading `-FlightDeckStateDir` (or a dedicated flag)
-  into `FlightDeckApp`'s construction of the `SessionDaemon` it hands to `SessionStore`, the
-  same way that launch argument already salts the persistence path.
+- **Debug and Release no longer share state — but only by file path, not by identity.** The
+  daemon root (`/tmp/flight-deck-debug-<uid>`) and, since 2026-09-29, the state directory
+  (`Flight Deck (Debug)`, with an override naming the live directory refused) are both salted
+  by build. The latter closed the worst collision: a Debug bundle launched from a worktree's
+  DerivedData restored the live `sessions.json`, resumed a duplicate agent for all 62 sessions,
+  and the duplicates' newer `~/.claude/sessions/<pid>.json` rows won the registry tie-break —
+  every question raised afterwards read as `idle` and never reached the phone. Still shared:
+  the `UserDefaults` domain (one bundle id — preferences, pairing, `installID`) and the logs.
+  The bundle-id half is planned in
+  `docs/superpowers/plans/2026-09-24-debug-build-identity-isolation.md` (its Task 4 is the
+  state-directory salt, now done). A **Release** bundle launched from DerivedData still reads
+  the live deck; nothing but AGENTS.md rule 2 stops that.
 
 ## API-error badge (2026-09-03)
 

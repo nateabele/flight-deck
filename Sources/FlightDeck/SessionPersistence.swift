@@ -250,12 +250,23 @@ final class FileSessionPersistence: SessionPersisting {
         self.legacyDefaults = legacyDefaults
     }
 
-    static func defaultDirectory() -> URL {
+    /// The state root, **different between Debug and Release builds** (`Flight Deck (Debug)` vs
+    /// `Flight Deck`), for the reason `SessionDaemon.defaultDirectory(debug:)` differs — except
+    /// that the daemon root alone never protected the live deck. `restore()` reads *this*
+    /// directory and types `claude --resume` into every session it finds, so a Debug bundle
+    /// launched from DerivedData against the shared file resumed a duplicate agent for all 62
+    /// live sessions on 2026-09-29. The duplicates outlived the app, and their newer
+    /// `~/.claude/sessions/<pid>.json` rows won the registry tie-break over the real agents:
+    /// every question raised afterwards read as `idle` and never reached the phone.
+    ///
+    /// Every `?? defaultDirectory()` caller (search index, answer-trigger and control sockets,
+    /// intakes root) inherits the split from here.
+    static func defaultDirectory(debug: Bool = SessionDaemon.isDebugBuild) -> URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
                 .appendingPathComponent("Library/Application Support", isDirectory: true)
         // "Flight Deck" (two words) matches the product name on disk, as in `Flight Deck.app`.
-        return base.appendingPathComponent("Flight Deck", isDirectory: true)
+        return base.appendingPathComponent(debug ? "Flight Deck (Debug)" : "Flight Deck", isDirectory: true)
     }
 
     func load() -> SessionSnapshot? {

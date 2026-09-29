@@ -97,4 +97,103 @@ final class StateDirectoryOverrideTests: XCTestCase {
             legacy.data(forKey: FileSessionPersistence.legacyKey),
             "an overridden store must leave the real legacy blob alone")
     }
+
+    // MARK: - Debug builds never share the live state directory
+
+    /// The 2026-09-29 incident: a Debug bundle launched from a worktree's DerivedData restored
+    /// the live `sessions.json` and started a second `claude --resume` for all 62 sessions. The
+    /// duplicates outlived the app, and because each wrote its own `~/.claude/sessions/<pid>.json`
+    /// with a newer `startedAt`, they won the registry tie-break over the real agents — every
+    /// question raised afterwards read as `idle` and never reached the phone. Separate daemon
+    /// roots (`SessionDaemon.defaultDirectory(debug:)`) did not help, because the thing that
+    /// resumes agents is `restore()`, and it read the shared file.
+    func testDebugAndReleaseDefaultToDifferentStateDirectories() {
+        let debug = FileSessionPersistence.defaultDirectory(debug: true)
+        let release = FileSessionPersistence.defaultDirectory(debug: false)
+
+        XCTAssertNotEqual(debug.standardizedFileURL.path, release.standardizedFileURL.path)
+        XCTAssertEqual(release.lastPathComponent, "Flight Deck")
+        XCTAssertEqual(debug.lastPathComponent, "Flight Deck (Debug)")
+        XCTAssertEqual(
+            debug.deletingLastPathComponent().path, release.deletingLastPathComponent().path,
+            "both live under Application Support; only the leaf differs")
+    }
+
+    /// The test host is itself a Debug build, so the no-argument default must be the debug one.
+    /// Every caller that writes `?? FileSessionPersistence.defaultDirectory()` — the search index,
+    /// the answer-trigger and control sockets, the intakes root — inherits the split from this.
+    func testTheRunningDebugBuildDefaultsToTheDebugDirectory() {
+        XCTAssertTrue(SessionDaemon.isDebugBuild, "the unit-test host is expected to be Debug")
+        XCTAssertEqual(
+            FileSessionPersistence.defaultDirectory().path,
+            FileSessionPersistence.defaultDirectory(debug: true).path)
+    }
+
+    /// `-FlightDeckStateDir` is the one remaining route by which a Debug build could be handed
+    /// the live deck. Refuse it: pointing a debug instance at the live directory is exactly the
+    /// collision, however it is spelled.
+    func testADebugBuildRefusesAnOverrideNamingTheLiveDirectory() {
+        let live = FileSessionPersistence.defaultDirectory(debug: false)
+        let debugDir = FileSessionPersistence.defaultDirectory(debug: true)
+        let spellings = [
+            live.path,
+            live.path + "/",
+            live.path + "/.",
+            live.appendingPathComponent("sub").path + "/..",
+            (live.path as NSString).abbreviatingWithTildeInPath,
+        ]
+        for spelling in spellings {
+            let defaults = makeDefaults("refuse-\(spellings.firstIndex(of: spelling)!)")
+            defaults.set(spelling, forKey: "FlightDeckStateDir")
+            XCTAssertEqual(
+                FlightDeckApp.stateDirectory(defaults, debug: true)?.standardizedFileURL.path,
+                debugDir.standardizedFileURL.path,
+                "a Debug build handed \(spelling) must fall back to its own directory")
+        }
+    }
+
+    /// The same refusal must follow a symlink to the live directory — the obvious way round a
+    /// string comparison.
+    func testADebugBuildRefusesASymlinkToTheLiveDirectory() throws {
+        let link = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("fd-live-link-\(UUID().uuidString)")
+        try FileManager.default.createSymbolicLink(
+            at: link, withDestinationURL: FileSessionPersistence.defaultDirectory(debug: false))
+        defer { try? FileManager.default.removeItem(at: link) }
+
+        let defaults = makeDefaults()
+        defaults.set(link.path, forKey: "FlightDeckStateDir")
+
+        XCTAssertEqual(
+            FlightDeckApp.stateDirectory(defaults, debug: true)?.path,
+            FileSessionPersistence.defaultDirectory(debug: true).path)
+    }
+
+    /// A scratch directory is still honoured in Debug — that is the supported way to try a
+    /// build against a seeded copy of a deck.
+    func testADebugBuildStillHonoursAScratchOverride() {
+        let defaults = makeDefaults()
+        defaults.set("/tmp/flight-deck-state-test", forKey: "FlightDeckStateDir")
+        XCTAssertEqual(
+            FlightDeckApp.stateDirectory(defaults, debug: true)?.path, "/tmp/flight-deck-state-test")
+    }
+
+    /// Release is the live deck; naming its own directory explicitly changes nothing.
+    func testAReleaseBuildHonoursAnOverrideNamingTheLiveDirectory() {
+        let live = FileSessionPersistence.defaultDirectory(debug: false)
+        let defaults = makeDefaults()
+        defaults.set(live.path, forKey: "FlightDeckStateDir")
+        XCTAssertEqual(FlightDeckApp.stateDirectory(defaults, debug: false)?.path, live.path)
+    }
+
+    /// The legacy `sessions.snapshot.v1` blob lives in the defaults domain Debug and Release
+    /// share (one bundle id). Migration *removes* it, so a Debug build allowed to migrate would
+    /// consume the live user's blob into the debug directory. Only an un-overridden Release
+    /// store may migrate.
+    func testOnlyAnUnoverriddenReleaseStoreMigratesLegacyDefaults() {
+        XCTAssertNotNil(FlightDeckApp.legacyMigrationDefaults(overridden: false, debug: false))
+        XCTAssertNil(FlightDeckApp.legacyMigrationDefaults(overridden: false, debug: true))
+        XCTAssertNil(FlightDeckApp.legacyMigrationDefaults(overridden: true, debug: false))
+        XCTAssertNil(FlightDeckApp.legacyMigrationDefaults(overridden: true, debug: true))
+    }
 }
