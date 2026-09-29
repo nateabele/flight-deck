@@ -46,14 +46,22 @@ struct PlanReaderScreen: View {
                         removed(after: nil, plan, show: showDiff)
                         ForEach(blocks, id: \.index) { block in
                             let notes = plan.notes.filter { $0.blockIndex == block.index }
-                            Markdown(block.text)
-                                .markdownTheme(TimelineMarkdown.theme)
-                                .padding(.horizontal, 6).padding(.vertical, 2)
+                            HStack(alignment: .top, spacing: 8) {
+                                VStack(alignment: .leading, spacing: 6) {
+                                    ForEach(Array(PlanReaderStyle.segments(of: block.text).enumerated()), id: \.offset) { _, segment in
+                                        segmentView(segment)
+                                    }
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                if !notes.isEmpty {
+                                    notesButton(count: notes.count) { openBlock = BlockNotes(id: block.index) }
+                                }
+                            }
+                            .padding(.horizontal, 6).padding(.vertical, 2)
                                 .background(RoundedRectangle(cornerRadius: 4).fill(
                                     added.contains(block.index) ? Color.green.opacity(0.12)
                                     : notes.contains { !$0.consumed } ? Color.yellow.opacity(0.14)
                                     : notes.isEmpty ? Color.clear : Color.yellow.opacity(0.06)))
-                                .modifier(NoteTap(count: notes.count) { openBlock = BlockNotes(id: block.index) })
                                 .id(block.index)
                             removed(after: block.index, plan, show: showDiff)
                         }
@@ -93,19 +101,31 @@ struct PlanReaderScreen: View {
         .intakePresence(id: intake, model: flightControl.detailModel(for: intake), flightControl: flightControl)
     }
 
-    /// Tap, button trait and "N notes" label only on a block that has notes; a block without
-    /// any is plain content and takes no gesture.
-    private struct NoteTap: ViewModifier {
-        let count: Int
-        let open: () -> Void
-        func body(content: Content) -> some View {
-            if count > 0 {
-                content.onTapGesture(perform: open)
-                    .accessibilityAddTraits(.isButton)
-                    .accessibilityHint("\(count) note\(count == 1 ? "" : "s")")
-            } else {
-                content
-            }
+    /// The way into a block's notes. A button beside the text rather than a tap on it: a tap
+    /// gesture on the block competes with the press that starts a text selection, and selection
+    /// is what a reader of a plan needs. A real `Button`, so VoiceOver reaches it as one.
+    private func notesButton(count: Int, open: @escaping () -> Void) -> some View {
+        Button(action: open) {
+            Text(PlanReaderStyle.notesLabel(count: count))
+                .font(.caption.weight(.semibold))
+                .padding(.horizontal, 8).padding(.vertical, 3)
+                .background(Capsule().fill(Color.yellow.opacity(0.25)))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(PlanReaderStyle.notesLabel(count: count))
+    }
+
+    /// Prose is selectable attributed text (the timeline's own renderer); code, tables, lists
+    /// and quotes stay MarkdownUI, which cannot be an attributed run, with system selection on.
+    @ViewBuilder private func segmentView(_ segment: TimelineSegment) -> some View {
+        switch segment {
+        case .prose(let text):
+            SelectableProseView(markdown: text, onReply: nil)
+        case .code(let language, let text):
+            Markdown(TimelineSegment.fenced(language: language, text))
+                .markdownTheme(TimelineMarkdown.theme).textSelection(.enabled)
+        case .richBlock(let text):
+            Markdown(text).markdownTheme(TimelineMarkdown.theme).textSelection(.enabled)
         }
     }
 
@@ -141,4 +161,17 @@ struct PlanReaderScreen: View {
             }
         }
     }
+}
+
+/// What the plan reader draws for a block, decided apart from SwiftUI so it can be tested.
+/// Follows `TimelineStyle`: the timeline's segmenter is the one place that knows what an
+/// attributed run can express.
+enum PlanReaderStyle {
+    /// A block's segments: `.prose` becomes selectable text, the rest stays MarkdownUI.
+    static func segments(of blockText: String) -> [TimelineSegment] {
+        TimelineSegmenter.segments(of: blockText)
+    }
+
+    /// The notes button's text and accessibility label.
+    static func notesLabel(count: Int) -> String { "\(count) note\(count == 1 ? "" : "s")" }
 }
