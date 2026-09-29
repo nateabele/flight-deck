@@ -755,6 +755,9 @@ struct PlanEditHooks {
     /// The intake's folded sections (`IntakeService.planFolds`), which outlive the section; nil
     /// keeps them in the editor for as long as it lives.
     var folds: PlanFoldStore?
+    /// The intake's project directory, which the plan's relative file links resolve against
+    /// (`PlanLinks`); nil resolves only absolute and `~` paths.
+    var projectPath: String?
 }
 
 /// `PlanLayers.userDiff`'s hunks, found without splitting and hashing the whole plan on every

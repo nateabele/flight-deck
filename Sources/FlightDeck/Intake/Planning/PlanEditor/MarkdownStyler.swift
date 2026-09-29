@@ -2,10 +2,15 @@ import AppKit
 
 /// An inline run inside a block: `range` is the content only (`bold`, not `**bold**`); its
 /// delimiters are in the block's `syntaxRanges`.
+///
+/// A link's `target` is where its destination sits in the source — the `url` of `[text](url)`,
+/// or the URL itself for `<url>` and a bare `https://…`. ⌘-click reads it from here, not from the
+/// glyphs: off the caret block the `(url)` is hidden syntax, so the visible text has no target.
 struct MarkdownSpan: Hashable {
     enum Kind: Hashable { case bold, italic, code, link }
     let kind: Kind
     let range: NSRange
+    var target: NSRange? = nil
 }
 
 /// One Markdown block of the plan, in UTF-16 offsets of the source text (the units
@@ -26,7 +31,7 @@ struct MarkdownBlock: Hashable {
     func shifted(by delta: Int) -> MarkdownBlock {
         func move(_ r: NSRange) -> NSRange { NSRange(location: r.location + delta, length: r.length) }
         return MarkdownBlock(kind: kind, range: move(range), syntaxRanges: syntaxRanges.map(move),
-                             spans: spans.map { MarkdownSpan(kind: $0.kind, range: move($0.range)) },
+                             spans: spans.map { MarkdownSpan(kind: $0.kind, range: move($0.range), target: $0.target.map(move)) },
                              marker: marker.map(move))
     }
 }
@@ -313,18 +318,23 @@ enum MarkdownStyler {
     /// claimed, so the `*` of a `**` is never also read as an italic delimiter.
     private static func inline(_ u: [UInt16], _ a: Int, _ b: Int, spans: inout [MarkdownSpan], syntax: inout [NSRange]) {
         // Most plan lines have no inline syntax at all; skip them before allocating the mask.
+        // `<` for an autolink, `://` for a bare URL.
         guard b - a >= 2 else { return }
         var any = false
         var scan = a
-        while scan < b, !any { any = u[scan] == 96 || u[scan] == 91 || u[scan] == 42; scan += 1 }
+        while scan < b, !any {
+            let c = u[scan]
+            any = c == 96 || c == 91 || c == 42 || c == 60 || (c == 58 && scan + 2 < b && u[scan + 1] == 47 && u[scan + 2] == 47)
+            scan += 1
+        }
         guard any else { return }
         var taken = [Bool](repeating: false, count: b - a)
         func free(_ i: Int) -> Bool { !taken[i - a] }
         func take(_ r: Range<Int>) { for i in r { taken[i - a] = true } }
-        func emit(_ kind: MarkdownSpan.Kind, open: NSRange, content: NSRange, close: NSRange) {
+        func emit(_ kind: MarkdownSpan.Kind, open: NSRange, content: NSRange, close: NSRange, target: NSRange? = nil) {
             syntax.append(open)
             syntax.append(close)
-            spans.append(MarkdownSpan(kind: kind, range: content))
+            spans.append(MarkdownSpan(kind: kind, range: content, target: target))
         }
 
         // `code`, matching the opening run's length (``a ` b``).
@@ -349,6 +359,17 @@ enum MarkdownStyler {
             i = close + run
         }
 
+        // <scheme:…> — an autolink: the brackets are syntax, the URL is both text and target.
+        i = a
+        while i < b {
+            guard u[i] == 60, free(i), let gt = (i + 1..<b).first(where: { u[$0] == 62 || u[$0] == 60 || u[$0] == 32 }),
+                  u[gt] == 62, isScheme(u, i + 1, gt) else { i += 1; continue }
+            let content = NSRange(location: i + 1, length: gt - i - 1)
+            emit(.link, open: NSRange(location: i, length: 1), content: content, close: NSRange(location: gt, length: 1), target: content)
+            take(i..<gt + 1)
+            i = gt + 1
+        }
+
         // [text](url)
         i = a
         while i < b {
@@ -356,10 +377,37 @@ enum MarkdownStyler {
                   rb + 1 < b, u[rb + 1] == 40, let rp = (rb + 2..<b).first(where: { u[$0] == 41 && free($0) })
             else { i += 1; continue }
             emit(.link, open: NSRange(location: i, length: 1), content: NSRange(location: i + 1, length: rb - i - 1),
-                 close: NSRange(location: rb, length: rp - rb + 1))
+                 close: NSRange(location: rb, length: rp - rb + 1), target: NSRange(location: rb + 2, length: rp - rb - 2))
             take(i..<i + 1)
             take(rb..<rp + 1)
             i = rp + 1
+        }
+
+        // A bare http(s):// URL, to the next space, less the sentence punctuation after it (and a
+        // `)` it didn't open — "(see https://x.y)"). No syntax: the text is the URL.
+        i = a
+        while i + 3 < b {
+            guard u[i] == 58, u[i + 1] == 47, u[i + 2] == 47, free(i),
+                  !spans.contains(where: { $0.kind == .link && NSLocationInRange(i, $0.range) }) else { i += 1; continue }
+            var s = i
+            while s > a, (u[s - 1] | 0x20) >= 97, (u[s - 1] | 0x20) <= 122 { s -= 1 }
+            let scheme = String(utf16CodeUnits: Array(u[s..<i]), count: i - s).lowercased()
+            guard scheme == "http" || scheme == "https", s == a || !isWordUnit(u[s - 1]), (s..<i).allSatisfy(free) else { i += 3; continue }
+            var e = i + 3
+            while e < b, u[e] != 32, u[e] != 9, u[e] != 60, free(e) { e += 1 }
+            var opens = 0
+            for k in s..<e where u[k] == 40 { opens += 1 }
+            while e > i + 3 {
+                let c = u[e - 1]
+                if c == 46 || c == 44 || c == 59 || c == 58 || c == 33 || c == 63 || c == 39 || c == 34 { e -= 1; continue }
+                if c == 41, opens < (s..<e).filter({ u[$0] == 41 }).count { e -= 1; continue }
+                break
+            }
+            guard e > i + 3 else { i += 3; continue }
+            let url = NSRange(location: s, length: e - s)
+            spans.append(MarkdownSpan(kind: .link, range: url, target: url))
+            take(s..<e)
+            i = e
         }
 
         // **bold** — only the delimiters are claimed, so code or a link inside still counts.
@@ -389,7 +437,32 @@ enum MarkdownStyler {
         }
     }
 
+    /// `u[s..<e]` starts with a URL scheme — `https:`, `mailto:`, `file:` — as an autolink's
+    /// content must (CommonMark: a letter, then 1–31 letters, digits, `+ . -`, then `:`).
+    private static func isScheme(_ u: [UInt16], _ s: Int, _ e: Int) -> Bool {
+        guard s < e, (u[s] | 0x20) >= 97, (u[s] | 0x20) <= 122 else { return false }
+        var k = s + 1
+        while k < e, k - s <= 32 {
+            let c = u[k]
+            if c == 58 { return k - s >= 2 && k + 1 < e }
+            guard isWordUnit(c) || c == 43 || c == 46 || c == 45 else { return false }
+            k += 1
+        }
+        return false
+    }
+
+    /// An ASCII letter or digit — what can't come right before a bare URL's scheme.
+    private static func isWordUnit(_ c: UInt16) -> Bool {
+        (c >= 48 && c <= 57) || ((c | 0x20) >= 97 && (c | 0x20) <= 122)
+    }
+
     // MARK: - Lookup and diff
+
+    /// The link span at `location` in `blocks`, its content taken as the clickable part.
+    static func link(at location: Int, in blocks: [MarkdownBlock]) -> MarkdownSpan? {
+        guard let index = blockIndex(at: location, in: blocks) else { return nil }
+        return blocks[index].spans.first { $0.kind == .link && NSLocationInRange(location, $0.range) }
+    }
 
     /// The block holding `location`, a caret sitting at a block's end included (the caret
     /// after the last character of a heading is still "in" it). Binary search: the caret
@@ -497,8 +570,14 @@ enum MarkdownStyler {
                 storage.addAttribute(.font, value: NSFont.monospacedSystemFont(ofSize: font.pointSize - 1, weight: .regular), range: span.range)
                 storage.addAttribute(.backgroundColor, value: theme.codeBackground, range: span.range)
             case .link:
+                // Tinted, not underlined: an editor's links are text first — the underline is
+                // the ⌘-hover cue (`PlanNSTextView`), as in Xcode. `.link` carries the target for
+                // VoiceOver (an AXLink with its URL); what a click does is `PlanNSTextView`'s.
                 storage.addAttribute(.foregroundColor, value: theme.link, range: span.range)
-                storage.addAttribute(.underlineStyle, value: NSUnderlineStyle.single.rawValue, range: span.range)
+                if let target = span.target, NSMaxRange(target) <= storage.length {
+                    let raw = storage.mutableString.substring(with: target)
+                    storage.addAttribute(.link, value: URL(string: raw).map { $0 as Any } ?? raw, range: span.range)
+                }
             }
         }
         for range in block.syntaxRanges {
