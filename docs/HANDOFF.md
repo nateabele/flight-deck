@@ -6,6 +6,8 @@ Start here if you're picking up Flight Deck fresh. This is the map; the linked d
 
 > **▶ Flight Control on the phone (2026-09-28) — design not started.** Handoff for the session that designs it: [FLIGHT-CONTROL-MOBILE-HANDOFF.md](FLIGHT-CONTROL-MOBILE-HANDOFF.md).
 
+> **▶ Flight Control coverage × fidelity (2026-09-28) — design not started.** How to tell whether Claude + Codex review a plan well enough, what a Gemini/Grok/Qwen reviewer would add, and fidelity as a coverage budget: [FLIGHT-CONTROL-COVERAGE-HANDOFF.md](FLIGHT-CONTROL-COVERAGE-HANDOFF.md).
+
 > **▶ Multi-agent ⌘K search (2026-09-21) — built, on branch `worktree-multi-agent-search`, not yet merged to `master`.**
 > ⌘K now searches every agent's history, not just claude's. A codex thread is discovered,
 > indexed and resumed the same way a claude conversation is, through one capability object —

@@ -1865,6 +1865,10 @@ feasibility unknown.
   interface (`start`/`adopt`/`result`/`cancel`), oracle's browser runner with its
   `challenge`/`tierUnavailable`/`uiChanged` diagnoses, and the unverified grok/gemini adapters
   are all next.
+- **Coverage metrics balanced against fidelity.** Design not started — is Claude + Codex
+  review enough for this plan, what would a third model family add, and should a fidelity be
+  a coverage budget rather than a fixed round count. The shadow probe it proposes needs the
+  slots above. Handoff: [FLIGHT-CONTROL-COVERAGE-HANDOFF.md](FLIGHT-CONTROL-COVERAGE-HANDOFF.md).
 - **Detection UI.** `IntakeService.availableModels()` only probes PATH for the two CLIs and
   fills in fixed defaults. Spec §6.2's detection — plan type and rate limits from
   `codex app-server`, `claude auth status`, per-value source labels, unreachable tiers shown as
