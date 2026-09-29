@@ -152,9 +152,10 @@ struct FleetListScreen: View {
                 case .intake(let id):
                     IntakeScreen(id: id, model: model.flightControl.detailModel(for: id), fleet: model)
                 case .round(let intake, let checkpoint):
-                    RoundDetailScreen(intake: intake, checkpoint: checkpoint, model: model.flightControl.detailModel(for: intake))
+                    RoundDetailScreen(intake: intake, checkpoint: checkpoint, model: model.flightControl.detailModel(for: intake),
+                                      flightControl: model.flightControl)
                 case .clarifications(let id):
-                    ClarificationsScreen(model: model.flightControl.detailModel(for: id))
+                    ClarificationsScreen(intake: id, model: model.flightControl.detailModel(for: id), flightControl: model.flightControl)
                 case .plan, .reader:
                     EmptyView()   // Task 11
                 }

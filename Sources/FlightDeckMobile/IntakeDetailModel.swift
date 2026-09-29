@@ -40,8 +40,9 @@ final class IntakeDetailModel {
                 self.detail = fresh
                 self.macClockOffset = fresh.servedAt.timeIntervalSince(self.receivedAt())
                 self.failure = nil
+                self.gone = false
             case .success(nil):
-                break
+                self.gone = false
             case .failure(.server(code: "unknown_intake")):
                 self.gone = true
             case .failure(.disconnected):

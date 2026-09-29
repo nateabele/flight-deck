@@ -2,7 +2,9 @@ import FleetKit
 import SwiftUI
 
 struct ClarificationsScreen: View {
+    let intake: UUID
     let model: IntakeDetailModel
+    let flightControl: FlightControlModel
     var body: some View {
         List {
             ForEach(Array((model.detail?.questions?.answered ?? []).enumerated()), id: \.offset) { round, exchange in
@@ -19,5 +21,6 @@ struct ClarificationsScreen: View {
         }
         .navigationTitle("Clarifications")
         .navigationBarTitleDisplayMode(.inline)
+        .intakePresence(id: intake, model: model, flightControl: flightControl)
     }
 }

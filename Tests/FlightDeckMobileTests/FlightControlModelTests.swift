@@ -65,6 +65,37 @@ final class FlightControlModelTests: XCTestCase {
         XCTAssertTrue(model.gone)
     }
 
+    func testAGoneIntakeThatComesBackClearsGone() {
+        let fetcher = StubFetcher()
+        let id = UUID()
+        let d = WireIntakeDetail(etag: "e", project: UUID(), summary: summary(id, attention: false, state: "triaging"),
+                                 intent: "I", progress: [], agents: [], rounds: [], pendingNotes: 0, servedAt: Date())
+        fetcher.detailReplies = [.failure(.server(code: "unknown_intake")), .success(d)]
+        let model = IntakeDetailModel(id: id, fetcher: fetcher)
+        model.refresh()
+        XCTAssertTrue(model.gone)
+        model.refresh()
+        XCTAssertFalse(model.gone, "a successful fetch means the Mac has it again")
+        XCTAssertEqual(model.detail, d)
+    }
+
+    func testPresenceIsReferenceCounted() {
+        let model = FlightControlModel(fetcher: StubFetcher())
+        let id = UUID(), other = UUID()
+        model.enter(id)                       // the intake screen
+        model.enter(id)                       // a pushed child appears BEFORE the parent disappears
+        model.leave(id)
+        XCTAssertEqual(model.onScreen, id, "the child is still on screen")
+        model.enter(other)
+        XCTAssertEqual(model.onScreen, other, "the most recent enter wins")
+        model.leave(other)
+        XCTAssertEqual(model.onScreen, id)
+        model.leave(id)
+        XCTAssertNil(model.onScreen)
+        model.leave(id)
+        XCTAssertNil(model.onScreen, "an unbalanced leave is harmless")
+    }
+
     func testADisconnectKeepsTheLastDetail() {
         let fetcher = StubFetcher()
         let d = WireIntakeDetail(etag: "e", project: UUID(), summary: summary(UUID(), attention: false, state: "triaging"),

@@ -6,8 +6,6 @@ struct IntakeScreen: View {
     let id: UUID
     let model: IntakeDetailModel
     let fleet: FleetModel
-    @Environment(\.scenePhase) private var scenePhase
-
     private var frozenAt: Date? { if case .lost = fleet.state { return fleet.lastLive }; return nil }
 
     var body: some View {
@@ -33,26 +31,17 @@ struct IntakeScreen: View {
                 }
             }
         }
-        .onAppear { fleet.flightControl.onScreen = id }
-        .onDisappear { if fleet.flightControl.onScreen == id { fleet.flightControl.onScreen = nil } }
-        .task(id: scenePhase) {
-            guard scenePhase == .active else { return }
-            model.refresh()
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .milliseconds(1_500))
-                guard !Task.isCancelled else { return }
-                model.refresh()
-            }
-        }
+        .intakePresence(id: id, model: model, flightControl: fleet.flightControl)
     }
 
     @ViewBuilder private func content(_ d: WireIntakeDetail) -> some View {
         VStack(spacing: 0) {
-            BoardStrip(model: BoardStripModel(detail: d), offset: model.macClockOffset, frozenAt: frozenAt) { checkpoint in
+            let strip = BoardStripModel(detail: d)
+            BoardStrip(model: strip, offset: model.macClockOffset, frozenAt: frozenAt) { checkpoint in
                 fleet.path.append(IntakeRoute.round(intake: id, checkpoint: checkpoint))
             }
             .padding(.bottom, 4)
-            TimelineView(.periodic(from: .now, by: 1)) { context in
+            TimelineView(ClockSchedule(since: strip.clockSince, offset: model.macClockOffset, frozenAt: frozenAt, idle: strip.idle)) { context in
                 let now = (frozenAt ?? context.date).addingTimeInterval(model.macClockOffset)
                 List {
                     sections(for: d, now: now)

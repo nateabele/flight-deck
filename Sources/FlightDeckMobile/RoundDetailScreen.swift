@@ -6,8 +6,10 @@ struct RoundDetailScreen: View {
     let intake: UUID
     @State var checkpoint: Int
     let model: IntakeDetailModel
+    let flightControl: FlightControlModel
 
-    init(intake: UUID, checkpoint: Int, model: IntakeDetailModel) {
+    init(intake: UUID, checkpoint: Int, model: IntakeDetailModel, flightControl: FlightControlModel) {
+        self.flightControl = flightControl
         self.intake = intake; self._checkpoint = State(initialValue: checkpoint); self.model = model
     }
 
@@ -62,6 +64,7 @@ struct RoundDetailScreen: View {
         }
         .navigationTitle(round?.name ?? "Round")
         .navigationBarTitleDisplayMode(.inline)
+        .intakePresence(id: intake, model: model, flightControl: flightControl)
         .toolbar {
             ToolbarItemGroup(placement: .topBarTrailing) {
                 Button { step(-1) } label: { Image(systemName: "chevron.left") }

@@ -8,8 +8,11 @@ import Foundation
 final class FlightControlModel {
     static let planCacheLimit = 4
     private(set) var banners: [IntakeBanner] = []
-    /// The intake whose screen is on top; its banner is suppressed.
-    var onScreen: UUID?
+    /// The intake whose screens are on top (the most recent to appear); its banner is
+    /// suppressed. Derived from `enter`/`leave`, never assigned.
+    private(set) var onScreen: UUID?
+    @ObservationIgnored private var presence: [UUID: Int] = [:]
+    @ObservationIgnored private var entered: [UUID] = []
     @ObservationIgnored private var known: [UUID: WireIntakeSummary] = [:]
     @ObservationIgnored private var details: [UUID: IntakeDetailModel] = [:]
     @ObservationIgnored private var plans: [String: WireIntakePlan] = [:]
@@ -17,6 +20,21 @@ final class FlightControlModel {
     @ObservationIgnored private weak var fetcher: IntakeFetching?
 
     init(fetcher: IntakeFetching) { self.fetcher = fetcher }
+
+    /// One of an intake's screens appeared. Counted, because a pushed child can appear before
+    /// its parent disappears.
+    func enter(_ id: UUID) {
+        presence[id, default: 0] += 1
+        entered.removeAll { $0 == id }
+        entered.append(id)
+        onScreen = entered.last
+    }
+
+    func leave(_ id: UUID) {
+        guard let count = presence[id] else { return }
+        if count > 1 { presence[id] = count - 1 } else { presence[id] = nil; entered.removeAll { $0 == id } }
+        onScreen = entered.last
+    }
 
     /// A snapshot (connect, resync): learn everything, announce nothing (Review Focus #3).
     func baseline(_ fleet: FleetSnapshot) {
@@ -38,6 +56,8 @@ final class FlightControlModel {
     /// pairing's, and a stale `known` would let the next Mac's first snapshot diff against it.
     func reset() {
         banners = []
+        presence = [:]
+        entered = []
         onScreen = nil
         known = [:]
         details = [:]
