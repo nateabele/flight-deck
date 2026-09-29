@@ -75,8 +75,7 @@ final class CardPlacementTests: XCTestCase {
 
     // MARK: - Trailing
 
-    /// `.trailing`: beside the anchor, a gap off its trailing edge, top edges aligned — the churn
-    /// lane's versions card, which below its marker sat over the section it explains.
+    /// `.trailing`: beside the anchor, a gap off its trailing edge, top edges aligned.
     func testTrailingOpensBesideTheAnchorTopAligned() {
         let marker = CGRect(x: 120, y: 400, width: 132, height: 20)
         let frame = CardPlacement.frame(for: card, anchor: marker, within: window, gap: 9, side: .trailing)
@@ -157,6 +156,51 @@ final class CardPlacementTests: XCTestCase {
         let tall = CGRect(x: 100, y: 170, width: 800, height: 400)
         XCTAssertEqual(CardPlacement.frame(for: card, anchor: low, within: window, gap: 7, side: .above, avoiding: [tall]).minY,
                        160 + 7, "no clear side at all: above wins, over the bar rather than the tape")
+    }
+
+    // MARK: - Below a line (the churn lane's versions card)
+
+    /// The marked heading's line, the text column's width: x 260…840 in an 800-wide window.
+    private func line(y: CGFloat) -> CGRect { CGRect(x: 260, y: y, width: 580, height: 30) }
+
+    /// `.belowLine`: under the line, a gap down, leading edges aligned with the text column.
+    func testBelowLineOpensUnderTheLineLeadingAligned() {
+        let anchor = line(y: 420)
+        let frame = CardPlacement.frame(for: card, anchor: anchor, within: window, gap: 6, side: .belowLine)
+        XCTAssertEqual(frame, CGRect(x: 260, y: 420 - 6 - 70, width: 180, height: 70))
+        XCTAssertEqual(CardPlacement.lineNubX(card: frame, anchor: anchor), CardPlacement.nubInset,
+                       "the nub at the line's leading end, beside the marker")
+    }
+
+    /// No room below in the visible area: above the line instead, still clear of it.
+    func testBelowLineFlipsAboveNearTheBottom() {
+        let anchor = line(y: 150)
+        let frame = CardPlacement.frame(for: card, anchor: anchor, within: window, gap: 6, side: .belowLine)
+        XCTAssertEqual(frame.minY, 180 + 6)
+        XCTAssertEqual(frame.minX, 260)
+    }
+
+    /// A text column starting near the window's side slides the card inside, an edge margin short.
+    func testBelowLineClampsInsideTheBoundsWithAMargin() {
+        let leading = CGRect(x: 60, y: 420, width: 580, height: 30)
+        XCTAssertEqual(CardPlacement.frame(for: card, anchor: leading, within: window, gap: 6, side: .belowLine).minX,
+                       window.minX + CardPlacement.edgeMargin)
+        let trailing = CGRect(x: 880, y: 420, width: 300, height: 30)
+        let t = CardPlacement.frame(for: card, anchor: trailing, within: window, gap: 6, side: .belowLine)
+        XCTAssertEqual(t.maxX, window.maxX - CardPlacement.edgeMargin)
+        XCTAssertEqual(CardPlacement.lineNubX(card: t, anchor: trailing), t.width - CardPlacement.nubInset)
+    }
+
+    /// Wherever the line is — top, middle, bottom, a squat window — the card never covers it.
+    func testBelowLineNeverCoversTheLine() {
+        for bounds in [window, CGRect(x: 100, y: 100, width: 800, height: 120)] {
+            for y in stride(from: 80.0, through: 620.0, by: 13) {
+                let anchor = line(y: y)
+                let frame = CardPlacement.frame(for: card, anchor: anchor, within: bounds, gap: 6, side: .belowLine)
+                XCTAssertFalse(frame.intersects(anchor), "\(bounds) \(anchor) → \(frame)")
+                XCTAssertGreaterThanOrEqual(frame.minX, bounds.minX)
+            }
+        }
     }
 
     /// Below stays the default, so every existing card is unchanged.

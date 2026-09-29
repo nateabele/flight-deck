@@ -9,15 +9,23 @@ import SwiftUI
 /// cover the lines being read next, flipped below only when the top edge leaves no room.
 ///
 /// `side: .trailing` opens beside the anchor instead, top edges aligned — for an anchor in a
-/// margin (the churn lane's marker), whose card hung below it over the very section it explains.
+/// margin with free space past it. (The churn lane's card used it until the plan wrapped to the
+/// pane; it now opens `.belowLine`.)
 ///
 /// `side: .above` is the board's hover card: over the anchor and centred on it, with a nub
 /// pointing down at it. The tape runs along the board's bottom, so a card hung below a slot sat
 /// on the neighbouring slots and on the row the pointer was moving along; above is out of that
 /// path. It flips below only when there is no room above, and steers clear of `avoiding` (the
 /// pinned control bar) when the other side has room.
+///
+/// `side: .belowLine` is the churn lane's versions card: the anchor is a whole line of text (the
+/// marked heading, from the text column's leading edge to its trailing one) and the card hangs
+/// just under it, leading edges aligned, with a nub up at the line — so it never covers the line
+/// it explains. It flips above only when the visible area has no room below. `.trailing` was
+/// the card's side while the plan had a fixed measure; wrapped to the pane, the text has no
+/// free space beside it, and the flipped card sat on the very lines being compared.
 enum CardPlacement {
-    enum Side { case below, trailing, above }
+    enum Side { case below, trailing, above, belowLine }
 
     /// How far an `.above` card keeps from the sides of its bounds.
     static let edgeMargin: CGFloat = 8
@@ -28,6 +36,7 @@ enum CardPlacement {
                       prefersAbove: Bool = false, side: Side = .below, avoiding obstacles: [CGRect] = []) -> CGRect {
         if side == .trailing { return trailing(card, anchor: anchor, within: bounds, gap: gap) }
         if side == .above { return above(card, anchor: anchor, within: bounds, gap: gap, avoiding: obstacles) }
+        if side == .belowLine { return belowLine(card, anchor: anchor, within: bounds, gap: gap) }
         let below = anchor.minY - gap - card.height
         let above = anchor.maxY + gap
         // Below is the reading direction; flip only when that runs off the bottom AND above fits,
@@ -56,6 +65,25 @@ enum CardPlacement {
         if fits(up) { return up }
         if fits(down) { return down }
         return bounds.maxY - anchor.maxY >= anchor.minY - bounds.minY ? up : down
+    }
+
+    /// Under the line, leading edges aligned and slid inside the bounds' sides with a margin;
+    /// above it when below runs out of the bounds and above fits; when neither fits, whichever
+    /// side has more room — never back over the line.
+    private static func belowLine(_ card: CGSize, anchor: CGRect, within bounds: CGRect, gap: CGFloat) -> CGRect {
+        let lo = bounds.minX + edgeMargin
+        let x = min(max(anchor.minX, lo), max(lo, bounds.maxX - edgeMargin - card.width))
+        let down = CGRect(x: x, y: anchor.minY - gap - card.height, width: card.width, height: card.height)
+        let up = CGRect(x: x, y: anchor.maxY + gap, width: card.width, height: card.height)
+        if down.minY >= bounds.minY { return down }
+        if up.maxY <= bounds.maxY { return up }
+        return anchor.minY - bounds.minY >= bounds.maxY - anchor.maxY ? down : up
+    }
+
+    /// A `.belowLine` card's nub: near the line's leading end — the end its marker sits beside,
+    /// in the gutter — held off the card's rounded corner.
+    static func lineNubX(card: CGRect, anchor: CGRect) -> CGFloat {
+        min(max(anchor.minX - card.minX + nubInset, nubInset), max(nubInset, card.width - nubInset))
     }
 
     /// Where along a placed card's width its nub goes: under the anchor's centre, held off the
@@ -135,6 +163,8 @@ final class FloatingCardAnchor: NSView {
     /// `.above`'s tighter gap: just the nub's height and a hair, so the nub all but touches the
     /// label it names.
     private static let nubGap: CGFloat = 7
+    /// `.belowLine`'s gap under the line: the nub's height, so its tip just meets the line.
+    private static let lineGap: CGFloat = 6
 
     /// The selection toolbar's variant: its panel takes clicks (still non-activating, and a
     /// borderless panel never becomes key, so the editor keeps focus and its selection), and it
@@ -214,14 +244,27 @@ final class FloatingCardAnchor: NSView {
         let fitting = host.fittingSize
         let size = CGSize(width: fitting.width - 2 * room, height: fitting.height - 2 * room)
         let anchor = window.convertToScreen(convert(bounds, to: nil))
-        let within = CardPlacement.bounds(window: window.frame, screen: window.screen?.visibleFrame)
-        let spot = CardPlacement.frame(for: size, anchor: anchor, within: within,
-                                       gap: placement == .above ? Self.nubGap : Self.gap, prefersAbove: prefersAbove,
+        var within = CardPlacement.bounds(window: window.frame, screen: window.screen?.visibleFrame)
+        // A line's card flips by what the page shows, not the whole window: below the scroll
+        // view's visible part is room nobody can see.
+        if placement == .belowLine, let clip = enclosingScrollView?.contentView {
+            let shown = within.intersection(window.convertToScreen(clip.convert(clip.bounds, to: nil)))
+            if !shown.isNull, !shown.isEmpty { within = shown }
+        }
+        let gap = switch placement {
+        case .above: Self.nubGap
+        case .belowLine: Self.lineGap
+        case .below, .trailing: Self.gap
+        }
+        let spot = CardPlacement.frame(for: size, anchor: anchor, within: within, gap: gap, prefersAbove: prefersAbove,
                                        side: placement, avoiding: placement == .above ? FloatingCardObstacle.frames(in: window) : [])
         // The nub never changes the card's size, so setting it after measuring is safe — and the
         // view's structure is the same with or without one, so the card's reveal isn't restarted.
-        let pointing = placement == .above
-            ? CardChrome.Nub(x: CardPlacement.nubX(card: spot, anchor: anchor), pointsDown: spot.minY >= anchor.maxY) : nil
+        let pointing: CardChrome.Nub? = switch placement {
+        case .above: CardChrome.Nub(x: CardPlacement.nubX(card: spot, anchor: anchor), pointsDown: spot.minY >= anchor.maxY)
+        case .belowLine: CardChrome.Nub(x: CardPlacement.lineNubX(card: spot, anchor: anchor), pointsDown: spot.minY >= anchor.maxY)
+        case .below, .trailing: nil
+        }
         if pointing != nub {
             nub = pointing
             host.rootView = content(pointing)
@@ -353,7 +396,7 @@ final class FloatingCardAnchor: NSView {
     }
 }
 
-/// The card inside its panel: the nub pointing at the anchor (`.above` only), and a hover card's
+/// The card inside its panel: the nub pointing at the anchor (`.above` and `.belowLine`), and a hover card's
 /// entrance — a slight scale-in alongside the panel's fade, none under Reduce Motion.
 private struct CardChrome: View {
     struct Nub: Equatable {
