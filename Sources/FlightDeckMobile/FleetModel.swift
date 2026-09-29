@@ -15,7 +15,7 @@ import UIKit
 /// simulator — see `scripts/test-ios.sh`.
 @MainActor
 @Observable
-final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, PresenceReporting, TranscriptSearching {
+final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, PresenceReporting, TranscriptSearching, IntakeFetching {
     private(set) var mac: PairedMac?
     private(set) var fleet = FleetSnapshot.empty
     private(set) var state = FleetConnector.State.idle
@@ -78,9 +78,15 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
     /// session's worth of prompt text.
     private static let maxRememberedSentCommands = 16
 
+    /// Flight Control's phone-side state. Assigned last in `init` (it needs `self` as its
+    /// fetcher, and `lazy` does not compose with `@Observable`); `@ObservationIgnored` because
+    /// it is its own observable and never reassigned.
+    @ObservationIgnored private(set) var flightControl: FlightControlModel!
+
     init(store: any PairedMacStoring = KeychainPairedMacStore()) {
         self.store = store
         self.mac = store.load()
+        self.flightControl = FlightControlModel(fetcher: self)
         // A cold launch asks for EVERYTHING, whatever cursor the pairing was saved with.
         //
         // `lastSeq` is a resume cursor: `hello(lastSeq:)` with a non-zero value means "send
@@ -559,6 +565,23 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
         connector.request(request, then: completion)
     }
 
+    /// Forwarded exactly as `timelinePage` is; `.disconnected` synchronously with no connector.
+    func intakeDetail(
+        _ id: UUID, ifNot: String?,
+        then completion: @escaping (Result<WireIntakeDetail?, FleetRequestError>) -> Void
+    ) {
+        guard let connector else { return completion(.failure(.disconnected)) }
+        connector.requestIntakeDetail(id: id, ifNot: ifNot, then: completion)
+    }
+
+    func intakePlan(
+        _ id: UUID, checkpoint: Int?, changes: Bool,
+        then completion: @escaping (Result<WireIntakePlan, FleetRequestError>) -> Void
+    ) {
+        guard let connector else { return completion(.failure(.disconnected)) }
+        connector.requestIntakePlan(id: id, checkpoint: checkpoint, changes: changes, then: completion)
+    }
+
     /// Ask the Mac to type something into a session's agent.
     ///
     /// Forwarded rather than absorbed, exactly as `timelinePage` is: the connector answers
@@ -750,6 +773,9 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
                     // not gone stale, so resweeping all of them would be the same waste
                     // `activityChanged`/`unreadChanged` were cut for.
                     self?.requestNewSessionOptions(for: project.id)
+                case .projectIntakes(let project, let intakes):
+                    guard let self else { return }
+                    self.flightControl.intakesChanged(project: project, intakes: intakes, fleet: self.fleet)
                 default:
                     break
                 }
@@ -806,6 +832,8 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
                         self?.refreshNewSessionOptions()
                         self?.refreshConversations()
                         self?.refreshRecentlyClosed()
+                        // Same deferral: the snapshot has to be applied before it is learned.
+                        self?.flightControl.baseline(self?.fleet ?? .empty)
                     }
                 }
                 PhoneLog.connection.notice("state \(Self.describe(state), privacy: .public)")
