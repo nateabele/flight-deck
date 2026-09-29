@@ -354,6 +354,35 @@ final class CodexProcessTransportTests: XCTestCase {
         XCTAssertEqual(fireCount, 1, "however many ways this fires, the owner must be told exactly once")
     }
 
+    // MARK: - Sending with no app-server to read it
+    //
+    // The 2026-09-29 beachball. `Pipe` holds BOTH ends in Flight Deck, so a line sent with no
+    // live app-server never fails with EPIPE — it queues. `CodexPinReconciler` asks an
+    // orphaned tab's never-started transport for `thread/list` every ~10 s; each request
+    // times out harmlessly, but its bytes stay in the pipe until the 64 KB buffer is full, and
+    // the next `write()` blocks the main thread forever. These assert "nothing queued" rather
+    // than "65 KB of sends returns", because the latter regresses by hanging the suite.
+
+    func testSendingOnANeverStartedTransportQueuesNothing() {
+        let transport = CodexProcessTransport()
+
+        transport.send(#"{"jsonrpc":"2.0","id":1,"method":"thread/list"}"# + "\n")
+
+        XCTAssertFalse(
+            transport.stdinHasQueuedBytesForTesting,
+            "a line with no process to read it must be dropped, or enough of them wedge the main thread"
+        )
+    }
+
+    func testSendingAfterTheTransportTerminatedQueuesNothing() {
+        let transport = CodexProcessTransport()
+        transport.stop()
+
+        transport.send(#"{"jsonrpc":"2.0","id":1,"method":"thread/list"}"# + "\n")
+
+        XCTAssertFalse(transport.stdinHasQueuedBytesForTesting)
+    }
+
     /// `deinit` is a resource-cleanup backstop (don't orphan the OS process), not a
     /// notification channel — by the time it runs there is no owner left to notify. Dropping
     /// the last reference without ever calling `stop()` must not crash and must not fire

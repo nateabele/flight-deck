@@ -372,8 +372,18 @@ final class CodexProcessTransport: CodexTransport {
         }
     }
 
+    /// Drops the line unless an app-server is running to read it.
+    ///
+    /// **Load-bearing, and it once froze the whole app.** `Pipe` keeps both ends open in this
+    /// process, so writing with no reader never fails — it queues, and a full buffer makes this
+    /// synchronous, main-actor `write()` block forever. `SessionStore` builds stacks it never
+    /// starts (an orphaned tab's, a codex that is missing), and `CodexPinReconciler` asks each
+    /// for `thread/list` every pass: each request times out harmlessly, but its bytes stayed
+    /// behind, and after ~an hour the 64 KB buffer filled and Flight Deck beachballed for good.
+    /// Dropping costs nothing: the request resolves by timeout or `transportClosed()` exactly as
+    /// it did before, since no reply was ever coming.
     func send(_ line: String) {
-        guard let data = line.data(using: .utf8) else { return }
+        guard process.isRunning, !hasTerminated, let data = line.data(using: .utf8) else { return }
         try? stdin.fileHandleForWriting.write(contentsOf: data)
     }
 
@@ -426,6 +436,15 @@ extension CodexProcessTransport {
     /// Test-only: exercises the exact path `process.terminationHandler` takes, without
     /// spawning a real process to trigger it.
     func simulateProcessTerminationForTesting() { terminate() }
+
+    /// Test-only: whether any bytes sit unread in the stdin pipe. A zero-timeout `poll`, never
+    /// a read — `availableData` on an empty pipe blocks, which is the very hang being tested.
+    /// Only meaningful before `start()`: after a real launch the parent's read end is the
+    /// child's to own.
+    var stdinHasQueuedBytesForTesting: Bool {
+        var descriptor = pollfd(fd: stdin.fileHandleForReading.fileDescriptor, events: Int16(POLLIN), revents: 0)
+        return poll(&descriptor, 1, 0) > 0 && descriptor.revents & Int16(POLLIN) != 0
+    }
 }
 
 extension CodexProcessTransport {
