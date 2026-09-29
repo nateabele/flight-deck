@@ -211,8 +211,15 @@ public enum ConvergenceSeries {
         // A cross-check round proposed from two families; counting every proposal would spike the
         // series on exactly the rounds that measure coverage (coverage spec §6).
         let issues: Int? = cross.map { record in
-            let clusters = record.clusters ?? proposals[i].changes.flatMap { Self.textClusters($0, thresholds: t) }
-            return IssueClusters.partition(clusters, count: record.proposers.count).count
+            let count = record.proposers.count
+            // Cleaned for the same reason CoverageSeries.reading cleans it: `record.clusters` is
+            // disk-persisted (crosscheck.json), so a corrupted/hand-edited file or version skew
+            // can carry a repeated index. `partition` assumes a valid partition; an index placed
+            // in two raw clusters would double-count it here (it doesn't trap here the way an
+            // out-of-range index traps a `record.proposers[_]` lookup, but it would still miscount).
+            let clusters = IssueClusters.clean(record.clusters, count: count)
+                ?? proposals[i].changes.flatMap { Self.textClusters($0, thresholds: t) }
+            return IssueClusters.partition(clusters, count: count).count
         }
         return ConvergencePoint(
             checkpoint: cp.id, stage: cp.stage, round: cp.round, changeCount: issues ?? r.changeCount ?? 0,

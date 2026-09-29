@@ -97,4 +97,23 @@ final class CoverageSeriesTests: XCTestCase {
         XCTAssertEqual(readings.map(\.checkpoint), [3], "old rounds with no crosscheck.json read as no reading, never as 0")
         XCTAssertEqual(readings.first?.round, 2)
     }
+
+    /// `crosscheck.json` is disk-persisted, so a corrupted/hand-edited file or version skew can
+    /// carry an out-of-range or repeated cluster index, or a families list with only one entry.
+    /// None of that may crash the fold that reads it — it runs off-main in the live app.
+    func testMalformedRecordDoesNotCrash() {
+        let changes = [ProposedChange(section: "## s0", rationale: "r0", edit: "e0"),
+                       ProposedChange(section: "## s1", rationale: "r1", edit: "e1")]
+        let verdicts = [ChangeVerdict(index: 0, verdict: .agree), ChangeVerdict(index: 1, verdict: .agree)]
+
+        let badIndex = CrossCheckRecord(proposers: [0, 1], families: [.codex, .claude],
+                                        clusters: [[0, 99], [1, 1]], blindOrderSeed: 1)
+        let r1 = CoverageSeries.reading(checkpoint: 1, round: 1, record: badIndex, changes: changes, verdicts: verdicts)
+        XCTAssertEqual(r1.matcher, .textSimilarity, "a cluster list that cleans to nothing reads as none given")
+
+        let oneFamily = CrossCheckRecord(proposers: [0, 1], families: [.codex], clusters: [[0, 1]], blindOrderSeed: 1)
+        let r2 = CoverageSeries.reading(checkpoint: 1, round: 1, record: oneFamily, changes: changes, verdicts: verdicts)
+        XCTAssertEqual(r2.familyB, r2.familyA, "a families list missing the second entry reads as same-family")
+        XCTAssertEqual(r2.band, .sameFamily)
+    }
 }

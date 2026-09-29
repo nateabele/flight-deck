@@ -95,19 +95,28 @@ public enum CoverageSeries {
         let count = record.proposers.count
         let a = record.families.first ?? .codex, b = record.families.dropFirst().first ?? a
         let textClusters = changes.flatMap { $0.count == count ? ConvergenceSeries.textClusters($0) : nil }
-        let matcher: CoverageMatcher = record.clusters == nil ? .textSimilarity : .integrator
-        let clusters = record.clusters ?? textClusters
+        // `record.clusters` came off disk (`crosscheck.json`): a corrupted or hand-edited file, or
+        // version skew, can carry an out-of-range or repeated index. Clean it before it ever
+        // reaches `partition`, exactly as `ConvergenceSeries.point` must (same file, same risk).
+        // A record whose clusters clean to nothing reads as none given, same as no clusters at all.
+        let cleanedClusters = IssueClusters.clean(record.clusters, count: count)
+        let matcher: CoverageMatcher = cleanedClusters == nil ? .textSimilarity : .integrator
+        let clusters = cleanedClusters ?? textClusters
         var out = CoverageReading(checkpoint: checkpoint, round: round, familyA: a, familyB: b, matcher: matcher,
                                   n1: 0, n2: 0, both: 0, rejectedA: 0, rejectedB: 0, found: 0, unfound: nil,
                                   band: .unmeasured, correlated: false, textSimilarityBoth: nil, matchersDisagree: false)
         // Accepted issues can't be counted without per-change verdicts: unmeasured, never 0.
         guard let verdicts else { return out }
         let verdict = Dictionary(verdicts.map { ($0.index, $0.verdict) }, uniquingKeysWith: { first, _ in first })
+        // Bounds-checked rather than a bare subscript: cleaning already keeps every index here
+        // inside `0..<count`, but a malformed record must never trap this fold regardless — it
+        // runs off-main in the live app. A value that is neither 0 nor 1 reads as neither family.
+        func proposer(_ i: Int) -> Int? { record.proposers.indices.contains(i) ? record.proposers[i] : nil }
         func counts(_ clusters: [[Int]]?) -> (n1: Int, n2: Int, both: Int) {
             var n1 = 0, n2 = 0, both = 0
             for issue in IssueClusters.partition(clusters, count: count) {
                 guard issue.contains(where: { verdict[$0] == .agree || verdict[$0] == .somewhat }) else { continue }
-                let byA = issue.contains { record.proposers[$0] == 0 }, byB = issue.contains { record.proposers[$0] == 1 }
+                let byA = issue.contains { proposer($0) == 0 }, byB = issue.contains { proposer($0) == 1 }
                 if byA { n1 += 1 }
                 if byB { n2 += 1 }
                 if byA && byB { both += 1 }
@@ -115,8 +124,8 @@ public enum CoverageSeries {
             return (n1, n2, both)
         }
         (out.n1, out.n2, out.both) = counts(clusters)
-        out.rejectedA = (0..<count).filter { record.proposers[$0] == 0 && verdict[$0] == .disagree }.count
-        out.rejectedB = (0..<count).filter { record.proposers[$0] == 1 && verdict[$0] == .disagree }.count
+        out.rejectedA = (0..<count).filter { proposer($0) == 0 && verdict[$0] == .disagree }.count
+        out.rejectedB = (0..<count).filter { proposer($0) == 1 && verdict[$0] == .disagree }.count
         out.found = out.n1 + out.n2 - out.both
         if matcher == .integrator, changes?.count == count {
             let text = counts(textClusters).both
