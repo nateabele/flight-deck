@@ -28,6 +28,11 @@ struct ProjectView: View {
     @State private var showingFlywheelConfirmation = false
     @State private var showingFlywheelSetupConfirmation = false
     @State private var probedFlywheelStatus: FlywheelStatus?
+    /// The expanded list's width, dragged at its trailing edge (`IntakesColumnEdge`) within
+    /// `paneWidths` — view state, as the `HSplitView` divider's position it replaces was.
+    @State private var paneWidth: CGFloat = 320
+    private static let paneWidths: ClosedRange<CGFloat> = 280...420
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     init(store: SessionStore, repo: Repo) {
         self.store = store
@@ -63,6 +68,10 @@ struct ProjectView: View {
             set: { intakeService.setInspectorShown($0, inProject: projectPath) }
         )
     }
+
+    /// Whether the Intakes list is collapsed to its rail — per project, through `IntakeService`
+    /// for the reason the selection and the inspector are.
+    private var listCollapsed: Bool { intakeService.intakeListCollapsed(forProject: projectPath) }
 
     /// Same predicate `ProjectHeaderRow`'s context-menu item reads — `FlywheelEnablement`
     /// is the one place that answers "has this project opted in", so the empty-state switch
@@ -153,35 +162,17 @@ struct ProjectView: View {
         probedFlywheelStatus = FlywheelProjectProbe.status(of: repo.url)
     }
 
+    /// The Intakes column over the detail pane, rather than beside it in an `HSplitView`: the
+    /// column animates its width when it collapses to its rail, and the detail must not follow
+    /// it frame by frame. The detail is laid out once, at the final width, the moment the toggle
+    /// flips (`.animation(nil, value:)` below) — the column then slides over the part it is about
+    /// to uncover, or out over the part it is about to cover. Resizing the detail with the column
+    /// re-laid its whole SwiftUI tree every frame and restarted the plan editor's whole-plan pass
+    /// on each (`PlanNSTextView.fitContainer`); `ProjectViewIntakeListLiveTests` pins one width
+    /// change per toggle. The split view's draggable divider is kept by `IntakesColumnEdge`.
     private var intakeSplitView: some View {
-        HSplitView {
-            VStack(alignment: .leading, spacing: 8) {
-                Text(repo.displayName).font(.title3.weight(.semibold))
-                Text("Intakes").font(.headline).foregroundStyle(.secondary)
-                List(selection: selectionBinding) {
-                    ForEach(intakes) { intake in
-                        IntakeRow(intake: intake, tape: intakeService.tapes[intake.id])
-                            .tag(intake.id)
-                            .accessibilityIdentifier("intake-row")
-                    }
-                }
-                Divider()
-                Text("Describe what you want…").font(.caption).foregroundStyle(.secondary)
-                TextEditor(text: $intent)
-                    .font(.body)
-                    .frame(minHeight: 60, maxHeight: 120)
-                    .border(.separator)
-                    .accessibilityIdentifier("intake-intent-field")
-                Button("Triage") {
-                    intakeService.capture(intent: intent, project: projectPath)
-                    intent = ""
-                }
-                .keyboardShortcut(.return, modifiers: .command)
-                .disabled(intent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            }
-            .padding(16)
-            .frame(minWidth: 280, idealWidth: 320, maxWidth: 420)
-
+        let collapsed = listCollapsed
+        return ZStack(alignment: .topLeading) {
             Group {
                 if let id = selectionBinding.wrappedValue, let intake = intakes.first(where: { $0.id == id }) {
                     // Keyed on the intake's id, not just present: selecting a different row
@@ -196,9 +187,19 @@ struct ProjectView: View {
                 }
             }
             .frame(minWidth: 320)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .padding(.leading, collapsed ? IntakeRail.width : paneWidth)
+            .animation(nil, value: collapsed)
+
+            intakesColumn(collapsed: collapsed)
         }
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
+                // The trailing counterpart of the list toggle (`listToggle`): `.primaryAction`
+                // puts it at the window's far right, over the inspector column when that is open
+                // — measured in `ProjectViewIntakeListLiveTests`, since the placement's docs say
+                // "leading" for macOS and the split view overrides them.
+                //
                 // ⌥⌘I is Ghostty's terminal-inspector chord, but only while a terminal has
                 // focus — and none is on screen here: `RootView` shows this view in place of
                 // the terminal. So a toolbar shortcut, live only while this view is, rather
@@ -218,5 +219,130 @@ struct ProjectView: View {
                 .accessibilityIdentifier("intake-inspector-toggle")
             }
         }
+    }
+
+    /// The Intakes list, or its rail. The width animates; each state's content keeps its own
+    /// width and is clipped by the moving edge while the two cross-fade, so neither re-wraps
+    /// through the widths in between. The one toggle rides the trailing edge in both states.
+    private func intakesColumn(collapsed: Bool) -> some View {
+        ZStack(alignment: .topLeading) {
+            if collapsed {
+                IntakeRail(intakes: intakes, tapes: intakeService.tapes, selection: selectionBinding,
+                           intent: $intent, onTriage: triage)
+                    .transition(.opacity)
+            } else {
+                expandedList
+                    .frame(width: paneWidth)
+                    .transition(.opacity)
+            }
+        }
+        .frame(width: collapsed ? IntakeRail.width : paneWidth, alignment: .leading)
+        .frame(maxHeight: .infinity, alignment: .top)
+        .clipped()
+        // Opaque: the column draws over the detail pane while it slides (`intakeSplitView`).
+        .background(Color(nsColor: .windowBackgroundColor))
+        .overlay(alignment: .topTrailing) {
+            listToggle(collapsed: collapsed).padding(.top, 12).padding(.trailing, 12)
+        }
+        .overlay(alignment: .trailing) {
+            IntakesColumnEdge(width: $paneWidth, range: Self.paneWidths, resizable: !collapsed)
+        }
+    }
+
+    private var expandedList: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(repo.displayName).font(.title3.weight(.semibold))
+                // Clear of the list toggle, which sits at this line's trailing end.
+                .padding(.trailing, 32)
+                .lineLimit(1)
+            Text("Intakes").font(.headline).foregroundStyle(.secondary)
+            List(selection: selectionBinding) {
+                ForEach(intakes) { intake in
+                    IntakeRow(intake: intake, tape: intakeService.tapes[intake.id])
+                        .tag(intake.id)
+                        .accessibilityIdentifier("intake-row")
+                }
+            }
+            Divider()
+            IntakeComposer(intent: $intent, onTriage: triage)
+        }
+        .padding(16)
+    }
+
+    /// Collapses the list to its rail and back — the leading counterpart of the inspector's
+    /// toolbar toggle. In the column rather than the toolbar: the toolbar's leading end already
+    /// holds the window's own sidebar toggle, and two sidebar glyphs side by side there would
+    /// leave the human guessing which list each one hides.
+    ///
+    /// ⌥⌘S, Notes' chord for its folder list (⌃⌘S, the standard Show Sidebar, is the session
+    /// sidebar's): not in libghostty's macOS defaults (`vendor/ghostty/src/config/Config.zig`)
+    /// nor on any menu here, and a view shortcut, live only while this view is on screen — the
+    /// same reasoning as ⌥⌘I's below.
+    private func listToggle(collapsed: Bool) -> some View {
+        Button(action: toggleList) {
+            Image(systemName: "sidebar.leading")
+                .font(.system(size: 14))
+                .foregroundStyle(.secondary)
+                .frame(width: 28, height: 28)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.borderless)
+        .keyboardShortcut("s", modifiers: [.command, .option])
+        .help(collapsed ? "Expand Intakes (⌥⌘S)" : "Collapse Intakes (⌥⌘S)")
+        .accessibilityLabel(collapsed ? "Expand Intakes" : "Collapse Intakes")
+        .accessibilityIdentifier("intake-list-toggle")
+    }
+
+    private func toggleList() {
+        // Read at the press, as the inspector toggle does: the chord's action is kept from an
+        // earlier body pass, and a captured value would re-apply the same state on every ⌥⌘S.
+        let collapse = !intakeService.intakeListCollapsed(forProject: projectPath)
+        withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.25)) {
+            intakeService.setIntakeListCollapsed(collapse, inProject: projectPath)
+        }
+    }
+
+    private func triage() {
+        intakeService.capture(intent: intent, project: projectPath)
+        intent = ""
+    }
+}
+
+/// The Intakes column's trailing hairline, and while the list is expanded the handle that
+/// resizes it — the divider `HSplitView` used to give it. Dragged in the global space: the
+/// handle moves with the edge it drags, so local coordinates would chase themselves.
+private struct IntakesColumnEdge: View {
+    @Binding var width: CGFloat
+    let range: ClosedRange<CGFloat>
+    let resizable: Bool
+    @State private var dragOrigin: CGFloat?
+
+    var body: some View {
+        Rectangle()
+            .fill(Color(nsColor: .separatorColor))
+            .frame(width: 1)
+            .overlay {
+                if resizable {
+                    Color.clear
+                        .frame(width: 9)
+                        .contentShape(Rectangle())
+                        .columnResizePointer()
+                        .gesture(DragGesture(minimumDistance: 1, coordinateSpace: .global)
+                            .onChanged { drag in
+                                let origin = dragOrigin ?? width
+                                dragOrigin = origin
+                                width = min(max(origin + drag.translation.width, range.lowerBound), range.upperBound)
+                            }
+                            .onEnded { _ in dragOrigin = nil })
+                        .accessibilityHidden(true)
+                }
+            }
+    }
+}
+
+private extension View {
+    /// The column-resize pointer where the system has one to give (macOS 15); the arrow before.
+    @ViewBuilder func columnResizePointer() -> some View {
+        if #available(macOS 15.0, *) { pointerStyle(.columnResize) } else { self }
     }
 }

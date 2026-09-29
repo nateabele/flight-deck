@@ -164,6 +164,10 @@ final class IntakeService: ObservableObject {
     /// for the reason `selectedIntake` is: as `ProjectView` `@State` it reset on a switch to
     /// another project or tab and back — the notes rail closed itself behind the human.
     @Published private(set) var inspectorProjects: Set<String> = []
+    /// The projects whose Intakes list is collapsed to its rail (`IntakeRail`), keyed by
+    /// `projectKey`. Here for the reason `inspectorProjects` is: as `ProjectView` `@State` the
+    /// list sprang back open on every switch to another project or tab and back.
+    @Published private(set) var collapsedListProjects: Set<String> = []
     /// Each `.shaping` intake's `tape.json` as last read, with the clicks the runner hasn't acked
     /// yet folded on top (`overlays`) — what the detail pane draws and what `attentionCount`
     /// consults. Refreshed on the shared clock (`pollTapes`), and by `send` in the click's turn.
@@ -194,6 +198,8 @@ final class IntakeService: ObservableObject {
     private static let selectionDefaultsKey = "IntakeSelectionByProject"
     /// `UserDefaults` key for `inspectorProjects`, persisted as an array of paths.
     private static let inspectorDefaultsKey = "IntakeInspectorByProject"
+    /// `UserDefaults` key for `collapsedListProjects`, persisted as an array of paths.
+    private static let collapsedListDefaultsKey = "IntakeListCollapsedByProject"
     /// Filled off the main actor by a detached probe started in `init` (the login-shell PATH
     /// lookup behind it can take seconds on first use); nil until that lands.
     private var availableModelsCache: AvailableModels?
@@ -332,6 +338,7 @@ final class IntakeService: ObservableObject {
             selectedIntake = raw.compactMapValues(UUID.init(uuidString:))
         }
         inspectorProjects = Set(defaults.stringArray(forKey: Self.inspectorDefaultsKey) ?? [])
+        collapsedListProjects = Set(defaults.stringArray(forKey: Self.collapsedListDefaultsKey) ?? [])
 
         // Launch recovery: a turn or release in flight when FD quit has no process left to
         // finish it. Saying "triaging" forever would hide that; `.interrupted` asks the human.
@@ -474,6 +481,21 @@ final class IntakeService: ObservableObject {
         guard inspectorProjects.contains(key) != shown else { return }
         if shown { inspectorProjects.insert(key) } else { inspectorProjects.remove(key) }
         defaults.set(inspectorProjects.sorted(), forKey: Self.inspectorDefaultsKey)
+    }
+
+    /// Whether `project`'s Intakes list is collapsed to its rail — expanded until the human
+    /// collapses it.
+    func intakeListCollapsed(forProject project: String) -> Bool {
+        collapsedListProjects.contains(Self.projectKey(project))
+    }
+
+    /// Collapses or expands `project`'s Intakes list and persists it, as `setInspectorShown`
+    /// does the inspector — and drops a write that changes nothing for the same reason.
+    func setIntakeListCollapsed(_ collapsed: Bool, inProject project: String) {
+        let key = Self.projectKey(project)
+        guard collapsedListProjects.contains(key) != collapsed else { return }
+        if collapsed { collapsedListProjects.insert(key) } else { collapsedListProjects.remove(key) }
+        defaults.set(collapsedListProjects.sorted(), forKey: Self.collapsedListDefaultsKey)
     }
 
     // MARK: - Pipeline

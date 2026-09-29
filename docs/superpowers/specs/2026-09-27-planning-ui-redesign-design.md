@@ -88,7 +88,26 @@ calm scrolling document, top to bottom:
    primary action trailing, as the default button. Shaping has no primary here (the transport is it).
 
 **Inspector (trailing, hidden by default, ⌥⌘I):** the Rounds editor grid for the chosen fidelity and
-the selected seat's details. The notes rail (§7.3) occupies it while the plan is focused.
+the selected seat's details. The notes rail (§7.3) occupies it while the plan is focused. Its
+toggle (`sidebar.trailing`, `.primaryAction`) is the toolbar's far-right item — over the inspector
+column when that is open — so the two sides mirror each other.
+
+**Intakes rail (leading, ⌥⌘S):** the Intakes list collapses to a ~52 pt rail, per project
+(`IntakeService.intakeListCollapsed`, persisted as `IntakeListCollapsedByProject`). The toggle is a
+`sidebar.leading` button at the column's top-right, riding the column's edge in both states — in
+the column rather than the toolbar because the toolbar's leading end already holds the window's
+own sidebar toggle. The rail draws one disc per intake (`IntakeRailMark`): the pill's colour, a
+glyph per state, and a solid orange disc with a white glyph for exactly the `needsAttention`
+states; the selection is a neutral tile with an accent ring. Hover (the board's `HoverIntent`
+rules: 350 ms rest, warm switching) or keyboard focus opens a `FloatingCard` beside the rail with
+the pill and the request; click, Return or Space selects; ↑/↓ walk the selection. The composer
+moves into a popover from a + at the rail's foot (Cancel/Esc, Triage ⌘↩), sharing one draft with
+the expanded list's. The width animates 0.25 s ease-in-out (instant under Reduce Motion), and the
+column draws over the detail pane rather than beside it: the detail takes its final width once,
+at the start, so the animation never re-lays the detail or restarts the plan editor's whole-plan
+pass per frame. The expanded list stays drag-resizable (280–420 pt) at its trailing edge.
+⌃⌘S is left to the session sidebar's standard Show Sidebar; ⌥⌘S is Notes' chord for its folder
+list and unbound in Ghostty's macOS defaults.
 
 ### 3.1 Stage bodies
 
