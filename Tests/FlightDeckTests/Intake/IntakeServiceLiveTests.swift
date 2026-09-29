@@ -393,10 +393,10 @@ final class IntakeServiceLiveTests: XCTestCase {
         var tape = Tape()
         tape.roundInProgress = Self.refine1
         XCTAssertEqual(PlanningActions.stopMessage(tape: tape),
-                       "Refine 1's work so far is discarded. Every round that already landed stays in the plan.")
+                       "Refine 1's work so far will be discarded. Every round that already landed stays in the plan.")
         tape.roundInProgress = nil
         XCTAssertEqual(PlanningActions.stopMessage(tape: tape),
-                       "No round is running, so nothing is discarded. Every round that already landed stays in the plan.")
+                       "No round is running, so nothing will be discarded. Every round that already landed stays in the plan.")
     }
 
     /// Every way into a fresh triage turn answers the click at once — not only Send Answers.

@@ -295,6 +295,38 @@ from scratch" above, paused mid-round where an item needs that.
 - Open an intake whose request is one short sentence. **Expect:** that sentence as the title, with
   no chevron.
 
+### Intakes rail and the two sidebar toggles
+
+- Click the sidebar glyph at the top-right of the Intakes list (or press ⌥⌘S, also with the plan
+  editor focused). **Expect:** the list slides closed to a ~52 pt rail in about a quarter second,
+  the toggle riding the edge to the rail's top; the detail pane jumps once to its new width at the
+  start and does NOT reflow frame by frame (no plan re-wrap shimmer, no board flaps); the toggle
+  reads "Expand Intakes" to VoiceOver. Press again: it slides back open. With Reduce Motion on,
+  both are instant. (One width change per toggle is unit-pinned by
+  `ProjectViewIntakeListLiveTests`; how the slide looks is not.)
+- Look down the rail. **Expect:** one disc per intake, in the pill's colours — solid orange with a
+  white glyph for every state that wants you (? needs answers, sliders choose fidelity, eye
+  review, ◐ partial, × failed, ! interrupted), an accent wash while working (magnifier triaging,
+  circling arrows shaping, paper plane releasing), green ✓ released, gray pause parked. The
+  selected intake has a neutral tile and an accent ring.
+- Rest the pointer on a disc. **Expect:** after about a third of a second, a card beside the rail
+  with the pill and the request (up to five lines); moving to the next disc opens its card at once;
+  a click selects the intake and closes the card; the card never takes the click itself.
+- Tab to the rail (Full Keyboard Access on). **Expect:** a focus ring on a disc and its card open;
+  ↑/↓ move the selection and focus through the rail (stopping at the ends); Return/Space select.
+  VoiceOver reads each disc as a button "<title>, <state>".
+- Click the rail's + . **Expect:** a popover beside it with "Describe what you want…", the editor
+  focused, Cancel and Triage; ⌘↩ triages and closes it, Esc (with the editor focused) closes it,
+  and a draft half-typed in the expanded list is still there in the popover and back again.
+- Drag the expanded list's right edge. **Expect:** a column-resize pointer; the list resizes
+  between about 280 and 420 pt.
+- Collapse the list in one project, switch to a second, to a terminal tab, back to the first;
+  quit and relaunch. **Expect:** the second project's list as it was left (expanded if never
+  collapsed), and the first comes back as a rail — across the switches and the relaunch.
+- Look at the toolbar with the inspector closed and open. **Expect:** the inspector toggle
+  (sidebar.trailing) is the far-right item, over the inspector column when it is open — the mirror
+  of the list toggle on the left.
+
 ### Control bar and transport
 
 - Every Run menu chord fires its labeled action and none collides with an existing Ghostty/app
