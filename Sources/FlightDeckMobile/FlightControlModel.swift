@@ -42,9 +42,11 @@ final class FlightControlModel {
         return m
     }
 
-    /// Checkpoint plans are immutable enough to cache (key: intake, checkpoint, changes); a head
-    /// request (`checkpoint == nil`) is never served from cache because the head moves, but its
-    /// answer refreshes the entry for the checkpoint it turned out to be.
+    /// Contract: the HEAD is always requested with `checkpoint: nil`, never looked up in the cache,
+    /// and its reply overwrites the cached entry for the checkpoint it turned out to be. Mac-side
+    /// plan edits land at the head, and an explicit-checkpoint key cannot revalidate (the phone
+    /// learns `editsVersion` only from a reply), so explicit checkpoints are for older rounds,
+    /// whose plans do not change, and stay cached (LRU, `planCacheLimit`).
     func plan(_ intake: UUID, checkpoint: Int?, changes: Bool,
               then completion: @escaping (Result<WireIntakePlan, FleetRequestError>) -> Void) {
         let key = checkpoint.map { "\(intake)/\($0)/\(changes)" }

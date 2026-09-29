@@ -8,11 +8,13 @@ private final class StubFetcher: IntakeFetching {
     var detailReplies: [Result<WireIntakeDetail?, FleetRequestError>] = []
     var planCalls = 0
     var planReply: Result<WireIntakePlan, FleetRequestError> = .failure(.disconnected)
+    /// Consumed first, one per call; `planReply` answers once it is empty.
+    var planReplies: [Result<WireIntakePlan, FleetRequestError>] = []
     func intakeDetail(_ id: UUID, ifNot: String?, then: @escaping (Result<WireIntakeDetail?, FleetRequestError>) -> Void) {
         detailCalls.append((id, ifNot)); then(detailReplies.isEmpty ? .failure(.disconnected) : detailReplies.removeFirst())
     }
     func intakePlan(_ id: UUID, checkpoint: Int?, changes: Bool, then: @escaping (Result<WireIntakePlan, FleetRequestError>) -> Void) {
-        planCalls += 1; then(planReply)
+        planCalls += 1; then(planReplies.isEmpty ? planReply : planReplies.removeFirst())
     }
 }
 
@@ -87,5 +89,22 @@ final class FlightControlModelTests: XCTestCase {
         for c in 10..<15 { model.plan(id, checkpoint: c, changes: false) { _ in } }
         model.plan(id, checkpoint: 3, changes: false) { _ in }
         XCTAssertEqual(fetcher.planCalls, 8, "LRU of 4: checkpoint 3 was evicted")
+    }
+
+    func testTheHeadIsNeverServedFromCacheAndItsReplyOverwritesTheCheckpointEntry() {
+        let fetcher = StubFetcher()
+        func plan(_ v: String) -> Result<WireIntakePlan, FleetRequestError> {
+            .success(WireIntakePlan(checkpoint: 3, roundName: "Refine 1", editsVersion: v, markdown: "# P", outline: [], notes: []))
+        }
+        fetcher.planReplies = [plan("a"), plan("b")]
+        let model = FlightControlModel(fetcher: fetcher)
+        let id = UUID()
+        model.plan(id, checkpoint: nil, changes: false) { _ in }
+        model.plan(id, checkpoint: nil, changes: false) { _ in }
+        XCTAssertEqual(fetcher.planCalls, 2, "a head request always goes to the Mac")
+        var served: String?
+        model.plan(id, checkpoint: 3, changes: false) { if case .success(let p) = $0 { served = p.editsVersion } }
+        XCTAssertEqual(fetcher.planCalls, 2, "the explicit checkpoint is served from cache")
+        XCTAssertEqual(served, "b", "the latest head reply replaced the older entry")
     }
 }
