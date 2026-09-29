@@ -85,7 +85,9 @@ struct FlightDeckMobileApp: App {
         }
     }
 
+    /// A no-op when that intake is already on top: pushing it again stacks a duplicate screen.
     private func openIntake(_ id: UUID) {
+        guard model.flightControl.onScreen != id else { return }
         model.path.append(IntakeRoute.intake(id))
     }
 }

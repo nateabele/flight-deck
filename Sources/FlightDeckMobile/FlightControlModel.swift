@@ -31,7 +31,10 @@ final class FlightControlModel {
 
     /// One of an intake's screens appeared. Counted, because a pushed child can appear before
     /// its parent disappears.
+    /// Also drops the intake's queued banners: one queued before its screen opened would
+    /// otherwise drop over that screen, or linger to announce what was just read.
     func enter(_ id: UUID) {
+        banners.removeAll { $0.id == id }
         presence[id, default: 0] += 1
         entered.removeAll { $0 == id }
         entered.append(id)

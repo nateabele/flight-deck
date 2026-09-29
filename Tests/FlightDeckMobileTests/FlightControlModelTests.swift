@@ -91,6 +91,18 @@ final class FlightControlModelTests: XCTestCase {
         XCTAssertEqual(model.macClockOffset, 10, "the list's clocks use the skew the intake screen learned")
     }
 
+    func testEnteringAnIntakeDropsItsQueuedBanner() {
+        let model = FlightControlModel(fetcher: StubFetcher())
+        let project = UUID(), id = UUID(), other = UUID()
+        let before = [summary(id, attention: false, state: "triaging"), summary(other, attention: false, state: "triaging")]
+        model.baseline(fleet(project, before))
+        let after = [summary(id, attention: true, state: "needsAnswers"), summary(other, attention: true, state: "review")]
+        model.intakesChanged(project: project, intakes: after, fleet: fleet(project, after))
+        XCTAssertEqual(model.banners.map(\.id), [id, other])
+        model.enter(id)
+        XCTAssertEqual(model.banners.map(\.id), [other], "its own screen is open: its banner would cover it")
+    }
+
     func testPresenceIsReferenceCounted() {
         let model = FlightControlModel(fetcher: StubFetcher())
         let id = UUID(), other = UUID()

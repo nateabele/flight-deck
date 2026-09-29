@@ -598,7 +598,8 @@ final class FleetListScreenTests: XCTestCase {
         var loud = quiet; loud.state = "needsAnswers"; loud.needsAttention = true
         model.flightControl.baseline(fleet(quiet))
         model.flightControl.intakesChanged(project: project, intakes: [loud], fleet: fleet(loud))
-        model.flightControl.enter(id)
+        // Another intake's screen: entering this one's own would drop its banner.
+        model.flightControl.enter(UUID())
         XCTAssertFalse(model.path.isEmpty)
         XCTAssertFalse(model.flightControl.banners.isEmpty, "the premise: a banner is queued")
 
