@@ -1865,10 +1865,39 @@ feasibility unknown.
   interface (`start`/`adopt`/`result`/`cancel`), oracle's browser runner with its
   `challenge`/`tierUnavailable`/`uiChanged` diagnoses, and the unverified grok/gemini adapters
   are all next.
-- **Coverage metrics balanced against fidelity.** Design not started — is Claude + Codex
-  review enough for this plan, what would a third model family add, and should a fidelity be
-  a coverage budget rather than a fixed round count. The shadow probe it proposes needs the
-  slots above. Handoff: [FLIGHT-CONTROL-COVERAGE-HANDOFF.md](FLIGHT-CONTROL-COVERAGE-HANDOFF.md).
+- **Coverage metrics balanced against fidelity — DESIGNED AND BUILT (2026-09-29).** Refine
+  rounds can now cross-check (a second model family reviews the same round), and
+  `CoverageSeries` folds both reviewers' verdicts into a band. Spec:
+  [superpowers/specs/2026-09-29-flight-control-coverage-design.md](superpowers/specs/2026-09-29-flight-control-coverage-design.md).
+  Plan: [superpowers/plans/2026-09-29-flight-control-coverage.md](superpowers/plans/2026-09-29-flight-control-coverage.md).
+  Deferred out of this branch (each its own later spec, design §10):
+  - **The shadow probe** for Gemini / Grok / Qwen (handoff §4): score-only integrate, a
+    `probes/` directory beside `checkpoints/`. Reuses this design's clustering and
+    `CoverageReading`.
+  - **An OpenAI-compatible (or per-vendor) harness** (handoff §5).
+  - **Cross-tape project index** ("Feature plans here usually saturate by Refine 2"), and
+    calibrating `CoverageThresholds` / `CoverageTargets` from finished tapes.
+  - **Reviewer family rotation per round and a reviewer persona.**
+  - **Cost per accepted issue by family** (needs a codex price table, or tokens as the unit).
+  - **Draft-stage metrics** (draft overlap, unique coverage, synthesis provenance).
+  - **Change severity** (major/minor).
+
+  Residuals noticed while building, deliberately not fixed on this branch:
+  - Plain (non-cross-check) Refine rounds still ignore the reviewer's fallback (pre-existing
+    `seat` behavior), while cross-check rounds honor it. It's inconsistent; a ruling kept it
+    out of this branch.
+  - A non-cancellation I/O error in the cross-reviewer's run setup pauses the round (it should
+    degrade to `.failed` instead, the same way a cross-reviewer failure elsewhere does).
+  - No test covers pausing while the cross-reviewer is still running — cancellation is proven
+    only by reading `CommandRunner`'s killpg path, never exercised live.
+  - `CoverageSeries` re-reads `changes.json`/`verdicts.json` that the convergence fold already
+    read in the same task — two passes over the same checkpoint files.
+  - Every `CoverageThresholds` / `CoverageTargets` value is an uncalibrated placeholder: one
+    intake existed while this was built, and it stopped before Refine 1, so nothing has tuned
+    the band boundaries or the per-fidelity stop targets against a real run.
+  - **The GUI check is the maintainer's** (agents can't drive the GUI, AGENTS.md rule 2): turn cross-check
+    on for an intake, continue Refine 1, confirm two reviewer rows run, then check the LCD's
+    COVERAGE cell and the coverage card's counts against `checkpoints/<n>/crosscheck.json`.
 - **Detection UI.** `IntakeService.availableModels()` only probes PATH for the two CLIs and
   fills in fixed defaults. Spec §6.2's detection — plan type and rate limits from
   `codex app-server`, `claude auth status`, per-value source labels, unreachable tiers shown as

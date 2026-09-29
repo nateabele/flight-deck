@@ -30,6 +30,25 @@ final class RoundConfigEditorRenderTests: XCTestCase {
             size: NSSize(width: 620, height: 340),
             to: URL(fileURLWithPath: dir).appendingPathComponent("rounds-editor-sketch.png")
         )
+
+        // Cross-check on (Feature plan's default with both harnesses present): the Cross-check
+        // picker plus the second reviewer's row sit right under Reviewer.
+        let crossCheck = try XCTUnwrap(PresetExpansion.config(for: .featurePlan, available: .defaults))
+        try render(
+            RoundConfigEditor(preset: .featurePlan, config: .constant(crossCheck), available: .defaults),
+            size: NSSize(width: 620, height: 560),
+            to: URL(fileURLWithPath: dir).appendingPathComponent("rounds-editor-crosscheck.png")
+        )
+
+        // Same family: the cross-check agent picked the reviewer's own harness, so the caption
+        // has to explain why the round won't actually cross-check rather than leaving it silent.
+        var sameFamily = crossCheck
+        sameFamily.crossReviewer = crossCheck.reviewer
+        try render(
+            RoundConfigEditor(preset: .featurePlan, config: .constant(sameFamily), available: .defaults),
+            size: NSSize(width: 620, height: 560),
+            to: URL(fileURLWithPath: dir).appendingPathComponent("rounds-editor-crosscheck-samefamily.png")
+        )
     }
 
     /// Parked offscreen `NSHostingView` + `layer.render(in:)` — screencapture is denied here,

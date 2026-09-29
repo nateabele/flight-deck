@@ -11,6 +11,7 @@ public enum SlotKeyPath: Hashable {
     case drafter(Int)
     case synthesizer
     case reviewer
+    case crossReviewer
     case integrator
     case encoder
     case polisher
@@ -46,7 +47,10 @@ struct RoundConfigEditor: View {
                     if index > 0 { Divider() }
                     VStack(alignment: .leading, spacing: 6) {
                         HStack(alignment: .firstTextBaseline, spacing: 6) {
-                            Text(row.role.capitalized).font(.callout.weight(.semibold))
+                            // `.capitalized` title-cases every word, which turns "cross-check
+                            // agent" into "Cross-Check Agent" — `sentenceCase` only raises the
+                            // first letter, so the role reads as the phrase `UIText` intends.
+                            Text(UIText.sentenceCase(UIText.roleName(row.role))).font(.callout.weight(.semibold))
                             if let persona = row.persona, persona != .general {
                                 Text(persona.rawValue).font(.caption).foregroundStyle(.secondary)
                             }
@@ -63,10 +67,43 @@ struct RoundConfigEditor: View {
                             }
                             .font(.callout)
                         }
+                        // Only reached once the crossReviewer row itself is showing (policy
+                        // not off), so the caption never appears while the picker reads "Off".
+                        if row.keyPath == .crossReviewer, Self.crossCheckSameFamily(config) {
+                            Text("Same family as the reviewer, so rounds won't cross-check.")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
                     }
+                }
+                // Directly under the reviewer row (spec: coverage §8) rather than folded into
+                // its own block above — the policy can be live with no crossReviewer row yet
+                // showing (nothing seeded), so it can't be gated on `Self.choice(for:)` the way
+                // every other row is.
+                if row.keyPath == .reviewer, config.reviewer != nil {
+                    crossCheckPicker
                 }
             }
         }
+    }
+
+    /// "Cross-check" policy picker: Off / First and last / Every round. Turning it on from
+    /// `.off` seeds `crossReviewer` from the OTHER harness the moment it's missing — an
+    /// unseeded row would show a picker with a persisted model field it can't yet resolve, and
+    /// a same-family default would file the round straight into `crossCheckSameFamily` on the
+    /// very first turn.
+    private var crossCheckPicker: some View {
+        HStack(spacing: 8) {
+            Text("Cross-check").foregroundStyle(.secondary)
+            Picker("Cross-check", selection: crossCheckBinding) {
+                Text("Off").tag(CrossCheckPolicy.off)
+                Text("First and last").tag(CrossCheckPolicy.firstAndLast)
+                Text("Every round").tag(CrossCheckPolicy.every)
+            }
+            .labelsHidden()
+            .pickerStyle(.menu)
+            .fixedSize()
+        }
+        .font(.callout)
     }
 
     private func harnessPicker(for keyPath: SlotKeyPath) -> some View {
@@ -176,6 +213,13 @@ struct RoundConfigEditor: View {
         )
     }
 
+    private var crossCheckBinding: Binding<CrossCheckPolicy> {
+        Binding(
+            get: { config.crossCheck ?? .off },
+            set: { newValue in config = Self.settingCrossCheck(config, to: newValue, available: available) }
+        )
+    }
+
     private var refinementCapBinding: Binding<Int> {
         Binding(get: { config.refinementCap }, set: { newValue in config = Self.setting(config) { $0.refinementCap = newValue } })
     }
@@ -212,16 +256,56 @@ struct RoundConfigEditor: View {
     }
 
     /// The awaiting-choice body's one line (spec §9): "Full plan · 4 drafters · refine ×5 ·
-    /// polish ×6 · customized". Counts only rounds the planner will actually run — refine needs
-    /// a reviewer, polish a polisher (`TapePlanner.sequence`) — so the line never promises a
-    /// cycle the inspector has no seat for.
+    /// polish ×6 · cross-check R1, R5 · customized". Counts only rounds the planner will
+    /// actually run — refine needs a reviewer, polish a polisher (`TapePlanner.sequence`) — so
+    /// the line never promises a cycle the inspector has no seat for.
     static func summary(preset: Preset, config: RoundConfig) -> String {
         let drafters = config.drafters.count
         var parts = [UIText.presetName(preset), "\(drafters) drafter\(drafters == 1 ? "" : "s")"]
         if config.reviewer != nil, config.refinementCap > 0 { parts.append("refine ×\(config.refinementCap)") }
         if config.polisher != nil, config.polishCap > 0 { parts.append("polish ×\(config.polishCap)") }
+        let crossRounds = crossCheckRounds(config)
+        if !crossRounds.isEmpty {
+            parts.append("cross-check " + crossRounds.map { "R\($0)" }.joined(separator: ", "))
+        }
         if config.customized { parts.append("customized") }
         return parts.joined(separator: " · ")
+    }
+
+    /// The refine rounds that would cross-check at the current caps — `TapePlanner`'s own
+    /// first/last/every rule, but over `refinementCap` alone: the editor has no tape (and so
+    /// no `extraRefinement`) to fold in. Empty whenever `config.crossChecks` is false (`.off`,
+    /// no crossReviewer yet, or a same-family pairing that can't cross-check anything).
+    static func crossCheckRounds(_ config: RoundConfig) -> [Int] {
+        guard config.crossChecks, let policy = config.crossCheck, config.refinementCap > 0 else { return [] }
+        let total = config.refinementCap
+        return (1...total).filter { round in
+            switch policy {
+            case .off: false
+            case .firstAndLast: round == 1 || round == total
+            case .every: true
+            }
+        }
+    }
+
+    /// Whether the crossReviewer picked the same family as the reviewer — the caption under its
+    /// row explains why a live policy still won't cross-check anything.
+    static func crossCheckSameFamily(_ config: RoundConfig) -> Bool {
+        guard let reviewer = config.reviewer, let crossReviewer = config.crossReviewer else { return false }
+        return ModelFamily(reviewer.choice.harness) == ModelFamily(crossReviewer.choice.harness)
+    }
+
+    /// Sets the policy and, the moment it goes live with nothing seeded yet, fills
+    /// `crossReviewer` from the OTHER harness's `available` choice — reusing `otherModel`
+    /// keeps "the opposite family" defined in exactly one place.
+    static func settingCrossCheck(_ config: RoundConfig, to policy: CrossCheckPolicy, available: AvailableModels) -> RoundConfig {
+        setting(config) { cfg in
+            cfg.crossCheck = policy
+            if policy != .off, cfg.crossReviewer == nil, let reviewer = cfg.reviewer,
+               let seed = Self.otherModel(for: reviewer.choice, available: available) {
+                cfg.crossReviewer = Slot(seed)
+            }
+        }
     }
 
     /// `ultra` enables delegation and isn't Pro, so it's excluded even though `effort` is a
@@ -229,8 +313,10 @@ struct RoundConfigEditor: View {
     static let effortChoices = ["low", "medium", "high", "xhigh", "max"]
 
     /// One row per filled seat, in the fixed order the round actually runs: every drafter,
-    /// then synthesizer, reviewer, integrator, encoder, polisher. Skips synthesizer/reviewer/
-    /// polisher when the preset has none, rather than emitting a row with nothing to bind to.
+    /// then synthesizer, reviewer, crossReviewer, integrator, encoder, polisher. Skips
+    /// synthesizer/reviewer/polisher when the preset has none, rather than emitting a row with
+    /// nothing to bind to — and skips crossReviewer whenever the policy reads `.off`/nil, even
+    /// if a `Slot` is sitting there seeded and ready, so the row only shows once it's live.
     static func slots(of config: RoundConfig) -> [(role: String, persona: DrafterPersona?, keyPath: SlotKeyPath)] {
         var rows: [(role: String, persona: DrafterPersona?, keyPath: SlotKeyPath)] = []
         for (i, slot) in config.drafters.enumerated() {
@@ -241,6 +327,9 @@ struct RoundConfigEditor: View {
         }
         if let reviewer = config.reviewer {
             rows.append(("reviewer", reviewer.persona, .reviewer))
+            if let policy = config.crossCheck, policy != .off, let crossReviewer = config.crossReviewer {
+                rows.append(("crossReviewer", crossReviewer.persona, .crossReviewer))
+            }
         }
         rows.append(("integrator", nil, .integrator))
         rows.append(("encoder", nil, .encoder))
@@ -265,6 +354,7 @@ struct RoundConfigEditor: View {
         case .drafter(let i): config.drafters.indices.contains(i) ? config.drafters[i].choice : nil
         case .synthesizer: config.synthesizer?.choice
         case .reviewer: config.reviewer?.choice
+        case .crossReviewer: config.crossReviewer?.choice
         case .integrator: config.integrator
         case .encoder: config.encoder
         case .polisher: config.polisher
@@ -276,16 +366,19 @@ struct RoundConfigEditor: View {
         case .drafter(let i): config.drafters.indices.contains(i) ? config.drafters[i].fallback : nil
         case .synthesizer: config.synthesizer?.fallback
         case .reviewer: config.reviewer?.fallback
-        case .integrator, .encoder, .polisher: nil
+        case .crossReviewer, .integrator, .encoder, .polisher: nil
         }
     }
 
     /// Only `Slot`-backed seats carry a fallback field at all — `integrator`/`encoder`/
     /// `polisher` are bare `ModelChoice`, with no availability retry modeled for them.
+    /// `crossReviewer` is a `Slot` too but never offers one: its fallback would be the
+    /// primary's family, and a same-family "cross-check" isn't independent (`RoundConfig`'s
+    /// own doc comment on `crossReviewer`).
     static func supportsFallback(_ keyPath: SlotKeyPath) -> Bool {
         switch keyPath {
         case .drafter, .synthesizer, .reviewer: true
-        case .integrator, .encoder, .polisher: false
+        case .crossReviewer, .integrator, .encoder, .polisher: false
         }
     }
 
@@ -301,6 +394,9 @@ struct RoundConfigEditor: View {
             case .reviewer:
                 guard cfg.reviewer != nil else { return }
                 mutate(&cfg.reviewer!.choice)
+            case .crossReviewer:
+                guard cfg.crossReviewer != nil else { return }
+                mutate(&cfg.crossReviewer!.choice)
             case .integrator:
                 mutate(&cfg.integrator)
             case .encoder:
@@ -322,8 +418,8 @@ struct RoundConfigEditor: View {
                 cfg.synthesizer?.fallback = fallback
             case .reviewer:
                 cfg.reviewer?.fallback = fallback
-            case .integrator, .encoder, .polisher:
-                break // No fallback field to set on a bare ModelChoice seat.
+            case .crossReviewer, .integrator, .encoder, .polisher:
+                break // crossReviewer never offers a fallback control; integrator/encoder/polisher have no field to set.
             }
         }
     }

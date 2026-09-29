@@ -1,5 +1,7 @@
 # Flight Control coverage × fidelity — design handoff
 
+**Designed:** see `docs/superpowers/specs/2026-09-29-flight-control-coverage-design.md`.
+
 **For:** a fresh Claude Code session that will brainstorm → spec → plan "coverage metrics
 balanced against plan fidelity" for Flight Control's planning rounds.
 **Written:** 2026-09-28, from the conversation with the maintainer that raised it. Nothing here is built;

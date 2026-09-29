@@ -37,21 +37,23 @@ final class RoundConfigEditorTests: XCTestCase {
     // MARK: - slots(of:)
 
     /// Full plan fills every seat, so this is the one preset whose row order exercises all
-    /// six roles at once — Sketch/Feature plan leave synthesizer/polisher (Sketch) or nothing
+    /// seven roles at once — Sketch/Feature plan leave synthesizer/polisher (Sketch) or nothing
     /// (Feature plan) out, which would silently hide an ordering bug the other presets can't.
+    /// Both harnesses are available, so `.firstAndLast` cross-check is live and crossReviewer
+    /// sits right after reviewer.
     func testSlotsOfFullPlanOrder() throws {
         let config = try fullPlan()
         let roles = RoundConfigEditor.slots(of: config).map(\.role)
-        XCTAssertEqual(roles, ["drafter", "drafter", "drafter", "drafter", "synthesizer", "reviewer", "integrator", "encoder", "polisher"])
+        XCTAssertEqual(roles, ["drafter", "drafter", "drafter", "drafter", "synthesizer", "reviewer", "crossReviewer", "integrator", "encoder", "polisher"])
     }
 
     func testSlotsOfFullPlanPersonasFollowDrafterOrder() throws {
         let config = try fullPlan()
         let personas = RoundConfigEditor.slots(of: config).map(\.persona)
-        // The reviewer seat is a `Slot` too, so it carries `Slot.init`'s default `.general`
-        // persona rather than nil — only integrator/encoder/polisher (bare `ModelChoice`, no
-        // persona field at all) are genuinely nil here.
-        XCTAssertEqual(personas, [.arbiter, .realist, .coverage, .stressTest, .arbiter, .general, nil, nil, nil])
+        // The reviewer and crossReviewer seats are `Slot`s too, so they carry `Slot.init`'s
+        // default `.general` persona rather than nil — only integrator/encoder/polisher (bare
+        // `ModelChoice`, no persona field at all) are genuinely nil here.
+        XCTAssertEqual(personas, [.arbiter, .realist, .coverage, .stressTest, .arbiter, .general, .general, nil, nil, nil])
     }
 
     /// Sketch has no synthesizer and no polisher — `slots(of:)` must skip both rather than
@@ -60,6 +62,25 @@ final class RoundConfigEditorTests: XCTestCase {
         let config = try XCTUnwrap(PresetExpansion.config(for: .sketch, available: available))
         let roles = RoundConfigEditor.slots(of: config).map(\.role)
         XCTAssertEqual(roles, ["drafter", "reviewer", "integrator", "encoder"])
+    }
+
+    /// Feature plan defaults `crossCheck` to `.firstAndLast` with both harnesses available
+    /// (`PresetExpansion`), so the second reviewer's row sits right after the primary's.
+    func testSlotsOfFeaturePlanListsCrossReviewerAfterReviewer() throws {
+        let config = try XCTUnwrap(PresetExpansion.config(for: .featurePlan, available: available))
+        let roles = RoundConfigEditor.slots(of: config).map(\.role)
+        XCTAssertEqual(roles, ["drafter", "drafter", "synthesizer", "reviewer", "crossReviewer", "integrator", "encoder", "polisher"])
+    }
+
+    /// Sketch seeds a `crossReviewer` too (so turning cross-check on later needs no extra
+    /// step), but its policy defaults to `.off` — the row must stay hidden until a human turns
+    /// the picker on, even though the seat underneath it is already filled.
+    func testSlotsOfSketchHidesCrossReviewerWhilePolicyIsOff() throws {
+        let config = try XCTUnwrap(PresetExpansion.config(for: .sketch, available: available))
+        XCTAssertEqual(config.crossCheck, .off)
+        XCTAssertNotNil(config.crossReviewer)
+        let roles = RoundConfigEditor.slots(of: config).map(\.role)
+        XCTAssertFalse(roles.contains("crossReviewer"))
     }
 
     // MARK: - polish controls
@@ -152,5 +173,18 @@ final class RoundConfigEditorTests: XCTestCase {
         let codexOnly = AvailableModels(codex: available.codex, claude: nil)
         XCTAssertEqual(RoundConfigEditor.harnesses(in: codexOnly), [.codex])
         XCTAssertEqual(RoundConfigEditor.harnesses(in: available), [.codex, .claude])
+    }
+
+    // MARK: - crossCheckRounds(_:) and summary(preset:config:)
+
+    func testSummaryNamesCrossCheckRounds() throws {
+        let cfg = try XCTUnwrap(PresetExpansion.config(for: .featurePlan, available: .defaults))
+        XCTAssertTrue(RoundConfigEditor.summary(preset: .featurePlan, config: cfg).contains("cross-check R1, R3"))
+        var off = cfg; off.crossCheck = .off
+        XCTAssertFalse(RoundConfigEditor.summary(preset: .featurePlan, config: off).contains("cross-check"))
+        var same = cfg; same.crossReviewer = cfg.reviewer
+        XCTAssertEqual(RoundConfigEditor.crossCheckRounds(same), [])
+        var every = cfg; every.crossCheck = .every
+        XCTAssertEqual(RoundConfigEditor.crossCheckRounds(every), [1, 2, 3])
     }
 }

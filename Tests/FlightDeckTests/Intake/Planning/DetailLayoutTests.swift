@@ -71,8 +71,10 @@ final class DetailLayoutTests: XCTestCase {
         config.refinementCap = 5
         config.polishCap = 6
         config.customized = true
+        // Full plan defaults to `.firstAndLast` cross-check with both harnesses available
+        // (`PresetExpansion`), so R1 and R5 (the new cap) name themselves in the line too.
         XCTAssertEqual(RoundConfigEditor.summary(preset: .fullPlan, config: config),
-                       "Full plan · 4 drafters · refine ×5 · polish ×6 · customized")
+                       "Full plan · 4 drafters · refine ×5 · polish ×6 · cross-check R1, R5 · customized")
 
         // Rounds the planner would never run are never promised: no reviewer means no refine,
         // no polisher means no polish (`TapePlanner.sequence`).

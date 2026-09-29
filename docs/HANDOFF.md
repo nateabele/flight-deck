@@ -6,7 +6,16 @@ Start here if you're picking up Flight Deck fresh. This is the map; the linked d
 
 > **▶ Flight Control on the phone (2026-09-28) — design not started.** Handoff for the session that designs it: [FLIGHT-CONTROL-MOBILE-HANDOFF.md](FLIGHT-CONTROL-MOBILE-HANDOFF.md).
 
-> **▶ Flight Control coverage × fidelity (2026-09-28) — design not started.** How to tell whether Claude + Codex review a plan well enough, what a Gemini/Grok/Qwen reviewer would add, and fidelity as a coverage budget: [FLIGHT-CONTROL-COVERAGE-HANDOFF.md](FLIGHT-CONTROL-COVERAGE-HANDOFF.md).
+> **▶ Flight Control coverage × fidelity (2026-09-29) — built, on branch `worktree-coverage`, not yet merged to `master`.**
+> Refine rounds can now cross-check: a second model family (`RoundConfig.crossReviewer`)
+> reviews the same round in parallel on whichever rounds the config's `CrossCheckPolicy` picks
+> (off / first-and-last / every), turned on from the Rounds inspector's new Cross-check row.
+> `CoverageSeries` folds both reviewers' verdicts into a coverage estimate — SATURATED / FEW
+> LEFT / MANY LEFT / NO OVERLAP / STALLED — shown on the LCD's COVERAGE cell and the coverage
+> card beside Convergence. `CoverageThresholds` (band boundaries) and `CoverageTargets`
+> (per-fidelity stop targets), both in `IntakeKit`, are uncalibrated placeholders — no tape has
+> run long enough yet to tune them against real data.
+> - **Spec:** [superpowers/specs/2026-09-29-flight-control-coverage-design.md](superpowers/specs/2026-09-29-flight-control-coverage-design.md) · **Handoff:** [FLIGHT-CONTROL-COVERAGE-HANDOFF.md](FLIGHT-CONTROL-COVERAGE-HANDOFF.md).
 
 > **▶ Multi-agent ⌘K search (2026-09-21) — built, on branch `worktree-multi-agent-search`, not yet merged to `master`.**
 > ⌘K now searches every agent's history, not just claude's. A codex thread is discovered,
