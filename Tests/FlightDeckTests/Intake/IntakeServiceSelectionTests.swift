@@ -1,3 +1,4 @@
+import Combine
 import XCTest
 import IntakeKit
 @testable import FlightDeck
@@ -109,5 +110,45 @@ final class IntakeServiceSelectionTests: XCTestCase {
         let relaunched = makeService()
         XCTAssertTrue(relaunched.inspectorShown(forProject: "/a"))
         XCTAssertFalse(relaunched.inspectorShown(forProject: "/b"))
+    }
+
+    // MARK: - Intakes list collapsed to its rail
+
+    /// Per project, and kept by the service rather than `ProjectView` `@State` for the reason
+    /// the inspector is: a switch away and back re-creates the view.
+    func testIntakeListCollapsedIsPerProject() {
+        let svc = makeService()
+        XCTAssertFalse(svc.intakeListCollapsed(forProject: "/a"), "expanded by default")
+        svc.setIntakeListCollapsed(true, inProject: "/a")
+        XCTAssertTrue(svc.intakeListCollapsed(forProject: "/a"))
+        XCTAssertFalse(svc.intakeListCollapsed(forProject: "/b"), "collapsing one project's list must not collapse another's")
+        XCTAssertTrue(svc.intakeListCollapsed(forProject: "/a/"), "a trailing slash is the same project")
+        XCTAssertFalse(svc.inspectorShown(forProject: "/a"), "the list and the inspector are separate state")
+        svc.setIntakeListCollapsed(false, inProject: "/a")
+        XCTAssertFalse(svc.intakeListCollapsed(forProject: "/a"))
+    }
+
+    func testIntakeListCollapsedPersistsAcrossServiceInstances() {
+        makeService().setIntakeListCollapsed(true, inProject: "/a")
+        let relaunched = makeService()
+        XCTAssertTrue(relaunched.intakeListCollapsed(forProject: "/a"))
+        XCTAssertFalse(relaunched.intakeListCollapsed(forProject: "/b"))
+        relaunched.setIntakeListCollapsed(false, inProject: "/a")
+        XCTAssertFalse(makeService().intakeListCollapsed(forProject: "/a"), "a relaunch must not re-collapse an expanded list")
+        XCTAssertEqual(defaults.stringArray(forKey: "IntakeListCollapsedByProject"), [])
+    }
+
+    /// A write that changes nothing publishes nothing: every view observing the service would
+    /// otherwise redraw for it.
+    func testIntakeListCollapsedDropsNoOpWrites() {
+        let svc = makeService()
+        var publishes = 0
+        let watch = svc.objectWillChange.sink { publishes += 1 }
+        defer { watch.cancel() }
+        svc.setIntakeListCollapsed(false, inProject: "/a")
+        XCTAssertEqual(publishes, 0)
+        svc.setIntakeListCollapsed(true, inProject: "/a")
+        svc.setIntakeListCollapsed(true, inProject: "/a")
+        XCTAssertEqual(publishes, 1)
     }
 }
