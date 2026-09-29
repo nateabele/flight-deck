@@ -169,13 +169,16 @@ public struct RoundExecutor: Sendable {
                                     synthesizer.choice, prompt: prompt, schema: RoundSchemas.review, cwd: inputs.project,
                                     readable: [base.deletingLastPathComponent(), work], inputs: inputs, &record)
         publishReview(review, run: runName(planned, "synthesizer"), inputs)
-        return try await integrate(review, base: base, ctx: ctx, planned, inputs, &record)
+        return try await integrate(review, base: base, ctx: ctx, planned, inputs, &record).files
     }
 
     /// A fresh reviewer every round — never a resume — so round N isn't anchored on what the
     /// same session already said in round N-1; that independence is the point of refining.
     private func refine(_ planned: PlannedRound, _ inputs: RoundInputs, _ record: inout RoundRecord) async throws -> [String: Data] {
         guard let reviewer = inputs.config.reviewer else { throw Pause.config("no reviewer") }
+        if planned.crossCheck, let cross = inputs.config.crossReviewer {
+            return try await crossCheckRefine(planned, reviewer, cross, inputs, &record)
+        }
         let plan = try currentPlan(inputs)
         let work = inputs.store.workDirectory()
         let ctx = context(inputs, graphFile: work.appendingPathComponent("graph.json"), observedAt: inputs.now())
@@ -184,7 +187,83 @@ public struct RoundExecutor: Sendable {
                                     schema: RoundSchemas.review, cwd: inputs.project,
                                     readable: [plan.deletingLastPathComponent(), work], inputs: inputs, &record)
         publishReview(review, run: runName(planned, "reviewer"), inputs)
-        return try await integrate(review, base: plan, ctx: ctx, planned, inputs, &record)
+        return try await integrate(review, base: plan, ctx: ctx, planned, inputs, &record).files
+    }
+
+    /// Coverage spec §4: two families review the same plan at once, each in its own fresh
+    /// session, and the integrator sees their proposals blind and says which are one issue. The
+    /// cross-reviewer never has a fallback and never pauses the round: its fallback would be the
+    /// primary's family, and a lost cross-check only costs this round's coverage reading — the
+    /// round still refines the plan with the primary's review alone.
+    private func crossCheckRefine(_ planned: PlannedRound, _ reviewer: Slot, _ cross: Slot, _ inputs: RoundInputs,
+                                  _ record: inout RoundRecord) async throws -> [String: Data] {
+        let plan = try currentPlan(inputs)
+        let work = inputs.store.workDirectory()
+        let ctx = context(inputs, graphFile: work.appendingPathComponent("graph.json"), observedAt: inputs.now())
+        let prompt = RoundPrompts.review(ctx, planFile: plan.path, round: planned.round)
+        let readable = [plan.deletingLastPathComponent(), work]
+        @Sendable func review(_ choice: ModelChoice, _ name: String) async throws -> Attempt<ReviewOutput> {
+            try await attempt(ReviewOutput.self, name, choice, prompt: prompt, schema: RoundSchemas.review,
+                              cwd: inputs.project, readable: readable, inputs: inputs)
+        }
+        let crossName = runName(planned, "crossReviewer")
+        // Started before the primary so the two turns overlap. Every `throw` below leaves this
+        // scope with it un-awaited, and an un-awaited `async let` is cancelled and then awaited
+        // on the way out — so a paused round kills the cross-reviewer's child rather than
+        // leaving it running (and billing) behind a round that has already stopped.
+        async let crossAttempt = review(cross.choice, crossName)
+        // The primary, exactly as a drafter: its slot's fallback once, then a pause.
+        let primaryName = runName(planned, "reviewer")
+        let primary: (review: ReviewOutput, outcome: SlotOutcome)
+        switch try await review(reviewer.choice, primaryName) {
+        case .ok(let out, let session):
+            primary = (out, SlotOutcome(role: "reviewer", used: reviewer.choice, requested: reviewer.choice,
+                                        status: .ok, sessionID: session))
+            publishReview(out, run: primaryName, inputs)
+        case .failed(let first, let firstSession):
+            guard let fallback = reviewer.fallback else {
+                record.slots.append(SlotOutcome(role: "reviewer", used: reviewer.choice, requested: reviewer.choice,
+                                                status: .failed, diagnosis: first, sessionID: firstSession))
+                throw Pause(diagnosis: first)
+            }
+            switch try await review(fallback, primaryName + "-fallback") {
+            case .ok(let out, let session):
+                primary = (out, SlotOutcome(role: "reviewer", used: fallback, requested: reviewer.choice,
+                                            status: .substituted, sessionID: session))
+                publishReview(out, run: primaryName + "-fallback", inputs)
+            case .failed(let diagnosis, let session):
+                record.slots.append(SlotOutcome(role: "reviewer", used: fallback, requested: reviewer.choice,
+                                                status: .failed, diagnosis: diagnosis, sessionID: session))
+                throw Pause(diagnosis: diagnosis)
+            }
+        }
+        record.slots.append(primary.outcome)
+        switch try await crossAttempt {
+        case .failed(let diagnosis, let session):
+            record.slots.append(SlotOutcome(role: "crossReviewer", used: cross.choice, requested: cross.choice,
+                                            status: .failed, diagnosis: diagnosis, sessionID: session))
+            return try await integrate(primary.review, base: plan, ctx: ctx, planned, inputs, &record).files
+        case .ok(let out, let session):
+            record.slots.append(SlotOutcome(role: "crossReviewer", used: cross.choice, requested: cross.choice,
+                                            status: .ok, sessionID: session))
+            publishReview(out, run: crossName, inputs)
+            // The id `run` gives this round's checkpoint: the order is reproducible from the
+            // tape alone, without storing the shuffle's state anywhere else.
+            let seed = (inputs.tape.head?.id ?? 0) + 1
+            let (merged, proposers) = BlindOrder.interleave(primary.review.changes, out.changes, seed: seed)
+            let summary = [primary.review.summary, out.summary].filter { !$0.isEmpty }.joined(separator: "\n\n")
+            let result = try await integrate(ReviewOutput(changes: merged, summary: summary), base: plan, ctx: ctx,
+                                             planned, inputs, &record, clustered: true)
+            // Families from what actually ran: a primary that fell back to the cross-reviewer's
+            // family makes this a same-family round, and coverage must not count it as two.
+            let crossRecord = CrossCheckRecord(
+                proposers: proposers,
+                families: [ModelFamily(primary.outcome.used.harness), ModelFamily(cross.choice.harness)],
+                clusters: result.integrated?.clusters(forChanges: merged.count), blindOrderSeed: seed)
+            var files = result.files
+            files[CrossCheckRecord.fileName] = try IntakeJSON.encoder.encode(crossRecord)
+            return files
+        }
     }
 
     /// Shared tail of synthesis and refine: stage `base` and the proposed changes in `work/`,
@@ -195,8 +274,13 @@ public struct RoundExecutor: Sendable {
     /// is joined again before it is measured or kept. Measured raw, the first round over a
     /// wrapped checkpoint would count every reflowed paragraph as its own churn — and an
     /// integrator that only reflowed would pass the did-it-edit check below.
+    ///
+    /// `clustered` swaps in the cross-check schema and prompt. The integrator's answer is
+    /// returned alongside the files because a cross-check caller needs the clusters it named,
+    /// which no checkpoint file carries; it is nil when nothing was proposed and no integrator ran.
     private func integrate(_ review: ReviewOutput, base: URL, ctx: RoundContext, _ planned: PlannedRound,
-                           _ inputs: RoundInputs, _ record: inout RoundRecord) async throws -> [String: Data] {
+                           _ inputs: RoundInputs, _ record: inout RoundRecord,
+                           clustered: Bool = false) async throws -> (files: [String: Data], integrated: IntegrateOutput?) {
         let work = inputs.store.workDirectory()
         let planFile = work.appendingPathComponent("plan.md"), changesFile = work.appendingPathComponent("changes.json")
         let before = try unwrappedPlan(base)
@@ -210,7 +294,7 @@ public struct RoundExecutor: Sendable {
         guard !review.changes.isEmpty else {
             record.changeCount = 0
             record.note = review.summary.isEmpty ? nil : review.summary
-            return ["plan.md": before, "changes.json": changes]
+            return (["plan.md": before, "changes.json": changes], nil)
         }
         try changes.write(to: changesFile, options: .atomic)
         try before.write(to: planFile, options: .atomic)
@@ -219,8 +303,8 @@ public struct RoundExecutor: Sendable {
         // cwd, so a project cwd would let the integrator edit the user's repo.
         let integrated = try await seat(IntegrateOutput.self, planned, "integrator", inputs.config.integrator,
                                    prompt: RoundPrompts.integrate(planFile: planFile.path, changesFile: changesFile.path,
-                                                                  humanEdits: ctx.humanEdits),
-                                   schema: RoundSchemas.integrate, cwd: work, readable: [], access: .writeInWork(work),
+                                                                  humanEdits: ctx.humanEdits, clustered: clustered),
+                                   schema: clustered ? RoundSchemas.integrateClustered : RoundSchemas.integrate, cwd: work, readable: [], access: .writeInWork(work),
                                    inputs: inputs, &record)
         let after = try unwrappedPlan(planFile)
         record.changeCount = review.changes.count
@@ -268,7 +352,7 @@ public struct RoundExecutor: Sendable {
         if let list = integrated.verdicts(forChanges: review.changes.count) {
             files["verdicts.json"] = try IntakeJSON.encoder.encode(list)
         }
-        return files
+        return (files, integrated)
     }
 
     private func encode(_ planned: PlannedRound, _ inputs: RoundInputs, _ record: inout RoundRecord) async throws -> [String: Data] {

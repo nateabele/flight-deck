@@ -519,6 +519,143 @@ final class RoundExecutorTests: XCTestCase {
         XCTAssertTrue(try XCTUnwrap(runner.calls("reviewer").first).prompt.contains("focus on auth"))
     }
 
+    // MARK: - Cross-check refine (coverage spec §4)
+
+    /// Codex reviews as the primary, Claude as the cross-reviewer, Claude integrates. Both
+    /// reviewers' prompts say "refinement round", so they are told apart by harness.
+    func crossConfig() -> RoundConfig {
+        var c = config()
+        c.reviewer = Slot(codexA)
+        c.crossReviewer = Slot(claudeB)
+        c.crossCheck = .firstAndLast
+        return c
+    }
+    let crossRound = PlannedRound(stage: .refine, round: 1, major: false, crossCheck: true)
+
+    func reviewTagged(_ tag: String, _ n: Int) -> String {
+        json(ReviewOutput(changes: (0..<n).map { ProposedChange(section: "## Scope", rationale: "\(tag)\($0)", edit: "add \(tag)\($0)") },
+                          summary: "\(tag) found \(n)"))
+    }
+
+    func clusteringIntegrator(_ call: ScriptedHarnessRunner.Call, clusters: [[Int]]?) -> CommandResult {
+        let plan = call.cwd.appendingPathComponent("plan.md")
+        let before = (try? String(contentsOf: plan, encoding: .utf8)) ?? ""
+        try! (before + "\n## Added\nnew line\n").write(to: plan, atomically: true, encoding: .utf8)
+        let n = (try? IntakeJSON.decoder.decode([ProposedChange].self,
+                                                from: Data(contentsOf: call.cwd.appendingPathComponent("changes.json"))))?.count ?? 0
+        let verdicts = (0..<n).map { ChangeVerdict(index: $0, verdict: .agree) }
+        return ok(call, "int", json(IntegrateOutput(agree: n, somewhat: 0, disagree: 0, notes: "applied",
+                                                    verdicts: verdicts, clusters: clusters)))
+    }
+
+    func testCrossCheckRunsBothReviewersAndStoresTheRecord() async throws {
+        let runner = ScriptedHarnessRunner { [unowned self] call in
+            switch call.role {
+            case "reviewer": return call.executable == "codex" ? ok(call, "p", self.reviewTagged("a", 3)) : ok(call, "c", self.reviewTagged("b", 2))
+            default: return self.clusteringIntegrator(call, clusters: [[0, 1], [9, 9]])
+            }
+        }
+        let (cp, files) = try checkpoint(try await executor(runner).run(crossRound, inputs(crossConfig(), tape: try refineTape())))
+        XCTAssertEqual(runner.calls("reviewer").count, 2)
+        XCTAssertEqual(Set(runner.calls("reviewer").map(\.executable)), ["codex", "claude"])
+        XCTAssertEqual(cp.record.slots.map(\.role), ["reviewer", "crossReviewer", "integrator"])
+        XCTAssertEqual(cp.record.changeCount, 5)
+        let record = try IntakeJSON.decoder.decode(CrossCheckRecord.self, from: XCTUnwrap(files[CrossCheckRecord.fileName]))
+        XCTAssertEqual(record.families, [.codex, .claude])
+        XCTAssertEqual(record.proposers.count, 5)
+        XCTAssertEqual(record.clusters, [[0, 1]], "cleaned: the out-of-range pair is dropped")
+        XCTAssertEqual(record.blindOrderSeed, cp.id)
+        let stored = try IntakeJSON.decoder.decode([ProposedChange].self, from: XCTUnwrap(files["changes.json"]))
+        XCTAssertEqual(stored.count, 5)
+        for (change, p) in zip(stored, record.proposers) { XCTAssertTrue(change.rationale.hasPrefix(p == 0 ? "a" : "b")) }
+        XCTAssertNotNil(files["verdicts.json"])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: store.runDirectory("refine-1-crossReviewer").path))
+    }
+
+    /// The integrator is handed the blind list and the clustered schema; no proposer shows.
+    func testCrossCheckIntegratorIsBlindAndClustered() async throws {
+        let seen = LockedBox<(changes: String, schema: String)>()
+        let runner = ScriptedHarnessRunner { [unowned self] call in
+            switch call.role {
+            case "reviewer": return call.executable == "codex" ? ok(call, "p", self.reviewTagged("a", 2)) : ok(call, "c", self.reviewTagged("b", 2))
+            default:
+                let changes = try! String(contentsOf: call.cwd.appendingPathComponent("changes.json"), encoding: .utf8)
+                let schemaDir = self.store.runDirectory("refine-1-integrator")
+                let schema = (try? String(contentsOf: schemaDir.appendingPathComponent("schema.json"), encoding: .utf8)) ?? ""
+                seen.set((changes, schema))
+                return self.clusteringIntegrator(call, clusters: nil)
+            }
+        }
+        _ = try checkpoint(try await executor(runner).run(crossRound, inputs(crossConfig(), tape: try refineTape())))
+        let got = try XCTUnwrap(seen.value)
+        XCTAssertFalse(got.changes.contains("proposer"))
+        XCTAssertFalse(got.changes.contains("codex") || got.changes.contains("claude"))
+        XCTAssertTrue(got.schema.contains("clusters"))
+        XCTAssertTrue(try XCTUnwrap(runner.calls("integrator").first).prompt.contains("same underlying issue"))
+    }
+
+    /// Review Focus 2: an integrator that answers without clusters still lands the round.
+    func testCrossCheckWithoutClustersStillLands() async throws {
+        let runner = ScriptedHarnessRunner { [unowned self] call in
+            switch call.role {
+            case "reviewer": return ok(call, "r", self.reviewTagged(call.executable == "codex" ? "a" : "b", 1))
+            default: return self.editingIntegrator(call)   // plain IntegrateOutput, no clusters key
+            }
+        }
+        let (_, files) = try checkpoint(try await executor(runner).run(crossRound, inputs(crossConfig(), tape: try refineTape())))
+        XCTAssertNil(try IntakeJSON.decoder.decode(CrossCheckRecord.self, from: XCTUnwrap(files[CrossCheckRecord.fileName])).clusters)
+    }
+
+    func testCrossReviewerFailureDegradesToASingleReview() async throws {
+        let runner = ScriptedHarnessRunner { [unowned self] call in
+            switch call.role {
+            case "reviewer": return call.executable == "codex" ? ok(call, "p", self.review(2)) : failed("rate limit exceeded")
+            default: return self.editingIntegrator(call)
+            }
+        }
+        let (cp, files) = try checkpoint(try await executor(runner).run(crossRound, inputs(crossConfig(), tape: try refineTape())))
+        XCTAssertNil(files[CrossCheckRecord.fileName])
+        XCTAssertEqual(cp.record.slots.first { $0.role == "crossReviewer" }?.status, .failed)
+        XCTAssertEqual(cp.record.changeCount, 2)
+        XCTAssertFalse(try XCTUnwrap(runner.calls("integrator").first).prompt.contains("same underlying issue"))
+    }
+
+    func testPrimaryFallbackToTheOtherFamilyIsRecordedAsSameFamily() async throws {
+        var cfg = crossConfig()
+        cfg.reviewer = Slot(codexA, fallback: claudeB)
+        let runner = ScriptedHarnessRunner { [unowned self] call in
+            switch call.role {
+            case "reviewer": return call.executable == "codex" ? failed("boom") : ok(call, "c", self.review(1))
+            default: return self.clusteringIntegrator(call, clusters: nil)
+            }
+        }
+        let (cp, files) = try checkpoint(try await executor(runner).run(crossRound, inputs(cfg, tape: try refineTape())))
+        XCTAssertEqual(cp.record.slots.first { $0.role == "reviewer" }?.status, .substituted)
+        XCTAssertEqual(try IntakeJSON.decoder.decode(CrossCheckRecord.self, from: XCTUnwrap(files[CrossCheckRecord.fileName])).families,
+                       [.claude, .claude])
+    }
+
+    /// Review Focus 3: both reviewers found nothing, so there is no integrator, but the record is kept.
+    func testCrossCheckWhereNobodyFindsAnything() async throws {
+        let runner = ScriptedHarnessRunner { [unowned self] call in
+            call.role == "reviewer" ? ok(call, "r", self.review(0)) : failed("the integrator must not run")
+        }
+        let (_, files) = try checkpoint(try await executor(runner).run(crossRound, inputs(crossConfig(), tape: try refineTape())))
+        XCTAssertTrue(runner.calls("integrator").isEmpty)
+        XCTAssertEqual(try IntakeJSON.decoder.decode(CrossCheckRecord.self, from: XCTUnwrap(files[CrossCheckRecord.fileName])).proposers, [])
+    }
+
+    func testANonCrossCheckRoundIsUnchanged() async throws {
+        let runner = ScriptedHarnessRunner { [unowned self] call in
+            call.role == "reviewer" ? ok(call, "r", self.review(1)) : self.editingIntegrator(call)
+        }
+        let (cp, files) = try checkpoint(try await executor(runner).run(PlannedRound(stage: .refine, round: 2, major: false),
+                                                                        inputs(crossConfig(), tape: try refineTape())))
+        XCTAssertEqual(runner.calls("reviewer").count, 1)
+        XCTAssertEqual(cp.record.slots.map(\.role), ["reviewer", "integrator"])
+        XCTAssertNil(files[CrossCheckRecord.fileName])
+    }
+
     func testSketchCurrentPlanIsDraftZero() async throws {
         let runner = ScriptedHarnessRunner { [unowned self] call in
             call.role == "reviewer" ? ok(call, "rev", self.review(1)) : self.editingIntegrator(call)
