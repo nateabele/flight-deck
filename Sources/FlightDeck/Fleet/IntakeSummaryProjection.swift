@@ -2,7 +2,9 @@ import FleetKit
 import Foundation
 import IntakeKit
 
-/// Intakes → the phone's coarse list rows (spec §6.1). Pure: no I/O, no clock of its own.
+/// Intakes → the phone's coarse list rows (spec §6.1). `isListed`, `summary` and `changes` are
+/// pure: no I/O, no clock of their own. `summaries(for:service:now:)` is not — it asks the
+/// service's `needsAttention`, which reads the intake's commands.jsonl.
 enum IntakeSummaryProjection {
     /// Released intakes stay on the phone's list this long (the maintainer, 2026-09-29), then leave it.
     static let releasedRetention: TimeInterval = 3 * 24 * 3600

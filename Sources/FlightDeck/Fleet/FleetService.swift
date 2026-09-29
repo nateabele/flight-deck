@@ -441,8 +441,6 @@ final class FleetService: ObservableObject {
         }
     }
 
-    /// A phone's hello files it as attached and observes what it was handed on resume; a local
-    /// caller's does neither — see `framesForLocal(resumingFrom:)`.
     /// Which capability a peer must have claimed to be sent this event (spec §6).
     static func requiredCapability(for event: FleetEvent) -> String? {
         if case .projectIntakes = event { return FleetCapability.flightControl }
@@ -458,6 +456,8 @@ final class FleetService: ObservableObject {
         }
     }
 
+    /// A phone's hello files it as attached and observes what it was handed on resume; a local
+    /// caller's does neither — see `framesForLocal(resumingFrom:)`.
     private func handleHello(_ attachment: FleetAttachment, _ lastSeq: Int) -> [ServerFrame] {
         if attachment.isLocal { return framesForLocal(resumingFrom: lastSeq) }
         noteAttached(attachment)
