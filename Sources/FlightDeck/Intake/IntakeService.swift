@@ -401,7 +401,13 @@ final class IntakeService: ObservableObject {
     }
 
     func attentionCount(forProject path: String) -> Int {
-        intakes(forProject: path).filter { $0.state.needsAttention || shapingNeedsAttention($0) }.count
+        intakes(forProject: path).filter(needsAttention).count
+    }
+
+    /// The ONE attention rule — the sidebar's count, the phone's badge and banner all read it,
+    /// so an intake cannot need you on one surface and not the other.
+    func needsAttention(_ i: Intake) -> Bool {
+        i.state.needsAttention || shapingNeedsAttention(i)
     }
 
     /// `project`'s selected intake, or nil when nothing is selected there OR the selection

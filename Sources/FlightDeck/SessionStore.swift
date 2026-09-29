@@ -1435,6 +1435,64 @@ final class SessionStore: ObservableObject {
 
     private func emit(_ events: FleetEvent...) { emit(events) }
 
+    /// The Flight Control summaries last RECORDED on the fleet wire, per project — nil when
+    /// Flight Control is off there, and an absent key means the same. `FleetProjection` reads
+    /// this, never `IntakeService` directly: the projection is the replicator's drift oracle,
+    /// and an intake change (or the Flight Control toggle, which lives in preferences) that
+    /// reached it without an event would trip the drift assertion. Written ONLY by
+    /// `refreshIntakeSummaries()`, in the same call that records the event, so the two cannot
+    /// disagree. Plain, not `@Published`: recording must not re-trigger the refresh that caused it.
+    private(set) var intakeSummaries: [Repo.ID: [WireIntakeSummary]?] = [:]
+    private var intakeRefreshScheduled = false
+    private var intakeRefreshForward: AnyCancellable?
+    private var lastIntakeRetentionTick = Date.distantPast
+    /// The retention tick's owner on `clock`, which keys subscribers by object identity —
+    /// registering the store itself would replace its other registration. Per store, not
+    /// shared: a test process builds many stores, and a shared owner would leave only the last.
+    private let intakeRetentionTicker = IntakeRetentionTicker()
+
+    /// Recomputes every project's summaries and records the difference. A project with Flight
+    /// Control off never touches `intakeService`, so a Mac that never enabled it never builds
+    /// the service here.
+    func refreshIntakeSummaries() {
+        let now = Date()
+        var next: [Repo.ID: [WireIntakeSummary]?] = [:]
+        for repo in repos {
+            guard preferences?.projectSettings(repo.url.path).flywheelEnabled == true else {
+                next[repo.id] = .some(nil); continue
+            }
+            let intakes = intakeService.intakes(forProject: repo.url.path)
+            next[repo.id] = IntakeSummaryProjection.summaries(for: intakes, service: intakeService, now: now)
+        }
+        let events = IntakeSummaryProjection.changes(from: intakeSummaries, to: next)
+        intakeSummaries = next
+        emit(events)
+    }
+
+    /// Called once by `FleetService` after it installs the replicator. Coalesces every store
+    /// change (the store already forwards `IntakeService` and preferences into
+    /// `objectWillChange`) into one refresh on the NEXT main-queue turn — `objectWillChange`
+    /// fires before the change lands — plus a 60 s tick so a released intake ages out.
+    func startIntakeSummaries() {
+        refreshIntakeSummaries()
+        intakeRefreshForward = objectWillChange.sink { [weak self] _ in self?.scheduleIntakeRefresh() }
+        clock.add(intakeRetentionTicker) { [weak self] in
+            guard let self, Date().timeIntervalSince(self.lastIntakeRetentionTick) >= 60 else { return }
+            self.lastIntakeRetentionTick = Date()
+            self.scheduleIntakeRefresh()
+        }
+    }
+
+    private func scheduleIntakeRefresh() {
+        guard !intakeRefreshScheduled else { return }
+        intakeRefreshScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.intakeRefreshScheduled = false
+            self.refreshIntakeSummaries()
+        }
+    }
+
     /// The only writer of `unreadIdle`.
     ///
     /// Not style. There were seven `insert`/`remove` sites — a selection `didSet`, restore,
@@ -8908,3 +8966,8 @@ enum AnswerAbortLog {
         try? handle.write(contentsOf: Data(record.utf8))
     }
 }
+
+/// A distinct owner for `SessionStore`'s retention tick on its `WatchClock`, which keys
+/// subscribers by object identity — registering the store itself would replace its other
+/// registration.
+final class IntakeRetentionTicker {}

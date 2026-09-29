@@ -632,9 +632,13 @@ public final class FleetSocketServer: @unchecked Sendable {
         listener.cancel()
     }
 
-    public func broadcast(_ frame: ServerFrame) {
+    /// `requiring`: only connections whose `hello` claimed that capability get the frame. An
+    /// older phone throws on an event tag it does not know and drops the socket, so a new
+    /// event must never reach one; the phone does not check `seq` gaps, so skipping is safe.
+    public func broadcast(_ frame: ServerFrame, requiring capability: String? = nil) {
         dispatchPrecondition(condition: .onQueue(queue))
-        for connection in attached.values {
+        for (id, connection) in attached {
+            if let capability, caps[id]?.contains(capability) != true { continue }
             FleetSocket.send(frame, over: connection)
         }
     }

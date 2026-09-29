@@ -179,6 +179,9 @@ final class FleetService: ObservableObject {
             prompts?.pushedOpenPrompt(inSession: id).map(\.callID)
         }
         wireHandlers()
+        // After the replicator is installed and `onEvents` wired, so the first refresh's
+        // events (a project with Flight Control on) reach the sockets and the replay ring.
+        store.startIntakeSummaries()
         Self.current = self
     }
 
@@ -354,8 +357,9 @@ final class FleetService: ObservableObject {
         replicator.onEvents = { [weak self] batch in
             guard let self else { return }
             for entry in batch {
-                self.server.broadcast(.event(seq: entry.seq, entry.event))
-                self.localServer.broadcast(.event(seq: entry.seq, entry.event))
+                let needed = Self.requiredCapability(for: entry.event)
+                self.server.broadcast(.event(seq: entry.seq, entry.event), requiring: needed)
+                self.localServer.broadcast(.event(seq: entry.seq, entry.event), requiring: needed)
             }
             // After the sends, never before: a record that says a closure was pushed to one
             // client is only true once it has been. The client count is read here for the
@@ -374,7 +378,7 @@ final class FleetService: ObservableObject {
         for server in [server, localServer] {
             server.onHello = { [weak self] attachment, lastSeq in
                 guard let self else { return [] }
-                return self.handleHello(attachment, lastSeq)
+                return Self.deliverable(self.handleHello(attachment, lastSeq), caps: attachment.caps)
             }
             server.onCommand = { [weak self] client, cid, command, reply in
                 guard let self else { return reply(.err(cid: cid, code: "stopped")) }
@@ -439,6 +443,21 @@ final class FleetService: ObservableObject {
 
     /// A phone's hello files it as attached and observes what it was handed on resume; a local
     /// caller's does neither — see `framesForLocal(resumingFrom:)`.
+    /// Which capability a peer must have claimed to be sent this event (spec §6).
+    static func requiredCapability(for event: FleetEvent) -> String? {
+        if case .projectIntakes = event { return FleetCapability.flightControl }
+        return nil
+    }
+
+    /// `hello` replies with the capability filter applied — a resume replay must not hand an
+    /// older phone the event `broadcast(_:requiring:)` withholds live.
+    static func deliverable(_ frames: [ServerFrame], caps: Set<String>) -> [ServerFrame] {
+        frames.filter { frame in
+            guard case .event(_, let event) = frame, let needed = requiredCapability(for: event) else { return true }
+            return caps.contains(needed)
+        }
+    }
+
     private func handleHello(_ attachment: FleetAttachment, _ lastSeq: Int) -> [ServerFrame] {
         if attachment.isLocal { return framesForLocal(resumingFrom: lastSeq) }
         noteAttached(attachment)
