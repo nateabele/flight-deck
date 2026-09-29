@@ -29,6 +29,12 @@ final class CoverageRenderTests: XCTestCase {
             ("nooverlap", try model([reading(n1: 3, n2: 4, both: 0, round: 1)], remaining: 2)),
             ("samefamily", try model([reading(n1: 20, n2: 18, both: 15, round: 1, families: [.claude, .claude])], remaining: 2)),
             ("pending", try model([], remaining: 3)),
+            ("pending-every", try model([], remaining: 3, policy: .every)),
+            // Neither family proposed anything: no verdicts.json on disk, and still SATURATED.
+            ("nothingfound", try model([r1, CoverageSeries.reading(checkpoint: 5, round: 3,
+                                                               record: CrossCheckRecord(proposers: [], families: [.codex, .claude],
+                                                                                        clusters: nil, blindOrderSeed: 1),
+                                                               changes: [], verdicts: nil)], remaining: 0)),
             ("correlated", try model([reading(n1: 20, n2: 18, both: 17, round: 1)], remaining: 0)),
             ("unmeasured", try model([unmeasured(round: 1), reading(n1: 12, n2: 10, both: 6, round: 3)], remaining: 0)),
             ("failed", try model([reading(n1: 20, n2: 18, both: 15, round: 1)], remaining: 0, failed: 3)),
@@ -85,10 +91,10 @@ final class CoverageRenderTests: XCTestCase {
     }
 
     private func model(_ readings: [CoverageReading], convergence: ConvergenceVerdict? = nil, remaining: Int = 0,
-                       failed: Int? = nil) throws -> CoverageCellModel {
+                       failed: Int? = nil, policy: CrossCheckPolicy = .firstAndLast) throws -> CoverageCellModel {
         let verdict = CoverageSeries.verdict(readings: readings, preset: .featurePlan, convergence: convergence,
-                                             refineRoundsRemaining: remaining, failedCrossCheckRound: failed)
-        return try XCTUnwrap(CoverageCellModel(verdict: verdict, crossChecks: true, readings: readings))
+                                             refineRoundsRemaining: remaining, crossCheckAhead: false, failedCrossCheckRound: failed)
+        return try XCTUnwrap(CoverageCellModel(verdict: verdict, crossChecks: true, readings: readings, policy: policy))
     }
 
     /// An older round with a cross-check record but no `verdicts.json`: no counts at all.

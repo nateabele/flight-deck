@@ -331,29 +331,27 @@ struct BoardModel: Equatable {
         return code.map { $0 + slack }
     }
 
-    // MARK: - Stage replay
+    // MARK: - Stage sequence
 
-    /// The tape's checkpoints, then whatever `TapePlanner` would run after them, found by
-    /// replaying `next` on a scratch copy — the planner's sequence is private, and replaying it
-    /// means the strip can never disagree with what the runner will actually do (extensions
-    /// included). `ShapingModel.stages` is this too, so the two views can't drift apart.
+    /// The tape's checkpoints, then whatever `TapePlanner.upcoming` says runs after them — the
+    /// planner's own sequence, so the strip can never disagree with what the runner will
+    /// actually do (extensions included), and the round in flight carries the cross-check flag it
+    /// started with. `ShapingModel.stages` is this too, so the two views can't drift apart.
     static func stages(tape: Tape, config: RoundConfig?) -> [StageMarker] {
         var markers = tape.checkpoints.enumerated().map { i, cp in
             StageMarker(order: i, stage: cp.stage, round: cp.round, label: ShapingModel.label(stage: cp.stage, round: cp.round),
                         major: cp.major, done: true, inProgress: false, checkpointID: cp.id,
                         // A landed round's own slots say whether it was a cross-check, not the
                         // config now: an Extend can move which round is "last" after this one ran.
-                        crossCheck: cp.record.slots.contains { $0.role == "crossReviewer" })
+                        // A failed cross-check agent measured nothing, so that round is plain —
+                        // as the sparkline and heatmap (which need its crosscheck.json) draw it.
+                        crossCheck: cp.record.slots.contains { $0.role == "crossReviewer" && $0.status != .failed })
         }
         guard let config else { return markers }
-        var scratch = tape
-        // Bounded so a planner bug can't hang the main thread; no real config comes close.
-        while markers.count < 200, let next = TapePlanner.next(after: scratch, config: config) {
+        for next in TapePlanner.upcoming(after: tape, config: config) {
             markers.append(StageMarker(order: markers.count, stage: next.stage, round: next.round,
                                        label: ShapingModel.label(stage: next.stage, round: next.round), major: next.major,
                                        done: false, inProgress: false, checkpointID: nil, crossCheck: next.crossCheck))
-            scratch.checkpoints.append(Checkpoint(id: (scratch.head?.id ?? 0) + 1, stage: next.stage, round: next.round,
-                                                  major: next.major, createdAt: Date(timeIntervalSince1970: 0)))
         }
         if tape.status == .running, let first = markers.firstIndex(where: { !$0.done }) {
             markers[first].inProgress = true
@@ -374,7 +372,7 @@ struct BoardModel: Equatable {
     }
 
     /// Stages − can shorten: ones with a round still scheduled — not landed, not in the air, and
-    /// not the failed one, which the next play reruns. From the same replay as the tape's slots,
+    /// not the failed one, which the next play reruns. From the same sequence as the tape's slots,
     /// so − is offered exactly while the bracket shows a round it would take away.
     static func trimmableStages(tape: Tape, config: RoundConfig?) -> [Stage] {
         let markers = stages(tape: tape, config: config)

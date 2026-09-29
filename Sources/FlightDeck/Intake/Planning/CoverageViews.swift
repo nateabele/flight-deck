@@ -30,8 +30,8 @@ struct CoverageCard: View {
             if let target = model.targetLine {
                 line(target).foregroundStyle(CardTone.ph.opacity(0.9))
             }
-            if model.rows.isEmpty {
-                line("Coverage is measured on cross-check rounds: R1 and the last Refine round.").foregroundStyle(CardTone.ph2)
+            if let empty = model.emptyNote {
+                line(empty).foregroundStyle(CardTone.ph2)
             }
             ForEach(Array(model.rows.enumerated()), id: \.offset) { _, row in
                 line(row).foregroundStyle(CardTone.ph2)

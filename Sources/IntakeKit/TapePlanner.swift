@@ -10,8 +10,8 @@ import Foundation
 /// shortens the stage the same way, from the other end.
 public enum TapePlanner {
     /// The full stage/round/major sequence a config (with the tape's current extensions)
-    /// plans to run, ending at release review. Not part of the public interface — `next`
-    /// is the only thing that needs it, expressed once so the ordering lives in one place.
+    /// plans to run, ending at release review. Not part of the public interface — `next`,
+    /// `upcoming` and `planned` read it, expressed once so the ordering lives in one place.
     private static func sequence(config: RoundConfig, extraRefinement: Int, extraPolish: Int) -> [PlannedRound] {
         var seq: [PlannedRound] = [PlannedRound(stage: .draft, round: 0, major: true)]
 
@@ -77,6 +77,28 @@ public enum TapePlanner {
         }
         let nextIndex = index + 1
         return nextIndex < seq.count ? seq[nextIndex] : nil
+    }
+
+    /// Every round still to run after the head, in order — the round in flight first, carrying
+    /// the `crossCheck` it started with (persisted in `roundInProgress`) rather than what the
+    /// sequence would decide now: an extend that moved "last" mid-round doesn't change what the
+    /// running round is doing. `major` stays the planned one, as `planned` gives the runner.
+    /// Empty when the head is no longer in the sequence, the same fail-safe as `next`.
+    public static func upcoming(after tape: Tape, config: RoundConfig) -> [PlannedRound] {
+        let seq = sequence(config: config, extraRefinement: tape.extraRefinement, extraPolish: tape.extraPolish)
+        let start: Int
+        if let head = tape.head {
+            guard let index = seq.firstIndex(where: { $0.stage == head.stage && $0.round == head.round }) else { return [] }
+            start = index + 1
+        } else {
+            start = 0
+        }
+        return seq[start...].map { round in
+            guard let running = tape.roundInProgress, running.stage == round.stage, running.round == round.round else { return round }
+            var started = round
+            started.crossCheck = running.crossCheck
+            return started
+        }
     }
 
     /// `(stage, round)` as the tape plans it NOW — nil when it isn't in the sequence. The runner

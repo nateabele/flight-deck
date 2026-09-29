@@ -187,4 +187,18 @@ final class RoundConfigEditorTests: XCTestCase {
         var every = cfg; every.crossCheck = .every
         XCTAssertEqual(RoundConfigEditor.crossCheckRounds(every), [1, 2, 3])
     }
+
+    /// Turning cross-checks on with only one harness installed can't seat a cross-check agent;
+    /// the inspector says why under the picker instead of silently leaving no row (spec §3).
+    func testCrossCheckOnWithOneFamilyExplainsWhy() throws {
+        let codexOnly = AvailableModels(codex: available.codex, claude: nil)
+        let base = try XCTUnwrap(PresetExpansion.config(for: .featurePlan, available: codexOnly))
+        XCTAssertNil(RoundConfigEditor.crossCheckUnavailableNote(base, available: codexOnly), "nothing to explain while off")
+        let on = RoundConfigEditor.settingCrossCheck(base, to: .firstAndLast, available: codexOnly)
+        XCTAssertNil(on.crossReviewer)
+        XCTAssertEqual(RoundConfigEditor.crossCheckUnavailableNote(on, available: codexOnly),
+                       "Cross-checks need a second model family; only one is installed.")
+        let both = try XCTUnwrap(PresetExpansion.config(for: .featurePlan, available: .defaults))
+        XCTAssertNil(RoundConfigEditor.crossCheckUnavailableNote(both, available: .defaults))
+    }
 }

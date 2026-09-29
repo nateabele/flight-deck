@@ -88,6 +88,32 @@ final class BoardModelTests: XCTestCase {
         XCTAssertEqual(board.slots.filter(\.crossCheck).map(\.code), ["RF1", "RF3"])
     }
 
+    /// The round in flight shows the flag it started with. Refine extended while R3 — the last
+    /// round, so a cross-check — runs makes R4 the new last; the engine is still cross-checking
+    /// R3, and the board must not drop its ×2 just because the plan now calls R3 plain.
+    func testRunningCrossCheckKeepsItsMarkAfterAnExtend() throws {
+        var tape = pausedAfterR1(status: .running)
+        tape.checkpoints.append(cp(4, .refine, 2, major: false, at: 756))
+        tape.roundInProgress = PlannedRound(stage: .refine, round: 3, major: true, crossCheck: true)
+        tape.extraRefinement = 1
+        let board = try board(try intake(.featurePlan), tape, now: 900)
+        XCTAssertEqual(board.slots.filter(\.crossCheck).map(\.code), ["RF3", "RF4"])
+    }
+
+    /// A landed round is a cross-check on the board only if its cross-check agent did not fail —
+    /// the sparkline and heatmap already draw such a round plain, and the three must agree.
+    func testLandedRoundWithAFailedCrossCheckAgentIsPlain() throws {
+        let codex = ModelChoice(harness: .codex, model: "gpt-5", effort: "high")
+        let failed = RoundRecord(slots: [SlotOutcome(role: "crossReviewer", used: codex, requested: codex, status: .failed)])
+        let ok = RoundRecord(slots: [SlotOutcome(role: "crossReviewer", used: codex, requested: codex, status: .ok)])
+        let tape = Tape(checkpoints: [cp(1, .draft, major: true, at: 0), cp(2, .synthesis, major: true, at: 180),
+                                      cp(3, .refine, 1, major: false, at: 468, failed)], status: .paused)
+        XCTAssertEqual(try board(try intake(.featurePlan), tape).slots.filter(\.crossCheck).map(\.code), ["RF3"])
+        var landed = tape
+        landed.checkpoints[2].record = ok
+        XCTAssertEqual(try board(try intake(.featurePlan), landed).slots.filter(\.crossCheck).map(\.code), ["RF1", "RF3"])
+    }
+
     func testLiveSlotAndDurations() throws {
         var tape = pausedAfterR1(status: .running)
         tape.checkpoints.append(cp(4, .refine, 2, major: false, at: 756))

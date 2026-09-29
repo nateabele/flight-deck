@@ -9,7 +9,7 @@ final class CoverageCellModelTests: XCTestCase {
                          convergence: ConvergenceVerdict? = nil, remaining: Int = 0,
                          failed: Int? = nil) -> CoverageVerdict {
         CoverageSeries.verdict(readings: readings, preset: preset, convergence: convergence,
-                               refineRoundsRemaining: remaining, failedCrossCheckRound: failed)
+                               refineRoundsRemaining: remaining, crossCheckAhead: false, failedCrossCheckRound: failed)
     }
     private func reading(n1: Int, n2: Int, both: Int, round: Int = 1, families: [ModelFamily] = [.codex, .claude]) -> CoverageReading {
         // Build through CoverageSeries.reading so the numbers are the fold's, not hand-set.
@@ -106,6 +106,96 @@ final class CoverageCellModelTests: XCTestCase {
         XCTAssertEqual(r.band, .unmeasured)
         let m = try XCTUnwrap(CoverageCellModel(verdict: verdict([r]), crossChecks: true))
         XCTAssertEqual(m.rows, ["Refine 2 · unmeasured (no per-change verdicts)"])
+    }
+
+    /// A cross-check where neither family proposed anything had nothing to match: "the integrator
+    /// gave no groups" there reads as a matching doubt about a reading with no issues in it.
+    func testNothingFoundHasNoMatcherNote() throws {
+        let r = CoverageSeries.reading(checkpoint: 5, round: 3,
+                                       record: CrossCheckRecord(proposers: [], families: [.codex, .claude],
+                                                                clusters: nil, blindOrderSeed: 1),
+                                       changes: [], verdicts: nil)
+        XCTAssertEqual(r.band, .saturated)
+        let m = try XCTUnwrap(CoverageCellModel(verdict: verdict([r]), crossChecks: true))
+        XCTAssertEqual(m.notes, [])
+    }
+
+    // MARK: - From the tape (the detail view's and the flap seed's one derivation)
+
+    private let t0 = Date(timeIntervalSince1970: 1_790_000_000)
+
+    private func intake(_ preset: Preset) throws -> Intake {
+        var intake = Intake(projectPath: "/tmp/project", intent: "Field-service scheduling platform")
+        intake.state = .shaping
+        intake.chosenPreset = preset
+        intake.roundConfig = try XCTUnwrap(PresetExpansion.config(for: preset, available: .defaults))
+        return intake
+    }
+
+    /// Draft, synthesis, then Refine 1 through `refines`.
+    private func tape(refines: Int, inProgress: PlannedRound? = nil) -> Tape {
+        var cps = [Checkpoint(id: 1, stage: .draft, round: 0, major: true, createdAt: t0),
+                   Checkpoint(id: 2, stage: .synthesis, round: 0, major: true, createdAt: t0)]
+        for round in 0..<refines {
+            cps.append(Checkpoint(id: 3 + round, stage: .refine, round: round + 1, major: false, createdAt: t0))
+        }
+        return Tape(checkpoints: cps, status: inProgress == nil ? .paused : .running, roundInProgress: inProgress)
+    }
+
+    private func verdict(_ intake: Intake, _ tape: Tape, config: RoundConfig? = nil, _ readings: [CoverageReading],
+                         convergence: ConvergenceVerdict?) throws -> CoverageVerdict {
+        CoverageCellModel.verdict(intake: intake, tape: tape, config: try config ?? XCTUnwrap(intake.roundConfig),
+                                  readings: readings, convergence: convergence)
+    }
+
+    /// A Feature plan (cap 3, first and last) settled after R2 with R1 reading MANY LEFT: R3 is
+    /// planned to cross-check again, so the cell reads the band, not an amber STALLED asking for
+    /// the very round that is already coming. Once R3 has landed short, it is a stall.
+    func testNoStallWhileThePlanStillCrossChecks() throws {
+        let feature = try intake(.featurePlan)
+        let short = [reading(n1: 20, n2: 18, both: 4)]
+        XCTAssertEqual(try verdict(feature, tape(refines: 2), short, convergence: .converging(settled: true)).state,
+                       .reading(.manyLeft))
+        XCTAssertEqual(try verdict(feature, tape(refines: 3), short + [reading(n1: 20, n2: 18, both: 4, round: 3)],
+                                   convergence: .converging(settled: true)).state, .stalled)
+    }
+
+    /// The round in flight counts by the flag it started with, not the config now: a cross-check
+    /// that is running will still re-measure coverage even after the policy is switched off.
+    func testTheRunningCrossCheckIsAhead() throws {
+        let feature = try intake(.featurePlan)
+        var off = try XCTUnwrap(feature.roundConfig)
+        off.crossCheck = .off
+        let running = tape(refines: 2, inProgress: PlannedRound(stage: .refine, round: 3, major: true, crossCheck: true))
+        XCTAssertEqual(try verdict(feature, running, config: off, [reading(n1: 20, n2: 18, both: 4)], convergence: .plateau).state,
+                       .reading(.manyLeft))
+        let plain = tape(refines: 2, inProgress: PlannedRound(stage: .refine, round: 3, major: true, crossCheck: false))
+        XCTAssertEqual(try verdict(feature, plain, config: off, [reading(n1: 20, n2: 18, both: 4)], convergence: .plateau).state,
+                       .stalled)
+    }
+
+    /// The trim suggestion counts only rounds trim can take back: the one running is paid for.
+    /// Full plan (cap 5), saturated at R1 with R2 in flight, leaves 3 to remove, not 4.
+    func testTrimSuggestionLeavesOutTheRunningRound() throws {
+        let full = try intake(.fullPlan)
+        let running = tape(refines: 1, inProgress: PlannedRound(stage: .refine, round: 2, major: false))
+        let v = try verdict(full, running, [reading(n1: 20, n2: 18, both: 15)], convergence: .tooEarly)
+        XCTAssertEqual(v.suggestedAction,
+                       "Saturated at Refine 1. Consider removing the remaining 3 Refine rounds (Run ▸ Remove a Round, ⌘-).")
+    }
+
+    /// The card's empty state names the rounds the policy actually cross-checks.
+    func testEmptyNoteFollowsThePolicy() throws {
+        XCTAssertEqual(CoverageCellModel(verdict: verdict([]), crossChecks: true, policy: .firstAndLast)?.emptyNote,
+                       "Coverage is measured on cross-check rounds: Refine 1 and the last Refine round.")
+        XCTAssertEqual(CoverageCellModel(verdict: verdict([]), crossChecks: true, policy: .every)?.emptyNote,
+                       "Coverage is measured on cross-check rounds: every Refine round.")
+        XCTAssertNil(CoverageCellModel(verdict: verdict([reading(n1: 20, n2: 18, both: 15)]), crossChecks: true,
+                                       policy: .every)?.emptyNote, "a card with rows has no empty state")
+        let feature = try intake(.featurePlan)
+        let model = try XCTUnwrap(CoverageCellModel(intake: feature, tape: tape(refines: 0), config: XCTUnwrap(feature.roundConfig),
+                                                    readings: [], cycles: []))
+        XCTAssertEqual(model.emptyNote, "Coverage is measured on cross-check rounds: Refine 1 and the last Refine round.")
     }
 
     /// Both cells split the engine's action at the same first ". " — one splitter, not two.

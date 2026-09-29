@@ -26,6 +26,9 @@ struct CoverageCellModel: Equatable {
     var targetLine: String?
     /// The engine's `suggestedAction`; empty when it has nothing to suggest.
     var action: String = ""
+    /// What the card says while it has no rows: which Refine rounds the policy cross-checks.
+    /// nil once there is a reading, and for a hand-made cell.
+    var emptyNote: String?
 
     /// The action's first sentence, the part the card sets in bold.
     var actionHeadline: String? { ConvergenceCellModel.splitAction(action)?.headline }
@@ -39,8 +42,9 @@ extension CoverageCellModel {
     /// Nil when the config doesn't cross-check and no reading exists: the cell is absent rather
     /// than a dash that could never change. A config switched off after a reading still shows it.
     /// `readings` are the card's rows, oldest first — the series the verdict was judged from;
-    /// the verdict keeps only its latest, which is all the rows are without them.
-    init?(verdict: CoverageVerdict, crossChecks: Bool, readings: [CoverageReading]? = nil) {
+    /// the verdict keeps only its latest, which is all the rows are without them. `policy` names
+    /// the rounds the empty card promises a reading at.
+    init?(verdict: CoverageVerdict, crossChecks: Bool, readings: [CoverageReading]? = nil, policy: CrossCheckPolicy? = nil) {
         guard crossChecks || verdict.latest != nil else { return nil }
         let latest = verdict.latest
         // A cross-reviewer that failed after the latest reading means the newest cross-check
@@ -66,22 +70,47 @@ extension CoverageCellModel {
         notes = latest.map(Self.notes) ?? []
         targetLine = Self.targetLine(verdict)
         action = verdict.suggestedAction
+        emptyNote = rows.isEmpty ? Self.emptyNote(policy) : nil
     }
 
-    /// The shaping screen's cell: the engine's verdict over `readings`, told the refine cycle's
-    /// convergence (a converged cycle short of target is a stall), how many refine rounds the
-    /// planner would still run (a saturated R1 suggests trimming them), and the newest refine
-    /// round whose cross-reviewer failed — which only a checkpoint's slots record. One derivation
-    /// for the detail view and the service's flap seed, so the seeded word is the shown word.
+    /// The shaping screen's cell: `verdict(intake:…)` read out, with the config's policy for the
+    /// empty card. One derivation for the detail view and the service's flap seed, so the seeded
+    /// word is the shown word.
     init?(intake: Intake, tape: Tape, config: RoundConfig, readings: [CoverageReading], cycles: [ConvergenceCycle]) {
-        let refines = tape.checkpoints.filter { $0.stage == .refine }
-        let planned = config.reviewer == nil ? 0 : config.refinementCap + tape.extraRefinement
-        let failed = refines.last { cp in cp.record.slots.contains { $0.role == "crossReviewer" && $0.status == .failed } }?.round
-        let verdict = CoverageSeries.verdict(readings: readings, preset: intake.chosenPreset ?? .featurePlan,
-                                             convergence: cycles.last { $0.stage == .refine }?.verdict,
-                                             refineRoundsRemaining: max(0, planned - refines.count),
-                                             failedCrossCheckRound: failed)
-        self.init(verdict: verdict, crossChecks: config.crossChecks, readings: readings)
+        let verdict = Self.verdict(intake: intake, tape: tape, config: config, readings: readings,
+                                   convergence: cycles.last { $0.stage == .refine }?.verdict)
+        self.init(verdict: verdict, crossChecks: config.crossChecks, readings: readings, policy: config.crossCheck)
+    }
+
+    /// The engine's verdict over `readings`, told the refine cycle's convergence (a converged
+    /// cycle short of target is a stall), what the planner still has ahead, and the newest refine
+    /// round whose cross-reviewer failed — which only a checkpoint's slots record.
+    ///
+    /// "Ahead" comes from `TapePlanner.upcoming`, never from round arithmetic: that is the
+    /// sequence the runner will actually walk (extends and trims included), with the running
+    /// round's own `crossCheck`. The running round is a cross-check still to land, but not a
+    /// round trim can remove, so it counts toward the first and not toward the second — the
+    /// trim suggestion once offered to remove a round already paid for.
+    static func verdict(intake: Intake, tape: Tape, config: RoundConfig, readings: [CoverageReading],
+                        convergence: ConvergenceVerdict?) -> CoverageVerdict {
+        let ahead = TapePlanner.upcoming(after: tape, config: config).filter { $0.stage == .refine }
+        let running = tape.roundInProgress
+        let failed = tape.checkpoints.last { cp in
+            cp.stage == .refine && cp.record.slots.contains { $0.role == "crossReviewer" && $0.status == .failed }
+        }?.round
+        return CoverageSeries.verdict(readings: readings, preset: intake.chosenPreset ?? .featurePlan,
+                                      convergence: convergence,
+                                      refineRoundsRemaining: ahead.filter { $0.stage != running?.stage || $0.round != running?.round }.count,
+                                      crossCheckAhead: ahead.contains(where: \.crossCheck),
+                                      failedCrossCheckRound: failed)
+    }
+
+    private static func emptyNote(_ policy: CrossCheckPolicy?) -> String? {
+        switch policy {
+        case .firstAndLast?: "Coverage is measured on cross-check rounds: Refine 1 and the last Refine round."
+        case .every?: "Coverage is measured on cross-check rounds: every Refine round."
+        case .off?, nil: nil
+        }
     }
 
     private static func words(_ band: CoverageBand) -> (String, String) {
@@ -113,7 +142,8 @@ extension CoverageCellModel {
         if r.correlated {
             out.append("\(r.familyA.displayName) and \(r.familyB.displayName) overlap on nearly every issue; the estimate may be low")
         }
-        if r.matcher == .textSimilarity { out.append("Matched by text similarity: the integrator gave no groups") }
+        // Nothing proposed means nothing to match: the note would cast doubt on an empty reading.
+        if r.matcher == .textSimilarity, r.n1 + r.n2 > 0 { out.append("Matched by text similarity: the integrator gave no groups") }
         if r.matchersDisagree, let text = r.textSimilarityBoth {
             out.append("Text matching finds \(text) in common; the integrator found \(r.both)")
         }

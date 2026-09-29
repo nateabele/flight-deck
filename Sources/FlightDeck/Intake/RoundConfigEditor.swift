@@ -92,18 +92,23 @@ struct RoundConfigEditor: View {
     /// a same-family default would file the round straight into `crossCheckSameFamily` on the
     /// very first turn.
     private var crossCheckPicker: some View {
-        HStack(spacing: 8) {
-            Text("Cross-check").foregroundStyle(.secondary)
-            Picker("Cross-check", selection: crossCheckBinding) {
-                Text("Off").tag(CrossCheckPolicy.off)
-                Text("First and last").tag(CrossCheckPolicy.firstAndLast)
-                Text("Every round").tag(CrossCheckPolicy.every)
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Text("Cross-check").foregroundStyle(.secondary)
+                Picker("Cross-check", selection: crossCheckBinding) {
+                    Text("Off").tag(CrossCheckPolicy.off)
+                    Text("First and last").tag(CrossCheckPolicy.firstAndLast)
+                    Text("Every round").tag(CrossCheckPolicy.every)
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .fixedSize()
             }
-            .labelsHidden()
-            .pickerStyle(.menu)
-            .fixedSize()
+            .font(.callout)
+            if let note = Self.crossCheckUnavailableNote(config, available: available) {
+                Text(note).font(.caption).foregroundStyle(.secondary)
+            }
         }
-        .font(.callout)
     }
 
     private func harnessPicker(for keyPath: SlotKeyPath) -> some View {
@@ -293,6 +298,16 @@ struct RoundConfigEditor: View {
     static func crossCheckSameFamily(_ config: RoundConfig) -> Bool {
         guard let reviewer = config.reviewer, let crossReviewer = config.crossReviewer else { return false }
         return ModelFamily(reviewer.choice.harness) == ModelFamily(crossReviewer.choice.harness)
+    }
+
+    /// The caption under the Cross-check picker when the policy is on but no cross-check agent
+    /// could be seated: only one harness is installed, so `settingCrossCheck` had no other
+    /// family to seed. Without it the picker read "First and last" and nothing else changed —
+    /// no agent row, no marked rounds, and no word why (spec §3: the inspector explains).
+    static func crossCheckUnavailableNote(_ config: RoundConfig, available: AvailableModels) -> String? {
+        guard let policy = config.crossCheck, policy != .off, config.crossReviewer == nil, let reviewer = config.reviewer,
+              otherModel(for: reviewer.choice, available: available) == nil else { return nil }
+        return "Cross-checks need a second model family; only one is installed."
     }
 
     /// Sets the policy and, the moment it goes live with nothing seeded yet, fills

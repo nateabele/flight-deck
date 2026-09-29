@@ -192,8 +192,9 @@ public enum CoverageBand { case saturated, fewLeft, manyLeft, noOverlap, sameFam
 
 `CoverageSeries.readings(_ checkpoints:, loadFile:)` returns one reading per Refine checkpoint that
 has a `crosscheck.json`. A reading is "unmeasured" when `verdicts.json` is missing, since accepted
-issues can't be counted without it. A checkpoint without `crosscheck.json` yields no reading. That
-is how older tapes look, and they never read as 0.
+issues can't be counted without it — unless neither family proposed anything (`proposers` empty):
+no integrator runs then, so there is no `verdicts.json`, and found = 0 reads SATURATED. A checkpoint
+without `crosscheck.json` yields no reading. That is how older tapes look, and they never read as 0.
 
 ### 5.2 Counting
 
@@ -280,8 +281,8 @@ string:
 
 | Situation | Suggestion |
 |---|---|
-| Convergence is `converging(settled: true)` or `plateau`, and the target is missed | **"Stalled: converged, but coverage is short of the Feature plan target.** One more Refine round will cross-check again; if it stays short, the plan may need a third model family." |
-| The target is met at Refine 1, and ≥ 2 Refine rounds remain | **"Saturated at Refine 1.** Consider removing the remaining N Refine rounds (Run ▸ Remove a Round, ⌘-)." |
+| Convergence is `converging(settled: true)` or `plateau`, the target is missed, and no planned cross-check Refine round (the running one included) is still to land | **"Stalled: converged, but coverage is short of the Feature plan target.** One more Refine round will cross-check again; if it stays short, the plan may need a third model family." |
+| The target is met at Refine 1, and ≥ 2 Refine rounds remain (not counting the one running) | **"Saturated at Refine 1.** Consider removing the remaining N Refine rounds (Run ▸ Remove a Round, ⌘-)." |
 | `noOverlap` or `manyLeft` at the last cross-check | **"Coverage is short.** Codex and Claude are finding different issues; another round, or a higher fidelity, would search more." |
 | `correlated` | **"Codex and Claude found nearly the same issues.** The estimate may be low; similar models share blind spots." |
 | Cross-check agent failed or same family | the fact, and that coverage is unmeasured for that round |

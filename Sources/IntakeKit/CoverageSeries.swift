@@ -105,8 +105,11 @@ public enum CoverageSeries {
         var out = CoverageReading(checkpoint: checkpoint, round: round, familyA: a, familyB: b, matcher: matcher,
                                   n1: 0, n2: 0, both: 0, rejectedA: 0, rejectedB: 0, found: 0, unfound: nil,
                                   band: .unmeasured, correlated: false, textSimilarityBoth: nil, matchersDisagree: false)
-        // Accepted issues can't be counted without per-change verdicts: unmeasured, never 0.
-        guard let verdicts else { return out }
+        // Accepted issues can't be counted without per-change verdicts: unmeasured, never 0. The
+        // exception is a round where neither family proposed anything: the executor runs no
+        // integrator then and writes no `verdicts.json`, yet there is nothing left to judge —
+        // found = 0 is the best reading there is, not an unmeasured one.
+        guard let verdicts = verdicts ?? (count == 0 ? [] : nil) else { return out }
         let verdict = Dictionary(verdicts.map { ($0.index, $0.verdict) }, uniquingKeysWith: { first, _ in first })
         // Bounds-checked rather than a bare subscript: cleaning already keeps every index here
         // inside `0..<count`, but a malformed record must never trap this fold regardless — it
@@ -232,15 +235,19 @@ extension CoverageSeries {
 
     /// The stopping signal (spec §7): is coverage enough for this fidelity, and if not, what to
     /// do about it. `readings` is oldest first, `refineRoundsRemaining` counts the rounds the
-    /// planner would still run — both drive the "already saturated, stop early" suggestion.
+    /// planner would still run (not the one in flight: trim can't take that back) — both drive
+    /// the "already saturated, stop early" suggestion. `crossCheckAhead` says a planned
+    /// cross-check Refine round (the one running included) has not landed yet: coverage will be
+    /// measured again, so a settled shortfall is not a stall — without it a Feature plan settled
+    /// after R2 went amber STALLED asking for "one more round" while R3 was already that round.
     public static func verdict(readings: [CoverageReading], preset: Preset, convergence: ConvergenceVerdict?,
-                               refineRoundsRemaining: Int, failedCrossCheckRound: Int?) -> CoverageVerdict {
+                               refineRoundsRemaining: Int, crossCheckAhead: Bool, failedCrossCheckRound: Int?) -> CoverageVerdict {
         let target = CoverageTarget(preset)
         let latest = readings.last
         let targetMet = latest.flatMap(target.met)
         let stalled: Bool
         switch convergence {
-        case .converging(settled: true), .plateau: stalled = targetMet == false
+        case .converging(settled: true), .plateau: stalled = targetMet == false && !crossCheckAhead
         default: stalled = false
         }
         let state: CoverageState = latest == nil ? .awaiting : (stalled ? .stalled : .reading(latest!.band))
