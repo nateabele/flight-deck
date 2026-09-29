@@ -2045,3 +2045,19 @@ different things — `ReleaseCounts` is the one count ("Release 3 New Tasks" ove
   `setCollapsed(false, forProjectAt:)` alongside the selection write), or land on the collapsed
   project's header, as cycling does, instead of the session inside it. Left to the maintainer's call
   rather than picked here.
+
+## Level 3 swarm: branch strategy (the maintainer's ruling, 2026-09-28 — for when Operate is designed)
+
+- **Default now: one shared main branch per project** — the simplified mode. Agents coordinate
+  through Agent Mail file reservations and the pre-commit guard, so reservation-conflict
+  visibility (a "contested" session state, why a commit was blocked) is required UI, not polish.
+- **Later: configurable per project — worktrees as the advanced mode.** The two modes run
+  different processes, not one process with a flag:
+  - Worktree mode needs an **integrator** role: a merge coordinator and test runner that brings
+    agents' worktree branches back to main (serialize merges, run the suite, bounce failures back
+    to the owning agent/task).
+  - **Infrastructure stacks:** some apps' stack (servers, databases, services) only runs on the
+    one main checkout. Options must include a stack per worktree, a stack for selected worktrees
+    only, and a single shared stack, with the integrator testing against whichever applies.
+- Design Level 3 so both modes share the task/claim/tending surfaces and differ only in the
+  landing path (commit-to-main vs. integrator merge).
