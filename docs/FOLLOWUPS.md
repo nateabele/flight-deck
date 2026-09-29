@@ -1873,8 +1873,12 @@ feasibility unknown.
   fills in fixed defaults. Spec §6.2's detection — plan type and rate limits from
   `codex app-server`, `claude auth status`, per-value source labels, unreachable tiers shown as
   unavailable with a reason — is not built, so the Rounds editor's model field is free text.
-- **The convergence gauge.** Spec §6.6: every input it needs (change lists, snapshots, tallies)
-  is already in the round records; nothing reads them as a gauge yet.
+- **The convergence gauge — FIXED by the planning UI redesign (2026-09-28).**
+  `ConvergenceSeries` (IntakeKit) folds every Refine/Polish cycle into a verdict
+  (`tooEarly`/`converging`/`plateau`/`diverging`), folded off-main by
+  `IntakeService.refreshConvergence`, and the LCD's CONVERGENCE cell, the section heatmap and
+  the churn lane draw it (`ConvergenceCellModel.swift`, `ConvergenceViews.swift`). Its
+  thresholds are still untuned — see the planning-UI section below.
 
 **Accepted residuals:**
 
@@ -1893,7 +1897,11 @@ feasibility unknown.
   `RoundsLiveProbeTests` ran a codex-only Sketch in-process — but no app-spawned runner has yet
   taken a tape to review with claude seats under the full flag set. That is
   `docs/FLYWHEEL-INTAKE-CHECKLIST.md`'s "Plan from scratch" job (including its Full plan variant
-  and the `.qartez/` check).
+  and the `.qartez/` check). State on 2026-09-28: Nate's one real run (the fieldOS intake,
+  `~/Library/Application Support/Flight Deck/intakes/DF11B6D8-…/`, Full plan) has two
+  checkpoints (Draft ×4, Synthesis), status `stopped`, with Refine 1 started and stopped — so
+  no tape has yet reached Encode, Polish or review with real claude + codex agents under the
+  flag set. Read that intake; never write it.
 - **Main-thread cost during a run is unmeasured.** The tick stats `tape.json` per shaping intake,
   decodes it when it moves (every heartbeat of a running tape), reads `commands.jsonl` for a
   waiting tape, and probes the runner socket; heartbeat-only changes are no longer published.
@@ -1920,13 +1928,16 @@ seat, 2026-09-27 — it reached review first time, 277 s, ~452k input / ~19k out
   switched yet) is stored there and feeds nothing — the UI should follow the head.
 - **`editPlan` carries the whole plan, and `commands.jsonl` never shrinks.** `appendCommand`
   re-reads every line to pick the next `seq`, so a UI that sends an edit per keystroke on a
-  large plan makes each append slower. Send on save/blur; compacting acked lines is the fix if
-  that is not enough.
+  large plan makes each append slower. The editor as built commits on end-of-editing or after
+  2 s idle (`EditPolicy.idle`, `PlanTextView.swift`), never per keystroke — but each commit is
+  still the whole plan, and a long session of edit bursts still grows the file without bound.
+  Compacting acked lines is the fix if appends ever show up in a profile.
 - **The lost-edit check is line-exact.** A round that keeps an edited line but reflows it (or
   moves one word) counts it as lost; the warning over-reports rather than under-reports.
-- **No views.** The UI (Obsidian-style editor, diff overlay, per-hunk Revert, highlight-to-note)
-  is still being designed; every engine seam it needs is in `PlanLayers`, `NoteAnchor`,
-  `TapeStore.userEdits`/`notes(in:)` and the three new `TapeCommand`s.
+- **No views — FIXED by the planning UI redesign (2026-09-28).** The editable plan with its
+  edit layer, per-hunk and Revert-all, anchored notes and the notes rail are built under
+  `Sources/FlightDeck/Intake/Planning/PlanEditor/` on exactly these seams. What is left of them
+  is in the planning-UI and "unverified in the GUI" sections below.
 
 ## From the planning UI redesign (2026-09-28), the views landed on top of the round engine
 
@@ -1957,12 +1968,18 @@ seat, 2026-09-27 — it reached review first time, 277 s, ~452k input / ~19k out
   across the *current* round's finished seats — the only place a cost is known, since only
   claude states one and only once a seat finishes. Checkpoints record no cost, so there is no
   run-total figure to fall back to across rounds; a dash means "nobody in this round has said
-  yet", not "free".
+  yet", not "free". The raw figures do survive: each claude seat's `runs/<run>/activity.json`
+  keeps its `costUSD` after the round lands, so a run total for claude seats is a fold over
+  `runs/`, not new recording; codex seats have tokens only. The coverage design
+  ([FLIGHT-CONTROL-COVERAGE-HANDOFF.md](FLIGHT-CONTROL-COVERAGE-HANDOFF.md) §2.8) needs the same
+  fold for cost per accepted change.
 - **Esc inside the plan editor may not reach the heatmap.** `NSTextView` binds Esc to
   `complete:`, not `cancelOperation:`, while the editor has focus, so `.onExitCommand` may never
-  fire there even though it closes the heatmap correctly with focus anywhere else (T9b). If this
-  turns out to matter in the GUI checklist, `PlanNSTextView` could forward Esc while the heatmap
-  is open.
+  fire there even though it closes the heatmap correctly with focus anywhere else (T9b). The
+  pane-wide `.onExitCommand` (`IntakeDetailView.swift`, "Esc closes the heatmap from anywhere in
+  the pane") landed, and closes the heatmap, then the finished-round panel — but whether it
+  fires with the editor as first responder is still only a GUI question. If it doesn't,
+  `PlanNSTextView` could forward Esc while the heatmap or panel is open.
 
 - **Typing flushed as the plan reaches review can be dropped (final review #15, recorded, not
   fixed).** `PlanTextView.dismantleNSView` commits the last idle-debounce window of typing when
@@ -2065,3 +2082,172 @@ different things — `ReleaseCounts` is the one count ("Release 3 New Tasks" ove
     only, and a single shared stack, with the integrator testing against whichever applies.
 - Design Level 3 so both modes share the task/claim/tending surfaces and differ only in the
   landing path (commit-to-main vs. integrator merge).
+
+## Flight Control — unverified in the GUI (gathered 2026-09-28)
+
+Every planning-UI behaviour below passed its unit tests and offscreen renders, and none has been
+seen in the real app: agents can't drive the GUI (AGENTS.md rule 2), and
+`docs/FLYWHEEL-INTAKE-CHECKLIST.md`'s "Planning UI" section (and its "Plan from scratch" job)
+has never been walked. Each item is on that checklist; this list is what the build reports
+flagged as most likely to differ from the tests. Nate's to run.
+
+- **Stop's confirmation defaults to Cancel.** `confirmationDialog("Stop the run?")` in
+  `IntakeDetailView.swift` forces Cancel with `.keyboardShortcut(.defaultAction)`, but macOS picks
+  a dialog's default itself. Check that Return after ⌘. keeps the round.
+- **Tab reaches the CONVERGENCE cell, agent rows and finished-round cards**, and Return/Space
+  acts on them (final review #8). The churn lane's NSView markers still can't take Tab focus;
+  their keyboard route is the heatmap plus the "Show Versions" VoiceOver action.
+- **Opening the heatmap from the pinned bar** scrolls the card into view and the heatmap never
+  covers the plan (final review #11, fixed without a live repro).
+- **Esc with the plan editor focused** closes the heatmap, then the round panel (see the
+  planning-UI entry above).
+- **⌘- (Remove a Round) and ⌘= (Extend) reach the Run menu past the Ghostty surface**, rather
+  than changing the terminal font size. ⌘- is `unbind` in `GhosttyDefaults.conf`; the live key
+  path is unchecked.
+- **+/− and play/pause show at once with no bounce back** (`TapeOverlay`): measured 0–2 ms
+  in-process, never on screen; `startRunner` still spawns on the main actor in the same turn as
+  the click (measured ~0 ms, unmeasured in the GUI).
+- **The notes-rail close race** (`ProjectViewInspectorLiveTests`) was reproduced offscreen only;
+  whether it is the path Nate hit in the real window's animation timing is unconfirmed. Check
+  ⌥⌘I and Hide Inspector, immediately and after settling, and per-project state across a
+  relaunch.
+- **A selected intake row's secondary text follows the key-window accent highlight**
+  (`IntakeRow.swift`, hierarchical `.secondary`); the offscreen List only draws the gray
+  unemphasized selection.
+- **The Intakes rail collapse jumps once, then slides** (`IntakeRail.swift`), by design so the
+  plan isn't re-laid each frame — judge the feel. The divider is now a SwiftUI `DragGesture`,
+  not an `NSSplitView` tracking loop, so whole-plan layout slices can run between drag ticks on
+  a 2,000-line plan; drag smoothness is unmeasured.
+- **A plain click on a link places the caret; ⌘-click opens it** (`PlanLinks`,
+  `PlanNSTextView.clicked(onLink:)`). Whether an editable TextKit 2 view calls
+  `clicked(onLink:)` on a plain click, and how caret/drag feel over link text, couldn't be
+  synthesized. Same for **VoiceOver activating a link**.
+- **Hover cards: the 350 ms intent delay, warm switching and the 500 ms cool-down**
+  (`HoverIntent`), the fade/scale entrance, and click/Esc/scroll closing them. Live pointer
+  timing can't be reached offscreen.
+- **Finished rounds: the panel's height animation, the caret sliding between cards, no flicker
+  on the 1 Hz tick, Esc, and Reduce Motion** (`FinishedRounds.swift`). Renders show settled
+  frames only.
+- **Folding and the section cue:** ⌥⌘←/→ fold with the editor focused, the chevron on hover,
+  auto-unfold on Find or caret landing, and the pinned board's "§ N. HEADING" breadcrumb
+  appearing only once the heading scrolls under the block (`PlanFolding.swift`,
+  `PlanOutline.swift`).
+- **One scroll for the plan:** wheel over the plan and over the pinned block scrolls the page;
+  the caret stays visible typing or pasting at the bottom and under the pinned block; notes
+  bands stay on their text after relayout; Find (⌘F) reveal and IME composition (both go
+  through the same `scrollRangeToVisible` override, never run live).
+
+## Flight Control — known gaps and limits (gathered 2026-09-28)
+
+- **Nothing of Flight Control crosses the phone link.** The iOS app has no intake, tape or plan
+  view and no wire types for them; design not started. Open questions (what the phone is for,
+  read-only first vs interactive, snapshot vs request/reply, notifications, iPad) are in
+  [FLIGHT-CONTROL-MOBILE-HANDOFF.md](FLIGHT-CONTROL-MOBILE-HANDOFF.md) §7.
+- **Only two harnesses, so only two model families.** `Harness` is `codex | claude`
+  (`Sources/IntakeKit/Intake.swift:24`), and one reviewer slot serves every Refine round
+  (`RoundConfig.reviewer`) — by default always codex, so reviewer diversity is zero. Coverage
+  metrics and the shadow probe that would tell Nate whether Gemini/Grok/Qwen add anything are
+  designed in [FLIGHT-CONTROL-COVERAGE-HANDOFF.md](FLIGHT-CONTROL-COVERAGE-HANDOFF.md).
+- **⏹ and notes are not overlaid** (`TapeOverlay.swift`). With ⏹ queued ahead of a + or play,
+  STOPS AT can show the old target until the runner acks ("Stopping…" is showing meanwhile).
+  The notes rail keeps its own optimistic copy. Play on a paused tape clears a FAILED/STOPPED
+  chip at once — intended, but visible.
+- **A trim sent with no live runner spawns one to fold it** (the same path `+` takes), so the
+  board waits for that spawn before the runner confirms. The engine would also let a trim remove
+  a failed round (it doesn't know which round failed); the UI never offers it.
+- **Heatmap jump geometry uses estimates.** The offset reads the document clip's height at the
+  moment of the jump, and the pinned block's height falls back to 300 pt before its first
+  measurement (`PageJump`, onescroll report).
+- **A heatmap cell opens Diff vs Previous, not the editor**, so there is no fold to open on that
+  path; notes-rail cards have no click-to-scroll action, so a note inside a folded section is
+  placed at its heading instead.
+- **Folds in the final plan last one editor lifetime.** Past shaping, `IntakeService` drops the
+  fold store on its next poll (`PlanFolding`).
+- **The versions card still covers text below its heading.** It now hangs below the heading
+  line and never covers the line itself (`CardPlacement.Side.belowLine`), but at pane width
+  there is no side room, so the lines under it are hidden while it is open.
+- **Link rendering quirks.** TextKit 2 ignores `.underlineStyle`, so the ⌘-hover underline is a
+  subview, removed on any text change; the ⌘-hover tip covers part of the next line while ⌘ is
+  held; relative links resolve against the project, never the plan's own location (it has none
+  — the plan lives in the checkpoint store).
+- **Hover-card flip is a 2D projection** (`TileFlip`, y-scale by cos θ), because
+  `layer.render(in:)` drops 3D transforms and blanked the mid-flip renders. No perspective taper
+  on screen; restoring `rotation3DEffect` is one line but loses the render frames. The card's
+  event monitor closes it on *any* scroll wheel event in the app while it is up.
+- **The Intakes list's expanded width doesn't persist** — it resets per view mount, as it did
+  under `HSplitView`.
+- **Old tapes mix line-count units.** Rounds recorded before `MarkdownUnwrap` counted hard-wrapped
+  source lines; later rounds count about one line per block. Nothing is converted, so churn and
+  "N lines" on a pre-unwrap tape jump at the boundary. A soft newline the human types inside a
+  paragraph is joined on store (renders the same).
+- **A failed tape's idle clock can be up to a minute stale** when it has `failedAt` but no next
+  slot: its minute ticks align to `failedAt` while the board counts from the head.
+- **`PlanNotesBridge` re-subscribes to enclosing clip views on `attach`**, which runs on every
+  view update; an editor re-parented with no update following would miss the outer scroll until
+  the next one. Not expected in practice.
+- **Finished-round card truncation is SwiftUI tail truncation**, not word-boundary; every field
+  is short by construction and none truncated at 184 pt, so it only matters if a field grows.
+
+## Flight Control — tooling and tests (gathered 2026-09-28)
+
+- **`scripts/test-unit.sh` exits 0 when the sharded run FAILS.** It tracks `rc` through the
+  shards and the serial lane but never exits with it: the last command is the
+  `echo "** SHARDED UNIT RUN … **"` banner, so the script's status is the echo's. Every caller
+  (agents, `&&` chains, any future CI) sees success on a red run; today the only reliable signal
+  is reading the final PASSED/FAILED line. Fix: `exit "$rc"` after the banner. (The
+  `FD_TEST_FILTER` path ends in a bare `exit` right after xctest, so it keeps xctest's own
+  status and is unaffected.)
+- **`CodexPinReconcileTests.testATickInTheGapBeforePassNowResumesCannotOverlapItsOwnPass` flaked
+  once under a full sharded run**, although its class is already in the serial lane
+  (`scripts/test-serial-classes.txt`). It passed alone three times and on the rerun. The serial
+  lane runs after the shards, so the load it saw was the machine's, not a sibling shard's — if it
+  recurs, give it a flake-hunt loop rather than rerunning the suite.
+- **`ProjectViewInspectorLiveTests` probably flashes titled windows on the real screen.** It
+  parks a plain titled `NSWindow` at −10,000 (`ProjectViewInspectorLiveTests.swift:130`); AppKit
+  constrains a titled window onto a screen when it is ordered front, which the rail work caught
+  happening. Move it to `ParkedWindow` (`ProjectViewIntakeListLiveTests.swift:188`, overrides
+  `constrainFrameRect`).
+- **The phone target has no terminology guard.** `TerminologyGuardTests` scans
+  `Sources/FlightDeck` and `Sources/IntakeKit` only, so a "bead", "seat" or "Flywheel" in a
+  `Sources/FlightDeckMobile` string would ship. Matters as soon as Flight Control reaches the
+  phone; extend the scan (and run it under `test-ios.sh` or read the files from the mac suite).
+- **Two render fixtures still say "seats failed after 3 retries"** —
+  `SplitFlapTextRenderTests.swift:30` and `DeparturesBoardRenderTests.swift:41`. Synthetic
+  diagnosis text no production path generates; cosmetic, but it is what the renders show.
+- **The link tests were written with the code, not red-first** (`PlanLinksTests`); the
+  scripts-open-in-editor follow-up was red-first.
+- **The `flywheel-intake` branch, its worktree (`.claude/worktrees/flywheel-intake`) and the
+  `.superpowers/sdd/2026-09-27-planning-ui-redesign/` workspace still exist** after the merge to
+  master. Deleting them is Nate's call.
+
+## Flight Control — next phases (gathered 2026-09-28)
+
+- **Coverage × fidelity — design not started.** Metrics for whether the reviewing families have
+  searched the plan's issue space (capture–recapture over accepted changes, per-family marginal
+  yield), fidelity presets as coverage budgets, a convergence-AND-coverage stopping rule, and a
+  shadow probe for trying Gemini/Grok/Qwen on frozen checkpoints — which needs a harness beyond
+  claude/codex (an OpenAI-compatible endpoint, say). Handoff:
+  [FLIGHT-CONTROL-COVERAGE-HANDOFF.md](FLIGHT-CONTROL-COVERAGE-HANDOFF.md).
+- **Flight Control on the phone — design not started.** Handoff:
+  [FLIGHT-CONTROL-MOBILE-HANDOFF.md](FLIGHT-CONTROL-MOBILE-HANDOFF.md).
+- **Level 3 "Operate" — not started.** Flight Deck as the swarm console rather than its
+  observer. The branch-strategy ruling is recorded above ("Level 3 swarm: branch strategy");
+  the rest, none of it designed:
+  - **Launch a swarm from released tasks** — pick with `bv`, claim, spawn agents into the
+    project's sessions.
+  - **A fleet table** — agent × current task × state × last active × account, a row jumping to
+    that session's terminal, built on `FleetService`/`FleetProjection`.
+  - **Reservation conflicts as a session state ("contested") and commit-guard visibility** — why
+    a commit was blocked. Required, not polish, in the shared-main default mode. Today the
+    `reservations` lane is a permanent nil-stub (see Observe Level 1 above), so this starts
+    with confirming `am`'s positive-path row shape.
+  - **Tending actions:** reclaim & respawn a stuck agent's in-progress task; "fresh eyes" (a
+    canned review prompt to a chosen agent); "reread AGENTS.md"; a quiet tend-cadence nudge
+    ("3 projects not tended in 14 min"); a `caam` account/rate-limit strip.
+  - **An Agent Mail inbox anchored to tasks**, unread threads reading like an unread session.
+  - **A task-graph convergence gauge** for the swarm (ready / in progress / blocked / done per
+    project), distinct from the planning rounds' convergence verdict.
+  - Unresolved: whether `AgentAdapter`/`AgentKind` should share `ntm`'s agent taxonomy, and
+    whether `ntm serve`'s event stream is worth a transport spike (its schema was never
+    inspected; [FLYWHEEL-SPIKE-FINDINGS.md](FLYWHEEL-SPIKE-FINDINGS.md) already ruled it out as
+    FD's own runner).
