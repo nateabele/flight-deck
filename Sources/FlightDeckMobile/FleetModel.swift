@@ -1,6 +1,7 @@
 import FleetKit
 import Foundation
 import Observation
+import SwiftUI
 import UIKit
 
 /// Everything both screens talk to, and nothing more.
@@ -16,6 +17,10 @@ import UIKit
 @MainActor
 @Observable
 final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, PresenceReporting, TranscriptSearching, IntakeFetching {
+    /// The Sessions list's navigation stack. Lives here, not in `FleetListScreen`'s `@State`,
+    /// because the in-app attention banner (app level) and the board strip (deep in the stack)
+    /// must push onto the same stack the list owns. Observed: the stack binds to it.
+    var path = NavigationPath()
     private(set) var mac: PairedMac?
     private(set) var fleet = FleetSnapshot.empty
     private(set) var state = FleetConnector.State.idle

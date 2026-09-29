@@ -12,12 +12,9 @@ struct FleetListScreen: View {
     /// candidate wiring belongs to THIS screen — see `refreshSearchCandidates()` — while the
     /// ranking and debounce machinery it owns is exactly what `SessionSearchModel` already is.
     @State private var search: SessionSearchModel
-    /// A binding path rather than plain `NavigationLink`s, and only because search needs it:
-    /// a `.session` result pushes straight away, but a `.conversation`/`.project` result opens
-    /// only after a round trip to the Mac answers — nothing to push a link value with a wait
-    /// in between. Every OTHER push in this screen still happens the ordinary
-    /// `NavigationLink(value:)` way; this only adds a second way to reach the same destination.
-    @State private var path = NavigationPath()
+    // The navigation path lives on `FleetModel` (`model.path`) so the app-level banner can push
+    // too. It is a binding path rather than plain `NavigationLink`s only because search needs
+    // it: a `.conversation`/`.project` result opens only after a round trip to the Mac answers.
 
     init(model: FleetModel) {
         self.model = model
@@ -49,7 +46,7 @@ struct FleetListScreen: View {
 
 
     var body: some View {
-        NavigationStack(path: $path) {
+        NavigationStack(path: Bindable(model).path) {
             List {
                 // Empty query: today's screen, byte for byte. Non-empty: results swap in
                 // whole, per the brief — nothing here is filtered in place, because the two
@@ -67,6 +64,12 @@ struct FleetListScreen: View {
                     }
                     ForEach(model.fleet.projects) { project in
                         Section {
+                            ForEach(Self.intakeRows(project)) { intake in
+                                NavigationLink(value: IntakeRoute.intake(intake.id)) {
+                                    IntakeRow(summary: intake, frozenAt: frozenAt)
+                                }
+                                .listRowInsets(Self.rowInsets)
+                            }
                             // Keyed on the session's tab id, never its conversation id — the
                             // latter is not stable across a re-pin and, for codex, differs
                             // from the tab id from birth.
@@ -264,7 +267,7 @@ struct FleetListScreen: View {
         case .session, .project:
             guard let id = Self.localDestination(for: result, in: model.fleet.projects)
             else { return }
-            path.append(id)
+            model.path.append(id)
         case .conversation(let conversationID):
             model.requestOpenConversation(
                 conversationID: conversationID, projectPath: result.projectPath
@@ -274,7 +277,7 @@ struct FleetListScreen: View {
                     if let offset = result.offset {
                         model.timelineModel(for: id).openAt(offset)
                     }
-                    path.append(id)
+                    model.path.append(id)
                 case .failure(let error):
                     // Task 7 was re-opened specifically to split `unknown_conversation` from
                     // `launch_failed` — see `TimelineFrames.FleetRequestError`'s doc comment —
@@ -311,6 +314,16 @@ struct FleetListScreen: View {
                 return "\(macName) couldn't open that conversation."
             }
         }
+    }
+
+    /// Ordered intakes for a project's section; empty when collapsed or when there are none.
+    static func intakeRows(_ project: WireProject) -> [WireIntakeSummary] {
+        project.isCollapsed ? [] : IntakeRowStyle.ordered(project.intakes ?? [])
+    }
+
+    /// Clocks freeze at the last moment the Mac was live, so a stale list never keeps counting.
+    private var frozenAt: Date? {
+        if case .lost = model.state { model.lastLive } else { nil }
     }
 
     /// Tighter than the platform default, and the only lever pulled for density that touches
@@ -379,6 +392,14 @@ struct FleetListScreen: View {
                 ? "Expand \(project.name)" : "Collapse \(project.name)")
 
             Spacer()
+            // Shown even when collapsed: the point is to surface what needs you from a closed group.
+            if let badge = IntakeRowStyle.badge(project.intakes) {
+                Text(badge).font(.caption2.weight(.bold))
+                    .padding(.horizontal, 7).padding(.vertical, 1)
+                    .background(Capsule().fill(Color.orange))
+                    .foregroundStyle(.black)
+                    .accessibilityLabel(badge)
+            }
             Text("\(project.sessions.count)").font(.caption.monospacedDigit())
 
             // Tap creates with the project's defaults; press and hold opens the menu. A plain

@@ -573,4 +573,15 @@ final class FleetListScreenTests: XCTestCase {
         XCTAssertFalse(message.isEmpty)
         XCTAssertTrue(message.contains("Dana's Mac"))
     }
+
+    func testIntakeRowsComeOrderedAndHideWithTheProject() {
+        let attention = WireIntakeSummary(id: UUID(), title: "A", state: "needsAnswers", needsAttention: true, createdAt: Date(timeIntervalSinceReferenceDate: 1))
+        let flying = WireIntakeSummary(id: UUID(), title: "B", state: "shaping", needsAttention: false, runStatus: "running", createdAt: Date(timeIntervalSinceReferenceDate: 2))
+        var project = WireProject(id: UUID(), name: "larkOS", path: "/w", intakes: [flying, attention])
+        XCTAssertEqual(FleetListScreen.intakeRows(project).map(\.id), [attention.id, flying.id])
+        project.isCollapsed = true
+        XCTAssertEqual(FleetListScreen.intakeRows(project), [])
+        project.isCollapsed = false; project.intakes = nil
+        XCTAssertEqual(FleetListScreen.intakeRows(project), [])
+    }
 }
