@@ -4870,6 +4870,18 @@ final class SessionStore: ObservableObject {
     ///   `addProject(at:selecting:)` rather than taking `addProject`'s own default, so a
     ///   client's search landing on a project new to the sidebar cannot select unconditionally
     ///   through a path this parameter forgot to reach.
+    /// Un-collapses the project holding `id`, so a ⌘K jump to an already-open tab lands on a
+    /// visible row. Without it the selection moves to a tab whose project renders only its
+    /// header, and the user cannot see where search took them. Only for a desk jump
+    /// (`selecting`): a client's `.select` moves nothing on screen, so there is no hidden row
+    /// to reveal and the sidebar must not change under the user for it.
+    private func revealProject(of id: UUID) {
+        guard let at = locate(id), repos[at.repo].isCollapsed else { return }
+        repos[at.repo].isCollapsed = false
+        emit(.projectCollapsed(id: repos[at.repo].id, isCollapsed: false))
+        persist()
+    }
+
     @discardableResult
     func openConversation(
         _ activation: SearchActivation.Activation,
@@ -4890,6 +4902,7 @@ final class SessionStore: ObservableObject {
             // a stale id (a tab closed between `plan` and this call) still reports `nil`
             // instead of an id that does not resolve to anything.
             guard locate(id) != nil else { return nil }
+            if selecting { revealProject(of: id) }
             select(id, selecting: selecting)
             return id
         case .resume(
@@ -4939,6 +4952,7 @@ final class SessionStore: ObservableObject {
         // second `claude --resume` starts on a conversation that already has a tab, two
         // processes appending one transcript and colliding in claude's pid-keyed registry.
         if let live = repos.flatMap(\.sessions).first(where: { $0.pinnedConversationID == pinned }) {
+            if selecting { revealProject(of: live.id) }
             select(live.id, selecting: selecting)
             return live.id
         }

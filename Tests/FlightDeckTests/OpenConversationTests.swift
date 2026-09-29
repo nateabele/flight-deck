@@ -144,6 +144,49 @@ final class OpenConversationTests: XCTestCase {
         XCTAssertEqual(store.repos.first?.isCollapsed, false)
     }
 
+    /// ⌘K on a tab that is already open: selecting a row the collapsed project hides would
+    /// land the desk on a tab with no visible sidebar row, so the project springs open.
+    func testSelectingAnAlreadyOpenTabInACollapsedProjectUncollapsesIt() {
+        let store = makeStore()
+        let session = store.newSession(in: projectA)
+        let elsewhere = store.newSession(in: projectB)
+        store.setCollapsed(true, forProjectAt: store.repos[0].id)
+        store.selectSession(elsewhere.id)
+
+        store.openConversation(.select(session.id))
+
+        XCTAssertEqual(store.selectedSessionID, session.id)
+        XCTAssertEqual(store.repos.first { $0.url == projectA }?.isCollapsed, false)
+    }
+
+    /// The same, through the in-store already-live guard rather than `plan`'s `.select`.
+    func testResumingAnAlreadyOpenConversationInACollapsedProjectUncollapsesIt() {
+        let store = makeStore()
+        let session = store.newSession(in: projectA)
+        store.newSession(in: projectB)
+        store.setCollapsed(true, forProjectAt: store.repos[0].id)
+
+        store.openConversation(.resume(
+            conversationID: session.pinnedConversationID.uuidString, projectPath: projectA.path,
+            title: "Again", agent: .claude, workingDirectory: projectA.path, transcriptPath: ""
+        ), directoryExists: { _ in true })
+
+        XCTAssertEqual(store.selectedSessionID, session.id)
+        XCTAssertEqual(store.repos.first { $0.url == projectA }?.isCollapsed, false)
+    }
+
+    /// A client's `.select` moves nothing on the desk, so it has no hidden row to reveal —
+    /// springing the project open would change the sidebar for a jump that never happened there.
+    func testAClientSelectLeavesACollapsedProjectCollapsed() {
+        let store = makeStore()
+        let session = store.newSession(in: projectA)
+        store.setCollapsed(true, forProjectAt: store.repos[0].id)
+
+        store.openConversation(.select(session.id), selecting: false)
+
+        XCTAssertEqual(store.repos.first?.isCollapsed, true)
+    }
+
     // MARK: - Re-adding a project that left the sidebar
 
     func testOpeningAConversationInAProjectThatLeftTheSidebarBringsItBack() {
