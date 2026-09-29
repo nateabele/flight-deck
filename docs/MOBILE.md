@@ -4,6 +4,8 @@
 "Fleet replication" section of [ARCHITECTURE.md](ARCHITECTURE.md)). This doc is what only a
 device on a network can prove, plus how to get a build onto one.
 
+Flight Control (planning intakes) is not on the phone yet; its design handoff is [FLIGHT-CONTROL-MOBILE-HANDOFF.md](FLIGHT-CONTROL-MOBILE-HANDOFF.md).
+
 **Some of it now runs.** `FlightDeckMobileTests` is an app-hosted unit suite on the simulator —
 `./scripts/test-ios.sh` — and it covers the phone's decision-making: the typed-code field, the
 two orderings `FleetModel` imposes on the keychain, and the status vocabulary the phone shares
