@@ -14,6 +14,13 @@ struct IntakeScreen: View {
                 ContentUnavailableView("This intake is no longer on your Mac", systemImage: "airplane.departure")
             } else if let detail = model.detail {
                 content(detail)
+            } else if model.failure != nil {
+                // A first fetch that failed for any other reason would otherwise spin forever.
+                // The raw error is not shown: it names wire codes, not anything to do.
+                VStack(spacing: 12) {
+                    Text("Couldn't load this intake.").font(.subheadline).foregroundStyle(.secondary)
+                    Button { model.refresh() } label: { Text("Retry").font(.subheadline) }
+                }
             } else {
                 ProgressView()
             }
@@ -53,7 +60,7 @@ struct IntakeScreen: View {
 
     @ViewBuilder private func sections(for d: WireIntakeDetail, now: Date) -> some View {
         if let open = d.questions?.open {
-            Section("Round \(d.questions!.answered.count + 1) · \(open.count) questions") {
+            Section("Round \(d.questions!.answered.count + 1) · \(open.count) question\(open.count == 1 ? "" : "s")") {
                 ForEach(Array(open.enumerated()), id: \.offset) { i, q in
                     Text("\(i + 1). \(q)").font(.subheadline)
                 }
@@ -102,7 +109,7 @@ struct IntakeScreen: View {
                         HStack {
                             VStack(alignment: .leading, spacing: 1) {
                                 Text(r.name).font(.subheadline)
-                                Text(Self.roundFact(r)).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                                roundFactText(r).font(.caption).foregroundStyle(.secondary).lineLimit(2)
                             }
                             Spacer()
                             Text(RoundFacts(r).time).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
@@ -126,7 +133,21 @@ struct IntakeScreen: View {
 
     static func roundFact(_ r: WireRound) -> String {
         if let v = r.verdicts, let c = r.changeCount { return "\(c) changes · agreed \(v.agreed) · somewhat \(v.somewhat) · declined \(v.declined)" }
-        if r.linesAdded > 0 || r.linesRemoved > 0 { return "+\(r.linesAdded) −\(r.linesRemoved)" + (r.outcome == "fallback" ? " · fell back ⇄" : "") }
-        return r.outcome == "fallback" ? "fell back ⇄" : ""
+        if r.linesAdded > 0 || r.linesRemoved > 0 { return "+\(r.linesAdded) −\(r.linesRemoved)" }
+        return ""
+    }
+
+    /// Whether the fact line carries "fell back ⇄" — only beside line counts or alone, as before.
+    static func fellBack(_ r: WireRound) -> Bool {
+        r.outcome == "fallback" && !(r.verdicts != nil && r.changeCount != nil)
+    }
+
+    /// The fallback fragment is amber (spec §3: fallback is an exception), as it is in round
+    /// detail; the rest of the line stays secondary.
+    private func roundFactText(_ r: WireRound) -> Text {
+        let base = Self.roundFact(r)
+        guard Self.fellBack(r) else { return Text(base) }
+        let fragment = Text("fell back ⇄").foregroundStyle(.orange)
+        return base.isEmpty ? fragment : Text("\(base) · \(fragment)")
     }
 }

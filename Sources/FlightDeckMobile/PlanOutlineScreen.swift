@@ -26,7 +26,8 @@ struct PlanOutlineScreen: View {
                             Spacer()
                             if let n = counts[s.blockIndex] {
                                 Text("\(n)").font(.caption2.weight(.bold)).padding(.horizontal, 6)
-                                    .background(Capsule().fill(Color.yellow.opacity(0.2))).foregroundStyle(.yellow)
+                                    // Black on solid yellow: yellow on a yellow wash vanished in light mode.
+                                    .background(Capsule().fill(Color.yellow)).foregroundStyle(.black)
                                     .accessibilityLabel("\(n) note\(n == 1 ? "" : "s")")
                             }
                             churnLane(s.churn, amber: s.diverging)
