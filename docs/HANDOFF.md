@@ -4,7 +4,20 @@
 
 Start here if you're picking up Flight Deck fresh. This is the map; the linked docs have the detail.
 
-> **▶ Flight Control on the phone (2026-09-28) — design not started.** Handoff for the session that designs it: [FLIGHT-CONTROL-MOBILE-HANDOFF.md](FLIGHT-CONTROL-MOBILE-HANDOFF.md).
+> **▶ Flight Control on the phone (2026-09-29) — Phase 1 (watch, read-only) built on branch `fc-mobile-watch`.**
+> The phone lists a project's intakes at the top of its section (with a "N need you" badge and an
+> in-app banner on a live transition to needing you), and opens an intake to its board strip,
+> agents, rounds, round detail, clarifications, plan outline and plan reader (changes and notes
+> shown, not editable). What crosses the wire: a sequenced `project.intakes` event of
+> `WireIntakeSummary`s, sent only to peers claiming the `flightControl` capability, so an older
+> phone never sees it; and two requests, `intake.detail` (etag-polled while an intake's screens
+> are open) and `intake.plan`. Wire types are in `Sources/FleetKit/IntakeWire.swift`; the Mac side
+> is `Sources/FlightDeck/Fleet/` plus `SessionStore.intakeSummaries`; the phone side is flat in
+> `Sources/FlightDeckMobile/` (`FlightControlModel`, `IntakeDetailModel`, `IntakeScreen`,
+> `BoardStrip`, `AgentRow`, `RoundDetailScreen`, `PlanOutlineScreen`, `PlanReaderScreen`, …).
+> Phases 2 (steer: transport, extend/trim, notes) and 3 (unblock, start, finish: answers,
+> fidelity, retry, review and release) are planned from the same spec.
+> - **Spec:** [superpowers/specs/2026-09-29-flight-control-mobile-design.md](superpowers/specs/2026-09-29-flight-control-mobile-design.md) (§11.1: as built) · **Plan:** [superpowers/plans/2026-09-29-flight-control-mobile-watch.md](superpowers/plans/2026-09-29-flight-control-mobile-watch.md) · **Terrain:** [FLIGHT-CONTROL-MOBILE-HANDOFF.md](FLIGHT-CONTROL-MOBILE-HANDOFF.md) · **Device checks:** [MOBILE.md](MOBILE.md) items 75–79.
 
 > **▶ Flight Control coverage × fidelity (2026-09-28) — design not started.** How to tell whether Claude + Codex review a plan well enough, what a Gemini/Grok/Qwen reviewer would add, and fidelity as a coverage budget: [FLIGHT-CONTROL-COVERAGE-HANDOFF.md](FLIGHT-CONTROL-COVERAGE-HANDOFF.md).
 

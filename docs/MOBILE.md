@@ -567,11 +567,36 @@ page.
     out on every frame of it. The fallback, if it ever is not, is a `CADisplayLink` sampling
     the root view's `keyboardLayoutGuide.layoutFrame` for as long as the drag lasts, in that
     same file.
+75. **Watch a Flight Control run from the phone.** Start a Full plan on the Mac for a project
+    with Flight Control enabled. On the phone the intake sits at the TOP of that project's
+    section with a blue pill "REFINE N" (or DRAFT) and a clock that counts up once a second.
+    Open it: the strip shows REFINE N OF M, the clock matches the Mac's IN THE AIR within a
+    second or two, and the tape's dots match the Mac's board slot for slot. Wrong: a clock
+    that jumps backwards when the screen refreshes, a negative clock, or a dot count that
+    differs from the Mac's board.
+76. **Get the banner once, and only once.** Leave the phone on the Sessions list. On the Mac,
+    let triage reach Needs answers. The banner drops in within about two seconds, reads
+    "<title> needs answers", and a tap opens the intake. Background the phone, come back: no
+    second banner. Force-quit and relaunch the phone app: no banner (the badge "1 needs you"
+    is there instead). Wrong: a banner on relaunch, or none at all while the list is open.
+77. **Pull the network during a run.** With an intake open, turn on Airplane Mode. The screen
+    dims, the clocks STOP and show the no-signal mark; they do not keep counting. Turn it off:
+    the clocks resume at the Mac's true value, without counting backwards.
+78. **Read the plan and its changes.** From the intake open Plan: sections are listed with
+    churn bars; a section the Mac's convergence flags is amber. Open a section: the reader
+    lands on it. Tap Changes: blocks the last round added are tinted green and removed ones
+    struck through. A note left on the Mac shows as a yellow wash on its passage; tap it to
+    read it. Wrong: a note on the wrong paragraph, or a note that is on the Mac but nowhere on
+    the phone (it should at worst be under "Notes not pinned to a passage").
+79. **Pair an older phone build.** Install a phone build from before this change against a Mac
+    with it, and run a Flight Control round on the Mac for a few minutes. The old phone stays
+    connected and shows sessions as before. Wrong: the old phone's connection drops or loops
+    when an intake changes.
 
 ## A second checklist: the iOS plumbing
 
-The sixty-one items above test the *feature* — that pairing, replication, resume, revocation, and
-now typing into and answering a live agent behave. These fifteen test the *app*, and they are
+The seventy-nine items above test the *feature* — that pairing, replication, resume, revocation,
+typing into and answering a live agent, and watching Flight Control behave. These fifteen test the *app*, and they are
 separated because they have a different character: each one was identified during review or
 execution as something no amount of reading or type-checking on the build machine could settle,
 and each has a specific observable outcome.

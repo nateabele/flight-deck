@@ -59,6 +59,9 @@ enum TerminologyScan {
         // "beads" as the snapshot-field key the two correlate on — never displayed.
         "ObserveDrawer.swift": ["beads"],
         "FlywheelProjection.swift": ["beads"],
+        // The phone's `IntakeRowStyle.presetName` matches the `Preset` wire raw value `"bead"`
+        // (a `case` pattern) in order to SHOW "Single task" — the literal is compared, never drawn.
+        "IntakeStyle.swift": ["bead"],
     ]
 
     /// IntakeKit files whose literals are all agent- or `br`-facing: prompts and schemas an agent
@@ -215,6 +218,14 @@ final class TerminologyGuardTests: XCTestCase {
     func testNoUserVisibleStringSaysBead() throws {
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()   // …/Tests/FlightDeckTests/Intake/Planning
             .appendingPathComponent("../../../../Sources/FlightDeck").standardized
+        let offenders = try TerminologyScan.offenders(under: root, allow: TerminologyScan.internalAllowList)
+        XCTAssertEqual(offenders, [], offenders.joined(separator: "\n"))
+    }
+
+    /// The phone had no guard (handoff §0.5); Flight Control's words reach it now.
+    func testNoUserVisiblePhoneStringSaysBeadFlywheelOrSeat() throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .appendingPathComponent("../../../../Sources/FlightDeckMobile").standardized
         let offenders = try TerminologyScan.offenders(under: root, allow: TerminologyScan.internalAllowList)
         XCTAssertEqual(offenders, [], offenders.joined(separator: "\n"))
     }

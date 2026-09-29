@@ -11,11 +11,14 @@ This doc maps the terrain. It does not design the mobile UI — that is your job
 
 ## 0. The five things you must not miss
 
-1. **No Flight Control data crosses the wire today. None.** `rg -i 'intake|flywheel|tape|checkpoint'`
-   over `Sources/FleetKit`, `Sources/FlightDeck/Fleet` and `Sources/FlightDeckMobile` returns
-   nothing. `WireProject` is `id, name, path, isCollapsed, sessions` (`Sources/FleetKit/Wire.swift`);
-   the desktop's intake-aware project rollup (`SessionStore.collapsedStatus`, which counts
-   `intakeService.attentionCount`) is not projected. The phone does not know intakes exist.
+1. **~~No Flight Control data crosses the wire today.~~ Superseded 2026-09-29 by Phase 1 (watch).**
+   What was true when this was written: nothing about intakes reached the phone. What crosses now
+   (spec: `docs/superpowers/specs/2026-09-29-flight-control-mobile-design.md`, §6 and §11.1): a
+   sequenced `project.intakes` event carrying `[WireIntakeSummary]`, sent only to peers that claim
+   the `flightControl` capability (an older phone never receives it, live or on replay), and two
+   read-only requests the phone makes while an intake's screens are open, `intake.detail` (etag-
+   polled every 1.5 s) and `intake.plan`. Wire types: `Sources/FleetKit/IntakeWire.swift`. Nothing
+   the phone sends changes an intake yet; steering and unblocking are Phases 2 and 3.
 2. **The engine cannot run on iOS as-is.** `IntakeKit` is a `platform: macOS` target
    (`project.yml`), and it spawns processes. Its model types (`Tape`, `Checkpoint`, `SeatActivity`,
    `PlanNote`, `ConvergenceSeries`…) are pure Foundation, but the phone cannot import them today.
