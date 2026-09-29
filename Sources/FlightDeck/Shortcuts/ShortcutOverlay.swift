@@ -1,7 +1,7 @@
 import SwiftUI
 
 extension Notification.Name {
-    /// Posted by the ⌘⇧/ menu item. A `Commands` struct has no route to `RootView`'s state —
+    /// Posted by the ⌘/ menu item. A `Commands` struct has no route to `RootView`'s state —
     /// the same shape `SearchCommands` uses for ⌘K.
     static let flightDeckToggleShortcuts = Notification.Name("flightDeckToggleShortcuts")
 }
@@ -14,18 +14,18 @@ struct ShortcutOverlayCommands: Commands {
             Button("Keyboard Shortcuts") {
                 NotificationCenter.default.post(name: .flightDeckToggleShortcuts, object: nil)
             }
-            // Spelled `"/"` + ⇧⌘, NOT `"?"` + ⌘. The `"?"` spelling is the exact key equivalent
-            // of the system's Help-menu search field, which AppKit inserts when the Help menu
-            // opens — and with that twin present, this item was drawn with no shortcut at all.
-            // `"/"` + shift is a distinct key equivalent, so it draws as ⇧⌘/, and AppKit still
-            // matches the physical ⌘⇧/ press: `TabNavigationCommands`' `"["` + ⇧⌘ items rely on
-            // the same shift-on-punctuation matching and fire today.
-            .keyboardShortcut("/", modifiers: [.command, .shift])
+            // ⌘/, not ⇧⌘/. macOS's system-wide "Show Help menu" shortcut (symbolic hotkey 98)
+            // is ⇧⌘/ by default and is taken before the app sees the key, so ⇧⌘/ opened the Help
+            // menu no matter how this item spelled it. An earlier "?" + ⌘ spelling also lost its
+            // drawn shortcut to the Help search field's own ⌘?. ⌘/ is free: libghostty binds no
+            // super+/, nothing else here uses it, and it is what Slack and Linear use for their
+            // shortcut lists.
+            .keyboardShortcut("/", modifiers: .command)
         }
     }
 }
 
-/// The ⌘⇧/ sheet: a glass command-bar panel in the style of Raycast and Spotlight (layout A,
+/// The ⌘/ sheet: a glass command-bar panel in the style of Raycast and Spotlight (layout A,
 /// 2026-09-28). Dark material over a light scrim, so the terminal stays readable behind it — the
 /// overlay is a glance, and a heavy dim reads as a modal dialog, which it is not.
 struct ShortcutOverlay: View {

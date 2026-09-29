@@ -35,6 +35,9 @@ own worktree by another session.
   `"/"` + shift as `"?"` — use whichever spelling is proven to match, and say which in a comment.
   **Resolved 2026-09-28:** `"/"` + ⇧⌘. The first spelling, `"?"` + ⌘, is the Help search field's
   own key equivalent, and the menu item was drawn with no shortcut beside it.
+  **Superseded 2026-09-29: the overlay is on ⌘/.** macOS's system "Show Help menu" shortcut
+  (symbolic hotkey 98) is ⇧⌘/ by default and takes the key before any app sees it, so ⇧⌘/
+  opened the Help menu whatever the item's spelling. ⌘/ is unbound by libghostty and the app.
 
 ## 1. Selection history
 

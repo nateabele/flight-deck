@@ -12,7 +12,7 @@ struct ShortcutGroup: Equatable, Identifiable {
     var id: String { title }
 }
 
-/// The ⌘⇧/ overlay's contents, derived from the main menu rather than a hand-kept list: a list
+/// The ⌘/ overlay's contents, derived from the main menu rather than a hand-kept list: a list
 /// drifts the first time someone adds a menu item, and the per-agent ⌘N variants are built at
 /// runtime so no static list could name them. Pure over `MenuNode` so it tests without AppKit's
 /// menu machinery; `ShortcutCatalog+AppKit.swift` adapts `NSMenu`.
