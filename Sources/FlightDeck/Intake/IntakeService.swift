@@ -105,11 +105,17 @@ final class SeatFeed {
         didSet { notify(Self.changed(oldValue, activities)) }
     }
     fileprivate(set) var records: [UUID: [String: RunRecord]] = [:] {
-        didSet { notify(Self.changed(oldValue, records)) }
+        didSet { settled(Self.changed(oldValue, records)) }
     }
     fileprivate(set) var results: [UUID: [String: SeatResult]] = [:] {
-        didSet { notify(Self.changed(oldValue, results)) }
+        didSet { settled(Self.changed(oldValue, results)) }
     }
+    /// Fired when a seat's `run.json` or `result.json` changes — the rate at which agents start
+    /// and finish, never `activities`' once-a-second beat. `SessionStore` hangs the phone's
+    /// intake summary refresh here: those files are what move "k of n agents", and they are
+    /// deliberately not published through `IntakeService.objectWillChange`, so without this an
+    /// agent finishing reached the phone only on an unrelated change or the 60 s tick.
+    var onSettled: (() -> Void)?
     /// Kept for the service's lifetime, never dropped: a reader holds its channel, and a
     /// replacement made later would be one it never hears from.
     private var channels: [UUID: SeatChannel] = [:]
@@ -129,6 +135,11 @@ final class SeatFeed {
 
     private func notify(_ ids: Set<UUID>) {
         for id in ids { channels[id]?.objectWillChange.send() }
+    }
+
+    private func settled(_ ids: Set<UUID>) {
+        notify(ids)
+        if !ids.isEmpty { onSettled?() }
     }
 
     private static func changed<V: Equatable>(_ old: [UUID: V], _ new: [UUID: V]) -> Set<UUID> {

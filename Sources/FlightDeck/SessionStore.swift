@@ -1333,6 +1333,9 @@ final class SessionStore: ObservableObject {
                 self?.session(project: project, agentName: agent) != nil
             })
         intakeChangeForward = service.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
+        // Straight to the summary refresh, never through `objectWillChange`: a seat settling
+        // must not redraw every view of the store (see `SeatFeed`), only reach the phone.
+        service.seats.onSettled = { [weak self] in self?.intakeSeatsSettled() }
         return service
     }()
     private var intakeChangeForward: AnyCancellable?
@@ -1473,6 +1476,10 @@ final class SessionStore: ObservableObject {
     /// change (the store already forwards `IntakeService` and preferences into
     /// `objectWillChange`) into one refresh on the NEXT main-queue turn — `objectWillChange`
     /// fires before the change lands — plus a 60 s tick so a released intake ages out.
+    ///
+    /// Seat files (`run.json`/`result.json`) arrive through `intakeSeatsSettled`, wired where
+    /// `intakeService` is built rather than here: this first refresh only builds the service
+    /// when some project has Flight Control on, and wiring it here would force every store to.
     func startIntakeSummaries() {
         refreshIntakeSummaries()
         intakeRefreshForward = objectWillChange.sink { [weak self] _ in self?.scheduleIntakeRefresh() }
@@ -1481,6 +1488,13 @@ final class SessionStore: ObservableObject {
             self.lastIntakeRetentionTick = Date()
             self.scheduleIntakeRefresh()
         }
+    }
+
+    /// A seat started or finished (`SeatFeed.onSettled`). Only once `startIntakeSummaries` has
+    /// run — before that nothing is on the wire to keep current.
+    private func intakeSeatsSettled() {
+        guard intakeRefreshForward != nil else { return }
+        scheduleIntakeRefresh()
     }
 
     private func scheduleIntakeRefresh() {
