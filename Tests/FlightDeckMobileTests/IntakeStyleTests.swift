@@ -53,6 +53,29 @@ final class IntakeStyleTests: XCTestCase {
         XCTAssertFalse(IntakeRowStyle.pill(s("someFutureState")).isEmpty)
     }
 
+    func testShapingSaysItsRunStatusOnceInWords() {
+        let running = s("shaping", now: "Refine 2", run: "running", done: 1, total: 2)
+        XCTAssertEqual(IntakeRowStyle.stateWord(running), "Shaping")
+        XCTAssertEqual(IntakeRowStyle.pill(running), "Shaping", "the pill is the state, not the round name")
+        XCTAssertEqual(IntakeRowStyle.fact(running, clock: "12:54"), "Refine 2 · 12:54 · 1 of 2 agents",
+                       "the round name appears once, in the fact")
+
+        let paused = s("shaping", now: "Refine 2", run: "paused")
+        XCTAssertEqual(IntakeRowStyle.glyph(paused), IntakeGlyph(symbol: "pause.fill", tone: .quiet))
+        XCTAssertEqual(IntakeRowStyle.stateWord(paused), "Paused", "paused whether or not it needs you")
+        XCTAssertEqual(IntakeRowStyle.pill(paused), "Paused")
+        let pausedForYou = s("shaping", attention: true, now: "Refine 2", run: "paused")
+        XCTAssertEqual(IntakeRowStyle.glyph(pausedForYou), IntakeGlyph(symbol: "pause.fill", tone: .attention))
+        XCTAssertEqual(IntakeRowStyle.stateWord(pausedForYou), "Paused")
+
+        let stopped = s("shaping", now: "Refine 2", run: "stopped")
+        XCTAssertEqual(IntakeRowStyle.stateWord(stopped), "Stopped")
+        XCTAssertEqual(IntakeRowStyle.pill(stopped), "Stopped")
+        XCTAssertEqual(IntakeRowStyle.stateWord(s("shaping", run: "failed")), "Failed")
+        XCTAssertEqual(IntakeRowStyle.stateWord(s("shaping", run: "idle")), "Shaping")
+        XCTAssertEqual(IntakeRowStyle.stateWord(s("shaping")), "Shaping")
+    }
+
     func testOnlyAWorkingIntakesClockTicksEverySecond() {
         XCTAssertFalse(IntakeRowStyle.clockIsIdle(s("shaping", run: "running")))
         XCTAssertFalse(IntakeRowStyle.clockIsIdle(s("triaging")))
@@ -84,6 +107,13 @@ final class IntakeStyleTests: XCTestCase {
             XCTAssertEqual(BannerPolicy.banners(previous: [base.id: base], next: [next], project: "p", onScreen: nil).first?.title,
                            "T \(words)")
         }
+    }
+
+    func testABannerWithNoFactNamesOnlyTheProject() {
+        let before = s("shaping", run: "running")
+        var after = before; after.state = "review"; after.needsAttention = true; after.runStatus = nil
+        XCTAssertEqual(BannerPolicy.banners(previous: [before.id: before], next: [after], project: "larkOS", onScreen: nil).first?.subtitle,
+                       "larkOS", "the title already says it is ready for review")
     }
 
     // MARK: Clock (Review Focus #1)

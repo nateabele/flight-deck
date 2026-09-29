@@ -59,7 +59,15 @@ enum IntakeRowStyle {
         case "needsAnswers": "Needs answers"
         case "awaitingChoice": "Choose fidelity"
         case "parked": "Parked"
-        case "shaping": s.runStatus == "running" ? "Shaping" : s.needsAttention ? "Paused" : "Shaping"
+        // Keyed on the run, never on `needsAttention`: a paused intake is paused whether or not
+        // it is waiting on you, and the intake screen's header reads this word.
+        case "shaping":
+            switch s.runStatus {
+            case "paused": "Paused"
+            case "stopped": "Stopped"
+            case "failed": "Failed"
+            default: "Shaping"
+            }
         case "review": "Ready for review"
         case "releasing": "Releasing"
         case "released": "Released"
@@ -70,9 +78,9 @@ enum IntakeRowStyle {
         }
     }
 
-    static func pill(_ s: WireIntakeSummary) -> String {
-        s.state == "shaping" ? (s.now ?? "Shaping") : stateWord(s)
-    }
+    /// Always the state word (spec §4.1): the round name lives in `fact`, and a pill carrying it
+    /// too read "REFINE 2 · Refine 2 · 12:54".
+    static func pill(_ s: WireIntakeSummary) -> String { stateWord(s) }
 
     static func fact(_ s: WireIntakeSummary, clock: String?) -> String? {
         switch s.state {
@@ -113,8 +121,9 @@ enum BannerPolicy {
             case "interrupted": "was interrupted"
             default: "is paused"
             }
-            let fact = IntakeRowStyle.fact(s, clock: nil) ?? IntakeRowStyle.stateWord(s)
-            return IntakeBanner(id: s.id, project: project, title: "\(s.title) \(words)", subtitle: "\(project) · \(fact)")
+            // No fact → just the project: the state word would only repeat the title's words.
+            let subtitle = IntakeRowStyle.fact(s, clock: nil).map { "\(project) · \($0)" } ?? project
+            return IntakeBanner(id: s.id, project: project, title: "\(s.title) \(words)", subtitle: subtitle)
         }
     }
 }
