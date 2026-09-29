@@ -111,11 +111,17 @@ final class LiveCardRenderTests: XCTestCase {
                                            tally: VerdictTally(agree: 11, somewhat: 2, disagree: 1)),
                        startedAt: now.addingTimeInterval(-880)),
         ], target: .nextMajor, status: .running, pendingNotes: [PlanNote.legacy("Keep the dispatcher override", index: 0)],
-           roundInProgress: PlannedRound(stage: .refine, round: 1, major: false), roundStartedAt: now.addingTimeInterval(-200))
+           // crossCheck: true (coverage spec §3) — Refine 1 is firstAndLast's first round, so the
+           // seat list carries the cross-check agent row between reviewer and integrator.
+           roundInProgress: PlannedRound(stage: .refine, round: 1, major: false, crossCheck: true),
+           roundStartedAt: now.addingTimeInterval(-200))
         var reviewer = activity(.codex, ago: 200, footprint: ["Dispatch": 7, "Core": 4, "docs": 2])
         reviewer.finished = true
         let activities: [String: SeatActivity] = [
             "refine-1-reviewer": reviewer,
+            "refine-1-crossReviewer": activity(.claude, ago: 200, headline: "Checking §4 against the mobile check-in flow",
+                                               verb: "Reading", object: "plan.md", footprint: ["Mobile": 5, "Dispatch": 2],
+                                               tokens: 71_000, quietFor: 12),
             "refine-1-integrator": activity(.codex, ago: 41, headline: "Applying the §4 ranking change",
                                             verb: "Editing", object: "plan.md", footprint: ["work": 1], tokens: 52_000,
                                             quietFor: 36),
@@ -137,7 +143,8 @@ final class LiveCardRenderTests: XCTestCase {
         intake.roundConfig = RoundConfig(
             drafters: [Slot(codex, persona: .arbiter), Slot(claude, persona: .realist, fallback: codex), Slot(claude, persona: .coverage)],
             synthesizer: Slot(claude), reviewer: Slot(codex), integrator: codex, encoder: codex, polisher: codex,
-            refinementCap: 3, polishCap: 2, freshEyesAndDedup: true, defaultPlay: .nextMajor, customized: false)
+            refinementCap: 3, polishCap: 2, freshEyesAndDedup: true, defaultPlay: .nextMajor, customized: false,
+            crossReviewer: Slot(claude), crossCheck: .firstAndLast)
         return intake
     }
 

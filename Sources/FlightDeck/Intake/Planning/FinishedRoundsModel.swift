@@ -73,12 +73,20 @@ enum FinishedRoundsModel {
     }
 
     static func detail(_ card: RoundCard) -> Detail {
-        Detail(title: card.name, stage: card.stageTitle,
-               facts: [Fact(label: "Duration", value: card.duration.map(BoardModel.clock) ?? missing),
-                       Fact(label: "Changes", value: card.changes ?? missing),
-                       Fact(label: "Lines", value: card.lines ?? missing),
-                       Fact(label: "Verdicts", value: card.tally ?? missing)],
-               note: card.note, seats: card.slots, sections: card.allSections, notesApplied: card.notesApplied)
+        // `card.slots` carries the engine's raw role ("crossReviewer"); the panel reads it through
+        // `UIText.roleName` so the second reviewer of a cross-check round reads as the public
+        // "cross-check agent" rather than the engine's internal seat name.
+        let seats = card.slots.map { seat -> SlotBadge in
+            var seat = seat
+            seat.label = UIText.roleName(seat.label)
+            return seat
+        }
+        return Detail(title: card.name, stage: card.stageTitle,
+                      facts: [Fact(label: "Duration", value: card.duration.map(BoardModel.clock) ?? missing),
+                              Fact(label: "Changes", value: card.changes ?? missing),
+                              Fact(label: "Lines", value: card.lines ?? missing),
+                              Fact(label: "Verdicts", value: card.tally ?? missing)],
+                      note: card.note, seats: seats, sections: card.allSections, notesApplied: card.notesApplied)
     }
 
     /// "11 · 2 · 1" from the card's "agreed 11 · somewhat 2 · declined 1": the numbers in the

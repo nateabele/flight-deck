@@ -79,6 +79,15 @@ final class BoardModelTests: XCTestCase {
         XCTAssertEqual(try board(intake, .empty).slots.filter { $0.group == "CLARIFY" }.map(\.code), ["CLR1"])
     }
 
+    /// A Feature plan's default cross-check policy is first-and-last: with `refinementCap: 3`,
+    /// Refine 1 and Refine 3 are cross-checks, Refine 2 is not — planned, before any of them run.
+    func testCrossCheckSlotsAreMarked() throws {
+        let tape = Tape(checkpoints: [cp(1, .draft, major: true, at: 0), cp(2, .synthesis, major: true, at: 180)],
+                        status: .paused)
+        let board = try board(try intake(.featurePlan, answered: 1), tape)
+        XCTAssertEqual(board.slots.filter(\.crossCheck).map(\.code), ["RF1", "RF3"])
+    }
+
     func testLiveSlotAndDurations() throws {
         var tape = pausedAfterR1(status: .running)
         tape.checkpoints.append(cp(4, .refine, 2, major: false, at: 756))

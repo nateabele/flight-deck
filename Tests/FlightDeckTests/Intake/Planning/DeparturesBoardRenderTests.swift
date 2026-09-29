@@ -28,12 +28,20 @@ final class DeparturesBoardRenderTests: XCTestCase {
         let syn = cp(2, .synthesis, major: true, at: 182)
         var rf1 = cp(3, .refine, 1, major: false, at: 470)
         rf1.record.annotations = [.legacy("tighten the rollout", index: 0)]
+        // A landed crossReviewer slot (coverage spec §3) so the paused/failed/done states show
+        // the board's "×2" mark on RF1 without depending on the planner's own crossCheck policy.
+        let codexChoice = ModelChoice(harness: .codex, model: "gpt-6-sol", effort: "high")
+        rf1.record.slots = [SlotOutcome(role: "reviewer", used: codexChoice, requested: codexChoice, status: .ok),
+                            SlotOutcome(role: "crossReviewer", used: codexChoice, requested: codexChoice, status: .ok),
+                            SlotOutcome(role: "integrator", used: codexChoice, requested: codexChoice, status: .ok)]
         let rf2 = cp(4, .refine, 2, major: false, at: 758)
         let rf3 = cp(5, .refine, 3, major: true, at: 1000)
         let enc = cp(6, .encode, major: true, at: 1164)
 
         let running = Tape(checkpoints: [draft, syn, rf1], target: .nextMajor, status: .running,
-                           roundInProgress: PlannedRound(stage: .refine, round: 2, major: false),
+                           // crossCheck: true so the running slot's live seat list carries the
+                           // cross-check agent row (coverage spec §3), not just the board mark.
+                           roundInProgress: PlannedRound(stage: .refine, round: 2, major: false, crossCheck: true),
                            roundStartedAt: t0.addingTimeInterval(470))
         let paused = Tape(checkpoints: [draft, syn, rf1, rf2, rf3, enc], status: .paused,
                           pendingNotes: [.legacy("cut the migration step", index: 0)])

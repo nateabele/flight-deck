@@ -55,4 +55,11 @@ enum UIText {
     static func notesCarried(_ n: Int) -> String {
         "\(n) \(n == 1 ? "note" : "notes") carried into task notes"
     }
+
+    /// A `SlotOutcome.role` as a human reads it. `"crossReviewer"` is the engine's internal seat
+    /// name (coverage spec §3) — a second reviewer, not a different kind of work — so it reads
+    /// "cross-check agent" everywhere a role is shown; every other role is already the public word.
+    static func roleName(_ role: String) -> String {
+        role == "crossReviewer" ? "cross-check agent" : role
+    }
 }

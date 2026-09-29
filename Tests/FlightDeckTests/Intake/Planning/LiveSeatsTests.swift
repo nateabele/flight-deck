@@ -33,6 +33,17 @@ final class LiveSeatsTests: XCTestCase {
         XCTAssertEqual(draft.map(\.model.role), ["arbiter", "realist", "coverage"])
     }
 
+    /// A cross-check round runs a second reviewer between the usual two, so the seat list has
+    /// three rows instead of two, and a non-cross-check round of the same stage keeps its own.
+    func testCrossCheckRefineListsTheCrossCheckAgent() throws {
+        var cfg = try XCTUnwrap(PresetExpansion.config(for: .featurePlan, available: .defaults))
+        cfg.crossCheck = .firstAndLast
+        let rows = LiveSeats.expected(PlannedRound(stage: .refine, round: 1, major: false, crossCheck: true), config: cfg)
+        XCTAssertEqual(rows.map(\.base), ["refine-1-reviewer", "refine-1-crossReviewer", "refine-1-integrator"])
+        XCTAssertEqual(rows[1].requested?.choice.harness, .claude)
+        XCTAssertEqual(LiveSeats.expected(PlannedRound(stage: .refine, round: 2, major: false), config: cfg).count, 2)
+    }
+
     /// A drafter that fell back is ONE row, keyed by its seat, drawn from the newest attempt — and
     /// drafter 10's runs never land on drafter 1's row.
     func testFallbackRunSpeaksForItsSeat() {

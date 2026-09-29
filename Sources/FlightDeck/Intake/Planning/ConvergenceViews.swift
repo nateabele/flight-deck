@@ -30,6 +30,9 @@ struct ConvergenceSparkline: View {
     let points: [Double]
     let tone: LCDCell.Tone
     var discontinuities: [Int] = []
+    /// Cross-check rounds (coverage spec §3): drawn hollow rather than filled, since their count
+    /// is two reviewers' issues, not the same unit as the rest of the line.
+    var hollow: [Int] = []
     var floor: Double?
 
     var body: some View {
@@ -66,9 +69,21 @@ struct ConvergenceSparkline: View {
             glow.addFilter(.shadow(color: color.opacity(0.45), radius: 2.5))
             glow.stroke(solid, with: .color(color), style: StrokeStyle(lineWidth: 1.7, lineCap: .round, lineJoin: .round))
             glow.stroke(dotted, with: .color(color.opacity(0.6)), style: StrokeStyle(lineWidth: 1.2, lineCap: .round, dash: [1, 3]))
+            // Every cross-check point draws hollow, not just the last one — a round mid-cycle can
+            // be a cross-check too (coverage spec §3's every-round policy).
+            for i in hollow where i != points.indices.last {
+                let p = at(i)
+                glow.stroke(Path(ellipseIn: CGRect(x: p.x - 2.5, y: p.y - 2.5, width: 5, height: 5)),
+                           with: .color(color), style: StrokeStyle(lineWidth: 1.3))
+            }
             if let last = points.indices.last {
                 let p = at(last)
-                glow.fill(Path(ellipseIn: CGRect(x: p.x - 3, y: p.y - 3, width: 6, height: 6)), with: .color(color))
+                let dot = Path(ellipseIn: CGRect(x: p.x - 3, y: p.y - 3, width: 6, height: 6))
+                if hollow.contains(last) {
+                    glow.stroke(dot, with: .color(color), style: StrokeStyle(lineWidth: 1.4))
+                } else {
+                    glow.fill(dot, with: .color(color))
+                }
             }
         }
         .frame(width: LCDMetrics.sparkWidth, height: 24)

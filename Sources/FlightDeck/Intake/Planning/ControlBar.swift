@@ -497,7 +497,7 @@ private struct LCDCellView: View {
             // The sparkline is the first thing a squeezed cell gives up; the word stays.
             if let convergence, width >= LCDMetrics.cellWidth(cell) {
                 ConvergenceSparkline(points: convergence.spark, tone: cell.tone, discontinuities: convergence.discontinuities,
-                                     floor: convergence.settledFloor)
+                                     hollow: convergence.hollow, floor: convergence.settledFloor)
             }
             VStack(alignment: .leading, spacing: 5) {
                 HStack(spacing: 6) {

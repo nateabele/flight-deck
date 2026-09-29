@@ -25,7 +25,12 @@ struct ConvergenceCellModel: Equatable {
     /// reviewer's (or polisher's) model changed, or the round is the first one an Extend added.
     /// The sparkline marks them and `cardLines` says what happened.
     var discontinuities: [Int] = []
-    /// The series line, the sections line, then one line per discontinuity.
+    /// Indices into `spark` where the round was a cross-check (coverage spec §3): two reviewers'
+    /// issues, not one reviewer's changes, so the count isn't the same unit as the rest of the
+    /// series and the sparkline draws the point hollow (stroke only) rather than filled.
+    var hollow: [Int] = []
+    /// The series line, the sections line, then one line per discontinuity, then one per
+    /// cross-check round.
     var cardLines: [String] = []
     /// The engine's `suggestedAction`; empty while it is too early to say.
     var action: String = ""
@@ -96,7 +101,9 @@ extension ConvergenceCellModel {
             breaks.append((i, "R\(points[i].round) is an extra round, past the \(planned) planned"))
         }
         discontinuities = Array(Set(breaks.map(\.index))).sorted()
+        hollow = points.indices.filter { points[$0].crossCheck }
         cardLines = [Self.seriesLine(cycle)] + [Self.sectionsLine(points)].compactMap { $0 } + breaks.map(\.line)
+            + hollow.map { "R\(points[$0].round) was a cross-check: two reviewers, counted as issues" }
 
         // The engine's own settled test, drawn: at or under max(floor, fraction × the first
         // compared round). Compared rounds start at the last model change.
@@ -185,7 +192,10 @@ struct HeatmapModel: Equatable {
             let (na, nb) = (Self.number(a), Self.number(b))
             return na != nb ? na < nb : firstSeen[a]! < firstSeen[b]!
         }
-        rounds = points.map { "R\($0.round)" }
+        // "R1 ×2" for a cross-check round (coverage spec §3): its column's count is two
+        // reviewers' issues, not one, and the header says so rather than reading as an ordinary
+        // round whose count happens to be bigger.
+        rounds = points.map { "R\($0.round)" + ($0.crossCheck ? " ×2" : "") }
         lines = sections.map { s in points.map { $0.sectionChurn[s] ?? 0 } }
         let top = Double(lines.flatMap { $0 }.max() ?? 0)
         cells = lines.map { row in row.map { top > 0 ? Double($0) / top : 0 } }

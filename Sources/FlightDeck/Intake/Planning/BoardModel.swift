@@ -22,6 +22,10 @@ struct TapeSlot: Identifiable, Equatable {
     let checkpointID: Int?
     /// "CLARIFY", "REFINE", "POLISH" for the bracketed cycles; nil for one-off stages.
     let group: String?
+    /// Refine only: a second model family reviewed (or will review) this round (coverage spec
+    /// §3) — the tape draws a small "×2" beside it. Never part of `code`, since label fitting
+    /// measures `code` and the mark is an adornment beside it, not part of the name.
+    var crossCheck: Bool = false
 
     /// The narrowest slot that shows `name` whole — what `LabelFit.choose` compares against.
     func fullWidth(measure: (String) -> CGFloat, padding: CGFloat = 8) -> CGFloat { measure(name) + padding }
@@ -120,7 +124,8 @@ struct BoardModel: Equatable {
                                   state: state,
                                   duration: Self.duration(state: state, landed: checkpoint, previous: previous, tape: tape, now: now),
                                   major: marker.major, flagged: flagged,
-                                  checkpointID: marker.checkpointID, group: Self.group(marker.stage)))
+                                  checkpointID: marker.checkpointID, group: Self.group(marker.stage),
+                                  crossCheck: marker.crossCheck))
         }
         slots.append(TapeSlot(id: "review", name: "Review", code: "REV",
                               state: tape.status == .reachedReview ? .done : .future,
@@ -335,7 +340,10 @@ struct BoardModel: Equatable {
     static func stages(tape: Tape, config: RoundConfig?) -> [StageMarker] {
         var markers = tape.checkpoints.enumerated().map { i, cp in
             StageMarker(order: i, stage: cp.stage, round: cp.round, label: ShapingModel.label(stage: cp.stage, round: cp.round),
-                        major: cp.major, done: true, inProgress: false, checkpointID: cp.id)
+                        major: cp.major, done: true, inProgress: false, checkpointID: cp.id,
+                        // A landed round's own slots say whether it was a cross-check, not the
+                        // config now: an Extend can move which round is "last" after this one ran.
+                        crossCheck: cp.record.slots.contains { $0.role == "crossReviewer" })
         }
         guard let config else { return markers }
         var scratch = tape
@@ -343,7 +351,7 @@ struct BoardModel: Equatable {
         while markers.count < 200, let next = TapePlanner.next(after: scratch, config: config) {
             markers.append(StageMarker(order: markers.count, stage: next.stage, round: next.round,
                                        label: ShapingModel.label(stage: next.stage, round: next.round), major: next.major,
-                                       done: false, inProgress: false, checkpointID: nil))
+                                       done: false, inProgress: false, checkpointID: nil, crossCheck: next.crossCheck))
             scratch.checkpoints.append(Checkpoint(id: (scratch.head?.id ?? 0) + 1, stage: next.stage, round: next.round,
                                                   major: next.major, createdAt: Date(timeIntervalSince1970: 0)))
         }

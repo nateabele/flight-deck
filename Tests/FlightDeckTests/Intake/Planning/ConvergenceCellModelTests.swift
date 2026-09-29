@@ -126,6 +126,16 @@ final class ConvergenceCellModelTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(ConvergenceCellModel(cycles: [c], plannedRounds: 4)).discontinuities, [])
     }
 
+    /// A cross-check round's count is two reviewers' issues, not one reviewer's changes — the
+    /// sparkline marks the point hollow rather than filled, and the card says why.
+    func testCrossCheckPointsAreHollowAndExplained() throws {
+        let points = [ConvergencePoint(checkpoint: 3, stage: .refine, round: 1, changeCount: 8, linesChurned: 40, crossCheck: true),
+                      ConvergencePoint(checkpoint: 4, stage: .refine, round: 2, changeCount: 4, linesChurned: 20)]
+        let m = try XCTUnwrap(ConvergenceCellModel(cycles: [ConvergenceSeries.assess(.refine, points)]))
+        XCTAssertEqual(m.hollow, [0])
+        XCTAssertTrue(m.cardLines.contains("R1 was a cross-check: two reviewers, counted as issues"))
+    }
+
     func testHeatmapNormalizationAndHot() {
         let hot = "## 4. Dispatch rules"
         let c = cycle([point(1, 36, agree: 0.76, churn: [hot: 10, "## 2. Technicians": 20, "## 10. Rollout": 2]),
@@ -155,6 +165,14 @@ final class ConvergenceCellModelTests: XCTestCase {
         XCTAssertEqual(map.sections, [])
         XCTAssertEqual(map.rounds, ["R1", "R2"])
         XCTAssertEqual(map.agree, [nil, nil])
+    }
+
+    /// The heatmap's column header names a cross-check round, so its column doesn't read as an
+    /// ordinary round whose count happens to be bigger.
+    func testHeatmapMarksCrossCheckColumn() {
+        let c = cycle([ConvergencePoint(checkpoint: 3, stage: .refine, round: 1, changeCount: 8, linesChurned: 0, crossCheck: true),
+                       point(2, 4)])
+        XCTAssertEqual(HeatmapModel(cycle: c).rounds, ["R1 ×2", "R2"])
     }
 
     func testChurnLaneStillSince() {

@@ -16,6 +16,10 @@ struct ConvergenceScenario {
     var models: [Int: ModelChoice] = [:]
     var extra = 0
     var proposals: [Int: [ProposedChange]] = [:]
+    /// Refine rounds that landed a `crosscheck.json` (coverage spec §3/§4.1) — the engine's own
+    /// signal for `ConvergencePoint.crossCheck`, independent of `record.slots`, so a render that
+    /// wants a hollow point/×2 column needs a round in this set, not just a `crossReviewer` slot.
+    var crossCheck: Set<Int> = []
 }
 
 enum ConvergenceFixture {
@@ -114,6 +118,16 @@ enum ConvergenceFixture {
                 files["changes.json"] = try IntakeJSON.encoder.encode(proposals)
                 files["verdicts.json"] = try IntakeJSON.encoder.encode([ChangeVerdict(index: 0, verdict: r == 3 ? .somewhat : .agree)])
             }
+            if scenario.crossCheck.contains(r) {
+                let count = scenario.proposals[r]?.count ?? 1
+                // Two distinct families (codex, claude): the "independent" case, not the
+                // primary-fell-back-to-cross-reviewer one — clusters nil so the fold falls back to
+                // `changes.json`'s own text clusters, same as a real crosscheck.json with nothing
+                // usable from the integrator.
+                let record = CrossCheckRecord(proposers: Array(repeating: 0, count: count),
+                                              families: [.codex, .claude], clusters: nil, blindOrderSeed: r)
+                files[CrossCheckRecord.fileName] = try IntakeJSON.encoder.encode(record)
+            }
             let churn = scenario.touched.map { $0[r - 1] }.reduce(0, +)
             try tapes.writeCheckpoint(
                 Checkpoint(id: 2 + r, parent: 1 + r, stage: .refine, round: r, major: r == rounds, createdAt: t,
@@ -148,7 +162,7 @@ enum ConvergenceFixture {
                                                        edit: "A job with no candidate is auto-assigned after 4 hours to the least-loaded technician.")],
                                     4: [ProposedChange(section: hotSection, rationale: "Auto-assignment surprises dispatchers",
                                                        edit: "A job with no candidate stays Unassigned until a dispatcher assigns it.")],
-                                ]),
+                                ], crossCheck: [1]),
         ]
     }
 }

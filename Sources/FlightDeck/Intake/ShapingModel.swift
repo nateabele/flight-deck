@@ -20,6 +20,10 @@ struct StageMarker: Identifiable, Equatable {
     /// The round the runner is executing right now (always the first pending marker).
     var inProgress: Bool
     var checkpointID: Int?
+    /// Refine only: a second model family reviewed (or will review) this round (coverage spec §3)
+    /// — from the landed checkpoint's own slots, or the planned round, so the board's ×2 mark
+    /// agrees with whichever one exists for this marker.
+    var crossCheck: Bool = false
     var id: Int { order }
 }
 

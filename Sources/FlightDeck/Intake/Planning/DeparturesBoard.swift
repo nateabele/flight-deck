@@ -325,10 +325,14 @@ struct DeparturesBoard: View {
     }
 
     /// The slot's name (its code when the name doesn't fit), plus the marks around it: the pause
-    /// glyph where the run is held, the live round's ticking clock, the flag for notes.
+    /// glyph where the run is held, the live round's ticking clock, the ×2 for a cross-check
+    /// round, the flag for notes.
     private func label(_ slot: TapeSlot, width: CGFloat) -> some View {
         let paused = slot.id == model.pausedAtSlotID
-        let glyphs: CGFloat = (paused ? 12 : 0) + (slot.flagged ? 12 : 0)
+        // "×2" is drawn beside the code, never folded into it — `code` is what label fitting
+        // measures, and a cross-check round's code must still be exactly "RF1", not "RF1×2".
+        let crossCheckWidth = slot.crossCheck ? Style.crossCheckMeasure("×2") + 4 : 0
+        let glyphs: CGFloat = (paused ? 12 : 0) + (slot.flagged ? 12 : 0) + crossCheckWidth
         let full = LabelFit.fitWidth(full: slot.name, measure: Style.slotMeasure)
         let code = LabelFit.fitWidth(full: slot.code, measure: Style.slotMeasure)
         // The live round's clock rides beside its name only while even the code still fits next
@@ -348,6 +352,9 @@ struct DeparturesBoard: View {
                           alwaysOffersCard: true, isFocusable: false, ownsHover: false)
                 // Exactly the width it will draw at, so the HStack can centre a code too.
                 .frame(width: full <= room ? full : min(room, code))
+            if slot.crossCheck {
+                Text("×2").font(Font(Style.crossCheckNS)).foregroundStyle(labelColor(slot).opacity(0.75))
+            }
             if let clock {
                 Text(clock).font(Font(Style.clockNS)).monospacedDigit().foregroundStyle(.white)
             }
@@ -558,6 +565,8 @@ private enum Style {
     static let slotMeasure = LabelFit.measureWith(slotNS)
     static let clockNS = NSFont.monospacedSystemFont(ofSize: 12, weight: .bold)
     static let clockMeasure = LabelFit.measureWith(clockNS)
+    static let crossCheckNS = NSFont.monospacedSystemFont(ofSize: 9.5, weight: .bold)
+    static let crossCheckMeasure = LabelFit.measureWith(crossCheckNS)
 }
 
 /// The instrument's phosphor-on-glass palette, shared with the split-flap card.

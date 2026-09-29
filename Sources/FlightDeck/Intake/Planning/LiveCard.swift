@@ -322,7 +322,15 @@ enum LiveSeats {
         case .refine:
             // The reviewer runs its choice with no persona (`RoundExecutor.refine`), so the row
             // doesn't claim one the engine never asked for.
+            guard round.crossCheck else {
+                return [(base: "\(p)reviewer", requested: c.reviewer.map { Slot($0.choice) }),
+                        (base: "\(p)integrator", requested: Slot(c.integrator))]
+            }
+            // A cross-check round runs a second reviewer (`RoundExecutor.crossCheckRefine`)
+            // between the usual two, so the queued list matches the seats the engine actually
+            // starts instead of showing the cross-reviewer as an unexpected extra run.
             return [(base: "\(p)reviewer", requested: c.reviewer.map { Slot($0.choice) }),
+                    (base: "\(p)crossReviewer", requested: c.crossReviewer.map { Slot($0.choice) }),
                     (base: "\(p)integrator", requested: Slot(c.integrator))]
         case .encode:
             return [(base: "\(p)encoder", requested: Slot(c.encoder))]

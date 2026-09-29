@@ -103,6 +103,14 @@ final class FinishedRoundsModelTests: XCTestCase {
         XCTAssertEqual(details[0].facts.map(\.value), ["—", "3 drafts", "—", "—"])
     }
 
+    /// The panel reads a raw slot role through `UIText.roleName`, so "crossReviewer" (the engine's
+    /// internal name for the second reviewer) reads as the public "cross-check agent" while every
+    /// other role passes through unchanged.
+    func testCrossReviewerReadsAsCrossCheckAgent() {
+        XCTAssertEqual(UIText.roleName("crossReviewer"), "cross-check agent")
+        XCTAssertEqual(UIText.roleName("reviewer"), "reviewer")
+    }
+
     // MARK: - Open card
 
     func testClickingTheOpenCardClosesAndAnotherSwitches() {
