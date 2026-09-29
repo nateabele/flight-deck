@@ -346,10 +346,11 @@ struct IntakeDetailView: View {
         if let config = intake.roundConfig {
             let board = boardModel(tape, config: config, now: now)
             let cell = convergenceCell
+            let coverage = coverageCell(tape, config: config)
             let lcd = LCDModel(tape: tape, config: config, board: board,
                                seats: seatModels(tape, config: config, now: now, seats: seats),
-                               convergence: cell, preview: preview, now: now)
-            ControlBar(lcd: lcd, convergence: cell, actions: planningActions ?? PlanningActions(enabled: [], perform: { _ in }),
+                               convergence: cell, coverage: coverage, preview: preview, now: now)
+            ControlBar(lcd: lcd, convergence: cell, coverage: coverage, actions: planningActions ?? PlanningActions(enabled: [], perform: { _ in }),
                        status: tape.status, defaultPlay: config.defaultPlay,
                        halting: service.halts[intake.id]?.label(for: tape), policy: service.flapPolicy(for: intake.id),
                        preview: $preview,
@@ -397,6 +398,11 @@ struct IntakeDetailView: View {
             intake.roundConfig.map { cycle.stage == .refine ? $0.refinementCap : $0.polishCap }
         }
         return ConvergenceCellModel(cycles: cycles, plannedRounds: planned)
+    }
+
+    /// The COVERAGE cell, from the folded readings beside the convergence series.
+    private func coverageCell(_ tape: Tape, config: RoundConfig) -> CoverageCellModel? {
+        CoverageCellModel(intake: intake, tape: tape, config: config, readings: service.coverage[intake.id] ?? [], cycles: cycles)
     }
 
     /// The cycle the heatmap and the churn lane describe: the latest with per-section numbers.

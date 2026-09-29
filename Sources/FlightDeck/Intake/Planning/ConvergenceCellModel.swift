@@ -36,11 +36,14 @@ struct ConvergenceCellModel: Equatable {
     var settledFloor: Double?
 
     /// The action's first sentence, the part the card sets in bold: "Diverging: §4 keeps changing".
-    var actionHeadline: String? { actionParts?.headline }
+    var actionHeadline: String? { Self.splitAction(action)?.headline }
     /// The rest of the action, if any: "Refining more will not settle it; decide §4 yourself."
-    var actionDetail: String? { actionParts?.detail }
+    var actionDetail: String? { Self.splitAction(action)?.detail }
 
-    private var actionParts: (headline: String, detail: String?)? {
+    /// An engine action split at its first ". " into the bold headline and the rest — shared with
+    /// the COVERAGE card (`CoverageCellModel`), so the two cards can never set the same kind of
+    /// sentence differently. Nil for an empty action (too early to say).
+    static func splitAction(_ action: String) -> (headline: String, detail: String?)? {
         guard !action.isEmpty else { return nil }
         guard let stop = action.range(of: ". ") else {
             return (action.hasSuffix(".") ? String(action.dropLast()) : action, nil)

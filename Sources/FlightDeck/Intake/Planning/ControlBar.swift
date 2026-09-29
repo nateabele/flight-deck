@@ -13,6 +13,8 @@ struct ControlBar: View {
     let lcd: LCDModel
     /// The cell's sparkline; its words are already in `lcd`.
     let convergence: ConvergenceCellModel?
+    /// The COVERAGE cell's card; its words are already in `lcd`.
+    var coverage: CoverageCellModel? = nil
     let actions: PlanningActions
     let status: RunnerStatus
     let defaultPlay: PlayMode
@@ -50,7 +52,7 @@ struct ControlBar: View {
             HStack(spacing: Metrics.gap) {
                 transport
                 LCDView(cells: shown, widths: LCDMetrics.widths(shown, available: lcdWidth),
-                        convergence: convergence, stopMode: lcd.stopMode, policy: policy,
+                        convergence: convergence, coverage: coverage, stopMode: lcd.stopMode, policy: policy,
                         heatmap: CellHeatmap(open: heatmapOpen, toggle: onConvergence, opensCard: opensConvergenceCard))
                 tools(compact: compact)
             }
@@ -313,7 +315,7 @@ enum LCDMetrics {
     static func isClock(_ kind: LCDCell.Kind) -> Bool {
         switch kind {
         case .elapsed: true
-        case .round, .seatsDone, .soFar, .billed, .convergence, .stopsAt: false
+        case .round, .seatsDone, .soFar, .billed, .convergence, .coverage, .stopsAt: false
         }
     }
 
@@ -395,6 +397,7 @@ private struct LCDView: View {
     let cells: [LCDCell]
     let widths: [CGFloat]
     let convergence: ConvergenceCellModel?
+    let coverage: CoverageCellModel?
     let stopMode: PlayMode?
     let policy: FlapPolicy
     let heatmap: CellHeatmap
@@ -403,7 +406,8 @@ private struct LCDView: View {
         HStack(spacing: 0) {
             ForEach(Array(cells.enumerated()), id: \.element.id) { index, cell in
                 LCDCellView(cell: cell, width: widths[index], convergence: cell.kind == .convergence ? convergence : nil,
-                            stopMode: stopMode, policy: policy, heatmap: heatmap)
+                            coverage: cell.kind == .coverage ? coverage : nil, stopMode: stopMode, policy: policy,
+                            heatmap: heatmap)
                 if index < cells.count - 1 {
                     Rectangle().fill(Color.white.opacity(0.05)).frame(width: 1)
                 }
@@ -435,6 +439,7 @@ private struct LCDCellView: View {
     let cell: LCDCell
     let width: CGFloat
     let convergence: ConvergenceCellModel?
+    let coverage: CoverageCellModel?
     let stopMode: PlayMode?
     let policy: FlapPolicy
     let heatmap: CellHeatmap
@@ -470,6 +475,16 @@ private struct LCDCellView: View {
                 .accessibilityAddTraits(.isButton)
                 .accessibilityHint(heatmap.open ? "Closes the section heatmap" : "Opens the section heatmap")
                 .accessibilityAction { heatmap.toggle?() }
+        } else if let coverage, cell.kind == .coverage {
+            // The same card on hover or focus, and no click: there is no coverage heatmap to open.
+            content
+                .contentShape(Rectangle())
+                .background(FloatingCard(isPresented: intent.shown == hoverID || focused,
+                                         card: CoverageCard(model: coverage).fixedSize(),
+                                         onDismiss: { intent.dismiss() }))
+                .onHover { intent.hover(hoverID, $0) }
+                .focusable()
+                .focused($focused)
         } else {
             content
         }

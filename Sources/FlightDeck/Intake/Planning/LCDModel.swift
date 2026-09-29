@@ -6,7 +6,7 @@ import IntakeKit
 /// is what the cell falls back to when `value` doesn't fit its measured slot (§5.3's rule, the
 /// same one the board's labels follow).
 struct LCDCell: Equatable, Identifiable {
-    enum Kind: String { case round, elapsed, seatsDone, soFar, billed, convergence, stopsAt }
+    enum Kind: String { case round, elapsed, seatsDone, soFar, billed, convergence, coverage, stopsAt }
     /// Colour for exceptions only (spec §2): accent is the live target, amber wants attention,
     /// red is a failure. A paused tape is none of those, so PAUSED is a caption, not a colour.
     enum Tone: Equatable { case normal, accent, amber, red }
@@ -33,21 +33,24 @@ struct LCDCell: Equatable, Identifiable {
 /// The caller rebuilds this on its 1 Hz tick together with the `BoardModel` it passes in, and
 /// passes the same `preview` to both: STOPS AT here and on the board must never disagree.
 struct LCDModel: Equatable {
-    /// Full order: round, elapsed, seatsDone, soFar, billed, convergence, stopsAt. Convergence
-    /// is absent until a Refine/Polish cycle has a series (`convergence == nil`); STOPS AT is
-    /// absent at review, where nothing is left to run and ROUND already says "ready for you".
+    /// Full order: round, elapsed, seatsDone, soFar, billed, convergence, coverage, stopsAt.
+    /// Convergence is absent until a Refine/Polish cycle has a series (`convergence == nil`);
+    /// coverage is absent for a config that doesn't cross-check and has no reading
+    /// (`coverage == nil`); STOPS AT is absent at review, where nothing is left to run and ROUND
+    /// already says "ready for you".
     var cells: [LCDCell]
     /// The mode STOPS AT describes — the hovered button's while previewing — so the cell can
     /// draw that button's glyph beside the stop. Nil once there's nothing left to run.
     var stopMode: PlayMode?
 
     /// The order cells leave as the bar narrows (spec §4): BILLED, then SO FAR, then STOPS AT,
-    /// which the board directly below repeats. AGENTS DONE goes last, leaving the compact set.
-    static let dropOrder: [LCDCell.Kind] = [.billed, .soFar, .stopsAt]
+    /// then COVERAGE — STOPS AT is repeated by the board below; nothing repeats COVERAGE. AGENTS
+    /// DONE goes last, leaving the compact set.
+    static let dropOrder: [LCDCell.Kind] = [.billed, .soFar, .stopsAt, .coverage]
     private static let compactDrop: [LCDCell.Kind] = [.seatsDone]
 
     init(tape: Tape, config: RoundConfig, board: BoardModel, seats: [SeatRowModel], convergence: ConvergenceCellModel?,
-         preview: PlayMode?, now: Date) {
+         coverage: CoverageCellModel? = nil, preview: PlayMode?, now: Date) {
         let mode = preview ?? (tape.status == .running ? BoardModel.mode(for: tape.target) : config.defaultPlay)
         let stop = board.slots.first { $0.id == board.stopTarget(for: mode) }
         self.stopMode = stop == nil ? nil : mode
@@ -63,6 +66,10 @@ struct LCDModel: Equatable {
                                  shortValue: Self.arrowAndCount(convergence.word, latest: convergence.latest),
                                  caption: "\(convergence.latest) change\(convergence.latest == 1 ? "" : "s")",
                                  tone: convergence.tone))
+        }
+        if let coverage {
+            cells.append(LCDCell(kind: .coverage, value: coverage.word, shortValue: coverage.shortWord,
+                                 caption: coverage.caption, tone: coverage.tone))
         }
         if let stop {
             cells.append(LCDCell(kind: .stopsAt, value: board.stopsAt.value, shortValue: stop.code,
@@ -105,6 +112,7 @@ struct LCDModel: Equatable {
         case .round: "lcd.round"
         case .stopsAt: "lcd.stopsAt"
         case .convergence: "lcd.convergence"
+        case .coverage: "lcd.coverage"
         case .elapsed, .seatsDone, .soFar, .billed: nil
         }
     }

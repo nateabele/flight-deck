@@ -8,7 +8,9 @@ import SwiftUI
 // drawn from the engine's verdict (`ConvergenceCycle`) through the models in
 // `ConvergenceCellModel.swift`, so none of them can tell a different story from the others.
 
-private enum Tone {
+/// The instrument cards' phosphor palette — shared with the COVERAGE card (`CoverageViews.swift`)
+/// so the two cards on one LCD can't drift apart in colour.
+enum CardTone {
     static let ph = SplitFlapCard.phosphor
     static let ph2 = ph.opacity(0.66)
     static let ph3 = ph.opacity(0.4)
@@ -41,13 +43,13 @@ struct ConvergenceSparkline: View {
                 var rule = Path()
                 rule.move(to: CGPoint(x: 0, y: y(floor)))
                 rule.addLine(to: CGPoint(x: size.width, y: y(floor)))
-                context.stroke(rule, with: .color(Tone.ph.opacity(0.28)), style: StrokeStyle(lineWidth: 1, dash: [2, 2]))
+                context.stroke(rule, with: .color(CardTone.ph.opacity(0.28)), style: StrokeStyle(lineWidth: 1, dash: [2, 2]))
             }
             for i in discontinuities where i > 0 && i < points.count {
                 var tick = Path()
                 tick.move(to: CGPoint(x: at(i).x, y: 0))
                 tick.addLine(to: CGPoint(x: at(i).x, y: size.height))
-                context.stroke(tick, with: .color(Tone.ph.opacity(0.45)), style: StrokeStyle(lineWidth: 1, dash: [1.5, 1.5]))
+                context.stroke(tick, with: .color(CardTone.ph.opacity(0.45)), style: StrokeStyle(lineWidth: 1, dash: [1.5, 1.5]))
             }
             var solid = Path(), dotted = Path()
             if !points.isEmpty { solid.move(to: at(0)) }
@@ -82,10 +84,11 @@ struct ConvergenceSparkline: View {
 struct ConvergenceCard: View {
     let model: ConvergenceCellModel
 
-    private static let width: CGFloat = 340
+    /// The accessory column's wrap width — the COVERAGE card uses the same, so the two read as one set.
+    static let width: CGFloat = 340
 
     var body: some View {
-        SplitFlapCard(full: model.word, detail: model.detail, tint: model.tone == .amber ? Tone.amber : nil, accessory: AnyView(accessory))
+        SplitFlapCard(full: model.word, detail: model.detail, tint: model.tone == .amber ? CardTone.amber : nil, accessory: AnyView(accessory))
     }
 
     private var accessory: some View {
@@ -93,22 +96,22 @@ struct ConvergenceCard: View {
             ForEach(Array(model.cardLines.enumerated()), id: \.offset) { i, line in
                 Text(line)
                     .font(.system(size: 12.5))
-                    .foregroundStyle(i == 0 ? Tone.ph.opacity(0.9) : Tone.ph2)
+                    .foregroundStyle(i == 0 ? CardTone.ph.opacity(0.9) : CardTone.ph2)
                     .fixedSize(horizontal: false, vertical: true)
             }
             if let headline = model.actionHeadline {
-                Rectangle().fill(Tone.ph.opacity(0.1)).frame(height: 1).padding(.vertical, 4)
+                Rectangle().fill(CardTone.ph.opacity(0.1)).frame(height: 1).padding(.vertical, 4)
                 Text(headline)
                     .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(model.tone == .amber ? Tone.amber : Tone.ph)
+                    .foregroundStyle(model.tone == .amber ? CardTone.amber : CardTone.ph)
                     .fixedSize(horizontal: false, vertical: true)
                 if let detail = model.actionDetail {
-                    Text(detail).font(.system(size: 12)).foregroundStyle(Tone.ph2).fixedSize(horizontal: false, vertical: true)
+                    Text(detail).font(.system(size: 12)).foregroundStyle(CardTone.ph2).fixedSize(horizontal: false, vertical: true)
                 }
             }
             Text("Click for the section heatmap · a signal, not a promise")
                 .font(.system(size: 11))
-                .foregroundStyle(Tone.ph3)
+                .foregroundStyle(CardTone.ph3)
                 .padding(.top, 2)
         }
         .frame(width: Self.width, alignment: .leading)
@@ -214,12 +217,12 @@ struct ConvergenceHeatmap: View {
     private var header: some View {
         HStack(alignment: .firstTextBaseline, spacing: 12) {
             Text(model.title)
-                .font(Font(Tone.caption))
+                .font(Font(CardTone.caption))
                 .tracking(1.5)
-                .foregroundStyle(Tone.ph)
+                .foregroundStyle(CardTone.ph)
             Text("lines changed per section, per round · click a cell to read that round's diff")
                 .font(.system(size: 12))
-                .foregroundStyle(Tone.ph3)
+                .foregroundStyle(CardTone.ph3)
                 .lineLimit(1)
             Spacer(minLength: 8)
             Button(action: onClose) {
@@ -228,9 +231,9 @@ struct ConvergenceHeatmap: View {
                     Text("esc")
                         .font(.system(size: 10, weight: .semibold, design: .monospaced))
                         .padding(.horizontal, 5).padding(.vertical, 1.5)
-                        .background(RoundedRectangle(cornerRadius: 4).fill(Tone.ph.opacity(0.1)))
+                        .background(RoundedRectangle(cornerRadius: 4).fill(CardTone.ph.opacity(0.1)))
                 }
-                .foregroundStyle(Tone.ph2)
+                .foregroundStyle(CardTone.ph2)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -257,7 +260,7 @@ struct ConvergenceHeatmap: View {
             if model.sections.isEmpty {
                 Text("No plan section changed in this cycle.")
                     .font(.system(size: 12))
-                    .foregroundStyle(Tone.ph3)
+                    .foregroundStyle(CardTone.ph3)
                     .offset(x: names.lowerBound, y: gridTop + 6)
             }
             ForEach(model.sections.indices, id: \.self) { s in
@@ -267,7 +270,7 @@ struct ConvergenceHeatmap: View {
     }
 
     private func rowCaption(_ text: String) -> some View {
-        Text(text).font(Font(Tone.caption)).tracking(1.5).foregroundStyle(Tone.ph3).fixedSize()
+        Text(text).font(Font(CardTone.caption)).tracking(1.5).foregroundStyle(CardTone.ph3).fixedSize()
     }
 
     private func roundHeader(_ r: Int, column: ClosedRange<CGFloat>) -> some View {
@@ -278,23 +281,23 @@ struct ConvergenceHeatmap: View {
         return VStack(spacing: 0) {
             Text(model.rounds[r])
                 .font(.system(size: 12.5, weight: .bold, design: .monospaced))
-                .foregroundStyle(Tone.ph)
+                .foregroundStyle(CardTone.ph)
                 .frame(height: M.roundRow)
             Text("\(model.counts[r])")
                 .font(.system(size: 11, design: .monospaced))
                 .monospacedDigit()
-                .foregroundStyle(Tone.ph3)
+                .foregroundStyle(CardTone.ph3)
                 .frame(height: M.countRow)
             if let agree {
                 VStack(spacing: 3) {
                     ZStack(alignment: .leading) {
-                        Capsule().fill(Tone.ph.opacity(0.12))
-                        Capsule().fill(fell ? Tone.amber : Tone.ph2).frame(width: max(2, (w - 20) * agree))
+                        Capsule().fill(CardTone.ph.opacity(0.12))
+                        Capsule().fill(fell ? CardTone.amber : CardTone.ph2).frame(width: max(2, (w - 20) * agree))
                     }
                     .frame(width: w - 20, height: 3)
                     Text("\(Int((agree * 100).rounded()))%")
                         .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(fell ? Tone.amber : Tone.ph2)
+                        .foregroundStyle(fell ? CardTone.amber : CardTone.ph2)
                 }
                 .frame(height: M.agreeRow)
             }
@@ -321,8 +324,8 @@ struct ConvergenceHeatmap: View {
 
             if hot || section == focusSection {
                 RoundedRectangle(cornerRadius: 7)
-                    .strokeBorder(hot ? Tone.amber : Tone.accent, lineWidth: 1.5)
-                    .shadow(color: (hot ? Tone.amber : Tone.accent).opacity(0.35), radius: 5)
+                    .strokeBorder(hot ? CardTone.amber : CardTone.accent, lineWidth: 1.5)
+                    .shadow(color: (hot ? CardTone.amber : CardTone.accent).opacity(0.35), radius: 5)
                     .frame(width: span.upperBound - span.lowerBound, height: M.cellHeight + 6)
                     .offset(x: span.lowerBound, y: y - 3)
             }
@@ -336,12 +339,12 @@ struct ConvergenceHeatmap: View {
         HStack(spacing: 8) {
             Text(model.labels[s])
                 .font(.system(size: 12.5, weight: .semibold, design: .monospaced))
-                .foregroundStyle(hot ? Tone.amber : Tone.ph3)
+                .foregroundStyle(hot ? CardTone.amber : CardTone.ph3)
                 .frame(width: 30, alignment: .leading)
-            Text(model.names[s]).font(.system(size: 13)).foregroundStyle(hot ? Tone.amber : Tone.ph).lineLimit(1).fixedSize()
+            Text(model.names[s]).font(.system(size: 13)).foregroundStyle(hot ? CardTone.amber : CardTone.ph).lineLimit(1).fixedSize()
             Spacer(minLength: 6)
             if let caption {
-                Text(caption).font(.system(size: 11.5)).foregroundStyle(hot ? Tone.amber : Tone.ph3).lineLimit(1).fixedSize()
+                Text(caption).font(.system(size: 11.5)).foregroundStyle(hot ? CardTone.amber : CardTone.ph3).lineLimit(1).fixedSize()
             }
         }
     }
@@ -355,16 +358,16 @@ struct ConvergenceHeatmap: View {
         return Button { onSelect(checkpoint, model.sections[s]) } label: {
             ZStack {
                 if lines == 0 {
-                    shape.strokeBorder(Tone.ph.opacity(0.08), lineWidth: 1)
-                    Text("·").font(.system(size: 12, weight: .bold)).foregroundStyle(Tone.ph3)
+                    shape.strokeBorder(CardTone.ph.opacity(0.08), lineWidth: 1)
+                    Text("·").font(.system(size: 12, weight: .bold)).foregroundStyle(CardTone.ph3)
                 } else {
-                    shape.fill(Tone.ph.opacity(0.07 + 0.6 * lum))
+                    shape.fill(CardTone.ph.opacity(0.07 + 0.6 * lum))
                     Text("\(lines)")
                         .font(.system(size: 12, weight: .bold, design: .monospaced))
                         .monospacedDigit()
-                        .foregroundStyle(lum > 0.55 ? Color(white: 0.08) : Tone.ph)
+                        .foregroundStyle(lum > 0.55 ? Color(white: 0.08) : CardTone.ph)
                 }
-                if selected { shape.strokeBorder(Tone.accent, lineWidth: 1.5) }
+                if selected { shape.strokeBorder(CardTone.accent, lineWidth: 1.5) }
             }
             .frame(width: column.upperBound - column.lowerBound, height: M.cellHeight)
             .contentShape(shape)
@@ -385,25 +388,25 @@ struct ConvergenceHeatmap: View {
                 Text(cell.word)
                     .font(.system(size: 20, weight: .bold, design: .monospaced))
                     .tracking(1.5)
-                    .foregroundStyle(amber ? Tone.amber : Tone.ph)
+                    .foregroundStyle(amber ? CardTone.amber : CardTone.ph)
                 Text(cell.detail.components(separatedBy: " · ").dropFirst().joined(separator: " · ").uppercased())
-                    .font(Font(Tone.caption))
+                    .font(Font(CardTone.caption))
                     .tracking(1.5)
-                    .foregroundStyle(Tone.ph2)
+                    .foregroundStyle(CardTone.ph2)
             }
             if let series = cell.cardLines.first {
-                Text(series).font(.system(size: 12.5)).foregroundStyle(Tone.ph2).fixedSize(horizontal: false, vertical: true)
+                Text(series).font(.system(size: 12.5)).foregroundStyle(CardTone.ph2).fixedSize(horizontal: false, vertical: true)
             }
             ForEach(Array(cell.cardLines.dropFirst(2).enumerated()), id: \.offset) { _, line in
-                Text(line).font(.system(size: 12)).foregroundStyle(Tone.ph3).fixedSize(horizontal: false, vertical: true)
+                Text(line).font(.system(size: 12)).foregroundStyle(CardTone.ph3).fixedSize(horizontal: false, vertical: true)
             }
             if let headline = cell.actionHeadline {
                 Text(headline)
                     .font(.system(size: 13.5, weight: .semibold))
-                    .foregroundStyle(amber ? Tone.amber : Tone.ph)
+                    .foregroundStyle(amber ? CardTone.amber : CardTone.ph)
                     .padding(.top, 4)
                 if let detail = cell.actionDetail {
-                    Text(detail).font(.system(size: 12.5)).foregroundStyle(Tone.ph2).fixedSize(horizontal: false, vertical: true)
+                    Text(detail).font(.system(size: 12.5)).foregroundStyle(CardTone.ph2).fixedSize(horizontal: false, vertical: true)
                 }
             }
             HStack(spacing: 8) {
@@ -411,7 +414,7 @@ struct ConvergenceHeatmap: View {
                     Button("Review \(hot) Diffs") { onSelect(last, section) }
                     if let onAnnotate { Button("Annotate \(hot)…") { onAnnotate(section) } }
                 }
-                Text("a signal, not a promise").font(.system(size: 11)).foregroundStyle(Tone.ph3)
+                Text("a signal, not a promise").font(.system(size: 11)).foregroundStyle(CardTone.ph3)
             }
             .controlSize(.small)
             .padding(.top, 2)
@@ -420,7 +423,7 @@ struct ConvergenceHeatmap: View {
         .frame(width: panelWidth - (layout.panelBelow ? 0 : 20), alignment: .leading)
         .padding(.leading, layout.panelBelow ? 0 : 20)
         .overlay(alignment: .leading) {
-            if !layout.panelBelow { Rectangle().fill(Tone.ph.opacity(0.08)).frame(width: 1) }
+            if !layout.panelBelow { Rectangle().fill(CardTone.ph.opacity(0.08)).frame(width: 1) }
         }
         .offset(x: layout.panelX, y: layout.panelBelow ? gridHeight + 8 : M.header + 4)
     }
@@ -799,23 +802,23 @@ struct SectionVersionsCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             VStack(alignment: .leading, spacing: 2) {
-                Text("\(HeatmapModel.label(section)) keeps changing").font(.system(size: 13, weight: .semibold)).foregroundStyle(Tone.ph)
+                Text("\(HeatmapModel.label(section)) keeps changing").font(.system(size: 13, weight: .semibold)).foregroundStyle(CardTone.ph)
                 Text(model.caption.map { $0.hasPrefix("changed") ? $0 + " rounds" : $0 } ?? "")
-                    .font(.system(size: 11.5)).foregroundStyle(Tone.amber)
+                    .font(.system(size: 11.5)).foregroundStyle(CardTone.amber)
             }
             if versions.isEmpty {
                 Text("The reviewers' proposals for this section weren't kept for these rounds.")
-                    .font(.system(size: 12)).foregroundStyle(Tone.ph3).fixedSize(horizontal: false, vertical: true)
+                    .font(.system(size: 12)).foregroundStyle(CardTone.ph3).fixedSize(horizontal: false, vertical: true)
             }
             ForEach(Array(versions.enumerated()), id: \.offset) { i, version in
-                if i > 0 { Rectangle().fill(Tone.ph.opacity(0.08)).frame(height: 1) }
+                if i > 0 { Rectangle().fill(CardTone.ph.opacity(0.08)).frame(height: 1) }
                 HStack(alignment: .firstTextBaseline, spacing: 10) {
-                    Text(version.round).font(.system(size: 11, weight: .bold, design: .monospaced)).foregroundStyle(Tone.ph3)
+                    Text(version.round).font(.system(size: 11, weight: .bold, design: .monospaced)).foregroundStyle(CardTone.ph3)
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(version.text).font(.system(size: 12)).foregroundStyle(Tone.ph2).lineLimit(4)
+                        Text(version.text).font(.system(size: 12)).foregroundStyle(CardTone.ph2).lineLimit(4)
                             .fixedSize(horizontal: false, vertical: true)
                         if let verdict = version.verdict {
-                            Text(Self.word(verdict)).font(.system(size: 10.5)).foregroundStyle(Tone.ph3)
+                            Text(Self.word(verdict)).font(.system(size: 10.5)).foregroundStyle(CardTone.ph3)
                         }
                     }
                 }
@@ -827,7 +830,7 @@ struct SectionVersionsCard: View {
             RoundedRectangle(cornerRadius: 9)
                 .fill(LinearGradient(colors: [Color(red: 0.102, green: 0.118, blue: 0.145), Color(red: 0.059, green: 0.071, blue: 0.086)],
                                      startPoint: .top, endPoint: .bottom))
-                .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(Tone.ph.opacity(0.16), lineWidth: 1))
+                .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(CardTone.ph.opacity(0.16), lineWidth: 1))
                 .shadow(color: .black.opacity(0.6), radius: 17, y: 14)
         )
         .environment(\.colorScheme, .dark)

@@ -890,7 +890,17 @@ final class IntakeService: ObservableObject {
                         self.flapPolicies[id]?.seed(surface: "lcd.convergence", text: word)
                     }
                 }
-                if self.coverage[id] != readings { self.coverage[id] = readings }
+                if self.coverage[id] != readings {
+                    let first = self.coverage[id] == nil
+                    self.coverage[id] = readings
+                    // As with the CONVERGENCE word: the first readings were true before anyone
+                    // looked, so the word they make is seeded rather than flapped in.
+                    if first, self.flapSeeded.contains(id), let intake = self.intake(id), let config = intake.roundConfig,
+                       let word = CoverageCellModel(intake: intake, tape: tape, config: config, readings: readings,
+                                                    cycles: self.convergence[id] ?? [])?.word {
+                        self.flapPolicies[id]?.seed(surface: "lcd.coverage", text: word)
+                    }
+                }
             }
         }
     }
@@ -907,10 +917,13 @@ final class IntakeService: ObservableObject {
         flapSeeded.insert(i.id)
         let tape = latestTapes[i.id] ?? tapeStore(i.id).loadTape()
         let board = BoardModel(intake: i, tape: tape, config: config, now: now(), selected: nil, preview: nil)
-        // The LCD's text values too, the CONVERGENCE word included once the series is known;
-        // a series folded after this is seeded as it lands (`refreshConvergence`).
+        // The LCD's text values too, the CONVERGENCE and COVERAGE words included once their
+        // series are known; a series folded after this is seeded as it lands (`refreshConvergence`).
         let lcd = LCDModel(tape: tape, config: config, board: board, seats: [],
-                           convergence: convergence[i.id].flatMap { ConvergenceCellModel(cycles: $0) }, preview: nil, now: now())
+                           convergence: convergence[i.id].flatMap { ConvergenceCellModel(cycles: $0) },
+                           coverage: coverage[i.id].flatMap { CoverageCellModel(intake: i, tape: tape, config: config, readings: $0,
+                                                                                 cycles: convergence[i.id] ?? []) },
+                           preview: nil, now: now())
         for (surface, text) in board.flapTexts.merging(lcd.flapTexts, uniquingKeysWith: { a, _ in a }) {
             policy.seed(surface: surface, text: text)
         }

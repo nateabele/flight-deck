@@ -219,7 +219,7 @@ final class LCDModelTests: XCTestCase {
                        [.round, .elapsed, .seatsDone, .convergence, .stopsAt])
         XCTAssertEqual(model.visible(width: 499, cellWidth: width).map(\.kind),
                        [.round, .elapsed, .seatsDone, .convergence])
-        XCTAssertEqual(LCDModel.dropOrder, [.billed, .soFar, .stopsAt])
+        XCTAssertEqual(LCDModel.dropOrder, [.billed, .soFar, .stopsAt, .coverage])
 
         // Uneven widths: a wide cell leaving can save a narrower one that would otherwise go.
         let uneven: (LCDCell) -> CGFloat = { $0.kind == .billed ? 300 : 50 }
@@ -274,5 +274,32 @@ final class LCDModelTests: XCTestCase {
         XCTAssertEqual(round.accessibilityLabel, "REFINE 2, running, of 4")
         let empty = LCDCell(kind: .elapsed, value: "—", shortValue: "—", caption: "paused", tone: .normal)
         XCTAssertEqual(empty.accessibilityLabel, "none, paused")
+    }
+
+    // MARK: - Coverage
+
+    /// COVERAGE sits right after CONVERGENCE and is the last optional cell to leave: STOPS AT is
+    /// repeated by the board below, nothing repeats COVERAGE.
+    func testCoverageCellFollowsConvergenceAndLeavesLast() throws {
+        let i = try intake(.featurePlan)
+        let tape = afterR1(.running)
+        let config = try XCTUnwrap(i.roundConfig)
+        let board = BoardModel(intake: i, tape: tape, config: config, now: t0.addingTimeInterval(500), selected: nil, preview: nil)
+        let cov = CoverageCellModel(word: "FEW LEFT", shortWord: "FEW", caption: "cross-check R1", tone: .normal)
+        let conv = ConvergenceCellModel(word: "TOO EARLY", latest: 3, spark: [3], tone: .normal)
+        let lcd = LCDModel(tape: tape, config: config, board: board, seats: [], convergence: conv, coverage: cov,
+                           preview: nil, now: t0.addingTimeInterval(500))
+        let kinds = lcd.cells.map(\.kind)
+        XCTAssertEqual(kinds.firstIndex(of: .coverage), kinds.firstIndex(of: .convergence).map { $0 + 1 })
+        let c = try XCTUnwrap(lcd.cells.first { $0.kind == .coverage })
+        XCTAssertEqual([c.value, c.shortValue, c.caption], ["FEW LEFT", "FEW", "cross-check R1"])
+        XCTAssertEqual(LCDModel.dropOrder, [.billed, .soFar, .stopsAt, .coverage])
+        XCTAssertEqual(LCDModel.flapSurface(.coverage), "lcd.coverage")
+
+        let width: (LCDCell) -> CGFloat = { _ in 100 }
+        XCTAssertEqual(lcd.visible(width: 599, cellWidth: width).map(\.kind),
+                       [.round, .elapsed, .seatsDone, .convergence, .coverage], "STOPS AT leaves before COVERAGE")
+        XCTAssertEqual(lcd.visible(width: 499, cellWidth: width).map(\.kind),
+                       [.round, .elapsed, .seatsDone, .convergence])
     }
 }
