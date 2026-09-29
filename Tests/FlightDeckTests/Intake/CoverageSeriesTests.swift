@@ -1,0 +1,100 @@
+import XCTest
+import IntakeKit
+
+/// Coverage spec §5: counting accepted issues per family, Chapman's estimate and the bands.
+final class CoverageSeriesTests: XCTestCase {
+    /// `a` issues only family A raised, `b` only B, `shared` raised by both, all accepted; plus
+    /// `rejected` proposals from A the integrator disagreed with.
+    private func reading(a: Int, b: Int, shared: Int, rejected: Int = 0, clusters given: Bool = true,
+                         families: [ModelFamily] = [.codex, .claude], verdicts: Bool = true) -> CoverageReading {
+        var proposers: [Int] = [], clusters: [[Int]] = [], changes: [ProposedChange] = [], vs: [ChangeVerdict] = []
+        func add(_ p: Int, _ text: String, _ v: Verdict) -> Int {
+            proposers.append(p); changes.append(ProposedChange(section: "## \(text)", rationale: text, edit: text))
+            vs.append(ChangeVerdict(index: changes.count - 1, verdict: v)); return changes.count - 1
+        }
+        for i in 0..<a { _ = add(0, "a\(i)", .agree) }
+        for i in 0..<b { _ = add(1, "b\(i)", .somewhat) }
+        for i in 0..<shared { clusters.append([add(0, "s\(i)", .agree), add(1, "s\(i)", .agree)]) }
+        for i in 0..<rejected { _ = add(0, "r\(i)", .disagree) }
+        let record = CrossCheckRecord(proposers: proposers, families: families,
+                                      clusters: given ? (clusters.isEmpty ? nil : clusters) : nil, blindOrderSeed: 1)
+        return CoverageSeries.reading(checkpoint: 3, round: 1, record: record, changes: changes, verdicts: verdicts ? vs : nil)
+    }
+
+    func testChapman() {
+        XCTAssertEqual(CoverageSeries.chapman(n1: 20, n2: 18, both: 15), 21.0 * 19.0 / 16.0 - 1, accuracy: 1e-9)
+        XCTAssertEqual(CoverageSeries.chapman(n1: 3, n2: 4, both: 0), 19, accuracy: 1e-9, "finite at no overlap")
+    }
+
+    /// The handoff's worked examples: 20/18/15 is saturated, 20/18/4 is far from it.
+    func testWorkedExamples() {
+        let sat = reading(a: 5, b: 3, shared: 15)
+        XCTAssertEqual([sat.n1, sat.n2, sat.both, sat.found], [20, 18, 15, 23])
+        XCTAssertEqual(sat.unfound, 1)   // N̂ = 21·19/16 − 1 ≈ 23.9, found 23
+        XCTAssertEqual(sat.band, .saturated)
+        let far = reading(a: 16, b: 14, shared: 4)
+        XCTAssertEqual(far.band, .manyLeft)
+        XCTAssertGreaterThan(far.unfound ?? 0, 6)
+    }
+
+    func testBandBoundariesInOrder() {
+        XCTAssertEqual(reading(a: 1, b: 1, shared: 0).band, .saturated, "found ≤ 2 beats no-overlap")
+        XCTAssertEqual(reading(a: 0, b: 0, shared: 0).band, .saturated, "nothing found by either (Review Focus 3)")
+        XCTAssertEqual(reading(a: 3, b: 3, shared: 0).band, .noOverlap)
+        XCTAssertEqual(reading(a: 6, b: 6, shared: 6).band, .fewLeft)   // 12/12/6: N̂ = 169/7 − 1 ≈ 23.1, found 18 → 5
+        XCTAssertEqual(reading(a: 5, b: 3, shared: 15, families: [.claude, .claude]).band, .sameFamily)
+        XCTAssertNil(reading(a: 5, b: 3, shared: 15, families: [.claude, .claude]).unfound)
+        XCTAssertEqual(reading(a: 5, b: 3, shared: 15, verdicts: false).band, .unmeasured)
+    }
+
+    func testRejectedProposalsAreNotCoverage() {
+        let r = reading(a: 2, b: 2, shared: 6, rejected: 4)
+        XCTAssertEqual(r.n1, 8); XCTAssertEqual(r.rejectedA, 4); XCTAssertEqual(r.rejectedB, 0)
+    }
+
+    func testCorrelated() {
+        XCTAssertTrue(reading(a: 0, b: 1, shared: 10).correlated)
+        XCTAssertFalse(reading(a: 2, b: 2, shared: 3).correlated, "3 of 5 overlap is not near-total")
+        XCTAssertFalse(reading(a: 5, b: 3, shared: 15).correlated)
+    }
+
+    func testTextSimilarityFallbackIsLabelled() {
+        let r = reading(a: 1, b: 1, shared: 3, clusters: false)
+        XCTAssertEqual(r.matcher, .textSimilarity)
+        XCTAssertEqual(r.both, 3, "identical texts cluster by similarity")
+        XCTAssertEqual(reading(a: 1, b: 1, shared: 3).matcher, .integrator)
+    }
+
+    func testMatcherDisagreement() {
+        // The integrator paired 12 issues whose texts share nothing: the text matcher finds 0.
+        var proposers: [Int] = [], changes: [ProposedChange] = [], vs: [ChangeVerdict] = [], clusters: [[Int]] = []
+        for i in 0..<12 {
+            proposers += [0, 1]
+            changes += [ProposedChange(section: "## X\(i)", rationale: "alpha\(i)", edit: "one"),
+                        ProposedChange(section: "## Y\(i)", rationale: "omega\(i)", edit: "two")]
+            vs += [ChangeVerdict(index: 2 * i, verdict: .agree), ChangeVerdict(index: 2 * i + 1, verdict: .agree)]
+            clusters.append([2 * i, 2 * i + 1])
+        }
+        let r = CoverageSeries.reading(checkpoint: 1, round: 1,
+                                       record: CrossCheckRecord(proposers: proposers, families: [.codex, .claude], clusters: clusters, blindOrderSeed: 1),
+                                       changes: changes, verdicts: vs)
+        XCTAssertEqual(r.textSimilarityBoth, 0)
+        XCTAssertTrue(r.matchersDisagree)
+    }
+
+    func testReadingsSkipRoundsWithoutARecord() throws {
+        let cps = [Checkpoint(id: 1, stage: .synthesis, round: 0, major: true, createdAt: Date()),
+                   Checkpoint(id: 2, stage: .refine, round: 1, major: false, createdAt: Date()),
+                   Checkpoint(id: 3, stage: .refine, round: 2, major: true, createdAt: Date())]
+        let record = CrossCheckRecord(proposers: [0, 1], families: [.codex, .claude], clusters: [[0, 1]], blindOrderSeed: 3)
+        let files: [Int: [String: Data]] = [3: [
+            CrossCheckRecord.fileName: try IntakeJSON.encoder.encode(record),
+            "changes.json": try IntakeJSON.encoder.encode([ProposedChange(section: "s", rationale: "r", edit: "e"),
+                                                           ProposedChange(section: "s", rationale: "r", edit: "e")]),
+            "verdicts.json": try IntakeJSON.encoder.encode([ChangeVerdict(index: 0, verdict: .agree), ChangeVerdict(index: 1, verdict: .agree)]),
+        ]]
+        let readings = CoverageSeries.readings(cps) { files[$0]?[$1] }
+        XCTAssertEqual(readings.map(\.checkpoint), [3], "old rounds with no crosscheck.json read as no reading, never as 0")
+        XCTAssertEqual(readings.first?.round, 2)
+    }
+}
