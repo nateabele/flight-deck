@@ -24,7 +24,8 @@
     "question-checkbox-toggled.captured.txt",
     "question-checkbox-submit-focused.captured.txt",
     "question-set-with-checkbox.captured.txt",
-    "question-numbered-description.captured.txt"
+    "question-numbered-description.captured.txt",
+    "question-preview.captured.txt"
   ],
   "isVerbatimCapturedOutput": true,
   "claudeVersion": "2.1.241 (Claude Code)",
@@ -54,7 +55,8 @@
     "question-checkbox-toggled.captured.txt": "f72605edd4ee012d802203e230bdf9aa8fba005e7af0d19bc920b67f6af5d998",
     "question-checkbox-submit-focused.captured.txt": "8496ddf345f5fc1b89279a1f8fa057fb409f7768c933170c66e2984c1321e7ac",
     "question-set-with-checkbox.captured.txt": "2d9c531b6f1a0e915e20eca4d02aac0592baec91d2ab1950dc1c288284162c40",
-    "question-numbered-description.captured.txt": "1722c61cae83ac84a143005bd6aa68ee67bb5663aabd41858c1a815b874329e5"
+    "question-numbered-description.captured.txt": "1722c61cae83ac84a143005bd6aa68ee67bb5663aabd41858c1a815b874329e5",
+    "question-preview.captured.txt": "061a7d198bf16c158023066dedf8f9e64044c8287e94bb687d3040345e59d261"
   },
   "whatTheseAre": [
     "The terminal SCREEN a blocked claude session shows, as plain text on a fixed-width grid \u2014",
@@ -314,6 +316,13 @@
         "question-numbered-description.captured.txt"
       ],
       "note": "Not a pty/pyte render like every batch above it: this screen came off a LIVE ghostty surface, written by Flight Deck's own AnswerAbortLog when a real phone answer was refused, and lifted verbatim out of the `--- viewport begin/end ---` block of ~/Library/Logs/flight-deck-answer.log (the 2026-09-23T20:52:54.373-05:00 record, check=no-focused-row). So it is exactly the string readViewport() returned on the refusal it documents \u2014 the one provenance gap the codex captures still record as open, closed here by accident rather than by method.\n\nNothing was dropped or edited: the whole 92-line viewport is here, banner and all, because the banner rows are above the dialog and a parser that scans the screen meets them. It carries this machine's own project path, which the earlier captures dropped to keep an account name out of the repo; there is no account name or org in this one.\n\nWhat it is for: option 1's description wraps immediately after the word \"Level\", so a DESCRIPTION line begins `0. ` at column 5 and ChoiceDialog.list() reads it as row number 0. The contiguous run breaks, focusedRow returns nil, and every answer to this dialog was refused for as long as it was on screen. AnswerPromptTests drives it; ChoiceDialogTests pins the shape."
+    },
+    "2.1.283 (Claude Code)": {
+      "capturedOn": "2026-09-29",
+      "files": [
+        "question-preview.captured.txt"
+      ],
+      "note": "Lifted the same way as question-numbered-description: verbatim out of the `--- viewport begin/end ---` block of ~/Library/Logs/flight-deck-answer.log (the 2026-09-29T06:52:46.058-05:00 record, check=option-row-mismatch), so it is exactly what readViewport() returned on a live ghostty surface. Nothing dropped or edited; the banner carries this machine's project path and plan tier and no account name.\n\nWhat it is for: an AskUserQuestion whose options carry a `preview`. Claude draws the preview as a box to the RIGHT of the options, on the same terminal lines, so row 1 reads `\u276f 1. Band word (Recommended)      \u250c\u2500\u2500\u2500\u2026\u2510`. ChoiceDialog took everything after `N. ` as the label, the pre-flight row check compared `Band word (Recommended) \u250c\u2500\u2500\u2026\u2510` against the transcript's `Band word (Recommended)`, and every phone answer to a preview question was refused as unreadable_screen before a key moved. Also recorded by this screen: in the preview layout `Chat about this` is drawn UNNUMBERED at column 2, below the closing rule."
     }
   }
 }

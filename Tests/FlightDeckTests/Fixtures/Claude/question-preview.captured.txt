@@ -1,0 +1,63 @@
+ ▐▛███▛█   Claude Code v2.1.283
+▝▜██████▀  Opus 5.5 (1M context) · Claude Max
+ ▝▝   ▝▝   ~/Projects/flight-deck
+
+
+❯ /clear                                                                                                                                                                                                               
+
+❯ Look at the flight control coverage handoff doc and pick it up from there.                                                                                                                                           
+
+⏺ Bash(git show --stat 2f14863 | head -20 && git log --oneline -8)
+  ⎿  commit 2f1486382886b62c71f0dec6617c2af348a62911
+     Author: Dana Lee <dana@example.com>
+     Date:   Mon Sep 28 21:59:52 2026 -0500
+     … +25 lines (ctrl+o to expand)
+
+⏺ Bash(git show --stat --format= 2f14863; )
+  ⎿   docs/FLIGHT-CONTROL-COVERAGE-HANDOFF.md | 412 ++++++++++++++++++++++++++++++++
+      docs/FOLLOWUPS.md                       |   4 +
+      docs/HANDOFF.md                         |   2 +
+      3 files changed, 418 insertions(+)
+
+  Read 1 file (ctrl+o to expand)
+
+⏺ Skill(superpowers:brainstorming)
+  ⎿  Successfully loaded skill
+
+⏺ Bash(rg -n "reviewer" Sources/IntakeKit/RoundConfig.swift | head; rg -n "case codex" Sources/IntakeKit/Intake.swift; rg -n "Fingerprint" Sources/IntakeKit/Convergenc…)
+  ⎿  49:    public var reviewer: Slot?
+     59:    public init(drafters: [Slot], synthesizer: Slot?, reviewer: Slot?, integrator: ModelChoice,
+     64:        self.reviewer = reviewer
+     … +41 lines (ctrl+o to expand)
+
+⏺ User answered Claude's questions:
+  ⎿  · Capture–recapture needs two independent reviewers over the same plan, but each Refine round has one reviewer today. How should we get that second pass? → Cross-check rounds (Recommended)
+
+⏺ Cross-check rounds it is. Next, who decides that two proposals are the same issue? This sets the overlap count m, which drives the whole estimate.
+
+⏺ User answered Claude's questions:
+  ⎿  · In a cross-check round, who decides that proposal #3 from Codex and proposal #7 from Claude are the same issue? → Integrator clusters (Recommended)
+
+⏺ Integrator clusters, with Fingerprint as a sanity check. Next is how honest the display can be. With one tape on disk, no threshold can be calibrated yet.
+
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ☐ Display 
+
+│ What should the COVERAGE cell on the LCD say? (All options keep the raw counts in the card: Codex 20 · Claude 18 · both 15.)
+
+❯ 1. Band word (Recommended)      ┌──────────────────────────────────────────┐
+  2. Estimated count              │ ┌ CONVERGENCE ──────┐┌ COVERAGE ─────┐   │
+  3. Binary                       │ │ ▁▃▅▂▁ converging  ││ FEW LEFT      │   │
+                                  │ │ 4 changes         ││ cross-check R1│   │
+                                  │ └───────────────────┘└───────────────┘   │
+                                  │ card: Codex 20 · Claude 18 · both 15     │
+                                  │       ≈ 2 unfound (estimate, Chapman)    │
+                                  └──────────────────────────────────────────┘
+
+                                  Notes: press n to add notes
+
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Chat about this
+
+Enter to select · ↑/↓ to navigate · n to add notes · Esc to cancel
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── Flywheel Planning ─

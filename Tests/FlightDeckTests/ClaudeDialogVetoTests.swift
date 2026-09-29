@@ -19,12 +19,12 @@ final class ClaudeDialogVetoTests: XCTestCase {
         try TimelineFixtureTests.text("\(name).captured", in: "Claude")
     }
 
-    /// Fifteen of these sixteen carry `Esc to cancel`. `question-two-review` does not — its
+    /// Sixteen of these seventeen carry `Esc to cancel`. `question-two-review` does not — its
     /// footer is `❯ 1. Submit answers` / `  2. Cancel`, caught only by the
     /// marker-plus-numbered-row rule. See `ClaudeTextChannel.hasNumberedMarkerRow`.
     ///
     /// **Internal rather than private** so `ClaudeComposerDetectorTests` can hold the *other*
-    /// predicate to the same sixteen screens — see its `testEveryDialogCaptureIsRefused`. One
+    /// predicate to the same seventeen screens — see its `testEveryDialogCaptureIsRefused`. One
     /// hand-written list, asserted twice: a dialog added here is covered by both gates at once,
     /// which is the whole reason the list is shared instead of copied.
     static let dialogs = [
@@ -32,7 +32,7 @@ final class ClaudeDialogVetoTests: XCTestCase {
         "question-single", "question-single-247", "question-two", "question-two-answered",
         "question-two-review", "question-multi", "question-checkbox", "question-checkbox-toggled",
         "question-checkbox-submit-focused", "question-set-with-checkbox",
-        "question-numbered-description",
+        "question-numbered-description", "question-preview",
         "workspace-trust",
     ]
 

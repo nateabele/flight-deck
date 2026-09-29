@@ -192,7 +192,7 @@ enum ChoiceDialog {
         /// be one the screen contradicts, and `list`'s contiguity check reads this field.
         var number: Int?
         var isMarked: Bool
-        /// The row's own text, with the marker and the `N.` removed.
+        /// The row's own text, with the marker, the `N.` and any preview beside it removed.
         var label: String
         /// Where the text after the `N.` begins, as a column in the original line — `5` for
         /// both `  1. [ ] Trail mix` and `  1. Rust`, since it is measured before the box is
@@ -240,6 +240,8 @@ enum ChoiceDialog {
     /// unnumbered row out of whatever sits under its options. A box shape no capture draws
     /// leaves the row unchecked, the action row unadmitted and the drive refused, which is the
     /// direction this file fails in.
+    ///
+    /// **An option's `preview` is cut off the end** — see `beforePreview`.
     private static func parse(_ line: String, marker: Character) -> Row? {
         var rest = Substring(line).drop(while: { $0 == " " })
         var isMarked = false
@@ -272,7 +274,7 @@ enum ChoiceDialog {
             rest = rest.dropFirst(4).drop(while: { $0 == " " })
         }
 
-        let label = normalized(rest)
+        let label = normalized(beforePreview(rest))
         guard !label.isEmpty else { return nil }
         return Row(number: number, isMarked: isMarked, label: label, textColumn: textColumn,
                    isCheckbox: isCheckbox)
@@ -343,7 +345,11 @@ enum ChoiceDialog {
                 pending = candidate
             } else if !current.isEmpty, let continuation = continuation(line, marker: marker) {
                 demoteCandidate()
-                current[current.count - 1].continuations.append(continuation)
+                // Empty is a line of nothing but preview box: it belongs to the row, so it must
+                // not end the run, and it has no words to join to the label.
+                if !continuation.isEmpty {
+                    current[current.count - 1].continuations.append(continuation)
+                }
             } else {
                 confirmCandidate()
                 lists.append(current)
@@ -426,10 +432,44 @@ enum ChoiceDialog {
     ///
     /// Indentation is what excludes the footer (`Enter to select · ↑/↓ to navigate …`) and the
     /// full-width `─` rules, which claude draws from column 1.
+    ///
+    /// Returns its text with any preview cut away, so a line that is ALL preview — the box
+    /// continuing down beside or below the options — comes back empty rather than nil.
     private static func continuation(_ line: String, marker: Character) -> String? {
-        guard line.first == " ", parse(line, marker: marker) == nil else { return nil }
-        let text = normalized(line)
-        return text.isEmpty ? nil : text
+        guard line.first == " ", parse(line, marker: marker) == nil,
+              !normalized(line).isEmpty
+        else { return nil }
+        return normalized(beforePreview(Substring(line)))
+    }
+
+    /// `text` up to where an `AskUserQuestion` option's **preview** begins, or all of it.
+    ///
+    /// Claude draws an option's `preview` as a box to the RIGHT of the options, on the same
+    /// terminal lines: `❯ 1. Band word (Recommended)      ┌────…┐` (`question-preview`).
+    /// Read to the end of the line, that row's label is the words plus the box, it confirms
+    /// against nothing the transcript holds, and every answer to a preview question is refused
+    /// before a key moves — the failure that came back from the phone.
+    ///
+    /// The preview's column is marked by **two or more blanks and then a box-drawing glyph**
+    /// (U+2500–U+257F). Both halves are needed. A label may contain a box glyph after a single
+    /// space (`Split │ pane`), and a label may be followed by blanks with nothing after them;
+    /// neither is cut. A label that itself contained two spaces and a box glyph would be cut
+    /// short and then fail to match the transcript, which is a refusal, not a wrong press.
+    private static func beforePreview(_ text: Substring) -> Substring {
+        var blanks = 0
+        for index in text.indices {
+            let character = text[index]
+            if character.isWhitespace {
+                blanks += 1
+                continue
+            }
+            if blanks >= 2, let scalar = character.unicodeScalars.first,
+               (0x2500...0x257F).contains(scalar.value) {
+                return text[..<index]
+            }
+            blanks = 0
+        }
+        return text
     }
 
     /// What two strings are compared as: whitespace runs collapsed, ends trimmed.

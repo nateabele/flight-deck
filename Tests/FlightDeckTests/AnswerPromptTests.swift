@@ -317,6 +317,27 @@ final class AnswerPromptTests: XCTestCase {
         XCTAssertEqual(spy.screensAdvanced, 2, "both presses landed on a screen")
     }
 
+    /// **The answer the phone could not give, on the screen it could not give it on.**
+    ///
+    /// `question-preview.captured.txt` is the live viewport off `flight-deck-answer.log`
+    /// (`check=option-row-mismatch`, 2026-09-29): a question whose options carry a preview, so
+    /// the box shares the focused row's line. The pre-flight row check read that box as part of
+    /// the label and refused this exact `.option` twice. The marker is already on the chosen
+    /// row, so the whole answer is one Return.
+    func testAnOptionIsAnsweredOnAScreenWithAPreviewBesideIt() throws {
+        let (store, spy, id) = makeStore(activity: .waiting)
+        spy.viewportOverride = try TimelineFixtureTests.text("question-preview.captured",
+                                                             in: "Claude")
+        XCTAssertEqual(
+            store.answerPrompt(
+                question(labels: ["Band word (Recommended)", "Estimated count", "Binary"]),
+                with: .option(index: 0, label: "Band word (Recommended)"), in: id, token: UUID()
+            ),
+            .dispatched
+        )
+        XCTAssertEqual(spy.events, [.ret])
+    }
+
     // MARK: deny — one Escape, no read
 
     /// **The property, asserted rather than described.** A denial reads nothing off the screen,

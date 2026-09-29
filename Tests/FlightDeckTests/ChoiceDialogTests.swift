@@ -250,6 +250,59 @@ final class ChoiceDialogTests: XCTestCase {
         )
     }
 
+    /// **An option with a `preview` shares its line with the preview's box.**
+    ///
+    /// `question-preview` is a live screen off the answer log (`check=option-row-mismatch`,
+    /// 2026-09-29): claude draws the preview to the right of the options, so row 0 is
+    /// `❯ 1. Band word (Recommended)      ┌────…┐`. Read to the end of the line, that row never
+    /// confirmed its own label, and every phone answer to a preview question was refused before
+    /// a key moved. The labels below are the transcript's, in its order.
+    func testAPreviewBesideTheOptionsIsNotPartOfAnyRowsLabel() throws {
+        let screen = try captured("question-preview.captured")
+        XCTAssertTrue(screen.contains("❯ 1. Band word (Recommended)      ┌"),
+                      "the preview sharing the option's line is the whole point of this capture")
+        let labels = ["Band word (Recommended)", "Estimated count", "Binary"]
+        XCTAssertEqual(focusedRow(inViewport: screen), 0)
+        for screenRow in labels.indices {
+            for (index, label) in labels.enumerated() {
+                XCTAssertEqual(row(screenRow, reads: label, inViewport: screen),
+                               screenRow == index, "row \(screenRow) vs \(label)")
+            }
+        }
+    }
+
+    /// **A label that wraps in the preview layout.** The option column is narrow there — about
+    /// thirty cells on the capture above — so a label of a few words wraps, and its second line
+    /// carries the preview's box after it just as the first does. Authored: no capture holds
+    /// one. The box-only line under it belongs to the row too, and must neither end the run nor
+    /// join the label.
+    func testALabelWrappedBesideAPreviewReassembles() {
+        let screen = viewport([
+            "❯ 1. Show the estimated count     ┌──────────────┐",
+            "     of unfound issues            │ ≈ 2 unfound  │",
+            "                                  └──────────────┘",
+            "  2. Binary                       ",
+            "",
+            "Enter to select · ↑/↓ to navigate · n to add notes · Esc to cancel",
+        ])
+        XCTAssertTrue(row(0, reads: "Show the estimated count of unfound issues",
+                          inViewport: screen))
+        XCTAssertTrue(row(1, reads: "Binary", inViewport: screen),
+                      "the box-only line under row 0 must not break the run before row 1")
+    }
+
+    /// **A box glyph inside a label is not a preview.** Only a run of two or more spaces ahead
+    /// of the glyph marks the preview's column; a label that merely contains one keeps it, so it
+    /// must match whole or not at all.
+    func testABoxGlyphInsideALabelIsKept() {
+        let screen = viewport([
+            "❯ 1. Split │ pane",
+            "  2. Keep one pane",
+        ])
+        XCTAssertTrue(row(0, reads: "Split │ pane", inViewport: screen))
+        XCTAssertFalse(row(0, reads: "Split", inViewport: screen))
+    }
+
     /// **The dialog answered on the Mac a moment ago.** The ordinary outcome, because this is
     /// asked on every answer and the screen may have moved on between the tap and the read: the
     /// list is simply gone, and what is left is the scrollback and the input bar. A label that
