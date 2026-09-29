@@ -573,4 +573,40 @@ final class FleetListScreenTests: XCTestCase {
         XCTAssertFalse(message.isEmpty)
         XCTAssertTrue(message.contains("Dana's Mac"))
     }
+
+    func testIntakeRowsComeOrderedAndHideWithTheProject() {
+        let attention = WireIntakeSummary(id: UUID(), title: "A", state: "needsAnswers", needsAttention: true, createdAt: Date(timeIntervalSinceReferenceDate: 1))
+        let flying = WireIntakeSummary(id: UUID(), title: "B", state: "shaping", needsAttention: false, runStatus: "running", createdAt: Date(timeIntervalSinceReferenceDate: 2))
+        var project = WireProject(id: UUID(), name: "larkOS", path: "/w", intakes: [flying, attention])
+        XCTAssertEqual(FleetListScreen.intakeRows(project).map(\.id), [attention.id, flying.id])
+        project.isCollapsed = true
+        XCTAssertEqual(FleetListScreen.intakeRows(project), [])
+        project.isCollapsed = false; project.intakes = nil
+        XCTAssertEqual(FleetListScreen.intakeRows(project), [])
+    }
+
+    /// The path used to die with `FleetListScreen`'s `@State` when unpair cleared `mac`; on the
+    /// model it would outlive the pairing and point a re-paired phone at the old Mac's screens.
+    func testUnpairingClearsTheNavigationPathAndPendingBanners() {
+        let model = FleetModel(store: InMemoryPairedMacStore())
+        model.path.append(IntakeRoute.intake(UUID()))
+        let project = UUID(), id = UUID()
+        func fleet(_ s: WireIntakeSummary) -> FleetSnapshot {
+            FleetSnapshot(projects: [WireProject(id: project, name: "larkOS", path: "/w", intakes: [s])])
+        }
+        let quiet = WireIntakeSummary(id: id, title: "T", state: "triaging", needsAttention: false, createdAt: Date())
+        var loud = quiet; loud.state = "needsAnswers"; loud.needsAttention = true
+        model.flightControl.baseline(fleet(quiet))
+        model.flightControl.intakesChanged(project: project, intakes: [loud], fleet: fleet(loud))
+        // Another intake's screen: entering this one's own would drop its banner.
+        model.flightControl.enter(UUID())
+        XCTAssertFalse(model.path.isEmpty)
+        XCTAssertFalse(model.flightControl.banners.isEmpty, "the premise: a banner is queued")
+
+        model.unpair()
+
+        XCTAssertTrue(model.path.isEmpty)
+        XCTAssertTrue(model.flightControl.banners.isEmpty)
+        XCTAssertNil(model.flightControl.onScreen)
+    }
 }

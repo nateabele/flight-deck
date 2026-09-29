@@ -5,6 +5,7 @@ import SwiftUI
 struct FlightDeckMobileApp: App {
     @State private var model = FleetModel()
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// Remembers whether the app was actually suspended. See `RedialOnReturn` — reading it off
     /// a single transition is the version that shipped and never fired.
     @State private var redial = RedialOnReturn()
@@ -32,6 +33,23 @@ struct FlightDeckMobileApp: App {
                     FleetListScreen(model: model)
                 }
             }
+            .overlay(alignment: .top) {
+                if let banner = model.flightControl.banners.first {
+                    AttentionBanner(
+                        banner: banner,
+                        onOpen: {
+                            model.flightControl.dismissBanner(banner.id)
+                            openIntake(banner.id)
+                        },
+                        onDismiss: { model.flightControl.dismissBanner(banner.id) }
+                    )
+                    // A fresh view per banner: the queue reuses this one otherwise, so a later
+                    // banner would neither re-run the VoiceOver announcement nor the transition.
+                    .id(banner.id)
+                    .transition(reduceMotion ? .opacity : .move(edge: .top).combined(with: .opacity))
+                }
+            }
+            .animation(.default, value: model.flightControl.banners.first?.id)
             // Started here, once, alongside the view it backs — `start()` is idempotent so a
             // second `onAppear` (the window regaining an already-appeared root, which SwiftUI
             // does not promise never to deliver) costs nothing beyond the guard check.
@@ -65,5 +83,11 @@ struct FlightDeckMobileApp: App {
             guard redial.phaseChanged(to: phase), model.mac != nil else { return }
             model.reconnect()
         }
+    }
+
+    /// A no-op when that intake is already on top: pushing it again stacks a duplicate screen.
+    private func openIntake(_ id: UUID) {
+        guard model.flightControl.onScreen != id else { return }
+        model.path.append(IntakeRoute.intake(id))
     }
 }

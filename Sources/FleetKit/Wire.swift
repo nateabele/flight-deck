@@ -25,16 +25,22 @@ public struct WireProject: Codable, Equatable, Sendable, Identifiable {
     public var path: String
     public var isCollapsed: Bool
     public var sessions: [WireSession]
+    /// This project's Flight Control intakes (spec §6.1). **nil** when Flight Control is not
+    /// enabled for the project — no rows and no + on the phone; `[]` when enabled with none.
+    /// Optional so a snapshot from a Mac that predates it decodes (synthesized `Codable`
+    /// reads an `Optional` with `decodeIfPresent`).
+    public var intakes: [WireIntakeSummary]?
 
     public init(
         id: UUID, name: String, path: String, isCollapsed: Bool = false,
-        sessions: [WireSession] = []
+        sessions: [WireSession] = [], intakes: [WireIntakeSummary]? = nil
     ) {
         self.id = id
         self.name = name
         self.path = path
         self.isCollapsed = isCollapsed
         self.sessions = sessions
+        self.intakes = intakes
     }
 }
 

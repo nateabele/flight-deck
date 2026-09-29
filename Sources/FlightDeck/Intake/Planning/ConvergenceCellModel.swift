@@ -400,6 +400,14 @@ struct SectionVersion: Equatable {
 }
 
 extension HeatmapModel {
+    /// The cycle the heatmap and the churn lane describe: the latest with per-section numbers.
+    /// Polish edits the change set, not the plan, so its cycle has none, and the refine cycle
+    /// before it is the plan's latest word on which sections moved. Shared with the phone's
+    /// plan outline (`IntakePlanProjection.churnSource`), so the two cannot pick apart.
+    static func sectionCycle(_ cycles: [ConvergenceCycle]) -> ConvergenceCycle? {
+        cycles.last { cycle in cycle.points.contains { !$0.sectionChurn.isEmpty } } ?? cycles.last
+    }
+
     /// The sections the verdict names — `hot` without building the whole map.
     static func hotSections(_ cycle: ConvergenceCycle) -> Set<String> {
         Set([ConvergenceCellModel.namedSection(cycle), cycle.trend.hotSection, cycle.trend.reopenedSection].compactMap { $0 })

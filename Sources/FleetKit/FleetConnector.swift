@@ -140,6 +140,9 @@ public final class FleetConnector: @unchecked Sendable {
     /// One `cid` space still, so a number is filed in at most one of the three and `apply` can
     /// try each in turn. Drained with the others.
     private var pendingOptions: [Int: (Result<WireNewSessionOptions, FleetRequestError>) -> Void] = [:]
+    /// The intake tables: one per answer shape, in the shared `cid` space like the rest.
+    private var pendingIntakeDetail: [Int: (Result<WireIntakeDetail?, FleetRequestError>) -> Void] = [:]
+    private var pendingIntakePlan: [Int: (Result<WireIntakePlan, FleetRequestError>) -> Void] = [:]
     /// A fourth answer type, on the same reasoning `pendingAcks` and `pendingOptions` give:
     /// one table per answer shape, all four sharing the single `cid` space `FleetClient.send`
     /// mints from, so a number is filed in at most one and `apply` tries each in turn.
@@ -280,6 +283,31 @@ public final class FleetConnector: @unchecked Sendable {
         pendingOptions[cid] = completion
     }
 
+    /// Ask for an intake's screen content. Same contract as `requestNewSessionOptions` —
+    /// exactly one answer; `.success(nil)` means "unchanged since `ifNot`".
+    public func requestIntakeDetail(
+        id: UUID, ifNot: String?,
+        then completion: @escaping (Result<WireIntakeDetail?, FleetRequestError>) -> Void
+    ) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard let winner else { return completion(.failure(.disconnected)) }
+        let cid = winner.send(FleetRequest.intakeDetail(id: id, ifNot: ifNot))
+        guard cid != 0 else { return completion(.failure(.disconnected)) }
+        pendingIntakeDetail[cid] = completion
+    }
+
+    /// Ask for a checkpoint's plan (nil: the head). Same contract as `requestIntakeDetail`.
+    public func requestIntakePlan(
+        id: UUID, checkpoint: Int?, changes: Bool,
+        then completion: @escaping (Result<WireIntakePlan, FleetRequestError>) -> Void
+    ) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard let winner else { return completion(.failure(.disconnected)) }
+        let cid = winner.send(FleetRequest.intakePlan(id: id, checkpoint: checkpoint, changes: changes))
+        guard cid != 0 else { return completion(.failure(.disconnected)) }
+        pendingIntakePlan[cid] = completion
+    }
+
     /// Ask the Mac which addresses it can currently be reached on. Same contract as
     /// `request(_:then:)` — exactly one answer, `.disconnected` synchronously when there is
     /// nothing to ask.
@@ -395,6 +423,22 @@ public final class FleetConnector: @unchecked Sendable {
     ) {
         dispatchPrecondition(condition: .onQueue(queue))
         guard let completion = pendingOptions.removeValue(forKey: cid) else { return }
+        completion(result)
+    }
+
+    private func resolveIntakeDetail(
+        _ cid: Int, with result: Result<WireIntakeDetail?, FleetRequestError>
+    ) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard let completion = pendingIntakeDetail.removeValue(forKey: cid) else { return }
+        completion(result)
+    }
+
+    private func resolveIntakePlan(
+        _ cid: Int, with result: Result<WireIntakePlan, FleetRequestError>
+    ) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard let completion = pendingIntakePlan.removeValue(forKey: cid) else { return }
         completion(result)
     }
 
@@ -632,6 +676,13 @@ public final class FleetConnector: @unchecked Sendable {
             // reason — a reopen list is not fleet state and must not move the resume point.
             resolveClosed(cid, with: .success(closed))
             return
+        case .intakeDetail(let cid, let detail):
+            // Unsequenced, same reason as `newSessionOptions`.
+            resolveIntakeDetail(cid, with: .success(detail))
+            return
+        case .intakePlan(let cid, let plan):
+            resolveIntakePlan(cid, with: .success(plan))
+            return
         case .err(let cid, let code):
             // Commands first, then requests. The tables share one `cid` space
             // (`FleetClient.nextCID` mints for all of them), so a number is in at most one of
@@ -644,6 +695,14 @@ public final class FleetConnector: @unchecked Sendable {
             if resolveAck(cid, with: .failure(.server(code: code))) { return }
             if pendingOptions[cid] != nil {
                 resolveOptions(cid, with: .failure(.server(code: code)))
+                return
+            }
+            if pendingIntakeDetail[cid] != nil {
+                resolveIntakeDetail(cid, with: .failure(.server(code: code)))
+                return
+            }
+            if pendingIntakePlan[cid] != nil {
+                resolveIntakePlan(cid, with: .failure(.server(code: code)))
                 return
             }
             if pendingEndpoints[cid] != nil {
@@ -882,6 +941,14 @@ public final class FleetConnector: @unchecked Sendable {
         let outstandingOptions = pendingOptions
         pendingOptions.removeAll()
         for completion in outstandingOptions.values { completion(.failure(.disconnected)) }
+        // And the intake screens, for the same reason: a phone whose socket dies mid-fetch
+        // must be told, not left on a spinner.
+        let outstandingIntakeDetail = pendingIntakeDetail
+        pendingIntakeDetail.removeAll()
+        for completion in outstandingIntakeDetail.values { completion(.failure(.disconnected)) }
+        let outstandingIntakePlan = pendingIntakePlan
+        pendingIntakePlan.removeAll()
+        for completion in outstandingIntakePlan.values { completion(.failure(.disconnected)) }
         // And the endpoint refresh. Added the moment the table was, per the rule in
         // docs/NETWORKING.md: a client whose socket dies with a request outstanding waits
         // forever otherwise.

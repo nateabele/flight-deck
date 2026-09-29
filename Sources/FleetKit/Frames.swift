@@ -609,16 +609,21 @@ public enum ServerFrame: Codable, Equatable, Sendable {
     /// built before this frame existed cannot decode it and would lose its socket, so the
     /// `caps` gate is the compatibility mechanism and this frame is merely what it protects.
     case phoneRequest(cid: Int, PhoneRequest)
+    /// The reply to `FleetRequest.intakeDetail`; `nil` means unchanged since the request's
+    /// `ifNot`. Unsequenced, like `page`: a screen's content is not fleet state.
+    case intakeDetail(cid: Int, WireIntakeDetail?)
+    /// The reply to `FleetRequest.intakePlan`. Unsequenced, like `page`.
+    case intakePlan(cid: Int, WireIntakePlan)
 
     enum CodingKeys: String, CodingKey {
         case t, seq, fleet, reason, cid, code, page, options, endpoints
-        case conversations, hits, session, closed
+        case conversations, hits, session, closed, detail, plan
     }
 
     /// Undotted, deliberately, and the newer five along with it — see the decoder below.
     private enum Tag: String, Codable {
         case snapshot, ack, err, page, options, endpoints, conversations, hits, session
-        case ask, closed
+        case ask, closed, intakeDetail, intakePlan
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -676,6 +681,14 @@ public enum ServerFrame: Codable, Equatable, Sendable {
             // request: two keyed containers over one encoder merge into a single JSON object,
             // and one request reading as one line is what makes a packet dump usable.
             try request.encode(to: encoder)
+        case .intakeDetail(let cid, let detail):
+            try c.encode(Tag.intakeDetail, forKey: .t)
+            try c.encode(cid, forKey: .cid)
+            try c.encodeIfPresent(detail, forKey: .detail)
+        case .intakePlan(let cid, let plan):
+            try c.encode(Tag.intakePlan, forKey: .t)
+            try c.encode(cid, forKey: .cid)
+            try c.encode(plan, forKey: .plan)
         }
     }
 
@@ -733,6 +746,12 @@ public enum ServerFrame: Codable, Equatable, Sendable {
                     cid: try c.decode(Int.self, forKey: .cid),
                     try PhoneRequest(from: decoder)
                 )
+            case .intakeDetail:
+                self = .intakeDetail(cid: try c.decode(Int.self, forKey: .cid),
+                                     try c.decodeIfPresent(WireIntakeDetail.self, forKey: .detail))
+            case .intakePlan:
+                self = .intakePlan(cid: try c.decode(Int.self, forKey: .cid),
+                                   try c.decode(WireIntakePlan.self, forKey: .plan))
             }
             return
         }
@@ -750,7 +769,8 @@ public extension ServerFrame {
         case .snapshot, .event: return nil
         case .ack(let cid), .err(let cid, _), .page(let cid, _), .newSessionOptions(let cid, _),
              .macEndpoints(let cid, _), .recentlyClosed(let cid, _), .conversations(let cid, _),
-             .searchHits(let cid, _), .session(let cid, _), .phoneRequest(let cid, _):
+             .searchHits(let cid, _), .session(let cid, _), .phoneRequest(let cid, _),
+             .intakeDetail(let cid, _), .intakePlan(let cid, _):
             return cid
         }
     }

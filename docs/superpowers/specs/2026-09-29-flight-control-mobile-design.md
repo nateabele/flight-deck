@@ -534,6 +534,51 @@ One spec, three plans, each shippable and each leaving the phone coherent:
 3. **Unblock, start and finish** — answers, fidelity + start, retry, discard, new intake, review
    and release (§6.4, remaining commands).
 
+### 11.1 Phase 1 as built (2026-09-29)
+
+Built on branch `fc-mobile-watch` from `docs/superpowers/plans/2026-09-29-flight-control-mobile-watch.md`.
+Where the build and this spec differ, the build is right and these are the corrections:
+
+1. `WireIntakeSummary` has no `version` field — the detail etag gives the poll its cheap check.
+2. The detail etag is SHA-256 over the encoded detail (etag and `servedAt` blanked), not file
+   mtimes.
+3. `WireAgent` carries display strings the Mac computes (`SeatRowModel` built at `.distantPast`)
+   plus dates; the quiet/stalled thresholds are shared via FleetKit `AgentActivityRules`.
+4. A round that failed without landing a checkpoint is not tappable on the board; its failure
+   shows in the intake screen's Failure section.
+5. Phase 1 waiting states are read-only ("… on your Mac for now"); the forms are Phase 3.
+6. The detail carries `servedAt`; the phone keeps `macClockOffset = servedAt − receivedAt`, so
+   Mac/phone clock skew never shows.
+7. Summaries are cached store-side (`SessionStore.intakeSummaries`) and `FleetProjection` reads the
+   cache, so the drift oracle and the event log agree by construction. An absent cache key means
+   nil; there is no forced first emission (startup emits nothing).
+8. Summary refresh triggers: any store change (coalesced to the next main turn), a
+   `SeatFeed.onSettled` hook when an agent's records or results change (an agent finishing), and
+   a 60 s tick for the 3-day retention.
+9. `project.intakes` is withheld from peers without the `flightControl` capability, both live and
+   in the hello replay; the local `flightdeck` CLI claims no capabilities, so it does not see
+   intake events.
+10. "Changes since previous" is a whole-block, verbatim-text set diff (`added: [Int]`,
+    `removed: [WireRemovedBlock]`) against the previous checkpoint that HAS a plan (the desktop's
+    `previousPlanCheckpoint`) — not per-line text, and not `parent`.
+11. Outline churn comes from the cycle containing the requested checkpoint if it has per-section
+    numbers, else the Mac's `sectionCycle` rule (shared as `HeatmapModel.sectionCycle`), so the
+    phone agrees with the Mac's churn lane during polish.
+12. Plan cache contract: the head is always requested with `checkpoint: nil` (never served from
+    cache; its reply refreshes the entry); explicit checkpoints are older rounds and are cached
+    (LRU, 4). `editsVersion` is not a lookup key — the phone cannot know it before fetching.
+13. The round detail's "Sections changed" opens the reader at that round's checkpoint (nil when it
+    is the head) with changes on, at the top — not at the section. Landing on the section needs a
+    section→block map on `WireRound`; Phase 2.
+14. Intake presence (banner suppression and the 1.5 s poll) is one shared view modifier applied to
+    every screen of an intake (intake, round detail, clarifications, outline, reader),
+    reference-counted so pushing a child keeps the intake "on screen".
+15. Idle clocks tick once a minute after 60 s (`ClockPolicy.tickInterval`, via a `TimelineView`
+    schedule).
+16. Unpairing resets the navigation path and all Flight Control state (banners, presence, caches).
+17. The plan reader never shows a stale plan as a diff: a failed load shows an inline message with
+    Retry, and a reply is applied only if it answers the latest request.
+
 ## 12. Non-goals
 
 Push of any kind (APNs, local notifications, Live Activities, widgets) — D4; iPad split view — D5;
