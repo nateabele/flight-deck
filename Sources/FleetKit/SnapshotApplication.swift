@@ -24,6 +24,10 @@ extension FleetSnapshot {
         case .projectsReordered(let order):
             projects = Self.reorder(projects, by: order)
 
+        case .projectIntakes(let id, let intakes):
+            guard let p = projects.firstIndex(where: { $0.id == id }) else { return }
+            projects[p].intakes = intakes
+
         case .sessionAdded(let session, let project, let at):
             guard let p = projects.firstIndex(where: { $0.id == project }) else { return }
             guard !projects[p].sessions.contains(where: { $0.id == session.id }) else { return }

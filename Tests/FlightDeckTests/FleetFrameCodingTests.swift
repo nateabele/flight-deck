@@ -56,7 +56,9 @@ final class FleetFrameCodingTests: XCTestCase {
                              hasBackgroundWork: true),
             .unreadChanged(id: UUID(), isUnread: true),
             .planGateChanged(id: UUID(), gate: gate),
-            .planGateChanged(id: UUID(), gate: nil)
+            .planGateChanged(id: UUID(), gate: nil),
+            .projectIntakes(project: UUID(), intakes: []),
+            .projectIntakes(project: UUID(), intakes: nil)
         ]
         for event in cases {
             let data = try JSONEncoder().encode(event)

@@ -8,6 +8,7 @@ enum FleetEventTag: String, Codable {
     case projectRemoved = "project.removed"
     case projectCollapsed = "project.collapsed"
     case projectsReordered = "projects.reordered"
+    case projectIntakes = "project.intakes"
     case sessionAdded = "session.added"
     case sessionRemoved = "session.removed"
     case sessionMoved = "session.moved"
@@ -30,6 +31,7 @@ extension FleetEvent: Codable {
         case openPromptCall
         case apiError
         case answerless
+        case intakes
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -113,6 +115,11 @@ extension FleetEvent: Codable {
             // Absent, not `null`, matching `planGateChanged` directly above: a decoder that has
             // never heard of this key must see what a Mac predating the case entirely would send.
             try c.encodeIfPresent(error, forKey: .apiError)
+        case .projectIntakes(let project, let intakes):
+            try c.encode(FleetEventTag.projectIntakes, forKey: .t)
+            try c.encode(project, forKey: .project)
+            // Absent, not `null`, for nil — see `WireProject.intakes`.
+            try c.encodeIfPresent(intakes, forKey: .intakes)
         }
     }
 
@@ -127,6 +134,9 @@ extension FleetEvent: Codable {
         case .projectCollapsed:
             self = .projectCollapsed(id: try c.decode(UUID.self, forKey: .id),
                                      isCollapsed: try c.decode(Bool.self, forKey: .isCollapsed))
+        case .projectIntakes:
+            self = .projectIntakes(project: try c.decode(UUID.self, forKey: .project),
+                                   intakes: try c.decodeIfPresent([WireIntakeSummary].self, forKey: .intakes))
         case .projectsReordered:
             self = .projectsReordered(order: try c.decode([UUID].self, forKey: .order))
         case .sessionAdded:

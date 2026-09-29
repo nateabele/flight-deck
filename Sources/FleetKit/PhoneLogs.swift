@@ -187,11 +187,16 @@ public enum FleetCapability {
     /// This peer answers `PhoneRequest.logs`.
     public static let logs = "logs"
 
+    /// This peer understands Flight Control: the `project.intakes` event and the `intake.*`
+    /// requests. Unlike `logs` it is a claim about what the peer can DECODE, not answer — the
+    /// Mac withholds `project.intakes` from any peer without it (spec §6).
+    public static let flightControl = "flightControl"
+
     /// Everything this build of FleetKit can answer when asked. Sent verbatim in `hello`.
     ///
     /// Claimed by the FleetKit half rather than by the app, because the frame handling is
     /// what is actually being advertised: a phone whose app forgot to install a log provider
     /// still answers, with `unhandled`, which is a refusal the Mac can print rather than a
     /// request that never comes back.
-    public static let supported = [logs]
+    public static let supported = [logs, flightControl]
 }
