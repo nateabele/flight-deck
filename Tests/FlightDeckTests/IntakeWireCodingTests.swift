@@ -1,5 +1,6 @@
 import XCTest
 @testable import FleetKit
+@testable import FlightDeck
 
 final class IntakeWireCodingTests: XCTestCase {
     static let summary = WireIntakeSummary(
@@ -63,5 +64,58 @@ final class IntakeWireCodingTests: XCTestCase {
     func testThePhoneAdvertisesFlightControl() {
         XCTAssertEqual(FleetCapability.flightControl, "flightControl")
         XCTAssertTrue(FleetCapability.supported.contains(FleetCapability.flightControl))
+    }
+
+    func testADetailRoundTripsEveryNestedType() throws {
+        let note = WireNote(id: UUID(), kind: "mustChange", text: "Not enough.",
+                            quote: "Require explicit proof", section: "7. Model-credential paths",
+                            consumed: false, blockIndex: 14)
+        let detail = WireIntakeDetail(
+            etag: "abc", project: UUID(), summary: Self.summary, intent: "Build it.",
+            progress: [WireProgressPhase(label: "Triage", detail: "3:40")],
+            board: WireBoard(
+                slots: [WireSlot(id: "refine-2", name: "Refine 2", code: "RF2", state: "live",
+                                 major: false, group: "REFINE", checkpoint: nil, duration: nil, flagged: false)],
+                nowName: "Refine 2", nowChip: "ON COURSE", clockCaption: "IN THE AIR",
+                clockSince: Self.summary.clockSince, clockText: nil, stopsAt: "Encode",
+                stopSlotID: "encode-0", callingAt: "2 · Polish 6 · Review",
+                convergence: WireConvergence(word: "CONVERGING ↘", amber: false, spark: [41, 14]),
+                defaultPlay: "nextMajor"),
+            agents: [WireAgent(id: "refine-2-reviewer", glyph: "running", role: "reviewer",
+                               identity: "codex · gpt-6-sol · high", headline: "Checking §7",
+                               action: "Reading broker.ts", footprint: [WireFootprint(dir: "beacon", count: 3)],
+                               startedAt: Self.summary.clockSince)],
+            rounds: [WireRound(checkpoint: 3, name: "Refine 1", code: "RF1", stage: "refine",
+                               startedAt: nil, landedAt: Date(timeIntervalSinceReferenceDate: 800_000_100),
+                               outcome: "ok", changeCount: 41, linesAdded: 620, linesRemoved: 180,
+                               verdicts: WireVerdicts(agreed: 33, somewhat: 6, declined: 2), note: nil,
+                               sectionsChanged: ["7. Model-credential paths"],
+                               agents: [WireRoundAgent(role: "reviewer", ran: "codex · gpt-6-sol · high", status: "ok", detail: nil)],
+                               notesConsumed: [note])],
+            questions: WireQuestions(open: nil, answered: [WireExchange(questions: ["Both?"], answers: ["Both"])]),
+            choice: nil, failure: nil, pendingNotes: 1, halt: nil, headCheckpoint: 3,
+            servedAt: Date(timeIntervalSinceReferenceDate: 800_000_200))
+        let data = try JSONEncoder().encode(detail)
+        XCTAssertEqual(try JSONDecoder().decode(WireIntakeDetail.self, from: data), detail)
+    }
+
+    func testAPlanRoundTrips() throws {
+        let plan = WireIntakePlan(
+            checkpoint: 3, roundName: "Refine 1", editsVersion: "", markdown: "# P\n\n## 1. A\n\nText.",
+            outline: [WireSection(heading: "1. A", level: 2, blockIndex: 1, churn: [4, 0],
+                                  diverging: false, settledSince: "Refine 1")],
+            notes: [], added: [2], removed: [WireRemovedBlock(after: 1, text: "Old text.")])
+        let data = try JSONEncoder().encode(plan)
+        XCTAssertEqual(try JSONDecoder().decode(WireIntakePlan.self, from: data), plan)
+    }
+
+    func testActivityThresholdsMatchTheDesktop() {
+        XCTAssertEqual(AgentActivityRules.quiet, 30)
+        XCTAssertEqual(AgentActivityRules.stalled, 90)
+    }
+
+    func testTheDesktopRowsUseTheSharedThresholds() {
+        XCTAssertEqual(SeatThresholds.default.quiet, AgentActivityRules.quiet)
+        XCTAssertEqual(SeatThresholds.default.stalled, AgentActivityRules.stalled)
     }
 }

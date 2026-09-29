@@ -1,3 +1,4 @@
+import FleetKit
 import Foundation
 import IntakeKit
 
@@ -401,8 +402,8 @@ struct SeatRowModel: Equatable, Identifiable {
 /// constants, not tuned against real runs yet (spec §12 non-goal) — a future pass adjusts these
 /// two numbers, never the call sites.
 struct SeatThresholds: Equatable {
-    var quiet: TimeInterval = 30
-    var stalled: TimeInterval = 90
+    var quiet: TimeInterval = AgentActivityRules.quiet
+    var stalled: TimeInterval = AgentActivityRules.stalled
     static let `default` = SeatThresholds()
 }
 
