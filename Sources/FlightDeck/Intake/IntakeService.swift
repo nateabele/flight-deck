@@ -244,6 +244,9 @@ final class IntakeService: ObservableObject {
     }
     /// Each shaping intake's refine/polish convergence series (spec §8).
     @Published private(set) var convergence: [UUID: [ConvergenceCycle]] = [:]
+    /// Each shaping intake's cross-check readings (coverage spec §5.4), folded with `convergence`
+    /// from the same files.
+    @Published private(set) var coverage: [UUID: [CoverageReading]] = [:]
     /// A start the human asked for that hasn't shown any sign of life yet — see `PendingStart`.
     /// Set by `answer`, `beginShaping` and `send`'s play commands; cleared by `settlePending` on
     /// the first sign of that work, and by `save` the moment the intake leaves the state the
@@ -754,7 +757,7 @@ final class IntakeService: ObservableObject {
         let shaping = Set(intakes.lazy.filter { $0.state == .shaping }.map(\.id))
         let tracked = Set(latestTapes.keys).union(tapes.keys).union(tapeDates.keys).union(seatRounds.keys)
             .union(seatActivities.keys).union(runRecords.keys).union(seatResults.keys).union(convergence.keys)
-            .union(convergenceKeys.keys).union(halts.keys).union(editConflicts.keys).union(editRouters.keys).union(planFoldStores.keys)
+            .union(convergenceKeys.keys).union(coverage.keys).union(halts.keys).union(editConflicts.keys).union(editRouters.keys).union(planFoldStores.keys)
             .union(overlays.keys)
         for gone in tracked.subtracting(shaping) {
             tapes[gone] = nil
@@ -765,6 +768,7 @@ final class IntakeService: ObservableObject {
             convergence[gone] = nil
             convergenceKeys[gone] = nil
             convergenceFolds[gone] = nil
+            coverage[gone] = nil
             halts[gone] = nil
             editConflicts[gone] = nil
             editRouters[gone] = nil
@@ -872,15 +876,21 @@ final class IntakeService: ObservableObject {
             let cycles = ConvergenceSeries.cycles(checkpoints) {
                 readFile(store.checkpointDirectory($0).appendingPathComponent($1))
             }
+            let readings = CoverageSeries.readings(checkpoints) {
+                readFile(store.checkpointDirectory($0).appendingPathComponent($1))
+            }
             await MainActor.run { [weak self] in
-                guard let self, self.convergenceKeys[id] == key, self.convergence[id] != cycles else { return }
-                let first = self.convergence[id] == nil
-                self.convergence[id] = cycles
-                // The first series is not news: it was true before anyone looked, and the board
-                // was seeded without it (it is folded after). Later ones flap as they change.
-                if first, self.flapSeeded.contains(id), let word = ConvergenceCellModel(cycles: cycles)?.word {
-                    self.flapPolicies[id]?.seed(surface: "lcd.convergence", text: word)
+                guard let self, self.convergenceKeys[id] == key else { return }
+                if self.convergence[id] != cycles {
+                    let first = self.convergence[id] == nil
+                    self.convergence[id] = cycles
+                    // The first series is not news: it was true before anyone looked, and the board
+                    // was seeded without it (it is folded after). Later ones flap as they change.
+                    if first, self.flapSeeded.contains(id), let word = ConvergenceCellModel(cycles: cycles)?.word {
+                        self.flapPolicies[id]?.seed(surface: "lcd.convergence", text: word)
+                    }
                 }
+                if self.coverage[id] != readings { self.coverage[id] = readings }
             }
         }
     }

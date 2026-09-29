@@ -736,6 +736,29 @@ final class IntakeServiceLiveTests: XCTestCase {
         XCTAssertLessThan(fold, 10)
     }
 
+    /// `coverage` is folded from the same checkpoint files, in the same detached task, as
+    /// `convergence` — so a cross-check refine checkpoint publishes both together.
+    func testCoverageIsFoldedWithConvergence() async throws {
+        let i = try seed(.shaping)
+        let store = tapeStore(i.id)
+        var tape = Tape.empty
+        tape.status = .running
+        let svc = await makeService()
+        let record = CrossCheckRecord(proposers: [0, 1], families: [.codex, .claude], clusters: [[0, 1]], blindOrderSeed: 2)
+        try store.writeCheckpoint(Checkpoint(id: 2, stage: .refine, round: 1, major: false, createdAt: clockNow),
+                                  files: ["plan.md": Data("# Plan\n\nround 1\n".utf8),
+                                          CrossCheckRecord.fileName: try IntakeJSON.encoder.encode(record),
+                                          "changes.json": try IntakeJSON.encoder.encode([ProposedChange(section: "s", rationale: "r", edit: "e"),
+                                                                                         ProposedChange(section: "s", rationale: "r", edit: "e")]),
+                                          "verdicts.json": try IntakeJSON.encoder.encode([ChangeVerdict(index: 0, verdict: .agree),
+                                                                                          ChangeVerdict(index: 1, verdict: .agree)])],
+                                  into: &tape)
+        svc.pollTapes()
+        await svc.convergenceFold(for: i.id)?.value
+        XCTAssertEqual(svc.coverage[i.id]?.map(\.round), [1])
+        XCTAssertEqual(svc.coverage[i.id]?.first?.both, 1)
+    }
+
     // MARK: flap policy
 
     func testFlapPolicyIsStablePerIntake() async throws {
