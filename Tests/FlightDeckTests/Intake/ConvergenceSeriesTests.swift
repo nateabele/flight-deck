@@ -365,4 +365,36 @@ final class ConvergenceSeriesTests: XCTestCase {
         XCTAssertEqual(try onlyCycle(refineTape([14, 12, 13], agree: [0.72, 0.74, 0.73])).suggestedAction,
                        "Plateau: consider annotating a section or stopping. Another round is unlikely to change much.")
     }
+
+    // MARK: - Cross-check rounds (coverage spec §6)
+
+    func testCrossCheckPointCountsIssuesNotProposals() throws {
+        // R1 is a cross-check of 6 proposals in 4 issues ([0,1], [2,3], 4, 5); R2 is a plain round of 2.
+        let codex = model("A")
+        let claude = ModelChoice(harness: .claude, model: "B", effort: "high")
+        let r1 = Checkpoint(id: 1, stage: .refine, round: 1, major: false, createdAt: t0,
+                            record: RoundRecord(slots: [
+                                SlotOutcome(role: "reviewer", used: codex, requested: codex, status: .ok),
+                                SlotOutcome(role: "crossReviewer", used: claude, requested: claude, status: .ok),
+                                SlotOutcome(role: "integrator", used: claude, requested: claude, status: .ok)],
+                                                changeCount: 6))
+        let r2 = Checkpoint(id: 2, stage: .refine, round: 2, major: true, createdAt: t0,
+                            record: RoundRecord(slots: [SlotOutcome(role: "reviewer", used: codex, requested: codex, status: .ok)],
+                                                changeCount: 2))
+        let record = CrossCheckRecord(proposers: [0, 1, 0, 1, 0, 1], families: [.codex, .claude],
+                                      clusters: [[0, 1], [2, 3]], blindOrderSeed: 1)
+        let files: [Int: [String: Data]] = [1: [CrossCheckRecord.fileName: try IntakeJSON.encoder.encode(record)]]
+        let cycle = try XCTUnwrap(ConvergenceSeries.cycles([r1, r2]) { files[$0]?[$1] }.first)
+        XCTAssertEqual(cycle.points.map(\.changeCount), [4, 2])
+        XCTAssertEqual(cycle.points.map(\.crossCheck), [true, false])
+        XCTAssertFalse(cycle.trend.modelChanged, "the primary reviewer names the trend's model")
+    }
+
+    func testCrossCheckWithoutClustersFallsBackToTextClusters() throws {
+        let same = ProposedChange(section: "## Auth", rationale: "tokens expire too late", edit: "shorten token expiry to 15 minutes")
+        let twin = ProposedChange(section: "## Auth", rationale: "token expiry too late", edit: "shorten the token expiry to 15 minutes")
+        let other = ProposedChange(section: "## Data", rationale: "no backups", edit: "add nightly backups")
+        XCTAssertEqual(ConvergenceSeries.textClusters([same, other, twin]), [[0, 2]])
+        XCTAssertNil(ConvergenceSeries.textClusters([same, other]))
+    }
 }

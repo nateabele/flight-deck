@@ -34,16 +34,19 @@ public struct ConvergencePoint: Equatable, Sendable {
     public var reopenCount: Int?
     /// Sections where this round removed most of what an earlier round of the cycle added.
     public var reopenedSections: [String]
+    /// Reviewed by two families; `changeCount` is its deduplicated issue count, the closest to
+    /// one reviewer's. Drawn hollow so it reads as measured differently.
+    public var crossCheck: Bool
 
     public init(checkpoint: Int, stage: Stage, round: Int, changeCount: Int, linesChurned: Int,
                 edgesChanged: Int? = nil, agreeRatio: Double? = nil, sectionsTouched: [String] = [],
                 sectionChurn: [String: Int] = [:], reviewerModel: ModelChoice? = nil, repeatCount: Int? = nil,
-                reopenCount: Int? = nil, reopenedSections: [String] = []) {
+                reopenCount: Int? = nil, reopenedSections: [String] = [], crossCheck: Bool = false) {
         self.checkpoint = checkpoint; self.stage = stage; self.round = round
         self.changeCount = changeCount; self.linesChurned = linesChurned; self.edgesChanged = edgesChanged
         self.agreeRatio = agreeRatio; self.sectionsTouched = sectionsTouched; self.sectionChurn = sectionChurn
         self.reviewerModel = reviewerModel; self.repeatCount = repeatCount; self.reopenCount = reopenCount
-        self.reopenedSections = reopenedSections
+        self.reopenedSections = reopenedSections; self.crossCheck = crossCheck
     }
 }
 
@@ -164,9 +167,15 @@ public enum ConvergenceSeries {
                 (changes: loadFile(cp.id, "changes.json").flatMap { try? IntakeJSON.decoder.decode([ProposedChange].self, from: $0) },
                  verdicts: loadFile(cp.id, "verdicts.json").flatMap { try? IntakeJSON.decoder.decode([ChangeVerdict].self, from: $0) })
             }
+            // Absence means "not a cross-check" (CrossCheckRecord's doc comment), so a plain
+            // round's checkpoint just never has this file.
+            let crossChecks = run.map { cp in
+                loadFile(cp.id, CrossCheckRecord.fileName).flatMap { try? IntakeJSON.decoder.decode(CrossCheckRecord.self, from: $0) }
+            }
             let edits = run.map { cp in plans[cp.id].map { sectionEdits(from: $0.base, to: $0.plan) } }
             let points = run.indices.map { i in
-                point(run[i], plans: plans[run[i].id], proposals: proposals, edits: edits, at: i, thresholds)
+                point(run[i], plans: plans[run[i].id], proposals: proposals, edits: edits, at: i, thresholds,
+                     cross: crossChecks[i])
             }
             return assess(run[0].stage, points, thresholds: thresholds)
         }
@@ -194,17 +203,24 @@ public enum ConvergenceSeries {
 
     private static func point(_ cp: Checkpoint, plans: (base: String, plan: String)?,
                               proposals: [(changes: [ProposedChange]?, verdicts: [ChangeVerdict]?)],
-                              edits: [SectionEdits?], at i: Int, _ t: ConvergenceThresholds) -> ConvergencePoint {
+                              edits: [SectionEdits?], at i: Int, _ t: ConvergenceThresholds,
+                              cross: CrossCheckRecord?) -> ConvergencePoint {
         let r = cp.record
         let role = cp.stage == .refine ? "reviewer" : "polisher"
         let (repeats, reopens) = repeatsAndReopens(proposals, at: i, t)
+        // A cross-check round proposed from two families; counting every proposal would spike the
+        // series on exactly the rounds that measure coverage (coverage spec §6).
+        let issues: Int? = cross.map { record in
+            let clusters = record.clusters ?? proposals[i].changes.flatMap { Self.textClusters($0, thresholds: t) }
+            return IssueClusters.partition(clusters, count: record.proposers.count).count
+        }
         return ConvergencePoint(
-            checkpoint: cp.id, stage: cp.stage, round: cp.round, changeCount: r.changeCount ?? 0,
+            checkpoint: cp.id, stage: cp.stage, round: cp.round, changeCount: issues ?? r.changeCount ?? 0,
             linesChurned: r.linesAdded + r.linesRemoved, edgesChanged: r.edgesChanged,
             agreeRatio: r.tally.flatMap(agreeRatio), sectionsTouched: r.sectionsChanged,
             sectionChurn: plans.map { PlanMetrics.sectionChurn(from: $0.base, to: $0.plan) } ?? [:],
             reviewerModel: r.slots.last { $0.role == role }?.used, repeatCount: repeats, reopenCount: reopens,
-            reopenedSections: reopenedSections(edits, at: i, t))
+            reopenedSections: reopenedSections(edits, at: i, t), crossCheck: cross != nil)
     }
 
     /// Over the verdicts actually given, not `changeCount`: the integrator's tally can
@@ -264,6 +280,29 @@ public enum ConvergenceSeries {
         }
         let verdictsKnown = i == 0 || earlier.contains { $0.verdicts != nil }
         return (repeats, verdictsKnown ? reopens : nil)
+    }
+
+    /// The same "same idea" test `repeatCount` uses, never checked against human judgement: the
+    /// fallback when the integrator gave no clusters, and the sanity check beside them. Groups
+    /// transitively — `matches` is not itself transitive, so A~B and B~C puts all three in one
+    /// cluster even where A and C alone wouldn't match.
+    public static func textClusters(_ changes: [ProposedChange], thresholds t: ConvergenceThresholds = .default) -> [[Int]]? {
+        let prints = changes.map(Fingerprint.init)
+        var parent = Array(prints.indices)
+        func find(_ x: Int) -> Int {
+            if parent[x] != x { parent[x] = find(parent[x]) }
+            return parent[x]
+        }
+        for i in prints.indices {
+            for j in (i + 1)..<prints.count where prints[i].matches(prints[j], t) {
+                let (ri, rj) = (find(i), find(j))
+                if ri != rj { parent[ri] = rj }
+            }
+        }
+        var groups: [Int: [Int]] = [:]
+        for i in prints.indices { groups[find(i), default: []].append(i) }
+        let clusters = groups.values.filter { $0.count >= 2 }.map { $0.sorted() }.sorted { $0[0] < $1[0] }
+        return clusters.isEmpty ? nil : clusters
     }
 
     /// A proposal reduced to what "the same idea" is judged on, embedding-free: lowercased,
