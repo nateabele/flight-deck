@@ -486,7 +486,7 @@ struct IntakeDetailView: View {
         let final = DetailLayout.planIsFinal(for: intake.state)
         let pinnedHeight = final ? 0
             : DetailLayout.pinnedBlockHeight(bar: barHeight, board: boardHeight, heatmap: heatmapHeight) ?? Metrics.pinnedEstimate
-        return DocumentPlan(service: service, intakeID: intake.id, title: DetailLayout.planTitle(for: intake.state),
+        return DocumentPlan(service: service, intakeID: intake.id, projectPath: intake.projectPath, title: DetailLayout.planTitle(for: intake.state),
                             tape: planTape ?? .empty, final: final,
                             selection: final ? nil : selectedCheckpoint, select: final ? .constant(nil) : $selectedCheckpoint,
                             focus: final ? nil : planFocus, churn: final ? nil : churnLane(),
@@ -1112,6 +1112,8 @@ private struct ClarificationsSection: View, Equatable {
 private struct DocumentPlan: View, Equatable {
     let service: IntakeService
     let intakeID: UUID
+    /// The intake's project directory — what the plan's relative file links open against.
+    let projectPath: String
     let title: String
     let tape: Tape
     let final: Bool
@@ -1124,7 +1126,7 @@ private struct DocumentPlan: View, Equatable {
     let onOpenNotes: () -> Void
 
     static func == (a: Self, b: Self) -> Bool {
-        a.intakeID == b.intakeID && a.title == b.title && a.tape == b.tape && a.final == b.final
+        a.intakeID == b.intakeID && a.projectPath == b.projectPath && a.title == b.title && a.tape == b.tape && a.final == b.final
             && a.selection == b.selection && a.focus == b.focus && a.churn?.cycle == b.churn?.cycle
             && a.noteShown == b.noteShown && a.notes === b.notes
     }
@@ -1148,7 +1150,8 @@ private struct DocumentPlan: View, Equatable {
                                          onConflict: { [service, intakeID] in service.recordEditConflict(intakeID, $0) },
                                          liveTape: { [service, intakeID] in service.tapes[intakeID] },
                                          router: final ? nil : service.editRouter(intakeID),
-                                         folds: service.planFolds(intakeID)))
+                                         folds: service.planFolds(intakeID),
+                                         projectPath: projectPath))
                 .churnLane(churn)
                 .focus(focus)
                 .readOnly(final)

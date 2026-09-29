@@ -734,21 +734,23 @@ final class ChurnLaneView: NSView {
         }
         (hit == nil ? NSCursor.arrow : NSCursor.pointingHand).set()
         guard let (marker, rect) = hit, marker.model.hot, let input else { return card.present(nil) }
-        // Past the text's trailing edge and top-aligned with the heading: below the marker, the
-        // card sat over the very section it explains, and beside the marker it still covered
-        // the start of every line. The plan wraps to the pane (`PlanGutter.textWidth`), so there
-        // is rarely room past it, and `CardPlacement` then flips the card back over the text.
-        card.placement = .trailing
-        card.frame = NSRect(x: textEnd - frame.minX, y: rect.minY, width: 0, height: rect.height)
+        // Under the heading's line, from the text column's leading edge (`.belowLine`): the card
+        // never covers the line it explains. Beside the text it had no room once the plan wrapped
+        // to the pane (`PlanGutter.textWidth`), and flipped back over the very lines compared.
+        card.placement = .belowLine
+        let column = textColumn
+        card.frame = NSRect(x: column.minX - frame.minX, y: rect.minY, width: column.width, height: rect.height)
         card.present(AnyView(SectionVersionsCard(section: marker.section, model: marker.model,
                                                  versions: input.versions(marker.section)).fixedSize()))
     }
 
-    /// Where the plan's lines end, in the text view's coordinates — the text container's
-    /// trailing edge, the lane's own trailing edge if there is no text view.
-    private var textEnd: CGFloat {
-        guard let textView, let container = textView.textContainer else { return frame.maxX }
-        return textView.textContainerOrigin.x + container.size.width
+    /// The plan's text column in the text view's coordinates — from where the glyphs start (the
+    /// container's leading edge plus its line padding) to the container's trailing edge; the
+    /// lane's own span if there is no text view.
+    private var textColumn: (minX: CGFloat, width: CGFloat) {
+        guard let textView, let container = textView.textContainer else { return (frame.minX, frame.width) }
+        let padding = container.lineFragmentPadding
+        return (textView.textContainerOrigin.x + padding, container.size.width - padding)
     }
 
     /// One marker for VoiceOver: its section and caption, pressable like a click.
