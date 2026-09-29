@@ -414,6 +414,7 @@ struct PlanSectionBody: View {
                 .editLayer(generated: generated[shown.checkpoint])
                 .handle(editor)
                 .folds(hooks.folds)
+                .links(projectPath: hooks.projectPath)
                 .churnLane(shown.editable ? churn : nil)
                 .annotating(notes)
                 .onChange(of: shown.checkpoint, initial: true) { _, checkpoint in notes?.checkpoint = checkpoint }

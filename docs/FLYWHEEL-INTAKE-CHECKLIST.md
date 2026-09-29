@@ -456,6 +456,17 @@ scrollers for one text).
   correct.
 - Turn on VoiceOver over the rendered plan. **Expect:** it reads the raw Markdown syntax, not a
   silently-rendered glyph.
+- Put links in the plan: `[doc](docs/some-file.md)`, `[code](Sources/X.swift:42)`, an absolute
+  path, `<https://…>`, a bare `https://…`, a `[gone](nope.md)` and a `[script](scripts/x.sh)`.
+  Plain-click each. **Expect:** the caret lands in the link text and nothing opens (links are
+  tinted, never underlined, no pointing hand). Hold ⌘ over each. **Expect:** the pointing hand,
+  an underline, and a small tip naming the resolved target; releasing ⌘ takes all three away
+  without moving the pointer. ⌘-click each. **Expect:** web links open in the default browser;
+  file links open in the default app for their type, relative ones resolved against the
+  project; a directory and the `.sh` are revealed in Finder, never run; `gone` beeps and says
+  "Not found: …" under the link for a moment, with no alert. Repeat with the plan unfocused
+  (click the agent inspector first) — ⌘ over a link still underlines it. With VoiceOver, move to
+  a link and press it (VO-Space). **Expect:** it is announced as a link, and the press opens it.
 - Hover a note/edit highlight band with a real mouse, then Revert it. **Expect:** the gutter and
   ghost markers track correctly while scrolling and at other pane widths; an inline ghost that
   wraps at a line's end still reads correctly; Undo after Revert restores the text.
@@ -495,8 +506,10 @@ scrollers for one text).
 - Toggle Reduce Motion and open/close the heatmap. **Expect:** no animated expand/collapse with
   it on.
 - Look at the finished-rounds strip's first card and an open versions card. **Expect:** the
-  first card is not clipped at the left edge; the versions card sits beside its marker, not on
-  top of the plan text.
+  first card is not clipped at the left edge; the versions card hangs just under the marked
+  heading's line (a small pointer up at it, its left edge on the text's), never over the heading
+  itself. Scroll so the marked heading sits near the window's bottom and hover again. **Expect:**
+  the card flips above the heading, pointer down, still clear of the heading line.
 - At a narrow pane where the tape itself scrolls, open the churn lane. **Expect:** note whether
   the amber "flipping" marker and heatmap columns visibly drift out of alignment with the tape —
   a known gap, see `docs/FOLLOWUPS.md`.

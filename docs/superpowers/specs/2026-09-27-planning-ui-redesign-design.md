@@ -302,6 +302,20 @@ for the session (`IntakeService.planFolds`) by heading text plus occurrence, fol
 through typing on it, and survive a new round by heading text (a fold whose heading vanished is
 dropped).
 
+**Links.** `[text](target)`, `<https://…>` autolinks and bare `http(s)://` URLs are tinted,
+never underlined, and a plain click on one is a click in an editor — the caret goes there.
+⌘-click opens it: web and `mailto:` targets in the default browser or mail app; file targets
+(absolute, `~`, `file://`, or relative to the intake's project, with any `:line[:col]`, `#L42`
+or `#fragment` stripped) in the default app for their type. A directory, and a file that
+opening would *run* (an app, a script such as `.sh`/`.command`/`.py`, an installer, a location
+file, anything executable), is revealed in Finder instead: a plan is agent-written text, and a
+⌘-click must never be how it executes code. A missing file beeps and says "Not found: …" under
+the link for a moment, no alert; any other scheme is ignored. While ⌘ is held over a link the
+pointer is a pointing hand, the link is underlined and a tip under it names the resolved
+target — tracked by mouse moves and modifier changes only, never per keystroke. The target is
+read from the Markdown parse, not the glyphs (off the caret block the `(target)` is hidden).
+Links carry `.link`, so VoiceOver finds them as links and its press opens them.
+
 **Where you are.** Once the section being read has scrolled its heading under the pinned block,
 its name shows in the pinned board's footer between DEP · CLR and ARR · REV, in the board's caption
 ("§ 5. MOBILE CHECK-IN"); a click brings the heading back under the block. Nothing shows while the
@@ -382,7 +396,10 @@ In the plan, each heading gets a **churn lane** in the margin, separate from the
 bar per round in the current cycle, height = that section's lines changed. Settled sections read
 "still since R2" in tertiary text. A section flagged diverging turns amber, its repeatedly-changed
 sentence gets a subtle amber highlight, and hovering the marker shows that sentence's version per
-round (from the checkpoints' kept `changes.json` + `verdicts.json`). Clicking a churn tick opens the
+round (from the checkpoints' kept `changes.json` + `verdicts.json`). The versions card hangs just
+under the marked heading's line, left edge on the text's, with a small pointer up at the line; it
+flips above only when the visible page has no room below, and never covers the heading line (it
+used to open beside the text, which wrapped to the pane left no room for). Clicking a churn tick opens the
 heatmap at that section.
 
 ### 8.3 Heatmap on click (D)

@@ -103,6 +103,49 @@ final class MarkdownStylerTests: XCTestCase {
         XCTAssertEqual(list.syntaxRanges.count, 2)
     }
 
+    /// Every link form a plan uses carries its target's source range — what ⌘-click opens even
+    /// where the `(url)` is hidden: `[text](url)`, an autolink `<url>` (brackets are syntax), and a
+    /// bare `https://…` (no syntax, its trailing sentence punctuation left out).
+    func testLinkTargetsForEveryForm() {
+        let text = "See [the doc](docs/x.md \"T\"), <https://a.example/b> and https://c.example/d?e=1. (also https://f.example/g)"
+        let ns = text as NSString
+        let spans = MarkdownStyler.blocks(text)[0].spans.filter { $0.kind == .link }
+        XCTAssertEqual(spans.map { ns.substring(with: $0.range) },
+                       ["the doc", "https://a.example/b", "https://c.example/d?e=1", "https://f.example/g"])
+        XCTAssertEqual(spans.compactMap { $0.target.map(ns.substring) },
+                       ["docs/x.md \"T\"", "https://a.example/b", "https://c.example/d?e=1", "https://f.example/g"])
+        let syntax = MarkdownStyler.blocks(text)[0].syntaxRanges.map(ns.substring)
+        XCTAssertEqual(syntax, ["[", "](docs/x.md \"T\")", "<", ">"], "a bare URL has no syntax to hide")
+
+        // Not links: a `<` that isn't a scheme, a URL inside code, a scheme glued to a word, a
+        // URL in link text counted once.
+        XCTAssertEqual(MarkdownStyler.blocks("a <b> c `https://x.y` xhttps://z.w")[0].spans.filter { $0.kind == .link }, [])
+        let nested = "[https://x.y](https://x.y)"
+        XCTAssertEqual(MarkdownStyler.blocks(nested)[0].spans.filter { $0.kind == .link }.count, 1)
+
+        // Shifted with its block, target and all.
+        let span = spans[0]
+        let moved = MarkdownStyler.blocks(text)[0].shifted(by: 5).spans.first { $0.kind == .link }!
+        XCTAssertEqual(moved.target?.location, span.target!.location + 5)
+        XCTAssertEqual(MarkdownStyler.link(at: span.range.location + 2, in: MarkdownStyler.blocks(text)), span)
+        XCTAssertNil(MarkdownStyler.link(at: 1, in: MarkdownStyler.blocks(text)))
+    }
+
+    /// Links are tinted, not underlined (the underline is the ⌘-hover cue), and carry `.link`
+    /// with their target for VoiceOver.
+    func testLinksAreTintedWithALinkAttribute() {
+        let text = "Read [the doc](docs/x.md) or https://x.example."
+        let storage = NSTextStorage(string: text)
+        MarkdownStyler.apply(to: storage, blocks: MarkdownStyler.blocks(text), revealBlock: nil, theme: .standard)
+        let ns = text as NSString
+        let doc = ns.range(of: "the doc").location, url = ns.range(of: "https://x.example").location
+        XCTAssertEqual(storage.attribute(.foregroundColor, at: doc, effectiveRange: nil) as? NSColor, PlanTheme.standard.link)
+        XCTAssertNil(storage.attribute(.underlineStyle, at: doc, effectiveRange: nil))
+        XCTAssertEqual((storage.attribute(.link, at: doc, effectiveRange: nil) as? URL)?.relativeString, "docs/x.md")
+        XCTAssertEqual(storage.attribute(.link, at: url, effectiveRange: nil) as? URL, URL(string: "https://x.example"))
+        XCTAssertNil(storage.attribute(.link, at: ns.range(of: "Read").location, effectiveRange: nil))
+    }
+
     func testRevealOnlyCaretBlock() {
         let text = "# A **b**\n\n# B **c**"
         let storage = NSTextStorage(string: text)

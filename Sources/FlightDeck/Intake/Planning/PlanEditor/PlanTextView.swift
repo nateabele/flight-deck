@@ -119,6 +119,8 @@ struct PlanTextView: NSViewRepresentable {
     /// Where the folded sections are kept — the intake's (`IntakeService.planFolds`), so they
     /// outlive this view; nil keeps them in the editor for as long as it lives.
     var folds: PlanFoldStore?
+    /// What the plan's relative file links resolve against — the intake's project directory.
+    var projectPath: String?
 
     init(text: Binding<String>, editable: Bool, onCommit: @escaping (String) -> Void, incoming: String?,
          onShowIncoming: @escaping () -> Void, incomingIsNavigation: Bool = false) {
@@ -156,6 +158,13 @@ struct PlanTextView: NSViewRepresentable {
     func folds(_ store: PlanFoldStore?) -> PlanTextView {
         var view = self
         view.folds = store
+        return view
+    }
+
+    /// Resolves the plan's relative file links against `path` — see `projectPath`.
+    func links(projectPath path: String?) -> PlanTextView {
+        var view = self
+        view.projectPath = path
         return view
     }
 
@@ -197,6 +206,7 @@ struct PlanTextView: NSViewRepresentable {
         let coordinator = context.coordinator
         coordinator.parent = self
         container.textView.isEditable = editable
+        container.textView.projectPath = projectPath
         container.textView.obscuredTop = context.environment.pageObscuredTop
         // While a commit's binding write is still queued, `text` is the pre-commit value; loading
         // it would put back the text the human just replaced.
@@ -542,6 +552,15 @@ struct PlanTextView: NSViewRepresentable {
             if let text = session.flush() { commit(text) }
         }
 
+        /// The link at `location` and its target's source text, from the parse — see
+        /// `PlanNSTextView.linkAt`.
+        func link(at location: Int) -> (range: NSRange, target: String)? {
+            guard let textView, let span = MarkdownStyler.link(at: location, in: blocks), let target = span.target else { return nil }
+            let ns = textView.string as NSString
+            guard NSMaxRange(target) <= ns.length else { return nil }
+            return (span.range, ns.substring(with: target))
+        }
+
         // MARK: Folding
 
         /// Where this editor's folds live — the parent's store when it hands one in.
@@ -575,6 +594,7 @@ struct PlanTextView: NSViewRepresentable {
             textView.visibleProxy = { [weak self] range in self?.visibleProxy(range) ?? range }
             textView.outline = { [weak self] in self?.headings ?? [] }
             textView.onScroll = { [weak self] in self?.layOutFoldGutter() }
+            textView.linkAt = { [weak self] location in self?.link(at: location) }
             foldGutter.measure = { [weak self] in self?.foldMarks() ?? [] }
             textView.addSubview(foldGutter, positioned: .below, relativeTo: nil)
 
@@ -903,6 +923,10 @@ final class PlanEditorContainer: NSView {
         textView.isAutomaticQuoteSubstitutionEnabled = false
         textView.isAutomaticDashSubstitutionEnabled = false
         textView.isAutomaticTextReplacementEnabled = false
+        // The styler tints links itself and the underline is the ⌘-hover cue; AppKit's default
+        // link look (blue, underlined, a pointing hand on plain hover) would say "click me" in
+        // an editor where a plain click places the caret.
+        textView.linkTextAttributes = [:]
         // The gutter lanes sit left of the text (`PlanGutter`, and `textContainerOrigin`
         // below); the inset is half the two margins, since the text view splits it evenly.
         textView.textContainerInset = NSSize(width: (PlanGutter.width(churn: false) + 8) / 2, height: 8)
@@ -1144,11 +1168,14 @@ class PlanNSTextView: NSTextView {
     override func didChangeText() {
         super.didChangeText()
         if fullLayoutNext != nil { layOutWholePlan() }
+        // The underlined link's range is the text's before the edit.
+        if hoveredLink != nil { updateLinkHover(at: nil, command: false) }
     }
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         observeScrolls()
+        if window == nil { stopWatchingModifiers() }
     }
 
     /// Every clip view the page scrolls this view in — observed on exactly those, re-subscribed
@@ -1167,7 +1194,10 @@ class PlanNSTextView: NSTextView {
         }
     }
 
-    deinit { scrollObservers.forEach(NotificationCenter.default.removeObserver) }
+    deinit {
+        scrollObservers.forEach(NotificationCenter.default.removeObserver)
+        if let flagsMonitor { NSEvent.removeMonitor(flagsMonitor) }
+    }
 
     // MARK: VoiceOver
 
@@ -1201,8 +1231,185 @@ class PlanNSTextView: NSTextView {
     }
 
     override func mouseDown(with event: NSEvent) {
-        if onFoldClick?(convert(event.locationInWindow, from: nil)) == true { return }
+        let point = convert(event.locationInWindow, from: nil)
+        if onFoldClick?(point) == true { return }
+        // ⌘-click on a link opens it; without ⌘ a click on a link is a click in an editor — the
+        // caret goes there. Taken before AppKit's, where ⌘-click adds a discontiguous selection.
+        if event.modifierFlags.contains(.command), event.clickCount == 1, let link = link(at: point) {
+            openLink(link)
+            return
+        }
         super.mouseDown(with: event)
+    }
+
+    // MARK: Links
+
+    /// The link at a character offset, from the Markdown parse (`MarkdownStyler.link(at:in:)`):
+    /// its clickable text and its target's source text — set by the coordinator, which owns the
+    /// blocks. The target comes from the parse because off the caret block `(url)` is hidden.
+    var linkAt: ((Int) -> (range: NSRange, target: String)?)?
+    /// What a relative link resolves against — the intake's project directory; nil resolves only
+    /// absolute and `~` paths.
+    var projectPath: String?
+    /// Opens, reveals and beeps; a test hands in one that records instead.
+    var linkOpener = PlanLinkOpener()
+    /// The link under the pointer while ⌘ is held — underlined (drawn over the text, so the
+    /// storage and the undo stack never see it) with the pointing hand and a tip naming where
+    /// it goes.
+    private(set) var hoveredLink: NSRange?
+    /// The ⌘-hover underline's segments (`underline`).
+    private(set) var linkUnderlines: [NSView] = []
+    /// The tip under a ⌘-hovered link, or the brief "Not found" notice after a ⌘-click.
+    private(set) var linkTip: PlanLinkTip?
+    /// Modifier changes while the pointer is over the text. `flagsChanged` reaches only the first
+    /// responder, and pressing ⌘ over a link in an unfocused plan must underline it too; the
+    /// monitor lives only while the pointer is inside, so it costs nothing elsewhere.
+    private var flagsMonitor: Any?
+
+    /// Where `target` goes, resolved against the project.
+    func resolveLink(_ target: String) -> PlanLinkTarget {
+        PlanLinks.resolve(target, projectPath: projectPath, probe: linkOpener.probe)
+    }
+
+    /// The link whose text is under `point` (view coordinates) — only over its glyphs, not
+    /// anywhere on its line.
+    func link(at point: NSPoint) -> (range: NSRange, target: String)? {
+        guard let linkAt else { return nil }
+        let index = characterIndexForInsertion(at: point)
+        for i in [index, index - 1] where i >= 0 {
+            guard let link = linkAt(i) else { continue }
+            return segmentRects(link.range).contains { $0.insetBy(dx: -1, dy: -2).contains(point) } ? link : nil
+        }
+        return nil
+    }
+
+    /// `range`'s line segments in view coordinates (one per wrapped line).
+    func segmentRects(_ range: NSRange) -> [NSRect] {
+        guard let layout = textLayoutManager, let textRange = textRange(range) else { return [] }
+        var rects: [NSRect] = []
+        let origin = textContainerOrigin
+        layout.ensureLayout(for: textRange)
+        layout.enumerateTextSegments(in: textRange, type: .standard, options: []) { _, frame, _, _ in
+            rects.append(frame.offsetBy(dx: origin.x, dy: origin.y))
+            return true
+        }
+        return rects
+    }
+
+    private func textRange(_ range: NSRange) -> NSTextRange? {
+        guard let content = textLayoutManager?.textContentManager,
+              let start = content.location(content.documentRange.location, offsetBy: range.location),
+              let end = content.location(start, offsetBy: range.length) else { return nil }
+        return NSTextRange(location: start, end: end)
+    }
+
+    /// Opens a link as ⌘-click does; a target that isn't there beeps and says so under the link.
+    func openLink(_ link: (range: NSRange, target: String)) {
+        let done = linkOpener.perform(resolveLink(link.target))
+        guard case .missing = done else { return }
+        let text = PlanLinks.describe(done)
+        showLinkTip(text, under: link.range, transient: true)
+        NSAccessibility.post(element: self, notification: .announcementRequested,
+                             userInfo: [.announcement: text, .priority: NSAccessibilityPriorityLevel.high.rawValue])
+    }
+
+    /// AppKit's link click — a click on a `.link` run, or VoiceOver's press on the AXLink.
+    /// A plain click in an editor places the caret, it never navigates; anything else (the
+    /// accessibility press has no mouse event) opens the link.
+    override func clicked(onLink link: Any, at charIndex: Int) {
+        linkClicked(at: charIndex, event: NSApp.currentEvent)
+    }
+
+    /// `clicked(onLink:at:)` with the event that caused it passed in, for tests.
+    func linkClicked(at charIndex: Int, event: NSEvent?) {
+        if let event, [.leftMouseDown, .leftMouseUp, .leftMouseDragged].contains(event.type), !event.modifierFlags.contains(.command) {
+            setSelectedRange(NSRange(location: characterIndexForInsertion(at: convert(event.locationInWindow, from: nil)), length: 0))
+            return
+        }
+        if let found = linkAt?(charIndex) { openLink(found) }
+    }
+
+    /// Follows the pointer and ⌘ over links. Does nothing unless ⌘ is down or a link is already
+    /// underlined, so an ordinary mouse move — and every keystroke — costs nothing here.
+    func updateLinkHover(at point: NSPoint?, command: Bool) {
+        let hit = command ? point.flatMap(link(at:)) : nil
+        if hit?.range == hoveredLink {
+            if hit != nil { NSCursor.pointingHand.set() }
+            return
+        }
+        underline(hoveredLink, false)
+        hoveredLink = hit?.range
+        underline(hoveredLink, true)
+        if let hit {
+            showLinkTip(PlanLinks.describe(resolveLink(hit.target)), under: hit.range, transient: false)
+            NSCursor.pointingHand.set()
+        } else {
+            if linkTip?.transient == false { hideLinkTip() }
+            NSCursor.iBeam.set()
+        }
+    }
+
+    /// A hairline under each of the link's line segments, as subviews. Not a TextKit 2
+    /// `.underlineStyle` rendering attribute: measured, it never drew (the attribute was set,
+    /// the glyphs stayed bare) — and a storage attribute would be an edit, on the undo stack.
+    private func underline(_ range: NSRange?, _ on: Bool) {
+        linkUnderlines.forEach { $0.removeFromSuperview() }
+        linkUnderlines = []
+        guard on, let range else { return }
+        linkUnderlines = segmentRects(range).map { rect in
+            let line = PlanLinkUnderline(frame: NSRect(x: rect.minX, y: rect.maxY - 2, width: rect.width, height: 1))
+            addSubview(line)
+            return line
+        }
+    }
+
+    private func showLinkTip(_ text: String, under range: NSRange, transient: Bool) {
+        hideLinkTip()
+        guard let line = segmentRects(range).first else { return }
+        let tip = PlanLinkTip(text: text, transient: transient)
+        let size = tip.fittingSize
+        let x = min(max(line.minX, visibleRect.minX + 4), max(visibleRect.minX + 4, visibleRect.maxX - size.width - 4))
+        tip.frame = NSRect(x: x, y: line.maxY + 4, width: size.width, height: size.height)
+        addSubview(tip)
+        linkTip = tip
+        guard transient else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self, weak tip] in
+            guard let self, let tip, self.linkTip === tip else { return }
+            self.hideLinkTip()
+        }
+    }
+
+    private func hideLinkTip() {
+        linkTip?.removeFromSuperview()
+        linkTip = nil
+    }
+
+    private var pointerInView: NSPoint? {
+        guard let window else { return nil }
+        let point = convert(window.mouseLocationOutsideOfEventStream, from: nil)
+        return visibleRect.contains(point) ? point : nil
+    }
+
+    private func watchModifiers() {
+        guard flagsMonitor == nil else { return }
+        flagsMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
+            MainActor.assumeIsolated {
+                guard let self, event.window === self.window else { return }
+                self.updateLinkHover(at: self.pointerInView, command: event.modifierFlags.contains(.command))
+            }
+            return event
+        }
+    }
+
+    private func stopWatchingModifiers() {
+        if let flagsMonitor { NSEvent.removeMonitor(flagsMonitor) }
+        flagsMonitor = nil
+        updateLinkHover(at: nil, command: false)
+    }
+
+    override func cursorUpdate(with event: NSEvent) {
+        if hoveredLink != nil { return NSCursor.pointingHand.set() }
+        super.cursorUpdate(with: event)
     }
 
     /// ⌥⌘← folds the caret's section and ⌥⌘→ opens it — only while this view has focus. No
@@ -1229,12 +1436,23 @@ class PlanNSTextView: NSTextView {
 
     override func mouseMoved(with event: NSEvent) {
         super.mouseMoved(with: event)
-        onHover?(convert(event.locationInWindow, from: nil))
+        let point = convert(event.locationInWindow, from: nil)
+        onHover?(point)
+        watchModifiers()
+        let command = event.modifierFlags.contains(.command)
+        if command || hoveredLink != nil { updateLinkHover(at: point, command: command) }
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        super.mouseEntered(with: event)
+        if event.trackingArea === hoverArea { watchModifiers() }
     }
 
     override func mouseExited(with event: NSEvent) {
         super.mouseExited(with: event)
-        if event.trackingArea === hoverArea { onHover?(nil) }
+        guard event.trackingArea === hoverArea else { return }
+        onHover?(nil)
+        stopWatchingModifiers()
     }
 
     /// The delegate's `undoManager(for:)` first. Measured: a plain `NSTextView` never
