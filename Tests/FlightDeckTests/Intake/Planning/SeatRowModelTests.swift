@@ -65,6 +65,16 @@ final class SeatRowModelTests: XCTestCase {
         XCTAssertEqual(row.role, "integrator", "no requested Slot at all — the run name is the only source")
     }
 
+    /// A controller ruling binds this: no user-facing surface may show the engine's raw seat
+    /// token "crossReviewer" — the live row must read the public "cross-check agent" (coverage
+    /// spec §3), same as the finished-round detail panel already does.
+    func testCrossReviewerRoleReadsAsCrossCheckAgent() {
+        let outcome = SlotOutcome(role: "crossReviewer", used: codex, requested: codex, status: .ok)
+        let row = SeatRowModel.make(run: "refine-1-crossReviewer", slot: outcome, requested: Slot(codex),
+                                    activity: nil, record: nil, roundRecord: nil, now: epoch)
+        XCTAssertEqual(row.role, "cross-check agent")
+    }
+
     // MARK: - Finished via run.json even when activity.json lags
 
     func testFinishedWhenRunJSONExitedEvenIfActivityUnfinished() {

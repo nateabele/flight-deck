@@ -17,7 +17,9 @@ struct SeatInspector: View {
                 HStack(spacing: 8) {
                     let (symbol, color) = SeatRow.symbol(model.glyph)
                     Image(systemName: symbol).foregroundStyle(color)
-                    Text(model.role.capitalized).font(.headline)
+                    // Sentence case, not `.capitalized`: "cross-check agent" is a phrase, and
+                    // title-casing it would read "Cross-Check Agent".
+                    Text(UIText.sentenceCase(model.role)).font(.headline)
                 }
                 Text(model.identity).foregroundStyle(.secondary)
                 Text(SeatRow.stateWord(model.glyph)).font(.callout).foregroundStyle(.secondary)

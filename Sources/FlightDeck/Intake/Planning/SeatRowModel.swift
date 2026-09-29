@@ -97,7 +97,10 @@ struct SeatRowModel: Equatable, Identifiable {
 
         let rawRole = slot?.role ?? roleFromRun(run) ?? "triage"
         let persona = slot?.persona ?? requested?.persona
-        let role = (persona != nil && persona != .general) ? personaName(persona!) : rawRole
+        // `rawRole` stays the engine's own token (`result(rawRole:roundRecord:)` switches on it
+        // below) — only the DISPLAYED role routes through `UIText.roleName`, so "crossReviewer"
+        // reads "cross-check agent" on every row without touching the logic keyed to the raw name.
+        let role = (persona != nil && persona != .general) ? personaName(persona!) : UIText.roleName(rawRole)
 
         let action = activity?.action.map(actionText)
         let headline = activity?.headline ?? action

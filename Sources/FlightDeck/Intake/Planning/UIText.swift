@@ -62,4 +62,11 @@ enum UIText {
     static func roleName(_ role: String) -> String {
         role == "crossReviewer" ? "cross-check agent" : role
     }
+
+    /// First letter up, the rest untouched — `String.capitalized` title-cases every word, which
+    /// turns "cross-check agent" into "Cross-Check Agent"; a role name is a phrase, not a title.
+    static func sentenceCase(_ s: String) -> String {
+        guard let first = s.first else { return s }
+        return first.uppercased() + s.dropFirst()
+    }
 }
