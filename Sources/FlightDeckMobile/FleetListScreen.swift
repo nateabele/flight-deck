@@ -156,8 +156,11 @@ struct FleetListScreen: View {
                                       flightControl: model.flightControl)
                 case .clarifications(let id):
                     ClarificationsScreen(intake: id, model: model.flightControl.detailModel(for: id), flightControl: model.flightControl)
-                case .plan, .reader:
-                    EmptyView()   // Task 11
+                case .plan(let intake, let checkpoint):
+                    PlanOutlineScreen(intake: intake, checkpoint: checkpoint, flightControl: model.flightControl)
+                case .reader(let intake, let checkpoint, let block, let changes):
+                    PlanReaderScreen(intake: intake, checkpoint: checkpoint, startBlock: block, changes: changes,
+                                     flightControl: model.flightControl)
                 }
             }
             // Inline, not the default large title. A large title costs roughly 52pt of height

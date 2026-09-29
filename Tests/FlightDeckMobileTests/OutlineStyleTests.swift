@@ -20,4 +20,14 @@ final class OutlineStyleTests: XCTestCase {
         XCTAssertEqual(OutlineStyle.noteCounts([note(2), note(5), note(6), note(6, consumed: true), note(nil)], outline: outline),
                        [1: 1, 4: 2])
     }
+
+    func testKindNamesCoverEveryKind() {
+        XCTAssertEqual(OutlineStyle.kindName("comment", text: "why?"), "Comment")
+        XCTAssertEqual(OutlineStyle.kindName("comment", text: ""), "Highlight")
+        XCTAssertEqual(OutlineStyle.kindName("question", text: ""), "Question")
+        XCTAssertEqual(OutlineStyle.kindName("mustChange", text: "x"), "Must change")
+        XCTAssertEqual(OutlineStyle.kindName("replace", text: "x"), "Replace")
+        XCTAssertEqual(OutlineStyle.kindName("delete", text: ""), "Delete")
+        XCTAssertEqual(OutlineStyle.kindName("somethingNew", text: "x"), "Note")
+    }
 }

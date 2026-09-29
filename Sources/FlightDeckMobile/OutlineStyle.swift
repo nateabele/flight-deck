@@ -17,4 +17,17 @@ enum OutlineStyle {
         }
         return counts
     }
+
+    /// The label a note carries in the read-only sheet. A comment with no text is a bare
+    /// highlight; an unknown kind (a newer Mac) degrades to "Note" rather than showing raw wire text.
+    static func kindName(_ kind: String, text: String) -> String {
+        switch kind {
+        case "comment": text.isEmpty ? "Highlight" : "Comment"
+        case "question": "Question"
+        case "mustChange": "Must change"
+        case "replace": "Replace"
+        case "delete": "Delete"
+        default: "Note"
+        }
+    }
 }
