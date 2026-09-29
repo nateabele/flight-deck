@@ -181,10 +181,26 @@ public struct PlannedRound: Codable, Equatable, Sendable {
     public var stage: Stage
     public var round: Int
     public var major: Bool
-    public init(stage: Stage, round: Int, major: Bool) {
+    /// Refine only: a second model family reviews this round's plan too (coverage spec §3).
+    /// Decided when the round starts and persisted in `Tape.roundInProgress`, so a later extend
+    /// can't change what a running round is doing.
+    public var crossCheck: Bool
+    public init(stage: Stage, round: Int, major: Bool, crossCheck: Bool = false) {
         self.stage = stage
         self.round = round
         self.major = major
+        self.crossCheck = crossCheck
+    }
+
+    private enum CodingKeys: String, CodingKey { case stage, round, major, crossCheck }
+
+    /// A `roundInProgress` written before cross-checks has no `crossCheck`: it wasn't one.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        stage = try c.decode(Stage.self, forKey: .stage)
+        round = try c.decode(Int.self, forKey: .round)
+        major = try c.decode(Bool.self, forKey: .major)
+        crossCheck = try c.decodeIfPresent(Bool.self, forKey: .crossCheck) ?? false
     }
 }
 

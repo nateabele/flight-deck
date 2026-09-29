@@ -189,4 +189,49 @@ final class RoundConfigTests: XCTestCase {
         XCTAssertNil(decoded.chosenPreset)
         XCTAssertNil(decoded.roundConfig)
     }
+
+    // MARK: - Cross-check (coverage spec §3)
+
+    func testCrossCheckDefaultsPerPreset() throws {
+        let sketch = try XCTUnwrap(PresetExpansion.config(for: .sketch, available: .defaults))
+        XCTAssertEqual(sketch.crossCheck, .off)
+        XCTAssertEqual(sketch.crossReviewer?.choice.harness, .claude)
+        XCTAssertNil(sketch.crossReviewer?.fallback, "a same-family fallback is not a cross-check")
+        for preset in [Preset.featurePlan, .fullPlan] {
+            let cfg = try XCTUnwrap(PresetExpansion.config(for: preset, available: .defaults))
+            XCTAssertEqual(cfg.crossCheck, .firstAndLast, "\(preset)")
+            XCTAssertEqual(cfg.crossReviewer?.choice.harness, .claude, "\(preset)")
+            XCTAssertTrue(cfg.crossChecks, "\(preset)")
+        }
+    }
+
+    func testSingleHarnessNeverCrossChecks() throws {
+        for available in [codexOnly, claudeOnly] {
+            let cfg = try XCTUnwrap(PresetExpansion.config(for: .fullPlan, available: available))
+            XCTAssertNil(cfg.crossReviewer)
+            XCTAssertNil(cfg.crossCheck)
+            XCTAssertFalse(cfg.crossChecks)
+        }
+    }
+
+    func testSameFamilyCrossReviewerDoesNotCrossCheck() throws {
+        var cfg = try XCTUnwrap(PresetExpansion.config(for: .featurePlan, available: .defaults))
+        cfg.crossReviewer = cfg.reviewer
+        XCTAssertFalse(cfg.crossChecks)
+    }
+
+    /// An intake.json written before cross-checks existed decodes to "off" (Review Focus 1).
+    func testOldConfigDecodesWithCrossCheckOff() throws {
+        let cfg = try XCTUnwrap(PresetExpansion.config(for: .featurePlan, available: .defaults))
+        var dict = try XCTUnwrap(JSONSerialization.jsonObject(with: IntakeJSON.encoder.encode(cfg)) as? [String: Any])
+        dict.removeValue(forKey: "crossCheck"); dict.removeValue(forKey: "crossReviewer")
+        let old = try IntakeJSON.decoder.decode(RoundConfig.self, from: JSONSerialization.data(withJSONObject: dict))
+        XCTAssertNil(old.crossCheck)
+        XCTAssertFalse(old.crossChecks)
+    }
+
+    func testModelFamilyFollowsHarness() {
+        XCTAssertEqual(ModelFamily(.codex), .codex)
+        XCTAssertEqual(ModelFamily(.claude).displayName, "Claude")
+    }
 }

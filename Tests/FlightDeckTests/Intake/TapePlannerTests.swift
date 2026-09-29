@@ -41,9 +41,9 @@ final class TapePlannerTests: XCTestCase {
         XCTAssertEqual(rounds, [
             PlannedRound(stage: .draft, round: 0, major: true),
             PlannedRound(stage: .synthesis, round: 0, major: true),
-            PlannedRound(stage: .refine, round: 1, major: false),
+            PlannedRound(stage: .refine, round: 1, major: false, crossCheck: true),
             PlannedRound(stage: .refine, round: 2, major: false),
-            PlannedRound(stage: .refine, round: 3, major: true),
+            PlannedRound(stage: .refine, round: 3, major: true, crossCheck: true),
             PlannedRound(stage: .encode, round: 0, major: true),
             PlannedRound(stage: .polish, round: 1, major: false),
             PlannedRound(stage: .polish, round: 2, major: true),
@@ -57,11 +57,11 @@ final class TapePlannerTests: XCTestCase {
         XCTAssertEqual(rounds, [
             PlannedRound(stage: .draft, round: 0, major: true),
             PlannedRound(stage: .synthesis, round: 0, major: true),
-            PlannedRound(stage: .refine, round: 1, major: false),
+            PlannedRound(stage: .refine, round: 1, major: false, crossCheck: true),
             PlannedRound(stage: .refine, round: 2, major: false),
             PlannedRound(stage: .refine, round: 3, major: false),
             PlannedRound(stage: .refine, round: 4, major: false),
-            PlannedRound(stage: .refine, round: 5, major: true),
+            PlannedRound(stage: .refine, round: 5, major: true, crossCheck: true),
             PlannedRound(stage: .encode, round: 0, major: true),
             PlannedRound(stage: .polish, round: 1, major: false),
             PlannedRound(stage: .polish, round: 2, major: false),
@@ -82,10 +82,10 @@ final class TapePlannerTests: XCTestCase {
         let (rounds, _) = walk(cfg, extraRefinement: 1)
         let refineRounds = rounds.filter { $0.stage == .refine }
         XCTAssertEqual(refineRounds, [
-            PlannedRound(stage: .refine, round: 1, major: false),
+            PlannedRound(stage: .refine, round: 1, major: false, crossCheck: true),
             PlannedRound(stage: .refine, round: 2, major: false),
             PlannedRound(stage: .refine, round: 3, major: false),
-            PlannedRound(stage: .refine, round: 4, major: true),
+            PlannedRound(stage: .refine, round: 4, major: true, crossCheck: true),
         ])
     }
 
@@ -143,7 +143,7 @@ final class TapePlannerTests: XCTestCase {
         XCTAssertEqual(refineRounds, [
             PlannedRound(stage: .refine, round: 2, major: false),
             PlannedRound(stage: .refine, round: 3, major: false),
-            PlannedRound(stage: .refine, round: 4, major: true),
+            PlannedRound(stage: .refine, round: 4, major: true, crossCheck: true),
         ])
     }
 
@@ -177,7 +177,8 @@ final class TapePlannerTests: XCTestCase {
         run(3, &tape, cfg) // draft, synthesis, refine 1
         TapePlanner.apply(.trim(.refine, by: 1), to: &tape, config: cfg)
         XCTAssertEqual(tape.extraRefinement, -1)
-        XCTAssertEqual(remaining(tape, cfg).filter { $0.stage == .refine }, [PlannedRound(stage: .refine, round: 2, major: true)])
+        XCTAssertEqual(remaining(tape, cfg).filter { $0.stage == .refine },
+                       [PlannedRound(stage: .refine, round: 2, major: true, crossCheck: true)])
     }
 
     /// A trim can't take back work: the stage never plans fewer rounds than already landed plus
@@ -211,7 +212,8 @@ final class TapePlannerTests: XCTestCase {
         XCTAssertEqual(remaining(tape, cfg).map(\.stage), [.synthesis, .encode, .polish, .polish])
         // + brings a round back.
         TapePlanner.apply(.extend(.refine, by: 1), to: &tape)
-        XCTAssertEqual(remaining(tape, cfg).filter { $0.stage == .refine }, [PlannedRound(stage: .refine, round: 1, major: true)])
+        XCTAssertEqual(remaining(tape, cfg).filter { $0.stage == .refine },
+                       [PlannedRound(stage: .refine, round: 1, major: true, crossCheck: true)])
     }
 
     func testTrimPolishToZeroMovesOnToFreshEyesOrReview() throws {
@@ -253,6 +255,54 @@ final class TapePlannerTests: XCTestCase {
         // fails safe to release review rather than guessing.
         cfg.polishCap = 1
         XCTAssertNil(TapePlanner.next(after: tape, config: cfg))
+    }
+
+    // MARK: - Cross-check flags (coverage spec §3)
+
+    private func refineFlags(_ config: RoundConfig, extra: Int = 0) -> [Int: Bool] {
+        let rounds = walk(config, extraRefinement: extra).rounds.filter { $0.stage == .refine }
+        return Dictionary(uniqueKeysWithValues: rounds.map { ($0.round, $0.crossCheck) })
+    }
+
+    func testCrossCheckPolicies() throws {
+        var cfg = try XCTUnwrap(PresetExpansion.config(for: .featurePlan, available: .defaults))
+        XCTAssertEqual(refineFlags(cfg), [1: true, 2: false, 3: true])
+        cfg.crossCheck = .every
+        XCTAssertEqual(refineFlags(cfg), [1: true, 2: true, 3: true])
+        cfg.crossCheck = .off
+        XCTAssertEqual(refineFlags(cfg), [1: false, 2: false, 3: false])
+        cfg.crossCheck = nil
+        XCTAssertEqual(refineFlags(cfg), [1: false, 2: false, 3: false])
+        cfg.crossCheck = .firstAndLast; cfg.refinementCap = 1
+        XCTAssertEqual(refineFlags(cfg), [1: true])
+    }
+
+    /// Extend moves "last": the new last round cross-checks (spec §3), and the old last does not.
+    func testExtendMovesTheLastCrossCheck() throws {
+        let cfg = try XCTUnwrap(PresetExpansion.config(for: .featurePlan, available: .defaults))
+        XCTAssertEqual(refineFlags(cfg, extra: 1), [1: true, 2: false, 3: false, 4: true])
+        XCTAssertEqual(refineFlags(cfg, extra: -1), [1: true, 2: true])
+    }
+
+    /// A round already started keeps the flag it started with: `roundInProgress` is persisted
+    /// (Review Focus 5). An extend landing mid-round flags the NEW last round too.
+    func testExtendMidRoundKeepsTheRunningRoundsFlag() throws {
+        let cfg = try XCTUnwrap(PresetExpansion.config(for: .featurePlan, available: .defaults))
+        var tape = walk(cfg).tape
+        tape.checkpoints.removeAll { $0.stage == .refine && $0.round == 3 || [.encode, .polish].contains($0.stage) }
+        let running = try XCTUnwrap(TapePlanner.next(after: tape, config: cfg))
+        XCTAssertEqual(running.round, 3); XCTAssertTrue(running.crossCheck)
+        tape.roundInProgress = running
+        tape.extraRefinement = 1
+        let data = try IntakeJSON.encoder.encode(tape)
+        XCTAssertEqual(try IntakeJSON.decoder.decode(Tape.self, from: data).roundInProgress?.crossCheck, true)
+        tape.checkpoints.append(Checkpoint(id: tape.checkpoints.count + 1, stage: .refine, round: 3, major: false, createdAt: Date()))
+        XCTAssertEqual(TapePlanner.next(after: tape, config: cfg)?.crossCheck, true)
+    }
+
+    func testOldPlannedRoundDecodesWithoutCrossCheck() throws {
+        let old = #"{"stage":"refine","round":2,"major":false}"#
+        XCTAssertFalse(try IntakeJSON.decoder.decode(PlannedRound.self, from: Data(old.utf8)).crossCheck)
     }
 
     // MARK: - Skipped stages

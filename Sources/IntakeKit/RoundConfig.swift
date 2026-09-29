@@ -39,6 +39,29 @@ public struct Slot: Codable, Equatable, Sendable {
 /// refinement or through polish); `.toReview` runs everything and lands on release review.
 public enum PlayMode: String, Codable, Sendable { case step, nextMajor, toReview }
 
+/// Which Refine rounds a second model family reviews in parallel (coverage spec §3). Synthesis
+/// never does: the synthesizer merges drafts rather than searching the plan for problems, so its
+/// proposals are not a review sample.
+public enum CrossCheckPolicy: String, Codable, Sendable, CaseIterable { case off, firstAndLast, every }
+
+/// A model's vendor lineage — what "cross-family" and coverage are counted over. Derived from the
+/// harness today; a later harness (Gemini, Grok, Qwen) adds a case here and nothing else changes.
+public enum ModelFamily: String, Codable, Sendable {
+    case codex, claude
+    public init(_ harness: Harness) {
+        switch harness {
+        case .codex: self = .codex
+        case .claude: self = .claude
+        }
+    }
+    public var displayName: String {
+        switch self {
+        case .codex: "Codex"
+        case .claude: "Claude"
+        }
+    }
+}
+
 /// The fully expanded shape of a shaping round: every seat, every cap, and the play mode a
 /// "Continue" click uses by default. `PresetExpansion` builds the initial one from a
 /// `Preset`; the config editor (Task 13) lets the human edit it in place, at which point
@@ -55,10 +78,23 @@ public struct RoundConfig: Codable, Equatable, Sendable {
     public var freshEyesAndDedup: Bool
     public var defaultPlay: PlayMode
     public var customized: Bool
+    /// The second family's reviewer on cross-check rounds. No fallback, ever: its fallback
+    /// would be the primary's family, and a same-family "cross-check" is not independent.
+    /// Optional so an `intake.json` written before cross-checks decodes unchanged.
+    public var crossReviewer: Slot?
+    /// nil reads as `.off` — every intake from before this existed, larkOS included.
+    public var crossCheck: CrossCheckPolicy?
+
+    /// Whether any round can cross-check: a policy, both reviewers, and two different families.
+    public var crossChecks: Bool {
+        guard let policy = crossCheck, policy != .off, let reviewer, let crossReviewer else { return false }
+        return ModelFamily(reviewer.choice.harness) != ModelFamily(crossReviewer.choice.harness)
+    }
 
     public init(drafters: [Slot], synthesizer: Slot?, reviewer: Slot?, integrator: ModelChoice,
                 encoder: ModelChoice, polisher: ModelChoice?, refinementCap: Int, polishCap: Int,
-                freshEyesAndDedup: Bool, defaultPlay: PlayMode, customized: Bool) {
+                freshEyesAndDedup: Bool, defaultPlay: PlayMode, customized: Bool,
+                crossReviewer: Slot? = nil, crossCheck: CrossCheckPolicy? = nil) {
         self.drafters = drafters
         self.synthesizer = synthesizer
         self.reviewer = reviewer
@@ -70,6 +106,8 @@ public struct RoundConfig: Codable, Equatable, Sendable {
         self.freshEyesAndDedup = freshEyesAndDedup
         self.defaultPlay = defaultPlay
         self.customized = customized
+        self.crossReviewer = crossReviewer
+        self.crossCheck = crossCheck
     }
 }
 
@@ -125,7 +163,8 @@ public enum PresetExpansion {
                 reviewer: Slot(a, fallback: hasFallback ? b : nil),
                 integrator: integrator, encoder: encoder, polisher: nil,
                 refinementCap: 2, polishCap: 0, freshEyesAndDedup: false,
-                defaultPlay: .toReview, customized: false)
+                defaultPlay: .toReview, customized: false,
+                crossReviewer: hasFallback ? Slot(b) : nil, crossCheck: hasFallback ? .off : nil)
         case .featurePlan:
             return RoundConfig(
                 drafters: [
@@ -136,7 +175,8 @@ public enum PresetExpansion {
                 reviewer: Slot(a, fallback: hasFallback ? b : nil),
                 integrator: integrator, encoder: encoder, polisher: available.claude ?? a,
                 refinementCap: 3, polishCap: 2, freshEyesAndDedup: false,
-                defaultPlay: .nextMajor, customized: false)
+                defaultPlay: .nextMajor, customized: false,
+                crossReviewer: hasFallback ? Slot(b) : nil, crossCheck: hasFallback ? .firstAndLast : nil)
         case .fullPlan:
             return RoundConfig(
                 drafters: [
@@ -149,7 +189,8 @@ public enum PresetExpansion {
                 reviewer: Slot(a, fallback: hasFallback ? b : nil),
                 integrator: integrator, encoder: encoder, polisher: available.claude ?? a,
                 refinementCap: 5, polishCap: 6, freshEyesAndDedup: true,
-                defaultPlay: .nextMajor, customized: false)
+                defaultPlay: .nextMajor, customized: false,
+                crossReviewer: hasFallback ? Slot(b) : nil, crossCheck: hasFallback ? .firstAndLast : nil)
         }
     }
 }
