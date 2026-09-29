@@ -33,6 +33,8 @@ own worktree by another session.
 - **⌘⇧/** is not bound by libghostty. It shadows the system Help-menu search chord (⌘?); accepted.
   Implementation must verify the chord actually fires on a US layout, since SwiftUI may register
   `"/"` + shift as `"?"` — use whichever spelling is proven to match, and say which in a comment.
+  **Resolved 2026-09-28:** `"/"` + ⇧⌘. The first spelling, `"?"` + ⌘, is the Help search field's
+  own key equivalent, and the menu item was drawn with no shortcut beside it.
 
 ## 1. Selection history
 
