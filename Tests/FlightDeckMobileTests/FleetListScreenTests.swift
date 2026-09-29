@@ -584,4 +584,28 @@ final class FleetListScreenTests: XCTestCase {
         project.isCollapsed = false; project.intakes = nil
         XCTAssertEqual(FleetListScreen.intakeRows(project), [])
     }
+
+    /// The path used to die with `FleetListScreen`'s `@State` when unpair cleared `mac`; on the
+    /// model it would outlive the pairing and point a re-paired phone at the old Mac's screens.
+    func testUnpairingClearsTheNavigationPathAndPendingBanners() {
+        let model = FleetModel(store: InMemoryPairedMacStore())
+        model.path.append(IntakeRoute.intake(UUID()))
+        let project = UUID(), id = UUID()
+        func fleet(_ s: WireIntakeSummary) -> FleetSnapshot {
+            FleetSnapshot(projects: [WireProject(id: project, name: "larkOS", path: "/w", intakes: [s])])
+        }
+        let quiet = WireIntakeSummary(id: id, title: "T", state: "triaging", needsAttention: false, createdAt: Date())
+        var loud = quiet; loud.state = "needsAnswers"; loud.needsAttention = true
+        model.flightControl.baseline(fleet(quiet))
+        model.flightControl.intakesChanged(project: project, intakes: [loud], fleet: fleet(loud))
+        model.flightControl.onScreen = id
+        XCTAssertFalse(model.path.isEmpty)
+        XCTAssertFalse(model.flightControl.banners.isEmpty, "the premise: a banner is queued")
+
+        model.unpair()
+
+        XCTAssertTrue(model.path.isEmpty)
+        XCTAssertTrue(model.flightControl.banners.isEmpty)
+        XCTAssertNil(model.flightControl.onScreen)
+    }
 }

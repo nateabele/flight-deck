@@ -33,6 +33,18 @@ final class FlightControlModel {
         banners.append(contentsOf: fresh)
     }
 
+    /// Forget everything learned from one pairing (unpair): queued banners, the on-screen
+    /// suppression, the last-seen intakes and cached detail/plan bodies. Intake content is this
+    /// pairing's, and a stale `known` would let the next Mac's first snapshot diff against it.
+    func reset() {
+        banners = []
+        onScreen = nil
+        known = [:]
+        details = [:]
+        plans = [:]
+        planOrder = []
+    }
+
     func dismissBanner(_ id: UUID) { banners.removeAll { $0.id == id } }
 
     func detailModel(for id: UUID) -> IntakeDetailModel {

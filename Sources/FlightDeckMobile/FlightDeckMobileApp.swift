@@ -43,6 +43,9 @@ struct FlightDeckMobileApp: App {
                         },
                         onDismiss: { model.flightControl.dismissBanner(banner.id) }
                     )
+                    // A fresh view per banner: the queue reuses this one otherwise, so a later
+                    // banner would neither re-run the VoiceOver announcement nor the transition.
+                    .id(banner.id)
                     .transition(reduceMotion ? .opacity : .move(edge: .top).combined(with: .opacity))
                 }
             }

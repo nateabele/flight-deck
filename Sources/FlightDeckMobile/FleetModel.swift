@@ -299,6 +299,12 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
         // Same privacy reasoning as `timelineModels` above: this is prompt content from the
         // pairing being revoked, not fleet-independent fact, and must not survive it.
         sentCommands.removeAll()
+        // The stack now lives on the model, not in the list view's `@State`, so it no longer dies
+        // with the view when `mac` goes nil: left alone, a re-pair (possibly to another Mac)
+        // would reopen on the old pairing's session and intake screens.
+        path = NavigationPath()
+        // Same reasoning: queued banners and cached intake bodies name the revoked pairing's work.
+        flightControl.reset()
         state = .idle
         lastLive = nil
         pairingProgress = nil
