@@ -38,41 +38,57 @@ final class PlanLinksTests: XCTestCase {
     }
 
     func testFilePathsResolve() {
-        XCTAssertEqual(resolve("/abs/notes.txt"), file("/abs/notes.txt"), "absolute")
+        XCTAssertEqual(resolve("/abs/notes.txt"), edit("/abs/notes.txt"), "absolute")
         XCTAssertEqual(resolve("~/plans/p.md"), file(home + "/plans/p.md"), "~")
-        XCTAssertEqual(resolve("file:///abs/notes.txt"), file("/abs/notes.txt"), "file://")
+        XCTAssertEqual(resolve("file:///abs/notes.txt"), edit("/abs/notes.txt"), "file://")
         XCTAssertEqual(resolve("docs/x.md"), file("/Users/me/fieldOS/docs/x.md"), "relative to the project")
-        XCTAssertEqual(resolve("./src/a.ts"), file("/Users/me/fieldOS/src/a.ts"), "./relative")
+        XCTAssertEqual(resolve("./src/a.ts"), edit("/Users/me/fieldOS/src/a.ts"), "./relative")
         XCTAssertEqual(resolve("docs/../README.md"), file("/Users/me/fieldOS/README.md"), "dot-dot standardized")
         XCTAssertEqual(resolve("My%20File.md"), file("/Users/me/fieldOS/My File.md"), "percent-encoded")
     }
 
     func testLineAndAnchorSuffixesAreStripped() {
-        XCTAssertEqual(resolve("Sources/App.swift:42"), file("/Users/me/fieldOS/Sources/App.swift"), ":line")
-        XCTAssertEqual(resolve("Sources/App.swift:42:7"), file("/Users/me/fieldOS/Sources/App.swift"), ":line:col")
-        XCTAssertEqual(resolve("Sources/App.swift#L42"), file("/Users/me/fieldOS/Sources/App.swift"), "#L")
-        XCTAssertEqual(resolve("Sources/App.swift#L42-L50"), file("/Users/me/fieldOS/Sources/App.swift"), "#L range")
+        XCTAssertEqual(resolve("Sources/App.swift:42"), edit("/Users/me/fieldOS/Sources/App.swift"), ":line")
+        XCTAssertEqual(resolve("Sources/App.swift:42:7"), edit("/Users/me/fieldOS/Sources/App.swift"), ":line:col")
+        XCTAssertEqual(resolve("Sources/App.swift#L42"), edit("/Users/me/fieldOS/Sources/App.swift"), "#L")
+        XCTAssertEqual(resolve("Sources/App.swift#L42-L50"), edit("/Users/me/fieldOS/Sources/App.swift"), "#L range")
         XCTAssertEqual(resolve("docs/x.md#setup"), file("/Users/me/fieldOS/docs/x.md"), "#fragment")
         XCTAssertEqual(resolve("/Users/me/fieldOS/README.md:3"), file("/Users/me/fieldOS/README.md"))
-        XCTAssertEqual(resolve("file:///abs/notes.txt:9"), file("/abs/notes.txt"))
+        XCTAssertEqual(resolve("file:///abs/notes.txt:9"), edit("/abs/notes.txt"))
         // `README.md:42` is a path and a line, never the scheme `readme.md`.
         XCTAssertNil(PlanLinks.scheme(of: "README.md:42"))
         XCTAssertNil(PlanLinks.scheme(of: "Makefile:12"))
         XCTAssertEqual(PlanLinks.scheme(of: "javascript:alert(1)"), "javascript")
     }
 
-    func testDirectoriesAndRunnableFilesAreRevealedNotOpened() {
+    private func edit(_ path: String) -> PlanLinkTarget { .edit(URL(fileURLWithPath: path)) }
+
+    /// Source and scripts open in the default text EDITOR — their own handler may run them
+    /// (Python Launcher for .py, Terminal for .command/.sh) — and are never just revealed: plan
+    /// links mostly point at code, which is what the human wants to read.
+    func testSourceAndScriptsOpenInTheEditor() {
+        XCTAssertEqual(resolve("scripts/deploy.sh"), edit("/Users/me/fieldOS/scripts/deploy.sh"), ".sh, not Terminal")
+        XCTAssertEqual(resolve("wipe.command"), edit("/Users/me/fieldOS/wipe.command"), ".command, not Terminal")
+        XCTAssertEqual(resolve("src/a.ts"), edit("/Users/me/fieldOS/src/a.ts"))
+        XCTAssertEqual(resolve("Sources/App.swift:42"), edit("/Users/me/fieldOS/Sources/App.swift"))
+        for ext in ["py", "js", "ts", "sh", "command", "zsh", "rb", "swift", "go", "rs", "c", "json", "yaml", "toml"] {
+            XCTAssertEqual(PlanLinks.kind(of: URL(fileURLWithPath: "/x/f." + ext), executable: false), .edit, ext)
+        }
+        XCTAssertEqual(PlanLinks.kind(of: URL(fileURLWithPath: "/x/run.sh"), executable: true), .edit, "an executable script is still text")
+    }
+
+    /// Finder is only for what can't be read as text and would run: bundles, non-text
+    /// executables, installers, disk images, Terminal/Automator/AppleScript documents.
+    func testDirectoriesAndRunnableBinariesAreRevealed() {
         XCTAssertEqual(resolve("docs"), reveal("/Users/me/fieldOS/docs"), "a directory shows in Finder")
         XCTAssertEqual(resolve("docs/"), reveal("/Users/me/fieldOS/docs"))
-        XCTAssertEqual(resolve("scripts/deploy.sh"), reveal("/Users/me/fieldOS/scripts/deploy.sh"), ".sh would run in Terminal")
-        XCTAssertEqual(resolve("wipe.command"), reveal("/Users/me/fieldOS/wipe.command"), ".command would run")
-        XCTAssertEqual(resolve("bin/tool"), reveal("/Users/me/fieldOS/bin/tool"), "an executable bit, no extension")
+        XCTAssertEqual(resolve("bin/tool"), reveal("/Users/me/fieldOS/bin/tool"), "an executable bit, no extension: a binary")
         XCTAssertEqual(resolve("/Applications/Evil.app"), reveal("/Applications/Evil.app"))
-        for ext in ["app", "command", "sh", "py", "scpt", "workflow", "terminal", "pkg", "webloc", "fileloc"] {
-            XCTAssertTrue(PlanLinks.runs(URL(fileURLWithPath: "/x/f." + ext)), ext)
+        for ext in ["app", "pkg", "mpkg", "dmg", "terminal", "workflow", "scpt"] {
+            XCTAssertEqual(PlanLinks.kind(of: URL(fileURLWithPath: "/x/f." + ext), executable: false), .reveal, ext)
         }
-        for ext in ["md", "txt", "swift", "ts", "json", "png", "pdf"] {
-            XCTAssertFalse(PlanLinks.runs(URL(fileURLWithPath: "/x/f." + ext)), ext)
+        for ext in ["md", "pdf", "png", "html"] {
+            XCTAssertEqual(PlanLinks.kind(of: URL(fileURLWithPath: "/x/f." + ext), executable: false), .open, ext)
         }
     }
 
@@ -87,9 +103,13 @@ final class PlanLinksTests: XCTestCase {
 
     func testOpenerDoesWhatTheTargetSays() {
         var opened: [URL] = [], revealed: [URL] = [], beeps = 0
-        let opener = PlanLinkOpener(open: { opened.append($0) }, reveal: { revealed.append($0) }, beep: { beeps += 1 }, probe: { _ in nil })
+        var edited: [URL] = []
+        let opener = PlanLinkOpener(open: { opened.append($0) }, edit: { edited.append($0) }, reveal: { revealed.append($0) },
+                                    beep: { beeps += 1 }, probe: { _ in nil })
         opener.perform(.web(URL(string: "https://x.y")!))
         opener.perform(file("/a.md"))
+        opener.perform(edit("/s.py"))
+        XCTAssertEqual(edited, [URL(fileURLWithPath: "/s.py")], "a script goes to the editor, never its own handler")
         opener.perform(reveal("/d"))
         opener.perform(.missing("/gone"))
         opener.perform(.unsupported)

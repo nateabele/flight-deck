@@ -306,10 +306,12 @@ dropped).
 never underlined, and a plain click on one is a click in an editor — the caret goes there.
 ⌘-click opens it: web and `mailto:` targets in the default browser or mail app; file targets
 (absolute, `~`, `file://`, or relative to the intake's project, with any `:line[:col]`, `#L42`
-or `#fragment` stripped) in the default app for their type. A directory, and a file that
-opening would *run* (an app, a script such as `.sh`/`.command`/`.py`, an installer, a location
-file, anything executable), is revealed in Finder instead: a plan is agent-written text, and a
-⌘-click must never be how it executes code. A missing file beeps and says "Not found: …" under
+or `#fragment` stripped). Source, scripts and other text (`.py`, `.js`, `.ts`, `.sh`, `.command`,
+`.json`, `.txt`…) open in the default text **editor** — never the file's own handler, which may run
+it (Python Launcher, Terminal): a plan is agent-written text, and a ⌘-click must never be how it
+executes code. A directory, and what can't be read and would run (an app, `.pkg`, `.dmg`,
+`.terminal`, `.workflow`, `.scpt`, a binary), is revealed in Finder. Everything else (Markdown,
+PDF, images) opens in its default app. A missing file beeps and says "Not found: …" under
 the link for a moment, no alert; any other scheme is ignored. While ⌘ is held over a link the
 pointer is a pointing hand, the link is underlined and a tip under it names the resolved
 target — tracked by mouse moves and modifier changes only, never per keystroke. The target is

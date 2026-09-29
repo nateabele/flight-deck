@@ -462,8 +462,9 @@ scrollers for one text).
   tinted, never underlined, no pointing hand). Hold ⌘ over each. **Expect:** the pointing hand,
   an underline, and a small tip naming the resolved target; releasing ⌘ takes all three away
   without moving the pointer. ⌘-click each. **Expect:** web links open in the default browser;
-  file links open in the default app for their type, relative ones resolved against the
-  project; a directory and the `.sh` are revealed in Finder, never run; `gone` beeps and says
+  `.md`/PDF links open in their default app, relative ones resolved against the project; the
+  `.swift` and the `.sh` open in your default text editor (the `.sh` never runs in Terminal); a
+  directory or an `.app` is revealed in Finder; `gone` beeps and says
   "Not found: …" under the link for a moment, with no alert. Repeat with the plan unfocused
   (click the agent inspector first) — ⌘ over a link still underlines it. With VoiceOver, move to
   a link and press it (VO-Space). **Expect:** it is announced as a link, and the press opens it.
