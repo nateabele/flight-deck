@@ -53,6 +53,14 @@ final class IntakeStyleTests: XCTestCase {
         XCTAssertFalse(IntakeRowStyle.pill(s("someFutureState")).isEmpty)
     }
 
+    func testOnlyAWorkingIntakesClockTicksEverySecond() {
+        XCTAssertFalse(IntakeRowStyle.clockIsIdle(s("shaping", run: "running")))
+        XCTAssertFalse(IntakeRowStyle.clockIsIdle(s("triaging")))
+        XCTAssertTrue(IntakeRowStyle.clockIsIdle(s("shaping", run: "paused")))
+        XCTAssertTrue(IntakeRowStyle.clockIsIdle(s("shaping", run: "stopped")))
+        XCTAssertTrue(IntakeRowStyle.clockIsIdle(s("failed", run: "failed")))
+    }
+
     // MARK: Banner (Review Focus #3)
 
     func testABannerFiresOnlyOnATransitionIntoNeedsYou() {

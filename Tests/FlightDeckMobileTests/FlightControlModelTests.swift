@@ -79,6 +79,18 @@ final class FlightControlModelTests: XCTestCase {
         XCTAssertEqual(model.detail, d)
     }
 
+    func testTheLastDetailsClockOffsetReachesTheList() {
+        let fetcher = StubFetcher()
+        let id = UUID()
+        fetcher.detailReplies = [.success(WireIntakeDetail(
+            etag: "e", project: UUID(), summary: summary(id, attention: false, state: "triaging"), intent: "I",
+            progress: [], agents: [], rounds: [], pendingNotes: 0, servedAt: Date(timeIntervalSinceReferenceDate: 110)))]
+        let model = FlightControlModel(fetcher: fetcher, receivedAt: { Date(timeIntervalSinceReferenceDate: 100) })
+        XCTAssertEqual(model.macClockOffset, 0, "no detail yet: assume no skew")
+        model.detailModel(for: id).refresh()
+        XCTAssertEqual(model.macClockOffset, 10, "the list's clocks use the skew the intake screen learned")
+    }
+
     func testPresenceIsReferenceCounted() {
         let model = FlightControlModel(fetcher: StubFetcher())
         let id = UUID(), other = UUID()

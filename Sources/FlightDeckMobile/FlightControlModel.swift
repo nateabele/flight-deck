@@ -11,6 +11,10 @@ final class FlightControlModel {
     /// The intake whose screens are on top (the most recent to appear); its banner is
     /// suppressed. Derived from `enter`/`leave`, never assigned.
     private(set) var onScreen: UUID?
+    /// Mac clock − phone clock, from the most recent detail any intake screen fetched. The
+    /// Sessions list has no detail of its own to learn it from, and a row counting with 0 while
+    /// the intake screen counts with the real skew shows two different times for one clock.
+    private(set) var macClockOffset: TimeInterval = 0
     @ObservationIgnored private var presence: [UUID: Int] = [:]
     @ObservationIgnored private var entered: [UUID] = []
     @ObservationIgnored private var known: [UUID: WireIntakeSummary] = [:]
@@ -18,8 +22,12 @@ final class FlightControlModel {
     @ObservationIgnored private var plans: [String: WireIntakePlan] = [:]
     @ObservationIgnored private var planOrder: [String] = []
     @ObservationIgnored private weak var fetcher: IntakeFetching?
+    @ObservationIgnored private let receivedAt: () -> Date
 
-    init(fetcher: IntakeFetching) { self.fetcher = fetcher }
+    init(fetcher: IntakeFetching, receivedAt: @escaping () -> Date = Date.init) {
+        self.fetcher = fetcher
+        self.receivedAt = receivedAt
+    }
 
     /// One of an intake's screens appeared. Counted, because a pushed child can appear before
     /// its parent disappears.
@@ -69,7 +77,9 @@ final class FlightControlModel {
 
     func detailModel(for id: UUID) -> IntakeDetailModel {
         if let m = details[id] { return m }
-        let m = IntakeDetailModel(id: id, fetcher: fetcher!)
+        let m = IntakeDetailModel(id: id, fetcher: fetcher!, receivedAt: receivedAt) { [weak self] offset in
+            self?.macClockOffset = offset
+        }
         details[id] = m
         return m
     }

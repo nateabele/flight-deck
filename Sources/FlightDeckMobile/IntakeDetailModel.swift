@@ -22,11 +22,15 @@ final class IntakeDetailModel {
     @ObservationIgnored private weak var fetcher: IntakeFetching?
     @ObservationIgnored private let receivedAt: () -> Date
     @ObservationIgnored private var inFlight = false
+    /// Told each fresh offset, so the Sessions list's clocks share it (`FlightControlModel`).
+    @ObservationIgnored private let onOffset: ((TimeInterval) -> Void)?
 
-    init(id: UUID, fetcher: IntakeFetching, receivedAt: @escaping () -> Date = Date.init) {
+    init(id: UUID, fetcher: IntakeFetching, receivedAt: @escaping () -> Date = Date.init,
+         onOffset: ((TimeInterval) -> Void)? = nil) {
         self.id = id
         self.fetcher = fetcher
         self.receivedAt = receivedAt
+        self.onOffset = onOffset
     }
 
     func refresh() {
@@ -39,6 +43,7 @@ final class IntakeDetailModel {
             case .success(let fresh?):
                 self.detail = fresh
                 self.macClockOffset = fresh.servedAt.timeIntervalSince(self.receivedAt())
+                self.onOffset?(self.macClockOffset)
                 self.failure = nil
                 self.gone = false
             case .success(nil):

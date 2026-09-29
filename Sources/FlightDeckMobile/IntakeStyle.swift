@@ -47,6 +47,12 @@ enum IntakeRowStyle {
         }
     }
 
+    /// Whether a row's clock may drop to once a minute (`ClockPolicy.tickInterval`): only an
+    /// intake that is working — a running round, or triage — needs a second hand.
+    static func clockIsIdle(_ s: WireIntakeSummary) -> Bool {
+        s.runStatus != "running" && s.state != "triaging"
+    }
+
     static func stateWord(_ s: WireIntakeSummary) -> String {
         switch s.state {
         case "triaging": "Triaging"

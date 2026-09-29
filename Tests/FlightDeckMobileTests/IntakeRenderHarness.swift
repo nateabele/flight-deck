@@ -145,7 +145,7 @@ final class IntakeRenderHarness: XCTestCase {
         let rows = List {
             Section {
                 ForEach(IntakeRowStyle.ordered(Fixture.states.map(\.1.summary))) { s in
-                    NavigationLink(value: s.id) { IntakeRow(summary: s, frozenAt: nil) }
+                    NavigationLink(value: s.id) { IntakeRow(summary: s, offset: 0, frozenAt: nil) }
                 }
             } header: { Text("larkOS").font(.footnote) }
         }

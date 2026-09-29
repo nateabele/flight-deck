@@ -66,7 +66,7 @@ struct FleetListScreen: View {
                         Section {
                             ForEach(Self.intakeRows(project)) { intake in
                                 NavigationLink(value: IntakeRoute.intake(intake.id)) {
-                                    IntakeRow(summary: intake, frozenAt: frozenAt)
+                                    IntakeRow(summary: intake, offset: model.flightControl.macClockOffset, frozenAt: frozenAt)
                                 }
                                 .listRowInsets(Self.rowInsets)
                             }
