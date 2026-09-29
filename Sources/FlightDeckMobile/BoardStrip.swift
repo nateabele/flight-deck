@@ -47,23 +47,42 @@ struct BoardStrip: View {
                     }
                 }
                 if !model.stopText.isEmpty || model.convergence != nil {
-                    HStack {
-                        Text(model.stopText).font(.system(.caption2, design: .monospaced)).foregroundStyle(Self.dim)
-                        Spacer()
-                        if let word = model.convergence {
-                            Text(word).font(.system(.caption2, design: .monospaced))
-                                .foregroundStyle(model.convergenceAmber ? .orange : Self.dim)
-                                .fixedSize()
+                    // Side by side when both fit on one line, else stacked: at AX5 a fixed-width
+                    // convergence word left the stop line one letter wide.
+                    ViewThatFits(in: .horizontal) {
+                        HStack {
+                            stopLine
+                            Spacer()
+                            convergenceWord
+                        }
+                        VStack(alignment: .leading, spacing: 2) {
+                            stopLine
+                            convergenceWord
                         }
                     }
                 }
             }
+            // A lost link dims the strip like the list below it: what it shows is as of then.
+            // The content only — dimming the glass too let a light background through, turning
+            // it grey and the strip's greys invisible on it.
+            .opacity(frozenAt == nil ? 1 : 0.5)
             .padding(.horizontal, 10).padding(.vertical, 8)
             .background(RoundedRectangle(cornerRadius: 12).fill(Color(red: 0.05, green: 0.07, blue: 0.09)))
             .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color(white: 0.2), lineWidth: 1))
             .padding(.horizontal, 12)
-            // A lost link dims the strip like the list below it: what it shows is as of then.
-            .opacity(frozenAt == nil ? 1 : 0.5)
+        }
+    }
+
+    private var stopLine: some View {
+        Text(model.stopText).font(.system(.caption2, design: .monospaced)).foregroundStyle(Self.dim)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    @ViewBuilder private var convergenceWord: some View {
+        if let word = model.convergence {
+            Text(word).font(.system(.caption2, design: .monospaced))
+                .foregroundStyle(model.convergenceAmber ? .orange : Self.dim)
+                .fixedSize()
         }
     }
 
