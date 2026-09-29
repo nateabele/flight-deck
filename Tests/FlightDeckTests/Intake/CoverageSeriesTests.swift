@@ -116,4 +116,68 @@ final class CoverageSeriesTests: XCTestCase {
         XCTAssertEqual(r2.familyB, r2.familyA, "a families list missing the second entry reads as same-family")
         XCTAssertEqual(r2.band, .sameFamily)
     }
+
+    // MARK: - Targets and verdict (coverage spec §7)
+
+    func testTargetsPerPreset() {
+        XCTAssertEqual(CoverageTarget(.bead), .none)
+        XCTAssertEqual(CoverageTarget(.sketch), .none)
+        XCTAssertEqual(CoverageTarget(.featurePlan), .fewLeftOrBetter)
+        XCTAssertEqual(CoverageTarget(.fullPlan), .saturatedIndependent)
+        XCTAssertNil(CoverageTarget.none.met(by: reading(a: 16, b: 14, shared: 4)))
+        XCTAssertEqual(CoverageTarget.fewLeftOrBetter.met(by: reading(a: 6, b: 6, shared: 6)), true)
+        XCTAssertEqual(CoverageTarget.saturatedIndependent.met(by: reading(a: 6, b: 6, shared: 6)), false)
+        XCTAssertEqual(CoverageTarget.saturatedIndependent.met(by: reading(a: 0, b: 1, shared: 10)), false, "correlated")
+    }
+
+    func testStalledWhenConvergedButShort() {
+        let v = CoverageSeries.verdict(readings: [reading(a: 16, b: 14, shared: 4)], preset: .featurePlan,
+                                       convergence: .converging(settled: true), refineRoundsRemaining: 0, failedCrossCheckRound: nil)
+        XCTAssertEqual(v.state, .stalled)
+        XCTAssertEqual(v.targetMet, false)
+        XCTAssertTrue(v.suggestedAction.hasPrefix("Stalled: converged, but coverage is short of the Feature plan target."))
+        let plateau = CoverageSeries.verdict(readings: [reading(a: 16, b: 14, shared: 4)], preset: .featurePlan,
+                                             convergence: .plateau, refineRoundsRemaining: 0, failedCrossCheckRound: nil)
+        XCTAssertEqual(plateau.state, .stalled)
+    }
+
+    func testNotStalledWhileStillConverging() {
+        let v = CoverageSeries.verdict(readings: [reading(a: 16, b: 14, shared: 4)], preset: .featurePlan,
+                                       convergence: .converging(settled: false), refineRoundsRemaining: 2, failedCrossCheckRound: nil)
+        XCTAssertEqual(v.state, .reading(.manyLeft))
+        XCTAssertTrue(v.suggestedAction.hasPrefix("Coverage is short. Codex and Claude are finding different issues"))
+    }
+
+    func testSaturatedEarlySuggestsTrimming() {
+        let v = CoverageSeries.verdict(readings: [reading(a: 5, b: 3, shared: 15)], preset: .fullPlan,
+                                       convergence: .tooEarly, refineRoundsRemaining: 4, failedCrossCheckRound: nil)
+        XCTAssertEqual(v.suggestedAction,
+                       "Saturated at Refine 1. Consider removing the remaining 4 Refine rounds (Run ▸ Remove a Round, ⌘-).")
+    }
+
+    func testSketchIsShownNeverJudged() {
+        let v = CoverageSeries.verdict(readings: [reading(a: 16, b: 14, shared: 4)], preset: .sketch,
+                                       convergence: .plateau, refineRoundsRemaining: 0, failedCrossCheckRound: nil)
+        XCTAssertEqual(v.state, .reading(.manyLeft))
+        XCTAssertNil(v.targetMet)
+    }
+
+    func testAwaitingAndFailedCrossCheck() {
+        let none = CoverageSeries.verdict(readings: [], preset: .featurePlan, convergence: nil, refineRoundsRemaining: 3,
+                                          failedCrossCheckRound: nil)
+        XCTAssertEqual(none.state, .awaiting)
+        XCTAssertEqual(none.suggestedAction, "")
+        let failed = CoverageSeries.verdict(readings: [], preset: .featurePlan, convergence: nil, refineRoundsRemaining: 2,
+                                            failedCrossCheckRound: 1)
+        XCTAssertEqual(failed.suggestedAction, "The cross-check agent failed at Refine 1, so coverage is unmeasured there.")
+    }
+
+    func testCorrelatedAndSameFamilyWording() {
+        let corr = CoverageSeries.verdict(readings: [reading(a: 0, b: 1, shared: 10)], preset: .sketch, convergence: nil,
+                                          refineRoundsRemaining: 0, failedCrossCheckRound: nil)
+        XCTAssertTrue(corr.suggestedAction.hasPrefix("Codex and Claude found nearly the same issues."))
+        let same = CoverageSeries.verdict(readings: [reading(a: 5, b: 3, shared: 15, families: [.claude, .claude])], preset: .fullPlan,
+                                          convergence: nil, refineRoundsRemaining: 0, failedCrossCheckRound: nil)
+        XCTAssertEqual(same.suggestedAction, "Both reviews at Refine 1 ran as Claude, so coverage is unmeasured there.")
+    }
 }

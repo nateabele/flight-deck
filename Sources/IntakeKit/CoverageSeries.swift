@@ -151,3 +151,132 @@ public enum CoverageSeries {
         return out
     }
 }
+
+/// Each fidelity's cross-check target (spec §7): what "enough coverage" means for that preset,
+/// and how to tell a reading against it. A customized config keeps its preset's target — the
+/// target tracks what was chosen at intake, not the drafter/reviewer counts a human tuned after.
+public enum CoverageTarget: Equatable, Sendable {
+    case none
+    case fewLeftOrBetter
+    case saturatedIndependent
+
+    public init(_ preset: Preset) {
+        switch preset {
+        case .bead, .sketch: self = .none
+        case .featurePlan: self = .fewLeftOrBetter
+        case .fullPlan: self = .saturatedIndependent
+        }
+    }
+
+    public var label: String? {
+        switch self {
+        case .none: nil
+        case .fewLeftOrBetter: "FEW LEFT or better"
+        case .saturatedIndependent: "SATURATED, independent"
+        }
+    }
+
+    /// nil when there's nothing to judge: no target (`.none`), or a reading that can't speak to
+    /// coverage at all (same family, unmeasured).
+    public func met(by reading: CoverageReading) -> Bool? {
+        guard self != .none, reading.band != .sameFamily, reading.band != .unmeasured else { return nil }
+        switch self {
+        case .none:
+            return nil
+        case .fewLeftOrBetter:
+            return reading.band == .saturated || reading.band == .fewLeft
+        case .saturatedIndependent:
+            return reading.band == .saturated && !reading.correlated
+        }
+    }
+}
+
+public enum CoverageState: Equatable, Sendable {
+    /// No cross-check reading yet: no Refine round has run, or none of them cross-checked.
+    case awaiting
+    case reading(CoverageBand)
+    /// Converged (or plateaued) short of the target, with no round left that would re-measure it.
+    case stalled
+}
+
+public struct CoverageVerdict: Equatable, Sendable {
+    public var state: CoverageState
+    public var latest: CoverageReading?
+    public var target: CoverageTarget
+    public var targetMet: Bool?
+    public var suggestedAction: String
+    public var failedCrossCheckRound: Int?
+
+    public init(state: CoverageState, latest: CoverageReading?, target: CoverageTarget, targetMet: Bool?,
+                suggestedAction: String, failedCrossCheckRound: Int?) {
+        self.state = state
+        self.latest = latest
+        self.target = target
+        self.targetMet = targetMet
+        self.suggestedAction = suggestedAction
+        self.failedCrossCheckRound = failedCrossCheckRound
+    }
+}
+
+extension CoverageSeries {
+    /// "<Preset>" spelled for the suggestion strings. IntakeKit can't see `UIText.presetName`
+    /// (it lives in the app target) — this mirrors its copy; keep the two in sync by hand.
+    private static func name(_ preset: Preset) -> String {
+        switch preset {
+        case .bead: "Single task"
+        case .sketch: "Sketch"
+        case .featurePlan: "Feature plan"
+        case .fullPlan: "Full plan"
+        }
+    }
+
+    /// The stopping signal (spec §7): is coverage enough for this fidelity, and if not, what to
+    /// do about it. `readings` is oldest first, `refineRoundsRemaining` counts the rounds the
+    /// planner would still run — both drive the "already saturated, stop early" suggestion.
+    public static func verdict(readings: [CoverageReading], preset: Preset, convergence: ConvergenceVerdict?,
+                               refineRoundsRemaining: Int, failedCrossCheckRound: Int?) -> CoverageVerdict {
+        let target = CoverageTarget(preset)
+        let latest = readings.last
+        let targetMet = latest.flatMap(target.met)
+        let stalled: Bool
+        switch convergence {
+        case .converging(settled: true), .plateau: stalled = targetMet == false
+        default: stalled = false
+        }
+        let state: CoverageState = latest == nil ? .awaiting : (stalled ? .stalled : .reading(latest!.band))
+        let action = suggestedAction(latest: latest, preset: preset, target: target, targetMet: targetMet,
+                                     stalled: stalled, refineRoundsRemaining: refineRoundsRemaining,
+                                     failedCrossCheckRound: failedCrossCheckRound)
+        return CoverageVerdict(state: state, latest: latest, target: target, targetMet: targetMet,
+                               suggestedAction: action, failedCrossCheckRound: failedCrossCheckRound)
+    }
+
+    /// Table order from spec §7 — the first row whose condition holds wins.
+    private static func suggestedAction(latest: CoverageReading?, preset: Preset, target: CoverageTarget,
+                                        targetMet: Bool?, stalled: Bool, refineRoundsRemaining: Int,
+                                        failedCrossCheckRound: Int?) -> String {
+        if stalled {
+            return "Stalled: converged, but coverage is short of the \(name(preset)) target. One more Refine round "
+                + "will cross-check again; if it stays short, the plan may need a third model family."
+        }
+        if let latest, latest.round == 1, targetMet == true, refineRoundsRemaining >= 2 {
+            return "Saturated at Refine 1. Consider removing the remaining \(refineRoundsRemaining) Refine rounds "
+                + "(Run ▸ Remove a Round, ⌘-)."
+        }
+        if let latest, latest.band == .noOverlap || latest.band == .manyLeft {
+            return "Coverage is short. \(latest.familyA.displayName) and \(latest.familyB.displayName) are finding "
+                + "different issues; another round, or a higher fidelity, would search more."
+        }
+        if let latest, latest.correlated {
+            return "\(latest.familyA.displayName) and \(latest.familyB.displayName) found nearly the same issues. "
+                + "The estimate may be low; similar models share blind spots."
+        }
+        if let latest, latest.band == .sameFamily {
+            return "Both reviews at Refine \(latest.round) ran as \(latest.familyA.displayName), so coverage is unmeasured there."
+        }
+        if let failedCrossCheckRound, failedCrossCheckRound > (latest?.round ?? 0) {
+            return "The cross-check agent failed at Refine \(failedCrossCheckRound), so coverage is unmeasured there."
+        }
+        return ""
+    }
+}
