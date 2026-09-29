@@ -36,4 +36,16 @@ final class AgentRowStyleTests: XCTestCase {
         XCTAssertFalse(AgentRowStyle.isAmber(.quiet(34)))
         XCTAssertTrue(AgentRowStyle.isAmber(.stalled(95, last: nil)))
     }
+
+    func testAClockOnlyWhenThereIsOneToShow() {
+        XCTAssertEqual(AgentRowStyle.elapsed(agent(), now: t0.addingTimeInterval(30)), 30)
+        var done = agent(glyph: "done")
+        XCTAssertNil(AgentRowStyle.elapsed(done, now: t0.addingTimeInterval(500)),
+                     "finished with no reported duration: no clock, never one that keeps counting")
+        done.duration = 42
+        XCTAssertEqual(AgentRowStyle.elapsed(done, now: t0.addingTimeInterval(500)), 42)
+        var queued = agent(glyph: "queued")
+        queued.startedAt = nil
+        XCTAssertNil(AgentRowStyle.elapsed(queued, now: t0.addingTimeInterval(500)), "not started: no invented 0:00")
+    }
 }

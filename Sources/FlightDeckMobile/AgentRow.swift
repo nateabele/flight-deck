@@ -26,8 +26,9 @@ struct AgentRow: View {
                 }
             }
             Spacer(minLength: 0)
-            Text(ClockPolicy.text(AgentRowStyle.elapsed(agent, now: now)))
-                .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+            if let elapsed = AgentRowStyle.elapsed(agent, now: now) {
+                Text(ClockPolicy.text(elapsed)).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+            }
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(AgentRowStyle.accessibilityLabel(agent, now: now))

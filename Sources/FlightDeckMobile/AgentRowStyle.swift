@@ -43,9 +43,12 @@ enum AgentRowStyle {
         }
     }
 
-    static func elapsed(_ a: WireAgent, now: Date) -> TimeInterval {
+    /// The row's clock, or nil when there is no honest one: a finished agent whose harness
+    /// reported no duration would otherwise count up from its start forever, and a queued one
+    /// has not started, so any number would be invented.
+    static func elapsed(_ a: WireAgent, now: Date) -> TimeInterval? {
         if let d = a.duration { return d }
-        guard let started = a.startedAt else { return 0 }
+        guard !finished(a), let started = a.startedAt else { return nil }
         return max(0, now.timeIntervalSince(started))
     }
 
