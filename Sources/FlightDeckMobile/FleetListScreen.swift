@@ -147,6 +147,18 @@ struct FleetListScreen: View {
                     onAbortBlocked: { await model.abortBlockedPrompt(session: $0) }
                 )
             }
+            .navigationDestination(for: IntakeRoute.self) { route in
+                switch route {
+                case .intake(let id):
+                    IntakeScreen(id: id, model: model.flightControl.detailModel(for: id), fleet: model)
+                case .round(let intake, let checkpoint):
+                    RoundDetailScreen(intake: intake, checkpoint: checkpoint, model: model.flightControl.detailModel(for: intake))
+                case .clarifications(let id):
+                    ClarificationsScreen(model: model.flightControl.detailModel(for: id))
+                case .plan, .reader:
+                    EmptyView()   // Task 11
+                }
+            }
             // Inline, not the default large title. A large title costs roughly 52pt of height
             // to render one unchanging word on the one screen in this app that has nothing but
             // a list to show.
