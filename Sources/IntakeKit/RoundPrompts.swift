@@ -47,12 +47,18 @@ public struct IntegrateOutput: Codable, Sendable {
     public var disagree: Int
     public var notes: String
     public var verdicts: [ChangeVerdict]?
-    public init(agree: Int, somewhat: Int, disagree: Int, notes: String, verdicts: [ChangeVerdict]? = nil) {
+    /// The integrator's issue groups on a cross-check round; nil off a normal round, or from an
+    /// integrator (or stored output) that predates cross-check. Read through
+    /// `clusters(forChanges:)`, never directly — this is the raw, uncleaned reply.
+    public var clusters: [[Int]]?
+    public init(agree: Int, somewhat: Int, disagree: Int, notes: String, verdicts: [ChangeVerdict]? = nil,
+                clusters: [[Int]]? = nil) {
         self.agree = agree
         self.somewhat = somewhat
         self.disagree = disagree
         self.notes = notes
         self.verdicts = verdicts
+        self.clusters = clusters
     }
 
     /// The verdict list cleaned against a round of `count` changes: indices outside it are
@@ -64,6 +70,9 @@ public struct IntegrateOutput: Codable, Sendable {
         return verdicts.filter { (0..<count).contains($0.index) && seen.insert($0.index).inserted }
             .sorted { $0.index < $1.index }
     }
+
+    /// The integrator's issue groups for a cross-check round of `count` changes, cleaned.
+    public func clusters(forChanges count: Int) -> [[Int]]? { IssueClusters.clean(clusters, count: count) }
 
     /// The round's totals: counted from the cleaned verdict list when there is one, else the
     /// integrator's own counts. The list wins because the two can disagree and only the list
@@ -136,6 +145,17 @@ public enum RoundSchemas {
      "properties":{"agree":{"type":"integer"},"somewhat":{"type":"integer"},
                    "disagree":{"type":"integer"},"notes":{"type":"string"},
                    "verdicts":{"type":"array","items":\(changeVerdict)}}}
+    """
+
+    /// A cross-check round's integrate: today's shape plus the issue groups (coverage spec §4.2).
+    /// A separate schema so an ordinary round's reply is exactly what it was.
+    public static let integrateClustered = """
+    {"type":"object","additionalProperties":false,
+     "required":["agree","somewhat","disagree","notes","verdicts","clusters"],
+     "properties":{"agree":{"type":"integer"},"somewhat":{"type":"integer"},
+                   "disagree":{"type":"integer"},"notes":{"type":"string"},
+                   "verdicts":{"type":"array","items":\(changeVerdict)},
+                   "clusters":{"type":"array","items":{"type":"array","items":{"type":"integer"}}}}}
     """
 
     /// Embeds `Triage.changeSetSchemaFragment` exactly, rather than a hand-copied twin that
@@ -448,9 +468,25 @@ public enum RoundPrompts {
 
     /// `humanEdits` is the head's capped edit diff, the same one the proposing seat saw: the
     /// integrator is the seat that actually rewrites the plan, so it is the one that has to
-    /// know which lines were the human's.
-    public static func integrate(planFile: String, changesFile: String, humanEdits: String? = nil) -> String {
-        """
+    /// know which lines were the human's. `clustered` is true only on a cross-check round,
+    /// where the changes file interleaves two reviewers' blind proposals (`BlindOrder`) and may
+    /// contain the same issue twice — the non-clustered text below is byte-identical to before
+    /// `clustered` existed, since a normal round's integrator sees no sign a cross-check is
+    /// even possible.
+    public static func integrate(planFile: String, changesFile: String, humanEdits: String? = nil,
+                                  clustered: Bool = false) -> String {
+        let clusterBlock = clustered ? """
+
+
+        Some proposals may be the same issue raised twice. Group every set of proposals that \
+        address the same underlying issue in `clusters` (lists of 0-based indices; a proposal \
+        in no group stands alone). Apply each issue at most once. Give every proposal a \
+        verdict: a duplicate of an issue you applied gets that issue's verdict.
+        """ : ""
+        let example = clustered
+            ? #"`{"agree": N, "somewhat": N, "disagree": N, "notes": "...", "verdicts": [{"index": 0, "verdict": "agree"}, ...], "clusters": [[0, 3], ...]}`"#
+            : #"`{"agree": N, "somewhat": N, "disagree": N, "notes": "...", "verdicts": [{"index": 0, "verdict": "agree"}, ...]}`"#
+        return """
         Integrate these revisions into `\(planFile)` in place; be meticulous; edit only \
         that file. The proposed changes are in \(changesFile). For any text you add or \
         rewrite: \(planTextRule)\(humanEditsBlock(humanEdits))
@@ -460,10 +496,9 @@ public enum RoundPrompts {
         disagreed-with change is NOT applied). Report your verdict on every change in \
         `verdicts`, one entry per change, where `index` is the change's 0-based position in \
         \(changesFile). Also report the counts, which must match those verdicts, and a \
-        one-line `notes` on what you did and why anything was left out.
+        one-line `notes` on what you did and why anything was left out.\(clusterBlock)
 
-        Return only JSON matching the provided schema: `{"agree": N, "somewhat": N, \
-        "disagree": N, "notes": "...", "verdicts": [{"index": 0, "verdict": "agree"}, ...]}`.
+        Return only JSON matching the provided schema: \(example).
         """
     }
 

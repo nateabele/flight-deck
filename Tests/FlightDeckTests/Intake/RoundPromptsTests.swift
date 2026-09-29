@@ -36,6 +36,14 @@ final class RoundPromptsTests: XCTestCase {
     func testReviewSchemaIsStrict() throws { assertStrict(try parse(RoundSchemas.review)) }
     func testIntegrateSchemaIsStrict() throws { assertStrict(try parse(RoundSchemas.integrate)) }
 
+    func testIntegrateClusteredSchemaIsStrictAndRequiresClusters() throws {
+        let schema = try parse(RoundSchemas.integrateClustered)
+        assertStrict(schema)
+        let outer = try XCTUnwrap(schema as? [String: Any])
+        XCTAssertTrue((outer["required"] as? [String])?.contains("clusters") ?? false)
+        XCTAssertFalse(RoundSchemas.integrate.contains("clusters"), "a normal round keeps today's exact shape")
+    }
+
     /// Convergence needs to know WHICH proposals the integrator took, not just how many: a
     /// re-proposed change it had rejected is the oscillation red flag. So the schema asks for a
     /// verdict per change, each one of the three words the counts already use.
@@ -241,6 +249,20 @@ final class RoundPromptsTests: XCTestCase {
         XCTAssertTrue(p.contains("`verdicts`"), p)
         XCTAssertTrue(p.contains("0-based"), p)
         XCTAssertTrue(p.contains(#""verdicts": [{"index": 0, "verdict": "agree"}"#), p)
+    }
+
+    func testClusteredIntegratePromptAsksForClustersOnlyWhenClustered() {
+        let plain = RoundPrompts.integrate(planFile: "/i/plan.md", changesFile: "/i/changes.json")
+        let clustered = RoundPrompts.integrate(planFile: "/i/plan.md", changesFile: "/i/changes.json", clustered: true)
+        XCTAssertFalse(plain.contains("clusters"))
+        XCTAssertTrue(clustered.contains("same underlying issue"))
+        XCTAssertTrue(clustered.contains("Apply each issue at most once"))
+        XCTAssertTrue(clustered.contains(#""clusters": [[0, 3]"#))
+    }
+
+    func testIntegrateOutputWithoutClustersDecodes() throws {
+        let old = #"{"agree":1,"somewhat":0,"disagree":0,"notes":"n","verdicts":[{"index":0,"verdict":"agree"}]}"#
+        XCTAssertNil(try IntakeJSON.decoder.decode(IntegrateOutput.self, from: Data(old.utf8)).clusters)
     }
 
     // MARK: - Encode
