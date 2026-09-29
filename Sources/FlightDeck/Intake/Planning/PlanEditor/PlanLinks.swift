@@ -7,8 +7,10 @@ enum PlanLinkTarget: Equatable {
     case web(URL)
     /// An existing file the default app for its type opens.
     case file(URL)
-    /// Shown selected in Finder instead of opened: a directory, or a file that opening would
-    /// RUN (`PlanLinks.runs`).
+    /// Source or a script: opened in the default text editor, never its own handler.
+    case edit(URL)
+    /// Shown selected in Finder instead of opened: a directory, an app or bundle, or a file that
+    /// can't be read as text and that opening would RUN (`PlanLinks.kind`).
     case reveal(URL)
     /// A file target that isn't there (or a relative one with no project to resolve it against).
     case missing(String)
@@ -64,8 +66,40 @@ enum PlanLinks {
         switch probe(path) {
         case nil: return .missing(path)
         case .directory: return .reveal(url)
-        case .file(let executable): return executable || runs(url) ? .reveal(url) : .file(url)
+        case .file(let executable):
+            switch kind(of: url, executable: executable) {
+            case .open: return .file(url)
+            case .edit: return .edit(url)
+            case .reveal: return .reveal(url)
+            }
         }
+    }
+
+    /// What ⌘-click does with an existing file: its default app, the default text editor, or
+    /// Finder.
+    enum FileKind: Equatable { case open, edit, reveal }
+
+    /// A plan is agent-written text, so its links are untrusted — and a file's OWN handler may
+    /// run it: `.py` opens in Python Launcher, `.command`/`.sh` in Terminal. So:
+    /// - anything readable as text (source, scripts, config) opens in the default text EDITOR,
+    ///   never its own handler — plan links mostly point at code, which is what the human wants
+    ///   to read, so revealing those would defeat the feature;
+    /// - what can't be read and would run (apps, installers, disk images, Terminal/Automator/
+    ///   compiled AppleScript documents, location files, binaries) is revealed in Finder;
+    /// - everything else — Markdown, PDFs, images, HTML — opens with its default app, which
+    ///   shows it rather than running it.
+    static func kind(of url: URL, executable: Bool) -> FileKind {
+        let ext = url.pathExtension.lowercased()
+        if revealExtensions.contains(ext) { return .reveal }
+        if documentExtensions.contains(ext) { return .open }
+        let type = ext.isEmpty ? nil : UTType(filenameExtension: ext)
+        if editExtensions.contains(ext) || type.map({ t in [UTType.script, .sourceCode, .text].contains { t.conforms(to: $0) } }) == true {
+            return .edit
+        }
+        if executable || type.map({ t in [UTType.application, .applicationBundle, .package, .executable, .unixExecutable].contains { t.conforms(to: $0) } }) == true {
+            return .reveal
+        }
+        return .open
     }
 
     /// A URL scheme, lowercased — only where the text really is a URL. `README.md:42` and
@@ -96,26 +130,22 @@ enum PlanLinks {
         return path
     }
 
-    /// Whether opening the file with its default app would RUN it rather than show it: an app
-    /// or bundle, a script (a `.command` or `.sh` opens in Terminal and runs; a `.py` can open
-    /// in Python Launcher, which runs it), an installer, or a location file that forwards to
-    /// something else. A plan is text an agent wrote, so its link is untrusted: ⌘-click on
-    /// `[notes](./scripts/wipe.command)` must not be how a plan executes code on the human's
-    /// Mac. These are revealed in Finder instead — the human can still open them, on purpose.
-    static func runs(_ url: URL) -> Bool {
-        let ext = url.pathExtension.lowercased()
-        if runnableExtensions.contains(ext) { return true }
-        guard !ext.isEmpty, let type = UTType(filenameExtension: ext) else { return false }
-        return [UTType.executable, .script, .application, .applicationBundle, .package, .unixExecutable]
-            .contains { type.conforms(to: $0) }
-    }
+    /// Revealed whatever their declared type says: they run (or forward to something that
+    /// does) and aren't text to read. Some have no declared type on a given Mac, and a missing
+    /// declaration must not make them openable.
+    static let revealExtensions: Set<String> = [
+        "app", "pkg", "mpkg", "dmg", "terminal", "workflow", "action", "scpt", "scptd", "prefpane", "saver", "osax",
+        "kext", "plugin", "bundle", "exe", "jar", "webloc", "inetloc", "fileloc", "url", "shortcut",
+    ]
 
-    /// Extensions `runs` treats as runnable whatever their declared type says — some have no
-    /// declared type on a given Mac, and a missing declaration must not make them openable.
-    static let runnableExtensions: Set<String> = [
-        "app", "command", "tool", "sh", "bash", "zsh", "csh", "ksh", "tcsh", "fish", "py", "pyw", "rb", "pl", "php",
-        "scpt", "scptd", "applescript", "workflow", "action", "terminal", "jar", "pkg", "mpkg", "exe", "bat",
-        "webloc", "inetloc", "fileloc", "url", "prefpane", "saver", "shortcut", "osax", "kext", "plugin", "bundle",
+    /// Text with a viewer of its own that shows rather than runs it — opened with its default app.
+    static let documentExtensions: Set<String> = ["md", "markdown", "mdown", "html", "htm", "rtf", "csv"]
+
+    /// Edited whatever their declared type says, for the Mac that declares none for them.
+    static let editExtensions: Set<String> = [
+        "py", "pyw", "js", "mjs", "cjs", "jsx", "ts", "tsx", "sh", "bash", "zsh", "fish", "csh", "ksh", "tcsh", "command",
+        "tool", "rb", "pl", "php", "lua", "swift", "go", "rs", "c", "h", "cc", "cpp", "hpp", "m", "mm", "kt", "java",
+        "cs", "sql", "json", "yaml", "yml", "toml", "ini", "cfg", "conf", "xml", "plist", "txt", "log", "applescript",
     ]
 
     /// The real file system: what is at `path`, and whether a file there is executable.
@@ -130,7 +160,7 @@ enum PlanLinks {
         func short(_ path: String) -> String { (path as NSString).abbreviatingWithTildeInPath }
         switch target {
         case .web(let url): return url.absoluteString
-        case .file(let url): return short(url.path)
+        case .file(let url), .edit(let url): return short(url.path)
         case .reveal(let url): return short(url.path) + " — shows in Finder"
         case .missing(let path): return "Not found: " + short(path)
         case .unsupported: return "This link can't be opened"
@@ -142,15 +172,28 @@ enum PlanLinks {
 /// editor or Finder.
 struct PlanLinkOpener {
     var open: (URL) -> Void = { NSWorkspace.shared.open($0) }
+    /// Opens in the default text editor — never the file's own handler (`PlanLinks.kind`).
+    var edit: (URL) -> Void = { url in
+        NSWorkspace.shared.open([url], withApplicationAt: PlanLinkOpener.editor(), configuration: NSWorkspace.OpenConfiguration())
+    }
     var reveal: (URL) -> Void = { NSWorkspace.shared.activateFileViewerSelecting([$0]) }
     var beep: () -> Void = { NSSound.beep() }
     var probe: (String) -> PlanLinks.Entry? = PlanLinks.diskProbe
+
+    /// The app the human edits source in: the default for source code, else for plain text,
+    /// else TextEdit.
+    static func editor() -> URL {
+        NSWorkspace.shared.urlForApplication(toOpen: .sourceCode)
+            ?? NSWorkspace.shared.urlForApplication(toOpen: .plainText)
+            ?? URL(fileURLWithPath: "/System/Applications/TextEdit.app")
+    }
 
     /// Returns what it did, so the editor can show the missing-file notice.
     @discardableResult
     func perform(_ target: PlanLinkTarget) -> PlanLinkTarget {
         switch target {
         case .web(let url), .file(let url): open(url)
+        case .edit(let url): edit(url)
         case .reveal(let url): reveal(url)
         case .missing: beep()
         case .unsupported: break
