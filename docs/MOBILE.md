@@ -596,9 +596,10 @@ page.
     of five keys under the tape — Pause, Step, Major, Review, Stop — with only Pause and Stop
     lit, and the strip is its usual few lines tall. Tap Pause: the key reads "Pausing…" at
     once, and within about two seconds the Mac's control bar shows paused and the phone's
-    strip reads "· PAUSED". Wrong: no change on the tap, a second tap that queues a second
-    pause, or a strip that swells to fill half the screen around its keys (the offscreen
-    render of this branch drew exactly that).
+    strip reads "· PAUSED". Until then the Pause key is off (a second tap does nothing) but its
+    "Pausing…" reads at full strength, and Stop stays lit. Wrong: no change on the tap, a
+    second tap that queues a second pause, or a strip that swells to fill half the screen
+    around its keys.
 81. **Stop a run from the phone, and change your mind first.** Tap Stop: a dialog titled "Stop
     the run?" names the round in its message, with **Stop Run** in red and Cancel. Cancel: the
     run carries on and nothing reaches the Mac (its log shows no `intake.tape`). Tap Stop
@@ -607,11 +608,10 @@ page.
 82. **Tap versus long-press on a play key.** Paused, tap Step: one round runs. Long-press Major
     for a second: a haptic tick, the small dot above the keys moves to Major, and the Mac's
     control bar moves its default dot too — and NO round starts. Then hold **Pause** (while
-    running) and **Stop** each for a full second and let go: note whether the key still acts.
-    A long-press on those two sets nothing, and the current code attaches the long-press to
-    every lit key, so a held Pause may do nothing at all. Wrong: a long-press that also plays,
-    a tap that moves the dot, or a held Pause/Stop that silently does nothing (report it —
-    the fix is to attach the long-press to the play keys only).
+    running) and **Stop** each for a full second and let go: the long-press belongs to the play
+    keys only, so a firm press on either still acts — Pause reads "Pausing…", Stop opens its
+    dialog. Wrong: a long-press that also plays, a tap that moves the dot, or a held Pause/Stop
+    that does nothing.
 83. **Add and remove a Refine round.** The Rounds header reads "Rounds · Refine ×N" with − and
     +. Tap +: the count reads N+1 on the phone and the Mac's plan shows the extra round. Tap −:
     back to N. Neither asks first. Wrong: a count that changes on one end only, or a + still
@@ -641,12 +641,15 @@ page.
     question asked.
 89. **Leave the reader with a note the runner has not read yet, and come back.** While a round
     is running (so the runner will not fold your note until the round ends), add a note and
-    wait for "Not yet sent" to clear. Go back to the intake, then open the plan again. Wrong:
-    the note is nowhere until a round later — the outbox that keeps it on screen belongs to
-    the reader, so today it may vanish on re-entry; record what you see.
+    wait for "Not yet sent" to clear. Go back to the intake, then open the plan again. The
+    outbox that keeps an acked-but-queued note on screen belongs to the reader, so on re-entry
+    the note may be absent from the phone until the runner folds it at the round's end; then it
+    appears as a pending note. On the Mac it is in the notes rail throughout. Wrong: it never
+    reappears on the Mac.
 90. **Pull the network mid-send.** Type a note, turn on Airplane Mode, tap Add. The card stays
-    with its words; within about ten seconds "Couldn't reach your Mac." appears and the card
-    offers Retry and Discard. Turn the network back on and Retry: exactly one note reaches the
+    with its words; within about ten seconds "Couldn't reach your Mac." appears (or, if the
+    link dropped with the note already written, "Lost the connection — your Mac may not have
+    got this.") and the card offers Retry and Discard. Turn the network back on and Retry: exactly one note reaches the
     Mac. Discard instead asks "Discard this note?" first. Wrong: the words lost, two notes on
     the Mac after one Retry, or a Discard with no question.
 91. **Tap a key while disconnected.** With Airplane Mode on, the keys and ± are dimmed and do

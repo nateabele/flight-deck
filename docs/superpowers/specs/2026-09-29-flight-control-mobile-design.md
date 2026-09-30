@@ -601,7 +601,16 @@ Where the build and this spec differ, the build is right and these are the corre
    after its command passes validation (a refused command leaves its token usable). In memory
    only (a Mac app restart forgets them).
 5. **Phone retries.** The phone keeps a timed-out action's token and reuses it on the next send
-   of the same action (cleared on ack or a definite err), so the Mac deduplicates a retry.
+   of the same action, so the Mac deduplicates a retry. A kept token lives at most 60 s (past
+   that a send is a new press) and is cleared by an ack or a definite err, including one that
+   arrives after the deadline — a late ack must not leave a token that turns a deliberate press
+   hours later into a duplicate the Mac acks without acting. A `.disconnected` after the write
+   (the socket dropped with the command in flight, which may have landed) also keeps the token
+   and says "Lost the connection — your Mac may not have got this."; a `.disconnected` before
+   anything was written (no socket) keeps "Not connected to your Mac, so this wasn't sent." and
+   leaves any earlier kept token as it was. **Mac backstop:** a note whose `noteID` is already
+   pending (on the tape or queued in `commands.jsonl`) is acked without being queued again, so
+   a retry under a lost token cannot add the same note twice.
 6. **Queued notes count as pending.** `removeNote` accepts notes still in `commands.jsonl` (not
    yet acked by the runner), not only `tape.pendingNotes`.
 7. **Anchoring a phone note.** The phone sends the checkpoint it is reading, the `PlanBlocks`
@@ -616,8 +625,10 @@ Where the build and this spec differ, the build is right and these are the corre
    equals the labelled stage (a − never trims a different stage than the label names).
 9. **Glyphs.** The phone's transport keys use the Mac control bar's glyphs (pause.fill,
    forward.end.fill, forward.end.alt.fill, forward.fill + small diamond.fill, stop.fill).
-10. **Keys.** Tap = command; long-press on a play key = make default (haptic); VoiceOver gets the
-    key as a button plus a "Make default" action. Stop always opens "Stop the run?" (destructive
+10. **Keys.** Tap = command; long-press on a play key = make default (haptic); VoiceOver gets a
+    play key as a button plus a "Make default" action. Pause and Stop carry no long-press (it
+    swallowed a firm press), and Pause is off while the Mac is already pausing (Stop stays live).
+    An acknowledgement ("Pausing…", "Stopping…") is drawn at full strength on its off key. Stop always opens "Stop the run?" (destructive
     Stop Run, Cancel). Keys and ± are disabled while disconnected.
 11. **Annotation on the phone.** "Note…" in the text-selection edit menu (the edit menu takes a
     list of `ProseAction`s; the timeline keeps its single Reply). A per-passage menu ("Add note
