@@ -18,6 +18,10 @@ Four things trip up every agent on this repo. The detail is in
 2. **Never launch a bundle from `DerivedData/`.** Flight Deck has no argv parsing — even
    `--help` boots a *second full app instance*, spawning duplicate `claude --resume` processes
    that collide in Claude's pid-keyed name registry. Run only `/Applications/Flight Deck.app`.
+   The duplicates **outlive the Debug app** — its daemons are detached — so a single stray
+   launch leaves a second agent per session running until you reap it
+   ([AGENT-OPERATIONS.md](docs/AGENT-OPERATIONS.md), "Quitting the Debug app does not undo a
+   collision").
 3. **Never `defaults delete dev.flightdeck.FlightDeck`.** Preferences live there. Sessions live
    in `~/Library/Application Support/Flight Deck/sessions.json`. Test isolation is the
    `-FlightDeckResetState YES` launch argument, not deletion.

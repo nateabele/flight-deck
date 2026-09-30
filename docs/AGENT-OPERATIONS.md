@@ -130,6 +130,40 @@ open -n "DerivedData/Build/Products/Debug/Flight Deck.app" \
 Note `-FlightDeckStateDir` redirects `sessions.json` only. Preferences still resolve to the
 shared `UserDefaults` domain, so a debug run can still change a real preference.
 
+**Quitting the Debug app does not undo a collision.** Its daemons are detached (children of
+launchd, not of the app), so every session it restored keeps a live fd-abduco daemon in
+`/tmp/flight-deck-debug-<uid>/` with its own shell and `claude --resume` inside, long after the
+app is gone. The symptom is "two fd-abduco processes" per session in Activity Monitor. On
+2026-09-28 one Debug launch from a worktree had left 54 such daemons and 52 duplicate agents
+running for a day. Nothing attaches to them, so they sit idle, but each one holds a second
+live process on the same transcript.
+
+Diagnose — debug daemons whose session id also has a release daemon are duplicates:
+
+```bash
+ps -axo command | rg -o 'flight-deck-debug-[0-9]+/[0-9a-f-]{36}' | wc -l
+ps -axo command | rg '^claude .*--plugin-dir .*/DerivedData/'   # agents from a dev bundle
+```
+
+Before reaping, check for any debug session with **no** release twin: it was created inside
+the Debug app and is absent from `sessions.json`, so its only handle afterwards is
+`claude --resume <id>` (its transcript is on disk and survives). Then reap with SIGTERM,
+never SIGKILL: agents first, so each closes its JSONL cleanly (a SIGKILL mid-append can tear a
+line in a file the live twin is still writing), then the daemons, so each runs its atexit
+handler and unlinks its socket and `.pid` sidecar. Write it in bash — in zsh an unquoted
+`$pids` does not word-split, so the kill silently gets one invalid argument:
+
+```bash
+bash -c 'kill -TERM $(pgrep -f "^claude .*--plugin-dir .*/DerivedData/")
+         sleep 2
+         kill -TERM $(pgrep -f "/tmp/flight-deck-debug-$(id -u)/fd-abduco -c")'
+rm /tmp/flight-deck-debug-$(id -u)/fd-abduco && rmdir /tmp/flight-deck-debug-$(id -u)
+```
+
+The release root is never touched. When
+counting survivors, don't `pgrep -f` a pattern from inside `bash -c '…'` — the wrapper's own
+argv matches and reports phantom processes.
+
 The swap script's own "never `open`s the DerivedData bundle" guarantee above is narrower and
 still correct: it runs unattended against the live deck, where there is no scratch directory in
 play and a second instance would be exactly the collision described.
