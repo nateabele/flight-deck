@@ -24,6 +24,10 @@ struct PlanReaderScreen: View {
     /// The note sheet's item. Its `id` is the note's wire id, minted here, once.
     @State private var draft: NoteDraft?
     @State private var outbox = NoteOutbox()
+    /// The note whose Delete / Discard is awaiting confirmation. The phone has no Undo (the Mac
+    /// has), so dropping the maintainer's words always asks first.
+    @State private var confirmingDelete: UUID?
+    @State private var confirmingDiscard: UUID?
 
     private var commands: IntakeCommandModel { flightControl.commands(for: intake) }
     private var detailModel: IntakeDetailModel { flightControl.detailModel(for: intake) }
@@ -218,13 +222,26 @@ struct PlanReaderScreen: View {
             if n.consumed { Text("Read by a round").font(.caption).foregroundStyle(.secondary) }
             if !n.consumed && notesAllowed {
                 let deleting = commands.inFlight.contains(.removeNote(n.id))
-                Button(role: .destructive) { remove(n.id) } label: {
+                Button(role: .destructive) { confirmingDelete = n.id } label: {
                     Text(deleting ? "Deleting…" : "Delete").font(.subheadline).frame(minHeight: 44)
                 }
                 .disabled(deleting)
             }
         }
         .opacity(n.consumed ? 0.7 : 1)
+        // On the card, not the screen: a card also lives in the notes sheet, and a dialog
+        // attached under a presented sheet never shows.
+        .confirmationDialog("Delete this note?", isPresented: confirming($confirmingDelete, n.id), titleVisibility: .visible) {
+            Button("Delete Note", role: .destructive) { remove(n.id) }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("The next round won't see it.").font(.subheadline)
+        }
+    }
+
+    /// A dialog's `isPresented` for one note out of the id awaiting confirmation.
+    private func confirming(_ state: Binding<UUID?>, _ id: UUID) -> Binding<Bool> {
+        Binding(get: { state.wrappedValue == id }, set: { if !$0 { state.wrappedValue = nil } })
     }
 
     /// A note this reader composed that the Mac has not acked. In flight it says so, plainly;
@@ -243,7 +260,7 @@ struct PlanReaderScreen: View {
                 HStack(spacing: 16) {
                     Text("Not sent").font(.caption).foregroundStyle(.secondary)
                     Button { submit(d) } label: { Text("Retry").font(.subheadline).frame(minHeight: 44) }
-                    Button(role: .destructive) { outbox.remove(d.id) } label: {
+                    Button(role: .destructive) { confirmingDiscard = d.id } label: {
                         Text("Discard").font(.subheadline).frame(minHeight: 44)
                     }
                 }
@@ -251,6 +268,12 @@ struct PlanReaderScreen: View {
         }
         .padding(8)
         .background(RoundedRectangle(cornerRadius: 6).fill(Color(.secondarySystemBackground)))
+        .confirmationDialog("Discard this note?", isPresented: confirming($confirmingDiscard, d.id), titleVisibility: .visible) {
+            Button("Discard", role: .destructive) { outbox.remove(d.id) }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("It hasn't reached your Mac, and its words will be lost.").font(.subheadline)
+        }
     }
 
     /// Send a composed note. It is listed as unsent first, so the tap changes the screen before
@@ -275,6 +298,8 @@ struct PlanReaderScreen: View {
         }, onAck: {
             outbox.remove(noteID)
             reloadHead()
+        }, onFailure: { error in
+            outbox.removeFailed(noteID, error: error)
         })
     }
 

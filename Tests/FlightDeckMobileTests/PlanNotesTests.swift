@@ -97,6 +97,20 @@ final class PlanNotesTests: XCTestCase {
         XCTAssertEqual(outbox.unsent.map(\.id), [b.id])
     }
 
+    /// A Delete refused as `note_consumed` can never succeed, so the pending card goes; any
+    /// other failure (moved on, no answer, not connected) leaves it to try again.
+    func testARemoveRefusedAsConsumedDropsTheNoteAndNothingElseDoes() {
+        var outbox = NoteOutbox()
+        let d = draft()
+        outbox.submit(d); outbox.acked(d.id)
+        outbox.removeFailed(d.id, error: .server(code: "intake_moved_on"))
+        outbox.removeFailed(d.id, error: .disconnected)
+        outbox.removeFailed(d.id, error: nil)
+        XCTAssertEqual(outbox.sentNotes.map(\.id), [d.id])
+        outbox.removeFailed(d.id, error: .server(code: "note_consumed"))
+        XCTAssertEqual(outbox.sentNotes, [])
+    }
+
     /// Submitting the same draft again (a retry) replaces it rather than listing it twice.
     func testResubmittingADraftDoesNotDuplicateIt() {
         var outbox = NoteOutbox()

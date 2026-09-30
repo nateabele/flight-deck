@@ -108,6 +108,13 @@ struct NoteOutbox: Equatable {
 
     mutating func remove(_ id: UUID) { entries.removeAll { $0.draft.id == id } }
 
+    /// A Delete that failed. Refused as `note_consumed`, it can never succeed — a round has read
+    /// the note, or the Mac never had it — so the card goes rather than offering a Delete that
+    /// fails forever. Any other failure leaves it for another try.
+    mutating func removeFailed(_ id: UUID, error: FleetRequestError?) {
+        if error == .server(code: "note_consumed") { remove(id) }
+    }
+
     /// Drop every note the plan now lists: from here the plan is the record.
     mutating func reconcile(with notes: [WireNote]) {
         let listed = Set(notes.map(\.id))

@@ -53,6 +53,31 @@ final class IntakeCommandModelTests: XCTestCase {
         XCTAssertNil(m.message)
     }
 
+    /// A caller that must undo something on a refusal hears the error itself, not just the
+    /// message: the reader drops a note a round has already read (`note_consumed`). A timeout is
+    /// reported as `nil`, the same "no answer" `CommandCopy` uses.
+    func testOnFailureHearsTheErrorAndNeverAnAck() async {
+        let c = StubCommander(), m = model(c, timeout: .milliseconds(50))
+        let id = intake
+        var heard: [String] = []
+        let record: (FleetRequestError?) -> Void = { error in
+            switch error {
+            case .server(let code)?: heard.append(code)
+            case .disconnected?: heard.append("disconnected")
+            case nil: heard.append("timeout")
+            }
+        }
+        var acked = 0
+        m.send(.removeNote(id), command: { .intakeRemoveNote(id: id, token: $0, noteID: id) },
+               onAck: { acked += 1 }, onFailure: record)
+        c.answer(.failure(.server(code: "note_consumed")))
+        m.send(.removeNote(id), command: { .intakeRemoveNote(id: id, token: $0, noteID: id) },
+               onAck: { acked += 1 }, onFailure: record)
+        try? await Task.sleep(for: .milliseconds(200))
+        XCTAssertEqual(heard, ["note_consumed", "timeout"])
+        XCTAssertEqual(acked, 0)
+    }
+
     func testErrSetsMappedMessageAndClears() {
         let c = StubCommander(), m = model(c)
         var acked = 0

@@ -76,7 +76,11 @@ final class IntakeCommandModel {
     /// next send of the same action reuses it: the Mac dedupes on the token, which is what
     /// makes the retry safe. It is forgotten on an ack or a `.server` err (a definitive answer)
     /// and on `.disconnected` (never sent), after which a fresh token is right.
-    func send(_ action: IntakeAction, command: (UUID) -> FleetCommand, onAck: @escaping () -> Void) {
+    ///
+    /// `onFailure` hears every failure after the message is set — the error, or `nil` for no
+    /// answer by the deadline — for a caller that must undo something on a particular refusal.
+    func send(_ action: IntakeAction, command: (UUID) -> FleetCommand, onAck: @escaping () -> Void,
+              onFailure: ((FleetRequestError?) -> Void)? = nil) {
         guard !inFlight.contains(action) else { return }
         let token = retryTokens[action] ?? UUID()
         inFlight.insert(action)
@@ -92,6 +96,7 @@ final class IntakeCommandModel {
             self.inFlight.remove(action)
             self.retryTokens[action] = token
             self.message = CommandCopy.message(for: nil)
+            onFailure?(nil)
         }
 
         guard let commander else {
@@ -99,6 +104,7 @@ final class IntakeCommandModel {
             inFlight.remove(action)
             retryTokens[action] = nil
             message = CommandCopy.message(for: .disconnected)
+            onFailure?(.disconnected)
             return
         }
         commander.sendIntake(command(token)) { [weak self] result in
@@ -109,7 +115,9 @@ final class IntakeCommandModel {
             self.retryTokens[action] = nil
             switch result {
             case .success: onAck()
-            case .failure(let error): self.message = CommandCopy.message(for: error)
+            case .failure(let error):
+                self.message = CommandCopy.message(for: error)
+                onFailure?(error)
             }
         }
     }
