@@ -22,10 +22,15 @@ final class FlightControlModel {
     @ObservationIgnored private var plans: [String: WireIntakePlan] = [:]
     @ObservationIgnored private var planOrder: [String] = []
     @ObservationIgnored private weak var fetcher: IntakeFetching?
+    @ObservationIgnored private weak var commander: IntakeCommanding?
+    @ObservationIgnored private var commandModels: [UUID: IntakeCommandModel] = [:]
     @ObservationIgnored private let receivedAt: () -> Date
 
-    init(fetcher: IntakeFetching, receivedAt: @escaping () -> Date = Date.init) {
+    /// `commander` defaults to nil so callers that never send (tests, the render harness) still
+    /// compile; with none, every send completes `.disconnected`.
+    init(fetcher: IntakeFetching, commander: IntakeCommanding? = nil, receivedAt: @escaping () -> Date = Date.init) {
         self.fetcher = fetcher
+        self.commander = commander
         self.receivedAt = receivedAt
     }
 
@@ -72,6 +77,7 @@ final class FlightControlModel {
         onScreen = nil
         known = [:]
         details = [:]
+        commandModels = [:]
         plans = [:]
         planOrder = []
     }
@@ -84,6 +90,15 @@ final class FlightControlModel {
             self?.macClockOffset = offset
         }
         details[id] = m
+        return m
+    }
+
+    /// One command model per intake, so in-flight state and the last failure survive the intake's
+    /// screens being pushed and popped.
+    func commands(for id: UUID) -> IntakeCommandModel {
+        if let m = commandModels[id] { return m }
+        let m = IntakeCommandModel(intake: id, commander: commander ?? DisconnectedCommander.shared)
+        commandModels[id] = m
         return m
     }
 
