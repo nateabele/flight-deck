@@ -110,7 +110,8 @@ someone asking for a terminal; it is the app starting. So `newSession(in:)` take
 `waking:` parameter defaulting to `.wakeIfNeeded`, and `seedInitialSession` passes
 `.never`, preserving today's behaviour there exactly: refuse, fork nothing.
 
-**Out of scope:** `restore()` and `reopenClosedSession()` stay unguarded and non-waking, as
+**Out of scope** *(superseded for `restore()` on 2026-09-30: it now wakes once before rebuilding,
+still without refusing)*: `restore()` and `reopenClosedSession()` stay unguarded and non-waking, as
 today. A relaunch with the display asleep can still bring back a deck of inert tabs, and
 `respawnSurface` remains the remedy. Auto-respawn on display wake is a separate change and
 is not attempted here.

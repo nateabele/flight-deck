@@ -256,4 +256,93 @@ final class DisplayWakeTests: XCTestCase {
         XCTAssertFalse(third)
         XCTAssertEqual(waker.calls, 2, "the cooldown has elapsed; the wake must be retried")
     }
+
+    // MARK: - Restore
+
+    private final class FakePersistence: SessionPersisting {
+        var stored: SessionSnapshot?
+        func load() -> SessionSnapshot? { stored }
+        func save(_ snapshot: SessionSnapshot) { stored = snapshot }
+    }
+
+    /// Records whether the display was drawable at the moment each surface was asked for —
+    /// the thing libghostty actually depends on. Returns nil like `StubProvider`, so no real
+    /// surface is ever built.
+    private final class DrawabilityRecordingProvider: SurfaceProvider {
+        let display: DisplayInspecting
+        var drawableAtCreation: [Bool] = []
+        init(display: DisplayInspecting) { self.display = display }
+        func makeSurface(_ config: Ghostty.SurfaceConfiguration) -> Ghostty.SurfaceView? {
+            drawableAtCreation.append(display.isDrawable)
+            return nil
+        }
+        func tick() {}
+        var defaultFontSize: Float { 12 }
+    }
+    private var retainedRecorders: [DrawabilityRecordingProvider] = []
+
+    private func restoringStore(
+        tabs: Int, drawable: Bool, wakeSucceeds: Bool
+    ) -> (SessionStore, DrawabilityRecordingProvider, Waker) {
+        let persistence = FakePersistence()
+        persistence.stored = SessionSnapshot(
+            sessions: (0..<tabs).map { SessionSnapshot.Entry(id: UUID(), title: "t\($0)", workingDirectory: tmp.path) },
+            selectedSessionID: nil, sessionCounter: tabs
+        )
+        let display = MutableDisplay(drawable)
+        let provider = DrawabilityRecordingProvider(display: display)
+        retainedRecorders.append(provider)
+        let store = SessionStore(provider: provider, persistence: persistence)
+        let waker = Waker(succeeds: wakeSucceeds, onWake: { display.set(true) })
+        store.display = display
+        store.displayWaker = waker
+        return (store, provider, waker)
+    }
+
+    /// The 2026-09-30 release swap: relaunched with the display asleep, every one of 61
+    /// restored tabs failed `ghostty_surface_new` and came up empty. A relaunch that restores
+    /// a deck must wake the display before it builds a single surface — once, not per tab.
+    func testRestoreWakesASleepingDisplayBeforeBuildingAnySurface() {
+        let (store, provider, waker) = restoringStore(tabs: 3, drawable: false, wakeSucceeds: true)
+        XCTAssertTrue(store.restore())
+        XCTAssertEqual(waker.calls, 1, "one wake for the whole deck")
+        XCTAssertEqual(provider.drawableAtCreation, [true, true, true],
+                       "every restored surface must be built against a drawable display")
+    }
+
+    func testRestoreNeverWakesAnAwakeDisplay() {
+        let (store, provider, waker) = restoringStore(tabs: 2, drawable: true, wakeSucceeds: true)
+        XCTAssertTrue(store.restore())
+        XCTAssertEqual(waker.calls, 0)
+        XCTAssertEqual(provider.drawableAtCreation, [true, true])
+    }
+
+    /// A failed wake must not cost the user their tabs: they come back inert, exactly as
+    /// before this change, and Restart Terminal remains the remedy. A deck that silently
+    /// vanished would be far worse than one that needs a respawn.
+    func testRestoreKeepsEveryTabWhenTheWakeFails() {
+        let (store, provider, waker) = restoringStore(tabs: 2, drawable: false, wakeSucceeds: false)
+        XCTAssertTrue(store.restore())
+        XCTAssertEqual(waker.calls, 1)
+        XCTAssertEqual(store.repos.flatMap(\.sessions).count, 2)
+        XCTAssertEqual(provider.drawableAtCreation, [false, false])
+    }
+
+    /// Nothing to rebuild, nothing to wake for: a snapshot of projects with no sessions must
+    /// not light the screen.
+    func testRestoreWithNoSessionsDoesNotWake() {
+        let persistence = FakePersistence()
+        persistence.stored = SessionSnapshot(
+            sessions: [], projects: [.init(path: tmp.path, isCollapsed: false)], sessionCounter: 0
+        )
+        let display = MutableDisplay(false)
+        let provider = DrawabilityRecordingProvider(display: display)
+        retainedRecorders.append(provider)
+        let store = SessionStore(provider: provider, persistence: persistence)
+        let waker = Waker(succeeds: true, onWake: { display.set(true) })
+        store.display = display
+        store.displayWaker = waker
+        XCTAssertTrue(store.restore())
+        XCTAssertEqual(waker.calls, 0)
+    }
 }

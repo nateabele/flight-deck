@@ -39,9 +39,9 @@ final class RespawnSurfaceTests: XCTestCase {
 
     /// A store carrying one inert tab, built with zero production support: a `StubProvider` —
     /// present, but its `makeSurface` always returns nil, the same idiom
-    /// `DisplayDrawableGuardTests` uses — restored from a one-session snapshot. `restore()` is
-    /// deliberately unguarded on `canCreateTerminal`, so the tab is inserted regardless of
-    /// `drawable`; the stub's nil surface means nothing is ever recorded in the registry, so
+    /// `DisplayDrawableGuardTests` uses — restored from a one-session snapshot. `restore()` wakes a
+    /// sleeping display but never refuses on `canCreateTerminal`, and this store keeps the
+    /// inert default waker, so the tab is inserted regardless of `drawable`; the stub's nil surface means nothing is ever recorded in the registry, so
     /// `hasShellProcess(for:)` reads false — exactly what a relaunch during sleep leaves
     /// behind. A provider being present (unlike a bare `provider: nil` store) is what keeps
     /// `canCreateTerminal` genuinely sensitive to `display`.

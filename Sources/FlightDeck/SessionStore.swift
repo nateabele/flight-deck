@@ -1574,8 +1574,9 @@ final class SessionStore: ObservableObject {
 
     /// `canCreateTerminal`, but allowed to *make* it true.
     ///
-    /// The four creation paths call this instead of reading `canCreateTerminal` directly, so
-    /// the wake happens in exactly one place. `canCreateTerminal` itself stays a pure query —
+    /// The four creation paths call this instead of reading `canCreateTerminal` directly, and
+    /// so does `restore()` — once, before it rebuilds the deck, ignoring the answer because it
+    /// restores every tab either way — so the wake happens in exactly one place. `canCreateTerminal` itself stays a pure query —
     /// it is read in contexts that must not light up a screen, and a property getter with a
     /// 350ms side effect would be a trap.
     ///
@@ -3275,6 +3276,27 @@ final class SessionStore: ObservableObject {
         // The agents that lost at least one tab to a deleted login. Collected rather than
         // reported in the loop so a login that took six tabs with it raises one alert.
         var orphanedAgents: Set<AgentID> = []
+
+        // Wake a sleeping display before building a single surface. libghostty needs a
+        // drawable to create one (see `DisplayInspecting`), and without it every restored tab
+        // comes up inert: the 2026-09-30 release swap relaunched with the screen off and all
+        // 61 tabs failed `ghostty_surface_new` ("invalid display count (0)"), leaving an empty
+        // deck in front of agents that were still running inside their daemons.
+        //
+        // This deliberately reverses the display-wake spec's "restore stays non-waking", and
+        // differs from `seedInitialSession`'s `.never` for a reason: seeding is the app
+        // starting, and refusing it costs one home tab nobody asked for; restoring is bringing
+        // back the whole fleet, and refusing costs every tab. Lighting the screen briefly on an
+        // unattended relaunch is the cheaper failure.
+        //
+        // Once, up front, not per tab: one wake covers the whole synchronous loop below. The
+        // result is ignored on purpose — a failed wake still restores every tab, inert, rather
+        // than dropping them; a tab that vanishes at relaunch is its own bug, and Restart
+        // Terminal (`respawnSurface`) remains the remedy. Gated on there being a session to
+        // rebuild, so a snapshot of bare projects never wakes anything.
+        if snapshot.sessions.contains(where: { directoryExists($0.workingDirectory) }) {
+            _ = ensureTerminalCreatable()
+        }
 
         // Pass two: file the sessions. `insertSession` appends a repo for any working
         // directory pass one did not cover, which is what keeps a v1 snapshot working.

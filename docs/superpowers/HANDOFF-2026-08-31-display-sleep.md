@@ -130,6 +130,11 @@ to this guard, so a sixth site cannot go missing the same way.
 must still refuse rather than birth an inert tab. B makes refusal the exception instead of the
 routine outcome; it does not make refusal impossible.
 
+**Superseded 2026-09-30 for `restore()`:** it now wakes the display once before rebuilding the
+deck (a release swap relaunched with the screen off and brought back 61 inert tabs) — see
+`DisplayWakeTests`' restore cases. It still never refuses, so a *failed* wake still yields inert
+tabs. The rest of this paragraph remains true for `reopenClosedSession()`.
+
 **Still out of scope, and still true:** `restore()` and `reopenClosedSession()` remain unguarded
 and non-waking (see Loose ends below) — a relaunch with the display asleep can still bring back
 a deck of inert tabs, `respawnSurface` remains the only remedy, and auto-respawn on display wake
@@ -230,7 +235,8 @@ render as a generic fallback.
   the description in the spec if wanted. Two defects were found *by running it* — a false
   positive from a partial state read, and a classifier that trusted a net shell count that any
   concurrent close corrupts. Check per-tab evidence, never a net count.
-- **`restore()` and `reopenClosedSession()` are deliberately unguarded.** Refusing to restore
+- **`restore()` and `reopenClosedSession()` are deliberately unguarded.** (2026-09-30: `restore()`
+  now *wakes* before rebuilding, but still never refuses — only a failed wake leaves inert tabs.) Refusing to restore
   would lose the deck. So a relaunch with the display asleep can bring back a whole deck of
   inert tabs, and `respawnSurface` is the only remedy. An auto-respawn on display wake would
   close this properly and does not exist.
