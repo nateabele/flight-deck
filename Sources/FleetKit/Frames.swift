@@ -266,10 +266,26 @@ public enum FleetCommand: Codable, Equatable, Sendable {
     /// than riding on `answerPrompt`'s existing plumbing: see `WireSession.allowsBlockedAbort`.
     case abortPrompt(id: UUID, token: UUID)
 
+    /// The phone steering a Flight Control intake: transport key, default play, a note, and a
+    /// note's withdrawal. `id` is the intake's, `token` the idempotency key (a retry after a
+    /// lost ack must not queue a second Step or a second note).
+    ///
+    /// **Sent only when the intake's detail has `steer == true`.** An older Mac throws on an
+    /// unknown `op` and, because `FleetSocketServer.onUndecodable` salvages only `req`, drops
+    /// the socket — so the capability rides the detail and the phone checks it first.
+    /// Every string here decodes unjudged (`command`, `mode`, `kind`): a refusal is an `err`
+    /// code from `IntakeService`, never a throw that ends the connection.
+    case intakeTape(id: UUID, token: UUID, command: String, stage: String?)
+    case intakeDefaultPlay(id: UUID, token: UUID, mode: String)
+    case intakeNote(id: UUID, token: UUID, noteID: UUID, kind: String, text: String,
+                    checkpoint: Int?, block: Int?, quote: String?)
+    case intakeRemoveNote(id: UUID, token: UUID, noteID: UUID)
+
     enum CodingKeys: String, CodingKey {
         case op, id, token, text, call, answer, index, label
         case isCollapsed, project, title, agent, accountIndex
         case block, approve, feedback
+        case command, stage, mode, noteID, kind, checkpoint, quote
     }
 
     private enum Op: String, Codable {
@@ -286,6 +302,10 @@ public enum FleetCommand: Codable, Equatable, Sendable {
         case annotatePlan = "plan.annotate"
         case resolvePlan = "plan.resolve"
         case abortPrompt = "prompt.abort"
+        case intakeTape = "intake.tape"
+        case intakeDefaultPlay = "intake.defaultPlay"
+        case intakeNote = "intake.note"
+        case intakeRemoveNote = "intake.removeNote"
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -355,6 +375,32 @@ public enum FleetCommand: Codable, Equatable, Sendable {
             try c.encode(call, forKey: .call)
             try c.encode(approve, forKey: .approve)
             try c.encodeIfPresent(feedback, forKey: .feedback)
+        case .intakeTape(let id, let token, let command, let stage):
+            try c.encode(Op.intakeTape, forKey: .op)
+            try c.encode(id, forKey: .id)
+            try c.encode(token, forKey: .token)
+            try c.encode(command, forKey: .command)
+            try c.encodeIfPresent(stage, forKey: .stage)
+        case .intakeDefaultPlay(let id, let token, let mode):
+            try c.encode(Op.intakeDefaultPlay, forKey: .op)
+            try c.encode(id, forKey: .id)
+            try c.encode(token, forKey: .token)
+            try c.encode(mode, forKey: .mode)
+        case .intakeNote(let id, let token, let noteID, let kind, let text, let checkpoint, let block, let quote):
+            try c.encode(Op.intakeNote, forKey: .op)
+            try c.encode(id, forKey: .id)
+            try c.encode(token, forKey: .token)
+            try c.encode(noteID, forKey: .noteID)
+            try c.encode(kind, forKey: .kind)
+            try c.encode(text, forKey: .text)
+            try c.encodeIfPresent(checkpoint, forKey: .checkpoint)
+            try c.encodeIfPresent(block, forKey: .block)
+            try c.encodeIfPresent(quote, forKey: .quote)
+        case .intakeRemoveNote(let id, let token, let noteID):
+            try c.encode(Op.intakeRemoveNote, forKey: .op)
+            try c.encode(id, forKey: .id)
+            try c.encode(token, forKey: .token)
+            try c.encode(noteID, forKey: .noteID)
         case .abortPrompt(let id, let token):
             try c.encode(Op.abortPrompt, forKey: .op)
             try c.encode(id, forKey: .id)
@@ -442,6 +488,36 @@ public enum FleetCommand: Codable, Equatable, Sendable {
             self = .abortPrompt(
                 id: try c.decode(UUID.self, forKey: .id),
                 token: try c.decode(UUID.self, forKey: .token)
+            )
+        case .intakeTape:
+            self = .intakeTape(
+                id: try c.decode(UUID.self, forKey: .id),
+                token: try c.decode(UUID.self, forKey: .token),
+                command: try c.decode(String.self, forKey: .command),
+                stage: try c.decodeIfPresent(String.self, forKey: .stage)
+            )
+        case .intakeDefaultPlay:
+            self = .intakeDefaultPlay(
+                id: try c.decode(UUID.self, forKey: .id),
+                token: try c.decode(UUID.self, forKey: .token),
+                mode: try c.decode(String.self, forKey: .mode)
+            )
+        case .intakeNote:
+            self = .intakeNote(
+                id: try c.decode(UUID.self, forKey: .id),
+                token: try c.decode(UUID.self, forKey: .token),
+                noteID: try c.decode(UUID.self, forKey: .noteID),
+                kind: try c.decode(String.self, forKey: .kind),
+                text: try c.decode(String.self, forKey: .text),
+                checkpoint: try c.decodeIfPresent(Int.self, forKey: .checkpoint),
+                block: try c.decodeIfPresent(Int.self, forKey: .block),
+                quote: try c.decodeIfPresent(String.self, forKey: .quote)
+            )
+        case .intakeRemoveNote:
+            self = .intakeRemoveNote(
+                id: try c.decode(UUID.self, forKey: .id),
+                token: try c.decode(UUID.self, forKey: .token),
+                noteID: try c.decode(UUID.self, forKey: .noteID)
             )
         }
     }
