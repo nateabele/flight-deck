@@ -84,9 +84,10 @@ covers it) → `superpowers:writing-plans` → Plannotator → subagent-driven, 
    is computed after the full rebuild; a plan fetch cost ≈ 0.6 s. Fixes: compute the etag from cheap
    inputs before rebuilding; cache `needsAttention` per tape change; cache the progress line.
 2. **`ProjectViewInspectorLiveTests.testInspectorClosesFromTheEditorAndIsRememberedPerProject`**
-   fails deterministically on this Mac (line 90, "the panel itself collapsed") — including at
-   `73b8ffb`, where the full suite passed earlier on 09-29. Machine/environment state, not Flight
-   Control code; needs its own investigation.
+   failed deterministically on this Mac on 09-29 evening (line 90, "the panel itself collapsed") —
+   including at `73b8ffb`, where the full suite had passed earlier that day — then **passed** in the
+   full run on merged master `6b084da` on 09-30 (4272 cases, `SHARDED UNIT RUN PASSED`). So it
+   depends on machine/window state, not Flight Control code; worth hardening if it recurs.
 3. **`Tests/FlightDeckTests/Fixtures/larkos-plan.md`** is a copy of the maintainer's real larkOS plan (used
    by the quote-locator and note-anchor tests). Get the maintainer's OK before any `git push`.
 4. **Flaky:** `FleetListScreenTests.testRefreshRecentlyClosedKeepsTheListThroughADisconnect`
