@@ -62,7 +62,9 @@ final class PlanReviewModelTests: XCTestCase {
     }
 
     /// Approving with notes is one action, not "send notes, then approve" — `POST /api/approve`
-    /// takes the feedback itself, so the reader's words and their verdict cannot separate.
+    /// takes the feedback itself. (Plannotator then saves it with the plan and does **not** pass
+    /// it to Claude Code, whose allow decision has no message field — hence
+    /// `testApprovingWouldDropWhatTheReaderSaid`.)
     func testApproveCarriesTheTypedFeedback() {
         var sent: [FleetCommand] = []
         let model = PlanReviewModel(
@@ -78,6 +80,30 @@ final class PlanReviewModelTests: XCTestCase {
         }
         XCTAssertTrue(approve)
         XCTAssertEqual(feedback, "ship it, but rename X")
+    }
+
+    /// **Approve cannot carry words to the agent.** Plannotator's allow decision for Claude
+    /// Code has no message field (it links anthropics/claude-code#16001 about it), so notes and
+    /// comments on an approved plan never reach the agent — verified on a live 0.27.8 gate on
+    /// 2026-09-30. Plannotator's own browser warns before approving over feedback; the phone
+    /// must too, and only when there is something to lose.
+    func testApprovingWouldDropWhatTheReaderSaid() {
+        let clean = model(plan: "A.\n\nB.")
+        XCTAssertFalse(clean.approveDropsFeedback, "nothing typed, nothing to warn about")
+
+        let noted = model(plan: "A.")
+        noted.feedback = "  \n "
+        XCTAssertFalse(noted.approveDropsFeedback, "whitespace is not a note")
+        noted.feedback = "rename X"
+        XCTAssertTrue(noted.approveDropsFeedback)
+
+        let pinned = model(plan: "A.\n\nB.")
+        pinned.comment(on: 1, text: "needs a rollback")
+        XCTAssertTrue(pinned.approveDropsFeedback)
+
+        let global = model(plan: "A.")
+        global.comment(on: nil, text: "missing tests")
+        XCTAssertTrue(global.approveDropsFeedback)
     }
 
     /// One tap, one verdict. A double tap on Approve must not send two.

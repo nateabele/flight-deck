@@ -12,8 +12,13 @@ import Foundation
 ///
 /// - `GET  /api/plan` → `{plan, origin, permissionMode, previousPlan, versionInfo, …}`
 /// - `POST /api/external-annotations` → `{source, type, text, originalText}`
+/// - `GET  /api/external-annotations` → `{annotations: [{type, text, originalText, …}], version}`
 /// - `POST /api/approve` → `{feedback?}`, resolves the hook `allow`
 /// - `POST /api/deny`    → `{feedback}`,  resolves it `deny`, feedback becomes the reason
+///
+/// **Neither verdict reads the annotation store** (re-read 2026-09-30): the hook gets exactly
+/// `body.feedback`, so comments posted above reach the agent only if the caller folds them into
+/// it — see `PlanFeedback`.
 struct PlanGateClient {
     /// Test seam, in the shape `PromptService.tail` is one: the network is the thing a test
     /// must substitute. The `Int` is the HTTP status; `nil` is a transport failure, which is
@@ -96,6 +101,23 @@ struct PlanGateClient {
         // pin the comment to the first character of the plan.
         if let originalText { body["originalText"] = originalText }
         return await post("/api/external-annotations", body)
+    }
+
+    /// Every comment the gate holds, whoever posted it — the input `PlanFeedback` needs, since
+    /// Plannotator will not assemble it itself. `nil` when the store could not be read, which is
+    /// a different fact from an empty one.
+    func annotations() async -> [PlanFeedback.Comment]? {
+        guard let url = url("/api/external-annotations") else { return nil }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        guard let (data, status) = await transport(request), (200..<300).contains(status),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let list = root["annotations"] as? [[String: Any]]
+        else { return nil }
+        return list.compactMap { entry in
+            guard let text = entry["text"] as? String else { return nil }
+            return PlanFeedback.Comment(text: text, originalText: entry["originalText"] as? String)
+        }
     }
 
     /// Resolve the gate. **Approve carries feedback too** — reading a plan, marking it up and

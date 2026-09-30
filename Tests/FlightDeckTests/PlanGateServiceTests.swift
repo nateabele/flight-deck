@@ -68,6 +68,72 @@ final class PlanGateServiceTests: XCTestCase {
                        "and the badge counts what was posted, not what was asked for")
     }
 
+    /// **The bug this guards: phone comments never reached the agent.** Plannotator's
+    /// `/api/deny` sends the hook exactly `body.feedback` and never reads its own annotation
+    /// store, so posting comments and then denying with no feedback left the agent reading
+    /// "Plan rejected by user" and guessing. The deny body must carry every comment, pinned
+    /// and global, plus the footer note.
+    @MainActor
+    func testRequestingChangesCarriesEveryCommentToTheAgent() async throws {
+        let (service, transport) = makeService(
+            plan: "# Plan\n\nRename the factory.\n\nDelete the cache.", callID: "c")
+        await service.refresh()
+        let session = service.knownSession
+        let blocks = PlanBlocks.split("# Plan\n\nRename the factory.\n\nDelete the cache.")
+        let pinned = try XCTUnwrap(blocks.blocks.first { $0.text == "Rename the factory." })
+        _ = await service.annotate(session: session, call: "c", text: "call it Builder",
+                                   block: pinned.index, token: UUID())
+        _ = await service.annotate(session: session, call: "c", text: "add tests first",
+                                   block: nil, token: UUID())
+
+        let result = await service.resolve(session: session, call: "c", approve: false,
+                                           feedback: "and split it up", token: UUID())
+
+        XCTAssertNil(result.failureCode)
+        let path = await transport.lastResolvePath
+        XCTAssertEqual(path, "/api/deny")
+        let sentFeedback = await transport.lastResolveFeedback
+        let feedback = try XCTUnwrap(sentFeedback,
+                                     "a deny with comments must not fall back to Plannotator's default")
+        XCTAssertTrue(feedback.contains(#"Feedback on: "Rename the factory.""#), feedback)
+        XCTAssertTrue(feedback.contains("> call it Builder"), feedback)
+        XCTAssertTrue(feedback.contains("> add tests first"), feedback)
+        XCTAssertTrue(feedback.contains("> and split it up"), feedback)
+        XCTAssertTrue(feedback.contains("3 pieces of feedback"), feedback)
+    }
+
+    /// The gate's own store is the source, not this Mac's memory: a comment this service
+    /// never posted — another tool, or this Mac before a restart emptied `gates` — is still a
+    /// comment the reader expects the agent to see.
+    @MainActor
+    func testFeedbackIncludesCommentsThisMacDidNotPost() async throws {
+        let (service, transport) = makeService(plan: "# A\n\nB.", callID: "c")
+        await service.refresh()
+        await transport.seedStoredAnnotation([
+            "type": "GLOBAL_COMMENT", "text": "from before the restart", "originalText": "",
+            "source": "flight-deck",
+        ])
+        _ = await service.resolve(session: service.knownSession, call: "c", approve: false,
+                                  feedback: nil, token: UUID())
+        let feedback = await transport.lastResolveFeedback
+        XCTAssertTrue(feedback?.contains("> from before the restart") == true, feedback ?? "nil")
+    }
+
+    /// The store could not be read: fall back to what this Mac itself posted rather than
+    /// resolving with nothing, which is exactly the silent loss being fixed.
+    @MainActor
+    func testAnUnreadableStoreFallsBackToWhatThisMacPosted() async throws {
+        let (service, transport) = makeService(plan: "First block.\n\nSecond block.", callID: "c")
+        await service.refresh()
+        _ = await service.annotate(session: service.knownSession, call: "c",
+                                   text: "remembered locally", block: nil, token: UUID())
+        await transport.failNextAnnotationsFetch()
+        _ = await service.resolve(session: service.knownSession, call: "c", approve: false,
+                                  feedback: nil, token: UUID())
+        let feedback = await transport.lastResolveFeedback
+        XCTAssertTrue(feedback?.contains("> remembered locally") == true, feedback ?? "nil")
+    }
+
     /// The check is on the token and never on the text: two comments a reader genuinely typed
     /// twice are two comments, however alike they read.
     @MainActor
@@ -354,6 +420,13 @@ private actor RecordingTransport {
     /// token question — two identical posts leave exactly the same last one behind as one does.
     private(set) var annotateCallCount = 0
     private(set) var lastAnnotation: (text: String, originalText: String?)?
+    /// Every comment the gate holds, in the order posted — what `GET /api/external-annotations`
+    /// serves back, as the real server does.
+    private(set) var stored: [[String: Any]] = []
+    /// The `feedback` field of the last approve/deny body: the only text the agent ever reads.
+    private(set) var lastResolveFeedback: String?
+    private(set) var lastResolvePath: String?
+    private var shouldFailNextAnnotationsFetch = false
 
     private var shouldPauseNextPlanFetch = false
     private var shouldFailNextPlanFetch = false
@@ -381,6 +454,17 @@ private actor RecordingTransport {
     /// `PlanGateClient.annotate` reports as `false`, i.e. the gate did not take it.
     func failNextAnnotation() {
         shouldFailNextAnnotation = true
+    }
+
+    /// Arranges for the *next* `GET /api/external-annotations` to fail at the transport.
+    func failNextAnnotationsFetch() {
+        shouldFailNextAnnotationsFetch = true
+    }
+
+    /// A comment someone else posted straight to the gate — another tool, or this Mac before
+    /// a restart dropped its in-memory record.
+    func seedStoredAnnotation(_ annotation: [String: Any]) {
+        stored.append(annotation)
     }
 
     /// Waits until a paused fetch has actually reached its pause point, so a test never races
@@ -413,6 +497,14 @@ private actor RecordingTransport {
             }
             let body = (try? JSONSerialization.data(withJSONObject: ["plan": plan])) ?? Data()
             return (body, 200)
+        case "/api/external-annotations" where request.httpMethod == "GET":
+            if shouldFailNextAnnotationsFetch {
+                shouldFailNextAnnotationsFetch = false
+                return nil
+            }
+            let body = (try? JSONSerialization.data(
+                withJSONObject: ["annotations": stored, "version": stored.count])) ?? Data()
+            return (body, 200)
         case "/api/external-annotations":
             if shouldFailNextAnnotation {
                 shouldFailNextAnnotation = false
@@ -422,10 +514,19 @@ private actor RecordingTransport {
             if let bodyData = request.httpBody,
                let json = try? JSONSerialization.jsonObject(with: bodyData) as? [String: Any] {
                 lastAnnotation = (json["text"] as? String ?? "", json["originalText"] as? String)
+                // Stored the way the real server stores it: a global comment's absent
+                // `originalText` comes back as `""`.
+                var entry = json
+                entry["originalText"] = json["originalText"] as? String ?? ""
+                stored.append(entry)
             }
             return (Data(#"{"ids":["stub"]}"#.utf8), 201)
         case "/api/approve", "/api/deny":
             resolveCallCount += 1
+            lastResolvePath = request.url?.path
+            lastResolveFeedback = request.httpBody
+                .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }?["feedback"]
+                as? String
             return (Data("{}".utf8), 200)
         default:
             return nil

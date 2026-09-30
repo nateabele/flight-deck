@@ -2281,3 +2281,22 @@ flagged as most likely to differ from the tests. The maintainer's to run.
     whether `ntm serve`'s event stream is worth a transport spike (its schema was never
     inspected; [FLYWHEEL-SPIKE-FINDINGS.md](FLYWHEEL-SPIKE-FINDINGS.md) already ruled it out as
     FD's own runner).
+
+## Plan comments from the phone (2026-09-30)
+
+- **Phone comments never reached the agent — FIXED.** Plannotator's `POST /api/deny` gives the
+  hook exactly `body.feedback` and never reads its own annotation store; the `# Plan Feedback`
+  document the browser's "Send Feedback" sends is built client-side by the browser. So a comment
+  posted to `/api/external-annotations` showed in the gate's sidebar and the agent read only
+  "Plan rejected by user". `PlanGateService.resolve` now reads the gate's store (falling back to
+  what this Mac posted) and sends `PlanFeedback.compose`, the browser's own format, as
+  `feedback`. Verified end to end against a live `plannotator` 0.27.8 gate: the hook's deny
+  message carried every pinned and global comment plus the footer note.
+  (`a35207e`, reverted in `dcc80a7`, had blamed the endpoint: `/api/deny` 404'd there because
+  that probe hit a non-plan Plannotator server. On a plan gate it answers 200.)
+- **Approve cannot carry words — a limitation, not fixable here.** Plannotator's allow decision
+  for Claude Code has no message field (Plannotator itself links anthropics/claude-code#16001),
+  so a note or comments on an approved plan are saved with the plan but never reach the agent.
+  The phone now confirms before an Approve that would drop them and offers "Request changes"
+  instead, as Plannotator's browser does. Revisit if Claude Code's `PermissionRequest` allow
+  decision gains a message.

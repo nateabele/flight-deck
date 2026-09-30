@@ -84,6 +84,36 @@ final class PlanGateClientTests: XCTestCase {
         XCTAssertNil(json["originalText"])
     }
 
+    /// The shape a live 0.27.8 gate served on 2026-09-30, verbatim: a global comment's
+    /// `originalText` comes back as `""`, never absent, and must read as no anchor — an empty
+    /// anchor would render as `Feedback on: ""`.
+    func testAnnotationsReadsTheGatesStore() async throws {
+        let recorder = Recorder()
+        let json = #"{"annotations":[{"id":"f5e8","blockId":"external","startOffset":0,"endOffset":0,"#
+            + #""type":"COMMENT","text":"call it WidgetBuilder","originalText":"Rename the factory.","#
+            + #""createdA":1790777780498,"source":"flight-deck"},{"id":"22a8","blockId":"external","#
+            + #""startOffset":0,"endOffset":0,"type":"GLOBAL_COMMENT","text":"add tests","#
+            + #""originalText":"","createdA":1790777780509,"source":"flight-deck"}],"version":2}"#
+        await recorder.push((Data(json.utf8), 200))
+        let comments = await client(recorder).annotations()
+        XCTAssertEqual(comments, [
+            .init(text: "call it WidgetBuilder", originalText: "Rename the factory."),
+            .init(text: "add tests", originalText: nil),
+        ])
+        let requests = await recorder.all()
+        let request = try XCTUnwrap(requests.first)
+        XCTAssertEqual(request.httpMethod, "GET")
+        XCTAssertEqual(request.url?.path, "/api/external-annotations")
+    }
+
+    /// A store that could not be read is `nil`, not `[]` — the caller falls back on the one
+    /// and must not on the other.
+    func testAnUnreadableStoreIsNilNotEmpty() async {
+        let recorder = Recorder()
+        let comments = await client(recorder).annotations()
+        XCTAssertNil(comments)
+    }
+
     func testResolveApproveHitsApproveWithFeedback() async throws {
         let recorder = Recorder()
         await recorder.push((Data(#"{"ok":true}"#.utf8), 200))

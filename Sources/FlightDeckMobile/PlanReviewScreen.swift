@@ -36,6 +36,9 @@ struct PlanReviewScreen: View {
     /// was. `PlanReviewModel.resolved` is deliberately just a latch (see its own comment); it
     /// is this screen, not the model, that needs to remember which button that latch belongs to.
     @State private var chosenApprove: Bool?
+    /// Up when Approve was pressed over comments or a note the agent would never see — see
+    /// `PlanReviewModel.approveDropsFeedback`.
+    @State private var confirmingApprove = false
 
     var body: some View {
         ScrollView {
@@ -83,6 +86,12 @@ struct PlanReviewScreen: View {
         return "Inline comments need Plannotator running on your Mac. "
             + "You can still read the plan and send a verdict."
     }
+
+    /// Plannotator's own browser says the same before an approve over feedback: Claude Code's
+    /// allow decision has no message field, so only a request for changes carries words back.
+    static let approveDropsFeedbackMessage =
+        "Approving tells the agent to go ahead but can't send it your comments or note. "
+        + "Request changes to send them."
 
     // MARK: Blocks
 
@@ -164,11 +173,32 @@ struct PlanReviewScreen: View {
                     Text("Request changes").frame(maxWidth: .infinity)
                 }
                 Button {
-                    chosenApprove = true
-                    model.resolve(approve: true)
+                    if model.approveDropsFeedback {
+                        confirmingApprove = true
+                    } else {
+                        chosenApprove = true
+                        model.resolve(approve: true)
+                    }
                 } label: {
                     Text("Approve").frame(maxWidth: .infinity)
                 }
+            }
+            .confirmationDialog(
+                "The agent won't see your comments",
+                isPresented: $confirmingApprove,
+                titleVisibility: .visible
+            ) {
+                Button("Request changes") {
+                    chosenApprove = false
+                    model.resolve(approve: false)
+                }
+                Button("Approve anyway", role: .destructive) {
+                    chosenApprove = true
+                    model.resolve(approve: true)
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text(Self.approveDropsFeedbackMessage)
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.regular)

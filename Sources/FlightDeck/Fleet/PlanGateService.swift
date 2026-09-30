@@ -19,6 +19,9 @@ final class PlanGateService {
         let plan: String
         let blocks: PlanBlocks
         var annotationCount: Int
+        /// What this Mac itself posted, for when the gate's store cannot be read at resolve
+        /// time — see `resolve`.
+        var posted: [PlanFeedback.Comment] = []
     }
 
     /// Test seams, in the shape `PromptService.tail` is one.
@@ -183,6 +186,7 @@ final class PlanGateService {
             return .failure("unreadable_screen")
         }
         gates[session]?.annotationCount += 1
+        gates[session]?.posted.append(PlanFeedback.Comment(text: text, originalText: originalText))
         return .success(())
     }
 
@@ -197,8 +201,17 @@ final class PlanGateService {
         guard gate.callID == call else { return .failure("prompt_changed") }
 
         resolvedTokens[session, default: []].append(token)
-        let ok = await makeClient(gate.entry.port)
-            .resolve(approved: approve, feedback: feedback)
+        // **The comments go in the verdict, or they go nowhere.** Plannotator hands the hook
+        // `feedback` verbatim and never reads its own annotation store, so every comment posted
+        // above has to be folded into this one string — see `PlanFeedback`. The gate's store
+        // first, so a comment this Mac did not post (or posted before a restart emptied
+        // `gates`) still counts; this Mac's own record if the store cannot be read, rather
+        // than resolving with nothing, which is the silent loss this exists to stop.
+        let client = makeClient(gate.entry.port)
+        let comments = await client.annotations() ?? gate.posted
+        let ok = await client.resolve(
+            approved: approve, feedback: PlanFeedback.compose(comments: comments, note: feedback)
+        )
         guard ok else {
             // The gate did not take it — let a retry through rather than swallowing the tap.
             resolvedTokens[session]?.removeAll { $0 == token }

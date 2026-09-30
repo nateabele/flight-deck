@@ -50,6 +50,15 @@ final class PlanReviewModel {
         else { globalSent.append(trimmed) }
     }
 
+    /// Whether approving would throw away something the reader said. Plannotator's allow
+    /// decision for Claude Code carries no message, so comments and the note reach the agent
+    /// only through "Request changes" — the screen confirms before an Approve that would drop
+    /// them, as Plannotator's own browser does.
+    var approveDropsFeedback: Bool {
+        !sent.isEmpty || !globalSent.isEmpty
+            || !feedback.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
     /// One tap, one verdict. Latched here as well as tokened on the Mac, because a double tap
     /// should not even reach the socket.
     func resolve(approve: Bool) {
