@@ -11,6 +11,9 @@ struct TransportKey: Equatable, Identifiable {
     let isDefault: Bool
     let ack: String?
     let accessibilityLabel: String
+    /// A play key, which a long press makes the default. Pause and Stop never can: a long press
+    /// attached to them swallows a firm press, the one a person gives a key that matters.
+    var canBeDefault: Bool { TransportKeys.playIDs.contains(id) }
 }
 
 /// Which keys the strip shows and which it will let a person press. Pure: the Mac's
@@ -23,6 +26,7 @@ enum TransportKeys {
         ("toReview", "forward.fill", "REVIEW", "Play to review"),
         ("stop", "stop.fill", "STOP", "Stop the run"),
     ]
+    static let playIDs: Set<String> = ["step", "nextMajor", "toReview"]
 
     /// `[]` unless the Mac said it accepts commands (`steer`), the intake is shaping, and the
     /// board carries controls: an older Mac drops the socket on a command it doesn't know.
@@ -34,10 +38,11 @@ enum TransportKeys {
         return table.map { row in
             let ack: String? = row.id == "stop" && stopping ? "Stopping…"
                 : row.id == "pause" && pausing ? "Pausing…" : nil
+            // A Mac already pausing needs no second Pause; Stop stays live through it.
             return TransportKey(
                 id: row.id, symbol: row.symbol, caption: row.caption,
                 enabled: controls.enabled.contains(row.id) && !stopping
-                    && !inFlight.contains(.tape(row.id)),
+                    && !inFlight.contains(.tape(row.id)) && !(row.id == "pause" && pausing),
                 isDefault: row.id == board.defaultPlay, ack: ack, accessibilityLabel: row.label)
         }
     }

@@ -68,6 +68,22 @@ final class TransportKeysTests: XCTestCase {
         XCTAssertEqual(key("pause", keys).ack, "Pausing…")
     }
 
+    /// The Mac already pausing (no press of ours in flight) is the same as ours: a second Pause
+    /// would do nothing, so the key is off. Stop must stay live — stopping a run that is slow to
+    /// pause is exactly what a person reaches for.
+    func testHaltPausingAloneDisablesPauseButNotStop() {
+        let keys = TransportKeys.keys(detail: Self.detail(halt: "pausing"), inFlight: [])
+        XCTAssertFalse(key("pause", keys).enabled)
+        XCTAssertTrue(key("stop", keys).enabled)
+    }
+
+    /// Only the play keys can become the default; a long press on Pause or Stop must not exist,
+    /// or holding either for half a second swallows the press.
+    func testOnlyPlayKeysCanBeTheDefault() {
+        let keys = TransportKeys.keys(detail: Self.detail(), inFlight: [])
+        XCTAssertEqual(keys.filter(\.canBeDefault).map(\.id), ["step", "nextMajor", "toReview"])
+    }
+
     func testHaltStoppingDisablesEveryPlayKey() {
         let keys = TransportKeys.keys(detail: Self.detail(halt: "stopping"), inFlight: [])
         XCTAssertTrue(keys.allSatisfy { !$0.enabled })
