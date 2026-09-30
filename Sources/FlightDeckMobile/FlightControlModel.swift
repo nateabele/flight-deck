@@ -77,6 +77,7 @@ final class FlightControlModel {
         onScreen = nil
         known = [:]
         details = [:]
+        for m in commandModels.values { m.cancelAll() }
         commandModels = [:]
         plans = [:]
         planOrder = []
@@ -97,7 +98,7 @@ final class FlightControlModel {
     /// screens being pushed and popped.
     func commands(for id: UUID) -> IntakeCommandModel {
         if let m = commandModels[id] { return m }
-        let m = IntakeCommandModel(intake: id, commander: commander ?? DisconnectedCommander.shared)
+        let m = IntakeCommandModel(intake: id, commander: commander)
         commandModels[id] = m
         return m
     }

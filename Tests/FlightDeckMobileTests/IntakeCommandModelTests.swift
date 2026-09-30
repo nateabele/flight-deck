@@ -92,12 +92,58 @@ final class IntakeCommandModelTests: XCTestCase {
         XCTAssertEqual(c.commands.count, 1)
     }
 
-    func testEachSendCarriesAFreshToken() {
+    func testCompletedSendsCarryDistinctTokens() {
         let c = StubCommander(), m = model(c)
         play(m)
         c.answer(.success(()))
         play(m)
         XCTAssertEqual(Set(c.tokens).count, 2)
+    }
+
+    func testResendAfterTimeoutReusesTokenUntilAcked() async {
+        let c = StubCommander()
+        let m = model(c, timeout: .milliseconds(50))
+        play(m)
+        try? await Task.sleep(for: .milliseconds(150))
+        play(m)
+        XCTAssertEqual(c.tokens.count, 2)
+        XCTAssertEqual(c.tokens[0], c.tokens[1])
+        c.answer(.success(()))  // the first, late ack: ignored
+        c.answer(.success(()))
+        XCTAssertTrue(m.inFlight.isEmpty)
+        play(m)
+        XCTAssertNotEqual(c.tokens[2], c.tokens[0])
+    }
+
+    func testServerErrAndDisconnectedForgetTheToken() async {
+        let c = StubCommander()
+        let m = model(c, timeout: .milliseconds(50))
+        play(m)
+        try? await Task.sleep(for: .milliseconds(150))
+        play(m)
+        c.answer(.success(()))  // stale
+        c.answer(.failure(.server(code: "not_allowed")))
+        play(m)
+        XCTAssertNotEqual(c.tokens[2], c.tokens[0])
+    }
+
+    func testCommanderGoneCompletesDisconnected() {
+        var c: StubCommander? = StubCommander()
+        let m = model(c!)
+        c = nil
+        play(m)
+        XCTAssertEqual(m.message, "Not connected to your Mac, so this wasn't sent.")
+        XCTAssertTrue(m.inFlight.isEmpty)
+    }
+
+    func testCancelAllDropsALateAck() {
+        let c = StubCommander(), m = model(c)
+        var acked = 0
+        play(m) { acked += 1 }
+        m.cancelAll()
+        XCTAssertTrue(m.inFlight.isEmpty)
+        c.answer(.success(()))
+        XCTAssertEqual(acked, 0)
     }
 
     func testCopyTable() {
@@ -123,5 +169,15 @@ final class IntakeCommandModelTests: XCTestCase {
         XCTAssertTrue(a === fc.commands(for: intake))
         fc.reset()
         XCTAssertFalse(a === fc.commands(for: intake))
+    }
+
+    func testCommandModelsDoNotRetainTheFleet() {
+        weak var weakFleet: FleetModel?
+        do {
+            let fleet = FleetModel(store: InMemoryPairedMacStore())
+            weakFleet = fleet
+            _ = fleet.flightControl!.commands(for: intake)
+        }
+        XCTAssertNil(weakFleet)
     }
 }

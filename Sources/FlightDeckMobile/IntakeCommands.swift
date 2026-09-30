@@ -12,16 +12,6 @@ protocol IntakeCommanding: AnyObject {
     )
 }
 
-/// Stands in when a `FlightControlModel` has no commander: every send fails `.disconnected`,
-/// so a person is told it wasn't sent rather than left waiting.
-@MainActor
-final class DisconnectedCommander: IntakeCommanding {
-    static let shared = DisconnectedCommander()
-    func sendIntake(_ command: FleetCommand, then: @escaping (Result<Void, FleetRequestError>) -> Void) {
-        then(.failure(.disconnected))
-    }
-}
-
 /// One thing a person can ask of an intake; identifies a send for the in-flight set.
 enum IntakeAction: Hashable {
     case tape(String), defaultPlay(String), note(UUID), removeNote(UUID)
@@ -55,11 +45,15 @@ final class IntakeCommandModel {
     let intake: UUID
     private(set) var inFlight: Set<IntakeAction> = []
     private(set) var message: String?
-    @ObservationIgnored private let commander: IntakeCommanding
+    /// Weak: the fleet owns Flight Control, which owns this model, so a strong reference here
+    /// would be a cycle that keeps a dropped `FleetModel` alive.
+    @ObservationIgnored private weak var commander: IntakeCommanding?
     @ObservationIgnored private let timeout: Duration
     @ObservationIgnored private var deadlines: [UUID: Task<Void, Never>] = [:]
+    /// Tokens of sends that timed out, by action; see `send`.
+    @ObservationIgnored private var retryTokens: [IntakeAction: UUID] = [:]
 
-    init(intake: UUID, commander: IntakeCommanding, timeout: Duration = .seconds(10)) {
+    init(intake: UUID, commander: IntakeCommanding?, timeout: Duration = .seconds(10)) {
         self.intake = intake
         self.commander = commander
         self.timeout = timeout
@@ -67,11 +61,24 @@ final class IntakeCommandModel {
 
     func clearMessage() { message = nil }
 
-    /// Does nothing if `action` is already in flight. The token is minted per send: a resend
-    /// after a timeout is a new command, since the first may still be queued on the Mac.
+    /// Forget everything in flight (unpair): a late ack or deadline must not touch state that
+    /// now belongs to nobody.
+    func cancelAll() {
+        for deadline in deadlines.values { deadline.cancel() }
+        deadlines = [:]
+        inFlight = []
+        retryTokens = [:]
+        message = nil
+    }
+
+    /// Does nothing if `action` is already in flight. A timeout cannot tell "the Mac never got
+    /// it" from "it got it and the ack was lost", so the timed-out token is remembered and the
+    /// next send of the same action reuses it: the Mac dedupes on the token, which is what
+    /// makes the retry safe. It is forgotten on an ack or a `.server` err (a definitive answer)
+    /// and on `.disconnected` (never sent), after which a fresh token is right.
     func send(_ action: IntakeAction, command: (UUID) -> FleetCommand, onAck: @escaping () -> Void) {
         guard !inFlight.contains(action) else { return }
-        let token = UUID()
+        let token = retryTokens[action] ?? UUID()
         inFlight.insert(action)
         message = nil
 
@@ -83,14 +90,23 @@ final class IntakeCommandModel {
             guard !Task.isCancelled, let self, self.deadlines.removeValue(forKey: token) != nil
             else { return }
             self.inFlight.remove(action)
+            self.retryTokens[action] = token
             self.message = CommandCopy.message(for: nil)
         }
 
+        guard let commander else {
+            deadlines.removeValue(forKey: token)?.cancel()
+            inFlight.remove(action)
+            retryTokens[action] = nil
+            message = CommandCopy.message(for: .disconnected)
+            return
+        }
         commander.sendIntake(command(token)) { [weak self] result in
             // Whichever of the answer and the deadline claims the token first wins.
             guard let self, let deadline = self.deadlines.removeValue(forKey: token) else { return }
             deadline.cancel()
             self.inFlight.remove(action)
+            self.retryTokens[action] = nil
             switch result {
             case .success: onAck()
             case .failure(let error): self.message = CommandCopy.message(for: error)
