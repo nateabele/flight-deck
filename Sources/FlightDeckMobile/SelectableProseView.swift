@@ -1,7 +1,16 @@
 import SwiftUI
 import UIKit
 
-/// A run of prose the reader can highlight, with **Reply** in the edit menu beside Copy.
+/// One item the edit menu offers on a selection, beside Copy: Reply in a conversation, Note… in
+/// a plan. `perform` is handed the selected text as rendered.
+struct ProseAction {
+    let title: String
+    let systemImage: String
+    let perform: (String) -> Void
+}
+
+/// A run of prose the reader can highlight, with the caller's actions (Reply, Note…) in the edit
+/// menu beside Copy.
 ///
 /// **Why a `UITextView` and not `Text`.** `.textSelection(.enabled)` makes prose selectable and
 /// gives the caller nothing back: no selected substring, no place to hang an action.
@@ -13,10 +22,10 @@ import UIKit
 /// attributes — see that file for why one design ends up with two renderers.
 struct SelectableProseView: UIViewRepresentable {
     let markdown: String
-    /// What Reply does with the highlighted text. The view knows nothing about composers.
-    /// `nil` when nothing is behind the text to reply into (the plan reader): the menu is then
-    /// the system's own, with no Reply that does nothing.
-    let onReply: ((String) -> Void)?
+    /// What the edit menu adds for a selection. The view knows nothing about composers or
+    /// notes. Empty when nothing is behind the text to act on (a plan the maintainer cannot annotate):
+    /// the menu is then the system's own, with no item that does nothing.
+    var actions: [ProseAction] = []
 
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
@@ -42,7 +51,7 @@ struct SelectableProseView: UIViewRepresentable {
     }
 
     func updateUIView(_ view: UITextView, context: Context) {
-        context.coordinator.onReply = onReply
+        context.coordinator.actions = actions
         context.coordinator.apply(markdown, to: view)
     }
 
@@ -64,10 +73,10 @@ struct SelectableProseView: UIViewRepresentable {
         return CGSize(width: width, height: ceil(size.height))
     }
 
-    func makeCoordinator() -> Coordinator { Coordinator(onReply: onReply) }
+    func makeCoordinator() -> Coordinator { Coordinator(actions: actions) }
 
     final class Coordinator: NSObject, UITextViewDelegate {
-        var onReply: ((String) -> Void)?
+        var actions: [ProseAction]
 
         /// The last markdown parsed, and what it parsed to. `sizeThatFits` and `updateUIView`
         /// both need the attributed string and SwiftUI calls them in either order and more than
@@ -95,8 +104,8 @@ struct SelectableProseView: UIViewRepresentable {
         /// can see the guard above short-circuit without timing anything.
         private(set) var assignmentCount = 0
 
-        init(onReply: ((String) -> Void)?) {
-            self.onReply = onReply
+        init(actions: [ProseAction]) {
+            self.actions = actions
         }
 
         /// Put `markdown` into `view`, parsing only when it is genuinely new, and assigning
@@ -117,23 +126,24 @@ struct SelectableProseView: UIViewRepresentable {
             assignmentCount += 1
         }
 
-        /// **Reply is appended, not spliced in beside Copy.** The suggested actions arrive as an
-        /// opaque list whose contents are the system's to change between releases, and reaching
-        /// into it to find Copy is a lookup that silently does nothing the first time Apple
-        /// renames it. Appended, Reply is the last item in the bar — which on a selection with
-        /// the standard actions is the position immediately after Copy anyway.
+        /// **The actions are appended, not spliced in beside Copy.** The suggested actions arrive
+        /// as an opaque list whose contents are the system's to change between releases, and
+        /// reaching into it to find Copy is a lookup that silently does nothing the first time
+        /// Apple renames it. Appended, they are the last items in the bar — which on a selection
+        /// with the standard actions is the position immediately after Copy anyway.
         func textView(
             _ textView: UITextView,
             editMenuForTextIn range: NSRange,
             suggestedActions: [UIMenuElement]
         ) -> UIMenu? {
-            guard range.length > 0, onReply != nil else { return nil }
+            guard range.length > 0, !actions.isEmpty else { return nil }
             let selected = (textView.text as NSString).substring(with: range)
-            let reply = UIAction(title: "Reply", image: UIImage(systemName: "arrowshape.turn.up.left")) {
-                [weak self] _ in
-                self?.onReply?(selected)
+            let added = actions.map { action in
+                UIAction(title: action.title, image: UIImage(systemName: action.systemImage)) { _ in
+                    action.perform(selected)
+                }
             }
-            return UIMenu(children: suggestedActions + [reply])
+            return UIMenu(children: suggestedActions + added)
         }
     }
 

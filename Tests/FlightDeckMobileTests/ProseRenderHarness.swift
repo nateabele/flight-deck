@@ -41,7 +41,7 @@ final class ProseRenderHarness: XCTestCase {
             .markdownTheme(TimelineMarkdown.theme)
             .font(.body)
             .frame(width: 346, alignment: .leading)
-        let attributedOnly = SelectableProseView(markdown: Self.sample, onReply: { _ in })
+        let attributedOnly = SelectableProseView(markdown: Self.sample)
             .font(.body)
             .frame(width: 346, alignment: .leading)
         print("HEIGHT markdown=\(measure(markdownOnly)) attributed=\(measure(attributedOnly))")
@@ -63,7 +63,7 @@ final class ProseRenderHarness: XCTestCase {
                 .font(.body)
             Divider()
             label("SelectableProseView — the same theme, as attributes")
-            SelectableProseView(markdown: Self.sample, onReply: { _ in })
+            SelectableProseView(markdown: Self.sample)
                 .font(.body)
         }
         .padding(12)
