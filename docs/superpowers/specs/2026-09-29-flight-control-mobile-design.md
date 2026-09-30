@@ -579,6 +579,73 @@ Where the build and this spec differ, the build is right and these are the corre
 17. The plan reader never shows a stale plan as a diff: a failed load shows an inline message with
     Retry, and a reply is applied only if it answers the latest request.
 
+### 11.2 Phase 2 as built (2026-09-29)
+
+Built on branch `fc-mobile-steer` from `docs/superpowers/plans/2026-09-29-flight-control-mobile-steer.md`.
+Where the build and this spec differ, the build is right and these are the corrections:
+
+1. **`steer` gate.** `WireIntakeDetail.steer` is true only from a Mac that accepts `intake.*`
+   commands; the phone sends no `intake.*` command without it (an older Mac throws on an unknown
+   command op and drops the socket — only `req` is salvaged).
+2. **One transport rule.** `TransportRules.make(tape:config:)` (moved from `ShapingModel.enabled`
+   + `PlanningActions.shaping`) drives the desktop's control bar, its Run menu, the Mac's
+   validation of phone commands, and `WireBoard.controls` (`WireControls`: enabled key names,
+   extend/trim stage, cycle name and planned count).
+3. **Four commands.** `intake.tape` (step/nextMajor/toReview/pause/stop/extend/trim + stage),
+   `intake.defaultPlay`, `intake.note` (noteID, kind, text, checkpoint?, block?, quote?),
+   `intake.removeNote`. Refusal codes: `unknown_intake`, `intake_moved_on`, `not_allowed`,
+   `unknown_command`, `unknown_mode`, `unknown_kind`, `empty_note`, `unknown_checkpoint`,
+   `unknown_block`, `note_consumed`; each logged `check=<code> intake=<id>`.
+4. **Tokens.** Per intake, the last 16 accepted tokens. An already-accepted token is acked BEFORE
+   validation (so a retry after a lost ack is acked, not refused); a token is remembered only
+   after its command passes validation (a refused command leaves its token usable). In memory
+   only (a Mac app restart forgets them).
+5. **Phone retries.** The phone keeps a timed-out action's token and reuses it on the next send
+   of the same action, so the Mac deduplicates a retry. A kept token lives at most 60 s (past
+   that a send is a new press) and is cleared by an ack or a definite err, including one that
+   arrives after the deadline — a late ack must not leave a token that turns a deliberate press
+   hours later into a duplicate the Mac acks without acting. A `.disconnected` after the write
+   (the socket dropped with the command in flight, which may have landed) also keeps the token
+   and says "Lost the connection — your Mac may not have got this."; a `.disconnected` before
+   anything was written (no socket) keeps "Not connected to your Mac, so this wasn't sent." and
+   leaves any earlier kept token as it was. **Mac backstop:** a note whose `noteID` is already
+   pending (on the tape or queued in `commands.jsonl`) is acked without being queued again, so
+   a retry under a lost token cannot add the same note twice.
+6. **Queued notes count as pending.** `removeNote` accepts notes still in `commands.jsonl` (not
+   yet acked by the runner), not only `tape.pendingNotes`.
+7. **Anchoring a phone note.** The phone sends the checkpoint it is reading, the `PlanBlocks`
+   block index, and the RENDERED selected text. The Mac finds that block's own occurrence by a
+   forward cursor walk over the blocks (never a substring hit in an earlier block), maps the
+   rendered text to a source range with `RenderedQuoteLocator` (inline markers, links, heading
+   prefixes, whitespace normalised on both sides), and builds the anchor with
+   `NoteAnchor(checkpoint:selecting:in:)`. Not found → the whole block (logged
+   `check=note_anchor_fallback`); blank quote → whole block without the log. Never a different
+   passage.
+8. **Rounds ±.** The phone shows "<Cycle> ×N − +" with each button enabled only when its stage
+   equals the labelled stage (a − never trims a different stage than the label names).
+9. **Glyphs.** The phone's transport keys use the Mac control bar's glyphs (pause.fill,
+   forward.end.fill, forward.end.alt.fill, forward.fill + small diamond.fill, stop.fill).
+10. **Keys.** Tap = command; long-press on a play key = make default (haptic); VoiceOver gets a
+    play key as a button plus a "Make default" action. Pause and Stop carry no long-press (it
+    swallowed a firm press), and Pause is off while the Mac is already pausing (Stop stays live).
+    An acknowledgement ("Pausing…", "Stopping…") is drawn at full strength on its off key. Stop always opens "Stop the run?" (destructive
+    Stop Run, Cancel). Keys and ± are disabled while disconnected.
+11. **Annotation on the phone.** "Note…" in the text-selection edit menu (the edit menu takes a
+    list of `ProseAction`s; the timeline keeps its single Reply). A per-passage menu ("Add note
+    to this passage", "Show N notes") replaces "tap a paragraph to note it" — tapping text is
+    selection's. A footer button adds a plan-wide note (no checkpoint, no block, no Highlight).
+12. **Notes only on the current plan.** Note controls appear only when the reader shows the
+    head; notes are made against the checkpoint captured when the draft is created, with a
+    noteID minted once per draft.
+13. **Unsent notes stay visible.** A `NoteOutbox` keeps a sent note on screen ("Not yet sent"
+    until ack, then until the plan lists it) because the Mac's plan projection lists only
+    runner-acked notes. A failed note offers Retry (same token, same noteID) or Discard — not
+    Edit (a retry with edited text would be deduplicated away). A Delete refused as
+    `note_consumed` drops the card.
+14. **Deletes confirm.** Deleting a pending note ("Delete this note?") and discarding a failed
+    draft ("Discard this note?") both confirm — the phone has no Undo, unlike the Mac's notes
+    rail.
+
 ## 12. Non-goals
 
 Push of any kind (APNs, local notifications, Live Activities, widgets) — D4; iPad split view — D5;

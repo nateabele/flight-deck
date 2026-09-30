@@ -1198,6 +1198,27 @@ final class FleetService: ObservableObject {
             if let code = store.submitPrompt(text, token: token, to: id).errorCode {
                 return .err(cid: cid, code: code)
             }
+        case .intakeTape(let id, let token, let command, let stage):
+            // No validation here — `IntakeService.phoneTape` is the one place that knows the
+            // tape and the rules (the store-method rule stated at `.prompt`).
+            if let code = store.intakeService.phoneTape(id, token: token, command: command, stage: stage) {
+                return .err(cid: cid, code: code)
+            }
+        case .intakeDefaultPlay(let id, let token, let mode):
+            if let code = store.intakeService.phoneDefaultPlay(id, token: token, mode: mode) {
+                return .err(cid: cid, code: code)
+            }
+        case .intakeNote(let id, let token, let noteID, let kind, let text, let checkpoint, let block, let quote):
+            if let code = store.intakeService.phoneNote(
+                id, token: token, noteID: noteID, kind: kind, text: text,
+                checkpoint: checkpoint, block: block, quote: quote
+            ) {
+                return .err(cid: cid, code: code)
+            }
+        case .intakeRemoveNote(let id, let token, let noteID):
+            if let code = store.intakeService.phoneRemoveNote(id, token: token, noteID: noteID) {
+                return .err(cid: cid, code: code)
+            }
         case .answerPrompt(let id, let token, let call, let answer):
             // Every refusal is the service's and the store's to make, for the reason `.prompt`
             // states: they are the only things that know the tab's agent, its status, its

@@ -1,5 +1,7 @@
 import AppKit
+import FleetKit
 import IntakeKit
+import OSLog
 
 /// Which harness, model and effort run triage.
 struct TriageSettings: Equatable, Sendable {
@@ -689,6 +691,172 @@ final class IntakeService: ObservableObject {
     func setDefaultPlay(_ id: UUID, _ mode: PlayMode) {
         guard let config = intake(id)?.roundConfig, config.defaultPlay != mode else { return }
         mutate(id) { $0.roundConfig = RoundConfigEditor.setting(config) { $0.defaultPlay = mode } }
+    }
+
+    // MARK: - Phone commands (spec §6.5)
+
+    /// The phone's refusals land in the fleet log beside `FleetService`'s own `check=` lines, so
+    /// one `log stream --predicate 'category == "fleet"'` shows a whole phone exchange.
+    private static let logger = Logger(subsystem: "dev.flightdeck.FlightDeck", category: "fleet")
+
+    /// Phone command tokens already accepted, per intake — a repeat is acked without being
+    /// applied twice (a retry after a lost ack must not queue a second Step). Last 16 kept.
+    private var phoneTokens: [UUID: [UUID]] = [:]
+    static let maxRememberedPhoneTokens = 16
+
+    /// Whether `token` was already accepted for `id`. Checked BEFORE validating: a retry after
+    /// a lost ack meets the state its first delivery changed — the note it removed is gone, the
+    /// tape it paused is paused — and validating that would refuse a command that in fact landed.
+    private func alreadyAccepted(_ token: UUID, for id: UUID) -> Bool {
+        phoneTokens[id]?.contains(token) == true
+    }
+
+    /// Remembers `token` as accepted — only once the command passed validation, so a refusal
+    /// does not burn the token and a corrected retry with the same one still applies.
+    private func accept(_ token: UUID, for id: UUID) {
+        var seen = phoneTokens[id, default: []]
+        seen.append(token)
+        if seen.count > Self.maxRememberedPhoneTokens { seen.removeFirst(seen.count - Self.maxRememberedPhoneTokens) }
+        phoneTokens[id] = seen
+    }
+
+    private func refuse(_ code: String, _ id: UUID) -> String {
+        Self.logger.info("check=\(code, privacy: .public) intake=\(id, privacy: .public)")
+        return code
+    }
+
+    /// The intake a phone command may act on, or the refusal code: `send` silently drops a
+    /// command for an intake that has left shaping, so the phone is told instead.
+    private func notShaping(_ id: UUID) -> String? {
+        guard let i = intake(id) else { return refuse("unknown_intake", id) }
+        return i.state == .shaping ? nil : refuse("intake_moved_on", id)
+    }
+
+    /// The phone's transport key (spec §6.5 `intakeTape`). Validated against the same
+    /// `TransportRules` the desktop's control bar uses, so the phone cannot do what the Mac's
+    /// own buttons would not. Returns nil when accepted, else a refusal code.
+    func phoneTape(_ id: UUID, token: UUID, command: String, stage: String?) -> String? {
+        if alreadyAccepted(token, for: id) { return nil }
+        if let refusal = notShaping(id) { return refusal }
+        let rules = TransportRules.make(tape: storedTape(id), config: intake(id)?.roundConfig)
+        let tapeCommand: TapeCommand, button: TransportButton
+        switch command {
+        case "step": (tapeCommand, button) = (.step, .step)
+        case "nextMajor": (tapeCommand, button) = (.nextMajor, .nextMajor)
+        case "toReview": (tapeCommand, button) = (.toReview, .toReview)
+        case "pause": (tapeCommand, button) = (.pause, .pause)
+        case "stop": (tapeCommand, button) = (.stop, .stop)
+        // ± carry the stage the phone was shown, and must still be the rule's: a phone acting on
+        // a stale board would otherwise lengthen a stage the Mac has already moved past.
+        case "extend":
+            guard let s = rules.extendStage, stage == s.rawValue else { return refuse("not_allowed", id) }
+            (tapeCommand, button) = (.extend(s, by: 1), .extend)
+        case "trim":
+            guard let s = rules.trimStage, stage == s.rawValue else { return refuse("not_allowed", id) }
+            (tapeCommand, button) = (.trim(s, by: 1), .trim)
+        default: return refuse("unknown_command", id)
+        }
+        guard rules.enabled.contains(button) else { return refuse("not_allowed", id) }
+        accept(token, for: id)
+        send(id, tapeCommand)
+        return nil
+    }
+
+    /// The phone's choice of default play (spec §6.5 `intakeDefaultPlay`).
+    func phoneDefaultPlay(_ id: UUID, token: UUID, mode: String) -> String? {
+        if alreadyAccepted(token, for: id) { return nil }
+        if let refusal = notShaping(id) { return refusal }
+        guard let play = PlayMode(rawValue: mode) else { return refuse("unknown_mode", id) }
+        accept(token, for: id)
+        setDefaultPlay(id, play)
+        return nil
+    }
+
+    /// A note from the phone (spec §6.5 `intakeNote`). The phone sends what it SHOWED — a block
+    /// index and the rendered phrase — and the Mac builds the anchor from the markdown source,
+    /// so the anchor is the same one the desktop's own highlight gesture would make. A phrase
+    /// the source cannot be matched to anchors to its whole block: coarser, never the wrong one.
+    func phoneNote(_ id: UUID, token: UUID, noteID: UUID, kind: String, text: String,
+                   checkpoint: Int?, block: Int?, quote: String?) -> String? {
+        if alreadyAccepted(token, for: id) { return nil }
+        if let refusal = notShaping(id) { return refusal }
+        // The backstop behind the token: a note id already pending IS this note, even under a
+        // fresh token — a phone whose link dropped after the write may have lost the token it
+        // sent it with — so it is acked without queuing a second copy.
+        if pendingNotes(id).contains(where: { $0.id == noteID }) {
+            accept(token, for: id)
+            return nil
+        }
+        guard let noteKind = NoteKind(rawValue: kind) else { return refuse("unknown_kind", id) }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        // An empty comment is a Highlight; every other kind says something or is not a note.
+        guard !trimmed.isEmpty || noteKind == .comment else { return refuse("empty_note", id) }
+        var anchor: NoteAnchor?
+        if let checkpoint {
+            let load: (Int, String) -> Data? = { self.checkpointFile(id, checkpoint: $0, $1) }
+            guard let markdown = PlanSection.effectivePlan(checkpoint: checkpoint, tape: storedTape(id), loadFile: load)
+            else { return refuse("unknown_checkpoint", id) }
+            if let block {
+                let blocks = PlanBlocks.split(markdown)
+                guard let b = blocks.block(at: block) else { return refuse("unknown_block", id) }
+                let scope = Self.occurrence(of: b, in: blocks, markdown: markdown)
+                // A blank quote is no phrase: the whole block, as for nil, and not a fallback.
+                let phrase = quote.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0 }
+                let found = phrase.flatMap { RenderedQuoteLocator.range(of: $0, within: scope, of: markdown) }
+                if phrase != nil, found == nil {
+                    Self.logger.info("check=note_anchor_fallback intake=\(id, privacy: .public)")
+                }
+                anchor = NoteAnchor(checkpoint: checkpoint, selecting: found ?? scope, in: markdown)
+            }
+        } else if block != nil {
+            return refuse("unknown_checkpoint", id)
+        }
+        accept(token, for: id)
+        send(id, .note(PlanNote(id: noteID, kind: noteKind, note: trimmed, anchor: anchor)))
+        return nil
+    }
+
+    /// The phone withdrawing a note it added (spec §6.5 `intakeRemoveNote`) — only while it is
+    /// still pending: a note a round has read has already shaped the plan.
+    func phoneRemoveNote(_ id: UUID, token: UUID, noteID: UUID) -> String? {
+        if alreadyAccepted(token, for: id) { return nil }
+        if let refusal = notShaping(id) { return refusal }
+        guard pendingNotes(id).contains(where: { $0.id == noteID }) else { return refuse("note_consumed", id) }
+        accept(token, for: id)
+        send(id, .removeNote(noteID))
+        return nil
+    }
+
+    /// `id`'s notes no round has read yet: the tape's pending notes with the queued note commands
+    /// no runner has acked folded on top. `TapeOverlay` does not fold notes, so a note sent a
+    /// moment ago is only a line in `commands.jsonl` until a runner reads it — and withdrawing it
+    /// then is exactly the phone's undo, which must not be refused as consumed.
+    private func pendingNotes(_ id: UUID) -> [PlanNote] {
+        let tape = storedTape(id)
+        return tapeStore(id).commands(after: tape.ackedCommandSeq).reduce(into: tape.pendingNotes) { notes, queued in
+            switch queued.command {
+            case .note(let note): notes.append(note)
+            case .removeNote(let withdrawn): notes.removeAll { $0.id == withdrawn }
+            default: break
+            }
+        }
+    }
+
+    /// Block `b`'s own place in `markdown`, found by walking every block up to it in order, each
+    /// search starting where the previous hit ended. Block text is verbatim source, but a bare
+    /// search matches substrings: `- TBD` would be found inside an earlier `- TBD later`, or a
+    /// paragraph `Scope` inside `## Scope`, and the note anchored on the wrong passage. Walking
+    /// the blocks in order also takes the second of two identical items for the second.
+    /// The whole plan if a search fails, which `split` makes impossible in practice.
+    static func occurrence(of b: PlanBlocks.Block, in blocks: PlanBlocks, markdown: String) -> Range<String.Index> {
+        let whole = markdown.startIndex..<markdown.endIndex
+        var from = markdown.startIndex
+        for block in blocks.blocks.prefix(b.index + 1) {
+            guard let hit = markdown.range(of: block.text, range: from..<markdown.endIndex) else { return whole }
+            if block.index == b.index { return hit }
+            from = hit.upperBound
+        }
+        return whole
     }
 
     /// Which models planning rounds can seat: the PATH probe triage uses, run off the main

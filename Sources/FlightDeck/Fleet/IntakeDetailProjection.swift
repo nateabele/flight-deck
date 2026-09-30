@@ -136,7 +136,8 @@ enum IntakeDetailProjection {
             rounds: (tape?.checkpoints ?? []).reversed().map(round),
             questions: i.exchanges.isEmpty ? nil : WireQuestions(open: open, answered: answered),
             choice: choice, failure: failure, pendingNotes: tape?.pendingNotes.count ?? 0, halt: halt,
-            headCheckpoint: tape.flatMap { PlanSection.planHead(tape: $0, loadFile: load) }, servedAt: servedAt)
+            headCheckpoint: tape.flatMap { PlanSection.planHead(tape: $0, loadFile: load) }, servedAt: servedAt,
+            steer: true)
         detail.etag = etag(detail)
         return detail
     }
@@ -171,6 +172,23 @@ enum IntakeDetailProjection {
             nowName: m.now.value, nowChip: m.nowChip, clockCaption: caption, clockSince: since, clockText: text,
             stopsAt: m.stopsAt.value, stopSlotID: m.stopSlotID, callingAt: m.callingAt.value,
             convergence: cell.map { WireConvergence(word: $0.word, amber: $0.tone == .amber, spark: $0.spark) },
-            defaultPlay: config.defaultPlay.rawValue)
+            defaultPlay: config.defaultPlay.rawValue,
+            controls: controls(TransportRules.make(tape: tape, config: config), board: m))
+    }
+
+    /// `rules` as the phone reads them. `annotate` is never sent — notes have their own gate —
+    /// and the order is the bar's, so the list is stable and the etag doesn't churn on a Set's
+    /// iteration order. The cycle is the one ± acts on, its planned count the board's own slots.
+    static func controls(_ rules: TransportRules, board: BoardModel) -> WireControls {
+        let order: [TransportButton] = [.step, .nextMajor, .toReview, .pause, .stop, .extend, .trim]
+        let names: [TransportButton: String] = [.step: "step", .nextMajor: "nextMajor", .toReview: "toReview",
+                                                .pause: "pause", .stop: "stop", .extend: "extend", .trim: "trim"]
+        let stage = rules.extendStage ?? rules.trimStage
+        let group = stage.map { $0 == .refine ? "REFINE" : "POLISH" }
+        return WireControls(
+            enabled: order.filter(rules.enabled.contains).compactMap { names[$0] },
+            extendStage: rules.extendStage?.rawValue, trimStage: rules.trimStage?.rawValue,
+            cycleName: stage.map { $0 == .refine ? "Refine" : "Polish" },
+            cyclePlanned: group.map { g in board.slots.filter { $0.group == g }.count })
     }
 }

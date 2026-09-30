@@ -4,7 +4,7 @@
 
 Start here if you're picking up Flight Deck fresh. This is the map; the linked docs have the detail.
 
-> **▶ Flight Control on the phone (2026-09-29) — Phase 1 (watch, read-only) built on branch `fc-mobile-watch`.**
+> **▶ Flight Control on the phone (2026-09-29) — Phase 1 (watch, read-only) built on branch `fc-mobile-watch`; Phase 2 (steer) on `fc-mobile-steer`.**
 > The phone lists a project's intakes at the top of its section (with a "N need you" badge and an
 > in-app banner on a live transition to needing you), and opens an intake to its board strip,
 > agents, rounds, round detail, clarifications, plan outline and plan reader (changes and notes
@@ -15,9 +15,20 @@ Start here if you're picking up Flight Deck fresh. This is the map; the linked d
 > is `Sources/FlightDeck/Fleet/` plus `SessionStore.intakeSummaries`; the phone side is flat in
 > `Sources/FlightDeckMobile/` (`FlightControlModel`, `IntakeDetailModel`, `IntakeScreen`,
 > `BoardStrip`, `AgentRow`, `RoundDetailScreen`, `PlanOutlineScreen`, `PlanReaderScreen`, …).
-> Phases 2 (steer: transport, extend/trim, notes) and 3 (unblock, start, finish: answers,
-> fidelity, retry, review and release) are planned from the same spec.
-> - **Spec:** [superpowers/specs/2026-09-29-flight-control-mobile-design.md](superpowers/specs/2026-09-29-flight-control-mobile-design.md) (§11.1: as built) · **Plan:** [superpowers/plans/2026-09-29-flight-control-mobile-watch.md](superpowers/plans/2026-09-29-flight-control-mobile-watch.md) · **Terrain:** [FLIGHT-CONTROL-MOBILE-HANDOFF.md](FLIGHT-CONTROL-MOBILE-HANDOFF.md) · **Device checks:** [MOBILE.md](MOBILE.md) items 75–79.
+> **Phase 2 (steer) built on branch `fc-mobile-steer`:** the strip grows a transport row (Pause,
+> Step, Major, Review, Stop — the Mac's glyphs; tap acts, long-press on a play key sets the
+> default, Stop always confirms), the Rounds header a "Refine ×N − +", and the plan reader notes —
+> "Note…" in the selection menu, a per-passage ⋯ menu, a plan-wide note, Delete on a pending note,
+> with unsent notes kept on screen by a `NoteOutbox`. Four commands (`intake.tape`,
+> `intake.defaultPlay`, `intake.note`, `intake.removeNote`), sent only when the detail's `steer`
+> is true (an older Mac drops the socket on an unknown command), validated on the Mac by the
+> same `TransportRules` that drive its control bar and deduplicated by token. A phone note's
+> rendered quote is found in its own block's source by `RenderedQuoteLocator`, falling back to
+> the whole block, never another passage. Phone side: `TransportKeys`, `IntakeCommands`,
+> `NoteComposer`, `NoteSheet`; Mac side: `IntakeService` and `TransportRules`.
+> Phase 3 (unblock, start, finish: answers, fidelity, retry, review and release) is planned from
+> the same spec.
+> - **Spec:** [superpowers/specs/2026-09-29-flight-control-mobile-design.md](superpowers/specs/2026-09-29-flight-control-mobile-design.md) (§11.1, §11.2: as built) · **Plans:** [watch](superpowers/plans/2026-09-29-flight-control-mobile-watch.md), [steer](superpowers/plans/2026-09-29-flight-control-mobile-steer.md) · **Terrain:** [FLIGHT-CONTROL-MOBILE-HANDOFF.md](FLIGHT-CONTROL-MOBILE-HANDOFF.md) · **Device checks:** [MOBILE.md](MOBILE.md) items 75–93.
 
 > **▶ Flight Control coverage × fidelity (2026-09-29) — built, on branch `worktree-coverage`, not yet merged to `master`.**
 > Refine rounds can now cross-check: a second model family (`RoundConfig.crossReviewer`)

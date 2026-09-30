@@ -70,19 +70,22 @@ public struct WireIntakeDetail: Codable, Equatable, Sendable {
     public var halt: String?
     public var headCheckpoint: Int?
     public var servedAt: Date
+    /// true from a Mac that accepts `intake.*` commands — the phone's ONLY licence to send them;
+    /// an older Mac drops the socket on an unknown command. nil from a Phase-1 Mac.
+    public var steer: Bool?
 
     public init(
         etag: String, project: UUID, summary: WireIntakeSummary, intent: String,
         progress: [WireProgressPhase] = [], board: WireBoard? = nil, agents: [WireAgent] = [],
         rounds: [WireRound] = [], questions: WireQuestions? = nil, choice: WireChoice? = nil,
         failure: WireFailure? = nil, pendingNotes: Int = 0, halt: String? = nil,
-        headCheckpoint: Int? = nil, servedAt: Date
+        headCheckpoint: Int? = nil, servedAt: Date, steer: Bool? = nil
     ) {
         self.etag = etag; self.project = project; self.summary = summary; self.intent = intent
         self.progress = progress; self.board = board; self.agents = agents; self.rounds = rounds
         self.questions = questions; self.choice = choice; self.failure = failure
         self.pendingNotes = pendingNotes; self.halt = halt; self.headCheckpoint = headCheckpoint
-        self.servedAt = servedAt
+        self.servedAt = servedAt; self.steer = steer
     }
 }
 
@@ -109,17 +112,38 @@ public struct WireBoard: Codable, Equatable, Sendable {
     public var callingAt: String
     public var convergence: WireConvergence?
     public var defaultPlay: String
+    /// The transport keys this tape allows right now; nil from a Phase-1 Mac.
+    public var controls: WireControls?
 
     public init(
         slots: [WireSlot] = [], nowName: String, nowChip: String, clockCaption: String,
         clockSince: Date? = nil, clockText: String? = nil, stopsAt: String,
         stopSlotID: String? = nil, callingAt: String, convergence: WireConvergence? = nil,
-        defaultPlay: String
+        defaultPlay: String, controls: WireControls? = nil
     ) {
         self.slots = slots; self.nowName = nowName; self.nowChip = nowChip
         self.clockCaption = clockCaption; self.clockSince = clockSince; self.clockText = clockText
         self.stopsAt = stopsAt; self.stopSlotID = stopSlotID; self.callingAt = callingAt
-        self.convergence = convergence; self.defaultPlay = defaultPlay
+        self.convergence = convergence; self.defaultPlay = defaultPlay; self.controls = controls
+    }
+}
+
+/// The Mac's `TransportRules`, as strings; nil from a Phase-1 Mac. `enabled` names the keys the
+/// Mac would accept now (`step`, `nextMajor`, `toReview`, `pause`, `stop`, `extend`, `trim`), so
+/// the phone never offers one it would refuse; an unknown name from a newer Mac is ignored.
+/// `extendStage`/`trimStage` are the stage + and − act on; `cycleName` and `cyclePlanned` name
+/// that cycle and its planned round count for the ± label.
+public struct WireControls: Codable, Equatable, Sendable {
+    public var enabled: [String]
+    public var extendStage: String?
+    public var trimStage: String?
+    public var cycleName: String?
+    public var cyclePlanned: Int?
+
+    public init(enabled: [String], extendStage: String? = nil, trimStage: String? = nil,
+                cycleName: String? = nil, cyclePlanned: Int? = nil) {
+        self.enabled = enabled; self.extendStage = extendStage; self.trimStage = trimStage
+        self.cycleName = cycleName; self.cyclePlanned = cyclePlanned
     }
 }
 

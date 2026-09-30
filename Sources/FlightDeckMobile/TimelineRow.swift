@@ -502,7 +502,9 @@ struct TimelineSegmentView: View {
         switch segment {
         case .prose(let text):
             if let onReply {
-                SelectableProseView(markdown: text, onReply: onReply)
+                SelectableProseView(markdown: text, actions: [
+                    ProseAction(title: "Reply", systemImage: "arrowshape.turn.up.left", perform: onReply),
+                ])
             } else {
                 // No composer behind this row, so nothing to reply into. MarkdownUI draws it,
                 // which is also the renderer the offscreen harnesses have always compared

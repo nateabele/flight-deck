@@ -173,6 +173,46 @@ final class IntakeDetailProjectionTests: XCTestCase {
         XCTAssertNotEqual(before.etag, after.etag)
     }
 
+    /// The phone's keys come from the Mac's `TransportRules`, never its own guess: a running
+    /// round offers Pause and Stop only (Annotate is never sent — notes have their own gate), and
+    /// `steer` is this Mac's licence for the phone to send `intake.*` at all.
+    func testAShapingDetailCarriesControlsAndSteer() async throws {
+        let (running, _) = try seedRunningDraft()
+        let paused = try seed(.shaping)
+        try updateTape(paused.id) { tape in
+            tape.status = .paused
+            tape.checkpoints = [Checkpoint(id: 1, stage: .draft, round: 0, major: true, createdAt: self.clockNow),
+                                Checkpoint(id: 2, stage: .synthesis, round: 0, major: true, createdAt: self.clockNow)]
+        }
+        let svc = await makeService()
+        svc.pollTapes()
+        let r = try XCTUnwrap(IntakeDetailProjection.detail(running.id, project: UUID(), service: svc, servedAt: Date()))
+        XCTAssertEqual(r.board?.controls?.enabled, ["pause", "stop"])
+        XCTAssertEqual(r.steer, true)
+
+        let p = try XCTUnwrap(IntakeDetailProjection.detail(paused.id, project: UUID(), service: svc, servedAt: Date()))
+        let controls = try XCTUnwrap(p.board?.controls)
+        XCTAssertEqual(controls.enabled, ["step", "nextMajor", "toReview", "extend", "trim"])
+        XCTAssertEqual(controls.extendStage, "refine")
+        XCTAssertEqual(controls.trimStage, "refine")
+        XCTAssertEqual(controls.cycleName, "Refine")
+        let refineSlots = try XCTUnwrap(p.board?.slots.filter { $0.group == "REFINE" }.count)
+        XCTAssertGreaterThan(refineSlots, 0)
+        XCTAssertEqual(controls.cyclePlanned, refineSlots)
+    }
+
+    func testTheEtagIsStableWithControls() async throws {
+        let (i, _) = try seedRunningDraft()
+        let svc = await makeService()
+        svc.pollTapes()
+        let a = try XCTUnwrap(IntakeDetailProjection.detail(i.id, project: UUID(), service: svc,
+                                                             servedAt: Date(timeIntervalSinceReferenceDate: 6_000)))
+        let b = try XCTUnwrap(IntakeDetailProjection.detail(i.id, project: a.project, service: svc,
+                                                             servedAt: Date(timeIntervalSinceReferenceDate: 9_000)))
+        XCTAssertNotNil(a.board?.controls)
+        XCTAssertEqual(a.etag, b.etag, "controls carry no clock: only servedAt differs, so the etag must not move")
+    }
+
     func testNeedsAnswersCarriesOpenAndAnsweredRounds() async throws {
         var i = try seed(.needsAnswers)
         i.exchanges = [TriageExchange(questions: ["Both?"], answers: ["Both"]), TriageExchange(questions: ["Who?", "Where?"])]

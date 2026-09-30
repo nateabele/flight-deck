@@ -592,11 +592,81 @@ page.
     with it, and run a Flight Control round on the Mac for a few minutes. The old phone stays
     connected and shows sessions as before. Wrong: the old phone's connection drops or loops
     when an intake changes.
+80. **Pause a run from the phone.** With a run in the air, open the intake: the strip has a row
+    of five keys under the tape — Pause, Step, Major, Review, Stop — with only Pause and Stop
+    lit, and the strip is its usual few lines tall. Tap Pause: the key reads "Pausing…" at
+    once, and within about two seconds the Mac's control bar shows paused and the phone's
+    strip reads "· PAUSED". Until then the Pause key is off (a second tap does nothing) but its
+    "Pausing…" reads at full strength, and Stop stays lit. Wrong: no change on the tap, a
+    second tap that queues a second pause, or a strip that swells to fill half the screen
+    around its keys.
+81. **Stop a run from the phone, and change your mind first.** Tap Stop: a dialog titled "Stop
+    the run?" names the round in its message, with **Stop Run** in red and Cancel. Cancel: the
+    run carries on and nothing reaches the Mac (its log shows no `intake.tape`). Tap Stop
+    again and choose Stop Run: the key reads "Stopping…", every key dims, and the Mac's run
+    stops. Wrong: a run that stops without the dialog, or Stop Run as the bold default.
+82. **Tap versus long-press on a play key.** Paused, tap Step: one round runs. Long-press Major
+    for a second: a haptic tick, the small dot above the keys moves to Major, and the Mac's
+    control bar moves its default dot too — and NO round starts. Then hold **Pause** (while
+    running) and **Stop** each for a full second and let go: the long-press belongs to the play
+    keys only, so a firm press on either still acts — Pause reads "Pausing…", Stop opens its
+    dialog. Wrong: a long-press that also plays, a tap that moves the dot, or a held Pause/Stop
+    that does nothing.
+83. **Add and remove a Refine round.** The Rounds header reads "Rounds · Refine ×N" with − and
+    +. Tap +: the count reads N+1 on the phone and the Mac's plan shows the extra round. Tap −:
+    back to N. Neither asks first. Wrong: a count that changes on one end only, or a + still
+    lit once the Refine stage has finished.
+84. **Note a phrase with bold in it.** Open the plan at the head. Select a phrase that runs
+    across **bold** or `code` text, then open the selection menu: Copy, and after it **Note…**
+    (the arrow may be needed on a narrow selection). Note… opens a half sheet quoting the
+    phrase; pick Must change, type, tap Add. The card shows "Not yet sent" for a moment, then
+    becomes a pending note. On the Mac, the notes rail shows the note on exactly that phrase.
+    Wrong: no Note… in the menu, or the Mac pinning it on another paragraph (a phrase it
+    cannot find lands on the whole passage — never on a different one).
+85. **Note a passage from its menu.** Tap the ⋯ beside a paragraph: "Add note to this passage"
+    (and "Show N notes" when it has some). Choose Add: the menu closes and the sheet rises,
+    reading "About this passage". Wrong: the sheet failing to appear, appearing and dropping
+    at once, or the menu and sheet fighting (a second tap needed).
+86. **Type in the note sheet at half height.** Open the sheet and leave it at its half-height
+    stop. The keyboard rises: the text field stays visible above it, with the kind chips and
+    Add reachable. Type three lines. Wrong: the field hidden behind the keyboard, or the sheet
+    jumping to full height on its own.
+87. **Add a plan-wide note.** At the foot of the plan, "Add a note to the whole plan": the sheet
+    reads "About the whole plan" and offers no Highlight. Add one. On the Mac it appears with
+    no anchor. Wrong: a Highlight chip on this sheet, or the Mac pinning it to a passage.
+88. **Delete a pending note from inside its notes sheet.** Tap a passage's "1 note" badge; in the
+    sheet, tap Delete on a note you left: a "Delete this note?" dialog opens over the sheet
+    with **Delete Note** and Cancel. Delete Note: it is gone on the phone and from the Mac's
+    rail. Wrong: no dialog (a dialog anchored under a sheet never shows), or a delete with no
+    question asked.
+89. **Leave the reader with a note the runner has not read yet, and come back.** While a round
+    is running (so the runner will not fold your note until the round ends), add a note and
+    wait for "Not yet sent" to clear. Go back to the intake, then open the plan again. The
+    outbox that keeps an acked-but-queued note on screen belongs to the reader, so on re-entry
+    the note may be absent from the phone until the runner folds it at the round's end; then it
+    appears as a pending note. On the Mac it is in the notes rail throughout. Wrong: it never
+    reappears on the Mac.
+90. **Pull the network mid-send.** Type a note, turn on Airplane Mode, tap Add. The card stays
+    with its words; within about ten seconds "Couldn't reach your Mac." appears (or, if the
+    link dropped with the note already written, "Lost the connection — your Mac may not have
+    got this.") and the card offers Retry and Discard. Turn the network back on and Retry: exactly one note reaches the
+    Mac. Discard instead asks "Discard this note?" first. Wrong: the words lost, two notes on
+    the Mac after one Retry, or a Discard with no question.
+91. **Tap a key while disconnected.** With Airplane Mode on, the keys and ± are dimmed and do
+    nothing. Wrong: a tap that seems to do something, then fails later.
+92. **Refuse a stale key.** Pause on the phone, then press Play on the Mac before the phone
+    refreshes, and tap Pause again on the phone: at worst a message in words ("That isn't
+    possible right now."), and the screen catches up. Wrong: a raw code with no words, or a
+    key stuck in its in-progress word.
+93. **Pair this phone with an older Mac** (a Mac build from before the phone could steer). A
+    run's strip has NO transport row, the Rounds header has no ± and the reader offers no
+    Note…, no ⋯ and no "Add a note to the whole plan" — and the phone stays connected. Wrong:
+    any of those controls showing (the Mac would drop the connection on the first command).
 
 ## A second checklist: the iOS plumbing
 
-The seventy-nine items above test the *feature* — that pairing, replication, resume, revocation,
-typing into and answering a live agent, and watching Flight Control behave. These fifteen test the *app*, and they are
+The ninety-three items above test the *feature* — that pairing, replication, resume, revocation,
+typing into and answering a live agent, and watching and steering Flight Control behave. These fifteen test the *app*, and they are
 separated because they have a different character: each one was identified during review or
 execution as something no amount of reading or type-checking on the build machine could settle,
 and each has a specific observable outcome.

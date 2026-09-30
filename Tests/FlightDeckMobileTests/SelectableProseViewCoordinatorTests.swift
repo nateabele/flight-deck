@@ -60,7 +60,7 @@ final class SelectableProseViewCoordinatorTests: XCTestCase {
     /// file-level comment above), so simple prose here would pass even against the old
     /// `view.attributedText != attributed` guard and not pin the regression at all.
     func testRepeatedMeasurementWithUnchangedMarkdownAssignsOnce() {
-        let coordinator = SelectableProseView.Coordinator(onReply: { _ in })
+        let coordinator = SelectableProseView.Coordinator(actions: [])
         let view = makeView()
         let para = "This is **bold** prose with `code`, a [link](https://example.com) and some " +
             "_emphasis_ that wraps across several lines on a phone. "
@@ -84,7 +84,7 @@ final class SelectableProseViewCoordinatorTests: XCTestCase {
     /// view that has never had anything assigned must get it on the very first `apply`, before
     /// anything is measured.
     func testFirstApplyAssignsImmediately() {
-        let coordinator = SelectableProseView.Coordinator(onReply: { _ in })
+        let coordinator = SelectableProseView.Coordinator(actions: [])
         let view = makeView()
 
         coordinator.apply("first render", to: view)
@@ -95,7 +95,7 @@ final class SelectableProseViewCoordinatorTests: XCTestCase {
 
     /// New markdown is new prose on screen, guard or no guard.
     func testChangedMarkdownReassigns() {
-        let coordinator = SelectableProseView.Coordinator(onReply: { _ in })
+        let coordinator = SelectableProseView.Coordinator(actions: [])
         let view = makeView()
 
         coordinator.apply("before", to: view)
@@ -113,7 +113,7 @@ final class SelectableProseViewCoordinatorTests: XCTestCase {
     /// comment) even though the markdown string is byte-identical, so it must reassign —
     /// exactly the case a guard keyed on the attributed string's *content* would miss.
     func testChangedContentSizeCategoryReassigns() {
-        let coordinator = SelectableProseView.Coordinator(onReply: { _ in })
+        let coordinator = SelectableProseView.Coordinator(actions: [])
         let view = makeView()
 
         coordinator.apply("same text", to: view)

@@ -99,6 +99,34 @@ final class IntakeWireCodingTests: XCTestCase {
         XCTAssertEqual(try JSONDecoder().decode(WireIntakeDetail.self, from: data), detail)
     }
 
+    func testABoardRoundTripsItsControls() throws {
+        let board = WireBoard(
+            nowName: "Refine 2", nowChip: "PAUSED", clockCaption: "PAUSED FOR", stopsAt: "Encode",
+            callingAt: "Review", defaultPlay: "nextMajor",
+            controls: WireControls(enabled: ["step", "nextMajor", "toReview", "extend", "trim"],
+                                   extendStage: "refine", trimStage: "refine", cycleName: "Refine", cyclePlanned: 3))
+        let data = try JSONEncoder().encode(board)
+        XCTAssertEqual(try JSONDecoder().decode(WireBoard.self, from: data), board)
+    }
+
+    /// A Phase-1 Mac sends neither field: the phone must read "no steering" (nil), never fail
+    /// to decode the detail it already knows how to show.
+    func testADetailFromAPhase1MacDecodesWithNoSteer() throws {
+        let detail = WireIntakeDetail(
+            etag: "abc", project: UUID(), summary: Self.summary, intent: "Build it.",
+            board: WireBoard(nowName: "Refine 2", nowChip: "ON COURSE", clockCaption: "IN THE AIR",
+                             stopsAt: "Encode", callingAt: "Review", defaultPlay: "nextMajor"),
+            servedAt: Date(timeIntervalSinceReferenceDate: 800_000_200))
+        let data = try JSONEncoder().encode(detail)
+        let json = try XCTUnwrap(String(data: data, encoding: .utf8))
+        XCTAssertFalse(json.contains("\"steer\""), json)
+        XCTAssertFalse(json.contains("\"controls\""), json)
+        let decoded = try JSONDecoder().decode(WireIntakeDetail.self, from: data)
+        XCTAssertNil(decoded.steer)
+        XCTAssertNil(decoded.board?.controls)
+        XCTAssertEqual(decoded, detail)
+    }
+
     func testAPlanRoundTrips() throws {
         let plan = WireIntakePlan(
             checkpoint: 3, roundName: "Refine 1", editsVersion: "", markdown: "# P\n\n## 1. A\n\nText.",

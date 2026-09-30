@@ -1,12 +1,16 @@
 import FleetKit
 import SwiftUI
 
-/// The pinned phosphor strip (spec §4.3). Phase 1 has no transport row.
+/// The pinned phosphor strip (spec §4.3), with the transport row when the Mac accepts steering.
 struct BoardStrip: View {
     let model: BoardStripModel
     let offset: TimeInterval
     let frozenAt: Date?
     let onDot: (Int) -> Void
+    /// The transport row; empty (the default) means no row. Every key is off while `frozenAt` is set.
+    var keys: [TransportKey] = []
+    var onKey: (String) -> Void = { _ in }
+    var onDefault: (String) -> Void = { _ in }
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var phosphor: Color {
@@ -61,6 +65,7 @@ struct BoardStrip: View {
                         }
                     }
                 }
+                if !keys.isEmpty { transportRow }
             }
             // A lost link dims the strip like the list below it: what it shows is as of then.
             // The content only — dimming the glass too let a light background through, turning
@@ -70,6 +75,82 @@ struct BoardStrip: View {
             .background(RoundedRectangle(cornerRadius: 12).fill(Color(red: 0.05, green: 0.07, blue: 0.09)))
             .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color(white: 0.2), lineWidth: 1))
             .padding(.horizontal, 12)
+        }
+    }
+
+    /// Fixed-height dividers and a row that takes only its ideal height: a bare 1-pt-wide
+    /// `Rectangle` is flexible vertically, and inside `IntakeScreen`'s VStack beside a List it
+    /// grew the row, and the strip, to half the screen.
+    private var transportRow: some View {
+        HStack(spacing: 0) {
+            ForEach(Array(keys.enumerated()), id: \.element.id) { i, key in
+                if i > 0 { Rectangle().fill(Color(white: 0.2)).frame(width: 1, height: 28) }
+                keyView(key)
+            }
+        }
+        .frame(minHeight: 44)
+        .fixedSize(horizontal: false, vertical: true)
+        .overlay(alignment: .top) { Rectangle().fill(Color(white: 0.2)).frame(height: 1).offset(y: -4) }
+        .padding(.top, 4)
+    }
+
+    /// Not a `Button`: a Button swallows the long press that sets the default. Only play keys
+    /// carry the long press (and its VoiceOver action) — on Pause or Stop it swallowed a firm
+    /// press of half a second, so those act on a tap alone.
+    @ViewBuilder private func keyView(_ key: TransportKey) -> some View {
+        let live = key.enabled && frozenAt == nil
+        let face = VStack(spacing: 2) {
+            ZStack(alignment: .top) {
+                if let ack = key.ack {
+                    Text(ack).font(.system(.caption2, design: .monospaced)).foregroundStyle(phosphor)
+                        .lineLimit(1).minimumScaleFactor(0.6)
+                } else {
+                    keyGlyph(key)
+                }
+            }
+            .frame(height: 20)
+            Text(key.caption).font(.system(.caption2, design: .monospaced)).foregroundStyle(Self.dim)
+                .lineLimit(1).minimumScaleFactor(0.6)
+        }
+        .overlay(alignment: .top) {
+            if key.isDefault { Circle().fill(Color.accentColor).frame(width: 4, height: 4).offset(y: -5) }
+        }
+        .frame(maxWidth: .infinity, minHeight: 44)
+        // An acknowledgement ("Pausing…") is the answer to the maintainer's own press: drawn at full
+        // strength though the key is off, or it read as disabled rather than working.
+        .opacity(live || (key.ack != nil && frozenAt == nil) ? 1 : 0.4)
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(key.ack ?? key.accessibilityLabel + (key.isDefault ? ", default" : ""))
+        .accessibilityAddTraits(.isButton)
+        if live && key.canBeDefault {
+            face
+                .onTapGesture { onKey(key.id) }
+                .onLongPressGesture(minimumDuration: 0.5) {
+                    UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                    onDefault(key.id)
+                }
+                .accessibilityAction { onKey(key.id) }
+                .accessibilityAction(named: "Make default") { onDefault(key.id) }
+        } else if live {
+            face
+                .onTapGesture { onKey(key.id) }
+                .accessibilityAction { onKey(key.id) }
+        } else {
+            // VoiceOver says "dimmed" for an off key rather than offering a button that does nothing.
+            face.disabled(true)
+        }
+    }
+
+    /// To-review is the forward glyph with a diamond beside it, as on the Mac's control bar.
+    @ViewBuilder private func keyGlyph(_ key: TransportKey) -> some View {
+        if key.id == "toReview" {
+            HStack(spacing: 2) {
+                Image(systemName: key.symbol).font(.subheadline)
+                Image(systemName: "diamond.fill").font(.system(size: 6))
+            }.foregroundStyle(phosphor)
+        } else {
+            Image(systemName: key.symbol).font(.subheadline).foregroundStyle(phosphor)
         }
     }
 

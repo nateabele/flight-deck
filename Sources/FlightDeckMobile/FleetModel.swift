@@ -16,7 +16,7 @@ import UIKit
 /// simulator — see `scripts/test-ios.sh`.
 @MainActor
 @Observable
-final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, PresenceReporting, TranscriptSearching, IntakeFetching {
+final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, PresenceReporting, TranscriptSearching, IntakeFetching, IntakeCommanding {
     /// The Sessions list's navigation stack. Lives here, not in `FleetListScreen`'s `@State`,
     /// because the in-app attention banner (app level) and the board strip (deep in the stack)
     /// must push onto the same stack the list owns. Observed: the stack binds to it.
@@ -91,7 +91,7 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
     init(store: any PairedMacStoring = KeychainPairedMacStore()) {
         self.store = store
         self.mac = store.load()
-        self.flightControl = FlightControlModel(fetcher: self)
+        self.flightControl = FlightControlModel(fetcher: self, commander: self)
         // A cold launch asks for EVERYTHING, whatever cursor the pairing was saved with.
         //
         // `lastSeq` is a resume cursor: `hello(lastSeq:)` with a non-zero value means "send
@@ -612,6 +612,16 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
         if sentCommands.count > Self.maxRememberedSentCommands {
             sentCommands.removeFirst(sentCommands.count - Self.maxRememberedSentCommands)
         }
+        guard let connector else { return completion(.failure(.disconnected)) }
+        connector.send(command, then: completion)
+    }
+
+    /// Flight Control's commands: forwarded exactly as `sendPrompt` is, and completing
+    /// `.disconnected` synchronously with no connector.
+    func sendIntake(
+        _ command: FleetCommand,
+        then completion: @escaping (Result<Void, FleetRequestError>) -> Void
+    ) {
         guard let connector else { return completion(.failure(.disconnected)) }
         connector.send(command, then: completion)
     }
