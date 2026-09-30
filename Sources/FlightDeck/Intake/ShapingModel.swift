@@ -89,16 +89,11 @@ struct ShapingModel {
 
     // MARK: - Transport
 
-    var enabled: Set<TransportButton> {
-        switch tape.status {
-        case .running: [.pause, .stop, .annotate]
-        case .paused, .idle, .stopped: [.step, .nextMajor, .toReview, .extend, .trim, .annotate]
-        // ⏯ re-runs the round that failed; ⏭ is withheld because after a failure the human
-        // should see one round succeed before committing to a whole stage again.
-        case .failed: [.step, .toReview, .annotate]
-        case .reachedReview: []
-        }
-    }
+    /// The lit buttons — `TransportRules`, the rule the phone is sent too, so the bar and the
+    /// phone can't offer different keys for the same tape.
+    var transport: TransportRules { TransportRules.make(tape: tape, config: intake.roundConfig) }
+
+    var enabled: Set<TransportButton> { transport.enabled }
 
     /// Stages ＋ can lengthen — `BoardModel.extendableStages`, shared so the strip's + and the
     /// board's bracket handle can't disagree.

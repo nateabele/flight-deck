@@ -2,8 +2,9 @@ import IntakeKit
 import SwiftUI
 
 /// What the shaping live card can do right now: which transport buttons are lit (from
-/// `ShapingModel.enabled`) and how to press one. The control bar's keys and the Run menu both
-/// go through this, so a chord can never do something the button beside it wouldn't.
+/// `TransportRules`, via `ShapingModel.transport`) and how to press one. The control bar's keys
+/// and the Run menu both go through this, so a chord can never do something the button beside
+/// it wouldn't.
 ///
 /// Equatable on the intake and the lit buttons, never the closure: published as a scene value,
 /// a value SwiftUI can't compare is a new value on every render of the pane, and each one
@@ -34,11 +35,10 @@ struct PlanningActions: Equatable {
             && (a.heatmap == nil) == (b.heatmap == nil)
     }
 
-    /// The live card's actions for intake `id`. Extend lengthens the current cycle by one
-    /// round — the stage the tape is in when that stage can still grow, else the next one that
-    /// can — and is withheld when nothing can (`TapePlanner` would ignore it). Trim is its mirror:
-    /// one unstarted round off the same cycle, withheld when no cycle has one. `annotate` starts a
-    /// note in the notes rail — on the plan's selection if there is one (`PlanNotesController.annotate`).
+    /// The live card's actions for intake `id`. Extend lengthens, and Trim shortens, the stage
+    /// `TransportRules` picks by one round, and each is dark when the rule withholds it. `annotate`
+    /// starts a note in the notes rail — on the plan's selection if there is one
+    /// (`PlanNotesController.annotate`).
     ///
     /// Stop only ASKS (`confirmStop`): it discards the round in flight, work already paid for,
     /// and one ⌘. did that with no way back (spec §2: destructive actions are always confirmed).
@@ -47,13 +47,9 @@ struct PlanningActions: Equatable {
     @MainActor
     static func shaping(_ id: UUID, service: IntakeService, model: ShapingModel,
                         annotate: @escaping () -> Void, confirmStop: @escaping () -> Void) -> PlanningActions {
-        let current = model.tape.roundInProgress?.stage ?? model.tape.head?.stage
-        let extendStage = model.extendStages.first { $0 == current } ?? model.extendStages.first
-        let trimStage = model.trimStages.first { $0 == current } ?? model.trimStages.first
-        var enabled = model.enabled
-        if extendStage == nil { enabled.remove(.extend) }
-        if trimStage == nil { enabled.remove(.trim) }
-        return PlanningActions(enabled: enabled, intakeID: id) { button in
+        let rules = model.transport
+        let extendStage = rules.extendStage, trimStage = rules.trimStage
+        return PlanningActions(enabled: rules.enabled, intakeID: id) { button in
             switch button {
             case .step: service.send(id, .step)
             case .nextMajor: service.send(id, .nextMajor)
