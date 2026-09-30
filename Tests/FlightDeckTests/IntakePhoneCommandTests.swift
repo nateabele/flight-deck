@@ -114,14 +114,14 @@ final class IntakePhoneCommandTests: XCTestCase {
     private static let phrase = "Keep **account sign-in** in scope."
 
     /// A shaping intake whose checkpoint 1 holds `plan`, and the block index of `phrase` in it.
-    private func seedPlan() throws -> (Intake, Int) {
+    private func seedPlan(_ plan: String = plan, phrase: String = phrase) throws -> (Intake, Int) {
         let i = try seed(.shaping)
         try updateTape(i.id) { tape in
             tape.status = .paused
             tape.checkpoints = [Checkpoint(id: 1, stage: .synthesis, round: 0, major: true, createdAt: self.clockNow)]
         }
-        try writeCheckpointFile(i.id, checkpoint: 1, "plan.md", Self.plan)
-        let block = try XCTUnwrap(PlanBlocks.split(Self.plan).blocks.first { $0.text == Self.phrase }?.index)
+        try writeCheckpointFile(i.id, checkpoint: 1, "plan.md", plan)
+        let block = try XCTUnwrap(PlanBlocks.split(plan).blocks.first { $0.text == phrase }?.index)
         return (i, block)
     }
 
@@ -225,6 +225,44 @@ final class IntakePhoneCommandTests: XCTestCase {
         let noteID = UUID()
         XCTAssertNil(svc.phoneNote(i.id, token: UUID(), noteID: noteID, kind: "comment", text: "Hm.",
                                    checkpoint: 1, block: block, quote: "not in the text"))
+        XCTAssertEqual(queuedNotes(i.id).first { $0.id == noteID }?.anchor?.quote, Self.phrase)
+    }
+
+    /// An earlier block that merely CONTAINS this block's text must not be taken for it: the
+    /// phrase "TBD" on `- TBD` anchors in that item, not inside `- TBD later` above it.
+    func testAnEarlierBlockContainingTheTextIsNotTheBlock() async throws {
+        let (i, block) = try seedPlan("# P\n\n- TBD later\n- TBD\n\nEnd.", phrase: "- TBD")
+        let svc = await makeService()
+        let noteID = UUID()
+        XCTAssertNil(svc.phoneNote(i.id, token: UUID(), noteID: noteID, kind: "comment", text: "Which?",
+                                   checkpoint: 1, block: block, quote: "TBD"))
+        let anchor = try XCTUnwrap(queuedNotes(i.id).first { $0.id == noteID }?.anchor)
+        XCTAssertEqual(anchor.quote, "TBD")
+        XCTAssertTrue(anchor.prefix.hasSuffix("- TBD later\n- "), "anchored inside the wrong block: \(anchor.prefix)")
+        XCTAssertTrue(anchor.suffix.hasPrefix("\n\nEnd."), "anchored inside the wrong block: \(anchor.suffix)")
+    }
+
+    /// Two identical items: a note on the second anchors to the second.
+    func testTheSecondOfTwoIdenticalBlocksIsTheSecond() async throws {
+        let plan = "# P\n\n- TBD\n- TBD\n\nEnd."
+        let (i, _) = try seedPlan(plan, phrase: "- TBD")
+        let second = try XCTUnwrap(PlanBlocks.split(plan).blocks.last { $0.text == "- TBD" }?.index)
+        let svc = await makeService()
+        let noteID = UUID()
+        XCTAssertNil(svc.phoneNote(i.id, token: UUID(), noteID: noteID, kind: "comment", text: "This one.",
+                                   checkpoint: 1, block: second, quote: "TBD"))
+        let anchor = try XCTUnwrap(queuedNotes(i.id).first { $0.id == noteID }?.anchor)
+        XCTAssertTrue(anchor.prefix.hasSuffix("- TBD\n- "), "anchored to the first item: \(anchor.prefix)")
+        XCTAssertTrue(anchor.suffix.hasPrefix("\n\nEnd."))
+    }
+
+    /// A blank quote is no phrase at all: the whole block, the same as a nil quote.
+    func testABlankQuoteAnchorsToTheWholeBlock() async throws {
+        let (i, block) = try seedPlan()
+        let svc = await makeService()
+        let noteID = UUID()
+        XCTAssertNil(svc.phoneNote(i.id, token: UUID(), noteID: noteID, kind: "comment", text: "Hm.",
+                                   checkpoint: 1, block: block, quote: "  "))
         XCTAssertEqual(queuedNotes(i.id).first { $0.id == noteID }?.anchor?.quote, Self.phrase)
     }
 

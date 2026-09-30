@@ -793,8 +793,10 @@ final class IntakeService: ObservableObject {
                 let blocks = PlanBlocks.split(markdown)
                 guard let b = blocks.block(at: block) else { return refuse("unknown_block", id) }
                 let scope = Self.occurrence(of: b, in: blocks, markdown: markdown)
-                let found = quote.flatMap { RenderedQuoteLocator.range(of: $0, within: scope, of: markdown) }
-                if quote != nil, found == nil {
+                // A blank quote is no phrase: the whole block, as for nil, and not a fallback.
+                let phrase = quote.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0 }
+                let found = phrase.flatMap { RenderedQuoteLocator.range(of: $0, within: scope, of: markdown) }
+                if phrase != nil, found == nil {
                     Self.logger.info("check=note_anchor_fallback intake=\(id, privacy: .public)")
                 }
                 anchor = NoteAnchor(checkpoint: checkpoint, selecting: found ?? scope, in: markdown)
@@ -833,22 +835,21 @@ final class IntakeService: ObservableObject {
         }
     }
 
-    /// Block `b`'s own place in `markdown`. Block text is verbatim source, but the same text can
-    /// appear twice (two identical list items), so this takes the occurrence whose number matches
-    /// how many earlier blocks share it — the first "- TBD" is never mistaken for the second.
-    /// The whole plan if it cannot be found, which `split` makes impossible in practice.
+    /// Block `b`'s own place in `markdown`, found by walking every block up to it in order, each
+    /// search starting where the previous hit ended. Block text is verbatim source, but a bare
+    /// search matches substrings: `- TBD` would be found inside an earlier `- TBD later`, or a
+    /// paragraph `Scope` inside `## Scope`, and the note anchored on the wrong passage. Walking
+    /// the blocks in order also takes the second of two identical items for the second.
+    /// The whole plan if a search fails, which `split` makes impossible in practice.
     static func occurrence(of b: PlanBlocks.Block, in blocks: PlanBlocks, markdown: String) -> Range<String.Index> {
-        let earlier = blocks.blocks.prefix(b.index).filter { $0.text == b.text }.count
+        let whole = markdown.startIndex..<markdown.endIndex
         var from = markdown.startIndex
-        var found: Range<String.Index>?
-        for _ in 0...earlier {
-            guard let r = markdown.range(of: b.text, range: from..<markdown.endIndex) else {
-                return markdown.startIndex..<markdown.endIndex
-            }
-            found = r
-            from = r.upperBound
+        for block in blocks.blocks.prefix(b.index + 1) {
+            guard let hit = markdown.range(of: block.text, range: from..<markdown.endIndex) else { return whole }
+            if block.index == b.index { return hit }
+            from = hit.upperBound
         }
-        return found ?? markdown.startIndex..<markdown.endIndex
+        return whole
     }
 
     /// Which models planning rounds can seat: the PATH probe triage uses, run off the main
