@@ -18,9 +18,9 @@ struct TransportKey: Equatable, Identifiable {
 enum TransportKeys {
     private static let table: [(id: String, symbol: String, caption: String, label: String)] = [
         ("pause", "pause.fill", "PAUSE", "Pause"),
-        ("step", "forward.frame.fill", "STEP", "Step one round"),
-        ("nextMajor", "forward.end.fill", "MAJOR", "Play to the next major stop"),
-        ("toReview", "forward.end.alt.fill", "REVIEW", "Play to review"),
+        ("step", "forward.end.fill", "STEP", "Step one round"),
+        ("nextMajor", "forward.end.alt.fill", "MAJOR", "Play to the next major stop"),
+        ("toReview", "forward.fill", "REVIEW", "Play to review"),
         ("stop", "stop.fill", "STOP", "Stop the run"),
     ]
 

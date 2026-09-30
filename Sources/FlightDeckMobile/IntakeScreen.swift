@@ -6,6 +6,8 @@ struct IntakeScreen: View {
     let id: UUID
     let model: IntakeDetailModel
     let fleet: FleetModel
+    @State private var confirmingStop = false
+    private var commands: IntakeCommandModel { fleet.flightControl.commands(for: id) }
     private var frozenAt: Date? { if case .lost = fleet.state { return fleet.lastLive }; return nil }
 
     var body: some View {
@@ -44,10 +46,29 @@ struct IntakeScreen: View {
     @ViewBuilder private func content(_ d: WireIntakeDetail) -> some View {
         VStack(spacing: 0) {
             let strip = BoardStripModel(detail: d)
-            BoardStrip(model: strip, offset: model.macClockOffset, frozenAt: frozenAt) { checkpoint in
-                fleet.path.append(IntakeRoute.round(intake: id, checkpoint: checkpoint))
-            }
+            BoardStrip(
+                model: strip, offset: model.macClockOffset, frozenAt: frozenAt,
+                onDot: { checkpoint in fleet.path.append(IntakeRoute.round(intake: id, checkpoint: checkpoint)) },
+                keys: TransportKeys.keys(detail: d, inFlight: commands.inFlight),
+                onKey: { key in
+                    if key == "stop" { confirmingStop = true } else { tape(key) }
+                },
+                onDefault: { mode in
+                    commands.send(.defaultPlay(mode), command: { .intakeDefaultPlay(id: id, token: $0, mode: mode) },
+                                  onAck: { model.refresh() })
+                })
             .padding(.bottom, 4)
+            if let message = commands.message {
+                HStack(alignment: .firstTextBaseline) {
+                    Text(message).font(.caption).foregroundStyle(.orange)
+                    Spacer()
+                    Button { commands.clearMessage() } label: {
+                        Image(systemName: "xmark").font(.caption).frame(minWidth: 44, minHeight: 44)
+                    }
+                    .accessibilityLabel("Dismiss")
+                }
+                .padding(.horizontal, 16)
+            }
             TimelineView(ClockSchedule(since: strip.clockSince, offset: model.macClockOffset, frozenAt: frozenAt, idle: strip.idle)) { context in
                 let now = (frozenAt ?? context.date).addingTimeInterval(model.macClockOffset)
                 List {
@@ -55,6 +76,42 @@ struct IntakeScreen: View {
                 }
                 .opacity(frozenAt == nil ? 1 : 0.5)
             }
+        }
+        .confirmationDialog(
+            TransportKeys.stopConfirmation(detail: d).title, isPresented: $confirmingStop, titleVisibility: .visible
+        ) {
+            Button("Stop Run", role: .destructive) { tape("stop") }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(TransportKeys.stopConfirmation(detail: d).message).font(.subheadline)
+        }
+    }
+
+    private func tape(_ command: String, stage: String? = nil) {
+        commands.send(.tape(command), command: { .intakeTape(id: id, token: $0, command: command, stage: stage) },
+                      onAck: { model.refresh() })
+    }
+
+    @ViewBuilder private func roundsHeader(_ d: WireIntakeDetail) -> some View {
+        if let control = RoundsControlModel.make(detail: d, inFlight: commands.inFlight) {
+            let live = frozenAt == nil
+            HStack(spacing: 0) {
+                Text("Rounds · \(control.title)").font(.footnote)
+                Spacer()
+                Button { tape("trim", stage: control.stage) } label: {
+                    Image(systemName: "minus").font(.subheadline).frame(minWidth: 44, minHeight: 44)
+                }
+                .disabled(!control.canTrim || !live)
+                .accessibilityLabel("Remove a \(control.stage) round")
+                Button { tape("extend", stage: control.stage) } label: {
+                    Image(systemName: "plus").font(.subheadline).frame(minWidth: 44, minHeight: 44)
+                }
+                .disabled(!control.canExtend || !live)
+                .accessibilityLabel("Add another \(control.stage) round")
+            }
+            .buttonStyle(.borderless)
+        } else {
+            Text("Rounds").font(.footnote)
         }
     }
 
@@ -103,7 +160,7 @@ struct IntakeScreen: View {
             }
         }
         if !d.rounds.isEmpty {
-            Section("Rounds") {
+            Section {
                 ForEach(d.rounds, id: \.checkpoint) { r in
                     NavigationLink(value: IntakeRoute.round(intake: id, checkpoint: r.checkpoint)) {
                         HStack {
@@ -116,7 +173,7 @@ struct IntakeScreen: View {
                         }
                     }
                 }
-            }
+            } header: { roundsHeader(d) }
         }
         if d.headCheckpoint != nil {
             Section {

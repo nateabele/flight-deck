@@ -42,7 +42,7 @@ final class TransportKeysTests: XCTestCase {
         let keys = TransportKeys.keys(detail: Self.detail(), inFlight: [])
         XCTAssertEqual(keys.map(\.id), ["pause", "step", "nextMajor", "toReview", "stop"])
         XCTAssertEqual(keys.map(\.symbol),
-                       ["pause.fill", "forward.frame.fill", "forward.end.fill", "forward.end.alt.fill", "stop.fill"])
+                       ["pause.fill", "forward.end.fill", "forward.end.alt.fill", "forward.fill", "stop.fill"])
         XCTAssertEqual(keys.map(\.caption), ["PAUSE", "STEP", "MAJOR", "REVIEW", "STOP"])
     }
 
