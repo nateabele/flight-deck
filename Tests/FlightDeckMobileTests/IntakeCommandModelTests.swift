@@ -33,8 +33,9 @@ private final class StubCommander: IntakeCommanding {
 final class IntakeCommandModelTests: XCTestCase {
     private let intake = UUID()
 
-    private func model(_ c: StubCommander, timeout: Duration = .seconds(10)) -> IntakeCommandModel {
-        IntakeCommandModel(intake: intake, commander: c, timeout: timeout)
+    private func model(_ c: StubCommander, timeout: Duration = .seconds(10),
+                       now: @escaping () -> Date = Date.init) -> IntakeCommandModel {
+        IntakeCommandModel(intake: intake, commander: c, timeout: timeout, now: now)
     }
 
     private func play(_ m: IntakeCommandModel, onAck: @escaping () -> Void = {}) {
@@ -140,7 +141,7 @@ final class IntakeCommandModelTests: XCTestCase {
         XCTAssertNotEqual(c.tokens[2], c.tokens[0])
     }
 
-    func testServerErrAndDisconnectedForgetTheToken() async {
+    func testServerErrForgetsTheToken() async {
         let c = StubCommander()
         let m = model(c, timeout: .milliseconds(50))
         play(m)
@@ -150,6 +151,64 @@ final class IntakeCommandModelTests: XCTestCase {
         c.answer(.failure(.server(code: "not_allowed")))
         play(m)
         XCTAssertNotEqual(c.tokens[2], c.tokens[0])
+    }
+
+    /// A late ack is still the Mac's answer: the kept token has done its job and must not be
+    /// reused by a deliberate press much later, which the Mac would ack as a duplicate while
+    /// nothing ran.
+    func testALateAckAfterATimeoutForgetsTheToken() async {
+        let c = StubCommander()
+        let m = model(c, timeout: .milliseconds(50))
+        play(m)
+        try? await Task.sleep(for: .milliseconds(150))
+        c.answer(.success(()))  // late: no deadline left, but definitive
+        play(m)
+        XCTAssertEqual(c.tokens.count, 2)
+        XCTAssertNotEqual(c.tokens[1], c.tokens[0])
+    }
+
+    /// A kept token is a retry of the press that timed out, not of every later press: past the
+    /// window a send is a new press and carries a new token.
+    func testAKeptTokenExpires() async {
+        let c = StubCommander()
+        var clock = Date(timeIntervalSince1970: 1_000)
+        let m = model(c, timeout: .milliseconds(50), now: { clock })
+        play(m)
+        try? await Task.sleep(for: .milliseconds(150))
+        clock += IntakeCommandModel.retryWindow + 1
+        play(m)
+        XCTAssertEqual(c.tokens.count, 2)
+        XCTAssertNotEqual(c.tokens[1], c.tokens[0])
+    }
+
+    /// `.disconnected` after the write (the connector draining in-flight acks when the socket
+    /// drops) may follow a command that landed: the token is kept so a retry dedupes, and the
+    /// words say so rather than "wasn't sent".
+    func testADropAfterTheWriteKeepsTheTokenAndSaysSo() {
+        let c = StubCommander(), m = model(c)
+        play(m)
+        c.answer(.failure(.disconnected))
+        XCTAssertEqual(m.message, "Lost the connection — your Mac may not have got this.")
+        XCTAssertTrue(m.inFlight.isEmpty)
+        play(m)
+        XCTAssertEqual(c.tokens.count, 2)
+        XCTAssertEqual(c.tokens[1], c.tokens[0])
+    }
+
+    /// No socket at all: nothing was sent this time, so the old words stand — but a token kept
+    /// from an earlier timeout survives, since that earlier send may still have landed.
+    func testASynchronousDisconnectKeepsAnEarlierToken() async {
+        let c = StubCommander()
+        let m = model(c, timeout: .milliseconds(50))
+        play(m)
+        try? await Task.sleep(for: .milliseconds(150))
+        c.answerBeforeReturning = .failure(.disconnected)
+        play(m)
+        XCTAssertEqual(m.message, "Not connected to your Mac, so this wasn't sent.")
+        c.answerBeforeReturning = nil
+        play(m)
+        XCTAssertEqual(c.tokens.count, 3)
+        XCTAssertEqual(c.tokens[2], c.tokens[0])
     }
 
     func testCommanderGoneCompletesDisconnected() {
@@ -185,6 +244,8 @@ final class IntakeCommandModelTests: XCTestCase {
             (.server(code: "weird"), "Your Mac wouldn't do that (weird)."),
         ]
         for (error, copy) in table { XCTAssertEqual(CommandCopy.message(for: error), copy) }
+        XCTAssertEqual(CommandCopy.message(for: .disconnected, afterSend: true),
+                       "Lost the connection — your Mac may not have got this.")
     }
 
     func testFlightControlVendsOneModelPerIntakeAndResetClears() {
