@@ -780,6 +780,13 @@ final class IntakeService: ObservableObject {
                    checkpoint: Int?, block: Int?, quote: String?) -> String? {
         if alreadyAccepted(token, for: id) { return nil }
         if let refusal = notShaping(id) { return refusal }
+        // The backstop behind the token: a note id already pending IS this note, even under a
+        // fresh token — a phone whose link dropped after the write may have lost the token it
+        // sent it with — so it is acked without queuing a second copy.
+        if pendingNotes(id).contains(where: { $0.id == noteID }) {
+            accept(token, for: id)
+            return nil
+        }
         guard let noteKind = NoteKind(rawValue: kind) else { return refuse("unknown_kind", id) }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         // An empty comment is a Highlight; every other kind says something or is not a note.

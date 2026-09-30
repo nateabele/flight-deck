@@ -308,6 +308,21 @@ final class IntakePhoneCommandTests: XCTestCase {
         XCTAssertEqual(commandLines(i.id), before + 1)
     }
 
+    /// The backstop behind the phone's token: a note id already pending is the same note, even
+    /// under a fresh token (a retry whose token the phone lost), so it is acked, not queued twice.
+    func testARepeatedNoteIDUnderANewTokenAddsOneNote() async throws {
+        let (i, _) = try seedPlan()
+        let svc = await makeService()
+        let before = commandLines(i.id)
+        let noteID = UUID()
+        for _ in 0..<2 {
+            XCTAssertNil(svc.phoneNote(i.id, token: UUID(), noteID: noteID, kind: "comment", text: "Once.",
+                                       checkpoint: nil, block: nil, quote: nil))
+        }
+        XCTAssertEqual(commandLines(i.id), before + 1)
+        XCTAssertEqual(queuedNotes(i.id).filter { $0.id == noteID }.count, 1)
+    }
+
     /// A retry after a lost ack finds the state its own first delivery changed — the note is
     /// already gone — and must still be acked, not refused as consumed.
     func testARetriedRemoveIsAckedNotRefused() async throws {
