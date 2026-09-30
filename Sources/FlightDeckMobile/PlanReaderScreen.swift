@@ -38,9 +38,13 @@ struct PlanReaderScreen: View {
         let id: Int
     }
 
-    init(intake: UUID, checkpoint: Int?, startBlock: Int?, changes: Bool, flightControl: FlightControlModel) {
+    /// `outbox` is for `IntakeRenderHarness` only: an unsent or failed card is otherwise a menu,
+    /// a sheet and a send away, none of which an offscreen render can press.
+    init(intake: UUID, checkpoint: Int?, startBlock: Int?, changes: Bool, flightControl: FlightControlModel,
+         outbox: NoteOutbox = NoteOutbox()) {
         self.intake = intake; self.checkpoint = checkpoint; self.startBlock = startBlock
         self._changes = State(initialValue: changes); self.flightControl = flightControl
+        self._outbox = State(initialValue: outbox)
     }
 
     var body: some View {

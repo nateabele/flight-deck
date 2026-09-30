@@ -11,7 +11,8 @@ import XCTest
 /// row clips at the largest accessibility size, none of that is reachable by an assertion. It
 /// draws the real screens (`IntakeScreen`, `RoundDetailScreen`, `PlanOutlineScreen`,
 /// `PlanReaderScreen`) inside a `NavigationStack`, fed fixture details through a stub fetcher,
-/// and writes PNGs.
+/// and writes PNGs. Phase 2 adds the steering surfaces: the transport row, the Rounds ±,
+/// `NoteSheet`, and the reader's unsent and failed note cards.
 ///
 /// Skipped unless `RENDER_INTAKE` is set. Its value is the output directory when it is an
 /// absolute path (the simulator `test-ios.sh` creates is deleted when it exits, taking
@@ -36,6 +37,8 @@ final class IntakeRenderHarness: XCTestCase {
     /// The models hold their fetcher `weak` (the real one is `FleetModel`, which outlives them),
     /// so a stub made inline is gone before the first request and the screen draws a spinner.
     private var stubs: [StubFetcher] = []
+    /// `IntakeCommandModel` holds its commander `weak` for the same reason.
+    private var commanders: [StubCommander] = []
 
     /// Called first by every render rather than from `setUp`, which is nonisolated.
     private func begin() throws {
@@ -165,6 +168,102 @@ final class IntakeRenderHarness: XCTestCase {
         try write(screenImage(of: screen, style: .light, size: .accessibility5), to: "rows-ax5.png")
     }
 
+    // MARK: - Phase 2: steering
+
+    /// The strip with its transport row: running (only Pause and Stop live), paused (the default
+    /// dot on Next major), a Pause the Mac is acting on, and a halt "stopping" (every key off,
+    /// Stop reading "Stopping…"). The Stop confirmation is a system dialog and cannot be drawn.
+    func testDrawTransportStrips() throws {
+        try begin()
+        let cases: [(String, WireIntakeDetail)] = [
+            ("running", Fixture.steering(Fixture.running, enabled: ["pause", "stop", "extend", "trim"])),
+            ("paused", Fixture.steering(Fixture.paused, enabled: ["step", "nextMajor", "toReview", "stop", "extend", "trim"])),
+            ("pausing", Fixture.steering(Fixture.running, enabled: ["pause", "stop"], halt: "pausing")),
+            ("stopping", Fixture.steering(Fixture.running, enabled: ["pause", "stop"], halt: "stopping")),
+        ]
+        let strips = VStack(alignment: .leading, spacing: 14) {
+            ForEach(cases, id: \.0) { name, detail in
+                Text(name).font(.caption2.weight(.semibold)).foregroundStyle(.secondary).padding(.horizontal, 12)
+                BoardStrip(model: BoardStripModel(detail: detail), offset: 0, frozenAt: nil, onDot: { _ in },
+                           keys: TransportKeys.keys(detail: detail, inFlight: []))
+            }
+            Text("running, link lost").font(.caption2.weight(.semibold)).foregroundStyle(.secondary).padding(.horizontal, 12)
+            BoardStrip(model: BoardStripModel(detail: cases[0].1), offset: 0, frozenAt: Date().addingTimeInterval(-30),
+                       onDot: { _ in }, keys: TransportKeys.keys(detail: cases[0].1, inFlight: []))
+        }
+        .padding(.vertical, 12)
+        for style in [UIUserInterfaceStyle.light, .dark] {
+            try write(measuredImage(of: strips, style: style), to: "transport-strips-\(Self.styleName(style)).png")
+        }
+        try write(measuredImage(of: strips, style: .light, size: .accessibility5), to: "transport-strips-ax5.png")
+    }
+
+    /// The whole intake screen while steering: the strip's transport row in place, and the
+    /// Rounds header's "Refine ×5 − +".
+    func testDrawSteeringIntakeScreen() throws {
+        try begin()
+        let running = Fixture.steering(Fixture.running, enabled: ["pause", "stop", "extend", "trim"])
+        let paused = Fixture.steering(Fixture.paused, enabled: ["step", "nextMajor", "toReview", "stop", "extend", "trim"])
+        for style in [UIUserInterfaceStyle.light, .dark] {
+            try draw(intake: running, style: style, size: nil, to: "steer-running-\(Self.styleName(style)).png")
+            try draw(intake: paused, style: style, size: nil, to: "steer-paused-\(Self.styleName(style)).png")
+        }
+        // 2600 as the Phase 1 AX5 renders: at 3200 the draw came back blank (one colour).
+        try draw(intake: running, style: .light, size: .accessibility5, to: "steer-running-ax5.png", height: 2600)
+    }
+
+    /// `NoteSheet` on its own, full height: a phrase note (quote, all six kinds) and a plan-wide
+    /// one (no quote, no Highlight). The keyboard is not drawn offscreen.
+    func testDrawNoteSheet() throws {
+        try begin()
+        let phrase = NoteDraft(target: NoteDraftTarget(block: 4, quote: "wait until the queue drains — check queue.isEmpty"),
+                               showing: 3, kind: "mustChange", text: "Say what happens to a job that is mid-flight when the ceiling hits.")
+        let wide = NoteDraft(target: NoteDraftTarget(block: nil, quote: nil), showing: 3)
+        for style in [UIUserInterfaceStyle.light, .dark] {
+            try write(screenImage(of: NoteSheet(draft: phrase) { _ in }, style: style, size: nil),
+                      to: "note-sheet-quote-\(Self.styleName(style)).png")
+            try write(screenImage(of: NoteSheet(draft: wide) { _ in }, style: style, size: nil),
+                      to: "note-sheet-plan-wide-\(Self.styleName(style)).png")
+        }
+        try write(screenImage(of: NoteSheet(draft: phrase) { _ in }, style: .light, size: .accessibility5),
+                  to: "note-sheet-quote-ax5.png")
+    }
+
+    /// The reader at the head with notes on: one note the Mac has not answered ("Not yet sent")
+    /// and one whose send failed (Retry / Discard, the reason in the message row).
+    func testDrawReaderWithUnsentNotes() throws {
+        try begin()
+        let detail = Fixture.steering(Fixture.running, enabled: ["pause", "stop", "extend", "trim"])
+        let id = detail.summary.id
+        for (name, answer) in [("unsent", nil), ("failed", Result<Void, FleetRequestError>.failure(.server(code: "not_allowed")))] {
+            let commander = StubCommander(answer: answer)
+            commanders.append(commander)
+            let flightControl = FlightControlModel(fetcher: stub(detail), commander: commander)
+            flightControl.detailModel(for: id).refresh()
+            let passage = NoteDraft(target: NoteDraftTarget(block: 4, quote: "the queue drains"), showing: 3,
+                                    kind: "question", text: "What if a producer ignores the pause?")
+            let wide = NoteDraft(target: NoteDraftTarget(block: nil, quote: nil), showing: 3,
+                                 kind: "comment", text: "Keep the plan to one page.")
+            var outbox = NoteOutbox()
+            for d in [passage, wide] {
+                outbox.submit(d)
+                // The send the reader would have made: in flight until answered, or failed.
+                flightControl.commands(for: id).send(.note(d.id), command: {
+                    .intakeNote(id: id, token: $0, noteID: d.id, kind: d.kind, text: d.text,
+                                checkpoint: d.checkpoint, block: d.target.block, quote: d.target.quote)
+                }, onAck: {})
+            }
+            for style in [UIUserInterfaceStyle.light, .dark] {
+                let reader = NavigationStack {
+                    PlanReaderScreen(intake: id, checkpoint: nil, startBlock: nil, changes: false,
+                                     flightControl: flightControl, outbox: outbox)
+                }
+                try write(screenImage(of: reader, style: style, size: nil, height: 2000),
+                          to: "reader-\(name)-\(Self.styleName(style)).png")
+            }
+        }
+    }
+
     // MARK: - Drawing
 
     private func draw(intake detail: WireIntakeDetail, style: UIUserInterfaceStyle, size: DynamicTypeSize?,
@@ -204,7 +303,8 @@ final class IntakeRenderHarness: XCTestCase {
 
     /// **Measured in one window, drawn in another** — see `ProseRenderHarness.image(of:style:)`
     /// for why the two passes cannot share a window.
-    private func measuredImage(of view: some View, style: UIUserInterfaceStyle) -> UIImage {
+    private func measuredImage(of view: some View, style: UIUserInterfaceStyle, size type: DynamicTypeSize? = nil) -> UIImage {
+        let view = sized(view, type)
         let measuring = UIHostingController(rootView: view.frame(width: Self.width))
         measuring.view.frame = CGRect(x: 0, y: 0, width: Self.width, height: 4000)
         let scratch = UIWindow(frame: measuring.view.frame)
@@ -280,6 +380,18 @@ private final class StubFetcher: IntakeFetching {
         var plan = Fixture.plan
         if !changes { plan.added = nil; plan.removed = nil }
         then(.success(plan))
+    }
+}
+
+/// Never answers (`answer == nil`: the send stays in flight, as when the Mac has not acked), or
+/// answers at once with `answer`.
+@MainActor
+private final class StubCommander: IntakeCommanding {
+    let answer: Result<Void, FleetRequestError>?
+    init(answer: Result<Void, FleetRequestError>?) { self.answer = answer }
+
+    func sendIntake(_ command: FleetCommand, then: @escaping (Result<Void, FleetRequestError>) -> Void) {
+        if let answer { then(answer) }
     }
 }
 
@@ -407,6 +519,18 @@ private enum Fixture {
         failure: WireFailure(reason: "Every reviewer failed in Refine 2: claude exited 1, codex hit its rate limit twice.",
                              output: "error: rate limit exceeded (429)\nretry-after: 60\nexit status 1"),
         pendingNotes: 1, headCheckpoint: 3, servedAt: t)
+
+    /// `detail` from a Mac that takes commands: `steer`, the board's controls with `enabled` live,
+    /// and a Refine cycle of five that both ± act on.
+    static func steering(_ detail: WireIntakeDetail, enabled: [String], halt: String? = nil) -> WireIntakeDetail {
+        var d = detail
+        d.steer = true
+        d.halt = halt
+        d.etag += "-steer-\(enabled.joined())-\(halt ?? "")"
+        d.board?.controls = WireControls(enabled: enabled, extendStage: "refine", trimStage: "refine",
+                                         cycleName: "Refine", cyclePlanned: 5)
+        return d
+    }
 
     static let markdown = """
     # Drain the queue before the flag flip
