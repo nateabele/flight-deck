@@ -167,9 +167,13 @@ struct PlanReaderScreen: View {
                 }
             }
         } label: {
+            // Top-aligned so it sits on a heading's first line, not low beside it.
             Image(systemName: "ellipsis.circle").font(.body).foregroundStyle(.secondary)
-                .frame(minWidth: 44, minHeight: 44)
+                .frame(minWidth: 44, minHeight: 44, alignment: .top)
         }
+        // A Menu tints its label with the accent, over `foregroundStyle`: every block wore a blue
+        // ⋯, and colour here is for exceptions only.
+        .tint(.secondary)
         .accessibilityLabel("Passage actions")
     }
 
@@ -270,6 +274,8 @@ struct PlanReaderScreen: View {
                 }
             }
         }
+        // Full width like the note cards beside it, not hugging its words.
+        .frame(maxWidth: .infinity, alignment: .leading)
         .padding(8)
         .background(RoundedRectangle(cornerRadius: 6).fill(Color(.secondarySystemBackground)))
         .confirmationDialog("Discard this note?", isPresented: confirming($confirmingDiscard, d.id), titleVisibility: .visible) {
