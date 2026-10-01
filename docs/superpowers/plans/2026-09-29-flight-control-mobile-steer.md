@@ -28,7 +28,7 @@
 1. **An older Mac, a Phase-2 phone:** the phone must not send `intake.*` (the Mac would drop the socket) → Task 6 test `testNoCommandIsSentWithoutSteer`.
 2. **A double tap / a retry after a lost ack** must not queue two Steps or two identical notes → Task 3 test `testARepeatedTokenAcksWithoutSendingAgain`.
 3. **The phone offering a key the Mac would refuse** (e.g. Next major after a failure, extend on a finished stage) → Task 1 `TransportRules` tests shared by desktop and wire; Task 3 `testAKeyTheRulesDisallowIsRefused`.
-4. **A selected phrase spanning `**bold**`, `` `code` ``, a link, or a wrapped line** must anchor to that phrase; a phrase not found must anchor to the whole passage, never to the wrong one → Task 2 locator tests against the real larkOS plan; Task 3 fallback test.
+4. **A selected phrase spanning `**bold**`, `` `code` ``, a link, or a wrapped line** must anchor to that phrase; a phrase not found must anchor to the whole passage, never to the wrong one → Task 2 locator tests against the long synthetic sample plan; Task 3 fallback test.
 5. **The note sheet over the keyboard** and the long-press/tap coexistence are device-only → Task 9 MOBILE.md items name the failures.
 
 ---
@@ -168,7 +168,7 @@ In `board(...)` pass `controls: controls(TransportRules.make(tape: tape, config:
 
 **Files:**
 - Create: `Sources/IntakeKit/RenderedQuoteLocator.swift`
-- Test: `Tests/FlightDeckTests/RenderedQuoteLocatorTests.swift` (uses `Tests/FlightDeckTests/Fixtures/larkos-plan.md`, already in the repo)
+- Test: `Tests/FlightDeckTests/RenderedQuoteLocatorTests.swift` (uses `Tests/FlightDeckTests/Fixtures/sample-plan.md`, already in the repo)
 
 **Interfaces:**
 - Produces: `public enum RenderedQuoteLocator { public static func range(of rendered: String, within scope: Range<String.Index>, of markdown: String) -> Range<String.Index>? }` — the source range whose RENDERED text equals `rendered` (after both sides are normalised), or nil.
@@ -214,7 +214,7 @@ final class RenderedQuoteLocatorTests: XCTestCase {
         XCTAssertEqual(md.distance(from: md.startIndex, to: r.lowerBound), md.distance(from: md.startIndex, to: second.lowerBound))
     }
     func testTheRealLarkOSPlan() throws {
-        let url = URL(fileURLWithPath: #filePath).deletingLastPathComponent().appendingPathComponent("Fixtures/larkos-plan.md")
+        let url = URL(fileURLWithPath: #filePath).deletingLastPathComponent().appendingPathComponent("Fixtures/sample-plan.md")
         let md = try String(contentsOf: url, encoding: .utf8)
         let r = RenderedQuoteLocator.range(of: "Require explicit proof that the chosen mode permits hosted and unattended execution",
                                            within: md.startIndex..<md.endIndex, of: md)

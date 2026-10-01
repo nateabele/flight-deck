@@ -33,8 +33,8 @@ final class RenderedQuoteLocatorTests: XCTestCase {
         let r = RenderedQuoteLocator.range(of: "alpha", within: second, of: md)!
         XCTAssertEqual(md.distance(from: md.startIndex, to: r.lowerBound), md.distance(from: md.startIndex, to: second.lowerBound))
     }
-    func testTheRealLarkOSPlan() throws {
-        let url = URL(fileURLWithPath: #filePath).deletingLastPathComponent().appendingPathComponent("Fixtures/larkos-plan.md")
+    func testALongRealisticPlan() throws {
+        let url = URL(fileURLWithPath: #filePath).deletingLastPathComponent().appendingPathComponent("Fixtures/sample-plan.md")
         let md = try String(contentsOf: url, encoding: .utf8)
         let r = RenderedQuoteLocator.range(of: "Require explicit proof that the chosen mode permits hosted and unattended execution",
                                            within: md.startIndex..<md.endIndex, of: md)

@@ -858,7 +858,7 @@ In `replicator.onEvents` (`:353-359`): `let needed = Self.requiredCapability(for
 **Files:**
 - Create: `Sources/FlightDeck/Fleet/IntakeDetailProjection.swift`, `Sources/FlightDeck/Fleet/IntakePlanProjection.swift`
 - Test: `Tests/FlightDeckTests/IntakeDetailProjectionTests.swift`, `Tests/FlightDeckTests/IntakePlanProjectionTests.swift`
-- Fixture: copy the real plan for the locator test, read-only, into `Tests/FlightDeckTests/Fixtures/larkos-plan.md` from `~/Library/Application Support/Flight Deck/intakes/7C3A9E52-4B1D-4F08-9A6E-2D5B8C1F0E47/checkpoints/2/plan.md` (`cp`, never write to the source). `Fixtures/**` is excluded from the test target's sources (project.yml), so load it via `#filePath`.
+- Fixture: `Tests/FlightDeckTests/Fixtures/sample-plan.md`, a long synthetic plan shaped like a real one (numbered items with **bold**, `code`, links). Never copy a real intake plan into the repo — they are private. `Fixtures/**` is excluded from the test target's sources (project.yml), so load it via `#filePath`.
 
 **Interfaces:**
 - Consumes: Task 2 types; `IntakeSummaryProjection.summary` (Task 3); `IntakeService` state (`tapes`, `files(_:)`, `triageActivities`, `convergence`, `halts`, `pending`, `checkpointFile(_:checkpoint:_:)`, `needsAttention(_:)`); `BoardModel(intake:tape:config:now:selected:preview:)`; `LiveSeats.rows(round:config:seats:now:)` / `LiveSeats.files(_:pending:)`; `SeatRowModel.make(...)`; `ConvergenceCellModel(cycles:plannedRounds:)`; `ProgressSummary.line(intake:tape:triage:loadFile:)`; `RoundConfigEditor.summary(preset:config:)`; `PlanSection.effectivePlan(checkpoint:tape:loadFile:)` / `PlanSection.planHead(tape:loadFile:)`; `ConvergenceSeries.sectionChurn`/`label`; `PlanBlocks.split`.
@@ -930,7 +930,7 @@ final class IntakePlanProjectionTests: XCTestCase {
 
     func testNotesLocateInTheRealLarkOSPlan() throws {
         let url = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
-            .appendingPathComponent("Fixtures/larkos-plan.md")
+            .appendingPathComponent("Fixtures/sample-plan.md")
         let plan = try String(contentsOf: url, encoding: .utf8)
         let blocks = PlanBlocks.split(plan)
         let note = PlanNote(kind: .mustChange, note: "n",

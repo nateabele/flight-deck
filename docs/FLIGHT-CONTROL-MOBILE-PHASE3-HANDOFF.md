@@ -88,8 +88,10 @@ covers it) → `superpowers:writing-plans` → Plannotator → subagent-driven, 
    including at `73b8ffb`, where the full suite had passed earlier that day — then **passed** in the
    full run on merged master `6b084da` on 09-30 (4272 cases, `SHARDED UNIT RUN PASSED`). So it
    depends on machine/window state, not Flight Control code; worth hardening if it recurs.
-3. **`Tests/FlightDeckTests/Fixtures/larkos-plan.md`** is a copy of the maintainer's real larkOS plan (used
-   by the quote-locator and note-anchor tests). Get the maintainer's OK before any `git push`.
+3. **The real larkOS plan fixture was removed** (the maintainer: keep it out of the repo); the quote-locator
+   and note-anchor tests now read the synthetic `Tests/FlightDeckTests/Fixtures/sample-plan.md`.
+   The old file is still in local history (added in `c4efb0b`, never pushed) — purge it from
+   history before any `git push`. Never copy a real intake plan into the repo.
 4. **Flaky:** `FleetListScreenTests.testRefreshRecentlyClosedKeepsTheListThroughADisconnect`
    (real socket; failed 1 in 4 runs on 09-29).
 5. **Parked polish (CAN-WAIT, from the final reviews):** transport row at AX5 (glyphs overlap,

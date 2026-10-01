@@ -108,9 +108,9 @@ final class IntakePlanProjectionTests: XCTestCase {
         XCTAssertEqual(located[1].kind, "question")
     }
 
-    func testNotesLocateInTheRealLarkOSPlan() throws {
+    func testNotesLocateInALongRealisticPlan() throws {
         let url = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
-            .appendingPathComponent("Fixtures/larkos-plan.md")
+            .appendingPathComponent("Fixtures/sample-plan.md")
         let plan = try String(contentsOf: url, encoding: .utf8)
         let blocks = PlanBlocks.split(plan)
         let note = PlanNote(kind: .mustChange, note: "n",
