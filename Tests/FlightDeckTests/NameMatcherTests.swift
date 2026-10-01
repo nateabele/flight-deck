@@ -78,4 +78,28 @@ final class NameMatcherTests: XCTestCase {
         XCTAssertNil(NameMatcher.score("session-menu", against: "sn"))
         XCTAssertEqual(NameMatcher.score("session-menu", against: "ssn")?.tier, .fuzzy)
     }
+
+    /// The typed text starting any word of the name is as good a match as it starting the
+    /// name. "On-Premise Infra" contains the word "Infra" exactly as "Infra Review" does;
+    /// tiering it as fuzzy ranked it below every prefix match, open tab or not.
+    func testAMatchAtTheStartOfALaterWordIsAPrefixMatch() {
+        let match = NameMatcher.score("On-Premise Infra", against: "infra")
+        XCTAssertEqual(match?.tier, .prefix)
+        XCTAssertEqual(match.map { $0.matchedRanges.map { String("On-Premise Infra"[$0]) } }, ["Infra"])
+        XCTAssertEqual(NameMatcher.score("fix the session-menu", against: "menu")?.tier, .prefix)
+    }
+
+    /// Inside a word is still not a word start — "frame" in "reframe" stays fuzzy.
+    func testAMatchInsideAWordIsNotAPrefixMatch() {
+        XCTAssertEqual(NameMatcher.score("reframe it", against: "frame")?.tier, .fuzzy)
+    }
+
+    /// Word-start matching takes the fuzzy floor: on a one- or two-letter query nearly every
+    /// name has some word starting with it, which would bury the real prefix hits.
+    func testAShortQueryDoesNotMatchALaterWord() {
+        XCTAssertNil(NameMatcher.score("session-menu", against: "m"))
+        XCTAssertNil(NameMatcher.score("session-menu", against: "me"))
+        XCTAssertEqual(NameMatcher.score("session-menu", against: "men")?.tier, .prefix)
+    }
 }
+

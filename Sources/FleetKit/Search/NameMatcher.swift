@@ -29,6 +29,8 @@ public struct NameMatch: Equatable {
 
 /// Fuzzy matching for session, project and conversation names.
 ///
+/// A query starting the name, or starting any later word of it, is a `.prefix` match.
+///
 /// This is the cheap half of search: a few hundred candidates, rescored on every keystroke
 /// with no I/O, which is what lets name results update with no debounce at all while
 /// transcript results wait 90 ms behind them.
@@ -55,11 +57,40 @@ public enum NameMatcher {
             let end = candidate.index(candidate.startIndex, offsetBy: needle.count)
             return NameMatch(tier: .prefix, matchedRanges: [candidate.startIndex..<end])
         }
-        guard needle.count >= minimumFuzzyQueryLength,
-              let ranges = subsequenceRanges(of: needle, in: haystack, mappedInto: candidate)
+        guard needle.count >= minimumFuzzyQueryLength else { return nil }
+        // The query starting a LATER word is the same quality as it starting the name: the
+        // name holds the typed word either way. Tiering it fuzzy put "On-Premise Infra" below
+        // "Infra Review" for "infra" before `SearchRanker`'s open-session tiebreak could run.
+        // Under the fuzzy floor because a short query starts some word in almost every name.
+        if let range = wordStartRange(of: needle, in: haystack, mappedInto: candidate) {
+            return NameMatch(tier: .prefix, matchedRanges: [range])
+        }
+        guard let ranges = subsequenceRanges(of: needle, in: haystack, mappedInto: candidate)
         else { return nil }
 
         return NameMatch(tier: .fuzzy, matchedRanges: ranges)
+    }
+
+    /// The first occurrence of `needle` that starts a word — preceded by anything that is not
+    /// a letter or digit — as a range into `original`.
+    ///
+    /// Mapped by Character offset, on the same equal-count assumption `subsequenceRanges`
+    /// makes; a lowercased copy that broke it returns nil, degrading to the fuzzy walk.
+    private static func wordStartRange(
+        of needle: String, in haystack: String, mappedInto original: String
+    ) -> Range<String.Index>? {
+        guard haystack.count == original.count else { return nil }
+        var from = haystack.startIndex
+        while let found = haystack.range(of: needle, range: from..<haystack.endIndex) {
+            let before = haystack[haystack.index(before: found.lowerBound)]
+            if !before.isLetter && !before.isNumber {
+                let start = haystack.distance(from: haystack.startIndex, to: found.lowerBound)
+                let lower = original.index(original.startIndex, offsetBy: start)
+                return lower..<original.index(lower, offsetBy: needle.count)
+            }
+            from = haystack.index(after: found.lowerBound)
+        }
+        return nil
     }
 
     /// Greedy left-to-right subsequence walk: take the first occurrence of each query

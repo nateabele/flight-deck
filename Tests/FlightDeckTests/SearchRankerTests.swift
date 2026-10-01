@@ -300,6 +300,18 @@ final class SearchRankerTests: XCTestCase {
         XCTAssertEqual(results.map(\.id), ["rename", "conversation:rename"])
     }
 
+    /// The case that was reported: "Infra" against a closed "Infra Review" and an open
+    /// "On-Premise Infra". Both names contain the word, so the open tab wins.
+    func testAnOpenSessionWithTheWordLaterInItsNameBeatsAClosedOneStartingWithIt() {
+        let results = SearchRanker.rank(
+            names: [closed("Infra Review"), session("On-Premise Infra", activity: 60 * 60)],
+            query: "Infra",
+            transcripts: []
+        )
+
+        XCTAssertEqual(results.map(\.title), ["On-Premise Infra", "Infra Review"])
+    }
+
     /// ...but the preference is only a tiebreak: a closed conversation whose name matches
     /// better still outranks an open tab whose name matches worse.
     func testAClosedConversationsBetterNameStillWins() {

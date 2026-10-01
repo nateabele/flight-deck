@@ -983,7 +983,7 @@ lets a result resume into the worktree it actually ran in, without re-deriving i
 directories for a matching filename, is gone.
 
 **Ranking is tiers, not a blended score.** `SearchRanker` orders by match-quality tier first
-(exact / prefix / fuzzy name match, then FTS5 transcript hit, then an `.automated` tier below
+(exact / prefix — the start of the name or of any later word — / fuzzy name match, then FTS5 transcript hit, then an `.automated` tier below
 that); within a tier an open session beats a closed conversation, and only then does recency
 break ties — deliberately not a single score, since
 BM25 (transcript relevance) and the fuzzy-subsequence score (name matching) are not on a
