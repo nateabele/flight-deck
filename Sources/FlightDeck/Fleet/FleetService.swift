@@ -246,7 +246,17 @@ final class FleetService: ObservableObject {
             uniquingKeysWith: { first, _ in first }
         )
         return WireConversationCatalogue(
-            conversations: conversations, sessionActivity: sessionActivity
+            conversations: conversations, sessionActivity: sessionActivity,
+            sessionConversations: Self.sessionConversations(store.repos.flatMap(\.sessions))
+        )
+    }
+
+    /// Each tab's pinned conversation, keyed the way `WireConversationCatalogue` keys it.
+    /// Lowercased to match the index, exactly as `SearchCandidates.build` claims by on the desk.
+    static func sessionConversations(_ sessions: [Session]) -> [String: String] {
+        Dictionary(
+            sessions.map { ($0.id.uuidString, $0.pinnedConversationID.uuidString.lowercased()) },
+            uniquingKeysWith: { first, _ in first }
         )
     }
 

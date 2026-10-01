@@ -56,7 +56,7 @@ Start here if you're picking up Flight Deck fresh. This is the map; the linked d
 > **✅ ⌘K Search (2026-08-27) — merged.**
 > `⌘K` opens a fleet-wide search overlay: type a session or project name to jump straight to
 > it, or a phrase you remember saying to search full transcript history — ranked by match
-> quality, recency breaking ties within a tier. First launch backfills that transcript
+> quality; at equal quality an open session beats a closed one, then recency breaks ties. First launch backfills that transcript
 > history in the background (newest conversations first), so name search works immediately
 > and transcript hits fill in as the backfill catches up. A running session's own transcript
 > indexes live as it streams, so it needs no backfill of its own. Ghostty claims `⌘K` for

@@ -984,12 +984,16 @@ directories for a matching filename, is gone.
 
 **Ranking is tiers, not a blended score.** `SearchRanker` orders by match-quality tier first
 (exact / prefix / fuzzy name match, then FTS5 transcript hit, then an `.automated` tier below
-that), and only breaks ties within a tier by recency — deliberately not a single score, since
+that); within a tier an open session beats a closed conversation, and only then does recency
+break ties — deliberately not a single score, since
 BM25 (transcript relevance) and the fuzzy-subsequence score (name matching) are not on a
 common scale, and any constant that mixed them would be undefendable. Transcript hits are
 always the last tiers: BM25 still governs which 200 candidate hits FTS5 returns (`LIMIT 200
-ORDER BY bm25(...)`), but within the overlay they are ordered by recency and drawn only below
-every name match. That ordering is what lets the debounced transcript query's slower results
+ORDER BY bm25(...)`), but within the overlay conversations are ordered by how closely their
+shown snippets match the typed text (`TranscriptMatch`: whole phrase, phrase ending mid-word,
+scattered terms), then by whether a tab is open, then by recency — and drawn only below every
+name match. Openness sits below match quality so it decides only between equally good matches;
+a closed conversation holding the exact phrase still beats an open tab with scattered hits. That ordering is what lets the debounced transcript query's slower results
 append below an already-visible, already-selected row instead of reordering the list out from
 under the user's finger. `.automated` exists because 86% of rollouts on a working machine are
 headless `codex exec` runs, concentrated in one repo — sharing the `.transcript` tier with

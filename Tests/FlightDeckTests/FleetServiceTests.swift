@@ -929,6 +929,23 @@ final class FleetServiceTests: XCTestCase {
         XCTAssertEqual(code, "index_unavailable")
     }
 
+    /// The catalogue names each tab's PINNED conversation, not its tab id. A codex tab, or a
+    /// claude tab after an in-session `/resume`, is pinned to a different id than the tab's —
+    /// and the phone needs the real one to tell an open session's transcript hits from a
+    /// closed conversation's.
+    func testSessionConversationsNameEachTabsPinnedConversation() {
+        let resumed = UUID()
+        let fresh = Session(title: "fresh", workingDirectory: "/w/alpha")
+        let repinned = Session(
+            title: "resumed", workingDirectory: "/w/alpha", pinnedConversationID: resumed
+        )
+
+        XCTAssertEqual(FleetService.sessionConversations([fresh, repinned]), [
+            fresh.id.uuidString: fresh.id.uuidString.lowercased(),
+            repinned.id.uuidString: resumed.uuidString.lowercased(),
+        ])
+    }
+
     // MARK: Phone presence
 
     /// **A viewer must lose its badge when ITS connection goes, not only when the last phone

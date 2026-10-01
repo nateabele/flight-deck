@@ -141,4 +141,45 @@ final class PhoneSearchCandidatesTests: XCTestCase {
             candidates.first { $0.kind == .project }?.lastActivity, newerStamp
         )
     }
+
+    /// A codex tab's conversation id is its thread id, not its tab id. With the Mac's map the
+    /// tab claims its catalogue row — no duplicate — and carries the id the ranker needs to
+    /// recognise its transcript hits as an open session's.
+    func testATabClaimsTheConversationTheMacSaysItIsPinnedTo() {
+        let tab = UUID()
+        let thread = "019a0000-0000-7000-8000-000000000001"
+        let candidates = PhoneSearchCandidates.build(
+            projects: [WireProject(
+                id: UUID(), name: "a", path: "/a",
+                sessions: [WireSession(id: tab, title: "codex tab", agent: "codex")]
+            )],
+            catalogue: WireConversationCatalogue(
+                conversations: [WireConversation(
+                    id: thread, name: "codex chat", projectPath: "/a", agent: "codex"
+                )],
+                sessionActivity: [:],
+                sessionConversations: [tab.uuidString: thread]
+            )
+        )
+
+        XCTAssertFalse(candidates.contains { $0.name == "codex chat" })
+        XCTAssertEqual(candidates.first { $0.name == "codex tab" }?.conversationID, thread)
+    }
+
+    /// An older Mac sends no map. A claude tab's id lowercased IS its conversation id at birth,
+    /// so that stays the fallback.
+    func testATabFallsBackToItsOwnIDWhenTheMacSendsNoMap() {
+        let tab = UUID()
+        let candidates = PhoneSearchCandidates.build(
+            projects: [WireProject(
+                id: UUID(), name: "a", path: "/a",
+                sessions: [WireSession(id: tab, title: "t", agent: "claude")]
+            )],
+            catalogue: WireConversationCatalogue(conversations: [], sessionActivity: [:])
+        )
+        XCTAssertEqual(
+            candidates.first { $0.name == "t" }?.conversationID, tab.uuidString.lowercased()
+        )
+    }
 }
+

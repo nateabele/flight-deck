@@ -17,10 +17,13 @@ enum PhoneSearchCandidates {
         for project in projects {
             var newest = Date.distantPast
             for session in project.sessions {
-                // Lowercased because a transcript filename stem is lowercase and
-                // `UUID.uuidString` is not — comparing them raw never matches, which would
-                // silently defeat the claim below and list every open session twice.
-                let key = session.id.uuidString.lowercased()
+                // The Mac's word for which conversation this tab is pinned to. Falling back to
+                // the tab id lowercased covers a Mac that predates the map: a claude tab starts
+                // pinned to its own id. Lowercased because a transcript filename stem is
+                // lowercase and `UUID.uuidString` is not — comparing them raw never matches,
+                // which would silently defeat the claim and list every open session twice.
+                let key = catalogue.sessionConversations[session.id.uuidString]
+                    ?? session.id.uuidString.lowercased()
                 claimed.insert(key)
                 let stamp = catalogue.sessionActivity[session.id.uuidString] ?? .distantPast
                 newest = max(newest, stamp)
@@ -31,7 +34,10 @@ enum PhoneSearchCandidates {
                     projectPath: project.path,
                     projectName: project.name,
                     lastActivity: stamp,
-                    conversationID: nil
+                    // Carried so `SearchRanker` can tell this tab's transcript hits come from an
+                    // open session. Activation goes by `kind`, so this changes no tap.
+                    conversationID: key,
+                    agent: session.agent
                 ))
             }
             candidates.append(NameCandidate(
@@ -67,10 +73,3 @@ enum PhoneSearchCandidates {
         return candidates
     }
 }
-
-// Note the claim key. A `WireSession` does not expose its conversation id, so a session is
-// matched against the catalogue by its tab id lowercased. For claude these are the same
-// value; for codex they are not, so a codex session's past conversation may appear as a
-// separate catalogue row. That is the honest limit of what the wire says today — do not
-// invent a mapping. If it proves confusing in use, the fix is a `conversationID` on
-// `WireSession`, not a guess here.

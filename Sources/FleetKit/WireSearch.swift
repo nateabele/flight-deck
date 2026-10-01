@@ -73,10 +73,38 @@ public struct WireConversationCatalogue: Codable, Equatable, Sendable {
     /// both currently use the bare default. Setting one anywhere would shift every timestamp
     /// on this wire silently, with nothing here to catch it.
     public let sessionActivity: [String: Date]
+    /// Live tab id (`uuidString`) → the conversation id it is pinned to, lowercased — the key
+    /// the index and `conversations` use.
+    ///
+    /// The phone cannot derive this. A claude tab starts pinned to its own id, but an
+    /// in-session `/resume` re-pins it, and a codex tab is pinned to its thread id from birth.
+    /// Without it the phone guessed the tab id, so a codex tab's own past conversation showed
+    /// up as a second, closed row, and `SearchRanker` could not tell that tab's transcript
+    /// hits came from an open session.
+    ///
+    /// On this reply rather than `WireSession` for the reason `sessionActivity` is: a re-pin
+    /// records no fleet event, so a snapshot field would trip `FleetReplicator`'s drift check.
+    public let sessionConversations: [String: String]
 
-    public init(conversations: [WireConversation], sessionActivity: [String: Date]) {
+    public init(
+        conversations: [WireConversation], sessionActivity: [String: Date],
+        sessionConversations: [String: String] = [:]
+    ) {
         self.conversations = conversations
         self.sessionActivity = sessionActivity
+        self.sessionConversations = sessionConversations
+    }
+
+    /// Hand-written so a reply from a Mac that predates `sessionConversations` decodes as an
+    /// empty map rather than throwing — the phone then falls back to the tab id, which is what
+    /// it did before the field existed.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        conversations = try c.decode([WireConversation].self, forKey: .conversations)
+        sessionActivity = try c.decode([String: Date].self, forKey: .sessionActivity)
+        sessionConversations = try c.decodeIfPresent(
+            [String: String].self, forKey: .sessionConversations
+        ) ?? [:]
     }
 }
 

@@ -29,4 +29,27 @@ final class WireConversationWireTests: XCTestCase {
         )
         XCTAssertEqual(round.agent, "codex")
     }
+
+    /// A catalogue from a Mac that predates `sessionConversations` must still decode — the
+    /// phone then falls back to claiming each tab by its own id, which is what it did before.
+    func testACatalogueMissingSessionConversationsDecodesAsEmpty() throws {
+        let legacy = """
+            {"conversations":[],"sessionActivity":{}}
+            """
+        let catalogue = try JSONDecoder().decode(
+            WireConversationCatalogue.self, from: Data(legacy.utf8)
+        )
+        XCTAssertEqual(catalogue.sessionConversations, [:])
+    }
+
+    func testSessionConversationsRoundTrip() throws {
+        let tab = UUID().uuidString
+        let catalogue = WireConversationCatalogue(
+            conversations: [], sessionActivity: [:], sessionConversations: [tab: "thread-1"]
+        )
+        let round = try JSONDecoder().decode(
+            WireConversationCatalogue.self, from: JSONEncoder().encode(catalogue)
+        )
+        XCTAssertEqual(round.sessionConversations, [tab: "thread-1"])
+    }
 }

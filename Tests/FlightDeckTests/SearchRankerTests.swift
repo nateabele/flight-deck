@@ -12,13 +12,28 @@ final class SearchRankerTests: XCTestCase {
     private func ago(_ seconds: TimeInterval) -> Date { now.addingTimeInterval(-seconds) }
 
     private func session(
-        _ name: String, project: String = "flight-deck", activity: TimeInterval
+        _ name: String, project: String = "flight-deck", activity: TimeInterval,
+        conversation: String? = nil, tab: UUID = UUID()
     ) -> NameCandidate {
         NameCandidate(
-            id: name, kind: .session(UUID()), name: name,
+            id: name, kind: .session(tab), name: name,
             projectPath: "/w/\(project)", projectName: project,
-            lastActivity: ago(activity), conversationID: nil
+            lastActivity: ago(activity), conversationID: conversation
         )
+    }
+
+    /// A past conversation with no tab — what `SearchCandidates` contributes from the index.
+    private func closed(_ name: String) -> NameCandidate {
+        NameCandidate(
+            id: "conversation:\(name)", kind: .conversation(name), name: name,
+            projectPath: "/w/flight-deck", projectName: "flight-deck",
+            lastActivity: .distantPast, conversationID: name
+        )
+    }
+
+    /// Wraps a term in the sentinels FTS5's `snippet()` marks matches with.
+    private func marked(_ term: String) -> String {
+        "\(SnippetSentinel.open)\(term)\(SnippetSentinel.close)"
     }
 
     private func project(_ name: String, activity: TimeInterval) -> NameCandidate {
@@ -270,6 +285,107 @@ final class SearchRankerTests: XCTestCase {
             results.map(\.transcriptPath),
             ["/Users/me/.codex/sessions/2026/09/21/rollout-abc.jsonl"]
         )
+    }
+
+    // MARK: - Open sessions over closed ones, at equal match quality
+
+    /// Name matches: at the same tier the open tab wins, however long ago it was touched.
+    func testAnOpenSessionsNameBeatsAClosedConversationsAtTheSameTier() {
+        let results = SearchRanker.rank(
+            names: [closed("rename"), session("rename", activity: 60 * 60 * 24 * 30)],
+            query: "rename",
+            transcripts: []
+        )
+
+        XCTAssertEqual(results.map(\.id), ["rename", "conversation:rename"])
+    }
+
+    /// ...but the preference is only a tiebreak: a closed conversation whose name matches
+    /// better still outranks an open tab whose name matches worse.
+    func testAClosedConversationsBetterNameStillWins() {
+        let results = SearchRanker.rank(
+            names: [session("rename-flow", activity: 1), closed("rename")],
+            query: "rename",
+            transcripts: []
+        )
+
+        XCTAssertEqual(results.map(\.id), ["conversation:rename", "rename-flow"])
+    }
+
+    /// Transcript hits: both conversations match the same word the same way, so the one with
+    /// a tab open wins — even though the closed conversation's hit is newer.
+    func testAnOpenSessionsTranscriptHitBeatsAClosedOneMatchingTheSameWords() {
+        let results = SearchRanker.rank(
+            names: [session("wifi", activity: 60, conversation: "live")],
+            query: "rename",
+            transcripts: [
+                hit("old", snippet: "the \(marked("rename")) bug", activity: 1),
+                hit("live", snippet: "the \(marked("rename")) flow", activity: 60 * 60),
+            ]
+        )
+
+        XCTAssertEqual(results.compactMap(\.snippet).first, "the \(marked("rename")) flow")
+    }
+
+    /// A session candidate built without a conversation id — a phone talking to a Mac that
+    /// predates `sessionConversations` — falls back to its tab id, which a claude tab starts
+    /// pinned to.
+    func testASessionWithNoConversationIDIsRecognisedAsOpenByItsTabID() {
+        let tab = UUID()
+        let results = SearchRanker.rank(
+            names: [session("wifi", activity: 60, tab: tab)],
+            query: "rename",
+            transcripts: [
+                hit("old", snippet: "the \(marked("rename")) bug", activity: 1),
+                hit(tab.uuidString.lowercased(), snippet: "a \(marked("rename")) flow", activity: 600),
+            ]
+        )
+
+        XCTAssertEqual(results.compactMap(\.snippet).first, "a \(marked("rename")) flow")
+    }
+
+    /// A closed conversation holding the typed words as a phrase beats an open one that only
+    /// has them scattered: the open preference never overrides a better textual match.
+    func testAClosedConversationWithThePhraseBeatsAnOpenOneWithScatteredWords() {
+        let results = SearchRanker.rank(
+            names: [session("wifi", activity: 60, conversation: "live")],
+            query: "rename flow",
+            transcripts: [
+                hit("live", snippet: "\(marked("flow")) then a \(marked("rename"))", activity: 1),
+                hit("old", snippet: "the \(marked("rename")) \(marked("flow")) broke", activity: 600),
+            ]
+        )
+
+        XCTAssertEqual(results.map(\.conversationID), ["old", "live"])
+    }
+
+    /// The whole word typed beats a longer word it is only the start of — "rename" is a
+    /// better match for "rename" than "renamed" is, so the closed conversation wins.
+    func testAWholeWordMatchBeatsAPrefixMatchFromAnOpenSession() {
+        let results = SearchRanker.rank(
+            names: [session("wifi", activity: 60, conversation: "live")],
+            query: "rename",
+            transcripts: [
+                hit("live", snippet: "we \(marked("renamed")) it", activity: 1),
+                hit("old", snippet: "please \(marked("rename")) it", activity: 600),
+            ]
+        )
+
+        XCTAssertEqual(results.map(\.conversationID), ["old", "live"])
+    }
+
+    /// Automation stays last even when its conversation has a tab open.
+    func testAnOpenExecConversationStillSortsBelowClosedInteractiveHits() {
+        let results = SearchRanker.rank(
+            names: [session("ci", activity: 1, conversation: "ci-runner")],
+            query: "rename",
+            transcripts: [
+                hit("ci-runner", snippet: "\(marked("rename"))", activity: 1, provenance: "exec"),
+                hit("old", snippet: "\(marked("rename"))", activity: 600),
+            ]
+        )
+
+        XCTAssertEqual(results.map(\.conversationID), ["old", "ci-runner"])
     }
 }
 
