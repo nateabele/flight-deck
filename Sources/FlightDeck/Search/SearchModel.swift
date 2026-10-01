@@ -85,6 +85,11 @@ final class SearchModel: ObservableObject {
         // Dropped immediately, not when the replacement arrives: otherwise a query with no
         // transcript hits leaves the previous query's hits on screen until it returns.
         transcripts = []
+        // A new query is a new list, so the highlight goes back to its top. Held by identity
+        // instead, a row that survives the keystroke keeps the highlight while better matches
+        // land above it — "In" highlights "Infra Review", "Infra" puts "On-Premise Infra"
+        // over it, and Return then opens the wrong one.
+        selectedID = nil
         rerank()
         scheduleTranscriptSearch()
     }
@@ -125,8 +130,9 @@ final class SearchModel: ObservableObject {
     private func rerank() {
         results = SearchRanker.rank(names: candidates, query: query, transcripts: transcripts)
         // Selection is held by identity across reranks, so a late-arriving batch of
-        // transcript hits leaves the highlighted row exactly where it was. It only resets
-        // when the row it named is genuinely gone — which is what a changed query does.
+        // transcript hits — or a candidate refresh — leaves the highlighted row exactly where
+        // it was. It resets when the row it named is gone, and on every query change, which
+        // clears it in `queryChanged` before calling here.
         if selectedID == nil || !results.contains(where: { $0.id == selectedID }) {
             selectedID = results.first?.id
         }

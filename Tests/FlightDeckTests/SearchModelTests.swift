@@ -108,6 +108,28 @@ final class SearchModelTests: XCTestCase {
         XCTAssertEqual(model.selectedID, model.results.first?.id)
     }
 
+    /// The reported case: the highlighted row SURVIVES the keystroke but is no longer on top.
+    /// "In" lists only "Infra Review" (a word start needs three letters); "Infra" adds the
+    /// open "On-Premise Infra" above it. The highlight must follow the top, not the row —
+    /// otherwise Return opens the third result and reaching the first takes two ↑ presses.
+    func testSelectionFollowsTheTopWhenTheHighlightedRowSurvivesAQueryChange() {
+        model.candidatesChanged([
+            NameCandidate(
+                id: "conversation:review", kind: .conversation("review"), name: "Infra Review",
+                projectPath: "/w/fd", projectName: "fd", lastActivity: .distantPast,
+                conversationID: "review"
+            ),
+            candidate("On-Premise Infra", activity: 100),
+        ])
+
+        model.query = "In"
+        XCTAssertEqual(model.selectedID, "conversation:review")
+
+        model.query = "Infra"
+        XCTAssertEqual(model.results.first?.id, "On-Premise Infra")
+        XCTAssertEqual(model.selectedID, "On-Premise Infra")
+    }
+
     /// Arrowing past either end holds rather than wrapping: at eight visible rows, wrapping
     /// from the top to the bottom of a 200-result list is disorienting, and the top of the
     /// list is where the best match is.
