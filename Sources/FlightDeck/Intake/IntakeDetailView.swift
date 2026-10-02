@@ -25,6 +25,13 @@ struct IntakeDetailView: View {
     /// Per project, held by `IntakeService` (`inspectorShown(forProject:)`); `ProjectView`'s
     /// toolbar button (⌥⌘I) toggles it, and Edit in Inspector and the notes open it.
     @Binding var showsInspector: Bool
+    /// What the inspector column is actually handed — `showsInspector`, except that a close
+    /// pressed while the column is still opening is held until the open is done
+    /// (`presentColumn`). Seeded from `showsInspector`: `ProjectView` keys this view on the
+    /// intake's id, so a project coming back with its inspector open starts with it open.
+    @State private var columnPresented: Bool
+    /// When the column was last asked to open, which is what dates the open animation.
+    @State private var columnOpenedAt: Date?
 
     /// Answer drafts for `.needsAnswers`, indexed the same as the current exchange's
     /// questions. Reloaded via `.task(id:)` below whenever the question set changes — the
@@ -109,6 +116,7 @@ struct IntakeDetailView: View {
         self.intake = intake
         self.onOpenReview = onOpenReview
         _showsInspector = showsInspector
+        _columnPresented = State(initialValue: showsInspector.wrappedValue)
         _expandedRounds = State(initialValue: expandedRounds)
         _requestExpanded = State(initialValue: requestExpanded)
         _selectedSeat = State(initialValue: selectedSeat)
@@ -207,6 +215,7 @@ struct IntakeDetailView: View {
         }
         .onChange(of: derivedKey, initial: true) { refreshDerived() }
         .onChange(of: intake.id, initial: true) { bindNotes() }
+        .onChange(of: showsInspector, initial: true) { _, shown in presentColumn(shown) }
         .onChange(of: service.notes(intake.id), initial: true) { _, onTape in notes.tapeNotes = onTape }
         // Choosing a seat is asking the inspector about the run, not the plan.
         .onChange(of: selectedSeat) { _, seat in if seat != nil { notes.planFocused = false } }
@@ -218,21 +227,55 @@ struct IntakeDetailView: View {
         }
     }
 
-    /// `showsInspector` as the column is handed it. The column writes back when AppKit's
-    /// collapse animation completes, and a close pressed while the column is still opening is
-    /// lost: AppKit finishes the open, and the write-back says `true` over the human's close —
-    /// ⌥⌘I or the toolbar hid the inspector and it came straight back. The open took about a
-    /// second with the plan relaying out beside it (`ProjectViewInspectorLiveTests`, offscreen),
-    /// so the window is wide. Nothing but this pane's
-    /// own openers has a reason to open the column, so an open it reports while closed is that
-    /// lost close: accept what it says, then close again, now that nothing is animating. A drag
-    /// that collapses the column is a real close and lands as is.
+    /// How long the column's open animation is taken to run. It took about a second with the
+    /// plan relaying out beside it (`ProjectViewInspectorLiveTests`, offscreen, a cold window);
+    /// the rest is margin. A cold open slower than this can still lose a close.
+    static let openSettle: TimeInterval = 1.2
+
+    /// The column as `.inspector` is handed it. A close pressed while the column is still
+    /// opening is lost two ways, and this guards the one `presentColumn` can't: AppKit finishes
+    /// the open and writes `true` back over the human's close — ⌥⌘I or the toolbar hid the
+    /// inspector and it came straight back. Nothing but this pane's own openers has a reason
+    /// to open the column, so an open it reports while closed is that lost close: accept what
+    /// it says, then close again, now that nothing is animating. A drag that collapses the
+    /// column is a real close and lands as is.
     private var inspectorPresented: Binding<Bool> {
-        Binding(get: { showsInspector }, set: { [$showsInspector] shown in
-            let reopenedItself = shown && !$showsInspector.wrappedValue
-            $showsInspector.wrappedValue = shown
-            if reopenedItself { DispatchQueue.main.async { $showsInspector.wrappedValue = false } }
+        Binding(get: { columnPresented }, set: { shown in
+            columnPresented = shown
+            guard shown && !showsInspector else {
+                showsInspector = shown
+                return
+            }
+            // Through `presentColumn`, not straight to `false`: inside the open window this
+            // write-back lands while the close is still held, and closing at once started a
+            // collapse mid-open whose own late write-back of `false` then undid a reopen.
+            DispatchQueue.main.async { presentColumn(showsInspector) }
         })
+    }
+
+    /// Follows `showsInspector` into the column, holding a close that arrives within
+    /// `openSettle` of the open until that window ends. The other way the close is lost:
+    /// `.inspector(isPresented:)` drops a `false` that lands mid-animation without a word —
+    /// AppKit never writes back, so the write-back guard above never runs, and the toolbar
+    /// said "Show Inspector" over a column that stayed open for good (6 s later, still open;
+    /// a log in the binding's setter never fired). Re-sending `false` is no cure, since SwiftUI
+    /// pushes a binding only on a change. The held close re-reads `showsInspector` when it
+    /// fires, so a reopen in between cancels it rather than closing the column under it.
+    private func presentColumn(_ shown: Bool) {
+        if shown {
+            if !columnPresented { columnOpenedAt = Date() }
+            columnPresented = true
+            return
+        }
+        guard columnPresented else { return }
+        let remaining = columnOpenedAt.map { Self.openSettle + $0.timeIntervalSinceNow } ?? 0
+        guard remaining > 0 else {
+            columnPresented = false
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + remaining) { [$showsInspector, $columnPresented] in
+            if !$showsInspector.wrappedValue { $columnPresented.wrappedValue = false }
+        }
     }
 
     // MARK: - Header

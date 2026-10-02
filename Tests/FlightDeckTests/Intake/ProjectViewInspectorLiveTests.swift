@@ -37,39 +37,7 @@ final class ProjectViewInspectorLiveTests: XCTestCase {
     }
 
     func testInspectorClosesFromTheEditorAndIsRememberedPerProject() throws {
-        let prefs = PreferencesStore(persistence: PreferencesStoreTests.MemoryPersistence())
-        let store = SessionStore(provider: nil, persistence: SessionPersistenceTests.FakePersistence(),
-                                 preferences: prefs, intakesRoot: root)
-        // Paths unique to this run, so nothing another run left in the standard domain reads back.
-        let tag = UUID().uuidString
-        store.newSession(in: URL(fileURLWithPath: "/w/inspector-a-\(tag)", isDirectory: true))
-        store.newSession(in: URL(fileURLWithPath: "/w/inspector-b-\(tag)", isDirectory: true))
-        let a = try XCTUnwrap(store.repos.first { $0.url.path.hasSuffix("inspector-a-\(tag)") })
-        let b = try XCTUnwrap(store.repos.first { $0.url.path.hasSuffix("inspector-b-\(tag)") })
-        let session = try XCTUnwrap(store.selectedSessionID)
-        for repo in [a, b] {
-            var settings = prefs.projectSettings(repo.url.path)
-            settings.flywheelEnabled = true
-            prefs.setProjectSettings(repo.url.path, settings)
-            try seedShaping(project: repo.url.standardizedFileURL.path)
-        }
-        // Seeded before first read: the service loads its intakes once, at init.
-        let service = store.intakeService
-        service.pollTapes()
-        restoreDefaults = {
-            for repo in [a, b] {
-                service.setInspectorShown(false, inProject: repo.url.path)
-                service.select(nil, inProject: repo.url.path)
-            }
-        }
-        for repo in [a, b] {
-            let path = repo.url.standardizedFileURL.path
-            service.select(service.intakes(forProject: path).first?.id, inProject: path)
-        }
-        store.selectProject(a.id)
-
-        let window = host(RootView(store: store, preferences: prefs))
-        settle()
+        let (store, a, b, session, window) = try openTwoShapingProjects()
         XCTAssertEqual(toggleLabel(in: window), "Show Inspector", "hidden by default (spec §3)")
 
         // Into the plan, as a click would: the plan focused is what puts the notes rail in the
@@ -106,7 +74,60 @@ final class ProjectViewInspectorLiveTests: XCTestCase {
         XCTAssertEqual(toggleLabel(in: window), "Hide Inspector", "project A's open inspector survived the switch")
     }
 
+    /// A close held for the open to finish (`IntakeDetailView.openSettle`) must not fire over a
+    /// reopen pressed before it lands: the column ends open, as the toolbar says.
+    func testReopenWithinTheOpenWindowKeepsTheColumnOpen() throws {
+        let (_, _, _, _, window) = try openTwoShapingProjects()
+        XCTAssertTrue(pressInspectorChord(in: window))
+        settle(0.3)
+        XCTAssertTrue(pressInspectorChord(in: window), "close, while the column is still opening")
+        settle(0.2)
+        XCTAssertTrue(pressInspectorChord(in: window), "reopen, before the held close lands")
+        settle(2.0)
+        XCTAssertEqual(toggleLabel(in: window), "Hide Inspector")
+        XCTAssertEqual(inspectorCollapsed(in: window), false, "the held close saw the reopen and stood down")
+    }
+
     // MARK: - Fixtures
+
+    /// Two projects, each with a shaping intake selected, A shown in a hosted `RootView`.
+    private func openTwoShapingProjects() throws -> (SessionStore, Repo, Repo, UUID, NSWindow) {
+        let prefs = PreferencesStore(persistence: PreferencesStoreTests.MemoryPersistence())
+        let store = SessionStore(provider: nil, persistence: SessionPersistenceTests.FakePersistence(),
+                                 preferences: prefs, intakesRoot: root)
+        // Paths unique to this run, so nothing another run left in the standard domain reads back.
+        let tag = UUID().uuidString
+        store.newSession(in: URL(fileURLWithPath: "/w/inspector-a-\(tag)", isDirectory: true))
+        store.newSession(in: URL(fileURLWithPath: "/w/inspector-b-\(tag)", isDirectory: true))
+        let a = try XCTUnwrap(store.repos.first { $0.url.path.hasSuffix("inspector-a-\(tag)") })
+        let b = try XCTUnwrap(store.repos.first { $0.url.path.hasSuffix("inspector-b-\(tag)") })
+        let session = try XCTUnwrap(store.selectedSessionID)
+        for repo in [a, b] {
+            var settings = prefs.projectSettings(repo.url.path)
+            settings.flywheelEnabled = true
+            prefs.setProjectSettings(repo.url.path, settings)
+            try seedShaping(project: repo.url.standardizedFileURL.path)
+        }
+        // Seeded before first read: the service loads its intakes once, at init.
+        let service = store.intakeService
+        service.pollTapes()
+        restoreDefaults = {
+            for repo in [a, b] {
+                service.setInspectorShown(false, inProject: repo.url.path)
+                service.select(nil, inProject: repo.url.path)
+            }
+        }
+        for repo in [a, b] {
+            let path = repo.url.standardizedFileURL.path
+            service.select(service.intakes(forProject: path).first?.id, inProject: path)
+        }
+        store.selectProject(a.id)
+
+        let window = host(RootView(store: store, preferences: prefs))
+        settle()
+        return (store, a, b, session, window)
+    }
+
 
     private func seedShaping(project: String) throws {
         var intake = Intake(projectPath: project, intent: "Plan the thing")
