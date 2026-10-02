@@ -1016,7 +1016,7 @@ private struct DetailHeader: View, Equatable {
 /// `.textSelection(.enabled)` — the same mechanism the Q&A answers already use — in the same
 /// `HStack`, so nothing moves; clicking it no longer collapses the disclosure, only the chevron
 /// does.
-// Not `private`: `IntakeDetailViewTests` instantiates it directly to inspect the view tree a
+// Not `private`: `RequestDisclosureTests` instantiates it directly to inspect the view tree a
 // real click/drag can reach, which a real AX-tree walk cannot do in a headless test host (see
 // that test's header comment).
 struct RequestDisclosure: View {
