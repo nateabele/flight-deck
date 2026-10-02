@@ -1883,6 +1883,18 @@ feasibility unknown.
   - **Draft-stage metrics** (draft overlap, unique coverage, synthesis provenance).
   - **Change severity** (major/minor).
 
+  **First real cross-check (2026-10-02) — the estimate is not usable yet.** One Refine round
+  over a copy of the larkOS intake (`RoundsLiveProbeTests`, skipped by default; 1009 s; claude
+  seats $2.92, codex 919k in / 15.8k out tokens): codex made 57 single-issue proposals, claude 12
+  — one per plan section, each bundling numbered sub-issues (mean 3,345 chars vs codex's 511;
+  its own summary said "75 problems"). So n1=49, n2=12, both=8 compares issues against sections,
+  and Chapman (~71, MANY LEFT) is meaningless. The integrator's 8 clusters were section matches
+  (3 good, 1 weak) and it missed obvious sub-issue duplicates; the text matcher found 0 in
+  common and the disagreement note fired, correctly. **Next:** make the review prompt/schema
+  force one issue per proposal (or have the integrator split bundles) before any threshold is
+  calibrated. Also seen: codex's `run.json` `finished` lands ~105 s after its last event, at the
+  same moment as the parallel claude seat — unexplained.
+
   Residuals noticed while building, deliberately not fixed on this branch:
   - Plain (non-cross-check) Refine rounds still ignore the reviewer's fallback (pre-existing
     `seat` behavior), while cross-check rounds honor it. It's inconsistent; a ruling kept it
