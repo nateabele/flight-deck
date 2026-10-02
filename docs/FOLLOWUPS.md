@@ -2169,10 +2169,10 @@ flagged as most likely to differ from the tests. The maintainer's to run.
 
 ## Flight Control — known gaps and limits (gathered 2026-09-28)
 
-- **Nothing of Flight Control crosses the phone link.** The iOS app has no intake, tape or plan
-  view and no wire types for them; design not started. Open questions (what the phone is for,
-  read-only first vs interactive, snapshot vs request/reply, notifications, iPad) are in
-  [FLIGHT-CONTROL-MOBILE-HANDOFF.md](FLIGHT-CONTROL-MOBILE-HANDOFF.md) §7.
+- **Flight Control on the phone — BUILT (superseded 2026-10-02).** This entry said nothing
+  crossed the phone link. Intake summaries, detail, plan, transport, default play and notes now
+  do: spec [superpowers/specs/2026-09-29-flight-control-mobile-design.md](superpowers/specs/2026-09-29-flight-control-mobile-design.md),
+  merged with `fc-mobile-watch` and `fc-mobile-steer`.
 - **Only two harnesses, so only two model families.** `Harness` is `codex | claude`
   (`Sources/IntakeKit/Intake.swift:24`), and one reviewer slot serves every Refine round
   (`RoundConfig.reviewer`) — by default always codex, so reviewer diversity is zero. Coverage
@@ -2252,13 +2252,13 @@ flagged as most likely to differ from the tests. The maintainer's to run.
 
 ## Flight Control — next phases (gathered 2026-09-28)
 
-- **Coverage × fidelity — design not started.** Metrics for whether the reviewing families have
+- **Coverage × fidelity — BUILT 2026-09-29 (see the round-engine section above).** Originally: Metrics for whether the reviewing families have
   searched the plan's issue space (capture–recapture over accepted changes, per-family marginal
   yield), fidelity presets as coverage budgets, a convergence-AND-coverage stopping rule, and a
   shadow probe for trying Gemini/Grok/Qwen on frozen checkpoints — which needs a harness beyond
   claude/codex (an OpenAI-compatible endpoint, say). Handoff:
   [FLIGHT-CONTROL-COVERAGE-HANDOFF.md](FLIGHT-CONTROL-COVERAGE-HANDOFF.md).
-- **Flight Control on the phone — design not started.** Handoff:
+- **Flight Control on the phone — BUILT (see "known gaps and limits" above).** Originally: Handoff:
   [FLIGHT-CONTROL-MOBILE-HANDOFF.md](FLIGHT-CONTROL-MOBILE-HANDOFF.md).
 - **Level 3 "Operate" — not started.** Flight Deck as the swarm console rather than its
   observer. The branch-strategy ruling is recorded above ("Level 3 swarm: branch strategy");
