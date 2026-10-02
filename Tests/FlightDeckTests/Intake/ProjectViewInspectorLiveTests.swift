@@ -75,7 +75,11 @@ final class ProjectViewInspectorLiveTests: XCTestCase {
     }
 
     /// A close held for the open to finish (`IntakeDetailView.openSettle`) must not fire over a
-    /// reopen pressed before it lands: the column ends open, as the toolbar says.
+    /// reopen pressed before it lands: the column ends open, as the toolbar says. This guards
+    /// the hold's re-check and the write-back variant: on the old view, AppKit's write-back
+    /// re-closed the column at once, and that collapse's late `false` undid the reopen. It is
+    /// not a RED for the root cause, `.inspector` silently dropping a mid-open `false`. That
+    /// drop depends on load. The test above covers it, run alone on a loaded machine.
     func testReopenWithinTheOpenWindowKeepsTheColumnOpen() throws {
         let (_, _, _, _, window) = try openTwoShapingProjects()
         XCTAssertTrue(pressInspectorChord(in: window))

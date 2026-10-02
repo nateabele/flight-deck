@@ -32,6 +32,9 @@ struct IntakeDetailView: View {
     @State private var columnPresented: Bool
     /// When the column was last asked to open, which is what dates the open animation.
     @State private var columnOpenedAt: Date?
+    /// Bumped by every `presentColumn`, so a held close acts only if nothing has asked for the
+    /// column since it was held (`presentColumn`).
+    @State private var columnGeneration = 0
 
     /// Answer drafts for `.needsAnswers`, indexed the same as the current exchange's
     /// questions. Reloaded via `.task(id:)` below whenever the question set changes — the
@@ -239,6 +242,10 @@ struct IntakeDetailView: View {
     /// to open the column, so an open it reports while closed is that lost close: accept what
     /// it says, then close again, now that nothing is animating. A drag that collapses the
     /// column is a real close and lands as is.
+    ///
+    /// Known opposite gap, not handled: a reopen pressed while the column is still collapsing
+    /// is undone when that collapse's late write-back of `false` lands. Label and column then
+    /// agree that it's closed, so nothing is out of step, but the reopen is lost.
     private var inspectorPresented: Binding<Bool> {
         Binding(get: { columnPresented }, set: { shown in
             columnPresented = shown
@@ -261,7 +268,12 @@ struct IntakeDetailView: View {
     /// a log in the binding's setter never fired). Re-sending `false` is no cure, since SwiftUI
     /// pushes a binding only on a change. The held close re-reads `showsInspector` when it
     /// fires, so a reopen in between cancels it rather than closing the column under it.
+    /// It also checks that it is still the latest request (`columnGeneration`). Without that,
+    /// an old hold could fire into a later open (a drag-collapse mid-open, then a reopen and
+    /// a close) and close it early, inside that open's own window, where the `false` is
+    /// dropped.
     private func presentColumn(_ shown: Bool) {
+        columnGeneration += 1
         if shown {
             if !columnPresented { columnOpenedAt = Date() }
             columnPresented = true
@@ -273,8 +285,10 @@ struct IntakeDetailView: View {
             columnPresented = false
             return
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + remaining) { [$showsInspector, $columnPresented] in
-            if !$showsInspector.wrappedValue { $columnPresented.wrappedValue = false }
+        DispatchQueue.main.asyncAfter(deadline: .now() + remaining) {
+            [$showsInspector, $columnPresented, $columnGeneration, generation = columnGeneration] in
+            guard $columnGeneration.wrappedValue == generation, !$showsInspector.wrappedValue else { return }
+            $columnPresented.wrappedValue = false
         }
     }
 
