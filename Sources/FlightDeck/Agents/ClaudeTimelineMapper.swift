@@ -44,6 +44,7 @@ enum ClaudeTimelineMapper {
         guard record["isSidechain"] as? Bool != true else { return [] }
 
         let at = record["timestamp"] as? String
+        if type == "attachment" { return typedMidTurn(record, offset: offset, at: at) }
         guard let message = record["message"] as? [String: Any] else { return [] }
 
         switch type {
@@ -60,6 +61,33 @@ enum ClaudeTimelineMapper {
             }
         default:
             return []
+        }
+    }
+
+    /// A message the user typed while claude was mid-turn.
+    ///
+    /// Claude writes it ONLY as a `queued_command` attachment — no `user` record follows: 107
+    /// of 108 in the 60 most recent transcripts on the build machine had none. Reading only
+    /// `user` records erased every such message from the phone, and stranded its "Queued to
+    /// your agent" ghost, which `PromptOutbox.reconcile` retires only on a `.userTurn` with
+    /// the same text. The prompt is mapped exactly as a `user` record's content would be.
+    ///
+    /// **Only `commandMode == "prompt"`.** The same attachment type delivers task
+    /// notifications mid-turn (`commandMode` "task-notification"); those are the harness, and
+    /// `ClaudeSession.events(inObject:)` already reads them for the agent count.
+    private static func typedMidTurn(
+        _ record: [String: Any], offset: Int, at: String?
+    ) -> [TimelineItem] {
+        guard let attachment = record["attachment"] as? [String: Any],
+              attachment["type"] as? String == "queued_command",
+              attachment["commandMode"] as? String == "prompt"
+        else { return [] }
+        if let text = attachment["prompt"] as? String {
+            return normalized(text, offset: offset, at: at)
+        }
+        let blocks = attachment["prompt"] as? [[String: Any]] ?? []
+        return blocks.enumerated().compactMap { index, block in
+            userItem(block, offset: offset, index: index, at: at)
         }
     }
 

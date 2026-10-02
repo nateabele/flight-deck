@@ -302,6 +302,53 @@ final class ClaudeTimelineMapperTests: XCTestCase {
         }
     }
 
+    // MARK: A message typed while claude is working
+
+    /// The phone's stuck "Queued to your agent" rows. A message typed while claude is mid-turn
+    /// is written ONLY as this `attachment` — never as a `user` record: 107 of 108 such
+    /// messages in the 60 most recent transcripts on the build machine had no `user` copy at
+    /// all. Dropping it erased the message from the phone's timeline, and `PromptOutbox`
+    /// retires a delivered ghost only when a `.userTurn` with its text comes back, so the
+    /// ghost sat there until the reader dismissed it. Shape copied from a 2.1.287 transcript.
+    func testAMessageTypedMidTurnIsAUserTurn() {
+        let items = items(#"""
+            {"parentUuid":"a88a","isSidechain":false,"attachment":{"type":"queued_command","prompt":"There was a latent permission prompt, try again.","source_uuid":"3cb9","delivery_id":"6929","commandMode":"prompt","origin":{"kind":"human"},"timestamp":"2026-10-02T04:02:18.608Z","humanTurn":true},"type":"attachment","uuid":"124d","timestamp":"2026-10-02T04:02:18.608Z","rendered":[{"content":"<system-reminder>\nThe user sent a new message while you were working:\nThere was a latent permission prompt, try again.\n</system-reminder>"}],"renderedRole":"system","version":"2.1.287"}
+            """#, at: 4096)
+        XCTAssertEqual(items.count, 1)
+        XCTAssertEqual(items[0].kind, .userTurn)
+        XCTAssertEqual(items[0].status, .complete)
+        XCTAssertEqual(items[0].id, "4096#0")
+        XCTAssertEqual(items[0].at, "2026-10-02T04:02:18.608Z")
+        XCTAssertEqual(items[0].body.text, "There was a latent permission prompt, try again.",
+                       "the prompt, not the system-reminder claude renders it inside")
+        XCTAssertNil(items[0].body.tool)
+        XCTAssertNil(items[0].body.callID)
+    }
+
+    /// A mid-turn message with a pasted image carries block content, like a `user` record's,
+    /// and must not put the base64 on the wire either.
+    func testAMessageTypedMidTurnWithAnImageMapsLikeAUserRecord() {
+        let items = items("""
+            {"type":"attachment","uuid":"bed1","timestamp":"2026-09-02T23:40:36.888Z",\
+            "isSidechain":false,"attachment":{"type":"queued_command","commandMode":"prompt",\
+            "origin":{"kind":"human"},"prompt":[{"type":"text","text":"[Image #1] same issue"},\
+            {"type":"image","source":{"type":"base64","media_type":"image/png",\
+            "data":"iVBORw0KGgoAAAANSUhEUgAAA"}}]}}
+            """, at: 8)
+        XCTAssertEqual(items.map(\.kind), [.userTurn, .userTurn])
+        XCTAssertEqual(items.map(\.id), ["8#0", "8#1"])
+        XCTAssertEqual(items.map(\.body.text), ["[Image #1] same issue", "[image]"])
+    }
+
+    /// A task notification delivered mid-turn rides the same attachment type, with its own
+    /// `commandMode`. It is the harness talking, and its `user`-record copy (when there is
+    /// one) is already a notice — so this one maps to nothing rather than a second row.
+    func testATaskNotificationDeliveredMidTurnIsNotMapped() {
+        XCTAssertTrue(items(#"""
+            {"type":"attachment","uuid":"t1","isSidechain":false,"attachment":{"type":"queued_command","commandMode":"task-notification","origin":{"kind":"task-notification"},"prompt":"<task-notification>\n<task-id>abc</task-id>\n</task-notification>"}}
+            """#).isEmpty)
+    }
+
     /// `isMeta` records are claude talking to itself — "Continue from where you left off.",
     /// the image-geometry note. Rendering them as user turns puts words in the user's mouth.
     func testAMetaRecordIsNotAUserTurn() {
