@@ -19,7 +19,12 @@ import SQLite3
 /// This is the only file in the app that sees a `sqlite3*`.
 final class SQLiteSearchIndex: SearchIndex {
     /// Bump on any schema change. A mismatch deletes the file — see `init`.
-    static let schemaVersion = 3
+    ///
+    /// Also bump when `TranscriptExtractor` starts reading records it used to skip: the
+    /// builder resumes each transcript from its stored offset, so lines already indexed are
+    /// never read again and the new rule would reach only text written after the upgrade.
+    /// 4 is that case — mid-turn messages (`queued_command` attachments).
+    static let schemaVersion = 4
 
     /// SQLite's own "copy this string, I may free it" sentinel. It is a `#define` casting
     /// -1 to a function pointer, which does not survive into Swift, so it is respelled here.

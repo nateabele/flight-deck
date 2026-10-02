@@ -46,20 +46,29 @@ enum TranscriptExtractor {
     static func messages(
         inObject object: [String: Any], conversationID: String, offset: Int
     ) -> [IndexedMessage] {
-        guard let role = IndexedMessage.Role(rawValue: object["type"] as? String ?? "")
-        else { return [] }
+        let role: IndexedMessage.Role
+        let content: Any?
+        if let typed = typedMidTurn(object) {
+            role = .user
+            content = typed
+        } else {
+            guard let named = IndexedMessage.Role(rawValue: object["type"] as? String ?? "")
+            else { return [] }
 
-        // The harness talking to itself rather than a person talking to an agent. Matches
-        // the exclusions `ConversationTitle.resolve` already applies when it picks a name
-        // out of the first real user message.
-        guard object["isMeta"] as? Bool != true,
-              object["isCompactSummary"] as? Bool != true,
-              let message = object["message"] as? [String: Any]
-        else { return [] }
+            // The harness talking to itself rather than a person talking to an agent.
+            // Matches the exclusions `ConversationTitle.resolve` already applies when it
+            // picks a name out of the first real user message.
+            guard object["isMeta"] as? Bool != true,
+                  object["isCompactSummary"] as? Bool != true,
+                  let message = object["message"] as? [String: Any]
+            else { return [] }
+            role = named
+            content = message["content"]
+        }
 
         let timestamp = (object["timestamp"] as? String).flatMap(timestamps.date(from:))
 
-        return texts(inContent: message["content"]).compactMap { text in
+        return texts(inContent: content).compactMap { text in
             // Trimmed before the emptiness check so a record whose whole content is a
             // newline does not become an index row that can never match anything but still
             // costs a row, a rowid, and a slot in every `LIMIT 200`.
@@ -70,6 +79,22 @@ enum TranscriptExtractor {
                 timestamp: timestamp, offset: offset
             )
         }
+    }
+
+    /// The prompt of a message typed while claude was mid-turn, in `content`'s shape, or nil.
+    ///
+    /// Claude writes such a message ONLY as a `queued_command` attachment — no `user` record
+    /// follows (107 of 108 in 60 real transcripts) — so a `user`-only read made every one of
+    /// them unfindable. `commandMode` "task-notification" rides the same attachment type and
+    /// is the harness, not a person. `ClaudeTimelineMapper.typedMidTurn` applies the same rule
+    /// for the phone's timeline.
+    private static func typedMidTurn(_ object: [String: Any]) -> Any? {
+        guard object["type"] as? String == "attachment",
+              let attachment = object["attachment"] as? [String: Any],
+              attachment["type"] as? String == "queued_command",
+              attachment["commandMode"] as? String == "prompt"
+        else { return nil }
+        return attachment["prompt"]
     }
 
     /// `content` is either a bare string or an array of typed blocks — the same two shapes
