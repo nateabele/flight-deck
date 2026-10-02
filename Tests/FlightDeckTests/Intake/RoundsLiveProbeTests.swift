@@ -13,6 +13,7 @@ import IntakeKit
 /// its own environment straight to `xctest`). Never loop it. Set
 /// `FLIGHTDECK_ROUNDS_LIVE_KEEP=<dir>` to keep a copy of the intake's checkpoints and
 /// `runs/` (every child's stdout/stderr) after the scratch project is removed.
+/// `testCrossCheckRefineOverACopiedIntake` also needs `FLIGHTDECK_XCHECK_INTAKE` (see it).
 ///
 /// The scratch project lives under `$HOME`, never `/tmp` (`am` treats temp paths as
 /// ephemeral), and is removed on every path, pass or fail.
@@ -102,6 +103,62 @@ final class RoundsLiveProbeTests: XCTestCase {
             XCTAssertTrue(FileManager.default.fileExists(atPath: run.appendingPathComponent("run.json").path),
                           "\(run.lastPathComponent) has no run.json")
         }
+    }
+
+    /// The first real data point for coverage (spec §4–§5): one cross-checked Refine round over
+    /// a COPY of a real intake that has a synthesis checkpoint, so the numbers come from a real
+    /// plan rather than tallyho. Point `FLIGHTDECK_XCHECK_INTAKE` at the copied intake directory —
+    /// never the live one under Application Support: this writes `runs/`, `work/` and the new
+    /// checkpoint into it, the way the runner would. The reviewers run read-only in the intake's
+    /// real `projectPath`. Three expensive turns (both reviewers and the integrator at the
+    /// intake's own models), so it runs once by hand and is never looped.
+    func testCrossCheckRefineOverACopiedIntake() async throws {
+        guard let path = environment["FLIGHTDECK_XCHECK_INTAKE"] else {
+            throw XCTSkip("cross-check probe: set FLIGHTDECK_XCHECK_INTAKE to a COPIED intake directory")
+        }
+        let dir = URL(fileURLWithPath: path, isDirectory: true)
+        let id = try XCTUnwrap(UUID(uuidString: dir.lastPathComponent), "the directory must be named for its intake id")
+        let intake = try IntakeStore(root: dir.deletingLastPathComponent()).load(id: id)
+        var config = try XCTUnwrap(intake.roundConfig)
+        // No fallback, as the coverage spec requires: a cross-reviewer that fell back would be
+        // the primary's family, and the round would measure nothing.
+        config.crossReviewer = Slot(ModelChoice(harness: .claude, model: "opus", effort: "high"))
+        config.crossCheck = .firstAndLast
+        XCTAssertTrue(config.crossChecks, "reviewer and cross-reviewer must be different families")
+        let store = TapeStore(intakeDirectory: dir)
+        var tape = store.loadTape()
+
+        let commands = SystemCommandRunner()
+        let executor = RoundExecutor(runner: commands, graphReader: GraphReader(runner: commands, environment: environment))
+        let inputs = RoundInputs(intake: intake, config: config, tape: tape, store: store,
+                                 project: URL(fileURLWithPath: intake.projectPath, isDirectory: true),
+                                 environment: environment)
+        let started = Date()
+        let result = try await executor.run(PlannedRound(stage: .refine, round: 1, major: false, crossCheck: true), inputs)
+        print("xcheck-live: round took " + String(format: "%.0f s", Date().timeIntervalSince(started)))
+        Self.printRuns(store)
+        guard case .checkpoint(let cp, let files) = result else {
+            if case .paused(let diagnosis, let partial) = result {
+                XCTFail("round paused: \(diagnosis) — slots \(partial.slots.map { "\($0.role):\($0.status)" })")
+            }
+            return
+        }
+        try store.writeCheckpoint(cp, files: files, into: &tape)
+        print("xcheck-live: checkpoint \(cp.id) files \(files.keys.sorted()), slots "
+              + cp.record.slots.map { "\($0.role)=\($0.used.harness.rawValue)/\($0.used.model):\($0.status)" }.joined(separator: " "))
+
+        let readings = CoverageSeries.readings(tape.checkpoints) { id, name in
+            try? Data(contentsOf: store.checkpointDirectory(id).appendingPathComponent(name))
+        }
+        let reading = try XCTUnwrap(readings.last, "no coverage reading — was crosscheck.json written?")
+        let estimate = CoverageSeries.chapman(n1: reading.n1, n2: reading.n2, both: reading.both)
+        print("xcheck-live: \(reading.familyA.rawValue) vs \(reading.familyB.rawValue), matcher \(reading.matcher.rawValue)")
+        print("xcheck-live: n1 \(reading.n1)  n2 \(reading.n2)  both \(reading.both)  found \(reading.found)  "
+              + String(format: "chapman %.1f", estimate) + "  unfound \(reading.unfound.map(String.init) ?? "-")")
+        print("xcheck-live: band \(reading.band.rawValue)  correlated \(reading.correlated)  "
+              + "textSimilarityBoth \(reading.textSimilarityBoth.map(String.init) ?? "-")  "
+              + "matchersDisagree \(reading.matchersDisagree)  rejectedA \(reading.rejectedA)  rejectedB \(reading.rejectedB)")
+        XCTAssertEqual(reading.checkpoint, cp.id)
     }
 
     // MARK: - Helpers
