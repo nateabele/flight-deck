@@ -484,6 +484,17 @@ page.
     perfectly good run of fields. If it is mistaken for a notification the row collapses the
     whole file to a single line and the content is gone from the row, the clipboard and
     VoiceOver at once.
+67a. **Send this session a message from another Claude session**, once while it is idle and
+    once mid-turn. Each arrives as its own row headed by the SENDER's session name (never
+    "You", never "Cross session message"), with a speech-bubble glyph, its numbered lists and
+    code spans rendered as markdown, and no `<cross-session-message>` tag anywhere. The idle
+    one is the regression: before, the phone dropped it entirely and showed the agent
+    answering nobody.
+67b. **Paste text into a prompt on the Mac** (enough that Claude Code wraps it as a paste) and
+    check the phone's "You" row: the pasted text reads inline with what you typed around it,
+    and no `<pasted_content id="…">` or `</pasted_content …>` tag shows. Paste one that itself
+    contains a `<system-reminder>` or a peer message: it must stay inside your row as you
+    pasted it, not split into a notice.
 
 68. **Answer a two-question prompt from the phone.** Ask claude something with two questions
     in one `AskUserQuestion`. The card shows BOTH, each with its options; tapping records a

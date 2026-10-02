@@ -31,7 +31,19 @@ enum ClaudeTimelineMapper {
         // Claude talking to itself: "Continue from where you left off.", the image-geometry
         // note that accompanies a paste. Rendering these as user turns puts words in the
         // user's mouth.
-        guard record["isMeta"] as? Bool != true else { return [] }
+        //
+        // One exception: a message from another Claude session that arrives while this one is
+        // idle is written as an `isMeta` `user` record — claude's own "Another Claude session
+        // sent a message:" sentence, then the wrapped message. Dropping the whole record left
+        // the phone showing the agent answering nobody, so the peer message alone is kept and
+        // the sentence around it is not.
+        if record["isMeta"] as? Bool == true {
+            guard record["type"] as? String == "user",
+                  let text = (record["message"] as? [String: Any])?["content"] as? String
+            else { return [] }
+            return normalized(text, offset: offset, at: record["timestamp"] as? String)
+                .filter { $0.body.tool == peerMessageWrapper }
+        }
         // A `/compact` writes its summary of the conversation so far as a `user` record
         // marked `isCompactSummary`. It is several paragraphs of claude's own prose under the
         // user's name — the same harm as `isMeta` on a record long enough to be believed.
@@ -103,7 +115,21 @@ enum ClaudeTimelineMapper {
         "local-command-stdout", "local-command-caveat",
         "bash-input", "bash-stdout", "bash-stderr",
         "command-name", "command-message", "command-args",
+        peerMessageWrapper,
     ]
+
+    /// A message another Claude session sent this one (`SendMessage` across sessions). It
+    /// opens with attributes — `<cross-session-message from="uds:…" from-name="…"
+    /// from-mode="…">` — and `from-name` becomes the row's `sender`. It is a notice because
+    /// the user did not write it, and a peer's prose is still prose: the phone renders it.
+    static let peerMessageWrapper = "cross-session-message"
+
+    /// Claude Code's wrapper around text the user pasted. It IS the user's words, so it is
+    /// unwrapped into the `.userTurn` around it rather than split out — and its body is never
+    /// searched for other wrappers: a peer message or a reminder inside a paste is the user
+    /// quoting one, not the harness delivering one. Both tags carry the paste's id
+    /// (`</pasted_content id="0074">`), which is why exact `</tag>` matching missed it.
+    static let pasteWrapper = "pasted_content"
 
     /// One `user` record's string content, split into what the harness said and what the
     /// person said.
@@ -113,12 +139,13 @@ enum ClaudeTimelineMapper {
     /// wrapper becomes its own `.systemNotice`, tagged with the wrapper's own name so a client
     /// can label it without re-parsing; anything left outside them stays a `.userTurn`. Order
     /// is document order, so a real message that arrived alongside a reminder still reads in
-    /// the position it was written.
+    /// the position it was written. A paste and the prose around it are one `.userTurn`.
     static func normalized(_ text: String, offset: Int, at: String?) -> [TimelineItem] {
         var items: [TimelineItem] = []
         var rest = Substring(text)
+        var userText = ""
 
-        func emit(_ tag: String?, _ body: Substring) {
+        func emit(_ tag: String?, _ body: Substring, sender: String? = nil) {
             let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
             // An empty wrapper — `<bash-stderr></bash-stderr>` is the common one — is a row
             // that would say nothing, so it is dropped rather than drawn blank.
@@ -127,38 +154,99 @@ enum ClaudeTimelineMapper {
                 TimelineItem(
                     id: TimelineItem.identifier(offset: offset, index: items.count),
                     kind: tag == nil ? .userTurn : .systemNotice, status: .complete,
-                    body: TimelineItem.Body(text: trimmed, tool: tag), at: at
+                    body: TimelineItem.Body(text: trimmed, tool: tag, sender: sender), at: at
                 )
             )
         }
 
+        func flushUserText() {
+            emit(nil, Substring(userText))
+            userText = ""
+        }
+
+        func take(_ open: Wrapper, _ body: Substring) {
+            if open.tag == pasteWrapper {
+                userText += body.trimmingCharacters(in: .newlines)
+            } else {
+                flushUserText()
+                emit(open.tag, body, sender: attribute("from-name", in: open.attributes))
+            }
+        }
+
         while let open = nextWrapper(in: rest) {
-            emit(nil, rest[rest.startIndex..<open.range.lowerBound])
+            userText += rest[rest.startIndex..<open.range.lowerBound]
             let afterOpen = open.range.upperBound
-            if let close = rest.range(of: "</\(open.tag)>", range: afterOpen..<rest.endIndex) {
-                emit(open.tag, rest[afterOpen..<close.lowerBound])
+            if let close = closingTag(open.tag, in: rest[afterOpen...]) {
+                take(open, rest[afterOpen..<close.lowerBound])
                 rest = rest[close.upperBound...]
             } else {
                 // Unclosed: take the remainder as the wrapper's body rather than leaving it
                 // to fall through as user prose, which is the failure being fixed.
-                emit(open.tag, rest[afterOpen...])
-                return items
+                take(open, rest[afterOpen...])
+                rest = rest[rest.endIndex...]
+                break
             }
         }
-        emit(nil, rest)
+        userText += rest
+        flushUserText()
         return items
     }
 
-    /// The earliest recognised opening tag in `text`, or `nil`.
-    private static func nextWrapper(
-        in text: Substring
-    ) -> (tag: String, range: Range<Substring.Index>)? {
-        var best: (tag: String, range: Range<Substring.Index>)?
-        for tag in harnessWrappers {
-            guard let r = text.range(of: "<\(tag)>") else { continue }
-            if best == nil || r.lowerBound < best!.range.lowerBound { best = (tag, r) }
+    private struct Wrapper {
+        var tag: String
+        var range: Range<Substring.Index>
+        var attributes: Substring
+    }
+
+    /// The earliest recognised opening tag in `text`, bare or with attributes, or `nil`.
+    ///
+    /// The name must end at `>` or a space: `<command-names>` is not `<command-name>`.
+    private static func nextWrapper(in text: Substring) -> Wrapper? {
+        var best: Wrapper?
+        for tag in harnessWrappers.union([pasteWrapper]) {
+            var from = text.startIndex
+            while let r = text.range(of: "<\(tag)", range: from..<text.endIndex) {
+                from = r.upperBound
+                if let best, r.lowerBound >= best.range.lowerBound { break }
+                guard r.upperBound < text.endIndex else { break }
+                let next = text[r.upperBound]
+                if next == ">" {
+                    best = Wrapper(tag: tag, range: r.lowerBound..<text.index(after: r.upperBound),
+                                   attributes: "")
+                    break
+                }
+                if next == " ", let end = text[r.upperBound...].firstIndex(of: ">") {
+                    best = Wrapper(tag: tag, range: r.lowerBound..<text.index(after: end),
+                                   attributes: text[r.upperBound..<end])
+                    break
+                }
+            }
         }
         return best
+    }
+
+    /// `</tag>`, or `</tag …>` — a paste repeats its id on the closing tag.
+    private static func closingTag(_ tag: String, in text: Substring) -> Range<Substring.Index>? {
+        var from = text.startIndex
+        while let r = text.range(of: "</\(tag)", range: from..<text.endIndex) {
+            from = r.upperBound
+            guard r.upperBound < text.endIndex else { return nil }
+            let next = text[r.upperBound]
+            if next == ">" { return r.lowerBound..<text.index(after: r.upperBound) }
+            if next == " ", let end = text[r.upperBound...].firstIndex(of: ">") {
+                return r.lowerBound..<text.index(after: end)
+            }
+        }
+        return nil
+    }
+
+    /// `name="value"` out of an opening tag's attributes; `nil` when absent or empty.
+    private static func attribute(_ name: String, in attributes: Substring) -> String? {
+        guard let start = attributes.range(of: " \(name)=\""),
+              let end = attributes[start.upperBound...].firstIndex(of: "\"")
+        else { return nil }
+        let value = attributes[start.upperBound..<end]
+        return value.isEmpty ? nil : String(value)
     }
 
     private static func blocks(_ message: [String: Any]) -> [[String: Any]] {

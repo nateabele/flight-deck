@@ -34,8 +34,8 @@ import UIKit
 /// tree when the whole body decodes and the same plain text as this row when it does not.
 /// That is a screen with room for both; a three-line card is not.
 ///
-/// Prose is the exception, and only prose: `.assistantText` and `.userTurn` are drawn as the
-/// Markdown they were written in, because half of every real assistant message carries inline
+/// Prose is the exception, and only prose: `.assistantText`, `.userTurn` and a message from
+/// another agent session are drawn as the Markdown they were written in, because half of every real assistant message carries inline
 /// code and one in seven a heading, a list or a fence that reads as literal syntax without a
 /// parser. `TimelineStyle.rendersMarkdown` is the whole of that boundary, and its `false` arm
 /// is why it is a function and not an `if`.
@@ -253,11 +253,12 @@ struct TimelineRow: View {
     private var proseBody: some View {
         // **Recognised by CONTENT, where every other branch here gates on KIND.** That is the
         // load-bearing part, not this branch's position: `rendersMarkdown` is a switch over
-        // kinds, so teaching it `.systemNotice` would push a `system-reminder`'s ordinary prose
-        // through the markdown parser as well. `parse` answers nil for every notice that is not
-        // a run of fields, so each of those falls through below exactly as it always did.
-        // (Order is not what saves us — `rendersMarkdown` is already false for `.systemNotice`
-        // — but reading the specific case first is how this stays legible.)
+        // kinds, so teaching it `.systemNotice` wholesale would push a `system-reminder`'s
+        // ordinary prose through the markdown parser as well — it admits exactly one notice, a
+        // peer session's message, by name. `parse` answers nil for every notice that is not a
+        // run of fields, so each of those falls through below exactly as it always did. (Order
+        // is not what saves us — `rendersMarkdown` is false for a `task-notification` — but
+        // reading the specific case first is how this stays legible.)
         if let notification = TimelineStyle.taskNotification(for: item) {
             TaskNotificationBody(notification: notification, expanded: isExpanded, onReply: onReply)
                 .foregroundStyle(proseColor)

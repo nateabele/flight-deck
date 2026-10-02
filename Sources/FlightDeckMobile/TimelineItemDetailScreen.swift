@@ -141,9 +141,9 @@ struct TimelineItemDetailScreen: View {
 ///
 /// **Three of the four gates are gates on the KIND, and the notification's is not** — that
 /// asymmetry is worth stating because the exclusivity argument used to rest on all of them
-/// being kind-gates. `rendersMarkdown(_:)` admits only `.assistantText` and `.userTurn`, and
-/// `jsonDocument(for:)` only `.toolCall` and `.toolResult`, so neither can ever see a
-/// `.systemNotice`. The notification gate asks a narrower question inside that kind — the
+/// being kind-gates. `rendersMarkdown(_:)` admits `.assistantText`, `.userTurn` and one named
+/// notice — a peer session's `cross-session-message`, never a `task-notification` — and
+/// `jsonDocument(for:)` only `.toolCall` and `.toolResult`. The notification gate asks a narrower question inside that kind — the
 /// wrapper's name AND a body that parses — so it cannot reach the other three's kinds either.
 /// They do not overlap, but they do not not-overlap for one uniform reason any more.
 ///
@@ -267,8 +267,8 @@ struct TimelineBodyBlock: View {
         // `secondarySystemBackground` — the panel's own fill. An agent's report carrying a
         // command or a block of test output would draw that block with no edge, which is the
         // collision this property exists to avoid rather than an exception to it. It reaches
-        // here at all only because `rendersMarkdown` gates on the KIND, and the kind is
-        // `.systemNotice`.
+        // here at all only because `rendersMarkdown` admits no `task-notification` — its one
+        // `.systemNotice` exception is a peer session's message.
         guard TimelineStyle.taskNotification(for: item) == nil else { return false }
         return !TimelineStyle.rendersMarkdown(item) || item.body.text.isEmpty
     }

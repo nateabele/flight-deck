@@ -97,6 +97,12 @@ public struct TimelineItem: Identifiable, Codable, Hashable, Sendable {
         public var truncatedBytes: Int
         /// The source record said this result was an error.
         public var isError: Bool
+        /// Who wrote a `.systemNotice` that is another agent talking rather than the harness —
+        /// the `from-name` of a `cross-session-message`. Nil everywhere else. A notice's `tool`
+        /// already says *which machine* wrote it; for a peer message that answer ("another
+        /// session") is the one thing the reader knows already, and the session's name is what
+        /// tells them whether to read on.
+        public var sender: String?
         /// Whether this body's full text has been spilled to disk and only a first-line preview is
         /// resident. **In-memory only — never encoded, never decoded** (see the coding below), so the
         /// wire contract is untouched: a body that crosses the socket is always the real thing.
@@ -106,7 +112,7 @@ public struct TimelineItem: Identifiable, Codable, Hashable, Sendable {
         public init(
             text: String, summary: String? = nil, tool: String? = nil,
             callID: String? = nil, truncatedBytes: Int = 0, isError: Bool = false,
-            isPlaceholder: Bool = false
+            sender: String? = nil, isPlaceholder: Bool = false
         ) {
             self.text = text
             self.summary = summary
@@ -114,11 +120,12 @@ public struct TimelineItem: Identifiable, Codable, Hashable, Sendable {
             self.callID = callID
             self.truncatedBytes = truncatedBytes
             self.isError = isError
+            self.sender = sender
             self.isPlaceholder = isPlaceholder
         }
 
         enum CodingKeys: String, CodingKey {
-            case text, summary, tool, callID, truncatedBytes, isError
+            case text, summary, tool, callID, truncatedBytes, isError, sender
         }
 
         /// Hand-written so the four rarely-set fields are ABSENT rather than null, and so
@@ -132,6 +139,7 @@ public struct TimelineItem: Identifiable, Codable, Hashable, Sendable {
             try c.encodeIfPresent(callID, forKey: .callID)
             if truncatedBytes != 0 { try c.encode(truncatedBytes, forKey: .truncatedBytes) }
             if isError { try c.encode(isError, forKey: .isError) }
+            try c.encodeIfPresent(sender, forKey: .sender)
         }
 
         public init(from decoder: any Decoder) throws {
@@ -142,6 +150,7 @@ public struct TimelineItem: Identifiable, Codable, Hashable, Sendable {
             callID = try c.decodeIfPresent(String.self, forKey: .callID)
             truncatedBytes = try c.decodeIfPresent(Int.self, forKey: .truncatedBytes) ?? 0
             isError = try c.decodeIfPresent(Bool.self, forKey: .isError) ?? false
+            sender = try c.decodeIfPresent(String.self, forKey: .sender)
         }
 
         /// A first-line preview cheap enough to keep resident for a spilled row's skeleton.
@@ -152,11 +161,12 @@ public struct TimelineItem: Identifiable, Codable, Hashable, Sendable {
 
         /// This body with its full text swapped for a preview and marked spilled, keeping everything a
         /// row skeleton needs — the summary, the tool, the callID, the truncation count, the error
-        /// flag. The full text is written to the spill store by the caller before this is installed.
+        /// flag, the sender. The full text is written to the spill store by the caller before this is installed.
         public func spilledPlaceholder() -> Body {
             Body(
                 text: Self.placeholderPreview(of: text), summary: summary, tool: tool,
-                callID: callID, truncatedBytes: truncatedBytes, isError: isError, isPlaceholder: true
+                callID: callID, truncatedBytes: truncatedBytes, isError: isError, sender: sender,
+                isPlaceholder: true
             )
         }
     }
