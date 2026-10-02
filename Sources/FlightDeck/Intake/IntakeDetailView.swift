@@ -1008,7 +1008,18 @@ private struct DetailHeader: View, Equatable {
 /// request in regular secondary text, the way an intake row reads (`IntakeRow`), so the first
 /// sentence is never shown twice. A request that is one short sentence has nothing more to show,
 /// so it is the title alone, with no chevron promising more.
-private struct RequestDisclosure: View {
+///
+/// Collapsed, the chevron and the title are one `Button` — there's nothing to select yet, so the
+/// whole row is just a toggle. Open, only the chevron stays a `Button`: a `Button`'s label
+/// swallows every click and drag before `.textSelection` ever sees them, so the request text used
+/// to sit un-copyable inside it. The text now sits beside the chevron as a plain `Text` with
+/// `.textSelection(.enabled)` — the same mechanism the Q&A answers already use — in the same
+/// `HStack`, so nothing moves; clicking it no longer collapses the disclosure, only the chevron
+/// does.
+// Not `private`: `IntakeDetailViewTests` instantiates it directly to inspect the view tree a
+// real click/drag can reach, which a real AX-tree walk cannot do in a headless test host (see
+// that test's header comment).
+struct RequestDisclosure: View {
     let intent: String
     let expanded: Bool
     let setExpanded: (Bool) -> Void
@@ -1018,31 +1029,50 @@ private struct RequestDisclosure: View {
         let parts = IntakeTitle(intent: intent)
         if parts.isWhole {
             title(Text(parts.title))
+                .textSelection(.enabled)
+        } else if expanded {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Button {
+                    if reduceMotion { setExpanded(false) }
+                    else { withAnimation(.easeInOut(duration: 0.2)) { setExpanded(false) } }
+                } label: {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .rotationEffect(.degrees(90))
+                        .frame(width: 12)
+                }
+                .buttonStyle(.plain)
+                // Enlarges only the hit target, not the layout — the glyph itself stays the same
+                // size and position so the row is pixel-identical to the old all-in-one button.
+                .contentShape(Rectangle().inset(by: -4))
+                .accessibilityLabel(parts.title)
+                .accessibilityValue("expanded")
+                .accessibilityHint("Hides the rest of the request")
+                .accessibilityIdentifier("intake-request")
+                title(Text(parts.lead)
+                      + Text(" " + parts.rest).font(.body).fontWeight(.regular).foregroundColor(.secondary))
+                    .textSelection(.enabled)
+                    .accessibilityIdentifier("intake-request-text")
+            }
         } else {
             Button {
-                if reduceMotion { setExpanded(!expanded) }
-                else { withAnimation(.easeInOut(duration: 0.2)) { setExpanded(!expanded) } }
+                if reduceMotion { setExpanded(true) }
+                else { withAnimation(.easeInOut(duration: 0.2)) { setExpanded(true) } }
             } label: {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Image(systemName: "chevron.right")
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundStyle(.secondary)
-                        .rotationEffect(.degrees(expanded ? 90 : 0))
                         .frame(width: 12)
-                    if expanded {
-                        title(Text(parts.lead)
-                              + Text(" " + parts.rest).font(.body).fontWeight(.regular).foregroundColor(.secondary))
-                            .accessibilityIdentifier("intake-request-text")
-                    } else {
-                        title(Text(parts.title))
-                    }
+                    title(Text(parts.title))
                 }
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .accessibilityLabel(parts.title)
-            .accessibilityValue(expanded ? "expanded" : "collapsed")
-            .accessibilityHint(expanded ? "Hides the rest of the request" : "Shows the whole request")
+            .accessibilityValue("collapsed")
+            .accessibilityHint("Shows the whole request")
             .accessibilityIdentifier("intake-request")
         }
     }
