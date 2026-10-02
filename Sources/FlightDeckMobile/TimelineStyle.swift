@@ -17,8 +17,8 @@ import SwiftUI
 /// `TimelineItem.Body.text`); a `.toolResult`'s is command output, where a leading `-` is a
 /// deleted line and not a bullet.
 ///
-/// So `rendersMarkdown(_:)` hands the Markdown parser only the two kinds a human wrote as
-/// prose, and `jsonDocument(for:)` — the one function here that looks at structure at all —
+/// So `rendersMarkdown(_:)` hands the Markdown parser only prose — the two kinds a human wrote,
+/// and a peer session's message — and `jsonDocument(for:)` — the one function here that looks at structure at all —
 /// is strict, whole-document, and returns `nil` far more often than not. `nil` means "draw the
 /// text", which is what every other function here does. `commandLine(for:)` still reads
 /// *lines*, never structure.
@@ -49,6 +49,12 @@ enum TimelineStyle {
             // Slice 2 (spec §9) emits these. Worded exactly as `SessionStatusGlyph.label`
             // words the same state, so the fleet row and this screen agree.
             return "Waiting for you"
+        case .systemNotice where isPeerMessage(item):
+            // Which session is talking is the reader's first question, and "Cross session
+            // message" answers a different one. A Mac too old to send `sender` still gets a
+            // word rather than the wrapper's name.
+            guard let sender = item.body.sender, !sender.isEmpty else { return "Another session" }
+            return sender
         case .systemNotice:
             // The wrapper's own name, humanised — "Task notification", "System reminder".
             // Named rather than lumped under one word because the reader's first question
@@ -85,6 +91,7 @@ enum TimelineStyle {
         case .thinking: return "brain"
         case .toolCall, .toolResult: return symbol(forTool: item.body.tool)
         case .prompt: return "questionmark.circle.fill"
+        case .systemNotice where isPeerMessage(item): return "bubble.left.and.bubble.right.fill"
         case .systemNotice: return "gearshape.fill"
         case .unknown: return "circle.dotted"
         }
@@ -117,9 +124,18 @@ enum TimelineStyle {
         case .thinking: return .secondary
         case .toolCall, .toolResult: return .green
         case .prompt: return .orange
+        case .systemNotice where isPeerMessage(item): return .indigo
         case .systemNotice: return .secondary
         case .unknown: return .secondary
         }
+    }
+
+    /// A message another Claude session sent this one — the one `.systemNotice` that is an
+    /// agent talking rather than the harness. It is drawn as prose: Markdown, uncut, expanding
+    /// in place. Every other notice stays machine text, which is why this is gated on the
+    /// wrapper name and not on the kind (see `rendersMarkdown(_:)`).
+    static func isPeerMessage(_ item: TimelineItem) -> Bool {
+        item.kind == .systemNotice && item.body.tool == "cross-session-message"
     }
 
     // MARK: What it says
@@ -304,6 +320,8 @@ enum TimelineStyle {
     /// code, 36.5% bold, and 14.9% a block construct (heading, list, fence, table, quote or
     /// rule) that renders as literal syntax without a parser. User turns are not a lesser case:
     /// 29.9% of them carry a block construct too, because that is how people write briefs.
+    /// A message from another agent session is the same agent prose arriving by another door,
+    /// so it is the one `.systemNotice` admitted (`isPeerMessage(_:)`).
     ///
     /// **The `false` arm is the load-bearing one**, and each of its five cases is a different
     /// way to be wrong:
@@ -324,6 +342,7 @@ enum TimelineStyle {
     static func rendersMarkdown(_ item: TimelineItem) -> Bool {
         switch item.kind {
         case .assistantText, .userTurn: return true
+        case .systemNotice where isPeerMessage(item): return true
         case .thinking, .toolCall, .toolResult, .prompt, .unknown, .systemNotice: return false
         }
     }
@@ -463,6 +482,9 @@ enum TimelineStyle {
     static func proseLineLimit(for item: TimelineItem, expanded: Bool = false) -> Int? {
         switch item.kind {
         case .assistantText, .userTurn:
+            guard !expanded else { return nil }
+            return exceeds(proseCeilingLines, item.body.text) ? proseCeilingLines : nil
+        case .systemNotice where isPeerMessage(item):
             guard !expanded else { return nil }
             return exceeds(proseCeilingLines, item.body.text) ? proseCeilingLines : nil
         case .thinking:
@@ -626,6 +648,8 @@ enum TimelineStyle {
         case .toolCall, .toolResult:
             return true
         case .assistantText, .userTurn:
+            return false
+        case .systemNotice where isPeerMessage(item):
             return false
         case .thinking, .prompt, .unknown, .systemNotice:
             return proseLineLimit(for: item) != nil

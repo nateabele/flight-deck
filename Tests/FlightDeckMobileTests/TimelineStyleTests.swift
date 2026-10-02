@@ -129,6 +129,46 @@ final class TimelineStyleTests: XCTestCase {
         XCTAssertEqual(TimelineStyle.heading(for: TimelineFixtures.prompt), "Waiting for you")
     }
 
+    // MARK: A message from another session
+
+    private func peerMessage(_ text: String, sender: String? = "The Plan Part 3") -> TimelineItem {
+        TimelineItem(
+            id: "9#0", kind: .systemNotice, status: .complete,
+            body: .init(text: text, tool: "cross-session-message", sender: sender)
+        )
+    }
+
+    /// Headed by the session that sent it. "Cross session message" answers a question the
+    /// reader never had; which session is talking is the one they do.
+    func testAPeerMessageIsHeadedBySenderAndFallsBackToAWord() {
+        XCTAssertEqual(TimelineStyle.heading(for: peerMessage("hi")), "The Plan Part 3")
+        XCTAssertEqual(TimelineStyle.heading(for: peerMessage("hi", sender: nil)),
+                       "Another session")
+        XCTAssertNotEqual(TimelineStyle.symbol(for: peerMessage("hi")), "gearshape.fill",
+                          "an agent talking is not the harness")
+    }
+
+    /// A peer's message is an agent's prose — numbered plans, code spans, headings — and read
+    /// as machine text it was a wall of backticks and asterisks, cut at fourteen lines.
+    func testAPeerMessageIsProseLikeAnAnswer() {
+        let short = peerMessage("1. Task 14 (`relational`)\n2. Then rebase")
+        XCTAssertTrue(TimelineStyle.rendersMarkdown(short))
+        XCTAssertNil(TimelineStyle.proseLineLimit(for: peerMessage(
+            Array(repeating: "line", count: 40).joined(separator: "\n"))))
+        XCTAssertFalse(TimelineStyle.opensDetail(short), "prose expands in place")
+        XCTAssertEqual(TimelineStyle.rowCopyText(for: short), short.body.text)
+    }
+
+    /// Every other notice stays machine text: a `bash-stdout` must not be reflowed.
+    func testOtherNoticesAreStillMachineText() {
+        let stdout = TimelineItem(
+            id: "9#1", kind: .systemNotice, status: .complete,
+            body: .init(text: "**not bold**", tool: "bash-stdout", sender: "x")
+        )
+        XCTAssertFalse(TimelineStyle.rendersMarkdown(stdout))
+        XCTAssertEqual(TimelineStyle.heading(for: stdout), "Bash stdout")
+    }
+
     /// A tool is whatever the agent was given, so most of them are names this build has never
     /// seen. They get the generic symbol; they do not get an empty one.
     func testAToolThisBuildDoesNotKnowStillGetsASymbol() {

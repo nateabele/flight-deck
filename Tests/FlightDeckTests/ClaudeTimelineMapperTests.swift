@@ -302,6 +302,79 @@ final class ClaudeTimelineMapperTests: XCTestCase {
         }
     }
 
+    // MARK: Wrappers that carry attributes
+
+    /// A message from another Claude session, delivered while this one was idle. Claude marks
+    /// the record `isMeta` and prefixes it with its own sentence, so before this the phone
+    /// dropped it whole — and then showed the agent answering nobody. Shape copied from a
+    /// 2026-10-02 transcript.
+    func testAPeerMessageDeliveredIdleIsANoticeFromItsSender() {
+        let items = items(#"""
+            {"type":"user","isMeta":true,"isSidechain":false,"timestamp":"2026-10-02T05:30:14.416Z","message":{"role":"user","content":"Another Claude session sent a message:\n<cross-session-message from=\"uds:/tmp/cc-socks/95812.sock\" from-name=\"The Plan Part 3\" from-mode=\"bypass\">\nF1d: got it, thanks. Plan:\n1. Task 14 finishes.\n</cross-session-message>"}}
+            """#, at: 64)
+        XCTAssertEqual(items.count, 1, "claude's own preface is not a row")
+        XCTAssertEqual(items[0].kind, .systemNotice)
+        XCTAssertEqual(items[0].id, "64#1",
+                       "the preface keeps its index though it is not drawn, as a dropped block does")
+        XCTAssertEqual(items[0].at, "2026-10-02T05:30:14.416Z")
+        XCTAssertEqual(items[0].body.tool, "cross-session-message")
+        XCTAssertEqual(items[0].body.sender, "The Plan Part 3")
+        XCTAssertEqual(items[0].body.text, "F1d: got it, thanks. Plan:\n1. Task 14 finishes.")
+        XCTAssertNil(items[0].body.callID)
+    }
+
+    /// The same message arriving mid-turn rides a `queued_command` attachment with
+    /// `commandMode` "prompt" — the user's own mode — and used to render under "You" with
+    /// its tags showing.
+    func testAPeerMessageDeliveredMidTurnIsANoticeAndNotAUserTurn() {
+        let items = items(#"""
+            {"type":"attachment","isSidechain":false,"attachment":{"type":"queued_command","commandMode":"prompt","prompt":"<cross-session-message from=\"uds:/tmp/cc-socks/36146.sock\" from-name=\"Phone Scrolling\" from-mode=\"bypass\">\nHeads-up: I replaced the app.\n</cross-session-message>"}}
+            """#)
+        XCTAssertEqual(items.map(\.kind), [.systemNotice])
+        XCTAssertEqual(items.first?.body.sender, "Phone Scrolling")
+        XCTAssertEqual(items.first?.body.text, "Heads-up: I replaced the app.")
+    }
+
+    /// `isMeta` still means claude talking to itself everywhere else. The exception is only
+    /// for the peer message, and only that message comes out of the record.
+    func testAMetaRecordWithoutAPeerMessageIsStillDropped() {
+        XCTAssertTrue(items(#"""
+            {"type":"user","isMeta":true,"isSidechain":false,"message":{"role":"user","content":"Another Claude session sent a message: nothing wrapped"}}
+            """#).isEmpty)
+    }
+
+    /// A paste is the user's own words. Its wrapper carries an id on BOTH tags, so the old
+    /// exact-match reader saw neither and the phone printed `</pasted_content id="0074">`
+    /// at the bottom of the user's message.
+    func testAPasteIsTheUsersOwnWordsWithoutItsTags() {
+        let items = items(#"""
+            {"type":"user","isSidechain":false,"message":{"role":"user","content":"Look at this:\n\n<pasted_content id=\"0074\">\nline one\nline two\n</pasted_content id=\"0074\">\n\nWhy?"}}
+            """#)
+        XCTAssertEqual(items.map(\.kind), [.userTurn], "one message, not three rows")
+        XCTAssertEqual(items.first?.body.text, "Look at this:\n\nline one\nline two\n\nWhy?")
+    }
+
+    /// What was pasted is quoted, not delivered: a peer message or a reminder copied into the
+    /// clipboard is the user showing it, and splitting it out would make the user's message
+    /// look like the agent received it from someone else. This is the exact report that
+    /// prompted the rule.
+    func testWrappersInsideAPasteStayPartOfThePaste() {
+        let items = items(#"""
+            {"type":"user","isSidechain":false,"message":{"role":"user","content":"\n\n<pasted_content id=\"0074\">\nThis renders badly:\n\n```\n<cross-session-message from=\"x\" from-name=\"P\">\nhi\n</cross-session-message>\n```\n<system-reminder>r</system-reminder>\n</pasted_content id=\"0074\">\n"}}
+            """#)
+        XCTAssertEqual(items.map(\.kind), [.userTurn])
+        XCTAssertEqual(items.first?.body.text, "This renders badly:\n\n```\n<cross-session-message from=\"x\" from-name=\"P\">\nhi\n</cross-session-message>\n```\n<system-reminder>r</system-reminder>")
+    }
+
+    /// A tag name is matched as a whole name: `<command-names>` is not `<command-name>` with
+    /// an attribute, and must stay the user's text.
+    func testATagThatMerelyStartsWithAWrapperNameIsNotOne() {
+        let items = items(#"""
+            {"type":"user","isSidechain":false,"message":{"role":"user","content":"<command-names>x</command-names>"}}
+            """#)
+        XCTAssertEqual(items.map(\.kind), [.userTurn])
+    }
+
     // MARK: A message typed while claude is working
 
     /// The phone's stuck "Queued to your agent" rows. A message typed while claude is mid-turn
