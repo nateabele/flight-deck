@@ -2273,7 +2273,7 @@ flagged as most likely to differ from the tests. The maintainer's to run.
 - **Flight Control on the phone — BUILT (see "known gaps and limits" above).** Originally: Handoff:
   [FLIGHT-CONTROL-MOBILE-HANDOFF.md](FLIGHT-CONTROL-MOBILE-HANDOFF.md).
 - **Level 3 "Operate" — not started.** Flight Deck as the swarm console rather than its
-  observer. The branch-strategy ruling is recorded above ("Level 3 swarm: branch strategy");
+  observer. Design handoff: [FLIGHT-CONTROL-LEVEL3-HANDOFF.md](FLIGHT-CONTROL-LEVEL3-HANDOFF.md). The branch-strategy ruling is recorded above ("Level 3 swarm: branch strategy");
   the rest, none of it designed:
   - **Launch a swarm from released tasks** — pick with `bv`, claim, spawn agents into the
     project's sessions.
