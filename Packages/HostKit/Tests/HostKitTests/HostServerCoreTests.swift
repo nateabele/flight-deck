@@ -80,4 +80,13 @@ final class HostServerCoreTests: XCTestCase {
         c.disconnect(slot: a.slot)
         XCTAssertTrue(a.closed); XCTAssertFalse(b.closed)
     }
+
+    /// Revoking a controller that is connected but silent (or mid-hello) must still keep it out.
+    func testRevokedSlotCannotHelloAfterDisconnect() throws {
+        let c = core(); let a = FakePeer()
+        c.disconnect(slot: a.slot)
+        c.receive(text: try hello(), from: a)
+        XCTAssertTrue(a.closed)
+        XCTAssertEqual(a.sent, [])
+    }
 }

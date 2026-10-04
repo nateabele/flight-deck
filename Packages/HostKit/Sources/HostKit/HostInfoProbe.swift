@@ -22,8 +22,10 @@ public struct HostInfoProbe: Sendable {
                  docker: dockerVersion(), diskFreeBytes: Self.diskFree(at: stateRoot))
     }
 
-    /// Runs `path args`, returning trimmed stdout only on a clean exit 0. Killed after 5s so a
-    /// wedged `docker version` cannot hang `host.info`.
+    /// Runs `path args`, returning trimmed stdout only on a clean exit 0. Because `host.info`
+    /// is answered synchronously, a hang here blocks the transport, so every wait is bounded:
+    /// SIGTERM at 5s, SIGKILL 1s later, and stdout is read on a side thread so a grandchild
+    /// still holding the pipe cannot pin the call (worst case ~7s, returning nil).
     public static func runCommand(_ path: String, _ args: [String]) -> String? {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: path)
@@ -32,13 +34,33 @@ public struct HostInfoProbe: Sendable {
         p.standardOutput = out
         p.standardError = FileHandle.nullDevice
         p.standardInput = FileHandle.nullDevice
+        let exited = DispatchSemaphore(value: 0)
+        p.terminationHandler = { _ in exited.signal() }
         do { try p.run() } catch { return nil }
-        DispatchQueue.global().asyncAfter(deadline: .now() + 5) { if p.isRunning { p.terminate() } }
-        let data = out.fileHandleForReading.readDataToEndOfFile()
-        p.waitUntilExit()
+
+        let box = OutputBox()
+        let readDone = DispatchSemaphore(value: 0)
+        let reader = out.fileHandleForReading
+        DispatchQueue.global().async {
+            box.data = reader.readDataToEndOfFile()
+            readDone.signal()
+        }
+
+        func within(_ s: Double, _ sem: DispatchSemaphore) -> Bool { sem.wait(timeout: .now() + s) == .success }
+        if !within(5, exited) {
+            p.terminate()
+            if !within(1, exited) {
+                kill(p.processIdentifier, SIGKILL)
+                _ = within(1, exited)
+            }
+            return nil
+        }
+        guard within(1, readDone) else { return nil }
         guard p.terminationReason == .exit, p.terminationStatus == 0 else { return nil }
-        return String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        return String(decoding: box.data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
     }
+
+    private final class OutputBox: @unchecked Sendable { var data = Data() }
 
     // MARK: - Fields
 

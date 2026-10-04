@@ -14,6 +14,9 @@ public struct PairedController: Codable, Sendable, Equatable {
     }
 }
 
+/// File-scope so it resolves to rename(2), not `ControllerStore.rename(slot:to:)`.
+private func posixRename(_ from: String, _ to: String) -> Int32 { rename(from, to) }
+
 /// The host's paired controllers, persisted as `controllers.json` under `root`.
 public final class ControllerStore: @unchecked Sendable {
     private let root: URL
@@ -32,8 +35,25 @@ public final class ControllerStore: @unchecked Sendable {
 
     public init(root: URL) {
         self.root = root
-        let data = try? Data(contentsOf: root.appendingPathComponent("controllers.json"))
-        controllers = data.flatMap { try? Self.decoder.decode([PairedController].self, from: $0) } ?? []
+        controllers = Self.load(root: root)
+    }
+
+    /// Missing file means a fresh host: empty. Anything else (unreadable, undecodable) is
+    /// moved aside, not ignored: starting empty and then overwriting on the next `add` would
+    /// silently destroy every pairing, so the bytes are kept for recovery and the failure is
+    /// logged.
+    private static func load(root: URL) -> [PairedController] {
+        let file = root.appendingPathComponent("controllers.json")
+        do {
+            return try decoder.decode([PairedController].self, from: Data(contentsOf: file))
+        } catch {
+            if !FileManager.default.fileExists(atPath: file.path) { return [] }
+            let aside = root.appendingPathComponent("controllers.json.corrupt-\(Int(Date().timeIntervalSince1970))")
+            FileHandle.standardError.write(Data(
+                "ControllerStore: \(file.path) unreadable (\(error)); moving to \(aside.lastPathComponent)\n".utf8))
+            if posixRename(file.path, aside.path) == 0 { chmod(aside.path, 0o600) }
+            return []
+        }
     }
 
     public func all() -> [PairedController] {
@@ -55,6 +75,15 @@ public final class ControllerStore: @unchecked Sendable {
         }
     }
 
+    /// False when the slot is unknown.
+    public func rename(slot: UUID, to name: String) throws -> Bool {
+        try mutate { list in
+            guard let i = list.firstIndex(where: { $0.slot == slot }) else { return false }
+            list[i].name = name
+            return true
+        }
+    }
+
     private func mutate(_ change: (inout [PairedController]) -> Bool) throws -> Bool {
         lock.lock()
         var next = controllers
@@ -69,21 +98,33 @@ public final class ControllerStore: @unchecked Sendable {
         return true
     }
 
-    /// Temp file created 0600 and then renamed over the target: the secrets are never on disk
-    /// under a wider mode, even briefly, and a crash mid-write leaves the old file intact
-    /// rather than a truncated one that would silently un-pair every controller.
+    /// The root is forced to 0700 every time (also tightening one that pre-existed wider). The
+    /// temp file is created exclusively at 0600, written and fsynced before the rename, so the
+    /// secrets are never on disk under a wider mode and a crash mid-write leaves the old file
+    /// intact rather than a truncated one that would silently un-pair every controller.
     private func persist(_ list: [PairedController]) throws {
-        try FileManager.default.createDirectory(
-            at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-        let tmp = root.appendingPathComponent("controllers.json.tmp")
+        let fm = FileManager.default
+        try fm.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: root.path)
+        let tmp = root.appendingPathComponent("controllers.json.tmp").path
         let data = try Self.encoder.encode(list)
-        try? FileManager.default.removeItem(at: tmp)
-        guard FileManager.default.createFile(
-            atPath: tmp.path, contents: data, attributes: [.posixPermissions: 0o600])
-        else { throw CocoaError(.fileWriteUnknown) }
-        guard rename(tmp.path, file.path) == 0 else {
-            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        unlink(tmp)   // a leftover from a crash would make O_EXCL fail forever
+        let fd = open(tmp, O_CREAT | O_EXCL | O_WRONLY | O_TRUNC, 0o600)
+        guard fd >= 0 else { throw Self.posixError() }
+        func fail() -> Error { let e = Self.posixError(); close(fd); unlink(tmp); return e }
+        var offset = 0
+        while offset < data.count {
+            let n = data.withUnsafeBytes { write(fd, $0.baseAddress! + offset, data.count - offset) }
+            if n < 0 { if errno == EINTR { continue }; throw fail() }
+            offset += n
         }
+        guard fsync(fd) == 0 else { throw fail() }
+        close(fd)
+        guard posixRename(tmp, file.path) == 0 else { let e = Self.posixError(); unlink(tmp); throw e }
+    }
+
+    private static func posixError() -> Error {
+        POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
     }
 
     // Default (reference-date double) date strategy on purpose: it round-trips a Date exactly,

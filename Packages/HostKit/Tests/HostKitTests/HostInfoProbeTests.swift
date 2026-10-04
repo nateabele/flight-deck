@@ -25,4 +25,12 @@ final class HostInfoProbeTests: XCTestCase {
         XCTAssertNil(HostInfoProbe.runCommand("/bin/sleep", ["30"]))
         XCTAssertLessThan(Date().timeIntervalSince(start), 6)
     }
+
+    /// A child that ignores SIGTERM, whose grandchild also holds the stdout pipe, must still
+    /// not pin the call: SIGKILL after the grace, and no waiting on the pipe's far end.
+    func testRunCommandSurvivesSigtermTrapAndPipeHoldingGrandchild() {
+        let start = Date()
+        XCTAssertNil(HostInfoProbe.runCommand("/bin/sh", ["-c", "trap '' TERM; sleep 30"]))
+        XCTAssertLessThan(Date().timeIntervalSince(start), 8)
+    }
 }

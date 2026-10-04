@@ -9,11 +9,19 @@ public protocol HostPeer: AnyObject, Sendable {
 }
 
 /// Transport-agnostic protocol logic: the hello gate, request dispatch and error replies.
+///
+/// Threading contract: the transport must call `receive` and `peerClosed` serially per
+/// connection, and off its event loop, because `host.info` is answered synchronously and
+/// shells out (up to ~7s if docker wedges). Different connections may run concurrently.
 public final class HostServerCore: @unchecked Sendable {
     private let hostName: @Sendable () -> String
     private let probe: HostInfoProbe
     private let lock = NSLock()
     private var peers: [ObjectIdentifier: (peer: HostPeer, helloed: Bool)] = [:]
+    /// Slots revoked via `disconnect`. `peers` only knows peers that have said hello, so
+    /// without this a revoked controller that was silent (or mid-hello) could hello afterwards.
+    /// Re-pairing mints a new slot UUID, so a revoked slot never needs to come back.
+    private var revokedSlots: Set<UUID> = []
     private var _onControllerName: (@Sendable (UUID, String) -> Void)?
 
     /// Fired on each accepted hello so the host can refresh a stored controller's display name.
@@ -27,8 +35,7 @@ public final class HostServerCore: @unchecked Sendable {
         self.probe = probe
     }
 
-    /// Replies are sent before this returns, so the caller's transport must not run it on a
-    /// thread it cannot afford to block: `host.info` shells out (up to 5s if docker wedges).
+    /// Replies are sent before this returns; see the type's threading contract.
     public func receive(text: String, from peer: HostPeer) {
         let key = ObjectIdentifier(peer)
         let frame: HostClientFrame
@@ -40,13 +47,28 @@ public final class HostServerCore: @unchecked Sendable {
         }
         switch frame {
         case .hello(let version, _, let name):
+            lock.lock()
+            let revoked = revokedSlots.contains(peer.slot)
+            lock.unlock()
+            if revoked {
+                forget(peer)
+                peer.close()
+                return
+            }
             guard version.major == ProtocolVersion.current.major else {
                 send(.refused(reason: .majorVersionMismatch(host: .current)), to: peer)
                 forget(peer)
                 peer.close()
                 return
             }
+            // Re-checked under the same lock that registers the peer, so a disconnect racing
+            // this hello either lands first (we refuse) or after (it finds the peer).
             lock.lock()
+            if revokedSlots.contains(peer.slot) {
+                lock.unlock()
+                peer.close()
+                return
+            }
             peers[key] = (peer, true)
             let notify = _onControllerName
             lock.unlock()
@@ -67,6 +89,7 @@ public final class HostServerCore: @unchecked Sendable {
 
     public func disconnect(slot: UUID) {
         lock.lock()
+        revokedSlots.insert(slot)
         let doomed = peers.values.map(\.peer).filter { $0.slot == slot }
         for p in doomed { peers[ObjectIdentifier(p)] = nil }
         lock.unlock()
