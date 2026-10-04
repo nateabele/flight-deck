@@ -120,9 +120,10 @@ public enum FleetTLS {
     /// The listener `FleetSocketServer` actually builds: the same keys, plus a PSK selection
     /// block that files each peer's offered identity in `identities` as it shakes hands.
     static func listenerParameters(
-        keys: [FleetDeviceKey], identities: FleetPSKIdentities?
+        keys: [FleetDeviceKey], identities: FleetPSKIdentities?,
+        suites: [tls_ciphersuite_t] = phoneSuites
     ) -> NWParameters {
-        let params = parameters(keys: keys, identities: identities)
+        let params = parameters(keys: keys, identities: identities, suites: suites)
         // Key rotation restarts the listener on the *same* port on every arm, expiry and
         // revocation (`FleetService.reloadKeys()`). `FleetSocketServer.start` now waits for
         // the old listener's cancellation to be confirmed before rebinding (its
@@ -138,8 +139,32 @@ public enum FleetTLS {
 
     /// Client side: this device's one key.
     public static func clientParameters(key: FleetDeviceKey) -> NWParameters {
-        parameters(keys: [key], identities: nil)
+        clientParameters(key: key, suites: phoneSuites)
     }
+
+    /// The same client with a different suite offer. Internal so the only callers that can
+    /// pick a suite are FleetKit's own transports (`HostTransport`), never an app call site.
+    static func clientParameters(key: FleetDeviceKey, suites: [tls_ciphersuite_t]) -> NWParameters {
+        parameters(keys: [key], identities: nil, suites: suites)
+    }
+
+    /// What the phone link appends: `TLS_PSK_WITH_AES_128_GCM_SHA256` (0x00A8), its suite since
+    /// day one. A named default, so that adding the host path's different suite cannot change
+    /// what a phone and a Mac negotiate.
+    static let phoneSuites = [
+        tls_ciphersuite_t(rawValue: numericCast(TLS_PSK_WITH_AES_128_GCM_SHA256))!
+    ]
+
+    /// What a host connection appends: `TLS_ECDHE_PSK_WITH_CHACHA20_POLY1305_SHA256` (0xCCAC).
+    /// It is not 0x00A8 because swift-nio-ssl's BoringSSL, the Linux hostd's TLS stack, does not
+    /// implement 0x00A8 at all. Its only PSK suites are 0x008C, 0x008D, 0xC035, 0xC036 and
+    /// 0xCCAC, and Darwin's default PSK offer (0x00A8/A9/AF/AE) contains none of them. A host
+    /// dialled with the phone's suite fails with `NO_SHARED_CIPHER` on the server and `-9824`
+    /// here. Of the shared suites, 0xCCAC is the only AEAD one, and it is the only one with
+    /// forward secrecy (ECDHE).
+    static let hostSuites = [
+        tls_ciphersuite_t(rawValue: numericCast(TLS_ECDHE_PSK_WITH_CHACHA20_POLY1305_SHA256))!
+    ]
 
     /// The pairing listener's parameters: exactly one PSK, the public bootstrap one.
     ///
@@ -171,10 +196,10 @@ public enum FleetTLS {
         // Belt-and-braces, not verified-necessary here: deleting this append from this exact
         // function still negotiated 0x00A8 (`TLS_PSK_WITH_AES_128_GCM_SHA256`) over TLS 1.2 in
         // 6ms on Darwin 25.5 — `add_pre_shared_key` appears to enable the suite on its own.
-        // Kept because it is harmless, it matches `parameters(keys:identities:)`'s pattern,
-        // and it is plausibly load-bearing on the iOS deployment target, where its absence is
-        // untested. What *is* verified, by mutation, is the other half of this trap: pinning
-        // a TLS 1.3 minimum — which looks like obvious hardening — silently breaks PSK
+        // Kept because it is harmless, it matches `parameters(keys:identities:suites:)`'s
+        // pattern, and it is plausibly load-bearing on the iOS deployment target, where its
+        // absence is untested. What *is* verified, by mutation, is the other half of this trap:
+        // pinning a TLS 1.3 minimum — which looks like obvious hardening — silently breaks PSK
         // identically, presenting as the handshake silence `PairingChannelTests` documents.
         // Do not add that pin.
         sec_protocol_options_append_tls_ciphersuite(
@@ -187,13 +212,13 @@ public enum FleetTLS {
         // from the fleet parameters, because the fleet ones no longer set it. The reasoning
         // recorded here (a pairing exchange is four frames on one LAN inside a two-minute
         // window, so it has no roaming to survive) is still true and is why this path never
-        // had it. See `parameters(keys:identities:)` for why the other path lost it: MPTCP
-        // without the entitlement makes a listener drop plain SYNs on Wi-Fi outright.
+        // had it. See `parameters(keys:identities:suites:)` for why the other path lost it:
+        // MPTCP without the entitlement makes a listener drop plain SYNs on Wi-Fi outright.
         return NWParameters(tls: tls)
     }
 
     private static func parameters(
-        keys: [FleetDeviceKey], identities: FleetPSKIdentities?
+        keys: [FleetDeviceKey], identities: FleetPSKIdentities?, suites: [tls_ciphersuite_t]
     ) -> NWParameters {
         let tls = NWProtocolTLS.Options()
         let sec = tls.securityProtocolOptions
@@ -239,9 +264,20 @@ public enum FleetTLS {
         // `sec_protocol_options_set_min_tls_protocol_version(sec, .TLSv13)` — which looks
         // like obvious hardening — silently breaks PSK, presenting as handshake silence
         // rather than `.failed`. Do not add that pin.
-        sec_protocol_options_append_tls_ciphersuite(
-            sec, tls_ciphersuite_t(rawValue: numericCast(TLS_PSK_WITH_AES_128_GCM_SHA256))!
-        )
+        //
+        // `suites` is `phoneSuites` (0x00A8) everywhere but `HostTransport`. An appended suite
+        // goes *in front of* Darwin's default PSK offer; it does not replace it. A captured
+        // ClientHello with `hostSuites` reads `[GREASE, 0xCCAC, 0x00A8, 0x00A9, 0x00AF, 0x00AE]`.
+        // The defaults cannot be stripped: `SecProtocolOptions.h` has append-only ciphersuite
+        // calls and nothing that clears the set. So the host path cannot *offer* only 0xCCAC.
+        // What keeps a host from falling back to 0x00A8 is the other end: the Linux server pins
+        // `ECDHE-PSK-CHACHA20-POLY1305` (and BoringSSL has no 0x00A8 to fall back to), and a
+        // Darwin host listener built from the same list settles on 0xCCAC. Whether that is the
+        // client's order or the listener's winning is not established, since both lists lead
+        // with it. `HostTransportLoopbackTests` asserts what actually gets negotiated.
+        for suite in suites {
+            sec_protocol_options_append_tls_ciphersuite(sec, suite)
+        }
 
         let parameters = NWParameters(tls: tls)
 

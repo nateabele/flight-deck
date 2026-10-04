@@ -113,7 +113,9 @@ Build order: **A → C → B → D**. B and D get their own specs.
 2. The script installs `~/.local/bin/flightdeck-hostd`, writes a systemd user unit, runs `loginctl enable-linger $USER`, starts the service, and prints a pairing code.
 3. You type the code into the sheet. Pairing then continues as in §3.1, step 4. Avahi advertises the service when it is present; otherwise you type the address into the sheet.
 
-**Gate:** before any other Linux work, a test must show that the Darwin `Network.framework` TLS-PSK client negotiates `TLS_PSK_WITH_AES_128_GCM_SHA256` with the swift-nio-ssl (BoringSSL) server and exchanges WebSocket frames. If that fails, the spec returns to brainstorming for the Linux transport. Do not paper over it.
+**Gate:** before any other Linux work, a test must show that the Darwin `Network.framework` TLS-PSK client negotiates `TLS_ECDHE_PSK_WITH_CHACHA20_POLY1305_SHA256` (0xCCAC) over TLS 1.2 with the swift-nio-ssl (BoringSSL) server and exchanges WebSocket frames. If that fails, the spec returns to brainstorming for the Linux transport. Do not paper over it.
+
+**Host connections use 0xCCAC; the phone link stays on 0x00A8.** The gate's first run (2026-10-04) found that swift-nio-ssl's BoringSSL has no `TLS_PSK_WITH_AES_128_GCM_SHA256` (0x00A8). The only PSK suites it has are 0x008C, 0x008D, 0xC035, 0xC036 and 0xCCAC. Darwin's default PSK offer is 0x00A8/A9/AF/AE, so a host and the Linux server had no suite in common, and the handshake failed with `NO_SHARED_CIPHER`. Darwin does offer and negotiate an appended 0xCCAC. It is also the stronger choice: ECDHE gives forward secrecy, and the cipher is an AEAD. So every host connection (`HostTransport`) pins it, Mac hosts included, which keeps one transport for both kinds of host. The Mac↔phone fleet and pairing channels keep 0x00A8 unchanged.
 
 ### 3.3 Connectivity
 - **Address order:** Bonjour, then the last-known address, then the Tailscale address. This reuses the phone's ranking.
