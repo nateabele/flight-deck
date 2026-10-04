@@ -133,6 +133,10 @@ public final class PairingListener: @unchecked Sendable {
     /// Read by tests and by nothing in production. Confined to `queue` like everything else.
     public private(set) var attemptsSpent = 0
 
+    /// Which pairing this window offers. Fixed for the listener's life: its service type, its
+    /// SPAKE2 names and its TLS suite all come from here, and a listener whose profile changed
+    /// mid-window would advertise one pairing and answer another.
+    public let profile: PairingProfile
     private let queue: DispatchQueue
     private var listener: NWListener?
     private var connections: [UUID: NWConnection] = [:]
@@ -164,11 +168,12 @@ public final class PairingListener: @unchecked Sendable {
     private var key: FleetDeviceKey?
     private var macName = ""
 
-    public init(queue: DispatchQueue = .main) {
+    public init(profile: PairingProfile = .phone, queue: DispatchQueue = .main) {
+        self.profile = profile
         self.queue = queue
     }
 
-    /// Binds an OS-assigned port and advertises it on `PairingChannel.bonjourType`.
+    /// Binds an OS-assigned port and advertises it on `profile.bonjourType`.
     ///
     /// No `releaseListenerOnQueue` dance, unlike `FleetSocketServer.start`: that exists
     /// because key rotation rebinds the fleet listener on the *same* port on every arm, expiry
@@ -199,7 +204,8 @@ public final class PairingListener: @unchecked Sendable {
         continuation: CheckedContinuation<NWEndpoint.Port, Error>
     ) {
         let parameters = FleetSocket.webSocketParameters(
-            FleetTLS.pairingListenerParameters(), maximumMessageSize: Self.maxFrameBytes
+            FleetTLS.pairingListenerParameters(profile: profile),
+            maximumMessageSize: Self.maxFrameBytes
         )
         let listener: NWListener
         do {
@@ -217,7 +223,7 @@ public final class PairingListener: @unchecked Sendable {
         // display name so a phone that finds two can tell them apart; it is unauthenticated
         // text from the network, for display only, until the seal delivers the real name.
         listener.service = NWListener.Service(
-            name: serviceName, type: PairingChannel.bonjourType,
+            name: serviceName, type: profile.bonjourType,
             txtRecord: NWTXTRecord([PairingChannel.txtNameKey: macName])
         )
 
@@ -400,7 +406,7 @@ public final class PairingListener: @unchecked Sendable {
             guard sessions[id] == nil else { return drop(id) }
             let session = SPAKE2Session(
                 role: .responder,
-                myName: PairingChannel.responderName, theirName: PairingChannel.initiatorName
+                myName: profile.responderName, theirName: profile.initiatorName
             )
             do {
                 // Generate before processing: the C context requires that order, and

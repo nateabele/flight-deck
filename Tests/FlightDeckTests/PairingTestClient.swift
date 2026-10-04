@@ -1,6 +1,6 @@
 import Foundation
 import Network
-@testable import FleetKit
+@_spi(HostPairing) @testable import FleetKit
 
 /// A hand-written phone side, used by `PairingListenerTests` before `PairingInitiator` exists.
 ///

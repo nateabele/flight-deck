@@ -1,6 +1,6 @@
 import Foundation
 import XCTest
-@testable import FleetKit
+@_spi(HostPairing) @testable import FleetKit
 
 /// `@testable`, deliberately: the pairing frames are internal to FleetKit. Nothing outside
 /// the module can construct one, which is the visibility half of invariant 3 — a caller in

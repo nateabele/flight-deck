@@ -68,6 +68,9 @@ public final class PairingRunner: @unchecked Sendable {
     /// has just finished typing on.
     public var discoveryWindow: TimeInterval = 5
 
+    /// Handed to the browser and to every initiator this run creates, so one run cannot
+    /// browse one pairing and dial another.
+    public let profile: PairingProfile
     private let queue: DispatchQueue
     private let browser: PairingBrowser
     private var initiator: PairingInitiator?
@@ -84,9 +87,10 @@ public final class PairingRunner: @unchecked Sendable {
     /// `cancel()` bumping it is what closes that, and `start()` calls `cancel()` first.
     private var generation = 0
 
-    public init(queue: DispatchQueue = .main) {
+    public init(profile: PairingProfile = .phone, queue: DispatchQueue = .main) {
+        self.profile = profile
         self.queue = queue
-        self.browser = PairingBrowser(queue: queue)
+        self.browser = PairingBrowser(profile: profile, queue: queue)
     }
 
     /// Browse, then try what was found.
@@ -154,7 +158,7 @@ public final class PairingRunner: @unchecked Sendable {
         let candidate = remaining.removeFirst()
         report(.trying(displayName: candidate.displayName))
 
-        let initiator = PairingInitiator(queue: queue)
+        let initiator = PairingInitiator(profile: profile, queue: queue)
         self.initiator = initiator
         initiator.onPaired = { [weak self] key, macName in
             guard let self, self.running else { return }

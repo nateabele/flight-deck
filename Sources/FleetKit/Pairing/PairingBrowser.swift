@@ -3,7 +3,7 @@ import Network
 
 /// Finds Macs that are armed for pairing right now.
 ///
-/// Browses `PairingChannel.bonjourType`, not the fleet's `_flightdeck._tcp`, and the
+/// Browses its profile's `bonjourType` (the phone's is `_flightdeck-pair._tcp`), not the fleet's `_flightdeck._tcp`, and the
 /// difference is the whole design: the pairing service exists only while a window is open, so
 /// an empty result set means "no Mac on this network is offering to pair" rather than "no Mac
 /// on this network", which are different sentences to put in front of a user.
@@ -33,10 +33,14 @@ public final class PairingBrowser: @unchecked Sendable {
     /// count goes stale.
     public var onResults: (([DiscoveredMac]) -> Void)?
 
+    /// Which pairing service to browse. A host-profile browser never sees a phone window, so
+    /// a controller cannot spend a guess from that window's three on a code meant for a host.
+    public let profile: PairingProfile
     private let queue: DispatchQueue
     private var browser: NWBrowser?
 
-    public init(queue: DispatchQueue = .main) {
+    public init(profile: PairingProfile = .phone, queue: DispatchQueue = .main) {
+        self.profile = profile
         self.queue = queue
     }
 
@@ -49,7 +53,7 @@ public final class PairingBrowser: @unchecked Sendable {
         // for `FleetConnector`, which only ever compares the instance name — it is not fine
         // here, where the TXT record's display name is the whole point of browsing.
         let browser = NWBrowser(
-            for: .bonjourWithTXTRecord(type: PairingChannel.bonjourType, domain: nil),
+            for: .bonjourWithTXTRecord(type: profile.bonjourType, domain: nil),
             using: .tcp
         )
         browser.browseResultsChangedHandler = { [weak self] results, _ in

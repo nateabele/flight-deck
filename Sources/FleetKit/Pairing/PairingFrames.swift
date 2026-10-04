@@ -1,8 +1,15 @@
 import Foundation
 
+// `@_spi(HostPairing) public` on all three types, not plain `public`: the Linux hostd compiles
+// this file into its `PairingCore` module (a symlink, so there is one vocabulary, not two that
+// can drift) and needs to construct frames from another module there. SPI keeps them out of
+// FleetKit's public API, so no app call site can import its way to a pairing frame — the
+// visibility argument on `PairingClientFrame` below still holds for everyone who does not
+// spell `@_spi(HostPairing) import`.
+
 /// Why the Mac stopped. Sent in the clear, so it says only what the phone needs to choose its
 /// next screen — never how close a guess was.
-enum PairingRejection: String, Codable, Equatable, Sendable {
+@_spi(HostPairing) public enum PairingRejection: String, Codable, Equatable, Sendable {
     /// The confirmation did not verify. From the Mac's side that is indistinguishable from a
     /// typo, and it costs one of three attempts.
     case badCode
@@ -21,7 +28,7 @@ enum PairingRejection: String, Codable, Equatable, Sendable {
 /// contains no `hello` and no `cmd`, and no code outside FleetKit can construct any pairing
 /// frame at all — so "a bootstrap connection must never reach `SessionStore`" is a property of
 /// what can be said on this socket rather than a check somebody has to remember to write.
-enum PairingClientFrame: Codable, Equatable, Sendable {
+@_spi(HostPairing) public enum PairingClientFrame: Codable, Equatable, Sendable {
     /// The phone's SPAKE2 message, 32 bytes. First frame on the connection.
     case pake(msg: Data)
     /// `PairingSecrets.initiatorConfirmation`, 32 bytes. Only frame after the Mac's `pake`.
@@ -31,7 +38,7 @@ enum PairingClientFrame: Codable, Equatable, Sendable {
 
     private enum Tag: String, Codable { case pake, confirm }
 
-    func encode(to encoder: any Encoder) throws {
+    public func encode(to encoder: any Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         switch self {
         case .pake(let msg):
@@ -43,7 +50,7 @@ enum PairingClientFrame: Codable, Equatable, Sendable {
         }
     }
 
-    init(from decoder: any Decoder) throws {
+    public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         switch try c.decode(Tag.self, forKey: .t) {
         case .pake: self = .pake(msg: try c.decode(Data.self, forKey: .msg))
@@ -53,7 +60,7 @@ enum PairingClientFrame: Codable, Equatable, Sendable {
 }
 
 /// Mac → phone, on the pairing channel only.
-enum PairingServerFrame: Codable, Equatable, Sendable {
+@_spi(HostPairing) public enum PairingServerFrame: Codable, Equatable, Sendable {
     /// The Mac's SPAKE2 message, 32 bytes.
     case pake(msg: Data)
     /// `PairingSecrets.responderConfirmation` plus the sealed device key. Both in one frame
@@ -67,7 +74,7 @@ enum PairingServerFrame: Codable, Equatable, Sendable {
 
     private enum Tag: String, Codable { case pake, sealed, reject }
 
-    func encode(to encoder: any Encoder) throws {
+    public func encode(to encoder: any Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         switch self {
         case .pake(let msg):
@@ -83,7 +90,7 @@ enum PairingServerFrame: Codable, Equatable, Sendable {
         }
     }
 
-    init(from decoder: any Decoder) throws {
+    public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         switch try c.decode(Tag.self, forKey: .t) {
         case .pake:

@@ -1,6 +1,14 @@
+#if canImport(CryptoKit)
 import CryptoKit
+#else
+import Crypto   // swift-crypto: same API surface for SHA256/HKDF/HMAC/AES.GCM
+#endif
 import Foundation
+#if canImport(Security)
 import Security
+#else
+import Glibc
+#endif
 
 /// The short code a user types when they cannot scan the QR.
 ///
@@ -35,8 +43,14 @@ public struct PairingCode: Equatable, Sendable {
         var bytes = [UInt8](repeating: 0, count: 7)
         // Same reasoning as `FleetDeviceKey.mint()`: a CSPRNG that will not answer is not a
         // condition to degrade around, so trap rather than fall back to something weaker.
+        // The Linux branch traps on the same condition for the same reason.
+        #if canImport(Security)
         let status = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
         precondition(status == errSecSuccess, "SecRandomCopyBytes failed: \(status)")
+        #else
+        // getentropy is the Linux CSPRNG with no fd and no partial reads below 256 bytes.
+        precondition(getentropy(&bytes, bytes.count) == 0, "getentropy failed: \(errno)")
+        #endif
         // 7 bytes is 56 bits; the code carries 55. Clear the top bit so the value and its
         // encoding agree — otherwise the 56th bit would be minted, dropped on the way out,
         // and two distinct secrets would render as the same code.

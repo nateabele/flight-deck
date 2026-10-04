@@ -1,4 +1,8 @@
+#if canImport(CryptoKit)
 import CryptoKit
+#else
+import Crypto   // swift-crypto: same API surface for SHA256/HKDF/HMAC/AES.GCM
+#endif
 import Foundation
 
 /// The constants the two ends of a pairing exchange must agree on byte for byte.
@@ -15,7 +19,10 @@ public enum PairingChannel {
     ///
     /// `flightdeck-pair` is exactly 15 characters, RFC 6763's maximum service label length.
     /// Any future rename must stay at or under that or Bonjour registration fails silently.
-    public static let bonjourType = "_flightdeck-pair._tcp"
+    ///
+    /// Forwards to `PairingProfile.phone`, which is now where the value lives; kept because the
+    /// iOS app reads it here, and a second literal is how the two would drift apart.
+    public static let bonjourType = PairingProfile.phone.bonjourType
 
     /// The TXT key carrying the Mac's display name, so a phone that discovers two armed Macs
     /// can name them. Cosmetic, and treated as such: it is unauthenticated text from the
@@ -29,8 +36,12 @@ public enum PairingChannel {
     /// has not learned the Mac's name yet — that is what the seal delivers — so any
     /// name-derived scheme would have the two sides guessing at each other. Fixed role labels
     /// give a fixed, agreed context, which is all the binding needs to be.
-    public static let initiatorName = Data("flightdeck-phone".utf8)
-    public static let responderName = Data("flightdeck-mac".utf8)
+    ///
+    /// The phone's pair, forwarded from `PairingProfile.phone`. A host pairing uses
+    /// `PairingProfile.host`'s, and the difference is what keeps the two from completing
+    /// against each other.
+    public static let initiatorName = PairingProfile.phone.initiatorName
+    public static let responderName = PairingProfile.phone.responderName
 
     /// The bootstrap PSK's identity. Deliberately not a UUID string: `FleetSocketServer`
     /// turns a PSK identity into a paired slot with `UUID(uuidString:)`, and an identity that

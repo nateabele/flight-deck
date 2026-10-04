@@ -4,21 +4,31 @@ import Security
 import XCTest
 @testable import FleetKit
 
-/// The §3.2 gate: Darwin's Network.framework TLS-PSK client against swift-nio-ssl (BoringSSL).
+/// The §3.2 gates: Darwin's Network.framework against swift-nio-ssl (BoringSSL) on Linux.
 /// Skipped unless `scripts/test-hostd-linux-interop.sh` started the Linux server and exported
-/// `FD_LINUX_HOSTD_ENDPOINT` (host:port) — `test-unit.sh` runs xctest directly, so a plain
-/// variable reaches the runner (no TEST_RUNNER_ prefix needed there).
+/// `FD_LINUX_HOSTD_ENDPOINT` (host:port) and `FD_LINUX_HOSTD_MODE` — `test-unit.sh` runs xctest
+/// directly, so a plain variable reaches the runner (no TEST_RUNNER_ prefix needed there).
+///
+/// Each test names the server mode it needs, because one container serves one mode: the echo
+/// tests dialled at the pairing responder would fail on its bootstrap PSK, and that failure
+/// would say nothing about either gate. The script fails a run in which its own mode's tests
+/// were skipped, so a skip here cannot pass a gate.
 final class LinuxHostdInteropTests: XCTestCase {
     static let slot = UUID(uuidString: "6F0B2C1E-8E37-4D7A-9D0A-3C5E2B1A9F00")!
     static let secret = Data(repeating: 0x5A, count: 32)
 
-    func testEchoOverPSKWebSocket() async throws {
-        guard let spec = ProcessInfo.processInfo.environment["FD_LINUX_HOSTD_ENDPOINT"] else {
-            throw XCTSkip("FD_LINUX_HOSTD_ENDPOINT not set")
+    /// The Linux server's endpoint, or a skip unless it was started in `mode`.
+    static func endpoint(mode: String) throws -> NWEndpoint {
+        let env = ProcessInfo.processInfo.environment
+        guard let spec = env["FD_LINUX_HOSTD_ENDPOINT"], env["FD_LINUX_HOSTD_MODE"] == mode else {
+            throw XCTSkip("Linux hostd not running in \(mode) mode")
         }
         let parts = spec.split(separator: ":")
-        let endpoint = NWEndpoint.hostPort(host: .init(String(parts[0])),
-                                           port: .init(String(parts[1]))!)
+        return .hostPort(host: .init(String(parts[0])), port: .init(String(parts[1]))!)
+    }
+
+    func testEchoOverPSKWebSocket() async throws {
+        let endpoint = try Self.endpoint(mode: "echo")
         let key = FleetDeviceKey(slot: Self.slot, secret: Self.secret)
         let connection = NWConnection(to: HostTransport.endpoint(for: endpoint),
                                       using: HostTransport.clientParameters(key: key))
@@ -32,12 +42,7 @@ final class LinuxHostdInteropTests: XCTestCase {
     }
 
     func testWrongKeyIsRefused() async throws {
-        guard let spec = ProcessInfo.processInfo.environment["FD_LINUX_HOSTD_ENDPOINT"] else {
-            throw XCTSkip("FD_LINUX_HOSTD_ENDPOINT not set")
-        }
-        let parts = spec.split(separator: ":")
-        let endpoint = NWEndpoint.hostPort(host: .init(String(parts[0])),
-                                           port: .init(String(parts[1]))!)
+        let endpoint = try Self.endpoint(mode: "echo")
         let key = FleetDeviceKey(slot: Self.slot, secret: Data(repeating: 0x00, count: 32))
         let connection = NWConnection(to: HostTransport.endpoint(for: endpoint),
                                       using: HostTransport.clientParameters(key: key))
@@ -56,6 +61,32 @@ final class LinuxHostdInteropTests: XCTestCase {
             XCTAssertEqual(status, errSSLPeerBadRecordMac, "unexpected TLS failure \(error)")
         }
         connection.cancel()
+    }
+
+    /// Gate 2: the shipped `PairingInitiator`, host profile, against the Linux
+    /// `NIOPairingResponder` — SPAKE2 from the pinned BoringSSL on both ends, the bootstrap PSK
+    /// over 0xCCAC (the server pins it), and the sealed key opening to exactly what the server
+    /// was told to deliver. A Darwin–Darwin pass proves none of this, because both halves there
+    /// are the same build of the same code.
+    /// `@MainActor` because `PairingInitiator` defaults to `.main` and asserts it.
+    @MainActor
+    func testDarwinInitiatorPairsWithLinuxResponder() async throws {
+        let endpoint = try Self.endpoint(mode: "pair")
+        guard let codeText = ProcessInfo.processInfo.environment["FD_LINUX_HOSTD_CODE"],
+              let code = PairingCode(normalizing: codeText) else {
+            throw XCTSkip("pairing interop env not set")
+        }
+        let initiator = PairingInitiator(profile: .host)
+        let paired = expectation(description: "paired")
+        initiator.onPaired = { key, hostName in
+            XCTAssertEqual(key.slot, Self.slot)          // the responder seals the slot it was given
+            XCTAssertEqual(key.secret, Self.secret)
+            XCTAssertEqual(hostName, "interop-host")
+            paired.fulfill()
+        }
+        initiator.onFailure = { XCTFail("pairing failed: \($0)"); paired.fulfill() }
+        initiator.start(code: code, endpoint: endpoint)
+        await fulfillment(of: [paired], timeout: 30)
     }
 
     /// Connects, sends one text frame, returns the first text frame received.

@@ -2,37 +2,6 @@ import Foundation
 import Network
 import Security
 
-/// One paired device: the slot the Mac filed it under, and the secret they share.
-///
-/// The slot id doubles as the TLS PSK *identity*, which is what lets one listener hold
-/// several devices' keys and still know which one connected — and what makes revoking a
-/// device exactly "delete this slot's secret" with no other bookkeeping.
-public struct FleetDeviceKey: Equatable, Sendable {
-    public let slot: UUID
-    /// 32 bytes from the system CSPRNG. Never derived from anything the user types: this is
-    /// displayed once, in a QR, on a screen the user is looking at (§3), so there is no
-    /// password to stretch and nothing to be memorable.
-    public let secret: Data
-
-    public init(slot: UUID, secret: Data) {
-        self.slot = slot
-        self.secret = secret
-    }
-
-    public static func mint() -> FleetDeviceKey {
-        var bytes = [UInt8](repeating: 0, count: 32)
-        // A failure here means the system CSPRNG is unavailable, which is not a condition
-        // to paper over with a weaker key — there is no safe fallback, so trap.
-        let status = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
-        precondition(status == errSecSuccess, "SecRandomCopyBytes failed: \(status)")
-        return FleetDeviceKey(slot: UUID(), secret: Data(bytes))
-    }
-
-    /// The PSK identity blob. The slot's UUID string rather than its raw bytes, so a packet
-    /// capture and the paired-devices list in Preferences name the same thing.
-    var identity: Data { Data(slot.uuidString.utf8) }
-}
-
 /// Which PSK identity each incoming connection offered, recorded as the handshake happens.
 ///
 /// This exists because there is no way to ask a *finished* connection which key it used.
@@ -172,7 +141,16 @@ public enum FleetTLS {
     /// folded into the array, and that is invariant 1 made structural: there is no argument
     /// anyone can pass to the fleet listener that puts the bootstrap PSK on it.
     public static func pairingListenerParameters() -> NWParameters {
-        let parameters = bootstrapParameters()
+        pairingListenerParameters(profile: .phone)
+    }
+
+    /// The same listener for a given pairing profile — `.host` appends 0xCCAC rather than the
+    /// phone's 0x00A8. Internal for the reason `clientParameters(key:suites:)` is: only
+    /// FleetKit's own pairing types pick a suite. The public phone entry point above routes
+    /// through `.phone`, whose suite list is the single 0x00A8 this path always appended, so
+    /// the phone's bootstrap offer is byte-for-byte unchanged.
+    static func pairingListenerParameters(profile: PairingProfile) -> NWParameters {
+        let parameters = bootstrapParameters(suites: ciphersuites(profile.tlsSuites))
         // Same narrow purpose as on the fleet listener: a socket the OS is still draining
         // from a previous run of this process. The pairing listener always takes a fresh
         // OS-assigned port, so it never rebinds one of its own.
@@ -182,10 +160,28 @@ public enum FleetTLS {
 
     /// The phone's side of the same channel.
     public static func pairingClientParameters() -> NWParameters {
-        bootstrapParameters()
+        pairingClientParameters(profile: .phone)
     }
 
-    private static func bootstrapParameters() -> NWParameters {
+    /// The initiator's side for a given profile; see `pairingListenerParameters(profile:)`.
+    static func pairingClientParameters(profile: PairingProfile) -> NWParameters {
+        bootstrapParameters(suites: ciphersuites(profile.tlsSuites))
+    }
+
+    /// `PairingProfile` carries IANA numbers because it is compiled on Linux, where
+    /// `tls_ciphersuite_t` does not exist. A number Network has no case for is a programming
+    /// error in a profile constant, not a runtime condition, so it traps rather than quietly
+    /// dropping the suite and leaving a host pairing to fail as handshake silence.
+    static func ciphersuites(_ raw: [UInt16]) -> [tls_ciphersuite_t] {
+        raw.map { value in
+            guard let suite = tls_ciphersuite_t(rawValue: value) else {
+                preconditionFailure("not a tls_ciphersuite_t: \(value)")
+            }
+            return suite
+        }
+    }
+
+    private static func bootstrapParameters(suites: [tls_ciphersuite_t]) -> NWParameters {
         let tls = NWProtocolTLS.Options()
         let sec = tls.securityProtocolOptions
         sec_protocol_options_add_pre_shared_key(
@@ -202,9 +198,12 @@ public enum FleetTLS {
         // pinning a TLS 1.3 minimum — which looks like obvious hardening — silently breaks PSK
         // identically, presenting as the handshake silence `PairingChannelTests` documents.
         // Do not add that pin.
-        sec_protocol_options_append_tls_ciphersuite(
-            sec, tls_ciphersuite_t(rawValue: numericCast(TLS_PSK_WITH_AES_128_GCM_SHA256))!
-        )
+        //
+        // `suites` is the profile's: `.phone` is exactly the 0x00A8 this always appended, and
+        // `.host` is 0xCCAC, which a Linux host's BoringSSL needs (see `FleetTLS.hostSuites`).
+        for suite in suites {
+            sec_protocol_options_append_tls_ciphersuite(sec, suite)
+        }
         // No PSK-selection block, unlike the fleet parameters: with exactly one registered
         // PSK there is no identity to attribute a connection to.
         //

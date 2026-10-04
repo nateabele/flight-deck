@@ -72,6 +72,10 @@ public final class PairingInitiator: @unchecked Sendable {
     /// crypto round-trips — and a runner walking three discovered Macs pays it once per Mac.
     public var exchangeTimeout: TimeInterval = 8
 
+    /// Which pairing this dials: its SPAKE2 names and its TLS suite. A host-profile initiator
+    /// against a phone window fails `.wrongCode` even with the right code — the names are in
+    /// the key — which is the domain separation, not a bug.
+    public let profile: PairingProfile
     private let queue: DispatchQueue
     private var connection: NWConnection?
     private var session: SPAKE2Session?
@@ -86,7 +90,8 @@ public final class PairingInitiator: @unchecked Sendable {
     /// abandon a live exchange.
     private var generation = 0
 
-    public init(queue: DispatchQueue = .main) {
+    public init(profile: PairingProfile = .phone, queue: DispatchQueue = .main) {
+        self.profile = profile
         self.queue = queue
     }
 
@@ -104,7 +109,7 @@ public final class PairingInitiator: @unchecked Sendable {
 
         session = SPAKE2Session(
             role: .initiator,
-            myName: PairingChannel.initiatorName, theirName: PairingChannel.responderName
+            myName: profile.initiatorName, theirName: profile.responderName
         )
 
         // The same 16 KiB inbound cap the Mac's listener imposes, and for the same reason
@@ -116,7 +121,7 @@ public final class PairingInitiator: @unchecked Sendable {
         // for this) would let a spoofed advertisement make the stack buffer megabytes before
         // any of this code sees a frame.
         let parameters = FleetSocket.webSocketParameters(
-            FleetTLS.pairingClientParameters(),
+            FleetTLS.pairingClientParameters(profile: profile),
             maximumMessageSize: PairingListener.maxFrameBytes
         )
         let connection = NWConnection(

@@ -1,7 +1,7 @@
 import Foundation
 import Network
 import XCTest
-@testable import FleetKit
+@_spi(HostPairing) @testable import FleetKit
 
 @MainActor
 final class PairingListenerTests: XCTestCase {

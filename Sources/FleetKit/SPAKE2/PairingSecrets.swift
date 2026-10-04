@@ -1,4 +1,12 @@
+#if canImport(CryptoKit)
 import CryptoKit
+#else
+// swift-crypto: same API surface for SHA256/HKDF/HMAC/AES.GCM. `@preconcurrency` because its
+// `SymmetricKey` is not marked `Sendable` where CryptoKit's is, so the Linux build of this
+// `Sendable` struct is otherwise a Swift 6 error. It is the same immutable value either way;
+// nothing here mutates a key after `init`.
+@preconcurrency import Crypto
+#endif
 import Foundation
 
 public enum PairingSealError: Error, Equatable {
