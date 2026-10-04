@@ -1,3 +1,4 @@
+import AppKit
 import XCTest
 @testable import FlightDeck
 
@@ -192,5 +193,59 @@ final class ProjectCollapseTests: XCTestCase {
 
         XCTAssertTrue(store.repos[0].isCollapsed)
         XCTAssertEqual(store.sidebarRows, [.project(store.repos[0].id)])
+    }
+
+    // MARK: - ←/→ on a selected project header
+
+    func testSetSelectedProjectCollapsedActsOnTheSelectedProject() {
+        let (store, _) = makeStore()
+        store.newSession(in: URL(fileURLWithPath: "/w/a", isDirectory: true))
+        store.newSession(in: URL(fileURLWithPath: "/w/b", isDirectory: true))
+        let b = store.repos[1].id
+        store.selectProject(b)
+
+        XCTAssertTrue(store.setSelectedProjectCollapsed(true))
+        XCTAssertTrue(store.repos[1].isCollapsed)
+        XCTAssertFalse(store.repos[0].isCollapsed, "only the selected project collapses")
+
+        XCTAssertTrue(store.setSelectedProjectCollapsed(false))
+        XCTAssertFalse(store.repos[1].isCollapsed)
+    }
+
+    func testSetSelectedProjectCollapsedStillClaimsTheKeyWhenAlreadyInThatState() {
+        let (store, _) = makeStore()
+        store.newSession(in: URL(fileURLWithPath: "/w/a", isDirectory: true))
+        store.selectProject(store.repos[0].id)
+
+        // Already expanded: → is a no-op, but it is still the sidebar's key, not a beep.
+        XCTAssertTrue(store.setSelectedProjectCollapsed(false))
+        XCTAssertFalse(store.repos[0].isCollapsed)
+    }
+
+    func testSetSelectedProjectCollapsedDeclinesWithNoProjectSelected() {
+        let (store, _) = makeStore()
+        store.newSession(in: URL(fileURLWithPath: "/w/a", isDirectory: true))
+
+        // A session is selected, not a project: the arrow must fall through untouched.
+        XCTAssertFalse(store.setSelectedProjectCollapsed(true))
+        XCTAssertFalse(store.repos[0].isCollapsed)
+    }
+
+    func testArrowCollapseIntentMapsBareLeftAndRight() {
+        // Arrow keys always carry `.numericPad` and `.function`; those must not disqualify them.
+        let arrowFlags: NSEvent.ModifierFlags = [.numericPad, .function]
+        XCTAssertEqual(SidebarInputMonitor.arrowCollapseIntent(keyCode: 123, modifiers: arrowFlags), true)
+        XCTAssertEqual(SidebarInputMonitor.arrowCollapseIntent(keyCode: 124, modifiers: arrowFlags), false)
+        XCTAssertEqual(SidebarInputMonitor.arrowCollapseIntent(keyCode: 123, modifiers: []), true)
+    }
+
+    func testArrowCollapseIntentIgnoresChordsAndOtherKeys() {
+        let arrowFlags: NSEvent.ModifierFlags = [.numericPad, .function]
+        // ⌃⌘←/→ is tab history (`TabNavigationCommands`); ⌥/⇧ arrows are someone else's too.
+        XCTAssertNil(SidebarInputMonitor.arrowCollapseIntent(keyCode: 123, modifiers: arrowFlags.union([.command, .control])))
+        XCTAssertNil(SidebarInputMonitor.arrowCollapseIntent(keyCode: 124, modifiers: arrowFlags.union(.option)))
+        XCTAssertNil(SidebarInputMonitor.arrowCollapseIntent(keyCode: 123, modifiers: arrowFlags.union(.shift)))
+        XCTAssertNil(SidebarInputMonitor.arrowCollapseIntent(keyCode: 125, modifiers: arrowFlags), "↓ stays the table's")
+        XCTAssertNil(SidebarInputMonitor.arrowCollapseIntent(keyCode: 36, modifiers: []))
     }
 }

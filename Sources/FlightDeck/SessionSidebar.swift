@@ -536,10 +536,14 @@ struct SessionSidebar: View {
             // and this one both drop anything that is not `case .project`, since a click on a
             // session row is handled by `List`'s own selection binding instead.
             selectRow: { index in
-                guard index >= 0, index < store.sidebarRows.count else { return }
-                guard case .project(let id) = store.sidebarRows[index] else { return }
+                guard index >= 0, index < store.sidebarRows.count else { return false }
+                guard case .project(let id) = store.sidebarRows[index] else { return false }
                 store.selectProject(id)
+                return true
             },
+            // ← / → on the highlighted project header. `false` (no project selected) leaves the
+            // arrow for the table and the terminal.
+            setSelectedProjectCollapsed: { store.setSelectedProjectCollapsed($0) },
             // How the monitor proves the row it decides about is the row that was pressed. A
             // session closing in another project removes a row, and every index below it shifts;
             // `SidebarRow.id` does not move.

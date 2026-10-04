@@ -2,7 +2,8 @@ import AppKit
 import SwiftUI
 
 /// Sidebar mouse/keyboard affordances that SwiftUI cannot express here: double-click-to-rename,
-/// click-to-focus, click-to-collapse, and Return-to-rename.
+/// click-to-focus, click-to-collapse, Return-to-rename, and ←/→ to collapse/expand the
+/// highlighted project.
 ///
 /// # Four mechanisms were measured. Three are dead. Read this before "simplifying".
 ///
@@ -56,7 +57,14 @@ import SwiftUI
 ///   commits an open rename field.
 /// - **mouse-down, `clickCount == 1`, that turns out not to have been a drag** → collapse that
 ///   project header if the press landed in its chevron zone, or select the project otherwise.
-///   The "turns out" is the whole trick; see below.
+///   The "turns out" is the whole trick; see below. A click that SELECTS a project also makes
+///   the table first responder: the detail column swaps the terminal for `ProjectView`, so
+///   there is no visible terminal to take focus from, and without it ←/→ below would have
+///   nowhere to arrive.
+/// - **← / → with a project selected and the sidebar focused** → collapse / expand that project,
+///   consuming the key. Unmodified only, so ⌃⌘←/→ (tab history) is untouched. "Focused" also
+///   admits the window itself as first responder, which is where focus falls when keyboard
+///   navigation (⌘⇧[/]) lands on a header and the terminal leaves the hierarchy under it.
 ///
 /// Mouse events are always returned unchanged, so row hit-testing and list dragging cannot
 /// change. A drag begins with a `clickCount == 1` down, so dragging never renames.
@@ -214,7 +222,13 @@ final class SidebarInputMonitor {
     /// chevron zone, starving this file's own click-vs-drag decision (see `SessionSidebar`'s
     /// `selectionBinding` comment for the GUI evidence). The caller still decides what "select"
     /// means; this file has no model of what a row is.
-    var selectRow: ((Int) -> Void)?
+    ///
+    /// Returns whether it selected a project, which is when the monitor also hands the table
+    /// keyboard focus so ←/→ reach `setSelectedProjectCollapsed`.
+    var selectRow: ((Int) -> Bool)?
+    /// Collapse (`true`) or expand (`false`) the selected project. Returns whether a project was
+    /// selected, so the monitor knows whether to consume the arrow.
+    var setSelectedProjectCollapsed: ((Bool) -> Bool)?
     /// The identity of the row at this table index — `SidebarRow.id`, supplied by the caller for
     /// the same reason as above. Click-to-collapse decides a press-duration after it began, and
     /// a bare index does not survive that: sessions come and go asynchronously here, so a row
@@ -224,6 +238,21 @@ final class SidebarInputMonitor {
 
     /// `kVK_Return`. Hard-coded rather than importing Carbon for one constant.
     private static let returnKeyCode: UInt16 = 36
+    /// `kVK_LeftArrow` / `kVK_RightArrow`.
+    private static let leftArrowKeyCode: UInt16 = 123
+    private static let rightArrowKeyCode: UInt16 = 124
+
+    /// `true` to collapse, `false` to expand, `nil` when this key is not one of ours. Pure so the
+    /// modifier rule is testable: arrow keys always arrive with `.numericPad` and `.function`
+    /// set, and a check that treated those as modifiers would never fire at all.
+    static func arrowCollapseIntent(keyCode: UInt16, modifiers: NSEvent.ModifierFlags) -> Bool? {
+        guard modifiers.intersection([.shift, .control, .option, .command]).isEmpty else { return nil }
+        switch keyCode {
+        case leftArrowKeyCode: return true
+        case rightArrowKeyCode: return false
+        default: return nil
+        }
+    }
 
     func start() {
         if mouseToken == nil {
@@ -235,7 +264,7 @@ final class SidebarInputMonitor {
         if keyToken == nil {
             keyToken = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
                 guard let self, self.handleKeyDown(event) else { return event }
-                return nil     // consumed: the sidebar had focus and acted on Return
+                return nil     // consumed: the sidebar had focus and acted on Return or ←/→
             }
         }
     }
@@ -403,7 +432,7 @@ final class SidebarInputMonitor {
         let upOnScreen = NSEvent.mouseLocation
         guard let hit = SessionWindow.hitView(
             inWindow: window, at: window.convertPoint(fromScreen: upOnScreen)
-        ), let (_, _, rowIndex) = Self.sidebarRow(under: hit) else { return }
+        ), let (table, _, rowIndex) = Self.sidebarRow(under: hit) else { return }
 
         let upIdentity = rowIdentity?(rowIndex)
         // The index resolved NOW, not the one pressed: whichever callback fires below, the rule
@@ -429,7 +458,11 @@ final class SidebarInputMonitor {
             pressedRowControl: pressedRowControl,
             inChevronZone: inChevronZone
         ) {
-            selectRow?(rowIndex)
+            // See the doc comment: a selected header shows `ProjectView`, not a terminal, so
+            // focus here takes nothing from the user and is what lets ←/→ act on it.
+            if selectRow?(rowIndex) == true, window.firstResponder !== table {
+                window.makeFirstResponder(table)
+            }
         }
     }
 
@@ -456,6 +489,15 @@ final class SidebarInputMonitor {
 
     /// Returns true if the event was handled and should be consumed.
     private func handleKeyDown(_ event: NSEvent) -> Bool {
+        if let collapse = Self.arrowCollapseIntent(keyCode: event.keyCode, modifiers: event.modifierFlags) {
+            guard let window = NSApp.keyWindow, SessionWindow.isSessionWindow(window) else { return false }
+            // The sidebar's table, or nothing at all. Never another table (the Intakes list owns
+            // its own arrows), a text field (arrows move the caret), or the terminal.
+            let responder = window.firstResponder
+            let sidebarFocused = (responder as? NSTableView).map(Self.isSidebarTable) ?? (responder === window)
+            guard sidebarFocused else { return false }
+            return setSelectedProjectCollapsed?(collapse) ?? false
+        }
         guard event.keyCode == Self.returnKeyCode else { return false }
         // Any modifier means this is some other command, not a plain Return.
         guard event.modifierFlags.intersection(.deviceIndependentFlagsMask).isEmpty else { return false }
@@ -654,7 +696,8 @@ extension View {
         renameRow: @escaping (Int) -> Void,
         renameSelected: @escaping () -> Bool,
         toggleRow: @escaping (Int) -> Void,
-        selectRow: @escaping (Int) -> Void,
+        selectRow: @escaping (Int) -> Bool,
+        setSelectedProjectCollapsed: @escaping (Bool) -> Bool,
         rowIdentity: @escaping (Int) -> String?
     ) -> some View {
         self
@@ -663,6 +706,7 @@ extension View {
                 monitor.renameSelected = renameSelected
                 monitor.toggleRow = toggleRow
                 monitor.selectRow = selectRow
+                monitor.setSelectedProjectCollapsed = setSelectedProjectCollapsed
                 monitor.rowIdentity = rowIdentity
                 monitor.start()
             }

@@ -5120,6 +5120,18 @@ final class SessionStore: ObservableObject {
         persist()
     }
 
+    /// ← and → on a highlighted project header (`SidebarInputMonitor`). Returns whether a
+    /// project was selected at all — NOT whether anything changed — because that is what decides
+    /// who owns the key: → on an already-expanded header is still the sidebar's keystroke, and
+    /// letting it fall through would only beep. With a session selected instead, the arrow is
+    /// left alone for the table and whatever else wants it.
+    @discardableResult
+    func setSelectedProjectCollapsed(_ isCollapsed: Bool) -> Bool {
+        guard let id = selectedProjectID, repos.contains(where: { $0.id == id }) else { return false }
+        setCollapsed(isCollapsed, forProjectAt: id)
+        return true
+    }
+
     /// The sidebar's single `.onMove` target. The policy — what may move where — lives in
     /// `SidebarReorder`, which is tested without a store; this only applies the result.
     func moveSidebarRows(fromOffsets source: IndexSet, toOffset destination: Int) {
