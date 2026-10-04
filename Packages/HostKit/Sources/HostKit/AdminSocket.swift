@@ -97,8 +97,17 @@ private func readLine(_ fd: Int32, timedOut: inout Bool) -> String? {
     return nil
 }
 
+private func setCloexec(_ fd: Int32) {
+    _ = fcntl(fd, F_SETFD, FD_CLOEXEC)
+}
+
 /// The user-only control channel to a running hostd. Both the Hosting tab and
-/// `flightdeck-hostd pair` run as the same user, so a `0600` unix socket is the trust boundary.
+/// `flightdeck-hostd pair` run as the same user, so a `0600` unix socket in a directory only
+/// that user can write is the trust boundary.
+///
+/// Lifetime: the accept thread retains the server, so `deinit` cannot run while it is live;
+/// call `stop()` to release it. `stop()` must not be called from inside the handler, which runs
+/// on the accept thread and would wait on itself (checked by a precondition).
 public final class AdminSocketServer: @unchecked Sendable {
     private let path: String
     private let handle: @Sendable (AdminRequest) -> AdminReply
@@ -106,6 +115,10 @@ public final class AdminSocketServer: @unchecked Sendable {
     private let lock = NSLock()
     private var stopped = false
     private let finished = DispatchSemaphore(value: 0)
+    private var acceptThread: Thread?
+    /// The file this server bound, so stop() never unlinks a successor's socket.
+    private var boundDev: dev_t = 0
+    private var boundIno: ino_t = 0
 
     /// A silent client gets this long before it is dropped: connections are served one at a
     /// time, so without it one idle connect would wedge every later pair/status call.
@@ -115,30 +128,52 @@ public final class AdminSocketServer: @unchecked Sendable {
         self.path = path
         self.handle = handle
         var addr = try makeAddress(path)
+        try Self.requirePrivateParent(of: path)
         try Self.clearStaleFile(at: path)
 
         let fd = socket(AF_UNIX, sockStream, 0)
         guard fd >= 0 else { throw posixError() }
-        // Bind creates the file with the umask's mode, so tighten it immediately; the
-        // window is harmless because the parent directory is the user's own.
+        // A leaked listening fd in a spawned agent would keep the path answering after hostd
+        // dies (this repo has been bitten by exactly that with control.sock).
+        setCloexec(fd)
+        // Bind creates the file with the umask's mode, so tighten it immediately. The window
+        // is harmless only because requirePrivateParent proved nobody else can reach the
+        // directory.
         let bound = withUnsafePointer(to: &addr) {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
                 bind(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
             }
         }
         guard bound == 0 else { let e = posixError(); close(fd); throw e }
-        guard chmod(path, 0o600) == 0, listen(fd, 4) == 0 else {
+        guard chmod(path, 0o600) == 0, listen(fd, 16) == 0 else {
             let e = posixError(); close(fd); unlink(path); throw e
         }
+        var st = stat()
+        if lstat(path, &st) == 0 { boundDev = st.st_dev; boundIno = st.st_ino }
         listenFd = fd
         let t = Thread { [self] in acceptLoop() }
         t.name = "hostkit.admin-socket"
+        acceptThread = t
         t.start()
+    }
+
+    /// The trust boundary is the directory, not the socket's mode: anyone who can write the
+    /// parent could swap in their own socket, or remove ours. Refuse a parent that another
+    /// user owns or that group/other can write.
+    private static func requirePrivateParent(of path: String) throws {
+        let parent = (path as NSString).deletingLastPathComponent
+        var st = stat()
+        guard stat(parent.isEmpty ? "." : parent, &st) == 0 else { throw posixError() }
+        guard st.st_uid == geteuid(), st.st_mode & 0o022 == 0 else {
+            throw POSIXError(.EPERM, userInfo: [NSLocalizedDescriptionKey:
+                "admin socket directory \(parent) must be owned by the current user and not group- or other-writable"])
+        }
     }
 
     /// A crashed hostd leaves its socket file behind and bind(2) refuses an existing path.
     /// Remove only a socket or plain leftover, judged by `lstat` so a symlink is never followed:
-    /// otherwise a planted link would make hostd unlink whatever it points at.
+    /// otherwise a planted link would make hostd unlink whatever it points at. A socket that
+    /// still accepts belongs to a live hostd and is never taken over (EADDRINUSE).
     private static func clearStaleFile(at path: String) throws {
         var st = stat()
         guard lstat(path, &st) == 0 else {
@@ -147,6 +182,29 @@ public final class AdminSocketServer: @unchecked Sendable {
         }
         let type = st.st_mode & S_IFMT
         guard type == S_IFSOCK || type == S_IFREG else { throw posixError(EEXIST) }
+        if type == S_IFSOCK { try requireDead(socketAt: path) }
+        guard unlink(path) == 0 || errno == ENOENT else { throw posixError() }
+    }
+
+    /// Probe-connects. ECONNREFUSED twice, 100 ms apart, means the owner is gone (the retry
+    /// covers an owner between bind and listen); a successful connect means it is alive.
+    private static func requireDead(socketAt path: String) throws {
+        let addr = try makeAddress(path)
+        for attempt in 0..<2 {
+            let fd = socket(AF_UNIX, sockStream, 0)
+            guard fd >= 0 else { throw posixError() }
+            defer { close(fd) }
+            var a = addr
+            let rc = withUnsafePointer(to: &a) {
+                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                    connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
+                }
+            }
+            if rc == 0 { throw posixError(EADDRINUSE) }
+            if errno == ENOENT { return }
+            guard errno == ECONNREFUSED else { throw posixError() }
+            if attempt == 0 { usleep(100_000) }
+        }
         guard unlink(path) == 0 || errno == ENOENT else { throw posixError() }
     }
 
@@ -159,6 +217,7 @@ public final class AdminSocketServer: @unchecked Sendable {
             guard poll(&p, 1, 200) > 0 else { continue }
             let client = accept(listenFd, nil, nil)
             guard client >= 0 else { continue }
+            setCloexec(client)
             serve(client)
             close(client)
         }
@@ -183,16 +242,16 @@ public final class AdminSocketServer: @unchecked Sendable {
     }
 
     public func stop() {
+        precondition(Thread.current !== acceptThread, "AdminSocketServer.stop() called from its own handler")
         lock.lock()
         if stopped { lock.unlock(); return }
         stopped = true
         lock.unlock()
         finished.wait()
         close(listenFd)
-        unlink(path)
+        var st = stat()
+        if lstat(path, &st) == 0, st.st_dev == boundDev, st.st_ino == boundIno { unlink(path) }
     }
-
-    deinit { stop() }
 }
 
 public enum AdminSocketClient {
@@ -212,6 +271,8 @@ public enum AdminSocketClient {
         guard rc == 0 else {
             // ENOENT: never started or cleanly stopped; ECONNREFUSED: a crashed hostd's leftover file.
             if errno == ENOENT || errno == ECONNREFUSED { throw AdminSocketError.notRunning }
+            // A full backlog on a unix socket makes a blocking connect fail with EAGAIN.
+            if errno == EAGAIN { throw AdminSocketError.timedOut }
             throw posixError()
         }
         guard writeAll(fd, Array((try HostWire.encode(r) + "\n").utf8)) else {
