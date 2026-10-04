@@ -1,5 +1,20 @@
 import Foundation
 
+// Wire table (JSON, one frame per message; keys are sorted on encode):
+//
+//   controller -> host
+//     hello     {"t":"hello","v":{major,minor},"caps":[string],"name":string}
+//     req       {"t":"req","id":int,"req":{"op":string}}
+//   host -> controller
+//     helloAck  {"t":"helloAck","v":{major,minor},"caps":[string],"name":string}
+//     refused   {"t":"refused","reason":{"kind":"majorVersionMismatch","host":{major,minor}}}
+//     reply     {"t":"reply","id":int,"rep":{"op":string,"info":{...}}}
+//     err       {"t":"err","id":int,"code":string,"message":string}
+//
+// `v` is an object, not a "1.0" string, so no peer ever parses a version out of text and a
+// minor of 10 cannot sort before 9. Unknown capability strings are dropped on decode; an
+// unknown frame tag or `op` throws.
+//
 // Hand-rolled `t`-tagged Codable, as in FleetKit's PairingFrames: the tag strings are the wire
 // contract between a Linux hostd and a Mac controller built months apart, so they are spelled
 // out here rather than derived from case names that a refactor could silently rename.
@@ -17,6 +32,12 @@ public struct ProtocolVersion: Codable, Sendable, Equatable, Comparable {
 
     public static let current = ProtocolVersion(major: 1, minor: 0)
 
+    // Explicit raw values: a Swift rename must not change the wire.
+    enum CodingKeys: String, CodingKey {
+        case major = "major"
+        case minor = "minor"
+    }
+
     public static func < (a: ProtocolVersion, b: ProtocolVersion) -> Bool {
         (a.major, a.minor) < (b.major, b.minor)
     }
@@ -24,6 +45,15 @@ public struct ProtocolVersion: Codable, Sendable, Equatable, Comparable {
 
 public enum HostCapability: String, Codable, Sendable {
     case hostInfo = "host.info"
+}
+
+extension KeyedDecodingContainer {
+    /// Capabilities are the additive half of version skew: a newer peer may advertise one this
+    /// build has never heard of. Decoding straight into the closed enum would throw and kill
+    /// the whole hello, so read strings and drop the unknown ones.
+    fileprivate func decodeCapabilities(forKey key: Key) throws -> [HostCapability] {
+        try decode([String].self, forKey: key).compactMap(HostCapability.init(rawValue:))
+    }
 }
 
 /// Controller → host.
@@ -58,7 +88,7 @@ public enum HostClientFrame: Codable, Sendable, Equatable {
         case .hello:
             self = .hello(
                 protocolVersion: try c.decode(ProtocolVersion.self, forKey: .v),
-                capabilities: try c.decode([HostCapability].self, forKey: .caps),
+                capabilities: try c.decodeCapabilities(forKey: .caps),
                 controllerName: try c.decode(String.self, forKey: .name)
             )
         case .req:
@@ -129,7 +159,7 @@ public enum HostServerFrame: Codable, Sendable, Equatable {
         case .helloAck:
             self = .helloAck(
                 protocolVersion: try c.decode(ProtocolVersion.self, forKey: .v),
-                capabilities: try c.decode([HostCapability].self, forKey: .caps),
+                capabilities: try c.decodeCapabilities(forKey: .caps),
                 hostName: try c.decode(String.self, forKey: .name)
             )
         case .refused:

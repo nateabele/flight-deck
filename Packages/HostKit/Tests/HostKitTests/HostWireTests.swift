@@ -43,4 +43,43 @@ final class HostWireTests: XCTestCase {
         XCTAssertLessThan(ProtocolVersion(major: 1, minor: 0), ProtocolVersion(major: 1, minor: 1))
         XCTAssertLessThan(ProtocolVersion(major: 1, minor: 9), ProtocolVersion(major: 2, minor: 0))
     }
+
+    func testHelloAndAckShapesArePinned() throws {
+        XCTAssertEqual(
+            try HostWire.encode(HostClientFrame.hello(protocolVersion: .current, capabilities: [.hostInfo], controllerName: "laptop")),
+            #"{"caps":["host.info"],"name":"laptop","t":"hello","v":{"major":1,"minor":0}}"#)
+        XCTAssertEqual(
+            try HostWire.encode(HostServerFrame.helloAck(protocolVersion: .current, capabilities: [.hostInfo], hostName: "mini")),
+            #"{"caps":["host.info"],"name":"mini","t":"helloAck","v":{"major":1,"minor":0}}"#)
+    }
+
+    func testRefusedAndErrShapesArePinned() throws {
+        XCTAssertEqual(
+            try HostWire.encode(HostServerFrame.refused(reason: .majorVersionMismatch(host: .init(major: 2, minor: 0)))),
+            #"{"reason":{"host":{"major":2,"minor":0},"kind":"majorVersionMismatch"},"t":"refused"}"#)
+        XCTAssertEqual(
+            try HostWire.encode(HostServerFrame.error(id: 7, code: "unsupported", message: "nope")),
+            #"{"code":"unsupported","id":7,"message":"nope","t":"err"}"#)
+    }
+
+    /// A nil `docker` is omitted, not `null`: pinned so a Linux and a Mac hostd agree.
+    func testHostInfoShapeIsPinned() throws {
+        var info = HostInfo(hostName: "mini", platform: "macOS", osVersion: "26.5", arch: "arm64",
+                            hostdVersion: "1.0", xcode: ["26.4"], docker: nil, diskFreeBytes: 42)
+        XCTAssertEqual(try HostWire.encode(info),
+            #"{"arch":"arm64","diskFreeBytes":42,"hostName":"mini","hostdVersion":"1.0","osVersion":"26.5","platform":"macOS","xcode":["26.4"]}"#)
+        info.docker = "27.0"
+        XCTAssertTrue(try HostWire.encode(info).contains(#""docker":"27.0""#))
+    }
+
+    /// Capabilities are the additive mechanism for minor-version skew: an unknown one must be
+    /// dropped, not fail the whole handshake.
+    func testUnknownCapabilityIsDropped() throws {
+        let hello = try HostWire.decode(HostClientFrame.self,
+            from: #"{"t":"hello","v":{"major":1,"minor":1},"caps":["host.info","future.cap"],"name":"x"}"#)
+        XCTAssertEqual(hello, .hello(protocolVersion: .init(major: 1, minor: 1), capabilities: [.hostInfo], controllerName: "x"))
+        let ack = try HostWire.decode(HostServerFrame.self,
+            from: #"{"t":"helloAck","v":{"major":1,"minor":1},"caps":["host.info","future.cap"],"name":"x"}"#)
+        XCTAssertEqual(ack, .helloAck(protocolVersion: .init(major: 1, minor: 1), capabilities: [.hostInfo], hostName: "x"))
+    }
 }

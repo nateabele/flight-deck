@@ -15,6 +15,18 @@ public struct HostInfo: Codable, Sendable, Equatable {
     public var docker: String?
     public var diskFreeBytes: Int64
 
+    // Explicit raw values: a Swift rename must not change the wire.
+    enum CodingKeys: String, CodingKey {
+        case hostName = "hostName"
+        case platform = "platform"
+        case osVersion = "osVersion"
+        case arch = "arch"
+        case hostdVersion = "hostdVersion"
+        case xcode = "xcode"
+        case docker = "docker"
+        case diskFreeBytes = "diskFreeBytes"
+    }
+
     public init(hostName: String, platform: String, osVersion: String, arch: String,
                 hostdVersion: String, xcode: [String], docker: String?, diskFreeBytes: Int64) {
         self.hostName = hostName
