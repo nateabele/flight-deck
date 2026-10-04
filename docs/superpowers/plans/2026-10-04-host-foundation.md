@@ -26,7 +26,7 @@ Pairing reuses FleetKit's SPAKE2 exchange, parameterized by a `PairingProfile` s
 - `HostKit` is "Foundation-only, Swift 6, with no Network.framework, Security or CryptoKit". It must build and test on Linux.
 - FleetKit stays Foundation, Network, Security and CryptoKit only, because it also compiles for iOS (`FleetKitiOS`). Touching FleetKit means running `./scripts/build-ios.sh`.
 - The app target keeps `SWIFT_VERSION: "5.0"`. New SwiftPM packages use tools version 6.0.
-- TLS: `TLS_PSK_WITH_AES_128_GCM_SHA256` (0x00A8) over TLS 1.2. **Never pin a TLS 1.3 minimum.** FleetTLS records that this silently breaks PSK.
+- TLS for **host** connections and host pairing: `TLS_ECDHE_PSK_WITH_CHACHA20_POLY1305_SHA256` (0xCCAC) over TLS 1.2 (the maintainer's ruling 2026-10-04 after gate 1: swift-nio-ssl's BoringSSL has no 0x00A8). The phone link keeps 0x00A8, unchanged. **Never pin a TLS 1.3 minimum.** FleetTLS records that this silently breaks PSK.
 - Bonjour service types must be at most 15 characters. Host fleet: `_fd-host._tcp`. Host pairing: `_fd-host-pair._tcp`.
 - Pairing codes are valid for **2 minutes**, with at most 3 attempts, as for the phone.
 - Liveness: a WebSocket ping every 15 s. Three missed pings mean offline. Reconnect backoff runs from 1 s to 30 s, and an `NWPathMonitor` change resets it.
@@ -183,7 +183,7 @@ final class LinuxHostdInteropTests: XCTestCase {
         XCTAssertEqual(reply, "echo:ping-gate")
         let tls = connection.metadata(definition: NWProtocolTLS.definition) as? NWProtocolTLS.Metadata
         let suite = sec_protocol_metadata_get_negotiated_tls_ciphersuite(tls!.securityProtocolMetadata)
-        XCTAssertEqual(suite.rawValue, 0x00A8)
+        XCTAssertEqual(suite.rawValue, 0xCCAC)
         connection.cancel()
     }
 
