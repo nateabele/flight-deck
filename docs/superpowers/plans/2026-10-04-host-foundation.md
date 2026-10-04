@@ -351,7 +351,7 @@ This proves that a Darwin `PairingInitiator` pairs with a Linux responder. **If 
 - Produces:
   - `public struct PairingProfile: Sendable, Equatable { bonjourType: String; initiatorName: Data; responderName: Data; static let phone; static let host }`
   - `PairingListener.init(profile: PairingProfile = .phone, queue:)`, `PairingInitiator.init(profile:queue:)`, `PairingBrowser.init(profile:queue:)` and `PairingRunner.init(profile:queue:)`. Every existing call site keeps the `.phone` default.
-  - `NIOPairingResponder.run(code: PairingCode, key: FleetDeviceKey, hostName: String, port: Int, deadline: TimeInterval = 120) async throws -> Paired`, where `Paired` carries `controllerName: String`.
+  - `NIOPairingResponder.run(code: PairingCode, key: FleetDeviceKey, hostName: String, port: Int, deadline: TimeInterval = 120) async throws`. It returns once the sealed key is delivered. The responder never learns the controller's name; the controller sends it in its first `hello` (Task 4's `onControllerName`).
 
 - [ ] **Step 1: Write the failing profile tests.**
 
@@ -1195,10 +1195,7 @@ packages:
   - **Listener:** an `NWListener(using: HostTransport.listenerParameters(keys: store keys))` with `service = .init(name: hostName(), type: "_fd-host._tcp")`.
   - **Key changes:** restart the listener on the same port, following `FleetSocketServer.start`'s wait-for-cancel then rebind. A key change after a revoke also calls `core.disconnect(slot:)` for the removed slots, so live connections close and are not merely refused next time.
   - **Peer identity:** read the slot through FleetKit's PSK selection, which is internal. Expose a minimal `public` hook in `HostTransport`: `listenerParameters(keys:onIdentity: @escaping (sec_protocol_metadata_t, UUID) -> Void)`, built on `FleetPSKIdentities`. Do not use `sec_protocol_metadata_access_pre_shared_keys`; `FleetSocketServer.swift:743` records why it gives the wrong answer.
-  - **Pairing:** a `PairingListener(profile: .host)` on an ephemeral port, exposed as `pairingPort` for tests, armed by `AdminRequest.arm` with `serviceName: hostName()`. Its `onPaired` adds the controller under the name the initiator gave. The `PairingListener` responder does not learn the initiator's name, so the controller sends its name in its first `hello` and the host renames the slot from `"controller"` then. Implement that rename in `HostServerCore.receive(.hello)` via a `onControllerName: (UUID, String) -> Void` hook, and add it to the Task 4 tests:
-    ```swift
-    func testHelloNamesTheController() throws { /* hook receives (peer.slot, "laptop") */ }
-    ```
+  - **Pairing:** a `PairingListener(profile: .host)` on an ephemeral port, exposed as `pairingPort` for tests, armed by `AdminRequest.arm` with `serviceName: hostName()`. Its `onPaired` adds the controller as `"controller"`, because the responder never learns the initiator's name. The controller sends its name in its first `hello`, and `core.onControllerName` (tested in Task 4) renames the slot in `ControllerStore`.
   - **Power:** `main.swift` starts the server with `root = HostStateRoot.default()`, port 47410, and `Host.current().localizedName`. It holds `ProcessInfo.processInfo.beginActivity(options: .idleSystemSleepDisabled…)` only while a connection is open (it holds no assertion when idle), then runs `dispatchMain()`.
   - **LaunchAgent plist** (an `SMAppService.agent` plist):
     ```xml
