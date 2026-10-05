@@ -1,0 +1,201 @@
+import CoreServices
+import Foundation
+import HostKit
+
+/// Transparent routing (spec §8): a per-session directory at the front of the tab's `PATH`
+/// holding one symlink per command a `[[route]]` names, each pointing at the bundled
+/// `flightdeck-route-shim.sh`. Typing `xcodebuild test …` in the tab then runs the shim, which
+/// hands the argv to `flightdeck route-exec`; the CLI matches it and delegates it or execs the
+/// real binary.
+///
+/// **Symlinks to one bundled script, not generated scripts.** Each shim learns its command
+/// from `$0`, so the shim directory carries no logic that an app update could leave stale: a
+/// new script reaches every running tab the moment the bundle is replaced.
+///
+/// **Per session, not per project.** A tab's `PATH` is fixed at launch, so its directory must
+/// outlive any one config; keying it on the session lets a tab close remove exactly its own.
+/// The contents are the project's, which is why the watcher below rebuilds every session of a
+/// project together.
+struct RouteShims {
+    /// Spec §8: set to `1` in a tab to run every routed command locally.
+    static let bypassVariable = "FLIGHTDECK_NO_ROUTE"
+
+    /// Where session directories live: `<state dir>/route-shims/<session id>/`.
+    let root: URL
+    /// The script every shim links to.
+    let script: URL
+
+    /// The copy inside the app bundle (`Contents/Resources/RouteShim/`, a folder reference in
+    /// `project.yml`). Nil only in a bundle built without it, where routing is simply absent.
+    static func bundledScript(_ bundle: Bundle = .main) -> URL? {
+        bundle.url(forResource: "flightdeck-route-shim", withExtension: "sh", subdirectory: "RouteShim")
+    }
+
+    static func defaultRoot(stateDirectory: URL) -> URL {
+        stateDirectory.appendingPathComponent("route-shims", isDirectory: true)
+    }
+
+    func directory(for session: UUID) -> URL {
+        root.appendingPathComponent(session.uuidString, isDirectory: true)
+    }
+
+    /// Brings `session`'s directory in line with `projectRoot`'s `delegate.toml`, and returns
+    /// the command names now shimmed.
+    ///
+    /// Returns nil, changing nothing, when the file does not parse. A config is invalid for a
+    /// moment in the middle of most edits; dropping the shims then would make a routed command
+    /// silently run locally, while keeping them lets `route-exec` report the parse error.
+    @discardableResult
+    func rebuild(session: UUID, projectRoot: URL) -> [String]? {
+        let names: [String]
+        do {
+            let config = try DelegateConfigParser.load(projectRoot: projectRoot)?.config ?? DelegateConfig()
+            names = RouteMatcher(config: config).commandNames
+        } catch {
+            return nil
+        }
+        do {
+            try install(names, session: session)
+        } catch {
+            return nil
+        }
+        return names
+    }
+
+    /// Makes the directory hold exactly one link per name, each pointing at `script`.
+    /// Everything in the directory is ours, so anything else is removed.
+    func install(_ names: [String], session: UUID) throws {
+        let fm = FileManager.default
+        let dir = directory(for: session)
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        let wanted = Set(names)
+        for existing in try fm.contentsOfDirectory(atPath: dir.path) {
+            let path = dir.appendingPathComponent(existing).path
+            if wanted.contains(existing), (try? fm.destinationOfSymbolicLink(atPath: path)) == script.path {
+                continue
+            }
+            try fm.removeItem(atPath: path)
+        }
+        for name in names where !fm.fileExists(atPath: dir.appendingPathComponent(name).path) {
+            try fm.createSymbolicLink(
+                atPath: dir.appendingPathComponent(name).path, withDestinationPath: script.path)
+        }
+    }
+
+    /// On tab close. Best effort: a leftover directory is a few dangling symlinks under the
+    /// state dir, not a fault worth surfacing.
+    func remove(session: UUID) {
+        try? FileManager.default.removeItem(at: directory(for: session))
+    }
+
+    /// `environment` with `dir` first on `PATH`, once. With no `PATH` of its own the tab
+    /// would inherit the app's, so that is what the shim directory goes in front of; setting
+    /// `PATH` to the shim directory alone would leave the tab unable to find anything.
+    static func environment(
+        _ environment: [String: String], prepending dir: URL,
+        inherited: String? = ProcessInfo.processInfo.environment["PATH"]
+    ) -> [String: String] {
+        let current = environment["PATH"] ?? inherited ?? ""
+        let entries = current.split(separator: ":", omittingEmptySubsequences: false).map(String.init)
+        guard entries.first != dir.path else { return environment }
+        var result = environment
+        result["PATH"] = current.isEmpty
+            ? dir.path : ([dir.path] + entries.filter { $0 != dir.path }).joined(separator: ":")
+        return result
+    }
+}
+
+/// Calls `onChange` when anything under a project's `.flightdeck/` changes, so its sessions'
+/// shim directories can be rebuilt (spec §8: "rebuilt when `delegate.toml` changes").
+///
+/// **It watches the project root, not `.flightdeck/`.** FSEvents reports nothing for a watched
+/// path that does not exist when the stream starts — measured with a probe stream on a temp
+/// directory, not assumed — and most projects have no `.flightdeck/` until `recipe add` makes
+/// one. Every other event under the root is dropped by a string prefix check, which costs
+/// far less than the stat-polling alternative.
+@MainActor
+final class RouteShimWatcher {
+    /// `nonisolated(unsafe)` so `deinit`, which is not main-actor isolated, can tear the
+    /// stream down; FSEvents' stop/invalidate/release are safe from any thread.
+    nonisolated(unsafe) private var stream: FSEventStreamRef?
+
+    /// Owned by the stream through the context's retain/release, so a callback already queued
+    /// on main when `stop()` runs finds a live sink with a nil watcher, never a freed pointer.
+    private final class Sink {
+        weak var watcher: RouteShimWatcher?
+    }
+
+    private let projectRoot: URL
+    private let onChange: () -> Void
+
+    /// Nil when FSEvents refuses the stream, in which case shims are only rebuilt at launch.
+    init?(projectRoot: URL, latency: TimeInterval = 0.3, onChange: @escaping () -> Void) {
+        // FSEvents reports real paths (`/private/var/…` for `/var/…`), so the prefix check
+        // must compare against the real root or it never matches. `realpath(3)`, not
+        // `resolvingSymlinksInPath`: that one deliberately strips `/private` again, and the
+        // first version of this watcher never fired for a project under the temp directory.
+        self.projectRoot = realpath(projectRoot.path, nil).map { pointer in
+            defer { free(pointer) }
+            return URL(fileURLWithPath: String(cString: pointer), isDirectory: true)
+        } ?? projectRoot
+        self.onChange = onChange
+        let sink = Sink()
+        sink.watcher = self
+        var context = FSEventStreamContext(
+            version: 0, info: Unmanaged.passUnretained(sink).toOpaque(),
+            retain: { info in
+                guard let info else { return nil }
+                _ = Unmanaged<Sink>.fromOpaque(info).retain()
+                return info
+            },
+            release: { info in
+                guard let info else { return }
+                Unmanaged<Sink>.fromOpaque(info).release()
+            },
+            copyDescription: nil)
+        let callback: FSEventStreamCallback = { _, info, count, paths, _, _ in
+            guard let info else { return }
+            let sink = Unmanaged<Sink>.fromOpaque(info).takeUnretainedValue()
+            guard let changed = unsafeBitCast(paths, to: NSArray.self) as? [String] else { return }
+            MainActor.assumeIsolated { sink.watcher?.handle(changed.prefix(count)) }
+        }
+        guard let stream = FSEventStreamCreate(
+            nil, callback, &context, [self.projectRoot.path] as CFArray,
+            FSEventStreamEventId(kFSEventStreamEventIdSinceNow), latency,
+            FSEventStreamCreateFlags(
+                kFSEventStreamCreateFlagUseCFTypes | kFSEventStreamCreateFlagFileEvents
+                    | kFSEventStreamCreateFlagNoDefer))
+        else { return nil }
+        self.stream = stream
+        FSEventStreamSetDispatchQueue(stream, .main)
+        guard FSEventStreamStart(stream) else {
+            stop()
+            return nil
+        }
+    }
+
+    deinit {
+        stop()
+    }
+
+    /// Idempotent. Without it a watcher dropped with its project would keep a stream, and a
+    /// main-queue callback, alive for the life of the app.
+    nonisolated func stop() {
+        guard let stream else { return }
+        FSEventStreamStop(stream)
+        FSEventStreamInvalidate(stream)
+        FSEventStreamRelease(stream)
+        self.stream = nil
+    }
+
+    private func handle(_ paths: ArraySlice<String>) {
+        if paths.contains(where: { Self.isConfigChange($0, projectRoot: projectRoot) }) { onChange() }
+    }
+
+    /// `.flightdeck` itself (created or removed) or anything inside it — but not a nested
+    /// project's `.flightdeck`, which configures that project, not this one.
+    nonisolated static func isConfigChange(_ path: String, projectRoot: URL) -> Bool {
+        let dir = projectRoot.appendingPathComponent(".flightdeck").path
+        return path == dir || path.hasPrefix(dir + "/")
+    }
+}
