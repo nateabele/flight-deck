@@ -1,4 +1,5 @@
 import Foundation
+import IntakeKit
 
 /// Read-only `am`/`br` wrappers for Observe. Mirrors `FlywheelCoordinator`'s runner+path
 /// injection and minimal-decode approach, with one rule reversed: a read that fails or
@@ -79,13 +80,16 @@ struct FlywheelReadCommands {
         }
     }
 
-    /// `br dep list <issue> --json` needs a real issue id (exit 3 without one) and has no
-    /// bare/whole-project form — Task 1 confirmed the argv and error envelope but never
-    /// obtained a positive-path row, and `br schema commands` itself has no `item_schema`
-    /// for this command. CC-1 in Task 1's report: ship as nil-stub, not a guessed edge shape.
-    // TODO(observe): unconfirmed shape — see notes
+    /// `br graph --all --json --db <db>` — the same command release reads live
+    /// (`IntakeKit/GraphReader`), decoded by the same `GraphSnapshot.decodeEdges`. `from` is the
+    /// dependent, `to` its dependency. Sorted so a repoll with the same graph is equal.
     func depEdges(project: String) async -> [RawDepEdge]? {
-        nil
+        await read(brPath, ["graph", "--all", "--json", "--db", beadsDBPath(project: project)], project: project) { data in
+            (try? GraphSnapshot.decodeEdges(graph: data)).map { edges in
+                edges.map { RawDepEdge(from: $0.dependent, to: $0.dependency) }
+                    .sorted { ($0.from, $0.to) < ($1.from, $1.to) }
+            }
+        }
     }
 
     /// `am inbox-events --agent <name> --project <project> --after <cursor> --direct --json`
