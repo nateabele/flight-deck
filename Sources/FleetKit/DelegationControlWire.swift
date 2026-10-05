@@ -8,29 +8,53 @@ import Foundation
 //     delegate.run / .exec / .up  {"run":{WireDelegateRun}}
 //     delegate.down / .restart / .sync  {service, cwd}
 //     delegate.ps                 {}
-//     delegate.wait               {run, timeout?}   seconds; absent = the CLI's default
-//     delegate.logs               {run, follow}
+//     delegate.wait               {run, timeout?, from?}   seconds; absent = the CLI's default
+//     delegate.logs               {run, follow, from?}     from: output byte offset to resume at
 //     delegate.stop / .diff / .apply  {run}
 //     recipe.ls / recipe.check    {cwd}
 //     recipe.add                  {cwd, name, recipe:{WireRecipe}}
+//     host.disk                   {host}           `host ls --disk`
+//     host.prune                  {host, repo?}    `host prune`; no repo = the whole workspace
 //   (`host.list` / `host.info` already exist, in `FleetRequest` itself.)
 //
 //   Replies, all `ServerFrame`s correlated by `cid`, all undotted tags:
-//     delegateStarted  {run:{runID, host}}        run/exec/up/restart accepted; for --detach,
-//                                                 the last frame before the CLI exits 0
+//     delegateStarted  {run:{runID, host, ports:[{local, remote}]}}
+//                                                 run/exec/up/restart accepted; `ports` are the
+//                                                 forwards as bound, so `auto:R` prints its port
 //     delegateNotice   {message}                  "waiting for mini's screen — held by …"
-//     delegateOutput   {stream, data(base64)}     stream "stdout" | "stderr" | "pty"
+//     delegateOutput   {stream, offset, data(base64)}  stream "stdout" | "stderr" | "pty";
+//                                                 offset: the run's output byte offset of `data`
 //     delegateExit     {status}                   the CLI's exit status, already mapped
-//                                                 (code, 128+signal); ends the stream
+//                                                 (code, 128+signal)
 //     delegateRuns     {runs:[WireDelegateRunRow]}   ps
-//     delegatePatch    {patch:{runID, patch}}        diff
+//     delegatePatch    {patch:{runID, patch?, patchPath?}}  diff
 //     delegateApplied  {applied:{runID, conflicts}}  apply
 //     recipes          {recipes:{WireRecipeBook}}    recipe.ls
 //     recipeCheck      {problems:[string]}           recipe.check; [] is valid
-//   `ack` answers stop, down, sync and recipe.add. A delegation failure is
+//     hostDisk         {usage:[{repoRoot, worktreeName, bytes}]}  host.disk
+//   `ack` answers stop, down, sync, recipe.add and host.prune. A delegation failure is
 //   `err(code, message)`, the message being the §5 one-line hint the CLI prints after
 //   `flightdeck: ` and exits 125 on; a `wait` that outlives its timeout is
 //   `err(code: "wait_timeout")`, which the CLI exits 124 on.
+//
+// Streams. `run`, `exec`, `up`, `restart`, `wait` and `logs` may draw many frames on one `cid`;
+// the stream ends at its terminal frame, after which nothing more is sent on that `cid`:
+//   - `delegateExit`, the run ended;
+//   - `err`, it failed (before or during the run);
+//   - `delegateStarted`, but only when `--detach` or the recipe's `long` is set: the CLI
+//     prints the run id and exits 0, leaving the run going. Otherwise `delegateStarted` is
+//     just the first frame of the stream.
+// Every other request is answered by exactly one frame.
+//
+// `delegateOutput.offset` lets a CLI that lost the app (a relaunch, a swap) resume with
+// `delegate.logs {from}` or `delegate.wait {from}` without repeating or dropping a byte.
+//
+// `--pty` is output-only in v1: the run writes to a terminal on the host, but the CLI forwards
+// no stdin and never resizes it after start; `columns`/`rows` size it once.
+//
+// A patch over 1 MiB comes back as `patchPath`, a file the app wrote under
+// `Application Support/Flight Deck/delegation/<run>.patch`, instead of inline `patch`: a
+// multi-megabyte JSON string on the control socket stalls every other reply behind it.
 //
 // Every one of these frames is sent only on the connection that asked, and only the local CLI
 // asks: the phone app never sends a `delegate.*` request, so an installed phone that cannot
@@ -62,21 +86,27 @@ public enum DelegateRequest: Codable, Equatable, Sendable {
     /// This session's runs and services (every one, for a human shell).
     case ps
     /// Block until `run` ends; `timeout` in seconds, nil for the CLI's default (9 min).
-    case wait(run: String, timeout: Int?)
-    case logs(run: String, follow: Bool)
+    /// `from` resumes the output at that byte offset; nil replays it from the start.
+    case wait(run: String, timeout: Int?, from: Int64?)
+    case logs(run: String, follow: Bool, from: Int64?)
     case stop(run: String)
     case diff(run: String)
     case apply(run: String)
     case recipeList(cwd: String)
     case recipeAdd(cwd: String, name: String, recipe: WireRecipe)
     case recipeCheck(cwd: String)
+    /// `flightdeck host ls --disk`: disk use of this Mac's workspace on `host`.
+    case hostDisk(host: String)
+    /// `flightdeck host prune`: delete this Mac's workspace on `host`, or only `repo`'s.
+    case hostPrune(host: String, repo: String?)
 
     /// True for the requests that change nothing anywhere: listing, replaying and reviewing.
     /// `ControlScope` lets these through at every level; the rest start, stop, or apply work.
     public var isReadOnly: Bool {
         switch self {
-        case .ps, .logs, .diff, .recipeList: return true
-        case .run, .exec, .up, .down, .restart, .sync, .wait, .stop, .apply, .recipeAdd, .recipeCheck:
+        case .ps, .logs, .diff, .recipeList, .hostDisk: return true
+        case .run, .exec, .up, .down, .restart, .sync, .wait, .stop, .apply, .recipeAdd, .recipeCheck,
+             .hostPrune:
             return false
         }
     }
@@ -97,9 +127,11 @@ public enum DelegateRequest: Codable, Equatable, Sendable {
         case recipeList = "recipe.ls"
         case recipeAdd = "recipe.add"
         case recipeCheck = "recipe.check"
+        case hostDisk = "host.disk"
+        case hostPrune = "host.prune"
     }
 
-    enum CodingKeys: String, CodingKey { case op, run, service, cwd, timeout, follow, name, recipe }
+    enum CodingKeys: String, CodingKey { case op, run, service, cwd, timeout, follow, name, recipe, from, host, repo }
 
     public func encode(to encoder: any Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
@@ -127,14 +159,16 @@ public enum DelegateRequest: Codable, Equatable, Sendable {
             try c.encode(cwd, forKey: .cwd)
         case .ps:
             try c.encode(Op.ps, forKey: .op)
-        case .wait(let run, let timeout):
+        case .wait(let run, let timeout, let from):
             try c.encode(Op.wait, forKey: .op)
             try c.encode(run, forKey: .run)
             try c.encodeIfPresent(timeout, forKey: .timeout)
-        case .logs(let run, let follow):
+            try c.encodeIfPresent(from, forKey: .from)
+        case .logs(let run, let follow, let from):
             try c.encode(Op.logs, forKey: .op)
             try c.encode(run, forKey: .run)
             try c.encode(follow, forKey: .follow)
+            try c.encodeIfPresent(from, forKey: .from)
         case .stop(let run):
             try c.encode(Op.stop, forKey: .op)
             try c.encode(run, forKey: .run)
@@ -155,6 +189,13 @@ public enum DelegateRequest: Codable, Equatable, Sendable {
         case .recipeCheck(let cwd):
             try c.encode(Op.recipeCheck, forKey: .op)
             try c.encode(cwd, forKey: .cwd)
+        case .hostDisk(let host):
+            try c.encode(Op.hostDisk, forKey: .op)
+            try c.encode(host, forKey: .host)
+        case .hostPrune(let host, let repo):
+            try c.encode(Op.hostPrune, forKey: .op)
+            try c.encode(host, forKey: .host)
+            try c.encodeIfPresent(repo, forKey: .repo)
         }
     }
 
@@ -177,10 +218,12 @@ public enum DelegateRequest: Codable, Equatable, Sendable {
         case .ps: self = .ps
         case .wait:
             self = .wait(run: try c.decode(String.self, forKey: .run),
-                         timeout: try c.decodeIfPresent(Int.self, forKey: .timeout))
+                         timeout: try c.decodeIfPresent(Int.self, forKey: .timeout),
+                         from: try c.decodeIfPresent(Int64.self, forKey: .from))
         case .logs:
             self = .logs(run: try c.decode(String.self, forKey: .run),
-                         follow: try c.decodeIfPresent(Bool.self, forKey: .follow) ?? false)
+                         follow: try c.decodeIfPresent(Bool.self, forKey: .follow) ?? false,
+                         from: try c.decodeIfPresent(Int64.self, forKey: .from))
         case .stop: self = .stop(run: try c.decode(String.self, forKey: .run))
         case .diff: self = .diff(run: try c.decode(String.self, forKey: .run))
         case .apply: self = .apply(run: try c.decode(String.self, forKey: .run))
@@ -190,6 +233,10 @@ public enum DelegateRequest: Codable, Equatable, Sendable {
                               name: try c.decode(String.self, forKey: .name),
                               recipe: try c.decode(WireRecipe.self, forKey: .recipe))
         case .recipeCheck: self = .recipeCheck(cwd: try c.decode(String.self, forKey: .cwd))
+        case .hostDisk: self = .hostDisk(host: try c.decode(String.self, forKey: .host))
+        case .hostPrune:
+            self = .hostPrune(host: try c.decode(String.self, forKey: .host),
+                              repo: try c.decodeIfPresent(String.self, forKey: .repo))
         }
     }
 }
@@ -269,10 +316,35 @@ public struct WireDelegateStarted: Codable, Equatable, Sendable {
     public let runID: String
     /// The host's registry name, as resolved.
     public let host: String
+    /// The forwards as bound: `up` with `auto:R` must print the local port it chose, or the
+    /// agent has no way to reach the service.
+    public let ports: [WirePortBinding]
 
-    public init(runID: String, host: String) {
+    public init(runID: String, host: String, ports: [WirePortBinding] = []) {
         self.runID = runID
         self.host = host
+        self.ports = ports
+    }
+
+    enum CodingKeys: String, CodingKey { case runID, host, ports }
+
+    /// Lenient on `ports`, which C0's shape lacked.
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(runID: try c.decode(String.self, forKey: .runID),
+                  host: try c.decode(String.self, forKey: .host),
+                  ports: try c.decodeIfPresent([WirePortBinding].self, forKey: .ports) ?? [])
+    }
+}
+
+/// One bound forward: local port on the Mac's 127.0.0.1 to `remote` on the host.
+public struct WirePortBinding: Codable, Equatable, Sendable {
+    public let local: UInt16
+    public let remote: UInt16
+
+    public init(local: UInt16, remote: UInt16) {
+        self.local = local
+        self.remote = remote
     }
 }
 
@@ -307,15 +379,33 @@ public struct WireDelegateRunRow: Codable, Equatable, Sendable {
     }
 }
 
-/// A run's changed-file patch, for `flightdeck diff`. `patch` is `git diff` text; empty when
-/// the run changed nothing.
+/// A run's changed-file patch, for `flightdeck diff`. Exactly one of `patch` (inline `git diff`
+/// text, empty when the run changed nothing) and `patchPath` (a file the app wrote, for a patch
+/// over 1 MiB) is set; both are optional so either can be omitted on the wire.
 public struct WireDelegatePatch: Codable, Equatable, Sendable {
     public let runID: String
-    public let patch: String
+    public let patch: String?
+    /// `Application Support/Flight Deck/delegation/<run>.patch`, absolute.
+    public let patchPath: String?
 
-    public init(runID: String, patch: String) {
+    public init(runID: String, patch: String? = nil, patchPath: String? = nil) {
         self.runID = runID
         self.patch = patch
+        self.patchPath = patchPath
+    }
+}
+
+/// One checkout's disk use on a host, for `flightdeck host ls --disk`. A copy of HostKit's
+/// `WorkspaceUsage`, for the reason the file header gives.
+public struct WireWorkspaceUsage: Codable, Equatable, Sendable {
+    public let repoRoot: String
+    public let worktreeName: String
+    public let bytes: Int64
+
+    public init(repoRoot: String, worktreeName: String, bytes: Int64) {
+        self.repoRoot = repoRoot
+        self.worktreeName = worktreeName
+        self.bytes = bytes
     }
 }
 

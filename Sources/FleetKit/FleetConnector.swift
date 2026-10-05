@@ -765,7 +765,7 @@ public final class FleetConnector: @unchecked Sendable {
             // point either.
             return
         case .delegateStarted, .delegateNotice, .delegateOutput, .delegateExit, .delegateRuns,
-             .delegatePatch, .delegateApplied, .recipes, .recipeCheck:
+             .delegatePatch, .delegateApplied, .recipes, .recipeCheck, .hostDisk:
             // Delegated execution's replies, which answer only `delegate.*` and `recipe.*`
             // requests the phone never sends, and go only to the connection that asked. A
             // stray is dropped like the host replies above: never folded, never moving the

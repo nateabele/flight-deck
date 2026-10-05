@@ -127,7 +127,7 @@ enum ControlScope {
         case .openConversation:
             return level == .full || caller == .human
         case .delegate(let delegate):
-            // `ps`, `logs`, `diff` and `recipe ls` only read. Every other delegation request
+            // `ps`, `logs`, `diff`, `recipe ls` and `host ls --disk` only read. Every other delegation request
             // starts, stops or applies work, so it is a write — but one that belongs to the
             // asking session, the way `prompt` does, not a fleet-wide one like
             // `openConversation`: a run is owned by the tab whose token started it, and the
@@ -138,7 +138,12 @@ enum ControlScope {
             // Not checked here: whether a run named by id (`stop`, `wait`, `apply`) is the
             // caller's own. Only `DelegationService` knows a run's owner, so under
             // `.ownSession` it must refuse another tab's run itself.
+            //
+            // `host prune` is the exception: it deletes this Mac's whole workspace on a host,
+            // every tab's checkouts with it, so no one session owns it. It follows the
+            // fleet-wide rule, as `openConversation` does.
             if delegate.isReadOnly || level == .full || caller == .human { return true }
+            if case .hostPrune = delegate { return false }
             guard case .session = caller else { return false }
             return level == .ownSession
         }
