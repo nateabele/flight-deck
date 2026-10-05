@@ -68,7 +68,7 @@ final class IntakeSteerCommandServiceTests: XCTestCase {
         guard case .ack = pause else { return XCTFail("a running shaping intake must accept pause, got \(pause)") }
 
         let unknown = try await send(.intakeTape(id: UUID(), token: UUID(), command: "pause", stage: nil))
-        guard case .err(_, let code) = unknown else { return XCTFail("expected err, got \(unknown)") }
+        guard case .err(_, let code, _) = unknown else { return XCTFail("expected err, got \(unknown)") }
         XCTAssertEqual(code, "unknown_intake")
 
         let note = try await send(.intakeNote(id: i.id, token: UUID(), noteID: UUID(), kind: "comment",
@@ -76,11 +76,11 @@ final class IntakeSteerCommandServiceTests: XCTestCase {
         guard case .ack = note else { return XCTFail("a plan-wide note must be accepted, got \(note)") }
 
         let badMode = try await send(.intakeDefaultPlay(id: i.id, token: UUID(), mode: "bogus"))
-        guard case .err(_, let modeCode) = badMode else { return XCTFail("expected err, got \(badMode)") }
+        guard case .err(_, let modeCode, _) = badMode else { return XCTFail("expected err, got \(badMode)") }
         XCTAssertEqual(modeCode, "unknown_mode")
 
         let gone = try await send(.intakeRemoveNote(id: i.id, token: UUID(), noteID: UUID()))
-        guard case .err(_, let removeCode) = gone else { return XCTFail("expected err, got \(gone)") }
+        guard case .err(_, let removeCode, _) = gone else { return XCTFail("expected err, got \(gone)") }
         XCTAssertEqual(removeCode, "note_consumed")
     }
 }

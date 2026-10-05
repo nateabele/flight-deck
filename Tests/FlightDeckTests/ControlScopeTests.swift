@@ -21,7 +21,7 @@ final class ControlScopeTests: XCTestCase {
     }
     private let reads: [FleetRequest] = [.timeline(session: UUID(), anchor: .latest, limit: 5),
         .newSessionOptions(project: UUID()), .recentlyClosed, .macEndpoints, .conversations,
-        .search(query: "q", limit: 5)]
+        .search(query: "q", limit: 5), .hostList, .hostInfo(name: "mini")]
     private let open = FleetRequest.openConversation(conversationID: "c", projectPath: "/p")
 
     func testFullPermitsEverythingFromAnyCaller() {

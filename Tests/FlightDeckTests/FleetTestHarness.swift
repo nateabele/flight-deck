@@ -24,8 +24,9 @@ final class FleetTestHarness {
 
     /// `store` is overridable so a test that needs a real provider (or a stubbed `display`,
     /// per `DisplayDrawableGuardTests`) can supply its own rather than being stuck with the
-    /// providerless default every other caller here relies on.
-    init(store: SessionStore? = nil) {
+    /// providerless default every other caller here relies on. `hosts` is for the
+    /// `flightdeck host …` tests; every other caller leaves the service without one.
+    init(store: SessionStore? = nil, hosts: HostService? = nil) {
         self.store = store ?? SessionStore(provider: nil, persistence: nil)
         key = FleetDeviceKey.mint()
         preferences = PreferencesStore(persistence: MemoryPersistence())
@@ -35,7 +36,8 @@ final class FleetTestHarness {
                 pairedAt: Date(), lastSeenAt: nil, armedUntil: nil
             )
         )
-        service = FleetService(store: self.store, preferences: preferences, armer: PairingArmer())
+        service = FleetService(store: self.store, preferences: preferences, armer: PairingArmer(),
+                               hosts: hosts)
         // Silenced by default, because the production sink appends to the developer's own
         // `~/Library/Logs/flight-deck-prompt.log` and every status change in every fleet test
         // would land in it. A test that wants the records replaces this closure — see

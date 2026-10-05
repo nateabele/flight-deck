@@ -122,7 +122,7 @@ final class AnswerLoopbackTests: XCTestCase {
         var frame: ServerFrame?
         log.onFrame = { received in
             switch received {
-            case .ack(cid), .err(cid, _):
+            case .ack(cid), .err(cid, _, _):
                 frame = received
                 landed.fulfill()
             default:
@@ -208,7 +208,7 @@ final class AnswerLoopbackTests: XCTestCase {
         let (refused, refusal) = reply(on: refusedCID, in: log)
         await fulfillment(of: [refused], timeout: 10)
 
-        guard case .err(refusedCID, let code) = try XCTUnwrap(refusal()) else {
+        guard case .err(refusedCID, let code, _) = try XCTUnwrap(refusal()) else {
             return XCTFail("a stale answer must be refused on its own cid, not acked")
         }
         // Not merely "an error": `unhandled` is what an unwired arm answers, and either that

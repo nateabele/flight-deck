@@ -71,7 +71,7 @@ final class FleetLocalControlTests: XCTestCase {
         let refused = expectation(description: "refused")
         var cid = 0
         let client = await attach(caller: token) { frame in
-            if case .err(let got, "out_of_scope") = frame, got == cid { refused.fulfill() }
+            if case .err(let got, "out_of_scope", _) = frame, got == cid { refused.fulfill() }
         }
         cid = client.send(FleetRequest.openConversation(conversationID: UUID().uuidString, projectPath: "/w"))
         await fulfillment(of: [refused], timeout: 5)

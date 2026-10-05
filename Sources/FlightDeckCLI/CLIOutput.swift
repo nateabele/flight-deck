@@ -38,6 +38,54 @@ enum CLIOutput {
                 ])
             }
         }
+        return columns(rows)
+    }
+
+    /// `host ls` for a human. A refused host's reason rides in its STATUS cell, because it is
+    /// the one thing the user has to act on ("Update Flight Deck on mini") and a separate
+    /// column would sit empty for every other host.
+    static func table(_ hosts: [WireHost], now: Date) -> String {
+        var rows = [["NAME", "PLATFORM", "STATUS", "LAST SEEN"]]
+        for host in hosts {
+            rows.append([
+                host.name, host.platform ?? "-",
+                host.detail.map { "\(host.status): \($0)" } ?? host.status,
+                // "now" for an online host: the registry stamps `lastSeenAt` when the link
+                // comes up, not on every pong, so its age would claim an idle-but-live host
+                // went quiet hours ago.
+                host.status == "online" ? "now" : host.lastSeenAt.map { relative($0, now: now) } ?? "never",
+            ])
+        }
+        return columns(rows)
+    }
+
+    /// `host info` for a human: one `key: value` line per field, the disk figure in the units
+    /// Finder would show rather than a twelve-digit byte count.
+    static func hostInfo(_ info: WireHostInfo) -> String {
+        let disk = ByteCountFormatter()
+        disk.countStyle = .file
+        return [
+            ("name", info.name), ("host", info.hostName), ("platform", info.platform),
+            ("os", info.osVersion), ("arch", info.arch), ("hostd", info.hostdVersion),
+            ("xcode", info.xcode.isEmpty ? "-" : info.xcode.joined(separator: ", ")),
+            ("docker", info.docker ?? "-"),
+            ("disk free", disk.string(fromByteCount: info.diskFreeBytes)),
+        ]
+        .map { "\($0):".padding(toLength: 11, withPad: " ", startingAt: 0) + $1 }
+        .joined(separator: "\n")
+    }
+
+    /// "4m ago". POSIX locale so the output a script or test reads does not change with the
+    /// user's language settings.
+    static func relative(_ date: Date, now: Date) -> String {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .abbreviated
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        return formatter.localizedString(for: date, relativeTo: now)
+    }
+
+    /// Left-aligned columns two spaces apart, each as wide as its widest cell.
+    private static func columns(_ rows: [[String]]) -> String {
         let widths = rows[0].indices.map { column in rows.map { $0[column].count }.max() ?? 0 }
         return rows.map { cells in
             cells.enumerated().map { column, cell in

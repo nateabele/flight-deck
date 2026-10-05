@@ -303,3 +303,61 @@ public struct WireSession: Codable, Equatable, Sendable, Identifiable {
         answerless = try c.decodeIfPresent(Bool.self, forKey: .answerless) ?? false
     }
 }
+
+/// One paired host as `flightdeck host ls` prints it: what the Mac's registry holds, plus the
+/// live state of its link.
+public struct WireHost: Codable, Equatable, Sendable {
+    public let name: String
+    /// "macOS" | "Linux", from the host's last `host.info`; nil until one has answered.
+    public let platform: String?
+    /// "online" | "offline" | "connecting" | "refused". A `String`, not an enum, for
+    /// `WireSession.agent`'s reason: a client-side enum would throw on a state added after the
+    /// client shipped.
+    public let status: String
+    /// Why a `refused` host turned this Mac away ("Update Flight Deck on mini"); nil otherwise.
+    public let detail: String?
+    /// A bare `Date`, under the same default-strategy caveat `WireConversationCatalogue`'s
+    /// `sessionActivity` documents.
+    public let lastSeenAt: Date?
+
+    public init(name: String, platform: String?, status: String, detail: String?, lastSeenAt: Date?) {
+        self.name = name
+        self.platform = platform
+        self.status = status
+        self.detail = detail
+        self.lastSeenAt = lastSeenAt
+    }
+}
+
+/// A host's toolchain, relayed from its `host.info` reply — `flightdeck host info`.
+///
+/// A FleetKit copy of HostKit's `HostInfo`, plus the registry `name`, rather than that type
+/// itself: FleetKit compiles for the phone and links nothing but Foundation, Network and
+/// Security, and the host protocol must stay free to change without moving this wire.
+public struct WireHostInfo: Codable, Equatable, Sendable {
+    /// The registry's name, which is what the CLI was given. `hostName` is what the host calls
+    /// itself, and the two differ once a duplicate has been renamed "mini-2".
+    public let name: String
+    public let hostName: String
+    public let platform: String
+    public let osVersion: String
+    public let arch: String
+    public let hostdVersion: String
+    /// Empty on Linux rather than absent, for the reason `HostInfo.xcode` gives.
+    public let xcode: [String]
+    public let docker: String?
+    public let diskFreeBytes: Int64
+
+    public init(name: String, hostName: String, platform: String, osVersion: String, arch: String,
+                hostdVersion: String, xcode: [String], docker: String?, diskFreeBytes: Int64) {
+        self.name = name
+        self.hostName = hostName
+        self.platform = platform
+        self.osVersion = osVersion
+        self.arch = arch
+        self.hostdVersion = hostdVersion
+        self.xcode = xcode
+        self.docker = docker
+        self.diskFreeBytes = diskFreeBytes
+    }
+}

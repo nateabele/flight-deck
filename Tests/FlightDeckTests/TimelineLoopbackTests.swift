@@ -240,7 +240,7 @@ final class TimelineLoopbackTests: XCTestCase {
         let answered = expectation(description: "err")
         client = FleetClient(key: harness.key)
         client.onFrame = { frame in
-            if case .err(let cid, let received) = frame {
+            if case .err(let cid, let received, _) = frame {
                 refusedOn = cid
                 code = received
                 answered.fulfill()

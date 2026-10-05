@@ -647,7 +647,11 @@ public enum ServerFrame: Codable, Equatable, Sendable {
     case snapshot(seq: Int, fleet: FleetSnapshot, reason: SnapshotReason)
     case event(seq: Int, FleetEvent)
     case ack(cid: Int)
-    case err(cid: Int, code: String)
+    /// `message` is for a human and optional: `code` stays the machine-readable contract every
+    /// caller matches on. Added for `host.info`, whose refusals carry facts the code cannot —
+    /// which hosts are paired, when one was last seen — and that the CLI has no other way to
+    /// learn. Omitted from the wire when nil, so every existing `err` keeps its bytes.
+    case err(cid: Int, code: String, message: String? = nil)
     /// The reply to `ClientFrame.req`. Correlated by `cid` and deliberately **not**
     /// sequenced: a history fetch is not fleet state, and giving it a `seq` would let a
     /// client paging back through an hour of transcript move the resume point it hands the
@@ -690,16 +694,21 @@ public enum ServerFrame: Codable, Equatable, Sendable {
     case intakeDetail(cid: Int, WireIntakeDetail?)
     /// The reply to `FleetRequest.intakePlan`. Unsequenced, like `page`.
     case intakePlan(cid: Int, WireIntakePlan)
+    /// The reply to `FleetRequest.hostList`. Unsequenced, like `page`: link state is not
+    /// fleet state. Never sent to the phone, which never asks.
+    case hostList(cid: Int, [WireHost])
+    /// The reply to `FleetRequest.hostInfo`. Unsequenced, like `page`.
+    case hostInfo(cid: Int, WireHostInfo)
 
     enum CodingKeys: String, CodingKey {
-        case t, seq, fleet, reason, cid, code, page, options, endpoints
-        case conversations, hits, session, closed, detail, plan
+        case t, seq, fleet, reason, cid, code, message, page, options, endpoints
+        case conversations, hits, session, closed, detail, plan, hosts, info
     }
 
     /// Undotted, deliberately, and the newer five along with it — see the decoder below.
     private enum Tag: String, Codable {
         case snapshot, ack, err, page, options, endpoints, conversations, hits, session
-        case ask, closed, intakeDetail, intakePlan
+        case ask, closed, intakeDetail, intakePlan, hosts, hostInfo
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -718,10 +727,11 @@ public enum ServerFrame: Codable, Equatable, Sendable {
         case .ack(let cid):
             try c.encode(Tag.ack, forKey: .t)
             try c.encode(cid, forKey: .cid)
-        case .err(let cid, let code):
+        case .err(let cid, let code, let message):
             try c.encode(Tag.err, forKey: .t)
             try c.encode(cid, forKey: .cid)
             try c.encode(code, forKey: .code)
+            try c.encodeIfPresent(message, forKey: .message)
         case .page(let cid, let page):
             try c.encode(Tag.page, forKey: .t)
             try c.encode(cid, forKey: .cid)
@@ -765,6 +775,14 @@ public enum ServerFrame: Codable, Equatable, Sendable {
             try c.encode(Tag.intakePlan, forKey: .t)
             try c.encode(cid, forKey: .cid)
             try c.encode(plan, forKey: .plan)
+        case .hostList(let cid, let hosts):
+            try c.encode(Tag.hosts, forKey: .t)
+            try c.encode(cid, forKey: .cid)
+            try c.encode(hosts, forKey: .hosts)
+        case .hostInfo(let cid, let info):
+            try c.encode(Tag.hostInfo, forKey: .t)
+            try c.encode(cid, forKey: .cid)
+            try c.encode(info, forKey: .info)
         }
     }
 
@@ -772,7 +790,7 @@ public enum ServerFrame: Codable, Equatable, Sendable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         // Try the frame's own tags first; anything else is an event's tag, which is why
         // the two namespaces must never collide. `FleetEventTag`'s values are all dotted
-        // and these eleven are not, which keeps that a property rather than a promise.
+        // and none of these are, which keeps that a property rather than a promise.
         if let tag = try? c.decode(Tag.self, forKey: .t) {
             switch tag {
             case .snapshot:
@@ -782,8 +800,10 @@ public enum ServerFrame: Codable, Equatable, Sendable {
             case .ack:
                 self = .ack(cid: try c.decode(Int.self, forKey: .cid))
             case .err:
+                // `decodeIfPresent`: every Mac before `host.info` sends no message.
                 self = .err(cid: try c.decode(Int.self, forKey: .cid),
-                            code: try c.decode(String.self, forKey: .code))
+                            code: try c.decode(String.self, forKey: .code),
+                            message: try c.decodeIfPresent(String.self, forKey: .message))
             case .page:
                 self = .page(cid: try c.decode(Int.self, forKey: .cid),
                              try c.decode(TimelinePage.self, forKey: .page))
@@ -828,6 +848,12 @@ public enum ServerFrame: Codable, Equatable, Sendable {
             case .intakePlan:
                 self = .intakePlan(cid: try c.decode(Int.self, forKey: .cid),
                                    try c.decode(WireIntakePlan.self, forKey: .plan))
+            case .hosts:
+                self = .hostList(cid: try c.decode(Int.self, forKey: .cid),
+                                 try c.decode([WireHost].self, forKey: .hosts))
+            case .hostInfo:
+                self = .hostInfo(cid: try c.decode(Int.self, forKey: .cid),
+                                 try c.decode(WireHostInfo.self, forKey: .info))
             }
             return
         }
@@ -843,10 +869,11 @@ public extension ServerFrame {
     var correlationID: Int? {
         switch self {
         case .snapshot, .event: return nil
-        case .ack(let cid), .err(let cid, _), .page(let cid, _), .newSessionOptions(let cid, _),
+        case .ack(let cid), .err(let cid, _, _), .page(let cid, _), .newSessionOptions(let cid, _),
              .macEndpoints(let cid, _), .recentlyClosed(let cid, _), .conversations(let cid, _),
              .searchHits(let cid, _), .session(let cid, _), .phoneRequest(let cid, _),
-             .intakeDetail(let cid, _), .intakePlan(let cid, _):
+             .intakeDetail(let cid, _), .intakePlan(let cid, _), .hostList(let cid, _),
+             .hostInfo(let cid, _):
             return cid
         }
     }

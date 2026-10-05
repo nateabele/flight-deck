@@ -245,6 +245,10 @@ final class CLIRunner {
             request(.newSessionOptions(project: id))
         case .open(let conversation, let path):
             request(.openConversation(conversationID: conversation, projectPath: path))
+        case .hostList:
+            request(.hostList)
+        case .hostInfo(let name):
+            request(.hostInfo(name: name))
         case .raw:
             raw()
         case .intakeRun:
@@ -356,7 +360,7 @@ final class CLIRunner {
         onSnapshot = { _ in if self.session(id) == nil { self.fail("gone") } }
         let cid = transport.send(.prompt(id: id, token: promptToken, text: text))
         replies[cid] = { frame in
-            if case .err(_, let code) = frame { self.fail(code) }
+            if case .err(_, let code, let message) = frame { self.fail(code, message) }
         }
     }
 
@@ -369,7 +373,7 @@ final class CLIRunner {
         let cid = transport.send(.newSessionOptions(project: projectID))
         replies[cid] = { frame in
             guard case .newSessionOptions(_, let menu) = frame else {
-                if case .err(_, let code) = frame { return self.fail(code) }
+                if case .err(_, let code, let message) = frame { return self.fail(code, message) }
                 return self.fail("unexpected_reply")
             }
             guard menu.options.contains(where: { $0.agent == agent && $0.index == account }) else {
@@ -399,7 +403,7 @@ final class CLIRunner {
         }
         let cid = transport.send(.newSession(project: projectID, agent: agent, accountIndex: account))
         replies[cid] = { frame in
-            if case .err(_, let code) = frame { return self.fail(code) }
+            if case .err(_, let code, let message) = frame { return self.fail(code, message) }
             acked = true
             settle()
         }
@@ -414,7 +418,7 @@ final class CLIRunner {
                                            limit: TimelineLimits.maxLimit))
         replies[cid] = { frame in
             guard case .page(_, let page) = frame else {
-                if case .err(_, let code) = frame { return self.fail(code) }
+                if case .err(_, let code, let message) = frame { return self.fail(code, message) }
                 return self.fail("unexpected_reply")
             }
             // The fleet as of the page, not the request: the session may have left `waiting`.
@@ -491,7 +495,7 @@ final class CLIRunner {
     private func send(_ command: FleetCommand) {
         let cid = transport.send(command)
         replies[cid] = { frame in
-            if case .err(_, let code) = frame { return self.fail(code) }
+            if case .err(_, let code, let message) = frame { return self.fail(code, message) }
             self.finish(0)
         }
     }
@@ -501,7 +505,7 @@ final class CLIRunner {
         replies[cid] = { frame in
             // No `default`: a new reply case must be given an output before this compiles.
             switch frame {
-            case .err(_, let code): return self.fail(code)
+            case .err(_, let code, let message): return self.fail(code, message)
             case .page(_, let page): self.out(CLIOutput.json(page))
             case .newSessionOptions(_, let options): self.out(CLIOutput.json(options))
             case .intakeDetail(_, let detail): self.out(CLIOutput.json(detail))
@@ -511,6 +515,10 @@ final class CLIRunner {
             case .conversations(_, let catalogue): self.out(CLIOutput.json(catalogue))
             case .searchHits(_, let hits): self.out(CLIOutput.json(hits))
             case .session(_, let id): self.out(id.uuidString)
+            case .hostList(_, let hosts):
+                self.out(self.wantsJSON ? CLIOutput.json(hosts) : CLIOutput.table(hosts, now: Date()))
+            case .hostInfo(_, let info):
+                self.out(self.wantsJSON ? CLIOutput.json(info) : CLIOutput.hostInfo(info))
             case .ack, .snapshot, .event, .phoneRequest: self.out(CLIOutput.line(frame))
             }
             self.finish(0)
@@ -567,10 +575,15 @@ final class CLIRunner {
 
     /// A machine-readable code, bare, on stderr — the wire's own `err` code or one of the CLI's
     /// (`no_prompt`, `timed_out`, …), so a script can match on it.
-    private func fail(_ code: String) {
+    ///
+    /// An `err` that carries a `message` prints that instead, as `flightdeck: <message>`: the
+    /// Mac only sends one when the code alone would leave the user guessing (`unknown_host`
+    /// without the names that ARE paired). Still exit 1, not `usage`'s 2 — the Mac refused,
+    /// the command line was fine.
+    private func fail(_ code: String, _ message: String? = nil) {
         // A timeout firing after the answer must not print a stray code.
         guard !finished else { return }
-        err(code)
+        err(message.map { "flightdeck: \($0)" } ?? code)
         finish(1)
     }
 

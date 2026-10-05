@@ -146,11 +146,11 @@ final class IntakeRequestPlumbingTests: XCTestCase {
         XCTAssertNil(again, "a matching etag is answered with nil")
 
         let unknown = try await ask(.intakeDetail(id: UUID(), ifNot: nil), harness: harness)
-        guard case .err(_, let code) = unknown else { return XCTFail("expected err, got \(unknown)") }
+        guard case .err(_, let code, _) = unknown else { return XCTFail("expected err, got \(unknown)") }
         XCTAssertEqual(code, "unknown_intake")
 
         let plan = try await ask(.intakePlan(id: UUID(), checkpoint: nil, changes: false), harness: harness)
-        guard case .err(_, let planCode) = plan else { return XCTFail("expected err, got \(plan)") }
+        guard case .err(_, let planCode, _) = plan else { return XCTFail("expected err, got \(plan)") }
         XCTAssertEqual(planCode, "unknown_intake")
     }
 }

@@ -35,6 +35,8 @@ let usageLines = [
     "flightdeck closed",
     "flightdeck intake run ID --root DIR   run an intake's planning rounds (started by Flight Deck)",
     "flightdeck options P",
+    "flightdeck host ls",
+    "flightdeck host info <host>",
     "flightdeck raw '<ClientFrame JSON>'",
     "",
     "Flags go before or after operands. Put -- before text that starts with -:",

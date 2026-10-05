@@ -188,7 +188,7 @@ final class FleetServiceTests: XCTestCase {
         self.client = client
         client.onFrame = { frame in
             if case .snapshot = frame { _ = client.send(.markRead(id: UUID())) }
-            if case .err(_, "unknown_session") = frame { refused.fulfill() }
+            if case .err(_, "unknown_session", _) = frame { refused.fulfill() }
         }
         client.connect(to: .hostPort(host: "127.0.0.1", port: port), lastSeq: 0)
         await fulfillment(of: [refused], timeout: 10)
@@ -227,7 +227,7 @@ final class FleetServiceTests: XCTestCase {
             if case .snapshot = frame {
                 _ = client.send(.newSession(project: project, agent: nil, accountIndex: nil))
             }
-            if case .err(_, "terminal_unavailable") = frame { refused.fulfill() }
+            if case .err(_, "terminal_unavailable", _) = frame { refused.fulfill() }
         }
         client.connect(to: .hostPort(host: "127.0.0.1", port: port), lastSeq: 0)
         await fulfillment(of: [refused], timeout: 10)
@@ -277,7 +277,7 @@ final class FleetServiceTests: XCTestCase {
                 // No project in this store has this id — `store.repos` was never seeded.
                 _ = client.send(.newSession(project: UUID(), agent: nil, accountIndex: nil))
             }
-            if case .err(_, let code) = frame {
+            if case .err(_, let code, _) = frame {
                 XCTAssertEqual(code, "unknown_project")
                 refused.fulfill()
             }
@@ -356,7 +356,7 @@ final class FleetServiceTests: XCTestCase {
             if case .snapshot = frame {
                 _ = client.send(.newSession(project: project, agent: nil, accountIndex: nil))
             }
-            if case .err(_, "terminal_unavailable") = frame {
+            if case .err(_, "terminal_unavailable", _) = frame {
                 XCTFail("a display that can be woken must not be refused")
             }
             if case .ack = frame { acked.fulfill() }
@@ -420,7 +420,7 @@ final class FleetServiceTests: XCTestCase {
             if case .snapshot = frame {
                 _ = client.send(.newSession(project: project, agent: nil, accountIndex: nil))
             }
-            if case .err(_, "terminal_unavailable") = frame {
+            if case .err(_, "terminal_unavailable", _) = frame {
                 XCTFail("a display that can be woken must not be refused")
             }
             if case .ack = frame { acked.fulfill() }
@@ -476,7 +476,7 @@ final class FleetServiceTests: XCTestCase {
             if case .session = frame {
                 XCTFail("a refused launch must never be reported as a session")
             }
-            if case .err(_, "launch_failed") = frame { refused.fulfill() }
+            if case .err(_, "launch_failed", _) = frame { refused.fulfill() }
         }
         client.connect(to: .hostPort(host: "127.0.0.1", port: port), lastSeq: 0)
         await fulfillment(of: [refused], timeout: 10)
@@ -871,7 +871,7 @@ final class FleetServiceTests: XCTestCase {
         client.connect(to: .hostPort(host: "127.0.0.1", port: port), lastSeq: 0)
         await fulfillment(of: [arrived], timeout: 10)
 
-        guard case .err(_, let code) = reply else {
+        guard case .err(_, let code, _) = reply else {
             return XCTFail("a search with no index must be refused, not answered: \(String(describing: reply))")
         }
         XCTAssertEqual(code, "index_unavailable")
@@ -898,7 +898,7 @@ final class FleetServiceTests: XCTestCase {
         client.connect(to: .hostPort(host: "127.0.0.1", port: port), lastSeq: 0)
         await fulfillment(of: [arrived], timeout: 10)
 
-        guard case .err(_, let code) = reply else {
+        guard case .err(_, let code, _) = reply else {
             return XCTFail("a throwing index must be refused, not answered: \(String(describing: reply))")
         }
         XCTAssertEqual(code, "index_unavailable")
@@ -923,7 +923,7 @@ final class FleetServiceTests: XCTestCase {
         client.connect(to: .hostPort(host: "127.0.0.1", port: port), lastSeq: 0)
         await fulfillment(of: [arrived], timeout: 10)
 
-        guard case .err(_, let code) = reply else {
+        guard case .err(_, let code, _) = reply else {
             return XCTFail("a conversations request with no index must be refused, not answered: \(String(describing: reply))")
         }
         XCTAssertEqual(code, "index_unavailable")

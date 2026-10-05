@@ -118,7 +118,7 @@ final class AbortPromptLoopbackTests: XCTestCase {
         var frame: ServerFrame?
         log.onFrame = { received in
             switch received {
-            case .ack(cid), .err(cid, _):
+            case .ack(cid), .err(cid, _, _):
                 frame = received
                 landed.fulfill()
             default:
@@ -144,7 +144,7 @@ final class AbortPromptLoopbackTests: XCTestCase {
         let (landed, frame) = reply(on: cid, in: log)
         await fulfillment(of: [landed], timeout: 10)
 
-        guard case .err(cid, let code) = try XCTUnwrap(frame()) else {
+        guard case .err(cid, let code, _) = try XCTUnwrap(frame()) else {
             return XCTFail("abort must be refused, not carried out, while the preference is off")
         }
         XCTAssertEqual(code, "abort_disabled")
@@ -236,7 +236,7 @@ final class AbortPromptLoopbackTests: XCTestCase {
         let (landed, frame) = reply(on: cid, in: log)
         await fulfillment(of: [landed], timeout: 10)
 
-        guard case .err(cid, let code) = try XCTUnwrap(frame()) else {
+        guard case .err(cid, let code, _) = try XCTUnwrap(frame()) else {
             return XCTFail("an unknown session must be refused by the store, not acked")
         }
         XCTAssertEqual(code, "unknown_session")
@@ -278,7 +278,7 @@ final class AbortPromptLoopbackTests: XCTestCase {
         let (landed, frame) = reply(on: cid, in: log)
         await fulfillment(of: [landed], timeout: 10)
 
-        guard case .err(cid, let code) = try XCTUnwrap(frame()) else {
+        guard case .err(cid, let code, _) = try XCTUnwrap(frame()) else {
             return XCTFail("a nameable dialog must be answered, never Escaped blind")
         }
         XCTAssertEqual(code, "prompt_nameable")

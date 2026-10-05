@@ -45,6 +45,15 @@ final class CLIArgumentsTests: XCTestCase {
     }
     // MARK: Final-review fixes
 
+    func testHostLs() throws { XCTAssertEqual(try parse("host", "ls").command, .hostList) }
+    func testHostInfo() throws { XCTAssertEqual(try parse("host", "info", "mini").command, .hostInfo(name: "mini")) }
+    func testHostInfoRequiresName() {
+        XCTAssertEqual(usageMessage("host", "info"), "host info: missing host")
+        XCTAssertEqual(usageMessage("host"), "host: missing subcommand")
+        XCTAssertEqual(usageMessage("host", "rm", "mini"), #"host: unknown subcommand "rm""#)
+        XCTAssertEqual(usageMessage("host", "ls", "mini"), #"unexpected argument "mini""#)
+    }
+
     private func usageMessage(_ args: String...) -> String? {
         do { _ = try CLIArguments.parse(args); return nil }
         catch { return (error as? CLIUsageError)?.message }

@@ -174,13 +174,16 @@ struct FlightDeckApp: App {
         // the two SwiftUI happens to evaluate first builds the store and the other reuses it.
         let deferredStore = DeferredOnce { Self.makeStore(preferences: preferences) }
         _store = StateObject(wrappedValue: deferredStore())
-        _fleet = StateObject(wrappedValue: Self.makeFleetService(
-            store: deferredStore(), preferences: preferences
-        ))
         // Eager, unlike the store: it touches neither `NSApp` nor the session store, and
         // being built here — not in a `@StateObject` thunk SwiftUI may evaluate whenever —
-        // is what guarantees the links open at launch.
-        _hosts = StateObject(wrappedValue: Self.makeHostService())
+        // is what guarantees the links open at launch. Built before `fleet` so the fleet's
+        // thunk can capture this same instance: a second one would hold its own links, and
+        // `flightdeck host ls` would report a registry Settings never sees.
+        let hosts = Self.makeHostService()
+        _hosts = StateObject(wrappedValue: hosts)
+        _fleet = StateObject(wrappedValue: Self.makeFleetService(
+            store: deferredStore(), preferences: preferences, hosts: hosts
+        ))
     }
 
     /// Builds the host service beside `FleetService` and starts its links. Cannot hold up
@@ -215,8 +218,10 @@ struct FlightDeckApp: App {
     /// reset — see the guard below. `@MainActor` because both `FleetService` and the
     /// `Task` it starts are.
     @MainActor
-    private static func makeFleetService(store: SessionStore, preferences: PreferencesStore) -> FleetService {
-        let service = FleetService(store: store, preferences: preferences, armer: PairingArmer())
+    private static func makeFleetService(store: SessionStore, preferences: PreferencesStore,
+                                         hosts: HostService) -> FleetService {
+        let service = FleetService(store: store, preferences: preferences, armer: PairingArmer(),
+                                   hosts: hosts)
         // The UITest gate is hermetic: a listener advertising this Mac on the real LAN
         // during a GUI test would be a live service, not a test fixture.
         guard !isResettingState else { return service }

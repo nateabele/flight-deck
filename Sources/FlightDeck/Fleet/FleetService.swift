@@ -65,6 +65,11 @@ final class FleetService: ObservableObject {
     /// Observability only — it reads the store and the frames already sent, and changes
     /// nothing. See `PromptLifecycleObserver` for why the push side needs its own witness.
     private let promptLifecycle: PromptLifecycleObserver
+    /// The paired hosts `flightdeck host …` reads. Optional only so the many fleet tests that
+    /// never touch a host need not build a registry; the app always passes one, and a nil
+    /// here answers `hosts_unavailable` rather than an empty list that would claim no host
+    /// is paired.
+    private let hosts: HostService?
     private(set) var boundPort: NWEndpoint.Port?
     /// The window's own listener, and the port it is on. Both are `nil` whenever no window is
     /// open, which is invariant 2 stated as a field rather than as a comment.
@@ -110,9 +115,10 @@ final class FleetService: ObservableObject {
 
     init(
         store: SessionStore, preferences: PreferencesStore, armer: PairingArmer,
-        controlSecret: Data = ControlEnvironment.secret()
+        hosts: HostService? = nil, controlSecret: Data = ControlEnvironment.secret()
     ) {
         self.store = store
+        self.hosts = hosts
         self.controlSecret = controlSecret
         self.preferences = preferences
         self.armer = armer
@@ -674,6 +680,28 @@ final class FleetService: ObservableObject {
                 // from "found it, could not open it" rather than folding both into one
                 // dead end.
                 reply(.err(cid: cid, code: "launch_failed"))
+            }
+        case .hostList:
+            // Synchronous: the registry and the link states are both in memory on this
+            // actor. Answered with every host offline too — it never dials anything.
+            guard let hosts else { return reply(.err(cid: cid, code: "hosts_unavailable")) }
+            reply(.hostList(cid: cid, hosts.registry.hosts.map {
+                HostProjection.row($0, hosts.statuses[$0.slot])
+            }))
+        case .hostInfo(let name):
+            guard let hosts else { return reply(.err(cid: cid, code: "hosts_unavailable")) }
+            // A `Task`, like `timeline`: the answer is a round trip to the host, bounded by
+            // `HostLink.requestTimeout`, and `reply` lands back on this actor afterwards.
+            Task { @MainActor in
+                do {
+                    let (record, info) = try await hosts.info(name: name)
+                    reply(.hostInfo(cid: cid, HostProjection.info(record, info)))
+                } catch {
+                    let refusal = HostProjection.refusal(
+                        for: error, name: name, registry: hosts.registry,
+                        state: { hosts.statuses[$0] }, now: Date())
+                    reply(.err(cid: cid, code: refusal.code, message: refusal.message))
+                }
             }
         }
     }

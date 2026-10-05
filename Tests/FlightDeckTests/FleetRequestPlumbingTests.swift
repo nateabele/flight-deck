@@ -340,7 +340,7 @@ final class FleetRequestPlumbingTests: XCTestCase {
         raw.onFrame = { [weak self] frame in
             guard let self else { return }
             switch frame {
-            case .err(1, "unsupported"):
+            case .err(1, "unsupported", _):
                 refused.fulfill()
                 // The proof the loop survived: a frame sent after the refusal, answered.
                 self.raw.send(ClientFrame.req(
@@ -370,7 +370,7 @@ final class FleetRequestPlumbingTests: XCTestCase {
             self.raw.send(UnparseableRequest(cid: 7, session: self.session, op: "timeline.tail"))
         }
         raw.onFrame = { frame in
-            if case .err(7, "unsupported") = frame { refused.fulfill() }
+            if case .err(7, "unsupported", _) = frame { refused.fulfill() }
         }
         raw.connect()
         await fulfillment(of: [refused], timeout: 10)

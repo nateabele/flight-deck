@@ -51,6 +51,9 @@ public enum CLICommand: Equatable {
     /// `CLIRunner` never sees one dispatched. Parsed here anyway because argument validation
     /// (a real UUID, `--root` present) belongs with every other verb's, not duplicated in main.
     case intakeRun(id: UUID, root: String)
+    case hostList
+    /// `name` is passed through unresolved: only the Mac's registry knows which hosts exist.
+    case hostInfo(name: String)
 }
 
 /// A fully parsed command line: the command itself, plus the two globals (`--json`,
@@ -303,6 +306,9 @@ public enum CLIArguments {
         case "intake":
             return try parseIntake(&c)
 
+        case "host":
+            return try parseHost(&c)
+
         default:
             throw CLIUsageError("unknown command \"\(verb)\"")
         }
@@ -336,6 +342,18 @@ public enum CLIArguments {
 
         default:
             throw CLIUsageError("plan: unknown subcommand \"\(sub)\"")
+        }
+    }
+
+    private static func parseHost(_ c: inout Cursor) throws -> CLICommand {
+        let sub = try c.requirePositional("host: missing subcommand")
+        switch sub {
+        case "ls":
+            return .hostList
+        case "info":
+            return .hostInfo(name: try c.requirePositional("host info: missing host"))
+        default:
+            throw CLIUsageError("host: unknown subcommand \"\(sub)\"")
         }
     }
 

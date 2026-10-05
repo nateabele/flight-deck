@@ -119,6 +119,10 @@ enum ControlScope {
         case .timeline, .newSessionOptions, .recentlyClosed, .macEndpoints, .conversations, .search,
              .intakeDetail, .intakePlan:
             return true
+        case .hostList, .hostInfo:
+            // Reads too: `host.info` crosses to the host, but asks it only for facts and
+            // changes nothing there or here. An agent in any tab may need the toolchain.
+            return true
         case .openConversation:
             return level == .full || caller == .human
         }

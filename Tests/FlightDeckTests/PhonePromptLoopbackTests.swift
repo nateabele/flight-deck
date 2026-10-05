@@ -89,7 +89,7 @@ final class PhonePromptLoopbackTests: XCTestCase {
         var frame: ServerFrame?
         client.onFrame = { received in
             switch received {
-            case .ack(cid), .err(cid, _):
+            case .ack(cid), .err(cid, _, _):
                 frame = received
                 landed.fulfill()
             default:
@@ -154,7 +154,7 @@ final class PhonePromptLoopbackTests: XCTestCase {
         let (landed, frame) = answer(client, cid: cid)
         await fulfillment(of: [landed], timeout: 10)
 
-        guard case .err(cid, let code) = try XCTUnwrap(frame()) else {
+        guard case .err(cid, let code, _) = try XCTUnwrap(frame()) else {
             return XCTFail("hostile text must be refused on the wire, not typed")
         }
         XCTAssertEqual(code, PromptText.Rejection.controlCharacters.rawValue)

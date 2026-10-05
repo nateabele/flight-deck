@@ -683,7 +683,7 @@ public final class FleetConnector: @unchecked Sendable {
         case .intakePlan(let cid, let plan):
             resolveIntakePlan(cid, with: .success(plan))
             return
-        case .err(let cid, let code):
+        case .err(let cid, let code, _):
             // Commands first, then requests. The tables share one `cid` space
             // (`FleetClient.nextCID` mints for all of them), so a number is in at most one of
             // them and the order cannot cross an answer — it is stated so a future table is
@@ -756,6 +756,11 @@ public final class FleetConnector: @unchecked Sendable {
             // reaching `advance(to:)` from here would let the Mac's own correlation id move
             // this phone's resume point.
             serve(request, cid: cid)
+            return
+        case .hostList, .hostInfo:
+            // Answers to `flightdeck host …`, which only the local CLI asks. The phone has no
+            // pending table for them, so one arriving here is a stray, and a stray reply must
+            // never move the resume point either.
             return
         }
         onFleet?(fleet)

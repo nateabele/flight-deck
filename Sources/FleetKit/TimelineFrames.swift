@@ -201,11 +201,18 @@ public enum FleetRequest: Codable, Equatable, Sendable {
     case intakeDetail(id: UUID, ifNot: String?)
     /// A checkpoint's plan (nil: the head), with a block diff against its parent when `changes`.
     case intakePlan(id: UUID, checkpoint: Int?, changes: Bool)
+    /// Every paired host and its link state — `flightdeck host ls`. Answered from the Mac's
+    /// own registry, so it costs no round trip to any host and works with all of them offline.
+    case hostList
+    /// One host's toolchain (`flightdeck host info <name>`), fetched live over its link.
+    /// `name` is matched exactly and case-insensitively, never as a prefix: a CLI that picked
+    /// "mini-2" for "mini" would run work on the wrong machine.
+    case hostInfo(name: String)
 
     enum CodingKeys: String, CodingKey {
         case op, session, anchor, cursor, limit, project
         case query, conversationID, projectPath
-        case intake, ifNot, checkpoint, changes
+        case intake, ifNot, checkpoint, changes, name
     }
 
     private enum Op: String, Codable {
@@ -218,6 +225,8 @@ public enum FleetRequest: Codable, Equatable, Sendable {
         case openConversation = "search.open"
         case intakeDetail = "intake.detail"
         case intakePlan = "intake.plan"
+        case hostList = "host.list"
+        case hostInfo = "host.info"
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -257,6 +266,11 @@ public enum FleetRequest: Codable, Equatable, Sendable {
             try c.encode(id, forKey: .intake)
             try c.encodeIfPresent(checkpoint, forKey: .checkpoint)
             try c.encode(changes, forKey: .changes)
+        case .hostList:
+            try c.encode(Op.hostList, forKey: .op)
+        case .hostInfo(let name):
+            try c.encode(Op.hostInfo, forKey: .op)
+            try c.encode(name, forKey: .name)
         }
     }
 
@@ -306,6 +320,10 @@ public enum FleetRequest: Codable, Equatable, Sendable {
             self = .intakePlan(id: try c.decode(UUID.self, forKey: .intake),
                                checkpoint: try c.decodeIfPresent(Int.self, forKey: .checkpoint),
                                changes: try c.decodeIfPresent(Bool.self, forKey: .changes) ?? false)
+        case .hostList:
+            self = .hostList
+        case .hostInfo:
+            self = .hostInfo(name: try c.decode(String.self, forKey: .name))
         }
     }
 }
