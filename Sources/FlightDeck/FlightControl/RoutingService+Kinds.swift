@@ -77,19 +77,22 @@ extension RoutingService {
         let plan = KindReroute.plan(rows: rows, affected: affected, project: url(project), kinds: kinds,
                                     router: makeRouter(), catalogs: catalogs, now: now())
         var written = 0
-        var failures: [String] = []
+        var failures: [(id: String, why: String)] = []
+        // A task pinned after the read: the writer refuses it, and it is still one we examined.
+        var pinnedAtWrite = 0
         for change in plan.changes {
             switch await writer.writeBlock(change.block, id: change.id, project: project) {
             case .written: written += 1
-            case .skippedPinned: break
-            case .failed(let why): failures.append(why)
+            case .skippedPinned: pinnedAtWrite += 1
+            case .failed(let why): failures.append((change.id, why))
             }
         }
         var note = "Re-routed \(written) open task\(written == 1 ? "" : "s")"
-        if !plan.skippedPinned.isEmpty { note += "; \(plan.skippedPinned.count) pinned left alone" }
+        let pinned = plan.skippedPinned.count + pinnedAtWrite
+        if pinned > 0 { note += "; \(pinned) pinned left alone" }
         if !plan.invalid.isEmpty { note += "; \(plan.invalid.count) with an invalid block skipped" }
         if !plan.unroutable.isEmpty { note += "; \(plan.unroutable.count) unroutable" }
-        if let first = failures.first { note += "; \(failures.count) failed: \(first)" }
+        if let first = failures.first { note += "; \(failures.count) failed (\(failures.map(\.id).joined(separator: ", "))): \(first.why)" }
         return note
     }
 }

@@ -25,9 +25,11 @@ final class FakeOpenTasks: OpenTaskReading, @unchecked Sendable {
 final class RecordingBlockWriter: BlockWriting, @unchecked Sendable {
     private(set) var writes: [(id: String, block: ExecutionBlock, project: String)] = []
     var outcome: BlockWriteOutcome = .written
+    /// Per-task answers, for a test that needs one write to fail or lose a race.
+    var outcomes: [String: BlockWriteOutcome] = [:]
     func writeBlock(_ block: ExecutionBlock, id: String, project: String) async -> BlockWriteOutcome {
         writes.append((id, block, project))
-        return outcome
+        return outcomes[id] ?? outcome
     }
 }
 

@@ -78,6 +78,21 @@ final class RoutingServiceKindsTests: XCTestCase {
         XCTAssertEqual(writer.writes.map(\.id), ["t1"], "golden-tests is merged into snapshot-tests; algorithm is untouched")
     }
 
+    func testWriterSideSkipsAndFailuresAreAccountedAndDoNotAbortTheRest() async throws {
+        let prefs = PreferencesStore(persistence: nil)
+        prefs.globalRoutingRules = [D.rule("g1", .any([.kind("tests")]), "codex", "gpt-6-sol", knobs: ["effort": "high"], pool: "codex-default")]
+        let tasks = FakeOpenTasks()
+        tasks.result = .success([try row("t1", kind: "snapshot-tests"), try row("t2", kind: "snapshot-tests"),
+                                 try row("t3", kind: "snapshot-tests")])
+        let writer = RecordingBlockWriter()
+        writer.outcomes = ["t2": .failed("br update exited 1"), "t3": .skippedPinned]
+        let svc = RoutingServiceSupport.make(prefs: prefs, tasks: tasks, writer: writer)
+        let error = await svc.merge("snapshot-tests", into: "tests", project: path)
+        XCTAssertNil(error)
+        XCTAssertEqual(writer.writes.map(\.id), ["t1", "t2", "t3"], "a failed write must not stop the rest")
+        XCTAssertEqual(svc.kindNote, "Re-routed 1 open task; 1 pinned left alone; 1 failed (t2): br update exited 1")
+    }
+
     func testAFailedReadIsReportedNotSwallowed() async {
         let tasks = FakeOpenTasks()
         tasks.result = .failure(OpenTaskReadError(message: "br list exited 1: x"))
