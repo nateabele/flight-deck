@@ -229,6 +229,9 @@ final class SwarmController {
             return .waiting("\(block.pool) is full and kind \(block.kind) is unknown")
         }
         let catalogs = await deps.catalogs()
+        // The swarm may have been paused or stopped during that await; no lease for a spawn that
+        // will not start.
+        guard record.state == .running else { return .waiting("the swarm is no longer running") }
         let spill = deps.router.spill(block, kind: kind, project: project, exhausted: [block.pool],
                                       catalogs: catalogs, now: now())
         // An unroutable spill has pool "": leasing it would hand out nothing and name no pool.
@@ -384,6 +387,9 @@ final class SwarmController {
         // Spec §10: the claim goes back to open and the agent is left alone (not killed), but a
         // tab that never showed a composer is never typed into again.
         _ = await deps.backend.returnToOpen(task, project: project)
+        // stop() may have retired the agent while the deliver or this give-back awaited; a retired
+        // agent keeps its done state and its marker (its lease is already released).
+        guard record.agent(session)?.state != .done else { return }
         becomeIdle(session)
         record.update(session) {
             $0.excludedFromReuse = true

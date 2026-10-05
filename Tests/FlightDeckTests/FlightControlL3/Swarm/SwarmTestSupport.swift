@@ -72,6 +72,8 @@ final class FakeSwarmAgentLauncher: SwarmAgentLauncher {
     var onCreateAttempt: (() -> Void)?
     /// Runs inside `resetContext`, before its result is returned.
     var onReset: (() -> Void)?
+    /// Runs inside `deliver`, before its result is returned.
+    var onDeliver: (() -> Void)?
     /// Structs rather than tuples so tests can map them with key paths.
     struct CreateCall { let task: String; let block: ExecutionBlock; let lease: AccountLease? }
     struct DeliverCall { let session: UUID; let prompt: String }
@@ -101,6 +103,7 @@ final class FakeSwarmAgentLauncher: SwarmAgentLauncher {
     }
     func deliver(_ prompt: String, to session: UUID) async -> Result<Void, SpawnError> {
         delivered.append(DeliverCall(session: session, prompt: prompt)); log.add("prompt \(name(session))")
+        onDeliver?()
         if let error = deliverFailures[session] { return .failure(error) }
         return .success(())
     }
@@ -161,6 +164,8 @@ final class SwarmRig {
     let store: SwarmStore
     var now = SwarmFixtures.at
     var catalogs = AdapterCatalogs([])
+    /// Runs when the controller asks for catalogs, so a test can act inside `plan`'s await.
+    var onCatalogs: (() -> Void)?
     var projectURL: URL { URL(fileURLWithPath: SwarmFixtures.project, isDirectory: true) }
 
     init() {
@@ -175,7 +180,8 @@ final class SwarmRig {
     var deps: SwarmController.Dependencies {
         let catalogs = self.catalogs
         return .init(backend: backend, launcher: launcher, host: host, router: router, kinds: kinds,
-                     allocator: allocator, capacity: capacity, catalogs: { catalogs })
+                     allocator: allocator, capacity: capacity,
+                     catalogs: { [weak self] in self?.onCatalogs?(); return catalogs })
     }
 
     @discardableResult

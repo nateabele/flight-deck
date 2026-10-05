@@ -134,4 +134,33 @@ final class SwarmControllerFailureTests: XCTestCase {
         XCTAssertTrue(rig.launcher.created.isEmpty)
         XCTAssertEqual(c.record.state, .paused)
     }
+
+    func testStoppingDuringADeliveryLeavesTheAgentDoneAndReturnsTheClaim() async {
+        let rig = SwarmRig()
+        let lease = rig.leases("codex-subs", 1)[0]
+        let ref = SessionRef(id: UUID(), agentName: "BlueLake")
+        rig.launcher.createResults = [.success(ref)]
+        rig.launcher.deliverFailures[ref.id] = .composerTimeout
+        rig.backend.ready = [SwarmFixtures.task("fx-1", SwarmFixtures.block())]
+        let c = rig.controller(rig.record(cap: 1))
+        rig.launcher.onDeliver = { c.stop(reason: "stopped from the menu") }
+        await rig.run(c)
+        XCTAssertEqual(c.record.agent(ref.id)?.state, .done)
+        XCTAssertNotEqual(c.record.agent(ref.id)?.marker, "stuck at start")
+        XCTAssertEqual(rig.backend.returned, ["fx-1"])
+        XCTAssertEqual(rig.allocator.released.filter { $0 == lease }.count, 1)
+    }
+
+    func testASpillIsNotLeasedWhenTheSwarmPausesWhileCatalogsLoad() async {
+        let rig = SwarmRig()
+        let spilled = SwarmFixtures.block("claude-subs", model: "opus", harness: "claude")
+        rig.leases("claude-subs", 1)
+        rig.router.spills["tests"] = Assignment(block: spilled)
+        rig.backend.ready = [SwarmFixtures.task("fx-1", SwarmFixtures.block())]
+        let c = rig.controller(rig.record(cap: 1))
+        rig.onCatalogs = { c.pause() }
+        await rig.run(c)
+        XCTAssertTrue(rig.launcher.created.isEmpty)
+        XCTAssertFalse(rig.allocator.leaseCalls.contains("claude-subs"), "no lease taken for a spill the swarm can no longer start")
+    }
 }
