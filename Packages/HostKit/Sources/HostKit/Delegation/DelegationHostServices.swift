@@ -141,7 +141,7 @@ public final class DelegationHostServices: @unchecked Sendable {
         case .screenStatus:
             return .screenStatus(screenStatus())
         // Listed rather than `default`, so a new op has to be placed on one side or the other.
-        case .syncTips, .syncPush, .runStart, .runAttach, .runSignal, .runCancel, .runResult, .runArtifacts,
+        case .syncTips, .syncPush, .runStart, .runAttach, .runSignal, .runCancel, .runResult, .runArtifacts, .runAck,
              .workspaceUsage, .workspacePrune:
             return nil
         }

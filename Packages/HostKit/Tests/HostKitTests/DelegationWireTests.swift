@@ -84,6 +84,22 @@ final class DelegationWireTests: XCTestCase {
                        #"{"id":1,"req":{"channel":7,"globs":["build/**/*.xcresult"],"op":"run.artifacts","runID":"r1"},"t":"req"}"#)
     }
 
+    /// `run.ack` (ruling 24): sent once the controller has *stored* a result, so a connection
+    /// that drops after the host's last write but before the bytes landed keeps the result.
+    func testRunAckShapeIsPinned() throws {
+        XCTAssertEqual(try req(.runAck(runID: "r1", repoRoot: "r00t")),
+                       #"{"id":1,"req":{"op":"run.ack","repoRoot":"r00t","runID":"r1"},"t":"req"}"#)
+        XCTAssertEqual(try rep(.runAck), #"{"id":1,"rep":{"op":"run.ack"},"t":"reply"}"#)
+    }
+
+    /// Lenient on `repoRoot`: an ack naming only the run still decodes, and the host finds the
+    /// repo from the run it started. Strict, a peer that left the key off would have its ack
+    /// answered `unsupported` and every result it fetched kept until the TTL.
+    func testRunAckDecodesWithoutRepoRoot() throws {
+        XCTAssertEqual(try HostWire.decode(HostRequest.self, from: #"{"op":"run.ack","runID":"r1"}"#),
+                       .delegation(.runAck(runID: "r1", repoRoot: nil)))
+    }
+
     func testServiceAndScreenRequestShapesArePinned() throws {
         XCTAssertEqual(try req(.portCheck(ports: [5432, 80])),
                        #"{"id":1,"req":{"op":"port.check","ports":[5432,80]},"t":"req"}"#)
@@ -192,6 +208,7 @@ final class DelegationWireTests: XCTestCase {
             .portOpen(service: "s", remote: 2, channel: 4), .serviceDown(service: "s"),
             .serviceSync(service: "s", ref: ref), .screenStatus, .workspaceUsage,
             .workspacePrune(repoRoot: nil), .workspacePrune(repoRoot: "r"),
+            .runAck(runID: "r", repoRoot: "r"), .runAck(runID: "r", repoRoot: nil),
         ]
         for r in requests {
             let frame = HostClientFrame.request(id: 9, .delegation(r))
@@ -204,6 +221,7 @@ final class DelegationWireTests: XCTestCase {
             .serviceSync,
             .screenStatus(ScreenStatus(supported: true, consoleUser: false, locked: true, holder: nil, queued: 0)),
             .usage([]), .usage([WorkspaceUsage(repoRoot: "r", worktreeName: "w", bytes: 0)]), .workspacePrune,
+            .runAck,
         ]
         for r in replies {
             let frame = HostServerFrame.reply(id: 9, .delegation(r))

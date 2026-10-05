@@ -207,6 +207,15 @@ public final class DelegationHost: @unchecked Sendable {
                 return Routed(reply: .runArtifacts(found: true))
             }
 
+        case .runAck(let runID, let repoRoot):
+            // Scoped like every run op while the runner still knows the run. After a hostd
+            // restart it does not, and the store's own per-controller keying is the scope:
+            // another slot's ack finds nothing of its own to drop.
+            if runner.owner(runID: runID) != nil { try owned(runID, by: slot) }
+            guard let repoRoot = repoRoot ?? lock.withLock({ runRepos[runID] }) else { throw RunnerError.unknownRun(runID) }
+            try await workspace.ackResult(controller: slot, repoRoot: repoRoot, runID: runID)
+            return Routed(reply: .runAck)
+
         case .workspaceUsage:
             return Routed(reply: .usage(try await workspace.usage(controller: slot)))
 
@@ -251,15 +260,12 @@ public final class DelegationHost: @unchecked Sendable {
         return { try await workspace.existingCheckout(controller: controller, repoRoot: ref.repoRoot, wtKey: ref.wtKey) }
     }
 
-    /// `run.result`: the result bundle on `channel`, then the reply naming its commit, then
-    /// the ack that drops it from the host.
+    /// `run.result`: the result bundle on `channel`, then the reply naming its commit.
     ///
-    /// Streamed before the reply, so the reply means "all of it was sent", and acked only once
-    /// every byte has been written and the channel finished: a transfer that drops part way
-    /// fails its write, skips the ack, and leaves the result for the controller to ask again
-    /// (until the store's TTL). The wire has no ack of its own, so a connection that dies
-    /// after the last write but before the controller stored the bytes still loses the result;
-    /// that window is the last in-flight window of the transfer.
+    /// Streamed before the reply, so the reply means "all of it was sent". Never acked here:
+    /// the controller sends `run.ack` once its copy is stored (ruling 24). Acking after the
+    /// last write would lose the result whenever the connection died between that write and
+    /// the controller's disk; un-acked, a second `run.result` simply sends it again.
     private func result(_ runID: String, controller: UUID, over channel: any ByteChannel) async throws -> Routed {
         try owned(runID, by: controller)
         guard let repoRoot = lock.withLock({ runRepos[runID] }) else { throw RunnerError.unknownRun(runID) }
@@ -279,8 +285,6 @@ public final class DelegationHost: @unchecked Sendable {
         defer { try? FileManager.default.removeItem(at: bundle) }
         let commit = try await commit(of: bundle)
         try await Self.stream(bundle, over: channel)
-        // Not fatal: the bytes are delivered, and an un-acked result only waits out its TTL.
-        try? await workspace.ackResult(controller: controller, repoRoot: repoRoot, runID: runID)
         return Routed(reply: .runResult(commit: commit))
     }
 

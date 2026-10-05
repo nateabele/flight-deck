@@ -143,7 +143,7 @@ final class LiveHostLink: HostLinking {
         case .syncPush, .runResult, .runArtifacts, .runAttach, .serviceDown, .serviceSync,
              .workspaceUsage, .workspacePrune:
             return bulkReplyTimeout
-        case .syncTips, .runStart, .runSignal, .runCancel, .portCheck, .portOpen, .screenStatus:
+        case .syncTips, .runStart, .runSignal, .runCancel, .runAck, .portCheck, .portOpen, .screenStatus:
             return HostLink.requestTimeout
         }
     }

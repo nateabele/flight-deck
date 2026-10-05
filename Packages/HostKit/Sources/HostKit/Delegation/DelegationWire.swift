@@ -11,6 +11,7 @@ import Foundation
 //     run.cancel     {runID}                                    -> {}
 //     run.result     {runID, channel}                           -> {commit?} (bundle on channel)
 //     run.artifacts  {runID, globs, channel}                    -> {found} (tar on channel)
+//     run.ack        {runID, repoRoot?}                         -> {}  (drops the stored result)
 //     port.check     {ports:[int]}                              -> {ports:[{port, holder}]}
 //     port.open      {service, remote, channel}                 -> {}  (bytes on channel)
 //     service.down   {service}                                  -> {}
@@ -65,6 +66,12 @@ import Foundation
 // controller that reconnected, resuming from the last offset it saw. Events for a run go to
 // every controller connection attached to it, so a dropped one loses nothing it can't replay.
 //
+// `run.result` leaves the result on the host; `run.ack` drops it, sent by the controller only
+// once it has stored the bundle (ruling 24). Acking on the host's side, after the last write,
+// would lose a result whose connection died before the controller's copy hit the disk.
+// `repoRoot` may be absent: the host then takes the repo of the run it started, which a
+// restarted hostd no longer knows, so a controller sends it.
+//
 // Every channel named here is opened by the controller (`ChannelOpening`), and the host claims
 // it by id (`ChannelAccepting`). A request that fails names a channel both sides then cancel;
 // see `ChannelProtocols.swift` for the rest of the channel rules.
@@ -89,6 +96,7 @@ private enum DelegationOp: String, Codable {
     case runCancel = "run.cancel"
     case runResult = "run.result"
     case runArtifacts = "run.artifacts"
+    case runAck = "run.ack"
     case portCheck = "port.check"
     case portOpen = "port.open"
     case serviceDown = "service.down"
@@ -113,6 +121,8 @@ public enum DelegationRequest: Codable, Sendable, Equatable {
     case runCancel(runID: String)
     case runResult(runID: String, channel: ChannelID)
     case runArtifacts(runID: String, globs: [String], channel: ChannelID)
+    /// The controller stored `runID`'s result; the host may drop it (ruling 24).
+    case runAck(runID: String, repoRoot: String?)
     case portCheck(ports: [UInt16])
     /// `service` is the service's run id.
     case portOpen(service: String, remote: UInt16, channel: ChannelID)
@@ -131,7 +141,7 @@ public enum DelegationRequest: Codable, Sendable, Equatable {
     public var capability: HostCapability {
         switch self {
         case .syncTips, .syncPush, .workspaceUsage, .workspacePrune: return .sync
-        case .runStart, .runAttach, .runSignal, .runCancel, .runResult, .runArtifacts: return .run
+        case .runStart, .runAttach, .runSignal, .runCancel, .runResult, .runArtifacts, .runAck: return .run
         case .portCheck, .portOpen, .serviceDown, .serviceSync: return .service
         case .screenStatus: return .screen
         }
@@ -174,6 +184,10 @@ public enum DelegationRequest: Codable, Sendable, Equatable {
             try c.encode(runID, forKey: .runID)
             try c.encode(globs, forKey: .globs)
             try c.encode(channel, forKey: .channel)
+        case .runAck(let runID, let repoRoot):
+            try c.encode(DelegationOp.runAck, forKey: .op)
+            try c.encode(runID, forKey: .runID)
+            try c.encodeIfPresent(repoRoot, forKey: .repoRoot)
         case .portCheck(let ports):
             try c.encode(DelegationOp.portCheck, forKey: .op)
             try c.encode(ports, forKey: .ports)
@@ -228,6 +242,9 @@ public enum DelegationRequest: Codable, Sendable, Equatable {
             self = .runArtifacts(runID: try c.decode(String.self, forKey: .runID),
                                  globs: try c.decode([String].self, forKey: .globs),
                                  channel: try c.decode(ChannelID.self, forKey: .channel))
+        case .runAck:
+            self = .runAck(runID: try c.decode(String.self, forKey: .runID),
+                           repoRoot: try c.decodeIfPresent(String.self, forKey: .repoRoot))
         case .portCheck:
             self = .portCheck(ports: try c.decode([UInt16].self, forKey: .ports))
         case .portOpen:
@@ -263,6 +280,8 @@ public enum DelegationReply: Codable, Sendable, Equatable {
     case runResult(commit: String?)
     /// false: no glob matched, and the channel carries only EOF.
     case runArtifacts(found: Bool)
+    /// `run.ack` done: the result is gone from the host.
+    case runAck
     case portCheck([PortStatus])
     case portOpen
     case serviceDown
@@ -294,6 +313,7 @@ public enum DelegationReply: Codable, Sendable, Equatable {
         case .portCheck(let statuses):
             try c.encode(DelegationOp.portCheck, forKey: .op)
             try c.encode(statuses, forKey: .ports)
+        case .runAck: try c.encode(DelegationOp.runAck, forKey: .op)
         case .portOpen: try c.encode(DelegationOp.portOpen, forKey: .op)
         case .serviceDown: try c.encode(DelegationOp.serviceDown, forKey: .op)
         case .serviceSync: try c.encode(DelegationOp.serviceSync, forKey: .op)
@@ -319,6 +339,7 @@ public enum DelegationReply: Codable, Sendable, Equatable {
         case .runResult: self = .runResult(commit: try c.decodeIfPresent(String.self, forKey: .commit))
         case .runArtifacts: self = .runArtifacts(found: try c.decode(Bool.self, forKey: .found))
         case .portCheck: self = .portCheck(try c.decode([PortStatus].self, forKey: .ports))
+        case .runAck: self = .runAck
         case .portOpen: self = .portOpen
         case .serviceDown: self = .serviceDown
         case .serviceSync: self = .serviceSync

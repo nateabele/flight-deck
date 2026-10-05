@@ -215,7 +215,9 @@ final class DelegationHostTests: XCTestCase {
         XCTAssertEqual(events.last, .exited(.code(3)))
     }
 
-    func testResultBundleThenAck() async throws {
+    /// Ruling 24: the host keeps a sent result until the controller acks it, so a transfer
+    /// that ended before the controller stored the bytes can simply be asked for again.
+    func testResultBundleIsKeptUntilTheControllerAcksIt() async throws {
         let repo = try repo()
         let c = Controller(core: try host())
         _ = try await c.hello()
@@ -230,9 +232,39 @@ final class DelegationHostTests: XCTestCase {
         let heads = try TempRepo.git(["bundle", "list-heads", file.path], in: repo.url)
         XCTAssertEqual(heads.split(separator: " ").first.map(String.init), try XCTUnwrap(commit))
 
-        // Delivered in full, so acked and gone: asking again is `result_expired`, not a
-        // second copy of the same edits.
+        // Sent in full but not acked: the controller may not have stored it, so it is still there.
+        let resent = try await result(runID, over: c)
+        XCTAssertEqual(resent.commit, commit)
+        XCTAssertEqual(resent.bytes, bytes)
+
+        let acked = try await c.request(.runAck(runID: runID, repoRoot: ref.repoRoot))
+        XCTAssertEqual(acked, .runAck)
+        // Acked, so gone: asking again is `result_expired`, not a second copy of the same edits.
         let again = await remote { try await self.result(runID, over: c) }
+        XCTAssertEqual(again, "result_expired")
+    }
+
+    /// An ack naming only the run (the lenient shape) finds the repo from the run itself; one
+    /// from another controller neither drops the result nor confirms the run exists.
+    func testAckWithoutRepoRootAndAForeignAck() async throws {
+        let repo = try repo()
+        let core = try host()
+        let mine = Controller(core: core), theirs = Controller(core: core)
+        _ = try await mine.hello()
+        _ = try await theirs.hello()
+        let ref = try await sync(repo, over: mine)
+        let runID = try await start("echo edited > a.txt", ref, over: mine)
+        _ = try await mine.events(runID)
+        _ = try await result(runID, over: mine)
+
+        let foreign = await remote { try await theirs.request(.runAck(runID: runID, repoRoot: ref.repoRoot)) }
+        XCTAssertEqual(foreign, "unknown_run")
+        let kept = try await result(runID, over: mine)
+        XCTAssertNotNil(kept.commit, "a foreign ack dropped the result")
+
+        let acked = try await mine.request(.runAck(runID: runID, repoRoot: nil))
+        XCTAssertEqual(acked, .runAck)
+        let again = await remote { try await self.result(runID, over: mine) }
         XCTAssertEqual(again, "result_expired")
     }
 
