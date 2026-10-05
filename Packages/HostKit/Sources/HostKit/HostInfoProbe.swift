@@ -36,13 +36,24 @@ public struct HostInfoProbe: Sendable {
         p.standardInput = FileHandle.nullDevice
         let exited = DispatchSemaphore(value: 0)
         p.terminationHandler = { _ in exited.signal() }
-        do { try p.run() } catch { return nil }
+        do { try p.run() } catch {
+            // A missing tool (no Docker: the probe tries three install paths every time) would
+            // otherwise leak both ends of the pipe on every `host.info`.
+            try? out.fileHandleForReading.close()
+            try? out.fileHandleForWriting.close()
+            return nil
+        }
 
         let box = OutputBox()
         let readDone = DispatchSemaphore(value: 0)
         let reader = out.fileHandleForReading
         DispatchQueue.global().async {
             box.data = reader.readDataToEndOfFile()
+            // Foundation never closes it, and one leaked descriptor per call walks a
+            // long-lived hostd (soft limit 256) into EMFILE. Closed here, at EOF, rather than
+            // by the caller: on the timeout path a grandchild may still hold the write end,
+            // and the read must finish before its descriptor goes.
+            try? reader.close()
             readDone.signal()
         }
 
