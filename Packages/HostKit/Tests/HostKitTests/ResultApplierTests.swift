@@ -311,4 +311,125 @@ final class ResultApplierTests: XCTestCase {
         XCTAssertEqual(repo.read("many/\(pad)7999.txt"), "y\n")
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: repo.url.appendingPathComponent("many").path).count, 8000)
     }
+
+    // MARK: - Fix round 3 (reviewer's probes, ZProbe2-4)
+
+    /// A tree with `drop` removed from HEAD's top level and `extra` (mktree lines) added.
+    func forgeLines(_ repo: TempRepo, runID: String, extra: [String], drop: Set<String> = []) throws {
+        let base = try repo.git("ls-tree", "-z", "HEAD").split(separator: "\0").map(String.init)
+            .filter { !drop.contains(String($0.split(separator: "\t", maxSplits: 1)[1])) }
+        let tree = try repo.git("mktree", "-z", input: (base + extra).joined(separator: "\0") + "\0")
+        try repo.git("update-ref", "refs/flightdeck/results/\(runID)", try repo.git("commit-tree", tree, "-p", "HEAD", "-m", "forged"))
+    }
+
+    /// A case-sensitive (Linux) host can return `Notes/bar` and `notes` side by side. On APFS
+    /// they are one entry, so one of them cannot be written: that must come back as a conflict
+    /// with the result kept, never as `clean` with the result deleted and the content gone.
+    func testFoldingCollisionIsAConflictNotSilentLoss() async throws {
+        let repo = try makeRepo()
+        let dir = try repo.git("mktree", input: "100644 blob \(try blob(repo, "inner\n"))\tbar\n")
+        try forgeLines(repo, runID: "r1", extra: ["040000 tree \(dir)\tNotes", "100644 blob \(try blob(repo, "file\n"))\tnotes"])
+
+        let outcome = try await ResultApplier().apply(worktree: repo.url, runID: "r1")
+
+        let sensitive = !FileManager.default.fileExists(atPath: repo.url.appendingPathComponent("A.TXT").path)
+        if sensitive {
+            XCTAssertEqual(outcome, .clean, "a case-sensitive file system holds both")
+        } else {
+            guard case .conflicts(let paths) = outcome else { return XCTFail("\(outcome)") }
+            XCTAssertFalse(paths.isEmpty)
+            XCTAssertNotEqual(try repo.git("for-each-ref", "refs/flightdeck/results/"), "", "the result is kept for the user to recover")
+        }
+    }
+
+    /// Full case folding, not `lowercased()`: final sigma, sharp s and the fi ligature fold to
+    /// σ, ss and fi under APFS's rules but not under lowercasing.
+    func testFoldingCoversFullCaseFolding() throws {
+        for (link, dir) in [("\u{3c2}", "\u{3c3}"), ("ss", "\u{df}"), ("fi", "\u{fb01}"), ("caf\u{e9}", "CAFE\u{301}")] {
+            let changes = [
+                ResultApplier.Change(oldMode: "000000", newMode: "120000", oldID: "", newID: "", status: "A", path: link),
+                ResultApplier.Change(oldMode: "000000", newMode: "100644", oldID: "", newID: "", status: "A", path: "\(dir)/hooks/pre-commit"),
+            ]
+            XCTAssertThrowsError(try ResultApplier.refuseFoldingCollisions(changes), "\(link) vs \(dir)")
+        }
+    }
+
+    /// A directory the result turns into a symlink: its tracked files are deleted and the link
+    /// takes its place. The prefix rule must not count the deleted children against the link.
+    func testDirectoryBecomesSymlink() async throws {
+        let repo = try makeRepo()
+        repo.write("d/keep.txt", "k\n")
+        try repo.commitAll()
+        try forgeLines(repo, runID: "r1", extra: ["120000 blob \(try blob(repo, "a.txt"))\td"], drop: ["d"])
+
+        let outcome = try await ResultApplier().apply(worktree: repo.url, runID: "r1")
+
+        XCTAssertEqual(outcome, .clean)
+        XCTAssertEqual(try FileManager.default.destinationOfSymbolicLink(atPath: repo.url.appendingPathComponent("d").path), "a.txt")
+    }
+
+    /// The same change aimed at `.git` is still refused.
+    func testDirectoryBecomesSymlinkIntoGitStillRefused() async throws {
+        let repo = try makeRepo()
+        repo.write("d/keep.txt", "k\n")
+        try repo.commitAll()
+        let hooks = try repo.git("mktree", input: "100755 blob \(try blob(repo, "evil\n"))\tpre-commit\n")
+        let D = try repo.git("mktree", input: "040000 tree \(hooks)\thooks\n")
+        try forgeLines(repo, runID: "r1", extra: ["120000 blob \(try blob(repo, ".git"))\td", "040000 tree \(D)\tD"], drop: ["d"])
+
+        let error = await thrown { try await ResultApplier().apply(worktree: repo.url, runID: "r1") }
+
+        guard case .unsafePath? = error as? SyncError else { return XCTFail(String(describing: error)) }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: repo.url.appendingPathComponent(".git/hooks/pre-commit").path))
+    }
+
+    /// `hash-object --stdin-paths` C-unquotes a line that starts with `"` and drops a trailing
+    /// CR: unquoted, a tracked `"odd` failed the whole apply, and `cr<CR>` hashed `cr`.
+    func testQuotedAndCRNamesHashTheRightFile() async throws {
+        let repo = try makeRepo()
+        repo.write("\"odd", "1\n"); repo.write("cr\r", "1\n"); repo.write("cr", "1\n")
+        try repo.commitAll()
+        repo.write("cr\r", "LOCAL EDIT\n")
+        try forgeLines(repo, runID: "r1", extra: ["100644 blob \(try blob(repo, "2\n"))\t\"odd", "100644 blob \(try blob(repo, "2\n"))\tcr\r"],
+                       drop: ["\"odd", "cr\r"])
+
+        let outcome = try await ResultApplier().apply(worktree: repo.url, runID: "r1")
+
+        XCTAssertEqual(outcome, .conflicts(["cr\r"]), "the local edit to cr<CR> is seen, not cr's content")
+        let merged = try XCTUnwrap(repo.read("cr\r"))
+        XCTAssertTrue(merged.contains("<<<<<<<") && merged.contains("LOCAL EDIT\n") && merged.contains("2\n"),
+                      "a real content conflict: both sides marked, the local edit kept")
+        XCTAssertEqual(repo.read("cr"), "1\n", "the look-alike cr is untouched")
+        XCTAssertEqual(repo.read("\"odd"), "2\n")
+    }
+
+    /// Defense in depth at the real entry point: a result bundle carrying a malformed tree
+    /// (duplicate entries, a `.git` entry in any spelling) is refused by `fetch` itself, before
+    /// it can become a pending result at all.
+    func testFetchRefusesMalformedTrees() async throws {
+        let host = try makeRepo()
+        // The controller is a clone: it has the snapshot but none of the forged objects, as in
+        // real use. (Fetching into the repo that made them transfers, and checks, nothing.)
+        let controller = TempRepo.scratch().appendingPathComponent("controller")
+        try TempRepo.git(["clone", "-q", host.url.path, controller.path], in: host.url.deletingLastPathComponent())
+        let blobID = try blob(host, "x\n")
+        let hooks = try host.git("mktree", input: "100755 blob \(blobID)\tpre-commit\n")
+        let cases = [
+            ("dotgit", "040000 tree \(hooks)\t.GIT"),
+            ("duplicate", "100644 blob \(blobID)\ta.txt"),
+        ]
+        for (name, line) in cases {
+            let lines = try host.git("ls-tree", "HEAD").split(separator: "\n").map(String.init) + [line]
+            let tree = try host.git("mktree", input: lines.joined(separator: "\n") + "\n")
+            let commit = try host.git("commit-tree", tree, "-p", "HEAD", "-m", name)
+            try host.git("update-ref", "refs/forged/\(name)", commit)
+            let bundle = TempRepo.scratch().appendingPathComponent("\(name).bundle")
+            try host.git("bundle", "create", "-q", bundle.path, "refs/forged/\(name)", "--not", "HEAD")
+
+            let error = await thrown { try await ResultApplier().fetch(bundle: bundle, worktree: controller, runID: name) }
+
+            XCTAssertNotNil(error, "\(name) must be refused at fetch")
+            XCTAssertEqual(try TempRepo.git(["for-each-ref", "refs/flightdeck/results/"], in: controller), "", name)
+        }
+    }
 }
