@@ -67,7 +67,8 @@ struct FleetListScreen: View {
                             if let swarm = project.swarm {
                                 SwarmCard(swarm: swarm, inFlight: model.swarmInFlight.contains(project.id),
                                           onPause: { model.setSwarmPaused(true, project: project.id) },
-                                          onResume: { model.setSwarmPaused(false, project: project.id) })
+                                          onResume: { model.setSwarmPaused(false, project: project.id) },
+                                          message: model.swarmMessages[project.id])
                                     .listRowInsets(Self.rowInsets)
                             }
                             ForEach(Self.intakeRows(project)) { intake in
@@ -768,6 +769,7 @@ struct FleetListScreen: View {
                         }
                         if let marker = swarm.marker { Text(marker).font(.caption2).foregroundStyle(.secondary) }
                     }
+                    .accessibilityElement(children: .contain)
                     .accessibilityIdentifier("swarm-row-chip")
                 }
             }

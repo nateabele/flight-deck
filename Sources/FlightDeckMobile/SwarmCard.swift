@@ -8,6 +8,7 @@ struct SwarmCard: View {
     let inFlight: Bool
     let onPause: () -> Void
     let onResume: () -> Void
+    var message: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -19,6 +20,10 @@ struct SwarmCard: View {
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(meter.state == "overSoft" || meter.state == "overHard" ? .orange : .secondary)
                     .accessibilityIdentifier("swarm-card-meter")
+            }
+            if let message {
+                Text(message).font(.caption).foregroundStyle(.red)
+                    .accessibilityIdentifier("swarm-card-error")
             }
             HStack {
                 if SwarmStyle.canPause(swarm) {

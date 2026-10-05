@@ -480,3 +480,49 @@ final class FleetModelTests: XCTestCase {
         )
     ])
 }
+
+/// Pause/Resume from the swarm card: the in-flight mark must always clear, and a failure must say so.
+@MainActor
+final class FleetModelSwarmCommandTests: XCTestCase {
+    private var sent: [FleetCommand] = []
+    private var pending: [(Result<Void, FleetRequestError>) -> Void] = []
+
+    private func model(timeout: Duration = .seconds(60)) -> FleetModel {
+        let m = FleetModel(store: RefusingPairedMacStore())
+        m.swarmTimeout = timeout
+        m.swarmSender = { [unowned self] command, done in sent.append(command); pending.append(done) }
+        return m
+    }
+
+    func testPauseAndResumeSendTheirCommandsAndAckClears() {
+        let m = model(); let project = UUID()
+        m.setSwarmPaused(true, project: project)
+        XCTAssertEqual(sent, [.swarmPause(project: project)])
+        XCTAssertTrue(m.swarmInFlight.contains(project))
+        m.setSwarmPaused(true, project: project)
+        XCTAssertEqual(sent.count, 1, "a second tap before the ack is ignored")
+        pending.removeFirst()(.success(()))
+        XCTAssertTrue(m.swarmInFlight.isEmpty)
+        XCTAssertNil(m.swarmMessages[project])
+        m.setSwarmPaused(false, project: project)
+        XCTAssertEqual(sent.last, .swarmResume(project: project))
+    }
+
+    func testFailureClearsInFlightAndSetsAnError() {
+        let m = model(); let project = UUID()
+        m.setSwarmPaused(true, project: project)
+        pending.removeFirst()(.failure(.server(code: "not_allowed")))
+        XCTAssertTrue(m.swarmInFlight.isEmpty)
+        XCTAssertEqual(m.swarmMessages[project], CommandCopy.message(for: .server(code: "not_allowed")))
+        m.setSwarmPaused(true, project: project)
+        XCTAssertNil(m.swarmMessages[project], "the next try clears the old message")
+    }
+
+    func testNoAnswerClearsAtTheDeadline() async {
+        let m = model(timeout: .milliseconds(50)); let project = UUID()
+        m.setSwarmPaused(true, project: project)
+        for _ in 0..<100 where m.swarmInFlight.contains(project) { try? await Task.sleep(for: .milliseconds(20)) }
+        XCTAssertTrue(m.swarmInFlight.isEmpty)
+        XCTAssertEqual(m.swarmMessages[project], CommandCopy.message(for: nil))
+    }
+}

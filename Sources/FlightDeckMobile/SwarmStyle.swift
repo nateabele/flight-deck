@@ -11,6 +11,7 @@ enum SwarmStyle {
     static func detail(_ agent: WireSwarmAgent) -> String { [agent.model, agent.accountName].compactMap { $0 }.joined(separator: " · ") }
     static func cardTitle(_ swarm: WireSwarm) -> String { swarm.banner ?? swarm.summary }
     static func canPause(_ swarm: WireSwarm) -> Bool { swarm.state == "running" || swarm.state == "draining" }
+    /// Draining is the one state with both: stop the drain by resuming, or finish pausing now.
     static func canResume(_ swarm: WireSwarm) -> Bool { swarm.state == "paused" || swarm.state == "draining" }
     static func meterText(_ meter: WireSwarmMeter) -> String {
         "\(meter.pool) · \(meter.accountName) · " + (meter.utilization.map { "\(Int(($0 * 100).rounded()))%" } ?? "no reading")
