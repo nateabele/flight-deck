@@ -230,13 +230,138 @@ move is on the maintainer's GUI checklist. A major-version mismatch is refused w
 
 **Delegated execution's contract (protocol 1.1, task C0 of sub-project C).** The host wire's
 ops, replies, `event` frame and channel-frame layout are in
-`Packages/HostKit/Sources/HostKit/Delegation/` (`DelegationWire.swift` has the table), beside the
-sync, run, service and config types the tracks implement. `HostRequest`/`HostReply` forward every
-op but `host.info` there. The CLI's half is `FleetRequest.delegate(DelegateRequest)` and nine
-`ServerFrame` replies, tabled in `Sources/FleetKit/DelegationControlWire.swift`. Until the tracks
-land, the host answers every delegation op `not_implemented` (and advertises none of the new
-capabilities), the app does the same for every `delegate.*`/`recipe.*` request, and the phone's
-connector drops the new replies, which the Mac never sends it.
+`Packages/HostKit/Sources/HostKit/Delegation/` (`DelegationWire.swift` has the table, and the A5
+error codes), beside the sync, run, service and config types. `HostRequest`/`HostReply` forward
+every op but `host.info` there. The CLI's half is `FleetRequest.delegate(DelegateRequest)` and its
+`ServerFrame` replies, tabled in `Sources/FleetKit/DelegationControlWire.swift`. What runs on top
+of it is the next section.
+
+## Delegated execution (sub-project C)
+
+A tab runs a command on a paired host as if it ran locally: `flightdeck run --on mini -- xcodebuild
+test` syncs the tab's uncommitted worktree, runs the command there, streams its output, and exits
+with its code. Spec: [§4–§9 of the remote-hosts spec](superpowers/specs/2026-10-03-remote-hosts-delegation-design.md);
+plan: [the delegated-execution plan](superpowers/plans/2026-10-05-delegated-execution.md); the
+live probes: [DELEGATION-PROBES.md](DELEGATION-PROBES.md).
+
+**The path of one `run`.**
+
+1. **CLI** (`Sources/FlightDeckCLI/Delegate*.swift`). `flightdeck run|exec|up|…` parses its verb
+   (`DelegateArguments`), sends one `delegate.*` request over the tab's control socket, and prints
+   the stream that comes back (`DelegateCommands`): output raw to its own stdout/stderr, then the
+   exit status. A session shell never dials a host.
+2. **App** (`Sources/FlightDeck/Delegation/DelegationService.swift`). `FleetService` hands every
+   `delegate.*`/`recipe.*` request to `DelegationService`, which owns runs per tab. It resolves the
+   worktree, recipe and host; runs the preflight; snapshots and pushes the worktree; starts the run;
+   relays its events to every CLI watching; and fetches the result when it ends. Everything that
+   touches git, a socket or a host is behind a protocol at the top of that file (`HostLinking`,
+   `DelegationHostDirectory`, `Preflighting`, `ResultApplying`, `DelegateConfigLoading`,
+   `WorktreeLocating`), so the whole flow runs in `DelegationServiceTests` against fakes. The real
+   conformers are in `Delegation/Live/`, built by `DelegationServiceFactory.live(hostService:)`.
+3. **Link** (`Sources/FlightDeck/Hosts/HostLink.swift`, `HostLinkChannels.swift`). One TLS-PSK
+   WebSocket per host carries JSON requests and, as binary messages, `ChannelMux` frames: numbered
+   byte channels with credit flow control (`ChannelMux.swift`; the rules are in
+   `ChannelProtocols.swift`'s header). The controller opens every channel; a request names it.
+4. **Host** (`Packages/HostKit/Sources/HostKit/Delegation/`). The hostd's router answers each op
+   off the connection's serial receive path, because `sync.push` waits on channel bytes that
+   arrive on that same connection. `Workspace` holds the object store and checkouts, `Runner` spawns
+   and spools, `ScreenLease` serialises screen runs, `PortCheck` names a port's holder. Both hostds
+   (`Sources/HostDaemon`, `Packages/HostDaemonLinux`) wire the same HostKit code.
+
+**Sync is git, and never touches the user's repo state** (`Snapshotter`, `BundleMaker`,
+`Workspace`). A snapshot is `git add -A` plus each declared `include` into a temporary index seeded
+from `HEAD`, committed as a child of `HEAD`; the index, stash, reflog and branches are untouched.
+The last five are kept under `refs/flightdeck/snapshots/<host>/<n>` so `gc` cannot prune them. The
+host says which tips it holds; the controller sends a bundle of only what is missing. On the host,
+`<state root>/workspaces/<controller slot>/<repo root commit>/` holds a bare `store.git` and a pool of
+checkouts (two per worktree by default), each a `git worktree` named after the local worktree so
+`docker compose` project names match. An apply is `checkout --force --detach` then `clean -fd`
+(never `-x`), so ignored build output survives and builds stay incremental; the tree hash is checked
+before anything runs. Refused up front: LFS repos (`lfs_unsupported`), repos with submodules
+(`submodules_unsupported`, out of v1 by ruling), and git older than 2.40 (`git_too_old`).
+
+**Results come back two ways.** Tracked changes are committed on the host as a child of the
+snapshot (`refs/fd/results/<run>`, kept until acknowledged or 24 h), fetched as a one-commit bundle,
+and shown by `flightdeck diff` or merged by `flightdeck apply` three-way against the *current*
+worktree, so edits made during the run conflict instead of being overwritten. `apply = "auto"`
+applies on completion and falls back to review on a conflict. `ResultApplier` trusts nothing the
+host sends: a path into `.git`, through a symlink, or colliding with another after case and NFC
+folding is refused as `unsafe_path` with nothing written. Artifacts (`--fetch`, recipe `fetch`)
+are tarred on the host at exit and unpacked over local files only where those are ignored.
+
+**Execution** (`Runner`, `OutputSpool`). A run is `$SHELL -lc '<cmd>'` in its own process group,
+in the checkout plus the CLI's relative subdirectory, with the host's login environment plus
+`--env` and recipe `env`; the controller's environment is never sent. Output is spooled to
+`runs/<id>/` (64 MiB cap, oldest dropped first) and carried in `event` frames of at most 64 KiB, each
+with its byte offset, so a CLI or an app that reconnects resumes exactly where it left off. A run
+outlives its controller's connection. Cancel is SIGINT, then SIGTERM after 10 s, then SIGKILL after
+10 s more. `--pty` is output-only in v1. Every run holds an idle-sleep assertion (IOKit on macOS,
+`systemd-inhibit` on Linux).
+
+**Exit codes are the contract an agent reads.** The remote command's own code; `128+n` for a
+signal; **125** with one `flightdeck:` stderr line naming the host and the next step when delegation
+itself failed (a `DelegationError`, `Preflight.swift`); 124 for a `wait` that timed out while the run
+carries on. A `long` recipe or `--detach` prints the run id and exits 0 at once, so an agent's tool
+timeout never kills a long build; `wait` (default 9 minutes) then picks it up.
+
+**Preflight before anything remote** (`Preflight.swift`, spec §7). In order: config and host,
+connection and capabilities, local `include`/`fetch` checks, binding every local port, the host's
+remote port check, the screen check. A failure releases whatever was reserved and exits 125 with
+nothing changed on either machine.
+
+**Services and ports** (`PortForwarder`, `PortReservation`). `up` starts a run that pins its
+checkout and lives until `down`. Each forwarded port is a `127.0.0.1:L` listener on the Mac; every
+accepted connection becomes a channel, and the host dials `127.0.0.1:R` for it (`port.open`). A
+service goes down when its tab closes (`FleetService` calls `DelegationService.sessionClosed` on the
+store's `sessionRemoved` event), on `down`, or when no controller has been connected for its orphan
+timeout (30 minutes by default). Port forwards are not rebuilt after an app relaunch (FOLLOWUPS).
+
+**Screen runs** (`ScreenLease`, `ConsoleSession`, HostKitDarwin). `screen = true` waits for the
+host's single screen lease and prints who holds it. On macOS the preflight refuses a host with no
+console user or a locked screen; while the lease is held the hostd keeps the display awake and
+shows a small "don't touch" panel. Linux refuses screen runs in v1. **Unverified live:** whether an
+XCTest UI suite actually runs from the hostd LaunchAgent (probe P3) and whether
+`CGSessionCopyCurrentDictionary` reports the lock reliably from it (P4); both are on the maintainer's
+checklist in [DELEGATION-PROBES.md](DELEGATION-PROBES.md).
+
+**Ownership and scope.** A run belongs to the tab whose control token started it: another tab gets
+`not_found` for it, a human shell sees everything (`DelegatedRun.isVisible`). `ps`, `logs`, `diff`,
+`wait`, `recipe ls|check` and `host ls --disk` are read-only scopes; every other delegate request is
+an own-session write, and `host prune` (every tab's checkouts) is fleet-wide. Paired phones are
+refused (`out_of_scope`). On the host, a run belongs to the controller slot that started it, and any
+other slot gets `unknown_run`. The app's runs persist in `delegation.json` beside `sessions.json`
+(`RunRegistry`), with ids (`r7`) never reused.
+
+**`delegate.toml` and transparent routing** (`DelegateConfigParser`, `RecipeWriter`,
+`RouteMatcher`, `RouteShims`). `.flightdeck/delegate.toml` holds `default_host`, `include`,
+`[recipe.<name>]` tables and `[[route]]` rules; the parser is a bounded TOML subset (nesting depth 32,
+so a hostile file is an error, not a crash). `recipe add` rewrites only that recipe's table. Every
+tab gets a shim directory, `<state dir>/route-shims/<session id>/`, first on its `PATH`: one symlink per
+routed command name, all pointing at the bundled `Resources/RouteShim/flightdeck-route-shim.sh`. The
+shim calls `flightdeck route-exec <name> -- <args>`, which delegates on a match and otherwise execs
+the real binary from `PATH` minus the shim directory. `DelegationBootstrap` builds the directory from
+`SessionStore.launchEnvironment` (fresh launches and reattaches alike), sets `FLIGHTDECK_CLI` (this
+build's CLI, so an older `flightdeck` on `PATH` is never the one asked) and `FLIGHTDECK_SHIM_DIR`,
+rebuilds every tab of a project when its `.flightdeck/` changes (one `RouteShimWatcher` per project),
+and removes the directory when the tab closes. `FLIGHTDECK_NO_ROUTE=1` bypasses routing. The
+bootstrap is built before the store, because the store launches its restored tabs inside its own
+initializer, and never under a UITest reset. **Unverified live:** whether a login shell profile
+that prepends to `PATH` (`fish_add_path`, `brew shellenv`, `path_helper`) pushes the shim directory
+off the front in a real tab.
+
+**Agents learn it from a skill** (spec §9). Claude gets `Resources/ClaudePlugin/skills/delegate/`
+through the plugin it is already launched with (`/flight-deck:delegate`); codex gets the same file
+copied to `$CODEX_HOME/skills/flightdeck-delegate/` (`CodexDelegateSkill`, which leaves a copy the
+user edited or deleted alone). Probe P1 showed a skill added under `--plugin-dir` does not appear in
+a running claude until `/reload-plugins`, and under fd-abduco a tab's claude outlives an app update.
+So at launch the app fingerprints the bundled plugin (`PluginReload`); when it changed, every claude
+tab whose daemon was already live is sent `/reload-plugins` through the gated `inject`, only while
+the status registry says idle and after any queued rename or prompt.
+
+**At launch and on reconnect** `DelegationBootstrap.connect` hands `FleetService` its
+`DelegationService` before either socket starts, then calls `resumeWatching()` now and again each
+time a host comes online, so a run or service from before a relaunch is watched without anyone
+having to `wait` on it first.
 
 ## Preferences
 

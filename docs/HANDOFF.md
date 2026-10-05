@@ -154,7 +154,8 @@ Codex tabs (codex 0.155.1 or newer) reach `flightdeck` through a narrow sandbox 
 **State:** built on branch `host-foundation` (not merged, not pushed), 12 tasks. A Flight Deck can pair
 a second Mac or a Linux box as a *host*, keep an authenticated link to it, and read its toolchain
 with `flightdeck host ls` and `flightdeck host info <name>`. Settings has two new tabs: Hosts
-(paired hosts, Add Host) and Hosting (this Mac as a host). Nothing executes on a host yet.
+(paired hosts, Add Host) and Hosting (this Mac as a host). Running commands on a host is
+sub-project C, the next section.
 
 - Design: [the remote-hosts spec](superpowers/specs/2026-10-03-remote-hosts-delegation-design.md)
   (its §3.2 lists the deviations decided while building, including the 0xCCAC ruling).
@@ -162,11 +163,34 @@ with `flightdeck host ls` and `flightdeck host info <name>`. Settings has two ne
 - As built: [ARCHITECTURE.md, "Hosts"](ARCHITECTURE.md#hosts-hostkit--hostdaemon--hostdaemonlinux--sourcesflightdeckhosts);
   scripts in [BUILD.md](BUILD.md); the hostd process hazards in
   [AGENT-OPERATIONS.md](AGENT-OPERATIONS.md); open items in [FOLLOWUPS.md](FOLLOWUPS.md).
-- **Next plan: sub-project C** (sync, the `run`/`exec`/`up`/`ps`/`recipe` CLI, execution and services,
-  preflight, `delegate.toml`, the agent skill). It also owns probe P3, the one placement
-  assumption still unverified.
+- **Sub-project C is built** (next section); probe P3, the one placement assumption, is still
+  unverified.
 - **The maintainer's before merging:** the GUI end-to-end checklist (FOLLOWUPS), building both Linux
   architectures, and publishing the release (next section).
+
+## Delegated execution (sub-project C)
+
+**State:** built on branch `delegation` in parallel tracks C0–C8 (not merged to master, not pushed).
+A tab runs a command on a paired host as if locally: `flightdeck run --on mini -- xcodebuild test`
+syncs the tab's uncommitted worktree through git, streams the output, and exits with the remote
+code (125 with one `flightdeck:` line when delegation itself failed). `up`/`down` keep a service
+running with its ports forwarded to `localhost`; `diff`/`apply` bring back what the run changed;
+`.flightdeck/delegate.toml` holds recipes and `[[route]]` rules, and routed commands are
+intercepted by per-tab shims on `PATH`. Claude and codex tabs learn all of it from one bundled
+`delegate` skill.
+
+- Design: [the remote-hosts spec](superpowers/specs/2026-10-03-remote-hosts-delegation-design.md), §4–§9.
+- Plan: [the delegated-execution plan](superpowers/plans/2026-10-05-delegated-execution.md).
+- As built: [ARCHITECTURE.md, "Delegated execution"](ARCHITECTURE.md#delegated-execution-sub-project-c);
+  test commands in [BUILD.md](BUILD.md); probes P1–P4 in [DELEGATION-PROBES.md](DELEGATION-PROBES.md);
+  open items in [FOLLOWUPS.md](FOLLOWUPS.md).
+- **Verified only in unit tests and in-process loopback.** No delegated run has crossed to a real
+  second machine. The maintainer's before relying on it: probes P3 and P4 on a second Mac, a real
+  UI-test run there (the "don't touch" panel, a second screen run queueing), a Linux pairing plus a
+  `flightdeck run`, and `command -v <routed command>` in a real tab to see the shim is first on
+  `PATH` (FOLLOWUPS lists all of it).
+- **Debug builds:** shims go under `Flight Deck (Debug)/route-shims/`; a UITest reset builds no
+  delegation at all. A Debug codex start still writes the real `~/.codex/skills/flightdeck-delegate/`.
 
 ## Releasing the Linux host (`flightdeck-hostd`)
 
