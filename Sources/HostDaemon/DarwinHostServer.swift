@@ -66,8 +66,12 @@ final class DarwinHostServer: @unchecked Sendable {
     /// Fired on `queue` whenever the number of authenticated connections changes. `main.swift`
     /// holds an idle-sleep assertion only while it is non-zero.
     var onConnectionCountChanged: (@Sendable (Int) -> Void)?
-    /// Each whole binary message (a `ChannelMux` frame), on the peer's queue in arrival order
-    /// beside its text frames. Set before `start`. Nil drops binary, as before delegation.
+    /// Each whole binary message (a `ChannelMux` frame), in arrival order, on the listener's
+    /// delivery queue — not the peer's queue, where `host.info` can block for ~7 s: channel
+    /// bytes must keep flowing while a request runs, and a handler waiting on a channel's
+    /// bytes from the peer's queue would otherwise deadlock against itself. So this must not
+    /// block (`ChannelMux.receive` does not). A frame racing the peer's close may land after
+    /// the mux is shut down; the mux drops it. Set before `start`. Nil drops binary.
     var onBinary: (@Sendable (DarwinHostPeer, Data) -> Void)?
 
     // Confined to `queue`.
@@ -110,8 +114,10 @@ final class DarwinHostServer: @unchecked Sendable {
     /// `endpoints` maps the bound port to this Mac's addresses for `helloAck`; `main.swift`
     /// passes `LocalEndpoints.advertised`. Defaults to none so a loopback test's controller is
     /// not handed the developer's real interfaces to store.
+    /// `probe` is injectable only so a test can make `host.info` slow on purpose.
     init(root: URL, port: NWEndpoint.Port?, hostName: @escaping @Sendable () -> String,
-         endpoints: @escaping @Sendable (UInt16) -> [String] = { _ in [] }) {
+         endpoints: @escaping @Sendable (UInt16) -> [String] = { _ in [] },
+         probe: HostInfoProbe? = nil) {
         self.root = root
         requestedPort = port
         self.hostName = hostName
@@ -121,7 +127,7 @@ final class DarwinHostServer: @unchecked Sendable {
         let advertisedPort = LockedPort()
         self.advertisedPort = advertisedPort
         core = HostServerCore(hostName: hostName,
-                              probe: HostInfoProbe(stateRoot: root, hostdVersion: darwinHostdVersion),
+                              probe: probe ?? HostInfoProbe(stateRoot: root, hostdVersion: darwinHostdVersion),
                               endpoints: { advertisedPort.value.map(endpoints) ?? [] })
         identities = HostTransport.PeerIdentities(queue: queue)
     }
@@ -394,10 +400,10 @@ final class DarwinHostServer: @unchecked Sendable {
                 let text = String(decoding: data, as: UTF8.self)
                 peer.queue.async { [core] in core.receive(text: text, from: peer) }
             } else if meta?.opcode == .binary, let data, let onBinary {
-                // The peer's queue, not `queue`: a mux frame must stay ordered with the
-                // request that names its channel, and off the listener's queue for the
-                // reason `DarwinHostPeer.queue` gives.
-                peer.queue.async { onBinary(peer, data) }
+                // Directly, for the reason `onBinary` gives. Ordering against the text
+                // request that names the channel does not matter: the mux holds bytes for an
+                // unclaimed channel until the request claims it.
+                onBinary(peer, data)
             }
             receive(on: peer)
         }

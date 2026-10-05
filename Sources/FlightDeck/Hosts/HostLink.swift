@@ -585,7 +585,8 @@ final class NetworkHostConnection: HostLinkConnection {
                         completion: .contentProcessed { _ in })
     }
 
-    /// One `ChannelMux` frame, on the same connection as `send(_:)` so the two keep call order.
+    /// One `ChannelMux` frame. Ordered with other calls made here, but `HostLink` reaches this
+    /// through a main-queue hop, so it is not ordered with text it sends directly.
     func send(binary: Data) {
         let metadata = NWProtocolWebSocket.Metadata(opcode: .binary)
         let context = NWConnection.ContentContext(identifier: "channel", metadata: [metadata])

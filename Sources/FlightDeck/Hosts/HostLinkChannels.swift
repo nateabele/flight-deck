@@ -31,7 +31,10 @@ extension HostLink {
         let mux = ChannelMux(role: .controller) { [weak connection] data in
             // The mux sends from whatever task wrote. The main queue is FIFO, so frames
             // from one writer reach the socket in the order it wrote them; a Task per
-            // frame would not promise that, and reordered data is corrupted data.
+            // frame would not promise that, and reordered data is corrupted data. That is
+            // the only order kept: a text request sent after these may overtake them, which
+            // is harmless because the host holds an unclaimed channel's bytes until the
+            // request naming it arrives.
             DispatchQueue.main.async {
                 MainActor.assumeIsolated { connection?.send(binary: data) }
             }

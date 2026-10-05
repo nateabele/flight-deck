@@ -49,6 +49,12 @@ public final class ChannelMux: ChannelOpening, ChannelAccepting, @unchecked Send
         case host
     }
 
+    /// Peer channels the host holds before anyone claims them. Each is bounded by the
+    /// window, so this bounds the pre-accept bytes too (32 x 256 KiB = 8 MiB): without it an
+    /// authenticated but broken peer could open ids without end and make us hold a window
+    /// for each.
+    public static let maxUnclaimed = 32
+
     private let role: Role
     private let send: @Sendable (Data) -> Void
     private let lock = NSLock()
@@ -156,6 +162,13 @@ public final class ChannelMux: ChannelOpening, ChannelAccepting, @unchecked Send
         } else if isPeerID(id) {
             // A close for a channel we never saw needs no answer; just never let it open.
             if frame.kind == .close { closedIDs.insert(id); return }
+            // Nor does a credit: the peer cannot have consumed bytes we never sent, and a
+            // channel created by one would sit against the cap with nothing behind it.
+            if frame.kind == .credit { return }
+            if incomingContinuation == nil,
+               channels.values.lazy.filter({ !$0.claimed }).count >= Self.maxUnclaimed {
+                return violation(id, &effects)
+            }
             channel = Channel(id: id, mux: self)
             channels[id] = channel
             if let incomingContinuation {
@@ -373,7 +386,17 @@ public final class ChannelMux: ChannelOpening, ChannelAccepting, @unchecked Send
             self.mux = mux
         }
 
+        /// Cancelling the writing task cancels the channel, as for `read`: a write cut short
+        /// has already sent part of `data`, so the stream is torn either way.
         func write(_ data: Data) async throws {
+            try await withTaskCancellationHandler {
+                try await writeAll(data)
+            } onCancel: {
+                cancel()
+            }
+        }
+
+        private func writeAll(_ data: Data) async throws {
             var offset = data.startIndex
             while offset < data.endIndex {
                 // Writes are cut at `maxPayload` so channels sharing the connection interleave
@@ -385,7 +408,16 @@ public final class ChannelMux: ChannelOpening, ChannelAccepting, @unchecked Send
             }
         }
 
-        func read() async throws -> Data? { try await mux.read(self) }
+        /// Task cancellation cancels the channel, both ends: a read abandoned mid-stream
+        /// leaves a stream nobody can resume, and without this a cancelled task would stay
+        /// parked until the peer happened to write or close.
+        func read() async throws -> Data? {
+            try await withTaskCancellationHandler {
+                try await mux.read(self)
+            } onCancel: {
+                cancel()
+            }
+        }
         func finish() async { mux.finish(self) }
         func cancel() { mux.cancel(self) }
 

@@ -58,9 +58,10 @@ final class HostChannelLoopbackTests: XCTestCase {
         try? FileManager.default.removeItem(at: root)
     }
 
-    private func server(_ key: FleetDeviceKey, _ muxes: HostMuxes) async throws -> (DarwinHostServer, NWEndpoint.Port) {
+    private func server(_ key: FleetDeviceKey, _ muxes: HostMuxes,
+                        probe: HostInfoProbe? = nil) async throws -> (DarwinHostServer, NWEndpoint.Port) {
         try ControllerStore(root: root).add(.init(slot: key.slot, name: "t", secret: key.secret, pairedAt: Date()))
-        let server = DarwinHostServer(root: root, port: nil, hostName: { "loop" })
+        let server = DarwinHostServer(root: root, port: nil, hostName: { "loop" }, probe: probe)
         server.onBinary = { peer, data in muxes.receive(data, from: peer) }
         return (server, try await server.start())
     }
@@ -112,6 +113,39 @@ final class HostChannelLoopbackTests: XCTestCase {
         XCTAssertEqual(data, ChannelFrame(channel: 1, kind: .data, payload: Data("ping!".utf8)))
         let eof = try ChannelFrame(decoding: try await Self.receiveBinary(on: c))
         XCTAssertEqual(eof, ChannelFrame(channel: 1, kind: .eof))
+    }
+
+    /// Channel bytes do not queue behind a slow request on the same connection. `host.info`
+    /// runs on the peer's queue and can take ~7 s; binary delivered there stalled every
+    /// transfer for as long, and a handler waiting on channel bytes from that queue would
+    /// have deadlocked. Here every probe command takes 2 s, and the echo must come back first.
+    func testSlowHostInfoDoesNotDelayAChannel() async throws {
+        let key = FleetDeviceKey.mint(), muxes = HostMuxes()
+        let slow = HostInfoProbe(stateRoot: root, hostdVersion: "t") { _, _ in
+            Thread.sleep(forTimeInterval: 2)
+            return nil
+        }
+        let (server, port) = try await server(key, muxes, probe: slow); defer { server.stop() }
+        let c = NWConnection(to: HostTransport.endpoint(for: .hostPort(host: "127.0.0.1", port: port)),
+                             using: HostTransport.clientParameters(key: key))
+        defer { c.cancel() }
+        _ = try await LinuxHostdInteropTests.roundTrip(c, text: try HostWire.encode(HostClientFrame.hello(
+            protocolVersion: .current, capabilities: [.hostInfo], controllerName: "t")))
+
+        let request = try HostWire.encode(HostClientFrame.request(id: 1, .hostInfo))
+        let meta = NWProtocolWebSocket.Metadata(opcode: .text)
+        c.send(content: Data(request.utf8), contentContext: .init(identifier: "t", metadata: [meta]),
+               isComplete: true, completion: .contentProcessed { _ in })
+        let started = Date()
+        Self.sendBinary(ChannelFrame(channel: 1, kind: .data, payload: Data("ping".utf8)).encoded(), on: c)
+        Self.sendBinary(ChannelFrame(channel: 1, kind: .eof).encoded(), on: c)
+        let host = await muxes.first()
+        try await Self.echo(on: host, 1)
+
+        // The next message must be the echo, binary; the host.info reply (text) fails this.
+        let data = try ChannelFrame(decoding: try await Self.receiveBinary(on: c))
+        XCTAssertEqual(data, ChannelFrame(channel: 1, kind: .data, payload: Data("ping!".utf8)))
+        XCTAssertLessThan(Date().timeIntervalSince(started), 1.5, "the channel waited for host.info")
     }
 
     /// The controller's half: a channel from `HostLink.openChannel()` reaches the host's mux,

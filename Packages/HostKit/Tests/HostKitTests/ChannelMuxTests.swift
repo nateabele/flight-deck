@@ -413,4 +413,162 @@ final class ChannelMuxTests: XCTestCase {
         await fulfillment(of: [failed], timeout: 2)
         do { _ = try await pair.controller.open(); XCTFail("opened after shutdown") } catch {}
     }
+
+    // MARK: Fix round 1
+
+    /// Both directions at full speed at once, through the synchronous pair: each side's
+    /// writer delivers straight into the other's mux, which answers with credit straight
+    /// back. A lock held across `send`, or credit returned for arrival instead of
+    /// consumption, deadlocks or corrupts here. One channel carrying both ways, then two.
+    func testSimultaneousBidirectionalLargeStreams() async throws {
+        let size = 16 << 20
+        func pattern(_ seed: UInt8) -> Data {
+            var block = Data(count: 1 << 20)
+            block.withUnsafeMutableBytes { raw in
+                for i in 0..<raw.count { raw[i] = UInt8(truncatingIfNeeded: i &* 7 &+ Int(seed)) }
+            }
+            return block
+        }
+        func expected(_ seed: UInt8) -> UInt64 {
+            var c = Checksum(); let b = pattern(seed)
+            for _ in 0..<(size >> 20) { c.add(b) }
+            return c.final
+        }
+        func pump(_ out: any ByteChannel, _ into: any ByteChannel, seed: UInt8) async throws -> (Int, UInt64) {
+            let block = pattern(seed)
+            let writer = Task {
+                for _ in 0..<(size >> 20) { try await out.write(block) }
+                await out.finish()
+            }
+            let reader = Task { () throws -> (Int, UInt64) in
+                var c = Checksum()
+                while let chunk = try await into.read() { c.add(chunk) }
+                return (c.count, c.final)
+            }
+            try await writer.value
+            return try await reader.value
+        }
+
+        for channels in [1, 2] {
+            let pair = MuxPair()
+            let up = try await pair.controller.open()
+            let upHost = try await pair.host.accept(up.id)
+            let (downHost, down): (any ByteChannel, any ByteChannel)
+            if channels == 1 {
+                (downHost, down) = (upHost, up)
+            } else {
+                let opened = try await pair.host.open()
+                downHost = opened
+                down = try await pair.controller.accept(opened.id)
+            }
+            async let a = pump(up, upHost, seed: 1)
+            async let b = pump(downHost, down, seed: 2)
+            let (ra, rb) = try await (a, b)
+            XCTAssertEqual(ra.0, size, "\(channels) channel(s): upstream count")
+            XCTAssertEqual(ra.1, expected(1), "\(channels) channel(s): upstream bytes")
+            XCTAssertEqual(rb.0, size, "\(channels) channel(s): downstream count")
+            XCTAssertEqual(rb.1, expected(2), "\(channels) channel(s): downstream bytes")
+        }
+    }
+
+    /// A writer parked for credit on a channel its own side then finishes must fail, not sit
+    /// parked for credit that a finished channel will never use.
+    func testFinishWakesAParkedWriter() async throws {
+        let pair = MuxPair()
+        let a = try await pair.controller.open()
+        _ = try await pair.host.accept(a.id)
+        let failed = expectation(description: "parked write failed")
+        Task {
+            do { try await a.write(Data(count: Int(ChannelFrame.initialCredit) + 1)) } catch { failed.fulfill() }
+        }
+        try await Task.sleep(nanoseconds: 100_000_000)  // parked at zero credit
+        await a.finish()
+        await fulfillment(of: [failed], timeout: 2)
+    }
+
+    func testShutdownFailsAParkedWriter() async throws {
+        let pair = MuxPair()
+        let a = try await pair.controller.open()
+        let failed = expectation(description: "parked write failed")
+        Task {
+            do { try await a.write(Data(count: Int(ChannelFrame.initialCredit) + 1)) } catch {
+                XCTAssertEqual(error as? ChannelMuxError, .shutdown)
+                failed.fulfill()
+            }
+        }
+        try await Task.sleep(nanoseconds: 100_000_000)
+        pair.controller.shutdown()
+        await fulfillment(of: [failed], timeout: 2)
+    }
+
+    /// A loop over `accept()` must end when the connection does, not wait forever.
+    func testAcceptStreamFinishesOnShutdown() async throws {
+        let pair = MuxPair()
+        let stream = pair.controller.accept()
+        let ended = expectation(description: "stream ended")
+        Task { for await _ in stream {}; ended.fulfill() }
+        pair.controller.shutdown()
+        await fulfillment(of: [ended], timeout: 2)
+    }
+
+    /// A cancelled task's read or write must return rather than stay parked; cancelling it
+    /// cancels the channel, both ends, since the stream is now torn.
+    func testTaskCancellationEndsParkedReadAndWrite() async throws {
+        let pair = MuxPair()
+        let a = try await pair.controller.open()
+        let b = try await pair.host.accept(a.id)
+        let reader = Task { _ = try await a.read() }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        reader.cancel()
+        do { try await reader.value; XCTFail("cancelled read returned normally") } catch {}
+        do { _ = try await b.read(); XCTFail("the peer never heard of the cancel") } catch {}
+
+        let c = try await pair.controller.open()
+        _ = try await pair.host.accept(c.id)
+        let writer = Task { try await c.write(Data(count: Int(ChannelFrame.initialCredit) + 1)) }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        writer.cancel()
+        do { try await writer.value; XCTFail("cancelled write returned normally") } catch {}
+    }
+
+    /// Unclaimed peer channels are capped: each is bounded by the window, but an
+    /// authenticated peer could otherwise open ids without end and make the host hold
+    /// 256 KiB for each. Past the cap a new id is closed; claimed ones do not count.
+    func testUnclaimedPeerChannelsAreCapped() async throws {
+        let pair = MuxPair()
+        var ids: [ChannelID] = []
+        for _ in 0..<ChannelMux.maxUnclaimed {
+            let c = try await pair.controller.open()
+            try await c.write(Data([1]))
+            ids.append(c.id)
+        }
+        let over = try await pair.controller.open()
+        try await over.write(Data([1]))
+        do { _ = try await pair.host.accept(over.id); XCTFail("past the cap still opened") } catch {}
+        do { _ = try await over.read(); XCTFail("the controller's end stayed open") } catch {}
+
+        // Claiming one frees a place.
+        _ = try await pair.host.accept(ids[0])
+        let next = try await pair.controller.open()
+        try await next.write(Data([1]))
+        _ = try await pair.host.accept(next.id)
+    }
+
+    /// A credit frame for a channel never seen is noise, not an open: it must not create a
+    /// channel, which would count against the unclaimed cap and surface on `accept()` with
+    /// nothing behind it.
+    func testCreditForAnUnknownChannelIsDropped() async throws {
+        let pair = MuxPair()
+        let stream = pair.host.accept()
+        let surfaced = expectation(description: "a channel surfaced")
+        surfaced.isInverted = true
+        surfaced.assertForOverFulfill = false
+        let watcher = Task { for await _ in stream { surfaced.fulfill() } }
+        for id in stride(from: ChannelID(1), through: 9, by: 2) {
+            pair.host.receive(binary: ChannelFrame.credit(channel: id, bytes: 10).encoded())
+        }
+        await fulfillment(of: [surfaced], timeout: 0.3)
+        XCTAssertEqual(pair.framesToController, 0, "answered a stray credit")
+        watcher.cancel()
+    }
 }
