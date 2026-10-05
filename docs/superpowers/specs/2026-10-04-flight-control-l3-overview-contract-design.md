@@ -125,9 +125,7 @@ swarm skips it. It is never silently repaired.
 
 ## 5. Adapter capabilities
 
-Added to `AgentAdapter` as a new protocol, `AgentRoutingCapabilities`. Every adapter conforms.
-A capability that an adapter cannot provide returns an explicit "unsupported" value, never a
-fake one.
+A separate `@MainActor` protocol, `AgentRoutingCapabilities`, with one conformer per agent, held in `RoutingCapabilityRegistry` (`Sources/FlightDeck/FlightControl/AgentRoutingCapabilities.swift`). Not on `AgentAdapter`: adapters are built per account, these answers are per agent. Session-specific calls take the `Session`. `RoutingCapabilityRegistry.standard()` switches exhaustively over `AgentID`, so a new agent case must state its answers to compile.
 
 | Capability | Type | Used by |
 |---|---|---|
@@ -176,12 +174,12 @@ All in IntakeKit (pure, Foundation only) unless noted.
 
 ```swift
 protocol KindRegistry      { func kinds(project: URL) -> [TaskKind]; func propose(_: TaskKind, project: URL) throws }
-protocol Router            { func assign(kind: TaskKind, project: URL, catalog: AdapterCatalogs) -> Assignment }
+protocol Router            { func assign(kind: TaskKind, project: URL, catalog: AdapterCatalogs, now: Date) -> Assignment; func spill(_: ExecutionBlock, kind: TaskKind, project: URL, exhausted: Set<PoolID>, catalogs: AdapterCatalogs, now: Date) -> Assignment? }
 protocol CapabilityIndex   { func rank(kind: TaskKind, candidates: [ModelRef]) -> [ScoredModel]; var snapshotDate: Date? { get } }
 protocol CapacityReader    { func headroom(pool: PoolID) -> [AccountHeadroom] }
 protocol PoolAllocator     { func lease(pool: PoolID) -> AccountLease?; func release(_: AccountLease) }
 protocol HandoffPlanner    { func request(for: SwarmAgent) -> HandoffRequest? }
-protocol SwarmSpawner      { func spawn(task: TaskRef, block: ExecutionBlock, lease: AccountLease?) async -> Result<SessionRef, SpawnError> }   // FlightDeck target
+protocol SwarmSpawner      { func spawn(task: TaskRef, block: ExecutionBlock, lease: AccountLease?, firstPrompt: String?) async -> Result<SessionRef, SpawnError> }   // FlightDeck target
 protocol UsageMeterSource  { var readings: AsyncStream<UsageReading> { get } }
 ```
 
@@ -197,6 +195,7 @@ windows, readAt, source), `UsageWindow` (name, utilization 0–1, resetsAt), `Ha
 - A fake for every protocol in `Tests/FlightDeckTests/FlightControlL3/Fakes/`, each scriptable
   and recording its calls.
 - `FakeAdapter`, a third adapter conformer, so "any adapter" is tested from day one.
+- `FakeAdapter` is `FakeRoutingCapabilities` with harness `"fake"`, not an `AgentAdapter` conformer.
 - Fixture tasks: br JSON with valid, invalid, pinned and missing execution blocks.
 - A fixture kind registry with seed, planning-proposed and merged kinds.
 - A fixture usage timeline: readings that cross soft, then hard, then reset.
