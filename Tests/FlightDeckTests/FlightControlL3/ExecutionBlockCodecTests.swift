@@ -137,11 +137,43 @@ final class ExecutionBlockCodecTests: XCTestCase {
                        .failure(.invalidField("v", "must be at least 1")))
     }
 
-    func testDecodeRejectsBooleanAsPinned() {
+    func testDecodeRejectsNonBooleanPinned() {
         func ctx(_ exec: String) -> String { #"{"flight_deck":{"execution":"# + exec + "}}" }
         let src = #""source":{"by":"rule","reason":"r","at":"2026-10-04T18:00:00Z"}"#
+        // 1 and 0 should be rejected
+        XCTAssertEqual(ExecutionBlockCodec.decode(agentContext: ctx(#"{"v":1,"kind":"k","harness":"h","model":"m","pool":"p","pinned":1,"# + src + "}")),
+                       .failure(.invalidField("pinned", "not a boolean")))
+        XCTAssertEqual(ExecutionBlockCodec.decode(agentContext: ctx(#"{"v":1,"kind":"k","harness":"h","model":"m","pool":"p","pinned":0,"# + src + "}")),
+                       .failure(.invalidField("pinned", "not a boolean")))
         // true from JSON should decode fine
         let ctxWithTrue = ctx(#"{"v":1,"kind":"k","harness":"h","model":"m","pool":"p","pinned":true,"# + src + "}")
         XCTAssertNotNil(try ExecutionBlockCodec.decode(agentContext: ctxWithTrue).get())
+    }
+
+    func testDecodeVMissing() {
+        func ctx(_ exec: String) -> String { #"{"flight_deck":{"execution":"# + exec + "}}" }
+        let src = #""source":{"by":"rule","reason":"r","at":"2026-10-04T18:00:00Z"}"#
+        XCTAssertEqual(ExecutionBlockCodec.decode(agentContext: ctx(#"{"kind":"k","harness":"h","model":"m","pool":"p","# + src + "}")),
+                       .failure(.missingField("v")))
+    }
+
+    func testDecodeVBoolean() {
+        func ctx(_ exec: String) -> String { #"{"flight_deck":{"execution":"# + exec + "}}" }
+        let src = #""source":{"by":"rule","reason":"r","at":"2026-10-04T18:00:00Z"}"#
+        XCTAssertEqual(ExecutionBlockCodec.decode(agentContext: ctx(#"{"v":true,"kind":"k","harness":"h","model":"m","pool":"p","# + src + "}")),
+                       .failure(.invalidField("v", "not an integer")))
+    }
+
+    func testDecodeFlightDeckNull() {
+        let ctx = #"{"flight_deck":null,"other":"data"}"#
+        XCTAssertNil(try ExecutionBlockCodec.decode(agentContext: ctx).get())
+    }
+
+    func testEncodeIntoFlightDeckNull() {
+        let ctx = #"{"flight_deck":null,"other":"data"}"#
+        let json = try! ExecutionBlockCodec.encode(block(), into: ctx)
+        let obj = try! JSONSerialization.jsonObject(with: Data(json.utf8)) as! [String: Any]
+        XCTAssertNotNil(obj["flight_deck"])
+        XCTAssertEqual(obj["other"] as? String, "data")
     }
 }

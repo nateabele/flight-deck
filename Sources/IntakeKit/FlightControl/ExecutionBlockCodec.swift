@@ -28,11 +28,8 @@ public enum ExecutionBlockCodec {
     }
 
     private static func isBooleanType(_ value: Any) -> Bool {
-        if value is Bool { return true }
-        if let num = value as? NSNumber {
-            return CFGetTypeID(num as CFTypeRef) == CFBooleanGetTypeID()
-        }
-        return false
+        guard let num = value as? NSNumber else { return false }
+        return CFGetTypeID(num as CFTypeRef) == CFBooleanGetTypeID()
     }
 
     private static func isIntegerType(_ value: Any) -> Bool {
@@ -97,8 +94,7 @@ public enum ExecutionBlockCodec {
 
         let pinned: Bool
         if let p = e["pinned"], !(p is NSNull) {
-            guard isBooleanType(p) else { return .failure(.invalidField("pinned", "not a boolean")) }
-            guard let b = p as? Bool else { return .failure(.invalidField("pinned", "not a boolean")) }
+            guard isBooleanType(p), let b = (p as? NSNumber)?.boolValue else { return .failure(.invalidField("pinned", "not a boolean")) }
             pinned = b
         } else { pinned = false }
         var host: String? = nil
