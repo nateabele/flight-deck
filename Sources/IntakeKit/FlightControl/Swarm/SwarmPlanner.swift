@@ -10,3 +10,17 @@ public enum SwarmPlanner {
         ready.filter { filter.admits($0.id) && !taken.contains($0.id) }
     }
 }
+
+extension SwarmPlanner {
+    /// Spec §4 step 4: an idle agent with the same config key whose account is still under soft
+    /// (`unknown` counts, as the allocator's own order does). The agent that has waited longest
+    /// goes first, so work spreads instead of piling onto the most recently finished tab.
+    public static func reuseCandidate(for key: ConfigKey, in agents: [SwarmAgentRecord],
+                                      isAvailable: (UUID) -> Bool,
+                                      headroom: (SwarmAgentRecord) -> HeadroomState) -> SwarmAgentRecord? {
+        agents
+            .filter { $0.state == .idle && !$0.excludedFromReuse && $0.config == key && isAvailable($0.session) }
+            .filter { [HeadroomState.underSoft, .unknown].contains(headroom($0)) }
+            .min { $0.stateSince < $1.stateSince }
+    }
+}

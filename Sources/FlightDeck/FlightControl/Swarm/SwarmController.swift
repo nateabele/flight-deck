@@ -97,8 +97,15 @@ final class SwarmController {
         record.unroutable = unroutable
     }
 
-    /// Where a task's agent comes from. Tasks 7b and 7c replace this body (reuse, spill, caps).
+    /// Reuse is checked before leasing (deviation 3): an idle agent already holds a lease on an
+    /// account under soft, and leasing first would hold two for one agent.
     func plan(_ task: ReadyTask, block: ExecutionBlock, allowReuse: Bool = true) async -> LaunchPlan {
+        if allowReuse, let agent = SwarmPlanner.reuseCandidate(
+            for: ConfigKey(block), in: record.agents,
+            isAvailable: { [deps] id in deps.host.sessionExists(id) && deps.host.isAgentIdle(id) },
+            headroom: { [weak self] in self?.headroom(of: $0) ?? .unknown }) {
+            return .reuse(session: agent.session)
+        }
         if let lease = deps.allocator.lease(pool: block.pool) { return .spawn(block: block, lease: lease) }
         return .waiting("no account in \(block.pool) is under its soft limit")
     }
@@ -122,7 +129,8 @@ final class SwarmController {
 
     private func run(_ plan: LaunchPlan, for task: ReadyTask) async {
         switch plan {
-        case .waiting, .reuse: return
+        case .waiting: return
+        case .reuse(let session): await reuse(session, for: task)
         case .spawn(let block, let lease): await spawn(block, lease: lease, for: task)
         }
     }
@@ -142,6 +150,35 @@ final class SwarmController {
             log(.spawn, task: task.id, session: ref.id, detail: "\(ref.agentName ?? "?") on \(key)")
             await claimAndPrompt(task, session: ref.id)
         }
+    }
+
+    private func reuse(_ session: UUID, for task: ReadyTask) async {
+        guard let agent = record.agent(session) else { return }
+        log(.reuse, task: task.id, session: session, detail: agent.agentName)
+        // Reservations first (Review Focus): a reused agent still holds its last task's files, and
+        // would block every other agent's commit on them.
+        if !(await deps.backend.releaseReservations(agent: agent.agentName, project: project)) {
+            log(.error, session: session, detail: "could not release \(agent.agentName)'s reservations")
+        }
+        deps.host.wakeIfAsleep(session)
+        guard await deps.launcher.resetContext(session) else {
+            record.update(session) {
+                $0.state = .idle; $0.stateSince = now(); $0.excludedFromReuse = true; $0.marker = "reset failed"
+            }
+            log(.resetFailed, task: task.id, session: session, detail: "spawning a fresh agent instead")
+            // Spec §10: spawn a new agent instead. The task is still unclaimed.
+            if case .spawn(let block, let lease) = await plan(task, block: agent.block.block, allowReuse: false) {
+                pendingSpawns[block.pool, default: 0] += 1
+                await spawn(block, lease: lease, for: task)
+            }
+            return
+        }
+        await claimAndPrompt(task, session: session)
+    }
+
+    func headroom(of agent: SwarmAgentRecord) -> HeadroomState {
+        guard let lease = agent.lease?.lease else { return .unknown }
+        return deps.capacity.headroom(for: lease)?.state ?? .unknown
     }
 
     /// Spec §4 steps 5–7. The claim comes after the spawn because it names the agent the spawn
@@ -207,4 +244,11 @@ final class SwarmController {
     }
 
     private func changed() { onChange(record) }
+}
+
+extension CapacityReader {
+    /// The headroom row for the account a lease holds, or nil when the reader does not list it.
+    func headroom(for lease: AccountLease) -> AccountHeadroom? {
+        headroom(pool: lease.pool).first { $0.account == lease.account }
+    }
 }
