@@ -194,10 +194,15 @@ struct AccountMeterBar: View {
             MeterTrack(fraction: model.fraction, soft: model.soft, hard: model.hard, state: model.state).frame(height: 6)
             Text(caption).font(.caption).foregroundStyle(.secondary).lineLimit(2)
         }
-        .accessibilityElement(children: .ignore)
-        .accessibilityIdentifier("meter-bar")
-        .accessibilityLabel(model.label)
-        .accessibilityValue(model.accessibilityValue)
+        // A VStack with ignored children surfaces on macOS as an AXGroup, and XCUITest reads an
+        // empty `value` off a group even when SwiftUI set one (the Meter Gallery UI test saw ""
+        // for every bar). A Text surfaces as static text, whose AXValue is its string, so the
+        // reading is carried as that string and the account name as the label. Visuals unchanged.
+        .accessibilityRepresentation {
+            Text(model.accessibilityValue)
+                .accessibilityLabel(model.label)
+                .accessibilityIdentifier("meter-bar")
+        }
     }
 
     private var caption: String { [model.resetText, model.sourceText, model.detail].compactMap { $0 }.joined(separator: " · ") }
