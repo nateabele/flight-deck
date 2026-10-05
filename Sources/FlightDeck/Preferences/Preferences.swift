@@ -156,6 +156,10 @@ struct Preferences: Codable, Equatable {
     /// Points. Optional for exactly the reason `confirmations` is — see that property's comment.
     /// `nil` means "never changed", which resolves to libghostty's configured `font-size`.
     var terminalFontSize: Float?
+    /// Flight Control's pools and hand-off settings (L3-U). Optional for exactly the reason
+    /// `confirmations` is — see that property's comment. `nil` means "never configured": the
+    /// default pools and hand-off settings.
+    var capacity: CapacityPreferences?
 
     init(
         globalFlags: FlagSet = FlagSet(),
@@ -170,7 +174,8 @@ struct Preferences: Codable, Equatable {
         pairedDevices: [PairedDevice]? = nil,
         installID: UUID? = nil,
         fleetPort: UInt16? = nil,
-        terminalFontSize: Float? = nil
+        terminalFontSize: Float? = nil,
+        capacity: CapacityPreferences? = nil
     ) {
         self.globalFlags = globalFlags
         self.projectFlags = projectFlags
@@ -185,6 +190,7 @@ struct Preferences: Codable, Equatable {
         self.installID = installID
         self.fleetPort = fleetPort
         self.terminalFontSize = terminalFontSize
+        self.capacity = capacity
     }
 
     /// Falls back to claude-then-codex so a `Preferences` that has never been migrated

@@ -127,6 +127,17 @@ final class PreferencesStore: ObservableObject {
 
     func account(id: UUID) -> AgentAccount? { preferences.accounts.first { $0.id == id } }
 
+    /// Settings → Capacity, defaults filled. A read, so callers never write a default back by
+    /// accident and rewrite `preferences.v1` on a pure lookup.
+    var capacity: CapacityPreferences { preferences.capacity ?? CapacityPreferences() }
+
+    /// One edit, one write: `preferences`' `didSet` persists once per assignment.
+    func updateCapacity(_ edit: (inout CapacityPreferences) -> Void) {
+        var next = capacity
+        edit(&next)
+        preferences.capacity = next
+    }
+
     /// The account a new session for `agent` in `project` launches under. nil is BROKEN — an
     /// explicit assignment that no longer resolves must never silently become another login.
     func account(for agent: AgentID, project: String) -> AgentAccount? {
