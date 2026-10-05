@@ -110,7 +110,7 @@ final class RoutingUITests: XCTestCase {
         let badge = prefs.staticTexts["kind-new-snapshot-tests"]
         XCTAssertTrue(badge.waitForExistence(timeout: 5), "a planning-proposed kind starts out new")
         shot(prefs, "kinds-new")
-        prefs.staticTexts["Snapshot tests"].click()
+        prefs.staticTexts["Snapshot tests"].firstMatch.click()
         waitUntilGone(badge, "opening a kind clears its badge")
 
         prefs.popUpButtons["kind-merge-picker"].click()
@@ -120,14 +120,14 @@ final class RoutingUITests: XCTestCase {
         waitFor(prefs.staticTexts["kind-note"], labelContains: "Re-routed")
         shot(prefs, "kinds-merged")
 
-        prefs.staticTexts["Algorithm"].click()
+        prefs.staticTexts["Algorithm"].firstMatch.click()
         let rename = prefs.textFields["kind-rename-field"]
         XCTAssertTrue(rename.waitForExistence(timeout: 5))
         rename.click()
         rename.typeKey("a", modifierFlags: .command)
         rename.typeText("Algorithms and data structures")
         prefs.buttons["kind-rename-apply"].click()
-        XCTAssertTrue(prefs.staticTexts["Algorithms and data structures"].waitForExistence(timeout: 5))
+        XCTAssertTrue(prefs.staticTexts["Algorithms and data structures"].firstMatch.waitForExistence(timeout: 5))
         shot(prefs, "kinds-renamed")
     }
 }
