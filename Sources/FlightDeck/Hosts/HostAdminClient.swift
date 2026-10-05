@@ -25,6 +25,15 @@ final class SMAppServiceAgent: AgentServiceRegistering {
     func unregister() throws { try service.unregister() }
 }
 
+/// An agent that is never registered and registers nothing: what a UITest reset launch gets,
+/// so toggling Hosting in a UI test cannot install a LaunchAgent under the developer's login
+/// that binds port 47410 and outlives the run.
+final class InertAgentService: AgentServiceRegistering {
+    var status: SMAppService.Status { .notRegistered }
+    func register() throws {}
+    func unregister() throws {}
+}
+
 /// The Hosting tab's model: whether this Mac's hostd is registered and running, its pairing
 /// window, and the controllers paired with it — all read from the hostd's admin socket.
 ///

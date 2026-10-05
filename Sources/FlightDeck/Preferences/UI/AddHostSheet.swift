@@ -228,7 +228,9 @@ struct AddHostSheet: View {
                 .accessibilityIdentifier("add-host-install-unpublished")
         }
 
-        Text("Then run `flightdeck-hostd pair` there and enter the code it prints.")
+        // The installer ends by exec'ing `pair` itself, so telling the user to run it again
+        // would arm a second code that replaces the one already on their screen.
+        Text("The installer finishes by printing a pairing code. Enter the machine's address and that code below. If the code expires, run `flightdeck-hostd pair` there for a new one.")
             .font(.callout)
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)

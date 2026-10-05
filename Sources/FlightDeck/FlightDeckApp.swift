@@ -219,12 +219,14 @@ struct FlightDeckApp: App {
     /// The Hosting tab's model. Inert until that tab is shown: it reads nothing at
     /// construction, and its admin poll runs only while the tab is visible.
     ///
-    /// Under a UITest reset its admin socket is a path nothing listens on, so a reset run
-    /// never reads, arms or revokes the developer's real hostd.
+    /// Under a UITest reset its admin socket is a path nothing listens on and its LaunchAgent is
+    /// `InertAgentService`, so a reset run never reads, arms or revokes the developer's real
+    /// hostd, and never registers (or unregisters) the real `dev.flightdeck.hostd` agent.
     @MainActor
     private static func makeHostingController() -> HostingController {
         guard !isResettingState else {
-            return HostingController(adminPath: "/tmp/fd-uitest-\(UUID().uuidString.prefix(8)).sock")
+            return HostingController(service: InertAgentService(),
+                                     adminPath: "/tmp/fd-uitest-\(UUID().uuidString.prefix(8)).sock")
         }
         return HostingController(adminPath: HostingController.defaultAdminPath)
     }

@@ -135,7 +135,7 @@ three ways, by what each side can link:
 
 | Piece | Compiles on | Holds |
 |---|---|---|
-| `Packages/HostKit` | macOS and Linux | Everything that is not transport: the host wire, `HostServerCore` (answers `hello`/`host.info`, owns peers by slot), `ControllerStore`, `HostInfoProbe`, `PairingWindow`, the admin socket. Foundation only. |
+| `Packages/HostKit` | macOS and Linux | Everything that is not transport: the host wire, `HostServerCore` (answers `hello`/`host.info`, owns peers by slot), `ControllerStore`, `HostInfoProbe`, `PairingWindow`, the admin socket, and `HostEndpoints` (the `getifaddrs` walk and the address ranking the phone's `LocalEndpoints` and both hostds share). Foundation only. |
 | `Sources/HostDaemon` | macOS | `DarwinHostServer`: `HostTransport` (Network.framework TLS-PSK + WebSocket) feeding `HostServerCore`. Embedded in the app and registered as a LaunchAgent. |
 | `Packages/HostDaemonLinux` | Linux | The same wiring on SwiftNIO (`PSKWebSocketServer`), the SPAKE2 responder (`NIOPairingResponder`), the CLI. A standalone SwiftPM package, built only in Docker. |
 
@@ -153,8 +153,8 @@ SPAKE2 transcript is one source file compiled twice, not two copies that could d
   0x008D, 0xC035, 0xC036 and 0xCCAC; Darwin's default offer is 0x00A8/A9/AF/AE, so the handshake
   died with `NO_SHARED_CIPHER`. The maintainer's ruling: **host connections and host pairing use 0xCCAC
   (`ECDHE-PSK-CHACHA20-POLY1305`) over TLS 1.2; the phone keeps 0x00A8.** Result: Darwin
-  negotiated 0xCCAC against swift-nio-ssl, a handshake plus echo round trip took 13 ms, a wrong
-  key is refused. Darwin can only *append* suites, so a Mac host listener would still accept
+  negotiated 0xCCAC against swift-nio-ssl, a handshake plus echo round trip took 13 ms (from the
+  task report, not rerun), a wrong key is refused. Darwin can only *append* suites, so a Mac host listener would still accept
   0x00A8 from a client that offered it; the suite is pinned on the Linux end and preferred on
   Darwin (`HostTransport`, `FleetTLS.hostSuites`). Never pin a TLS 1.3 minimum: Darwin's PSK
   silently breaks.
@@ -179,7 +179,9 @@ under the 15-character label limit. On Linux, avahi's `avahi-publish` is used if
 without it nothing is advertised and the user types the address.
 
 **The admin socket's trust model.** `<state root>/admin.sock` is how the Hosting tab and
-`flightdeck-hostd pair|status|revoke` drive a *running* hostd (arm, list, revoke). The boundary is
+`flightdeck-hostd pair|status|controllers|revoke` drive a *running* hostd (arm, list, revoke).
+On a Linux host, `flightdeck-hostd controllers` (`--json` for JSON) prints each paired controller's
+slot, name and pairing time; the slot is what `flightdeck-hostd revoke SLOT` takes. The boundary is
 the filesystem: a `0600` unix socket in a directory the user owns and that is not group- or
 other-writable, checked before bind. It is not authenticated beyond that, so anything running as the
 same user can arm a window, which is already equivalent to that user's other powers. A new hostd
@@ -195,12 +197,33 @@ controller's live connection within a second and refuses its next connect.
 **Placement, and the open question.** The macOS hostd is a LaunchAgent, so it runs in the GUI login
 session (it stops at logout, which the Hosting tab says). That placement is the spec's bet for
 sub-project C: XCTest UI runs need a GUI session. **That bet (probe P3) is unverified** until C
-runs a UI suite from a hostd. Linux is a systemd *user* unit with linger enabled.
+runs a UI suite from a hostd. The `SMAppService` registration itself is unverified live too: the
+tests drive a fake agent, and no agent has registered the real one from an installed build. Linux
+is a systemd *user* unit with linger enabled — **unverified live**: the installer is tested only
+against stub `systemctl`/`loginctl`, never on a real systemd host, so "survives logout" is the
+design, not an observation.
 
 **Controller link.** `HostLink` races every stored endpoint plus any Bonjour result in parallel; the
 first `helloAck` wins. It pings every 15 s and drops after three unanswered pings, backs off 1, 2, 4,
-8, 16 then 30 s, and an `NWPathMonitor` change resets the backoff, so an address change (Wi-Fi to
-Tailscale) needs no re-pairing. A major-version mismatch is refused with "Update Flight Deck on
+8, 16 then 30 s, and an `NWPathMonitor` change resets the backoff.
+
+**Reaching a host off the LAN (Tailscale).** The controller can only learn the address that
+answered, and a host paired over Bonjour answers on its LAN address, so on its own a controller
+would never hold the host's tailnet address and would lose the host the moment the laptop left the
+room. So **hosts report their own addresses**: `helloAck` carries an optional `endpoints` list
+(`host:port`, IPv6 bracketed; omitted when empty, and absent decodes to `[]`, so older hosts and
+controllers interoperate). The macOS hostd fills it from the app's own `LocalEndpoints` ranking (the
+file is compiled into the hostd target too), the Linux hostd from a `getifaddrs` walk with no primary
+interface; both drop loopback and link-local, rank a Tailscale (CGNAT `100.64/10`) tunnel first, and
+cap the list at four (`HostEndpoints.advertised`). On each win the controller merges the address
+that answered, the advertised list and what it had stored (`HostLink.mergedEndpoints`), keeps at most
+four (`HostRecord.maxEndpoints`, not the phone's QR-bound two) with a LAN and a tailnet address both
+kept when both exist, and persists that in `hosts.json`. The next race dials them all, so a laptop
+that moves from Wi-Fi to Tailscale reaches the host through the tailnet address it learned while
+still on the LAN. The spec's "Bonjour, then last-known, then Tailscale" is therefore a race of all
+three, not a sequence. Unverified live: the unit tests drive a scripted network
+(`testAdvertisedTailnetAddressReachesTheHostOnceTheLANOneGoesStale`); the real Wi-Fi-to-Tailscale
+move is on the maintainer's GUI checklist. A major-version mismatch is refused with "Update Flight Deck on
 <name>". The Mac's own control socket answers `host.list` and `host.info` for the CLI
 (`HostProjection`), and the phone's connector ignores those replies.
 

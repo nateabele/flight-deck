@@ -2321,6 +2321,21 @@ What is open, in the order it will bite:
 
 ### Not built, not done
 
+- **MUST-FIX before the first `hostd-v*` publish: installer hardening.** Three items, none optional:
+  wrap `hostd-install.sh`'s body in `main()` (called on the last line) so a truncated `curl | sh`
+  runs nothing; have `build-hostd-linux.sh` write `installer.xcconfig` only after a full
+  two-architecture build (a partial run writes a digest the published release cannot match, and
+  the Release app then embeds a command that fails its own checksum); and require an `https` asset
+  base on the app side before the Add Host sheet shows a command. Publishing without them ships a
+  pasted command that can half-run or point at plain HTTP.
+- **Spec §5 is not fully met.** `flightdeck host info` reports no simulators and no screen state
+  (locked, asleep, logged out), and `flightdeck host ls` shows no tools and no workspace sizes.
+  `HostInfo` carries neither; both need new fields (additive, so a minor-version bump) and a
+  probe on each hostd.
+- **Forgetting a host while it is online does not revoke on the host (§3.5).** Hosts → Forget
+  drops the controller's key and record, but the host keeps the slot until its owner revokes it
+  (Hosting tab, or `flightdeck-hostd controllers` then `revoke` on Linux). The spec wants Forget to
+  send a revoke over the live link first; there is no such request on the wire yet.
 - **`flightdeck host update` (spec §3.4) is not built.** The major-version refusal and its
   "Update Flight Deck on <name>" message are; the command that pushes a new hostd to a host is not.
   Until it exists, updating a Linux host is re-running the pasted installer.
@@ -2339,7 +2354,10 @@ What is open, in the order it will bite:
   checks: pair a second Mac (Settings → Hosting on the target, Hosts → Add Host on the controller,
   `flightdeck host info <name>` lists Xcode versions); revoke from the host's Hosting tab (controller
   shows offline within seconds, reconnect refused); pair a Linux box with the pasted command; move
-  the laptop from Wi-Fi to Tailscale and see the host return online with no re-pairing.
+  the laptop from Wi-Fi to Tailscale and see the host return online with no re-pairing. For the
+  last one, check `hosts.json` holds the host's `100.x` address *before* leaving the LAN: hosts now
+  advertise their own addresses in `helloAck` (ARCHITECTURE.md, "Reaching a host off the LAN"),
+  which is unit-tested against a scripted network only.
 - **P3 (does XCTest UI run from a hostd LaunchAgent?) is unverified** until sub-project C.
 - **Sub-project C is the next plan:** sync, the `run`/`exec`/`up`/`ps`/`recipe` CLI, execution and
   services, preflight, `delegate.toml`, the agent skill, and deleting `workspaces/<slot>/` on
@@ -2364,9 +2382,16 @@ What is open, in the order it will bite:
   47411 is reported as "code expired".
 - Linux hostd: SIGTERM while a window is armed orphans the `_fd-host-pair` `avahi-publish` child
   (`exit(0)` skips the `defer`).
-- A pairing that completes after the window was consumed is delivered but not stored. The macOS
-  hostd revokes the just-sealed slot (a late `consume` fails); confirm the Linux responder gates
-  `consume` before the seal in the same way.
+- **Late pairing: a lost race leaves the controller holding a dead key.** NEITHER hostd consumes
+  the window before the seal: both transports seal and send first, and only then (from the
+  seal's send completion) consume the window and store the controller. If the code was replaced,
+  cancelled or expired while that exchange was in flight, the consume fails, nothing is stored
+  (the macOS hostd also revokes the slot at once), and the controller holds a key the host never
+  accepts — it shows the host as paired and never gets online. The race is narrow: the exchange
+  has to straddle a re-arm, a cancel or the two-minute expiry. Fixing it means a gate the responder
+  consults *before* sealing, which neither `PairingListener` nor `NIOPairingResponder` offers.
+  (A second controller sealing from the same code inside one window is closed: both responders
+  refuse every confirm after their first seal.)
 
 **Host core and the stores**
 - `HostServerCore`: a frame with a known op but bad fields is also labelled "unsupported".
@@ -2386,21 +2411,17 @@ What is open, in the order it will bite:
   stable ping interval.
 - `Handle` and `NetworkHostConnection` have no `deinit` teardown when released without `stop()` (no
   leak in the app today).
-- The sync-settling pairing driver is retained; IPv6 learned endpoints are unbracketed where paired
-  ones are bracketed; the `endpoints` doc "most recently winning first" overstates.
+- The sync-settling pairing driver is retained.
 - A hostd's error code is passed through unprefixed into the Mac `err` namespace; the relative-date
   helper is duplicated.
 
 **Settings UI**
-- The UITest reset still registers the real `SMAppServiceAgent`, so its comment overclaims hermeticity.
 - After `.failed` the Hosting tab keeps stale controllers and their Revoke buttons; the revoke
   read-back uses the current generation.
 - An in-flight pairing survives closing the Add Host sheet (no `cancelPairing` on disappear), and the
   countdown reaching zero can send `cancelArm` more than once.
 
 **Installer and release**
-- Wrap `hostd-install.sh`'s body in `main()` so a truncated `curl | sh` runs nothing; write
-  `installer.xcconfig` only after a full two-architecture build (a partial run writes a digest the
-  published release cannot match); require an `https` asset base on the app side; give a failed
+- The three MUST-FIX items are at the top of this section. Lesser: give a failed
   `systemctl enable --now` its own `die` message.
 

@@ -212,6 +212,10 @@ keeps an admin socket at `<state root>/admin.sock`.
   from the shared label; not observed live). If hosting looks wrong after switching builds, toggle it off and on from the
   build you mean to use. This is unlike `sessions.json`, which Debug splits off on purpose (see
   "Debug bundles fork the fleet").
+- **On a Linux host, list and revoke from a shell:** `flightdeck-hostd controllers` prints each
+  paired controller as `SLOT<TAB>NAME<TAB>PAIRED-AT` (`--json` for JSON); `flightdeck-hostd revoke
+  SLOT` unpairs one and cuts its live connection. Both exit 2 when hostd is not running. A Mac host
+  does the same from Settings → Hosting.
 - **Never launch the hostd binary by hand from `DerivedData/` to "try it".** It binds 47410 and
   the admin socket in the real state root, which belong to the live hostd.
 - Interop tests (`test-hostd-linux-interop.sh`) bind fixed ports (47410, 47411) and share the
