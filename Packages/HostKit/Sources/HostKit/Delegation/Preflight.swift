@@ -5,10 +5,11 @@ import Foundation
 // over `PreflightChecks`; the app supplies the real checks (config, HostLink, PortForwarder,
 // git) and tests supply recording fakes.
 
-/// A delegation failure: the CLI prints `description` as its one stderr line and exits 125.
-/// `code` is machine-readable (A5's pinned codes where a host error has one); `message` names
-/// the host or port and the next step, because the reader is usually an agent that can only
-/// act on what the line tells it.
+/// A delegation failure. `description` is the finished 125 line (`flightdeck: …`); the CLI
+/// prints it as-is and exits 125. `code` is one of A5's host codes or A5b's controller
+/// preflight codes (both pinned in `DelegationWire.swift`). `message` names the host or port
+/// and then, after " — ", the next step: the reader is usually an agent that can only act on
+/// what the line tells it.
 public struct DelegationError: Error, Equatable, Sendable, CustomStringConvertible {
     public static let exitStatus: Int32 = 125
 
@@ -22,12 +23,20 @@ public struct DelegationError: Error, Equatable, Sendable, CustomStringConvertib
 
     public var description: String { "flightdeck: \(message)" }
 
-    /// Step 4, worded as the spec's example: `localhost:5432 is held by postgres (pid 812);
-    /// try --port 15433:5432 or --port auto:5432`.
+    /// Step 4, the spec's example with the shared " — " joiner: `localhost:5432 is held by
+    /// postgres (pid 812) — try --port 15433:5432 or --port auto:5432`.
     public static func localPortHeld(local: UInt16, remote: UInt16, holder: PortHolder, suggestion: UInt16?) -> DelegationError {
         let tries = (suggestion.map { ["--port \($0):\(remote)"] } ?? []) + ["--port auto:\(remote)"]
-        return DelegationError(code: "port_held",
-                               message: "localhost:\(local) is held by \(describe(holder)); try \(tries.joined(separator: " or "))")
+        return DelegationError(code: "local_port_held",
+                               message: "localhost:\(local) is held by \(describe(holder)) — try \(tries.joined(separator: " or "))")
+    }
+
+    /// Step 4 when nothing listens but the bind still fails: our own forward's connections,
+    /// closed by us first, leave the port in TIME_WAIT for ~30 s after a `down`, and Network
+    /// framework cannot bind over that.
+    public static func localPortInTimeWait(local: UInt16, remote: UInt16) -> DelegationError {
+        DelegationError(code: "local_port_held",
+                        message: "localhost:\(local) was just released and is still in TIME_WAIT — retry shortly or use --port auto:\(remote)")
     }
 
     /// Step 5. The remote port is the service's own, so the way out is on the host.
@@ -39,7 +48,7 @@ public struct DelegationError: Error, Equatable, Sendable, CustomStringConvertib
         default: stop = "stop it on \(host)"
         }
         return DelegationError(code: "port_held",
-                               message: "\(host):\(port) is held by \(describe(holder)); \(stop), or change the recipe's remote port")
+                               message: "\(host):\(port) is held by \(describe(holder)) — \(stop), or change the recipe's remote port")
     }
 
     static func describe(_ holder: PortHolder) -> String {
@@ -162,12 +171,12 @@ public enum Preflight {
 
             guard let caps = try await checks.hostCapabilities(host) else {             // 2
                 throw DelegationError(code: "host_unavailable",
-                                      message: "\(host) is not connected; check flightdeck host ls, and that hostd is running on \(host)")
+                                      message: "\(host) is not connected — check flightdeck host ls, and that hostd is running on \(host)")
             }
             let missing = plan.requiredCapabilities.filter { !caps.contains($0) }
             if !missing.isEmpty {
                 throw DelegationError(code: "unsupported",
-                                      message: "\(host)'s hostd does not support \(missing.map(noun).joined(separator: " and ")); update Flight Deck on \(host), then retry")
+                                      message: "\(host)'s hostd does not support \(missing.map(noun).joined(separator: " and ")) — update Flight Deck on \(host), then retry")
             }
 
             try await checks.checkLocalPaths(plan)                                       // 3
@@ -181,8 +190,10 @@ public enum Preflight {
                 let answers = try await checks.remotePorts(asked, host: host)
                 for port in asked {
                     guard let status = answers.first(where: { $0.port == port }) else {
-                        throw DelegationError(code: "remote_port_unchecked",
-                                              message: "\(host) did not check port \(port); update Flight Deck on \(host), then retry")
+                        // A host that skips a port speaks a `port.check` this controller does
+                        // not understand, so it is reported as the op being unsupported.
+                        throw DelegationError(code: "unsupported",
+                                              message: "\(host) did not check port \(port) — update Flight Deck on \(host), then retry")
                     }
                     if status.holder != .free {
                         throw DelegationError.remotePortHeld(host: host, port: port, holder: status.holder)
@@ -199,7 +210,10 @@ public enum Preflight {
         } catch {
             held?.release()
             if let error = error as? DelegationError { throw error }
-            throw DelegationError(code: "preflight_failed", message: "preflight for \(host) failed: \(error); fix it, then retry")
+            // Cancellation means the caller has gone (the CLI hung up); it must see that to
+            // stop, not a 125 line that nobody will read.
+            if error is CancellationError { throw error }
+            throw DelegationError(code: "preflight_failed", message: "preflight for \(host) failed: \(error) — fix it, then retry")
         }
     }
 
@@ -208,14 +222,14 @@ public enum Preflight {
     static func screenFailure(_ status: ScreenStatus, host: String) -> DelegationError? {
         if !status.supported {
             return DelegationError(code: "screen_unsupported",
-                                   message: "\(host) cannot take screen runs (Linux hosts refuse --screen); drop --screen or pick a macOS host")
+                                   message: "\(host) cannot take screen runs (Linux hosts refuse --screen) — drop --screen or pick a macOS host")
         }
         if !status.consoleUser {
             return DelegationError(code: "no_console_user",
-                                   message: "\(host) has no user logged in at the console; log in on \(host)'s screen, then retry")
+                                   message: "\(host) has no user logged in at the console — log in on \(host)'s screen, then retry")
         }
         if status.locked {
-            return DelegationError(code: "screen_locked", message: "\(host)'s screen is locked; unlock it, then retry")
+            return DelegationError(code: "screen_locked", message: "\(host)'s screen is locked — unlock it, then retry")
         }
         return nil
     }
@@ -252,7 +266,7 @@ public enum Preflight {
             guard case .fixed(let local) = mapping.local else { continue }
             if let first = seen[local] {
                 throw DelegationError(code: "invalid_port",
-                                      message: "local port \(local) is mapped twice (\(first.notation), \(mapping.notation)); give one of them another local port")
+                                      message: "local port \(local) is mapped twice (\(first.notation), \(mapping.notation)) — give one of them another local port")
             }
             seen[local] = mapping
         }

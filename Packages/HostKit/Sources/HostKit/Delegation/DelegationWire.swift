@@ -47,6 +47,16 @@ import Foundation
 //   unsupported             an op or frame this host does not know (`HostServerCore`)
 //   not_implemented         an op this host knows of but does not serve yet
 //
+// A5b: codes the controller raises itself in preflight (`Preflight`, `PortForwarder`), never
+// sent by a host. Each is a `DelegationError`, whose description is the finished 125 line.
+//   host_unavailable        the host is not connected (§7 step 2)
+//   invalid_port            a `--port`/recipe port that does not parse, or one local port twice
+//   port_bind_failed        a local listener failed for a reason other than the port being held
+//   preflight_failed        a check failed with an error that was not already a 125 line
+//   local_port_held         a requested local port is held, or still in TIME_WAIT (§7 step 4)
+// A host lacking a needed capability, or answering `port.check` for fewer ports than asked,
+// is reported as A5's `unsupported`; a held remote port is A5's `port_held`.
+//
 // `run.start` with `apply: false` is `flightdeck exec`: run in the worktree's existing checkout
 // without applying `ref`, whose commit and tree are then the controller's view only and are
 // not verified. With `apply: true` the host applies and verifies `ref` first (§4.4).

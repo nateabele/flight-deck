@@ -56,19 +56,20 @@ final class PreflightTests: XCTestCase {
             _ = try await Preflight.run(checks)
             XCTFail("expected a failure")
         } catch let error as DelegationError {
-            XCTAssertEqual(error.code, "port_held")
+            XCTAssertEqual(error.code, "local_port_held")
         } catch { XCTFail("\(error)") }
         XCTAssertEqual(checks.calls, ["resolve", "host", "paths", "localPorts"])
     }
 
     func testLocalPortMessageIsTheSpecsExample() {
         let e = DelegationError.localPortHeld(local: 5432, remote: 5432, holder: .process(name: "postgres", pid: 812), suggestion: 15433)
-        XCTAssertEqual(e.message, "localhost:5432 is held by postgres (pid 812); try --port 15433:5432 or --port auto:5432")
-        XCTAssertEqual(e.description, "flightdeck: localhost:5432 is held by postgres (pid 812); try --port 15433:5432 or --port auto:5432")
+        XCTAssertEqual(e.message, "localhost:5432 is held by postgres (pid 812) — try --port 15433:5432 or --port auto:5432")
+        XCTAssertEqual(e.description, "flightdeck: localhost:5432 is held by postgres (pid 812) — try --port 15433:5432 or --port auto:5432")
         XCTAssertEqual(DelegationError.exitStatus, 125)
+        XCTAssertEqual(e.code, "local_port_held")
 
         let own = DelegationError.localPortHeld(local: 8080, remote: 80, holder: .flightDeck(session: "api"), suggestion: nil)
-        XCTAssertEqual(own.message, #"localhost:8080 is held by Flight Deck session "api"; try --port auto:80"#)
+        XCTAssertEqual(own.message, #"localhost:8080 is held by Flight Deck session "api" — try --port auto:80"#)
     }
 
     func testRemotePortHeldNamesTheContainerAndTheHost() async {
@@ -79,16 +80,16 @@ final class PreflightTests: XCTestCase {
             XCTFail("expected a failure")
         } catch let error as DelegationError {
             XCTAssertEqual(error.code, "port_held")
-            XCTAssertEqual(error.message, #"mini:3000 is held by Docker container "web-1"; stop it on mini (docker stop web-1), or change the recipe's remote port"#)
+            XCTAssertEqual(error.message, #"mini:3000 is held by Docker container "web-1" — stop it on mini (docker stop web-1), or change the recipe's remote port"#)
         } catch { XCTFail("\(error)") }
         XCTAssertEqual(checks.releases, 1)
     }
 
     func testRemoteProcessAndUnknownHolders() {
         XCTAssertEqual(DelegationError.remotePortHeld(host: "mini", port: 5432, holder: .process(name: "postgres", pid: 90)).message,
-                       "mini:5432 is held by postgres (pid 90); stop it on mini, or change the recipe's remote port")
+                       "mini:5432 is held by postgres (pid 90) — stop it on mini, or change the recipe's remote port")
         XCTAssertEqual(DelegationError.remotePortHeld(host: "mini", port: 5432, holder: .unknown).message,
-                       "mini:5432 is held by another process; stop it on mini, or change the recipe's remote port")
+                       "mini:5432 is held by another process — stop it on mini, or change the recipe's remote port")
     }
 
     /// A host that answers "free" for fewer ports than asked has not checked them all; that
@@ -99,15 +100,16 @@ final class PreflightTests: XCTestCase {
             _ = try await Preflight.run(checks)
             XCTFail("expected a failure")
         } catch let error as DelegationError {
-            XCTAssertEqual(error.code, "remote_port_unchecked")
+            XCTAssertEqual(error.code, "unsupported")
+            XCTAssertEqual(error.message, "mini did not check port 3000 — update Flight Deck on mini, then retry")
         } catch { XCTFail("\(error)") }
     }
 
     func testHostNotConnectedOrMissingCapability() async {
         for (caps, code, message) in [
-            (nil, "host_unavailable", "mini is not connected; check flightdeck host ls, and that hostd is running on mini"),
+            (nil, "host_unavailable", "mini is not connected — check flightdeck host ls, and that hostd is running on mini"),
             (Set<HostCapability>([.hostInfo, .run, .sync]), "unsupported",
-             "mini's hostd does not support services and screen runs; update Flight Deck on mini, then retry"),
+             "mini's hostd does not support services and screen runs — update Flight Deck on mini, then retry"),
         ] as [(Set<HostCapability>?, String, String)] {
             let checks = RecordingChecks(plan: plan, capabilities: caps)
             do {
@@ -153,8 +155,20 @@ final class PreflightTests: XCTestCase {
             XCTFail("expected a failure")
         } catch let error as DelegationError {
             XCTAssertEqual(error.code, "preflight_failed")
-            XCTAssertEqual(error.message, "preflight for mini failed: disk on fire; fix it, then retry")
+            XCTAssertEqual(error.message, "preflight for mini failed: disk on fire — fix it, then retry")
         } catch { XCTFail("\(error)") }
+        XCTAssertEqual(checks.releases, 1)
+    }
+
+    /// A cancelled preflight (the CLI went away) is not a 125: the caller must see the
+    /// cancellation to stop, not a "preflight failed" line nobody will read.
+    func testCancellationIsRethrownUnchanged() async {
+        let checks = RecordingChecks(plan: plan, foreign: CancellationError())
+        do {
+            _ = try await Preflight.run(checks)
+            XCTFail("expected a failure")
+        } catch is CancellationError {
+        } catch { XCTFail("wrapped: \(error)") }
         XCTAssertEqual(checks.releases, 1)
     }
 
@@ -189,7 +203,7 @@ final class PreflightTests: XCTestCase {
         XCTAssertThrowsError(try Preflight.mergePorts(recipe: ["5432"], cli: ["5432:6543"])) { error in
             XCTAssertEqual((error as? DelegationError)?.code, "invalid_port")
             XCTAssertEqual((error as? DelegationError)?.message,
-                           "local port 5432 is mapped twice (5432:5432, 5432:6543); give one of them another local port")
+                           "local port 5432 is mapped twice (5432:5432, 5432:6543) — give one of them another local port")
         }
     }
 }

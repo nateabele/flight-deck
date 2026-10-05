@@ -36,24 +36,27 @@ public struct PortCheck: PortChecking {
     /// Runs on a global queue: `lsof` and `docker ps` block for up to seconds, and a blocked
     /// cooperative thread stalls every other task on the host, including the run streams.
     public func holder(of port: UInt16) async -> PortHolder {
+        await check([port])[0].holder
+    }
+
+    /// One `docker ps` for the whole batch, and only if some port is held: it costs ~100 ms
+    /// against a live daemon, and a recipe with five ports would otherwise pay it five times.
+    public func check(_ ports: [UInt16]) async -> [PortStatus] {
         await withCheckedContinuation { cont in
-            DispatchQueue.global().async { cont.resume(returning: holderNow(of: port)) }
+            DispatchQueue.global().async {
+                let docker = DockerListing(check: self)
+                cont.resume(returning: ports.map { PortStatus(port: $0, holder: holderNow(of: $0, docker: docker)) })
+            }
         }
     }
 
-    public func check(_ ports: [UInt16]) async -> [PortStatus] {
-        var out: [PortStatus] = []
-        for port in ports { out.append(PortStatus(port: port, holder: await holder(of: port))) }
-        return out
-    }
-
-    func holderNow(of port: UInt16) -> PortHolder {
+    private func holderNow(of port: UInt16, docker: DockerListing) -> PortHolder {
         switch Self.probe(port) {
         case true?: return .free
-        case false?: return name(holderOf: port) ?? .unknown
+        case false?: return name(holderOf: port, docker: docker) ?? .unknown
         // Could not bind for another reason (a privileged port, no permission): trust a
         // holder if one can be named, else the port is not known to be taken.
-        case nil: return name(holderOf: port) ?? .free
+        case nil: return name(holderOf: port, docker: docker) ?? .free
         }
     }
 
@@ -61,23 +64,42 @@ public struct PortCheck: PortChecking {
     /// own bind just failed). Docker first, because Docker Desktop, OrbStack and Linux's
     /// docker-proxy hold a published port in their own process, and "OrbStack (pid 12191)"
     /// tells the user nothing they can stop.
+    ///
+    /// Blocks on `lsof`/`docker` for up to seconds, so never on the main queue.
     public func name(holderOf port: UInt16) -> PortHolder? {
-        if let container = dockerHolder(of: port) { return .container(name: container) }
+        name(holderOf: port, docker: DockerListing(check: self))
+    }
+
+    private func name(holderOf port: UInt16, docker: DockerListing) -> PortHolder? {
+        dispatchPrecondition(condition: .notOnQueue(.main))
+        if let container = docker.output.flatMap({ Self.parseDockerPS($0, port: port) }) {
+            return .container(name: container)
+        }
         #if os(Linux)
         return procHolder(of: port)
         #else
-        return run("/usr/sbin/lsof", ["-nP", "-iTCP:\(port)", "-sTCP:LISTEN"]).flatMap(Self.parseLsof)
+        // `+c0`: the full command name; lsof's default cuts it at 9 characters.
+        return run("/usr/sbin/lsof", ["+c0", "-nP", "-iTCP:\(port)", "-sTCP:LISTEN"]).flatMap(Self.parseLsof)
         #endif
     }
 
     // MARK: Docker
 
-    private func dockerHolder(of port: UInt16) -> String? {
-        let fm = FileManager.default
-        guard let docker = searchPath.map({ "\($0)/docker" }).first(where: fm.isExecutableFile(atPath:)),
-              let out = run(docker, ["ps", "--format", "{{.Names}}\t{{.Ports}}"])
-        else { return nil }
-        return Self.parseDockerPS(out, port: port)
+    /// `docker ps` run at most once, on first use.
+    private final class DockerListing: @unchecked Sendable {
+        private let check: PortCheck
+        private var cached: String??
+
+        init(check: PortCheck) { self.check = check }
+
+        var output: String? {
+            if let cached { return cached }
+            let fm = FileManager.default
+            let out = check.searchPath.map { "\($0)/docker" }.first(where: fm.isExecutableFile(atPath:))
+                .flatMap { check.run($0, ["ps", "--format", "{{.Names}}\t{{.Ports}}"]) }
+            cached = .some(out)
+            return out
+        }
     }
 
     /// `docker ps --format '{{.Names}}\t{{.Ports}}'` → the container publishing `port` on the
@@ -170,18 +192,22 @@ public struct PortCheck: PortChecking {
     /// True when nothing listens on `port` on any local address.
     public static func isFree(_ port: UInt16) -> Bool { probe(port) == true }
 
-    /// Binds (never listens) the IPv4 wildcard and the dual-stack IPv6 wildcard. Between them
-    /// they collide with a listener on any v4 or v6 address, loopback included. True: free;
-    /// false: `EADDRINUSE`; nil: the bind failed for another reason and says nothing.
+    /// Binds (never listens) `SO_REUSEADDR` sockets on 0.0.0.0, dual-stack ::, 127.0.0.1 and
+    /// ::1. True: free; false: `EADDRINUSE`; nil: a bind failed for another reason and says
+    /// nothing.
     ///
-    /// `SO_REUSEADDR` differs by kernel, so it differs here. On Linux it lets the probe bind past
-    /// a TIME_WAIT left by a service that just stopped, while still colliding with any
-    /// listener. On macOS it would let the wildcard bind beside a 127.0.0.1 listener and call a
-    /// held port free (measured), so the probe goes without it there.
+    /// `SO_REUSEADDR` makes a TIME_WAIT left by a service that just stopped read as free, as
+    /// it is to the next service, which binds with it too. Reading it as held failed every
+    /// quick `down`/`up` for 30 s. The four addresses are needed because the option is
+    /// lenient on macOS: there a wildcard bind succeeds beside a 127.0.0.1 listener, and only
+    /// the exact-address probe collides with it. All four together catch a listener on any of
+    /// them, measured on both kernels. On Linux a TIME_WAIT left by a server *without*
+    /// `SO_REUSEADDR` still reads as held, and correctly: the next server cannot bind over it
+    /// either.
     static func probe(_ port: UInt16) -> Bool? {
         var unsure = false
-        for family in [AF_INET, AF_INET6] {
-            switch bindOnce(port, family: family) {
+        for address in ProbeAddress.allCases {
+            switch bindOnce(port, address) {
             case 0: continue
             case EADDRINUSE: return false
             case EAFNOSUPPORT, EADDRNOTAVAIL: continue   // no IPv6 on this host
@@ -191,36 +217,37 @@ public struct PortCheck: PortChecking {
         return unsure ? nil : true
     }
 
+    private enum ProbeAddress: CaseIterable { case v4Any, v6AnyDual, v4Loopback, v6Loopback }
+
     /// 0 on success, else the errno of the failing call.
-    private static func bindOnce(_ port: UInt16, family: Int32) -> Int32 {
+    private static func bindOnce(_ port: UInt16, _ address: ProbeAddress) -> Int32 {
+        let v6 = address == .v6AnyDual || address == .v6Loopback
         #if os(Linux)
-        let fd = socket(family, Int32(SOCK_STREAM.rawValue), 0)
+        let fd = socket(v6 ? AF_INET6 : AF_INET, Int32(SOCK_STREAM.rawValue), 0)
         #else
-        let fd = socket(family, SOCK_STREAM, 0)
+        let fd = socket(v6 ? AF_INET6 : AF_INET, SOCK_STREAM, 0)
         #endif
         guard fd >= 0 else { return errno }
         defer { close(fd) }
-        #if os(Linux)
-        var one: Int32 = 1
+        var one: Int32 = 1, zero: Int32 = 0
         setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, socklen_t(MemoryLayout<Int32>.size))
-        #endif
-        var zero: Int32 = 0
         let result: Int32
-        if family == AF_INET {
-            var addr = sockaddr_in()
-            addr.sin_family = sa_family_t(AF_INET)
-            addr.sin_port = port.bigEndian
-            result = withUnsafePointer(to: &addr) {
-                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) }
-            }
-        } else {
+        if v6 {
             setsockopt(fd, Int32(IPPROTO_IPV6), IPV6_V6ONLY, &zero, socklen_t(MemoryLayout<Int32>.size))
             var addr = sockaddr_in6()
             addr.sin6_family = sa_family_t(AF_INET6)
             addr.sin6_port = port.bigEndian
-            addr.sin6_addr = in6addr_any
+            addr.sin6_addr = address == .v6Loopback ? in6addr_loopback : in6addr_any
             result = withUnsafePointer(to: &addr) {
                 $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in6>.size)) }
+            }
+        } else {
+            var addr = sockaddr_in()
+            addr.sin_family = sa_family_t(AF_INET)
+            addr.sin_port = port.bigEndian
+            addr.sin_addr.s_addr = address == .v4Loopback ? inet_addr("127.0.0.1") : 0
+            result = withUnsafePointer(to: &addr) {
+                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) }
             }
         }
         return result == 0 ? 0 : errno

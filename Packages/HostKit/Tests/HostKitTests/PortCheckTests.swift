@@ -157,6 +157,45 @@ final class PortCheckTests: XCTestCase {
         XCTAssertFalse(PortCheck.isFree(listener.port))
     }
 
+    /// Every address a server commonly listens on reads as held, IPv6 loopback included.
+    func testLiveListenerOnEveryAddressIsHeld() throws {
+        for address in [LiveListener.Address.v4Loopback, .v4Any, .v6Loopback, .v6Any] {
+            guard let listener = try? LiveListener(address) else { continue }   // no IPv6 here
+            XCTAssertFalse(PortCheck.isFree(listener.port), "\(address)")
+            listener.close()
+        }
+    }
+
+    /// A port left in TIME_WAIT by a service that just stopped is free: the next service binds
+    /// it with SO_REUSEADDR, as servers do. Reading it as held made every quick `down`/`up`
+    /// fail preflight for 30 s on macOS (measured).
+    func testLiveTimeWaitReadsFree() throws {
+        let port = try LiveListener.timeWaitPort()
+        XCTAssertFalse(Sock.plainBind(port), "precondition: the port is in TIME_WAIT")
+        XCTAssertTrue(PortCheck.isFree(port))
+    }
+
+    /// `port.check` for several ports asks Docker once, not once per port: `docker ps` costs
+    /// ~100 ms against a live daemon, and a recipe with five ports would pay it five times.
+    func testCheckRunsDockerPSOnce() async throws {
+        let a = try LiveListener(), b = try LiveListener()
+        defer { a.close(); b.close() }
+        let bin = try tempDir()
+        let count = bin.appendingPathComponent("count")
+        let docker = bin.appendingPathComponent("docker")
+        try """
+        #!/bin/sh
+        echo x >> '\(count.path)'
+        printf 'pa\\t0.0.0.0:\(a.port)->1/tcp\\npb\\t0.0.0.0:\(b.port)->2/tcp\\n'
+        """.write(to: docker, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: docker.path)
+
+        let statuses = await PortCheck(searchPath: [bin.path]).check([a.port, b.port])
+        XCTAssertEqual(statuses, [PortStatus(port: a.port, holder: .container(name: "pa")),
+                                  PortStatus(port: b.port, holder: .container(name: "pb"))])
+        XCTAssertEqual(try String(contentsOf: count, encoding: .utf8), "x\n")
+    }
+
     // MARK: Suggestion
 
     /// The spec's own example: 5432 held, 15432 held too, so 15433.
@@ -176,41 +215,139 @@ final class PortCheckTests: XCTestCase {
     }
 }
 
-/// A real listening IPv4 socket on an OS-chosen port, standing in for "something else holds
-/// this port".
+/// A real listening socket on an OS-chosen port, standing in for "something else holds this
+/// port". `.v6Any` is dual-stack, as most servers that listen on `::` are.
 final class LiveListener {
+    enum Address { case v4Loopback, v4Any, v6Loopback, v6Any }
+
     let port: UInt16
     private var fd: Int32
 
-    init(loopback: Bool = true) throws {
-        #if os(Linux)
-        let fd = socket(AF_INET, Int32(SOCK_STREAM.rawValue), 0)
-        #else
-        let fd = socket(AF_INET, SOCK_STREAM, 0)
-        #endif
-        var addr = sockaddr_in()
-        addr.sin_family = sa_family_t(AF_INET)
-        addr.sin_addr.s_addr = loopback ? inet_addr("127.0.0.1") : 0
-        var len = socklen_t(MemoryLayout<sockaddr_in>.size)
-        let bound = withUnsafeMutablePointer(to: &addr) { ptr in
-            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
-                bind(fd, sa, len) == 0 && listen(fd, 8) == 0 && getsockname(fd, sa, &len) == 0
-            }
-        }
-        guard bound else { throw POSIXError(.EADDRINUSE) }
-        self.fd = fd
-        port = UInt16(bigEndian: addr.sin_port)
+    convenience init(loopback: Bool = true) throws {
+        try self.init(loopback ? .v4Loopback : .v4Any)
     }
+
+    /// `reuseAddress`: as real servers set it. On Linux a TIME_WAIT blocks even an
+    /// `SO_REUSEADDR` bind unless the socket that left it had the option too (measured in
+    /// swift:6.3-noble), so only a reuse server's TIME_WAIT is one the next server binds over.
+    init(_ address: Address, port: UInt16 = 0, reuseAddress: Bool = false) throws {
+        let v6 = address == .v6Loopback || address == .v6Any
+        let fd = Sock.make(v6 ? AF_INET6 : AF_INET)
+        if reuseAddress {
+            var one: Int32 = 1
+            setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, socklen_t(MemoryLayout<Int32>.size))
+        }
+        if v6 {
+            var off: Int32 = 0
+            setsockopt(fd, Int32(IPPROTO_IPV6), IPV6_V6ONLY, &off, socklen_t(MemoryLayout<Int32>.size))
+        }
+        var storage = Sock.address(address, port: port)
+        var len = socklen_t(v6 ? MemoryLayout<sockaddr_in6>.size : MemoryLayout<sockaddr_in>.size)
+        let bound = withUnsafeMutableBytes(of: &storage) { raw in
+            let sa = raw.baseAddress!.assumingMemoryBound(to: sockaddr.self)
+            return bind(fd, sa, len) == 0 && listen(fd, 8) == 0 && getsockname(fd, sa, &len) == 0
+        }
+        guard bound else { Sock.close(fd); throw POSIXError(.EADDRINUSE) }
+        self.fd = fd
+        self.port = Sock.port(of: storage, v6: v6)
+    }
+
+    /// Accepts one pending connection and returns its fd.
+    func accept() -> Int32 { Glue.accept(fd) }
 
     func close() {
         guard fd >= 0 else { return }
+        Sock.close(fd)
+        fd = -1
+    }
+
+    deinit { close() }
+
+    /// A port left in TIME_WAIT on the *server* side, as a service that closed its
+    /// connections first and then stopped leaves it: the state a restarted service binds over.
+    static func timeWaitPort() throws -> UInt16 {
+        let listener = try LiveListener(.v4Loopback, reuseAddress: true)
+        let client = Sock.make(AF_INET)
+        var addr = Sock.address(.v4Loopback, port: listener.port)
+        let connected = withUnsafeBytes(of: &addr) {
+            connect(client, $0.baseAddress!.assumingMemoryBound(to: sockaddr.self), socklen_t(MemoryLayout<sockaddr_in>.size)) == 0
+        }
+        guard connected else { throw POSIXError(.ECONNREFUSED) }
+        let server = listener.accept()
+        Sock.close(server)                 // the server closes first, so the TIME_WAIT is its own
+        var byte: UInt8 = 0
+        _ = recv(client, &byte, 1, 0)      // the client sees EOF...
+        Sock.close(client)                 // ...and closes its side
+        listener.close()
+        usleep(100_000)
+        return listener.port
+    }
+}
+
+/// The few socket calls whose spelling differs between Glibc and Darwin.
+enum Sock {
+    static func make(_ family: Int32) -> Int32 {
+        #if os(Linux)
+        socket(family, Int32(SOCK_STREAM.rawValue), 0)
+        #else
+        socket(family, SOCK_STREAM, 0)
+        #endif
+    }
+
+    static func close(_ fd: Int32) {
         #if os(Linux)
         _ = Glibc.close(fd)
         #else
         _ = Darwin.close(fd)
         #endif
-        fd = -1
     }
 
-    deinit { close() }
+    static func address(_ address: LiveListener.Address, port: UInt16) -> sockaddr_storage {
+        var storage = sockaddr_storage()
+        withUnsafeMutableBytes(of: &storage) { raw in
+            switch address {
+            case .v4Loopback, .v4Any:
+                var a = sockaddr_in()
+                a.sin_family = sa_family_t(AF_INET)
+                a.sin_port = port.bigEndian
+                a.sin_addr.s_addr = address == .v4Loopback ? inet_addr("127.0.0.1") : 0
+                withUnsafeBytes(of: &a) { raw.copyMemory(from: $0) }
+            case .v6Loopback, .v6Any:
+                var a = sockaddr_in6()
+                a.sin6_family = sa_family_t(AF_INET6)
+                a.sin6_port = port.bigEndian
+                a.sin6_addr = address == .v6Loopback ? in6addr_loopback : in6addr_any
+                withUnsafeBytes(of: &a) { raw.copyMemory(from: $0) }
+            }
+        }
+        return storage
+    }
+
+    static func port(of storage: sockaddr_storage, v6: Bool) -> UInt16 {
+        var storage = storage
+        return withUnsafeBytes(of: &storage) { raw in
+            v6 ? UInt16(bigEndian: raw.load(as: sockaddr_in6.self).sin6_port)
+               : UInt16(bigEndian: raw.load(as: sockaddr_in.self).sin_port)
+        }
+    }
+
+    /// A bind with no options: fails on TIME_WAIT, which is how a test proves it made one.
+    static func plainBind(_ port: UInt16) -> Bool {
+        let fd = make(AF_INET)
+        defer { close(fd) }
+        var addr = address(.v4Loopback, port: port)
+        return withUnsafeBytes(of: &addr) {
+            bind(fd, $0.baseAddress!.assumingMemoryBound(to: sockaddr.self), socklen_t(MemoryLayout<sockaddr_in>.size)) == 0
+        }
+    }
+}
+
+private enum Glue {
+    static func accept(_ fd: Int32) -> Int32 {
+        #if os(Linux)
+        Glibc.accept(fd, nil, nil)
+        #else
+        Darwin.accept(fd, nil, nil)
+        #endif
+    }
 }
