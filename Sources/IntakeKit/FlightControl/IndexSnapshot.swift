@@ -169,22 +169,48 @@ public struct IndexConfig: Codable, Equatable, Sendable {
         lastRefreshAttemptAt = try c.decodeIfPresent(Date.self, forKey: .lastRefreshAttemptAt)
     }
 
+    /// True when the file on disk could not be read AND could not be set aside, so it still holds
+    /// the user's only copy of their aliases and hand scores. `save(to:)` refuses while it is set:
+    /// the next settings edit (or the weekly refresh's attempt stamp) would otherwise overwrite it.
+    /// Not persisted.
+    public private(set) var isSaveBlocked = false
+
+    struct SaveBlocked: LocalizedError, Sendable {
+        var errorDescription: String? { "the existing settings file could not be read or moved aside, so it was left untouched" }
+    }
+
     /// A missing file is a first launch: the initial config, no problem. A file that exists but
-    /// does not decode (or is from a newer Flight Deck) is moved aside to
-    /// `config.unreadable-<stamp>.json` before the initial config is returned — the next save
-    /// would otherwise overwrite the user's aliases and hand scores in place.
+    /// cannot be read, does not decode, or is from a newer Flight Deck is moved aside to
+    /// `config.unreadable-<stamp>-<id>.json` before the initial config is returned — the next save
+    /// would otherwise overwrite the user's aliases and hand scores in place. If the move fails a
+    /// copy is tried; if that fails too the returned config refuses to save (`isSaveBlocked`) and
+    /// the problem says the original was left where it is.
     public static func load(from url: URL) -> (config: IndexConfig, problem: String?) {
-        guard let data = try? Data(contentsOf: url) else { return (initial(), nil) }
-        if let config = try? IndexSnapshot.decoder().decode(IndexConfig.self, from: data), config.v <= currentVersion {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: url.path) else { return (initial(), nil) }
+        if let data = try? Data(contentsOf: url),
+           let config = try? IndexSnapshot.decoder().decode(IndexConfig.self, from: data), config.v <= currentVersion {
             return (config, nil)
         }
+        // The id keeps a second failure in the same second from colliding with the first aside.
         let aside = url.deletingLastPathComponent()
-            .appendingPathComponent("config.unreadable-\(IndexStamp.string(Date())).json")
-        try? FileManager.default.moveItem(at: url, to: aside)
-        return (initial(), "Capability index settings could not be read. They were moved to \(aside.lastPathComponent) and the defaults loaded.")
+            .appendingPathComponent("config.unreadable-\(IndexStamp.string(Date()))-\(UUID().uuidString.prefix(8)).json")
+        var fresh = initial()
+        if (try? fm.moveItem(at: url, to: aside)) != nil {
+            return (fresh, "Capability index settings could not be read. They were moved to \(aside.lastPathComponent) and the defaults loaded.")
+        }
+        if (try? fm.copyItem(at: url, to: aside)) != nil {
+            // The copy keeps the data safe, but the original is still in place: block the save so
+            // it is not overwritten either.
+            fresh.isSaveBlocked = true
+            return (fresh, "Capability index settings could not be read. A copy was saved as \(aside.lastPathComponent), but the original could not be moved, so the defaults are loaded and changes will not be saved.")
+        }
+        fresh.isSaveBlocked = true
+        return (fresh, "Capability index settings could not be read, and could not be moved or copied. The file was left untouched; the defaults are loaded and changes will not be saved.")
     }
 
     public func save(to url: URL) throws {
+        if isSaveBlocked { throw SaveBlocked() }
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         try IndexSnapshot.encoder().encode(self).write(to: url, options: .atomic)
     }

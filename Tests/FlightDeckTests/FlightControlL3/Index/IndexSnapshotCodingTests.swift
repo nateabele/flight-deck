@@ -74,6 +74,64 @@ final class IndexSnapshotCodingTests: XCTestCase {
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: dir.path).filter { $0.hasPrefix("config.unreadable-") }.count, 1)
     }
 
+    func testNewerVersionConfigIsMovedAsideAndReported() throws {
+        let dir = IndexFixtures.scratch()
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("config.json")
+        try Data(#"{"v":99}"#.utf8).write(to: url)
+        let (config, problem) = IndexConfig.load(from: url)
+        XCTAssertEqual(config, IndexConfig.initial())
+        XCTAssertNotNil(problem)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: dir.path).filter { $0.hasPrefix("config.unreadable-") }.count, 1)
+    }
+
+    func testExistingButUnreadableFileIsNotTreatedAsMissing() throws {
+        let dir = IndexFixtures.scratch()
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("config.json")
+        try Data(#"{"v":1}"#.utf8).write(to: url)
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: url.path)
+        addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
+        let (config, problem) = IndexConfig.load(from: url)
+        XCTAssertEqual(config, IndexConfig.initial())
+        XCTAssertNotNil(problem, "a file that exists but cannot be read is a problem, not a first launch")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.path), "it must be moved aside, not left for the next save")
+    }
+
+    func testFailedMoveLeavesTheOriginalAndBlocksSaving() throws {
+        let dir = IndexFixtures.scratch()
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("config.json")
+        let original = Data("{ not json".utf8)
+        try original.write(to: url)
+        // A read-only directory refuses both the move and the copy.
+        try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: dir.path)
+        addTeardownBlock {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: dir.path)
+            try? FileManager.default.removeItem(at: dir)
+        }
+        let (config, problem) = IndexConfig.load(from: url)
+        XCTAssertEqual(try Data(contentsOf: url), original, "the original must be left exactly where it is")
+        XCTAssertTrue(config.isSaveBlocked)
+        XCTAssertTrue(try XCTUnwrap(problem).contains("left untouched"), "the message must not claim a move that did not happen")
+        XCTAssertThrowsError(try config.save(to: url))
+        XCTAssertEqual(try Data(contentsOf: url), original, "a later save must not overwrite it")
+    }
+
+    func testTwoFailuresInTheSameSecondGetDistinctAsideNames() throws {
+        let dir = IndexFixtures.scratch()
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("config.json")
+        for _ in 0..<2 {
+            try Data("{ bad".utf8).write(to: url)
+            _ = IndexConfig.load(from: url)
+        }
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: dir.path).filter { $0.hasPrefix("config.unreadable-") }.count, 2)
+    }
+
     func testMissingConfigIsInitialWithoutAProblem() {
         let (config, problem) = IndexConfig.load(from: IndexFixtures.scratch().appendingPathComponent("config.json"))
         XCTAssertEqual(config, IndexConfig.initial())
