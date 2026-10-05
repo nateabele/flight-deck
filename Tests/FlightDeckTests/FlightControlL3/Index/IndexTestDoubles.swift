@@ -31,15 +31,18 @@ final class ScriptedIndexHeadless: HeadlessRunner, @unchecked Sendable {
 }
 
 /// A headless runner that streams, like the real one: it feeds `onStdout` a stream-json
-/// `assistant` line whose usage is `tokens`, then waits for its task to be cancelled — the way
-/// the real process runs on until the runner SIGTERMs it — and throws `CancellationError`.
+/// `assistant` line whose usage is `tokens`, then waits (up to 5 s) for its task to be cancelled — the
+/// way the real process runs on until the runner SIGTERMs it — and throws `CancellationError`.
 /// Exists because `ScriptedIndexHeadless` only delivers stdout at exit, so it cannot exercise
-/// the MID-RUN cap stop; a runner that never stopped the process would hang this one forever
-/// (the test's own timeout is the failure).
+/// the MID-RUN cap stop; a runner that never stopped the process leaves `cancelled` false.
 final class StreamingIndexHeadless: HeadlessRunner, @unchecked Sendable {
     private let lock = NSLock()
     let tokens: Int
+    private var wasCancelled = false
     private(set) var ran: [String] = []
+    /// True only if the run ended because its task was cancelled — what tells a mid-stream stop
+    /// apart from the runner's after-exit cap check, which yields the same outcome.
+    var cancelled: Bool { lock.withLock { wasCancelled } }
     init(tokens: Int) { self.tokens = tokens }
 
     func run(_ command: (executable: String, arguments: [String], unsetEnvironment: [String]),
@@ -53,9 +56,15 @@ final class StreamingIndexHeadless: HeadlessRunner, @unchecked Sendable {
         lock.withLock { ran.append(prompt) }
         let line = #"{"type":"assistant","message":{"id":"m1","content":[],"usage":{"input_tokens":\#(tokens),"output_tokens":0}}}"# + "\n"
         onStdout?(Data(line.utf8))
-        while true {
-            try Task.checkCancellation()
-            try await Task.sleep(nanoseconds: 1_000_000)
+        // Bounded so a regressed stop fails the test instead of hanging the suite.
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline {
+            if Task.isCancelled {
+                lock.withLock { wasCancelled = true }
+                throw CancellationError()
+            }
+            try? await Task.sleep(nanoseconds: 1_000_000)
         }
+        return (Data(), "timed out waiting for cancel", 1)
     }
 }

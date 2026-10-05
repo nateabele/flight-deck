@@ -132,6 +132,7 @@ final class IndexRefreshRunnerTests: XCTestCase {
         let h = StreamingIndexHeadless(tokens: 2000)
         let sources = ["a", "b"].map { IndexFixtures.source($0) }
         let outcome = await IndexRefreshRunner(headless: h, now: { [now] in now }).refresh(plan(sources, cap: 1500))
+        XCTAssertTrue(h.cancelled, "the meter must cancel the run mid-stream")
         XCTAssertEqual(h.ran.count, 1, "the later source is skipped, not run")
         XCTAssertEqual(outcome.snapshot.sources.map(\.stale), [true, true])
         XCTAssertEqual(outcome.snapshot.sources.map(\.error), ["token cap reached", "token cap reached"])
