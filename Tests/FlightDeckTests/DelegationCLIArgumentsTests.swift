@@ -109,6 +109,11 @@ final class DelegationCLIArgumentsTests: XCTestCase {
         XCTAssertEqual(try parse("route-exec", "xcodebuild", "--", "test", "--json", "-scheme", "X"),
                        .delegate(.routeExec(argv0: "xcodebuild", args: ["test", "--json", "-scheme", "X"])))
         XCTAssertEqual(try parse("route-exec", "make", "--"), .delegate(.routeExec(argv0: "make", args: [])))
+        // C4's shim probes a too-old CLI with a bare `route-exec`: a usage error (exit 2, nothing
+        // run) that must never read "unknown command", which is how an old CLI answers.
+        let bare = usage("route-exec")
+        XCTAssertNotNil(bare)
+        XCTAssertFalse(bare?.contains("unknown command") ?? true, bare ?? "")
     }
 
     func testRequestFillsCwdAndSizesOnlyAPty() {
