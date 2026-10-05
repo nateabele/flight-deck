@@ -17,6 +17,7 @@ enum ObserveEnrichment {
         }
         // Without an events lane (still a stub) every holder of a contended file read as stalled
         // and the collision trigger fired on every block. A tab's own activity is the stand-in.
+        // Synthesizing events from tab activity deliberately makes the Activity lane available.
         if snapshot.events == nil, !activity.isEmpty {
             out.events = activity.sorted { $0.key < $1.key }.map {
                 FlywheelReadCommands.RawEvent(agent: $0.key, kind: "activity", at: $0.value)

@@ -57,6 +57,16 @@ final class FlywheelNotifierLightUpTests: XCTestCase {
         XCTAssertEqual(recording.notified.map { $0.0 }, [blue])
     }
 
+    func testACycleOfUnassignedTasksNotifiesNobodyAndDoesNotCrash() {
+        let recording = Recording()
+        let p = projection(holderActiveAt: now,
+                           edges: [.init(from: "t-1", to: "t-2"), .init(from: "t-2", to: "t-1")],
+                           beads: [.init(id: "t-1", title: "a", status: "in_progress", assignee: nil),
+                                   .init(id: "t-2", title: "b", status: "in_progress", assignee: nil)])
+        notifier(recording, ids: ["BlueLake": UUID(), "GreenFox": UUID()]).evaluate(projectsByKey: ["/p": p])
+        XCTAssertTrue(recording.notified.isEmpty, "the task id is not an agent name, so route finds no tab")
+    }
+
     func testADependencyCycleRoutesToTheTaskOwner() {
         let recording = Recording(); let blue = UUID()
         let p = projection(holderActiveAt: now,

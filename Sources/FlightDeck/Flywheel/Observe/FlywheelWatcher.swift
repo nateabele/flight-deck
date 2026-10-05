@@ -1,7 +1,7 @@
 import Foundation
 
-/// mtime-gates a coalesced re-poll of the two live `FlywheelReadCommands` lanes
-/// (`agents`, `inProgressBeads`) for one project's Observe tab.
+/// mtime-gates a coalesced re-poll of the four live `FlywheelReadCommands` lanes
+/// (`agents`, `inProgressBeads`, `reservations`, `depEdges`) for one project's Observe tab.
 ///
 /// Mirrors `SessionStatusWatcher`: `WatchClock`-registered rather than owning a timer,
 /// `nil` clock in tests that drive `drain()` directly. Polling rather than a vnode watch
@@ -9,8 +9,8 @@ import Foundation
 /// per-path kqueue registration for files that are written elsewhere (`am`/`br`, not this
 /// process) and whose staleness tolerance is "within a beat or two", not "instantly".
 ///
-/// **Why mtime-gate at all, rather than just re-shelling on every tick.** The two lanes
-/// are cheap individually, but Observe can have several project tabs open at once, each
+/// **Why mtime-gate at all, rather than just re-shelling on every tick.** The four lanes
+/// are cheap individually, yet each repoll spawns four `am`/`br` processes, and Observe can have several project tabs open at once, each
 /// with its own watcher on the shared clock — an untargeted poll would multiply `am`/`br`
 /// spawns by tab count on every single beat regardless of whether anything changed. A
 /// `stat` per watched path is orders of magnitude cheaper than a process spawn, so `drain()`
