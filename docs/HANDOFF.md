@@ -170,7 +170,8 @@ sub-project C, the next section.
 
 ## Delegated execution (sub-project C)
 
-**State:** built on branch `delegation` in parallel tracks C0–C8 (not merged to master, not pushed).
+**State:** built in parallel tracks C0–C8 and integrated on branch `c8-int` (not merged to master,
+not pushed).
 A tab runs a command on a paired host as if locally: `flightdeck run --on mini -- xcodebuild test`
 syncs the tab's uncommitted worktree through git, streams the output, and exits with the remote
 code (125 with one `flightdeck:` line when delegation itself failed). `up`/`down` keep a service
@@ -184,8 +185,9 @@ intercepted by per-tab shims on `PATH`. Claude and codex tabs learn all of it fr
 - As built: [ARCHITECTURE.md, "Delegated execution"](ARCHITECTURE.md#delegated-execution-sub-project-c);
   test commands in [BUILD.md](BUILD.md); probes P1–P4 in [DELEGATION-PROBES.md](DELEGATION-PROBES.md);
   open items in [FOLLOWUPS.md](FOLLOWUPS.md).
-- **Verified only in unit tests and in-process loopback.** No delegated run has crossed to a real
-  second machine. The maintainer's before relying on it: probes P3 and P4 on a second Mac, a real
+- **Verified in unit tests, an end-to-end loopback (`DelegationLoopbackTests`: the real service,
+  link and macOS hostd in one process) and the Linux hostd in a container
+  (`test-hostd-linux-interop.sh run`).** No delegated run has crossed to a real second machine. The maintainer's before relying on it: probes P3 and P4 on a second Mac, a real
   UI-test run there (the "don't touch" panel, a second screen run queueing), a Linux pairing plus a
   `flightdeck run`, and `command -v <routed command>` in a real tab to see the shim is first on
   `PATH` (FOLLOWUPS lists all of it).

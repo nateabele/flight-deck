@@ -58,7 +58,7 @@ TEST_RUNNER_FLIGHTDECK_FLAKE_HUNT=1 FLIGHTDECK_TEST_THROTTLE=0 ./scripts/smoke.s
 ./scripts/build-boringssl-linux.sh   # once per checkout: libcrypto.a for the Linux hostd's SPAKE2
 ./scripts/test-hostkit.sh            # Packages/HostKit on macOS, then in swift:6.3-noble
 ./scripts/test-hostd-linux.sh        # Packages/HostDaemonLinux's own tests, in a Linux container
-./scripts/test-hostd-linux-interop.sh echo|pair|pair-wrong|serve   # Darwin <-> Linux hostd gates; ONE at a time
+./scripts/test-hostd-linux-interop.sh echo|pair|pair-wrong|serve|run   # Darwin <-> Linux hostd gates (run = delegated run); ONE at a time
 ./scripts/build-hostd-linux.sh       # release assets, BOTH arches, into build/hostd-release/ — before a Release build
 ./scripts/test-hostd-install.sh      # the pasted installer, end to end in ubuntu:24.04; ends INSTALL PASS
 # (scripts/hostd-install.sh is the installer itself, not a command you run.)

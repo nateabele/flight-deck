@@ -263,8 +263,9 @@ live probes: [DELEGATION-PROBES.md](DELEGATION-PROBES.md).
    byte channels with credit flow control (`ChannelMux.swift`; the rules are in
    `ChannelProtocols.swift`'s header). The controller opens every channel; a request names it.
 4. **Host** (`Packages/HostKit/Sources/HostKit/Delegation/`). The hostd's router answers each op
-   off the connection's serial receive path, because `sync.push` waits on channel bytes that
-   arrive on that same connection. `Workspace` holds the object store and checkouts, `Runner` spawns
+   off the connection's serial receive path (`DelegationHost`: one task per request, and
+   `host.info` answered off it too), because `sync.push` waits on channel bytes that arrive on
+   that same connection. Each connection gets its mux at hello and loses it at close. `Workspace` holds the object store and checkouts, `Runner` spawns
    and spools, `ScreenLease` serialises screen runs, `PortCheck` names a port's holder. Both hostds
    (`Sources/HostDaemon`, `Packages/HostDaemonLinux`) wire the same HostKit code.
 
@@ -281,8 +282,10 @@ before anything runs. Refused up front: LFS repos (`lfs_unsupported`), repos wit
 (`submodules_unsupported`, out of v1 by ruling), and git older than 2.40 (`git_too_old`).
 
 **Results come back two ways.** Tracked changes are committed on the host as a child of the
-snapshot (`refs/fd/results/<run>`, kept until acknowledged or 24 h), fetched as a one-commit bundle,
-and shown by `flightdeck diff` or merged by `flightdeck apply` three-way against the *current*
+snapshot (`refs/fd/results/<run>`) and fetched as a one-commit bundle. The host keeps it until the
+controller sends `run.ack` after storing that bundle, or for 24 h (ruling 24: a host that dropped it
+after its own last write would lose every result whose connection died before the Mac's copy
+landed). It is shown by `flightdeck diff` or merged by `flightdeck apply` three-way against the *current*
 worktree, so edits made during the run conflict instead of being overwritten. `apply = "auto"`
 applies on completion and falls back to review on a conflict. `ResultApplier` trusts nothing the
 host sends: a path into `.git`, through a symlink, or colliding with another after case and NFC
@@ -358,10 +361,20 @@ So at launch the app fingerprints the bundled plugin (`PluginReload`); when it c
 tab whose daemon was already live is sent `/reload-plugins` through the gated `inject`, only while
 the status registry says idle and after any queued rename or prompt.
 
-**At launch and on reconnect** `DelegationBootstrap.connect` hands `FleetService` its
-`DelegationService` before either socket starts, then calls `resumeWatching()` now and again each
-time a host comes online, so a run or service from before a relaunch is watched without anyone
-having to `wait` on it first.
+**At launch and on reconnect** `DelegationBootstrap.connect` hands `FleetService` the service
+`DelegationServiceFactory.live(hostService:sessionTitle:)` builds, before either socket starts.
+The service's `init` calls `resumeWatching()`, and the factory points `LiveHostDirectory.onHostOnline`
+at it, so a run or service from before a relaunch is watched again as soon as its host is up,
+without anyone having to `wait` on it first. Each run's output is mirrored to disk
+(`<state dir>/delegation/<host slot>-<host run id>.out`, `RunMirror`), so a reattach asks the host
+only for the bytes the copy lacks, and `logs` of a finished run answers with the host offline.
+
+**A run that never ran** (a tree mismatch, a locked screen) is reported by the host as one
+synthesized `flightdeck: <reason>` output line and `exited(125)`: the wire has no failure event.
+
+**Tested end to end** by `DelegationLoopbackTests` (the factory-built service over a real TLS link to
+an in-process `DarwinHostServer`, real processes in temp repos) and, against the Linux hostd in a
+container, by `test-hostd-linux-interop.sh run`. Neither has crossed to a real second machine.
 
 ## Preferences
 

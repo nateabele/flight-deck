@@ -2437,8 +2437,8 @@ What is open, in the order it will bite:
 `flightdeck run|exec|up|down|restart|sync|ps|wait|logs|stop|diff|apply|recipe` on top of the
 paired-host link (plan: [the delegated-execution plan](superpowers/plans/2026-10-05-delegated-execution.md);
 as built: ARCHITECTURE.md, "Delegated execution"). Built in parallel tracks C0–C8. Every result
-below comes from unit tests and in-process loopback; **nothing has run against a real second
-machine.**
+below comes from unit tests, the end-to-end `DelegationLoopbackTests` and the Linux hostd in a local
+container; **nothing has run against a real second machine.**
 
 ### Unverified live, and the maintainer's
 
@@ -2449,6 +2449,10 @@ machine.**
 - **The spec's manual checks (§10):** a real UI test on a second Mac (the "don't touch" panel shows
   while the lease is held, and a second screen run queues behind the first), and a Linux pairing
   from the pasted command followed by a `flightdeck run` there.
+- **The "don't touch" panel and the hostd's AppKit run loop.** The macOS hostd now ends in
+  `ScreenPanel.runApplication()` (an `.accessory` `NSApplication`) instead of `dispatchMain()`.
+  Unchecked on a real Mac: that it still launches and serves as a LaunchAgent, that the panel draws
+  while a screen lease is held, and that it never takes focus from the UI test it guards.
 - **`SMAppService` registration of the hostd from an installed build** has never run (sub-project A
   item above); every delegation run on a Mac host depends on it.
 - **A routed command in a real tab.** Whether a login profile that prepends to `PATH`
@@ -2483,6 +2487,32 @@ machine.**
   drops it. Fine for 1.x skew, but adding an event kind is a minor bump older controllers ignore.
 
 ### Deferred minors, by area
+
+**Host router and wire**
+- **No failure event.** A run that never ran is a synthesized `flightdeck: <reason>` line plus
+  `exited(125)`. The line sits at the spool's end without being stored in it, so a re-attach from
+  past it sends it again at the new offset (a cosmetic duplicate).
+- **No event-send backpressure on the host.** `HostPeer.send(text:)` is fire-and-forget and
+  `Runner.events` buffers without limit: replaying a full 64 MiB spool to a slow link holds about
+  85 MiB in hostd.
+- **`unknown_run` after a hostd restart.** The run-to-repo map is in memory and runs do not survive
+  a restart, so `run.result`/`run.artifacts` for an older run answer `unknown_run`. `run.ack` carries
+  `repoRoot`, so an ack still reaches the store.
+- **The 60 s idle limit counts only channel bytes.** `sync.push`, `run.result` and `run.artifacts`
+  fail `host_timeout` after 60 s with no bytes moving, and the host moves none while it unpacks a
+  pushed bundle or builds a result bundle. A very large repo could hit it; a host keepalive (credit
+  frames while it works) is the fix.
+- `run.result` tells a run still going (`run_active`) by `(runner as? Runner)?.phase`:
+  `RunControlling` has no phase query.
+- `port.open` checks the run's owner, not that it is a service still running; a finished run's port
+  simply gets `dial_failed`.
+
+**Controller adapters**
+- `RunMirror` writes on the main actor (small appends; a compaction rewrites at most 32 MiB once per
+  32 MiB of output), and a late subscriber's replay is read in full into an unbounded stream.
+- A replay is recognised when offsets go backwards or a state event arrives, so a `queued`→`started`
+  landing just before the replay begins can be taken for its start and leave a hole in the copy
+  until the next replay.
 
 **Channel mux**
 - The unclaimed-channel cap is skipped once an `accept()` stream exists (controller side only).
