@@ -69,3 +69,39 @@ final class DelegationStreamTests: XCTestCase {
         XCTAssertEqual(got, [.hostList(cid: got.first?.correlationID ?? -1, [])])
     }
 }
+
+/// `ReplyStream`'s rules, without a socket: the answered-once rule, and the output bound.
+final class DelegationReplyStreamTests: XCTestCase {
+    private let mebibyte = Data(count: 1024 * 1024)
+
+    func testOrdinaryRepliesAreSentInlineOnce() {
+        let stream = ReplyStream()
+        XCTAssertEqual(stream.admit(.ack(cid: 1)), .send(.ack(cid: 1)))
+        XCTAssertEqual(stream.admit(.ack(cid: 1)), .drop)
+    }
+
+    /// Past 4 MiB of output the stack has not taken, the stream ends with `slow_reader` — once
+    /// — and nothing more goes out; sent bytes free the window again.
+    func testOutputPastTheHighWaterMarkEndsTheStream() {
+        let stream = ReplyStream()
+        for offset in 0..<4 {
+            XCTAssertEqual(stream.admit(.delegateOutput(cid: 1, stream: "stdout", offset: Int64(offset) << 20, data: mebibyte)),
+                           .stream(.delegateOutput(cid: 1, stream: "stdout", offset: Int64(offset) << 20, data: mebibyte),
+                                   bytes: mebibyte.count))
+        }
+        stream.sent(mebibyte.count)
+        guard case .stream(.delegateOutput, _) = stream.admit(.delegateOutput(cid: 1, stream: "stdout", offset: 4 << 20, data: mebibyte))
+        else { return XCTFail("a freed window takes more") }
+        guard case .stream(.err(1, "slow_reader", _), 0) = stream.admit(.delegateOutput(cid: 1, stream: "stdout", offset: 5 << 20, data: mebibyte))
+        else { return XCTFail("past the mark, the stream ends") }
+        XCTAssertEqual(stream.admit(.delegateExit(cid: 1, status: 0)), .drop)
+    }
+
+    /// One oversized chunk with nothing in flight is still sent: the bound is on a backlog.
+    func testOneLargeChunkAloneIsSent() {
+        let stream = ReplyStream()
+        let big = Data(count: 5 * 1024 * 1024)
+        guard case .stream(.delegateOutput, _) = stream.admit(.delegateOutput(cid: 1, stream: "stdout", offset: 0, data: big))
+        else { return XCTFail() }
+    }
+}

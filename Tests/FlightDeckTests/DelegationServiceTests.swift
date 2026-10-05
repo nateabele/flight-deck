@@ -19,8 +19,10 @@ final class FakeByteChannel: ByteChannel, @unchecked Sendable {
     func cancel() { cancelled = true }
 }
 
-/// A host. Events are buffered per run and replayed to every subscriber, honouring `from`,
-/// which is the buffering contract `HostLinking.events` asks of C8's adapter.
+/// A host, keeping exactly the `HostLinking.events` contract C8's adapter must (ruling 6):
+/// events buffered from the start, any number of concurrent subscribers each from its own
+/// offset, a chunk straddling the offset cut to start there, and replay in the order state,
+/// output, end.
 @MainActor
 final class FakeHostLink: HostLinking {
     let name: String
@@ -30,9 +32,13 @@ final class FakeHostLink: HostLinking {
     var resultBytes: Data?
     var resultCommit: String?
     var nextChannel: ChannelID = 1
+    /// Thrown by the next `run.start`, as a host `err` reaches the controller.
+    var failStart: Error?
     var channels: [FakeByteChannel] = []
     private var events: [String: [RunEvent]] = [:]
     private var continuations: [String: [(Int64, AsyncThrowingStream<RunEvent, Error>.Continuation)]] = [:]
+    /// How many subscriptions are open per run, for the fan-out test.
+    func subscribers(_ runID: String) -> Int { continuations[runID]?.count ?? 0 }
 
     init(name: String) { self.name = name }
 
@@ -42,6 +48,7 @@ final class FakeHostLink: HostLinking {
         case .syncTips: return .syncTips(tips: [])
         case .syncPush: return .syncPush
         case .runStart:
+            if let failStart { throw failStart }
             nextRun += 1
             return .runStart(runID: "h\(nextRun)")
         case .runCancel: return .runCancel
@@ -51,6 +58,7 @@ final class FakeHostLink: HostLinking {
             emit(id, .exited(.signal(15)))
             return .serviceDown
         case .serviceSync: return .serviceSync
+        case .portOpen: return .portOpen
         default: throw HostLinkError.remote(code: "unsupported", message: "fake")
         }
     }
@@ -65,8 +73,16 @@ final class FakeHostLink: HostLinking {
     nonisolated func events(runID: String, from offset: Int64) -> AsyncThrowingStream<RunEvent, Error> {
         AsyncThrowingStream { continuation in
             Task { @MainActor in
-                for event in self.events[runID, default: []] { Self.deliver(event, from: offset, to: continuation) }
-                if self.events[runID]?.contains(where: Self.isEnd) == true { return continuation.finish() }
+                let history = self.events[runID, default: []]
+                // State first, then output, then the end (A2's replay order).
+                let state = history.filter { if case .queued = $0 { return true }; if case .started = $0 { return true }; return false }
+                for event in state.suffix(1) + history.filter({ if case .output = $0 { return true }; return false }) {
+                    Self.deliver(event, from: offset, to: continuation)
+                }
+                if let end = history.first(where: Self.isEnd) {
+                    continuation.yield(end)
+                    return continuation.finish()
+                }
                 self.continuations[runID, default: []].append((offset, continuation))
             }
         }
@@ -90,8 +106,14 @@ final class FakeHostLink: HostLinking {
 
     private static func deliver(_ event: RunEvent, from offset: Int64,
                                 to continuation: AsyncThrowingStream<RunEvent, Error>.Continuation) {
-        if case .output(_, let at, let data) = event, at + Int64(data.count) <= offset { return }
-        continuation.yield(event)
+        guard case .output(let stream, let at, let data) = event else {
+            continuation.yield(event)
+            return
+        }
+        let end = at + Int64(data.count)
+        guard end > offset else { return }
+        let skip = Int(max(0, offset - at))
+        continuation.yield(.output(stream: stream, offset: at + Int64(skip), data: Data(data.dropFirst(skip))))
     }
 }
 
@@ -101,30 +123,31 @@ final class FakeHosts: DelegationHostDirectory {
     var hostNames: [String] { links.keys.sorted() }
     func link(named name: String) throws -> any HostLinking {
         guard let link = links[name] else {
-            throw DelegationFailure(code: "host_offline", message: "\(name) is offline (last seen 4m ago)")
+            throw DelegationError(code: "host_offline", message: "\(name) is offline (last seen 4m ago)")
         }
         return link
     }
 }
 
-final class FakeReservation: _PendingPortReservation {
-    var ports: [WirePortBinding]
+final class FakeReservation: PortReservation, @unchecked Sendable {
+    let forwards: [PortForward]
     var released = 0
-    var forwarded: String?
-    init(ports: [WirePortBinding] = []) { self.ports = ports }
-    func forward(service runID: String, link: any HostLinking) { forwarded = runID }
+    /// What `startForwarding` was handed: one opener per remote port.
+    var opener: ((UInt16) -> any ChannelOpening)?
+    init(forwards: [PortForward] = []) { self.forwards = forwards }
+    func startForwarding(_ connect: @escaping @Sendable (UInt16) -> any ChannelOpening) { opener = connect }
     func release() { released += 1 }
 }
 
 final class FakePreflight: Preflighting {
-    var failure: DelegationFailure?
+    var failure: DelegationError?
     var plans: [DelegationPlan] = []
     var reservations: [FakeReservation] = []
-    var ports: [WirePortBinding] = []
-    func preflight(_ plan: DelegationPlan, link: any HostLinking) async throws -> any _PendingPortReservation {
+    var forwards: [PortForward] = []
+    func preflight(_ plan: DelegationPlan, link: any HostLinking) async throws -> any PortReservation {
         plans.append(plan)
         if let failure { throw failure }
-        let reservation = FakeReservation(ports: ports)
+        let reservation = FakeReservation(forwards: forwards)
         reservations.append(reservation)
         return reservation
     }
@@ -144,17 +167,23 @@ final class FakeSync: SnapshotMaking, BundleMaking, @unchecked Sendable {
     }
 }
 
-final class FakeResults: ResultApplying {
+final class FakeResults: ResultApplying, @unchecked Sendable {
     /// What `apply` answers when conflicts are not allowed (auto) and when they are.
     var autoOutcome: ApplyOutcome = .clean
     var applied: [(commit: String, allowConflicts: Bool)] = []
     var patchText = "diff --git a/x b/x\n"
-    func patch(bundle: URL, commit: String, snapshot: SnapshotRef, worktree: URL) throws -> String { patchText }
-    func apply(bundle: URL, commit: String, snapshot: SnapshotRef, worktree: URL, allowConflicts: Bool) throws -> ApplyOutcome {
+    /// Whether each call ran off the main thread, as the protocol promises the app.
+    var ranOnMain: [Bool] = []
+    func patch(bundle: URL, commit: String, snapshot: SnapshotRef, worktree: URL) async throws -> String {
+        ranOnMain.append(Thread.isMainThread)
+        return patchText
+    }
+    func apply(bundle: URL, commit: String, snapshot: SnapshotRef, worktree: URL, allowConflicts: Bool) async throws -> ApplyOutcome {
+        ranOnMain.append(Thread.isMainThread)
         applied.append((commit, allowConflicts))
         return allowConflicts ? .clean : autoOutcome
     }
-    func extractArtifacts(tar: URL, into worktree: URL) throws {}
+    func extractArtifacts(tar: URL, into worktree: URL) async throws {}
 }
 
 final class FakeConfig: DelegateConfigLoading {
@@ -165,15 +194,12 @@ final class FakeConfig: DelegateConfigLoading {
     func problems(in config: DelegateConfig, hosts: [String]) -> [String] {
         config.recipes.compactMap { name, r in r.host.flatMap { hosts.contains($0) ? nil : "\(name): unknown host \($0)" } }
     }
-    func recipe(routing argv: [String], in config: DelegateConfig) -> String? {
-        DelegationService.fnmatchRoute(argv, config.routes)
-    }
 }
 
 struct FakeWorktrees: WorktreeLocating {
     var root = URL(fileURLWithPath: "/w/proj")
-    func locate(cwd: URL) throws -> (worktree: URL, subdir: String) { (root, "") }
-    func ignored(_ paths: [String], in worktree: URL) -> Set<String> { [] }
+    func locate(cwd: URL) async throws -> (worktree: URL, subdir: String) { (root, "") }
+    func ignored(_ paths: [String], in worktree: URL) async -> Set<String> { [] }
 }
 
 // MARK: - Tests
@@ -202,8 +228,8 @@ final class DelegationServiceTests: XCTestCase {
         makeService(worktrees: FakeWorktrees())
     }
 
-    private func makeService(worktrees: any WorktreeLocating) {
-        service = DelegationService(registry: RunRegistry(file: nil), dependencies: .init(
+    private func dependencies(worktrees: any WorktreeLocating = FakeWorktrees()) -> DelegationService.Dependencies {
+        .init(
             hosts: hosts, preflight: preflight, snapshots: sync, bundles: sync, results: results,
             config: config, worktrees: worktrees, sessionTitle: { _ in "alpha" },
             // Records the bound; a short one elapses at once, a long one (the 9-minute default)
@@ -212,7 +238,12 @@ final class DelegationServiceTests: XCTestCase {
                 self?.waitTimeouts.append(seconds)
                 if seconds >= 60 { try await Task.sleep(nanoseconds: 3_600_000_000_000) }
             },
-            directory: FileManager.default.temporaryDirectory.appendingPathComponent("fd-deleg-\(UUID().uuidString)")))
+            directory: FileManager.default.temporaryDirectory.appendingPathComponent("fd-deleg-\(UUID().uuidString)"),
+            replayIdle: 0.05)
+    }
+
+    private func makeService(worktrees: any WorktreeLocating) {
+        service = DelegationService(registry: RunRegistry(file: nil), dependencies: dependencies(worktrees: worktrees))
     }
 
     /// Sends one request and collects every frame it draws.
@@ -278,7 +309,7 @@ final class DelegationServiceTests: XCTestCase {
 
     func testDelegationFailureIs125WithOneLine() async throws {
         let line = "mini: localhost:5432 is held by postgres (pid 812) — try --port 15433:5432 or --port auto:5432"
-        preflight.failure = DelegationFailure(code: "local_port_held", message: line)
+        preflight.failure = DelegationError(code: "local_port_held", message: line)
         let frames = send(.run(WireDelegateRun(cwd: "/w/proj", host: "mini", command: ["make"])))
         try await until { frames.all.contains(where: terminal) }
         guard case .err(1, "local_port_held", let message?) = frames.all.last else { return XCTFail("\(frames.all)") }
@@ -345,12 +376,12 @@ final class DelegationServiceTests: XCTestCase {
     }
 
     func testTabCloseDownsServices() async throws {
-        preflight.ports = [WirePortBinding(local: 15432, remote: 5432)]
+        preflight.forwards = [PortForward(local: 15432, remote: 5432)]
         let up = send(.up(WireDelegateRun(cwd: "/w/proj", host: "mini", command: ["postgres"], ports: ["15432:5432"])))
         let id = try await started(up)
         XCTAssertEqual(up.all.last, .delegateStarted(cid: 1, WireDelegateStarted(
             runID: id, host: "mini", ports: [WirePortBinding(local: 15432, remote: 5432)])))
-        XCTAssertEqual(preflight.reservations.first?.forwarded, hostRunID())
+        XCTAssertNotNil(preflight.reservations.first?.opener, "a service's forwards start serving")
         let other = send(.up(WireDelegateRun(cwd: "/w/proj", host: "mini", command: ["redis"])), as: .session(otherTab))
         let otherID = try await started(other)
 
@@ -503,14 +534,192 @@ final class DelegationServiceTests: XCTestCase {
         XCTAssertEqual(spec.command, "xcodebuild test -scheme 'My App'")
     }
 
-    func testCommandAndPortComposition() throws {
+    func testCommandComposition() throws {
         XCTAssertEqual(try DelegationService.command(argv: ["make && make test"], recipe: nil, routed: false), "make && make test")
         XCTAssertEqual(try DelegationService.command(argv: ["-only-testing:X Y"], recipe: Recipe(run: "xcodebuild test"), routed: false),
                        "xcodebuild test '-only-testing:X Y'")
         XCTAssertThrowsError(try DelegationService.command(argv: [], recipe: nil, routed: false))
-        XCTAssertEqual(try DelegationService.ports(recipe: ["5432", "8080:80"], cli: ["15432:5432"]).map(\.notation),
-                       ["8080:80", "15432:5432"])
-        XCTAssertThrowsError(try DelegationService.ports(recipe: [], cli: ["a:b"]))
+    }
+
+    // MARK: Fix round 1
+
+    /// A `long` recipe run without `detach` streams to its end: only the request's `detach`
+    /// (or `up`) ends a stream on `delegateStarted`, so the app and the CLI can never disagree.
+    func testOnlyTheRequestsDetachEndsAStreamOnStarted() async throws {
+        config.config = DelegateConfig(recipes: ["ui": Recipe(host: "mini", run: "xcodebuild test", long: true)])
+        let frames = send(.run(WireDelegateRun(cwd: "/w/proj", recipe: "ui")))
+        _ = try await started(frames)
+        mini.emit(hostRunID(), .exited(.code(5)))
+        try await until { frames.all.contains(where: terminal) }
+        XCTAssertEqual(frames.all.last, .delegateExit(cid: 1, status: 5))
+    }
+
+    /// `exec` never routes: it runs the argv in the existing checkout, as given.
+    func testExecNeverRoutes() async throws {
+        config.config = DelegateConfig(defaultHost: "mini",
+                                       recipes: ["ui": Recipe(host: "elsewhere", run: "x", long: true)],
+                                       routes: [Route(match: "xcodebuild *", recipe: "ui")])
+        let frames = send(.exec(WireDelegateRun(cwd: "/w/proj", command: ["xcodebuild", "build"])))
+        _ = try await started(frames)
+        XCTAssertNil(service.registry.runs.first?.recipe)
+        XCTAssertEqual(service.registry.runs.first?.host, "mini")
+    }
+
+    func testApplyWithNoResultSaysSo() async throws {
+        let frames = send(.run(WireDelegateRun(cwd: "/w/proj", host: "mini", command: ["make"])))
+        let id = try await started(frames)
+        mini.emit(hostRunID(), .exited(.code(0)))
+        try await until { frames.all.contains(where: terminal) }
+        let applied = send(.apply(run: id))
+        try await until { applied.all.contains(where: terminal) }
+        guard case .err(_, "nothing_to_apply", let message?) = applied.all.last else { return XCTFail("\(applied.all)") }
+        XCTAssertTrue(message.contains(id), message)
+    }
+
+    /// A host line already names the host; it is never prefixed a second time.
+    func testAHostLineIsNotPrefixedTwice() async throws {
+        mini.failStart = HostLinkError.remote(code: "no_console_user", message: "x")
+        let frames = send(.run(WireDelegateRun(cwd: "/w/proj", host: "mini", command: ["make"])))
+        try await until { frames.all.contains(where: terminal) }
+        XCTAssertEqual(frames.all.last, .err(cid: 1, code: "no_console_user",
+                                             message: "nobody is logged in at mini's console — log in there, then rerun"))
+    }
+
+    /// After a relaunch the app has no live watcher; `logs` still replays what the host spooled.
+    func testLogsAfterARelaunchReplaysTheSpool() async throws {
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("fd-reg-\(UUID().uuidString).json")
+        service = DelegationService(registry: RunRegistry(file: file), dependencies: dependencies())
+        let frames = send(.run(WireDelegateRun(cwd: "/w/proj", host: "mini", command: ["make"], detach: true)))
+        let id = try await started(frames)
+        mini.emit(hostRunID(), .output(stream: .stdout, offset: 0, data: Data("built".utf8)))
+
+        service = DelegationService(registry: RunRegistry(file: file), dependencies: dependencies())
+        let logs = send(.logs(run: id, follow: false, from: nil))
+        try await until { logs.all.contains(where: terminal) }
+        XCTAssertEqual(logs.all, [.delegateOutput(cid: 1, stream: "stdout", offset: 0, data: Data("built".utf8)), .ack(cid: 1)])
+    }
+
+    /// A restarted service stays the tab's, even when a human shell restarts it.
+    func testRestartKeepsTheOwner() async throws {
+        let up = send(.up(WireDelegateRun(cwd: "/w/proj", host: "mini", command: ["db"])))
+        let id = try await started(up)
+        let restarted = send(.restart(service: id, cwd: "/w/proj"), as: .human)
+        try await until { restarted.all.count == 1 }
+        XCTAssertEqual(service.registry.runs.last?.owner, tab)
+    }
+
+    /// A reattaching `run` (`noTimeout`) waits as long as the run takes: no 540 s, no 124.
+    func testAReattachHasNoTimeout() async throws {
+        let frames = send(.run(WireDelegateRun(cwd: "/w/proj", host: "mini", command: ["make"], detach: true)))
+        let id = try await started(frames)
+        mini.emit(hostRunID(), .output(stream: .stdout, offset: 0, data: Data("ab".utf8)))
+        let resumed = send(.wait(run: id, timeout: nil, from: 1, noTimeout: true))
+        try await Task.sleep(nanoseconds: 30_000_000)
+        XCTAssertTrue(waitTimeouts.isEmpty, "no timer at all: \(waitTimeouts)")
+        mini.emit(hostRunID(), .exited(.code(0)))
+        try await until { resumed.all.contains(where: terminal) }
+        XCTAssertEqual(resumed.all, [.delegateOutput(cid: 1, stream: "stdout", offset: 1, data: Data("b".utf8)),
+                                     .delegateExit(cid: 1, status: 0)])
+    }
+
+    /// Ruling 6: an attached run, a `wait {from}` and the monitor all subscribe to one run at
+    /// once, each from its own offset, and none sees another's bytes.
+    func testConcurrentSubscriptionsKeepTheirOwnOffsets() async throws {
+        let attached = send(.run(WireDelegateRun(cwd: "/w/proj", host: "mini", command: ["make"])))
+        let id = try await started(attached)
+        mini.emit(hostRunID(), .output(stream: .stdout, offset: 0, data: Data("0123".utf8)))
+        let late = send(.wait(run: id, timeout: nil, from: 2, noTimeout: true))
+        try await until { self.mini.subscribers(self.hostRunID()) == 2 }
+        mini.emit(hostRunID(), .output(stream: .stdout, offset: 4, data: Data("45".utf8)))
+        mini.emit(hostRunID(), .exited(.code(0)))
+        try await until { attached.all.contains(where: terminal) && late.all.contains(where: terminal) }
+        let bytes = { (frames: Frames) in frames.all.compactMap { frame -> String? in
+            if case .delegateOutput(_, _, _, let data) = frame { return String(decoding: data, as: UTF8.self) }
+            return nil
+        }.joined() }
+        XCTAssertEqual(bytes(attached), "012345")
+        XCTAssertEqual(bytes(late), "2345")
+    }
+
+    func testWaitSurfacesNoticesAndADownedServiceEndsIt() async throws {
+        let up = send(.up(WireDelegateRun(cwd: "/w/proj", host: "mini", command: ["db"])))
+        let id = try await started(up)
+        let waited = send(.wait(run: id, timeout: nil, from: nil))
+        try await until { self.waitTimeouts.count == 1 }
+        mini.emit(hostRunID(), .queued(position: 1, on: .slot, holder: nil))
+        try await until { waited.all.count == 1 }
+        XCTAssertEqual(waited.all.first, .delegateNotice(cid: 1, message: "waiting for a free checkout on mini"))
+        let down = send(.down(service: id, cwd: "/w/proj"))
+        try await until { down.all.contains(where: terminal) && waited.all.contains(where: terminal) }
+        XCTAssertEqual(waited.all.last, .delegateExit(cid: 1, status: 0))
+    }
+
+    /// The hint skips a file under an included directory, and never fires for `exec`, which
+    /// sent nothing at all.
+    func testHintRespectsDirectoryIncludesAndSkipsExec() async throws {
+        let repo = try Self.tempRepo(ignored: [], files: ["config/secrets.json", ".env"], gitignore: "config/\n.env\n")
+        makeService(worktrees: GitWorktreeLocator())
+        for request in [DelegateRequest.run(WireDelegateRun(cwd: repo.path, host: "mini", command: ["make"], include: ["config/"])),
+                        .exec(WireDelegateRun(cwd: repo.path, host: "mini", command: ["make"]))] {
+            let frames = send(request)
+            _ = try await started(frames)
+            mini.emit(hostRunID(), .output(stream: .stderr, offset: 0, data: Data("open config/secrets.json: missing; .env: exec".utf8)))
+            mini.emit(hostRunID(), .exited(.code(1)))
+            try await until { frames.all.contains(where: terminal) }
+            if case .run = request {
+                // config/secrets.json was sent under `config/`; `.env` was not.
+                guard case .err(_, "missing_include", let message?) = frames.all.last else { return XCTFail("\(frames.all)") }
+                XCTAssertTrue(message.contains(".env is ignored"), message)
+            } else {
+                XCTAssertEqual(frames.all.last, .delegateExit(cid: 1, status: 1))
+            }
+        }
+    }
+
+    func testSyncWithRestartOnSyncAnswersAsRestartDoes() async throws {
+        config.config = DelegateConfig(recipes: ["db": Recipe(host: "mini", run: "postgres", service: true, restartOnSync: true)])
+        let up = send(.up(WireDelegateRun(cwd: "/w/proj", recipe: "db")))
+        let id = try await started(up)
+        let synced = send(.sync(service: id, cwd: "/w/proj"), as: .human)
+        try await until { synced.all.count == 1 }
+        guard case .delegateStarted(_, let started) = synced.all.last else { return XCTFail("\(synced.all)") }
+        XCTAssertNotEqual(started.runID, id)
+        XCTAssertEqual(service.registry.run(started.runID)?.owner, tab, "the tab's service, whoever synced it")
+    }
+
+    func testResultWorkRunsOffTheMainActor() async throws {
+        mini.resultCommit = "res1"
+        mini.resultBytes = Data("bundle".utf8)
+        let frames = send(.run(WireDelegateRun(cwd: "/w/proj", host: "mini", command: ["make"])))
+        let id = try await started(frames)
+        mini.emit(hostRunID(), .exited(.code(0)))
+        try await until { frames.all.contains(where: terminal) }
+        let diff = send(.diff(run: id))
+        try await until { diff.all.contains(where: terminal) }
+        let applied = send(.apply(run: id))
+        try await until { applied.all.contains(where: terminal) }
+        XCTAssertEqual(results.ranOnMain, [false, false])
+    }
+
+    /// A service's forwards open `port.open` channels named for its host run.
+    func testAServicesForwardOpensPortChannels() async throws {
+        preflight.forwards = [PortForward(local: 15432, remote: 5432)]
+        let up = send(.up(WireDelegateRun(cwd: "/w/proj", host: "mini", command: ["db"], ports: ["15432:5432"])))
+        _ = try await started(up)
+        let opener = try XCTUnwrap(preflight.reservations.first?.opener)
+        let channel = try await opener(5432).open()
+        XCTAssertEqual(mini.requests.last, .portOpen(service: hostRunID(), remote: 5432, channel: channel.id))
+    }
+
+    /// Every run still going is watched again at launch, so its end is recorded unasked.
+    func testALaunchWatchesRunsStillGoing() async throws {
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("fd-reg-\(UUID().uuidString).json")
+        service = DelegationService(registry: RunRegistry(file: file), dependencies: dependencies())
+        let frames = send(.run(WireDelegateRun(cwd: "/w/proj", host: "mini", command: ["make"], detach: true)))
+        let id = try await started(frames)
+        service = DelegationService(registry: RunRegistry(file: file), dependencies: dependencies())
+        mini.emit(hostRunID(), .exited(.code(7)))
+        try await until { self.service.registry.run(id)?.status == 7 }
     }
 
     // MARK: Helpers

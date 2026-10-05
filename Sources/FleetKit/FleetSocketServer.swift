@@ -916,8 +916,9 @@ public final class FleetSocketServer: @unchecked Sendable {
                 // frames: its `delegateStarted`/`delegateNotice`/`delegateOutput` frames pass
                 // and leave the `cid` open, and its terminal frame closes it like any reply.
                 // Every frame any other request draws is terminal, so for those this is the
-                // same answered-once rule it always was.
-                var answered = false
+                // same answered-once rule it always was. `ReplyStream` holds that rule, and the
+                // stream's backpressure.
+                let stream = ReplyStream()
                 onRequest(attachment, cid, request) { [weak self, weak connection] frame in
                     guard let self, let connection else { return }
                     // The reply comes back from wherever the page was read, which is the
@@ -926,14 +927,28 @@ public final class FleetSocketServer: @unchecked Sendable {
                     // this is the code that reads it — a reader that hopped for itself would
                     // be reading that table from its own thread.
                     dispatchPrecondition(condition: .onQueue(self.queue))
-                    guard !answered else { return }
-                    answered = !frame.continuesStream
+                    let action = stream.admit(frame)
                     // The connection may have ended while the page was being read — a phone
                     // that put itself in a pocket mid-scroll. `attached` is keyed by a fresh
                     // UUID per connection and `drop(id)` removes it, so this cannot match a
                     // later peer that happens to reuse anything.
                     guard self.attached[id] != nil else { return }
-                    FleetSocket.send(frame, over: connection)
+                    switch action {
+                    case .drop:
+                        return
+                    case .send(let frame):
+                        FleetSocket.send(frame, over: connection)
+                    case .stream(let frame, let bytes):
+                        // Encoded off `queue` (the main queue in production), on the stream's
+                        // own serial queue so its frames still reach the socket in order; the
+                        // bytes count as in flight until the stack has taken them.
+                        let queue = self.queue
+                        stream.encoder.async {
+                            FleetSocket.send(frame, over: connection, onSent: {
+                                queue.async { stream.sent(bytes) }
+                            })
+                        }
+                    }
                 }
             case .logs(let cid, let logs):
                 // The answer to something THIS Mac asked. Gated on attachment like every
@@ -1050,4 +1065,50 @@ public extension ServerFrame {
             return false
         }
     }
+}
+
+/// One request's replies on one connection: the answered-once rule, and a delegation
+/// stream's backpressure.
+///
+/// **Backpressure, the simple way.** Output bytes handed to the socket but not yet taken by
+/// the stack (`.contentProcessed`) are counted; past `highWater` the stream is ended with a
+/// terminal `err(slow_reader)` rather than buffered without bound in the app. The CLI already
+/// counts every byte it printed, so it answers by reattaching with `delegate.wait {from}` on
+/// the same connection and loses nothing — the run's output is spooled on the host either way.
+/// Pausing and resuming per subscriber would need the app to replay from its own copy of the
+/// output, which it does not keep.
+final class ReplyStream {
+    /// 4 MiB of output in flight: far past anything a terminal reading at speed accumulates,
+    /// well short of the app holding a whole build log in socket buffers for a stalled reader.
+    static let highWater = 4 * 1024 * 1024
+
+    enum Action: Equatable {
+        case drop
+        /// An ordinary reply, sent as every reply always was.
+        case send(ServerFrame)
+        /// A stream frame: encoded off the main queue, `bytes` of output counted until sent.
+        case stream(ServerFrame, bytes: Int)
+    }
+
+    let encoder = DispatchQueue(label: "dev.flightdeck.fleet.stream", qos: .userInitiated)
+    private(set) var inFlight = 0
+    private var closed = false
+    private var streaming = false
+
+    func admit(_ frame: ServerFrame) -> Action {
+        guard !closed else { return .drop }
+        if !frame.continuesStream { closed = true }
+        guard streaming || frame.continuesStream else { return .send(frame) }
+        streaming = true
+        guard case .delegateOutput(let cid, _, _, let data) = frame else { return .stream(frame, bytes: 0) }
+        if inFlight > 0, inFlight + data.count > Self.highWater {
+            closed = true
+            return .stream(.err(cid: cid, code: "slow_reader",
+                                message: "output outran the reader — reattach with delegate.wait {from}"), bytes: 0)
+        }
+        inFlight += data.count
+        return .stream(frame, bytes: data.count)
+    }
+
+    func sent(_ bytes: Int) { inFlight -= bytes }
 }

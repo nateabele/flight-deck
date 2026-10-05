@@ -8,6 +8,8 @@ final class DelegationCLIRunnerTests: XCTestCase {
     private var err: [String] = []
     private var written: [(String, Data)] = []
     private var execs: [(String, [String])] = []
+    /// Set to make the next raw write fail, as stdout's reader going away does (`| head`).
+    private var writeError: Error?
     private var code: Int32?
     private var scheduled: [(TimeInterval, () -> Void)] = []
 
@@ -18,7 +20,10 @@ final class DelegationCLIRunnerTests: XCTestCase {
                           context: CLIContext(selfID: nil, cwd: "/w/a", json: false, isTTY: isTTY, environment: env),
                           out: { self.out.append($0) }, err: { self.err.append($0) },
                           finish: { self.code = $0 }, schedule: { self.scheduled.append(($0, $1)) },
-                          write: { self.written.append(($0, $1)) }, execReal: { self.execs.append(($0, $1)) })
+                          write: {
+                              if let error = self.writeError { throw error }
+                              self.written.append(($0, $1))
+                          }, execReal: { self.execs.append(($0, $1)) })
         r.run()
         transport.push(.snapshot(seq: 1, fleet: FleetSnapshot(), reason: .initial))
         return r
@@ -65,7 +70,7 @@ final class DelegationCLIRunnerTests: XCTestCase {
     func testAWaitTimeoutIs124() {
         let t = FakeTransport()
         _ = runner("wait", "r7", "--timeout", "30", transport: t)
-        guard case .req(let cid, .delegate(.wait("r7", 30, nil))) = t.sent.last else { return XCTFail("\(t.sent)") }
+        guard case .req(let cid, .delegate(.wait("r7", 30, nil, false))) = t.sent.last else { return XCTFail("\(t.sent)") }
         t.push(.err(cid: cid, code: "wait_timeout", message: "r7 is still running on mini after 30s"))
         XCTAssertEqual(code, 124)
     }
@@ -134,7 +139,7 @@ final class DelegationCLIRunnerTests: XCTestCase {
         scheduled.forEach { $0.1() }
         XCTAssertEqual(t.connects.count, 2)
         t.push(.snapshot(seq: 1, fleet: FleetSnapshot(), reason: .initial))
-        guard case .req(let resumed, .delegate(.wait("r9", nil, 3))) = t.sent.last else { return XCTFail("\(t.sent)") }
+        guard case .req(let resumed, .delegate(.wait("r9", nil, 3, true))) = t.sent.last else { return XCTFail("\(t.sent)") }
         // An overlapping replay prints only the new bytes.
         t.push(.delegateOutput(cid: resumed, stream: "stdout", offset: 2, data: Data("cde".utf8)))
         t.push(.delegateExit(cid: resumed, status: 0))
@@ -192,6 +197,158 @@ final class DelegationCLIRunnerTests: XCTestCase {
         _ = runner("route-exec", "make", "--", "x", transport: bypass, env: ["FLIGHTDECK_NO_ROUTE": "1"])
         XCTAssertTrue(bypass.connects.isEmpty)
         XCTAssertEqual(execs.last?.1, ["x"])
+    }
+
+    /// A run that never started is a delegation failure: 125, one line, the next step.
+    func testADropBeforeStartedIs125() {
+        let t = FakeTransport()
+        _ = runner("exec", "--on", "mini", "--", "make", transport: t)
+        t.onDisconnect?(nil)
+        XCTAssertEqual(code, 125)
+        XCTAssertEqual(err.count, 1)
+        XCTAssertTrue(err[0].hasPrefix("flightdeck: "), err[0])
+
+        let unreachable = FakeTransport()
+        code = nil
+        err = []
+        let invocation = try! CLIArguments.parse(["wait", "r1"])
+        CLIRunner(invocation: invocation, transport: unreachable,
+                  context: CLIContext(selfID: nil, cwd: "/w/a", json: false, isTTY: true),
+                  out: { _ in }, err: { self.err.append($0) }, finish: { self.code = $0 }, schedule: { _, _ in }).run()
+        unreachable.onDisconnect?(nil)
+        XCTAssertEqual(code, 125, "cannot reach the app is a delegation failure for run, exec and wait")
+        XCTAssertEqual(err.count, 1)
+    }
+
+    /// A service recipe run through `run` detaches, as `up` does: the CLI says so in `detach`.
+    func testAServiceRecipeDetaches() {
+        let t = FakeTransport()
+        _ = runner("run", "db", transport: t)
+        answerBook(t, WireRecipeBook(defaultHost: "mini", include: [],
+                                     recipes: [WireRecipe(name: "db", run: "postgres", service: true)], routes: []))
+        guard case .req(_, .delegate(.run(let run))) = t.sent.last else { return XCTFail() }
+        XCTAssertTrue(run.detach)
+    }
+
+    /// `exec` never routes, so it never asks for the recipe book.
+    func testExecDoesNotReadTheBook() {
+        let t = FakeTransport()
+        _ = runner("exec", "--on", "mini", "--", "xcodebuild", "build", transport: t)
+        guard case .req(_, .delegate(.exec(let run))) = t.sent.last else { return XCTFail("\(t.sent)") }
+        XCTAssertFalse(run.detach)
+    }
+
+    func testApplyWithNothingToApplyExitsNonZero() {
+        let t = FakeTransport()
+        _ = runner("apply", "r1", transport: t)
+        t.push(.err(cid: lastCID(t), code: "nothing_to_apply", message: "r1 changed no files — nothing to apply"))
+        XCTAssertEqual(code, 1)
+    }
+
+    /// Ctrl-C before the run has an id still stops it, once the id arrives.
+    func testInterruptBeforeStartedStopsWhenTheIdArrives() {
+        let t = FakeTransport()
+        let r = runner("exec", "--on", "mini", "--", "sleep", "9", transport: t)
+        let cid = lastCID(t)
+        r.interrupt()
+        XCTAssertNil(code)
+        t.push(.delegateStarted(cid: cid, WireDelegateStarted(runID: "r6", host: "mini")))
+        guard case .req(_, .delegate(.stop("r6"))) = t.sent.last else { return XCTFail("\(t.sent)") }
+    }
+
+    /// Ctrl-C on `wait` only stops waiting: the run is not cancelled.
+    func testInterruptOnWaitDetaches() {
+        let t = FakeTransport()
+        let r = runner("wait", "r6", transport: t)
+        r.interrupt()
+        XCTAssertEqual(code, 130)
+        XCTAssertFalse(t.sent.contains { if case .req(_, .delegate(.stop)) = $0 { return true }; return false })
+    }
+
+    func testAnAttachedRunNamesItsIdOnceOnStderr() {
+        let t = FakeTransport()
+        _ = runner("exec", "--on", "mini", "--", "make", transport: t)
+        t.push(.delegateStarted(cid: lastCID(t), WireDelegateStarted(runID: "r8", host: "mini")))
+        XCTAssertEqual(err.count, 1)
+        XCTAssertTrue(err.first?.contains("r8") == true)
+    }
+
+    /// `flightdeck run … | head`: the reader leaving is EPIPE, not a crash. The CLI detaches
+    /// with 141 and prints nothing more; nothing stops the run.
+    func testABrokenPipeDetachesWith141() {
+        let t = FakeTransport()
+        _ = runner("exec", "--on", "mini", "--", "yes", transport: t)
+        let cid = lastCID(t)
+        t.push(.delegateStarted(cid: cid, WireDelegateStarted(runID: "r1", host: "mini")))
+        writeError = POSIXError(.EPIPE)
+        t.push(.delegateOutput(cid: cid, stream: "stdout", offset: 0, data: Data("y\n".utf8)))
+        XCTAssertEqual(code, 141)
+        let sentBefore = t.sent.count
+        t.push(.delegateOutput(cid: cid, stream: "stdout", offset: 2, data: Data("y\n".utf8)))
+        XCTAssertEqual(t.sent.count, sentBefore)
+        XCTAssertFalse(t.sent.contains { if case .req(_, .delegate(.stop)) = $0 { return true }; return false })
+    }
+
+    /// The app ended the stream because this reader fell behind: the CLI picks the run back up
+    /// from its next unprinted byte on the same connection, with no timeout.
+    func testASlowReaderResumesFromItsOffset() {
+        let t = FakeTransport()
+        _ = runner("exec", "--on", "mini", "--", "make", transport: t)
+        let cid = lastCID(t)
+        t.push(.delegateStarted(cid: cid, WireDelegateStarted(runID: "r3", host: "mini")))
+        t.push(.delegateOutput(cid: cid, stream: "stdout", offset: 0, data: Data("abcd".utf8)))
+        t.push(.err(cid: cid, code: "slow_reader", message: "x"))
+        XCTAssertNil(code)
+        guard case .req(_, .delegate(.wait("r3", nil, 4, true))) = t.sent.last else { return XCTFail("\(t.sent)") }
+    }
+
+    /// A dropped app that never comes back ends the run's CLI with 125 and the next step,
+    /// not a reconnect loop forever.
+    func testReconnectsAreBounded() {
+        let t = FakeTransport()
+        _ = runner("exec", "--on", "mini", "--", "make", transport: t)
+        t.push(.delegateStarted(cid: lastCID(t), WireDelegateStarted(runID: "r4", host: "mini")))
+        for _ in 0...DelegateCommandRunner.reconnectLimit {
+            t.onDisconnect?(nil)
+            scheduled.forEach { $0.1() }
+            scheduled = []
+        }
+        XCTAssertEqual(code, 125)
+        XCTAssertTrue(err.last?.contains("flightdeck wait r4") == true, "\(err)")
+    }
+
+    func testJSONDetachIncludesTheNextStep() {
+        let t = FakeTransport()
+        let invocation = try! CLIArguments.parse(["run", "--detach", "--on", "mini", "--", "make"])
+        CLIRunner(invocation: invocation, transport: t,
+                  context: CLIContext(selfID: nil, cwd: "/w/a", json: true, isTTY: false),
+                  out: { self.out.append($0) }, err: { _ in }, finish: { self.code = $0 }, schedule: { _, _ in }).run()
+        t.push(.snapshot(seq: 1, fleet: FleetSnapshot(), reason: .initial))
+        t.push(.delegateStarted(cid: lastCID(t), WireDelegateStarted(runID: "r2", host: "mini")))
+        XCTAssertEqual(out, [#"{"host":"mini","next":"flightdeck wait r2","ports":[],"runID":"r2"}"#])
+    }
+
+    func testSyncAcceptsARestart() {
+        let t = FakeTransport()
+        _ = runner("sync", "db", transport: t)
+        t.push(.delegateStarted(cid: lastCID(t), WireDelegateStarted(runID: "r9", host: "mini")))
+        XCTAssertEqual(code, 0)
+        let plain = FakeTransport()
+        code = nil
+        _ = runner("sync", "db", transport: plain)
+        plain.push(.ack(cid: lastCID(plain)))
+        XCTAssertEqual(code, 0)
+    }
+
+    /// The real binary must get Ctrl-C and `kill` back: an ignored signal stays ignored across
+    /// `exec`.
+    func testRouteExecRestoresDefaultSignalsBeforeExec() {
+        let saved = signal(SIGINT, SIG_IGN)
+        defer { signal(SIGINT, saved) }
+        DelegateRouting.resetSignals()
+        var action = sigaction()
+        sigaction(SIGINT, nil, &action)
+        XCTAssertEqual(unsafeBitCast(action.__sigaction_u.__sa_handler, to: Int.self), unsafeBitCast(SIG_DFL, to: Int.self))
     }
 
     func testRouteResolutionSkipsTheShimDirectory() throws {

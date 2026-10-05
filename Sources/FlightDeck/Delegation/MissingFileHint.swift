@@ -26,18 +26,22 @@ enum MissingFileHint {
     ///     carries (§4.1). An absolute host path is cut after it to get back to a relative one.
     ///   - subdir: the run's subdirectory, which a bare relative path in the output is
     ///     relative to.
-    ///   - sent: the `include` paths that were synced, which are by definition not missing.
+    ///   - sent: the `include` paths that were synced, which are by definition not missing —
+    ///     a directory include (`config` or `config/`) covers everything under it.
     ///   - ignored: answers which of the candidates git ignores in `worktree`.
-    static func hint(tail: String, worktree: URL, worktreeName: String, subdir: String, sent: Set<String>,
-                     ignored: (_ paths: [String], _ worktree: URL) -> Set<String>) -> String? {
+    static func hint(tail: String, worktree: URL, worktreeName: String, subdir: String, sent: [String],
+                     ignored: (_ paths: [String], _ worktree: URL) async -> Set<String>) async -> String? {
         let fm = FileManager.default
+        let covered = sent.compactMap { normalized($0) }
         var seen = Set<String>()
         let existing = candidates(in: tail, worktreeName: worktreeName, subdir: subdir).filter { path in
-            guard seen.insert(path).inserted, !sent.contains(path) else { return false }
+            guard seen.insert(path).inserted,
+                  !covered.contains(where: { path == $0 || path.hasPrefix($0 + "/") })
+            else { return false }
             return fm.fileExists(atPath: worktree.appendingPathComponent(path).path)
         }
         guard !existing.isEmpty else { return nil }
-        let ignoredPaths = ignored(existing, worktree)
+        let ignoredPaths = await ignored(existing, worktree)
         return existing.first { ignoredPaths.contains($0) }.map(message(for:))
     }
 
