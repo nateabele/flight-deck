@@ -166,7 +166,8 @@ public final class FleetSocketServer: @unchecked Sendable {
     /// that has grown the same problem.
     ///
     /// `reply` must be called on `queue`, and it asserts that. It answers at most once —
-    /// a second call is dropped rather than trusted — and calling it after the connection has
+    /// a second call is dropped rather than trusted, except after a frame whose
+    /// `continuesStream` is true (a delegation stream's progress) — and calling it after the connection has
     /// ended is safe and does nothing, because a phone can leave inside the moment a page
     /// takes to read and that is the ordinary case, not an error.
     public var onRequest: (
@@ -905,11 +906,17 @@ public final class FleetSocketServer: @unchecked Sendable {
                     FleetSocket.send(ServerFrame.err(cid: cid, code: "unhandled"), over: connection)
                     return
                 }
-                // At most one frame per `cid`, enforced here rather than asked of every
-                // reader: a client correlates a reply by that number and closes the fetch out
-                // when it lands, so a second one is a page it is no longer expecting and has
+                // At most one *terminal* frame per `cid`, enforced here rather than asked of
+                // every reader: a client correlates a reply by that number and closes the fetch
+                // out when it lands, so a second one is a page it is no longer expecting and has
                 // nowhere to put. One `Bool` on `queue` — where this closure has just
                 // asserted it is — makes it impossible instead of merely documented.
+                //
+                // A delegation stream (`flightdeck run`) is the one request answered with many
+                // frames: its `delegateStarted`/`delegateNotice`/`delegateOutput` frames pass
+                // and leave the `cid` open, and its terminal frame closes it like any reply.
+                // Every frame any other request draws is terminal, so for those this is the
+                // same answered-once rule it always was.
                 var answered = false
                 onRequest(attachment, cid, request) { [weak self, weak connection] frame in
                     guard let self, let connection else { return }
@@ -920,7 +927,7 @@ public final class FleetSocketServer: @unchecked Sendable {
                     // be reading that table from its own thread.
                     dispatchPrecondition(condition: .onQueue(self.queue))
                     guard !answered else { return }
-                    answered = true
+                    answered = !frame.continuesStream
                     // The connection may have ended while the page was being read — a phone
                     // that put itself in a pocket mid-scroll. `attached` is keyed by a fresh
                     // UUID per connection and `drop(id)` removes it, so this cannot match a
@@ -1021,4 +1028,26 @@ public enum FleetSocketError: Error {
     /// Something is already answering on the local socket path — another instance on the same
     /// state directory, whose clients would be orphaned if this one unlinked it.
     case inUse
+}
+
+public extension ServerFrame {
+    /// More frames may follow this one on its `cid` (a delegation stream, see
+    /// `DelegationControlWire.swift`). Exhaustive with no `default`, so a new reply case cannot
+    /// compile until someone decides whether it ends its request; deciding wrong either way is
+    /// a hang (a stream closed early) or a stray frame (a reply left open).
+    ///
+    /// `delegateStarted` is non-terminal here even though a detached run ends on it
+    /// (`DelegationControlWire.swift`): the frame alone cannot say which it is, and the app
+    /// sends nothing after a detached one, so leaving that `cid` open costs nothing.
+    var continuesStream: Bool {
+        switch self {
+        case .delegateStarted, .delegateNotice, .delegateOutput:
+            return true
+        case .snapshot, .event, .ack, .err, .page, .newSessionOptions, .macEndpoints, .recentlyClosed,
+             .conversations, .searchHits, .session, .phoneRequest, .intakeDetail, .intakePlan, .hostList,
+             .hostInfo, .delegateExit, .delegateRuns, .delegatePatch, .delegateApplied, .recipes,
+             .recipeCheck, .hostDisk:
+            return false
+        }
+    }
 }

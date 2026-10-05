@@ -13,6 +13,11 @@ struct CLIContext {
     /// id): a pipe gets JSON even without `--json`, so a script that forgot the flag still
     /// reads something parseable.
     var isTTY: Bool
+    /// The CLI's terminal size, for `run --pty` (nil without a terminal).
+    var columns: Int? = nil
+    var rows: Int? = nil
+    /// For `route-exec`'s `FLIGHTDECK_NO_ROUTE` bypass.
+    var environment: [String: String] = [:]
 }
 
 /// One `flightdeck` invocation, as a state machine over frames: connect, take the fleet
@@ -65,6 +70,12 @@ final class CLIRunner {
     /// and `raw hello` is waiting to print.
     private var onSnapshot: ((ServerFrame) -> Void)?
 
+    /// The delegation verb in flight (`run`, `wait r7`, …), whose streams outlive one frame.
+    private var delegateRunner: DelegateCommandRunner?
+    /// Raw run output to the CLI's own stdout/stderr, and `route-exec`'s exec of the real binary.
+    private let write: (String, Data) -> Void
+    private let execReal: (String, [String]) -> Void
+
     private var tailTarget: UUID?
     private var tailSawSnapshot = false
     private var rawFrame: ClientFrame?
@@ -74,7 +85,9 @@ final class CLIRunner {
     init(invocation: CLIInvocation, transport: CLITransport, context: CLIContext,
          out: @escaping (String) -> Void, err: @escaping (String) -> Void,
          finish: @escaping (Int32) -> Void,
-         schedule: @escaping (TimeInterval, @escaping () -> Void) -> Void) {
+         schedule: @escaping (TimeInterval, @escaping () -> Void) -> Void,
+         write: ((String, Data) -> Void)? = nil,
+         execReal: ((String, [String]) -> Void)? = nil) {
         self.invocation = invocation
         self.transport = transport
         self.context = context
@@ -82,6 +95,9 @@ final class CLIRunner {
         self.err = err
         self.onFinish = finish
         self.schedule = schedule
+        // A test that passes neither still sees run output, as text, beside everything else.
+        self.write = write ?? { _, data in out(String(decoding: data, as: UTF8.self)) }
+        self.execReal = execReal ?? { argv0, _ in err("exec \(argv0)"); finish(0) }
     }
 
     func run() {
@@ -113,6 +129,10 @@ final class CLIRunner {
             }
         case .wait(_, _, let timeout?), .send(_, _, true, let timeout?):
             schedule(timeout) { self.fail("timed_out") }
+        case .delegate(.routeExec(let argv0, let args)) where context.environment["FLIGHTDECK_NO_ROUTE"] == "1":
+            // The bypass needs no app at all: not even a connect, which would cost a routed
+            // command its latency for nothing.
+            return execReal(argv0, args)
         default:
             break
         }
@@ -160,9 +180,18 @@ final class CLIRunner {
         // Checked before `reachedMac`: the sandbox refuses the `connect()` syscall itself, so
         // this fires on the very first attempt, and it means something a retry cannot fix —
         // unlike an ordinary drop, `tail`/`wait` must not schedule a reconnect against it either.
+        if case .delegate(.routeExec(let argv0, let args)) = invocation.command, delegateRunner?.isDelegating != true {
+            // No app to ask, or it went away before routing was decided: the shim's command
+            // still runs, locally, exactly as it would have without the shim.
+            return execReal(argv0, args)
+        }
         if Self.isSandboxRefusal(error) { return finish(77) }
         // The 69 message names the socket path, which only the main program knows.
         guard reachedMac else { return finish(69) }
+        if let delegateRunner {
+            guard delegateRunner.disconnected() else { return fail("disconnected") }
+            return
+        }
         switch invocation.command {
         case .tail, .wait:
             // Both outlive an app restart: resume from the last sequence seen, so `tail`'s
@@ -251,6 +280,8 @@ final class CLIRunner {
             request(.hostInfo(name: name))
         case .raw:
             raw()
+        case .delegate(let command):
+            delegate(command)
         case .intakeRun:
             // main.swift intercepts `intake run` right after the usage check, before a
             // transport or this runner exists at all — the detached process has no fleet to
@@ -262,6 +293,38 @@ final class CLIRunner {
     }
 
     // MARK: Commands
+
+    /// Hands a delegation verb to its own state machine (`DelegateCommands.swift`), wired to
+    /// this runner's socket and outputs.
+    private func delegate(_ command: DelegateCommand) {
+        let runner = DelegateCommandRunner(
+            command: command, cwd: context.cwd, columns: context.columns, rows: context.rows,
+            wantsJSON: wantsJSON,
+            hooks: DelegateRunnerHooks(
+                send: { self.transport.send($0) },
+                expect: { cid, handler in self.replies[cid] = handler },
+                out: out, err: err, write: write,
+                finish: { self.finish($0) },
+                execReal: execReal,
+                reconnect: {
+                    // Resumes once the fresh connection's snapshot lands; `reattach` then asks
+                    // for the output from the first byte this CLI has not printed.
+                    self.onSnapshot = { _ in self.onSnapshot = nil; self.delegateRunner?.reattach() }
+                    self.schedule(Self.reconnectDelay) {
+                        guard !self.finished else { return }
+                        self.transport.connect(lastSeq: 0)
+                    }
+                }))
+        delegateRunner = runner
+        runner.start()
+    }
+
+    /// Ctrl-C, forwarded to the attached run (§6.1). Anything else just ends.
+    func interrupt() {
+        guard !finished else { return }
+        guard let delegateRunner else { return finish(130) }
+        delegateRunner.interrupt()
+    }
 
     private func ls(_ token: String?) {
         var shown = fleet
@@ -522,10 +585,9 @@ final class CLIRunner {
             case .ack, .snapshot, .event, .phoneRequest: self.out(CLIOutput.line(frame))
             case .delegateStarted, .delegateNotice, .delegateOutput, .delegateExit, .delegateRuns,
                  .delegatePatch, .delegateApplied, .recipes, .recipeCheck, .hostDisk:
-                // Nothing parses a delegation subcommand yet (task C6), so no request here
-                // draws one; printed raw like the arm above rather than dropped. C6 replaces
-                // this with real output, and with streaming: these may arrive several to a
-                // `cid`, and `finish` below would end the CLI at the first.
+                // Delegation verbs never come through here — `DelegateCommandRunner` sends and
+                // reads them, streams included — so no request here draws one; printed raw like
+                // the arm above rather than dropped.
                 self.out(CLIOutput.line(frame))
             }
             self.finish(0)
