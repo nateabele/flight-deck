@@ -2875,6 +2875,11 @@ final class SessionStore: ObservableObject {
             // `controlSocket` reaches the adapter separately (its `didSet` and the stack
             // builder); the flags need both, and neither write depends on the other's order.
             stack.adapter.controlAccessSupported = CodexVersionProbe.supportsControlAccess(version)
+            // Here rather than at app launch, so a user who never opens a codex tab never gets
+            // a file written into their codex home. It also runs before any of this account's
+            // tabs spawns its TUI, so even the first tab starts with the skill on disk. It is
+            // off-main and bounded; see `installBundledOffMainActor`.
+            await CodexDelegateSkill.installBundledOffMainActor(codexHome: stack.transport.home)
             try stack.transport.start()
             try await CodexProcessTransport.verifyHandshake(stack.rpc)
         }
