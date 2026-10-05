@@ -21,11 +21,16 @@ final class AgentAccountEnvironmentTests: XCTestCase {
             .appendingPathComponent("Flight Deck", isDirectory: true)
             .appendingPathComponent("hook-events-debug", isDirectory: true)
             .path
+        let expectedUsageDir = base
+            .appendingPathComponent("Flight Deck", isDirectory: true)
+            .appendingPathComponent("usage-debug", isDirectory: true)
+            .path
         XCTAssertEqual(
             ClaudeAdapter().environment(for: account(.claude)),
             [
                 "CLAUDE_CONFIG_DIR": "/tmp/home",
                 "FLIGHT_DECK_EVENT_DIR": expectedEventDir,
+                "FLIGHT_DECK_USAGE_DIR": expectedUsageDir,
             ]
         )
         XCTAssertEqual(CodexAdapter(rpc: CodexRPC(transport: NullTransport())).environment(for: account(.codex)),
@@ -34,11 +39,13 @@ final class AgentAccountEnvironmentTests: XCTestCase {
 
     /// The account-free half, which is the half the launch path actually uses: a tab whose
     /// login was deleted is launched with no account at all and must still report its
-    /// lifecycle. Codex takes the empty default — its readiness comes from rollout evidence
+    /// lifecycle. The account-free half carries claude's hook directory and its usage directory
+    /// (the mod writes there whether or not the tab has an account). Codex takes the empty default — its readiness comes from rollout evidence
     /// on disk, which needs nothing in the child's environment.
     func testTheAccountFreeLaunchEnvironmentCarriesOnlyClaudesHookDirectory() {
         XCTAssertEqual(ClaudeAdapter().launchEnvironment,
-                       ["FLIGHT_DECK_EVENT_DIR": ClaudePluginLocation.eventDirectory.path])
+                       ["FLIGHT_DECK_EVENT_DIR": ClaudePluginLocation.eventDirectory.path,
+                        "FLIGHT_DECK_USAGE_DIR": ClaudePluginLocation.usageDirectory.path])
         XCTAssertEqual(CodexAdapter(rpc: CodexRPC(transport: NullTransport())).launchEnvironment, [:])
     }
 

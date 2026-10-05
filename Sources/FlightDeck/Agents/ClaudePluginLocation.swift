@@ -32,6 +32,16 @@ enum ClaudePluginLocation {
             .appendingPathComponent("hook-events-\(buildTag)", isDirectory: true)
     }
 
+    /// Where the usage mod writes one file per tab (Flight Control L3-U). Beside the hook-event
+    /// directory and split by build for the same reason: a debug build must never read the
+    /// release fleet's meters as its own.
+    static var usageDirectory: URL {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        return base
+            .appendingPathComponent("Flight Deck", isDirectory: true)
+            .appendingPathComponent("usage-\(buildTag)", isDirectory: true)
+    }
+
     /// Where Flight Deck runs its plugin from, when the engine writes into plugin folders.
     ///
     /// Claude lays its type declarations into `<plugin>/.claude-plugin/types/` every time it loads
@@ -47,14 +57,17 @@ enum ClaudePluginLocation {
     }
 
     /// Mirrors `source` into `destination`: copies new and changed files, removes files the
-    /// source no longer ships, and never touches `.claude-plugin/types/`, which is the engine's.
+    /// source no longer ships, and never touches `.claude-plugin/types/` in either folder: that is
+    /// the engine's. The source's copy matters too — `claude plugin test` on the repo folder writes
+    /// types there, they would ship in the bundle, and copying them would overwrite the engine's
+    /// own declarations in the destination with a stale version's.
     /// Compares bytes rather than dates so a reinstall of the same build rewrites nothing — a
     /// rewrite would hot-reload the module in every open claude tab for no reason.
     @discardableResult
     static func materialize(from source: URL, to destination: URL = materializedDirectory) throws -> URL {
         let fm = FileManager.default
         try fm.createDirectory(at: destination, withIntermediateDirectories: true)
-        let shipped = try relativeFiles(under: source)
+        let shipped = try relativeFiles(under: source).filter { !$0.hasPrefix(".claude-plugin/types/") }
         for path in shipped {
             let from = source.appendingPathComponent(path), to = destination.appendingPathComponent(path)
             let bytes = try Data(contentsOf: from)

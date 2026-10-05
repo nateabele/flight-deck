@@ -40,6 +40,20 @@ final class ClaudePluginMaterializeTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: dst.appendingPathComponent(".claude-plugin/types/claude-code/index.d.ts").path))
     }
 
+    /// `claude plugin test Resources/ClaudePlugin` makes the engine write types into the SOURCE
+    /// folder, and the folder reference ships them. Copying them would overwrite the engine's own
+    /// declarations in the owned copy with a stale version's.
+    func testNeverCopiesTheSourcesEngineTypes() throws {
+        let src = root.appendingPathComponent("src"), dst = root.appendingPathComponent("dst")
+        try write("v1", "hooks/register.ts", in: src)
+        try write("stale", ".claude-plugin/types/x.d.ts", in: src)
+        try write("stale", ".claude-plugin/types/y.d.ts", in: src)
+        try write("fresh", ".claude-plugin/types/y.d.ts", in: dst)
+        _ = try ClaudePluginLocation.materialize(from: src, to: dst)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: dst.appendingPathComponent(".claude-plugin/types/x.d.ts").path))
+        XCTAssertEqual(try String(contentsOf: dst.appendingPathComponent(".claude-plugin/types/y.d.ts"), encoding: .utf8), "fresh")
+    }
+
     func testRemovesAFileTheSourceNoLongerShips() throws {
         let src = root.appendingPathComponent("src"), dst = root.appendingPathComponent("dst")
         try write("x", "scripts/old.sh", in: src)

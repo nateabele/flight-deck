@@ -184,6 +184,17 @@ final class ClaudePluginPayloadTests: XCTestCase {
 
     private var staged: [URL] = []
 
+    /// The usage mod is data the engine loads, so nothing else would notice it went missing from
+    /// the bundle until every claude account read "no reading" (Flight Control L3-U).
+    func testHooksManifestLoadsTheUsageModule() throws {
+        let root = try pluginRoot()
+        let obj = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contentsOf: root.appendingPathComponent("hooks/hooks.json"))) as? [String: Any])
+        XCTAssertEqual(obj["modules"] as? [String], ["./register.ts"])
+        let module = try String(contentsOf: root.appendingPathComponent("hooks/register.ts"), encoding: .utf8)
+        XCTAssertTrue(module.contains("'session.measure'"))
+        XCTAssertTrue(module.contains("'FLIGHT_DECK_USAGE_DIR'"))
+    }
+
     override func tearDownWithError() throws {
         for url in staged { try? FileManager.default.removeItem(at: url) }
         staged.removeAll()
