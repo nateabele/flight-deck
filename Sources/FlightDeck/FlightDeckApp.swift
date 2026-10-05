@@ -7,6 +7,7 @@ struct FlightDeckApp: App {
     @StateObject private var preferences: PreferencesStore
     @StateObject private var store: SessionStore
     @StateObject private var fleet: FleetService
+    @StateObject private var hosts: HostService
 
     private static let logger = Logger(subsystem: "dev.flightdeck.FlightDeck", category: "fleet")
 
@@ -176,6 +177,38 @@ struct FlightDeckApp: App {
         _fleet = StateObject(wrappedValue: Self.makeFleetService(
             store: deferredStore(), preferences: preferences
         ))
+        // Eager, unlike the store: it touches neither `NSApp` nor the session store, and
+        // being built here — not in a `@StateObject` thunk SwiftUI may evaluate whenever —
+        // is what guarantees the links open at launch.
+        _hosts = StateObject(wrappedValue: Self.makeHostService())
+    }
+
+    /// Builds the host service beside `FleetService` and starts its links. Cannot hold up
+    /// launch: `hosts.json` is a few hundred bytes, `start()` returns at once and reads the
+    /// Keychain off the main thread, and with no paired hosts it does nothing.
+    ///
+    /// Under a UITest reset it gets a throwaway file and an in-memory secret store and is
+    /// never started, for the reason the fleet listener is not: a reset run must neither read
+    /// the developer's paired hosts nor dial them.
+    @MainActor
+    private static func makeHostService() -> HostService {
+        let controllerName = Host.current().localizedName ?? "Mac"
+        guard !isResettingState else {
+            let scratch = FileManager.default.temporaryDirectory
+                .appendingPathComponent("flightdeck-hosts-\(UUID().uuidString).json")
+            return HostService(
+                registry: HostRegistry(fileURL: scratch, secrets: InMemoryHostSecretStore()),
+                controllerName: controllerName)
+        }
+        // Beside `sessions.json`, through the same resolution, so a Debug build reads
+        // "Flight Deck (Debug)" and `-FlightDeckStateDir` moves it too.
+        let directory = stateDirectory() ?? FileSessionPersistence.defaultDirectory()
+        let service = HostService(
+            registry: HostRegistry(fileURL: directory.appendingPathComponent("hosts.json"),
+                                   secrets: KeychainHostSecretStore()),
+            controllerName: controllerName)
+        service.start()
+        return service
     }
 
     /// Builds the fleet service and starts its listener, unless the launch is a UITest
