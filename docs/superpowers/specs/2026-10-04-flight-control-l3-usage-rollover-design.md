@@ -187,3 +187,55 @@ Capacity pane.
 - `Sources/IntakeKit/SeatActivity.swift`: keep `unifiedWindows`, not just `status`
 - `Sources/FlightDeck/Preferences/UI/CapacityPane.swift`
 - `Tests/FlightDeckTests/FlightControlL3/Usage/…`, `UITests/FlightDeckUITests/CapacityUITests.swift`
+
+## 12. Follow-up notes
+
+### Probe results (L3-U plan Task 1, 2026-10-05)
+
+- Versions: claude 2.1.289 (Claude Code), codex-cli 0.160.0. Mod API types found at
+  `/private/tmp/claude-501/bundled-skills/2.1.289/<hash>/plugin-authoring/types/claude-code.d.ts`
+  (version-specific). All six patterns present: `'session.measure'`, `SessionMeasureInput`,
+  `SessionRateLimit` (`{kind, percentUsed, resetsAt?}`; `percentUsed` is 0–100 with at most one
+  decimal, past 100 on an exceeded spend limit), `$.fs.write(path, text)`, `$.env.get(name)`,
+  `$.clock.now()`.
+- Probe 1 (one `hooks.json`, shell hooks + `modules`): **Outcome 1A**. `claude plugin validate`
+  passes and lists the module (`./register.ts hooks: session.measure`, env reads
+  `FLIGHT_DECK_SESSION_ID`, `FLIGHT_DECK_USAGE_DIR`). The validator never lists command hooks —
+  it prints none for the bundled `Resources/ClaudePlugin` either — so the decisive evidence is
+  runtime: in the same session the `Stop` shell hook wrote `shell-hook.txt` *and* the module wrote
+  its usage file. Both kinds coexist in one `hooks.json`.
+- Probe 1 (prompt on load): **Outcome 3A** — an interactive `claude --plugin-dir` tab (tmux TTY,
+  child-session markers cleared) booted straight to the composer, no trust/enable/reload dialog.
+  Types laid into the plugin folder: **yes → Task 2 (Outcome 3C)**. At load (01:27:19, not at
+  `validate`) the engine created `.claude-plugin/types/{.gitignore,tsconfig.json,claude-code/,
+  claude-code-mcp/,claude-code-tools/}` inside the `--plugin-dir` folder. The bundled
+  `Resources/ClaudePlugin` (no module) got no `types/` from `validate`.
+- Probe 2 (`session.measure` in an interactive tab): **Outcome 4A**. After one turn the mod file
+  was `{"v":1,"tab":"11111111-…","session":"7050…","readAt":"2026-10-05T06:32:21.357Z",
+  "changed":["context","cost"],"rateLimits":[{"kind":"five_hour","percentUsed":1,
+  "resetsAt":"2026-10-05T11:30:00.000Z"},{"kind":"seven_day","percentUsed":58,
+  "resetsAt":"2026-10-08T21:00:00.000Z"}]}`. `/usage` (about 4 minutes later, with other
+  sessions on the same account running in parallel): Current session 2 % (resets 6:30am CDT =
+  11:30Z), Current week (all models) 58 % (resets Oct 8 4pm CDT = 21:00Z). The reset times match
+  exactly; the session figure moved one point in between, consistent with the parallel load, not
+  a parser disagreement. `/usage` also shows a third window, "Current week (Fable)" 0 %, that
+  `session.measure` does not report. Note: the first measurement's `changed` did not include
+  `rateLimits` even though `rateLimits` was populated, so the mod must write on every measure, not
+  only when `changed` contains `rateLimits`. Headless `claude -p`: **Outcome 4C** — the module
+  fired and wrote `22222222-….json` (`changed` included `rateLimits`, five_hour 2 %, seven_day
+  58 %).
+- Probe 3 (codex `account/rateLimits/read`): **Outcome 5A**. `result` carries `rateLimits` and
+  `rateLimitsByLimitId.codex` with `primary {usedPercent 0, windowDurationMins 300, resetsAt}` and
+  `secondary {usedPercent 0, windowDurationMins 10080, resetsAt}`, `planType "plus"`, plus fields
+  the plan did not name: `ordinaryUsageAllowed`, `spendControlReached`, `rateLimitReachedType`,
+  `credits`, `rateLimitResetCredits`, `accountId`, `rateLimitUpsell`. With 0 % used, `resetsAt`
+  is "now + window" and advances on every read (it moved 553 s between two reads 553 s apart):
+  an unused window has no fixed reset. Saved (account id and credit ids redacted) as
+  `Tests/FlightDeckTests/Fixtures/FlightControlL3/Usage/codex-rate-limits-read.captured.json`.
+  Pushes during this connection's own turn: **yes** — one `account/rateLimits/updated` with
+  `params.rateLimits` of the same shape (note `spendControlReached: null` in the push vs `false`
+  in the read, and an `emittedAtMs` beside `params`); saved as `codex-rate-limits-updated.captured.json`.
+  Deviation 1's 120 s poll stays, because the TUI's turns run on a different connection.
+- Probe hazard: typing `/usage` + Enter in one `send-keys` let the slash menu complete to
+  `/auto-mode-setup`; it was cancelled with Escape before anything ran. Type the command, confirm
+  the menu's first row, then send Enter.

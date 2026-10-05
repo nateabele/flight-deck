@@ -1,0 +1,78 @@
+{
+  "ordinaryUsageAllowed": true,
+  "rateLimits": {
+    "limitId": "codex",
+    "limitName": null,
+    "normalModelSlug": null,
+    "primary": {
+      "usedPercent": 0,
+      "windowDurationMins": 300,
+      "resetsAt": 1791200098
+    },
+    "secondary": {
+      "usedPercent": 0,
+      "windowDurationMins": 10080,
+      "resetsAt": 1791786898
+    },
+    "credits": {
+      "hasCredits": false,
+      "unlimited": false,
+      "balance": "0"
+    },
+    "individualLimit": null,
+    "spendControlReached": false,
+    "planType": "plus",
+    "rateLimitReachedType": null
+  },
+  "rateLimitsByLimitId": {
+    "codex": {
+      "limitId": "codex",
+      "limitName": null,
+      "normalModelSlug": null,
+      "primary": {
+        "usedPercent": 0,
+        "windowDurationMins": 300,
+        "resetsAt": 1791200098
+      },
+      "secondary": {
+        "usedPercent": 0,
+        "windowDurationMins": 10080,
+        "resetsAt": 1791786898
+      },
+      "credits": {
+        "hasCredits": false,
+        "unlimited": false,
+        "balance": "0"
+      },
+      "individualLimit": null,
+      "spendControlReached": false,
+      "planType": "plus",
+      "rateLimitReachedType": null
+    }
+  },
+  "rateLimitResetCredits": {
+    "availableCount": 2,
+    "credits": [
+      {
+        "id": "RateLimitResetCredit_redacted1",
+        "resetType": "codexRateLimits",
+        "status": "available",
+        "grantedAt": 1790103721,
+        "expiresAt": 1792695721,
+        "title": "Full reset (Weekly + 5 hr)",
+        "description": "Thanks for using Codex! You've been granted one free rate limit reset."
+      },
+      {
+        "id": "RateLimitResetCredit_redacted2",
+        "resetType": "codexRateLimits",
+        "status": "available",
+        "grantedAt": 1790711156,
+        "expiresAt": 1793303156,
+        "title": "Full reset (Weekly + 5 hr)",
+        "description": "Thanks for using Codex! You've been granted one free rate limit reset."
+      }
+    ]
+  },
+  "accountId": "00000000-0000-0000-0000-000000000000",
+  "rateLimitUpsell": null
+}
