@@ -183,7 +183,7 @@ Plan: `docs/superpowers/plans/2026-10-04-flight-control-l3-r-routing.md`.
 9. Kind re-routing runs on merge and re-weight over `br list --status open --json`; released
    tasks' edits carry no kind. `br update --agent-context` gets `--force` only when the new value
    is under half the old length (br 0.6.0 refuses that otherwise).
-10. Routing UI tests run from `scripts/test-routing-ui.sh` and skip under `smoke.sh`.
+10. Routing UI tests run from `scripts/test-routing-ui.sh` and skip under `smoke.sh`; they are gated on `TEST_RUNNER_FLIGHTDECK_ROUTING_UI=1`.
 11. Spill reasons say "exhausted", not "over hard limit": the router knows only that a pool was excluded.
 12. Controller rulings during the build:
     (a) `extension PoolDirectory { defaultPools(for:) }` in RoutingSeams.swift holds the one copy
@@ -191,6 +191,11 @@ Plan: `docs/superpowers/plans/2026-10-04-flight-control-l3-r-routing.md`.
     (b) `extension TaskKind { isLive; weightsText }` in TaskKind+Routing.swift; kinds with no
     weights print `none`.
     (c) The compiler prompt's dimension bullet was tightened after the live haiku probe compiled
-    the spec sentence to kind terms (run 1 failed, run 2 passed).
+    the spec sentence to kind terms (run 1 failed, run 2 passed). It deliberately prefers dimension
+    terms over the spec §2 example's `{kind: tests}` form.
     (d) The re-route note counts writer-side pinned skips and names failed task ids.
     (e) Release re-checks cancellation after the routing await.
+13. (Plan deviation 14.) L3-0's `testUnsupportedCatalogYieldsAnEmptyDisabledCatalog` was rewritten against a fake.
+14. (Plan deviation 15.) The encode fixture is written in the shape of an encode output, not recorded live.
+15. Follow-up ops (non-create) carry no kind: the schema forces `taskKind` null. Any block they
+    would need routes as `implement-simple` with "no kind from planning;" (review finding M7).
