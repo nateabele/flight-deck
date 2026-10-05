@@ -182,7 +182,7 @@ final class SwarmRig {
 
     var deps: SwarmController.Dependencies {
         let catalogs = self.catalogs
-        return .init(backend: backend, launcher: launcher, host: host, router: router, kinds: kinds,
+        return .init(backend: backend, launcher: launcher, host: host, makeRouter: { [router] in router }, kinds: kinds,
                      allocator: allocator, capacity: capacity,
                      catalogs: { [weak self] in self?.onCatalogs?(); return catalogs })
     }

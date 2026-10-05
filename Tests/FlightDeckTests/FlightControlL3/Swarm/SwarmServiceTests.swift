@@ -12,7 +12,7 @@ final class SwarmServiceTests: XCTestCase {
                                    spawner: FakeSwarmSpawner(), host: rig.host,
                                    registry: RoutingCapabilityRegistry([]), clock: clock,
                                    now: { [unowned rig] in rig.now })
-        service.dependencies = SwarmDependencies(router: rig.router, kinds: rig.kinds,
+        service.dependencies = SwarmDependencies(makeRouter: { [router = rig.router] in router }, kinds: rig.kinds,
                                                  allocator: rig.allocator, capacity: rig.capacity)
         return service
     }
@@ -152,7 +152,7 @@ final class SwarmServiceTests: XCTestCase {
         let s = service(rig)
         await s.settle()
         let old = try XCTUnwrap(s.controller(forProject: SwarmFixtures.project))
-        s.dependencies = SwarmDependencies(router: rig.router, kinds: rig.kinds,
+        s.dependencies = SwarmDependencies(makeRouter: { [router = rig.router] in router }, kinds: rig.kinds,
                                            allocator: rig.allocator, capacity: rig.capacity)
         let new = try XCTUnwrap(s.controller(forProject: SwarmFixtures.project))
         XCTAssertFalse(old === new)
@@ -173,7 +173,7 @@ final class SwarmServiceTests: XCTestCase {
         var s: SwarmService? = SwarmService(store: rig.store, backend: rig.backend, launcher: rig.launcher,
                                             spawner: nil, host: host!, registry: RoutingCapabilityRegistry([]),
                                             clock: nil)
-        s?.dependencies = SwarmDependencies(router: rig.router, kinds: rig.kinds,
+        s?.dependencies = SwarmDependencies(makeRouter: { [router = rig.router] in router }, kinds: rig.kinds,
                                             allocator: rig.allocator, capacity: rig.capacity)
         host = nil
         XCTAssertNil(weakHost, "neither the service nor its controllers keep the host alive")

@@ -59,8 +59,12 @@ public struct ConfigKey: RawRepresentable, Hashable, Codable, Sendable, CustomSt
     public var rawValue: String
     public init(rawValue: String) { self.rawValue = rawValue }
     public init(_ block: ExecutionBlock) {
-        let knobs = block.knobs.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: ",")
-        rawValue = [block.harness.rawValue, block.model, knobs, block.pool.rawValue].joined(separator: "|")
+        rawValue = [block.harness.rawValue, block.model, Self.knobsText(block.knobs), block.pool.rawValue].joined(separator: "|")
+    }
+    /// `k=v` pairs sorted by key and joined with `,`: the one spelling of a knob set that the key,
+    /// the launch sheet and the swarm panel share.
+    public static func knobsText(_ knobs: [String: String]) -> String {
+        knobs.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: ",")
     }
     public var description: String { rawValue }
 }

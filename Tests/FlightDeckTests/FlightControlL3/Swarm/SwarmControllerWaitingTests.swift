@@ -22,6 +22,19 @@ final class SwarmControllerWaitingTests: XCTestCase {
         XCTAssertTrue(rig.store.log(swarm: c.record.id).contains { $0.kind == .spill && $0.detail.hasPrefix("codex-subs → claude-subs") })
     }
 
+    func testEverySpillAsksTheFactoryForAFreshRouter() async {
+        let rig = SwarmRig()
+        rig.leases("claude-subs", 2)
+        rig.router.spills["tests"] = Assignment(block: spilled)
+        rig.backend.ready = [SwarmFixtures.task("fx-1", SwarmFixtures.block()), SwarmFixtures.task("fx-2", SwarmFixtures.block())]
+        var made = 0
+        var deps = rig.deps
+        deps.makeRouter = { [router = rig.router] in made += 1; return router }
+        let c = SwarmController(record: rig.record(cap: 2), store: rig.store, deps: deps, now: { rig.now })
+        await rig.run(c)
+        XCTAssertEqual(made, 2, "a router is never cached across plans")
+    }
+
     func testAPinnedBlockNeverSpillsAndWaits() async {
         let rig = SwarmRig()
         rig.leases("claude-subs", 1)

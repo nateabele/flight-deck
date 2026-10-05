@@ -41,7 +41,7 @@ final class SwarmStoreWiringTests: XCTestCase {
         let store = SessionStore(provider: nil, persistence: nil, swarmsRoot: root)
         let service = store.swarmService
         XCTAssertNil(service.dependencies)
-        store.swarmDependencies = SwarmDependencies(router: FakeRouter(), kinds: FakeKindRegistry(),
+        store.swarmDependencies = SwarmDependencies(makeRouter: { FakeRouter() }, kinds: FakeKindRegistry(),
                                                     allocator: FakePoolAllocator(), capacity: FakeCapacityReader())
         XCTAssertNotNil(service.dependencies)
     }

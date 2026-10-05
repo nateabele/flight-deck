@@ -10,7 +10,8 @@ final class SwarmController {
         var backend: SwarmBackend
         var launcher: SwarmAgentLauncher
         var host: SwarmHost
-        var router: any Router
+        /// A factory, never a stored router: L3-R rebuilds its router when rules or the index change, so each plan asks fresh.
+        var makeRouter: () -> any Router
         var kinds: any KindRegistry
         var allocator: any PoolAllocator
         var capacity: any CapacityReader
@@ -240,7 +241,7 @@ final class SwarmController {
         // The swarm may have been paused or stopped during that await; no lease for a spawn that
         // will not start.
         guard record.state == .running else { return .waiting("the swarm is no longer running") }
-        let spill = deps.router.spill(block, kind: kind, project: project, exhausted: [block.pool],
+        let spill = deps.makeRouter().spill(block, kind: kind, project: project, exhausted: [block.pool],
                                       catalogs: catalogs, now: now())
         // An unroutable spill has pool "": leasing it would hand out nothing and name no pool.
         guard let spill, !spill.isUnroutable else {

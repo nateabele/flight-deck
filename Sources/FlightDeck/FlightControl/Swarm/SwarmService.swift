@@ -13,10 +13,13 @@ struct FlywheelToolPaths: Equatable {
 /// The L3-R/L3-U conformers a swarm routes and leases through. Nil until the integration branch
 /// (or the Debug fixture backend) supplies them; without them nothing launches.
 struct SwarmDependencies {
-    var router: any Router
+    /// A factory so no caller holds a stale router; each launch plan, spill and sheet open asks again.
+    var makeRouter: () -> any Router
     var kinds: any KindRegistry
     var allocator: any PoolAllocator
     var capacity: any CapacityReader
+    /// The pools the launch sheet's Override picker offers; L3-U's pool store replaces the stand-in.
+    var pools: any PoolDirectory = DefaultPoolDirectory(harnesses: ["claude", "codex"])
 }
 
 /// L3-U's hand-off driver answers these; L3-S only routes the phone's decision to it.
@@ -186,7 +189,7 @@ final class SwarmService: ObservableObject {
         let registry = self.registry
         let controller = SwarmController(
             record: record, store: store,
-            deps: .init(backend: backend, launcher: launcher, host: WeakSwarmHost(host), router: deps.router, kinds: deps.kinds,
+            deps: .init(backend: backend, launcher: launcher, host: WeakSwarmHost(host), makeRouter: deps.makeRouter, kinds: deps.kinds,
                         allocator: deps.allocator, capacity: deps.capacity,
                         catalogs: { await registry.catalogs(enabled: Set(registry.harnesses)) }),
             now: now)

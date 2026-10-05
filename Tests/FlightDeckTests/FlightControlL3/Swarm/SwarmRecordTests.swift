@@ -18,6 +18,11 @@ final class SwarmRecordTests: XCTestCase {
         XCTAssertEqual(ConfigKey(block(knobs: [:])).rawValue, "codex|gpt-6-sol||codex-subs")
     }
 
+    func testKnobsTextIsSortedAndCommaJoined() {
+        XCTAssertEqual(ConfigKey.knobsText(["effort": "high", "agent": "build"]), "agent=build,effort=high")
+        XCTAssertEqual(ConfigKey.knobsText([:]), "")
+    }
+
     func testConfigKeyIgnoresKnobOrder() {
         let a = block(knobs: ["effort": "high", "agent": "build"])
         let b = block(knobs: ["agent": "build", "effort": "high"])
