@@ -158,6 +158,12 @@ final class HostLink {
     /// that file's extension can reach it; a mux lives exactly as long as one winner, since
     /// its ids and credit mean nothing on the next connection.
     var channelMux: ChannelMux?
+    /// What the winner's helloAck advertised; nil while no connection is live. Delegation's
+    /// preflight checks a plan's needs against it before reserving anything (§7 step 2).
+    private(set) var capabilities: Set<HostCapability>?
+    /// Every run `event` frame on the live connection (protocol 1.1), for delegation's run
+    /// streams. One listener: `LiveHostLink` fans them out to its subscribers.
+    var onEvent: ((String, RunEvent) -> Void)?
 
     private static let logger = Logger(subsystem: "dev.flightdeck.FlightDeck", category: "hosts")
 
@@ -190,17 +196,40 @@ final class HostLink {
         state = .offline(lastSeen: lastSeen)
     }
 
-    func request(_ r: HostRequest) async throws -> HostReply {
+    /// `timeout` is longer than the default only for a request whose reply waits on bulk work
+    /// on the host, which would otherwise fail `.timedOut` while the host is still working.
+    ///
+    /// With `progress` it is an idle timeout instead: it runs from the later of the send and
+    /// the last activity `progress` reports. A `sync.push` reply follows the whole bundle, so
+    /// any fixed bound either fails a big first sync mid-transfer or leaves a dead one hanging;
+    /// a transfer that is still moving never times out, and one that stalls fails `timeout`
+    /// after it stopped.
+    func request(_ r: HostRequest, timeout: TimeInterval = HostLink.requestTimeout,
+                 progress: (@MainActor () -> Date)? = nil) async throws -> HostReply {
         guard case .online = state, let winner else { throw HostLinkError.offline }
         let id = nextRequestID
         nextRequestID += 1
         let text = try HostWire.encode(HostClientFrame.request(id: id, r))
         return try await withCheckedThrowingContinuation { continuation in
-            let timer = clock.schedule(after: Self.requestTimeout) { [weak self] in
-                self?.resolve(id, .failure(.timedOut))
-            }
-            pending[id] = (continuation, timer)
+            pending[id] = (continuation, expire(id, after: timeout, idle: timeout, progress: progress))
             winner.send(text)
+        }
+    }
+
+    /// Fails request `id` after `delay`, unless `progress` reports activity within the last
+    /// `idle` seconds, in which case it checks again when that activity is `idle` old.
+    private func expire(_ id: Int, after delay: TimeInterval, idle: TimeInterval,
+                        progress: (@MainActor () -> Date)?) -> HostLinkCancellable {
+        clock.schedule(after: delay) { [weak self] in
+            guard let self, self.pending[id] != nil else { return }
+            if let progress {
+                let quiet = self.clock.now.timeIntervalSince(progress())
+                if quiet < idle {
+                    self.pending[id]?.timer = self.expire(id, after: idle - quiet, idle: idle, progress: progress)
+                    return
+                }
+            }
+            self.resolve(id, .failure(.timedOut))
         }
     }
 
@@ -270,13 +299,11 @@ final class HostLink {
             case .reply(let id, let reply): resolve(id, .success(reply))
             case .error(let id, let code, let message): resolve(id, .failure(.remote(code: code, message: message)))
             case .helloAck, .refused: break
-            case .event:
-                // A run's event (protocol 1.1). Nothing attaches to runs until delegation
-                // lands (tasks C1/C6), so a host cannot have a reason to send one yet; it
-                // still counts as proof of life above.
-                break
+            case .event(let runID, let event):
+                onEvent?(runID, event)
             }
-        } else if case .helloAck(_, _, let hostName, let advertised) = frame {
+        } else if case .helloAck(_, let caps, let hostName, let advertised) = frame {
+            capabilities = Set(caps)
             win(connection, hostName: hostName, advertised: advertised)
         }
     }
@@ -318,6 +345,7 @@ final class HostLink {
 
     /// The live connection is gone: closed by the host, or silent past `missedPongLimit`.
     private func dropped() {
+        capabilities = nil
         winner?.cancel()
         winner = nil
         pingTimer?.cancel()
@@ -428,6 +456,7 @@ final class HostLink {
     }
 
     private func teardown() {
+        capabilities = nil
         cancelRacers()
         winner?.cancel()
         winner = nil
