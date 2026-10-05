@@ -64,6 +64,9 @@ test('writes nothing outside Flight Deck', async ($, on) => {
 test('writes nothing off a subscription', async ($, on) => {
   const writes: Write[] = []
   mock.env(on, { FLIGHT_DECK_USAGE_DIR: '/fd/usage', FLIGHT_DECK_SESSION_ID: 'T' })
+  // The clock is mocked so that, without the mod's empty-windows guard, the write would succeed.
+  // Unmocked, `$.clock.now()` throws, the mod swallows it, and this test would pass vacuously.
+  mock.clock(on, { now: Date.parse('2026-10-04T19:00:00.000Z') })
   engine(on, writes)
   await $.session.measure({ ...measure, rateLimits: [] })
   expect(writes.length).toBe(0)

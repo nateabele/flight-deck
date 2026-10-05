@@ -39,10 +39,11 @@ final class AgentAccountEnvironmentTests: XCTestCase {
 
     /// The account-free half, which is the half the launch path actually uses: a tab whose
     /// login was deleted is launched with no account at all and must still report its
-    /// lifecycle. The account-free half carries claude's hook directory and its usage directory
-    /// (the mod writes there whether or not the tab has an account). Codex takes the empty default — its readiness comes from rollout evidence
-    /// on disk, which needs nothing in the child's environment.
-    func testTheAccountFreeLaunchEnvironmentCarriesOnlyClaudesHookDirectory() {
+    /// lifecycle. It carries claude's hook directory and its usage directory (the mod writes
+    /// there whether or not the tab has an account). Codex takes the empty default — its
+    /// readiness comes from rollout evidence on disk, which needs nothing in the child's
+    /// environment.
+    func testTheAccountFreeLaunchEnvironmentCarriesOnlyClaudesHookAndUsageDirectories() {
         XCTAssertEqual(ClaudeAdapter().launchEnvironment,
                        ["FLIGHT_DECK_EVENT_DIR": ClaudePluginLocation.eventDirectory.path,
                         "FLIGHT_DECK_USAGE_DIR": ClaudePluginLocation.usageDirectory.path])
