@@ -359,6 +359,14 @@ final class SessionStore: ObservableObject {
     /// resolve `focusedObserveProjection()` against until the fleet reconnects anyway.
     @Published var observeDAGPresented = false
 
+    /// The launch sheet `RootView` presents. Set from the project header's "Run Ready Tasks…"
+    /// and a released intake's "Run Tasks…".
+    @Published var swarmLaunchRequest: SwarmLaunchRequest?
+
+    func requestSwarmLaunch(project: String, filter: SwarmFilter, title: String) {
+        swarmLaunchRequest = SwarmLaunchRequest(project: project, filter: filter, title: title)
+    }
+
     /// Weak: `GhosttyApp.shared` is a process-wide static that owns itself for the life of
     /// the process (see `GhosttyApp.shared`'s doc comment); the store must not co-own it.
     private weak var provider: SurfaceProvider?

@@ -248,6 +248,10 @@ struct ProjectHeaderRow: View {
             if isFlywheelEnabled {
                 Button("Flight Control coordination enabled") {}
                     .disabled(true)
+                Button("Run Ready Tasks…") {
+                    store.requestSwarmLaunch(project: repo.url.standardizedFileURL.path, filter: .allReady,
+                                             title: repo.displayName)
+                }
             } else if flywheelStatus.isFlywheelProject {
                 Button("Enable Flight Control…") { showingFlywheelConfirmation = true }
             } else {
