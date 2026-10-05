@@ -198,8 +198,10 @@ public struct RoundContext: Sendable {
     /// (`PlanLayers.promptDiff`); nil when the human hasn't edited it.
     public var humanEdits: String?
     public var observedAt: Date
+    /// The project's task kinds, offered to every round that creates tasks (spec L3-R §4).
+    public var kinds: [TaskKind]
     public init(intent: String, qa: [TriageExchange], graphFile: String, agentsFile: String?,
-                readmeFile: String?, notes: [PlanNote] = [], humanEdits: String? = nil, observedAt: Date) {
+                readmeFile: String?, notes: [PlanNote] = [], humanEdits: String? = nil, observedAt: Date, kinds: [TaskKind] = []) {
         self.intent = intent
         self.qa = qa
         self.graphFile = graphFile
@@ -208,6 +210,7 @@ public struct RoundContext: Sendable {
         self.notes = notes
         self.humanEdits = humanEdits
         self.observedAt = observedAt
+        self.kinds = kinds
     }
 }
 
@@ -511,7 +514,7 @@ public enum RoundPrompts {
 
         \(changeSetInputs(c))
 
-        \(Triage.changeSetRulesText(observedAt: c.observedAt))\(steering(c))
+        \(Triage.changeSetRulesText(observedAt: c.observedAt, kinds: c.kinds))\(steering(c))
 
         Return only JSON matching the provided schema: `{"changeSet": {...}, "summary": "..."}`.
         """
@@ -532,7 +535,7 @@ public enum RoundPrompts {
 
         \(changeSetInputs(c))
 
-        \(Triage.changeSetRulesText(observedAt: c.observedAt))\(steering(c))
+        \(Triage.changeSetRulesText(observedAt: c.observedAt, kinds: c.kinds))\(steering(c))
 
         Return only JSON matching the provided schema: `{"changeSet": {...}, "summary": "..."}`.
         """
@@ -554,7 +557,7 @@ public enum RoundPrompts {
 
         \(changeSetInputs(c))
 
-        \(Triage.changeSetRulesText(observedAt: c.observedAt))\(steering(c))
+        \(Triage.changeSetRulesText(observedAt: c.observedAt, kinds: c.kinds))\(steering(c))
 
         Return only JSON matching the provided schema: `{"changeSet": {...}, "summary": "..."}`.
         """
@@ -572,7 +575,7 @@ public enum RoundPrompts {
 
         \(changeSetInputs(c))
 
-        \(Triage.changeSetRulesText(observedAt: c.observedAt))\(steering(c))
+        \(Triage.changeSetRulesText(observedAt: c.observedAt, kinds: c.kinds))\(steering(c))
 
         Return only JSON matching the provided schema: `{"changeSet": {...}, "summary": "..."}`.
         """
