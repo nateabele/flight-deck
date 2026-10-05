@@ -175,6 +175,23 @@ final class DelegateConfigParserTests: XCTestCase {
         XCTAssertNoThrow(try DelegateConfigParser.parse(ok))
     }
 
+    /// A dotted path 100,000 long built a 100,000-deep chain of tables, and freeing it
+    /// recursed in deinit until the stack overflowed — the same crash as deep arrays, through
+    /// keys instead of values.
+    func testDeepKeyPathsAreAnErrorNotACrash() {
+        let path = Array(repeating: "a", count: 100_000).joined(separator: ".")
+        for text in ["[\(path)]", "[[\(path)]]", "\(path) = 1"] {
+            XCTAssertThrowsError(try DelegateConfigParser.parse(text)) { error in
+                XCTAssertEqual((error as? DelegateConfigIssue)?.message, "keys nested too deeply")
+            }
+        }
+        // An inline table takes a single key, so a dotted one is refused before any table is
+        // built; the point is that it is an error and not a crash.
+        XCTAssertThrowsError(try DelegateConfigParser.parse("x = { \(path) = 1 }"))
+        let ok = Array(repeating: "a", count: 32).joined(separator: ".")
+        XCTAssertNoThrow(try DelegateConfigParser.parse("[\(ok)]\n\(ok) = 1"))
+    }
+
     /// Editors on Windows (and some on macOS) save a UTF-8 BOM; it is not a key.
     func testLeadingByteOrderMarkIsSkipped() throws {
         XCTAssertEqual(try DelegateConfigParser.parse("\u{FEFF}default_host = \"mini\"").config.defaultHost, "mini")

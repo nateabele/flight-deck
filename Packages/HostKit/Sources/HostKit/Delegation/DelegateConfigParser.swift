@@ -375,7 +375,8 @@ struct TOMLReader {
     private var index = 0
     private var line = 1
 
-    /// The deepest an array or inline table may nest. The reader recurses per level, and the
+    /// The deepest an array or inline table may nest, and the longest a dotted key or header
+    /// path may be. The reader recurses per level, and the
     /// file is checked in — a cloned repo controls it — so an unbounded `[[[…` 100,000 deep
     /// overflowed the stack and crashed Flight Deck on every launch that read it. §8 needs
     /// one level; 32 leaves room for anything a person would write.
@@ -493,6 +494,9 @@ struct TOMLReader {
         while true {
             skipTrivia(newlines: false)
             guard peek() == "." else { return path }
+            // Each component is a table level, and a 100,000-long path built a chain of tables
+            // that overflowed the stack when it was freed (deinit recurses down the chain).
+            guard path.count < Self.maxDepth else { throw issue("keys nested too deeply") }
             advance()
             skipTrivia(newlines: false)
             path.append(try key())

@@ -152,7 +152,10 @@ final class RouteShimsTests: XCTestCase {
         let shimDir = temp.appendingPathComponent("shims/S")
         for dir in [real, cli, shimDir] { try fm.createDirectory(at: dir, withIntermediateDirectories: true) }
         func tool(_ url: URL, _ label: String) throws {
-            try "#!/bin/bash\necho \(label)\nfor a in \"$@\"; do echo \"[$a]\"; done\necho \"PATH=$PATH\"\n"
+            // A bare `route-exec` gets a current CLI's answer to the shim's probe: a usage
+            // error, exit 2, nothing done.
+            let probe = "if [ \"$#\" = 1 ] && [ \"$1\" = route-exec ]; then echo 'usage: flightdeck route-exec <argv0> -- <args…>' >&2; exit 2; fi\n"
+            try "#!/bin/bash\n\(probe)echo \(label)\nfor a in \"$@\"; do echo \"[$a]\"; done\necho \"PATH=$PATH\"\n"
                 .write(to: url, atomically: true, encoding: .utf8)
             try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
         }
@@ -247,6 +250,48 @@ final class RouteShimsTests: XCTestCase {
         try oldCLI(temp.appendingPathComponent("cli bin/flightdeck"))
         let output = try runShell("xcodebuild test", path: path)
         XCTAssertTrue(output.hasPrefix("REAL\n[test]\n"), output)
+    }
+
+    private func stubCLI(_ body: String) throws {
+        let url = temp.appendingPathComponent("cli bin/flightdeck")
+        try "#!/bin/bash\n\(body)\n".write(to: url, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
+    }
+
+    /// A CLI on PATH that crashes on the probe would crash on the real call too; execing it
+    /// anyway made the command unrunnable.
+    func testScriptRunsTheRealBinaryWhenTheCLICrashes() throws {
+        let (_, path) = try fakes(withCLI: false)
+        try stubCLI("kill -SEGV $$")
+        XCTAssertTrue(try runShell("xcodebuild test", path: path).hasPrefix("REAL\n[test]\n"))
+    }
+
+    /// Exit 2 with no usage text is not a current CLI either.
+    func testScriptRunsTheRealBinaryWhenTheProbeSaysNothing() throws {
+        let (_, path) = try fakes(withCLI: false)
+        try stubCLI("exit 2")
+        XCTAssertTrue(try runShell("xcodebuild test", path: path).hasPrefix("REAL\n[test]\n"))
+    }
+
+    /// A probe that hangs is killed, with its children, after 2 seconds. Killing only the CLI
+    /// left its `sleep` holding the capture pipe, and the shim waited the full 30 seconds.
+    func testScriptRunsTheRealBinaryWhenTheProbeHangs() throws {
+        let (_, path) = try fakes(withCLI: false)
+        try stubCLI("[ \"$#\" = 1 ] && sleep 30\necho HUNG \"$@\"")
+        let start = Date()
+        XCTAssertTrue(try runShell("xcodebuild test", path: path).hasPrefix("REAL\n[test]\n"))
+        XCTAssertLessThan(Date().timeIntervalSince(start), 10)
+    }
+
+    /// FLIGHTDECK_CLI is this build's own CLI, so it is not probed: one process, not two.
+    func testTrustedCLIIsNotProbed() throws {
+        let (_, path) = try fakes(withCLI: false)
+        let log = temp.appendingPathComponent("calls.log")
+        let cli = temp.appendingPathComponent("trusted-cli")
+        try "#!/bin/bash\necho \"$*\" >> '\(log.path)'\n".write(to: cli, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: cli.path)
+        _ = try runShell("xcodebuild test", path: path, extra: ["FLIGHTDECK_CLI": cli.path])
+        XCTAssertEqual(try String(contentsOf: log, encoding: .utf8), "route-exec xcodebuild -- test\n")
     }
 
     /// A child that rebuilt PATH with the shims on it must not route again.
