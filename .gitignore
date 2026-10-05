@@ -29,3 +29,6 @@ scripts/adapterprobe/corpus/
 # ("regenerate rather than edit"). Never commit them; the installed claude is the authority.
 Resources/ClaudePlugin/.claude-plugin/types/
 Resources/ClaudeUsagePlugin/.claude-plugin/types/
+scripts/.capacity-ui.log
+scripts/.capacity-ui.xcresult/
+scripts/.capacity-ui-shots/
