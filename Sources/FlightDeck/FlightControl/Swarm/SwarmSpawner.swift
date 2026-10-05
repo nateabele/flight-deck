@@ -31,6 +31,10 @@ struct PromptDelivery {
     let sleep: (Duration) async -> Void
     let now: () -> Date
     let timeout: TimeInterval
+    /// Whether the tab still exists. The queue letting go of a prompt is not proof it was typed:
+    /// closing a tab drops its whole queue, and that must not read as a delivery (the claim would
+    /// be held for an agent that never got its prompt).
+    var exists: (UUID) -> Bool = { _ in true }
 
     func deliver(_ text: String, to session: UUID) async -> Result<Void, SpawnError> {
         let token = UUID()
@@ -49,13 +53,14 @@ struct PromptDelivery {
             }
         }
         while pending(token, session) {
+            guard exists(session) else { return .failure(.launchFailed("the tab is gone")) }
             if now() >= deadline {
                 withdraw(token, session)
                 return .failure(.composerTimeout)
             }
             await sleep(SwarmTiming.deliveryPoll)
         }
-        return .success(())
+        return exists(session) ? .success(()) : .failure(.launchFailed("the tab is gone"))
     }
 }
 
@@ -99,7 +104,8 @@ final class StoreSwarmSpawner: SwarmSpawner, SwarmAgentLauncher {
                 pending: { [weak store] token, id in store?.isPromptQueued(token, for: id) ?? false },
                 withdraw: { [weak store] token, id in store?.withdrawQueuedPrompt(token, from: id) },
                 sleep: { try? await Task.sleep(for: $0) },
-                now: Date.init, timeout: SwarmTiming.composerTimeout))
+                now: Date.init, timeout: SwarmTiming.composerTimeout,
+                exists: { [weak store] in store?.sessionExists($0) ?? false }))
     }
 
     func createAgent(task: TaskRef, block: ExecutionBlock, lease: AccountLease?) async -> Result<SessionRef, SpawnError> {

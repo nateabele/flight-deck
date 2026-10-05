@@ -54,10 +54,31 @@ final class PromptDeliveryTests: XCTestCase {
 
     func testAQueuedPromptStillUntypedAtTheDeadlineIsWithdrawn() async {
         var withdrawn: [UUID] = []
-        let r = await delivery(answers: [.queued], queuedFor: 1_000, clock: Clock(),
-                               withdrawn: { withdrawn.append($0) }).deliver("go", to: UUID())
+        var submitted: [UUID] = []
+        let clock = Clock()
+        var remaining = 1_000
+        let d = PromptDelivery(
+            submit: { _, token, _ in submitted.append(token); return .queued },
+            pending: { _, _ in defer { remaining -= 1 }; return remaining > 0 },
+            withdraw: { token, _ in withdrawn.append(token) },
+            sleep: { clock.now += Double($0.components.seconds) }, now: { clock.now }, timeout: 120)
+        let r = await d.deliver("go", to: UUID())
         XCTAssertEqual(failure(r), .composerTimeout)
+        XCTAssertEqual(withdrawn, submitted)
         XCTAssertEqual(withdrawn.count, 1)
+    }
+
+    func testATabClosedWhileItsPromptWasQueuedIsAFailureNotADelivery() async {
+        var open = true
+        var remaining = 2
+        let d = PromptDelivery(
+            submit: { _, _, _ in .queued },
+            // Closing a tab drops its queue, so the prompt leaves it without ever being typed.
+            pending: { _, _ in remaining -= 1; if remaining == 0 { open = false }; return remaining > 0 },
+            withdraw: { _, _ in }, sleep: { _ in }, now: { Date(timeIntervalSince1970: 0) }, timeout: 120,
+            exists: { _ in open })
+        let r = await d.deliver("go", to: UUID())
+        XCTAssertEqual(failure(r), .launchFailed("the tab is gone"))
     }
 
     func testRefusalsAreLaunchFailures() async {
