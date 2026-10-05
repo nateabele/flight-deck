@@ -113,7 +113,13 @@ public enum HeadroomPolicy {
         }
         let unknown = AccountHeadroom(account: account, worstUtilization: nil, state: .unknown, resetsAt: nil)
         guard let reading, isFresh(reading, now: now) else { return unknown }
-        let scored = reading.windows.map { ($0, effectiveUtilization(of: $0, readAt: reading.readAt, now: now)) }
+        // Filter out windows whose reset time has passed (and is not clock skew); if all are expired, return unknown
+        let unexpired = reading.windows.filter { window in
+            guard let resets = window.resetsAt else { return true }
+            // If resetsAt is at or before readAt, it's clock skew, not a real reset—keep the window
+            return resets <= reading.readAt || resets > now
+        }
+        let scored = unexpired.map { ($0, effectiveUtilization(of: $0, readAt: reading.readAt, now: now)) }
         guard let worst = scored.max(by: { $0.1 < $1.1 }) else { return unknown }
         let state: HeadroomState = worst.1 >= hard ? .overHard : worst.1 >= soft ? .overSoft : .underSoft
         return AccountHeadroom(account: account, worstUtilization: worst.1, state: state, resetsAt: worst.0.resetsAt)

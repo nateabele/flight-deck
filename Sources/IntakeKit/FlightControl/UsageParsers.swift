@@ -188,9 +188,9 @@ public struct OpenCodeAPIErrorEvent: Equatable, Sendable {
 
 /// OpenCode has no meter, only refusals: a 429 is the whole signal.
 public enum OpenCodeRateLimit {
-    /// Documented here for the popover's wording; `HeadroomPolicy.rejectionBackoff` is what
-    /// applies it, to a rejection whose reading carries no reset time.
-    public static let backoff: TimeInterval = 15 * 60
+    /// Single source of truth: `HeadroomPolicy.rejectionBackoff` applies it to a rejection
+    /// with no reset time, and we document it here for the popover's wording.
+    public static let backoff: TimeInterval = HeadroomPolicy.rejectionBackoff
 
     public static func reading(for event: OpenCodeAPIErrorEvent, account: AccountRef) -> UsageReading? {
         guard event.status == 429 else { return nil }
