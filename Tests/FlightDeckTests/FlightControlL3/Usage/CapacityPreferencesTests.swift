@@ -45,6 +45,14 @@ final class CapacityPreferencesTests: XCTestCase {
         XCTAssertEqual(pools[1].accounts, [UsageRefs.spareID])
     }
 
+    func testAUserPoolDropsAnotherAgentsAccount() {
+        let mine = CapacityPool.hosted(id: "pool-abc12345", label: "Mixed", harness: "claude",
+                                       accounts: [UsageRefs.codexID, UsageRefs.spareID])
+        let pools = CapacityPreferences(pools: [mine]).effectivePools(accounts: [work, spare, codex])
+        XCTAssertEqual(pools.first { $0.id == "pool-abc12345" }?.accounts, [UsageRefs.spareID],
+                       "a stored blob may hold a cross-harness member; it must never be leased")
+    }
+
     func testALocalPoolPassesThroughUntouched() {
         let local = CapacityPool.local(id: "pool-local001", label: "Ollama", harness: "opencode", endpoint: "http://localhost:11434")
         XCTAssertEqual(CapacityPreferences(pools: [local]).effectivePools(accounts: [work]).last, local)

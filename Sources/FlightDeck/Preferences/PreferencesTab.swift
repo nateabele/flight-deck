@@ -15,4 +15,5 @@ enum PreferencesTab: Hashable, CaseIterable {
     case shell
     case tools
     case devices
+    case capacity
 }

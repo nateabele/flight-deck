@@ -34,6 +34,13 @@ struct PreferencesView: View {
                 .tabItem { Label("Devices", systemImage: "iphone.and.arrow.forward") }
                 .accessibilityIdentifier("prefs-devices")
                 .tag(PreferencesTab.devices)
+
+            // No container-level accessibilityIdentifier on this tab: SwiftUI stamps it onto every
+            // child and hides the leaf controls' own identifiers from the UI test.
+            CapacityPane(preferences: preferences, usage: UsageService.shared,
+                         localHarnesses: CapacityPane.defaultLocalHarnesses())
+                .tabItem { Label("Capacity", systemImage: "gauge.with.dots.needle.33percent") }
+                .tag(PreferencesTab.capacity)
         }
         .frame(width: 720, height: 560)
     }

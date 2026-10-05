@@ -60,7 +60,12 @@ struct CapacityPreferences: Codable, Equatable {
             }
         }
         for var pool in stored where !out.contains(where: { $0.id == pool.id }) {
-            if pool.kind == .hosted { pool.accounts = pool.accounts.filter(liveIDs.contains) }
+            // A member of another agent's harness is dropped too: leasing a codex account for a
+            // claude spawn would launch it under the wrong login.
+            if pool.kind == .hosted {
+                let sameHarness = Set(live.filter { $0.agent.harnessID == pool.harness }.map(\.id))
+                pool.accounts = pool.accounts.filter { liveIDs.contains($0) && sameHarness.contains($0) }
+            }
             out.append(pool)
         }
         return out

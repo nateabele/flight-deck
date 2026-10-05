@@ -128,7 +128,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func startUsage(store: SessionStore) {
         guard let preferences = store.preferences, !UsageService.shared.isAttached else { return }
         UsageService.shared.attach(store: store, preferences: preferences)
+        #if DEBUG
+        if UsageFixture.isRequested { UsageFixture.install(into: UsageService.shared, preferences: preferences) }
+        if UsageFixture.isGalleryRequested { meterGallery = MeterGalleryWindow.show(usage: UsageService.shared) }
+        #endif
     }
+
+    #if DEBUG
+    /// The capacity UI test's Meter Gallery (L3-U); held so it is not released when shown.
+    private var meterGallery: NSWindow?
+    #endif
 
     /// Opens the answer trigger's socket, if this launch was told to.
     ///
