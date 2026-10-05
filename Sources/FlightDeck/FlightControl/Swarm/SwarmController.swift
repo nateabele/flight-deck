@@ -53,11 +53,58 @@ final class SwarmController {
         guard !isTicking else { return }
         isTicking = true
         defer { isTicking = false }
+        await sweepClosedTabs()
         switch record.state {
         case .running: await fillSlots()
         case .draining, .paused, .stopped: break
         }
         changed()
+    }
+
+    /// Called with the Observe watcher's in-progress task ids for this project. A working agent
+    /// whose task left that set is asked about through `br show`, because "left in_progress"
+    /// means closed, reopened, or merely a watcher snapshot that predates the claim.
+    func taskSetChanged(inProgress: Set<String>) async {
+        var freed = false
+        for agent in record.agents where agent.state == .working {
+            guard let task = agent.task, !inProgress.contains(task),
+                  let reading = await deps.backend.status(task, project: project) else { continue }
+            if reading.status == "closed" {
+                record.update(agent.session) { $0.state = .idle; $0.lastTask = task; $0.task = nil; $0.stateSince = now() }
+                log(.close, task: task, session: agent.session, detail: agent.agentName)
+                freed = true
+            } else if reading.status == "in_progress", reading.assignee == agent.agentName {
+                continue
+            } else {
+                // Spec §4: back to open (or taken over) while its agent still held it.
+                record.update(agent.session) { $0.state = .idle; $0.task = nil; $0.stateSince = now() }
+                let who = reading.assignee.map { " · \($0)" } ?? ""
+                log(.reopen, task: task, session: agent.session, detail: "now \(reading.status)\(who) while \(agent.agentName) held it")
+                freed = true
+            }
+        }
+        changed()
+        if freed { await tick(); await settle() }
+    }
+
+    /// A tab the user closed (Review Focus): its claim goes back to open unless the task is
+    /// already closed or someone else holds it, its lease is released, and it leaves the swarm.
+    private func sweepClosedTabs() async {
+        for agent in record.agents where [.starting, .working, .idle].contains(agent.state)
+            && !deps.host.sessionExists(agent.session) {
+            for task in Set([agent.task, agent.pendingClaim].compactMap { $0 }) {
+                let reading = await deps.backend.status(task, project: project)
+                let ours = reading?.assignee == nil || reading?.assignee == agent.agentName
+                if reading?.status != "closed", ours {
+                    _ = await deps.backend.returnToOpen(task, project: project)
+                    log(.released, task: task, session: agent.session, detail: "\(agent.agentName)'s tab was closed")
+                }
+            }
+            if let lease = agent.lease { deps.allocator.release(lease.lease) }
+            record.update(agent.session) {
+                $0.state = .done; $0.task = nil; $0.pendingClaim = nil; $0.marker = "tab closed"; $0.stateSince = now()
+            }
+        }
     }
 
     private func fillSlots() async {
