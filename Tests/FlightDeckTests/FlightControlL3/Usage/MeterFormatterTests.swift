@@ -77,4 +77,44 @@ final class MeterFormatterTests: XCTestCase {
         XCTAssertEqual(m?.hard, 0.6)
         XCTAssertNil(MeterFormatter.rowMeter(account: UsageRefs.spareID, ledger: ledger, now: now), "unknown draws nothing")
     }
+
+    func testRejectionWithMeter() {
+        let now = usageISO("2026-10-04T19:00:00Z")
+        let reading = UsageReading(account: UsageRefs.work, windows: [UsageWindow(name: "five_hour", utilization: 0.10, resetsAt: usageISO("2026-10-04T23:00:00Z"))],
+                                   readAt: now.addingTimeInterval(-180), source: "claude mod", hardRejection: false)
+        let rejection = Rejection(at: now.addingTimeInterval(-60), until: now.addingTimeInterval(600), source: "Claude API: 429")
+        let h = AccountHeadroom(account: UsageRefs.work, worstUtilization: 1, state: .overHard, resetsAt: rejection.expiry)
+        let m = MeterFormatter.account(h, pool: pool, reading: reading, error: nil, now: now, rejection: rejection, timeZone: utc, locale: posix)
+        XCTAssertEqual(m.state, .overHard)
+        XCTAssertEqual(m.fraction, 0.10, "shows real meter, not synthetic 1")
+        XCTAssertEqual(m.percentText, "10%")
+        XCTAssertTrue(m.sourceText?.starts(with: "Claude API: 429") ?? false, "sourceText starts with rejection source")
+        XCTAssertEqual(m.detail, "Refused by the provider")
+        XCTAssertTrue(m.accessibilityValue.contains("refused"))
+    }
+
+    func testRejectionWithoutMeter() {
+        let now = usageISO("2026-10-04T19:00:00Z")
+        let rejection = Rejection(at: now.addingTimeInterval(-60), until: now.addingTimeInterval(600), source: "API error")
+        let h = AccountHeadroom(account: UsageRefs.work, worstUtilization: 1, state: .overHard, resetsAt: rejection.expiry)
+        let m = MeterFormatter.account(h, pool: pool, reading: nil, error: nil, now: now, rejection: rejection, timeZone: utc, locale: posix)
+        XCTAssertNil(m.fraction, "no meter reading means no fraction")
+        XCTAssertEqual(m.percentText, "—")
+        XCTAssertTrue(m.sourceText?.starts(with: "API error") ?? false)
+        XCTAssertEqual(m.detail, "Refused by the provider")
+        XCTAssertTrue(m.accessibilityValue.contains("refused"))
+    }
+
+    func testExpiredRejectionShowsNormalMeter() {
+        let now = usageISO("2026-10-04T19:00:00Z")
+        let reading = UsageReading(account: UsageRefs.work, windows: [UsageWindow(name: "five_hour", utilization: 0.30, resetsAt: usageISO("2026-10-04T23:00:00Z"))],
+                                   readAt: now.addingTimeInterval(-180), source: "claude mod", hardRejection: false)
+        let rejection = Rejection(at: now.addingTimeInterval(-1000), until: now.addingTimeInterval(-100), source: "expired")
+        let h = AccountHeadroom(account: UsageRefs.work, worstUtilization: 0.30, state: .overSoft, resetsAt: usageISO("2026-10-04T23:00:00Z"))
+        let m = MeterFormatter.account(h, pool: pool, reading: reading, error: nil, now: now, rejection: rejection, timeZone: utc, locale: posix)
+        XCTAssertEqual(m.state, .overSoft, "expired rejection does not override state")
+        XCTAssertEqual(m.fraction, 0.30)
+        XCTAssertEqual(m.sourceText, "claude mod · 3 min ago", "shows normal meter source, not rejection")
+        XCTAssertNil(m.detail, "no rejection detail when rejection is expired")
+    }
 }

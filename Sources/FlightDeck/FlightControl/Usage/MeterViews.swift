@@ -18,7 +18,10 @@ struct AccountMeterModel: Identifiable, Equatable {
 
     /// What VoiceOver says, and what the UI test reads, so both describe the same state.
     var accessibilityValue: String {
-        guard let fraction else { return detail ?? "no reading" }
+        // A refusal is the one state a listener must not mistake for a measured number, so its
+        // wording is spoken in the sentence's own case rather than as a capitalised label.
+        let spokenDetail = detail.map { $0 == MeterFormatter.refusedDetail ? $0.lowercased() : $0 }
+        guard let fraction else { return spokenDetail ?? "no reading" }
         var parts = ["\(Int((fraction * 100).rounded())) percent used"]
         switch state {
         case .underSoft: parts.append("has headroom")
@@ -27,7 +30,7 @@ struct AccountMeterModel: Identifiable, Equatable {
         case .unknown: break
         }
         if let resetText { parts.append(resetText) }
-        if let detail { parts.append(detail) }
+        if let spokenDetail { parts.append(spokenDetail) }
         return parts.joined(separator: ", ")
     }
 }
@@ -41,6 +44,8 @@ struct PoolMeterModel: Identifiable, Equatable {
 }
 
 enum MeterFormatter {
+    static let refusedDetail = "Refused by the provider"
+
     static func age(_ seconds: TimeInterval) -> String {
         let s = max(0, seconds)
         switch s {
@@ -61,14 +66,37 @@ enum MeterFormatter {
     }
 
     static func account(_ h: AccountHeadroom, pool: CapacityPool, reading: UsageReading?, error: String?, now: Date,
+                        rejection: Rejection? = nil,
                         timeZone: TimeZone = .current, locale: Locale = .current) -> AccountMeterModel {
+        // A local pool's bar is slots in use; soft/hard ticks mean nothing there, so they sit at
+        // the end of the track.
+        let isLocal = pool.kind == .local
+
+        // Spec §3: a rejection marks the account over hard whatever the meter said, so the bar
+        // must say refused and name what refused it. Drawing it as a plain measured 100% hides
+        // that the provider, not our arithmetic, closed the account.
+        if let rejection, now < rejection.expiry {
+            let realUtilization = reading.flatMap { r in
+                r.worstWindow.map { window in
+                    HeadroomPolicy.effectiveUtilization(of: window, readAt: r.readAt, now: now)
+                }
+            }
+            return AccountMeterModel(
+                id: "\(pool.id.rawValue)|\(h.account.id?.uuidString ?? "slot")",
+                label: h.account.label,
+                fraction: realUtilization,
+                state: .overHard,
+                soft: isLocal ? 1 : pool.softThreshold,
+                hard: isLocal ? 1 : pool.hardThreshold,
+                resetText: resetText(rejection.expiry, now: now, timeZone: timeZone, locale: locale),
+                sourceText: "\(rejection.source) · \(age(now.timeIntervalSince(rejection.at)))",
+                detail: refusedDetail)
+        }
+
         let detail: String?
         if let error { detail = error }
         else if h.state == .unknown { detail = reading == nil ? "no reading" : "reading is stale" }
         else { detail = nil }
-        // A local pool's bar is slots in use; soft/hard ticks mean nothing there, so they sit at
-        // the end of the track.
-        let isLocal = pool.kind == .local
         return AccountMeterModel(
             id: "\(pool.id.rawValue)|\(h.account.id?.uuidString ?? "slot")",
             label: h.account.label,
@@ -87,7 +115,8 @@ enum MeterFormatter {
                 account(h, pool: pool,
                         reading: h.account.id.flatMap { ledger.latestReading(account: $0) },
                         error: h.account.id.flatMap { ledger.sourceError(account: $0) },
-                        now: now, timeZone: timeZone, locale: locale)
+                        now: now, rejection: h.account.id.flatMap { ledger.rejection(account: $0) },
+                        timeZone: timeZone, locale: locale)
             }
             // The spec's caveat, said where the number is: FD counts only its own agents.
             let note: String? = pool.kind == .local
@@ -106,7 +135,8 @@ enum MeterFormatter {
             guard let h = ledger.headroom(pool: pool.id).first(where: { $0.account.id == id }),
                   h.state == .overSoft || h.state == .overHard else { continue }
             let m = account(h, pool: pool, reading: ledger.latestReading(account: id), error: ledger.sourceError(account: id),
-                            now: now, timeZone: timeZone, locale: locale)
+                            now: now, rejection: ledger.rejection(account: id),
+                            timeZone: timeZone, locale: locale)
             if best.map({ severity(m) > severity($0) }) ?? true { best = m }
         }
         return best
