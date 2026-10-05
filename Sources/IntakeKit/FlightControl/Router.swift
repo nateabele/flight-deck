@@ -89,6 +89,46 @@ public enum RouterCore {
                                      at: ctx.now))))
     }
 
+    /// Re-routes ONE spawn with `exhausted` pools removed (spec §5). Called by L3-S at spawn,
+    /// never by encode, and the caller never writes the result back to the task: a spill is a
+    /// detour for this spawn, not a new decision about the task.
+    ///
+    /// The rule's `fallbackPool` goes first — it is the spill target the sentence named. A
+    /// pinned block never spills: a manual choice waits for its pool rather than being undone.
+    public static func spill(_ block: ExecutionBlock, kind: TaskKind, exhausted: Set<PoolID>,
+                             _ ctx: RoutingContext) -> Assignment? {
+        guard !block.pinned else { return nil }
+        var open = ctx
+        open.pools = ctx.pools.filter { !exhausted.contains($0.id) }
+        open.defaultPools = ctx.defaultPools.filter { !exhausted.contains($0.value) }
+
+        func spilled(_ b: ExecutionBlock, ruleId: String?) -> Assignment {
+            var out = b
+            out.kind = block.kind
+            out.source = AssignmentSource(by: .spill, ruleId: ruleId,
+                                          reason: "\(block.pool.rawValue) exhausted → \(b.pool.rawValue)/\(b.model)", at: ctx.now)
+            return Assignment(block: out)
+        }
+
+        if let ruleId = block.source.ruleId,
+           let rule = (ctx.projectRules + ctx.globalRules).first(where: { $0.id == ruleId }),
+           let compiled = rule.compiled, let fallback = compiled.assign.fallbackPool,
+           let pool = open.pools.first(where: { $0.id == fallback }),
+           let cat = open.catalogs.byHarness[pool.harness], cat.enabled {
+            let sameAgent = pool.harness == compiled.assign.harness
+            let model = sameAgent ? compiled.assign.model : (cat.defaultModel ?? cat.models.first?.id)
+            let knobs = sameAgent ? compiled.assign.knobs : [:]
+            if let model, open.catalogs.contains(ModelRef(harness: pool.harness, model: model)) {
+                let b = ExecutionBlock(kind: block.kind, harness: pool.harness, model: model, knobs: knobs,
+                                       pool: pool.id, source: block.source)
+                return spilled(b, ruleId: ruleId)
+            }
+        }
+
+        guard case .routed(let a) = assign(kind: kind, open) else { return nil }
+        return spilled(a.block, ruleId: a.block.source.ruleId)
+    }
+
     /// The rule's assignment if it can still run: agent enabled, model listed, knobs accepted,
     /// pool present and the agent's. A rule written for a model that has since left the catalog
     /// is skipped — routing to it would hand the swarm a block nothing can launch.
@@ -124,5 +164,56 @@ public enum RouterCore {
             }
         }
         return held.joined(separator: " + ") + " → \(harness.rawValue)"
+    }
+}
+
+/// The contract's `Router` (L3-0 §7): reads its context from injected sources, then defers to
+/// `RouterCore`. L3-S calls `assign` at launch and `spill` at spawn through the protocol.
+public struct RuleRouter: Router {
+    public let rules: any RoutingRuleSource
+    public let kinds: any KindRegistry
+    public let index: any CapabilityIndex
+    public let pools: any PoolDirectory
+    public let defaultHarness: @Sendable (URL) -> HarnessID?
+    public let confidenceFloor: Double
+
+    public init(rules: any RoutingRuleSource, kinds: any KindRegistry, index: any CapabilityIndex,
+                pools: any PoolDirectory, defaultHarness: @escaping @Sendable (URL) -> HarnessID?,
+                confidenceFloor: Double = RouterCore.defaultConfidenceFloor) {
+        self.rules = rules; self.kinds = kinds; self.index = index; self.pools = pools
+        self.defaultHarness = defaultHarness; self.confidenceFloor = confidenceFloor
+    }
+
+    /// An unreadable registry routes with no kinds: the task's own weights still decide, and
+    /// a broken `kinds.json` must not stop the swarm.
+    public func context(project: URL, catalogs: AdapterCatalogs, now: Date) -> RoutingContext {
+        let lists = rules.rules(project: project)
+        return RoutingContext(projectRules: lists.project, globalRules: lists.global,
+                              kinds: (try? kinds.kinds(project: project)) ?? [],
+                              catalogs: catalogs, pools: pools.pools(), defaultPools: pools.defaultPools(for: catalogs.order),
+                              defaultHarness: defaultHarness(project), index: index,
+                              confidenceFloor: confidenceFloor, now: now)
+    }
+
+    public func route(kind: TaskKind, project: URL, catalogs: AdapterCatalogs, now: Date) -> RouteOutcome {
+        RouterCore.assign(kind: kind, context(project: project, catalogs: catalogs, now: now))
+    }
+
+    /// The contract's `assign` cannot fail (deviation 5), so an unroutable task gets
+    /// `Assignment.unroutable`: empty harness, model and pool. `ExecutionBlockCodec` refuses to
+    /// decode an empty field, so nothing downstream can launch it; callers that can fail use
+    /// `route` instead.
+    public func assign(kind: TaskKind, project: URL, catalogs: AdapterCatalogs, now: Date) -> Assignment {
+        switch route(kind: kind, project: project, catalogs: catalogs, now: now) {
+        case .routed(let a):
+            return a
+        case .unroutable(let why):
+            return Assignment.unroutable(kind: kind.id, reason: why, at: now)
+        }
+    }
+
+    public func spill(_ block: ExecutionBlock, kind: TaskKind, project: URL, exhausted: Set<PoolID>,
+                      catalogs: AdapterCatalogs, now: Date) -> Assignment? {
+        RouterCore.spill(block, kind: kind, exhausted: exhausted, context(project: project, catalogs: catalogs, now: now))
     }
 }

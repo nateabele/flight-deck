@@ -74,3 +74,13 @@ public struct ProjectFileRuleSource: RoutingRuleSource {
         RuleLists(project: store.load(project: project).rules, global: global)
     }
 }
+
+extension PoolDirectory {
+    /// Each listed agent's default pool; an agent with none is left out, so routing never
+    /// assigns an agent a pool that does not exist. One loop for the router and its callers.
+    public func defaultPools(for harnesses: [HarnessID]) -> [HarnessID: PoolID] {
+        var out: [HarnessID: PoolID] = [:]
+        for h in harnesses { if let p = defaultPool(for: h) { out[h] = p } }
+        return out
+    }
+}
