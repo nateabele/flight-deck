@@ -56,7 +56,8 @@ final class SwarmController {
         await sweepClosedTabs()
         switch record.state {
         case .running: await fillSlots()
-        case .draining, .paused, .stopped: break
+        case .draining: finishDrainIfIdle()
+        case .paused, .stopped: break
         }
         changed()
     }
@@ -151,6 +152,63 @@ final class SwarmController {
         }
         record.waiting = waiting
         record.unroutable = unroutable
+        let claimable = candidates.count - unroutable.count
+        if record.state == .running, SwarmPlanner.isFinished(claimable: claimable, waiting: waiting.count,
+                                                              active: record.activeCount,
+                                                              launching: launches.count + pendingSpawnCount) {
+            stop(reason: "nothing left to do")
+        }
+    }
+
+    /// No new claims or spawns; running agents continue (spec §4).
+    func pause() {
+        guard record.state == .running || record.state == .draining else { return }
+        record.state = .paused
+        log(.pause)
+        changed()
+    }
+
+    func resume() async {
+        guard record.state == .paused || record.state == .draining else { return }
+        record.state = .running
+        record.banner = nil
+        record.spawnFailures = [:]
+        log(.resume)
+        changed()
+        await tick()
+    }
+
+    /// Like pause, and the swarm becomes stopped when the last working agent goes idle.
+    func drain() {
+        guard record.state == .running || record.state == .paused else { return }
+        record.state = .draining
+        log(.drain)
+        finishDrainIfIdle()
+        changed()
+    }
+
+    /// The swarm keeps nothing running: leases are released and agents leave it. Their tabs stay
+    /// open, and their claims stay with them — turning Flight Control off is what returns claims.
+    /// An agent already `.done` (its tab was closed) had its lease released then; the record keeps
+    /// the lease for history, so releasing it again here would double-free the account.
+    func stop(reason: String) {
+        guard record.state != .stopped else { return }
+        record.state = .stopped
+        for agent in record.agents where agent.state != .done && agent.state != .handedOff {
+            retire(agent)
+        }
+        log(.stop, detail: reason)
+        changed()
+    }
+
+    private func retire(_ agent: SwarmAgentRecord) {
+        if let lease = agent.lease { deps.allocator.release(lease.lease) }
+        record.update(agent.session) { $0.state = .done; $0.stateSince = now() }
+    }
+
+    private func finishDrainIfIdle() {
+        guard record.state == .draining, record.activeCount == 0, launches.isEmpty, pendingSpawnCount == 0 else { return }
+        stop(reason: "drained")
     }
 
     /// Reuse is checked before leasing (deviation 3): an idle agent already holds a lease on an
@@ -210,6 +268,7 @@ final class SwarmController {
             guard let self else { return }
             await self.run(plan, for: task)
             self.launches[id] = nil
+            self.finishDrainIfIdle()
             self.changed()
         }
     }
@@ -254,7 +313,8 @@ final class SwarmController {
             }
             log(.resetFailed, task: task.id, session: session, detail: "spawning a fresh agent instead")
             // Spec §10: spawn a new agent instead. The task is still unclaimed.
-            if case .spawn(let block, let lease) = await plan(task, block: agent.block.block, allowReuse: false) {
+            if record.state == .running,
+               case .spawn(let block, let lease) = await plan(task, block: agent.block.block, allowReuse: false) {
                 pendingSpawns[block.pool, default: 0] += 1
                 await spawn(block, lease: lease, for: task)
             }
@@ -271,7 +331,13 @@ final class SwarmController {
     /// Spec §4 steps 5–7. The claim comes after the spawn because it names the agent the spawn
     /// booted; a claim that fails leaves an idle agent the next tick can reuse.
     private func claimAndPrompt(_ task: ReadyTask, session: UUID) async {
-        guard let agent = record.agent(session) else { return }
+        guard let agent = record.agent(session), agent.state != .done else { return }
+        // The swarm may have been paused, drained or stopped while the spawn or reset ran (R4).
+        switch record.state {
+        case .running: break
+        case .stopped: retire(agent); return
+        case .paused, .draining: becomeIdle(session); return
+        }
         // Saved BEFORE the claim runs (Review Focus: a crash mid-claim).
         record.update(session) { $0.pendingClaim = task.id }
         changed()

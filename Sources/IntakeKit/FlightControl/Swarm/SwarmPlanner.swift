@@ -24,3 +24,11 @@ extension SwarmPlanner {
             .min { $0.stateSince < $1.stateSince }
     }
 }
+
+extension SwarmPlanner {
+    /// Spec §4: a swarm stops on its own when nothing is ready, nothing is waiting and no agent is
+    /// working. Unroutable tasks are not "ready" here — nothing will ever start them.
+    public static func isFinished(claimable: Int, waiting: Int, active: Int, launching: Int) -> Bool {
+        claimable == 0 && waiting == 0 && active == 0 && launching == 0
+    }
+}
