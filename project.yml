@@ -78,6 +78,13 @@ targets:
       - path: Resources/ClaudePlugin
         type: folder
         buildPhase: resources
+      # The routing shim every `[[route]]` command in a session's shim directory symlinks to
+      # (spec §8, `RouteShims.bundledScript`). A folder reference like ClaudePlugin above, so
+      # it lands at `Contents/Resources/RouteShim/` with its executable bit intact — a symlink
+      # to a non-executable script fails every routed command with "permission denied".
+      - path: Resources/RouteShim
+        type: folder
+        buildPhase: resources
       # The hostd's LaunchAgent, where `SMAppService.agent(plistName:)` looks for it:
       # `Contents/Library/LaunchAgents`. Its `BundleProgram` names the embedded binary below.
       - path: Sources/HostDaemon/dev.flightdeck.hostd.plist

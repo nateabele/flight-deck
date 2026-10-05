@@ -31,6 +31,18 @@ final class PSKWebSocketServer: @unchecked Sendable {
             }
         }
 
+        /// One binary message: a `ChannelMux` frame (delegation's byte channels). Here rather
+        /// than in BinaryFrames.swift because it needs the private `channel`. Same hop to the
+        /// loop as `send(text:)`, so text and binary sends keep their call order on the wire.
+        func send(binary: Data) {
+            let channel = self.channel
+            channel.eventLoop.execute {
+                let buffer = channel.allocator.buffer(bytes: binary)
+                channel.writeAndFlush(WebSocketFrame(fin: true, opcode: .binary, data: buffer),
+                                      promise: nil)
+            }
+        }
+
         /// Safe from any thread: `Channel.close` hops to the channel's loop itself.
         func close() {
             channel.close(promise: nil)
@@ -46,6 +58,7 @@ final class PSKWebSocketServer: @unchecked Sendable {
     private let keys: @Sendable () -> [String: [UInt8]]
     private let onText: @Sendable (Connection, String) -> Void
     private let onClose: (@Sendable (Connection) -> Void)?
+    private let onBinary: (@Sendable (Connection, Data) -> Void)?
     private let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
     private let gate: HandshakeGate
 
@@ -58,12 +71,14 @@ final class PSKWebSocketServer: @unchecked Sendable {
          maxPending: Int = HandshakeGate.maxPending,
          handshakeDeadline: TimeAmount = HandshakeGate.deadline,
          onText: @escaping @Sendable (Connection, String) -> Void,
-         onClose: (@Sendable (Connection) -> Void)? = nil) {
+         onClose: (@Sendable (Connection) -> Void)? = nil,
+         onBinary: (@Sendable (Connection, Data) -> Void)? = nil) {
         self.host = host
         self.port = port
         self.keys = keys
         self.onText = onText
         self.onClose = onClose
+        self.onBinary = onBinary
         gate = HandshakeGate(limit: maxPending, deadline: handshakeDeadline)
     }
 
@@ -72,6 +87,7 @@ final class PSKWebSocketServer: @unchecked Sendable {
         let keys = self.keys
         let onText = self.onText
         let onClose = self.onClose
+        let onBinary = self.onBinary
         let gate = self.gate
         // Built once up front and discarded, so a configuration BoringSSL rejects (a cipher
         // string it has no suite for) fails the daemon at launch rather than every handshake.
@@ -108,7 +124,7 @@ final class PSKWebSocketServer: @unchecked Sendable {
                         return channel.eventLoop.makeCompletedFuture {
                             try channel.pipeline.syncOperations.addHandlers(Self.frameHandlers(
                                 connection: connection, maxMessageBytes: Self.maxMessageBytes,
-                                onText: onText, onClose: onClose))
+                                onText: onText, onClose: onClose, onBinary: onBinary))
                         }
                     }
                 )
@@ -150,13 +166,20 @@ final class PSKWebSocketServer: @unchecked Sendable {
     /// frame handler's `errorCaught`, which closes the connection.
     static func frameHandlers(connection: Connection, maxMessageBytes: Int,
                               onText: @escaping @Sendable (Connection, String) -> Void,
-                              onClose: (@Sendable (Connection) -> Void)?) -> [ChannelHandler] {
-        [
+                              onClose: (@Sendable (Connection) -> Void)?,
+                              onBinary: (@Sendable (Connection, Data) -> Void)? = nil) -> [ChannelHandler] {
+        // Binary messages split off ahead of the text handler, which drops them; without an
+        // `onBinary` they still are dropped, as before delegation.
+        let binary: [ChannelHandler] = onBinary.map {
+            [BinaryFrameHandler(connection: connection, onBinary: $0)]
+        } ?? []
+        return [
             // No minimum fragment size: the count cap and the byte cap already bound what a
             // peer can make us hold, and a floor would refuse a legal small trailing fragment
             // from a client that fragments at its own boundaries.
             NIOWebSocketFrameAggregator(minNonFinalFragmentSize: 0, maxAccumulatedFrameCount: 4096,
                                         maxAccumulatedFrameSize: maxMessageBytes),
+        ] + binary + [
             WebSocketFrameHandler(connection: connection, onText: onText, onClose: onClose),
         ]
     }
