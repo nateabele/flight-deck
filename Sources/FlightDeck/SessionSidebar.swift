@@ -86,6 +86,9 @@ private struct SessionRow: View {
     /// A background task is running under this tab's agent. A decoration, not a state — see
     /// `SessionStore.backgroundWorkSessions`.
     var hasBackgroundWork: Bool = false
+    /// The swarm annotation when this tab is a swarm agent (L3-S), else nil — non-swarm rows
+    /// are unchanged.
+    var swarm: SwarmSessionAnnotation? = nil
 
     @State private var isEditing = false
     @State private var draft = ""
@@ -176,6 +179,9 @@ private struct SessionRow: View {
                 }
                 Text(session.title)
                     .accessibilityIdentifier("session-row-title")
+                if let swarm {
+                    SwarmRowChips(annotation: swarm)
+                }
             }
             Spacer()
             if isAccountMismatched {
@@ -452,7 +458,8 @@ struct SessionSidebar: View {
                             isConflicted: conflicted.contains(session.id),
                             isAccountMismatched: mismatched.contains(session.id),
                             isPhoneActive: phoneActiveSessions.contains(session.id),
-                            hasBackgroundWork: store.backgroundWorkSessions.contains(session.id)
+                            hasBackgroundWork: store.backgroundWorkSessions.contains(session.id),
+                            swarm: store.swarmServiceIfBuilt?.annotation(for: session.id)
                         )
                         .tag(session.id)
                         // Animated HERE, on the container, not inside the badge: the badge is

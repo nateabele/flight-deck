@@ -42,6 +42,10 @@ final class SwarmService: ObservableObject {
     var onChange: (() -> Void)?
     weak var handoffDecisions: HandoffDecisionSink?
 
+    /// Whether a session is contested right now. Set by contested detection (Task 11d); until
+    /// then nothing is contested, which is the truth for a swarm with no guard blocks.
+    var isContested: (UUID) -> Bool = { _ in false }
+
     let store: SwarmStore
     let backend: SwarmBackend
     let launcher: SwarmAgentLauncher
