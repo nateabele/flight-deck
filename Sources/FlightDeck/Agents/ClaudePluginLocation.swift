@@ -56,18 +56,32 @@ enum ClaudePluginLocation {
             .appendingPathComponent("claude-plugin-\(buildTag)", isDirectory: true)
     }
 
-    /// Mirrors `source` into `destination`: copies new and changed files, removes files the
-    /// source no longer ships, and never touches `.claude-plugin/types/` in either folder: that is
-    /// the engine's. The source's copy matters too — `claude plugin test` on the repo folder writes
-    /// types there, they would ship in the bundle, and copying them would overwrite the engine's
-    /// own declarations in the destination with a stale version's.
-    /// Compares bytes rather than dates so a reinstall of the same build rewrites nothing — a
-    /// rewrite would hot-reload the module in every open claude tab for no reason.
+    /// The destination's record of the paths Flight Deck itself copied there. Pruning is driven
+    /// by this list, never by a scan of the destination: the engine writes its own files into the
+    /// folder (a root `tsconfig.json`, `.claude-plugin/types/`), and a scan-based prune deleted
+    /// them on every claude launch for the engine to write back.
+    static let materializeManifestName = ".flightdeck-materialized"
+
+    /// Mirrors `source` into `destination`: copies new and changed files, removes files Flight
+    /// Deck copied earlier that the source no longer ships, and never touches
+    /// `.claude-plugin/types/` in either folder: that is the engine's. The source's copy matters
+    /// too — `claude plugin test` on the repo folder writes types there, they would ship in the
+    /// bundle, and copying them would overwrite the engine's own declarations in the destination
+    /// with a stale version's.
+    /// Compares bytes rather than dates, and sets permissions only when they differ, so a
+    /// reinstall of the same build touches nothing — a rewrite (or even a chmod, which bumps
+    /// ctime) risks hot-reloading the module in every open claude tab for no reason.
     @discardableResult
     static func materialize(from source: URL, to destination: URL = materializedDirectory) throws -> URL {
         let fm = FileManager.default
         try fm.createDirectory(at: destination, withIntermediateDirectories: true)
-        let shipped = try relativeFiles(under: source).filter { !$0.hasPrefix(".claude-plugin/types/") }
+        let manifestURL = destination.appendingPathComponent(materializeManifestName)
+        // First run (no manifest) deletes nothing: we cannot know what is ours.
+        let previous: Set<String> = (try? String(contentsOf: manifestURL, encoding: .utf8))
+            .map { Set($0.split(separator: "\n").map(String.init)) } ?? []
+        let shipped = try relativeFiles(under: source).filter {
+            !$0.hasPrefix(".claude-plugin/types/") && $0 != materializeManifestName
+        }
         for path in shipped {
             let from = source.appendingPathComponent(path), to = destination.appendingPathComponent(path)
             let bytes = try Data(contentsOf: from)
@@ -75,13 +89,18 @@ enum ClaudePluginLocation {
                 try fm.createDirectory(at: to.deletingLastPathComponent(), withIntermediateDirectories: true)
                 try bytes.write(to: to, options: .atomic)
             }
-            if let perms = try fm.attributesOfItem(atPath: from.path)[.posixPermissions] {
-                try fm.setAttributes([.posixPermissions: perms], ofItemAtPath: to.path)
+            let want = try fm.attributesOfItem(atPath: from.path)[.posixPermissions] as? NSNumber
+            let have = try? fm.attributesOfItem(atPath: to.path)[.posixPermissions] as? NSNumber
+            if let want, want != have {
+                try fm.setAttributes([.posixPermissions: want], ofItemAtPath: to.path)
             }
         }
-        for path in try relativeFiles(under: destination)
-        where !shipped.contains(path) && !path.hasPrefix(".claude-plugin/types/") {
-            try fm.removeItem(at: destination.appendingPathComponent(path))
+        for path in previous.subtracting(shipped) where !path.hasPrefix(".claude-plugin/types/") && path != materializeManifestName {
+            try? fm.removeItem(at: destination.appendingPathComponent(path))
+        }
+        let manifest = Data((shipped.sorted().joined(separator: "\n") + "\n").utf8)
+        if (try? Data(contentsOf: manifestURL)) != manifest {
+            try manifest.write(to: manifestURL, options: .atomic)
         }
         return destination
     }

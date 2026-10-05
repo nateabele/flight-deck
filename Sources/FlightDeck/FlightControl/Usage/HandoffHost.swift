@@ -7,7 +7,9 @@ import IntakeKit
 protocol HandoffHost: AnyObject {
     func activity(of session: SessionRef) -> SessionActivity?
     func isRateLimited(_ session: SessionRef) -> Bool
-    func interrupt(_ session: SessionRef)
+    /// True only when Escape was actually sent; the store refuses an idle composer or a dialog.
+    @discardableResult
+    func interrupt(_ session: SessionRef) -> Bool
     func confirm(_ request: HandoffRequest) async -> Bool
     func kind(for block: ExecutionBlock, project: URL) -> TaskKind?
     func catalogs() async -> AdapterCatalogs
@@ -105,7 +107,7 @@ final class StoreHandoffHost: HandoffHost {
         return RateLimitClassifier.isRateLimit(status: e.status, kind: e.kind)
     }
 
-    func interrupt(_ session: SessionRef) { store?.interruptTurn(session.id) }
+    func interrupt(_ session: SessionRef) -> Bool { store?.interruptTurn(session.id) ?? false }
 
     /// With "Confirm hand-offs" on and nothing installed to ask, the answer is no — never a
     /// silent yes on the user's behalf — and the user is told why their agent stayed put.

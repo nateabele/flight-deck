@@ -313,6 +313,9 @@ Capacity pane.
     as value with an empty label (found in real XCUITest runs).
 29. The Capacity settings tab carries no container accessibility identifier (a container
     identifier is stamped onto every child and hides theirs); the tab is found by its title.
+30. The over-hard notice is per account per crossing, for live tabs, and never fires on launch
+    for a reading already over hard.
+31. Default pools hold every live account; Remove is not offered there.
 
 ### Provided at integration
 

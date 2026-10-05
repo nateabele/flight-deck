@@ -116,4 +116,15 @@ final class CapacityEditingTests: XCTestCase {
         CapacityEditing.toggle(UUID(), in: id, &prefs, accounts: all)
         XCTAssertEqual(prefs.pools?.last?.accounts, [], "an unknown account cannot join either")
     }
+
+    /// A default pool is every live account; Remove used to just reorder it while looking like
+    /// an exclusion.
+    func testTogglingAMemberOfADefaultPoolLeavesTheEffectivePoolUnchanged() {
+        var prefs = CapacityPreferences()
+        let before = prefs.effectivePools(accounts: accounts).first { $0.id == "claude-default" }?.accounts
+        CapacityEditing.toggle(UsageRefs.workID, in: "claude-default", &prefs, accounts: accounts)
+        let after = prefs.effectivePools(accounts: accounts).first { $0.id == "claude-default" }?.accounts
+        XCTAssertEqual(after, before)
+        XCTAssertEqual(after, [UsageRefs.workID, UsageRefs.spareID])
+    }
 }

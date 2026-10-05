@@ -20,7 +20,10 @@ final class HeadlessClaudeUsageSource {
             // rateLimitedAt, not rateLimitStatus: the status string stays "rejected" after the seat
             // recovers and would keep reporting a working account as over the limit.
             if a.rateLimitedAt != nil {
-                let until = a.rateLimitResetsAt.map { [UsageWindow(name: "rejected", utilization: 1, resetsAt: $0)] } ?? []
+                // A reset at or before the event is already over: kept, the refusal would expire
+                // the moment it is recorded and the account would look usable. Dropping it
+                // gives the rejection its default backoff instead.
+                let until = a.rateLimitResetsAt.flatMap { $0 > at ? $0 : nil }.map { [UsageWindow(name: "rejected", utilization: 1, resetsAt: $0)] } ?? []
                 out.append(UsageReading(account: account, windows: until, readAt: at, source: "claude headless", hardRejection: true))
             } else if let windows = a.rateLimitWindows {
                 out.append(UsageReading(account: account, windows: windows, readAt: at, source: "claude headless", hardRejection: false))

@@ -68,10 +68,15 @@ enum CapacityEditing {
     }
 
     static func toggle(_ account: UUID, in id: PoolID, _ prefs: inout CapacityPreferences, accounts: [AgentAccount]) {
-        // Removing a member is always allowed; adding one only if it is a live account of the
+        // A default pool is every live account of its agent, by definition (`effectivePools`
+        // re-appends any the stored list lacks). Removing one used to just shove it to the end of
+        // the list while the user believed it was excluded, so a default pool refuses both
+        // directions; adding is moot, every live account is already in it.
+        // Otherwise removing a member is allowed; adding one only if it is a live account of the
         // pool's own harness, so a codex login can never be leased for a claude spawn.
         let eligible = accounts.contains { $0.id == account && !$0.isRemoved }
         edit(id, &prefs, accounts: accounts) { pool in
+            if pool.isDefault { return }
             if let i = pool.accounts.firstIndex(of: account) { pool.accounts.remove(at: i); return }
             guard eligible, accounts.first(where: { $0.id == account })?.agent.harnessID == pool.harness else { return }
             pool.accounts.append(account)

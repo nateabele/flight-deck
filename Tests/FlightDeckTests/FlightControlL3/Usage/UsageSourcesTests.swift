@@ -91,6 +91,14 @@ final class UsageSourcesTests: XCTestCase {
         XCTAssertEqual(r.first?.worstWindow?.resetsAt, resets)
     }
 
+    func testARejectionWhoseResetIsAlreadyPastCarriesNoWindow() {
+        let at = Date(timeIntervalSince1970: 1_000)
+        let a = seat(windows: nil, status: "rejected", resets: at.addingTimeInterval(-5), last: at)
+        let r = HeadlessClaudeUsageSource().readings(from: [a], account: UsageRefs.work)
+        XCTAssertEqual(r.first?.hardRejection, true)
+        XCTAssertEqual(r.first?.windows, [], "so the default backoff applies, not an already-expired refusal")
+    }
+
     func testARecoveredSeatWithAStaleRejectedStatusIsNotARejection() {
         let w = [UsageWindow(name: "five_hour", utilization: 0.3, resetsAt: nil)]
         var a = seat(windows: w, status: "rejected", last: Date(timeIntervalSince1970: 100))

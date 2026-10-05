@@ -20,6 +20,8 @@ final class UsageServiceTests: XCTestCase {
     private var codexHangs = false
     private var seats: [SeatActivity] = []
     private var swarm: Set<UUID> = []
+    /// Sessions the store has a status for. nil means every tab is live.
+    private var live: Set<UUID>?
     private var capacity = CapacityPreferences()
     private let notifier = UsageSpyNotifier()
     private let accounts = [
@@ -52,7 +54,8 @@ final class UsageServiceTests: XCTestCase {
             },
             seatActivities: { [unowned self] in self.seats },
             notifier: { [unowned self] in self.notifier },
-            isSwarmSession: { [unowned self] in self.swarm.contains($0) })
+            isSwarmSession: { [unowned self] in self.swarm.contains($0) },
+            isLive: { [unowned self] in self.live?.contains($0) ?? true })
         return UsageService(environment: env, ledger: CapacityLedger(now: { c.now }), now: { c.now }, codexReadTimeout: codexReadTimeout)
     }
 
@@ -164,10 +167,14 @@ final class UsageServiceTests: XCTestCase {
         XCTAssertEqual(svc.ledger.latestReading(account: UsageRefs.workID)?.source, "claude headless")
     }
 
+    // Behavior changed on purpose (final review): the notice is per ACCOUNT per crossing, and a
+    // reading already over hard on the first tick is stale news (mod files outlive a relaunch),
+    // so the crossing must be observed while running.
     func testAManualTabIsToldOncePerCrossing() async {
         let tab = claudeTab(on: UsageRefs.workID)
         sessions = [tab]
         let svc = service()
+        await svc.tick()
         svc.ingest(UsageRefs.reading(UsageRefs.work, 0.97, at: clock.now))
         await svc.tick(); await svc.tick()
         XCTAssertEqual(notifier.notes.count, 1)
@@ -175,6 +182,36 @@ final class UsageServiceTests: XCTestCase {
         clock.advance(10); svc.ingest(UsageRefs.reading(UsageRefs.work, 0.10, at: clock.now)); await svc.tick()
         clock.advance(10); svc.ingest(UsageRefs.reading(UsageRefs.work, 0.98, at: clock.now)); await svc.tick()
         XCTAssertEqual(notifier.notes.count, 2, "a new crossing is news again")
+    }
+
+    func testThreeManualTabsOnOneOverHardAccountSendOneNotice() async {
+        sessions = [claudeTab(on: UsageRefs.workID), claudeTab(on: UsageRefs.workID), claudeTab(on: UsageRefs.workID)]
+        let svc = service()
+        await svc.tick()
+        svc.ingest(UsageRefs.reading(UsageRefs.work, 0.97, at: clock.now))
+        await svc.tick(); await svc.tick()
+        XCTAssertEqual(notifier.notes.count, 1)
+    }
+
+    func testATabWithoutALiveStatusIsNotCounted() async {
+        let dead = claudeTab(on: UsageRefs.workID)
+        sessions = [dead]; live = []
+        let svc = service()
+        await svc.tick()
+        svc.ingest(UsageRefs.reading(UsageRefs.work, 0.97, at: clock.now))
+        await svc.tick()
+        XCTAssertEqual(notifier.notes, [])
+    }
+
+    func testAnAccountAlreadyOverHardOnTheFirstTickIsNotAnnouncedUntilItCrossesAgain() async {
+        sessions = [claudeTab(on: UsageRefs.workID)]
+        let svc = service()
+        svc.ingest(UsageRefs.reading(UsageRefs.work, 0.97, at: clock.now))
+        await svc.tick(); await svc.tick()
+        XCTAssertEqual(notifier.notes, [], "a stale on-disk reading at launch is not a crossing")
+        clock.advance(10); svc.ingest(UsageRefs.reading(UsageRefs.work, 0.10, at: clock.now)); await svc.tick()
+        clock.advance(10); svc.ingest(UsageRefs.reading(UsageRefs.work, 0.98, at: clock.now)); await svc.tick()
+        XCTAssertEqual(notifier.notes.count, 1)
     }
 
     func testASwarmTabIsNotNotifiedTheDriverHandlesIt() async {

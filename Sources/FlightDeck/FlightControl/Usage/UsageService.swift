@@ -22,6 +22,9 @@ struct UsageEnvironment {
     /// Swarm tabs are the hand-off driver's; only manual tabs get the one-time notice. L3-S
     /// answers this at integration; until then every tab is manual.
     var isSwarmSession: @MainActor (UUID) -> Bool
+    /// Whether the tab's agent is running (the store has a status for it). A tab whose agent has
+    /// exited is still in the sidebar; telling the user about its account's limit is noise.
+    var isLive: @MainActor (UUID) -> Bool = { _ in true }
 
     static var empty: UsageEnvironment {
         UsageEnvironment(sessions: { [] }, apiErrors: { [:] }, accounts: { [] },
@@ -49,7 +52,8 @@ struct UsageEnvironment {
                 return intake.seatActivities.values.flatMap(\.values) + Array(intake.triageActivities.values)
             },
             notifier: { [weak store] in store?.notifier },
-            isSwarmSession: { _ in false })
+            isSwarmSession: { _ in false },
+            isLive: { [weak store] in store?.statuses[$0] != nil })
     }
 }
 
@@ -110,7 +114,10 @@ final class UsageService: ObservableObject {
     private var firstSeen: [UUID: Date] = [:]
     private var reported: Set<UUID> = []
     private var rejectedTabs: Set<UUID> = []
+    /// Accounts already announced for the current crossing; keyed by account, not tab, so eight
+    /// tabs on one account make one notice.
     private var notifiedOverHard: Set<UUID> = []
+    private var noticeSeeded = false
     private var loop: Task<Void, Never>?
     private var cancellables: Set<AnyCancellable> = []
 
@@ -360,12 +367,31 @@ final class UsageService: ObservableObject {
     }
 
     private func noticeManualTabs(_ sessions: [Session]) {
-        for s in sessions where !(swarmPredicate ?? environment.isSwarmSession)(s.id) {
+        let isSwarm = swarmPredicate ?? environment.isSwarmSession
+        var manualByAccount: [UUID: (ref: AccountRef, tabs: [Session])] = [:]
+        var allAccounts: Set<UUID> = []
+        for s in sessions {
             guard let ref = accountRef(for: s), let id = ref.id else { continue }
-            guard isOverHard(account: id) else { notifiedOverHard.remove(s.id); continue }
-            guard notifiedOverHard.insert(s.id).inserted else { continue }
+            allAccounts.insert(id)
+            guard !isSwarm(s.id), environment.isLive(s.id) else { continue }
+            manualByAccount[id, default: (ref, [])].tabs.append(s)
+        }
+        // The first tick only records what is already over hard. The mod's files persist across a
+        // relaunch and the 7-day window can sit above 95 % for days, so a reading found at launch
+        // is old news; only a crossing observed while running is announced.
+        if !noticeSeeded {
+            noticeSeeded = true
+            notifiedOverHard = Set(allAccounts.filter(isOverHard(account:)))
+            return
+        }
+        // Re-arm every account that dropped back under hard, even one with no live tab now.
+        notifiedOverHard = notifiedOverHard.filter(isOverHard(account:))
+        for (id, entry) in manualByAccount.sorted(by: { $0.key.uuidString < $1.key.uuidString })
+        where isOverHard(account: id) && notifiedOverHard.insert(id).inserted {
+            let first = entry.tabs[0]
             environment.notifier()?.notify(
-                sessionID: s.id, title: "\(ref.label) is near its usage limit", subtitle: s.title,
+                sessionID: first.id, title: "\(entry.ref.label) is near its usage limit",
+                subtitle: entry.tabs.count == 1 ? first.title : "\(entry.tabs.count) tabs",
                 body: "Flight Control does not move your own tabs. This agent may stop until the limit resets.")
         }
     }

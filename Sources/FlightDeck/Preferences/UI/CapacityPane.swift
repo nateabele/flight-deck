@@ -111,7 +111,9 @@ struct CapacityPane: View {
                     Image(systemName: "line.3.horizontal").foregroundStyle(.tertiary)
                     Text(accounts.first { $0.id == id }?.displayName ?? "Removed account")
                     Spacer()
-                    Button("Remove") { edit { CapacityEditing.toggle(id, in: pool.id, &$0, accounts: $1) } }.buttonStyle(.borderless)
+                    if !pool.isDefault {
+                        Button("Remove") { edit { CapacityEditing.toggle(id, in: pool.id, &$0, accounts: $1) } }.buttonStyle(.borderless)
+                    }
                 }
             }
             .onMove { from, to in edit { CapacityEditing.move(in: pool.id, from: from, to: to, &$0, accounts: $1) } }
@@ -119,6 +121,10 @@ struct CapacityPane: View {
         .frame(minHeight: 90, maxHeight: 160)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("capacity-accounts")
+        if pool.isDefault {
+            Text("A default pool holds every \(accountNoun(pool)) account. Make a new pool to choose accounts.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
         let others = accounts.filter { $0.agent.harnessID == pool.harness && !$0.isRemoved && !pool.accounts.contains($0.id) }
         if !others.isEmpty {
             Menu("Add account") {
@@ -138,6 +144,10 @@ struct CapacityPane: View {
             Text("Agents hand off at \(Int((pool.hardThreshold * 100).rounded()))% (hard)")
         }
         .accessibilityIdentifier("capacity-hard")
+    }
+
+    private func accountNoun(_ pool: CapacityPool) -> String {
+        AgentID.allCases.first { $0.harnessID == pool.harness }?.displayName ?? "agent"
     }
 
     @ViewBuilder
@@ -169,6 +179,8 @@ struct CapacityPane: View {
             }
             .accessibilityIdentifier("capacity-deadline")
             Text("Your own tabs are never handed off. When their account passes its hard limit, you get one notification.")
+                .font(.caption).foregroundStyle(.secondary)
+            Text("Takes effect when Flight Control runs swarm agents.")
                 .font(.caption).foregroundStyle(.secondary)
         }
     }

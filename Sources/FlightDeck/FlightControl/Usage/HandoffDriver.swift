@@ -96,8 +96,12 @@ final class HandoffDriver {
         if !isBoundary(activity, agent) {
             guard now().timeIntervalSince(since) >= settings().deadline else { return }
             if activity == .busy {
-                host.interrupt(agent.session)
-                record(.interrupted, agent, request, detail: "deadline reached mid-turn")
+                // Logged only when the host really sent Escape: the store refuses an idle agent
+                // with a busy background subagent, and a log line for an interrupt that never
+                // happened misleads whoever reads it.
+                if host.interrupt(agent.session) {
+                    record(.interrupted, agent, request, detail: "deadline reached mid-turn")
+                }
             }
             // `.waiting`: a dialog is open, so the agent is not generating. Escape would answer it
             // as a denial and start a new turn on the exhausted account — hand off as it stands;

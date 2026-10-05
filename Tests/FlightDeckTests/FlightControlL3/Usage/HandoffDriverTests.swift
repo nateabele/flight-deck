@@ -108,6 +108,16 @@ final class HandoffDriverTests: XCTestCase {
         XCTAssertEqual(host.log.map(\.outcome), [.interrupted, .handedOff])
     }
 
+    func testARefusedInterruptIsNotLogged() async {
+        host.activities[oldID] = .busy
+        host.interruptSucceeds = false
+        let d = driver()
+        await d.evaluate([agent])
+        clock.advance(600); await d.evaluate([agent])
+        XCTAssertEqual(host.interrupted, [oldID], "the driver still tried")
+        XCTAssertEqual(host.log.map(\.outcome), [.handedOff], "no .interrupted entry for an Escape that was never sent")
+    }
+
     /// Review focus: Escape in a permission dialog is a denial, and a denial restarts a turn on
     /// the exhausted account. At the deadline the agent is handed off as it stands.
     func testDeadlineDuringAPermissionDialogHandsOffWithoutEscape() async {
