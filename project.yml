@@ -78,6 +78,13 @@ targets:
       - path: Resources/ClaudePlugin
         type: folder
         buildPhase: resources
+      # The hostd's LaunchAgent, where `SMAppService.agent(plistName:)` looks for it:
+      # `Contents/Library/LaunchAgents`. Its `BundleProgram` names the embedded binary below.
+      - path: Sources/HostDaemon/dev.flightdeck.hostd.plist
+        buildPhase:
+          copyFiles:
+            destination: wrapper
+            subpath: Contents/Library/LaunchAgents
     dependencies:
       - framework: vendor/ghostty-artifacts/GhosttyKit.xcframework
         embed: false
@@ -96,6 +103,15 @@ targets:
         codeSign: true
         copy:
           destination: executables
+      # `flightdeck-hostd` (target `HostDaemon`, below), beside `flightdeck` in Contents/MacOS,
+      # which is the path the LaunchAgent plist's `BundleProgram` names.
+      - target: HostDaemon
+        embed: true
+        codeSign: true
+        copy:
+          destination: executables
+      - package: HostKit
+        product: HostKit
     settings:
       base:
         # `productName:` above only renames the product *reference* (and the
@@ -152,6 +168,13 @@ targets:
       # load. `CLIEndToEndTests` drives `CLIRunner` through it against a real local socket,
       # the one place a dropped `onReady`/`onFrame`/`onDisconnect` forward shows up.
       - path: Sources/FlightDeckTool/LocalFleetTransport.swift
+      # The macOS hostd's server, compiled in so `HostTransportLoopbackTests` drives the real
+      # one over loopback. Not `main.swift` (top-level code that would run at load, and would
+      # bind the real host port) and not the LaunchAgent plist.
+      - path: Sources/HostDaemon
+        excludes:
+          - "main.swift"
+          - "*.plist"
       # `Fixtures` is carved out into its own folder-reference entry below so its
       # subdirectory structure (e.g. `Fixtures/Codex/notifications.json`) survives into the
       # test bundle's Resources. Left in the plain group above, xcodegen's default "Copy
@@ -321,6 +344,38 @@ targets:
       base:
         PRODUCT_NAME: flightdeck
         PRODUCT_MODULE_NAME: FlightDeckCLI
+        LD_RUNPATH_SEARCH_PATHS: "@executable_path/../Frameworks"
+        HEADER_SEARCH_PATHS: $(SRCROOT)/vendor/boringssl-artifacts/include
+        DEVELOPMENT_TEAM: 2T9E3N27J8
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY: Apple Development
+
+  # The macOS hostd: serves this Mac to other Flight Decks, as a GUI-session LaunchAgent
+  # (`Sources/HostDaemon/dev.flightdeck.hostd.plist`). Embedded at `Contents/MacOS/
+  # flightdeck-hostd` by the `FlightDeck` target above.
+  #
+  # Named against the case-folding collisions recorded on `FlightDeckCLI` above, all three
+  # knobs: the target is `HostDaemon` and the sources folder `Sources/HostDaemon`, neither of
+  # which folds onto anything; PRODUCT_NAME `flightdeck-hostd` folds onto neither
+  # `flightdeck` nor `FlightDeck`; and PRODUCT_MODULE_NAME is pinned, because the default
+  # (`flightdeck_hostd`) would be a stray lowercase module beside `FlightDeck.swiftmodule` in
+  # Products/Debug.
+  HostDaemon:
+    type: tool
+    platform: macOS
+    sources:
+      - path: Sources/HostDaemon
+        excludes: ["*.plist"]
+    dependencies:
+      - target: FleetKit
+        embed: false
+      - package: HostKit
+        product: HostKit
+    settings:
+      base:
+        SWIFT_VERSION: "6.0"
+        PRODUCT_NAME: flightdeck-hostd
+        PRODUCT_MODULE_NAME: HostDaemon
         LD_RUNPATH_SEARCH_PATHS: "@executable_path/../Frameworks"
         HEADER_SEARCH_PATHS: $(SRCROOT)/vendor/boringssl-artifacts/include
         DEVELOPMENT_TEAM: 2T9E3N27J8
