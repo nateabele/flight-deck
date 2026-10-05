@@ -30,16 +30,20 @@ Connect the repo in the Pages dashboard, then add `flightdeckapp.dev` as a custo
 domain. Because there's no build step, `wrangler pages deploy site` works just as
 well for a one-off publish.
 
-## Before it goes live
+## On each release
 
-**The download link is a placeholder.** Two occurrences of
-`/download/FlightDeck-latest.dmg` in `index.html` (hero and closing CTA), each
-marked with a `PLACEHOLDER:` comment. Point them at the real release artifact
-once shipping is set up:
+**The download link names the release asset directly.** Two occurrences in
+`index.html` (hero and closing CTA) point at the GitHub release asset,
+`releases/download/vX.Y.Z/FlightDeck-vX.Y.Z-macOS-arm64.zip`. Bump the tag and
+the file name together when a new release is published. `releases/latest/download/`
+can't stand in for it, because the asset name carries the version:
 
 ```bash
-rg -n 'FlightDeck-latest.dmg' index.html
+rg -n 'releases/download' index.html
 ```
+
+The build is signed but not notarized, so the closing CTA tells visitors to
+right-click → Open on first launch. Drop that line once releases are notarized.
 
 Everything else on the page is accurate as written — see below.
 
