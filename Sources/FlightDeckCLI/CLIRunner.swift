@@ -325,7 +325,8 @@ final class CLIRunner {
                         guard !self.finished else { return }
                         self.transport.connect(lastSeq: 0)
                     }
-                }))
+                },
+                schedule: schedule))
         delegateRunner = runner
         runner.start()
     }

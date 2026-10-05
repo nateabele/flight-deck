@@ -44,6 +44,52 @@ struct DelegatedRun: Codable, Equatable {
     /// so a watcher restarted after a relaunch fetches the same artifacts and hints the same.
     var include: [String] = []
     var fetch: [String] = []
+
+    init(id: String, hostRunID: String, host: String, owner: UUID?, kind: Kind, command: String, recipe: String?,
+         state: State, status: Int32?, ports: [String], startedAt: Date, worktree: String, snapshot: SnapshotRef?,
+         applyMode: ApplyMode, request: WireDelegateRun, resultCommit: String?, resultBundle: String?) {
+        self.id = id
+        self.hostRunID = hostRunID
+        self.host = host
+        self.owner = owner
+        self.kind = kind
+        self.command = command
+        self.recipe = recipe
+        self.state = state
+        self.status = status
+        self.ports = ports
+        self.startedAt = startedAt
+        self.worktree = worktree
+        self.snapshot = snapshot
+        self.applyMode = applyMode
+        self.request = request
+        self.resultCommit = resultCommit
+        self.resultBundle = resultBundle
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, hostRunID, host, owner, kind, command, recipe, state, status, ports, startedAt, worktree
+        case snapshot, applyMode, request, include, fetch, resultCommit, resultBundle
+    }
+
+    /// `include` and `fetch` came after the first file was written: absent reads as none, so
+    /// an older `delegation.json` still loads rather than being set aside as corrupt.
+    init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(id: try c.decode(String.self, forKey: .id), hostRunID: try c.decode(String.self, forKey: .hostRunID),
+                  host: try c.decode(String.self, forKey: .host), owner: try c.decodeIfPresent(UUID.self, forKey: .owner),
+                  kind: try c.decode(Kind.self, forKey: .kind), command: try c.decode(String.self, forKey: .command),
+                  recipe: try c.decodeIfPresent(String.self, forKey: .recipe), state: try c.decode(State.self, forKey: .state),
+                  status: try c.decodeIfPresent(Int32.self, forKey: .status), ports: try c.decode([String].self, forKey: .ports),
+                  startedAt: try c.decode(Date.self, forKey: .startedAt), worktree: try c.decode(String.self, forKey: .worktree),
+                  snapshot: try c.decodeIfPresent(SnapshotRef.self, forKey: .snapshot),
+                  applyMode: try c.decode(ApplyMode.self, forKey: .applyMode),
+                  request: try c.decode(WireDelegateRun.self, forKey: .request),
+                  resultCommit: try c.decodeIfPresent(String.self, forKey: .resultCommit),
+                  resultBundle: try c.decodeIfPresent(String.self, forKey: .resultBundle))
+        include = try c.decodeIfPresent([String].self, forKey: .include) ?? []
+        fetch = try c.decodeIfPresent([String].self, forKey: .fetch) ?? []
+    }
     /// The result commit and the bundle holding it, once fetched and until applied. Nil when
     /// the run changed nothing, or before it ended.
     var resultCommit: String?
@@ -84,9 +130,13 @@ final class RunRegistry {
         self.file = file
         stored = Stored(next: 1, runs: [])
         guard let file, let data = try? Data(contentsOf: file) else { return }
+        var salvaged = 0
         do {
             stored = try JSONDecoder().decode(Stored.self, from: data)
         } catch {
+            // The ids it named may still be in a CLI's scrollback (`flightdeck wait r12`):
+            // fresh ids start above every one still legible, so none is handed out twice.
+            salvaged = Self.highestID(in: String(decoding: data, as: UTF8.self))
             // Moved aside rather than overwritten by the next save: it is the only record of
             // which services are running, and someone may want to read it back by hand.
             let aside = file.appendingPathExtension("corrupt-\(Int(Date().timeIntervalSince1970))")
@@ -95,8 +145,15 @@ final class RunRegistry {
         }
         // Above every id on record, whatever the counter says: a hand-edited or half-written
         // file must not let `mintID` hand out an id that already names a run.
-        let highest = stored.runs.compactMap { Int($0.id.dropFirst()) }.max() ?? 0
+        let highest = max(salvaged, stored.runs.compactMap { Int($0.id.dropFirst()) }.max() ?? 0)
         stored.next = max(stored.next, highest + 1)
+    }
+
+    /// The highest `"id":"rN"` (or `"next":N - 1`) readable in damaged text.
+    static func highestID(in text: String) -> Int {
+        let ids = text.matches(of: #/"id"\s*:\s*"r(\d+)"/#).compactMap { Int($0.1) }
+        let next = text.matches(of: #/"next"\s*:\s*(\d+)/#).compactMap { Int($0.1).map { $0 - 1 } }
+        return (ids + next).max() ?? 0
     }
 
     var runs: [DelegatedRun] { stored.runs }

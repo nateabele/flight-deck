@@ -136,7 +136,7 @@ final class DelegationCLIRunnerTests: XCTestCase {
         t.push(.delegateOutput(cid: cid, stream: "stdout", offset: 0, data: Data("abc".utf8)))
         t.onDisconnect?(nil)
         XCTAssertNil(code)
-        scheduled.forEach { $0.1() }
+        scheduled.removeFirst().1() // the reconnect; the snapshot deadline stays pending
         XCTAssertEqual(t.connects.count, 2)
         t.push(.snapshot(seq: 1, fleet: FleetSnapshot(), reason: .initial))
         guard case .req(let resumed, .delegate(.wait("r9", nil, 3, true))) = t.sent.last else { return XCTFail("\(t.sent)") }
@@ -349,6 +349,52 @@ final class DelegationCLIRunnerTests: XCTestCase {
         var action = sigaction()
         sigaction(SIGINT, nil, &action)
         XCTAssertEqual(unsafeBitCast(action.__sigaction_u.__sa_handler, to: Int.self), unsafeBitCast(SIG_DFL, to: Int.self))
+    }
+
+    /// Right after a relaunch the app is back but its host link is not: a reattach retries
+    /// `host_unavailable` within the cap, and when the cap runs out the 125 line still ends on
+    /// `flightdeck wait`.
+    func testAReattachRetriesAnUnavailableHostThenEndsOnTheWaitHint() {
+        let t = FakeTransport()
+        _ = runner("exec", "--on", "mini", "--", "make", transport: t)
+        t.push(.delegateStarted(cid: lastCID(t), WireDelegateStarted(runID: "r7", host: "mini")))
+        t.onDisconnect?(nil)
+        scheduled.removeFirst().1() // the reconnect
+        t.push(.snapshot(seq: 1, fleet: FleetSnapshot(), reason: .initial))
+        for attempt in 1...DelegateCommandRunner.reconnectLimit {
+            guard case .req(let cid, .delegate(.wait("r7", nil, 0, true))) = t.sent.last else { return XCTFail("\(t.sent)") }
+            t.push(.err(cid: cid, code: "host_unavailable", message: "mini is not connected"))
+            if attempt < DelegateCommandRunner.reconnectLimit {
+                XCTAssertNil(code, "attempt \(attempt) retries")
+                scheduled.filter { $0.0 == 1 }.last?.1()
+            }
+        }
+        XCTAssertEqual(code, 125)
+        XCTAssertTrue(err.last?.hasSuffix("flightdeck wait r7") == true, "\(err)")
+    }
+
+    /// The user's own `wait --timeout` keeps its timeout across a reconnect; only a run's
+    /// internal reattach waits without one.
+    func testAWaitKeepsItsTimeoutAcrossAReconnect() {
+        let t = FakeTransport()
+        _ = runner("wait", "r2", "--timeout", "30", transport: t)
+        t.onDisconnect?(nil)
+        scheduled.removeFirst().1()
+        t.push(.snapshot(seq: 1, fleet: FleetSnapshot(), reason: .initial))
+        guard case .req(_, .delegate(.wait("r2", 30, nil, false))) = t.sent.last else { return XCTFail("\(t.sent)") }
+    }
+
+    /// A reconnect whose snapshot never comes ends in 10 s with the wait hint, not a hang.
+    func testASnapshotThatNeverComesEndsOnTheWaitHint() {
+        let t = FakeTransport()
+        _ = runner("exec", "--on", "mini", "--", "make", transport: t)
+        t.push(.delegateStarted(cid: lastCID(t), WireDelegateStarted(runID: "r8", host: "mini")))
+        t.onDisconnect?(nil)
+        let deadline = scheduled.first { $0.0 == 1 + DelegateCommandRunner.snapshotDeadline }
+        scheduled.forEach { $0.1() }
+        XCTAssertNotNil(deadline)
+        XCTAssertEqual(code, 125)
+        XCTAssertTrue(err.last?.hasSuffix("flightdeck wait r8") == true, "\(err)")
     }
 
     func testRouteResolutionSkipsTheShimDirectory() throws {

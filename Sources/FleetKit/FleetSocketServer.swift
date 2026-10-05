@@ -159,6 +159,16 @@ public final class FleetSocketServer: @unchecked Sendable {
         (_ client: FleetAttachment, _ cid: Int, _ command: FleetCommand,
          _ reply: @escaping (ServerFrame) -> Void) -> Void
     )?
+    /// The cancellation for a request this server is answering, valid only inside `onRequest`
+    /// (synchronously, on `queue`). It fires once the request's terminal frame is sent, when
+    /// its stream is dropped (`slow_reader`), or when the connection ends — so a handler that
+    /// keeps producing frames (a delegation replay) stops rather than replying into nothing
+    /// until the run ends.
+    public func replyCancellation(for client: FleetAttachment, cid: Int) -> ReplyCancellation? {
+        dispatchPrecondition(condition: .onQueue(queue))
+        return cancellations[client.id]?[cid]
+    }
+
     /// Answers a request. Same reply-callback shape `onCommand` has, forced rather than
     /// stylistic in both directions: most commands are still dispatched on the way out of the
     /// frame handler, but a page is a file read that would otherwise block `queue` — which in
@@ -232,6 +242,10 @@ public final class FleetSocketServer: @unchecked Sendable {
     /// the reason `names` is. Only ever filed in local mode: a phone that sends `caller` has it
     /// ignored, so nothing off the local socket can claim to be a local caller.
     private var callers: [UUID: String] = [:]
+    /// Each connection's requests still open, by `cid`: what `replyCancellation(for:cid:)` hands
+    /// a handler, fired when the request's last frame goes out, its stream is dropped, or the
+    /// connection ends.
+    private var cancellations: [UUID: [Int: ReplyCancellation]] = [:]
     /// The unix socket path when this instance was started by `startLocal`, and `nil` in the
     /// paired (TLS-PSK) mode. `stop()` unlinks it. Confined to `queue`.
     private var localPath: String?
@@ -570,6 +584,11 @@ public final class FleetSocketServer: @unchecked Sendable {
         names.removeAll()
         caps.removeAll()
         callers.removeAll()
+        // Every open request on every connection is over: whatever is still producing replies
+        // for one (a delegation replay) must stop.
+        let open = cancellations.values.flatMap(\.values)
+        cancellations.removeAll()
+        open.forEach { $0.cancel() }
         ready.removeAll()
         identities.removeAll()
         // Drained, not merely dropped, and the distinction is the whole rule `asks` states: a
@@ -919,6 +938,9 @@ public final class FleetSocketServer: @unchecked Sendable {
                 // same answered-once rule it always was. `ReplyStream` holds that rule, and the
                 // stream's backpressure.
                 let stream = ReplyStream()
+                if case .delegate(let delegate) = request { stream.runID = delegate.namedRun }
+                let cancellation = ReplyCancellation()
+                self.cancellations[id, default: [:]][cid] = cancellation
                 onRequest(attachment, cid, request) { [weak self, weak connection] frame in
                     guard let self, let connection else { return }
                     // The reply comes back from wherever the page was read, which is the
@@ -928,6 +950,11 @@ public final class FleetSocketServer: @unchecked Sendable {
                     // be reading that table from its own thread.
                     dispatchPrecondition(condition: .onQueue(self.queue))
                     let action = stream.admit(frame)
+                    let closesNow = stream.isClosed && self.cancellations[id]?[cid] === cancellation
+                    if closesNow { self.cancellations[id]?[cid] = nil }
+                    // Fired on the way out, after this frame is queued: the producer's last
+                    // reply must still go out first.
+                    defer { if closesNow { cancellation.cancel() } }
                     // The connection may have ended while the page was being read — a phone
                     // that put itself in a pocket mid-scroll. `attached` is keyed by a fresh
                     // UUID per connection and `drop(id)` removes it, so this cannot match a
@@ -1021,6 +1048,9 @@ public final class FleetSocketServer: @unchecked Sendable {
         names.removeValue(forKey: id)
         caps.removeValue(forKey: id)
         callers.removeValue(forKey: id)
+        // The connection's open requests end with it, so their producers stop (see
+        // `replyCancellation`). Removed before firing, so a handler that re-enters finds none.
+        cancellations.removeValue(forKey: id)?.values.forEach { $0.cancel() }
         // Drained, not cleared, and before the `attached` check for the reason `slots` is
         // removed before it: a connection can be asked and then die without ever reaching the
         // arm below. Removed from the table BEFORE the loop, so a completion that re-enters —
@@ -1074,9 +1104,9 @@ public extension ServerFrame {
 /// the stack (`.contentProcessed`) are counted; past `highWater` the stream is ended with a
 /// terminal `err(slow_reader)` rather than buffered without bound in the app. The CLI already
 /// counts every byte it printed, so it answers by reattaching with `delegate.wait {from}` on
-/// the same connection and loses nothing — the run's output is spooled on the host either way.
-/// Pausing and resuming per subscriber would need the app to replay from its own copy of the
-/// output, which it does not keep.
+/// the same connection and loses nothing: `HostLinking.events(from:)` replays any offset.
+/// Ending and reattaching keeps the per-reader state in one place, the reattach, rather than
+/// in a pause/resume protocol beside it.
 final class ReplyStream {
     /// 4 MiB of output in flight: far past anything a terminal reading at speed accumulates,
     /// well short of the app holding a whole build log in socket buffers for a stalled reader.
@@ -1092,7 +1122,11 @@ final class ReplyStream {
 
     let encoder = DispatchQueue(label: "dev.flightdeck.fleet.stream", qos: .userInitiated)
     private(set) var inFlight = 0
+    /// The run this stream is about, when known (`delegateStarted`, or a `wait`/`logs` naming
+    /// it), so a `slow_reader` read by a CLI that cannot reattach still says how to.
+    var runID: String?
     private var closed = false
+    var isClosed: Bool { closed }
     private var streaming = false
 
     func admit(_ frame: ServerFrame) -> Action {
@@ -1100,15 +1134,52 @@ final class ReplyStream {
         if !frame.continuesStream { closed = true }
         guard streaming || frame.continuesStream else { return .send(frame) }
         streaming = true
+        if case .delegateStarted(_, let started) = frame { runID = started.runID }
         guard case .delegateOutput(let cid, _, _, let data) = frame else { return .stream(frame, bytes: 0) }
         if inFlight > 0, inFlight + data.count > Self.highWater {
             closed = true
+            // Read verbatim by a CLI too old to reattach on its own: it must still end on the
+            // step that recovers the run.
+            let next = runID.map { " — flightdeck wait \($0) to pick it back up" } ?? ""
             return .stream(.err(cid: cid, code: "slow_reader",
-                                message: "output outran the reader — reattach with delegate.wait {from}"), bytes: 0)
+                                message: "the run's output outran this reader\(next)"), bytes: 0)
         }
         inFlight += data.count
         return .stream(frame, bytes: data.count)
     }
 
     func sent(_ bytes: Int) { inFlight -= bytes }
+}
+
+/// Fired once when a request is over for its reader (`FleetSocketServer.replyCancellation`).
+/// Confined to the server's queue, like every handler it is passed to.
+public final class ReplyCancellation {
+    private var handlers: [() -> Void] = []
+    public private(set) var isCancelled = false
+
+    public init() {}
+
+    /// Runs `handler` at cancellation, or at once if that already happened.
+    public func onCancel(_ handler: @escaping () -> Void) {
+        guard !isCancelled else { return handler() }
+        handlers.append(handler)
+    }
+
+    public func cancel() {
+        guard !isCancelled else { return }
+        isCancelled = true
+        let run = handlers
+        handlers = []
+        run.forEach { $0() }
+    }
+}
+
+extension DelegateRequest {
+    /// The run a `wait`/`logs` names, for `ReplyStream`'s `slow_reader` line.
+    var namedRun: String? {
+        switch self {
+        case .wait(let run, _, _, _), .logs(let run, _, _): return run
+        default: return nil
+        }
+    }
 }
