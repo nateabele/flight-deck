@@ -2272,7 +2272,7 @@ flagged as most likely to differ from the tests. The maintainer's to run.
   [FLIGHT-CONTROL-COVERAGE-HANDOFF.md](FLIGHT-CONTROL-COVERAGE-HANDOFF.md).
 - **Flight Control on the phone — BUILT (see "known gaps and limits" above).** Originally: Handoff:
   [FLIGHT-CONTROL-MOBILE-HANDOFF.md](FLIGHT-CONTROL-MOBILE-HANDOFF.md).
-- **Level 3 "Operate" — DESIGNED (2026-10-04), not built.** Five specs, built in parallel after
+- **Level 3 "Operate" — DESIGNED (2026-10-04); L3-0 contract MERGED (28e79fb, 2026-10-05), L3-R/I/U/S building in parallel worktrees.** Five specs, built in parallel after
   the contract lands: overview and contract
   ([L3-0](superpowers/specs/2026-10-04-flight-control-l3-overview-contract-design.md)), routing
   ([L3-R](superpowers/specs/2026-10-04-flight-control-l3-routing-design.md)), capability index
