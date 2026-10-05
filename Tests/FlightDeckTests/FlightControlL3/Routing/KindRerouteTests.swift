@@ -73,7 +73,9 @@ final class KindRerouteTests: XCTestCase {
         let rows = try TaskContextRow.parse(brList: RoutingFixtures.data("br-list-open.json"))
         XCTAssertEqual(rows.map(\.id), ["fx-a", "fx-b"])
         XCTAssertNotNil(rows[0].agentContext); XCTAssertNil(rows[1].agentContext)
-        // Envelope via the fixtures above; a bare array inline, so both shapes are pinned.
+        // Envelopes: br-list-open.json above and L3-0's br-list-with-blocks (real execution-block rows).
+        XCTAssertEqual(try TaskContextRow.parse(brList: L3Fixtures.data("br-list-with-blocks")).count, 5)
+        // A bare array inline, so both shapes are pinned.
         let bare = try TaskContextRow.parse(brList: Data(#"[{"id":"b1","agent_context":"{}"},{"id":"b2"}]"#.utf8))
         XCTAssertEqual(bare, [TaskContextRow(id: "b1", agentContext: "{}"), TaskContextRow(id: "b2", agentContext: nil)])
         XCTAssertThrowsError(try TaskContextRow.parse(brList: Data(#""nope""#.utf8)))
