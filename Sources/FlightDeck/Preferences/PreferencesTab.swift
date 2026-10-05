@@ -15,4 +15,7 @@ enum PreferencesTab: Hashable, CaseIterable {
     case shell
     case tools
     case devices
+    /// Temporary (plan spec deviation 14): integration moves `CapabilityIndexPane` into L3-R's
+    /// `FlightControlSettingsTab` as a section and deletes this tab and case.
+    case capabilityIndex
 }

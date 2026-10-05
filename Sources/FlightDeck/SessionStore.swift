@@ -1340,6 +1340,15 @@ final class SessionStore: ObservableObject {
     }()
     private var intakeChangeForward: AnyCancellable?
 
+    /// The capability index (Flight Control L3-I), built and scheduled by `FlightDeckApp.makeStore`
+    /// right after this store. Nil in every store a test builds, so no test can start a refresh
+    /// that spends tokens.
+    var capabilityIndexService: CapabilityIndexService?
+
+    /// The shared poll clock, for services built after the store (the capability index's weekly
+    /// check). A second `WatchClock` would be a second wakeup source — the thing it exists to avoid.
+    var watchClock: WatchClock { clock }
+
     /// Built by `FlightDeckApp` immediately after this store, wrapping the SAME
     /// `Notifying` instance `notifier` (below) wraps for ordinary session notifications
     /// — see that factory's comment for why no second `Notifying` is constructed. `nil`

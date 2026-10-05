@@ -34,6 +34,11 @@ struct PreferencesView: View {
                 .tabItem { Label("Devices", systemImage: "iphone.and.arrow.forward") }
                 .accessibilityIdentifier("prefs-devices")
                 .tag(PreferencesTab.devices)
+
+            CapabilityIndexSettingsTab(index: sessions.capabilityIndexService)
+                .tabItem { Label("Capability Index", systemImage: "chart.bar.xaxis") }
+                .accessibilityIdentifier("prefs-capability-index")
+                .tag(PreferencesTab.capabilityIndex)
         }
         .frame(width: 720, height: 560)
     }

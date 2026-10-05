@@ -277,6 +277,8 @@ struct FlightDeckApp: App {
         // Test-only second project, so the sidebar has something to reorder. Guarded by
         // `resetState` as well as its own flag: a reset run reads and writes no persistence,
         // so this can never reach the developer's real `sessions.json`.
+        store.capabilityIndexService = Self.makeCapabilityIndexService(store: store, resetState: resetState)
+
         if resetState, Self.isSeedingSecondProject {
             store.newSession(in: FileManager.default.temporaryDirectory)
         }
@@ -292,6 +294,31 @@ struct FlightDeckApp: App {
         store.flywheelNotifier = flywheelNotifier
 
         return store
+    }
+
+    /// The capability index. A UITest reset run gets a scratch directory — seeded from
+    /// `-FlightDeckCapabilityIndexFixture <dir>` when given, copied so a rollback in the test
+    /// never edits the fixture in the repo — and is NEVER scheduled, so no UI test can start a
+    /// refresh that spends tokens. A real launch uses `<state dir>/capability-index`, which
+    /// already differs between Debug and Release builds.
+    @MainActor
+    private static func makeCapabilityIndexService(store: SessionStore, resetState: Bool) -> CapabilityIndexService {
+        if resetState {
+            let scratch = FileManager.default.temporaryDirectory
+                .appendingPathComponent("FlightDeck-capability-index-\(UUID().uuidString)", isDirectory: true)
+            if let path = UserDefaults.standard.string(forKey: "FlightDeckCapabilityIndexFixture"), !path.isEmpty {
+                try? FileManager.default.copyItem(at: URL(fileURLWithPath: path, isDirectory: true), to: scratch)
+            }
+            return CapabilityIndexService(directory: scratch)
+        }
+        let root = Self.stateDirectory() ?? FileSessionPersistence.defaultDirectory()
+        let service = CapabilityIndexService(
+            directory: CapabilityIndexService.directory(stateRoot: root),
+            // Every registered harness. Until L3-R fills `modelCatalog()` these are the L3-0
+            // stubs' empty catalogs, so a refresh proposes no aliases before integration.
+            catalogs: { await RoutingCapabilityRegistry.standard().catalogs(enabled: Set(AgentID.allCases.map(\.harnessID))) })
+        service.startScheduling(clock: store.watchClock)
+        return service
     }
 
     var body: some Scene {
