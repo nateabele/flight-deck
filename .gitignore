@@ -18,6 +18,7 @@ vendor/.zig-toolchain
 vendor/.build-shim
 *.profraw
 scripts/.smoke.log
+scripts/.routing-ui.log
 scripts/.release-build.log
 scripts/.adapterprobe.log
 scripts/adapterprobe/corpus/

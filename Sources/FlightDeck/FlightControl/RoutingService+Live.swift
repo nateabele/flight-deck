@@ -26,8 +26,8 @@ extension RoutingService {
             writer: BeadWriter(actor: "flightdeck-routing"))
     }
 
-    /// The service `FlightDeckApp` builds.
+    /// `live`, or the UI-test fixture under `-FlightDeckResetState YES -FlightDeckRoutingFixture YES`.
     static func make(preferences: PreferencesStore) -> RoutingService {
-        live(preferences: preferences)
+        RoutingUIFixture.isActive ? RoutingUIFixture.service(preferences: preferences) : live(preferences: preferences)
     }
 }
