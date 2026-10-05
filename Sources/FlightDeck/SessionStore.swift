@@ -1315,6 +1315,18 @@ final class SessionStore: ObservableObject {
             // Completion detection (spec §4): the swarm reads the same polls Observe does.
             self?.swarmServiceStorage?.projectionsChanged(projections)
         }
+        service.enrich = { [weak self] key, snapshot in
+            guard let self, let swarm = self.swarmServiceStorage else { return snapshot }
+            // A busy agent is active now, whatever its last transition said: a long turn makes
+            // no transitions, and must not read as stalled. `lastActiveAt` stands in for the
+            // events lane, which is still empty.
+            var activity: [String: Date] = [:]
+            for (session, name) in self.flywheelAgents(inProject: key) {
+                activity[name] = self.isAgentIdle(session) ? (self.lastActiveAt(for: session) ?? .distantPast) : self.now()
+            }
+            return ObserveEnrichment.enrich(snapshot, contests: swarm.contests(project: key), activity: activity,
+                                            blocked: swarm.declaredBlocked(project: key))
+        }
         return service
     }()
 
@@ -1373,6 +1385,11 @@ final class SessionStore: ObservableObject {
     func useSwarmService(_ service: SwarmService) {
         swarmServiceStorage = service
         if service.dependencies == nil { service.dependencies = swarmDependencies }
+        service.reservationsLookup = { [weak self] key in
+            (self?.observeService.projection(forProject: key)?.reservations ?? []).map {
+                HeldReservation(pattern: $0.file, holder: $0.holder, since: $0.since == .distantPast ? nil : $0.since)
+            }
+        }
         swarmChangeForward = service.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
     }
 

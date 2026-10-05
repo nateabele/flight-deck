@@ -7,12 +7,9 @@ import Foundation
 /// (a transient block, an actively-worked collision) is deliberately silent — see
 /// `docs/superpowers/specs/2026-09-24-flywheel-observe` for the "don't cry wolf" rationale.
 ///
-/// **Level 1 caveat:** all three triggers below are wired and unit-tested but dormant
-/// against live data. The block trigger needs an agent whose bead has `status ==
-/// "blocked"`, but the only live bead read (`br list --status in_progress`) never returns
-/// one; the collision and dependency-cycle triggers need the `reservations`/`depEdges`
-/// lanes, both permanent nil-stubs in Level 1 (see `docs/FOLLOWUPS.md`). So `evaluate(...)`
-/// is effectively a no-op on live projections until a later level wires those lanes.
+/// **Triggers are live since L3-S:** the block trigger reads `BLOCKED:` declarations, the
+/// collision trigger reads `am` reservations plus the swarm's guard-block waiters and tab activity,
+/// and the dependency-cycle trigger reads `br graph` edges (see `ObserveEnrichment`).
 @MainActor
 final class FlywheelNotifier {
     /// One notification per distinct reason we'd wake a human, so the same agent can be
@@ -114,11 +111,14 @@ final class FlywheelNotifier {
     private func evaluateDependencyCycle(projectKey: String, projection: FlywheelProjection, observedKeys: inout Set<String>) {
         guard let cycleParticipants = firstDependencyCycle(in: projection.depEdges), let leader = cycleParticipants.min() else { return }
 
-        let key = causeKey(projectKey: projectKey, agentName: leader, cause: .depCycle)
+        // `br graph` edges name tasks, not agents (L3-S): route to the agent holding the leader
+        // task so the notification lands on a tab, and name the task in the text.
+        let owner = projection.beadsByID[leader]?.assignee ?? leader
+        let key = causeKey(projectKey: projectKey, agentName: owner, cause: .depCycle)
         observedKeys.insert(key)
         guard fired[key] == nil else { return }
 
-        fire(key: key, projectKey: projectKey, agentName: leader,
+        fire(key: key, projectKey: projectKey, agentName: owner,
              title: "Dependency cycle involving \(leader)",
              subtitle: projectKey,
              body: "A dependency cycle needs a human to break it: \(cycleParticipants.sorted().joined(separator: ", ")).")

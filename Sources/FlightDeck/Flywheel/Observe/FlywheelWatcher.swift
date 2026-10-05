@@ -125,9 +125,9 @@ final class FlywheelWatcher {
 
     /// Bypasses the mtime gate and shells out unconditionally — used to prime the first
     /// snapshot on `start()`/tab focus, and by `scheduleRepoll()` once the debounce settles.
-    /// Only two lanes are live (`agents`, `inProgressBeads`); `reservations`/`depEdges`/
-    /// `events` stay Task 2 nil-stubs that never touch the runner, so this is always exactly
-    /// two shell-outs, not five.
+    /// Four lanes are live (`agents`, `inProgressBeads`, `reservations`, `depEdges`); `events`
+    /// stays a nil-stub that never touches the runner, so this is always exactly four
+    /// shell-outs, not five.
     func repollNow() async {
         guard !isPolling else { return }
         isPolling = true
@@ -144,8 +144,10 @@ final class FlywheelWatcher {
 
         async let agents = reads.agents(project: project)
         async let beads = reads.inProgressBeads(project: project)
+        async let reservations = reads.reservations(project: project)
+        async let depEdges = reads.depEdges(project: project)
         let snapshot = await FlywheelSnapshot(
-            agents: agents, beads: beads, reservations: nil, depEdges: nil, events: nil
+            agents: agents, beads: beads, reservations: reservations, depEdges: depEdges, events: nil
         )
         onChange(snapshot)
     }

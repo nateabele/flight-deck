@@ -47,7 +47,7 @@ final class SwarmService: ObservableObject {
     var isContested: (UUID) -> Bool = { _ in false }
     /// The last guard block and BLOCKED: line per session (spec §7.4).
     private(set) var signals: [UUID: SessionSignals] = [:]
-    /// The project's held reservations, from the Observe projection (wired by `SessionStore`).
+    /// The project's held reservations, from the Observe projection (wired by `SessionStore.useSwarmService`).
     var reservationsLookup: (String) -> [HeldReservation] = { _ in [] }
 
     let store: SwarmStore

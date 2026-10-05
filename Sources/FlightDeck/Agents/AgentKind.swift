@@ -1,7 +1,6 @@
 import FleetKit
 import Foundation
 import IntakeKit
-import IntakeKit
 
 /// Which coding agent a tab runs. The raw value is a storage format — it is written into
 /// `sessions.json` — so it is spelled explicitly rather than derived from the case name.
