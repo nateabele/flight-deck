@@ -68,11 +68,13 @@ extension SwarmService {
         return nil
     }
 
+    func lastActiveAt(for session: UUID) -> Date? { host?.lastActiveAt(for: session) }
+
     func annotation(for session: UUID, now: Date = Date()) -> SwarmSessionAnnotation? {
         guard let (_, agent) = agentRecord(session) else { return nil }
         let headroom = agent.lease.flatMap { dependencies?.capacity.headroom(for: $0.lease) }
         return SwarmAnnotations.session(agent, headroom: headroom, contested: isContested(session),
-                                        lastActive: host?.lastActiveAt(for: session), now: now)
+                                        lastActive: lastActiveAt(for: session), now: now)
     }
 
     func summary(forProject path: String) -> SwarmHeaderSummary? {
@@ -109,7 +111,9 @@ struct SwarmRowChips: View {
                 MinimalMeter(value: meter)
                     .frame(width: 22, height: 4)
                     .help("Account at \(Int(meter * 100))%")
+                    .accessibilityElement(children: .ignore)
                     .accessibilityLabel("account at \(Int(meter * 100)) percent")
+                    .accessibilityValue("\(Int(meter * 100)) percent")
                     .accessibilityIdentifier("swarm-meter")
             }
             if let marker = annotation.marker {
@@ -134,6 +138,89 @@ struct MinimalMeter: View {
                 Capsule().fill(.quaternary)
                 Capsule().fill(value >= 1 ? Color.red : .orange)
                     .frame(width: geometry.size.width * min(1, max(0, value)))
+            }
+        }
+    }
+}
+
+/// The header's swarm summary. Text, not a button: `ProjectHeaderRow` keeps every mouse-down
+/// for its drag (see that file). Its popover opens from the header's context menu.
+struct SwarmHeaderChip: View {
+    let summary: SwarmHeaderSummary
+    var body: some View {
+        Text(summary.chipText)
+            .font(.caption2)
+            .lineLimit(1)
+            .padding(.horizontal, 5)
+            .background(Capsule().fill(summary.banner == nil ? AnyShapeStyle(.quaternary) : AnyShapeStyle(Color.orange.opacity(0.25))))
+            .accessibilityIdentifier("swarm-header-chip")
+    }
+}
+
+/// Pool meters (from capacity headroom — L3-U's meter view replaces `MinimalMeter` at
+/// integration) and the tasks the swarm cannot start, with why.
+struct SwarmPopover: View {
+    let record: SwarmRecord
+    let meters: [SwarmMeterRow]
+    let summary: SwarmHeaderSummary
+    let onPause: () -> Void
+    let onResume: () -> Void
+
+    static func lines(for record: SwarmRecord) -> [String] {
+        record.waiting.map { "\($0.task) — \($0.reason)" } + record.unroutable.map { "\($0.task) — unroutable: \($0.reason)" }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(summary.text).font(.headline)
+            if let banner = summary.banner { Text(banner).foregroundStyle(.orange) }
+            ForEach(meters, id: \.self) { meter in
+                HStack {
+                    Text("\(meter.pool) · \(meter.label)").font(.caption)
+                    Spacer()
+                    if let value = meter.value {
+                        MinimalMeter(value: value).frame(width: 80, height: 5)
+                        Text("\(Int(value * 100))%").font(.caption.monospacedDigit())
+                    } else {
+                        Text("no reading").font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+            }
+            let waiting = Self.lines(for: record)
+            if !waiting.isEmpty {
+                Text("Waiting").font(.subheadline)
+                ForEach(waiting, id: \.self) { Text($0).font(.caption) }
+            }
+            HStack {
+                if summary.canPause { Button("Pause", action: onPause).buttonStyle(.link).accessibilityIdentifier("swarm-pause") }
+                if summary.canResume { Button("Resume", action: onResume).buttonStyle(.link).accessibilityIdentifier("swarm-resume") }
+            }
+        }
+        .padding(12)
+        .frame(minWidth: 320)
+        // A container-level identifier would otherwise stamp every child, hiding their strings
+        // from a UI test that reads `popover.staticTexts`.
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("swarm-popover")
+    }
+}
+
+/// One account row of a pool meter: the popover's and the phone's.
+struct SwarmMeterRow: Hashable {
+    let pool: String
+    let label: String
+    let value: Double?
+    let state: HeadroomState
+}
+
+extension SwarmService {
+    /// One row per account in every pool the swarm's agents lease from.
+    func meters(forProject path: String) -> [SwarmMeterRow] {
+        guard let record = record(forProject: path), let capacity = dependencies?.capacity else { return [] }
+        let pools = Set(record.agents.compactMap { $0.lease?.pool }).sorted { $0.rawValue < $1.rawValue }
+        return pools.flatMap { pool in
+            capacity.headroom(pool: pool).map {
+                SwarmMeterRow(pool: pool.rawValue, label: $0.account.label, value: $0.worstUtilization, state: $0.state)
             }
         }
     }

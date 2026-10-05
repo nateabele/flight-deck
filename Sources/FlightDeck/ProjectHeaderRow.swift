@@ -24,6 +24,7 @@ struct ProjectHeaderRow: View {
     // Populated once by `.onAppear` for a plain project with no cached suggestion — see
     // `flywheelStatus`'s doc comment for why this exists at all.
     @State private var probedFlywheelStatus: FlywheelStatus?
+    @State private var showingSwarmPopover = false
 
     /// Whether this row should draw as the selected project. A pure static function rather than
     /// a computed property so `SidebarSelectionTests` can assert it without standing up a
@@ -145,6 +146,10 @@ struct ProjectHeaderRow: View {
             // nothing in it takes the mouse-down.
             Spacer(minLength: 4)
 
+            if let summary = swarmSummary {
+                SwarmHeaderChip(summary: summary)
+            }
+
             if repo.isCollapsed {
                 Text("\(repo.sessions.count)")
                     .font(.caption)
@@ -252,6 +257,21 @@ struct ProjectHeaderRow: View {
                     store.requestSwarmLaunch(project: repo.url.standardizedFileURL.path, filter: .allReady,
                                              title: repo.displayName)
                 }
+                if let summary = swarmSummary {
+                    Button("Swarm Details…") { showingSwarmPopover = true }
+                    if summary.canPause {
+                        Button("Pause Swarm") { store.swarmService.pause(project: repo.url.standardizedFileURL.path) }
+                    }
+                    if summary.canResume {
+                        Button("Resume Swarm") { store.swarmService.resume(project: repo.url.standardizedFileURL.path) }
+                    }
+                    if summary.state == .running || summary.state == .paused {
+                        Button("Drain Swarm") { store.swarmService.drain(project: repo.url.standardizedFileURL.path) }
+                    }
+                    if summary.state != .stopped {
+                        Button("Stop Swarm") { store.swarmService.stop(project: repo.url.standardizedFileURL.path) }
+                    }
+                }
             } else if flywheelStatus.isFlywheelProject {
                 Button("Enable Flight Control…") { showingFlywheelConfirmation = true }
             } else {
@@ -279,6 +299,15 @@ struct ProjectHeaderRow: View {
             showingEnableConfirmation: $showingFlywheelConfirmation,
             showingSetupConfirmation: $showingFlywheelSetupConfirmation
         )
+        .popover(isPresented: $showingSwarmPopover, arrowEdge: .trailing) {
+            if let service = store.swarmServiceIfBuilt,
+               let record = service.record(forProject: repo.url.standardizedFileURL.path),
+               let summary = swarmSummary {
+                SwarmPopover(record: record, meters: service.meters(forProject: record.project), summary: summary,
+                             onPause: { service.pause(project: record.project) },
+                             onResume: { service.resume(project: record.project) })
+            }
+        }
     }
 
     /// The native sidebar selection pill, reproduced. Every number was measured, not chosen:
@@ -299,6 +328,17 @@ struct ProjectHeaderRow: View {
 
     private func toggle() {
         store.setCollapsed(!repo.isCollapsed, forProjectAt: repo.id)
+    }
+
+    private var swarmSummary: SwarmHeaderSummary? {
+        store.swarmServiceIfBuilt?.summary(forProject: repo.url.standardizedFileURL.path)
+    }
+
+    /// The summary and banner as VoiceOver words — the only route, since this row is one
+    /// combined accessibility element.
+    static func swarmAccessibilityParts(_ summary: SwarmHeaderSummary?) -> [String] {
+        guard let summary else { return [] }
+        return [summary.text] + (summary.banner.map { [$0] } ?? [])
     }
 
     private var isFlywheelEnabled: Bool {
@@ -368,6 +408,7 @@ struct ProjectHeaderRow: View {
             // its own), so this is the only route this fact has to VoiceOver while expanded.
             parts.append(intakeAttentionTooltip)
         }
+        parts.append(contentsOf: Self.swarmAccessibilityParts(swarmSummary))
         return parts.joined(separator: ", ")
     }
 }
