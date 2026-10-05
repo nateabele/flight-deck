@@ -138,6 +138,12 @@ public final class Runner: RunControlling, @unchecked Sendable {
         set { lock.withLock { _appendHook = newValue } }
     }
     private var _appendHook: (@Sendable () throws -> Void)?
+    /// Test seam: runs as a run asks for its slot, with its id (a cancel landing just then).
+    var acquireHook: (@Sendable (String) -> Void)? {
+        get { lock.withLock { _acquireHook } }
+        set { lock.withLock { _acquireHook = newValue } }
+    }
+    private var _acquireHook: (@Sendable (String) -> Void)?
 
     /// - Parameters:
     ///   - runsRoot: `runs/` under the host's state root; each run spools to `runs/<id>/`.
@@ -326,9 +332,17 @@ public final class Runner: RunControlling, @unchecked Sendable {
     }
 
     private func beginAcquire(_ run: Run) {
+        acquireHook?(run.id)
         // The task is stored in the same critical section that publishes `.queued(.slot)`, so a
-        // cancel that sees the phase always finds the task to cancel.
+        // cancel that sees the phase always finds the task to cancel. A run already ended or
+        // cancelled (a cancel landing between a screen grant and here) is left alone:
+        // publishing `.queued(.slot)` over its exit would resurrect it and take a slot for it.
+        var abandoned = false
         update(run) {
+            guard !$0.phase.isTerminal, !$0.cancelRequested else {
+                abandoned = !$0.phase.isTerminal
+                return
+            }
             $0.phase = .queued(.slot)
             $0.acquireTask = Task { [weak self] in
                 let notice = Task { [weak self] in
@@ -354,6 +368,7 @@ public final class Runner: RunControlling, @unchecked Sendable {
                 }
             }
         }
+        if abandoned { terminate(run, .exited(.signal(SIGINT))) }
     }
 
     /// Commits the run to starting, unless a cancel got there first. Atomic with `cancel`'s
@@ -610,7 +625,12 @@ public final class Runner: RunControlling, @unchecked Sendable {
     private func terminate(_ run: Run, _ phase: RunPhase, failure: Error? = nil) {
         screen.release(run.id)   // a no-op unless the run holds or waits for it
         releaseAssertions(run)
-        let (spool, lost, lostError) = lock.withLock { (run.spool, run.lostBytes, run.lostError) }
+        // Reset with the read: the marker is written once, here, and a second `terminate` (the
+        // first terminal phase wins, but each caller still gets this far) must not repeat it.
+        let (spool, lost, lostError) = lock.withLock {
+            defer { run.lostBytes = 0 }
+            return (run.spool, run.lostBytes, run.lostError)
+        }
         if lost > 0 {
             try? spool?.append(Self.lostMarker(lost, lostError), to: run.spec.pty ? .pty : .stderr)
         }
@@ -631,7 +651,8 @@ public final class Runner: RunControlling, @unchecked Sendable {
         if prune { pruneOldSpools() }
     }
 
-    private func pruneOldSpools() {
+    /// Internal for a test; otherwise at startup and at most hourly from `terminate`.
+    func pruneOldSpools() {
         let fm = FileManager.default
         let cutoff = Date().addingTimeInterval(-Self.spoolRetention)
         let live: Set<String> = lock.withLock {
@@ -639,6 +660,7 @@ public final class Runner: RunControlling, @unchecked Sendable {
             return Set(runs.values.filter { !$0.phase.isTerminal }.map(\.id))
         }
         guard let names = try? fm.contentsOfDirectory(atPath: runsRoot.path) else { return }
+        var pruned: [String] = []
         for name in names where !live.contains(name) {
             let dir = runsRoot.appendingPathComponent(name)
             // The newest of the directory and its files: appending to a spool file does not
@@ -647,7 +669,13 @@ public final class Runner: RunControlling, @unchecked Sendable {
             let newest = ([dir] + files.map { dir.appendingPathComponent($0) })
                 .compactMap { (try? fm.attributesOfItem(atPath: $0.path))?[.modificationDate] as? Date }
                 .max() ?? .distantFuture
-            if newest < cutoff { try? fm.removeItem(at: dir) }
+            if newest < cutoff, (try? fm.removeItem(at: dir)) != nil { pruned.append(name) }
+        }
+        // A retained run whose spool is gone is forgotten with it: kept, it would replay as a
+        // run that printed nothing, and `logs` would show an empty run instead of "gone".
+        lock.withLock {
+            for id in pruned where runs[id]?.phase.isTerminal ?? false { runs[id] = nil }
+            finishedOrder.removeAll { runs[$0] == nil }
         }
     }
 

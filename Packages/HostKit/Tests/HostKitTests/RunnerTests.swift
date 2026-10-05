@@ -472,6 +472,11 @@ final class RunnerTests: XCTestCase {
         var rest: [RunEvent] = []
         while let ev = try await live.next() { rest.append(ev) }
         XCTAssertEqual(rest, [.exited(.signal(SIGINT))])
+        // The exit is reported at the cancel, by design, and the late slot goes back whenever
+        // `acquire` returns: asserting it the instant the stream ends raced that task, and
+        // failed under load.
+        let deadline = Date().addingTimeInterval(5)
+        while released.all.isEmpty, Date() < deadline { try await Task.sleep(nanoseconds: 10_000_000) }
         XCTAssertEqual(released.all, [lease])
     }
 
@@ -653,6 +658,47 @@ final class RunnerTests: XCTestCase {
         let text = output(events)
         XCTAssertTrue(text.contains("lost"), text)
         XCTAssertTrue(text.contains("second"), text)
+    }
+
+    // MARK: - C3 follow-ups (C8)
+
+    /// A screen run cancelled in the instant between its screen grant and its slot request
+    /// stays cancelled: the slot request must not overwrite the exit with `.queued(.slot)`,
+    /// which checked out a slot for a run nobody wanted and reported its end twice.
+    func testCancelBetweenScreenGrantAndSlotRequestStaysCancelled() async throws {
+        let r = try runner()
+        let acquired = LeaseLog()
+        r.acquireHook = { [unowned r] id in r.cancel(runID: id) }
+        let lease = try checkout()
+        let id = r.start(spec("echo must-not-run", screen: true),
+                         owner: LeaseHolderOwner(controller: controllerID, session: "A")) {
+            acquired.add(lease)
+            return lease
+        }
+        let events = try await collect(r, id)
+        XCTAssertEqual(events, [.exited(.signal(SIGINT))])
+        try await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(r.phase(runID: id), .exited(.signal(SIGINT)))
+        XCTAssertTrue(acquired.all.isEmpty, "no slot was taken for the cancelled run")
+    }
+
+    /// A finished run whose spool the day-old prune deleted is forgotten with it, so `logs`
+    /// says the run is gone instead of replaying an empty run as if it had printed nothing.
+    func testPrunedSpoolRetiresItsRun() async throws {
+        let root = try tempDir("runs")
+        let r = Runner(runsRoot: root, shell: "/bin/sh", hostEnvironment: hostEnv, console: FixedConsole(state: consoleAvailable))
+        let id = start(r, spec("echo hi"), try checkout())
+        _ = try await collect(r, id)
+        let dir = root.appendingPathComponent(id)
+        let old = Date().addingTimeInterval(-25 * 3600)
+        for name in try FileManager.default.contentsOfDirectory(atPath: dir.path) {
+            try FileManager.default.setAttributes([.modificationDate: old], ofItemAtPath: dir.appendingPathComponent(name).path)
+        }
+        try FileManager.default.setAttributes([.modificationDate: old], ofItemAtPath: dir.path)
+        r.pruneOldSpools()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: dir.path))
+        XCTAssertNil(r.phase(runID: id))
+        XCTAssertNil(r.owner(runID: id))
     }
 
     private final class Counter: @unchecked Sendable {

@@ -33,4 +33,17 @@ final class HostInfoProbeTests: XCTestCase {
         XCTAssertNil(HostInfoProbe.runCommand("/bin/sh", ["-c", "trap '' TERM; sleep 30"]))
         XCTAssertLessThan(Date().timeIntervalSince(start), 8)
     }
+
+    /// `host.info` and every `port.check` shell out through this. A read end left open per
+    /// call walks a long-lived hostd (soft limit 256) into EMFILE, and Linux corelibs'
+    /// `Process.run` segfaults walking a large `/proc/self/fd`.
+    func testRunCommandLeavesOpenFdCountFlat() {
+        func openFDs() -> Int { (try? FileManager.default.contentsOfDirectory(atPath: "/dev/fd").count) ?? -1 }
+        _ = HostInfoProbe.runCommand("/bin/echo", ["warm"])
+        let before = openFDs()
+        for _ in 0..<50 { XCTAssertEqual(HostInfoProbe.runCommand("/bin/echo", ["hi"]), "hi") }
+        // The common case on a host without Docker: the probe tries three install paths.
+        for _ in 0..<50 { XCTAssertNil(HostInfoProbe.runCommand("/nonexistent/docker", ["version"])) }
+        XCTAssertLessThanOrEqual(openFDs(), before + 2, "fds before \(before), after \(openFDs())")
+    }
 }
