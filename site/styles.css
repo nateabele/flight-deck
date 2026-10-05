@@ -522,12 +522,23 @@ html.js .finder-item.opened { opacity: 0; pointer-events: none; }
   position: relative;
   transition: background 0.12s ease-out;
 }
+/* Status glyph LEADS the title, in a reserved 16px slot (SessionRow's
+   ZStack + Color.clear), so every title starts at the same x whether or not a
+   glyph is showing. */
 .row-session { padding-left: 24px; }
+.row-session .slot {
+  width: 16px;
+  flex: none;
+  display: flex;
+  align-items: center;
+}
 .row-session:hover { background: rgba(255, 255, 255, 0.06); }
 
 .row-session.selected {
-  /* macOS selected sidebar row: accent fill, full strength when key */
-  background: var(--accent);
+  /* The terminal holds first responder nearly always, so the table is not
+     emphasized and a selected row is the unemphasized GRAY fill, not accent
+     (see ProjectHeaderRow.isEmphasized). */
+  background: rgba(255, 255, 255, 0.15);
   color: #fff;
 }
 .row-session.selected .row-title { color: #fff; }
@@ -542,7 +553,7 @@ html.js .finder-item.opened { opacity: 0; pointer-events: none; }
 
 /* Project header: chevron + semibold subheadline in secondary */
 .row-project {
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 600;
   color: var(--fg-secondary);
   letter-spacing: -0.005em;
@@ -579,22 +590,26 @@ html.js .finder-item.opened { opacity: 0; pointer-events: none; }
 }
 .row-project .trail { margin-left: 0; }
 
+/* SubagentCount: caption2, monospaced digits, tinted, at the trailing edge */
 .subcount {
-  font-size: 10.5px;
+  font-size: 10px;
   font-variant-numeric: tabular-nums;
-  color: var(--glow-cyan);
+  color: var(--accent);
   line-height: 1;
 }
-.row-session.selected .subcount { color: rgba(255, 255, 255, 0.92); }
 
 /* Status glyphs (SF Symbol shapes, drawn as SVG) */
 .glyph { width: 11px; height: 11px; flex: none; display: block; }
+/* Read idle is .primary at 10% — the sidebar's resting state, deliberately
+   near-invisible. The hero's inline glyph reuses this class, so only the
+   sidebar rows get the faint version. */
 .glyph-idle    { color: var(--fg-secondary); opacity: 0.8; }
+.row .glyph-idle { color: #fff; opacity: 0.1; }
 .glyph-unread  { color: var(--accent); opacity: 1; }
 .glyph-waiting { color: var(--orange); }
 .glyph-shell   { color: var(--green); }
-.row-session.selected .glyph-idle   { color: rgba(255, 255, 255, 0.85); opacity: 1; }
-.row-session.selected .glyph-unread { color: #fff; }
+/* BackgroundWorkBadge: a decoration beside the title, not a state of its own */
+.glyph-bg { color: var(--green); width: 11px; height: 11px; flex: none; }
 
 /* The macOS indeterminate spinner, for .busy. Every dimension derives from
    --sp so the same spoke geometry can be reused at text size in prose. */
@@ -615,7 +630,6 @@ html.js .finder-item.opened { opacity: 0; pointer-events: none; }
   background: var(--fg-secondary);
   transform-origin: 50% calc(var(--sp) * 0.45);
 }
-.row-session.selected .spinner i { background: rgba(255, 255, 255, 0.95); }
 @keyframes spin-step { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 2.4s; } }
 
@@ -671,17 +685,31 @@ html.js .finder-item.opened { opacity: 0; pointer-events: none; }
 }
 .sidebar-foot .new-btn svg { width: 12px; height: 12px; }
 
-/* --- Terminal pane ------------------------------------------------------- */
+/* --- Terminal pane -------------------------------------------------------
+   Claude Code as it actually draws itself, measured off a live `claude`
+   (2.1.289) in tmux: ⏺ message and tool bullets, the ⎿ result gutter, the ✶
+   spinner row, the ─ ruled composer, the ╌ ruled permission dialog. Colours are
+   Claude's own dark-theme palette, not the site's. */
 .terminal {
+  --t-fg:     #f2f2f2;
+  --t-sub:    #949494;   /* results, hints, stats */
+  --t-rule:   #808080;   /* composer rules */
+  --t-claude: #d77757;   /* spinner */
+  --t-ok:     #4eba65;   /* finished tool bullet */
+  --t-err:    #ff6b80;   /* failed tool bullet */
+  --t-perm:   #b1b9f9;   /* permission dialog + inline code */
+  --t-mode:   #afafff;   /* "accept edits on" */
+  --t-shell:  #00d7d7;   /* "1 shell" */
+  --t-user:   #373737;   /* submitted prompt block */
   flex: 1;
   min-width: 0;
   background: var(--bg-inset);
-  padding: 14px 18px;
+  padding: 12px 16px 10px;
   overflow: hidden;
   font-family: var(--mono);
   font-size: 12px;
-  line-height: 1.62;
-  color: #c8d4e6;
+  line-height: 1.42;
+  color: var(--t-fg);
   position: relative;
   display: flex;
   flex-direction: column;
@@ -691,61 +719,90 @@ html.js .finder-item.opened { opacity: 0; pointer-events: none; }
    collapse — otherwise every line renders double-spaced. Leading indentation
    inside a line is preserved by pre-wrap on the line itself. */
 .term-body { white-space: normal; word-break: break-word; }
-.term-body .l {
+.term-body .l,
+.term-foot .l {
   display: block;
   white-space: pre-wrap;
-  min-height: 1.62em;
+  min-height: 1.42em;
 }
+/* A wrapped message line hangs under its text, not under the bullet */
+.l.hang { padding-left: 2ch; text-indent: -2ch; }
 
-/* Claude Code's on-screen vocabulary */
-.c-dim    { color: #55678a; }
-.c-cyan   { color: var(--glow-cyan); }
-.c-blue   { color: #6aa9ff; }
-.c-green  { color: #4ade80; }
-.c-orange { color: #ffb340; }
-.c-red    { color: #ff6b6b; }
-.c-white  { color: #eef3fb; }
-.c-mag    { color: #c48bff; }
+.t-sub    { color: var(--t-sub); }
+.t-b      { font-weight: 700; }
+.t-code   { color: var(--t-perm); }
+.t-claude { color: var(--t-claude); }
 
-/* The ❯ input box Claude Code draws */
-.inputbox {
-  margin-top: 10px;
-  border: 1px solid #24344f;
-  border-radius: 5px;
-  padding: 4px 9px;
-  color: #55678a;
-  display: flex;
-  gap: 7px;
-  align-items: baseline;
+/* ⏺ — white for the model's own words, then grey while a tool runs, green when
+   it succeeded, pink when it failed */
+.b-msg  { color: #fff; }
+.b-run  { color: var(--t-sub); }
+.b-ok   { color: var(--t-ok); }
+.b-err  { color: var(--t-err); }
+.t-err  { color: var(--t-err); }
+
+/* The submitted prompt: a full-width grey block, ❯ in grey, text in white */
+.l.user {
+  background: var(--t-user);
+  color: #fff;
+  margin-bottom: 1.42em;
 }
-.inputbox .marker { color: var(--glow-cyan); }
+.l.user .t-sub { user-select: none; }
+
+/* Diff: gutter number + sign, whole-line tint, as Update(...) prints it */
+.l.df { white-space: pre; overflow: hidden; }
+.l.df.ctx .g { color: #6b6b6b; }
+.l.df.add { background: #225c2b; }
+.l.df.del { background: #7a2936; }
+.l.df.add .g { color: #4eba65; }
+.l.df.del .g { color: #ff6b80; }
+.k { color: #f92672; }   /* keyword */
+.n { color: #66d9ef; }   /* storage / type */
+.f { color: #a6e22e; }   /* function */
+.v { color: #ae81ff; }   /* number */
+
+/* ✶ Cogitating… (38s · ↓ 2.1k tokens) */
+.spin-row { margin-top: 1.42em; }
+.spin-row .glyph-s { color: var(--t-claude); display: inline-block; width: 2ch; }
+.spin-row .verb { color: var(--t-claude); }
+.spin-row .stat { color: var(--t-sub); }
+.term-hint { color: var(--t-sub); }
+
+/* Composer: ruled top and bottom, ❯ prompt between */
+.term-foot { margin-top: 1.42em; }
+.rule {
+  display: block;
+  overflow: hidden;
+  white-space: nowrap;
+  color: var(--t-rule);
+  line-height: 1.2;
+  user-select: none;
+}
+.prompt { display: flex; align-items: center; color: var(--t-sub); }
+.prompt .marker { margin-right: 1ch; }
 .caret {
   display: inline-block;
-  width: 6.6px;
-  height: 13px;
-  background: var(--glow-cyan);
-  /* Centred on the prompt row. NOT vertical-align: .inputbox is a flex
-     container, and flex items ignore it outright — which is why this looked
-     unchanged through two attempts to nudge it. Baseline alignment is also
-     wrong here: an empty inline-block's baseline is its bottom edge, so the
-     caret hung entirely above the text baseline. */
-  align-self: center;
+  width: 1ch;
+  height: 1.15em;
+  background: var(--t-fg);
   animation: blink 1.1s steps(2) infinite;
 }
 @keyframes blink { 50% { opacity: 0; } }
 @media (prefers-reduced-motion: reduce) { .caret { animation: none; } }
 
-.term-status {
-  margin-top: 7px;
-  font-size: 11px;
-  color: #3f4f6d;
-  display: flex;
-  gap: 14px;
-}
+.mode-row { color: var(--t-sub); margin-top: 1px; }
+.mode-row .mode { color: var(--t-mode); }
+.mode-row .shell { color: var(--t-shell); }
+
+/* Permission dialog: replaces the composer, ruled in its own blue */
+.dialog .rule     { color: var(--t-perm); }
+.dialog .dash     { color: #4e4e4e; }
+.dialog .title    { color: var(--t-perm); font-weight: 700; }
+.dialog .opt-sel  { color: var(--t-perm); }
 
 @media (max-width: 760px) {
   .sidebar { width: 190px; }
-  .terminal { font-size: 10.5px; padding: 11px 13px; }
+  .terminal { font-size: 10.5px; padding: 11px 12px 9px; }
 }
 @media (max-width: 560px) {
   .split { flex-direction: column; }

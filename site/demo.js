@@ -36,10 +36,12 @@
          <circle cx="8" cy="8" r="5.6" fill="currentColor" mask="url(#qm)"/>`
       ),
 
-    // terminal.fill — prompt and underscore knocked out
-    shell: () =>
+    // terminal.fill — prompt and underscore knocked out. BackgroundWorkBadge: a
+    // green decoration beside the title of a session with a background task,
+    // not a status of its own (the app dropped the old `.shell` activity).
+    bgBadge: () =>
       svg(
-        "glyph glyph-shell",
+        "glyph glyph-bg",
         `<mask id="tm" maskUnits="userSpaceOnUse" x="0" y="0" width="16" height="16">
            <rect width="16" height="16" fill="white"/>
            <path d="M4.5 6.2 6.9 8.05 4.5 9.9" stroke="black" stroke-width="1.15"
@@ -80,88 +82,237 @@
   };
 
   /* ------------------------------------------------------------- terminals */
-  /* Claude Code as it actually renders: ● tool calls, ⎿ results, the ❯ box. */
+  /* Claude Code as it actually renders — measured off a live `claude` 2.1.289
+     in tmux, not remembered: the ⏺ bullet (white for the model's words, then
+     grey / green / pink as a tool runs / succeeds / fails), the ⎿ result gutter,
+     `Update(file)` with a numbered diff, the ✶ spinner row, and the ─ ruled
+     composer. See .terminal in styles.css for the palette. */
 
+  const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const line = (html, cls) => `<span class="l${cls ? " " + cls : ""}">${html}</span>`;
+  const sub = (s) => `<span class="t-sub">${s}</span>`;
+  const code = (s) => `<span class="t-code">${esc(s)}</span>`;
+  const bold = (s) => `<span class="t-b">${s}</span>`;
+
+  /* ⏺ text — a wrapped line hangs under the words, not the bullet */
+  const msg = (...lines) => lines.map((l, i) => line(i ? "  " + l : `<span class="b-msg">⏺</span> ${l}`, "hang")).join("");
+
+  /* ⏺ Tool(arg) — state is "run" | "ok" | "err" */
+  const tool = (state, name, arg) =>
+    line(`<span class="b-${state}">⏺</span> ${bold(name)}(${esc(arg)})`);
+
+  /* ⎿  result — continuation lines sit under the text, five columns in */
+  const res = (...lines) =>
+    lines.map((l, i) => line(i ? "     " + l : sub("  ⎿  ") + l)).join("");
+
+  /* A tool group Claude collapses to one grey line */
+  const folded = (html) => line("  " + sub(html + " (ctrl+o to expand)"));
+
+  /* The submitted prompt: a grey block */
+  const user = (text) => line(sub("❯ ") + esc(text), "user");
+
+  /* Just enough highlighting for the three or four diff lines on screen */
+  const KW = /\b(export|function|func|static|const|let|return|if|guard|await|async|new|private|struct|in|else)\b/g;
+  const hl = (src) =>
+    esc(src)
+      .replace(/\b(\d[\d_]*)\b/g, '<span class="v">$1</span>')
+      .replace(KW, '<span class="k">$1</span>')
+      .replace(/\b(Math|Int|Bool|String|IndexSet|number|Promise|Response)\b/g, '<span class="n">$1</span>')
+      .replace(/\b([a-z]\w*)(?=\()/gi, (m, n) => (/^(export|function|func|static|const|let|return|if|guard|await|async|new|in|else)$/.test(n) ? n : `<span class="f">${n}</span>`));
+
+  /* One diff row: gutter is the line number plus the sign, as Claude prints it */
+  const diff = (rows) =>
+    rows
+      .map(([sign, n, src]) =>
+        line(
+          `<span class="g">${String(n).padStart(4, " ")} ${sign === "c" ? " " : sign}</span> ${hl(src)}`,
+          "df " + { "+": "add", "-": "del", c: "ctx" }[sign]
+        )
+      )
+      .join("");
+
+  /* Each terminal is body (always shown), tail (only once the turn has
+     finished — it would contradict the spinner otherwise) and the spinner's
+     verb/stats while the agent is still working. */
   const T = {
-    "refactor-sidebar": `<span class="l"><span class="c-mag">●</span> <span class="c-white">Read</span><span class="c-dim">(Sources/FlightDeck/SessionSidebar.swift)</span></span>
-<span class="l">  <span class="c-dim">⎿  Read 212 lines</span></span>
-<span class="l"></span>
-<span class="l"><span class="c-mag">●</span> The flat <span class="c-cyan">ForEach</span> is load-bearing — <span class="c-cyan">.onMove</span> isn't supported on a</span>
-<span class="l">  ForEach that yields Sections. Flattening is what lets one drag</span>
-<span class="l">  gesture reorder projects <span class="c-white">and</span> sessions. Extracting the row policy.</span>
-<span class="l"></span>
-<span class="l"><span class="c-mag">●</span> <span class="c-white">Update</span><span class="c-dim">(Sources/FlightDeck/SidebarReorder.swift)</span></span>
-<span class="l">  <span class="c-dim">⎿  Added 34 lines, removed 11 lines</span></span>
-<span class="l"></span>
-<span class="l"><span class="c-mag">●</span> <span class="c-white">Bash</span><span class="c-dim">(./scripts/test-unit.sh)</span></span>
-<span class="l">  <span class="c-dim">⎿  Running 66 tests…</span></span>`,
+    "refactor-sidebar": {
+      body:
+        user("Pull the reorder policy out of SessionSidebar so it can be tested") +
+        msg("I'll start with how the rows are built today.") + line("") +
+        folded("Read <b>1</b> file") + line("") +
+        msg(
+          "The flat " + code("ForEach") + " is load-bearing — " + code(".onMove") + " isn't supported on a",
+          "ForEach that yields Sections, so flattening is what lets one drag gesture",
+          "reorder projects and sessions. I'll extract the row policy and leave the structure alone."
+        ) + line("") +
+        tool("ok", "Update", "Sources/FlightDeck/SidebarReorder.swift") +
+        res("Added <b>3</b> lines, removed <b>2</b> lines") +
+        diff([
+          ["c", 41, "enum SidebarReorder {"],
+          ["-", 42, "    func move(from: IndexSet, to: Int) {"],
+          ["-", 43, "        rows.move(fromOffsets: from, toOffset: to)"],
+          ["+", 42, "    static func apply(_ rows: [SidebarRow], from: IndexSet, to: Int) -> [SidebarRow] {"],
+          ["+", 43, "        var next = rows"],
+          ["+", 44, "        next.move(fromOffsets: from, toOffset: to)"],
+          ["c", 45, "    }"],
+        ]) + line("") +
+        tool("ok", "Bash", "./scripts/test-unit.sh") +
+        res(sub("Executed 66 tests, with 0 failures (2.104 seconds)")),
+      tail: msg("Done. The policy is a pure function now, and " + code("SessionSidebar") + " just calls it."),
+      spin: { verb: "Cogitating", secs: 38, tokens: "2.1k" },
+      took: "Crunched for 1m 14s",
+    },
 
-    "status-pipeline": `<span class="l"><span class="c-mag">●</span> <span class="c-white">Bash</span><span class="c-dim">(./scripts/test-unit.sh --filter StatusWatcher)</span></span>
-<span class="l">  <span class="c-dim">⎿  Executed 12 tests, with 0 failures (0.418 seconds)</span></span>
-<span class="l"></span>
-<span class="l"><span class="c-mag">●</span> All twelve pass. The watcher polls rather than watching vnodes</span>
-<span class="l">  because <span class="c-cyan">claude</span> rewrites the registry file in place — no create,</span>
-<span class="l">  no rename, so a directory watch would never fire.</span>
-<span class="l"></span>
-<span class="l"><span class="c-mag">●</span> Summary of what changed:</span>
-<span class="l">  <span class="c-dim">•</span> <span class="c-white">ClaudeStatusFile</span> now fails closed on a torn read</span>
-<span class="l">  <span class="c-dim">•</span> pid/filename mismatch yields nil instead of a stale status</span>
-<span class="l">  <span class="c-dim">•</span> the watcher keeps its last known value across a bad poll</span>
-<span class="l"></span>
-<span class="l"><span class="c-green">✓ Done</span> <span class="c-dim">— 3 files changed, 66 tests green</span></span>`,
+    "status-pipeline": {
+      body:
+        user("Why does StatusWatcher poll instead of watching the registry directory?") +
+        msg("Let me run its tests first to get a baseline.") + line("") +
+        tool("ok", "Bash", "./scripts/test-unit.sh --filter StatusWatcher") +
+        res(sub("Executed 12 tests, with 0 failures (0.418 seconds)")),
+      tail:
+        msg(
+          "All twelve pass. The watcher polls rather than watching vnodes because " + code("claude"),
+          "rewrites the registry file in place — no create, no rename — so a directory",
+          "watch would never fire."
+        ) + line("") +
+        msg(
+          "Summary of what changed:",
+          "- " + code("ClaudeStatusFile") + " now fails closed on a torn read",
+          "- a pid/filename mismatch yields nil instead of a stale status",
+          "- the watcher keeps its last known value across a bad poll"
+        ),
+      spin: { verb: "Pondering", secs: 21, tokens: "1.4k" },
+      took: "Crunched for 52s",
+    },
 
-    "retry-backoff": `<span class="l"><span class="c-mag">●</span> <span class="c-white">Read</span><span class="c-dim">(src/transport/retry.ts)</span></span>
-<span class="l">  <span class="c-dim">⎿  Read 148 lines</span></span>
-<span class="l"></span>
-<span class="l"><span class="c-mag">●</span> The backoff is exponential but unjittered, so every client that</span>
-<span class="l">  saw the same 503 retries on the same schedule. Adding full jitter.</span>
-<span class="l"></span>
-<span class="l"><span class="c-orange">╭─ Permission required ────────────────────────────────────────────╮</span></span>
-<span class="l"><span class="c-orange">│</span> <span class="c-white">Bash</span> wants to run:                                               <span class="c-orange">│</span></span>
-<span class="l"><span class="c-orange">│</span>                                                                  <span class="c-orange">│</span></span>
-<span class="l"><span class="c-orange">│</span>   <span class="c-cyan">npm run migrate:staging</span>                                        <span class="c-orange">│</span></span>
-<span class="l"><span class="c-orange">│</span>                                                                  <span class="c-orange">│</span></span>
-<span class="l"><span class="c-orange">│</span>   <span class="c-white">❯ 1.</span> Yes                                                       <span class="c-orange">│</span></span>
-<span class="l"><span class="c-orange">│</span>     <span class="c-dim">2.</span> Yes, and don't ask again                                  <span class="c-orange">│</span></span>
-<span class="l"><span class="c-orange">│</span>     <span class="c-dim">3.</span> No, tell Claude what to do differently                    <span class="c-orange">│</span></span>
-<span class="l"><span class="c-orange">╰──────────────────────────────────────────────────────────────────╯</span></span>`,
+    "retry-backoff": {
+      body:
+        user("Add full jitter to backoff() in the retry transport, then run the staging migration") +
+        folded("Read <b>1</b> file") + line("") +
+        msg(
+          "The backoff is exponential but unjittered, so every client that saw the same",
+          "503 retries on the same schedule. Adding full jitter."
+        ) + line("") +
+        tool("ok", "Update", "src/transport/retry.ts") +
+        res("Added <b>2</b> lines, removed <b>1</b> line") +
+        diff([
+          ["c", 12, "export function backoff(attempt: number): number {"],
+          ["-", 13, "  return Math.min(30000, 100 * 2 ** attempt);"],
+          ["+", 13, "  const cap = Math.min(30000, 100 * 2 ** attempt);"],
+          ["+", 14, "  return Math.random() * cap;"],
+          ["c", 15, "}"],
+        ]) + line("") +
+        tool("run", "Bash", "npm run migrate:staging") +
+        res(sub("Waiting…")),
+      /* A blocked session sits in a dialog, not at the composer */
+      dialog: {
+        title: "Bash command",
+        sub: "Run shell command",
+        cmd: "npm run migrate:staging",
+        note: "This command requires approval",
+        ask: "Do you want to proceed?",
+        opts: ["Yes", "Yes, and don’t ask again for: npm run *", "No"],
+      },
+      tail: msg("Migration applied to staging."),
+      spin: { verb: "Noodling", secs: 9, tokens: "0.8k" },
+      took: "Crunched for 31s",
+    },
 
-    "oauth-refresh": `<span class="l"><span class="c-mag">●</span> <span class="c-white">Update</span><span class="c-dim">(src/auth/refresh.ts)</span></span>
-<span class="l">  <span class="c-dim">⎿  Added 22 lines, removed 8 lines</span></span>
-<span class="l"></span>
-<span class="l"><span class="c-mag">●</span> Refresh now single-flights: concurrent callers await one in-flight</span>
-<span class="l">  request instead of each starting their own and racing to write the</span>
-<span class="l">  token back. Kicking off the integration suite in the background.</span>
-<span class="l"></span>
-<span class="l"><span class="c-mag">●</span> <span class="c-white">Bash</span><span class="c-dim">(npm run test:integration)</span> <span class="c-green">&amp;</span></span>
-<span class="l">  <span class="c-dim">⎿  Running in background (bash_a41f)</span></span>
-<span class="l"></span>
-<span class="l"><span class="c-green">✓</span> <span class="c-dim">Turn complete — background command still running</span></span>`,
+    "oauth-refresh": {
+      body:
+        user("Make token refresh single-flight, then run the integration suite") +
+        tool("ok", "Update", "src/auth/refresh.ts") +
+        res("Added <b>5</b> lines, removed <b>2</b> lines") +
+        diff([
+          ["c", 28, "let inflight: Promise<Token> | null = null;"],
+          ["-", 29, "export async function refresh(): Promise<Token> {"],
+          ["+", 29, "export function refresh(): Promise<Token> {"],
+          ["+", 30, "  inflight ??= fetchToken().finally(() => { inflight = null; });"],
+          ["+", 31, "  return inflight;"],
+          ["c", 32, "}"],
+        ]) + line("") +
+        msg(
+          "Concurrent callers now await one in-flight request instead of each starting",
+          "their own and racing to write the token back. Kicking off the integration",
+          "suite in the background."
+        ) + line("") +
+        tool("ok", "Bash", "npm run test:integration") +
+        res(sub("Running in the background (↓ to manage)")),
+      tail: msg("Refresh is single-flighted and the suite is running. I'll check it when it reports back."),
+      spin: { verb: "Churning", secs: 17, tokens: "1.1k" },
+      took: "Crunched for 48s",
+    },
 
-    "index-service": `<span class="l"><span class="c-mag">●</span> <span class="c-white">Bash</span><span class="c-dim">(cargo build --release --features semantic)</span></span>
-<span class="l">  <span class="c-dim">⎿  Compiling quillmap v0.9.2</span></span>
-<span class="l">  <span class="c-dim">⎿  Finished release profile in 41.20s</span></span>
-<span class="l"></span>
-<span class="l"><span class="c-mag">●</span> Index is warm: <span class="c-white">1,111 files</span>, <span class="c-white">20,723 symbols</span>. Single-writer WAL</span>
-<span class="l">  holds across the worktrees, which was the open question.</span>`,
+    "index-service": {
+      body:
+        user("Rebuild the index with the semantic feature and confirm the WAL holds across worktrees") +
+        tool("ok", "Bash", "cargo build --release --features semantic") +
+        res(sub("Compiling quillmap v0.9.2"), sub("Finished `release` profile [optimized] target(s) in 41.20s")),
+      tail: msg(
+        "Index is warm: 1,111 files, 20,723 symbols. Single-writer WAL holds across the",
+        "worktrees, which was the open question."
+      ),
+      spin: { verb: "Sautéing", secs: 6, tokens: "0.5k" },
+      took: "Crunched for 1m 03s",
+    },
   };
 
-  const RESUME_TERM = `<span class="l"><span class="c-dim">Restoring 5 sessions…</span></span>
-<span class="l"><span class="c-dim">⎿  reattached to conversation 4c426e3f · flight-deck</span></span>
-<span class="l"></span>
-<span class="l"><span class="c-mag">●</span> <span class="c-white">Bash</span><span class="c-dim">(./scripts/test-unit.sh)</span></span>
-<span class="l">  <span class="c-dim">⎿  Executed 66 tests, with 0 failures (2.104 seconds)</span></span>
-<span class="l"></span>
-<span class="l"><span class="c-mag">●</span> Picking up where this left off — the reorder policy was extracted</span>
-<span class="l">  but <span class="c-cyan">SidebarReorder.apply</span> still needs the collapsed-project case.</span>
-<span class="l"></span>
-<span class="l"><span class="c-cyan">❯</span> <span class="c-dim">Keep going.</span></span>`;
+  /* After a quit and relaunch the conversation is replayed, and the nudge Flight
+     Deck offers is typed into the composer on the user's behalf */
+  const RESUMED = {
+    body: T["refactor-sidebar"].body + line("") + user("Keep going."),
+    spin: { verb: "Pondering", secs: 3, tokens: "0.2k" },
+  };
+
+  /* The spinner row's glyph cycles through these, as Claude's does */
+  const SPIN_GLYPHS = ["·", "✢", "✳", "✶", "✻", "✽"];
+  const RULE = "─".repeat(240);
+  const DASH = "╌".repeat(240);
+
+  /* The composer, and the footer row under it */
+  function composer(s) {
+    const mode =
+      '<span class="mode">⏵⏵ accept edits on</span>' +
+      (s.bg ? ' · <span class="shell">1 shell</span> · /tasks to see subagents' : " (shift+tab to cycle)");
+    return (
+      `<span class="rule" aria-hidden="true">${RULE}</span>` +
+      `<span class="l prompt"><span class="marker">❯</span><span class="caret"></span></span>` +
+      `<span class="rule" aria-hidden="true">${RULE}</span>` +
+      `<span class="l mode-row">  ${mode}</span>`
+    );
+  }
+
+  /* The permission dialog Claude raises — numbered options, ❯ on the first */
+  function dialog(d) {
+    const dash = `<span class="rule dash" aria-hidden="true">${DASH}</span>`;
+    return (
+      `<div class="dialog"><span class="rule" aria-hidden="true">${RULE}</span>` +
+      line(" " + `<span class="title">${d.title}</span>`) +
+      line(" " + sub(d.sub)) +
+      dash +
+      line(" " + esc(d.cmd)) +
+      dash +
+      line(" " + d.note) +
+      line("") +
+      line(" " + d.ask) +
+      d.opts
+        .map((o, i) =>
+          i === 0
+            ? line(` <span class="opt-sel">❯ ${sub("1. ")}<span class="opt-sel">${o}</span></span>`)
+            : line(`   ${sub(i + 1 + ".")} ${esc(o)}`)
+        )
+        .join("") +
+      line("") +
+      line(" " + sub("Esc to cancel · Tab to amend")) +
+      `</div>`
+    );
+  }
 
   /* ----------------------------------------------------------------- beats */
 
   const P = (path, name, sessions, collapsed) => ({ path, name, sessions, collapsed: !!collapsed });
   const S = (id, title, status, extra) =>
-    Object.assign({ id, title, status, subagents: 0, unread: false, conflict: false }, extra);
+    Object.assign({ id, title, status, subagents: 0, unread: false, conflict: false, bg: false }, extra);
 
   const BEATS = [
     {
@@ -198,7 +349,7 @@
     },
     {
       caption:
-        "One hits a permission prompt. It turns <strong>orange the instant it needs you</strong> — you don't have to be looking at that tab to find out.",
+        "One hits a permission prompt. Its glyph turns <strong>orange the instant it needs you</strong> — you don't have to be looking at that tab to find out.",
       selected: "retry-backoff",
       projects: [
         P("~/Projects/flight-deck", "flight-deck", [
@@ -213,7 +364,7 @@
     },
     {
       caption:
-        "Green is the state most tools miss: the model turn <strong>ended</strong>, but a backgrounded command is still running. Neither working nor done.",
+        "The green terminal badge is the state most tools miss: the turn <strong>ended</strong>, but a backgrounded command is still running. Neither working nor done.",
       selected: "oauth-refresh",
       projects: [
         P("~/Projects/flight-deck", "flight-deck", [
@@ -222,7 +373,7 @@
         ]),
         P("~/Projects/ledger-sync", "ledger-sync", [
           S("retry-backoff", "retry-backoff", "waiting"),
-          S("oauth-refresh", "oauth-refresh", "shell"),
+          S("oauth-refresh", "oauth-refresh", "idle", { bg: true }),
         ]),
       ],
     },
@@ -237,7 +388,7 @@
         ]),
         P("~/Projects/ledger-sync", "ledger-sync", [
           S("retry-backoff", "retry-backoff", "waiting"),
-          S("oauth-refresh", "oauth-refresh", "shell"),
+          S("oauth-refresh", "oauth-refresh", "idle", { bg: true }),
         ]),
       ],
     },
@@ -252,7 +403,7 @@
         ]),
         P("~/Projects/ledger-sync", "ledger-sync", [
           S("retry-backoff", "retry-backoff", "waiting"),
-          S("oauth-refresh", "oauth-refresh", "shell"),
+          S("oauth-refresh", "oauth-refresh", "idle", { bg: true }),
         ], true),
         P("~/Projects/quillmap", "quillmap", [S("index-service", "index-service", "busy")]),
       ],
@@ -296,7 +447,7 @@
   let override = null; // a session the visitor clicked
 
   /* Status priority for a collapsed project — mirrors SessionActivity.summaryRank */
-  const RANK = { idle: 0, busy: 1, shell: 2, waiting: 3 };
+  const RANK = { idle: 0, busy: 1, waiting: 2 };
 
   function collapsedStatus(sessions) {
     let best = null;
@@ -309,33 +460,34 @@
 
   function glyphFor(s) {
     if (!s.status) return "";
-    if (s.status === "busy") {
-      return (
-        GLYPH.busy() +
-        (s.subagents > 0 ? `<span class="subcount">${s.subagents}</span>` : "")
-      );
-    }
+    if (s.status === "busy") return GLYPH.busy();
     if (s.status === "waiting") return GLYPH.waiting();
-    if (s.status === "shell") return GLYPH.shell();
     return GLYPH.idle(s.unread);
   }
 
+  /* SessionStatus.tooltip(unread:backgroundWork:) — the background clause is
+     never substituted, and always last. */
   function tooltipFor(s) {
+    let base = "";
     switch (s.status) {
       case "busy":
-        return s.subagents > 0
+        base = s.subagents > 0
           ? `Working — ${s.subagents} subagent${s.subagents === 1 ? "" : "s"}`
           : "Working";
+        break;
       case "waiting":
-        return "Waiting for you — permission prompt";
-      case "shell":
-        return "Background command running";
+        base = "Waiting for you — Claude needs your permission to use Bash";
+        break;
       case "idle":
-        return s.unread ? "Finished — not yet viewed" : "Idle";
-      default:
-        return "";
+        base = s.unread ? "Finished — not yet viewed" : "Idle";
+        break;
     }
+    return s.bg ? base + " — background command running" : base;
   }
+
+  /* A collapsed project hides an idle child's dot, but not its badge — the same
+     rule as store.projectHasBackgroundWork */
+  const projectHasBg = (sessions) => sessions.some((s) => s.bg);
 
   function render(beat, selectedId) {
     const rows = [];
@@ -349,7 +501,7 @@
            ${
              proj.collapsed
                ? `<span class="count">${proj.sessions.length}</span>
-                  <span class="trail">${rolled ? glyphFor({ status: rolled, subagents: 0 }) : ""}</span>`
+                  <span class="trail">${rolled ? glyphFor({ status: rolled, subagents: 0 }) : ""}${projectHasBg(proj.sessions) ? GLYPH.bgBadge() : ""}</span>`
                : ""
            }
            ${GLYPH.xmark()}
@@ -369,10 +521,12 @@
                 data-session="${s.id}" role="button" tabindex="0"
                 aria-pressed="${s.id === selectedId}"
                 title="${tooltipFor(s)}">
+             <span class="slot">${glyphFor(s)}</span>
+             ${s.bg ? GLYPH.bgBadge() : ""}
              <span class="row-title">${s.title}</span>
              <span class="trail">
                ${s.conflict ? GLYPH.conflict() : ""}
-               ${glyphFor(s)}
+               ${s.status === "busy" && s.subagents > 0 ? `<span class="subcount">${s.subagents}</span>` : ""}
                ${GLYPH.xmark()}
              </span>
            </div>`
@@ -384,17 +538,49 @@
     if (footEl) footEl.textContent = "New Session";
 
     // Terminal
-    const body = beat.resumed && selectedId === "refactor-sidebar"
-      ? RESUME_TERM
-      : T[selectedId] || T["refactor-sidebar"];
+    const sess = beat.projects.flatMap((p) => p.sessions).find((x) => x.id === selectedId)
+      || beat.projects[0].sessions[0];
+    termEl.innerHTML = terminalFor(beat.resumed && sess.id === "refactor-sidebar" ? RESUMED : T[sess.id], sess);
+    startSpin();
+  }
 
-    termEl.innerHTML =
-      `<div class="term-body">${body}</div>
-       <div class="inputbox"><span class="marker">❯</span><span class="caret"></span></div>
-       <div class="term-status">
-         <span>${selectedId}</span>
-         <span>${beat.projects.find((p) => p.sessions.some((s) => s.id === selectedId))?.path || ""}</span>
-       </div>`;
+  /* The pane follows the session's status: spinner while busy, the permission
+     dialog while waiting, and the finished turn's footer once idle. */
+  function terminalFor(t, s) {
+    let tail = "";
+    let foot = composer(s);
+    if (s.status === "busy") {
+      tail =
+        `<span class="l spin-row"><span class="glyph-s">${SPIN_GLYPHS[3]}</span>` +
+        `<span class="verb">${t.spin.verb}…</span> ` +
+        `<span class="stat">(<span class="secs" data-s="${t.spin.secs}">${t.spin.secs}s</span> · ↓ ${t.spin.tokens} tokens)</span></span>`;
+    } else if (s.status === "waiting" && T[s.id].dialog) {
+      foot = dialog(T[s.id].dialog);
+    } else {
+      tail =
+        (t.tail ? line("") + t.tail : "") +
+        line("") +
+        line(`<span class="t-sub">✻ ${t.took || "Crunched for 40s"}${s.bg ? " · done 10:50 AM · 1 shell still running" : ""}</span>`);
+    }
+    return `<div class="term-body">${t.body}${tail}</div><div class="term-foot">${foot}</div>`;
+  }
+
+  /* Cycle the spinner glyph and count the seconds up, as the real row does.
+     One interval, restarted on every render, so it can never stack. */
+  let spinTimer = null;
+  function startSpin() {
+    clearInterval(spinTimer);
+    spinTimer = null;
+    const glyph = termEl.querySelector(".glyph-s");
+    if (!glyph || reduceMotion) return;
+    const secs = termEl.querySelector(".secs");
+    let n = 3;
+    const t0 = Date.now();
+    spinTimer = setInterval(() => {
+      if (!glyph.isConnected) return clearInterval(spinTimer);
+      glyph.textContent = SPIN_GLYPHS[++n % SPIN_GLYPHS.length];
+      secs.textContent = +secs.dataset.s + Math.floor((Date.now() - t0) / 1000) + "s";
+    }, 220);
   }
 
   function selectedFor(beat) {
