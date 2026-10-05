@@ -115,6 +115,81 @@ final class WorkspaceTests: XCTestCase {
         XCTAssertEqual(text(second, "b.txt"), "b2\n")
     }
 
+    /// A git SIGKILLed mid-checkout (the timeout's escalation, an OOM kill, power loss) leaves
+    /// `index.lock` in the worktree's admin dir. Without recovery every later run on that slot
+    /// fails with "index.lock exists" until someone deletes it by hand.
+    func testStaleIndexLockDoesNotWedgeSlot() async throws {
+        let repo = try makeRepo()
+        let store = Workspace(root: TempRepo.scratch(), poolSize: 1)
+        let first = try await store.checkout(controller: controller, ref: try await push(repo, to: store), pin: false)
+        let gitDir = try TempRepo.git(["rev-parse", "--absolute-git-dir"], in: first.path)
+        await store.release(first)
+        FileManager.default.createFile(atPath: gitDir + "/index.lock", contents: Data())
+        FileManager.default.createFile(atPath: gitDir + "/locked", contents: Data("killed".utf8))
+
+        repo.write("a.txt", "after the crash\n")
+        let second = try await store.checkout(controller: controller, ref: try await push(repo, to: store), pin: false)
+
+        XCTAssertEqual(text(second, "a.txt"), "after the crash\n")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: gitDir + "/index.lock"))
+    }
+
+    /// A slot whose worktree is broken beyond a stale lock (its admin dir gone) is rebuilt,
+    /// not left failing every run.
+    func testBrokenSlotIsRebuilt() async throws {
+        let repo = try makeRepo()
+        let store = Workspace(root: TempRepo.scratch(), poolSize: 1)
+        let first = try await store.checkout(controller: controller, ref: try await push(repo, to: store), pin: false)
+        let gitDir = try TempRepo.git(["rev-parse", "--absolute-git-dir"], in: first.path)
+        await store.release(first)
+        try FileManager.default.removeItem(atPath: gitDir)
+
+        repo.write("a.txt", "rebuilt\n")
+        let second = try await store.checkout(controller: controller, ref: try await push(repo, to: store), pin: false)
+        XCTAssertEqual(second.path, first.path)
+        XCTAssertEqual(text(second, "a.txt"), "rebuilt\n")
+    }
+
+    /// The host must ignore what the controller ignores. A path ignored only by the
+    /// controller's `info/exclude` (or global excludes file) is not ignored by `.gitignore` on
+    /// the host, so without shipping those rules every apply's `clean -fd` deletes it (no
+    /// incremental builds) and every result commit captures it as a "change".
+    func testControllerOnlyExcludesHonoredOnHost() async throws {
+        let repo = try makeRepo()
+        repo.write(".git/info/exclude", "# local only\nlocal-cache/\n")
+        let store = Workspace(root: TempRepo.scratch(), poolSize: 1)
+        let first = try await store.checkout(controller: controller, ref: try await push(repo, to: store), pin: false)
+        try FileManager.default.createDirectory(at: first.path.appendingPathComponent("local-cache"), withIntermediateDirectories: true)
+        try Data("warm".utf8).write(to: first.path.appendingPathComponent("local-cache/x.o"))
+
+        let captured = try await store.resultCommit(lease: first, runID: "r1")
+        XCTAssertNil(captured, "a controller-ignored path is not a result")
+        await store.release(first)
+
+        repo.write("a.txt", "a2\n")
+        let second = try await store.checkout(controller: controller, ref: try await push(repo, to: store), pin: false)
+        XCTAssertEqual(text(second, "local-cache/x.o"), "warm", "clean -fd must not delete it")
+        XCTAssertFalse(exists(second, ".flightdeck-excludes"), "the rules live outside the tree")
+    }
+
+    /// After a hostd restart `exec` must land in the slot the worktree last ran in, not
+    /// whichever slot number sorts first.
+    func testExistingCheckoutAfterRestartPicksMostRecentSlot() async throws {
+        let repo = try makeRepo()
+        let root = TempRepo.scratch()
+        let store = Workspace(root: root, poolSize: 2)
+        let s1 = try await push(repo, to: store)
+        repo.write("a.txt", "newest\n"); let s2 = try await push(repo, to: store)
+        let older = try await store.checkout(controller: controller, ref: s1, pin: false)
+        try await Task.sleep(nanoseconds: 1_100_000_000)
+        let newer = try await store.checkout(controller: controller, ref: s2, pin: false)
+        XCTAssertNotEqual(older.slot, newer.slot)
+
+        let found = try await Workspace(root: root).existingCheckout(controller: controller, repoRoot: s1.repoRoot, wtKey: s1.wtKey)
+        XCTAssertEqual(found.slot, newer.slot)
+        XCTAssertEqual(text(found, "a.txt"), "newest\n")
+    }
+
     // MARK: - Pool (§4.6)
 
     func testPoolLocksAndQueues() async throws {
@@ -361,22 +436,49 @@ final class WorkspaceTests: XCTestCase {
                        try repo.git("rev-parse", "HEAD"))
 
         let lease = try await store.checkout(controller: controller, ref: refs.last!, pin: false)
-        for run in ["fetched", "fresh"] {
-            try Data(run.utf8).write(to: lease.path.appendingPathComponent("\(run).txt"))
-            let commit = try await store.resultCommit(lease: lease, runID: run)
-            XCTAssertNotNil(commit)
-        }
-        let bundle = try await store.resultBundle(controller: controller, repoRoot: refs[0].repoRoot, runID: "fetched")
-        XCTAssertNotNil(bundle)
+        try Data("fresh".utf8).write(to: lease.path.appendingPathComponent("fresh.txt"))
+        let commit = try await store.resultCommit(lease: lease, runID: "fresh")
+        XCTAssertNotNil(commit)
 
-        func results() throws -> [String] {
-            try TempRepo.git(["for-each-ref", "--format=%(refname:lstrip=3)", "refs/fd/results/"], in: storeGit)
-                .split(separator: "\n").map(String.init).sorted()
-        }
         try await store.gc(now: Date())
-        XCTAssertEqual(try results(), ["fresh"], "a fetched result expires at the next gc")
+        let kept = try await store.resultBundle(controller: controller, repoRoot: refs[0].repoRoot, runID: "fresh")
+        XCTAssertNotNil(kept, "an unacked result outlives a gc inside its TTL")
         try await store.gc(now: Date().addingTimeInterval(25 * 3600))
-        XCTAssertEqual(try results(), [], "an unfetched result expires after 24h")
+        let expired = await thrown { try await store.resultBundle(controller: controller, repoRoot: refs[0].repoRoot, runID: "fresh") }
+        XCTAssertEqual(expired as? SyncError, .resultExpired)
+    }
+
+    /// A transfer that drops after the bundle was made must not lose the run's edits. The
+    /// result stays until the controller acks it, so a retry gets the same bundle; and "this
+    /// run changed nothing" (nil) must stay distinguishable from "this result is gone" (throws),
+    /// or a lost result would read as a run that edited nothing.
+    func testResultSurvivesUntilAcked() async throws {
+        let repo = try makeRepo()
+        let store = Workspace(root: TempRepo.scratch())
+        let s1 = try await push(repo, to: store)
+        let lease = try await store.checkout(controller: controller, ref: s1, pin: false)
+        let none = try await store.resultCommit(lease: lease, runID: "quiet")
+        XCTAssertNil(none)
+        try Data("edit".utf8).write(to: lease.path.appendingPathComponent("a.txt"))
+        let commit = try await store.resultCommit(lease: lease, runID: "busy")
+        XCTAssertNotNil(commit)
+        await store.release(lease)
+
+        let first = try await store.resultBundle(controller: controller, repoRoot: s1.repoRoot, runID: "busy")
+        XCTAssertNotNil(first)
+        try await store.gc(now: Date())
+        let retry = try await store.resultBundle(controller: controller, repoRoot: s1.repoRoot, runID: "busy")
+        XCTAssertNotNil(retry, "a dropped transfer is retried, not lost")
+
+        let quiet = try await store.resultBundle(controller: controller, repoRoot: s1.repoRoot, runID: "quiet")
+        XCTAssertNil(quiet, "nothing changed is nil, not an error")
+        let unknown = await thrown { try await store.resultBundle(controller: controller, repoRoot: s1.repoRoot, runID: "never") }
+        XCTAssertEqual(unknown as? SyncError, .resultExpired)
+        XCTAssertEqual((unknown as? SyncError)?.code, "result_expired")
+
+        try await store.ackResult(controller: controller, repoRoot: s1.repoRoot, runID: "busy")
+        let acked = await thrown { try await store.resultBundle(controller: controller, repoRoot: s1.repoRoot, runID: "busy") }
+        XCTAssertEqual(acked as? SyncError, .resultExpired, "an acked result is the controller's now")
     }
 
     private func tarListing(_ tar: URL) throws -> [String] {

@@ -44,6 +44,14 @@ public enum SyncError: Error, Equatable, CustomStringConvertible {
     case noCheckout
     /// `prune` would delete a checkout a run or service still holds.
     case runActive
+    /// The run's result is unknown, past its TTL, or already acked: distinct from "the run
+    /// changed nothing" (nil), so a lost result never reads as an empty one.
+    case resultExpired
+    /// A result path that is absolute, has a `.`, `..` or `.git` component, or sits under a
+    /// symlink: writing it could escape the worktree or plant a git hook.
+    case unsafePath(String)
+    /// git older than 2.40, which lacks `merge-tree --write-tree --merge-base`.
+    case gitTooOld(String)
 
     public var code: String {
         switch self {
@@ -52,6 +60,9 @@ public enum SyncError: Error, Equatable, CustomStringConvertible {
         case .treeMismatch: return "tree_mismatch"
         case .noCheckout: return "no_checkout"
         case .runActive: return "run_active"
+        case .resultExpired: return "result_expired"
+        case .gitTooOld: return "git_too_old"
+        case .unsafePath: return "unsafe_path"
         case .unbornHead, .bundleLacksSnapshot, .invalidName, .artifactTracked: return "unsupported"
         }
     }
@@ -69,6 +80,9 @@ public enum SyncError: Error, Equatable, CustomStringConvertible {
             return "fetch glob \"\(glob)\" matches tracked file \(path); tracked files come back through `flightdeck diff`/`apply`"
         case .noCheckout: return "this worktree has never been synced to the host; use `flightdeck run` first"
         case .runActive: return "a run or service is still using this workspace; stop it first"
+        case .resultExpired: return "the run's result is gone from the host (fetched already, or older than 24h)"
+        case .unsafePath(let path): return "the host's result writes an unsafe path \"\(path)\"; nothing was applied"
+        case .gitTooOld(let version): return "git \(version) is too old; delegation needs git 2.40 or later"
         }
     }
 }
@@ -134,16 +148,29 @@ public struct GitRunner: Sendable {
             .first { FileManager.default.isExecutableFile(atPath: $0.path) }
     }
 
-    /// Runs `git args` in `dir`. Throws `GitError.failed` for a status outside `accept`.
+    /// For the calls that move a whole repository: a first `bundle create`, its `fetch`, and a
+    /// big `checkout` can legitimately take far longer than the default.
+    public static let longTimeout: TimeInterval = 3600
+
+    /// Runs `git args` in `dir`. Throws `GitError.failed` for a status outside `accept`, and
+    /// `SyncError.gitTooOld` (once per executable, then cached) for git older than 2.40.
     @discardableResult
     public func run(_ args: [String], in dir: URL? = nil, env extra: [String: String] = [:],
-                    input: Data? = nil, accept: Set<Int32> = [0]) throws -> Output {
+                    input: Data? = nil, accept: Set<Int32> = [0], timeout: TimeInterval? = nil) throws -> Output {
         guard let executable else { throw GitError.notFound }
+        try Self.requireSupported(executable, environment: environment)
+        return try execute(executable, args, in: dir, env: environment.merging(extra) { $1 }, input: input,
+                           accept: accept, timeout: timeout ?? self.timeout)
+    }
+
+    private func execute(_ executable: URL, _ args: [String], in dir: URL?, env: [String: String], input: Data?,
+                         accept: Set<Int32>, timeout: TimeInterval) throws -> Output {
+        Self.ignoreSIGPIPE
         let p = Process()
         p.executableURL = executable
         p.arguments = args
         if let dir { p.currentDirectoryURL = dir }
-        p.environment = environment.merging(extra) { $1 }
+        p.environment = env
         let out = Pipe(), err = Pipe()
         p.standardOutput = out
         p.standardError = err
@@ -154,18 +181,26 @@ public struct GitRunner: Sendable {
         try p.run()
 
         // Both pipes drain on their own threads: a git that fills stderr while we block on
-        // stdout (or the reverse) would otherwise deadlock until the timeout.
+        // stdout (or the reverse) would otherwise deadlock until the timeout. Each reader closes
+        // its own read end once it hits EOF: Foundation never closes them, and two leaked
+        // descriptors per call took a test process past 800 open fds, where Linux corelibs'
+        // `/proc/self/fd` walk in `Process.run` segfaults. Closing from the reader, not here,
+        // also covers the timeout path: a grandchild that outlives a killed git holds the write
+        // end, and the read end must stay open until it lets go, then close.
         let box = Box()
         let drained = DispatchGroup()
         for (handle, isOut) in [(out.fileHandleForReading, true), (err.fileHandleForReading, false)] {
             DispatchQueue.global().async(group: drained) {
                 let data = handle.readDataToEndOfFile()
+                try? handle.close()
                 box.lock.withLock { if isOut { box.out = data } else { box.err = data } }
             }
         }
         if let inPipe, let input {
             DispatchQueue.global().async {
-                inPipe.fileHandleForWriting.write(input)
+                // A git that exits without reading all of stdin makes this write fail with
+                // EPIPE; with SIGPIPE ignored that is an error we drop, not a dead process.
+                try? inPipe.fileHandleForWriting.write(contentsOf: input)
                 try? inPipe.fileHandleForWriting.close()
             }
         }
@@ -179,14 +214,7 @@ public struct GitRunner: Sendable {
             throw GitError.timedOut(args: args, seconds: timeout)
         }
         // A grandchild (a credential helper, a filter) still holding a pipe must not pin us.
-        // Once drained, the read ends are closed here: Foundation never closes them, and two
-        // leaked descriptors per call took a test process past 800 open fds, where Linux
-        // corelibs' `/proc/self/fd` walk in `Process.run` segfaults. If the drain timed out a
-        // reader still owns its handle, so that rare call leaks rather than closing under it.
-        if drained.wait(timeout: .now() + 5) == .success {
-            try? out.fileHandleForReading.close()
-            try? err.fileHandleForReading.close()
-        }
+        _ = drained.wait(timeout: .now() + 5)
         let (stdout, stderr) = box.lock.withLock { (box.out, box.err) }
         let status = p.terminationReason == .exit ? p.terminationStatus : 128 + p.terminationStatus
         let result = Output(status: status, stdout: stdout, stderr: String(decoding: stderr, as: UTF8.self))
@@ -196,9 +224,45 @@ public struct GitRunner: Sendable {
         return result
     }
 
+    /// SIGPIPE's default action kills the whole process, and in the hostd that is every run and
+    /// service on the host. Writing stdin to a git that has already exited raises it, so the
+    /// process ignores it once and write errors surface as EPIPE instead. Process-wide by
+    /// nature; every server process wants this anyway.
+    private static let ignoreSIGPIPE: Void = { signal(SIGPIPE, SIG_IGN) }()
+
+    private static let versionLock = NSLock()
+    nonisolated(unsafe) private static var checkedVersions: [String: String?] = [:]
+
+    /// Checks `git --version` once per executable. `merge-tree --write-tree --merge-base`
+    /// (apply) needs 2.40; an older git would otherwise fail deep inside an apply with a usage
+    /// error that names neither the cause nor the fix.
+    private static func requireSupported(_ executable: URL, environment: [String: String]) throws {
+        let cached = versionLock.withLock { checkedVersions[executable.path] }
+        if let cached {
+            if let tooOld = cached { throw SyncError.gitTooOld(tooOld) }
+            return
+        }
+        let probe = GitRunner(isolated: true)
+        let text = (try? probe.execute(executable, ["--version"], in: nil, env: environment, input: nil,
+                                       accept: [0], timeout: 30).text) ?? ""
+        let verdict: String? = isSupported(versionOutput: text) ? nil : (text.split(separator: " ").dropFirst(2).first.map(String.init) ?? text)
+        versionLock.withLock { checkedVersions[executable.path] = .some(verdict) }
+        if let verdict { throw SyncError.gitTooOld(verdict) }
+    }
+
+    /// True for `git version X.Y…` with X.Y ≥ 2.40.
+    static func isSupported(versionOutput: String) -> Bool {
+        let words = versionOutput.split(separator: " ")
+        guard words.count >= 3, words[0] == "git", words[1] == "version" else { return false }
+        let parts = words[2].split(separator: ".").prefix(2).map { Int($0.prefix { $0.isNumber }) ?? 0 }
+        guard parts.count == 2 else { return false }
+        return parts[0] > 2 || (parts[0] == 2 && parts[1] >= 40)
+    }
+
     /// `run(...).text`: trimmed stdout.
-    public func text(_ args: [String], in dir: URL? = nil, env: [String: String] = [:], input: Data? = nil) throws -> String {
-        try run(args, in: dir, env: env, input: input).text
+    public func text(_ args: [String], in dir: URL? = nil, env: [String: String] = [:], input: Data? = nil,
+                     timeout: TimeInterval? = nil) throws -> String {
+        try run(args, in: dir, env: env, input: input, timeout: timeout).text
     }
 
     /// NUL-separated stdout (`-z` output) split into fields, dropping the trailing empty one.

@@ -14,20 +14,36 @@ import Foundation
 /// user's index, branches and stash are never touched, so `git status` afterwards simply shows
 /// the applied changes as unstaged edits.
 ///
+/// Every path comes from the host, so none is trusted: an absolute path, a `.`, `..` or
+/// `.git` component, or a parent directory that is a symlink refuses the whole apply before
+/// anything is written.
+///
 /// Uses `merge-tree --write-tree --merge-base`, which needs git 2.40 or later.
 public struct ResultApplier: Sendable {
     public enum Outcome: Sendable, Equatable {
+        /// Fully applied; the pending result is dropped.
         case clean
-        /// Applied, but these paths carry conflict markers (or, for a path the result adds
-        /// where an ignored local file already sits, were left alone).
+        /// Applied except these paths, which carry conflict markers or were left alone because
+        /// the local file changed under the apply. The pending result is kept for another try.
         case conflicts([String])
         /// No pending result for the run, or it is already fully applied.
         case nothing
     }
 
     private let git: GitRunner
+    /// Test seam: runs after the merge is computed and before the first write, where a
+    /// concurrent save by the user lands in real life.
+    private let beforeWrite: (@Sendable () -> Void)?
 
-    public init(git: GitRunner = GitRunner()) { self.git = git }
+    public init(git: GitRunner = GitRunner()) {
+        self.git = git
+        self.beforeWrite = nil
+    }
+
+    init(git: GitRunner = GitRunner(), beforeWrite: (@Sendable () -> Void)?) {
+        self.git = git
+        self.beforeWrite = beforeWrite
+    }
 
     private static func ref(_ runID: String) -> String { "refs/flightdeck/results/\(runID)" }
 
@@ -41,7 +57,8 @@ public struct ResultApplier: Sendable {
                 throw SyncError.bundleLacksSnapshot(runID)
             }
             try git.run(["fetch", "-q", "--no-tags", "--no-write-fetch-head", bundle.path,
-                         "+\(head[head.index(after: space)...]):\(Self.ref(runID))"], in: worktree)
+                         "+\(head[head.index(after: space)...]):\(Self.ref(runID))"], in: worktree,
+                        timeout: GitRunner.longTimeout)
             return String(head[..<space])
         }
     }
@@ -56,10 +73,11 @@ public struct ResultApplier: Sendable {
         }
     }
 
-    /// Drops the pending result (after an apply, or when the user declines it).
+    /// Drops the pending result (when the user declines it). A no-op when there is none.
     public func discard(worktree: URL, runID: String) async throws {
         let runID = try SyncName.validate(runID)
         try await GitRunner.offload { [git] in
+            guard (try? git.text(["rev-parse", "-q", "--verify", Self.ref(runID)], in: worktree)) != nil else { return }
             _ = try git.run(["update-ref", "-d", Self.ref(runID)], in: worktree)
         }
     }
@@ -94,45 +112,98 @@ public struct ResultApplier: Sendable {
         // -z --name-only: <tree> NUL <conflicted path> NUL ... NUL NUL <messages>.
         let fields = merged.stdout.split(separator: 0, omittingEmptySubsequences: false).map { String(decoding: $0, as: UTF8.self) }
         let mergedTree = fields[0]
-        var conflicts = merged.status == 1 ? Array(fields.dropFirst().prefix { !$0.isEmpty }) : []
-        guard mergedTree != oursTree else { return conflicts.isEmpty ? .nothing : .conflicts(Array(Set(conflicts)).sorted()) }
+        var conflicts = Set(merged.status == 1 ? Array(fields.dropFirst().prefix { !$0.isEmpty }) : [])
 
         let changes = try git.fields(["diff-tree", "-r", "-z", "--no-renames", "--name-status", oursTree, mergedTree], in: top)
-        let fm = FileManager.default
-        for i in stride(from: 0, to: changes.count - 1, by: 2) {
-            let (status, path) = (changes[i], changes[i + 1])
+        let pairs = stride(from: 0, to: changes.count - 1, by: 2).map { (status: changes[$0], path: changes[$0 + 1]) }
+        let realTop = top.resolvingSymlinksInPath()
+        for (_, path) in pairs { try Self.checkSafe(path, under: realTop) }
+        let before = try entries(of: oursTree, paths: pairs.map(\.path), in: top)
+
+        beforeWrite?()
+        for (status, path) in pairs {
             let file = top.appendingPathComponent(path)
+            // The file must still be what "ours" recorded, or the user saved it after the merge
+            // was computed: writing now would throw that save away.
+            guard try isUnchanged(file, path: path, since: before[path], in: top) else {
+                conflicts.insert(path)
+                continue
+            }
             if status == "D" {
-                try? fm.removeItem(at: file)
-                continue
+                try? FileManager.default.removeItem(at: file)
+            } else {
+                try write(path, from: mergedTree, to: file, in: top)
             }
-            // An added path that already exists locally was not in "ours", so it is ignored
-            // here: refuse to replace it and report it, rather than overwrite the user's file.
-            if status == "A", (try? fm.attributesOfItem(atPath: file.path)) != nil {
-                conflicts.append(path)
-                continue
-            }
-            try write(path, from: mergedTree, to: file, in: top)
         }
-        return conflicts.isEmpty ? .clean : .conflicts(Array(Set(conflicts)).sorted())
+        if mergedTree == oursTree && conflicts.isEmpty {
+            try git.run(["update-ref", "-d", Self.ref(runID)], in: top)
+            return .nothing
+        }
+        guard conflicts.isEmpty else { return .conflicts(conflicts.sorted()) }
+        try git.run(["update-ref", "-d", Self.ref(runID)], in: top)
+        return .clean
     }
 
-    /// Writes one blob from `tree` to `file`, carrying git's two modes (executable bit and
-    /// symlink). A gitlink is skipped: submodules are refused at snapshot time anyway.
+    /// Refuses a host-supplied path that could write outside the worktree or into git's own
+    /// files: absolute, a `.`/`..`/`.git` component (any case: macOS's file system folds it),
+    /// or an existing parent that is a symlink, which would carry the write wherever it points.
+    static func checkSafe(_ path: String, under top: URL) throws {
+        let parts = path.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
+        guard !path.hasPrefix("/"), !parts.contains(where: { $0.isEmpty || $0 == "." || $0 == ".." || $0.lowercased() == ".git" })
+        else { throw SyncError.unsafePath(path) }
+        var dir = top
+        let fm = FileManager.default
+        for part in parts.dropLast() {
+            dir = dir.appendingPathComponent(part)
+            guard let type = (try? fm.attributesOfItem(atPath: dir.path))?[.type] as? FileAttributeType else { break }
+            if type == .typeSymbolicLink { throw SyncError.unsafePath(path) }
+        }
+    }
+
+    /// `path -> (mode, object id)` in `tree`, for the given paths.
+    private func entries(of tree: String, paths: [String], in top: URL) throws -> [String: (mode: String, id: String)] {
+        guard !paths.isEmpty else { return [:] }
+        let rows = try git.fields(["ls-tree", "-r", "-z", "--full-tree", tree, "--"] + paths.map { ":(literal)\($0)" }, in: top)
+        var out: [String: (mode: String, id: String)] = [:]
+        for row in rows {
+            let halves = row.split(separator: "\t", maxSplits: 1)
+            let meta = halves.first?.split(separator: " ") ?? []
+            guard halves.count == 2, meta.count == 3 else { continue }
+            out[String(halves[1])] = (String(meta[0]), String(meta[2]))
+        }
+        return out
+    }
+
+    /// Whether the file on disk is still what "ours" recorded for it (absent, when ours had no
+    /// entry). Hashed with the path's clean filters, the way `add` saw it.
+    private func isUnchanged(_ file: URL, path: String, since entry: (mode: String, id: String)?, in top: URL) throws -> Bool {
+        let fm = FileManager.default
+        let attrs = try? fm.attributesOfItem(atPath: file.path)
+        guard let entry else { return attrs == nil }
+        guard let attrs else { return false }
+        if entry.mode == "120000" {
+            guard attrs[.type] as? FileAttributeType == .typeSymbolicLink,
+                  let target = try? fm.destinationOfSymbolicLink(atPath: file.path) else { return false }
+            return try git.text(["hash-object", "--stdin"], in: top, input: Data(target.utf8)) == entry.id
+        }
+        return try git.text(["hash-object", "--path=\(path)", file.path], in: top) == entry.id
+    }
+
+    /// Writes one blob from `tree` to `file` as a checkout would: through the path's smudge
+    /// and eol filters, with git's two modes (executable bit and symlink). A gitlink is
+    /// skipped: submodules are refused at snapshot time anyway.
     private func write(_ path: String, from tree: String, to file: URL, in top: URL) throws {
-        let entry = try git.fields(["ls-tree", "-z", tree, "--", path], in: top).first ?? ""
-        let meta = entry.split(separator: "\t", maxSplits: 1).first?.split(separator: " ") ?? []
-        guard meta.count == 3, meta[1] == "blob" else { return }
-        let mode = meta[0]
-        let data = try git.run(["cat-file", "blob", String(meta[2])], in: top).stdout
+        guard let entry = try entries(of: tree, paths: [path], in: top)[path] else { return }
         let fm = FileManager.default
         try fm.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
         try? fm.removeItem(at: file)
-        if mode == "120000" {
-            try fm.createSymbolicLink(atPath: file.path, withDestinationPath: String(decoding: data, as: UTF8.self))
-        } else {
+        if entry.mode == "120000" {
+            let target = try git.run(["cat-file", "blob", entry.id], in: top).stdout
+            try fm.createSymbolicLink(atPath: file.path, withDestinationPath: String(decoding: target, as: UTF8.self))
+        } else if entry.mode.hasPrefix("100") {
+            let data = try git.run(["cat-file", "--filters", "--path=\(path)", entry.id], in: top).stdout
             try data.write(to: file)
-            try fm.setAttributes([.posixPermissions: mode == "100755" ? 0o755 : 0o644], ofItemAtPath: file.path)
+            try fm.setAttributes([.posixPermissions: entry.mode == "100755" ? 0o755 : 0o644], ofItemAtPath: file.path)
         }
     }
 }

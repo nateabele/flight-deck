@@ -270,6 +270,48 @@ final class SnapshotterTests: XCTestCase {
         XCTAssertEqual(try repo.git("for-each-ref", "refs/flightdeck/"), "", "a refused snapshot records nothing")
     }
 
+    /// LFS is refused *before* `add`: with git-lfs installed, `add` runs its clean filter over
+    /// every matching file (slow, and it writes LFS objects into the user's repo) only to be
+    /// refused afterwards. The filter here leaves a marker if it ever runs.
+    func testLFSRefusedBeforeTheCleanFilterRuns() async throws {
+        let repo = try TempRepo()
+        repo.write("a.txt", "a\n")
+        try repo.commitAll()
+        let marker = repo.url.deletingLastPathComponent().appendingPathComponent("clean-filter-ran")
+        // Both keys: an installed git-lfs sets `filter.lfs.process` globally, and it wins over
+        // `clean`, so overriding only `clean` would test nothing on a machine that has git-lfs.
+        try repo.git("config", "filter.lfs.clean", "touch '\(marker.path)'; cat")
+        try repo.git("config", "filter.lfs.process", "sh -c 'touch \"\(marker.path)\"; exit 1'")
+        repo.write(".gitattributes", "*.bin filter=lfs\n")
+        repo.write("new.bin", "data\n")
+
+        let error = await thrown { try await Snapshotter().snapshot(worktree: repo.url, host: "mini", include: []) }
+
+        XCTAssertEqual(error as? SyncError, .lfsUnsupported)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path), "the LFS clean filter must never run")
+    }
+
+    /// An agent can run `flightdeck run` from inside a git hook, where GIT_DIR and
+    /// GIT_INDEX_FILE point at the user's own repo and index. Inherited, they would aim the
+    /// snapshot's temporary index at the user's real one.
+    func testInheritedGitEnvironmentIsScrubbed() async throws {
+        let repo = try TempRepo()
+        repo.write("a.txt", "a\n")
+        try repo.commitAll()
+        repo.write("a.txt", "edit\n")
+        let decoy = TempRepo.scratch()
+        setenv("GIT_DIR", decoy.path, 1)
+        setenv("GIT_INDEX_FILE", decoy.appendingPathComponent("index").path, 1)
+        setenv("GIT_WORK_TREE", decoy.path, 1)
+        let git = GitRunner()
+        unsetenv("GIT_DIR"); unsetenv("GIT_INDEX_FILE"); unsetenv("GIT_WORK_TREE")
+
+        let ref = try await Snapshotter(git: git).snapshot(worktree: repo.url, host: "mini", include: [])
+
+        XCTAssertEqual(repo.show(ref.commit, "a.txt"), "edit")
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: decoy.path), [])
+    }
+
     /// Submodules are out of v1 (C0 amendment A1): the host has no store to resolve a gitlink
     /// from, so the submodule's directory would arrive empty and the run would fail confusingly.
     func testSubmoduleRefused() async throws {
@@ -354,5 +396,52 @@ final class SnapshotterTests: XCTestCase {
 
     private func size(_ url: URL) throws -> Int {
         (try FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.intValue ?? 0
+    }
+}
+
+final class GitRunnerTests: XCTestCase {
+    /// Open descriptors: on Linux only pipes, the kind a git call opens, because other suites'
+    /// sockets and dispatch's own descriptors come and go in the background and would make a
+    /// whole-process count measure them instead.
+    func openFDs() -> Int {
+        #if os(Linux)
+        let fds = (try? FileManager.default.contentsOfDirectory(atPath: "/proc/self/fd")) ?? []
+        return fds.filter { ((try? FileManager.default.destinationOfSymbolicLink(atPath: "/proc/self/fd/\($0)")) ?? "").hasPrefix("pipe:") }.count
+        #else
+        return ((try? FileManager.default.contentsOfDirectory(atPath: "/dev/fd")) ?? []).count
+        #endif
+    }
+
+    /// `merge-tree --write-tree --merge-base` (apply) needs 2.40; an older git would fail
+    /// mid-apply with a usage error instead of saying what is wrong.
+    func testVersionGate() {
+        XCTAssertTrue(GitRunner.isSupported(versionOutput: "git version 2.40.0"))
+        XCTAssertTrue(GitRunner.isSupported(versionOutput: "git version 2.50.1 (Apple Git-155)"))
+        XCTAssertTrue(GitRunner.isSupported(versionOutput: "git version 3.0.0"))
+        XCTAssertFalse(GitRunner.isSupported(versionOutput: "git version 2.39.5"))
+        XCTAssertFalse(GitRunner.isSupported(versionOutput: "git version 1.9.1"))
+        XCTAssertFalse(GitRunner.isSupported(versionOutput: "nonsense"))
+        XCTAssertEqual(SyncError.gitTooOld("2.39.5").code, "git_too_old")
+    }
+
+    /// A timed-out git whose grandchild still holds the pipes must not leak them for good:
+    /// a host that times out now and then would creep towards the fd limit.
+    func testTimeoutPathReleasesPipes() async throws {
+        let git = GitRunner(timeout: 0.5)
+        let before = openFDs()
+        let start = Date()
+        XCTAssertThrowsError(try git.run(["-c", "alias.hang=!sleep 2", "hang"])) { error in
+            guard case .timedOut? = error as? GitError else { return XCTFail("\(error)") }
+        }
+        XCTAssertLessThan(Date().timeIntervalSince(start), 8)
+        for _ in 0..<100 where openFDs() > before { try await Task.sleep(nanoseconds: 100_000_000) }
+        XCTAssertLessThanOrEqual(openFDs(), before)
+    }
+
+    /// git exiting without reading its stdin must not kill the caller with SIGPIPE: in the
+    /// hostd that is every run and every service on the host.
+    func testUnreadStdinDoesNotRaiseSIGPIPE() throws {
+        let out = try GitRunner().run(["--version"], input: Data(count: 4 << 20))
+        XCTAssertTrue(out.text.hasPrefix("git version"))
     }
 }

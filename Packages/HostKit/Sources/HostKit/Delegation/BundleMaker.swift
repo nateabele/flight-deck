@@ -30,7 +30,8 @@ public struct BundleMaker: BundleMaking {
         defer { if existing == nil { _ = try? git.run(["update-ref", "-d", ref], in: worktree) } }
 
         let out = FileManager.default.temporaryDirectory.appendingPathComponent("fd-\(UUID().uuidString).bundle")
-        try git.run(["bundle", "create", "-q", out.path, ref] + (present.isEmpty ? [] : ["--not"] + present), in: worktree)
+        try git.run(["bundle", "create", "-q", out.path, ref] + (present.isEmpty ? [] : ["--not"] + present), in: worktree,
+                    timeout: GitRunner.longTimeout)
         return out
     }
 

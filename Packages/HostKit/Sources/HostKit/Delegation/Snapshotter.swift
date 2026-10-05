@@ -11,6 +11,9 @@ import Foundation
 /// The commit is deterministic: a fixed identity, and author and committer dates taken from
 /// `HEAD`. The same `HEAD` with the same files gives the same commit, so a re-run of unchanged
 /// code shares the host's checkout slot instead of taking another one (§4.6).
+///
+/// The commit message carries the controller's effective excludes (`info/exclude` and the
+/// resolved `core.excludesFile`), which `.gitignore` does not: see `SnapshotMessage`.
 public struct Snapshotter: SnapshotMaking {
     public let keep: Int
     private let git: GitRunner
@@ -45,16 +48,20 @@ public struct Snapshotter: SnapshotMaking {
         let index = try TempIndex(git: git, top: top, dir: gitDir, seed: head)
         defer { index.remove() }
 
-        try git.run(["add", "-A"], in: top, env: index.env)
         let includes = include.filter { FileManager.default.fileExists(atPath: top.appendingPathComponent($0).path) }
+        try refuseLFS(top: top, env: index.env, includes: includes)
+        try git.run(["add", "-A"], in: top, env: index.env)
         if !includes.isEmpty {
             try git.run(["add", "-f", "--"] + includes, in: top, env: index.env)
         }
-        try refuseUnsupported(top: top, env: index.env)
+        // After `add`: a nested repository only becomes a gitlink by being added.
+        let staged = try git.fields(["ls-files", "-s", "-z"], in: top, env: index.env)
+        if staged.contains(where: { $0.hasPrefix("160000 ") }) { throw SyncError.submodulesUnsupported }
 
         let tree = try git.text(["write-tree"], in: top, env: index.env)
         let date = try git.text(["show", "-s", "--format=%ct", head], in: top)
-        let commit = try git.text(["commit-tree", tree, "-p", head, "-m", "flightdeck snapshot"], in: top,
+        let message = SnapshotMessage.compose(excludes: try effectiveExcludes(top: top))
+        let commit = try git.text(["commit-tree", tree, "-p", head, "-m", message], in: top,
                                   env: ["GIT_AUTHOR_DATE": "@\(date) +0000", "GIT_COMMITTER_DATE": "@\(date) +0000"])
         try record(commit, host: host, in: top)
 
@@ -62,20 +69,44 @@ public struct Snapshotter: SnapshotMaking {
                            worktreeName: top.lastPathComponent, commit: commit, tree: tree)
     }
 
-    /// Refuses what v1 cannot reproduce on the host, before anything is recorded. LFS (§4.2.5):
-    /// the host would check out pointer files and run against them. Submodules (amendment A1):
-    /// the host has no store to resolve the gitlink from, so the directory would arrive empty.
-    private func refuseUnsupported(top: URL, env: [String: String]) throws {
-        let staged = try git.fields(["ls-files", "-s", "-z"], in: top, env: env)
-        if staged.contains(where: { $0.hasPrefix("160000 ") }) { throw SyncError.submodulesUnsupported }
-
-        let paths = staged.compactMap { $0.split(separator: "\t", maxSplits: 1).last.map(String.init) }
+    /// Refuses an LFS repo (§4.2.5): the host would check out pointer files and run against
+    /// them. Checked *before* `add`, over every path `add` would touch: with git-lfs installed,
+    /// `add` runs its clean filter on each matching file, which is slow and writes LFS objects
+    /// into the user's repo, all for a snapshot about to be refused.
+    private func refuseLFS(top: URL, env: [String: String], includes: [String]) throws {
+        var paths = try git.fields(["ls-files", "-z", "--cached", "--others", "--exclude-standard"], in: top, env: env)
+        if !includes.isEmpty {
+            paths += try git.fields(["ls-files", "-z", "--others", "--"] + includes, in: top, env: env)
+        }
         guard !paths.isEmpty else { return }
         let input = Data(paths.joined(separator: "\0").utf8 + [0])
         let attrs = try git.fields(["check-attr", "-z", "--stdin", "filter"], in: top, env: env, input: input)
         // -z output is path, attribute, value triples.
         if stride(from: 2, to: attrs.count, by: 3).contains(where: { attrs[$0] == "lfs" }) {
             throw SyncError.lfsUnsupported
+        }
+    }
+
+    /// The patterns this controller ignores beyond `.gitignore`: the resolved global
+    /// `core.excludesFile` (or git's XDG default), then `info/exclude`, in that order so the
+    /// repo's own file wins, as it does in git. Comments and blank lines are dropped.
+    private func effectiveExcludes(top: URL) throws -> [String] {
+        let fm = FileManager.default
+        var files: [String] = []
+        if let configured = try? git.text(["config", "--path", "core.excludesFile"], in: top), !configured.isEmpty {
+            files.append(configured)
+        } else {
+            let env = ProcessInfo.processInfo.environment
+            let xdg = env["XDG_CONFIG_HOME"].flatMap { $0.isEmpty ? nil : $0 }
+                ?? fm.homeDirectoryForCurrentUser.appendingPathComponent(".config").path
+            files.append("\(xdg)/git/ignore")
+        }
+        let info = try git.text(["rev-parse", "--git-path", "info/exclude"], in: top)
+        files.append(info.hasPrefix("/") ? info : top.appendingPathComponent(info).path)
+        return files.flatMap { file -> [String] in
+            guard let text = try? String(contentsOfFile: file, encoding: .utf8) else { return [] }
+            return text.split(separator: "\n").map { String($0).trimmingCharacters(in: .init(charactersIn: "\r")) }
+                .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty && !$0.hasPrefix("#") }
         }
     }
 
@@ -101,21 +132,50 @@ public struct Snapshotter: SnapshotMaking {
 
     /// The repo's oldest root commit (§4.1): a repo with several roots (a merged-in history)
     /// must name the same store from every clone, whichever root `rev-list` happens to list first.
+    /// Cached per toplevel: it walks all of history, and a repo's roots do not change.
     private func rootCommit(top: URL) throws -> String {
+        if let cached = Self.rootLock.withLock({ Self.roots[top.path] }) { return cached }
         let roots = try git.text(["rev-list", "--max-parents=0", "--timestamp", "HEAD"], in: top)
             .split(separator: "\n").compactMap { line -> (Int, String)? in
                 let parts = line.split(separator: " ")
                 guard parts.count == 2, let ts = Int(parts[0]) else { return nil }
                 return (ts, String(parts[1]))
             }
-        return roots.min { $0.0 != $1.0 ? $0.0 < $1.0 : $0.1 < $1.1 }!.1
+        let root = roots.min { $0.0 != $1.0 ? $0.0 < $1.0 : $0.1 < $1.1 }!.1
+        Self.rootLock.withLock { Self.roots[top.path] = root }
+        return root
     }
+
+    private static let rootLock = NSLock()
+    nonisolated(unsafe) private static var roots: [String: String] = [:]
 
     /// A host's display name as one ref component: anything git would refuse becomes `-`.
     static func refComponent(_ name: String) -> String {
         let allowed = Set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")
         let cleaned = String(name.map { allowed.contains($0) ? $0 : "-" })
         return cleaned.isEmpty ? "host" : cleaned
+    }
+}
+
+/// The snapshot commit's message. Beyond its subject it carries the controller's effective
+/// excludes, the ignore rules `.gitignore` does not: the host must ignore exactly what the
+/// controller ignores, or each apply's `clean -fd` deletes a locally ignored build directory
+/// and each result commit captures it. The message, rather than a side ref or a file in the
+/// tree: it travels inside the bundle with no wire change, it is not part of the tree, so
+/// the verified tree hash is unaffected, and the commit stays deterministic.
+enum SnapshotMessage {
+    static let subject = "flightdeck snapshot"
+    static let marker = "[flightdeck-excludes]"
+
+    static func compose(excludes: [String]) -> String {
+        excludes.isEmpty ? subject : "\(subject)\n\n\(marker)\n" + excludes.joined(separator: "\n")
+    }
+
+    /// The exclude patterns in a snapshot commit's message; empty when it has none.
+    static func excludes(in message: String) -> [String] {
+        let lines = message.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        guard let start = lines.firstIndex(of: marker) else { return [] }
+        return lines[(start + 1)...].filter { !$0.isEmpty }
     }
 }
 

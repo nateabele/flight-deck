@@ -7,7 +7,9 @@ import Foundation
 ///   store.git/                                  bare object store
 ///     refs/fd/heads/<wt-key>                    the local HEAD each worktree last sent
 ///     refs/fd/snapshots/<wt-key>/<n>            the last K snapshots per worktree
-///     refs/fd/results/<run-id>                  result commits until fetched or 24h old
+///     refs/fd/results/<run-id>                  result commits until acked or 24h old
+///     fd-results/<run-id>                       "this run changed nothing", same lifetime
+///     worktrees/<n>/flightdeck-excludes         the controller's excludes, per slot
 ///   checkouts/<wt-key>-<slot>/<worktree-name>/  one `git worktree` per pool slot
 /// <root>/runs/<run-id>/artifacts.tar            captured artifacts
 /// ```
@@ -94,7 +96,8 @@ public final class Workspace: WorkspaceStore, @unchecked Sendable {
                 let prefix = "refs/fd/snapshots/\(ref.wtKey)/"
                 let numbers = try numbered(prefix, in: store)
                 let next = (numbers.last ?? 0) + 1
-                try git.run(["fetch", "-q", "--no-tags", "--no-write-fetch-head", bundle.path, "\(bundleRef):\(prefix)\(next)"], in: store)
+                try git.run(["fetch", "-q", "--no-tags", "--no-write-fetch-head", bundle.path, "\(bundleRef):\(prefix)\(next)"],
+                            in: store, timeout: GitRunner.longTimeout)
                 // Early check, so a bad push fails at sync and not on the first checkout.
                 let tree = try git.text(["rev-parse", "\(ref.commit)^{tree}"], in: store)
                 guard tree == ref.tree else { throw SyncError.treeMismatch(expected: ref.tree, actual: tree) }
@@ -150,7 +153,7 @@ public final class Workspace: WorkspaceStore, @unchecked Sendable {
                 do {
                     try await GitRunner.offload { [self] in
                         try withStore(storeURL(controller: controller, repoRoot: ref.repoRoot)) {
-                            try apply(ref, at: path, store: storeURL(controller: controller, repoRoot: ref.repoRoot))
+                            try apply(ref, at: path, store: storeURL(controller: controller, repoRoot: ref.repoRoot), exclusive: true)
                         }
                     }
                 } catch {
@@ -248,24 +251,66 @@ public final class Workspace: WorkspaceStore, @unchecked Sendable {
     /// the snapshot exactly, while ignored build output (DerivedData, `node_modules`, `.build`)
     /// stays, so builds are incremental. Unchanged files keep their mtimes because git only
     /// rewrites what differs. Then the tree is verified (§4.4.3) before anything can run.
-    private func apply(_ ref: SnapshotRef, at path: URL, store: URL) throws {
+    ///
+    /// "Ignored" means what the controller ignores: the excludes its snapshot carries
+    /// (`SnapshotMessage`) are written into this slot's admin dir and given to `clean`.
+    ///
+    /// `exclusive` (no other holder of the slot) permits recovery. A git SIGKILLed mid-checkout
+    /// (our own timeout escalation, an OOM kill, power loss) leaves `index.lock` and possibly
+    /// `locked` behind, and every later run on the slot would fail on them forever. With nobody
+    /// else in the slot they can only be stale, so they are removed; and if the in-place apply
+    /// still fails, the slot is rebuilt from scratch rather than left wedged. With a sharer
+    /// (an `exec` beside a service) its git may be live, so nothing is touched.
+    private func apply(_ ref: SnapshotRef, at path: URL, store: URL, exclusive: Bool) throws {
         let fm = FileManager.default
-        if fm.fileExists(atPath: path.appendingPathComponent(".git").path) {
-            // A run that touched a file without changing it (a formatter, `touch`) leaves it
-            // stat-dirty, and `checkout --force` rewrites stat-dirty files, bumping the mtime and
-            // forcing a rebuild. Refreshing first re-hashes those and finds them clean.
-            try git.run(["update-index", "-q", "--refresh"], in: path, accept: [0, 1])
-            try git.run(["checkout", "-q", "--force", "--detach", ref.commit], in: path)
-            try git.run(["clean", "-fdq"], in: path)
-        } else {
-            // A slot directory without `.git` is a leftover from a prune or a crash mid-add.
+        var applied = false
+        if let admin = Self.adminDir(path), fm.fileExists(atPath: admin.path) {
+            if exclusive {
+                try? fm.removeItem(at: admin.appendingPathComponent("index.lock"))
+                try? fm.removeItem(at: admin.appendingPathComponent("locked"))
+            }
+            do {
+                // A run that touched a file without changing it (a formatter, `touch`) leaves it
+                // stat-dirty, and `checkout --force` rewrites stat-dirty files, bumping the mtime
+                // and forcing a rebuild. Refreshing first re-hashes those and finds them clean.
+                try git.run(["update-index", "-q", "--refresh"], in: path, accept: [0, 1])
+                try git.run(["checkout", "-q", "--force", "--detach", ref.commit], in: path, timeout: GitRunner.longTimeout)
+                applied = true
+            } catch {
+                if !exclusive { throw error }
+            }
+        }
+        if !applied {
+            // A slot with no usable worktree: a leftover from a prune, a crash mid-add, or a
+            // checkout that failed for a reason no lock removal fixed.
             try? fm.removeItem(at: path)
             try fm.createDirectory(at: path.deletingLastPathComponent(), withIntermediateDirectories: true)
             try git.run(["worktree", "prune"], in: store)
-            try git.run(["worktree", "add", "-q", "--detach", "--force", path.path, ref.commit], in: store)
+            try git.run(["worktree", "add", "-q", "--detach", "--force", path.path, ref.commit], in: store,
+                        timeout: GitRunner.longTimeout)
         }
+        guard let admin = Self.adminDir(path) else { throw SyncError.noCheckout }
+        let message = try git.text(["log", "-1", "--format=%B", ref.commit], in: path)
+        let excludes = admin.appendingPathComponent("flightdeck-excludes")
+        try Data(SnapshotMessage.excludes(in: message).map { $0 + "\n" }.joined().utf8).write(to: excludes)
+        try git.run(Self.ignoring(excludes) + ["clean", "-fdq"], in: path, timeout: GitRunner.longTimeout)
         let actual = try git.text(["rev-parse", "HEAD^{tree}"], in: path)
         guard actual == ref.tree else { throw SyncError.treeMismatch(expected: ref.tree, actual: actual) }
+    }
+
+    /// A worktree's admin dir, from its `.git` file (`gitdir: …`), read without git so that it
+    /// still works on a slot whose git state is broken.
+    private static func adminDir(_ path: URL) -> URL? {
+        guard let text = try? String(contentsOf: path.appendingPathComponent(".git"), encoding: .utf8),
+              text.hasPrefix("gitdir: ") else { return nil }
+        let dir = text.dropFirst("gitdir: ".count).trimmingCharacters(in: .whitespacesAndNewlines)
+        return dir.hasPrefix("/") ? URL(fileURLWithPath: dir) : path.appendingPathComponent(dir)
+    }
+
+    /// Config for the commands that decide what is ignored (`clean`, the result's `add`): the
+    /// controller's excludes, and no host-wide attributes file.
+    private static func ignoring(_ excludes: URL) -> [String] {
+        ["-c", "core.excludesFile=\(excludes.path)", "-c", "core.attributesFile=/dev/null"]
     }
 
     /// For `exec`: the worktree's most recently applied checkout, as it stands, with no apply.
@@ -276,25 +321,30 @@ public final class Workspace: WorkspaceStore, @unchecked Sendable {
         if let lease = lock.withLock({ joinExisting(key, id) }) { return lease }
 
         // Nothing in memory (a fresh hostd): rediscover the checkouts from disk.
-        let found = try await GitRunner.offload { [self] () -> [(Int, URL, SnapshotRef)] in
+        let found = try await GitRunner.offload { [self] () -> [(Int, URL, SnapshotRef, Date)] in
             let fm = FileManager.default
             let dirs = (try? fm.contentsOfDirectory(atPath: checkoutsDir(key).path)) ?? []
-            return dirs.compactMap { dir -> (Int, URL, SnapshotRef)? in
+            return dirs.compactMap { dir -> (Int, URL, SnapshotRef, Date)? in
                 guard dir.hasPrefix(key.wtKey + "-"), let slot = Int(dir.dropFirst(key.wtKey.count + 1)),
                       let name = try? fm.contentsOfDirectory(atPath: checkoutsDir(key).appendingPathComponent(dir).path).first
                 else { return nil }
                 let path = slotPath(key, slot, name)
                 guard let commit = try? git.text(["rev-parse", "HEAD"], in: path),
                       let tree = try? git.text(["rev-parse", "HEAD^{tree}"], in: path) else { return nil }
-                return (slot, path, SnapshotRef(repoRoot: key.repoRoot, wtKey: key.wtKey, worktreeName: name, commit: commit, tree: tree))
+                // Every apply rewrites the slot's index, so its mtime is "last applied".
+                let applied = Self.adminDir(path).flatMap {
+                    (try? fm.attributesOfItem(atPath: $0.appendingPathComponent("index").path))?[.modificationDate] as? Date
+                } ?? .distantPast
+                return (slot, path, SnapshotRef(repoRoot: key.repoRoot, wtKey: key.wtKey, worktreeName: name, commit: commit, tree: tree), applied)
             }
         }
         return try lock.withLock {
             if let lease = joinExisting(key, id) { return lease }
-            guard let (index, path, ref) = found.min(by: { $0.0 < $1.0 }) else { throw SyncError.noCheckout }
+            guard let (index, path, ref, applied) = found.max(by: { $0.3 < $1.3 }) else { throw SyncError.noCheckout }
             let slot = pools[key]?[index] ?? Slot(path: path)
             slot.ref = ref
             slot.ready = true
+            slot.lastApplied = applied
             slot.holders.insert(id)
             pools[key, default: [:]][index] = slot
             leases[id] = (key, index)
@@ -314,9 +364,12 @@ public final class Workspace: WorkspaceStore, @unchecked Sendable {
     /// `service.sync`: applies `ref` in place to the lease's own slot.
     public func reapply(_ lease: CheckoutLease, ref: SnapshotRef) async throws -> CheckoutLease {
         let ref = try validated(ref)
-        guard let (key, index) = lock.withLock({ leases[lease.id] }) else { throw SyncError.noCheckout }
+        guard let (key, index, alone) = lock.withLock({ () -> (PoolKey, Int, Bool)? in
+            guard let (key, index) = leases[lease.id] else { return nil }
+            return (key, index, pools[key]?[index]?.holders == [lease.id])
+        }) else { throw SyncError.noCheckout }
         let store = storeURL(controller: key.controller, repoRoot: key.repoRoot)
-        try await GitRunner.offload { [self] in try withStore(store) { try apply(ref, at: lease.path, store: store) } }
+        try await GitRunner.offload { [self] in try withStore(store) { try apply(ref, at: lease.path, store: store, exclusive: alone) } }
         lock.withLock {
             pools[key]?[index]?.ref = ref
             pools[key]?[index]?.lastApplied = Date()
@@ -338,40 +391,68 @@ public final class Workspace: WorkspaceStore, @unchecked Sendable {
 
     // MARK: - Results (§4.5)
 
-    /// Stages the checkout's non-ignored changes in a temporary index and commits them as a
-    /// child of the snapshot. Run after the command exits and before the slot is released.
+    /// Stages the checkout's non-ignored changes (ignored as the controller ignores them) in a
+    /// temporary index and commits them as a child of the snapshot. Must run after the command
+    /// exits and *before* the slot is released: the next run's apply cleans the slot. A run
+    /// that changed nothing records that too, so `resultBundle` can tell it from a lost result.
     public func resultCommit(lease: CheckoutLease, runID: String) async throws -> String? {
         let runID = try SyncName.validate(runID)
         return try await GitRunner.offload { [git] () -> String? in
+            let store = URL(fileURLWithPath: try git.text(["rev-parse", "--path-format=absolute", "--git-common-dir"], in: lease.path))
             let index = try TempIndex(git: git, top: lease.path, dir: FileManager.default.temporaryDirectory, seed: lease.ref.commit)
             defer { index.remove() }
-            try git.run(["add", "-A"], in: lease.path, env: index.env)
+            let ignoring = Self.adminDir(lease.path).map { Self.ignoring($0.appendingPathComponent("flightdeck-excludes")) } ?? []
+            try git.run(ignoring + ["add", "-A"], in: lease.path, env: index.env)
             let tree = try git.text(["write-tree"], in: lease.path, env: index.env)
-            guard tree != lease.ref.tree else { return nil }
+            guard tree != lease.ref.tree else {
+                let marks = store.appendingPathComponent("fd-results")
+                try FileManager.default.createDirectory(at: marks, withIntermediateDirectories: true)
+                try Data("none\n".utf8).write(to: marks.appendingPathComponent(runID))
+                return nil
+            }
             let commit = try git.text(["commit-tree", tree, "-p", lease.ref.commit, "-m", "flightdeck result \(runID)"], in: lease.path)
             try git.run(["update-ref", "refs/fd/results/\(runID)", commit], in: lease.path)
             return commit
         }
     }
 
-    /// A bundle of the one result commit (its parent, the snapshot, is the controller's). It is
-    /// a fresh temporary file the caller streams and deletes. Bundling marks the result
-    /// fetched, so the next `gc` expires it.
+    /// A bundle of the one result commit (its parent, the snapshot, is the controller's), as a
+    /// fresh temporary file the caller streams and deletes. Bundling changes nothing: a transfer
+    /// that drops can simply ask again, until `ackResult` or the TTL. nil when the run changed
+    /// nothing; `SyncError.resultExpired` when the result is unknown, acked or past its TTL.
     public func resultBundle(controller: UUID, repoRoot: String, runID: String) async throws -> URL? {
         let store = storeURL(controller: controller, repoRoot: try SyncName.objectID(repoRoot))
         let runID = try SyncName.validate(runID)
         return try await GitRunner.offload { [git] () -> URL? in
-            guard FileManager.default.fileExists(atPath: store.path),
-                  let commit = try? git.text(["rev-parse", "-q", "--verify", "refs/fd/results/\(runID)"], in: store)
-            else { return nil }
-            let out = FileManager.default.temporaryDirectory.appendingPathComponent("fd-\(UUID().uuidString).bundle")
-            try git.run(["bundle", "create", "-q", out.path, "refs/fd/results/\(runID)", "--not", "\(commit)^"], in: store)
-            let marks = store.appendingPathComponent("fd-fetched")
-            try FileManager.default.createDirectory(at: marks, withIntermediateDirectories: true)
-            _ = FileManager.default.createFile(atPath: marks.appendingPathComponent(runID).path, contents: nil)
+            let fm = FileManager.default
+            guard fm.fileExists(atPath: store.path) else { throw SyncError.resultExpired }
+            guard let commit = try? git.text(["rev-parse", "-q", "--verify", "refs/fd/results/\(runID)"], in: store) else {
+                if fm.fileExists(atPath: store.appendingPathComponent("fd-results/\(runID)").path) { return nil }
+                throw SyncError.resultExpired
+            }
+            let out = fm.temporaryDirectory.appendingPathComponent("fd-\(UUID().uuidString).bundle")
+            try git.run(["bundle", "create", "-q", out.path, "refs/fd/results/\(runID)", "--not", "\(commit)^"], in: store,
+                        timeout: GitRunner.longTimeout)
             return out
         }
     }
+
+    /// The controller has fetched and stored the result: drop it now rather than at the TTL.
+    /// Idempotent, so a retried ack is harmless.
+    public func ackResult(controller: UUID, repoRoot: String, runID: String) async throws {
+        let store = storeURL(controller: controller, repoRoot: try SyncName.objectID(repoRoot))
+        let runID = try SyncName.validate(runID)
+        try await GitRunner.offload { [self] in
+            guard FileManager.default.fileExists(atPath: store.path) else { return }
+            try withStore(store) {
+                if (try? git.text(["rev-parse", "-q", "--verify", "refs/fd/results/\(runID)"], in: store)) != nil {
+                    try git.run(["update-ref", "-d", "refs/fd/results/\(runID)"], in: store)
+                }
+                try? FileManager.default.removeItem(at: store.appendingPathComponent("fd-results/\(runID)"))
+            }
+        }
+    }
+
 
     // MARK: - Artifacts (§4.5)
 
@@ -470,7 +551,7 @@ public final class Workspace: WorkspaceStore, @unchecked Sendable {
         }
     }
 
-    /// Expires result refs that were fetched or are older than `resultTTL`, prunes stale
+    /// Expires results nobody acked within `resultTTL` (acked ones are already gone), prunes stale
     /// worktree records, then `git gc --auto` (§4.7). The host calls it periodically.
     public func gc(now: Date = Date()) async throws {
         let base = root.appendingPathComponent("workspaces")
@@ -488,21 +569,22 @@ public final class Workspace: WorkspaceStore, @unchecked Sendable {
 
     private func collect(_ store: URL, now: Date) throws {
         let fm = FileManager.default
-        let marks = store.appendingPathComponent("fd-fetched")
-        let fetched = Set((try? fm.contentsOfDirectory(atPath: marks.path)) ?? [])
         let rows = try git.text(["for-each-ref", "--format=%(refname:lstrip=3) %(committerdate:unix)", "refs/fd/results/"], in: store)
             .split(separator: "\n").compactMap { line -> (String, TimeInterval)? in
                 let parts = line.split(separator: " ")
                 guard parts.count == 2, let t = TimeInterval(parts[1]) else { return nil }
                 return (String(parts[0]), t)
             }
-        let expired = rows.filter { fetched.contains($0.0) || now.timeIntervalSince1970 - $0.1 > resultTTL }.map(\.0)
+        let expired = rows.filter { now.timeIntervalSince1970 - $0.1 > resultTTL }.map(\.0)
         if !expired.isEmpty {
             let script = expired.map { "delete refs/fd/results/\($0)\n" }.joined()
             try git.run(["update-ref", "--stdin"], in: store, input: Data(script.utf8))
         }
-        for mark in fetched where !rows.contains(where: { $0.0 == mark }) || expired.contains(mark) {
-            try? fm.removeItem(at: marks.appendingPathComponent(mark))
+        let marks = store.appendingPathComponent("fd-results")
+        for mark in (try? fm.contentsOfDirectory(atPath: marks.path)) ?? [] {
+            let url = marks.appendingPathComponent(mark)
+            let made = (try? fm.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date ?? .distantPast
+            if now.timeIntervalSince(made) > resultTTL { try? fm.removeItem(at: url) }
         }
         try git.run(["worktree", "prune"], in: store)
         try git.run(["gc", "--auto", "-q"], in: store)
