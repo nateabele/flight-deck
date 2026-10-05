@@ -160,4 +160,9 @@ final class UsageParsersTests: XCTestCase {
         XCTAssertEqual(file.windows[0].utilization, 1.045, accuracy: 1e-9)
         XCTAssertNil(file.windows[0].resetsAt)
     }
+
+    func testOpenCodeRateLimitBackoffEqualsHeadroomPolicyRejectionBackoff() {
+        XCTAssertEqual(OpenCodeRateLimit.backoff, HeadroomPolicy.rejectionBackoff,
+                       "a hardcoded backoff here would drift from the ledger's rejection timeout")
+    }
 }

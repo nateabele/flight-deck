@@ -117,24 +117,11 @@ final class CapacityLedgerTests: XCTestCase {
         XCTAssertNil(ledger.lease(pool: "nope"))
     }
 
-    func testOpenCodeRateLimitBackoffEqualsHeadroomPolicyRejectionBackoff() {
-        XCTAssertEqual(OpenCodeRateLimit.backoff, HeadroomPolicy.rejectionBackoff)
-    }
-
     func testSourceErrorIsClearedByTheNextReading() {
         ledger.setSourceError("Codex app-server: transportClosed", account: UsageRefs.workID)
         XCTAssertEqual(ledger.sourceError(account: UsageRefs.workID), "Codex app-server: transportClosed")
         ledger.ingest(UsageRefs.reading(UsageRefs.work, 0.2, at: clock.now))
         XCTAssertNil(ledger.sourceError(account: UsageRefs.workID))
-    }
-
-    func testAWindowedRejectionIsStoredAsTheMeterForThePopover() {
-        let until = clock.now.addingTimeInterval(300)
-        ledger.ingest(UsageReading(account: UsageRefs.work, windows: [UsageWindow(name: "retry-after", utilization: 1, resetsAt: until)],
-                                   readAt: clock.now, source: "429", hardRejection: true))
-        XCTAssertEqual(ledger.latestReading(account: UsageRefs.workID)?.worstWindow?.utilization, 1,
-                       "a windowed rejection is stored as the meter so the popover shows it")
-        XCTAssertEqual(ledger.headroom(pool: "claude-default").first?.state, .overHard)
     }
 
     /// Review focus: the meter is per account, so two pools listing one account must agree on

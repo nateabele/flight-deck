@@ -37,12 +37,6 @@ public final class CapacityLedger: CapacityReader, PoolAllocator, @unchecked Sen
         lock.withLock {
             if reading.hardRejection {
                 rejections[id] = Rejection(at: reading.readAt, until: reading.worstWindow?.resetsAt, source: reading.source)
-                // Ruling m9: store windowless rejection as latest meter too, for popover
-                if reading.windows.isEmpty {
-                    return
-                }
-                // Ruling m9: if the rejection carries windows, also store it as the account's latest meter reading
-                meters[id] = reading
                 return
             }
             if let current = meters[id], current.readAt > reading.readAt { return }
