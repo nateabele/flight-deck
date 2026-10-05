@@ -46,6 +46,15 @@ public final class HostServerCore: @unchecked Sendable {
     /// Replies are sent before this returns; see the type's threading contract.
     public func receive(text: String, from peer: HostPeer) {
         let key = ObjectIdentifier(peer)
+        // Before decoding, and for every frame: a revoked controller that upgraded but stayed
+        // silent was never in `peers`, so the revoke could not close it, and its next frame
+        // would otherwise earn a `no_hello` or `malformed` reply — telling a revoked key that
+        // it still reaches a live host. It gets a close and nothing else.
+        if isRevoked(peer.slot) {
+            forget(peer)
+            peer.close()
+            return
+        }
         let frame: HostClientFrame
         do {
             frame = try HostWire.decode(HostClientFrame.self, from: text)
@@ -55,14 +64,6 @@ public final class HostServerCore: @unchecked Sendable {
         }
         switch frame {
         case .hello(let version, _, let name):
-            lock.lock()
-            let revoked = revokedSlots.contains(peer.slot)
-            lock.unlock()
-            if revoked {
-                forget(peer)
-                peer.close()
-                return
-            }
             guard version.major == ProtocolVersion.current.major else {
                 send(.refused(reason: .majorVersionMismatch(host: .current)), to: peer)
                 forget(peer)
@@ -126,6 +127,11 @@ public final class HostServerCore: @unchecked Sendable {
         send(.error(id: id, code: "no_hello", message: "send hello first"), to: peer)
         forget(peer)
         peer.close()
+    }
+
+    private func isRevoked(_ slot: UUID) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return revokedSlots.contains(slot)
     }
 
     private func isHelloed(_ key: ObjectIdentifier) -> Bool {

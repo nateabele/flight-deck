@@ -10,6 +10,10 @@ import PairingCore
 //       Exit 0 when a controller paired, 1 when the code expired (or burned), 2 when hostd is
 //       not running.
 //   status [--root DIR]      the admin status reply, as JSON. Exit 2 when hostd is not running.
+//   controllers [--json] [--root DIR]
+//                            the paired controllers, one "SLOT<TAB>NAME<TAB>PAIRED-AT" line each
+//                            (ISO 8601), or a JSON array with --json. Exit 2 when hostd is not
+//                            running. The SLOT is what `revoke` takes.
 //   revoke SLOT [--root DIR] unpairs SLOT and cuts its live connections. Exit 1 when SLOT is not
 //                            paired, 2 when hostd is not running.
 //
@@ -28,6 +32,7 @@ func usage() -> Never {
         usage: flightdeck-hostd serve [--port N] [--root DIR]
                flightdeck-hostd pair [--root DIR]
                flightdeck-hostd status [--root DIR]
+               flightdeck-hostd controllers [--json] [--root DIR]
                flightdeck-hostd revoke SLOT [--root DIR]
                flightdeck-hostd echo --port N --slot UUID --secret-hex HEX
                flightdeck-hostd pair-test --port N --slot UUID --secret-hex HEX --code CODE
@@ -90,6 +95,15 @@ case "pair":
 case "status":
     let reply = adminRequest(.status, root: stateRoot(args))
     say((try? HostWire.encode(reply)) ?? "{}")
+case "controllers":
+    guard case .controllers(let list) = adminRequest(.listControllers, root: stateRoot(args)) else {
+        fail("unexpected reply to controllers", code: 1)
+    }
+    if args.contains("--json") {
+        do { say(try ControllersCommand.json(list)) } catch { fail("could not encode: \(error)", code: 1) }
+    } else if !list.isEmpty {
+        say(ControllersCommand.text(list))
+    }
 case "revoke":
     guard args.count > 1, let slot = UUID(uuidString: args[1]) else { usage() }
     switch adminRequest(.revoke(slot: slot), root: stateRoot(args)) {
@@ -154,8 +168,8 @@ func seedTestController(_ spec: String, into store: ControllerStore) throws {
                                    pairedAt: Date()))
 }
 
-/// One admin round trip, exiting 2 when hostd is not running — the code `pair`, `status` and
-/// `revoke` share, so `hostd-install.sh` can tell "start it first" from every other failure.
+/// One admin round trip, exiting 2 when hostd is not running — the code `pair`, `status`,
+/// `controllers` and `revoke` share, so `hostd-install.sh` can tell "start it first" from every other failure.
 func adminRequest(_ request: AdminRequest, root: URL) -> AdminReply {
     let path = root.appendingPathComponent("admin.sock").path
     do {

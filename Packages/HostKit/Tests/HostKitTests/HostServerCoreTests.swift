@@ -110,4 +110,20 @@ final class HostServerCoreTests: XCTestCase {
         XCTAssertTrue(a.closed)
         XCTAssertEqual(a.sent, [])
     }
+
+    /// A revoked controller that upgraded but never spoke is not in the core's table, so the
+    /// revoke could not close it. Whatever it sends next must be met with a silent close: an
+    /// `err` reply would tell a revoked key that it still reaches a live host.
+    func testRevokedSilentPeerIsClosedWithoutAnyReply() throws {
+        let c = core()
+        for text in [try HostWire.encode(HostClientFrame.request(id: 4, .hostInfo)),
+                     #"{"t":"req","id":5,"req":{"op":"fleet.teleport"}}"#,
+                     "{not json"] {
+            let p = FakePeer()
+            c.disconnect(slot: p.slot)
+            c.receive(text: text, from: p)
+            XCTAssertEqual(p.sent, [], "replied to a revoked slot: \(text)")
+            XCTAssertTrue(p.closed)
+        }
+    }
 }

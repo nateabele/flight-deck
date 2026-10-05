@@ -113,9 +113,20 @@ final class LinuxHostdInteropTests: XCTestCase {
         c.cancel()
     }
 
-    /// Review Focus 2: revoking through the admin socket closes the live connection promptly.
+    /// Review Focus 2: revoking through the admin socket closes the live connection within the
+    /// ruling's one second and refuses the next connect; and `controllers`, which is how a
+    /// Linux host's owner finds the slot to revoke, lists it before and not after.
     func testRevokedControllerIsDisconnected() async throws {
         guard let ep = Self.endpoint(), let container = ProcessInfo.processInfo.environment["FD_LINUX_HOSTD_CONTAINER"] else { throw XCTSkip("env") }
+        let listed = try Self.hostd(container, ["controllers", "--json", "--root", "/tmp/fdroot"])
+        XCTAssertEqual(listed.status, 0)
+        XCTAssertTrue(listed.output.contains(#""slot":"\#(Self.slot.uuidString)""#), listed.output)
+        let text = try Self.hostd(container, ["controllers", "--root", "/tmp/fdroot"])
+        XCTAssertTrue(text.output.split(separator: "\n").contains { $0.hasPrefix(Self.slot.uuidString + "\t") },
+                      text.output)
+        XCTAssertEqual(try Self.hostd(container, ["controllers", "--root", "/tmp/no-hostd-here"]).status, 2,
+                       "a hostd that is not running is exit 2, as for status and revoke")
+
         let c = NWConnection(to: HostTransport.endpoint(for: ep), using: HostTransport.clientParameters(key: .init(slot: Self.slot, secret: Self.secret)))
         _ = try await Self.roundTrip(c, text: HostWire.encode(HostClientFrame.hello(protocolVersion: .current, capabilities: [], controllerName: "interop")))
         let closed = expectation(description: "closed")
@@ -123,12 +134,32 @@ final class LinuxHostdInteropTests: XCTestCase {
         closed.assertForOverFulfill = false
         c.stateUpdateHandler = { if case .cancelled = $0 { closed.fulfill() }; if case .failed = $0 { closed.fulfill() } }
         c.receiveMessage { _, _, complete, error in if complete || error != nil { closed.fulfill() } }
-        let p = Process(); p.executableURL = URL(fileURLWithPath: "/usr/local/bin/docker")
-        p.arguments = ["exec", container, Self.hostdBinary, "revoke", Self.slot.uuidString, "--root", "/tmp/fdroot"]
-        try p.run(); p.waitUntilExit()
-        XCTAssertEqual(p.terminationStatus, 0, "revoke subcommand failed")
-        await fulfillment(of: [closed], timeout: 2)
+        let revoked = try Self.hostd(container, ["revoke", Self.slot.uuidString, "--root", "/tmp/fdroot"])
+        XCTAssertEqual(revoked.status, 0, "revoke subcommand failed: \(revoked.output)")
+        await fulfillment(of: [closed], timeout: 1)  // the ruling's bound
         c.cancel()
+
+        // The key closure reads the store per handshake, so the revoked key is refused at once.
+        // Judged by the reply, as in the macOS test: only a helloAck means it got back in.
+        let again = NWConnection(to: HostTransport.endpoint(for: ep), using: HostTransport.clientParameters(key: .init(slot: Self.slot, secret: Self.secret)))
+        let reply = try? await Self.roundTrip(again, text: HostWire.encode(HostClientFrame.hello(protocolVersion: .current, capabilities: [], controllerName: "interop")), timeout: 5)
+        XCTAssertNil(reply.flatMap { try? HostWire.decode(HostServerFrame.self, from: $0) }, "revoked key got back in")
+        again.cancel()
+        XCTAssertFalse(try Self.hostd(container, ["controllers", "--root", "/tmp/fdroot"]).output
+            .contains(Self.slot.uuidString), "still listed after revoke")
+    }
+
+    /// Runs the container's hostd binary with `arguments`; its exit status and stdout.
+    static func hostd(_ container: String, _ arguments: [String]) throws -> (status: Int32, output: String) {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/local/bin/docker")
+        p.arguments = ["exec", container, hostdBinary] + arguments
+        let out = Pipe()
+        p.standardOutput = out
+        try p.run()
+        let data = out.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        return (p.terminationStatus, String(decoding: data, as: UTF8.self))
     }
 
     /// The whole pairing contract against `serve`: `flightdeck-hostd pair` arms through the

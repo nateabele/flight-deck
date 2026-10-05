@@ -61,6 +61,31 @@ final class AdvertisedEndpointsTests: XCTestCase {
     }
 }
 
+/// `flightdeck-hostd controllers`: the slot is what `revoke` takes, so it leads each line and
+/// must be the exact `UUID` text `revoke` parses back.
+final class ControllersCommandTests: XCTestCase {
+    let list = [
+        AdminController(slot: UUID(uuidString: "6F0B2C1E-8E37-4D7A-9D0A-3C5E2B1A9F00")!, name: "laptop",
+                        pairedAt: Date(timeIntervalSince1970: 1_791_200_000)),
+        AdminController(slot: UUID(uuidString: "00000000-0000-4000-8000-000000000001")!, name: "dana's mini",
+                        pairedAt: Date(timeIntervalSince1970: 1_791_300_000)),
+    ]
+
+    func testOneLinePerControllerSlotFirst() {
+        XCTAssertEqual(ControllersCommand.text(list), """
+            6F0B2C1E-8E37-4D7A-9D0A-3C5E2B1A9F00\tlaptop\t2026-10-05T11:33:20Z
+            00000000-0000-4000-8000-000000000001\tdana's mini\t2026-10-06T15:20:00Z
+            """)
+        XCTAssertEqual(ControllersCommand.text([]), "")
+    }
+
+    func testJSONIsAnArrayOfSlotNamePairedAt() throws {
+        XCTAssertEqual(try ControllersCommand.json(Array(list.prefix(1))),
+            #"[{"name":"laptop","pairedAt":"2026-10-05T11:33:20Z","slot":"6F0B2C1E-8E37-4D7A-9D0A-3C5E2B1A9F00"}]"#)
+        XCTAssertEqual(try ControllersCommand.json([]), "[]")
+    }
+}
+
 final class WebSocketFragmentTests: XCTestCase {
     private final class Received: @unchecked Sendable {
         let lock = NSLock()
@@ -111,7 +136,64 @@ private final class FailingWrites: ChannelOutboundHandler, Sendable {
     }
 }
 
+/// Swallows writes without completing them: a sealed frame still in flight, the moment between
+/// sealing a key and the verdict that closes the window.
+private final class HeldWrites: ChannelOutboundHandler, @unchecked Sendable {
+    typealias OutboundIn = NIOAny
+    var held: [EventLoopPromise<Void>?] = []
+    func write(context: ChannelHandlerContext, data: NIOAny, promise: EventLoopPromise<Void>?) {
+        held.append(promise)
+    }
+}
+
 final class PairingVerdictTests: XCTestCase {
+    /// One code, one key: while the first controller's sealed frame is still being written,
+    /// a second connection that also knows the code must be refused, not sealed the same key.
+    /// The window's verdict waits on that write, so before the per-window flag there was a gap
+    /// in which both sealed.
+    func testASecondConfirmWhileTheFirstSealIsInFlightIsRefused() throws {
+        let loop = EmbeddedEventLoop()
+        let code = PairingCode.mint()
+        let window = NIOPairingResponder.Window(loop: loop, code: code, key: .mint(), hostName: "h")
+        let profile = NIOPairingResponder.profile
+
+        let first = EmbeddedChannel(loop: loop)
+        let held = HeldWrites()
+        let second = EmbeddedChannel(loop: loop)
+        let a = try XCTUnwrap(window.accept(first)), b = try XCTUnwrap(window.accept(second))
+        window.ready(a); window.ready(b)
+        var confirmations: [Data] = []
+        for (peer, channel) in [(a, first), (b, second)] {
+            let initiator = SPAKE2Session(role: .initiator, myName: profile.initiatorName,
+                                          theirName: profile.responderName)
+            window.handle(.pake(msg: try initiator.message(for: code)), from: peer)
+            loop.run()
+            let frame = try XCTUnwrap(try channel.readOutbound(as: WebSocketFrame.self))
+            var data = frame.unmaskedData
+            guard case .pake(let theirs) = try JSONDecoder().decode(
+                PairingServerFrame.self, from: Data(data.readBytes(length: data.readableBytes)!)) else {
+                return XCTFail("expected the responder's pake")
+            }
+            let secrets = try PairingSecrets(keyMaterial: initiator.keyMaterial(from: theirs),
+                                             transcript: initiator.transcript)
+            confirmations.append(secrets.initiatorConfirmation)
+        }
+        // The first seal's write never completes: the window is mid-delivery.
+        try first.pipeline.syncOperations.addHandler(held)
+        window.handle(.confirm(mac: confirmations[0]), from: a)
+        loop.run()
+        XCTAssertEqual(held.held.count, 1, "the first controller was sealed the key")
+        XCTAssertNil(window.verdict, "still in flight")
+
+        window.handle(.confirm(mac: confirmations[1]), from: b)
+        loop.run()
+        let reply = try XCTUnwrap(try second.readOutbound(as: WebSocketFrame.self))
+        var data = reply.unmaskedData
+        let decoded = try JSONDecoder().decode(
+            PairingServerFrame.self, from: Data(data.readBytes(length: data.readableBytes)!))
+        XCTAssertEqual(decoded, .reject(.attemptsExhausted), "a second controller was sealed the same key")
+    }
+
     /// The third wrong guess must end the window even when that peer is already gone and its
     /// reject cannot be written. Before, the verdict waited on the write succeeding, so a peer
     /// that hung up first left the window open with its budget spent, answering

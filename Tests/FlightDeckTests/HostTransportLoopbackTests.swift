@@ -84,6 +84,17 @@ final class HostTransportLoopbackTests: XCTestCase {
         XCTAssertEqual(try AdminSocketClient.send(.revoke(slot: key.slot), path: adminPath), .ok)
         await fulfillment(of: [closed], timeout: 1)  // the ruling's bound
         c.cancel()
+
+        // And the next connect with the revoked key is refused: closing the live socket is
+        // half of a revoke; a key that could simply dial again would make it cosmetic.
+        // Judged by what came back, not by whether the round trip threw: a socket the host
+        // closes right after the handshake ends the round trip with an empty frame, which is a
+        // refusal too. Only a helloAck means the key got back in.
+        let again = connection(to: port, key: key)
+        let reply = try? await LinuxHostdInteropTests.roundTrip(again, text: hello("t"), timeout: 5)
+        XCTAssertNil(reply.flatMap { try? HostWire.decode(HostServerFrame.self, from: $0) },
+                     "revoked key got back in")
+        again.cancel()
     }
 
     /// The slot comes from the handshake, per connection: with two controllers connected,

@@ -58,6 +58,59 @@ final class PairingProfileTests: XCTestCase {
         await fulfillment(of: [failed], timeout: 15)
     }
 
+    /// The reverse direction: a phone that dials a *host's* window with the host's code (read
+    /// off the wrong screen) must fail as a wrong code too, never be sealed a host key.
+    func testPhoneInitiatorFailsAgainstHostListener() async throws {
+        let listener = PairingListener(profile: .host)
+        self.listener = listener
+        let code = PairingCode.mint()
+        let port = try await listener.start(code: code, key: .mint(), macName: "m",
+                                            serviceName: "t-\(UUID())", port: nil)
+        let initiator = PairingInitiator(profile: .phone)
+        let failed = expectation(description: "fails")
+        initiator.onPaired = { _, _ in XCTFail("cross-profile pairing must not succeed") }
+        initiator.onFailure = { failure in XCTAssertEqual(failure, .wrongCode); failed.fulfill() }
+        initiator.start(code: code, endpoint: .hostPort(host: "127.0.0.1", port: port))
+        await fulfillment(of: [failed], timeout: 15)
+    }
+
+    /// One code, one key. A window that has sealed its key must refuse a second confirmation —
+    /// from another connection that also knows the code — rather than seal the same key to a
+    /// second controller. On both profiles: nothing in either flow pairs twice per window, and
+    /// before this a consumer that had not yet closed the window (it closes from `onPaired`,
+    /// which waits on the seal's send) left that gap open.
+    func testASecondPairingFromTheSameCodeIsRefusedOnceTheKeyIsSealed() async throws {
+        for profile in [PairingProfile.host, .phone] {
+            let listener = PairingListener(profile: profile)
+            self.listener = listener
+            let code = PairingCode.mint()
+            let port = try await listener.start(code: code, key: .mint(), macName: "m",
+                                                serviceName: "t-\(UUID())", port: nil)
+            nonisolated(unsafe) var pairings = 0
+            listener.onPaired = { pairings += 1 }
+
+            let first = PairingInitiator(profile: profile)
+            let paired = expectation(description: "first pairs")
+            first.onPaired = { _, _ in paired.fulfill() }
+            first.onFailure = { XCTFail("first pairing failed: \($0)"); paired.fulfill() }
+            first.start(code: code, endpoint: .hostPort(host: "127.0.0.1", port: port))
+            await fulfillment(of: [paired], timeout: 15)
+
+            let second = PairingInitiator(profile: profile)
+            let refused = expectation(description: "second refused")
+            second.onPaired = { _, _ in XCTFail("\(profile.bonjourType): a second controller paired from one code"); refused.fulfill() }
+            second.onFailure = { failure in
+                XCTAssertEqual(failure, .attemptsExhausted)
+                refused.fulfill()
+            }
+            second.start(code: code, endpoint: .hostPort(host: "127.0.0.1", port: port))
+            await fulfillment(of: [refused], timeout: 15)
+            XCTAssertEqual(pairings, 1)
+            listener.stop()
+            self.listener = nil
+        }
+    }
+
     /// The control for the test above: the same code over the same loopback pairs when both
     /// ends are the host profile, so the failure there is the names, not the transport.
     func testHostProfilePairsWithItself() async throws {

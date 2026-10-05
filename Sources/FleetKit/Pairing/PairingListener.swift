@@ -151,6 +151,13 @@ public final class PairingListener: @unchecked Sendable {
     /// fresh nonce and fire `onPaired` again, which is not what "fired once" can mean to a
     /// consumer that hangs window teardown and key promotion off it.
     private var paired: Set<UUID> = []
+    /// The window has sealed its key to someone. Per window, where `paired` is per connection:
+    /// a second connection that also knows the code (two controllers typing one host's code at
+    /// once, or a stranger who watched it typed) would otherwise be sealed the same key in the
+    /// moment before the consumer's `onPaired` — which waits on the seal's send — closes the
+    /// window. Set at the seal, not at its send completion, because that moment is the gap.
+    /// Cleared only by `start`, so one window seals one key.
+    private var sealed = false
     /// Connections whose socket has become usable — TLS-PSK done, WebSocket upgrade done — and
     /// which are therefore out from under `handshakeDeadline` and into `firstFrameDeadline`.
     /// Same `Set`-rather-than-a-cancelled-timer reasoning as `spoken` below, and the same
@@ -191,6 +198,7 @@ public final class PairingListener: @unchecked Sendable {
                 self.key = key
                 self.macName = macName
                 self.attemptsSpent = 0
+                self.sealed = false
                 bind(
                     port: port, serviceName: serviceName, macName: macName,
                     continuation: continuation
@@ -392,6 +400,12 @@ public final class PairingListener: @unchecked Sendable {
         // still be flushing, and cancelling it here would truncate the frame the exchange
         // exists to deliver — the very failure `onSent` is here to avoid.
         guard !paired.contains(id) else { return }
+        // Any other connection, once the key is out: answered as a spent window, the one
+        // verdict the initiator already turns into "ask for a new code", rather than a silent
+        // drop that reads as the network failing.
+        guard !sealed else {
+            return reply(.reject(.attemptsExhausted), over: connection, thenDrop: id)
+        }
         guard attemptsSpent < Self.maxAttempts else {
             // Answered rather than silently dropped so a phone can say "ask your Mac for a new
             // code" instead of "the network went away". The window is already burned; there is
@@ -467,6 +481,7 @@ public final class PairingListener: @unchecked Sendable {
             // connection is deliberately left open — the consumer's `stop()` is what closes
             // it, and by then the frame is out.
             paired.insert(id)
+            sealed = true
             // The key material has done its job; nothing after this may consult it.
             sessions.removeValue(forKey: id)
             secrets.removeValue(forKey: id)

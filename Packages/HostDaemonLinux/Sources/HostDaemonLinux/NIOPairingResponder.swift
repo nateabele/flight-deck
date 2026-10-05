@@ -163,6 +163,10 @@ enum NIOPairingResponder {
         private let hostName: String
         private var peers: [ObjectIdentifier: Peer] = [:]
         private var attemptsSpent = 0
+        /// The key has been sealed to some peer: `PairingListener.sealed`. The verdict waits on
+        /// that frame's write, and without this a second peer that also knew the code could be
+        /// sealed the same key inside that wait.
+        private var sealed = false
         private var server: Channel?
         private var continuation: CheckedContinuation<Void, Error>?
         /// The verdict, reached once; a deadline or a frame arriving after it changes nothing.
@@ -217,6 +221,7 @@ enum NIOPairingResponder {
             loop.preconditionInEventLoop()
             guard !finished else { return drop(peer) }
             guard !peer.paired else { return }
+            guard !sealed else { return reply(.reject(.attemptsExhausted), to: peer) }
             guard attemptsSpent < NIOPairingResponder.maxAttempts else {
                 // Unreachable while the verdict below is reached unconditionally, but a spent
                 // budget with no verdict is exactly the state that left the window open forever,
@@ -267,6 +272,7 @@ enum NIOPairingResponder {
                     return reply(.reject(.malformed), to: peer)
                 }
                 peer.paired = true
+                sealed = true
                 peer.session = nil
                 peer.secrets = nil
                 // Success is the sealed frame's write completing, never the line after the
