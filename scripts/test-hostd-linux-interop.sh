@@ -8,10 +8,11 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 IMAGE=swift:6.3-noble
 NAME=fd-hostd-interop-$$
-MODE=${1:-echo}            # echo (gate 1) | pair, pair-wrong (gate 2) | serve (task 6)
-# serve takes the hostd's own default port, 47410, because the pairing window it arms binds
-# 47411 inside the same container; the gate modes keep 47411, the pairing port they stand in for.
-if [ "$MODE" = serve ]; then PORT=${FD_INTEROP_PORT:-47410}; else PORT=${FD_INTEROP_PORT:-47411}; fi
+MODE=${1:-echo}            # echo (gate 1) | pair, pair-wrong (gate 2) | serve (task 6) | run (delegation)
+# serve and run take the hostd's own default port, 47410: serve because the pairing window it
+# arms binds 47411 inside the same container, run because it is the real `serve` too. The gate
+# modes keep 47411, the pairing port they stand in for.
+case "$MODE" in serve|run) PORT=${FD_INTEROP_PORT:-47410} ;; *) PORT=${FD_INTEROP_PORT:-47411} ;; esac
 # A fixed code, minted once with `PairingCode.mint()` and pasted here: the server is told it on
 # its command line and the Darwin test reads it from the environment, so both ends type the
 # same code with no channel between them. It protects nothing — the pairing it opens is one
@@ -25,6 +26,8 @@ SECRET_HEX=$(printf '5a%.0s' {1..32})
 # for a server that is meant to still be running.
 EXPECT_EXIT=
 PUBLISH=()
+# The XCTest class holding the mode's gate tests.
+CLASS=LinuxHostdInteropTests
 case "$MODE" in
   # The gate tests each mode exists to run. A run of that mode in which any of them did not
   # pass — skipped included — fails, so a test that quietly XCTSkips (an env variable renamed
@@ -44,6 +47,11 @@ case "$MODE" in
               testPairThroughServeThenHelloRenamesTheController)
         # The pairing window `pair` arms inside the container listens on 47411.
         PUBLISH=(-p "127.0.0.1:47411:47411") ;;
+  # Delegated execution on the real serve: the app's DelegationService syncs a temp repo, runs
+  # `echo`, then `git status` in the synced checkout, over the NIO transport and Linux router.
+  run)  ARGS=(serve --port "$PORT" --root /tmp/fdroot --test-controller "$SLOT:$SECRET_HEX")
+        CLASS=LinuxHostdRunInteropTests
+        GATE=(testDelegatedRunAgainstLinuxHostd) ;;
   *)    echo "unknown mode $MODE" >&2; exit 64 ;;
 esac
 # Mounted at its own resolved path as well as through /src: in a worktree
@@ -78,15 +86,15 @@ until docker logs "$NAME" 2>&1 | rg -q "listening on"; do
 done
 FD_LINUX_HOSTD_ENDPOINT="127.0.0.1:$PORT" FD_LINUX_HOSTD_MODE="$MODE" FD_LINUX_HOSTD_CODE="$CODE" \
   FD_LINUX_HOSTD_CONTAINER="$NAME" FD_LINUX_HOSTD_PAIRING_ENDPOINT="127.0.0.1:47411" \
-  FD_TEST_FILTER="${FD_INTEROP_FILTER:-LinuxHostdInteropTests}" \
+  FD_TEST_FILTER="${FD_INTEROP_FILTER:-$CLASS}" \
   ./scripts/test-unit.sh 2>&1 | tee "$LOG"
 # `if`, not a bare `! rg`: set -e does not apply to a negated command, so `! rg` stops the
 # script only when it is the last line — which it no longer is.
 if rg -n "error:|failed \(" "$LOG"; then exit 1; fi
 for test in ${GATE[@]+"${GATE[@]}"}; do
-  rg -q "LinuxHostdInteropTests $test\]' passed" "$LOG" \
+  rg -q "$CLASS $test\]' passed" "$LOG" \
     || { echo "gate test $test did not pass in $MODE mode (skipped or not run):"; \
-         rg -n "LinuxHostdInteropTests $test\]'" "$LOG" || true; exit 1; }
+         rg -n "$CLASS $test\]'" "$LOG" || true; exit 1; }
 done
 if [ -n "$EXPECT_EXIT" ]; then
   for _ in $(seq 1 15); do
