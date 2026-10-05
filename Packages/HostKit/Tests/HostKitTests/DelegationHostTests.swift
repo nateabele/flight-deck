@@ -74,6 +74,10 @@ private final class Controller: HostPeer, @unchecked Sendable {
         }
     }
 
+    func started(_ runID: String) async throws {
+        _ = try await wait("start of \(runID)") { if case .event(runID, .started) = $0 { return true }; return false }
+    }
+
     func forgetFrames() { lock.withLock { frames = [] } }
 
     func closeConnection() { queue.sync { core.peerClosed(self) } }
@@ -368,6 +372,31 @@ final class DelegationHostTests: XCTestCase {
         XCTAssertEqual(events.last, .exited(.code(125)))
         let (commit, _) = try await result(runID, over: c)
         XCTAssertNil(commit, "nothing ran, so nothing changed")
+    }
+
+    /// A service starts through the services (so they hold its slot and can sync and down
+    /// it), and the service ops reach them through the router.
+    func testServiceStartsThroughTheServicesAndTheirOpsAreRouted() async throws {
+        let repo = try repo()
+        let c = Controller(core: try host())
+        _ = try await c.hello()
+        let ref = try await sync(repo, over: c)
+        var service = spec("echo up; sleep 30")
+        service.service = true
+        service.downCommand = "echo down-ran"
+        guard case .runStart(let runID) = try await c.request(.runStart(ref: ref, spec: service, owner: "tab", apply: true))
+        else { return XCTFail("run.start") }
+        try await c.started(runID)
+        _ = try await c.request(.screenStatus)
+
+        // service.sync finds the service's own slot only if the services started it.
+        let synced = try await c.request(.serviceSync(service: runID, ref: ref))
+        XCTAssertEqual(synced, .serviceSync)
+        let downed = try await c.request(.serviceDown(service: runID))
+        XCTAssertEqual(downed, .serviceDown)
+        let events = try await c.events(runID)
+        XCTAssertTrue(output(events).contains("down-ran"), output(events))
+        XCTAssertEqual(events.last, .exited(.signal(SIGTERM)))
     }
 
     /// Binary frames from a connection that has not said hello go nowhere; once it closes,

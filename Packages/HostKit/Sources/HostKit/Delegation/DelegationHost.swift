@@ -159,8 +159,13 @@ public final class DelegationHost: @unchecked Sendable {
             }
 
         case .runStart(let ref, let spec, let owner, let apply):
-            let runID = runner.start(spec, owner: LeaseHolderOwner(controller: slot, session: owner),
-                                     acquire: try await acquire(ref, spec, apply: apply, controller: slot))
+            let owner = LeaseHolderOwner(controller: slot, session: owner)
+            let acquire = try await acquire(ref, spec, apply: apply, controller: slot)
+            // A service starts through the services, which call the runner themselves: they
+            // must hold its pinned slot (for `service.sync`) and know which controller's
+            // services to down when its orphan timeout runs out, and the runner exposes neither.
+            let runID = spec.service ? services.startService(spec, owner: owner, acquire: acquire)
+                                     : runner.start(spec, owner: owner, acquire: acquire)
             lock.withLock {
                 // Pruned to the runs the runner still knows, so a hostd up for weeks does not
                 // keep a row per run it ever started.
