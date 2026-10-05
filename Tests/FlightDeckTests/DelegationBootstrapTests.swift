@@ -1,4 +1,3 @@
-import Combine
 import HostKit
 import XCTest
 @testable import FlightDeck
@@ -47,11 +46,6 @@ final class DelegationBootstrapTests: XCTestCase {
             return environment
         }
         func sessionClosed(_ session: UUID) { closed.append(session) }
-    }
-
-    private final class CountingLifecycle: DelegationLifecycle {
-        var resumes = 0
-        func resumeWatching() { resumes += 1 }
     }
 
     private var temp: URL!
@@ -167,28 +161,6 @@ final class DelegationBootstrapTests: XCTestCase {
             RunLoop.main.run(until: Date().addingTimeInterval(0.05))
         }
         XCTAssertTrue(FileManager.default.fileExists(atPath: link), "the watcher rebuilt the tab's shims")
-    }
-
-    // MARK: Launch and reconnect
-
-    func testRunsAreWatchedAgainAtLaunchAndWhenAHostComesOnline() {
-        let hooks = bootstrap()
-        let lifecycle = CountingLifecycle()
-        let states = PassthroughSubject<[UUID: HostLinkState], Never>()
-        let mini = UUID(), box = UUID()
-
-        hooks.attach(lifecycle, hostStates: states.eraseToAnyPublisher())
-        XCTAssertEqual(lifecycle.resumes, 1, "at launch")
-
-        states.send([mini: .connecting, box: .offline(lastSeen: nil)])
-        XCTAssertEqual(lifecycle.resumes, 1, "nothing came online")
-        states.send([mini: .online(hostName: "mini"), box: .offline(lastSeen: nil)])
-        XCTAssertEqual(lifecycle.resumes, 2, "mini came online")
-        states.send([mini: .online(hostName: "mini"), box: .offline(lastSeen: nil)])
-        XCTAssertEqual(lifecycle.resumes, 2, "still online is not news")
-        states.send([mini: .offline(lastSeen: nil), box: .offline(lastSeen: nil)])
-        states.send([mini: .online(hostName: "mini"), box: .offline(lastSeen: nil)])
-        XCTAssertEqual(lifecycle.resumes, 3, "a reconnect is")
     }
 
     // MARK: Plugin reload

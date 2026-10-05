@@ -1,4 +1,3 @@
-import Combine
 import Foundation
 
 /// What `SessionStore` tells delegation about its tabs. A protocol so the store's tests can
@@ -13,17 +12,6 @@ protocol DelegationSessionHooks: AnyObject {
     /// The tab closed.
     func sessionClosed(_ session: UUID)
 }
-
-/// The part of `DelegationService` the bootstrap drives. A protocol so the launch and
-/// reconnect rule below is tested without a host.
-@MainActor
-protocol DelegationLifecycle: AnyObject {
-    /// Watches again every run the registry still has queued or running. Idempotent: a run
-    /// already watched keeps its one monitor, and one whose host is offline is skipped.
-    func resumeWatching()
-}
-
-extension DelegationService: DelegationLifecycle {}
 
 /// Brings delegation up beside the app, outside `DelegationService`'s own file: the route
 /// shims every tab is launched with, and the service the control socket answers through.
@@ -44,9 +32,6 @@ final class DelegationBootstrap: DelegationSessionHooks {
     /// Live tabs by project, so one watcher rebuilds every tab of the project it fired for.
     private var sessions: [URL: Set<UUID>] = [:]
     private var watchers: [URL: RouteShimWatcher] = [:]
-    private var lifecycle: (any DelegationLifecycle)?
-    private var hostWatch: AnyCancellable?
-    private var online: Set<UUID> = []
 
     init(shims: RouteShims?, cli: URL? = RouteShims.bundledCLI()) {
         self.shims = shims
@@ -63,36 +48,18 @@ final class DelegationBootstrap: DelegationSessionHooks {
 
     // MARK: Delegation
 
-    /// Builds the real service, hands it to the control socket, and keeps its runs watched.
-    func connect(fleet: FleetService, hosts: HostService) {
-        let service = DelegationServiceFactory.live(hostService: hosts)
-        fleet.delegation = service
-        attach(service, hostStates: hosts.$statuses.eraseToAnyPublisher())
-    }
-
-    /// Resumes watching now, and again whenever a host comes online.
+    /// Builds the real service and hands it to the control socket.
     ///
-    /// Now, for a run from before a relaunch: without it a service that died while the app was
-    /// gone stays `running` in `flightdeck ps` until somebody happens to `wait` on it. Again on
-    /// every host that comes online, because at launch no link is up yet — `resumeWatching`
-    /// skips an offline host — so the launch call alone would watch nothing on a cold start.
-    func attach(_ lifecycle: any DelegationLifecycle,
-                hostStates: AnyPublisher<[UUID: HostLinkState], Never>) {
-        self.lifecycle = lifecycle
-        lifecycle.resumeWatching()
-        hostWatch = hostStates.sink { [weak self] states in
-            MainActor.assumeIsolated { self?.hostStatesChanged(states) }
-        }
-    }
-
-    private func hostStatesChanged(_ states: [UUID: HostLinkState]) {
-        let now = Set(states.compactMap { slot, state -> UUID? in
-            if case .online = state { return slot }
-            return nil
-        })
-        let arrived = !now.subtracting(online).isEmpty
-        online = now
-        if arrived { lifecycle?.resumeWatching() }
+    /// `sessionTitle` names the tab in the host's screen-queue message ("waiting on the screen
+    /// for <tab>"); without it every run there reads "terminal".
+    ///
+    /// Keeping runs watched is the service's own job, not this one's: its `init` resumes the
+    /// registry's live runs, and the factory points `LiveHostDirectory.onHostOnline` at
+    /// `resumeWatching`. That hook fires on the main-actor turn *after* the status is
+    /// published; a `$statuses` sink here would fire in `willSet`, before the link reads as
+    /// online, so `resumeWatching` would skip the very host that just came up.
+    func connect(fleet: FleetService, hosts: HostService, sessionTitle: @escaping (UUID) -> String?) {
+        fleet.delegation = DelegationServiceFactory.live(hostService: hosts, sessionTitle: sessionTitle)
     }
 
     // MARK: DelegationSessionHooks

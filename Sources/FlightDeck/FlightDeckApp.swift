@@ -256,7 +256,7 @@ struct FlightDeckApp: App {
         guard !isResettingState else { return service }
         // Before either socket starts, so no `delegate.*` request is ever answered
         // `not_implemented` by a fleet that simply had not been handed its service yet.
-        delegation?.connect(fleet: service, hosts: hosts)
+        delegation?.connect(fleet: service, hosts: hosts) { [weak store] in store?.title(of: $0) }
         Task {
             do {
                 try await service.start()
