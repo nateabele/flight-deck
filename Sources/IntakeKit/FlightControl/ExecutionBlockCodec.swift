@@ -27,6 +27,21 @@ public enum ExecutionBlockCodec {
         let f = ISO8601DateFormatter(); f.formatOptions = [.withInternetDateTime]; return f
     }
 
+    private static func isBooleanType(_ value: Any) -> Bool {
+        if value is Bool { return true }
+        if let num = value as? NSNumber {
+            return CFGetTypeID(num as CFTypeRef) == CFBooleanGetTypeID()
+        }
+        return false
+    }
+
+    private static func isIntegerType(_ value: Any) -> Bool {
+        guard let num = value as? NSNumber else { return false }
+        if CFGetTypeID(num as CFTypeRef) == CFBooleanGetTypeID() { return false }
+        let objCType = String(cString: num.objCType)
+        return objCType == "q" || objCType == "l" || objCType == "i" || objCType == "s" || objCType == "Q" || objCType == "L" || objCType == "I" || objCType == "S"
+    }
+
     public static func decode(agentContext: String?) -> Result<ExecutionBlock?, ExecutionBlockError> {
         guard let text = agentContext, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return .success(nil)
@@ -34,10 +49,15 @@ public enum ExecutionBlockCodec {
         guard let root = (try? JSONSerialization.jsonObject(with: Data(text.utf8), options: [.fragmentsAllowed])) as? [String: Any] else {
             return .failure(.notJSONObject)
         }
+        if let fdRaw = root["flight_deck"], !(fdRaw is NSNull), fdRaw as? [String: Any] == nil {
+            return .failure(.invalidField("flight_deck", "not an object"))
+        }
         guard let fd = root["flight_deck"] as? [String: Any], let raw = fd["execution"] else { return .success(nil) }
         guard let e = raw as? [String: Any] else { return .failure(.invalidField("execution", "not an object")) }
 
-        guard let v = e["v"] as? Int else { return .failure(.missingField("v")) }
+        guard let vRaw = e["v"] else { return .failure(.missingField("v")) }
+        guard isIntegerType(vRaw), let v = vRaw as? Int else { return .failure(.invalidField("v", "not an integer")) }
+        if v < 1 { return .failure(.invalidField("v", "must be at least 1")) }
         if v > ExecutionBlock.currentVersion { return .failure(.unsupportedVersion(v)) }
 
         func string(_ key: String) -> Result<String, ExecutionBlockError> {
@@ -69,14 +89,23 @@ public enum ExecutionBlockCodec {
         guard let reason = src["reason"] as? String else { return .failure(.missingField("source.reason")) }
         guard let atRaw = src["at"] as? String else { return .failure(.missingField("source.at")) }
         guard let at = iso().date(from: atRaw) else { return .failure(.invalidField("source.at", "not ISO 8601")) }
-        let ruleId = src["ruleId"] as? String
+        var ruleId: String? = nil
+        if let r = src["ruleId"], !(r is NSNull) {
+            guard let s = r as? String else { return .failure(.invalidField("source.ruleId", "not a string")) }
+            ruleId = s
+        }
 
         let pinned: Bool
         if let p = e["pinned"], !(p is NSNull) {
+            guard isBooleanType(p) else { return .failure(.invalidField("pinned", "not a boolean")) }
             guard let b = p as? Bool else { return .failure(.invalidField("pinned", "not a boolean")) }
             pinned = b
         } else { pinned = false }
-        let host = e["host"] as? String
+        var host: String? = nil
+        if let h = e["host"], !(h is NSNull) {
+            guard let s = h as? String else { return .failure(.invalidField("host", "not a string")) }
+            host = s
+        }
 
         return .success(ExecutionBlock(v: v, kind: KindID(kind), harness: HarnessID(harness), model: model,
                                        knobs: knobs, pool: PoolID(pool),
@@ -104,6 +133,9 @@ public enum ExecutionBlockCodec {
                 throw ExecutionBlockError.notJSONObject
             }
             root = obj
+        }
+        if let fdRaw = root["flight_deck"], !(fdRaw is NSNull), fdRaw as? [String: Any] == nil {
+            throw ExecutionBlockError.invalidField("flight_deck", "not an object")
         }
         var fd = root["flight_deck"] as? [String: Any] ?? [:]
         fd["execution"] = dictionary(block)

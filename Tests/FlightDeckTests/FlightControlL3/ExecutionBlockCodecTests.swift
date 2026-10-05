@@ -86,4 +86,62 @@ final class ExecutionBlockCodecTests: XCTestCase {
         XCTAssertFalse(b.pinned); XCTAssertNil(b.host); XCTAssertEqual(b.knobs, [:])
         XCTAssertEqual(b.modelRef, ModelRef(harness: "h", model: "m", knobs: [:]))
     }
+
+    // Fix 1: flight_deck validation
+    func testEncodeRefusesNonObjectFlightDeck() {
+        let ctx = #"{"flight_deck":"not an object"}"#
+        XCTAssertThrowsError(try ExecutionBlockCodec.encode(block(), into: ctx)) {
+            XCTAssertEqual($0 as? ExecutionBlockError, .invalidField("flight_deck", "not an object"))
+        }
+    }
+
+    func testDecodeRefusesNonObjectFlightDeck() {
+        let ctx = #"{"flight_deck":"not an object","execution":{"v":1,"kind":"k","harness":"h","model":"m","pool":"p","source":{"by":"rule","reason":"r","at":"2026-10-04T18:00:00Z"}}}"#
+        XCTAssertEqual(ExecutionBlockCodec.decode(agentContext: ctx), .failure(.invalidField("flight_deck", "not an object")))
+    }
+
+    func testDecodeAbsentFlightDeckStillReturnsNil() {
+        let ctx = #"{"instructions":"something"}"#
+        XCTAssertNil(try ExecutionBlockCodec.decode(agentContext: ctx).get())
+    }
+
+    // Fix 2: source.ruleId and host validation
+    func testDecodeRejectsNonStringRuleId() {
+        func ctx(_ exec: String) -> String { #"{"flight_deck":{"execution":"# + exec + "}}" }
+        let src = #""source":{"by":"rule","reason":"r","at":"2026-10-04T18:00:00Z","ruleId":123}"#
+        XCTAssertEqual(ExecutionBlockCodec.decode(agentContext: ctx(#"{"v":1,"kind":"k","harness":"h","model":"m","pool":"p","# + src + "}")),
+                       .failure(.invalidField("source.ruleId", "not a string")))
+    }
+
+    func testDecodeRejectsNonStringHost() {
+        func ctx(_ exec: String) -> String { #"{"flight_deck":{"execution":"# + exec + "}}" }
+        let src = #""source":{"by":"rule","reason":"r","at":"2026-10-04T18:00:00Z"}"#
+        XCTAssertEqual(ExecutionBlockCodec.decode(agentContext: ctx(#"{"v":1,"kind":"k","harness":"h","model":"m","pool":"p","# + src + #","host":123}"#)),
+                       .failure(.invalidField("host", "not a string")))
+    }
+
+    // Fix 3: v validation (integer, >= 1)
+    func testDecodeRejectsNonIntegerV() {
+        func ctx(_ exec: String) -> String { #"{"flight_deck":{"execution":"# + exec + "}}" }
+        let src = #""source":{"by":"rule","reason":"r","at":"2026-10-04T18:00:00Z"}"#
+        XCTAssertEqual(ExecutionBlockCodec.decode(agentContext: ctx(#"{"v":"1","kind":"k","harness":"h","model":"m","pool":"p","# + src + "}")),
+                       .failure(.invalidField("v", "not an integer")))
+        XCTAssertEqual(ExecutionBlockCodec.decode(agentContext: ctx(#"{"v":1.5,"kind":"k","harness":"h","model":"m","pool":"p","# + src + "}")),
+                       .failure(.invalidField("v", "not an integer")))
+    }
+
+    func testDecodeRejectsVLessThanOne() {
+        func ctx(_ exec: String) -> String { #"{"flight_deck":{"execution":"# + exec + "}}" }
+        let src = #""source":{"by":"rule","reason":"r","at":"2026-10-04T18:00:00Z"}"#
+        XCTAssertEqual(ExecutionBlockCodec.decode(agentContext: ctx(#"{"v":0,"kind":"k","harness":"h","model":"m","pool":"p","# + src + "}")),
+                       .failure(.invalidField("v", "must be at least 1")))
+    }
+
+    func testDecodeRejectsBooleanAsPinned() {
+        func ctx(_ exec: String) -> String { #"{"flight_deck":{"execution":"# + exec + "}}" }
+        let src = #""source":{"by":"rule","reason":"r","at":"2026-10-04T18:00:00Z"}"#
+        // true from JSON should decode fine
+        let ctxWithTrue = ctx(#"{"v":1,"kind":"k","harness":"h","model":"m","pool":"p","pinned":true,"# + src + "}")
+        XCTAssertNotNil(try ExecutionBlockCodec.decode(agentContext: ctxWithTrue).get())
+    }
 }
