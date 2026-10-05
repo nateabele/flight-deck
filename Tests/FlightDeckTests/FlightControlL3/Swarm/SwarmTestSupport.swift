@@ -17,6 +17,8 @@ final class FakeSwarmBackend: SwarmBackend {
     let log: SwarmCallLog
     var ready: [ReadyTask] = []
     var readyFails = false
+    /// Tasks whose `writeBlock` fails (and records nothing).
+    var writeFails: Set<String> = []
     var claimResults: [String: ClaimOutcome] = [:]
     /// Runs inside `releaseReservations`, so a test can act while a reuse is mid-flight.
     var onReleaseReservations: (() -> Void)?
@@ -56,6 +58,7 @@ final class FakeSwarmBackend: SwarmBackend {
         return true
     }
     func writeBlock(_ block: ExecutionBlock, task: String, existingContext: String?, project: URL) async -> Bool {
+        if writeFails.contains(task) { return false }
         written.append(WriteCall(task: task, block: block)); return true
     }
     func releaseReservations(agent: String, project: URL) async -> Bool {

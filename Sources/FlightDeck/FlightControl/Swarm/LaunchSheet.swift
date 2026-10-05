@@ -59,6 +59,8 @@ final class LaunchSheetModel: ObservableObject {
     private let service: SwarmService
     private let registry: RoutingCapabilityRegistry
     private var directory: (any PoolDirectory)?
+    /// Set for the whole of `launch()`, so a double press starts one swarm.
+    private var launching = false
     private let now: () -> Date
     private var projectURL: URL { URL(fileURLWithPath: request.project, isDirectory: true) }
 
@@ -71,6 +73,18 @@ final class LaunchSheetModel: ObservableObject {
     func poolOptions(for harness: HarnessID) -> [PoolSummary] { directory?.pools().filter { $0.harness == harness } ?? [] }
     func defaultPool(for harness: HarnessID) -> PoolID? { directory?.defaultPool(for: harness) }
 
+    /// The pool to show after the harness changes: its default, else its first listed pool, else
+    /// empty (free text). Never the previous harness's pool.
+    func pool(afterChangingTo harness: HarnessID) -> String {
+        (defaultPool(for: harness) ?? poolOptions(for: harness).first?.id)?.rawValue ?? ""
+    }
+
+    /// A listed pool for `harness` when the directory has any; else any non-empty text.
+    func isValidPool(_ pool: String, for harness: HarnessID) -> Bool {
+        let options = poolOptions(for: harness)
+        return options.isEmpty ? !pool.isEmpty : options.contains { $0.id.rawValue == pool }
+    }
+
     var pools: [String] { Set(rows.compactMap { $0.unroutable == nil ? $0.block?.pool.rawValue : nil }).sorted() }
     var canLaunch: Bool { service.dependencies != nil && rows.contains { $0.unroutable == nil } }
 
@@ -80,7 +94,7 @@ final class LaunchSheetModel: ObservableObject {
         guard let deps = service.dependencies else { error = "Flight Control routing is not connected yet."; return }
         let tasks: [ReadyTask]
         switch await backend.readyTasks(project: projectURL) {
-        case .success(let ready): tasks = ready
+        case .success(let ready): tasks = ready; error = nil
         case .failure(let failure): error = failure.message; return
         }
         directory = deps.pools
@@ -149,10 +163,25 @@ final class LaunchSheetModel: ObservableObject {
         return true
     }
 
+    /// A failed write-back aborts: the controller reads blocks from br, so launching anyway would
+    /// run a block different from the one this sheet showed.
     func launch() async -> SwarmRecord? {
+        guard !launching else { return nil }
+        launching = true
+        defer { launching = false }
+        var failed: [String] = []
         for row in rows where row.changed && row.unroutable == nil {
             guard let block = row.block else { continue }
-            _ = await backend.writeBlock(block, task: row.id, existingContext: row.existingContext, project: projectURL)
+            if await backend.writeBlock(block, task: row.id, existingContext: row.existingContext, project: projectURL) {
+                // Saved: a later Launch must not write it again.
+                if let i = rows.firstIndex(where: { $0.id == row.id }) { rows[i].changed = false }
+            } else {
+                failed.append(row.id)
+            }
+        }
+        guard failed.isEmpty else {
+            error = "Could not save the routing for \(failed.joined(separator: ", "))"
+            return nil
         }
         return service.launch(project: request.project, cap: cap, poolCaps: poolCaps, filter: request.filter)
     }
@@ -239,7 +268,7 @@ struct LaunchSheet: View {
                 ForEach(harnesses, id: \.self) { Text($0.rawValue).tag($0) }
             }.frame(width: 140)
             .onChange(of: draftHarness) { harness in
-                if let pool = model.defaultPool(for: harness) { draftPool = pool.rawValue }
+                draftPool = model.pool(afterChangingTo: harness)
             }
             TextField("Model", text: $draftModel).frame(width: 140)
             TextField("Knobs, e.g. effort=high", text: $draftKnobs).frame(width: 180)
@@ -252,9 +281,11 @@ struct LaunchSheet: View {
                 }.frame(width: 180)
             }
             Button("Save") {
-                guard let knobs = LaunchSheetModel.parseKnobs(draftKnobs), !draftModel.isEmpty, !draftPool.isEmpty else { return }
+                guard let knobs = LaunchSheetModel.parseKnobs(draftKnobs), !draftModel.isEmpty,
+                      model.isValidPool(draftPool, for: draftHarness) else { return }
                 Task { if await model.override(id, harness: draftHarness, model: draftModel, knobs: knobs, pool: PoolID(draftPool)) { editing = nil } }
             }
+            .disabled(!model.isValidPool(draftPool, for: draftHarness))
             Button("Close") { editing = nil }
         }
         .font(.caption)

@@ -172,10 +172,63 @@ final class LaunchSheetModelTests: XCTestCase {
     }
 
     func testEachLoadAsksForAFreshRouter() async throws {
-        let (rig, _, model, _) = try rig()
+        let (_, _, model, _) = try rig()
         await model.load()
         await model.load()
         XCTAssertEqual(routerCalls.n, 2)
+    }
+
+    func testAFailedWriteBackAbortsTheLaunch() async throws {
+        let (rig, service, model, _) = try rig()
+        await model.load()
+        rig.backend.writeFails = ["fx-valid"]
+        let record = await model.launch()
+        XCTAssertNil(record)
+        XCTAssertEqual(model.error, "Could not save the routing for fx-valid")
+        XCTAssertNil(service.record(forProject: project), "the swarm never runs a block the sheet did not save")
+    }
+
+    func testASecondLaunchWhileOneIsRunningDoesNothing() async throws {
+        let (rig, _, model, _) = try rig()
+        await model.load()
+        async let first = model.launch()
+        async let second = model.launch()
+        let results = await [first, second]
+        XCTAssertEqual(results.compactMap { $0 }.count, 1)
+        XCTAssertEqual(rig.backend.written.map(\.task), ["fx-valid"])
+    }
+
+    func testASuccessfulLoadClearsAStaleError() async throws {
+        let (rig, _, model, _) = try rig()
+        rig.backend.readyFails = true
+        await model.load()
+        XCTAssertNotNil(model.error)
+        rig.backend.readyFails = false
+        await model.load()
+        XCTAssertNil(model.error)
+    }
+
+    func testChangingTheHarnessResetsThePoolToItsDefaultThenFirstOptionThenEmpty() async throws {
+        let (_, _, model, _) = try rig()
+        pools.summaries = [PoolSummary(id: "claude-subs", harness: "claude", label: "C"),
+                           PoolSummary(id: "claude-team", harness: "claude", label: "C2"),
+                           PoolSummary(id: "codex-subs", harness: "codex", label: "X")]
+        pools.defaults = ["claude": "claude-team"]
+        await model.load()
+        XCTAssertEqual(model.pool(afterChangingTo: "claude"), "claude-team")
+        XCTAssertEqual(model.pool(afterChangingTo: "codex"), "codex-subs", "no default: the first option")
+        XCTAssertEqual(model.pool(afterChangingTo: "opencode"), "", "nothing listed: free text, cleared")
+    }
+
+    func testSaveNeedsAPoolFromTheListWhenTheDirectoryHasOne() async throws {
+        let (_, _, model, _) = try rig()
+        pools.summaries = [PoolSummary(id: "claude-subs", harness: "claude", label: "C")]
+        await model.load()
+        XCTAssertTrue(model.isValidPool("claude-subs", for: "claude"))
+        XCTAssertFalse(model.isValidPool("codex-subs", for: "claude"), "another harness's pool cannot be pinned")
+        XCTAssertFalse(model.isValidPool("", for: "claude"))
+        XCTAssertTrue(model.isValidPool("anything", for: "opencode"), "free text when the directory lists none")
+        XCTAssertFalse(model.isValidPool("", for: "opencode"))
     }
 
     func testParseKnobs() {
