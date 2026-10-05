@@ -70,6 +70,10 @@ final class FleetService: ObservableObject {
     /// here answers `hosts_unavailable` rather than an empty list that would claim no host
     /// is paired.
     private let hosts: HostService?
+    /// Answers `delegate.*` and `recipe.*` (spec §5). Set by the app once its host links are
+    /// wired (task C8); nil answers `not_implemented`, which is what every fleet test without
+    /// one and any build that predates the wiring wants.
+    var delegation: DelegationService?
     private(set) var boundPort: NWEndpoint.Port?
     /// The window's own listener, and the port it is on. Both are `nil` whenever no window is
     /// open, which is invariant 2 stated as a field rather than as a comment.
@@ -373,6 +377,9 @@ final class FleetService: ObservableObject {
         replicator.onEvents = { [weak self] batch in
             guard let self else { return }
             for entry in batch {
+                // A closed tab takes its services down with it (§6.2): nothing should keep a
+                // port forwarded for a session that no longer exists.
+                if case .sessionRemoved(let id) = entry.event { self.delegation?.sessionClosed(id) }
                 let needed = Self.requiredCapability(for: entry.event)
                 self.server.broadcast(.event(seq: entry.seq, entry.event), requiring: needed)
                 self.localServer.broadcast(.event(seq: entry.seq, entry.event), requiring: needed)
@@ -703,12 +710,22 @@ final class FleetService: ObservableObject {
                     reply(.err(cid: cid, code: refusal.code, message: refusal.message))
                 }
             }
-        case .delegate:
-            // The contract is frozen (task C0); `DelegationService` (task C6) answers these.
-            // Until then every one is refused by name, so a CLI built ahead of the app fails at
-            // once with a reason rather than waiting on an answer that never comes.
-            reply(.err(cid: cid, code: "not_implemented",
-                       message: "delegated execution is not implemented in this Flight Deck yet"))
+        case .delegate(let delegate):
+            // Local callers only: a run belongs to the tab whose token started it, and a phone
+            // has no tab and no token, so nothing it started could ever be owned, listed or
+            // stopped. Refused before anything else, wired or not.
+            guard client.isLocal else { return reply(.err(cid: cid, code: "out_of_scope")) }
+            // Refused by name until the app wires the service, so a CLI built ahead of the app
+            // fails at once with a reason rather than waiting on an answer that never comes.
+            guard let delegation else {
+                return reply(.err(cid: cid, code: "not_implemented",
+                                  message: "delegated execution is not implemented in this Flight Deck yet"))
+            }
+            // Taken here, synchronously inside `onRequest` where it is valid: it stops the
+            // request's producers once its reader is gone.
+            delegation.handle(delegate, caller: ControlScope.caller(token: client.caller, secret: controlSecret),
+                              cid: cid, cancellation: localServer.replyCancellation(for: client, cid: cid),
+                              reply: reply)
         }
     }
 

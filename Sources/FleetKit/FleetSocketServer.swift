@@ -159,6 +159,16 @@ public final class FleetSocketServer: @unchecked Sendable {
         (_ client: FleetAttachment, _ cid: Int, _ command: FleetCommand,
          _ reply: @escaping (ServerFrame) -> Void) -> Void
     )?
+    /// The cancellation for a request this server is answering, valid only inside `onRequest`
+    /// (synchronously, on `queue`). It fires once the request's terminal frame is sent, when
+    /// its stream is dropped (`slow_reader`), or when the connection ends — so a handler that
+    /// keeps producing frames (a delegation replay) stops rather than replying into nothing
+    /// until the run ends.
+    public func replyCancellation(for client: FleetAttachment, cid: Int) -> ReplyCancellation? {
+        dispatchPrecondition(condition: .onQueue(queue))
+        return cancellations[client.id]?[cid]
+    }
+
     /// Answers a request. Same reply-callback shape `onCommand` has, forced rather than
     /// stylistic in both directions: most commands are still dispatched on the way out of the
     /// frame handler, but a page is a file read that would otherwise block `queue` — which in
@@ -166,7 +176,8 @@ public final class FleetSocketServer: @unchecked Sendable {
     /// that has grown the same problem.
     ///
     /// `reply` must be called on `queue`, and it asserts that. It answers at most once —
-    /// a second call is dropped rather than trusted — and calling it after the connection has
+    /// a second call is dropped rather than trusted, except after a frame whose
+    /// `continuesStream` is true (a delegation stream's progress) — and calling it after the connection has
     /// ended is safe and does nothing, because a phone can leave inside the moment a page
     /// takes to read and that is the ordinary case, not an error.
     public var onRequest: (
@@ -231,6 +242,10 @@ public final class FleetSocketServer: @unchecked Sendable {
     /// the reason `names` is. Only ever filed in local mode: a phone that sends `caller` has it
     /// ignored, so nothing off the local socket can claim to be a local caller.
     private var callers: [UUID: String] = [:]
+    /// Each connection's requests still open, by `cid`: what `replyCancellation(for:cid:)` hands
+    /// a handler, fired when the request's last frame goes out, its stream is dropped, or the
+    /// connection ends.
+    private var cancellations: [UUID: [Int: ReplyCancellation]] = [:]
     /// The unix socket path when this instance was started by `startLocal`, and `nil` in the
     /// paired (TLS-PSK) mode. `stop()` unlinks it. Confined to `queue`.
     private var localPath: String?
@@ -569,6 +584,11 @@ public final class FleetSocketServer: @unchecked Sendable {
         names.removeAll()
         caps.removeAll()
         callers.removeAll()
+        // Every open request on every connection is over: whatever is still producing replies
+        // for one (a delegation replay) must stop.
+        let open = cancellations.values.flatMap(\.values)
+        cancellations.removeAll()
+        open.forEach { $0.cancel() }
         ready.removeAll()
         identities.removeAll()
         // Drained, not merely dropped, and the distinction is the whole rule `asks` states: a
@@ -905,12 +925,22 @@ public final class FleetSocketServer: @unchecked Sendable {
                     FleetSocket.send(ServerFrame.err(cid: cid, code: "unhandled"), over: connection)
                     return
                 }
-                // At most one frame per `cid`, enforced here rather than asked of every
-                // reader: a client correlates a reply by that number and closes the fetch out
-                // when it lands, so a second one is a page it is no longer expecting and has
+                // At most one *terminal* frame per `cid`, enforced here rather than asked of
+                // every reader: a client correlates a reply by that number and closes the fetch
+                // out when it lands, so a second one is a page it is no longer expecting and has
                 // nowhere to put. One `Bool` on `queue` — where this closure has just
                 // asserted it is — makes it impossible instead of merely documented.
-                var answered = false
+                //
+                // A delegation stream (`flightdeck run`) is the one request answered with many
+                // frames: its `delegateStarted`/`delegateNotice`/`delegateOutput` frames pass
+                // and leave the `cid` open, and its terminal frame closes it like any reply.
+                // Every frame any other request draws is terminal, so for those this is the
+                // same answered-once rule it always was. `ReplyStream` holds that rule, and the
+                // stream's backpressure.
+                let stream = ReplyStream()
+                if case .delegate(let delegate) = request { stream.runID = delegate.namedRun }
+                let cancellation = ReplyCancellation()
+                self.cancellations[id, default: [:]][cid] = cancellation
                 onRequest(attachment, cid, request) { [weak self, weak connection] frame in
                     guard let self, let connection else { return }
                     // The reply comes back from wherever the page was read, which is the
@@ -919,14 +949,33 @@ public final class FleetSocketServer: @unchecked Sendable {
                     // this is the code that reads it — a reader that hopped for itself would
                     // be reading that table from its own thread.
                     dispatchPrecondition(condition: .onQueue(self.queue))
-                    guard !answered else { return }
-                    answered = true
+                    let action = stream.admit(frame)
+                    let closesNow = stream.isClosed && self.cancellations[id]?[cid] === cancellation
+                    if closesNow { self.cancellations[id]?[cid] = nil }
+                    // Fired on the way out, after this frame is queued: the producer's last
+                    // reply must still go out first.
+                    defer { if closesNow { cancellation.cancel() } }
                     // The connection may have ended while the page was being read — a phone
                     // that put itself in a pocket mid-scroll. `attached` is keyed by a fresh
                     // UUID per connection and `drop(id)` removes it, so this cannot match a
                     // later peer that happens to reuse anything.
                     guard self.attached[id] != nil else { return }
-                    FleetSocket.send(frame, over: connection)
+                    switch action {
+                    case .drop:
+                        return
+                    case .send(let frame):
+                        FleetSocket.send(frame, over: connection)
+                    case .stream(let frame, let bytes):
+                        // Encoded off `queue` (the main queue in production), on the stream's
+                        // own serial queue so its frames still reach the socket in order; the
+                        // bytes count as in flight until the stack has taken them.
+                        let queue = self.queue
+                        stream.encoder.async {
+                            FleetSocket.send(frame, over: connection, onSent: {
+                                queue.async { stream.sent(bytes) }
+                            })
+                        }
+                    }
                 }
             case .logs(let cid, let logs):
                 // The answer to something THIS Mac asked. Gated on attachment like every
@@ -999,6 +1048,9 @@ public final class FleetSocketServer: @unchecked Sendable {
         names.removeValue(forKey: id)
         caps.removeValue(forKey: id)
         callers.removeValue(forKey: id)
+        // The connection's open requests end with it, so their producers stop (see
+        // `replyCancellation`). Removed before firing, so a handler that re-enters finds none.
+        cancellations.removeValue(forKey: id)?.values.forEach { $0.cancel() }
         // Drained, not cleared, and before the `attached` check for the reason `slots` is
         // removed before it: a connection can be asked and then die without ever reaching the
         // arm below. Removed from the table BEFORE the loop, so a completion that re-enters —
@@ -1021,4 +1073,113 @@ public enum FleetSocketError: Error {
     /// Something is already answering on the local socket path — another instance on the same
     /// state directory, whose clients would be orphaned if this one unlinked it.
     case inUse
+}
+
+public extension ServerFrame {
+    /// More frames may follow this one on its `cid` (a delegation stream, see
+    /// `DelegationControlWire.swift`). Exhaustive with no `default`, so a new reply case cannot
+    /// compile until someone decides whether it ends its request; deciding wrong either way is
+    /// a hang (a stream closed early) or a stray frame (a reply left open).
+    ///
+    /// `delegateStarted` is non-terminal here even though a detached run ends on it
+    /// (`DelegationControlWire.swift`): the frame alone cannot say which it is, and the app
+    /// sends nothing after a detached one, so leaving that `cid` open costs nothing.
+    var continuesStream: Bool {
+        switch self {
+        case .delegateStarted, .delegateNotice, .delegateOutput:
+            return true
+        case .snapshot, .event, .ack, .err, .page, .newSessionOptions, .macEndpoints, .recentlyClosed,
+             .conversations, .searchHits, .session, .phoneRequest, .intakeDetail, .intakePlan, .hostList,
+             .hostInfo, .delegateExit, .delegateRuns, .delegatePatch, .delegateApplied, .recipes,
+             .recipeCheck, .hostDisk:
+            return false
+        }
+    }
+}
+
+/// One request's replies on one connection: the answered-once rule, and a delegation
+/// stream's backpressure.
+///
+/// **Backpressure, the simple way.** Output bytes handed to the socket but not yet taken by
+/// the stack (`.contentProcessed`) are counted; past `highWater` the stream is ended with a
+/// terminal `err(slow_reader)` rather than buffered without bound in the app. The CLI already
+/// counts every byte it printed, so it answers by reattaching with `delegate.wait {from}` on
+/// the same connection and loses nothing: `HostLinking.events(from:)` replays any offset.
+/// Ending and reattaching keeps the per-reader state in one place, the reattach, rather than
+/// in a pause/resume protocol beside it.
+final class ReplyStream {
+    /// 4 MiB of output in flight: far past anything a terminal reading at speed accumulates,
+    /// well short of the app holding a whole build log in socket buffers for a stalled reader.
+    static let highWater = 4 * 1024 * 1024
+
+    enum Action: Equatable {
+        case drop
+        /// An ordinary reply, sent as every reply always was.
+        case send(ServerFrame)
+        /// A stream frame: encoded off the main queue, `bytes` of output counted until sent.
+        case stream(ServerFrame, bytes: Int)
+    }
+
+    let encoder = DispatchQueue(label: "dev.flightdeck.fleet.stream", qos: .userInitiated)
+    private(set) var inFlight = 0
+    /// The run this stream is about, when known (`delegateStarted`, or a `wait`/`logs` naming
+    /// it), so a `slow_reader` read by a CLI that cannot reattach still says how to.
+    var runID: String?
+    private var closed = false
+    var isClosed: Bool { closed }
+    private var streaming = false
+
+    func admit(_ frame: ServerFrame) -> Action {
+        guard !closed else { return .drop }
+        if !frame.continuesStream { closed = true }
+        guard streaming || frame.continuesStream else { return .send(frame) }
+        streaming = true
+        if case .delegateStarted(_, let started) = frame { runID = started.runID }
+        guard case .delegateOutput(let cid, _, _, let data) = frame else { return .stream(frame, bytes: 0) }
+        if inFlight > 0, inFlight + data.count > Self.highWater {
+            closed = true
+            // Read verbatim by a CLI too old to reattach on its own: it must still end on the
+            // step that recovers the run.
+            let next = runID.map { " — flightdeck wait \($0) to pick it back up" } ?? ""
+            return .stream(.err(cid: cid, code: "slow_reader",
+                                message: "the run's output outran this reader\(next)"), bytes: 0)
+        }
+        inFlight += data.count
+        return .stream(frame, bytes: data.count)
+    }
+
+    func sent(_ bytes: Int) { inFlight -= bytes }
+}
+
+/// Fired once when a request is over for its reader (`FleetSocketServer.replyCancellation`).
+/// Confined to the server's queue, like every handler it is passed to.
+public final class ReplyCancellation {
+    private var handlers: [() -> Void] = []
+    public private(set) var isCancelled = false
+
+    public init() {}
+
+    /// Runs `handler` at cancellation, or at once if that already happened.
+    public func onCancel(_ handler: @escaping () -> Void) {
+        guard !isCancelled else { return handler() }
+        handlers.append(handler)
+    }
+
+    public func cancel() {
+        guard !isCancelled else { return }
+        isCancelled = true
+        let run = handlers
+        handlers = []
+        run.forEach { $0() }
+    }
+}
+
+extension DelegateRequest {
+    /// The run a `wait`/`logs` names, for `ReplyStream`'s `slow_reader` line.
+    var namedRun: String? {
+        switch self {
+        case .wait(let run, _, _, _), .logs(let run, _, _): return run
+        default: return nil
+        }
+    }
 }

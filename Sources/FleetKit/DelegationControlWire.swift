@@ -8,7 +8,8 @@ import Foundation
 //     delegate.run / .exec / .up  {"run":{WireDelegateRun}}
 //     delegate.down / .restart / .sync  {service, cwd}
 //     delegate.ps                 {}
-//     delegate.wait               {run, timeout?, from?}   seconds; absent = the CLI's default
+//     delegate.wait               {run, timeout?, from?, noTimeout?}   seconds; absent = the
+//                                 default (9 min); noTimeout: a CLI reattaching to its own `run`
 //     delegate.logs               {run, follow, from?}     from: output byte offset to resume at
 //     delegate.stop / .diff / .apply  {run}
 //     recipe.ls / recipe.check    {cwd}
@@ -87,7 +88,10 @@ public enum DelegateRequest: Codable, Equatable, Sendable {
     case ps
     /// Block until `run` ends; `timeout` in seconds, nil for the CLI's default (9 min).
     /// `from` resumes the output at that byte offset; nil replays it from the start.
-    case wait(run: String, timeout: Int?, from: Int64?)
+    /// `noTimeout` is a reattach: a `flightdeck run` that lost the app picks its run back up
+    /// with `wait {from}`, and must not turn into a 9-minute wait that exits 124. Optional on
+    /// the wire (absent = false), so a CLI that predates it still decodes.
+    case wait(run: String, timeout: Int?, from: Int64?, noTimeout: Bool = false)
     case logs(run: String, follow: Bool, from: Int64?)
     case stop(run: String)
     case diff(run: String)
@@ -104,9 +108,9 @@ public enum DelegateRequest: Codable, Equatable, Sendable {
     /// `ControlScope` lets these through at every level; the rest start, stop, or apply work.
     public var isReadOnly: Bool {
         switch self {
-        case .ps, .logs, .diff, .recipeList, .hostDisk: return true
-        case .run, .exec, .up, .down, .restart, .sync, .wait, .stop, .apply, .recipeAdd, .recipeCheck,
-             .hostPrune:
+        // `wait` and `recipe check` (ruling 3) only watch and validate.
+        case .ps, .wait, .logs, .diff, .recipeList, .recipeCheck, .hostDisk: return true
+        case .run, .exec, .up, .down, .restart, .sync, .stop, .apply, .recipeAdd, .hostPrune:
             return false
         }
     }
@@ -131,7 +135,9 @@ public enum DelegateRequest: Codable, Equatable, Sendable {
         case hostPrune = "host.prune"
     }
 
-    enum CodingKeys: String, CodingKey { case op, run, service, cwd, timeout, follow, name, recipe, from, host, repo }
+    enum CodingKeys: String, CodingKey {
+        case op, run, service, cwd, timeout, follow, name, recipe, from, host, repo, noTimeout
+    }
 
     public func encode(to encoder: any Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
@@ -159,8 +165,9 @@ public enum DelegateRequest: Codable, Equatable, Sendable {
             try c.encode(cwd, forKey: .cwd)
         case .ps:
             try c.encode(Op.ps, forKey: .op)
-        case .wait(let run, let timeout, let from):
+        case .wait(let run, let timeout, let from, let noTimeout):
             try c.encode(Op.wait, forKey: .op)
+            if noTimeout { try c.encode(true, forKey: .noTimeout) }
             try c.encode(run, forKey: .run)
             try c.encodeIfPresent(timeout, forKey: .timeout)
             try c.encodeIfPresent(from, forKey: .from)
@@ -219,7 +226,8 @@ public enum DelegateRequest: Codable, Equatable, Sendable {
         case .wait:
             self = .wait(run: try c.decode(String.self, forKey: .run),
                          timeout: try c.decodeIfPresent(Int.self, forKey: .timeout),
-                         from: try c.decodeIfPresent(Int64.self, forKey: .from))
+                         from: try c.decodeIfPresent(Int64.self, forKey: .from),
+                         noTimeout: try c.decodeIfPresent(Bool.self, forKey: .noTimeout) ?? false)
         case .logs:
             self = .logs(run: try c.decode(String.self, forKey: .run),
                          follow: try c.decodeIfPresent(Bool.self, forKey: .follow) ?? false,

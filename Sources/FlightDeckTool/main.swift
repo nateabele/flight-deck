@@ -35,8 +35,22 @@ let usageLines = [
     "flightdeck closed",
     "flightdeck intake run ID --root DIR   run an intake's planning rounds (started by Flight Deck)",
     "flightdeck options P",
-    "flightdeck host ls",
+    "flightdeck host ls [--disk [HOST]]",
     "flightdeck host info <host>",
+    "flightdeck host prune <host> [--repo R]",
+    "flightdeck run [--on H] [--include P]... [--fetch G]... [--env K=V]... [--pty] [--screen] [--detach] -- cmd...",
+    "flightdeck run RECIPE [same flags] [-- extra args]",
+    "flightdeck exec --on H -- cmd...      run in the host's checkout without syncing",
+    "flightdeck up RECIPE | up --on H --port L:R... -- cmd...",
+    "flightdeck down|restart|sync SERVICE",
+    "flightdeck ps",
+    "flightdeck wait RUN [--timeout S]     exits with the run's status; 124 on timeout",
+    "flightdeck logs RUN [--follow]",
+    "flightdeck stop RUN",
+    "flightdeck diff|apply RUN",
+    "flightdeck recipe ls|check",
+    "flightdeck recipe add NAME --run CMD [--host H] [--service] [--long] [--screen] [--port P]... [--apply auto]",
+    "  (delegation failures exit 125 with one flightdeck: line naming the host and the next step)",
     "flightdeck raw '<ClientFrame JSON>'",
     "",
     "Flags go before or after operands. Put -- before text that starts with -:",
@@ -117,11 +131,19 @@ let socketPath = invocation.socket
     ?? env["FLIGHT_DECK_CONTROL_SOCKET"]
     ?? (stateDir + "/control.sock")
 
+// The terminal's size, for `run --pty` (§6.1): the host's pty is sized once from it.
+var window = winsize()
+let hasTerminal = ioctl(1, TIOCGWINSZ, &window) == 0 && window.ws_col > 0
+
 let context = CLIContext(
     selfID: UUID(uuidString: env["FLIGHT_DECK_SESSION_ID"] ?? ""),
     cwd: FileManager.default.currentDirectoryPath,
     json: invocation.json,
-    isTTY: isatty(1) == 1
+    isTTY: isatty(1) == 1,
+    columns: hasTerminal ? Int(window.ws_col) : nil,
+    rows: hasTerminal ? Int(window.ws_row) : nil,
+    environment: env,
+    socketPath: socketPath
 )
 
 let transport = LocalFleetTransport(path: socketPath, caller: env["FLIGHT_DECK_CALLER"])
@@ -148,8 +170,33 @@ let runner = CLIRunner(
     },
     schedule: { delay, action in
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: action)
-    }
+    },
+    // A delegated run's bytes, as they came: no newline added, stderr kept apart from stdout,
+    // so `flightdeck run -- make` reads exactly like `make`.
+    // `write(contentsOf:)`, which throws, never the legacy `write(_:)`, which raises an
+    // Objective-C exception on EPIPE and crashes `flightdeck run … | head`.
+    write: { stream, data in
+        try (stream == "stderr" ? FileHandle.standardError : FileHandle.standardOutput).write(contentsOf: data)
+    },
+    execReal: { argv0, args in exit(DelegateRouting.execReal(argv0, args, environment: env)) }
 )
 
+// A delegated run forwards Ctrl-C to the host (§6.1) rather than dying and leaving the run
+// going there unwatched. Only for the verbs attached to a run; every other verb keeps the
+// default disposition.
+var interruptSources: [DispatchSourceSignal] = []
+if case .delegate(let command) = invocation.command {
+    switch command {
+    case .run, .exec, .wait, .logs, .routeExec:
+        interruptSources = RunnerSignals.install(signals: [SIGINT]) {
+            DispatchQueue.main.async { runner.interrupt() }
+        }
+    default:
+        break
+    }
+}
+
 runner.run()
-dispatchMain()
+withExtendedLifetime(interruptSources) {
+    dispatchMain()
+}
