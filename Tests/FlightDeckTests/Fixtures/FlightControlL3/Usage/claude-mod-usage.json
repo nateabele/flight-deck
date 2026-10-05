@@ -1,0 +1,4 @@
+{"v": 1, "tab": "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE", "session": "8552adc8-bbae-48c2-9b86-29a5becfa369",
+ "readAt": "2026-10-04T19:00:00.000Z",
+ "rateLimits": [{"kind": "five_hour", "percentUsed": 82.5, "resetsAt": "2026-10-04T23:00:00.000Z"},
+                {"kind": "seven_day", "percentUsed": 31, "resetsAt": "2026-10-09T00:00:00Z"}]}

@@ -1,0 +1,19 @@
+{
+  "rateLimits": {"limitId": "codex", "limitName": null,
+    "primary": {"usedPercent": 42, "windowDurationMins": 300, "resetsAt": 1791154800},
+    "secondary": {"usedPercent": 71, "windowDurationMins": 10080, "resetsAt": 1791504000},
+    "credits": {"hasCredits": false, "unlimited": false, "balance": "0"},
+    "planType": "plus", "rateLimitReachedType": null, "spendControlReached": null, "individualLimit": null},
+  "rateLimitsByLimitId": {
+    "codex": {"limitId": "codex", "limitName": null,
+      "primary": {"usedPercent": 42, "windowDurationMins": 300, "resetsAt": 1791154800},
+      "secondary": {"usedPercent": 71, "windowDurationMins": 10080, "resetsAt": 1791504000},
+      "credits": {"hasCredits": false, "unlimited": false, "balance": "0"},
+      "planType": "plus", "rateLimitReachedType": null, "spendControlReached": null, "individualLimit": null},
+    "codex_bengalfox": {"limitId": "codex_bengalfox", "limitName": "GPT-6 Sol",
+      "primary": {"usedPercent": 88, "windowDurationMins": 300, "resetsAt": 1791151200},
+      "secondary": null, "credits": null, "planType": "plus",
+      "rateLimitReachedType": null, "spendControlReached": null, "individualLimit": null}
+  },
+  "rateLimitResetCredits": null
+}

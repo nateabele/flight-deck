@@ -1,0 +1,202 @@
+import Foundation
+
+/// Which reported failures mean "this account is out of quota", as opposed to "the API is having
+/// a bad day". Only the first moves an account to over-hard: treating an overloaded API as
+/// exhaustion would hand off every agent on every account at once, onto accounts that are just
+/// as overloaded. Kinds are each agent's own spelling — claude's transcript `error`, codex's
+/// rollout `codex_error_info` in snake_case (see `CodexTurnRecovery`).
+public enum RateLimitClassifier {
+    public static let kinds: Set<String> = ["rate_limit", "rate_limit_exceeded", "usage_limit_exceeded", "usage_limit_reached"]
+
+    public static func isRateLimit(status: Int?, kind: String?) -> Bool {
+        if status == 429 { return true }
+        guard let kind else { return false }
+        return kinds.contains(kind)
+    }
+}
+
+/// One spelling for a window across vendors, so the popover says "five_hour" for claude's
+/// `five_hour` and codex's 300-minute primary alike.
+public enum UsageWindowName {
+    public static func forDuration(minutes: Int?) -> String {
+        switch minutes {
+        case 300?: return "five_hour"
+        case 10080?: return "seven_day"
+        case let m?: return "\(m)m"
+        case nil: return "window"
+        }
+    }
+}
+
+/// One codex rate-limit bucket (`limitId`), as the app-server reports it.
+public struct CodexRateBucket: Equatable, Sendable {
+    public var limitId: String
+    public var primary: UsageWindow?
+    public var secondary: UsageWindow?
+    /// Non-nil once codex says a limit was reached (`rate_limit_reached`, a depleted workspace…).
+    public var reachedType: String?
+
+    public init(limitId: String, primary: UsageWindow? = nil, secondary: UsageWindow? = nil, reachedType: String? = nil) {
+        self.limitId = limitId; self.primary = primary; self.secondary = secondary; self.reachedType = reachedType
+    }
+}
+
+/// `account/rateLimits/read` and `account/rateLimits/updated`, per the schema in
+/// `codex-app-server-v2.generated.json`: `usedPercent` is an integer 0–100, `resetsAt` unix
+/// seconds, `windowDurationMins` minutes.
+public enum CodexRateLimitParser {
+    static func window(_ raw: Any?, limitId: String) -> UsageWindow? {
+        guard let w = raw as? [String: Any], let used = (w["usedPercent"] as? NSNumber)?.doubleValue else { return nil }
+        let minutes = (w["windowDurationMins"] as? NSNumber)?.intValue
+        let resets = (w["resetsAt"] as? NSNumber).map { Date(timeIntervalSince1970: $0.doubleValue) }
+        let base = UsageWindowName.forDuration(minutes: minutes)
+        return UsageWindow(name: limitId == "codex" ? base : "\(limitId):\(base)", utilization: used / 100, resetsAt: resets)
+    }
+
+    public static func bucket(_ snapshot: [String: Any]) -> CodexRateBucket {
+        let id = snapshot["limitId"] as? String ?? "codex"
+        return CodexRateBucket(limitId: id,
+                               primary: window(snapshot["primary"], limitId: id),
+                               secondary: window(snapshot["secondary"], limitId: id),
+                               reachedType: snapshot["rateLimitReachedType"] as? String)
+    }
+
+    /// The multi-bucket view when the server sends one, else the backward-compatible single
+    /// bucket. Keyed by `limitId`.
+    public static func readResponse(_ result: [String: Any]) -> [String: CodexRateBucket] {
+        if let byID = result["rateLimitsByLimitId"] as? [String: Any], !byID.isEmpty {
+            var out: [String: CodexRateBucket] = [:]
+            for (key, value) in byID {
+                guard var snapshot = value as? [String: Any] else { continue }
+                if snapshot["limitId"] as? String == nil { snapshot["limitId"] = key }
+                let b = bucket(snapshot)
+                out[b.limitId] = b
+            }
+            return out
+        }
+        guard let single = result["rateLimits"] as? [String: Any] else { return [:] }
+        let b = bucket(single)
+        return [b.limitId: b]
+    }
+
+    /// A rolling update is sparse: the schema says a missing or null value "does not clear a
+    /// previously observed value". So only what the update carries replaces what the last read
+    /// said; the 120-second read (UsageService) is what corrects anything an update left stale.
+    public static func merge(update params: [String: Any], into buckets: [String: CodexRateBucket]) -> [String: CodexRateBucket] {
+        guard let snapshot = params["rateLimits"] as? [String: Any] else { return buckets }
+        let id = snapshot["limitId"] as? String ?? "codex"
+        var out = buckets
+        var b = out[id] ?? CodexRateBucket(limitId: id)
+        if let p = window(snapshot["primary"], limitId: id) { b.primary = p }
+        if let s = window(snapshot["secondary"], limitId: id) { b.secondary = s }
+        if let reached = snapshot["rateLimitReachedType"] as? String { b.reachedType = reached }
+        out[id] = b
+        return out
+    }
+
+    public static func reading(_ buckets: [String: CodexRateBucket], account: AccountRef, readAt: Date,
+                               source: String = "codex app-server") -> UsageReading? {
+        guard !buckets.isEmpty else { return nil }
+        let ordered = buckets.keys.sorted().compactMap { buckets[$0] }
+        let windows = ordered.flatMap { [$0.primary, $0.secondary].compactMap { $0 } }
+        return UsageReading(account: account, windows: windows, readAt: readAt, source: source,
+                            hardRejection: ordered.contains { $0.reachedType != nil })
+    }
+}
+
+/// claude's stream-json `rate_limit_event.rate_limit_info`. `unifiedWindows` utilization is
+/// already 0–1; `resetsAt` is unix seconds.
+public enum ClaudeRateLimitParser {
+    public static func windows(rateLimitInfo info: [String: Any]) -> [UsageWindow] {
+        guard let unified = info["unifiedWindows"] as? [String: Any] else { return [] }
+        return unified.keys.sorted().compactMap { name in
+            guard let w = unified[name] as? [String: Any], let u = (w["utilization"] as? NSNumber)?.doubleValue else { return nil }
+            let resets = (w["resetsAt"] as? NSNumber).map { Date(timeIntervalSince1970: $0.doubleValue) }
+            return UsageWindow(name: name, utilization: u, resetsAt: resets)
+        }
+    }
+
+    /// `allowed` and `allowed_warning` pass; anything else that is present is a refusal. An
+    /// absent status is no evidence either way.
+    public static func isRejected(rateLimitInfo info: [String: Any]) -> Bool {
+        guard let status = info["status"] as? String else { return false }
+        return !status.hasPrefix("allowed")
+    }
+
+    public static func resetsAt(rateLimitInfo info: [String: Any]) -> Date? {
+        (info["resetsAt"] as? NSNumber).map { Date(timeIntervalSince1970: $0.doubleValue) }
+    }
+}
+
+/// The file Flight Deck's claude mod writes per tab: `<usage dir>/<id>.json`. `percentUsed` is
+/// 0–100 with one decimal (the mod API's `SessionRateLimit`), so it is divided here, once.
+public struct ModUsageFile: Equatable, Sendable {
+    public struct Window: Equatable, Sendable {
+        public var kind: String
+        public var percentUsed: Double
+        public var resetsAt: Date?
+        public init(kind: String, percentUsed: Double, resetsAt: Date?) { self.kind = kind; self.percentUsed = percentUsed; self.resetsAt = resetsAt }
+    }
+    public static let currentVersion = 1
+
+    public var v: Int
+    public var tab: String?
+    public var session: String?
+    public var readAt: Date
+    public var rateLimits: [Window]
+
+    public var windows: [UsageWindow] {
+        rateLimits.map { UsageWindow(name: $0.kind, utilization: $0.percentUsed / 100, resetsAt: $0.resetsAt) }
+    }
+
+    static func date(_ raw: Any?) -> Date? {
+        guard let text = raw as? String else { return nil }
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let d = f.date(from: text) { return d }
+        f.formatOptions = [.withInternetDateTime]
+        return f.date(from: text)
+    }
+
+    /// Nil for a torn write (the mod's write and this read can interleave; the next scan
+    /// retries), a newer version, or a missing `readAt` — never a partial reading.
+    public static func decode(_ data: Data) -> ModUsageFile? {
+        guard let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let v = (obj["v"] as? NSNumber)?.intValue, v <= currentVersion,
+              let readAt = date(obj["readAt"]) else { return nil }
+        let raw = obj["rateLimits"] as? [[String: Any]] ?? []
+        let windows = raw.compactMap { w -> Window? in
+            guard let kind = w["kind"] as? String, let pct = (w["percentUsed"] as? NSNumber)?.doubleValue else { return nil }
+            return Window(kind: kind, percentUsed: pct, resetsAt: date(w["resetsAt"]))
+        }
+        return ModUsageFile(v: v, tab: obj["tab"] as? String, session: obj["session"] as? String, readAt: readAt, rateLimits: windows)
+    }
+}
+
+/// What the OpenCode adapter reports when its server answers with an `APIError`. Defined here,
+/// not on that adapter's branch, so the meter can be built and tested before it merges.
+public struct OpenCodeAPIErrorEvent: Equatable, Sendable {
+    public var status: Int
+    /// Seconds, from the `retry-after` header when the provider sent one.
+    public var retryAfter: TimeInterval?
+    public var message: String
+    public var at: Date
+    public init(status: Int, retryAfter: TimeInterval?, message: String, at: Date) {
+        self.status = status; self.retryAfter = retryAfter; self.message = message; self.at = at
+    }
+}
+
+/// OpenCode has no meter, only refusals: a 429 is the whole signal.
+public enum OpenCodeRateLimit {
+    /// Documented here for the popover's wording; `HeadroomPolicy.rejectionBackoff` is what
+    /// applies it, to a rejection whose reading carries no reset time.
+    public static let backoff: TimeInterval = 15 * 60
+
+    public static func reading(for event: OpenCodeAPIErrorEvent, account: AccountRef) -> UsageReading? {
+        guard event.status == 429 else { return nil }
+        let windows = event.retryAfter.map {
+            [UsageWindow(name: "retry-after", utilization: 1, resetsAt: event.at.addingTimeInterval($0))]
+        } ?? []
+        return UsageReading(account: account, windows: windows, readAt: event.at, source: "opencode 429", hardRejection: true)
+    }
+}
