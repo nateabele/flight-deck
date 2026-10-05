@@ -20,14 +20,17 @@ import PairingCore
 //       gate 2: one host-profile pairing window that seals that slot and secret under the
 //       name "interop-host", then exits 0 — or exits 1 when the window burns or expires.
 
+/// Names the installed binary, not the SwiftPM product: `hostd-install.sh` puts this on PATH as
+/// `flightdeck-hostd`, and the Add Host sheet tells the user to type that name, so a usage line
+/// saying `HostDaemonLinux` would name a command that does not exist on their machine.
 func usage() -> Never {
     FileHandle.standardError.write(Data("""
-        usage: HostDaemonLinux serve [--port N] [--root DIR]
-               HostDaemonLinux pair [--root DIR]
-               HostDaemonLinux status [--root DIR]
-               HostDaemonLinux revoke SLOT [--root DIR]
-               HostDaemonLinux echo --port N --slot UUID --secret-hex HEX
-               HostDaemonLinux pair-test --port N --slot UUID --secret-hex HEX --code CODE
+        usage: flightdeck-hostd serve [--port N] [--root DIR]
+               flightdeck-hostd pair [--root DIR]
+               flightdeck-hostd status [--root DIR]
+               flightdeck-hostd revoke SLOT [--root DIR]
+               flightdeck-hostd echo --port N --slot UUID --secret-hex HEX
+               flightdeck-hostd pair-test --port N --slot UUID --secret-hex HEX --code CODE
 
         """.utf8))
     exit(64)

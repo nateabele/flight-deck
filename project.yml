@@ -112,6 +112,12 @@ targets:
           destination: executables
       - package: HostKit
         product: HostKit
+    # The Linux hostd installer's URL and digest. Only Release picks up the digest that
+    # scripts/build-hostd-linux.sh writes (through an optional include, so a checkout with no
+    # assets built still builds); Debug always says the installer is not published.
+    configFiles:
+      Debug: Resources/Hostd.xcconfig
+      Release: Resources/HostdRelease.xcconfig
     settings:
       base:
         # `productName:` above only renames the product *reference* (and the
@@ -152,13 +158,15 @@ targets:
         GENERATE_INFOPLIST_FILE: "YES"
         # The Linux hostd installer the Add Host sheet's command names. Custom keys cannot be
         # `INFOPLIST_KEY_` settings (Xcode honours only the keys it knows), so this partial
-        # plist carries them and Xcode merges it into the generated one, expanding the two
-        # settings below. Empty until a release publishes an installer: with no digest the
-        # sheet says the installer is not published rather than showing a command that has
-        # nothing to check against.
+        # plist carries them and Xcode merges it into the generated one, expanding
+        # FD_HOSTD_RELEASE_BASE_URL and FD_HOSTD_INSTALLER_SHA256. Those two are set by the
+        # `configFiles` below, not here: a target setting would outrank them and hide the
+        # digest scripts/build-hostd-linux.sh writes for a Release build.
         INFOPLIST_FILE: Resources/FlightDeck-Info.plist
-        FD_HOSTD_RELEASE_BASE_URL: ""
-        FD_HOSTD_INSTALLER_SHA256: ""
+        # The app's version, and the hostd release tag (`hostd-v<this>`) the Add Host sheet's
+        # install command downloads from. scripts/build-hostd-linux.sh reads it from this line,
+        # so keep it the only MARKETING_VERSION in this file.
+        MARKETING_VERSION: "0.1.0"
         SWIFT_OBJC_BRIDGING_HEADER: Sources/FlightDeck/BridgingHeader.h
         HEADER_SEARCH_PATHS: $(SRCROOT)/Sources/FlightDeck/GhosttyEmbed $(SRCROOT)/vendor/boringssl-artifacts/include
         # libghostty (GhosttyKit) statically bundles C++ (glslang); link the C++

@@ -1,0 +1,14 @@
+// The Linux hostd installer the Add Host sheet's command names, expanded into the app's
+// Info.plist by Resources/FlightDeck-Info.plist. Debug uses this file alone; Release goes
+// through HostdRelease.xcconfig, which adds the digest a real asset build writes.
+//
+// Here and not as target settings in project.yml: target settings outrank a target's xcconfig,
+// so a default there would silently override the digest the generated xcconfig supplies.
+//
+// `//` starts a comment in an xcconfig, so the URL's scheme is split with an empty `$()`;
+// written plainly the value would be just `https:`.
+FD_HOSTD_RELEASE_BASE_URL = https:/$()/github.com/nateabele/flight-deck/releases/download/hostd-v$(MARKETING_VERSION)
+
+// Empty until scripts/build-hostd-linux.sh has built the assets: with no digest the sheet says
+// the installer is not published, rather than showing a command with nothing to check against.
+FD_HOSTD_INSTALLER_SHA256 =

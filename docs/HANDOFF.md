@@ -149,6 +149,26 @@ Full command table, wire mapping, and the `--help` output: **[design spec](super
 
 Codex tabs (codex 0.155.1 or newer) reach `flightdeck` through a narrow sandbox grant, for the control socket file only, that Flight Deck adds to their launch line (not when you chose a codex sandbox in Preferences); a blocked agent gets exit `77`. After a codex update, run `./scripts/test-codex-live.sh` to check the grant still holds — see ARCHITECTURE.md, "Codex tabs".
 
+## Releasing the Linux host (`flightdeck-hostd`)
+
+Settings → Hosts → Add Host → Linux shows one command, `curl -fsSL <base>/hostd-install.sh | sh
+-s -- --sha256 <digest>`. Its `<base>` is `https://github.com/nateabele/flight-deck/releases/download/hostd-v<MARKETING_VERSION>`
+(`MARKETING_VERSION` is in `project.yml`), and its `<digest>` is the SHA-256 of that release's
+`SHA256SUMS`. Until the digest is set, the sheet says the installer is not published.
+
+1. `./scripts/build-hostd-linux.sh` builds both architectures in Docker (x86_64 is emulated and
+   slow) into `build/hostd-release/`: the two tarballs, `hostd-install.sh`, `SHA256SUMS`, and
+   `installer.xcconfig`, which carries the digest.
+2. `./scripts/test-hostd-install.sh` runs the pasted command end to end in `ubuntu:24.04` from a
+   local HTTP server and ends `INSTALL PASS`. It rebuilds aarch64 only, which **empties
+   `build/hostd-release/`**, so run it before step 1 or with `FD_HOSTD_SKIP_BUILD=1`.
+3. **Publishing is a manual, outward-facing step that no script performs.** Create the GitHub
+   release `hostd-v<MARKETING_VERSION>` and upload the two tarballs, `hostd-install.sh` and
+   `SHA256SUMS` from step 1, with no rebuild in between: the digest pins those exact bytes.
+4. Build the Release app (`scripts/swap-release.sh`). The Release config includes
+   `build/hostd-release/installer.xcconfig` optionally, so it embeds the digest. Debug, and any
+   checkout that has no assets built, keep the digest empty.
+
 ## How the code is laid out
 
 The spine is `FlightDeckApp → RootWindow → TerminalPane → GhosttyApp → Ghostty.SurfaceView`. Flight Deck's own code is small; the terminal surface is adapt-copied from Ghostty and decoupled from its app shell. Component map and key files: **[ARCHITECTURE.md](ARCHITECTURE.md)**.

@@ -1,0 +1,7 @@
+// The Release config's hostd settings: the defaults, then the digest of the assets
+// scripts/build-hostd-linux.sh last built, which replaces the empty one.
+#include "Hostd.xcconfig"
+
+// `#include?`, optional: build/ is gitignored, so a fresh checkout — or any Release build made
+// before the assets are — has no such file, and a plain #include requires it.
+#include? "../build/hostd-release/installer.xcconfig"
