@@ -173,29 +173,37 @@ listed in L3-I §2. L3-0 ships the initial list as data, so the other specs can 
 All in IntakeKit (pure, Foundation only) unless noted.
 
 ```swift
-protocol KindRegistry      { func kinds(project: URL) -> [TaskKind]; func propose(_: TaskKind, project: URL) throws }
-protocol Router            { func assign(kind: TaskKind, project: URL, catalogs: AdapterCatalogs, now: Date) -> Assignment; func spill(_: ExecutionBlock, kind: TaskKind, project: URL, exhausted: Set<PoolID>, catalogs: AdapterCatalogs, now: Date) -> Assignment? }
+protocol KindRegistry      { func kinds(project: URL) throws -> [TaskKind]; func propose(_ kind: TaskKind, project: URL) throws -> TaskKind }
+protocol Router            { func assign(kind: TaskKind, project: URL, catalogs: AdapterCatalogs, now: Date) -> Assignment; func spill(_ block: ExecutionBlock, kind: TaskKind, project: URL, exhausted: Set<PoolID>, catalogs: AdapterCatalogs, now: Date) -> Assignment? }
 protocol CapabilityIndex   { func rank(kind: TaskKind, candidates: [ModelRef]) -> [ScoredModel]; var snapshotDate: Date? { get } }
 protocol CapacityReader    { func headroom(pool: PoolID) -> [AccountHeadroom] }
-protocol PoolAllocator     { func lease(pool: PoolID) -> AccountLease?; func release(_: AccountLease) }
-protocol HandoffPlanner    { func request(for: SwarmAgent) -> HandoffRequest? }
-protocol SwarmSpawner      { func spawn(task: TaskRef, block: ExecutionBlock, lease: AccountLease?, firstPrompt: String) async -> Result<SessionRef, SpawnError> }   // FlightDeck target
+protocol PoolAllocator     { func lease(pool: PoolID) -> AccountLease?; func release(_ lease: AccountLease) }
+protocol PoolDirectory     { func pools() -> [PoolSummary]; func defaultPool(for harness: HarnessID) -> PoolID? }
+protocol HandoffPlanner    { func request(for agent: SwarmAgentSnapshot) -> HandoffRequest? }
+protocol SwarmSpawner      { func spawn(task: TaskRef, block: ExecutionBlock, lease: AccountLease?, firstPrompt: String) async -> Result<SessionRef, SpawnError> }   // FlightDeck target, @MainActor
 protocol UsageMeterSource  { var readings: AsyncStream<UsageReading> { get } }
 ```
 
-**Value types** (Codable, Sendable, Equatable): `ExecutionBlock`, `TaskKind`, `Dimension`,
-`ModelRef` (harness + model), `Assignment` (block + reason), `ScoredModel` (score, confidence),
-`PoolID`, `AccountHeadroom` (account, worst-window utilization, state
-`underSoft|overSoft|overHard|unknown`, resetsAt), `AccountLease`, `UsageReading` (account,
-windows, readAt, source), `UsageWindow` (name, utilization 0–1, resetsAt), `HandoffRequest`,
-`TranscriptPointer`, `TaskRef`, `SessionRef`.
+`DefaultPoolDirectory` (IntakeKit) is the one built conformer of `PoolDirectory`: one
+`<harness>-default` pool per agent, so routing runs end to end before L3-U's pool store exists.
+
+**Value types, as built.** Codable: `ModelRef`, `AssignmentSource`, `AssignmentSourceKind`,
+`TaskKind`, `Dimension`, `KindRegistryFile`, `HarnessID`, `PoolID`, `KindID`, `ModelEntry`,
+`AdapterCatalog`, `HeadroomState`, `AccountRef`, `PoolSummary`, `UsageWindow`, `UsageReading`,
+`TranscriptPointer`, `TaskRef`, `SessionRef`. Not Codable: `ExecutionBlock` (the codec writes it
+into `agent_context`, so foreign keys survive), `Assignment`, `AdapterCatalogs`, `ScoredModel`,
+`AccountHeadroom`, `AccountLease`, `SwarmAgentSnapshot`, `HandoffRequest`, `SpawnError`.
+`AccountRef` is equal by harness + id, so a renamed account still matches its leases and
+readings; an id-less local-pool slot compares by label. `Router.assign` cannot fail, so
+`Assignment.unroutable(kind:reason:at:)` is the shared way to say "no route"; check it with
+`isUnroutable` and read `unroutableReason`. A writer never stores an unroutable block.
 
 ## 8. Fakes and fixtures (shipped in L3-0)
 
 - A fake for every protocol in `Tests/FlightDeckTests/FlightControlL3/Fakes/`, each scriptable
   and recording its calls.
-- `FakeAdapter`, a third adapter conformer, so "any adapter" is tested from day one.
-- `FakeAdapter` is `FakeRoutingCapabilities` with harness `"fake"`, not an `AgentAdapter` conformer.
+- `FakeAdapter` is `FakeRoutingCapabilities` with harness `"fake"`, not an `AgentAdapter` conformer, so "any adapter" is tested from day one.
+- `FakePoolDirectory` is scriptable with `summaries` and `defaults`.
 - Fixture tasks: br JSON with valid, invalid, pinned and missing execution blocks.
 - A fixture kind registry with seed, planning-proposed and merged kinds.
 - A fixture usage timeline: readings that cross soft, then hard, then reset.
@@ -215,9 +223,13 @@ in a scratch repo.
 
 ## 11. Files
 
-- `Sources/IntakeKit/FlightControl/ExecutionBlock.swift`, `TaskKind.swift`, `Dimensions.swift`,
-  `Protocols.swift`, `ExecutionBlockCodec.swift`
-- `Sources/FlightDeck/Agents/AgentRoutingCapabilities.swift`, plus a conformance stub in each
-  adapter that returns "unsupported" where L3-R/U/S will fill it in
-- `Tests/FlightDeckTests/FlightControlL3/…`
+- `Sources/IntakeKit/FlightControl/`: `Identifiers.swift`, `ExecutionBlock.swift`,
+  `ExecutionBlockCodec.swift`, `Dimensions.swift`, `TaskKind.swift`, `ContractValues.swift`,
+  `ContractProtocols.swift`
+- `Sources/FlightDeck/FlightControl/AgentRoutingCapabilities.swift`: the claude and codex
+  "unsupported" stubs live here, not in each adapter, where L3-R/U/S will fill them in
+- `Tests/FlightDeckTests/FlightControlL3/` (tests, `Fakes/ContractFakes.swift`,
+  `Fakes/FakeRoutingCapabilities.swift`, `L3Fixtures.swift`) and
+  `Tests/FlightDeckTests/Fixtures/FlightControlL3/` (`br-list-with-blocks.json`, `kinds.json`,
+  `usage-timeline.json`)
 - `docs/FOLLOWUPS.md`: replace "Level 3 'Operate' — not started" with pointers to these specs
