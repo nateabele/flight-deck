@@ -9,6 +9,7 @@ enum FleetEventTag: String, Codable {
     case projectCollapsed = "project.collapsed"
     case projectsReordered = "projects.reordered"
     case projectIntakes = "project.intakes"
+    case projectSwarm = "project.swarm"
     case sessionAdded = "session.added"
     case sessionRemoved = "session.removed"
     case sessionMoved = "session.moved"
@@ -31,7 +32,7 @@ extension FleetEvent: Codable {
         case openPromptCall
         case apiError
         case answerless
-        case intakes
+        case intakes, swarm
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -120,6 +121,11 @@ extension FleetEvent: Codable {
             try c.encode(project, forKey: .project)
             // Absent, not `null`, for nil — see `WireProject.intakes`.
             try c.encodeIfPresent(intakes, forKey: .intakes)
+        case .projectSwarm(let project, let swarm):
+            try c.encode(FleetEventTag.projectSwarm, forKey: .t)
+            try c.encode(project, forKey: .project)
+            // Absent, not `null`, for nil — the `projectIntakes` rule.
+            try c.encodeIfPresent(swarm, forKey: .swarm)
         }
     }
 
@@ -137,6 +143,9 @@ extension FleetEvent: Codable {
         case .projectIntakes:
             self = .projectIntakes(project: try c.decode(UUID.self, forKey: .project),
                                    intakes: try c.decodeIfPresent([WireIntakeSummary].self, forKey: .intakes))
+        case .projectSwarm:
+            self = .projectSwarm(project: try c.decode(UUID.self, forKey: .project),
+                                 swarm: try c.decodeIfPresent(WireSwarm.self, forKey: .swarm))
         case .projectsReordered:
             self = .projectsReordered(order: try c.decode([UUID].self, forKey: .order))
         case .sessionAdded:

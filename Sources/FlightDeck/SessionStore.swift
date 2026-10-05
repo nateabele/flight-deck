@@ -1390,6 +1390,7 @@ final class SessionStore: ObservableObject {
                 HeldReservation(pattern: $0.file, holder: $0.holder, since: $0.since == .distantPast ? nil : $0.since)
             }
         }
+        service.onChange = { [weak self] in self?.scheduleSwarmRefresh() }
         swarmChangeForward = service.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
     }
 
@@ -1546,6 +1547,41 @@ final class SessionStore: ObservableObject {
     }
 
     private func emit(_ events: FleetEvent...) { emit(events) }
+
+    /// The swarm summaries last RECORDED on the fleet wire, per project — the `intakeSummaries`
+    /// rule: `FleetProjection` reads this cache, never the service, so a swarm change that reached
+    /// the projection without an event cannot exist.
+    private(set) var swarmSummaries: [Repo.ID: WireSwarm?] = [:]
+    private var swarmSummariesStarted = false
+    private var swarmRefreshScheduled = false
+
+    func refreshSwarmSummaries() {
+        var next: [Repo.ID: WireSwarm?] = [:]
+        for repo in repos {
+            next[repo.id] = swarmServiceStorage.flatMap { service in
+                service.record(forProject: repo.url.path).flatMap { SwarmWireProjection.wire($0, service: service) }
+            }
+        }
+        let events = SwarmWireProjection.changes(from: swarmSummaries, to: next)
+        swarmSummaries = next
+        emit(events)
+    }
+
+    /// Called by `FleetService` after it installs the replicator, beside `startIntakeSummaries`.
+    func startSwarmSummaries() {
+        swarmSummariesStarted = true
+        refreshSwarmSummaries()
+    }
+
+    /// Coalesces a burst of swarm changes into one refresh on the next main-queue turn.
+    private func scheduleSwarmRefresh() {
+        guard swarmSummariesStarted, !swarmRefreshScheduled else { return }
+        swarmRefreshScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            self?.swarmRefreshScheduled = false
+            self?.refreshSwarmSummaries()
+        }
+    }
 
     /// The Flight Control summaries last RECORDED on the fleet wire, per project — nil when
     /// Flight Control is off there, and an absent key means the same. `FleetProjection` reads

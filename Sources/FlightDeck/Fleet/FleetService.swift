@@ -182,6 +182,7 @@ final class FleetService: ObservableObject {
         // After the replicator is installed and `onEvents` wired, so the first refresh's
         // events (a project with Flight Control on) reach the sockets and the replay ring.
         store.startIntakeSummaries()
+        store.startSwarmSummaries()
         Self.current = self
     }
 
@@ -454,6 +455,7 @@ final class FleetService: ObservableObject {
     /// Which capability a peer must have claimed to be sent this event (spec §6).
     static func requiredCapability(for event: FleetEvent) -> String? {
         if case .projectIntakes = event { return FleetCapability.flightControl }
+        if case .projectSwarm = event { return FleetCapability.swarm }
         return nil
     }
 
@@ -1191,6 +1193,16 @@ final class FleetService: ObservableObject {
             if let code = store.intakeService.phoneRemoveNote(id, token: token, noteID: noteID) {
                 return .err(cid: cid, code: code)
             }
+        case .swarmPause(let project):
+            guard let path = store.projectPath(project) else { return .err(cid: cid, code: "unknown_project") }
+            guard store.swarmServiceIfBuilt?.pause(project: path) == true else { return .err(cid: cid, code: "no_swarm") }
+        case .swarmResume(let project):
+            guard let path = store.projectPath(project) else { return .err(cid: cid, code: "unknown_project") }
+            guard store.swarmServiceIfBuilt?.resume(project: path) == true else { return .err(cid: cid, code: "no_swarm") }
+        case .handoffConfirm(let id):
+            guard store.swarmServiceIfBuilt?.confirmHandoff(session: id) == true else { return .err(cid: cid, code: "no_handoff") }
+        case .handoffDecline(let id):
+            guard store.swarmServiceIfBuilt?.declineHandoff(session: id) == true else { return .err(cid: cid, code: "no_handoff") }
         case .answerPrompt(let id, let token, let call, let answer):
             // Every refusal is the service's and the store's to make, for the reason `.prompt`
             // states: they are the only things that know the tab's agent, its status, its
