@@ -99,7 +99,11 @@ enum FleetProjection {
             // because that is the shape a client reads: nothing else on the wire names "this
             // Mac" independent of a tab.
             allowsBlockedAbort: allowsBlockedAbort,
-            answerless: status?.answerless ?? false
+            answerless: status?.answerless ?? false,
+            // A fact about this build: `SessionStore.answerPrompt` drives the row. It says
+            // nothing about which agents raise questions — `OpenPrompt.find` decides that on
+            // both ends, so a tab with no question card never reads it.
+            acceptsTypedAnswers: true
         )
     }
 }

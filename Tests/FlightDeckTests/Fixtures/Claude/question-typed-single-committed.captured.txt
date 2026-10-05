@@ -1,0 +1,34 @@
+ ▐▛███▛█   Claude Code v2.1.289                                                                                                         
+▝▜██████▀  Opus 5.5 · Claude Max                                                                                                        
+ ▝▝   ▝▝   /…/claude-501/-Users-me-Projects-flight-deck/8a334862-0e05-4951-b162-f08508f22e45/scratchpad/probe-ws       
+                                                                                                                                        
+                                                                                                                                        
+❯ Use the AskUserQuestion tool to ask me which of three colors I like best: red, green, or blue. One question, short descriptions. Do   
+  nothing else, just ask.                                                                                                               
+                                                                                                                                        
+⏺ User answered Claude's questions:                                                                                                     
+  ⎿  · Which color do you like best? → teal 3 ok                                                                                        
+                                                                                                                                        
+✻ Actualizing… (4s · ↓ 149 tokens)                                                                                                      
+                                                                                                                                        
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯                                                                                                                                       
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Opus 5.5  [░░░░░░░░░░] 4%                                                                                         ◐ medium · /effort  
+  ⏵⏵ auto mode on (shift+tab to cycle) · ← 2 agents                                                                                     
+                                                                                                                                        
+                                                                                                                                        
+                                                                                                                                        
+                                                                                                                                        
+                                                                                                                                        
+                                                                                                                                        
+                                                                                                                                        
+                                                                                                                                        
+                                                                                                                                        
+                                                                                                                                        
+                                                                                                                                        
+                                                                                                                                        
+                                                                                                                                        
+                                                                                                                                        
+                                                                                                                                        
+                                                                                                                                        

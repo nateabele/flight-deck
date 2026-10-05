@@ -6039,8 +6039,9 @@ final class SessionStore: ObservableObject {
             // 2. The target is `allowRow` = 0, and the row below it is "Yes, and don't ask
             //    again for …" — a DURABLE PERMISSION GRANT. A blind Return on a cursor somebody
             //    moved would create one, silently, from a pocket. An `.answers` drive that
-            //    STOPS is recoverable — claude draws a review screen before anything commits,
-            //    so an abort part-way leaves a dialog a human can still finish or cancel — and
+            //    STOPS is recoverable — claude draws a review screen before anything commits
+            //    (except on a lone single-select question, whose one press is the commit), so
+            //    an abort part-way leaves a dialog a human can still finish or cancel — and
             //    that is the whole of the claim: an `.answers` drive that continues onto the
             //    wrong row commits a wrong answer, exactly as
             //    `drive(_:driver:injector:id:token:)` sets out. What is not recoverable in
@@ -6080,6 +6081,17 @@ final class SessionStore: ObservableObject {
             }
             for (question, chosen) in zip(questions, selections) {
                 for selection in chosen {
+                    // A typed answer has no label in any transcript to check, so what is held
+                    // to account is its position: the "Type something" row and nowhere else.
+                    // Its words are judged by `AnswerPlan.plan` below, which refuses ones that
+                    // would be keystrokes rather than text.
+                    if selection.text != nil {
+                        guard selection.index == question.options.count else {
+                            recordEarlyAbort(.setLabelMismatch, injector: injector)
+                            return .unreadableScreen
+                        }
+                        continue
+                    }
                     guard question.options.indices.contains(selection.index),
                           question.options[selection.index].label == selection.label
                     else {
@@ -6091,7 +6103,8 @@ final class SessionStore: ObservableObject {
                 }
             }
             guard let plan = AnswerPlan.plan(
-                for: questions, answers: selections.map { $0.map(\.index) }
+                for: questions,
+                picks: selections.map { $0.map { $0.text.map(AnswerPlan.Pick.typed) ?? .option($0.index) } }
             ) else { return .unanswerable }
             return drive(plan, driver: driver, injector: injector, id: id, token: token)
 
@@ -6287,8 +6300,9 @@ final class SessionStore: ObservableObject {
     ///
     /// **What that costs, stated exactly, because the obvious sentence about it is wrong.**
     /// claude shows a review screen listing every question with its chosen answer and asks
-    /// "Ready to submit your answers?" — and that screen bounds a drive that **STOPS**, not one
-    /// that continues wrong. The plan's last step is an unconditional `.submit`
+    /// "Ready to submit your answers?" — for a set or a checkbox question; a lone single-select
+    /// question has none, and its one press commits — and that screen bounds a drive that
+    /// **STOPS**, not one that continues wrong. The plan's last step is an unconditional `.submit`
     /// (`AnswerPlan.plan`), so a press that landed on the wrong row is carried straight through
     /// to the commit by the very next step. "Continues wrong" is the new failure mode and it is
     /// the one `cursorBeforePress` and `landingAfterMove` used to catch:
@@ -6375,6 +6389,29 @@ final class SessionStore: ObservableObject {
         let distance = step.to - step.from
         for _ in 0..<abs(distance) {
             if distance > 0 { injector.sendArrowDown() } else { injector.sendArrowUp() }
+        }
+
+        // A typed answer is pasted once the cursor has landed on its row, and only then pressed —
+        // or not, on a checkbox question, where the paste alone ticks the box. A seam either
+        // side, because the row turns into a text field when the cursor reaches it and the
+        // paste has to repaint before a Return reads it.
+        if case .typed(_, let text, let thenPress) = step.purpose {
+            injectionSettle { [weak self] in
+                guard let self else { return }
+                injector.sendText(text)
+                self.injectionSettle { [weak self] in
+                    guard let self else { return }
+                    guard thenPress else {
+                        self.perform(steps, at: index + 1, driver: driver, injector: injector, id: id)
+                        return
+                    }
+                    injector.sendReturn()
+                    self.injectionSettle { [weak self] in
+                        self?.perform(steps, at: index + 1, driver: driver, injector: injector, id: id)
+                    }
+                }
+            }
+            return
         }
 
         // The 120ms seam stays between the move and the press, unchanged. It is the same
@@ -8962,6 +8999,10 @@ struct AnswerAbort: Equatable {
         case .option(let question, let option): return "option(q\(question),o\(option))"
         case .action(let question, let isLast):
             return "action(q\(question),\(AnswerPlan.actionLabel(isLast: isLast)))"
+        case .typed(let question, let text, let thenPress):
+            // The length, never the words: this line goes to the unified log, and what a
+            // reader typed is theirs.
+            return "typed(q\(question),\(text.count)ch\(thenPress ? ",press" : ""))"
         case .submit: return "submit"
         case nil: return "-"
         }

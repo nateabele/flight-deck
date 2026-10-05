@@ -19,12 +19,12 @@ final class ClaudeDialogVetoTests: XCTestCase {
         try TimelineFixtureTests.text("\(name).captured", in: "Claude")
     }
 
-    /// Sixteen of these seventeen carry `Esc to cancel`. `question-two-review` does not — its
-    /// footer is `❯ 1. Submit answers` / `  2. Cancel`, caught only by the
-    /// marker-plus-numbered-row rule. See `ClaudeTextChannel.hasNumberedMarkerRow`.
+    /// Twenty-one of these twenty-three carry `Esc to cancel`. The two review screens,
+    /// `question-two-review` and `question-typed-checkbox-review`, do not — their footer is
+    /// `❯ 1. Submit answers` / `  2. Cancel`, caught only by the marker-plus-numbered-row rule. See `ClaudeTextChannel.hasNumberedMarkerRow`.
     ///
     /// **Internal rather than private** so `ClaudeComposerDetectorTests` can hold the *other*
-    /// predicate to the same seventeen screens — see its `testEveryDialogCaptureIsRefused`. One
+    /// predicate to the same twenty-three screens — see its `testEveryDialogCaptureIsRefused`. One
     /// hand-written list, asserted twice: a dialog added here is covered by both gates at once,
     /// which is the whole reason the list is shared instead of copied.
     static let dialogs = [
@@ -34,11 +34,17 @@ final class ClaudeDialogVetoTests: XCTestCase {
         "question-checkbox-submit-focused", "question-set-with-checkbox",
         "question-numbered-description", "question-preview",
         "workspace-trust",
+        // claude 2.1.289, the "Type something" row — `typed-answers.captured.provenance.json`.
+        "question-typed-focused", "question-typed-single", "question-typed-set",
+        "question-typed-checkbox", "question-typed-checkbox-submit-focused",
+        "question-typed-checkbox-review",
     ]
 
     private static let composers = [
         "idle-empty-box", "busy-echo-only", "busy-draft-below-echo",
         "busy-queued-message", "busy-streaming-no-box", "busy-streaming-no-marker",
+        // A lone question's answer just committed: the turn resumes with an empty box.
+        "question-typed-single-committed", "question-single-committed-no-review",
     ]
 
     /// **Every `*.captured.txt` in `Fixtures/Claude` must appear in one of the two lists

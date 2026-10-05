@@ -50,6 +50,37 @@ final class PromptCardTests: XCTestCase {
         )
     }
 
+    // MARK: Typed answers
+
+    /// A pasted newline is flattened rather than refused — in claude's field it would be
+    /// Return, and the Mac refuses it — and an emoji's zero-width joiner survives, being text.
+    func testTypedWordsAreFlattenedToOneLineAndBlankOnesAreNothing() {
+        XCTAssertEqual(PromptCard.typedAnswer("  teal\nplease  "), "teal please")
+        XCTAssertEqual(PromptCard.typedAnswer("👩‍💻 yes"), "👩‍💻 yes")
+        XCTAssertNil(PromptCard.typedAnswer(" \n\t "))
+        XCTAssertNil(PromptCard.typedAnswer(""))
+    }
+
+    /// The row one past the options goes out as the reader's words, beside any boxes ticked
+    /// above it; one whose field was emptied sends nothing for that row.
+    func testTheTypedRowGoesOutAsWordsBesideTheOptions() {
+        let questions = [
+            PromptQuestion(question: "Snacks?", options: [.init(label: "Chips"), .init(label: "Nuts")],
+                           multiSelect: true),
+            PromptQuestion(question: "Colour?", options: [.init(label: "Red")]),
+        ]
+        XCTAssertEqual(
+            PromptCard.selections(for: questions, picks: [0: [2, 1], 1: [1]],
+                                  typed: [0: "pretzels", 1: "teal\n"]),
+            [[AnswerSelection(index: 1, label: "Nuts"), .typed("pretzels", optionCount: 2)],
+             [.typed("teal", optionCount: 1)]]
+        )
+        XCTAssertEqual(
+            PromptCard.selections(for: [questions[1]], picks: [0: [1]], typed: [0: "  "]),
+            [[]], "no words, no answer"
+        )
+    }
+
     func testAnUnanswerableQuestionShowsItsReasonAndNoControls() {
         let multi = question(unanswerable: PromptQuestion.multiSelectReason)
         XCTAssertFalse(PromptCard.showsControls(for: multi, state: .idle))

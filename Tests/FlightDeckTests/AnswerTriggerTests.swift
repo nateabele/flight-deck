@@ -178,15 +178,12 @@ final class AnswerTriggerTests: XCTestCase {
     // MARK: - answer
 
     /// **The whole point, end to end.** A line of JSON names option 1, and the terminal is
-    /// driven: one arrow down onto the row, then Return, then the review screen's Return. Those
-    /// events come from `SessionStore.drive`, through `AnswerPlan`'s computed steps and past the
-    /// dialog check each one makes — none of which a trigger that typed keys itself would have
-    /// touched.
+    /// driven: one arrow down onto the row, then Return. Those events come from
+    /// `SessionStore.drive`, through `AnswerPlan`'s computed steps and past the dialog check each
+    /// one makes — none of which a trigger that typed keys itself would have touched.
     ///
-    /// The third event is the plan's `submit` step. The spy never repaints into a review screen
-    /// here, and that used to end the drive: the per-step label check found no `Submit answers`
-    /// row and refused. The planned drive no longer reads labels, so it presses where the plan
-    /// says — which is what `AnswerPromptTests` covers against the real review capture.
+    /// No third Return: a lone single-select question has no review screen, so the plan ends on
+    /// the press that answers it (`AnswerPlanTests.testALoneSingleSelectQuestionIsOneMoveAndOnePress`).
     func testAnAnswerByIndexDrivesTheRealPlan() throws {
         let (trigger, spy, id) = makeTrigger()
         show(trigger, askLine("toolu_A"))
@@ -198,7 +195,7 @@ final class AnswerTriggerTests: XCTestCase {
         XCTAssertEqual(body["ok"] as? Bool, true)
         XCTAssertEqual(body["result"] as? String, "dispatched")
         XCTAssertEqual(body["call"] as? String, "toolu_A")
-        XCTAssertEqual(spy.events, [.arrow(1), .ret, .ret])
+        XCTAssertEqual(spy.events, [.arrow(1), .ret])
     }
 
     /// The reply carries where the abort log ended *before* the keystroke, because a drive
