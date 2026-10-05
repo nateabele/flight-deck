@@ -411,6 +411,29 @@ final class SwarmController {
         log(.pause, detail: record.banner ?? "")
     }
 
+    /// Run once for a swarm restored from disk (`SwarmService` calls it). A `starting` agent or one
+    /// with a `pendingClaim` was cut off before its prompt landed: any claim it holds goes back
+    /// to open, because the agent never heard about the task, and the agent becomes idle.
+    /// A status that cannot be read is never treated as "ours": that agent is left untouched,
+    /// pendingClaim included, for a later retry.
+    func reconcileAfterRestart() async {
+        for agent in record.agents where agent.state == .starting || agent.pendingClaim != nil {
+            var readings: [(task: String, reading: TaskStatusReading)] = []
+            var unreadable = false
+            for task in Set([agent.pendingClaim, agent.task].compactMap { $0 }).sorted() {
+                guard let reading = await deps.backend.status(task, project: project) else { unreadable = true; break }
+                readings.append((task, reading))
+            }
+            if unreadable { continue }
+            for (task, reading) in readings where reading.status == "in_progress" && reading.assignee == agent.agentName {
+                _ = await deps.backend.returnToOpen(task, project: project)
+                log(.released, task: task, session: agent.session, detail: "claimed before a restart but never prompted")
+            }
+            becomeIdle(agent.session)
+        }
+        changed()
+    }
+
     private func becomeIdle(_ session: UUID) {
         record.update(session) { $0.pendingClaim = nil; $0.task = nil; $0.state = .idle; $0.stateSince = now() }
     }
