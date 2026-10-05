@@ -10,13 +10,14 @@ import os
 // the whole flow — resolve, preflight, sync, start, stream, result — runs in a unit test
 // against in-memory fakes. Track C8 plugs in the real ones: `HostLink` + the channel mux for
 // `HostLinking`, C2's `Snapshotter`/`BundleMaker`/`ResultApplier`, C5's preflight and port
-// forwarder, C4's TOML parser and route matcher.
+// forwarder, C4's TOML parser.
 //
 // Streaming (DelegationControlWire.swift's "Streams"): a `run` answers its `cid` with
 // `delegateStarted`, any `delegateNotice`s and `delegateOutput`s, and ends it with exactly one
 // terminal frame:
-//   delegateStarted         when detached (`--detach`, a `long` recipe, every service): the
-//                           CLI prints the id and exits 0; this service sends nothing after it
+//   delegateStarted         only when the request says `detach`, or it is `up`/`restart`: the
+//                           CLI decides (`detach = --detach || long || service`), so the two
+//                           ends can never disagree about which frame is the last
 //   delegateExit {status}   an attached run ended; the CLI exits with `status`
 //   err {code, message}     delegation failed (125), the missing-file hint (125), or a
 //                           `wait` timeout (`wait_timeout`, 124)
@@ -34,11 +35,22 @@ protocol HostLinking: AnyObject {
     func request(_ request: DelegationRequest) async throws -> DelegationReply
     /// A fresh channel whose id a following request names (`sync.push`, `run.result`, …).
     func openChannel() async throws -> any ByteChannel
-    /// Every event for `runID` from output byte `offset` on, then live ones until it exits.
-    /// The adapter must buffer events that arrive before anyone subscribes — a `run.start`
-    /// attaches at once, so its first output can beat the reply naming the run — and re-send
-    /// `run.attach` from the last delivered offset after a reconnect, so a laptop that slept
-    /// mid-run loses nothing and repeats nothing.
+    /// Every event for `runID` whose output lies at or past byte `offset`, then live ones until
+    /// it exits. The contract the adapter must keep (ruling 6), which `FakeHostLink` keeps
+    /// exactly:
+    /// - **Concurrent subscriptions, independent offsets.** The monitor, an attached `run`, a
+    ///   `wait {from}` and a `logs` may all subscribe to one run at once, each from its own
+    ///   offset. The adapter keeps ONE host attach per run (`run.start`'s, or `run.attach`)
+    ///   and fans its events out locally, so a second subscriber never costs a second attach.
+    /// - **Exact offsets.** A subscriber from `offset` gets no byte before it: a chunk that
+    ///   straddles it is cut to start there.
+    /// - **Replay order** (A2): the run's current state (`queued`/`started`), then output from
+    ///   `offset`, then `exited` if it has finished — a subscriber that arrives after the end
+    ///   still gets the whole story, and the stream then finishes.
+    /// - **Nothing lost before the first subscriber.** `run.start` attaches at once, so its
+    ///   first output can beat the reply naming the run; the adapter buffers it.
+    /// - **Reconnect.** After a dropped link it re-sends `run.attach` from the last offset it
+    ///   holds, so a laptop that slept mid-run loses nothing and repeats nothing.
     func events(runID: String, from offset: Int64) -> AsyncThrowingStream<RunEvent, Error>
 }
 
@@ -47,7 +59,7 @@ protocol HostLinking: AnyObject {
 protocol DelegationHostDirectory: AnyObject {
     /// Every paired host, for the message that lists them when no host was given.
     var hostNames: [String] { get }
-    /// The link to `name`. Throws `DelegationFailure` with the §5 line when it is unknown or
+    /// The link to `name`. Throws `DelegationError` with the §5 line when it is unknown or
     /// offline ("mini is offline (last seen 4m ago)").
     func link(named name: String) throws -> any HostLinking
 }
@@ -66,23 +78,10 @@ struct DelegationPlan {
     let sync: Bool
 }
 
-/// §7 steps 2–7, in order (C5's `Preflight`). Throws `DelegationFailure` with the 125 line;
-/// a failure must leave nothing reserved.
+/// §7 steps 2–7, in order (C5's `Preflight.run` behind it). Throws `DelegationError` whose
+/// message is already the finished 125 line; a failure leaves nothing reserved.
 protocol Preflighting {
-    func preflight(_ plan: DelegationPlan, link: any HostLinking) async throws -> any _PendingPortReservation
-}
-
-/// What a passed preflight holds: the bound local listeners for a service's ports (§7 step 4).
-/// A stand-in for HostKit's `PortReservation` (track C5's `Preflight.swift`), which replaces it
-/// when C5 merges: `forward(service:link:)` becomes its `startForwarding`. `release()` must
-/// never block, since it is called on the main actor.
-protocol _PendingPortReservation: AnyObject {
-    /// The forwards as bound, `auto` resolved to the port actually chosen.
-    var ports: [WirePortBinding] { get }
-    /// Starts handing accepted connections to the host as `port.open` channels.
-    func forward(service runID: String, link: any HostLinking)
-    /// Idempotent: the preflight's failure path, `down`, and a service dying all call it.
-    func release()
+    func preflight(_ plan: DelegationPlan, link: any HostLinking) async throws -> any PortReservation
 }
 
 /// How a run's changed files came back, or did not.
@@ -94,20 +93,22 @@ enum ApplyOutcome: Equatable {
     case nothing
 }
 
-/// The controller side of §4.5 (C2's `ResultApplier`).
-protocol ResultApplying {
+/// The controller side of §4.5 (C2's `ResultApplier`). Async and nonisolated: each one is git
+/// work, awaited off the main actor so a big merge never stalls the UI.
+protocol ResultApplying: Sendable {
     /// `git diff` text for `commit` against `snapshot`.
-    func patch(bundle: URL, commit: String, snapshot: SnapshotRef, worktree: URL) throws -> String
+    func patch(bundle: URL, commit: String, snapshot: SnapshotRef, worktree: URL) async throws -> String
     /// A three-way merge into the **current** worktree with `snapshot` as the base, so edits
     /// made during the run conflict rather than being overwritten. `allowConflicts: false` is
     /// `apply = "auto"`: a conflicting merge writes nothing and reports the paths.
     func apply(bundle: URL, commit: String, snapshot: SnapshotRef, worktree: URL,
-               allowConflicts: Bool) throws -> ApplyOutcome
+               allowConflicts: Bool) async throws -> ApplyOutcome
     /// Unpacks the artifact tar into the worktree; a file replaces a local one only if ignored.
-    func extractArtifacts(tar: URL, into worktree: URL) throws
+    func extractArtifacts(tar: URL, into worktree: URL) async throws
 }
 
-/// `.flightdeck/delegate.toml` (C4's parser and writer behind it).
+/// `.flightdeck/delegate.toml` (C4's parser and writer behind it). Route matching is not here:
+/// it is C4's `RouteMatcher`, the same rule the CLI's `route-exec` applies.
 protocol DelegateConfigLoading {
     /// Nil when the project has no `delegate.toml`, which is not an error: `run --on mini --
     /// make` needs none.
@@ -115,23 +116,41 @@ protocol DelegateConfigLoading {
     func add(_ recipe: Recipe, named name: String, worktree: URL) throws
     /// `recipe check`'s findings; empty means valid.
     func problems(in config: DelegateConfig, hosts: [String]) -> [String]
-    /// The recipe of the first `[[route]]` whose glob matches the joined argv.
-    func recipe(routing argv: [String], in config: DelegateConfig) -> String?
 }
 
-/// Finds the worktree a CLI's cwd is in, and asks git about it.
-protocol WorktreeLocating {
+/// Finds the worktree a CLI's cwd is in, and asks git about it. Async and nonisolated, so the
+/// `git` processes run off the main actor.
+protocol WorktreeLocating: Sendable {
     /// The worktree root, and the cwd relative to it ("" at the root).
-    func locate(cwd: URL) throws -> (worktree: URL, subdir: String)
+    func locate(cwd: URL) async throws -> (worktree: URL, subdir: String)
     /// Which of `paths` (worktree-relative) git ignores.
-    func ignored(_ paths: [String], in worktree: URL) -> Set<String>
+    func ignored(_ paths: [String], in worktree: URL) async -> Set<String>
 }
 
-/// A delegation that could not go ahead. `message` is the one line the CLI prints after
-/// `flightdeck: ` before exiting 125, so it names the host and the next step.
-struct DelegationFailure: Error, Equatable {
-    let code: String
-    let message: String
+/// A port forward's channel to the host: `port.open` naming a fresh channel, per accepted
+/// connection. What `PortReservation.startForwarding` is handed for each remote port.
+private final class ServicePortOpener: ChannelOpening, @unchecked Sendable {
+    private let link: any HostLinking
+    private let service: String
+    private let remote: UInt16
+
+    init(link: any HostLinking, service: String, remote: UInt16) {
+        self.link = link
+        self.service = service
+        self.remote = remote
+    }
+
+    func open() async throws -> any ByteChannel {
+        let channel = try await link.openChannel()
+        do {
+            _ = try await link.request(.portOpen(service: service, remote: remote, channel: channel.id))
+        } catch {
+            // A6: a channel named by a failed request is cancelled by both sides.
+            channel.cancel()
+            throw error
+        }
+        return channel
+    }
 }
 
 // MARK: - Service
@@ -155,6 +174,9 @@ final class DelegationService {
         /// `Application Support/Flight Deck/delegation/`: fetched result bundles until applied,
         /// artifact tars until unpacked, and `<run>.patch` for a `diff` over 1 MiB.
         var directory: URL
+        /// How long a `logs` replay of a run this app did not watch waits for the next event
+        /// before deciding it has caught up (see `logs`).
+        var replayIdle: TimeInterval = 2
     }
 
     /// `flightdeck wait`'s default bound (§6.1): under the 10-minute tool timeout agents run
@@ -168,13 +190,13 @@ final class DelegationService {
 
     let registry: RunRegistry
     private let deps: Dependencies
-    /// Runs this app instance is watching, by local id. A run from before a relaunch has none
-    /// until something asks about it (`ensureLive`).
+    /// Runs this app instance is watching, by local id.
     private var live: [String: LiveRun] = [:]
 
     init(registry: RunRegistry, dependencies: Dependencies) {
         self.registry = registry
         self.deps = dependencies
+        resumeWatching()
     }
 
     /// What happened to a run, as the CLIs watching it need it.
@@ -189,19 +211,35 @@ final class DelegationService {
 
     private final class LiveRun {
         let link: any HostLinking
-        var reservation: (any _PendingPortReservation)?
+        var reservation: (any PortReservation)?
         var subscribers: [UUID: (Update) -> Void] = [:]
         /// The last `MissingFileHint.tailBytes` of stderr and pty output.
         var errorTail = Data()
         /// One past the last output byte seen: where a non-following `logs` stops.
         var outputEnd: Int64 = 0
+        /// Watched by this app instance from the run's start, so `outputEnd` is the truth. A
+        /// watcher restarted after a relaunch is still catching up, and `logs` must not trust it.
+        let watchedFromStart: Bool
         var ended: (status: Int32, hint: String?)?
         var monitor: Task<Void, Never>?
 
-        init(link: any HostLinking) { self.link = link }
+        init(link: any HostLinking, watchedFromStart: Bool) {
+            self.link = link
+            self.watchedFromStart = watchedFromStart
+        }
 
         func publish(_ update: Update) {
             for subscriber in subscribers.values { subscriber(update) }
+        }
+    }
+
+    /// Watches again every run the registry still has going — after a relaunch, so services
+    /// that die and runs that finish are recorded without anyone asking first. A host that is
+    /// not connected yet is skipped; a later `wait`/`logs` (or C8 calling this again once the
+    /// link is up) picks it up.
+    func resumeWatching() {
+        for record in registry.runs where record.state == .running || record.state == .queued {
+            _ = try? ensureLive(record)
         }
     }
 
@@ -221,7 +259,6 @@ final class DelegationService {
             return reply(.err(cid: cid, code: "out_of_scope",
                               message: "this tab's control token is not valid — reopen the tab and retry"))
         }
-        let fail: (Error) -> Void = { reply(Self.refusal(cid: cid, $0)) }
         Task { @MainActor in
             do {
                 switch request {
@@ -232,16 +269,16 @@ final class DelegationService {
                     try await self.down(try self.service(service, owner: owner))
                     reply(.ack(cid: cid))
                 case .restart(let service, _):
-                    let record = try self.service(service, owner: owner)
-                    try await self.down(record)
-                    try await self.start(record.request, mode: .up, owner: owner, cid: cid, reply: reply)
+                    try await self.restart(try self.service(service, owner: owner), cid: cid, reply: reply)
                 case .sync(let service, _):
-                    try await self.sync(try self.service(service, owner: owner), owner: owner, cid: cid, reply: reply)
+                    try await self.sync(try self.service(service, owner: owner), cid: cid, reply: reply)
                 case .ps:
                     let rows = self.registry.runs.filter { $0.isVisible(to: owner) }.map(\.row)
                     reply(.delegateRuns(cid: cid, rows))
-                case .wait(let id, let timeout, let from):
-                    try self.wait(try self.visibleRun(id, owner: owner), timeout: timeout, from: from, cid: cid, reply: reply)
+                case .wait(let id, let timeout, let from, let noTimeout):
+                    let seconds = noTimeout ? nil : timeout.map(TimeInterval.init) ?? Self.defaultWaitTimeout
+                    try self.wait(try self.visibleRun(id, owner: owner), timeout: seconds, from: from,
+                                  cid: cid, reply: reply)
                 case .logs(let id, let follow, let from):
                     try self.logs(try self.visibleRun(id, owner: owner), follow: follow, from: from ?? 0,
                                   timeout: nil, cid: cid, reply: reply)
@@ -254,7 +291,9 @@ final class DelegationService {
                     }
                     reply(.ack(cid: cid))
                 case .diff(let id):
-                    reply(.delegatePatch(cid: cid, try self.diff(try self.finishedRun(id, owner: owner))))
+                    reply(.delegatePatch(cid: cid, try await self.diff(try self.finishedRun(id, owner: owner))))
+                case .apply(let id):
+                    reply(.delegateApplied(cid: cid, try await self.apply(try self.finishedRun(id, owner: owner))))
                 case .hostDisk(let host):
                     let link = try self.deps.hosts.link(named: host)
                     guard case .usage(let usage) = try await self.hostRequest(.workspaceUsage, on: link) else {
@@ -266,19 +305,17 @@ final class DelegationService {
                 case .hostPrune(let host, let repo):
                     _ = try await self.hostRequest(.workspacePrune(repoRoot: repo), on: try self.deps.hosts.link(named: host))
                     reply(.ack(cid: cid))
-                case .apply(let id):
-                    reply(.delegateApplied(cid: cid, try self.apply(try self.finishedRun(id, owner: owner))))
                 case .recipeList(let cwd):
-                    reply(.recipes(cid: cid, Self.book(try self.config(cwd: cwd).config)))
+                    reply(.recipes(cid: cid, Self.book(try await self.config(cwd: cwd).config)))
                 case .recipeAdd(let cwd, let name, let recipe):
-                    let worktree = try self.locate(cwd).worktree
+                    let worktree = try await self.locate(cwd).worktree
                     try self.deps.config.add(try Self.recipe(recipe), named: name, worktree: worktree)
                     reply(.ack(cid: cid))
                 case .recipeCheck(let cwd):
-                    reply(.recipeCheck(cid: cid, problems: self.check(cwd: cwd)))
+                    reply(.recipeCheck(cid: cid, problems: await self.check(cwd: cwd)))
                 }
             } catch {
-                fail(error)
+                reply(Self.refusal(cid: cid, error))
             }
         }
     }
@@ -302,41 +339,45 @@ final class DelegationService {
 
     private enum Mode { case run, exec, up }
 
+    /// `owner` is the tab the new run belongs to — for `restart`/`sync`, the original
+    /// service's, whoever asked.
     private func start(_ run: WireDelegateRun, mode: Mode, owner: UUID?, cid: Int,
                        reply: @escaping (ServerFrame) -> Void) async throws {
         // §7 step 1: resolve the worktree, the recipe and the host — all local, all before
         // anything is reserved, so a typo costs nothing.
-        let (worktree, subdir) = try locate(run.cwd)
+        let (worktree, subdir) = try await locate(run.cwd)
         let config = try loadConfig(worktree) ?? DelegateConfig()
-        let recipeName = run.recipe ?? deps.config.recipe(routing: run.command, in: config)
+        // `exec` never routes: it inspects the existing checkout with exactly the argv given.
+        let routed = mode == .exec ? nil : RouteMatcher(config: config).match(run.command)?.recipe
+        let recipeName = run.recipe ?? routed
         var recipe: Recipe?
         if let recipeName {
             guard let found = config.recipes[recipeName] else {
-                throw DelegationFailure(code: "unknown_recipe",
-                                        message: "no recipe named \(recipeName) in .flightdeck/delegate.toml — flightdeck recipe ls lists them")
+                throw DelegationError(code: "unknown_recipe",
+                                      message: "no recipe named \(recipeName) in .flightdeck/delegate.toml — flightdeck recipe ls lists them")
             }
             recipe = found
         }
         let command = try Self.command(argv: run.command, recipe: recipe, routed: run.recipe == nil)
         let host = try resolveHost(run.host ?? recipe?.host ?? config.defaultHost)
         let service = mode == .up || recipe?.service == true
+        let include = config.include + run.include
+        let fetch = (recipe?.fetch ?? []) + run.fetch
         let spec = RunSpec(
             command: command, subdir: subdir,
             env: (recipe?.env ?? [:]).merging(run.env) { _, cli in cli },
             pty: run.pty, screen: run.screen || recipe?.screen == true, service: service,
-            downCommand: recipe?.down, ports: try Self.ports(recipe: recipe?.ports ?? [], cli: run.ports),
+            downCommand: recipe?.down, ports: try Preflight.mergePorts(recipe: recipe?.ports ?? [], cli: run.ports),
             ptySize: run.columns.flatMap { columns in run.rows.map { TerminalSize(columns: columns, rows: $0) } },
-            fetch: (recipe?.fetch ?? []) + run.fetch, pool: recipe?.pool)
-        let include = config.include + run.include
-        let fetch = (recipe?.fetch ?? []) + run.fetch
+            fetch: fetch, pool: recipe?.pool)
         let link = try deps.hosts.link(named: host)
 
-        // §7 steps 2–7. Nothing after this point may leave the reservation held on failure.
+        // §7 steps 2–7. A preflight failure's message is already the finished §5 line, host
+        // and next step included: passed through as is.
         let plan = DelegationPlan(host: host, worktree: worktree, subdir: subdir, spec: spec,
                                   include: include, fetch: fetch, sync: mode != .exec)
-        // A preflight failure's message is already the finished §5 line, host and next step
-        // included: passed through as is, never re-prefixed.
         let reservation = try await deps.preflight.preflight(plan, link: link)
+        // Nothing after this point may leave the reservation held on failure.
         let hostRunID: String
         let snapshot: SnapshotRef
         do {
@@ -359,53 +400,65 @@ final class DelegationService {
         }
 
         let id = registry.mintID()
-        let record = DelegatedRun(
+        var record = DelegatedRun(
             id: id, hostRunID: hostRunID, host: host, owner: owner, kind: service ? .service : .run,
             command: command, recipe: recipeName, state: .running, status: nil,
-            ports: reservation.ports.map { "\($0.local):\($0.remote)" },
+            ports: reservation.forwards.map { "\($0.local):\($0.remote)" },
             startedAt: Date(), worktree: worktree.path, snapshot: mode == .exec ? nil : snapshot,
             applyMode: recipe?.apply ?? .review, request: run, resultCommit: nil, resultBundle: nil)
+        record.include = include
+        record.fetch = fetch
         registry.add(record)
-        let liveRun = LiveRun(link: link)
-        liveRun.reservation = reservation
+        let liveRun = LiveRun(link: link, watchedFromStart: true)
         live[id] = liveRun
-        if service { reservation.forward(service: hostRunID, link: link) } else { reservation.release() }
+        if service {
+            liveRun.reservation = reservation
+            reservation.startForwarding { remote in ServicePortOpener(link: link, service: hostRunID, remote: remote) }
+        } else {
+            reservation.release()
+        }
 
-        let started = WireDelegateStarted(runID: id, host: host, ports: reservation.ports)
-        if service || run.detach || recipe?.long == true {
-            // Detached: `delegateStarted` is the terminal frame, and the CLI prints the id and
-            // `flightdeck wait` and returns inside the agent's tool timeout. The monitor still
-            // records how it ends, for that `wait`.
-            monitor(id, liveRun, fetch: fetch, include: include)
+        let started = WireDelegateStarted(runID: id, host: host, ports: reservation.forwards.map {
+            WirePortBinding(local: $0.local, remote: $0.remote)
+        })
+        // Only the request decides (see the file header): the CLI read the recipe book and set
+        // `detach` for a long or service recipe, and `up` is detached by definition.
+        if mode == .up || run.detach {
+            monitor(id, liveRun)
             return reply(.delegateStarted(cid: cid, started))
         }
         reply(.delegateStarted(cid: cid, started))
+        attach(liveRun, cid: cid, hint: true, reply: reply)
+        monitor(id, liveRun)
+    }
+
+    /// Streams a run's updates to one CLI until it ends.
+    private func attach(_ liveRun: LiveRun, cid: Int, hint: Bool, reply: @escaping (ServerFrame) -> Void) {
         let token = UUID()
         liveRun.subscribers[token] = { [weak liveRun] update in
             switch update {
             case .notice(let message): reply(.delegateNotice(cid: cid, message: message))
             case .output(let stream, let offset, let data):
                 reply(.delegateOutput(cid: cid, stream: stream.rawValue, offset: offset, data: data))
-            case .ended(let status, let hint):
+            case .ended(let status, let missing):
                 liveRun?.subscribers[token] = nil
-                if let hint { return reply(.err(cid: cid, code: "missing_include", message: hint)) }
+                if hint, let missing { return reply(.err(cid: cid, code: "missing_include", message: missing)) }
                 reply(.delegateExit(cid: cid, status: status))
             case .lost(let message):
                 liveRun?.subscribers[token] = nil
                 reply(.err(cid: cid, code: "run_lost", message: message))
             }
         }
-        monitor(id, liveRun, fetch: fetch, include: include)
     }
 
     /// Watches a run to its end, whoever (if anyone) is attached: the registry's state, a
     /// result to fetch, artifacts, `apply = "auto"`, the missing-file hint.
-    private func monitor(_ id: String, _ liveRun: LiveRun, fetch: [String], include: [String]) {
+    private func monitor(_ id: String, _ liveRun: LiveRun) {
         guard liveRun.monitor == nil, let record = registry.run(id) else { return }
         liveRun.monitor = Task { @MainActor [weak self] in
             do {
                 for try await event in liveRun.link.events(runID: record.hostRunID, from: 0) {
-                    guard let self else { return }
+                    guard let self, liveRun.ended == nil else { return }
                     switch event {
                     case .queued(let position, let reason, let holder):
                         self.registry.update(id) { $0.state = .queued }
@@ -422,7 +475,7 @@ final class DelegationService {
                         }
                         liveRun.publish(.output(stream, offset: offset, data))
                     case .exited(let exit):
-                        await self.finish(id, liveRun, exit: exit, fetch: fetch, include: include)
+                        await self.finish(id, liveRun, exit: exit)
                         return
                     case .serviceDied(let exit):
                         liveRun.reservation?.release()
@@ -435,37 +488,45 @@ final class DelegationService {
                 // Cleared so the next `wait`/`logs` (`ensureLive`) starts watching again.
                 Self.logger.error("lost \(id, privacy: .public): \(String(describing: error), privacy: .public)")
                 liveRun.monitor = nil
-                liveRun.publish(.lost("lost the link to \(record.host) mid-run; \(id) carries on there — flightdeck logs \(id) --follow"))
+                liveRun.publish(.lost("lost the link to \(record.host) mid-run — \(id) carries on there; flightdeck logs \(id) --follow"))
             }
         }
     }
 
-    private func finish(_ id: String, _ liveRun: LiveRun, exit: RunExit, fetch: [String], include: [String]) async {
+    private func finish(_ id: String, _ liveRun: LiveRun, exit: RunExit) async {
         liveRun.reservation?.release()
         guard let record = registry.run(id) else { return }
         let status = exit.cliStatus
-        let worktree = URL(fileURLWithPath: record.worktree)
         if record.kind == .run, let snapshot = record.snapshot {
             await fetchResult(record, snapshot: snapshot, liveRun)
-            if !fetch.isEmpty { await fetchArtifacts(record, globs: fetch, liveRun) }
-            if record.applyMode == .auto { autoApply(id, liveRun) }
+            if !record.fetch.isEmpty { await fetchArtifacts(record, globs: record.fetch, liveRun) }
+            if record.applyMode == .auto { await autoApply(id, liveRun) }
         }
+        // Only a synced run: `exec` sent nothing, so "wasn't sent" would be no clue at all.
         var hint: String?
-        if status != 0, record.kind == .run {
-            hint = MissingFileHint.hint(
+        if status != 0, record.kind == .run, let snapshot = record.snapshot {
+            let worktree = URL(fileURLWithPath: record.worktree)
+            let worktrees = deps.worktrees
+            hint = await MissingFileHint.hint(
                 tail: String(decoding: liveRun.errorTail, as: UTF8.self), worktree: worktree,
-                worktreeName: record.snapshot?.worktreeName ?? worktree.lastPathComponent,
-                subdir: record.request.cwd.hasPrefix(record.worktree)
-                    ? String(record.request.cwd.dropFirst(record.worktree.count)).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-                    : "",
-                sent: Set(include), ignored: { self.deps.worktrees.ignored($0, in: $1) })
+                worktreeName: snapshot.worktreeName, subdir: Self.subdir(of: record),
+                sent: record.include, ignored: { await worktrees.ignored($0, in: $1) })
                 .map { "\(record.host): \($0)" }
         }
         registry.update(id) { $0.state = .exited; $0.status = status }
         end(liveRun, status: status, hint: hint)
     }
 
+    private static func subdir(of record: DelegatedRun) -> String {
+        guard record.request.cwd.hasPrefix(record.worktree) else { return "" }
+        return String(record.request.cwd.dropFirst(record.worktree.count))
+            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+    }
+
+    /// Records the end once: a service `down` ends it at once, and the host's own `exited`
+    /// that follows changes nothing.
     private func end(_ liveRun: LiveRun, status: Int32, hint: String?) {
+        guard liveRun.ended == nil else { return }
         liveRun.ended = (status, hint)
         liveRun.publish(.ended(status: status, hint: hint))
     }
@@ -484,7 +545,7 @@ final class DelegationService {
             guard case .runResult(let commit?) = reply else { return }
             registry.update(record.id) { $0.resultCommit = commit; $0.resultBundle = file.path }
         } catch {
-            liveRun.publish(.notice("couldn't fetch \(record.id)'s changed files from \(record.host): \(Self.describe(error))"))
+            liveRun.publish(.notice("couldn't fetch \(record.id)'s changed files from \(record.host) — \(Self.describe(error))"))
         }
     }
 
@@ -498,23 +559,23 @@ final class DelegationService {
                 return false
             }
             guard case .runArtifacts(true) = reply else { return }
-            try deps.results.extractArtifacts(tar: file, into: URL(fileURLWithPath: record.worktree))
+            try await deps.results.extractArtifacts(tar: file, into: URL(fileURLWithPath: record.worktree))
             try? FileManager.default.removeItem(at: file)
         } catch {
-            liveRun.publish(.notice("couldn't fetch \(record.id)'s artifacts from \(record.host): \(Self.describe(error))"))
+            liveRun.publish(.notice("couldn't fetch \(record.id)'s artifacts from \(record.host) — \(Self.describe(error))"))
         }
     }
 
     /// `apply = "auto"` (§4.5): applied on completion unless the merge would conflict, in
     /// which case nothing is written and the result is kept for review — and the CLI is told,
     /// so the agent does not assume its changes landed.
-    private func autoApply(_ id: String, _ liveRun: LiveRun) {
+    private func autoApply(_ id: String, _ liveRun: LiveRun) async {
         guard let record = registry.run(id), let commit = record.resultCommit, let bundle = record.resultBundle,
               let snapshot = record.snapshot
         else { return }
         do {
-            switch try deps.results.apply(bundle: URL(fileURLWithPath: bundle), commit: commit, snapshot: snapshot,
-                                          worktree: URL(fileURLWithPath: record.worktree), allowConflicts: false) {
+            switch try await deps.results.apply(bundle: URL(fileURLWithPath: bundle), commit: commit, snapshot: snapshot,
+                                                worktree: URL(fileURLWithPath: record.worktree), allowConflicts: false) {
             case .clean, .nothing:
                 clearResult(id)
                 liveRun.publish(.notice("applied \(id)'s changed files"))
@@ -526,12 +587,12 @@ final class DelegationService {
         }
     }
 
-    private func diff(_ record: DelegatedRun) throws -> WireDelegatePatch {
+    private func diff(_ record: DelegatedRun) async throws -> WireDelegatePatch {
         guard let commit = record.resultCommit, let bundle = record.resultBundle, let snapshot = record.snapshot else {
             return WireDelegatePatch(runID: record.id, patch: "")
         }
-        let patch = try deps.results.patch(bundle: URL(fileURLWithPath: bundle), commit: commit, snapshot: snapshot,
-                                           worktree: URL(fileURLWithPath: record.worktree))
+        let patch = try await deps.results.patch(bundle: URL(fileURLWithPath: bundle), commit: commit, snapshot: snapshot,
+                                                 worktree: URL(fileURLWithPath: record.worktree))
         guard patch.utf8.count > Self.inlinePatchLimit else { return WireDelegatePatch(runID: record.id, patch: patch) }
         let file = scratchFile("\(record.id).patch")
         try FileManager.default.createDirectory(at: deps.directory, withIntermediateDirectories: true)
@@ -539,12 +600,15 @@ final class DelegationService {
         return WireDelegatePatch(runID: record.id, patchPath: file.path)
     }
 
-    private func apply(_ record: DelegatedRun) throws -> WireDelegateApplied {
+    /// Refused when there is nothing to apply — the run changed nothing, or it was applied
+    /// already — so `apply` exiting 0 always means files changed.
+    private func apply(_ record: DelegatedRun) async throws -> WireDelegateApplied {
         guard let commit = record.resultCommit, let bundle = record.resultBundle, let snapshot = record.snapshot else {
-            return WireDelegateApplied(runID: record.id, conflicts: [])
+            throw DelegationError(code: "nothing_to_apply",
+                                  message: "\(record.id) has no changes to apply — it changed no files, or they were applied already")
         }
-        let outcome = try deps.results.apply(bundle: URL(fileURLWithPath: bundle), commit: commit, snapshot: snapshot,
-                                             worktree: URL(fileURLWithPath: record.worktree), allowConflicts: true)
+        let outcome = try await deps.results.apply(bundle: URL(fileURLWithPath: bundle), commit: commit, snapshot: snapshot,
+                                                   worktree: URL(fileURLWithPath: record.worktree), allowConflicts: true)
         // Applied either way: conflict markers are now in the worktree, and applying the same
         // patch a second time would only stack another set on top.
         clearResult(record.id)
@@ -560,13 +624,12 @@ final class DelegationService {
     // MARK: wait / logs
 
     /// `flightdeck wait` (§6.1): blocks until the run ends and answers its status, or gives up
-    /// after `timeout` (`wait_timeout`, 124) while the run carries on. With `from` it is a
-    /// reattach — the CLI lost the app mid-run — and streams the output from that byte on, so
-    /// the agent sees nothing twice and misses nothing.
-    private func wait(_ record: DelegatedRun, timeout: Int?, from: Int64?, cid: Int,
+    /// after `timeout` (`wait_timeout`, 124) while the run carries on; nil `timeout` is a
+    /// reattach, which waits as long as the run takes. With `from` it streams the output from
+    /// that byte on, so a CLI that lost the app sees nothing twice and misses nothing.
+    private func wait(_ record: DelegatedRun, timeout: TimeInterval?, from: Int64?, cid: Int,
                       reply: @escaping (ServerFrame) -> Void) throws {
-        let seconds = timeout.map(TimeInterval.init) ?? Self.defaultWaitTimeout
-        if let from { return try logs(record, follow: true, from: from, timeout: seconds, cid: cid, reply: reply) }
+        if let from { return try logs(record, follow: true, from: from, timeout: timeout, cid: cid, reply: reply) }
         if let status = record.status, record.state == .exited || record.state == .died {
             return reply(.delegateExit(cid: cid, status: status))
         }
@@ -576,6 +639,9 @@ final class DelegationService {
         var answered = false
         liveRun.subscribers[token] = { [weak liveRun] update in
             switch update {
+            case .notice(let message):
+                // "waiting for mini's screen …" matters most to exactly this caller.
+                reply(.delegateNotice(cid: cid, message: message))
             case .ended(let status, _):
                 // The hint is the attached `run`'s to print, beside the output it explains; a
                 // `wait` reports the status the agent asked for.
@@ -586,11 +652,12 @@ final class DelegationService {
                 answered = true
                 liveRun?.subscribers[token] = nil
                 reply(.err(cid: cid, code: "run_lost", message: message))
-            case .notice, .output:
+            case .output:
                 break
             }
         }
-        expire(after: seconds, record, cid: cid) {
+        guard let timeout else { return }
+        expire(after: timeout, record, cid: cid) {
             guard !answered else { return false }
             answered = true
             liveRun.subscribers[token] = nil
@@ -598,16 +665,20 @@ final class DelegationService {
         } reply: { reply($0) }
     }
 
-    /// Replays the run's spooled output from the host, from byte `from`. Without `follow`, stops
-    /// at what had been written when asked (`ack`); with it, carries on to the end
-    /// (`delegateExit`), bounded by `timeout` when it is a `wait`.
+    /// Replays the run's spooled output from the host, from byte `from`. With `follow`, carries
+    /// on to the end (`delegateExit`), bounded by `timeout` when it is a `wait`. Without it,
+    /// stops at what had been written when asked (`ack`) — known exactly for a run this app
+    /// watched from its start; for one it did not (a relaunch), it stops once the host has
+    /// sent nothing for `replayIdle`, since the replay comes all at once and then goes quiet.
     private func logs(_ record: DelegatedRun, follow: Bool, from: Int64, timeout: TimeInterval?, cid: Int,
                       reply: @escaping (ServerFrame) -> Void) throws {
         let liveRun = try ensureLive(record)
         let ended = record.state == .exited || record.state == .died || liveRun.ended != nil
+        let knowsEnd = liveRun.watchedFromStart && !ended
         let stopAt = liveRun.outputEnd
-        if !follow, !ended, stopAt <= from { return reply(.ack(cid: cid)) }
+        if !follow, knowsEnd, stopAt <= from { return reply(.ack(cid: cid)) }
         var done = false
+        var lastEvent = 0
         let finish: (ServerFrame) -> Void = { frame in
             guard !done else { return }
             done = true
@@ -617,10 +688,11 @@ final class DelegationService {
             do {
                 for try await event in liveRun.link.events(runID: record.hostRunID, from: from) {
                     guard !done else { return }
+                    lastEvent += 1
                     switch event {
                     case .output(let stream, let offset, let data):
                         reply(.delegateOutput(cid: cid, stream: stream.rawValue, offset: offset, data: data))
-                        if !follow, !ended, offset + Int64(data.count) >= stopAt { return finish(.ack(cid: cid)) }
+                        if !follow, knowsEnd, offset + Int64(data.count) >= stopAt { return finish(.ack(cid: cid)) }
                     case .exited(let exit), .serviceDied(let exit):
                         return finish(follow ? .delegateExit(cid: cid, status: exit.cliStatus) : .ack(cid: cid))
                     case .queued, .started:
@@ -630,6 +702,18 @@ final class DelegationService {
                 finish(.ack(cid: cid))
             } catch {
                 finish(Self.refusal(cid: cid, Self.named(error, host: record.host)))
+            }
+        }
+        if !follow, !knowsEnd, !ended {
+            let idle = deps.replayIdle
+            Task { @MainActor in
+                var seen = -1
+                while !done, seen != lastEvent {
+                    seen = lastEvent
+                    try? await Task.sleep(nanoseconds: UInt64(idle * 1e9))
+                }
+                replay.cancel()
+                finish(.ack(cid: cid))
             }
         }
         guard let timeout else { return }
@@ -656,34 +740,42 @@ final class DelegationService {
     /// (one from before a relaunch) or restarting one that lost its link, so `wait` still
     /// learns how it ends.
     private func ensureLive(_ record: DelegatedRun) throws -> LiveRun {
-        let liveRun = try live[record.id] ?? LiveRun(link: link(for: record))
+        let liveRun = try live[record.id] ?? LiveRun(link: link(for: record), watchedFromStart: false)
         live[record.id] = liveRun
         if liveRun.ended != nil || record.state == .exited || record.state == .died { return liveRun }
-        monitor(record.id, liveRun, fetch: record.request.fetch, include: record.request.include)
+        monitor(record.id, liveRun)
         return liveRun
     }
 
     // MARK: Services
 
+    /// Stops a service, and ends it for everyone watching: its `wait` answers at once rather
+    /// than hanging on an `exited` the host may word differently.
     private func down(_ record: DelegatedRun) async throws {
         _ = try await hostRequest(.serviceDown(service: record.hostRunID), on: try link(for: record))
         live[record.id]?.reservation?.release()
-        registry.update(record.id) { $0.state = .exited }
+        registry.update(record.id) { $0.state = .exited; $0.status = $0.status ?? 0 }
+        if let liveRun = live[record.id] { end(liveRun, status: 0, hint: nil) }
+    }
+
+    /// Down, then up again with the same request — as the same tab's service, whoever asked.
+    private func restart(_ record: DelegatedRun, cid: Int, reply: @escaping (ServerFrame) -> Void) async throws {
+        try await down(record)
+        try await start(record.request, mode: .up, owner: record.owner, cid: cid, reply: reply)
     }
 
     /// `flightdeck sync <service>` (§6.2): re-applies the current snapshot to the service's
-    /// pinned checkout, or restarts it when its recipe says `restart_on_sync`.
-    private func sync(_ record: DelegatedRun, owner: UUID?, cid: Int, reply: @escaping (ServerFrame) -> Void) async throws {
+    /// pinned checkout and answers `ack`, or restarts it when its recipe says
+    /// `restart_on_sync` and answers as `restart` does (`delegateStarted`, the new id).
+    private func sync(_ record: DelegatedRun, cid: Int, reply: @escaping (ServerFrame) -> Void) async throws {
         let worktree = URL(fileURLWithPath: record.worktree)
         let config = try loadConfig(worktree)
         if let name = record.recipe, config?.recipes[name]?.restartOnSync == true {
-            try await down(record)
-            return try await start(record.request, mode: .up, owner: owner, cid: cid, reply: reply)
+            return try await restart(record, cid: cid, reply: reply)
         }
         let link = try link(for: record)
-        let include = (config?.include ?? []) + record.request.include
         do {
-            let snapshot = try await deps.snapshots.snapshot(worktree: worktree, host: record.host, include: include)
+            let snapshot = try await deps.snapshots.snapshot(worktree: worktree, host: record.host, include: record.include)
             try await push(snapshot, from: worktree, to: link)
             _ = try await hostRequest(.serviceSync(service: record.hostRunID, ref: snapshot), on: link)
         } catch {
@@ -694,14 +786,14 @@ final class DelegationService {
 
     // MARK: Recipes
 
-    private func config(cwd: String) throws -> (worktree: URL, config: DelegateConfig) {
-        let worktree = try locate(cwd).worktree
+    private func config(cwd: String) async throws -> (worktree: URL, config: DelegateConfig) {
+        let worktree = try await locate(cwd).worktree
         return (worktree, try loadConfig(worktree) ?? DelegateConfig())
     }
 
-    private func check(cwd: String) -> [String] {
+    private func check(cwd: String) async -> [String] {
         do {
-            let (_, config) = try config(cwd: cwd)
+            let (_, config) = try await config(cwd: cwd)
             return deps.config.problems(in: config, hosts: deps.hosts.hostNames)
         } catch {
             return [Self.describe(error)]
@@ -721,9 +813,9 @@ final class DelegationService {
 
     static func recipe(_ wire: WireRecipe) throws -> Recipe {
         guard let apply = ApplyMode(rawValue: wire.apply) else {
-            throw DelegationFailure(code: "invalid_recipe", message: "apply must be review or auto, got \(wire.apply)")
+            throw DelegationError(code: "invalid_recipe", message: "apply must be review or auto, got \(wire.apply)")
         }
-        for port in wire.ports { _ = try ports(recipe: [port], cli: []) }
+        _ = try Preflight.mergePorts(recipe: wire.ports, cli: [])
         return Recipe(host: wire.host, run: wire.run, down: wire.down, screen: wire.screen, long: wire.long,
                       service: wire.service, restartOnSync: wire.restartOnSync, fetch: wire.fetch,
                       ports: wire.ports, env: wire.env, apply: apply, pool: wire.pool)
@@ -731,16 +823,16 @@ final class DelegationService {
 
     // MARK: Resolution
 
-    private func locate(_ cwd: String) throws -> (worktree: URL, subdir: String) {
-        do { return try deps.worktrees.locate(cwd: URL(fileURLWithPath: cwd)) } catch {
-            throw DelegationFailure(code: "not_a_repo", message: "\(cwd) is not in a git worktree — delegation syncs a git checkout; cd into one")
+    private func locate(_ cwd: String) async throws -> (worktree: URL, subdir: String) {
+        do { return try await deps.worktrees.locate(cwd: URL(fileURLWithPath: cwd)) } catch {
+            throw DelegationError(code: "not_a_repo", message: "\(cwd) is not in a git worktree — delegation syncs a git checkout; cd into one")
         }
     }
 
     private func loadConfig(_ worktree: URL) throws -> DelegateConfig? {
         do { return try deps.config.load(worktree: worktree) } catch {
-            throw DelegationFailure(code: "invalid_config",
-                                    message: ".flightdeck/delegate.toml: \(Self.describe(error)) — flightdeck recipe check")
+            throw DelegationError(code: "invalid_config",
+                                  message: ".flightdeck/delegate.toml: \(Self.describe(error)) — flightdeck recipe check")
         }
     }
 
@@ -750,10 +842,10 @@ final class DelegationService {
         if let name { return name }
         let paired = deps.hosts.hostNames
         guard !paired.isEmpty else {
-            throw DelegationFailure(code: "no_host", message: "no hosts are paired — pair one in Settings › Hosts, then rerun with --on <host>")
+            throw DelegationError(code: "no_host", message: "no hosts are paired — pair one in Settings › Hosts, then rerun with --on <host>")
         }
-        throw DelegationFailure(code: "no_host",
-                                message: "no host given and no default_host in .flightdeck/delegate.toml — rerun with --on \(paired.joined(separator: "|"))")
+        throw DelegationError(code: "no_host",
+                              message: "no host given and no default_host in .flightdeck/delegate.toml — rerun with --on \(paired.joined(separator: "|"))")
     }
 
     private func link(for record: DelegatedRun) throws -> any HostLinking {
@@ -765,7 +857,7 @@ final class DelegationService {
     /// `not_found` rather than "not yours", so one agent cannot even probe another's ids.
     private func visibleRun(_ id: String, owner: UUID?) throws -> DelegatedRun {
         guard let record = registry.run(id), record.isVisible(to: owner) else {
-            throw DelegationFailure(code: "not_found", message: "no run \(id) in this session — flightdeck ps lists them")
+            throw DelegationError(code: "not_found", message: "no run \(id) in this session — flightdeck ps lists them")
         }
         return record
     }
@@ -773,7 +865,7 @@ final class DelegationService {
     private func finishedRun(_ id: String, owner: UUID?) throws -> DelegatedRun {
         let record = try visibleRun(id, owner: owner)
         guard record.state == .exited || record.state == .died else {
-            throw DelegationFailure(code: "still_running", message: "\(id) is still running on \(record.host) — flightdeck wait \(id) first")
+            throw DelegationError(code: "still_running", message: "\(id) is still running on \(record.host) — flightdeck wait \(id) first")
         }
         return record
     }
@@ -785,7 +877,7 @@ final class DelegationService {
         }
         if let byID = candidates.first(where: { $0.id == name }) { return byID }
         if let byRecipe = candidates.last(where: { $0.recipe == name }) { return byRecipe }
-        throw DelegationFailure(code: "not_found", message: "no running service \(name) in this session — flightdeck ps lists them")
+        throw DelegationError(code: "not_found", message: "no running service \(name) in this session — flightdeck ps lists them")
     }
 
     /// The shell text to run. A recipe's `run`, with any extra argv appended; a routed
@@ -800,7 +892,7 @@ final class DelegationService {
             return ([recipe.run] + argv.map(shellQuote)).joined(separator: " ")
         }
         guard !argv.isEmpty else {
-            throw DelegationFailure(code: "no_command", message: "nothing to run — name a recipe, or give the command after --")
+            throw DelegationError(code: "no_command", message: "nothing to run — name a recipe, or give the command after --")
         }
         return argv.count == 1 ? argv[0] : argv.map(shellQuote).joined(separator: " ")
     }
@@ -809,19 +901,6 @@ final class DelegationService {
         let safe = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "@%_+=:,./-"))
         if !word.isEmpty, word.unicodeScalars.allSatisfy(safe.contains) { return word }
         return "'" + word.replacingOccurrences(of: "'", with: "'\\''") + "'"
-    }
-
-    /// The recipe's ports, with a CLI `--port` replacing the recipe's entry for the same
-    /// remote port (§6.2) rather than forwarding it twice.
-    static func ports(recipe: [String], cli: [String]) throws -> [PortMapping] {
-        func parse(_ text: String) throws -> PortMapping {
-            do { return try PortMapping.parse(text) } catch {
-                throw DelegationFailure(code: "invalid_port", message: "\(text) is not a port mapping — use N, L:R or auto:R")
-            }
-        }
-        let overrides = try cli.map(parse)
-        let kept = try recipe.map(parse).filter { mapping in !overrides.contains { $0.remote == mapping.remote } }
-        return kept + overrides
     }
 
     // MARK: Transfer
@@ -834,18 +913,23 @@ final class DelegationService {
         let channel = try await link.openChannel()
         async let pushed = hostRequest(.syncPush(ref: snapshot, channel: channel.id), on: link)
         do {
-            let handle = try FileHandle(forReadingFrom: bundle)
-            defer { try? handle.close() }
-            while let chunk = try handle.read(upToCount: 64 * 1024), !chunk.isEmpty {
-                try await channel.write(chunk)
-            }
-            await channel.finish()
+            try await Self.send(bundle, over: channel)
         } catch {
             channel.cancel()
             _ = try? await pushed
             throw error
         }
         _ = try await pushed
+    }
+
+    /// The bundle's bytes onto the channel, read off the main actor.
+    private nonisolated static func send(_ file: URL, over channel: any ByteChannel) async throws {
+        let handle = try FileHandle(forReadingFrom: file)
+        defer { try? handle.close() }
+        while let chunk = try handle.read(upToCount: 64 * 1024), !chunk.isEmpty {
+            try await channel.write(chunk)
+        }
+        await channel.finish()
     }
 
     /// Sends `request` naming a fresh channel and saves what arrives on it to `file`. Read and
@@ -900,12 +984,12 @@ final class DelegationService {
     /// host and what to do, at one place.
     private func hostRequest(_ request: DelegationRequest, on link: any HostLinking) async throws -> DelegationReply {
         do { return try await link.request(request) } catch HostLinkError.remote(let code, let message) {
-            throw DelegationFailure(code: code, message: Self.hostLine(code: code, message: message, host: link.name))
+            throw DelegationError(code: code, message: Self.hostLine(code: code, message: message, host: link.name))
         }
     }
 
-    private static func unexpected(_ host: String, _ op: String) -> DelegationFailure {
-        DelegationFailure(code: "unexpected_reply", message: "\(host) answered \(op) with something else — update Flight Deck on both machines")
+    private static func unexpected(_ host: String, _ op: String) -> DelegationError {
+        DelegationError(code: "unexpected_reply", message: "\(host) answered \(op) with something else — update Flight Deck on both machines")
     }
 
     /// The §5 line for each host error code pinned in `DelegationWire.swift`'s header (A5).
@@ -922,42 +1006,35 @@ final class DelegationService {
         case "run_active": return "\(host): the run is still going — flightdeck wait it first"
         case "port_held": return "\(host): \(message) — free the port on \(host), or forward another with --port L:R"
         case "dial_failed": return "\(host): \(message) — is the service listening on that port?"
+        case "result_expired": return "the result expired on \(host) — rerun to get the changes again"
+        case "unsafe_path": return "\(host) sent back a result with an unsafe path, so nothing was applied — check the run's changes on \(host)"
+        case "git_too_old": return "\(host)'s git is older than 2.40 — update git on \(host), then rerun"
         case "unsupported", "not_implemented": return "\(host) does not support this yet — update Flight Deck on \(host)"
         default: return "\(host): \(message)"
         }
     }
 
-    /// A `[[route]]` match with `fnmatch` semantics (`*` crosses `/` and spaces), the same rule
-    /// the CLI's `route-exec` applies. For a `DelegateConfigLoading` that has no matcher of its
-    /// own; C8 can swap in C4's `RouteMatcher`, but then must swap the CLI's in step with it.
-    nonisolated static func fnmatchRoute(_ argv: [String], _ routes: [Route]) -> String? {
-        let joined = argv.joined(separator: " ")
-        return routes.first { fnmatch($0.match, joined, 0) == 0 }?.recipe
-    }
-
     // MARK: Errors
 
-    /// The `err` frame for a failure: a `DelegationFailure` verbatim, anything else wrapped
-    /// so the CLI still prints one `flightdeck:` line.
+    /// The `err` frame for a failure. A `DelegationError`'s `message`, never its `description`,
+    /// which already starts `flightdeck: ` — the CLI adds that itself.
     static func refusal(cid: Int, _ error: Error) -> ServerFrame {
-        if let failure = error as? DelegationFailure {
+        if let failure = error as? DelegationError {
             return .err(cid: cid, code: failure.code, message: failure.message)
         }
         return .err(cid: cid, code: "delegation_failed", message: describe(error))
     }
 
-    /// Prefixes the host to a failure that does not already name it (§5: every 125 line names
-    /// the host).
+    /// Names the host in a failure that is not already a finished line. Every `DelegationError`
+    /// here is one — `hostLine`, the preflight and the directory all word their own — so only
+    /// a stray error is wrapped.
     private static func named(_ error: Error, host: String) -> Error {
-        if let failure = error as? DelegationFailure {
-            guard !failure.message.hasPrefix(host) else { return failure }
-            return DelegationFailure(code: failure.code, message: "\(host): \(failure.message)")
-        }
-        return DelegationFailure(code: "delegation_failed", message: "\(host): \(describe(error))")
+        if error is DelegationError { return error }
+        return DelegationError(code: "delegation_failed", message: "\(host): \(describe(error))")
     }
 
     static func describe(_ error: Error) -> String {
-        if let failure = error as? DelegationFailure { return failure.message }
+        if let failure = error as? DelegationError { return failure.message }
         if let localized = error as? LocalizedError, let text = localized.errorDescription { return text }
         return String(describing: error)
     }
@@ -965,27 +1042,28 @@ final class DelegationService {
 
 // MARK: - Git
 
-/// `WorktreeLocating` through the `git` CLI, as everything in delegation reaches git.
+/// `WorktreeLocating` through the `git` CLI, as everything in delegation reaches git. Each call
+/// is a `git` process; `async` and nonisolated, so it never runs on the main actor.
 struct GitWorktreeLocator: WorktreeLocating {
-    func locate(cwd: URL) throws -> (worktree: URL, subdir: String) {
-        let lines = try git(["rev-parse", "--show-toplevel", "--show-prefix"], in: cwd)
+    func locate(cwd: URL) async throws -> (worktree: URL, subdir: String) {
+        let lines = try Self.git(["rev-parse", "--show-toplevel", "--show-prefix"], in: cwd)
             .split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
         guard let root = lines.first, !root.isEmpty else {
-            throw DelegationFailure(code: "not_a_repo", message: "\(cwd.path) is not in a git worktree")
+            throw DelegationError(code: "not_a_repo", message: "\(cwd.path) is not in a git worktree")
         }
         let prefix = lines.count > 1 ? lines[1] : ""
         return (URL(fileURLWithPath: root), prefix.hasSuffix("/") ? String(prefix.dropLast()) : prefix)
     }
 
-    func ignored(_ paths: [String], in worktree: URL) -> Set<String> {
+    func ignored(_ paths: [String], in worktree: URL) async -> Set<String> {
         guard !paths.isEmpty,
-              let out = try? git(["check-ignore", "--stdin"], in: worktree, input: paths.joined(separator: "\n") + "\n",
-                                 okStatuses: [0, 1])
+              let out = try? Self.git(["check-ignore", "--stdin"], in: worktree,
+                                      input: paths.joined(separator: "\n") + "\n", okStatuses: [0, 1])
         else { return [] }
         return Set(out.split(separator: "\n").map(String.init))
     }
 
-    private func git(_ args: [String], in dir: URL, input: String? = nil, okStatuses: Set<Int32> = [0]) throws -> String {
+    private static func git(_ args: [String], in dir: URL, input: String? = nil, okStatuses: Set<Int32> = [0]) throws -> String {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
         process.arguments = ["git"] + args
@@ -996,12 +1074,12 @@ struct GitWorktreeLocator: WorktreeLocating {
         process.standardError = FileHandle.nullDevice
         process.standardInput = inPipe
         try process.run()
-        if let input { inPipe.fileHandleForWriting.write(Data(input.utf8)) }
+        if let input { try inPipe.fileHandleForWriting.write(contentsOf: Data(input.utf8)) }
         try inPipe.fileHandleForWriting.close()
         let data = out.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
         guard okStatuses.contains(process.terminationStatus) else {
-            throw DelegationFailure(code: "git_failed", message: "git \(args.first ?? "") failed in \(dir.path)")
+            throw DelegationError(code: "git_failed", message: "git \(args.first ?? "") failed in \(dir.path)")
         }
         return String(decoding: data, as: UTF8.self).trimmingCharacters(in: .newlines)
     }

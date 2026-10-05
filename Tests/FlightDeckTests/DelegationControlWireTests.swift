@@ -77,6 +77,14 @@ final class DelegationControlWireTests: XCTestCase {
                        #"{"op":"delegate.wait","run":"r1"}"#)
         XCTAssertEqual(try sorted(FleetRequest.delegate(.wait(run: "r1", timeout: 60, from: 4096))),
                        #"{"from":4096,"op":"delegate.wait","run":"r1","timeout":60}"#)
+        // A reattaching `run`'s wait has no timeout; absent means the default, and decodes so.
+        XCTAssertEqual(try sorted(FleetRequest.delegate(.wait(run: "r1", timeout: nil, from: 7, noTimeout: true))),
+                       #"{"from":7,"noTimeout":true,"op":"delegate.wait","run":"r1"}"#)
+        XCTAssertEqual(try JSONDecoder().decode(FleetRequest.self, from: Data(
+                           #"{"op":"delegate.wait","run":"r1","from":7,"noTimeout":true}"#.utf8)),
+                       .delegate(.wait(run: "r1", timeout: nil, from: 7, noTimeout: true)))
+        XCTAssertEqual(try JSONDecoder().decode(FleetRequest.self, from: Data(#"{"op":"delegate.wait","run":"r1"}"#.utf8)),
+                       .delegate(.wait(run: "r1", timeout: nil, from: nil)))
         XCTAssertEqual(try sorted(FleetRequest.delegate(.logs(run: "r1", follow: true, from: nil))),
                        #"{"follow":true,"op":"delegate.logs","run":"r1"}"#)
         XCTAssertEqual(try sorted(FleetRequest.delegate(.logs(run: "r1", follow: false, from: 1 << 33))),

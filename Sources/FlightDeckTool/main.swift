@@ -142,7 +142,8 @@ let context = CLIContext(
     isTTY: isatty(1) == 1,
     columns: hasTerminal ? Int(window.ws_col) : nil,
     rows: hasTerminal ? Int(window.ws_row) : nil,
-    environment: env
+    environment: env,
+    socketPath: socketPath
 )
 
 let transport = LocalFleetTransport(path: socketPath, caller: env["FLIGHT_DECK_CALLER"])
@@ -172,8 +173,10 @@ let runner = CLIRunner(
     },
     // A delegated run's bytes, as they came: no newline added, stderr kept apart from stdout,
     // so `flightdeck run -- make` reads exactly like `make`.
+    // `write(contentsOf:)`, which throws, never the legacy `write(_:)`, which raises an
+    // Objective-C exception on EPIPE and crashes `flightdeck run … | head`.
     write: { stream, data in
-        (stream == "stderr" ? FileHandle.standardError : FileHandle.standardOutput).write(data)
+        try (stream == "stderr" ? FileHandle.standardError : FileHandle.standardOutput).write(contentsOf: data)
     },
     execReal: { argv0, args in exit(DelegateRouting.execReal(argv0, args, environment: env)) }
 )

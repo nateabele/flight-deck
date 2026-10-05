@@ -18,6 +18,8 @@ struct CLIContext {
     var rows: Int? = nil
     /// For `route-exec`'s `FLIGHTDECK_NO_ROUTE` bypass.
     var environment: [String: String] = [:]
+    /// The control socket, for the one-line "cannot reach Flight Deck at …" a run verb prints.
+    var socketPath: String? = nil
 }
 
 /// One `flightdeck` invocation, as a state machine over frames: connect, take the fleet
@@ -73,7 +75,7 @@ final class CLIRunner {
     /// The delegation verb in flight (`run`, `wait r7`, …), whose streams outlive one frame.
     private var delegateRunner: DelegateCommandRunner?
     /// Raw run output to the CLI's own stdout/stderr, and `route-exec`'s exec of the real binary.
-    private let write: (String, Data) -> Void
+    private let write: (String, Data) throws -> Void
     private let execReal: (String, [String]) -> Void
 
     private var tailTarget: UUID?
@@ -86,7 +88,7 @@ final class CLIRunner {
          out: @escaping (String) -> Void, err: @escaping (String) -> Void,
          finish: @escaping (Int32) -> Void,
          schedule: @escaping (TimeInterval, @escaping () -> Void) -> Void,
-         write: ((String, Data) -> Void)? = nil,
+         write: ((String, Data) throws -> Void)? = nil,
          execReal: ((String, [String]) -> Void)? = nil) {
         self.invocation = invocation
         self.transport = transport
@@ -186,6 +188,15 @@ final class CLIRunner {
             return execReal(argv0, args)
         }
         if Self.isSandboxRefusal(error) { return finish(77) }
+        if delegateRunner == nil, case .delegate(let command) = invocation.command,
+           DelegateCommandRunner.isRunVerb(command) {
+            // `run`, `exec` and `wait` report a missing app the way they report any failure to
+            // delegate (§5): 125 and one line with the next step, so an agent reading `$?`
+            // need not know a second code means the same thing.
+            err(reachedMac ? "flightdeck: lost Flight Deck before the run started — check flightdeck ps, then rerun"
+                           : "flightdeck: cannot reach Flight Deck\(context.socketPath.map { " at \($0)" } ?? "") — start it, then rerun")
+            return finish(125)
+        }
         // The 69 message names the socket path, which only the main program knows.
         guard reachedMac else { return finish(69) }
         if let delegateRunner {

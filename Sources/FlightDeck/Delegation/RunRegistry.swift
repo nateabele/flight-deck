@@ -40,6 +40,10 @@ struct DelegatedRun: Codable, Equatable {
     let applyMode: ApplyMode
     /// The request that started it, kept so `restart` can start the same thing again.
     let request: WireDelegateRun
+    /// The resolved `include` (project + `--include`) and `fetch` (recipe + `--fetch`), kept
+    /// so a watcher restarted after a relaunch fetches the same artifacts and hints the same.
+    var include: [String] = []
+    var fetch: [String] = []
     /// The result commit and the bundle holding it, once fetched and until applied. Nil when
     /// the run changed nothing, or before it ended.
     var resultCommit: String?
@@ -78,12 +82,21 @@ final class RunRegistry {
     /// host still covers.
     init(file: URL?) {
         self.file = file
-        if let file, let data = try? Data(contentsOf: file),
-           let stored = try? JSONDecoder().decode(Stored.self, from: data) {
-            self.stored = stored
-        } else {
-            stored = Stored(next: 1, runs: [])
+        stored = Stored(next: 1, runs: [])
+        guard let file, let data = try? Data(contentsOf: file) else { return }
+        do {
+            stored = try JSONDecoder().decode(Stored.self, from: data)
+        } catch {
+            // Moved aside rather than overwritten by the next save: it is the only record of
+            // which services are running, and someone may want to read it back by hand.
+            let aside = file.appendingPathExtension("corrupt-\(Int(Date().timeIntervalSince1970))")
+            try? FileManager.default.moveItem(at: file, to: aside)
+            Self.logger.error("delegation.json unreadable, moved to \(aside.lastPathComponent, privacy: .public)")
         }
+        // Above every id on record, whatever the counter says: a hand-edited or half-written
+        // file must not let `mintID` hand out an id that already names a run.
+        let highest = stored.runs.compactMap { Int($0.id.dropFirst()) }.max() ?? 0
+        stored.next = max(stored.next, highest + 1)
     }
 
     var runs: [DelegatedRun] { stored.runs }
