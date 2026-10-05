@@ -501,6 +501,21 @@ final class SessionStore: ObservableObject {
         return ClaudePluginLocation.applying(to: options, bundle: .main)
     }
 
+    /// The options a tab launches with: the project's resolved preferences, with a swarm task's
+    /// overrides laid on top by the agent's own routing capability. Overrides the agent cannot
+    /// apply refuse the launch — a task routed to a model must never quietly run on another.
+    func launchOptions(for agent: AgentID, project: String, overrides: LaunchOverrides?) -> Result<AgentOptions, AgentLaunchError> {
+        let base = options(for: agent, project: project)
+        guard let overrides, overrides.model != nil || !overrides.knobs.isEmpty else { return .success(base) }
+        guard let capabilities = routingCapabilities.capabilities(for: agent.harnessID) else {
+            return .failure(.prepareFailed("\(agent.displayName) has no routing capabilities"))
+        }
+        switch capabilities.applying(overrides, to: base) {
+        case .supported(let applied): return .success(applied)
+        case .unsupported(let reason): return .failure(.prepareFailed(reason))
+        }
+    }
+
     /// Codex's half of the two dictionaries above, held together rather than as four fields
     /// because the four are inseparable: the adapter and the runtime are only usable through
     /// the one `CodexRPC` that speaks to the one app-server process they share.
@@ -1345,6 +1360,10 @@ final class SessionStore: ObservableObject {
     /// — see that factory's comment for why no second `Notifying` is constructed. `nil`
     /// until then, and nil forever in a `SessionStore` built directly by a test.
     var flywheelNotifier: FlywheelNotifier?
+
+    /// Every agent's Level 3 capabilities, keyed by harness. Lazily the standard set; settable so
+    /// a test can register a fake harness and the integration branch can swap in real conformers.
+    lazy var routingCapabilities: RoutingCapabilityRegistry = .standard()
 
     /// Guards the lazy notification-authorization request `startObserving(project:)`
     /// makes: the underlying `Notifying.requestAuthorization()` should fire once, the
@@ -2217,7 +2236,7 @@ final class SessionStore: ObservableObject {
     func newSession(
         in url: URL, at index: Int? = nil, account explicit: UUID? = nil,
         waking: DisplayWakePolicy = .wakeIfNeeded, selecting: Bool = true,
-        flywheelIdentity: FlywheelIdentity? = nil
+        flywheelIdentity: FlywheelIdentity? = nil, overrides: LaunchOverrides? = nil
     ) -> Session {
         guard ensureTerminalCreatable(waking) else {
             launchFailureReporter.report(.terminalUnavailable(displayAsleep: true))
@@ -2243,7 +2262,11 @@ final class SessionStore: ObservableObject {
             flywheelIdentity: flywheelIdentity
         )
         let adapter = adapter(for: instance(for: session))
-        let options = options(for: session.agent, project: url.path)
+        // `createSession` has already refused an override this agent cannot apply, so a failure
+        // here is unreachable from it; the plain preferences are the right answer for any other
+        // caller that passed overrides directly.
+        let options = (try? launchOptions(for: session.agent, project: url.path, overrides: overrides).get())
+            ?? options(for: session.agent, project: url.path)
         return addSession(
             session,
             in: url,
@@ -2277,7 +2300,7 @@ final class SessionStore: ObservableObject {
     @discardableResult
     func createSession(
         agent: AgentID, in directory: String, at index: Int? = nil, account explicit: UUID? = nil,
-        selecting: Bool = true
+        selecting: Bool = true, overrides: LaunchOverrides? = nil
     ) async -> Result<UUID, AgentLaunchError> {
         // Before anything else, covering both branches below: the codex branch calls
         // `addSession` directly rather than routing through `newSession(in:)`, so it does not
@@ -2304,6 +2327,15 @@ final class SessionStore: ObservableObject {
             launchFailureReporter.report(error)
             return .failure(error)
         }
+        // Checked before anything is created on either branch, so an override the agent cannot
+        // apply refuses the tab rather than launching it on the project's defaults.
+        let launchOptions: AgentOptions
+        switch self.launchOptions(for: agent, project: directory, overrides: overrides) {
+        case .success(let resolved): launchOptions = resolved
+        case .failure(let error):
+            launchFailureReporter.report(error)
+            return .failure(error)
+        }
         // An agent that mints its own conversation id has nothing to negotiate, so it takes
         // the synchronous path and never touches anything this method builds below.
         //
@@ -2324,7 +2356,7 @@ final class SessionStore: ObservableObject {
             return .success(
                 newSession(
                     in: url, at: index, account: explicit, selecting: selecting,
-                    flywheelIdentity: identity
+                    flywheelIdentity: identity, overrides: overrides
                 ).id
             )
         }
@@ -2341,7 +2373,7 @@ final class SessionStore: ObservableObject {
             title: nextSessionTitle(), workingDirectory: directory, agent: agent,
             accountID: account?.id
         )
-        let options = options(for: agent, project: directory)
+        let options = launchOptions
         // Resolved once, from the draft, and used for every registry the creation touches:
         // the adapter it prepares against, the app-server it holds open, and the teardown it
         // defers all have to name the same account, or the creation guards a stack nobody is

@@ -91,7 +91,9 @@ final class ClaudeRoutingCapabilities: AgentRoutingCapabilities {
     func usageMeterSource(account: AgentAccount?) -> RoutingCapability<any UsageMeterSource> { .unsupported(reason: "filled in by L3-U") }
     func transcriptPointer(for session: Session) -> RoutingCapability<TranscriptPointer> { .unsupported(reason: "filled in by L3-U") }
     func resetContext(_ session: Session) async throws -> RoutingCapability<Void> { .unsupported(reason: "filled in by L3-S") }
-    func applying(_ overrides: LaunchOverrides, to options: AgentOptions) -> RoutingCapability<AgentOptions> { .unsupported(reason: "filled in by L3-S") }
+    func applying(_ overrides: LaunchOverrides, to options: AgentOptions) -> RoutingCapability<AgentOptions> {
+        ClaudeLaunchOverrides.apply(overrides, to: options)
+    }
 }
 
 @MainActor
@@ -103,7 +105,9 @@ final class CodexRoutingCapabilities: AgentRoutingCapabilities {
     func usageMeterSource(account: AgentAccount?) -> RoutingCapability<any UsageMeterSource> { .unsupported(reason: "filled in by L3-U") }
     func transcriptPointer(for session: Session) -> RoutingCapability<TranscriptPointer> { .unsupported(reason: "filled in by L3-U") }
     func resetContext(_ session: Session) async throws -> RoutingCapability<Void> { .unsupported(reason: "filled in by L3-S") }
-    func applying(_ overrides: LaunchOverrides, to options: AgentOptions) -> RoutingCapability<AgentOptions> { .unsupported(reason: "filled in by L3-S") }
+    func applying(_ overrides: LaunchOverrides, to options: AgentOptions) -> RoutingCapability<AgentOptions> {
+        CodexLaunchOverrides.apply(overrides, to: options)
+    }
 }
 
 /// Owned by L3-S. Spawns (or the caller reuses) an agent for `task` and submits `firstPrompt`
