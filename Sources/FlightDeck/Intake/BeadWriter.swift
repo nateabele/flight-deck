@@ -38,10 +38,10 @@ struct BeadWriter {
         self.actor = actor
     }
 
-    func apply(_ steps: [ApplyStep], project: String) async -> Outcome {
+    func apply(_ steps: [ApplyStep], project: String, agentContexts: [String: String] = [:]) async -> Outcome {
         var outcome = Outcome()
         for step in steps {
-            switch await run(step, idMap: outcome.idMap, project: project) {
+            switch await run(step, idMap: outcome.idMap, project: project, agentContexts: agentContexts) {
             case .created(let tempId, let id):
                 outcome.applied += 1
                 outcome.idMap[tempId] = id
@@ -60,7 +60,7 @@ struct BeadWriter {
         return outcome
     }
 
-    private func run(_ step: ApplyStep, idMap: [String: String], project: String) async -> StepOutcome {
+    private func run(_ step: ApplyStep, idMap: [String: String], project: String, agentContexts: [String: String]) async -> StepOutcome {
         let description = describe(step)
         switch step {
         case .create(let bead):
@@ -71,6 +71,9 @@ struct BeadWriter {
             // is not a mismatch to "fix".
             if let acceptance = bead.acceptance { args += ["--acceptance", acceptance] }
             if !bead.labels.isEmpty { args += ["-l", bead.labels.joined(separator: ",")] }
+            // L3-R §4: the routed execution block. A new task has no other `agent_context` to
+            // keep, so this is the whole value (`ExecutionBlockCodec.encode(_, into: nil)`).
+            if let context = agentContexts[bead.tempId] { args += ["--agent-context", context] }
             args += ["--actor", actor, "--json"]
             switch await exec(args, description: description, project: project) {
             case .failure(let error): return .failed(error.message)
@@ -178,5 +181,64 @@ struct BeadWriter {
             return .failure(ExecFailure(message: "\(description): exit \(exitCode)\(detail)"))
         }
         return .success(stdout)
+    }
+}
+
+/// What `writeBlock` did to one task.
+enum BlockWriteOutcome: Equatable, Sendable {
+    case written
+    case skippedPinned
+    case failed(String)
+}
+
+/// Writes one task's execution block after a re-route (spec L3-R §5: "when a kind is merged or
+/// re-weighted"). A protocol so `RoutingService`'s tests never run `br`.
+protocol BlockWriting: Sendable {
+    func writeBlock(_ block: ExecutionBlock, id: String, project: String) async -> BlockWriteOutcome
+}
+
+extension BeadWriter: BlockWriting {
+    /// Reads the task's `agent_context`, replaces only `flight_deck.execution`, writes the whole
+    /// value back. Never over a pinned block, a newer block, an invalid block or a context that
+    /// is not a JSON object: each of those belongs to someone else, and is reported instead.
+    func writeBlock(_ block: ExecutionBlock, id: String, project: String) async -> BlockWriteOutcome {
+        let description = "route \(id)"
+        let existing: String?
+        switch await exec(["show", id, "--json"], description: description, project: project) {
+        case .failure(let error):
+            return .failed(error.message)
+        case .success(let stdout):
+            guard let data = stdout.data(using: .utf8),
+                  let rows = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]],
+                  let row = rows.first else {
+                return .failed("\(description): task not found: \(stdout.firstLine)")
+            }
+            existing = row["agent_context"] as? String
+        }
+        switch ExecutionBlockCodec.decode(agentContext: existing) {
+        case .success(let old?) where old.pinned: return .skippedPinned
+        case .failure(let error): return .failed("\(description): \(error.message)")
+        default: break
+        }
+        let merged: String
+        do { merged = try ExecutionBlockCodec.encode(block, into: existing) }
+        catch let error as ExecutionBlockError { return .failed("\(description): \(error.message)") }
+        catch { return .failed("\(description): \(error)") }
+        var args = ["update", id, "--agent-context", merged]
+        // br 0.6.0 refuses a write that keeps less than half the old length (exit 4) unless
+        // forced — a shorter reason would otherwise make the re-route fail. Only then: `--force`
+        // also bypasses br's blocked-task guard, which this write has no business overriding.
+        if Self.shrinksBelowHalf(old: existing, new: merged) { args.append("--force") }
+        args += ["--actor", actor]
+        switch await exec(args, description: description, project: project) {
+        case .failure(let error): return .failed(error.message)
+        case .success: return .written
+        }
+    }
+
+    /// Both measures, because br counts characters and an emoji-heavy reason makes the two disagree.
+    static func shrinksBelowHalf(old: String?, new: String) -> Bool {
+        guard let old, !old.isEmpty else { return false }
+        return new.count * 2 < old.count || new.utf8.count * 2 < old.utf8.count
     }
 }
