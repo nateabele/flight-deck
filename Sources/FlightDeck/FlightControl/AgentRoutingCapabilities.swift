@@ -80,14 +80,14 @@ final class RoutingCapabilityRegistry {
     }
 }
 
-/// Stubs until L3-R (catalog, knobs, overrides), L3-U (meter, transcript) and L3-S (reset) fill
-/// them in. Each says "unsupported" with the spec that owns it.
+/// Catalog and knobs are real (L3-R, `RoutingCatalogs.swift`); the rest stay stubs
+/// until L3-U (meter, transcript) and L3-S (reset, overrides) fill them in.
 @MainActor
 final class ClaudeRoutingCapabilities: AgentRoutingCapabilities {
     let harness: HarnessID = AgentID.claude.harnessID
     let accountModel: AccountModel = .login
-    var knobSchema: [String: [String]] { [:] }
-    func modelCatalog() async -> RoutingCapability<[ModelEntry]> { .unsupported(reason: "filled in by L3-R") }
+    var knobSchema: [String: [String]] { ClaudeRoutingCatalog.knobSchema }
+    func modelCatalog() async -> RoutingCapability<[ModelEntry]> { .supported(ClaudeRoutingCatalog.models) }
     func usageMeterSource(account: AgentAccount?) -> RoutingCapability<any UsageMeterSource> { .unsupported(reason: "filled in by L3-U") }
     func transcriptPointer(for session: Session) -> RoutingCapability<TranscriptPointer> { .unsupported(reason: "filled in by L3-U") }
     func resetContext(_ session: Session) async throws -> RoutingCapability<Void> { .unsupported(reason: "filled in by L3-S") }
@@ -98,8 +98,8 @@ final class ClaudeRoutingCapabilities: AgentRoutingCapabilities {
 final class CodexRoutingCapabilities: AgentRoutingCapabilities {
     let harness: HarnessID = AgentID.codex.harnessID
     let accountModel: AccountModel = .login
-    var knobSchema: [String: [String]] { [:] }
-    func modelCatalog() async -> RoutingCapability<[ModelEntry]> { .unsupported(reason: "filled in by L3-R") }
+    var knobSchema: [String: [String]] { CodexRoutingCatalog.shared.knobSchema }
+    func modelCatalog() async -> RoutingCapability<[ModelEntry]> { await CodexRoutingCatalog.shared.models() }
     func usageMeterSource(account: AgentAccount?) -> RoutingCapability<any UsageMeterSource> { .unsupported(reason: "filled in by L3-U") }
     func transcriptPointer(for session: Session) -> RoutingCapability<TranscriptPointer> { .unsupported(reason: "filled in by L3-U") }
     func resetContext(_ session: Session) async throws -> RoutingCapability<Void> { .unsupported(reason: "filled in by L3-S") }
