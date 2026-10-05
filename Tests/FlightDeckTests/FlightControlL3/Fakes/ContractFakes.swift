@@ -1,4 +1,5 @@
 import Foundation
+import XCTest
 import IntakeKit
 
 /// Scriptable doubles for every Level 3 protocol. Shared by all four parallel branches, so keep
@@ -32,7 +33,10 @@ final class FakeRouter: Router, @unchecked Sendable {
     func assign(kind: TaskKind, project: URL, catalogs: AdapterCatalogs, now: Date) -> Assignment {
         lock.lock(); defer { lock.unlock() }
         assignCalls.append(kind.id)
-        guard let a = assignments[kind.id] ?? defaultAssignment else { fatalError("FakeRouter: no assignment scripted for \(kind.id)") }
+        guard let a = assignments[kind.id] ?? defaultAssignment else {
+            XCTFail("FakeRouter: no assignment scripted for \(kind.id)")
+            return Assignment.unroutable(kind: kind.id, reason: "unscripted", at: now)
+        }
         return a
     }
     func spill(_ block: ExecutionBlock, kind: TaskKind, project: URL, exhausted: Set<PoolID>,
@@ -98,4 +102,18 @@ final class FakeUsageMeterSource: UsageMeterSource, @unchecked Sendable {
     }
     func send(_ r: UsageReading) { continuation.yield(r) }
     func finish() { continuation.finish() }
+}
+
+final class FakePoolDirectory: PoolDirectory, @unchecked Sendable {
+    private let lock = NSLock()
+    var summaries: [PoolSummary] = []
+    var defaults: [HarnessID: PoolID] = [:]
+    func pools() -> [PoolSummary] {
+        lock.lock(); defer { lock.unlock() }
+        return summaries
+    }
+    func defaultPool(for harness: HarnessID) -> PoolID? {
+        lock.lock(); defer { lock.unlock() }
+        return defaults[harness]
+    }
 }

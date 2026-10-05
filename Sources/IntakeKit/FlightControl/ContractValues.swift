@@ -28,7 +28,9 @@ public struct AdapterCatalogs: Equatable, Sendable {
 
     public init(_ catalogs: [AdapterCatalog]) {
         byHarness = Dictionary(catalogs.map { ($0.harness, $0) }, uniquingKeysWith: { a, _ in a })
-        order = catalogs.map(\.harness)
+        // First occurrence wins, matching `byHarness`; a repeat would list its models twice.
+        var seen = Set<HarnessID>()
+        order = catalogs.map(\.harness).filter { seen.insert($0).inserted }
     }
 
     public func contains(_ ref: ModelRef) -> Bool {
@@ -52,6 +54,23 @@ public struct AdapterCatalogs: Equatable, Sendable {
 public struct Assignment: Equatable, Sendable {
     public var block: ExecutionBlock
     public init(block: ExecutionBlock) { self.block = block }
+
+    /// `Router.assign` cannot fail, so this is the shared way for every branch to say "no route".
+    /// A writer never stores an unroutable block (the codec refuses empty fields anyway).
+    public static func unroutable(kind: KindID, reason: String, at: Date) -> Assignment {
+        Assignment(block: ExecutionBlock(kind: kind, harness: "", model: "", knobs: [:], pool: "",
+                                         source: AssignmentSource(by: .default, ruleId: nil, reason: "unroutable: \(reason)", at: at),
+                                         pinned: false))
+    }
+
+    public var isUnroutable: Bool { block.harness.rawValue.isEmpty || block.model.isEmpty || block.pool.rawValue.isEmpty }
+
+    public var unroutableReason: String? {
+        guard isUnroutable else { return nil }
+        let prefix = "unroutable: "
+        let r = block.source.reason
+        return r.hasPrefix(prefix) ? String(r.dropFirst(prefix.count)) : r
+    }
 }
 
 public struct ScoredModel: Equatable, Sendable {
@@ -64,11 +83,23 @@ public struct ScoredModel: Equatable, Sendable {
 public enum HeadroomState: String, Codable, Sendable { case underSoft, overSoft, overHard, unknown }
 
 /// An account as Level 3 sees it. `id == nil` is a slot in a local pool, which has no account.
+///
+/// Identity is harness + id. A rename changes `label`, and a renamed account must still match its
+/// leases and readings. A slot with no id has nothing else to go on, so it compares by label.
 public struct AccountRef: Codable, Hashable, Sendable {
     public var harness: HarnessID
     public var id: UUID?
     public var label: String
     public init(harness: HarnessID, id: UUID?, label: String) { self.harness = harness; self.id = id; self.label = label }
+
+    public static func == (a: AccountRef, b: AccountRef) -> Bool {
+        guard a.harness == b.harness, a.id == b.id else { return false }
+        return a.id != nil || a.label == b.label
+    }
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(harness)
+        if let id { hasher.combine(id) } else { hasher.combine(label) }
+    }
 }
 
 public struct AccountHeadroom: Equatable, Sendable {
@@ -158,4 +189,11 @@ public struct HandoffRequest: Equatable, Sendable {
 
 public enum SpawnError: Error, Equatable, Sendable {
     case launchFailed(String), composerTimeout, unsupportedHarness(HarnessID), claimConflict(String)
+}
+
+public struct PoolSummary: Codable, Hashable, Sendable {
+    public var id: PoolID
+    public var harness: HarnessID
+    public var label: String
+    public init(id: PoolID, harness: HarnessID, label: String) { self.id = id; self.harness = harness; self.label = label }
 }

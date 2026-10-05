@@ -19,6 +19,8 @@ public struct AssignmentSource: Codable, Equatable, Sendable {
     public var by: AssignmentSourceKind
     public var ruleId: String?
     public var reason: String
+    /// Stored at whole-second precision (ISO 8601 without fractions), so a block built from
+    /// `Date()` is not equal to itself after a codec round trip. Truncate before comparing.
     public var at: Date
     public init(by: AssignmentSourceKind, ruleId: String? = nil, reason: String, at: Date) {
         self.by = by; self.ruleId = ruleId; self.reason = reason; self.at = at

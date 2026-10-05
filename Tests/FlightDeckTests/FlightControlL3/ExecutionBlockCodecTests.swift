@@ -176,4 +176,22 @@ final class ExecutionBlockCodecTests: XCTestCase {
         XCTAssertNotNil(obj["flight_deck"])
         XCTAssertEqual(obj["other"] as? String, "data")
     }
+
+    func testDecodeRejectsNonStringSourceFields() {
+        func ctx(_ src: String) -> String {
+            #"{"flight_deck":{"execution":{"v":1,"kind":"k","harness":"h","model":"m","pool":"p","source":"# + src + "}}}"
+        }
+        XCTAssertEqual(ExecutionBlockCodec.decode(agentContext: ctx(#"{"by":5,"reason":"r","at":"2026-10-04T18:00:00Z"}"#)),
+                       .failure(.invalidField("source.by", "not a string")))
+        XCTAssertEqual(ExecutionBlockCodec.decode(agentContext: ctx(#"{"by":"rule","reason":5,"at":"2026-10-04T18:00:00Z"}"#)),
+                       .failure(.invalidField("source.reason", "not a string")))
+        XCTAssertEqual(ExecutionBlockCodec.decode(agentContext: ctx(#"{"by":"rule","reason":"r","at":5}"#)),
+                       .failure(.invalidField("source.at", "not a string")))
+        XCTAssertEqual(ExecutionBlockCodec.decode(agentContext: ctx(#"{"reason":"r","at":"2026-10-04T18:00:00Z"}"#)),
+                       .failure(.missingField("source.by")))
+        XCTAssertEqual(ExecutionBlockCodec.decode(agentContext: ctx(#"{"by":"rule","at":"2026-10-04T18:00:00Z"}"#)),
+                       .failure(.missingField("source.reason")))
+        XCTAssertEqual(ExecutionBlockCodec.decode(agentContext: ctx(#"{"by":"rule","reason":"r"}"#)),
+                       .failure(.missingField("source.at")))
+    }
 }

@@ -19,6 +19,25 @@ public protocol Router: Sendable {
                catalogs: AdapterCatalogs, now: Date) -> Assignment?
 }
 
+/// Owned by L3-U (its pool store conforms; `DefaultPoolDirectory` stands in until then).
+public protocol PoolDirectory: Sendable {
+    func pools() -> [PoolSummary]
+    func defaultPool(for harness: HarnessID) -> PoolID?
+}
+
+/// One `<harness>-default` pool per agent — L3-U §2's default pools, which exist before anyone
+/// configures capacity. Enough for routing to run end to end before L3-U's pool store conforms.
+public struct DefaultPoolDirectory: PoolDirectory {
+    public let harnesses: [HarnessID]
+    public init(harnesses: [HarnessID]) { self.harnesses = harnesses }
+    public func pools() -> [PoolSummary] {
+        harnesses.map { PoolSummary(id: PoolID("\($0.rawValue)-default"), harness: $0, label: "\($0.rawValue) — all accounts") }
+    }
+    public func defaultPool(for harness: HarnessID) -> PoolID? {
+        harnesses.contains(harness) ? PoolID("\(harness.rawValue)-default") : nil
+    }
+}
+
 /// Owned by L3-I.
 public protocol CapabilityIndex: Sendable {
     /// Best first. Unknown models are omitted, never scored zero.

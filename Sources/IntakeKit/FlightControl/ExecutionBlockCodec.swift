@@ -79,12 +79,18 @@ public enum ExecutionBlockCodec {
 
         guard let s = e["source"] else { return .failure(.missingField("source")) }
         guard let src = s as? [String: Any] else { return .failure(.invalidField("source", "not an object")) }
-        guard let byRaw = src["by"] as? String else { return .failure(.missingField("source.by")) }
+        func srcString(_ key: String) -> Result<String, ExecutionBlockError> {
+            guard let value = src[key] else { return .failure(.missingField("source.\(key)")) }
+            guard let str = value as? String else { return .failure(.invalidField("source.\(key)", "not a string")) }
+            return .success(str)
+        }
+        let byRaw: String, reason: String, atRaw: String
+        switch srcString("by") { case .success(let x): byRaw = x; case .failure(let x): return .failure(x) }
         guard let by = AssignmentSourceKind(rawValue: byRaw) else {
             return .failure(.invalidField("source.by", "unknown value \(byRaw)"))
         }
-        guard let reason = src["reason"] as? String else { return .failure(.missingField("source.reason")) }
-        guard let atRaw = src["at"] as? String else { return .failure(.missingField("source.at")) }
+        switch srcString("reason") { case .success(let x): reason = x; case .failure(let x): return .failure(x) }
+        switch srcString("at") { case .success(let x): atRaw = x; case .failure(let x): return .failure(x) }
         guard let at = iso().date(from: atRaw) else { return .failure(.invalidField("source.at", "not ISO 8601")) }
         var ruleId: String? = nil
         if let r = src["ruleId"], !(r is NSNull) {
