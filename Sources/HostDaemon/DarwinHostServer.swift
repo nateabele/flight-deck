@@ -66,6 +66,9 @@ final class DarwinHostServer: @unchecked Sendable {
     /// Fired on `queue` whenever the number of authenticated connections changes. `main.swift`
     /// holds an idle-sleep assertion only while it is non-zero.
     var onConnectionCountChanged: (@Sendable (Int) -> Void)?
+    /// Each whole binary message (a `ChannelMux` frame), on the peer's queue in arrival order
+    /// beside its text frames. Set before `start`. Nil drops binary, as before delegation.
+    var onBinary: (@Sendable (DarwinHostPeer, Data) -> Void)?
 
     // Confined to `queue`.
     private var listener: NWListener?
@@ -390,6 +393,11 @@ final class DarwinHostServer: @unchecked Sendable {
             if meta?.opcode == .text, let data {
                 let text = String(decoding: data, as: UTF8.self)
                 peer.queue.async { [core] in core.receive(text: text, from: peer) }
+            } else if meta?.opcode == .binary, let data, let onBinary {
+                // The peer's queue, not `queue`: a mux frame must stay ordered with the
+                // request that names its channel, and off the listener's queue for the
+                // reason `DarwinHostPeer.queue` gives.
+                peer.queue.async { onBinary(peer, data) }
             }
             receive(on: peer)
         }

@@ -154,6 +154,10 @@ final class HostLink {
     /// link drops or stops. A continuation left here forever is a CLI call that never returns.
     private var pending: [Int: (continuation: CheckedContinuation<HostReply, Error>,
                                 timer: HostLinkCancellable)] = [:]
+    /// The winner's byte channels (HostLinkChannels.swift). Internal, not private, only so
+    /// that file's extension can reach it; a mux lives exactly as long as one winner, since
+    /// its ids and credit mean nothing on the next connection.
+    var channelMux: ChannelMux?
 
     private static let logger = Logger(subsystem: "dev.flightdeck.FlightDeck", category: "hosts")
 
@@ -290,6 +294,7 @@ final class HostLink {
                                           stored: record.endpoints)
         if merged != record.endpoints { onEndpointsChanged?(merged) }
         schedulePing()
+        attachChannels(to: connection)
         state = .online(hostName: hostName)
     }
 
@@ -318,6 +323,7 @@ final class HostLink {
         pingTimer?.cancel()
         pingTimer = nil
         failPending()
+        detachChannels()
         // Scheduled before the state is reported, so a handler reading the link already sees
         // the retry it is waiting on.
         scheduleRetry()
@@ -431,6 +437,7 @@ final class HostLink {
         pingTimer = nil
         stopBrowsing()
         failPending()
+        detachChannels()
     }
 
     /// `host:port`, with an IPv6 literal optionally bracketed. The last colon splits, so an
@@ -543,6 +550,9 @@ final class NetworkHostConnection: HostLinkConnection {
     var onReady: (() -> Void)?
     var onText: ((String) -> Void)?
     var onClosed: (() -> Void)?
+    /// Whole binary messages: `ChannelMux` frames (HostLinkChannels.swift). Before these,
+    /// every message was decoded as text, so a binary one surfaced as an unreadable frame.
+    var onBinary: ((Data) -> Void)?
 
     private let connection: NWConnection
     private var ended = false
@@ -575,6 +585,14 @@ final class NetworkHostConnection: HostLinkConnection {
                         completion: .contentProcessed { _ in })
     }
 
+    /// One `ChannelMux` frame, on the same connection as `send(_:)` so the two keep call order.
+    func send(binary: Data) {
+        let metadata = NWProtocolWebSocket.Metadata(opcode: .binary)
+        let context = NWConnection.ContentContext(identifier: "channel", metadata: [metadata])
+        connection.send(content: binary, contentContext: context, isComplete: true,
+                        completion: .contentProcessed { _ in })
+    }
+
     func ping(onPong: @escaping () -> Void) {
         let metadata = NWProtocolWebSocket.Metadata(opcode: .ping)
         metadata.setPongHandler(.main) { error in
@@ -593,6 +611,7 @@ final class NetworkHostConnection: HostLinkConnection {
         onReady = nil
         onText = nil
         onClosed = nil
+        onBinary = nil
         connection.cancel()
     }
 
@@ -615,7 +634,11 @@ final class NetworkHostConnection: HostLinkConnection {
             MainActor.assumeIsolated {
                 guard let self, !self.ended else { return }
                 if error != nil { return self.end() }
-                if let data, !data.isEmpty {
+                let opcode = (context?.protocolMetadata(definition: NWProtocolWebSocket.definition)
+                    as? NWProtocolWebSocket.Metadata)?.opcode
+                if let data, !data.isEmpty, opcode == .binary {
+                    self.onBinary?(data)
+                } else if let data, !data.isEmpty {
                     self.onText?(String(decoding: data, as: UTF8.self))
                 } else if complete, context?.isFinal ?? true {
                     return self.end()
