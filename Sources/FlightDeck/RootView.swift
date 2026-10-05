@@ -57,7 +57,9 @@ struct RootView: View {
                                       collapsed: store.observeDrawerCollapsed,
                                       onToggleCollapse: { store.toggleObserveDrawer() },
                                       onJumpToRootCause: { store.jumpToObserveRootCause() },
-                                      onOpenDAG: { store.presentObserveDAG() })
+                                      onOpenDAG: { store.presentObserveDAG() },
+                                      assignment: store.focusedSwarmAssignment(),
+                                      onJumpToSession: { store.selectedSessionID = $0 })
                     }
                 }
             } else {

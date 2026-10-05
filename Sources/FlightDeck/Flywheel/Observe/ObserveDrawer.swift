@@ -1,8 +1,15 @@
 import SwiftUI
 
-/// The four fixed rows of the per-tab Observe drawer, in display order.
+/// The fixed rows of the per-tab Observe drawer, in display order. `assignment` (L3-S) is
+/// first and appears only for a swarm agent.
 enum ObserveLane: Equatable, Sendable {
-    case workingOn, files, dependency, activity
+    case assignment, workingOn, files, dependency, activity
+}
+
+/// A jump to another tab — the assignment lane's previous/next hand-off agents.
+struct ObserveLaneLink: Equatable, Sendable {
+    let title: String
+    let session: UUID
 }
 
 /// One rendered row. `isUnavailable` means the poll couldn't answer this lane's question
@@ -14,6 +21,7 @@ struct ObserveLaneRow: Equatable, Sendable {
     let title: String
     let detail: String
     let isUnavailable: Bool
+    var links: [ObserveLaneLink] = []
 }
 
 /// Pure reduction from a projected `Agent` to the drawer's four rows. No SwiftUI, no I/O —
@@ -27,6 +35,7 @@ struct ObserveLaneModel {
     /// (edges with no timestamps, or vice versa) isn't one this drawer can render.
     private static func unavailableKeys(for lane: ObserveLane) -> [String] {
         switch lane {
+        case .assignment: return []
         case .workingOn: return ["agents", "beads"]
         case .files: return ["reservations"]
         case .dependency: return ["depEdges"]
@@ -37,10 +46,14 @@ struct ObserveLaneModel {
     /// `nil` agent means the tab's identity never showed up in this poll (the external
     /// case documented on `FlywheelProjection.agent(for:)`) — there is no per-lane data to
     /// degrade, so the drawer itself is absent rather than showing four unavailable rows.
-    static func lanes(for agent: FlywheelProjection.Agent?, unavailable: Set<String>) -> [ObserveLaneRow] {
+    static func lanes(for agent: FlywheelProjection.Agent?, assignment: SwarmAssignmentDetail? = nil,
+                      unavailable: Set<String>) -> [ObserveLaneRow] {
         guard let agent else { return [] }
-
-        return [
+        let head = assignment.map {
+            [ObserveLaneRow(lane: .assignment, title: "Assignment", detail: $0.lines.joined(separator: "\n"),
+                            isUnavailable: false, links: $0.links)]
+        } ?? []
+        return head + [
             row(.workingOn, title: "Working on", unavailable: unavailable) {
                 workingOnDetail(agent)
             },
@@ -104,6 +117,8 @@ struct ObserveDrawer: View {
     let onToggleCollapse: () -> Void
     let onJumpToRootCause: () -> Void
     let onOpenDAG: () -> Void
+    var assignment: SwarmAssignmentDetail? = nil
+    var onJumpToSession: (UUID) -> Void = { _ in }
 
     var body: some View {
         if let agent {
@@ -147,7 +162,7 @@ struct ObserveDrawer: View {
                 .accessibilityLabel("Collapse Observe drawer")
             }
 
-            ForEach(ObserveLaneModel.lanes(for: agent, unavailable: []), id: \.lane) { row in
+            ForEach(ObserveLaneModel.lanes(for: agent, assignment: assignment, unavailable: []), id: \.lane) { row in
                 laneRow(row)
             }
 
@@ -164,7 +179,21 @@ struct ObserveDrawer: View {
             Text(row.title)
                 .font(.caption.bold())
                 .frame(width: 80, alignment: .leading)
-            if row.lane == .dependency {
+            if row.lane == .assignment {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(row.detail).font(.caption).textSelection(.enabled)
+                    HStack {
+                        ForEach(row.links, id: \.session) { link in
+                            Button(link.title) { onJumpToSession(link.session) }
+                                .buttonStyle(.link)
+                                .font(.caption)
+                        }
+                    }
+                }
+                // A container id would otherwise stamp every child, hiding the detail text's value.
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("observe-lane-assignment")
+            } else if row.lane == .dependency {
                 Button(action: onOpenDAG) {
                     Text(row.detail)
                         .font(.caption)

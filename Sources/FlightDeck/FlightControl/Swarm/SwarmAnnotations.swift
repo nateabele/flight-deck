@@ -225,3 +225,54 @@ extension SwarmService {
         }
     }
 }
+
+struct SwarmAssignmentDetail: Equatable {
+    var lines: [String]
+    var links: [ObserveLaneLink]
+}
+
+extension SwarmAnnotations {
+    static func assignment(agent: SwarmAgentRecord, headroom: AccountHeadroom?, previous: SwarmAgentRecord?,
+                           next: SwarmAgentRecord?, lastActive: Date?, now: Date) -> SwarmAssignmentDetail {
+        let block = agent.block.block
+        var lines = ["\(agent.task.map { "task \($0)" } ?? "no task") · kind \(block.kind.rawValue)"]
+        let knobs = ConfigKey.knobsText(block.knobs)
+        lines.append([block.harness.rawValue, block.model, knobs.isEmpty ? nil : knobs, "pool \(block.pool.rawValue)"]
+            .compactMap { $0 }.joined(separator: " · "))
+        if block.pinned {
+            lines.append("pinned by hand — \(block.source.reason)")
+        } else {
+            let rule = block.source.ruleId.map { " \($0)" } ?? ""
+            lines.append("routed by \(block.source.by.rawValue)\(rule) — \(block.source.reason)")
+        }
+        if let lease = agent.lease?.lease {
+            let percent = headroom?.worstUtilization.map { " · \(Int(($0 * 100).rounded()))%" } ?? ""
+            lines.append("account \(lease.account.label)\(percent)")
+        } else {
+            lines.append("no account lease")
+        }
+        var links: [ObserveLaneLink] = []
+        if let previous {
+            lines.append("handed off from \(previous.agentName)")
+            links.append(ObserveLaneLink(title: "← \(previous.agentName)", session: previous.session))
+        }
+        if let next {
+            lines.append("handed off to \(next.agentName)")
+            links.append(ObserveLaneLink(title: "\(next.agentName) →", session: next.session))
+        }
+        if let ago = activeAgo(lastActive, now: now) { lines.append(ago) }
+        return SwarmAssignmentDetail(lines: lines, links: links)
+    }
+}
+
+extension SwarmService {
+    func assignment(for session: UUID, now: Date = Date()) -> SwarmAssignmentDetail? {
+        guard let (record, agent) = agentRecord(session) else { return nil }
+        let headroom = agent.lease.flatMap { dependencies?.capacity.headroom(for: $0.lease) }
+        return SwarmAnnotations.assignment(
+            agent: agent, headroom: headroom,
+            previous: agent.handedOffFrom.flatMap { record.agent($0) },
+            next: agent.handedOffTo.flatMap { record.agent($0) },
+            lastActive: lastActiveAt(for: session), now: now)
+    }
+}

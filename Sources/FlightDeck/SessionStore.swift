@@ -2711,6 +2711,12 @@ final class SessionStore: ObservableObject {
         return proj.agent(for: identity)
     }
 
+    /// The drawer's Assignment lane for the focused tab, when it is a swarm agent.
+    func focusedSwarmAssignment() -> SwarmAssignmentDetail? {
+        guard let id = selectedSessionID else { return nil }
+        return swarmServiceIfBuilt?.assignment(for: id)
+    }
+
     /// `DependencyDAGOverlay`'s mount point: the focused tab's whole-project projection
     /// (every agent/bead/edge the last poll saw), resolved the same way
     /// `focusedObserveAgent()` is. Kept separate from that method rather than having the
