@@ -354,9 +354,9 @@ final class ChannelMuxTests: XCTestCase {
 
         // A peer ignoring its credit: one frame past the bound, nobody has accepted yet.
         let flood = try await pair.controller.open()
-        for _ in 0..<(window / ChannelMux.maxChunk) {
+        for _ in 0..<(window / ChannelFrame.maxPayload) {
             pair.host.receive(binary: ChannelFrame(channel: flood.id, kind: .data,
-                                                   payload: Data(count: ChannelMux.maxChunk)).encoded())
+                                                   payload: Data(count: ChannelFrame.maxPayload)).encoded())
         }
         pair.host.receive(binary: ChannelFrame(channel: flood.id, kind: .data, payload: Data([1])).encoded())
         do { _ = try await pair.host.accept(flood.id); XCTFail("accepted an overflowed channel") } catch {}

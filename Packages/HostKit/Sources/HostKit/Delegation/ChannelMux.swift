@@ -49,11 +49,6 @@ public final class ChannelMux: ChannelOpening, ChannelAccepting, @unchecked Send
         case host
     }
 
-    /// Payload cap per data frame. Small enough that channels sharing the connection
-    /// interleave at a fine grain (a 16 MiB write cannot monopolise the socket for its whole
-    /// length), large enough that the 5-byte header is noise.
-    public static let maxChunk = 64 * 1024
-
     private let role: Role
     private let send: @Sendable (Data) -> Void
     private let lock = NSLock()
@@ -176,9 +171,9 @@ public final class ChannelMux: ChannelOpening, ChannelAccepting, @unchecked Send
         switch frame.kind {
         case .data:
             // Past the allowance is past the window, which for a channel nobody has claimed
-            // yet is the pre-accept buffer's bound; past `maxChunk` is a frame no conforming
+            // yet is the pre-accept buffer's bound; past `ChannelFrame.maxPayload` is a frame no conforming
             // writer sends (A6). Either closes the channel rather than buffering the excess.
-            guard !channel.receivedEOF, frame.payload.count <= Self.maxChunk,
+            guard !channel.receivedEOF, frame.payload.count <= ChannelFrame.maxPayload,
                   frame.payload.count <= channel.receiveAllowance else {
                 return violation(id, &effects)
             }
@@ -381,7 +376,9 @@ public final class ChannelMux: ChannelOpening, ChannelAccepting, @unchecked Send
         func write(_ data: Data) async throws {
             var offset = data.startIndex
             while offset < data.endIndex {
-                let n = try await mux.reserve(self, upTo: min(data.endIndex - offset, ChannelMux.maxChunk))
+                // Writes are cut at `maxPayload` so channels sharing the connection interleave
+                // finely: one 16 MiB write cannot hold the socket for its whole length.
+                let n = try await mux.reserve(self, upTo: min(data.endIndex - offset, ChannelFrame.maxPayload))
                 guard n > 0 else { continue }
                 mux.sendData(self, data.subdata(in: offset..<offset + n))
                 offset += n
