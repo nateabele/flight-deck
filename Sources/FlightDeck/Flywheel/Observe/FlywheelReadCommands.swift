@@ -69,16 +69,14 @@ struct FlywheelReadCommands {
         }
     }
 
-    /// `am reservations --project <project> --all --json` — the envelope
-    /// (`{_meta, _alerts, all_active, reservation_read_attestation}`) is confirmed, but
-    /// Task 1's live probe returned an empty `all_active`, so the per-row shape backing
-    /// `RawReservation{file,holder,since,waiters}` was never observed and isn't in the
-    /// findings doc's schema dump either. Guessing a row shape here would risk silently
-    /// decoding nothing (or worse, decoding garbage) forever, so this stays a nil-stub
-    /// until a real held reservation can be captured.
-    // TODO(observe): unconfirmed shape — see notes
+    /// `am reservations --project <project> --all --json`. The row shape was captured live in
+    /// L3-S Task 11a (`Fixtures/FlightControlL3/Swarm/am-reservations-held.json`). `waiters` is
+    /// always empty here: am knows who holds, not who is waiting — the swarm's guard-block capture
+    /// fills that in (Task 11e).
     func reservations(project: String) async -> [RawReservation]? {
-        nil
+        await read(amPath, ["reservations", "--project", project, "--all", "--json"], project: project) {
+            ReservationRows.decode($0)
+        }
     }
 
     /// `br dep list <issue> --json` needs a real issue id (exit 3 without one) and has no
@@ -99,5 +97,64 @@ struct FlywheelReadCommands {
     // TODO(observe): unconfirmed shape — see notes
     func events(project: String, after: String) async -> (events: [RawEvent], cursor: String)? {
         nil
+    }
+}
+
+/// Decodes `am reservations --all --json`'s `all_active` rows. Field names are read from short
+/// candidate lists because the robot output has renamed fields between am releases; a row with
+/// no recognizable path or holder is dropped rather than guessed. The captured row (am 0.3.35)
+/// is `{agent, path, exclusive, remaining_seconds, remaining, granted_at: "5s ago"}`: its only
+/// grant time is relative, so it is anchored on the envelope's `_meta.timestamp`.
+enum ReservationRows {
+    static let pathKeys = ["path_pattern", "path", "pattern", "file"]
+    static let holderKeys = ["agent_name", "agent", "holder", "holder_name"]
+    static let timeKeys = ["created_ts", "created_at", "acquired_ts", "since"]
+    static let relativeTimeKeys = ["granted_at"]
+
+    static func decode(_ data: Data) -> [FlywheelReadCommands.RawReservation]? {
+        guard let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let rows = object["all_active"] as? [[String: Any]] else { return nil }
+        let anchor = ((object["_meta"] as? [String: Any])?["timestamp"] as? String)
+            .flatMap(AgentMailTime.parse) ?? Date()
+        return rows.compactMap { row in
+            guard let path = pathKeys.lazy.compactMap({ row[$0] as? String }).first,
+                  let holder = holderKeys.lazy.compactMap({ holderName(row[$0]) }).first else { return nil }
+            let absolute = timeKeys.lazy.compactMap { (row[$0] as? String).flatMap(AgentMailTime.parse) }.first
+            let relative = relativeTimeKeys.lazy.compactMap {
+                (row[$0] as? String).flatMap { AgentMailTime.parseRelative($0, from: anchor) }
+            }.first
+            return FlywheelReadCommands.RawReservation(
+                file: path, holder: holder, since: absolute ?? relative ?? .distantPast, waiters: [])
+        }
+    }
+
+    private static func holderName(_ value: Any?) -> String? {
+        if let name = value as? String, !name.isEmpty { return name }
+        if let object = value as? [String: Any], let name = object["name"] as? String { return name }
+        return nil
+    }
+}
+
+/// am writes microsecond timestamps (`2026-09-22T16:57:34.483761Z`, `…+00:00`), which
+/// `JSONDecoder.iso8601` refuses. Fractions are cut to milliseconds before parsing.
+enum AgentMailTime {
+    static func parse(_ text: String) -> Date? {
+        let trimmed = text.replacingOccurrences(of: #"(\.\d{3})\d+"#, with: "$1", options: .regularExpression)
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = fractional.date(from: trimmed) { return date }
+        let plain = ISO8601DateFormatter()
+        plain.formatOptions = [.withInternetDateTime]
+        return plain.date(from: trimmed)
+    }
+
+    /// `"5s ago"`, `"12m ago"`, `"2h ago"`, `"1d ago"` — the form am's reservation rows use for
+    /// `granted_at` — resolved against `anchor`. Anything else is nil.
+    static func parseRelative(_ text: String, from anchor: Date) -> Date? {
+        let parts = text.split(separator: " ")
+        guard parts.count == 2, parts[1] == "ago", let unit = parts[0].last,
+              let amount = Double(parts[0].dropLast()),
+              let seconds = ["s": 1.0, "m": 60, "h": 3600, "d": 86400][String(unit)] else { return nil }
+        return anchor.addingTimeInterval(-amount * seconds)
     }
 }

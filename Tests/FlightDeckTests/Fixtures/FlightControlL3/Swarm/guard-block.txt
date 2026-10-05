@@ -1,0 +1,5 @@
+ERROR: mcp-agent-mail: file reservation conflict detected!
+  Sources/Foo.swift conflicts with reservation 'Sources/*.swift' held by GreenFox
+
+Set AGENT_MAIL_GUARD_MODE=warn to allow commit anyway, or AGENT_MAIL_BYPASS=1 to skip this guard.
+mcp-agent-mail chain-runner: 50-agent-mail.py exited with status 1
