@@ -4,6 +4,8 @@ struct PreferencesView: View {
     @ObservedObject var preferences: PreferencesStore
     @ObservedObject var sessions: SessionStore
     @ObservedObject var fleet: FleetService
+    @ObservedObject var hosts: HostService
+    @ObservedObject var hosting: HostingController
 
     var body: some View {
         // Bound rather than unbound, and every pane tagged: without a selection binding there
@@ -34,6 +36,16 @@ struct PreferencesView: View {
                 .tabItem { Label("Devices", systemImage: "iphone.and.arrow.forward") }
                 .accessibilityIdentifier("prefs-devices")
                 .tag(PreferencesTab.devices)
+
+            HostsSettingsTab(hostService: hosts)
+                .tabItem { Label("Hosts", systemImage: "desktopcomputer.and.arrow.down") }
+                .accessibilityIdentifier("prefs-hosts")
+                .tag(PreferencesTab.hosts)
+
+            HostingSettingsTab(controller: hosting)
+                .tabItem { Label("Hosting", systemImage: "server.rack") }
+                .accessibilityIdentifier("prefs-hosting")
+                .tag(PreferencesTab.hosting)
         }
         .frame(width: 720, height: 560)
     }

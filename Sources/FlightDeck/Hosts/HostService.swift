@@ -203,6 +203,9 @@ final class HostService: ObservableObject {
     }
 
     private func save(_ record: HostRecord) {
+        // The registry is not observable, so the Hosts tab would otherwise show a host's
+        // platform and last-seen time only after some later status change happened to redraw it.
+        objectWillChange.send()
         registry.update(record)
         links[record.slot]?.record = record
     }

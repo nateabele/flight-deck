@@ -8,6 +8,7 @@ struct FlightDeckApp: App {
     @StateObject private var store: SessionStore
     @StateObject private var fleet: FleetService
     @StateObject private var hosts: HostService
+    @StateObject private var hosting: HostingController
 
     private static let logger = Logger(subsystem: "dev.flightdeck.FlightDeck", category: "fleet")
 
@@ -181,6 +182,7 @@ struct FlightDeckApp: App {
         // `flightdeck host ls` would report a registry Settings never sees.
         let hosts = Self.makeHostService()
         _hosts = StateObject(wrappedValue: hosts)
+        _hosting = StateObject(wrappedValue: Self.makeHostingController())
         _fleet = StateObject(wrappedValue: Self.makeFleetService(
             store: deferredStore(), preferences: preferences, hosts: hosts
         ))
@@ -212,6 +214,19 @@ struct FlightDeckApp: App {
             controllerName: controllerName)
         service.start()
         return service
+    }
+
+    /// The Hosting tab's model. Inert until that tab is shown: it reads nothing at
+    /// construction, and its admin poll runs only while the tab is visible.
+    ///
+    /// Under a UITest reset its admin socket is a path nothing listens on, so a reset run
+    /// never reads, arms or revokes the developer's real hostd.
+    @MainActor
+    private static func makeHostingController() -> HostingController {
+        guard !isResettingState else {
+            return HostingController(adminPath: "/tmp/fd-uitest-\(UUID().uuidString.prefix(8)).sock")
+        }
+        return HostingController(adminPath: HostingController.defaultAdminPath)
     }
 
     /// Builds the fleet service and starts its listener, unless the launch is a UITest
@@ -347,7 +362,8 @@ struct FlightDeckApp: App {
 
         // A `Settings` scene gives ⌘, and the standard Preferences window for free.
         Settings {
-            PreferencesView(preferences: preferences, sessions: store, fleet: fleet)
+            PreferencesView(preferences: preferences, sessions: store, fleet: fleet,
+                            hosts: hosts, hosting: hosting)
         }
     }
 }

@@ -150,6 +150,15 @@ targets:
         # than added when someone reports "my phone can't find my Mac".
         INFOPLIST_KEY_NSLocalNetworkUsageDescription: Flight Deck uses the local network to let your paired iPhone see your sessions.
         GENERATE_INFOPLIST_FILE: "YES"
+        # The Linux hostd installer the Add Host sheet's command names. Custom keys cannot be
+        # `INFOPLIST_KEY_` settings (Xcode honours only the keys it knows), so this partial
+        # plist carries them and Xcode merges it into the generated one, expanding the two
+        # settings below. Empty until a release publishes an installer: with no digest the
+        # sheet says the installer is not published rather than showing a command that has
+        # nothing to check against.
+        INFOPLIST_FILE: Resources/FlightDeck-Info.plist
+        FD_HOSTD_RELEASE_BASE_URL: ""
+        FD_HOSTD_INSTALLER_SHA256: ""
         SWIFT_OBJC_BRIDGING_HEADER: Sources/FlightDeck/BridgingHeader.h
         HEADER_SEARCH_PATHS: $(SRCROOT)/Sources/FlightDeck/GhosttyEmbed $(SRCROOT)/vendor/boringssl-artifacts/include
         # libghostty (GhosttyKit) statically bundles C++ (glslang); link the C++
