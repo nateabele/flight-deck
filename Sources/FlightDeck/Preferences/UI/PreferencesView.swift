@@ -38,7 +38,9 @@ struct PreferencesView: View {
 
             FlightControlSettingsTab(preferences: preferences, sessions: sessions, routing: routing)
                 .tabItem { Label("Flight Control", systemImage: "airplane") }
-                .accessibilityIdentifier("prefs-flight-control")
+                // No `.accessibilityIdentifier` here: on a container SwiftUI/macOS stamps it over
+                // every descendant, which renamed the section buttons, the project picker and the
+                // scroll view to "prefs-flight-control" and hid `fc-section-routing` from XCUITest.
                 .tag(PreferencesTab.flightControl)
         }
         .frame(width: 720, height: 560)

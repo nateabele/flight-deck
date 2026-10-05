@@ -48,9 +48,12 @@ final class RoutingUITests: XCTestCase {
 
     private func waitFor(_ element: XCUIElement, labelContains text: String, timeout: TimeInterval = 5,
                          file: StaticString = #filePath, line: UInt = #line) {
-        let expectation = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label CONTAINS %@", text), object: element)
+        // A macOS SwiftUI `Text` exposes its string as the accessibility *value* with an empty
+        // label (see the hierarchy attached to a failing run), so `label` alone never matches.
+        let expectation = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label CONTAINS %@ OR value CONTAINS %@", text, text), object: element)
         let result = XCTWaiter().wait(for: [expectation], timeout: timeout)
-        XCTAssertEqual(result, .completed, "never showed \"\(text)\"; shows \"\(element.exists ? element.label : "nothing")\"",
+        XCTAssertEqual(result, .completed, "never showed \"\(text)\"; shows \"\(element.exists ? "\(element.value as? String ?? element.label)" : "nothing")\"",
                        file: file, line: line)
     }
 
@@ -100,7 +103,8 @@ final class RoutingUITests: XCTestCase {
         XCTAssertTrue(hint.waitForExistence(timeout: 5), "the fixture project's confirmed rule carries a hint")
         waitFor(hint, labelContains: "gpt-6-luna")
         shot(prefs, "routing-hint")
-        prefs.buttons["routing-hint-dismiss-p1"].click()
+        // `.buttonStyle(.link)` exposes the button as a Link, not a Button.
+        prefs.links["routing-hint-dismiss-p1"].click()
         waitUntilGone(hint, "a dismissed hint stays gone")
     }
 
