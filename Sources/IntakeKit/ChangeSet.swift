@@ -45,6 +45,38 @@ public struct FieldSet: Codable, Equatable, Sendable {
     public var isEmpty: Bool { title == nil && description == nil && acceptance == nil && priority == nil }
 }
 
+/// A new task kind a planning agent proposes when no listed kind fits (spec L3-R §4). Its
+/// weights travel as `[{dimension, weight}]`: strict-mode output schemas cannot describe an
+/// open-keyed object, so the dictionary exists only on this side of the wire.
+public struct KindProposal: Codable, Equatable, Sendable {
+    public var name: String
+    public var description: String
+    public var dimensions: [String: Double]
+
+    public init(name: String, description: String, dimensions: [String: Double]) {
+        self.name = name; self.description = description; self.dimensions = dimensions
+    }
+
+    private struct Weight: Codable { let dimension: String; let weight: Double }
+    private enum Key: String, CodingKey { case name, description, dimensions }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: Key.self)
+        name = try c.decode(String.self, forKey: .name)
+        description = try c.decodeIfPresent(String.self, forKey: .description) ?? ""
+        var dims: [String: Double] = [:]
+        for w in try c.decodeIfPresent([Weight].self, forKey: .dimensions) ?? [] { dims[w.dimension] = w.weight }
+        dimensions = dims
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: Key.self)
+        try c.encode(name, forKey: .name)
+        try c.encode(description, forKey: .description)
+        try c.encode(dimensions.sorted { $0.key < $1.key }.map { Weight(dimension: $0.key, weight: $0.value) }, forKey: .dimensions)
+    }
+}
+
 public struct NewBead: Codable, Equatable, Sendable {
     public var tempId: String
     public var title: String
@@ -53,10 +85,16 @@ public struct NewBead: Codable, Equatable, Sendable {
     public var description: String
     public var acceptance: String?
     public var labels: [String]
+    /// The kind planning classified this task as — an id in the project's kind registry.
+    public var taskKind: KindID?
+    /// Planning's new kind, when no listed one fits. Wins over `taskKind` when both are set.
+    public var kindProposal: KindProposal?
     public init(tempId: String, title: String, type: String = "task", priority: Int = 2,
-                description: String, acceptance: String? = nil, labels: [String] = []) {
+                description: String, acceptance: String? = nil, labels: [String] = [],
+                taskKind: KindID? = nil, kindProposal: KindProposal? = nil) {
         self.tempId = tempId; self.title = title; self.type = type; self.priority = priority
         self.description = description; self.acceptance = acceptance; self.labels = labels
+        self.taskKind = taskKind; self.kindProposal = kindProposal
     }
 }
 
@@ -80,7 +118,7 @@ public enum ChangeOp: Equatable, Sendable {
 
 extension ChangeOp: Codable {
     private enum Key: String, CodingKey {
-        case op, tempId, title, type, priority, description, acceptance, labels
+        case op, tempId, title, type, priority, description, acceptance, labels, taskKind, kindProposal
         case from, to, kind, id, set, pre, delivery, reason, of
     }
     public struct UnknownOp: Error, Equatable { public let op: String }
@@ -97,7 +135,11 @@ extension ChangeOp: Codable {
                 priority: try c.decodeIfPresent(Int.self, forKey: .priority) ?? 2,
                 description: try c.decode(String.self, forKey: .description),
                 acceptance: try c.decodeIfPresent(String.self, forKey: .acceptance),
-                labels: try c.decodeIfPresent([String].self, forKey: .labels) ?? []))
+                labels: try c.decodeIfPresent([String].self, forKey: .labels) ?? [],
+                // `""` is no kind: a model that cannot classify sometimes answers an empty string
+                // rather than null, and an empty id would route as an unknown kind.
+                taskKind: try c.decodeIfPresent(KindID.self, forKey: .taskKind).flatMap { $0.rawValue.isEmpty ? nil : $0 },
+                kindProposal: try c.decodeIfPresent(KindProposal.self, forKey: .kindProposal)))
         case "addEdge":
             self = .addEdge(from: try c.decode(BeadRef.self, forKey: .from),
                             to: try c.decode(BeadRef.self, forKey: .to),
@@ -131,6 +173,8 @@ extension ChangeOp: Codable {
             try c.encode(b.type, forKey: .type); try c.encode(b.priority, forKey: .priority)
             try c.encode(b.description, forKey: .description)
             try c.encodeIfPresent(b.acceptance, forKey: .acceptance); try c.encode(b.labels, forKey: .labels)
+            try c.encodeIfPresent(b.taskKind, forKey: .taskKind)
+            try c.encodeIfPresent(b.kindProposal, forKey: .kindProposal)
         case .addEdge(let from, let to, let kind):
             try c.encode("addEdge", forKey: .op)
             try c.encode(from, forKey: .from); try c.encode(to, forKey: .to); try c.encode(kind, forKey: .kind)

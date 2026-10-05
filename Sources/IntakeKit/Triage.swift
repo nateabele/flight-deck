@@ -14,9 +14,13 @@ public enum Triage {
 
     private static let nullableString = #"{"type":["string","null"]}"#
     private static let pre = #"{"type":["object","null"],"additionalProperties":false,"required":["status","assignee"],"properties":{"status":{"type":"string"},"assignee":{"type":["string","null"]}}}"#
+    /// `kindProposal` (spec L3-R §4). A static literal, not built from `Dimensions.all`, so the
+    /// schema stays byte-stable for `triage-schema.json`; an unknown dimension is dropped when
+    /// the proposal is registered instead of rejected by the CLI.
+    private static let kindProposal = #"{"type":["object","null"],"additionalProperties":false,"required":["name","description","dimensions"],"properties":{"name":{"type":"string"},"description":{"type":"string"},"dimensions":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["dimension","weight"],"properties":{"dimension":{"type":"string"},"weight":{"type":"number"}}}}}}"#
     private static let op = """
     {"type":"object","additionalProperties":false,
-     "required":["op","tempId","title","type","priority","description","acceptance","labels","from","to","kind","id","set","pre","delivery","reason","of"],
+     "required":["op","tempId","title","type","priority","description","acceptance","labels","from","to","kind","id","set","pre","delivery","reason","of","taskKind","kindProposal"],
      "properties":{
       "op":{"type":"string","enum":["createBead","addEdge","editBead","reopen","followUp"]},
       "tempId":\(nullableString),"title":\(nullableString),"type":\(nullableString),
@@ -30,7 +34,8 @@ public enum Triage {
       "pre":\(pre),
       "delivery":{"type":["object","null"],"additionalProperties":false,"required":["rating","reason"],
                   "properties":{"rating":{"type":"string","enum":["clarifying","scopeChange","invalidating"]},"reason":{"type":"string"}}},
-      "reason":\(nullableString),"of":\(nullableString)}}
+      "reason":\(nullableString),"of":\(nullableString),
+      "taskKind":\(nullableString),"kindProposal":\(kindProposal)}}
     """
 
     /// The `changeSet` object on its own — a nullable `{graphObservedAt, ops}` shape, `ops`
