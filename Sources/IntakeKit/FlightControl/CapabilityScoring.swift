@@ -116,6 +116,121 @@ public enum CapabilityScoring {
     }
 }
 
+extension CapabilityScoring {
+    /// A kind's score from one model's dimensions: Σ weight × score over the dimensions that have
+    /// data, divided by the weight that had data; confidence is that weight's share of the kind's
+    /// total. Nil when no weighted dimension has data. Summed in sorted dimension order:
+    /// dictionary order changes run to run, and a float sum taken in another order can differ in
+    /// its last bit — enough to flip a tie between two models.
+    public static func kindScore(_ kind: TaskKind, _ dimensions: [String: DimensionScore]) -> (score: Double, confidence: Double)? {
+        let weights = kind.dimensions.filter { Dimensions.isKnown($0.key) && $0.value > 0 }
+        let order = weights.keys.sorted()
+        let total = order.reduce(0.0) { $0 + (weights[$1] ?? 0) }
+        guard total > 0 else { return nil }
+        var num = 0.0
+        var present = 0.0
+        for d in order {
+            guard let s = dimensions[d], let w = weights[d] else { continue }
+            num += w * s.score
+            present += w
+        }
+        guard present > 0 else { return nil }
+        return (num / present, present / total)
+    }
+
+    /// A catalog candidate has no knobs and stands for every scored knob variant of its model; a
+    /// candidate that names knobs (a rule's assignment) matches only that exact variant.
+    public static func matches(candidate: ModelRef, scored: ModelRef) -> Bool {
+        candidate.harness == scored.harness && candidate.model == scored.model
+            && (candidate.knobs.isEmpty || candidate.knobs == scored.knobs)
+    }
+
+    /// Best first; models with no data for the kind are omitted, never scored zero; equal scores
+    /// keep the candidates' (catalog) order. A bare candidate returns its best variant's
+    /// `ModelRef`, knobs included, so the router can write those knobs into the block.
+    public static func rank(kind: TaskKind, candidates: [ModelRef], scores: [ModelScores]) -> [ScoredModel] {
+        var ranked: [(order: Int, model: ScoredModel)] = []
+        for (i, candidate) in candidates.enumerated() {
+            var best: ScoredModel?
+            for variant in scores where matches(candidate: candidate, scored: variant.model) {
+                guard let r = kindScore(kind, variant.dimensions) else { continue }
+                let s = ScoredModel(model: variant.model, score: r.score, confidence: r.confidence)
+                if let b = best, b.score > s.score || (b.score == s.score && b.confidence >= s.confidence) { continue }
+                best = s
+            }
+            if let best { ranked.append((i, best)) }
+        }
+        return ranked.sorted {
+            $0.model.score != $1.model.score ? $0.model.score > $1.model.score : $0.order < $1.order
+        }.map(\.model)
+    }
+
+    /// One model's score on one dimension, resolving a bare ref to its best variant there.
+    public static func dimensionScore(_ ref: ModelRef, _ dimension: String, in scores: [ModelScores])
+        -> (model: ModelRef, score: DimensionScore)? {
+        var best: (model: ModelRef, score: DimensionScore)?
+        for variant in scores where matches(candidate: ref, scored: variant.model) {
+            guard let s = variant.dimensions[dimension] else { continue }
+            if let b = best, b.score.score >= s.score { continue }
+            best = (variant.model, s)
+        }
+        return best
+    }
+
+    /// The rows behind one heatmap cell: every row, in sources feeding `dimension`, that the
+    /// snapshot's own aliases map to exactly `model`. Uses the snapshot's aliases, not today's
+    /// config, so a cell cites what its score was computed from.
+    public static func citations(for model: ModelRef, dimension: String, snapshot: IndexSnapshot,
+                                 sources: [IndexSource]) -> [Citation] {
+        let aliases = AliasTable(entries: snapshot.aliases)
+        var out: [Citation] = []
+        for result in snapshot.sources {
+            guard let source = sources.first(where: { $0.id == result.sourceID }),
+                  (source.dimensions[dimension] ?? 0) > 0 else { continue }
+            for row in result.rows where aliases.model(source: source.id, benchmarkModel: row.benchmarkModel) == model {
+                out.append(Citation(sourceID: source.id, sourceName: source.name, benchmarkModel: row.benchmarkModel,
+                                    score: row.score, unit: row.unit, url: row.url, quotedFigure: row.quotedFigure,
+                                    retrievedAt: row.retrievedAt, stale: result.stale))
+            }
+        }
+        return out
+    }
+}
+
+/// One cited row, as the Settings click-through shows it.
+public struct Citation: Equatable, Sendable, Identifiable {
+    public var sourceID: String
+    public var sourceName: String
+    public var benchmarkModel: String
+    public var score: Double
+    public var unit: IndexUnit
+    public var url: String
+    public var quotedFigure: String
+    public var retrievedAt: String?
+    public var stale: Bool
+    public var id: String { "\(sourceID)|\(benchmarkModel)|\(url)" }
+    public init(sourceID: String, sourceName: String, benchmarkModel: String, score: Double, unit: IndexUnit,
+                url: String, quotedFigure: String, retrievedAt: String?, stale: Bool) {
+        self.sourceID = sourceID; self.sourceName = sourceName; self.benchmarkModel = benchmarkModel
+        self.score = score; self.unit = unit; self.url = url; self.quotedFigure = quotedFigure
+        self.retrievedAt = retrievedAt; self.stale = stale
+    }
+}
+
+/// The `CapabilityIndex` conformer: one snapshot's scores (with hand scores overlaid), frozen.
+/// A value, so a router holding one never sees it change under a ranking; the app swaps in a
+/// new one through `LiveCapabilityIndex` when a snapshot applies.
+public struct SnapshotCapabilityIndex: CapabilityIndex {
+    public let scores: [ModelScores]
+    public let snapshotDate: Date?
+    public init(scores: [ModelScores], snapshotDate: Date?) { self.scores = scores; self.snapshotDate = snapshotDate }
+    public static let empty = SnapshotCapabilityIndex(scores: [], snapshotDate: nil)
+
+    public func rank(kind: TaskKind, candidates: [ModelRef]) -> [ScoredModel] {
+        CapabilityScoring.rank(kind: kind, candidates: candidates, scores: scores)
+    }
+}
+
 extension IndexSnapshot {
     /// The one place a snapshot is built from source results — for a refresh and for an alias
     /// rescore alike — so the two can never score the same rows differently.
