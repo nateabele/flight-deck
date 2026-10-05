@@ -65,14 +65,17 @@ final class LinuxHostd: @unchecked Sendable {
     /// reports "expired" for a controller that has just paired.
     private let pairingLock = NSLock()
 
-    init(root: URL, port: Int, hostName: String) {
+    /// `delegation` defaults to the real router under `root` (runs, checkouts; no screen on
+    /// Linux in v1); a test passes its own.
+    init(root: URL, port: Int, hostName: String, delegation: DelegationHost? = nil) {
         self.root = root
         self.port = port
         self.hostName = hostName
         store = ControllerStore(root: root)
         core = HostServerCore(hostName: { hostName },
                               probe: HostInfoProbe(stateRoot: root, hostdVersion: hostdVersion),
-                              endpoints: { Self.advertisedEndpoints(from: HostEndpoints.enumerate(), port: port) })
+                              endpoints: { Self.advertisedEndpoints(from: HostEndpoints.enumerate(), port: port) },
+                              delegation: delegation ?? .standard(root: root, screenSupported: false))
         knownSlots = Set(store.all().map(\.slot))
     }
 
@@ -105,7 +108,8 @@ final class LinuxHostd: @unchecked Sendable {
                            uniquingKeysWith: { first, _ in first })
             },
             onText: { [weak self] connection, text in self?.received(text, on: connection) },
-            onClose: { [weak self] connection in self?.closed(connection) }
+            onClose: { [weak self] connection in self?.closed(connection) },
+            onBinary: { [weak self] connection, data in self?.received(binary: data, on: connection) }
         )
         let channel = try server.start()
         let admin = try AdminSocketServer(path: root.appendingPathComponent("admin.sock").path) {
@@ -137,14 +141,22 @@ final class LinuxHostd: @unchecked Sendable {
         }
     }
 
-    // MARK: - Transport
+    // MARK: - Transport (internal for the router-behind-NIO test)
 
-    private func received(_ text: String, on connection: PSKWebSocketServer.Connection) {
+    func received(_ text: String, on connection: PSKWebSocketServer.Connection) {
         guard let peer = peer(for: connection) else { return connection.close() }
         peer.queue.async { [core] in core.receive(text: text, from: peer) }
     }
 
-    private func closed(_ connection: PSKWebSocketServer.Connection) {
+    /// Straight from the event loop, in arrival order, never through the peer's queue: a
+    /// `sync.push` waiting there for these bytes would otherwise wait on itself. The core
+    /// drops it for a connection with no mux (no hello yet).
+    func received(binary data: Data, on connection: PSKWebSocketServer.Connection) {
+        guard let peer = peer(for: connection) else { return connection.close() }
+        core.receive(binary: data, from: peer)
+    }
+
+    func closed(_ connection: PSKWebSocketServer.Connection) {
         lock.lock()
         let peer = peers.removeValue(forKey: ObjectIdentifier(connection))
         lock.unlock()

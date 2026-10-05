@@ -71,7 +71,10 @@ final class DarwinHostServer: @unchecked Sendable {
     /// bytes must keep flowing while a request runs, and a handler waiting on a channel's
     /// bytes from the peer's queue would otherwise deadlock against itself. So this must not
     /// block (`ChannelMux.receive` does not). A frame racing the peer's close may land after
-    /// the mux is shut down; the mux drops it. Set before `start`. Nil drops binary.
+    /// the mux is shut down; the mux drops it. Set before `start`.
+    ///
+    /// Nil (hostd's own wiring) hands binary to the core, whose delegation router owns each
+    /// connection's mux; a test that wires its own mux sets this instead.
     var onBinary: (@Sendable (DarwinHostPeer, Data) -> Void)?
 
     // Confined to `queue`.
@@ -115,9 +118,11 @@ final class DarwinHostServer: @unchecked Sendable {
     /// passes `LocalEndpoints.advertised`. Defaults to none so a loopback test's controller is
     /// not handed the developer's real interfaces to store.
     /// `probe` is injectable only so a test can make `host.info` slow on purpose.
+    /// `delegation` is the run/sync/service router (`main.swift` passes
+    /// `DelegationHost.standard`); nil serves `host.info` alone, as a 1.0 host did.
     init(root: URL, port: NWEndpoint.Port?, hostName: @escaping @Sendable () -> String,
          endpoints: @escaping @Sendable (UInt16) -> [String] = { _ in [] },
-         probe: HostInfoProbe? = nil) {
+         probe: HostInfoProbe? = nil, delegation: DelegationHost? = nil) {
         self.root = root
         requestedPort = port
         self.hostName = hostName
@@ -128,7 +133,8 @@ final class DarwinHostServer: @unchecked Sendable {
         self.advertisedPort = advertisedPort
         core = HostServerCore(hostName: hostName,
                               probe: probe ?? HostInfoProbe(stateRoot: root, hostdVersion: darwinHostdVersion),
-                              endpoints: { advertisedPort.value.map(endpoints) ?? [] })
+                              endpoints: { advertisedPort.value.map(endpoints) ?? [] },
+                              delegation: delegation)
         identities = HostTransport.PeerIdentities(queue: queue)
     }
 
@@ -399,11 +405,11 @@ final class DarwinHostServer: @unchecked Sendable {
             if meta?.opcode == .text, let data {
                 let text = String(decoding: data, as: UTF8.self)
                 peer.queue.async { [core] in core.receive(text: text, from: peer) }
-            } else if meta?.opcode == .binary, let data, let onBinary {
+            } else if meta?.opcode == .binary, let data {
                 // Directly, for the reason `onBinary` gives. Ordering against the text
                 // request that names the channel does not matter: the mux holds bytes for an
                 // unclaimed channel until the request claims it.
-                onBinary(peer, data)
+                if let onBinary { onBinary(peer, data) } else { core.receive(binary: data, from: peer) }
             }
             receive(on: peer)
         }

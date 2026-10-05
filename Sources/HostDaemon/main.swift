@@ -1,6 +1,10 @@
 import Foundation
 import Network
 import HostKit
+import HostKitDarwin
+#if canImport(AppKit)
+import AppKit
+#endif
 
 // flightdeck-hostd for macOS, launched by `dev.flightdeck.hostd.plist` as a GUI-session
 // LaunchAgent: `flightdeck-hostd serve`. The admin socket at `<root>/admin.sock` is how the
@@ -30,10 +34,32 @@ nonisolated(unsafe) var activity: NSObjectProtocol?
 /// next launch.
 let hostName = Host.current().localizedName ?? ProcessInfo.processInfo.hostName
 
+let root = HostStateRoot.default()
+
+// Delegated execution (§4–§6): runs and their checkouts under the state root. A Mac host has
+// a screen, so it takes screen runs, with IOKit's sleep assertions and the console session's
+// lock state; HostKit alone knows neither.
+let delegation = DelegationHost.standard(root: root, power: IOKitPowerAssertions(), console: DarwinConsoleSession(),
+                                         screenSupported: true)
+
 // Advertised in every helloAck, so a controller that paired over Bonjour on the LAN also
 // learns this Mac's tailnet address and can still reach it after leaving the room.
-let server = DarwinHostServer(root: HostStateRoot.default(), port: 47410, hostName: { hostName },
-                              endpoints: { LocalEndpoints.advertised(port: $0) })
+let server = DarwinHostServer(root: root, port: 47410, hostName: { hostName },
+                              endpoints: { LocalEndpoints.advertised(port: $0) }, delegation: delegation)
+
+#if canImport(AppKit)
+// The "UI tests running — don't touch" panel is up exactly while a run holds the screen
+// lease (§6.3), so whoever sits at the Mac does not grab the mouse mid-test. Each change
+// re-reads the holder on the main actor rather than passing it along: a grant and a release
+// in quick succession must leave the panel showing the current state, whatever order the
+// two hops land in.
+let screen = delegation.screen
+screen.observe { [screen] in
+    Task { @MainActor in
+        if let holder = screen.holder { ScreenPanel.show(holder: holder) } else { ScreenPanel.hide() }
+    }
+}
+#endif
 server.onConnectionCountChanged = { count in
     if count > 0, activity == nil {
         activity = ProcessInfo.processInfo.beginActivity(
@@ -71,4 +97,14 @@ Task {
     }
 }
 
+#if canImport(AppKit)
+// An accessory app rather than `dispatchMain()`: the panel needs AppKit's main run loop, and
+// hostd is a LaunchAgent in the Aqua session (the plist), so it has a window server. No Dock
+// icon and no menu bar; the main queue is still serviced as before.
+withExtendedLifetime(signals) {
+    NSApplication.shared.setActivationPolicy(.accessory)
+    NSApplication.shared.run()
+}
+#else
 withExtendedLifetime(signals) { dispatchMain() }
+#endif
