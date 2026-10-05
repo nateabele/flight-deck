@@ -565,6 +565,11 @@ final class SessionStore: ObservableObject {
     /// against a process that has not spoken yet.
     private var codexHandshake: [UUID?: Task<Void, Error>] = [:]
 
+    /// Every codex app-server notification, with the account its server answers for. Flight
+    /// Control's usage meter reads `account/rateLimits/updated` here (L3-U); with no listener
+    /// they are dropped, as they always were.
+    var onCodexNotification: (@MainActor (UUID?, String, [String: Any]) -> Void)?
+
     /// Test seam. Proves the app-server's lifetime — lazy on first codex use, gone with the
     /// last codex tab or with its process — without spawning a process to observe it.
     var hasCodexStackForTesting: Bool { !codexStacks.isEmpty }
@@ -666,8 +671,20 @@ final class SessionStore: ObservableObject {
             self.codexStacks[account] = nil
             self.codexHandshake[account] = nil
         }
+        stack.rpc.onNotification = { [weak self] method, params in
+            self?.onCodexNotification?(account, method, params)
+        }
         codexStacks[account] = stack
         return stack
+    }
+
+    /// This account's codex rate limits, asked of the app-server Flight Deck already runs for it
+    /// (L3-U). Nil when none is running: a meter must never spawn `codex app-server` — the stack
+    /// exists only while the account has a codex tab, which is exactly when its meter matters.
+    func codexRateLimitsRead(account: UUID?) async throws -> [String: Any]? {
+        guard let stack = codexStacks[account], let handshake = codexHandshake[account] else { return nil }
+        try await handshake.value
+        return try await stack.rpc.request("account/rateLimits/read", [:])
     }
 
     /// Stops one account's app-server once that account's last codex tab is gone.
