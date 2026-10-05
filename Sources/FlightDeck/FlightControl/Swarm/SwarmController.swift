@@ -191,6 +191,24 @@ final class SwarmController {
         changed()
     }
 
+    /// L3-U's hand-off (spec §4): the old agent is marked handed off and its lease released (its
+    /// account is past hard), and the new agent carries the same task forward.
+    @discardableResult
+    func recordHandoff(from old: UUID, to new: SessionRef, block: ExecutionBlock, lease: AccountLease?) -> Bool {
+        guard let previous = record.agent(old), previous.state == .working || previous.state == .idle else { return false }
+        record.update(old) {
+            $0.state = .handedOff; $0.handedOffTo = new.id; $0.lastTask = $0.task; $0.task = nil; $0.stateSince = now()
+        }
+        if let held = previous.lease { deps.allocator.release(held.lease) }
+        var next = SwarmAgentRecord(session: new.id, agentName: new.agentName ?? "", block: block, lease: lease,
+                                    task: previous.task, state: .working, stateSince: now())
+        next.handedOffFrom = old
+        record.agents.append(next)
+        log(.handoff, task: previous.task, session: new.id, detail: "\(previous.agentName) → \(new.agentName ?? "?")")
+        changed()
+        return true
+    }
+
     private func retire(_ agent: SwarmAgentRecord) {
         if let lease = agent.lease { deps.allocator.release(lease.lease) }
         record.update(agent.session) { $0.state = .done; $0.stateSince = now() }

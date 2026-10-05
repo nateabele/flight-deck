@@ -271,7 +271,10 @@ struct FlightDeckApp: App {
             // search index does, so a debug instance pointed at a copy of a real deck never
             // triages into the real one's intakes.
             intakesRoot: (Self.stateDirectory() ?? FileSessionPersistence.defaultDirectory())
-                .appendingPathComponent("intakes", isDirectory: true)
+                .appendingPathComponent("intakes", isDirectory: true),
+            // Beside `intakes/`, honouring `-FlightDeckStateDir` the same way. A reset run gets a
+            // scratch root (nil), so a UI test never restores the developer's swarms.
+            swarmsRoot: resetState ? nil : (Self.stateDirectory() ?? FileSessionPersistence.defaultDirectory())
         )
 
         // Test-only second project, so the sidebar has something to reorder. Guarded by

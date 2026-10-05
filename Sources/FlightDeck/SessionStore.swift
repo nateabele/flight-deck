@@ -1304,6 +1304,8 @@ final class SessionStore: ObservableObject {
         let service = FlywheelObserveService(reads: flywheelObserveReads, clock: clock)
         service.onProjectionsChanged = { [weak self] projections in
             self?.flywheelNotifier?.evaluate(projectsByKey: projections)
+            // Completion detection (spec §4): the swarm reads the same polls Observe does.
+            self?.swarmServiceStorage?.projectionsChanged(projections)
         }
         return service
     }()
@@ -1321,6 +1323,59 @@ final class SessionStore: ObservableObject {
     lazy var resolvedIntakesRoot: URL = intakesRoot
         ?? FileManager.default.temporaryDirectory
             .appendingPathComponent("FlightDeck-intakes-\(UUID().uuidString)", isDirectory: true)
+
+    /// The `am`/`br` executables every flywheel command runs. `system` except under the Debug
+    /// fixture backend.
+    let flywheelTools: FlywheelToolPaths
+
+    /// Where `swarms.json` lives, as handed to `init` — nil for every store but the app's own,
+    /// for the reason `intakesRoot` gives: a test must never restore the developer's swarms.
+    private let swarmsRoot: URL?
+
+    lazy var resolvedSwarmsRoot: URL = swarmsRoot
+        ?? FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlightDeck-swarms-\(UUID().uuidString)", isDirectory: true)
+
+    private var swarmServiceStorage: SwarmService?
+    private var swarmChangeForward: AnyCancellable?
+
+    /// The routing/capacity conformers (L3-R/L3-U), set by the integration branch or the Debug
+    /// fixture backend. Forwarded to the service whenever it changes.
+    var swarmDependencies: SwarmDependencies? {
+        didSet { swarmServiceStorage?.dependencies = swarmDependencies }
+    }
+
+    /// Built on first use. Its changes are forwarded as this store's, because the sidebar and
+    /// header observe only the store.
+    var swarmService: SwarmService {
+        if let built = swarmServiceStorage { return built }
+        let spawner = StoreSwarmSpawner.live(store: self)
+        let service = SwarmService(
+            store: SwarmStore(root: resolvedSwarmsRoot),
+            backend: BrSwarmBackend(runner: SystemFlywheelProcessRunner(), brPath: flywheelTools.br, amPath: flywheelTools.am),
+            launcher: spawner, spawner: spawner, host: self, registry: routingCapabilities, clock: clock)
+        useSwarmService(service)
+        return service
+    }
+
+    var swarmServiceIfBuilt: SwarmService? { swarmServiceStorage }
+
+    /// Installs a service — the lazy builder, tests, and the Debug fixture backend. The one place
+    /// a service is wired to this store.
+    func useSwarmService(_ service: SwarmService) {
+        swarmServiceStorage = service
+        if service.dependencies == nil { service.dependencies = swarmDependencies }
+        swarmChangeForward = service.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
+    }
+
+    /// A swarm on disk shows its "paused after restart" banner at launch, so the service is built
+    /// now when there is something to restore — and not otherwise, so a Mac that never ran a
+    /// swarm never builds one.
+    func restoreSwarmsIfPresent() {
+        if FileManager.default.fileExists(atPath: resolvedSwarmsRoot.appendingPathComponent("swarms.json").path) {
+            _ = swarmService
+        }
+    }
 
     /// Owns every project's intakes (triage, review, release). Lazy for the same reason as
     /// `observeService`, and one more: its init reads and writes its root, so a host that
@@ -2011,9 +2066,13 @@ final class SessionStore: ObservableObject {
         flywheelCoordinator: FlywheelCoordinator = FlywheelCoordinator(),
         flywheelSetup: FlywheelSetup = FlywheelSetup(),
         flywheelObserveReads: FlywheelReadCommands = FlywheelReadCommands(),
-        intakesRoot: URL? = nil
+        intakesRoot: URL? = nil,
+        flywheelTools: FlywheelToolPaths = .system,
+        swarmsRoot: URL? = nil
     ) {
         self.intakesRoot = intakesRoot
+        self.flywheelTools = flywheelTools
+        self.swarmsRoot = swarmsRoot
         self.provider = provider
         self.persistence = persistence
         self.preferences = preferences
@@ -2097,14 +2156,21 @@ final class SessionStore: ObservableObject {
         transcriptsRoot: URL? = nil,
         statusIsAlive: ((pid_t) -> Bool)? = nil,
         daemon: SessionDaemon = SessionDaemon(),
-        intakesRoot: URL? = nil
+        intakesRoot: URL? = nil,
+        flywheelTools: FlywheelToolPaths = .system,
+        swarmsRoot: URL? = nil
     ) {
         self.init(
             provider: ghostty,
             persistence: persistence,
             preferences: preferences,
             daemon: daemon,
-            intakesRoot: intakesRoot
+            flywheelCoordinator: FlywheelCoordinator(amPath: flywheelTools.am),
+            flywheelSetup: FlywheelSetup(amPath: flywheelTools.am, brPath: flywheelTools.br),
+            flywheelObserveReads: FlywheelReadCommands(amPath: flywheelTools.am, brPath: flywheelTools.br),
+            intakesRoot: intakesRoot,
+            flywheelTools: flywheelTools,
+            swarmsRoot: swarmsRoot
         )
         // Load-bearing: `display` defaults to the always-permissive `AlwaysDrawableDisplay()`
         // so tests that construct a `SessionStore` don't have to stub it (see that type's doc
@@ -2178,6 +2244,7 @@ final class SessionStore: ObservableObject {
         // never a race — see `maintenanceTick`'s doc comment for why running twice is safe
         // anyway.
         clock.add(self) { [weak self] in self?.maintenanceTick() }
+        restoreSwarmsIfPresent()
         if let previousRun {
             Task { [weak self] in await self?.sweepOrphans(from: previousRun) }
         }
