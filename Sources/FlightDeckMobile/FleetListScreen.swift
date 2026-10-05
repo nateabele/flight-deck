@@ -64,6 +64,12 @@ struct FleetListScreen: View {
                     }
                     ForEach(model.fleet.projects) { project in
                         Section {
+                            if let swarm = project.swarm {
+                                SwarmCard(swarm: swarm, inFlight: model.swarmInFlight.contains(project.id),
+                                          onPause: { model.setSwarmPaused(true, project: project.id) },
+                                          onResume: { model.setSwarmPaused(false, project: project.id) })
+                                    .listRowInsets(Self.rowInsets)
+                            }
                             ForEach(Self.intakeRows(project)) { intake in
                                 NavigationLink(value: IntakeRoute.intake(intake.id)) {
                                     IntakeRow(summary: intake, offset: model.flightControl.macClockOffset, frozenAt: frozenAt)
@@ -79,7 +85,7 @@ struct FleetListScreen: View {
                             // the moment either end toggled.
                             if !project.isCollapsed {
                                 ForEach(project.sessions) { session in
-                                    sessionRow(session)
+                                    sessionRow(session, swarm: SwarmStyle.agent(for: session.id, in: project))
                                 }
                             }
                         } header: {
@@ -569,9 +575,9 @@ struct FleetListScreen: View {
             : UnreadAction(title: "Unread", systemImage: "circle.fill", marksUnread: true)
     }
 
-    private func sessionRow(_ session: WireSession) -> some View {
+    private func sessionRow(_ session: WireSession, swarm: WireSwarmAgent? = nil) -> some View {
         NavigationLink(value: session.id) {
-            Self.row(session)
+            Self.row(session, swarm: swarm)
         }
         .listRowInsets(Self.rowInsets)
         // `allowsFullSwipe: true`, the mirror image of the trailing lane's `false` below —
@@ -720,7 +726,7 @@ struct FleetListScreen: View {
     /// carries `SearchResult.highlightedRanges` when a search result calls this — routed
     /// through `SessionSearchResults.highlighted`, the one place that turns a range into
     /// underline styling, so a session row and a name row agree on what "matched" looks like.
-    static func row(_ session: WireSession, highlighted ranges: [Range<String.Index>] = []) -> some View {
+    static func row(_ session: WireSession, swarm: WireSwarmAgent? = nil, highlighted ranges: [Range<String.Index>] = []) -> some View {
         HStack(spacing: 8) {
             SessionStatusGlyph(session: session)
             // Gated on `activity` existing, not just on the flag: a fresh pairing (or a
@@ -752,6 +758,17 @@ struct FleetListScreen: View {
                 // needed)". Sharing the source is what keeps the two from disagreeing again.
                 if let waitingCaption = SessionStatusGlyph.waitingCaption(for: session) {
                     Text(waitingCaption).font(.caption).foregroundStyle(.orange)
+                }
+                if let swarm, let chip = SwarmStyle.chip(swarm) {
+                    HStack(spacing: 4) {
+                        Text(chip).font(.caption2.monospaced())
+                        if swarm.contested {
+                            Image(systemName: "lock.trianglebadge.exclamationmark").foregroundStyle(.orange)
+                                .accessibilityLabel("contested")
+                        }
+                        if let marker = swarm.marker { Text(marker).font(.caption2).foregroundStyle(.secondary) }
+                    }
+                    .accessibilityIdentifier("swarm-row-chip")
                 }
             }
             Spacer()

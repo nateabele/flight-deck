@@ -626,6 +626,22 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
         connector.send(command, then: completion)
     }
 
+    /// Projects with a pause/resume on the way, so the card cannot send a second one before the
+    /// Mac answers the first.
+    private(set) var swarmInFlight: Set<UUID> = []
+
+    func setSwarmPaused(_ paused: Bool, project: UUID) {
+        guard !swarmInFlight.contains(project) else { return }
+        swarmInFlight.insert(project)
+        sendIntake(paused ? .swarmPause(project: project) : .swarmResume(project: project)) { [weak self] _ in
+            self?.swarmInFlight.remove(project)
+        }
+    }
+
+    func decideHandoff(_ confirm: Bool, session: UUID) {
+        sendIntake(confirm ? .handoffConfirm(id: session) : .handoffDecline(id: session)) { _ in }
+    }
+
     /// Escape at a dialog nothing on this build can read — see `FleetCommand.abortPrompt`'s own
     /// comment for why it names a session rather than a call, and `PromptCard.showsBlocked` for
     /// when this is ever offered at all.
