@@ -13,14 +13,19 @@ enum DelegationServiceFactory {
     /// `<stateDirectory>/delegation/<host slot>-<host run id>.out`: host run ids are `r<N>` on
     /// every host, so the slot keeps two hosts' `r3` apart. `LiveHostDirectory.prune(host:runIDs:)`
     /// takes host run ids (`DelegatedRun.hostRunID`) for that reason.
+    ///
+    /// Not wired here: acking a fetched result on the host. The wire has no op for it
+    /// (`DelegationRequest` lacks one); the host acks after sending (W1), until the final
+    /// integration adds a controller-driven `run.ack`.
     static func live(hostService: HostService, stateDirectory: URL? = nil,
                      sessionTitle: @escaping (UUID) -> String? = { _ in nil },
                      forwarder: PortForwarder = PortForwarder()) -> DelegationService {
         let state = stateDirectory ?? FlightDeckApp.stateDirectory() ?? FileSessionPersistence.defaultDirectory()
         let directory = state.appendingPathComponent("delegation", isDirectory: true)
         let registry = hostService.registry
+        let hosts = LiveHostDirectory(hostService: hostService, mirrors: directory)
         let dependencies = DelegationService.Dependencies(
-            hosts: LiveHostDirectory(hostService: hostService, mirrors: directory),
+            hosts: hosts,
             preflight: LivePreflight(forwarder: forwarder),
             snapshots: LiveSnapshotter(),
             bundles: LiveBundleMaker(),
@@ -32,7 +37,10 @@ enum DelegationServiceFactory {
             worktrees: LiveWorktreeLocator(),
             sessionTitle: sessionTitle,
             directory: directory)
-        return DelegationService(registry: RunRegistry(file: state.appendingPathComponent("delegation.json")),
-                                 dependencies: dependencies)
+        let service = DelegationService(registry: RunRegistry(file: state.appendingPathComponent("delegation.json")),
+                                        dependencies: dependencies)
+        // Runs whose host was offline at launch are skipped by the service's own first pass.
+        hosts.onHostOnline = { [weak service] in service?.resumeWatching() }
+        return service
     }
 }

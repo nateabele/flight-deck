@@ -272,7 +272,7 @@ final class LiveHostLinkTests: XCTestCase {
         }
         transport.failNext = HostLinkError.offline
         do { _ = try await link.request(.runCancel(runID: "r1")); XCTFail() } catch let error as DelegationError {
-            XCTAssertEqual(error.code, "host_unavailable")
+            XCTAssertEqual(error.code, "host_offline")
             XCTAssertTrue(error.message.hasPrefix("mini went offline before answering run.cancel"), error.message)
         }
         transport.failNext = HostLinkError.timedOut
@@ -281,7 +281,17 @@ final class LiveHostLinkTests: XCTestCase {
         }
     }
 
-    func testATransferTimesOutOnIdlenessAndOtherBulkRepliesGetTheLongBound() async throws {
+    func testIsConnectedFollowsTheTransportUntilClosed() {
+        let link = makeLink()
+        XCTAssertTrue(link.isConnected)
+        transport.isOnline = false
+        XCTAssertFalse(link.isConnected)
+        transport.isOnline = true
+        link.close(CancellationError())
+        XCTAssertFalse(link.isConnected, "closed for good: the host was forgotten or refused us")
+    }
+
+        func testATransferTimesOutOnIdlenessAndOtherBulkRepliesGetTheLongBound() async throws {
         let link = makeLink()
         let ref = SnapshotRef(repoRoot: "a", wtKey: "k", worktreeName: "w", commit: "b", tree: "c")
         let channel = try await link.openChannel()

@@ -73,6 +73,12 @@ final class LiveHostLink: HostLinking {
 
     var capabilities: Set<HostCapability>? { transport.capabilities }
 
+    /// Up now, and not closed for good. `DelegationService` asks the directory again for a
+    /// link that is not, which hands back this same object while the host stays paired, so
+    /// its feeds and their copies carry over the reconnect.
+    var isConnected: Bool { !closed && transport.isOnline }
+    private var closed = false
+
     // MARK: Requests
 
     func request(_ request: DelegationRequest) async throws -> DelegationReply {
@@ -85,8 +91,10 @@ final class LiveHostLink: HostLinking {
                 reply = try await transport.send(request, timeout: Self.timeout(for: request), progress: nil)
             }
         } catch HostLinkError.offline {
-            throw DelegationError(code: "host_unavailable",
-                                  message: "\(name) went offline before answering \(Self.op(request)) — rerun once flightdeck host ls shows it online")
+            // One code for "the host is not there" however it was found out (C6 round 2), so
+            // the CLI's retry list keys on `host_offline` alone.
+            throw unavailable?() ?? DelegationError(code: "host_offline",
+                                                    message: "\(name) went offline before answering \(Self.op(request)) — rerun once flightdeck host ls shows it online")
         } catch HostLinkError.timedOut {
             throw DelegationError(code: "host_timeout",
                                   message: "\(name) did not answer \(Self.op(request)) in time — check that hostd is running on \(name), then rerun")
@@ -177,6 +185,7 @@ final class LiveHostLink: HostLinking {
     /// The host is gone for good (forgotten, or refusing us): every open stream fails rather
     /// than waiting on a reconnect that will never come. The copies on disk stay.
     func close(_ error: Error) {
+        closed = true
         let all = feeds
         feeds = [:]
         for (runID, feed) in all {

@@ -11,6 +11,12 @@ final class LiveHostDirectory: DelegationHostDirectory {
     private let now: () -> Date
     private var links: [UUID: (host: HostLink, live: LiveHostLink)] = [:]
     private var online: [UUID: Bool] = [:]
+    /// Every slot's last known "online", links handed out or not, for `onHostOnline`.
+    private var wasOnline: [UUID: Bool] = [:]
+    /// A host's link came up: the factory points this at `DelegationService.resumeWatching`,
+    /// so runs whose host was offline at launch (or dropped since) are watched again without
+    /// waiting for someone to ask about them.
+    var onHostOnline: (() -> Void)?
     private var watch: AnyCancellable?
 
     /// `mirrors` is where each run's output copy lives (`RunMirror`):
@@ -71,6 +77,19 @@ final class LiveHostDirectory: DelegationHostDirectory {
     }
 
     private func statusesChanged(_ statuses: [UUID: HostLinkState]) {
+        var cameOnline = false
+        for (slot, state) in statuses {
+            let isOnline: Bool
+            if case .online = state { isOnline = true } else { isOnline = false }
+            if isOnline, wasOnline[slot] != true { cameOnline = true }
+            wasOnline[slot] = isOnline
+        }
+        wasOnline = wasOnline.filter { statuses[$0.key] != nil }
+        if cameOnline {
+            // After this publish lands: the sink runs before `statuses` is assigned, and the
+            // watchers it starts read the link's state through the directory.
+            Task { @MainActor [weak self] in self?.onHostOnline?() }
+        }
         for (slot, entry) in links {
             switch statuses[slot] {
             case nil:
