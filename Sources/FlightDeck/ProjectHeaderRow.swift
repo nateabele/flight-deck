@@ -25,6 +25,8 @@ struct ProjectHeaderRow: View {
     // `flywheelStatus`'s doc comment for why this exists at all.
     @State private var probedFlywheelStatus: FlywheelStatus?
     @State private var showingSwarmPopover = false
+    @State private var showingTurnOff = false
+    @State private var showingRemoval = false
 
     /// Whether this row should draw as the selected project. A pure static function rather than
     /// a computed property so `SidebarSelectionTests` can assert it without standing up a
@@ -272,10 +274,13 @@ struct ProjectHeaderRow: View {
                         Button("Stop Swarm") { store.swarmService.stop(project: repo.url.standardizedFileURL.path) }
                     }
                 }
+                Button("Turn Off Flight Control…") { showingTurnOff = true }
             } else if flywheelStatus.isFlywheelProject {
                 Button("Enable Flight Control…") { showingFlywheelConfirmation = true }
+                removeFromRepoItem
             } else {
                 Button("Set Up Flight Control…") { showingFlywheelSetupConfirmation = true }
+                removeFromRepoItem
             }
             // Ellipsis because it opens a window, matching "Configure Tools…". Last rather
             // than above Close Project by request.
@@ -307,6 +312,24 @@ struct ProjectHeaderRow: View {
                              onPause: { service.pause(project: record.project) },
                              onResume: { service.resume(project: record.project) })
             }
+        }
+        .confirmationDialog("Turn off Flight Control for \(repo.displayName)?", isPresented: $showingTurnOff) {
+            Button("Turn Off") { Task { await store.turnOffFlightControl(project: repo.url.standardizedFileURL.path) } }
+        } message: {
+            Text("The swarm drains and stops, tasks it claimed go back to open, agents' file reservations are released, and Flight Deck stops watching. Hooks, AGENTS.md and the task data stay as they are.")
+        }
+        .confirmationDialog("Remove Flight Control from \(repo.displayName)?", isPresented: $showingRemoval) {
+            Button("Remove", role: .destructive) { Task { _ = await store.removeFlightControl(from: repo.url.standardizedFileURL) } }
+        } message: {
+            Text(FlightControlRepoRemoval(runner: SystemFlywheelProcessRunner()).plannedChanges(repo: repo.url.standardizedFileURL)
+                .joined(separator: "\n"))
+        }
+    }
+
+    /// Offered only while Flight Control is off and its guard or hook is still in the repo.
+    @ViewBuilder private var removeFromRepoItem: some View {
+        if flywheelStatus.guardInstalled || flywheelStatus.beadsSyncHooksInstalled {
+            Button("Remove Flight Control from Repo…") { showingRemoval = true }
         }
     }
 

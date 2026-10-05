@@ -284,3 +284,26 @@ extension SwarmService {
         })
     }
 }
+
+extension SwarmService {
+    /// Spec §9 steps 1–2: drain then stop the project's swarm, then return to open every task it
+    /// claimed that is not closed. Returns those ids. Agents keep running in their tabs.
+    ///
+    /// A status that cannot be read is not "not closed": it is left alone, as is a task whose
+    /// return-to-open failed (it is not reported as reopened), so a br hiccup never reopens work
+    /// that finished and never claims a reopen that did not happen.
+    func turnOff(project: String) async -> [String] {
+        guard let controller = controller(forProject: project) else { return [] }
+        let url = URL(fileURLWithPath: Self.key(project), isDirectory: true)
+        let held = Set(controller.record.agents.flatMap { [$0.task, $0.pendingClaim].compactMap { $0 } })
+        controller.drain()
+        controller.stop(reason: "Flight Control turned off")
+        var reopened: [String] = []
+        for task in held.sorted() {
+            guard let reading = await backend.status(task, project: url), reading.status != "closed" else { continue }
+            if await backend.returnToOpen(task, project: url) { reopened.append(task) }
+        }
+        controller.log(.released, detail: "returned to open: \(reopened.joined(separator: ", "))")
+        return reopened
+    }
+}

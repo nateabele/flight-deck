@@ -2691,6 +2691,31 @@ final class SessionStore: ObservableObject {
         }
     }
 
+    /// Spec §9: drain and stop the project's swarm, give back its claims and every FD-booted
+    /// agent's reservations, stop watching, and clear the flag. The repo is not edited.
+    @discardableResult
+    func turnOffFlightControl(project path: String) async -> FlightControlOff.Report {
+        let backend: SwarmBackend = swarmServiceStorage?.backend
+            ?? BrSwarmBackend(runner: SystemFlywheelProcessRunner(), brPath: flywheelTools.br, amPath: flywheelTools.am)
+        let off = FlightControlOff(
+            swarm: swarmServiceStorage, backend: backend,
+            agents: { [weak self] in self?.flywheelAgents(inProject: $0) ?? [] },
+            stopObserving: { [weak self] in self?.observeService.disable(project: $0) },
+            setEnabled: { [weak self] project, enabled in
+                guard let self else { return }
+                var settings = self.preferences?.projectSettings(project) ?? ProjectSettings()
+                settings.flywheelEnabled = enabled ? true : nil
+                self.preferences?.setProjectSettings(project, settings)
+            })
+        return await off.run(project: path)
+    }
+
+    /// Spec §9 "Remove from repo…": undoes the guard, hook and AGENTS.md section; never `.beads`.
+    func removeFlightControl(from repo: URL) async -> [String] {
+        await FlightControlRepoRemoval(runner: SystemFlywheelProcessRunner(), amPath: flywheelTools.am,
+                                       brPath: flywheelTools.br).remove(repo: repo)
+    }
+
     /// The "Set Up Flight Control…" menu action's target — `enableFlywheel`'s sibling for a project
     /// the probe found neither `.beads/` nor `.agent-mail.yaml` in. Bootstraps those markers
     /// first (`FlywheelSetup.initialize`, which also runs `enable`'s own steps), then marks
