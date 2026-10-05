@@ -12,7 +12,12 @@ struct RuleRowPresentation: Equatable {
 
     /// A confirmed rule offers no Compile: recompiling the same words could silently change what
     /// routes. Editing the sentence is the way back to draft (spec §2).
-    init(rule: RoutingRule, compiling: Bool, note: String?) {
+    ///
+    /// `hasUncommittedEdit` is a typed-but-not-submitted sentence. Until it is committed the rule
+    /// still holds the OLD compiled form, so Confirm would confirm that form under words it was
+    /// not compiled from: Confirm is off, and Compile is on in any state (the row commits the edit
+    /// first, which sends the rule back to draft, then compiles the new sentence).
+    init(rule: RoutingRule, compiling: Bool, note: String?, hasUncommittedEdit: Bool = false) {
         if compiling {
             stateLabel = "Compiling…"
         } else {
@@ -26,8 +31,8 @@ struct RuleRowPresentation: Equatable {
         compiledText = rule.compiled.map(RuleText.compiled)
         failureText = rule.state == .failed ? rule.failure.map { "Failed: \($0)" } : nil
         self.note = note
-        canCompile = !compiling && (rule.state == .draft || rule.state == .failed)
-        canConfirm = !compiling && rule.state == .compiled
+        canCompile = !compiling && (hasUncommittedEdit || rule.state == .draft || rule.state == .failed)
+        canConfirm = !compiling && !hasUncommittedEdit && rule.state == .compiled
     }
 }
 

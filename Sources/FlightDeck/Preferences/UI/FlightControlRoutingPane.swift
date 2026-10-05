@@ -93,7 +93,8 @@ struct RuleRow: View {
     @State private var editing: String?
 
     var body: some View {
-        let p = RuleRowPresentation(rule: rule, compiling: routing.compiling.contains(rule.id), note: routing.notes[rule.id])
+        let p = RuleRowPresentation(rule: rule, compiling: routing.compiling.contains(rule.id), note: routing.notes[rule.id],
+                                   hasUncommittedEdit: editing != nil && editing != rule.sentence)
         VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .firstTextBaseline) {
                 TextField("Sentence", text: Binding(get: { editing ?? rule.sentence }, set: { editing = $0 }))
@@ -128,7 +129,11 @@ struct RuleRow: View {
                 .font(.caption)
             }
             HStack {
-                Button("Compile") { Task { await routing.compile(rule.id, in: scope) } }
+                Button("Compile") {
+                    // Commit a typed-but-unsubmitted sentence first, or this compiles the old words.
+                    commit()
+                    Task { await routing.compile(rule.id, in: scope) }
+                }
                     .disabled(!p.canCompile)
                     .accessibilityIdentifier("routing-compile-\(rule.id)")
                 Button("Confirm") { routing.confirm(rule.id, in: scope) }

@@ -22,6 +22,12 @@ final class RoutingPresentationTests: XCTestCase {
         XCTAssertTrue(p.canConfirm); XCTAssertFalse(p.canCompile)
     }
 
+    func testAnUncommittedEditBlocksConfirmAndLetsCompileCommitIt() {
+        let p = RuleRowPresentation(rule: D.r3(state: .compiled), compiling: false, note: nil, hasUncommittedEdit: true)
+        XCTAssertFalse(p.canConfirm, "confirming would bless the old compiled form under new words")
+        XCTAssertTrue(p.canCompile)
+    }
+
     func testAConfirmedRuleOffersNeitherUntilItsSentenceChanges() {
         let p = RuleRowPresentation(rule: D.r3(), compiling: false, note: nil)
         XCTAssertEqual(p.stateLabel, "Confirmed")

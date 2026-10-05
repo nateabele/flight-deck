@@ -1301,6 +1301,11 @@ final class SessionStore: ObservableObject {
         ?? FileManager.default.temporaryDirectory
             .appendingPathComponent("FlightDeck-intakes-\(UUID().uuidString)", isDirectory: true)
 
+    /// L3-R routing: rules, kinds, the compiler and the router. Attached by
+    /// `FlightDeckApp.makeStore` right after this store is built; nil in every store a test builds
+    /// directly, whose releases then write tasks with no execution block, as before Level 3.
+    var flightControlRouting: RoutingService?
+
     /// Owns every project's intakes (triage, review, release). Lazy for the same reason as
     /// `observeService`, and one more: its init reads and writes its root, so a host that
     /// never touches intakes never creates that directory. The root is `resolvedIntakesRoot`.
@@ -1318,11 +1323,6 @@ final class SessionStore: ObservableObject {
     /// real `IntakeRunnerController` sharing this store's `daemon`/`daemonControl` — so a
     /// runner's socket lives in the directory `SessionDaemon` already manages, and a fake-daemon
     /// test's control is the one the runner is probed through too.
-    /// L3-R routing: rules, kinds, the compiler and the router. Attached by
-    /// `FlightDeckApp.makeStore` right after this store is built; nil in every store a test builds
-    /// directly, whose releases then write tasks with no execution block, as before Level 3.
-    var flightControlRouting: RoutingService?
-
     private(set) lazy var intakeService: IntakeService = {
         let root = resolvedIntakesRoot
         let service = IntakeService(
