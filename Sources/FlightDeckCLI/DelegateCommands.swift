@@ -19,6 +19,8 @@ struct DelegateRunnerHooks {
     var execReal: (_ argv0: String, _ args: [String]) -> Void
     /// Starts a fresh connection after a drop; the runner's `reattach` follows its snapshot.
     var reconnect: () -> Void
+    /// The runner's timer, for retrying a reattach and bounding a reconnect.
+    var schedule: (TimeInterval, @escaping () -> Void) -> Void = { _, _ in }
 }
 
 /// One delegation verb (spec §5) from parse to exit.
@@ -32,6 +34,11 @@ final class DelegateCommandRunner {
     /// How many reconnects a run that lost the app gets before the CLI gives up on it (one a
     /// second): long enough to outlast an app relaunch, short of hanging an agent forever.
     static let reconnectLimit = 30
+    /// How long a reconnected socket may take to deliver its snapshot before the CLI gives up.
+    static let snapshotDeadline: TimeInterval = 10
+    /// Refusals a reattach retries rather than reports: the app is back but its link to the
+    /// host is not yet (right after a relaunch). They share `reconnectLimit`.
+    static let retriable: Set<String> = ["host_unavailable", "host_offline"]
 
     private let command: DelegateCommand
     private let cwd: String
@@ -50,6 +57,12 @@ final class DelegateCommandRunner {
     /// Ctrl-C came before `delegateStarted` named the run; the stop goes out with the id.
     private var stopWhenStarted = false
     private var reconnects = 0
+    /// Bumped per drop, so only the latest reconnect's snapshot deadline can fire.
+    private var generation = 0
+    private var awaitingSnapshot = false
+    /// On a reattach path — after a drop or a `slow_reader` — where every failure must still
+    /// say how to get the run back.
+    private var resuming = false
     private var finished = false
     /// `route-exec` has matched and handed the command to the app: from here a lost app is a
     /// lost run (125), no longer a reason to run the real binary — which would run it twice.
@@ -168,19 +181,30 @@ final class DelegateCommandRunner {
             refused("disconnected", "lost Flight Deck before the run started — check flightdeck ps, then rerun")
             return true
         }
+        resuming = true
         reconnects += 1
         guard reconnects <= Self.reconnectLimit else {
-            refused("disconnected", "lost Flight Deck — \(runID) carries on on the host; flightdeck wait \(runID)")
+            refused("disconnected", "lost Flight Deck — \(runID) carries on on the host")
             return true
         }
+        generation += 1
+        awaitingSnapshot = true
+        let attempt = generation
         hooks.reconnect()
+        hooks.schedule(1 + Self.snapshotDeadline) { self.snapshotOverdue(attempt) }
         return true
+    }
+
+    /// The reconnect connected but no snapshot came: the app is wedged, not restarting.
+    private func snapshotOverdue(_ attempt: Int) {
+        guard !finished, awaitingSnapshot, attempt == generation, let runID else { return }
+        refused("disconnected", "Flight Deck did not answer after reconnecting — \(runID) carries on on the host")
     }
 
     /// The fresh connection's snapshot arrived: pick the run up where the output stopped.
     func reattach() {
         guard !finished, let runID else { return }
-        reconnects = 0
+        awaitingSnapshot = false
         resume(runID)
     }
 
@@ -189,9 +213,12 @@ final class DelegateCommandRunner {
     /// no timeout — it is still the same run, not a new 9-minute `wait` that exits 124. A
     /// `wait` keeps its own terms and, as before, prints no output.
     private func resume(_ runID: String) {
+        resuming = true
         switch command {
-        case .wait(_, let timeout, nil):
-            stream(.wait(run: runID, timeout: timeout, from: nil), detached: false)
+        case .wait(_, let timeout, let from):
+            // The user's own `wait`, on its own terms: its `--timeout`, and output only if it
+            // asked for some with `--from`.
+            stream(.wait(run: runID, timeout: timeout, from: from == nil ? nil : nextOffset), detached: false)
         case .logs(_, let follow, _):
             stream(.logs(run: runID, follow: follow, from: nextOffset), detached: false)
         default:
@@ -263,6 +290,13 @@ final class DelegateCommandRunner {
                 self.finish(0) // `logs` without --follow: the replay is done; a plain `sync`
             case .err(_, "slow_reader", _) where self.runID != nil:
                 self.resume(self.runID!)
+            case .err(_, let code, let message) where self.resuming && Self.retriable.contains(code):
+                // The app is back, its link to the host not yet: try again, within the cap.
+                self.reconnects += 1
+                guard self.reconnects <= Self.reconnectLimit, let runID = self.runID else {
+                    return self.refused(code, message)
+                }
+                self.hooks.schedule(1) { if !self.finished { self.resume(runID) } }
             case .err(_, let code, let message):
                 self.refused(code, message)
             default:
@@ -425,7 +459,11 @@ final class DelegateCommandRunner {
     /// Every delegation failure is 125 and one `flightdeck:` line (§5); a `wait` that timed
     /// out is 124 with the run still going.
     private func refused(_ code: String, _ message: String?) {
-        hooks.err("flightdeck: \(message ?? code)")
+        var line = message ?? code
+        // On a reattach the run is still going, wherever this CLI lost it: the line ends on
+        // the one step that gets it back.
+        if resuming, let runID, !line.contains("flightdeck wait \(runID)") { line += " — flightdeck wait \(runID)" }
+        hooks.err("flightdeck: \(line)")
         switch code {
         case "wait_timeout": finish(124)
         // Not a failure to delegate: the run is fine, it just left nothing to apply.

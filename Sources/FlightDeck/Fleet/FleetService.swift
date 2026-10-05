@@ -721,8 +721,11 @@ final class FleetService: ObservableObject {
                 return reply(.err(cid: cid, code: "not_implemented",
                                   message: "delegated execution is not implemented in this Flight Deck yet"))
             }
+            // Taken here, synchronously inside `onRequest` where it is valid: it stops the
+            // request's producers once its reader is gone.
             delegation.handle(delegate, caller: ControlScope.caller(token: client.caller, secret: controlSecret),
-                              cid: cid, reply: reply)
+                              cid: cid, cancellation: localServer.replyCancellation(for: client, cid: cid),
+                              reply: reply)
         }
     }
 

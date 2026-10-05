@@ -26,6 +26,7 @@ final class FakeByteChannel: ByteChannel, @unchecked Sendable {
 @MainActor
 final class FakeHostLink: HostLinking {
     let name: String
+    var isConnected = true
     var requests: [DelegationRequest] = []
     var nextRun = 0
     /// Bytes the next pulled channel (`run.result`/`run.artifacts`) will carry.
@@ -36,7 +37,7 @@ final class FakeHostLink: HostLinking {
     var failStart: Error?
     var channels: [FakeByteChannel] = []
     private var events: [String: [RunEvent]] = [:]
-    private var continuations: [String: [(Int64, AsyncThrowingStream<RunEvent, Error>.Continuation)]] = [:]
+    private var continuations: [String: [UUID: (Int64, AsyncThrowingStream<RunEvent, Error>.Continuation)]] = [:]
     /// How many subscriptions are open per run, for the fan-out test.
     func subscribers(_ runID: String) -> Int { continuations[runID]?.count ?? 0 }
 
@@ -83,14 +84,20 @@ final class FakeHostLink: HostLinking {
                     continuation.yield(end)
                     return continuation.finish()
                 }
-                self.continuations[runID, default: []].append((offset, continuation))
+                let key = UUID()
+                self.continuations[runID, default: [:]][key] = (offset, continuation)
+                // A cancelled subscriber's stream ends and frees its slot (the contract's
+                // "Cancellation"), which is what lets a test count what is still subscribed.
+                continuation.onTermination = { _ in
+                    Task { @MainActor in self.continuations[runID]?[key] = nil }
+                }
             }
         }
     }
 
     func emit(_ runID: String, _ event: RunEvent) {
         events[runID, default: []].append(event)
-        for (offset, continuation) in continuations[runID, default: []] {
+        for (offset, continuation) in continuations[runID, default: [:]].values {
             Self.deliver(event, from: offset, to: continuation)
             if Self.isEnd(event) { continuation.finish() }
         }
@@ -174,12 +181,15 @@ final class FakeResults: ResultApplying, @unchecked Sendable {
     var patchText = "diff --git a/x b/x\n"
     /// Whether each call ran off the main thread, as the protocol promises the app.
     var ranOnMain: [Bool] = []
+    /// How long `apply` takes, to let a racing replay show itself.
+    var applyDelay: UInt64 = 0
     func patch(bundle: URL, commit: String, snapshot: SnapshotRef, worktree: URL) async throws -> String {
         ranOnMain.append(Thread.isMainThread)
         return patchText
     }
     func apply(bundle: URL, commit: String, snapshot: SnapshotRef, worktree: URL, allowConflicts: Bool) async throws -> ApplyOutcome {
         ranOnMain.append(Thread.isMainThread)
+        if applyDelay > 0 { try await Task.sleep(nanoseconds: applyDelay) }
         applied.append((commit, allowConflicts))
         return allowConflicts ? .clean : autoOutcome
     }
@@ -248,9 +258,10 @@ final class DelegationServiceTests: XCTestCase {
 
     /// Sends one request and collects every frame it draws.
     private final class Frames { var all: [ServerFrame] = [] }
-    private func send(_ request: DelegateRequest, as caller: ControlCaller? = nil) -> Frames {
+    private func send(_ request: DelegateRequest, as caller: ControlCaller? = nil,
+                      cancellation: ReplyCancellation? = nil) -> Frames {
         let frames = Frames()
-        service.handle(request, caller: caller ?? .session(tab), cid: 1) { frames.all.append($0) }
+        service.handle(request, caller: caller ?? .session(tab), cid: 1, cancellation: cancellation) { frames.all.append($0) }
         return frames
     }
 
@@ -720,6 +731,71 @@ final class DelegationServiceTests: XCTestCase {
         service = DelegationService(registry: RunRegistry(file: file), dependencies: dependencies())
         mini.emit(hostRunID(), .exited(.code(7)))
         try await until { self.service.registry.run(id)?.status == 7 }
+    }
+
+    // MARK: Fix round 2
+
+    /// Three resumes, then the reader goes: no replay outlives its reader, and the host link
+    /// is left with the monitor's subscription alone.
+    func testResumesLeaveNoReplayRunningOnceTheirReaderIsGone() async throws {
+        let frames = send(.run(WireDelegateRun(cwd: "/w/proj", host: "mini", command: ["make"], detach: true)))
+        let id = try await started(frames)
+        mini.emit(hostRunID(), .output(stream: .stdout, offset: 0, data: Data("abc".utf8)))
+        var readers: [ReplyCancellation] = []
+        for from in [Int64(0), 1, 2] {
+            let reader = ReplyCancellation()
+            readers.append(reader)
+            _ = send(.wait(run: id, timeout: nil, from: from, noTimeout: true), cancellation: reader)
+        }
+        try await until("three replays") { self.service.activeReplays == 3 }
+        readers.forEach { $0.cancel() }
+        try await until("replays gone") { self.service.activeReplays == 0 && self.mini.subscribers(self.hostRunID()) == 1 }
+    }
+
+    /// A resumed run exits only once the run is finished here: its auto-applied changes are in
+    /// the worktree first, as they are for the attached run.
+    func testAResumedRunExitsAfterItsResultIsApplied() async throws {
+        config.config = DelegateConfig(recipes: ["gen": Recipe(host: "mini", run: "make gen", apply: .auto)])
+        mini.resultCommit = "res1"
+        mini.resultBytes = Data("bundle".utf8)
+        results.applyDelay = 100_000_000
+        let frames = send(.run(WireDelegateRun(cwd: "/w/proj", recipe: "gen", detach: true)))
+        let id = try await started(frames)
+        let resumed = send(.wait(run: id, timeout: nil, from: 0, noTimeout: true))
+        var appliedAtExit: Int?
+        mini.emit(hostRunID(), .exited(.code(0)))
+        try await until("exit") {
+            if appliedAtExit == nil, resumed.all.contains(where: terminal) { appliedAtExit = results.applied.count }
+            return appliedAtExit != nil
+        }
+        XCTAssertEqual(resumed.all.last, .delegateExit(cid: 1, status: 0))
+        XCTAssertEqual(appliedAtExit, 1, "the changes were applied before the CLI was told the run ended")
+    }
+
+    /// A non-following `logs` stops at the output end it saw when it began, not at whatever
+    /// arrives while it replays.
+    func testLogsStopsAtTheEndItSawWhenItBegan() async throws {
+        let frames = send(.run(WireDelegateRun(cwd: "/w/proj", host: "mini", command: ["make"], detach: true)))
+        let id = try await started(frames)
+        mini.emit(hostRunID(), .output(stream: .stdout, offset: 0, data: Data("abc".utf8)))
+        try await Task.sleep(nanoseconds: 20_000_000)
+        let logs = send(.logs(run: id, follow: false, from: nil))
+        mini.emit(hostRunID(), .output(stream: .stdout, offset: 3, data: Data("def".utf8)))
+        try await until { logs.all.contains(where: terminal) }
+        XCTAssertEqual(logs.all, [.delegateOutput(cid: 1, stream: "stdout", offset: 0, data: Data("abc".utf8)), .ack(cid: 1)])
+    }
+
+    /// A dropped link is never reused: the next request goes to the directory's current one.
+    func testADeadLinkIsReplacedFromTheDirectory() async throws {
+        let frames = send(.run(WireDelegateRun(cwd: "/w/proj", host: "mini", command: ["make"], detach: true)))
+        let id = try await started(frames)
+        mini.isConnected = false
+        let fresh = FakeHostLink(name: "mini")
+        hosts.links["mini"] = fresh
+        let stopped = send(.stop(run: id))
+        try await until { stopped.all.contains(where: terminal) }
+        XCTAssertEqual(stopped.all.last, .ack(cid: 1))
+        XCTAssertEqual(fresh.requests, [.runCancel(runID: "h1")])
     }
 
     // MARK: Helpers

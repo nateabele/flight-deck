@@ -51,4 +51,28 @@ final class DelegationRunRegistryTests: XCTestCase {
         try JSONSerialization.data(withJSONObject: json).write(to: url)
         XCTAssertEqual(RunRegistry(file: url).mintID(), "r42")
     }
+
+    /// Ids still legible in a set-aside file are never handed out again.
+    func testIdsInACorruptFileAreNotReused() throws {
+        let url = file()
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data(#"{"next":3,"runs":[{"id":"r17","host":"mini" BROKEN"#.utf8).write(to: url)
+        XCTAssertEqual(RunRegistry(file: url).mintID(), "r18")
+    }
+
+    /// A file written before `include`/`fetch` existed still loads.
+    func testAnOlderRecordWithoutIncludeOrFetchLoads() throws {
+        let url = file()
+        let registry = RunRegistry(file: url)
+        registry.add(run("r1"))
+        var json = try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as! [String: Any]
+        var runs = json["runs"] as! [[String: Any]]
+        runs[0]["include"] = nil
+        runs[0]["fetch"] = nil
+        json["runs"] = runs
+        try JSONSerialization.data(withJSONObject: json).write(to: url)
+        let reloaded = RunRegistry(file: url)
+        XCTAssertEqual(reloaded.run("r1")?.fetch, [])
+        XCTAssertEqual(reloaded.run("r1")?.include, [])
+    }
 }

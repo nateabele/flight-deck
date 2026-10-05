@@ -31,17 +31,29 @@ import os
 protocol HostLinking: AnyObject {
     /// The registry name, for every message that names the host.
     var name: String { get }
+    /// False once the link has dropped for good. A run's watcher holding a dead link asks
+    /// the directory again (`DelegationService.link(for:)`) rather than failing on it forever.
+    var isConnected: Bool { get }
     /// One request, answered by its reply; a host error throws (`HostLinkError.remote`).
     func request(_ request: DelegationRequest) async throws -> DelegationReply
     /// A fresh channel whose id a following request names (`sync.push`, `run.result`, …).
     func openChannel() async throws -> any ByteChannel
     /// Every event for `runID` whose output lies at or past byte `offset`, then live ones until
-    /// it exits. The contract the adapter must keep (ruling 6), which `FakeHostLink` keeps
-    /// exactly:
+    /// it exits. The contract the adapter must keep (rulings 6 and 21); `FakeHostLink` keeps
+    /// the subscription half of it:
+    /// - **A disk mirror is the replay source** (ruling 21). The adapter keeps each run's
+    ///   output under `Application Support/Flight Deck/delegation/<runID>.out`, bounded at
+    ///   64 MiB per run with the oldest dropped first, as the host spool is. `events(from:)`
+    ///   replays from the mirror, then goes live. It attaches to the host only for a range the
+    ///   mirror lacks (a fresh install, a range dropped from the mirror). The mirror survives a
+    ///   relaunch and is pruned with the registry. So a resume, a `logs`, a `slow_reader`
+    ///   reattach cost a local read, not a host round trip.
     /// - **Concurrent subscriptions, independent offsets.** The monitor, an attached `run`, a
     ///   `wait {from}` and a `logs` may all subscribe to one run at once, each from its own
     ///   offset. The adapter keeps ONE host attach per run (`run.start`'s, or `run.attach`)
     ///   and fans its events out locally, so a second subscriber never costs a second attach.
+    /// - **Cancellation.** A subscriber's task being cancelled ends its stream and frees it;
+    ///   the run, and every other subscriber, carry on.
     /// - **Exact offsets.** A subscriber from `offset` gets no byte before it: a chunk that
     ///   straddles it is cut to start there.
     /// - **Replay order** (A2): the run's current state (`queued`/`started`), then output from
@@ -175,8 +187,9 @@ final class DelegationService {
         /// artifact tars until unpacked, and `<run>.patch` for a `diff` over 1 MiB.
         var directory: URL
         /// How long a `logs` replay of a run this app did not watch waits for the next event
-        /// before deciding it has caught up (see `logs`).
+        /// before deciding it has caught up, and how long it waits for the first (see `logs`).
         var replayIdle: TimeInterval = 2
+        var replayFirstEvent: TimeInterval = 10
     }
 
     /// `flightdeck wait`'s default bound (§6.1): under the 10-minute tool timeout agents run
@@ -192,6 +205,9 @@ final class DelegationService {
     private let deps: Dependencies
     /// Runs this app instance is watching, by local id.
     private var live: [String: LiveRun] = [:]
+    /// Replay tasks (`logs`, `wait {from}`) still running: each ends with its run, its reader
+    /// (the request's `ReplyCancellation`), or its own end, so a test can see none leak.
+    private(set) var activeReplays = 0
 
     init(registry: RunRegistry, dependencies: Dependencies) {
         self.registry = registry
@@ -210,7 +226,7 @@ final class DelegationService {
     }
 
     private final class LiveRun {
-        let link: any HostLinking
+        var link: any HostLinking
         var reservation: (any PortReservation)?
         var subscribers: [UUID: (Update) -> Void] = [:]
         /// The last `MissingFileHint.tailBytes` of stderr and pty output.
@@ -247,8 +263,13 @@ final class DelegationService {
 
     /// Answers one request. `reply` may be called several times for a streaming `cid`, always
     /// on the main actor, and the last call is the terminal frame.
+    ///
+    /// `cancellation` fires when the reader is gone — the stream's last frame went out, it was
+    /// dropped as a `slow_reader`, or the connection ended — and stops whatever is still
+    /// producing for this `cid`. Without it every resume left a replay running to the run's end.
     func handle(_ request: DelegateRequest, caller: ControlCaller, cid: Int,
-                reply: @escaping (ServerFrame) -> Void) {
+                cancellation: ReplyCancellation? = nil, reply: @escaping (ServerFrame) -> Void) {
+        let cancellation = cancellation ?? ReplyCancellation()
         let owner: UUID?
         switch caller {
         case .human: owner = nil
@@ -262,9 +283,12 @@ final class DelegationService {
         Task { @MainActor in
             do {
                 switch request {
-                case .run(let run): try await self.start(run, mode: .run, owner: owner, cid: cid, reply: reply)
-                case .exec(let run): try await self.start(run, mode: .exec, owner: owner, cid: cid, reply: reply)
-                case .up(let run): try await self.start(run, mode: .up, owner: owner, cid: cid, reply: reply)
+                case .run(let run):
+                    try await self.start(run, mode: .run, owner: owner, cid: cid, cancellation: cancellation, reply: reply)
+                case .exec(let run):
+                    try await self.start(run, mode: .exec, owner: owner, cid: cid, cancellation: cancellation, reply: reply)
+                case .up(let run):
+                    try await self.start(run, mode: .up, owner: owner, cid: cid, cancellation: cancellation, reply: reply)
                 case .down(let service, _):
                     try await self.down(try self.service(service, owner: owner))
                     reply(.ack(cid: cid))
@@ -278,10 +302,11 @@ final class DelegationService {
                 case .wait(let id, let timeout, let from, let noTimeout):
                     let seconds = noTimeout ? nil : timeout.map(TimeInterval.init) ?? Self.defaultWaitTimeout
                     try self.wait(try self.visibleRun(id, owner: owner), timeout: seconds, from: from,
-                                  cid: cid, reply: reply)
+                                  reattach: noTimeout, cid: cid, cancellation: cancellation, reply: reply)
                 case .logs(let id, let follow, let from):
                     try self.logs(try self.visibleRun(id, owner: owner), follow: follow, from: from ?? 0,
-                                  timeout: nil, cid: cid, reply: reply)
+                                  timeout: nil, endFromRun: false, hint: false, cid: cid,
+                                  cancellation: cancellation, reply: reply)
                 case .stop(let id):
                     let record = try self.visibleRun(id, owner: owner)
                     if record.kind == .service {
@@ -342,6 +367,7 @@ final class DelegationService {
     /// `owner` is the tab the new run belongs to — for `restart`/`sync`, the original
     /// service's, whoever asked.
     private func start(_ run: WireDelegateRun, mode: Mode, owner: UUID?, cid: Int,
+                       cancellation: ReplyCancellation = ReplyCancellation(),
                        reply: @escaping (ServerFrame) -> Void) async throws {
         // §7 step 1: resolve the worktree, the recipe and the host — all local, all before
         // anything is reserved, so a typo costs nothing.
@@ -428,13 +454,15 @@ final class DelegationService {
             return reply(.delegateStarted(cid: cid, started))
         }
         reply(.delegateStarted(cid: cid, started))
-        attach(liveRun, cid: cid, hint: true, reply: reply)
+        attach(liveRun, cid: cid, hint: true, cancellation: cancellation, reply: reply)
         monitor(id, liveRun)
     }
 
-    /// Streams a run's updates to one CLI until it ends.
-    private func attach(_ liveRun: LiveRun, cid: Int, hint: Bool, reply: @escaping (ServerFrame) -> Void) {
+    /// Streams a run's updates to one CLI until it ends, or the CLI is gone.
+    private func attach(_ liveRun: LiveRun, cid: Int, hint: Bool, cancellation: ReplyCancellation,
+                        reply: @escaping (ServerFrame) -> Void) {
         let token = UUID()
+        cancellation.onCancel { [weak liveRun] in liveRun?.subscribers[token] = nil }
         liveRun.subscribers[token] = { [weak liveRun] update in
             switch update {
             case .notice(let message): reply(.delegateNotice(cid: cid, message: message))
@@ -624,12 +652,16 @@ final class DelegationService {
     // MARK: wait / logs
 
     /// `flightdeck wait` (§6.1): blocks until the run ends and answers its status, or gives up
-    /// after `timeout` (`wait_timeout`, 124) while the run carries on; nil `timeout` is a
-    /// reattach, which waits as long as the run takes. With `from` it streams the output from
-    /// that byte on, so a CLI that lost the app sees nothing twice and misses nothing.
-    private func wait(_ record: DelegatedRun, timeout: TimeInterval?, from: Int64?, cid: Int,
-                      reply: @escaping (ServerFrame) -> Void) throws {
-        if let from { return try logs(record, follow: true, from: from, timeout: timeout, cid: cid, reply: reply) }
+    /// after `timeout` (`wait_timeout`, 124) while the run carries on; nil `timeout` waits as
+    /// long as the run takes. With `from` it also streams the output from that byte on, so a
+    /// CLI that lost the app sees nothing twice and misses nothing. `reattach` is a run's own
+    /// CLI picking it back up: it gets the missing-file hint the attached run would have.
+    private func wait(_ record: DelegatedRun, timeout: TimeInterval?, from: Int64?, reattach: Bool, cid: Int,
+                      cancellation: ReplyCancellation, reply: @escaping (ServerFrame) -> Void) throws {
+        if let from {
+            return try logs(record, follow: true, from: from, timeout: timeout, endFromRun: true, hint: reattach,
+                            cid: cid, cancellation: cancellation, reply: reply)
+        }
         if let status = record.status, record.state == .exited || record.state == .died {
             return reply(.delegateExit(cid: cid, status: status))
         }
@@ -637,6 +669,10 @@ final class DelegationService {
         if let ended = liveRun.ended { return reply(.delegateExit(cid: cid, status: ended.status)) }
         let token = UUID()
         var answered = false
+        cancellation.onCancel { [weak liveRun] in
+            answered = true
+            liveRun?.subscribers[token] = nil
+        }
         liveRun.subscribers[token] = { [weak liveRun] update in
             switch update {
             case .notice(let message):
@@ -657,7 +693,7 @@ final class DelegationService {
             }
         }
         guard let timeout else { return }
-        expire(after: timeout, record, cid: cid) {
+        expire(after: timeout, record, cid: cid, cancellation: cancellation) {
             guard !answered else { return false }
             answered = true
             liveRun.subscribers[token] = nil
@@ -665,12 +701,19 @@ final class DelegationService {
         } reply: { reply($0) }
     }
 
-    /// Replays the run's spooled output from the host, from byte `from`. With `follow`, carries
-    /// on to the end (`delegateExit`), bounded by `timeout` when it is a `wait`. Without it,
-    /// stops at what had been written when asked (`ack`) — known exactly for a run this app
-    /// watched from its start; for one it did not (a relaunch), it stops once the host has
-    /// sent nothing for `replayIdle`, since the replay comes all at once and then goes quiet.
-    private func logs(_ record: DelegatedRun, follow: Bool, from: Int64, timeout: TimeInterval?, cid: Int,
+    /// Replays the run's output from byte `from` (`HostLinking.events`).
+    ///
+    /// - `follow`: carries on to the end, bounded by `timeout` when it is a `wait`.
+    /// - `endFromRun`: the terminal `delegateExit` comes from the run's own end — after the
+    ///   watcher has fetched the result, the artifacts and applied `apply = "auto"` — never
+    ///   from the replay's `exited`, which can arrive first: a resumed `run` must not exit
+    ///   before its changes are in the worktree, as the attached one never does.
+    /// - Neither: stops at the output end seen when it began (`ack`). That end is exact for a
+    ///   run this app watched from its start. For one it did not (a relaunch), the replay is
+    ///   taken as caught up once it goes quiet: `replayIdle` after an event, with
+    ///   `replayFirstEvent` allowed for the first.
+    private func logs(_ record: DelegatedRun, follow: Bool, from: Int64, timeout: TimeInterval?,
+                      endFromRun: Bool, hint: Bool, cid: Int, cancellation: ReplyCancellation,
                       reply: @escaping (ServerFrame) -> Void) throws {
         let liveRun = try ensureLive(record)
         let ended = record.state == .exited || record.state == .died || liveRun.ended != nil
@@ -678,13 +721,39 @@ final class DelegationService {
         let stopAt = liveRun.outputEnd
         if !follow, knowsEnd, stopAt <= from { return reply(.ack(cid: cid)) }
         var done = false
+        var replayDone = false
         var lastEvent = 0
+        let token = UUID()
+        var replay: Task<Void, Never>?
+        let close: () -> Void = { [weak liveRun] in
+            done = true
+            replay?.cancel()
+            liveRun?.subscribers[token] = nil
+        }
         let finish: (ServerFrame) -> Void = { frame in
             guard !done else { return }
-            done = true
+            close()
             reply(frame)
         }
-        let replay = Task { @MainActor in
+        let endIfReady: () -> Void = { [weak liveRun] in
+            guard replayDone, let end = liveRun?.ended else { return }
+            if hint, let missing = end.hint { return finish(.err(cid: cid, code: "missing_include", message: missing)) }
+            finish(.delegateExit(cid: cid, status: end.status))
+        }
+        if endFromRun {
+            liveRun.subscribers[token] = { update in
+                switch update {
+                case .ended: endIfReady()
+                case .lost(let message): finish(.err(cid: cid, code: "run_lost", message: message))
+                case .notice(let message): if !done { reply(.delegateNotice(cid: cid, message: message)) }
+                case .output: break
+                }
+            }
+        }
+        cancellation.onCancel { close() }
+        activeReplays += 1
+        replay = Task { @MainActor in
+            defer { self.activeReplays -= 1 }
             do {
                 for try await event in liveRun.link.events(runID: record.hostRunID, from: from) {
                     guard !done else { return }
@@ -694,11 +763,16 @@ final class DelegationService {
                         reply(.delegateOutput(cid: cid, stream: stream.rawValue, offset: offset, data: data))
                         if !follow, knowsEnd, offset + Int64(data.count) >= stopAt { return finish(.ack(cid: cid)) }
                     case .exited(let exit), .serviceDied(let exit):
+                        replayDone = true
+                        if endFromRun { return endIfReady() }
                         return finish(follow ? .delegateExit(cid: cid, status: exit.cliStatus) : .ack(cid: cid))
                     case .queued, .started:
                         break
                     }
                 }
+                guard !done else { return }
+                replayDone = true
+                if endFromRun { return endIfReady() }
                 finish(.ack(cid: cid))
             } catch {
                 finish(Self.refusal(cid: cid, Self.named(error, host: record.host)))
@@ -706,34 +780,45 @@ final class DelegationService {
         }
         if !follow, !knowsEnd, !ended {
             let idle = deps.replayIdle
+            let first = deps.replayFirstEvent
             Task { @MainActor in
+                // The first event may take a host round trip; after it, the replay comes all
+                // at once, so a quiet `idle` means it has caught up.
+                let step = min(idle, 0.1)
+                var waited: TimeInterval = 0
+                while !done, lastEvent == 0, waited < first {
+                    try? await Task.sleep(nanoseconds: UInt64(step * 1e9))
+                    waited += step
+                }
                 var seen = -1
                 while !done, seen != lastEvent {
                     seen = lastEvent
                     try? await Task.sleep(nanoseconds: UInt64(idle * 1e9))
                 }
-                replay.cancel()
                 finish(.ack(cid: cid))
             }
         }
         guard let timeout else { return }
-        expire(after: timeout, record, cid: cid) {
+        expire(after: timeout, record, cid: cid, cancellation: cancellation) {
             guard !done else { return false }
-            replay.cancel()
+            close()
             return true
-        } reply: { finish($0) }
+        } reply: { reply($0) }
     }
 
     /// After `seconds`, answers `wait_timeout` unless `claim` says the wait already ended. Only
     /// the wait gives up: the run carries on, and the agent can wait again.
-    private func expire(after seconds: TimeInterval, _ record: DelegatedRun, cid: Int, claim: @escaping () -> Bool,
-                        reply: @escaping (ServerFrame) -> Void) {
-        Task { @MainActor in
+    /// The timer ends with the reader too (`cancellation`), so a dropped `wait` leaves no
+    /// 9-minute sleeper behind.
+    private func expire(after seconds: TimeInterval, _ record: DelegatedRun, cid: Int, cancellation: ReplyCancellation,
+                        claim: @escaping () -> Bool, reply: @escaping (ServerFrame) -> Void) {
+        let timer = Task { @MainActor in
             try? await self.deps.sleep(seconds)
-            guard claim() else { return }
+            guard !Task.isCancelled, claim() else { return }
             reply(.err(cid: cid, code: "wait_timeout",
                        message: "\(record.id) is still running on \(record.host) after \(Int(seconds))s — flightdeck wait \(record.id) again, or flightdeck logs \(record.id)"))
         }
+        cancellation.onCancel { timer.cancel() }
     }
 
     /// The live watcher for `record`, starting one for a run this app instance did not start
@@ -743,6 +828,8 @@ final class DelegationService {
         let liveRun = try live[record.id] ?? LiveRun(link: link(for: record), watchedFromStart: false)
         live[record.id] = liveRun
         if liveRun.ended != nil || record.state == .exited || record.state == .died { return liveRun }
+        // A watcher that lost its link restarts on whatever link the directory has now.
+        if liveRun.monitor == nil { liveRun.link = try link(for: record) }
         monitor(record.id, liveRun)
         return liveRun
     }
@@ -848,9 +935,14 @@ final class DelegationService {
                               message: "no host given and no default_host in .flightdeck/delegate.toml — rerun with --on \(paired.joined(separator: "|"))")
     }
 
+    /// The run's link: the one it is watched on while that is up, else a fresh one from the
+    /// directory — a link that dropped is never reused, so the first request after a host
+    /// comes back does not fail on the corpse of the old one.
     private func link(for record: DelegatedRun) throws -> any HostLinking {
-        if let liveRun = live[record.id] { return liveRun.link }
-        return try deps.hosts.link(named: record.host)
+        if let liveRun = live[record.id], liveRun.link.isConnected { return liveRun.link }
+        let link = try deps.hosts.link(named: record.host)
+        live[record.id]?.link = link
+        return link
     }
 
     /// A run or service named by id, which must be the caller's own: another tab's run is

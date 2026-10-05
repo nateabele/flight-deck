@@ -60,6 +60,42 @@ final class DelegationStreamTests: XCTestCase {
         XCTAssertEqual(got.count, 2, "\(got)")
     }
 
+    /// A request's cancellation fires once its last frame is out, and when its connection
+    /// ends with the request still open — what stops a delegation replay with no reader.
+    func testAReplyCancellationFiresOnTheTerminalFrameAndOnDisconnect() async throws {
+        let path = "/tmp/fdrc-\(UUID().uuidString.prefix(8)).sock"
+        let server = FleetSocketServer()
+        defer { server.stop() }
+        server.onHello = { _, _ in [.snapshot(seq: 1, fleet: FleetSnapshot(), reason: .initial)] }
+        var tokens: [ReplyCancellation] = []
+        var replies: [(ServerFrame) -> Void] = []
+        server.onRequest = { client, cid, _, reply in
+            tokens.append(server.replyCancellation(for: client, cid: cid)!)
+            replies.append(reply)
+        }
+        try await server.startLocal(path: path)
+        let client = FleetClient(localCaller: nil)
+        let asked = expectation(description: "two requests")
+        client.onFrame = { frame in
+            if case .snapshot = frame {
+                client.send(FleetRequest.delegate(.ps))
+                client.send(FleetRequest.delegate(.ps))
+            }
+        }
+        client.connect(toLocal: path, lastSeq: 0)
+        while tokens.count < 2 { try await Task.sleep(nanoseconds: 10_000_000) }
+        asked.fulfill()
+        await fulfillment(of: [asked], timeout: 1)
+        replies[0](.delegateNotice(cid: 1, message: "x"))
+        XCTAssertFalse(tokens[0].isCancelled, "a stream frame leaves it open")
+        replies[0](.delegateExit(cid: 1, status: 0))
+        XCTAssertTrue(tokens[0].isCancelled, "the terminal frame closes it")
+        XCTAssertFalse(tokens[1].isCancelled)
+        client.disconnect()
+        for _ in 0..<500 where !tokens[1].isCancelled { try await Task.sleep(nanoseconds: 10_000_000) }
+        XCTAssertTrue(tokens[1].isCancelled, "the connection ending closes what was still open")
+    }
+
     /// Every pre-existing request is unchanged: its first reply is its only reply.
     func testAnOrdinaryRequestIsStillAnsweredOnce() async throws {
         let got = try await frames(for: .hostList) { cid, reply in
@@ -92,9 +128,21 @@ final class DelegationReplyStreamTests: XCTestCase {
         stream.sent(mebibyte.count)
         guard case .stream(.delegateOutput, _) = stream.admit(.delegateOutput(cid: 1, stream: "stdout", offset: 4 << 20, data: mebibyte))
         else { return XCTFail("a freed window takes more") }
-        guard case .stream(.err(1, "slow_reader", _), 0) = stream.admit(.delegateOutput(cid: 1, stream: "stdout", offset: 5 << 20, data: mebibyte))
+        guard case .stream(.err(1, "slow_reader", let message?), 0) = stream.admit(.delegateOutput(cid: 1, stream: "stdout", offset: 5 << 20, data: mebibyte))
         else { return XCTFail("past the mark, the stream ends") }
+        XCTAssertFalse(message.contains("flightdeck wait"), "no run known yet, so no hint to give")
         XCTAssertEqual(stream.admit(.delegateExit(cid: 1, status: 0)), .drop)
+    }
+
+    /// A CLI too old to reattach prints the `slow_reader` line as is: it ends on the step
+    /// that gets the run back.
+    func testSlowReaderNamesTheRunToWaitOn() {
+        let stream = ReplyStream()
+        _ = stream.admit(.delegateStarted(cid: 1, WireDelegateStarted(runID: "r5", host: "mini")))
+        _ = stream.admit(.delegateOutput(cid: 1, stream: "stdout", offset: 0, data: Data(count: 4 << 20)))
+        guard case .stream(.err(_, "slow_reader", let message?), _) = stream.admit(.delegateOutput(cid: 1, stream: "stdout", offset: 4 << 20, data: Data(count: 1)))
+        else { return XCTFail() }
+        XCTAssertTrue(message.hasSuffix("flightdeck wait r5 to pick it back up"), message)
     }
 
     /// One oversized chunk with nothing in flight is still sent: the bound is on a backlog.
