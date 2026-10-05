@@ -731,10 +731,11 @@ public enum ServerFrame: Codable, Equatable, Sendable {
     /// a reconnect. Printed as `flightdeck: <message>`.
     case delegateNotice(cid: Int, message: String)
     /// Run output. `stream` is "stdout" | "stderr" | "pty", a `String` for `WireHost.status`'s
-    /// reason.
-    case delegateOutput(cid: Int, stream: String, data: Data)
-    /// The run ended; `status` is what the CLI exits with (the code, or 128+signal). The last
-    /// frame of a stream.
+    /// reason. `offset` is `data`'s byte offset in the run's output, which a CLI that lost
+    /// the app resumes from with `delegate.logs`/`delegate.wait` `from`.
+    case delegateOutput(cid: Int, stream: String, offset: Int64, data: Data)
+    /// The run ended; `status` is what the CLI exits with (the code, or 128+signal). A
+    /// terminal frame: nothing follows it on its `cid`.
     case delegateExit(cid: Int, status: Int32)
     /// The reply to `delegate.ps`.
     case delegateRuns(cid: Int, [WireDelegateRunRow])
@@ -746,11 +747,13 @@ public enum ServerFrame: Codable, Equatable, Sendable {
     case recipes(cid: Int, WireRecipeBook)
     /// The reply to `recipe.check`: one line per problem, empty when the file is valid.
     case recipeCheck(cid: Int, problems: [String])
+    /// The reply to `host.disk`.
+    case hostDisk(cid: Int, [WireWorkspaceUsage])
 
     enum CodingKeys: String, CodingKey {
         case t, seq, fleet, reason, cid, code, message, page, options, endpoints
         case conversations, hits, session, closed, detail, plan, hosts, info
-        case run, stream, data, status, runs, patch, applied, recipes, problems
+        case run, stream, data, status, runs, patch, applied, recipes, problems, offset, usage
     }
 
     /// Undotted, deliberately, and the newer five along with it — see the decoder below.
@@ -758,7 +761,7 @@ public enum ServerFrame: Codable, Equatable, Sendable {
         case snapshot, ack, err, page, options, endpoints, conversations, hits, session
         case ask, closed, intakeDetail, intakePlan, hosts, hostInfo
         case delegateStarted, delegateNotice, delegateOutput, delegateExit, delegateRuns
-        case delegatePatch, delegateApplied, recipes, recipeCheck
+        case delegatePatch, delegateApplied, recipes, recipeCheck, hostDisk
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -841,10 +844,11 @@ public enum ServerFrame: Codable, Equatable, Sendable {
             try c.encode(Tag.delegateNotice, forKey: .t)
             try c.encode(cid, forKey: .cid)
             try c.encode(message, forKey: .message)
-        case .delegateOutput(let cid, let stream, let data):
+        case .delegateOutput(let cid, let stream, let offset, let data):
             try c.encode(Tag.delegateOutput, forKey: .t)
             try c.encode(cid, forKey: .cid)
             try c.encode(stream, forKey: .stream)
+            try c.encode(offset, forKey: .offset)
             try c.encode(data, forKey: .data)
         case .delegateExit(let cid, let status):
             try c.encode(Tag.delegateExit, forKey: .t)
@@ -870,6 +874,10 @@ public enum ServerFrame: Codable, Equatable, Sendable {
             try c.encode(Tag.recipeCheck, forKey: .t)
             try c.encode(cid, forKey: .cid)
             try c.encode(problems, forKey: .problems)
+        case .hostDisk(let cid, let usage):
+            try c.encode(Tag.hostDisk, forKey: .t)
+            try c.encode(cid, forKey: .cid)
+            try c.encode(usage, forKey: .usage)
         }
     }
 
@@ -950,6 +958,7 @@ public enum ServerFrame: Codable, Equatable, Sendable {
             case .delegateOutput:
                 self = .delegateOutput(cid: try c.decode(Int.self, forKey: .cid),
                                        stream: try c.decode(String.self, forKey: .stream),
+                                       offset: try c.decode(Int64.self, forKey: .offset),
                                        data: try c.decode(Data.self, forKey: .data))
             case .delegateExit:
                 self = .delegateExit(cid: try c.decode(Int.self, forKey: .cid),
@@ -969,6 +978,9 @@ public enum ServerFrame: Codable, Equatable, Sendable {
             case .recipeCheck:
                 self = .recipeCheck(cid: try c.decode(Int.self, forKey: .cid),
                                     problems: try c.decode([String].self, forKey: .problems))
+            case .hostDisk:
+                self = .hostDisk(cid: try c.decode(Int.self, forKey: .cid),
+                                 try c.decode([WireWorkspaceUsage].self, forKey: .usage))
             }
             return
         }
@@ -989,9 +1001,9 @@ public extension ServerFrame {
              .searchHits(let cid, _), .session(let cid, _), .phoneRequest(let cid, _),
              .intakeDetail(let cid, _), .intakePlan(let cid, _), .hostList(let cid, _),
              .hostInfo(let cid, _), .delegateStarted(let cid, _), .delegateNotice(let cid, _),
-             .delegateOutput(let cid, _, _), .delegateExit(let cid, _), .delegateRuns(let cid, _),
+             .delegateOutput(let cid, _, _, _), .delegateExit(let cid, _), .delegateRuns(let cid, _),
              .delegatePatch(let cid, _), .delegateApplied(let cid, _), .recipes(let cid, _),
-             .recipeCheck(let cid, _):
+             .recipeCheck(let cid, _), .hostDisk(let cid, _):
             return cid
         }
     }

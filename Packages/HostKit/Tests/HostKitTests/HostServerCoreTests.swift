@@ -70,6 +70,20 @@ final class HostServerCoreTests: XCTestCase {
         guard case .helloAck = try p.frames().first else { return XCTFail() }
     }
 
+    /// A 1.0 controller (from before delegation) still connects to a 1.1 host and still gets
+    /// `host.info`. The hello is the 1.0 build's literal bytes, not one encoded here, so the
+    /// test cannot pass by a change that moved both ends of this build together.
+    func testA10HelloIsAcceptedByA11Core() throws {
+        XCTAssertEqual(ProtocolVersion.current, ProtocolVersion(major: 1, minor: 1))
+        let c = core(); let p = FakePeer()
+        c.receive(text: #"{"caps":["host.info"],"name":"laptop","t":"hello","v":{"major":1,"minor":0}}"#, from: p)
+        c.receive(text: #"{"id":2,"req":{"op":"host.info"},"t":"req"}"#, from: p)
+        let f = try p.frames()
+        XCTAssertEqual(f.first, .helloAck(protocolVersion: .current, capabilities: [.hostInfo], hostName: "mini"))
+        guard f.count == 2, case .reply(2, .hostInfo) = f[1] else { return XCTFail("\(f)") }
+        XCTAssertFalse(p.closed)
+    }
+
     func testGarbageIsAnErrorNotACrash() throws {
         let c = core(); let p = FakePeer()
         c.receive(text: try hello(), from: p)

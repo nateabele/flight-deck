@@ -21,6 +21,22 @@ import Foundation
 // request names (`sync.push`, `run.result`, `run.artifacts`, `port.open`) is opened by the
 // controller, which then names its id in the request; the host claims it with
 // `ChannelAccepting.accept`.
+//
+// Rules both muxes follow (C1 implements them; each names the failure it prevents):
+//   - A credit frame is an additive increment, never an absolute window: frames can cross in
+//     flight, and an absolute value would let a stale grant shrink or double the window.
+//   - Odd ids belong to the controller, even ids to the host, and no id is reused on a
+//     connection. Two sides opening at once can then never collide, and a late frame for a
+//     closed channel can never land in a new one.
+//   - A frame for an unknown or closed id is dropped, not answered: the other side may have
+//     closed it a moment ago, and an error reply would race its own close.
+//   - Data that arrives before the host's `accept` is buffered up to `initialCredit`; anything
+//     past that closes the channel. The sender may write that much before the request that
+//     names the channel is even read, and a peer exceeding its credit is broken.
+//   - When a request naming a channel fails, both sides cancel that channel, so neither keeps
+//     a buffer for bytes nobody will read.
+//   - A data payload is at most `maxPayload` (64 KiB), so one channel's frame never holds the
+//     shared connection long enough to stall the control frames behind it.
 
 public typealias ChannelID = UInt32
 
@@ -69,6 +85,8 @@ public struct ChannelFrame: Sendable, Equatable {
     public static let headerLength = 5
     /// 256 KiB per channel per direction, granted implicitly at open.
     public static let initialCredit: UInt32 = 256 * 1024
+    /// The largest data payload one frame may carry.
+    public static let maxPayload = 64 * 1024
 
     public let channel: ChannelID
     public let kind: ChannelFrameKind
