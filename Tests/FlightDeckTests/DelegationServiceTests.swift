@@ -163,6 +163,8 @@ final class FakePreflight: Preflighting {
 
 final class FakeSync: SnapshotMaking, BundleMaking, @unchecked Sendable {
     var snapshots = 0
+    /// Every bundle file made, for the test's tearDown to remove.
+    var made: [URL] = []
     func snapshot(worktree: URL, host: String, include: [String]) async throws -> SnapshotRef {
         snapshots += 1
         return SnapshotRef(repoRoot: "root", wtKey: "wt", worktreeName: worktree.lastPathComponent,
@@ -171,6 +173,7 @@ final class FakeSync: SnapshotMaking, BundleMaking, @unchecked Sendable {
     func bundle(worktree: URL, snapshot: SnapshotRef, haves: [String]) async throws -> URL {
         let file = FileManager.default.temporaryDirectory.appendingPathComponent("fd-bundle-\(UUID().uuidString)")
         try Data("bundle".utf8).write(to: file)
+        made.append(file)
         return file
     }
 }
@@ -227,6 +230,10 @@ final class DelegationServiceTests: XCTestCase {
     private var waitTimeouts: [TimeInterval] = []
     private let tab = UUID()
     private let otherTab = UUID()
+    /// Service directories and registry files this test made under the shared temp directory.
+    private var temporaries: [URL] = []
+    /// `tempRepo`'s repos; static because it is.
+    private static var repos: [URL] = []
 
     override func setUp() async throws {
         hosts = FakeHosts()
@@ -239,8 +246,24 @@ final class DelegationServiceTests: XCTestCase {
         makeService(worktrees: FakeWorktrees())
     }
 
+    override func tearDown() async throws {
+        service = nil
+        for url in temporaries + (sync?.made ?? []) + Self.repos { try? FileManager.default.removeItem(at: url) }
+        temporaries = []
+        Self.repos = []
+    }
+
+    /// A registry file under the temp directory, removed in tearDown.
+    private func registryFile() -> URL {
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("fd-reg-\(UUID().uuidString).json")
+        temporaries.append(file)
+        return file
+    }
+
     private func dependencies(worktrees: any WorktreeLocating = FakeWorktrees()) -> DelegationService.Dependencies {
-        .init(
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("fd-deleg-\(UUID().uuidString)")
+        temporaries.append(directory)
+        return .init(
             hosts: hosts, preflight: preflight, snapshots: sync, bundles: sync, results: results,
             config: config, worktrees: worktrees, sessionTitle: { _ in "alpha" },
             // Records the bound; a short one elapses at once, a long one (the 9-minute default)
@@ -249,7 +272,7 @@ final class DelegationServiceTests: XCTestCase {
                 self?.waitTimeouts.append(seconds)
                 if seconds >= 60 { try await Task.sleep(nanoseconds: 3_600_000_000_000) }
             },
-            directory: FileManager.default.temporaryDirectory.appendingPathComponent("fd-deleg-\(UUID().uuidString)"),
+            directory: directory,
             replayIdle: 0.05, replayFirstEvent: 0.2)
     }
 
@@ -420,8 +443,11 @@ final class DelegationServiceTests: XCTestCase {
         XCTAssertEqual(failed.all.last, .err(cid: 1, code: "missing_include",
                                              message: "mini: .env is ignored locally and wasn't sent — rerun with --include .env or add it to delegate.toml"))
 
-        // No hint for: a tracked file, a path that doesn't exist here, one that was sent, or a run that succeeded.
+        // No hint for: a tracked file, a path that doesn't exist here (unignored, and ignored
+        // under `build/`, which only the existence check rules out), one that was sent, or a
+        // run that succeeded.
         for (stderr, include, code) in [("tracked.txt: missing", [String](), Int32(1)), ("nope.env: missing", [], 1),
+                                        ("build/missing.log: missing", [], 1),
                                         (".env: missing", [".env"], 1), (".env: missing", [], 0)] {
             let frames = send(.run(WireDelegateRun(cwd: repo.path, host: "mini", command: ["make"], include: include)))
             _ = try await started(frames)
@@ -629,7 +655,7 @@ final class DelegationServiceTests: XCTestCase {
 
     /// After a relaunch the app has no live watcher; `logs` still replays what the host spooled.
     func testLogsAfterARelaunchReplaysTheSpool() async throws {
-        let file = FileManager.default.temporaryDirectory.appendingPathComponent("fd-reg-\(UUID().uuidString).json")
+        let file = registryFile()
         service = DelegationService(registry: RunRegistry(file: file), dependencies: dependencies())
         let frames = send(.run(WireDelegateRun(cwd: "/w/proj", host: "mini", command: ["make"], detach: true)))
         let id = try await started(frames)
@@ -755,7 +781,7 @@ final class DelegationServiceTests: XCTestCase {
 
     /// Every run still going is watched again at launch, so its end is recorded unasked.
     func testALaunchWatchesRunsStillGoing() async throws {
-        let file = FileManager.default.temporaryDirectory.appendingPathComponent("fd-reg-\(UUID().uuidString).json")
+        let file = registryFile()
         service = DelegationService(registry: RunRegistry(file: file), dependencies: dependencies())
         let frames = send(.run(WireDelegateRun(cwd: "/w/proj", host: "mini", command: ["make"], detach: true)))
         let id = try await started(frames)
@@ -809,7 +835,10 @@ final class DelegationServiceTests: XCTestCase {
         let frames = send(.run(WireDelegateRun(cwd: "/w/proj", host: "mini", command: ["make"], detach: true)))
         let id = try await started(frames)
         mini.emit(hostRunID(), .output(stream: .stdout, offset: 0, data: Data("abc".utf8)))
-        try await Task.sleep(nanoseconds: 20_000_000)
+        // The monitor takes events in order, so once it has taken the `queued` behind "abc",
+        // "abc" is in the end `logs` starts from. A sleep here only hoped it had.
+        mini.emit(hostRunID(), .queued(position: 1, on: .slot, holder: nil))
+        try await until("the monitor took abc") { self.service.registry.run(id)?.state == .queued }
         let logs = send(.logs(run: id, follow: false, from: nil))
         mini.emit(hostRunID(), .output(stream: .stdout, offset: 3, data: Data("def".utf8)))
         try await until { logs.all.contains(where: terminal) }
@@ -832,7 +861,7 @@ final class DelegationServiceTests: XCTestCase {
     /// A run that finished before a relaunch: a reattach answers its code at once, rather than
     /// waiting on an end nothing will ever publish.
     func testAReattachToARunThatEndedBeforeARelaunchAnswersAtOnce() async throws {
-        let file = FileManager.default.temporaryDirectory.appendingPathComponent("fd-reg-\(UUID().uuidString).json")
+        let file = registryFile()
         service = DelegationService(registry: RunRegistry(file: file), dependencies: dependencies())
         let frames = send(.run(WireDelegateRun(cwd: "/w/proj", host: "mini", command: ["make"], detach: true)))
         let id = try await started(frames)
@@ -868,10 +897,15 @@ final class DelegationServiceTests: XCTestCase {
             try Data("x".utf8).write(to: url)
         }
         try Data(gitignore.utf8).write(to: root.appendingPathComponent(".gitignore"))
+        repos.append(root)
         let git = Process()
         git.executableURL = URL(fileURLWithPath: "/usr/bin/env")
         git.arguments = ["git", "init", "-q"]
         git.currentDirectoryURL = root
+        // Neither the user's ~/.gitconfig nor their global excludes may decide what this repo
+        // ignores: the hint tests assert exactly what `.gitignore` says.
+        git.environment = ["PATH": ProcessInfo.processInfo.environment["PATH"] ?? "/usr/bin:/bin",
+                           "HOME": root.path, "GIT_CONFIG_GLOBAL": "/dev/null"]
         try git.run()
         git.waitUntilExit()
         return root

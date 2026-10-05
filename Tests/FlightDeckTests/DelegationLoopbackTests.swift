@@ -92,6 +92,19 @@ final class DelegationLoopbackTests: XCTestCase {
     }
 
     override func tearDown() async throws {
+        // Every run leads its own process group, and stopping the server does not touch the
+        // runner, so a test that fails between `up` and `down` would leave its service (a
+        // perl accept loop holding a port) running after the suite. Every run the runner has a
+        // spool directory for is ended here, failed test or not.
+        if let runner, let runs = try? FileManager.default.contentsOfDirectory(
+            atPath: root.appendingPathComponent("host/runs").path) {
+            for id in runs {
+                switch runner.phase(runID: id) {
+                case .queued?, .running?: try? await runner.down(runID: id)
+                default: break
+                }
+            }
+        }
         hostService?.forget(slot: key.slot)
         server?.stop()
         try? FileManager.default.removeItem(at: root)
@@ -236,7 +249,8 @@ final class DelegationLoopbackTests: XCTestCase {
     }
 
     /// The run's edits come back as a patch, are applied on request, and the host's copy is
-    /// dropped only by the controller's `run.ack` after it stored the bundle (ruling 24).
+    /// dropped only by the controller's `run.ack` after it stored the bundle, so a transfer cut
+    /// short loses nothing: the controller simply fetches it again.
     func testResultPatchComesBackAndIsAcked() async throws {
         let repo = try repo()
         let frames = try await run("echo edited > a.txt", in: repo, as: tabA)
@@ -337,14 +351,26 @@ final class DelegationLoopbackTests: XCTestCase {
 
     /// Two tabs want the host's one screen: the second is told who holds it, by this Mac's
     /// run id and the holder tab's title, and runs once the first lets go.
+    ///
+    /// The first run holds the screen until the test creates `gate`, and the test creates it
+    /// only once the second has been told it is queued. A fixed hold (`sleep 1.5`) raced the
+    /// second run's preflight, snapshot and push: under load the first could end before the
+    /// second ever queued.
     func testScreenQueueAcrossTwoSessions() async throws {
         let repo = try repo()
-        let first = send(.run(WireDelegateRun(cwd: repo.path, host: "mini", command: ["sleep 1.5; echo first"],
+        let gate = root.appendingPathComponent("screen-gate")
+        let first = send(.run(WireDelegateRun(cwd: repo.path, host: "mini",
+                                              command: ["while [ ! -e '\(gate.path)' ]; do sleep 0.05; done; echo first"],
                                               screen: true)), as: tabA)
         try await waitUntil(timeout: 30) { self.screen.holder != nil }
         let firstID = try XCTUnwrap(first.started?.runID)
 
-        let second = try await run("echo second", in: repo, as: tabB, screen: true)
+        let second = send(.run(WireDelegateRun(cwd: repo.path, host: "mini", command: ["echo second"], screen: true)),
+                          as: tabB)
+        try await waitUntil(timeout: 60) { second.notices.contains { $0.hasPrefix("waiting for mini's screen") } || second.isDone }
+        XCTAssertNil(second.exit, "the second ran while the first still held the screen")
+        try Data().write(to: gate)
+        try await done(second)
         try await done(first)
         XCTAssertEqual(first.exit, 0)
         XCTAssertEqual(second.exit, 0)
@@ -392,6 +418,64 @@ final class DelegationLoopbackTests: XCTestCase {
         try await done(exec)
         XCTAssertEqual(exec.exit, 0, "\(exec.all)")
         XCTAssertEqual(exec.output(), "alpha\nkept\n")
+    }
+
+    /// `logs` of a finished run replays its whole output, contiguous, and from an offset only
+    /// what follows it, both from the app that watched it and from a relaunched one that has
+    /// only its disk copy and the host. The unit suites prove each half against a fake.
+    func testLogsReplaysAFinishedRunBeforeAndAfterARelaunch() async throws {
+        let repo = try repo()
+        let lines = (1...40).map { "line\($0)\n" }.joined()
+        let frames = try await run("for i in $(seq 1 40); do echo line$i; done", in: repo, as: tabA)
+        XCTAssertEqual(frames.exit, 0)
+        let id = try XCTUnwrap(frames.started?.runID)
+
+        let logs = send(.logs(run: id, follow: false, from: nil), as: tabA)
+        try await done(logs)
+        XCTAssertEqual(logs.all.last, .ack(cid: 1), "\(logs.all.suffix(2))")
+        XCTAssertEqual(logs.output(), lines)
+        assertContiguous(logs)
+
+        service = DelegationServiceFactory.live(hostService: hostService, stateDirectory: state,
+                                                sessionTitle: { [tabA] in $0 == tabA ? "alpha" : nil })
+        let whole = send(.logs(run: id, follow: false, from: nil), as: tabA)
+        try await done(whole)
+        XCTAssertEqual(whole.output(), lines, "after a relaunch: \(whole.all.suffix(2))")
+        assertContiguous(whole)
+
+        let tail = send(.logs(run: id, follow: false, from: 6), as: tabA)
+        try await done(tail)
+        XCTAssertEqual(tail.output(), String(lines.dropFirst(6)), "\(tail.all.suffix(2))")
+    }
+
+    /// §6.2 on real processes: a service whose controller is gone is downed by the host once
+    /// its `orphan_timeout` runs out, and not while the controller is still connected. The
+    /// timeout is shortened through the wire's `orphanTimeout`, which the CLI does not set,
+    /// so the service is started with a raw `run.start` on the snapshot a normal run synced.
+    func testAnOrphanedServiceIsDownedAfterItsTimeout() async throws {
+        let repo = try repo()
+        let synced = try await run("true", in: repo, as: tabA)
+        let snapshot = try XCTUnwrap(service.registry.run(XCTUnwrap(synced.started?.runID))?.snapshot)
+        let pidFile = root.appendingPathComponent("service.pid")
+        let link = try XCTUnwrap(hostService.link(slot: key.slot))
+        let spec = RunSpec(command: "echo $$ > '\(pidFile.path)'; exec sleep 600", subdir: "", env: [:], pty: false,
+                           screen: false, service: true, downCommand: nil, ports: [], orphanTimeout: 1)
+        let reply = try await link.request(.delegation(.runStart(ref: snapshot, spec: spec, owner: "alpha", apply: false)))
+        guard case .delegation(.runStart(let hostID)) = reply else { return XCTFail("\(reply)") }
+        try await waitUntil(timeout: 30) { (try? String(contentsOf: pidFile, encoding: .utf8))?.isEmpty == false }
+        let pid = try XCTUnwrap(Int32(String(contentsOf: pidFile, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)))
+
+        // Connected for longer than the timeout: the service keeps running.
+        try await Task.sleep(nanoseconds: 1_500_000_000)
+        XCTAssertEqual(runner.phase(runID: hostID), .running)
+        XCTAssertEqual(kill(pid, 0), 0, "downed while its controller was still connected")
+
+        link.stop()
+        try await waitUntil(timeout: 20) {
+            if case .running? = self.runner.phase(runID: hostID) { false } else { true }
+        }
+        // The process is gone, not just forgotten by the runner.
+        try await waitUntil(timeout: 10) { kill(pid, 0) == -1 && errno == ESRCH }
     }
 
     // MARK: Sockets

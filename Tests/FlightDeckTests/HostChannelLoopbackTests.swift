@@ -136,16 +136,15 @@ final class HostChannelLoopbackTests: XCTestCase {
         let meta = NWProtocolWebSocket.Metadata(opcode: .text)
         c.send(content: Data(request.utf8), contentContext: .init(identifier: "t", metadata: [meta]),
                isComplete: true, completion: .contentProcessed { _ in })
-        let started = Date()
         Self.sendBinary(ChannelFrame(channel: 1, kind: .data, payload: Data("ping".utf8)).encoded(), on: c)
         Self.sendBinary(ChannelFrame(channel: 1, kind: .eof).encoded(), on: c)
         let host = await muxes.first()
         try await Self.echo(on: host, 1)
 
         // The next message must be the echo, binary; the host.info reply (text) fails this.
+        // The order is the whole proof: a wall-clock bound on top of it only measured load.
         let data = try ChannelFrame(decoding: try await Self.receiveBinary(on: c))
         XCTAssertEqual(data, ChannelFrame(channel: 1, kind: .data, payload: Data("ping!".utf8)))
-        XCTAssertLessThan(Date().timeIntervalSince(started), 1.5, "the channel waited for host.info")
     }
 
     /// The controller's half: a channel from `HostLink.openChannel()` reaches the host's mux,

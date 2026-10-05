@@ -69,13 +69,16 @@ final class DelegationStreamTests: XCTestCase {
         server.onHello = { _, _ in [.snapshot(seq: 1, fleet: FleetSnapshot(), reason: .initial)] }
         var tokens: [ReplyCancellation] = []
         var replies: [(ServerFrame) -> Void] = []
+        // Fulfilled by the server as the second request lands, so the wait below is bounded
+        // by the timeout instead of a poll that would hang the suite if one never arrived.
+        let asked = expectation(description: "two requests")
         server.onRequest = { client, cid, _, reply in
             tokens.append(server.replyCancellation(for: client, cid: cid)!)
             replies.append(reply)
+            if tokens.count == 2 { asked.fulfill() }
         }
         try await server.startLocal(path: path)
         let client = FleetClient(localCaller: nil)
-        let asked = expectation(description: "two requests")
         client.onFrame = { frame in
             if case .snapshot = frame {
                 client.send(FleetRequest.delegate(.ps))
@@ -83,9 +86,7 @@ final class DelegationStreamTests: XCTestCase {
             }
         }
         client.connect(toLocal: path, lastSeq: 0)
-        while tokens.count < 2 { try await Task.sleep(nanoseconds: 10_000_000) }
-        asked.fulfill()
-        await fulfillment(of: [asked], timeout: 1)
+        await fulfillment(of: [asked], timeout: 10)
         replies[0](.delegateNotice(cid: 1, message: "x"))
         XCTAssertFalse(tokens[0].isCancelled, "a stream frame leaves it open")
         replies[0](.delegateExit(cid: 1, status: 0))
