@@ -18,6 +18,8 @@ final class FakeSwarmBackend: SwarmBackend {
     var ready: [ReadyTask] = []
     var readyFails = false
     var claimResults: [String: ClaimOutcome] = [:]
+    /// Runs inside `releaseReservations`, so a test can act while a reuse is mid-flight.
+    var onReleaseReservations: (() -> Void)?
     var statuses: [String: TaskStatusReading] = [:]
     var details: [String: TaskDetail] = [:]
     struct ClaimCall: Equatable { let task: String; let actor: String }
@@ -54,7 +56,7 @@ final class FakeSwarmBackend: SwarmBackend {
         written.append(WriteCall(task: task, block: block)); return true
     }
     func releaseReservations(agent: String, project: URL) async -> Bool {
-        released.append(agent); log.add("release \(agent)"); return true
+        released.append(agent); log.add("release \(agent)"); onReleaseReservations?(); return true
     }
 }
 
@@ -66,6 +68,10 @@ final class FakeSwarmAgentLauncher: SwarmAgentLauncher {
     var deliverFailures: [UUID: SpawnError] = [:]
     var resetResults: [UUID: Bool] = [:]
     var onCreate: ((SessionRef) -> Void)?
+    /// Runs at the start of every `createAgent`, success or not.
+    var onCreateAttempt: (() -> Void)?
+    /// Runs inside `resetContext`, before its result is returned.
+    var onReset: (() -> Void)?
     /// Structs rather than tuples so tests can map them with key paths.
     struct CreateCall { let task: String; let block: ExecutionBlock; let lease: AccountLease? }
     struct DeliverCall { let session: UUID; let prompt: String }
@@ -82,6 +88,7 @@ final class FakeSwarmAgentLauncher: SwarmAgentLauncher {
 
     func createAgent(task: TaskRef, block: ExecutionBlock, lease: AccountLease?) async -> Result<SessionRef, SpawnError> {
         created.append(CreateCall(task: task.id, block: block, lease: lease))
+        onCreateAttempt?()
         let result = createResults.isEmpty
             ? .success(SessionRef(id: UUID(), agentName: "Agent\(created.count)"))
             : createResults.removeFirst()
@@ -99,6 +106,7 @@ final class FakeSwarmAgentLauncher: SwarmAgentLauncher {
     }
     func resetContext(_ session: UUID) async -> Bool {
         resets.append(session); log.add("reset \(name(session))")
+        onReset?()
         return resetResults[session] ?? true
     }
 }

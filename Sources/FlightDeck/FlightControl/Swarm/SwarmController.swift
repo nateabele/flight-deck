@@ -285,15 +285,23 @@ final class SwarmController {
         let key = ConfigKey(block)
         let created = await deps.launcher.createAgent(task: TaskRef(id: task.id, project: project), block: block, lease: lease)
         pendingSpawns[block.pool] = max(0, (pendingSpawns[block.pool] ?? 1) - 1)
-        switch created {
+        // An agent with no name cannot claim (br would record an empty actor), so a launch that
+        // returns none is a failed launch; its tab is left alone, as with any failed spawn.
+        let outcome: Result<(ref: SessionRef, name: String), SpawnError> = created.flatMap { ref in
+            guard let name = ref.agentName, !name.isEmpty else {
+                return .failure(.launchFailed("the launcher returned no agent name"))
+            }
+            return .success((ref, name))
+        }
+        switch outcome {
         case .failure(let error):
             if let lease { deps.allocator.release(lease) }
             noteSpawnFailure(key, error: error)
-        case .success(let ref):
+        case .success(let (ref, name)):
             record.spawnFailures[key.rawValue] = nil
-            record.agents.append(SwarmAgentRecord(session: ref.id, agentName: ref.agentName ?? "", block: block,
+            record.agents.append(SwarmAgentRecord(session: ref.id, agentName: name, block: block,
                                                   lease: lease, task: nil, state: .starting, stateSince: now()))
-            log(.spawn, task: task.id, session: ref.id, detail: "\(ref.agentName ?? "?") on \(key)")
+            log(.spawn, task: task.id, session: ref.id, detail: "\(name) on \(key)")
             await claimAndPrompt(task, session: ref.id)
         }
     }
@@ -306,10 +314,16 @@ final class SwarmController {
         if !(await deps.backend.releaseReservations(agent: agent.agentName, project: project)) {
             log(.error, session: session, detail: "could not release \(agent.agentName)'s reservations")
         }
+        // stop() may have retired this agent (lease released) while the release ran: never wake,
+        // reset or type into it.
+        guard record.state != .stopped, record.agent(session)?.state != .done else { return }
         deps.host.wakeIfAsleep(session)
         guard await deps.launcher.resetContext(session) else {
-            record.update(session) {
-                $0.state = .idle; $0.stateSince = now(); $0.excludedFromReuse = true; $0.marker = "reset failed"
+            // ...or while the reset ran: a retired agent stays retired.
+            if record.agent(session)?.state != .done {
+                record.update(session) {
+                    $0.state = .idle; $0.stateSince = now(); $0.excludedFromReuse = true; $0.marker = "reset failed"
+                }
             }
             log(.resetFailed, task: task.id, session: session, detail: "spawning a fresh agent instead")
             // Spec §10: spawn a new agent instead. The task is still unclaimed.
@@ -366,17 +380,29 @@ final class SwarmController {
         }
     }
 
-    /// Task 7f replaces this body with the spec §10 stuck-at-start handling.
     private func deliveryFailed(_ session: UUID, task: String, error: SpawnError) async {
+        // Spec §10: the claim goes back to open and the agent is left alone (not killed), but a
+        // tab that never showed a composer is never typed into again.
         _ = await deps.backend.returnToOpen(task, project: project)
         becomeIdle(session)
-        log(.error, task: task, session: session, detail: Self.describe(error))
+        record.update(session) {
+            $0.excludedFromReuse = true
+            $0.marker = error == .composerTimeout ? "stuck at start" : "prompt failed"
+        }
+        log(error == .composerTimeout ? .stuck : .error, task: task, session: session, detail: Self.describe(error))
     }
 
-    /// Task 7f replaces this body with the three-in-a-row pause.
     private func noteSpawnFailure(_ key: ConfigKey, error: SpawnError) {
-        record.spawnFailures[key.rawValue, default: 0] += 1
+        let count = (record.spawnFailures[key.rawValue] ?? 0) + 1
+        record.spawnFailures[key.rawValue] = count
         log(.spawnFailed, detail: "\(key): \(Self.describe(error))")
+        // Spec §10: three in a row on one config pause the swarm, so a broken login or a missing
+        // Agent Mail does not chew through every ready task. Only a running swarm pauses: a
+        // launch that fails after stop() must not resurrect the swarm as paused.
+        guard count >= SwarmTiming.spawnFailureLimit, record.state == .running else { return }
+        record.state = .paused
+        record.banner = "Paused: \(count) launches in a row failed for \(key) — \(Self.describe(error))"
+        log(.pause, detail: record.banner ?? "")
     }
 
     private func becomeIdle(_ session: UUID) {
