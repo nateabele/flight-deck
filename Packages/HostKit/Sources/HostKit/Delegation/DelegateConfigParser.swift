@@ -58,7 +58,13 @@ public enum DelegateConfigParser {
     public static func load(projectRoot: URL) throws -> DelegateConfigParseResult? {
         let url = fileURL(projectRoot: projectRoot)
         guard FileManager.default.fileExists(atPath: url.path) else { return nil }
-        return try parse(String(contentsOf: url, encoding: .utf8))
+        // Decoded here rather than by `String(contentsOf:encoding:)`, whose Cocoa error would
+        // reach `recipe check` and the 125 line as an opaque "couldn't be opened" with no hint
+        // that the file is simply in the wrong encoding.
+        guard let text = String(data: try Data(contentsOf: url), encoding: .utf8) else {
+            throw DelegateConfigIssue(.error, "delegate.toml is not valid UTF-8; save it as UTF-8")
+        }
+        return try parse(text)
     }
 
     /// Throws the first `DelegateConfigIssue` with severity `.error`.
@@ -369,8 +375,18 @@ struct TOMLReader {
     private var index = 0
     private var line = 1
 
+    /// The deepest an array or inline table may nest. The reader recurses per level, and the
+    /// file is checked in — a cloned repo controls it — so an unbounded `[[[…` 100,000 deep
+    /// overflowed the stack and crashed Flight Deck on every launch that read it. §8 needs
+    /// one level; 32 leaves room for anything a person would write.
+    static let maxDepth = 32
+
     init(_ text: String) {
-        scalars = Array(text.unicodeScalars)
+        var scalars = Array(text.unicodeScalars)
+        // A UTF-8 byte-order mark, which some editors save; read as a key it would make the
+        // first line an "expected a key" error on a file that looks fine.
+        if scalars.first == "\u{FEFF}" { scalars.removeFirst() }
+        self.scalars = scalars
     }
 
     mutating func read() throws -> TOMLDocument {
@@ -507,12 +523,13 @@ struct TOMLReader {
 
     // MARK: Values
 
-    private mutating func value() throws -> TOMLValue {
+    private mutating func value(depth: Int = 0) throws -> TOMLValue {
         switch peek() {
         case "\"": return .string(try basicString())
         case "'": return .string(try literalString())
-        case "[": return try array()
-        case "{": return try inlineTable()
+        case "[", "{":
+            guard depth < Self.maxDepth else { throw issue("arrays nested too deeply") }
+            return peek() == "[" ? try array(depth: depth + 1) : try inlineTable(depth: depth + 1)
         default:
             var token = ""
             while let scalar = peek(), !" \t\r\n,]}#".unicodeScalars.contains(scalar) {
@@ -532,7 +549,7 @@ struct TOMLReader {
         }
     }
 
-    private mutating func array() throws -> TOMLValue {
+    private mutating func array(depth: Int) throws -> TOMLValue {
         let start = line
         advance()  // [
         var items: [TOMLValue] = []
@@ -543,7 +560,7 @@ struct TOMLReader {
                 advance()
                 return .array(items)
             }
-            items.append(try value())
+            items.append(try value(depth: depth))
             skipTrivia(newlines: true)
             switch peek() {
             case ",": advance()
@@ -555,7 +572,7 @@ struct TOMLReader {
     }
 
     /// `{ K = "v", … }`, on one line as TOML requires.
-    private mutating func inlineTable() throws -> TOMLValue {
+    private mutating func inlineTable(depth: Int) throws -> TOMLValue {
         advance()  // {
         var entries: [String: TOMLValue] = [:]
         skipTrivia(newlines: false)
@@ -571,7 +588,7 @@ struct TOMLReader {
             advance()
             skipTrivia(newlines: false)
             guard entries[key] == nil else { throw issue("duplicate key \(key)") }
-            entries[key] = try value()
+            entries[key] = try value(depth: depth)
             skipTrivia(newlines: false)
             switch peek() {
             case ",": advance()
@@ -592,6 +609,7 @@ struct TOMLReader {
             switch scalar {
             case "\"": return string
             case "\n": throw issue("unterminated string", at: line - 1)
+            case _ where Self.isControl(scalar): throw controlCharacter(scalar)
             case "\\":
                 guard let escape = peek() else { break }
                 advance()
@@ -633,9 +651,21 @@ struct TOMLReader {
             advance()
             if scalar == "'" { return string }
             if scalar == "\n" { throw issue("unterminated string", at: line - 1) }
+            if Self.isControl(scalar) { throw controlCharacter(scalar) }
             string.unicodeScalars.append(scalar)
         }
         throw issue("unterminated string")
+    }
+
+    /// TOML's rule, and the reason for it here: a raw control character in a `run` command
+    /// reaches a shell on another machine as something no reviewer of the file could see. Tab
+    /// is allowed; anything else must be written as an escape.
+    static func isControl(_ scalar: Unicode.Scalar) -> Bool {
+        (scalar.value < 0x20 && scalar != "\t") || scalar.value == 0x7F
+    }
+
+    private func controlCharacter(_ scalar: Unicode.Scalar) -> DelegateConfigIssue {
+        issue(String(format: "raw control character U+%04X in a string; write it as an escape", scalar.value))
     }
 
     // MARK: Scanning

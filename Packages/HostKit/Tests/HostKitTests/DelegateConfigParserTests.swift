@@ -160,6 +160,51 @@ final class DelegateConfigParserTests: XCTestCase {
         }
     }
 
+    /// The file is checked in, so a cloned repo controls it. Recursion without a bound let a
+    /// `[[[…` 100,000 deep overflow the stack and take Flight Deck down at every launch.
+    func testDeepNestingIsAnErrorNotACrash() {
+        let depth = 100_000
+        for text in ["x = " + String(repeating: "[", count: depth),
+                     "x = " + String(repeating: "{a=", count: depth)] {
+            XCTAssertThrowsError(try DelegateConfigParser.parse(text)) { error in
+                XCTAssertEqual((error as? DelegateConfigIssue)?.message, "arrays nested too deeply")
+            }
+        }
+        // 32 levels is the limit, and still parses.
+        let ok = "x = " + String(repeating: "[", count: 32) + String(repeating: "]", count: 32)
+        XCTAssertNoThrow(try DelegateConfigParser.parse(ok))
+    }
+
+    /// Editors on Windows (and some on macOS) save a UTF-8 BOM; it is not a key.
+    func testLeadingByteOrderMarkIsSkipped() throws {
+        XCTAssertEqual(try DelegateConfigParser.parse("\u{FEFF}default_host = \"mini\"").config.defaultHost, "mini")
+    }
+
+    /// TOML forbids raw control characters in strings; one in a `run` command would reach a
+    /// shell on another machine as something no reviewer of the file could see.
+    func testRawControlCharactersInStringsAreErrors() {
+        for text in ["run = \"a\u{01}b\"", "run = 'a\u{1B}[2Jb'", "run = \"a\u{7F}\""] {
+            XCTAssertThrowsError(try DelegateConfigParser.parse(text), text) { error in
+                XCTAssertTrue((error as? DelegateConfigIssue)?.message.contains("control character") == true, "\(error)")
+            }
+        }
+        // A tab is allowed raw, and an escaped newline is just a newline.
+        XCTAssertNoThrow(try DelegateConfigParser.parse("[recipe.a]\nrun = \"a\tb\\nc\""))
+    }
+
+    func testNonUTF8FileIsAnIssueNotACocoaError() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = DelegateConfigParser.fileURL(projectRoot: root)
+        try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data([0x72, 0x75, 0x6E, 0x20, 0x3D, 0x20, 0xFF, 0xFE]).write(to: file)
+        XCTAssertThrowsError(try DelegateConfigParser.load(projectRoot: root)) { error in
+            let issue = error as? DelegateConfigIssue
+            XCTAssertEqual(issue?.severity, .error)
+            XCTAssertTrue(issue?.message.contains("UTF-8") == true, "\(error)")
+        }
+    }
+
     func testIssueDescriptionNamesTheFileLineAndSeverity() {
         let issue = DelegateConfigIssue(.error, line: 4, "recipe.a.screen must be true or false")
         XCTAssertEqual(issue.description, "delegate.toml:4: error: recipe.a.screen must be true or false")

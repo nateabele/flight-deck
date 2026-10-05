@@ -1,3 +1,4 @@
+import CoreServices
 import HostKit
 import XCTest
 @testable import FlightDeck
@@ -124,14 +125,20 @@ final class RouteShimsTests: XCTestCase {
 
     func testEnvironmentPutsTheShimDirectoryFirstOnce() {
         let dir = URL(fileURLWithPath: "/tmp/shims/S")
-        XCTAssertEqual(RouteShims.environment(["A": "1", "PATH": "/usr/bin:/bin"], prepending: dir),
+        XCTAssertEqual(RouteShims.environment(["A": "1", "PATH": "/usr/bin:/bin"], prepending: dir, cli: nil),
                        ["A": "1", "PATH": "/tmp/shims/S:/usr/bin:/bin"])
         // Already first (a rebuild re-applied to the same environment): unchanged, not doubled.
-        XCTAssertEqual(RouteShims.environment(["PATH": "/tmp/shims/S:/usr/bin"], prepending: dir)["PATH"],
+        XCTAssertEqual(RouteShims.environment(["PATH": "/tmp/shims/S:/usr/bin"], prepending: dir, cli: nil)["PATH"],
                        "/tmp/shims/S:/usr/bin")
         // No PATH of its own: the inherited one, so the tab does not lose every other directory.
-        XCTAssertEqual(RouteShims.environment([:], prepending: dir, inherited: "/usr/bin")["PATH"],
+        XCTAssertEqual(RouteShims.environment([:], prepending: dir, cli: nil, inherited: "/usr/bin")["PATH"],
                        "/tmp/shims/S:/usr/bin")
+    }
+
+    func testEnvironmentNamesThisBuildsCLI() {
+        let cli = URL(fileURLWithPath: "/Applications/Flight Deck.app/Contents/MacOS/flightdeck")
+        let env = RouteShims.environment(["PATH": "/tmp/shims/S"], prepending: URL(fileURLWithPath: "/tmp/shims/S"), cli: cli)
+        XCTAssertEqual(env["FLIGHTDECK_CLI"], cli.path, "set even when the PATH needed no change")
     }
 
     // MARK: - The script, run by bash
@@ -153,6 +160,13 @@ final class RouteShimsTests: XCTestCase {
         if withCLI { try tool(cli.appendingPathComponent("flightdeck"), "CLI") }
         try fm.createSymbolicLink(at: shimDir.appendingPathComponent("xcodebuild"), withDestinationURL: Self.script)
         return (shimDir, [shimDir.path, cli.path, real.path, "/usr/bin", "/bin"].joined(separator: ":"))
+    }
+
+    /// A CLI from before route-exec: the real one's usage error, exit 2.
+    private func oldCLI(_ url: URL) throws {
+        try "#!/bin/bash\necho OLD\nif [ \"$1\" = route-exec ]; then echo 'flightdeck: unknown command \"route-exec\"' >&2; exit 2; fi\n"
+            .write(to: url, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
     }
 
     private func runShell(_ command: String, path: String, extra: [String: String] = [:]) throws -> String {
@@ -195,7 +209,80 @@ final class RouteShimsTests: XCTestCase {
             .hasPrefix("CLI\n"))
     }
 
+    /// The tab's PATH has an older `flightdeck` first; the one named by the app wins.
+    func testScriptPrefersFlightdeckCLIOverPath() throws {
+        let (_, path) = try fakes(withCLI: false)
+        try oldCLI(temp.appendingPathComponent("cli bin/flightdeck"))
+        let current = temp.appendingPathComponent("current/flightdeck")
+        try FileManager.default.createDirectory(at: current.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try "#!/bin/bash\necho CURRENT \"$@\"\n".write(to: current, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: current.path)
+        let output = try runShell("xcodebuild test", path: path, extra: ["FLIGHTDECK_CLI": current.path])
+        XCTAssertEqual(output, "CURRENT route-exec xcodebuild -- test\n")
+    }
+
+    /// No FLIGHTDECK_CLI (a tab launched before this build): the CLI in the script's own
+    /// bundle, `Contents/MacOS/flightdeck`, beats the older one on PATH.
+    func testScriptPrefersTheCLIInItsOwnBundle() throws {
+        let fm = FileManager.default
+        let (shimDir, path) = try fakes(withCLI: false)
+        try oldCLI(temp.appendingPathComponent("cli bin/flightdeck"))
+        let contents = temp.appendingPathComponent("Fake.app/Contents")
+        let bundled = contents.appendingPathComponent("Resources/RouteShim/flightdeck-route-shim.sh")
+        try fm.createDirectory(at: bundled.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try fm.copyItem(at: Self.script, to: bundled)
+        try fm.createDirectory(at: contents.appendingPathComponent("MacOS"), withIntermediateDirectories: true)
+        let sibling = contents.appendingPathComponent("MacOS/flightdeck")
+        try "#!/bin/bash\necho SIBLING \"$@\"\n".write(to: sibling, atomically: true, encoding: .utf8)
+        try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: sibling.path)
+        let link = shimDir.appendingPathComponent("xcodebuild")
+        try fm.removeItem(at: link)
+        try fm.createSymbolicLink(at: link, withDestinationURL: bundled)
+        XCTAssertEqual(try runShell("xcodebuild test", path: path), "SIBLING route-exec xcodebuild -- test\n")
+    }
+
+    /// Only an old CLI is reachable: the command runs locally instead of failing.
+    func testScriptRunsTheRealBinaryWhenTheCLIPredatesRouteExec() throws {
+        let (_, path) = try fakes(withCLI: false)
+        try oldCLI(temp.appendingPathComponent("cli bin/flightdeck"))
+        let output = try runShell("xcodebuild test", path: path)
+        XCTAssertTrue(output.hasPrefix("REAL\n[test]\n"), output)
+    }
+
+    /// A child that rebuilt PATH with the shims on it must not route again.
+    func testRouteDepthGuardRunsTheRealBinary() throws {
+        let (_, path) = try fakes(withCLI: true)
+        XCTAssertTrue(try runShell("xcodebuild test", path: path, extra: ["FLIGHTDECK_ROUTE_DEPTH": "1"])
+            .hasPrefix("REAL\n"))
+        // And the CLI is handed depth 1, so its fall-through's children inherit the guard.
+        let probe = temp.appendingPathComponent("depth-cli")
+        try "#!/bin/bash\necho DEPTH=$FLIGHTDECK_ROUTE_DEPTH\n".write(to: probe, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: probe.path)
+        XCTAssertEqual(try runShell("xcodebuild test", path: path, extra: ["FLIGHTDECK_CLI": probe.path]), "DEPTH=1\n")
+    }
+
+    /// The shim dir spelled differently on PATH (trailing slash, a symlinked parent) is still
+    /// the shim dir; a string compare missed it and the fall-through found the shim again.
+    func testScriptStripsTheShimDirHoweverItIsSpelled() throws {
+        let (shimDir, path) = try fakes(withCLI: false)
+        let alias = temp.appendingPathComponent("alias")
+        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: shimDir.deletingLastPathComponent())
+        let spelled = path.replacingOccurrences(of: shimDir.path + ":", with: shimDir.path + "/:")
+            + ":" + alias.appendingPathComponent("S").path
+        let output = try runShell("xcodebuild -version", path: spelled)
+        XCTAssertTrue(output.hasPrefix("REAL\n"), output)
+        let pathLine = output.split(separator: "\n").first { $0.hasPrefix("PATH=") } ?? ""
+        XCTAssertFalse(pathLine.contains(shimDir.path), output)
+        XCTAssertFalse(pathLine.contains(alias.path), output)
+    }
+
     // MARK: - Watching delegate.toml
+
+    func testDroppedEventsAndRootChangesForceARebuild() {
+        XCTAssertTrue(RouteShimWatcher.mustRescan(FSEventStreamEventFlags(kFSEventStreamEventFlagMustScanSubDirs)))
+        XCTAssertTrue(RouteShimWatcher.mustRescan(FSEventStreamEventFlags(kFSEventStreamEventFlagRootChanged)))
+        XCTAssertFalse(RouteShimWatcher.mustRescan(FSEventStreamEventFlags(kFSEventStreamEventFlagItemModified)))
+    }
 
     func testOnlyPathsUnderDotFlightdeckCountAsAChange() {
         let root = URL(fileURLWithPath: "/p/repo")

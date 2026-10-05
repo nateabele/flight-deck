@@ -14,12 +14,23 @@ public enum RecipeWriter {
     /// second copy of a recipe it never saw), when `name` cannot be a table name, and — as a
     /// last check — when the result would not read back as exactly `recipe`.
     public static func add(name: String, recipe: Recipe, to text: String) throws -> String {
-        guard !name.isEmpty, !name.contains(where: \.isNewline) else {
-            throw DelegateConfigIssue(.error, "a recipe name must be non-empty and on one line")
+        guard !name.isEmpty, !name.unicodeScalars.contains(where: TOMLReader.isControl), !name.contains("\t")
+        else {
+            throw DelegateConfigIssue(.error, "a recipe name must be non-empty, on one line, with no control characters")
         }
+        // A CRLF file stays CRLF: a writer that added LF lines to it would leave mixed endings,
+        // which review tools show as a change to every line.
+        let crlf = text.utf8.contains(13)
+        let eol = crlf ? "\r\n" : "\n"
         let headers = try DelegateConfigParser.headers(in: text)
-        var lines = text.components(separatedBy: "\n")
-        let block = render(name: name, recipe: recipe)
+        // Split on the byte, never on `Character`s: "\r\n" is ONE Character, and on Linux
+        // `components(separatedBy: "\n")` compares Characters, so a CRLF file came back as a
+        // single line and a replace appended a duplicate table instead.
+        var lines = text.utf8.split(separator: 10, omittingEmptySubsequences: false)
+            .map { String(decoding: $0, as: UTF8.self) }
+        // `lines` comes from splitting on "\n", so a CRLF file's lines keep their "\r"; the
+        // inserted block's lines need one too.
+        let block = render(name: name, recipe: recipe).map { crlf ? $0 + "\r" : $0 }
 
         // Its own table and any `[recipe.<name>.*]` subtables (a hand-written
         // `[recipe.<name>.env]`): the rendered block writes `env` inline, so a leftover subtable
@@ -48,8 +59,8 @@ public enum RecipeWriter {
             output = lines.joined(separator: "\n")
         } else {
             var prefix = text
-            if !prefix.isEmpty && !prefix.hasSuffix("\n") { prefix += "\n" }
-            if !prefix.isEmpty && !prefix.hasSuffix("\n\n") { prefix += "\n" }
+            if !prefix.isEmpty && !endsWith(prefix, "\n") { prefix += eol }
+            if !prefix.isEmpty && !endsWith(prefix, eol + eol) { prefix += eol }
             output = prefix + block.joined(separator: "\n") + "\n"
         }
 
@@ -82,6 +93,12 @@ public enum RecipeWriter {
         var end = index + 1 < headers.count ? headers[index + 1].line - 1 : lines.count
         while end > start + 1, isBlank(lines[end - 1]) || isComment(lines[end - 1]) { end -= 1 }
         return start..<end
+    }
+
+    /// Byte-wise, for the same reason as the split above: `hasSuffix("\n")` is false for a
+    /// string ending in the single Character "\r\n".
+    private static func endsWith(_ text: String, _ suffix: String) -> Bool {
+        text.utf8.reversed().starts(with: suffix.utf8.reversed())
     }
 
     private static func isBlank(_ line: String) -> Bool {

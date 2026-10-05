@@ -19,6 +19,10 @@ import HostKit
 struct RouteShims {
     /// Spec §8: set to `1` in a tab to run every routed command locally.
     static let bypassVariable = "FLIGHTDECK_NO_ROUTE"
+    /// The CLI the shim should run. Whatever `flightdeck` is first on a tab's PATH is often an
+    /// older install with no `route-exec`, which broke every routed command; naming this
+    /// build's own CLI at launch removes the guess.
+    static let cliVariable = "FLIGHTDECK_CLI"
 
     /// Where session directories live: `<state dir>/route-shims/<session id>/`.
     let root: URL
@@ -29,6 +33,11 @@ struct RouteShims {
     /// `project.yml`). Nil only in a bundle built without it, where routing is simply absent.
     static func bundledScript(_ bundle: Bundle = .main) -> URL? {
         bundle.url(forResource: "flightdeck-route-shim", withExtension: "sh", subdirectory: "RouteShim")
+    }
+
+    /// `Contents/MacOS/flightdeck` in this app's bundle.
+    static func bundledCLI(_ bundle: Bundle = .main) -> URL? {
+        bundle.url(forAuxiliaryExecutable: "flightdeck")
     }
 
     static func defaultRoot(stateDirectory: URL) -> URL {
@@ -88,17 +97,19 @@ struct RouteShims {
         try? FileManager.default.removeItem(at: directory(for: session))
     }
 
-    /// `environment` with `dir` first on `PATH`, once. With no `PATH` of its own the tab
-    /// would inherit the app's, so that is what the shim directory goes in front of; setting
-    /// `PATH` to the shim directory alone would leave the tab unable to find anything.
+    /// `environment` with `dir` first on `PATH`, once, and `FLIGHTDECK_CLI` naming `cli`.
+    /// With no `PATH` of its own the tab would inherit the app's, so that is what the shim
+    /// directory goes in front of; setting `PATH` to the shim directory alone would leave the
+    /// tab unable to find anything.
     static func environment(
-        _ environment: [String: String], prepending dir: URL,
+        _ environment: [String: String], prepending dir: URL, cli: URL? = bundledCLI(),
         inherited: String? = ProcessInfo.processInfo.environment["PATH"]
     ) -> [String: String] {
+        var result = environment
+        if let cli { result[cliVariable] = cli.path }
         let current = environment["PATH"] ?? inherited ?? ""
         let entries = current.split(separator: ":", omittingEmptySubsequences: false).map(String.init)
-        guard entries.first != dir.path else { return environment }
-        var result = environment
+        guard entries.first != dir.path else { return result }
         result["PATH"] = current.isEmpty
             ? dir.path : ([dir.path] + entries.filter { $0 != dir.path }).joined(separator: ":")
         return result
@@ -153,18 +164,19 @@ final class RouteShimWatcher {
                 Unmanaged<Sink>.fromOpaque(info).release()
             },
             copyDescription: nil)
-        let callback: FSEventStreamCallback = { _, info, count, paths, _, _ in
+        let callback: FSEventStreamCallback = { _, info, count, paths, flags, _ in
             guard let info else { return }
             let sink = Unmanaged<Sink>.fromOpaque(info).takeUnretainedValue()
             guard let changed = unsafeBitCast(paths, to: NSArray.self) as? [String] else { return }
-            MainActor.assumeIsolated { sink.watcher?.handle(changed.prefix(count)) }
+            let flags = Array(UnsafeBufferPointer(start: flags, count: count))
+            MainActor.assumeIsolated { sink.watcher?.handle(changed.prefix(count), flags: flags) }
         }
         guard let stream = FSEventStreamCreate(
             nil, callback, &context, [self.projectRoot.path] as CFArray,
             FSEventStreamEventId(kFSEventStreamEventIdSinceNow), latency,
             FSEventStreamCreateFlags(
                 kFSEventStreamCreateFlagUseCFTypes | kFSEventStreamCreateFlagFileEvents
-                    | kFSEventStreamCreateFlagNoDefer))
+                    | kFSEventStreamCreateFlagNoDefer | kFSEventStreamCreateFlagWatchRoot))
         else { return nil }
         self.stream = stream
         FSEventStreamSetDispatchQueue(stream, .main)
@@ -188,8 +200,20 @@ final class RouteShimWatcher {
         self.stream = nil
     }
 
-    private func handle(_ paths: ArraySlice<String>) {
-        if paths.contains(where: { Self.isConfigChange($0, projectRoot: projectRoot) }) { onChange() }
+    private func handle(_ paths: ArraySlice<String>, flags: [FSEventStreamEventFlags]) {
+        if paths.contains(where: { Self.isConfigChange($0, projectRoot: projectRoot) })
+            || flags.contains(where: Self.mustRescan) {
+            onChange()
+        }
+    }
+
+    /// Events FSEvents could not deliver individually (MustScanSubDirs, set when it or the
+    /// kernel dropped events under load), or the root itself being moved or deleted
+    /// (RootChanged, which `WatchRoot` turns on). Either way the change to `delegate.toml` may
+    /// be in what was lost, and a rebuild is cheap; without this a dropped event left a tab's
+    /// shims stale until the next edit.
+    nonisolated static func mustRescan(_ flags: FSEventStreamEventFlags) -> Bool {
+        flags & FSEventStreamEventFlags(kFSEventStreamEventFlagMustScanSubDirs | kFSEventStreamEventFlagRootChanged) != 0
     }
 
     /// `.flightdeck` itself (created or removed) or anything inside it — but not a nested

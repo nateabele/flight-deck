@@ -44,6 +44,11 @@ public struct RouteMatcher: Sendable {
         guard let word = pattern.split(separator: " ", omittingEmptySubsequences: true).first
         else { return nil }
         guard !word.contains(where: { "*?[]\\/".contains($0) }) else { return nil }
+        // `.` and `..` would be a symlink named for a directory entry, and a control character
+        // a file name nobody can see or type — neither is a command a shim can stand in for.
+        guard word != ".", word != "..",
+              !word.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7F })
+        else { return nil }
         return String(word)
     }
 

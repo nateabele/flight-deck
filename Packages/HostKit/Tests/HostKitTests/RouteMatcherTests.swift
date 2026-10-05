@@ -65,6 +65,11 @@ final class RouteMatcherTests: XCTestCase {
             Route(match: "*build x", recipe: "d"),   // a glob: nothing to shim
             Route(match: "./run.sh *", recipe: "e"), // a path, not a PATH lookup
             Route(match: "  ", recipe: "f"),
+            // `.` and `..` would be a symlink named for a directory entry; a control
+            // character would be a file name no one can see or type.
+            Route(match: ". *", recipe: "g"),
+            Route(match: ".. *", recipe: "h"),
+            Route(match: "ma\u{1B}ke *", recipe: "i"),
         ])
         XCTAssertEqual(matcher.commandNames, ["make", "xcodebuild"])
     }

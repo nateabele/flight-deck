@@ -72,6 +72,15 @@ final class RecipeWriterTests: XCTestCase {
         XCTAssertEqual(try DelegateConfigParser.parse(text).config.recipes["every thing"], recipe)
     }
 
+    /// A CRLF file must stay CRLF: mixed endings show up as a whole-file diff in review.
+    func testKeepsCRLFLineEndings() throws {
+        let original = "# crlf\r\n[recipe.a]\r\nrun = \"a\"\r\n"
+        let appended = try RecipeWriter.add(name: "b", recipe: Recipe(run: "b"), to: original)
+        XCTAssertEqual(appended, original + "\r\n[recipe.b]\r\nrun = \"b\"\r\n")
+        let replaced = try RecipeWriter.add(name: "a", recipe: Recipe(run: "z", long: true), to: original)
+        XCTAssertEqual(replaced, "# crlf\r\n[recipe.a]\r\nrun = \"z\"\r\nlong = true\r\n")
+    }
+
     func testFileWithoutTrailingNewlineStillGetsASeparateTable() throws {
         let text = try RecipeWriter.add(name: "b", recipe: Recipe(run: "b"), to: "[recipe.a]\nrun = \"a\"")
         XCTAssertEqual(text, "[recipe.a]\nrun = \"a\"\n\n[recipe.b]\nrun = \"b\"\n")
@@ -86,6 +95,7 @@ final class RecipeWriterTests: XCTestCase {
     func testRejectsAnEmptyOrMultiLineName() {
         XCTAssertThrowsError(try RecipeWriter.add(name: "", recipe: Recipe(run: "a"), to: ""))
         XCTAssertThrowsError(try RecipeWriter.add(name: "a\nb", recipe: Recipe(run: "a"), to: ""))
+        XCTAssertThrowsError(try RecipeWriter.add(name: "a\u{1B}b", recipe: Recipe(run: "a"), to: ""))
     }
 
     func testAddToProjectCreatesTheDirectoryAndFile() throws {
