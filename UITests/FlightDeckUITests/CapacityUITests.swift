@@ -28,7 +28,26 @@ final class CapacityUITests: XCTestCase {
 
     private func bar(_ label: String, in window: XCUIElement) -> XCUIElement {
         window.descendants(matching: .any).matching(identifier: "meter-bar")
-            .matching(NSPredicate(format: "label == %@", label)).firstMatch
+            .matching(NSPredicate(format: "value BEGINSWITH %@", "\(label):")).firstMatch
+    }
+
+    /// The bar's whole string ("Work: 82 percent used, ..."), read only after the element is
+    /// confirmed to exist so a missing bar is an assertion failure, not an aborted snapshot.
+    private func barValue(_ label: String, in window: XCUIElement, tree: String) -> String {
+        guard bar(label, in: window).waitForExistence(timeout: 10) else {
+            attachTree(window, tree)
+            XCTFail("no meter-bar whose value begins \"\(label):\" in \(tree)")
+            return ""
+        }
+        return bar(label, in: window).value as? String ?? ""
+    }
+
+    /// The accessibility tree as text, so a failed lookup says what was actually exposed.
+    private func attachTree(_ window: XCUIElement, _ name: String) {
+        let attachment = XCTAttachment(string: window.exists ? window.debugDescription : "window does not exist")
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
     }
 
     func testMetersAndCapacityPane() throws {
@@ -42,16 +61,22 @@ final class CapacityUITests: XCTestCase {
             "-FlightControlUsageFixture", "YES",
             "-FlightControlMeterGallery", "YES",
         ]
+        continueAfterFailure = true
         app.launch()
         app.activate()
 
         XCTContext.runActivity(named: "the pool popover draws one bar per account, with its state") { _ in
             let gallery = app.windows["Meter Gallery"]
-            XCTAssertTrue(gallery.waitForExistence(timeout: 20), "the gallery window did not open")
-            XCTAssertTrue(bar("Work", in: gallery).waitForExistence(timeout: 10))
-            XCTAssertTrue((bar("Work", in: gallery).value as? String ?? "").contains("82 percent used, past its soft limit"))
-            XCTAssertEqual(bar("Spare", in: gallery).value as? String, "no reading")
-            XCTAssertTrue((bar("Codex", in: gallery).value as? String ?? "").contains("past its hard limit"))
+            guard gallery.waitForExistence(timeout: 20) else {
+                attachTree(app.windows.firstMatch, "gallery-tree")
+                XCTFail("the gallery window did not open")
+                return
+            }
+            let work = barValue("Work", in: gallery, tree: "gallery-tree")
+            XCTAssertTrue(work.contains("82 percent used, past its soft limit"), work)
+            XCTAssertEqual(barValue("Spare", in: gallery, tree: "gallery-tree"), "Spare: no reading")
+            let codex = barValue("Codex", in: gallery, tree: "gallery-tree")
+            XCTAssertTrue(codex.contains("past its hard limit"), codex)
             shoot(gallery, "pool-popover")
         }
 
@@ -67,11 +92,16 @@ final class CapacityUITests: XCTestCase {
             // No identifier on the tab itself (a container identifier would shadow its children),
             // so find the window by the tab button's "Capacity" title, as the smoke tests do for "Agents".
             let prefs = app.windows.containing(.button, identifier: "Capacity").firstMatch
-            XCTAssertTrue(prefs.waitForExistence(timeout: 10), "Settings did not open with a Capacity tab")
+            guard prefs.waitForExistence(timeout: 10) else {
+                attachTree(app.windows.firstMatch, "settings-tree")
+                XCTFail("Settings did not open with a Capacity tab")
+                return
+            }
             prefs.buttons["Capacity"].click()
             XCTAssertTrue(prefs.descendants(matching: .any).matching(identifier: "capacity-pool-list").firstMatch.waitForExistence(timeout: 5))
             XCTAssertTrue(text("Claude default", in: prefs).exists)
             XCTAssertTrue(text("Codex default", in: prefs).exists)
+            if !bar("Work", in: prefs).waitForExistence(timeout: 5) { attachTree(prefs, "settings-tree") }
             XCTAssertTrue(bar("Work", in: prefs).exists, "the pane embeds the same bar the popover draws")
             shoot(prefs, "capacity-pane")
 

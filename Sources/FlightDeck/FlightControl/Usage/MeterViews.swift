@@ -35,6 +35,11 @@ struct AccountMeterModel: Identifiable, Equatable {
     }
 }
 
+extension AccountMeterModel {
+    /// The one string the bar exposes: the account's name, then its reading.
+    var spokenText: String { "\(label): \(accessibilityValue)" }
+}
+
 struct PoolMeterModel: Identifiable, Equatable {
     let id: PoolID
     let title: String
@@ -194,14 +199,12 @@ struct AccountMeterBar: View {
             MeterTrack(fraction: model.fraction, soft: model.soft, hard: model.hard, state: model.state).frame(height: 6)
             Text(caption).font(.caption).foregroundStyle(.secondary).lineLimit(2)
         }
-        // A VStack with ignored children surfaces on macOS as an AXGroup, and XCUITest reads an
-        // empty `value` off a group even when SwiftUI set one (the Meter Gallery UI test saw ""
-        // for every bar). A Text surfaces as static text, whose AXValue is its string, so the
-        // reading is carried as that string and the account name as the label. Visuals unchanged.
+        // An AXGroup carries no AXValue on macOS (the first UI run read "" off every bar), and a
+        // Text reports its string as `value` with an empty `label` (a label set on it was not
+        // matchable either). So the name and the reading travel together in the one string a
+        // Text exposes, which XCUITest reads as `value` and VoiceOver speaks. Visuals unchanged.
         .accessibilityRepresentation {
-            Text(model.accessibilityValue)
-                .accessibilityLabel(model.label)
-                .accessibilityIdentifier("meter-bar")
+            Text(model.spokenText).accessibilityIdentifier("meter-bar")
         }
     }
 
