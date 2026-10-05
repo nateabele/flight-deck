@@ -43,8 +43,13 @@ final class BrSwarmBackend: SwarmBackend {
         let scheduler = await run(brPath, ["scheduler", "--format", "json"], project)
         let ranks = scheduler.flatMap { $0.exitCode == 0 ? SwarmTaskDecoding.schedulerRanks(Data($0.stdout.utf8)) : nil } ?? [:]
         // `br ready` does not carry `agent_context` (probed, br 0.6.0), so blocks come from here.
-        let list = await run(brPath, ["list", "--status", "open", "--json"], project)
-        let contexts = list.flatMap { $0.exitCode == 0 ? SwarmTaskDecoding.listContexts(Data($0.stdout.utf8)) : nil } ?? [:]
+        // Unlike the scheduler this must not degrade: a pinned/manual block is binding, and with no
+        // contexts every task would look block-less, so it would be re-routed and `writeBlock`
+        // would overwrite its `agent_context`. A failed list is a failed read, like `br ready`.
+        guard let list = await run(brPath, ["list", "--status", "open", "--json"], project), list.exitCode == 0,
+              let contexts = SwarmTaskDecoding.listContexts(Data(list.stdout.utf8)) else {
+            return .failure(SwarmBackendError(message: "br list failed"))
+        }
         return .success(SwarmTaskDecoding.join(ready: rows, ranks: ranks, contexts: contexts))
     }
 

@@ -23,6 +23,20 @@ final class BrSwarmBackendTests: XCTestCase {
         XCTAssertEqual(tasks.map(\.id), ["fx-b", "fx-a", "fx-c"])
         XCTAssertTrue(fake.argv.contains(["br", "scheduler", "--format", "json"]))
         XCTAssertTrue(fake.argv.contains(["br", "list", "--status", "open", "--json"]))
+        XCTAssertEqual(try tasks[1].block.get()?.model, "gpt-6-sol", "the block from br list reached the task")
+    }
+
+    /// A pinned block is binding. Without `br list` every task would look block-less, so a pinned
+    /// task would be re-routed and `writeBlock` would overwrite its `agent_context`.
+    func testListFailureIsAnErrorNotBlocklessTasks() async throws {
+        for listResponse: (String, Int32)? in [nil, ("boom", 1), ("not json", 0)] {
+            let fake = MultiRunner()
+            fake.responses["br ready --json"] = (try fixture("br-ready"), 0)
+            fake.responses["br scheduler --format"] = (try fixture("br-scheduler"), 0)
+            fake.responses["br list --status"] = listResponse
+            let result = await BrSwarmBackend(runner: fake).readyTasks(project: project)
+            guard case .failure = result else { return XCTFail("a failed br list must fail readyTasks: \(String(describing: listResponse))") }
+        }
     }
 
     func testSchedulerFailureDegradesToPriorityOrder() async throws {
