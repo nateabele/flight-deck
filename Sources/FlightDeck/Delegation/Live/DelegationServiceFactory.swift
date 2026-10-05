@@ -13,10 +13,6 @@ enum DelegationServiceFactory {
     /// `<stateDirectory>/delegation/<host slot>-<host run id>.out`: host run ids are `r<N>` on
     /// every host, so the slot keeps two hosts' `r3` apart. `LiveHostDirectory.prune(host:runIDs:)`
     /// takes host run ids (`DelegatedRun.hostRunID`) for that reason.
-    ///
-    /// Not wired here: acking a fetched result on the host. The wire has no op for it
-    /// (`DelegationRequest` lacks one); the host acks after sending (W1), until the final
-    /// integration adds a controller-driven `run.ack`.
     static func live(hostService: HostService, stateDirectory: URL? = nil,
                      sessionTitle: @escaping (UUID) -> String? = { _ in nil },
                      forwarder: PortForwarder = PortForwarder()) -> DelegationService {

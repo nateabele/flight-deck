@@ -55,6 +55,7 @@ final class FakeHostLink: HostLinking {
         case .runCancel: return .runCancel
         case .runResult: return .runResult(commit: resultCommit)
         case .runArtifacts: return .runArtifacts(found: false)
+        case .runAck: return .runAck
         case .serviceDown(let id):
             emit(id, .exited(.signal(15)))
             return .serviceDown
@@ -468,6 +469,36 @@ final class DelegationServiceTests: XCTestCase {
         try await until { frames.all.contains(where: terminal) }
         XCTAssertEqual(results.applied.map(\.allowConflicts), [false])
         XCTAssertNil(service.registry.run(id)?.resultCommit)
+    }
+
+    /// Ruling 24: the host drops a result only when told, and told only after the bundle is
+    /// on this Mac's disk and in the registry, so a transfer cut short is simply fetched again.
+    func testAStoredResultIsAckedAndNoResultIsNot() async throws {
+        mini.resultCommit = "res1"
+        mini.resultBytes = Data("bundle".utf8)
+        let frames = send(.run(WireDelegateRun(cwd: "/w/proj", host: "mini", command: ["make"])))
+        let id = try await started(frames)
+        mini.emit(hostRunID(), .exited(.code(0)))
+        try await until { frames.all.contains(where: terminal) }
+
+        guard case .runStart(let ref, _, _, _)? = mini.requests.first(where: { Self.op($0) == "run.start" }) else {
+            return XCTFail("\(mini.requests)")
+        }
+        let ops = mini.requests.map(Self.op)
+        XCTAssertEqual(mini.requests.last(where: { Self.op($0) == "run.ack" }),
+                       .runAck(runID: hostRunID(), repoRoot: ref.repoRoot))
+        XCTAssertLessThan(try XCTUnwrap(ops.firstIndex(of: "run.result")), try XCTUnwrap(ops.firstIndex(of: "run.ack")))
+        let stored = try XCTUnwrap(service.registry.run(id)?.resultBundle)
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: stored)), Data("bundle".utf8))
+
+        // A run that changed nothing has nothing on the host to drop.
+        mini.resultCommit = nil
+        mini.resultBytes = nil
+        let quiet = send(.run(WireDelegateRun(cwd: "/w/proj", host: "mini", command: ["true"])))
+        _ = try await started(quiet)
+        mini.emit(hostRunID(), .exited(.code(0)))
+        try await until { quiet.all.contains(where: terminal) }
+        XCTAssertEqual(mini.requests.filter { Self.op($0) == "run.ack" }.count, 1)
     }
 
     func testAPatchOverOneMebibyteComesBackAsAFile() async throws {

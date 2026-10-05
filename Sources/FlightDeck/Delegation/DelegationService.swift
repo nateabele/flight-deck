@@ -572,6 +572,10 @@ final class DelegationService {
             }
             guard case .runResult(let commit?) = reply else { return }
             registry.update(record.id) { $0.resultCommit = commit; $0.resultBundle = file.path }
+            // Only now may the host drop its copy (ruling 24): until the bundle is on disk and
+            // in the registry, a cut transfer is fetched again. Best effort — a lost ack, or a
+            // host too old to know the op, only leaves the copy to the host's 24 h expiry.
+            _ = try? await hostRequest(.runAck(runID: record.hostRunID, repoRoot: snapshot.repoRoot), on: liveRun.link)
         } catch {
             liveRun.publish(.notice("couldn't fetch \(record.id)'s changed files from \(record.host) — \(Self.describe(error))"))
         }
