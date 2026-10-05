@@ -193,16 +193,20 @@ public final class DelegationHostServices: @unchecked Sendable {
     /// its own timer (its `orphanTimeout`, else the host default); one that runs out with the
     /// controller still away downs that service, `down` command and all.
     public func controllerDisconnected(_ slot: UUID) {
-        lock.withLock {
+        let stale: [Task<Void, Never>] = lock.withLock {
             let generation = bump(slot)
             let mine = services.filter { $0.value.controller == slot }
-            orphanTimers[slot] = mine.map { id, service in
-                Task { [weak self, clock] in
-                    await clock.sleep(seconds: service.orphanTimeout)
-                    await self?.orphanTimeoutExpired(id, slot: slot, generation: generation)
+            defer {
+                orphanTimers[slot] = mine.map { id, service in
+                    Task { [weak self, clock] in
+                        await clock.sleep(seconds: service.orphanTimeout)
+                        await self?.orphanTimeoutExpired(id, slot: slot, generation: generation)
+                    }
                 }
             }
+            return orphanTimers[slot] ?? []
         }
+        stale.forEach { $0.cancel() }
     }
 
     /// The router calls this when `slot` connects. Cancels its pending orphan timers.
@@ -214,8 +218,9 @@ public final class DelegationHostServices: @unchecked Sendable {
         timers.forEach { $0.cancel() }
     }
 
-    /// Under `lock`. Also cancels nothing: a cancelled sleep returns early, so the generation
-    /// check, not cancellation, is what keeps a stale timer from acting.
+    /// Under `lock`. Cancelling a timer only ends its sleep early (`SystemRunClock` swallows
+    /// the cancellation and returns), so the generation check, not cancellation, is what keeps
+    /// a stale timer from acting.
     private func bump(_ slot: UUID) -> Int {
         generations[slot, default: 0] += 1
         return generations[slot]!
