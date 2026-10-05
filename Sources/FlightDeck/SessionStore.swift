@@ -8480,6 +8480,25 @@ final class SessionStore: ObservableObject {
         return injectorOverride ?? surfaces[id]
     }
 
+    /// Escape into a tab whose agent is mid-turn: both claude's and codex's TUIs stop the turn on
+    /// it. Flight Control's hand-off deadline uses it (L3-U §5.1).
+    ///
+    /// Refuses an idle tab — a stray Escape there clears the user's draft — and a tab sitting in
+    /// a dialog unless the caller says so, because Escape there is a *denial*, which restarts a
+    /// turn rather than ending one. Retiring an agent (`retireAgent`) is the one caller that
+    /// wants the denial.
+    @discardableResult
+    func interruptTurn(_ id: UUID, includingDialog: Bool = false) -> Bool {
+        // `.busy` is read from `agentActivity` (what the agent itself reported), not `activity`:
+        // `activity` is lifted to busy while a background subagent runs, and an agent idle at
+        // its composer would take the Escape, losing the user's draft for nothing (ruling M3).
+        guard let status = statuses[id],
+              status.agentActivity == .busy || (includingDialog && status.activity == .waiting),
+              let injector = injector(for: id) else { return false }
+        injector.sendEscape()
+        return true
+    }
+
     func surface(for id: UUID) -> Ghostty.SurfaceView? { surfaces[id] }
 
     func tick() { provider?.tick() }
