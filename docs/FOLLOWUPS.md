@@ -2301,7 +2301,7 @@ flagged as most likely to differ from the tests. The maintainer's to run.
     inspected; [FLYWHEEL-SPIKE-FINDINGS.md](FLYWHEEL-SPIKE-FINDINGS.md) already ruled it out as
     FD's own runner).
 
-  **L3-0 contract merged (a067ac0); L3-R/I/U/S may start.**
+  **L3-0 contract built on branch l3-contract (a067ac0) and merged to master; L3-R/I/U/S may start.**
 
 ## Plan comments from the phone (2026-09-30)
 

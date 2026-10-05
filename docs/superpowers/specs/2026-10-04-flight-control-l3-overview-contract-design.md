@@ -174,12 +174,12 @@ All in IntakeKit (pure, Foundation only) unless noted.
 
 ```swift
 protocol KindRegistry      { func kinds(project: URL) -> [TaskKind]; func propose(_: TaskKind, project: URL) throws }
-protocol Router            { func assign(kind: TaskKind, project: URL, catalog: AdapterCatalogs, now: Date) -> Assignment; func spill(_: ExecutionBlock, kind: TaskKind, project: URL, exhausted: Set<PoolID>, catalogs: AdapterCatalogs, now: Date) -> Assignment? }
+protocol Router            { func assign(kind: TaskKind, project: URL, catalogs: AdapterCatalogs, now: Date) -> Assignment; func spill(_: ExecutionBlock, kind: TaskKind, project: URL, exhausted: Set<PoolID>, catalogs: AdapterCatalogs, now: Date) -> Assignment? }
 protocol CapabilityIndex   { func rank(kind: TaskKind, candidates: [ModelRef]) -> [ScoredModel]; var snapshotDate: Date? { get } }
 protocol CapacityReader    { func headroom(pool: PoolID) -> [AccountHeadroom] }
 protocol PoolAllocator     { func lease(pool: PoolID) -> AccountLease?; func release(_: AccountLease) }
 protocol HandoffPlanner    { func request(for: SwarmAgent) -> HandoffRequest? }
-protocol SwarmSpawner      { func spawn(task: TaskRef, block: ExecutionBlock, lease: AccountLease?, firstPrompt: String?) async -> Result<SessionRef, SpawnError> }   // FlightDeck target
+protocol SwarmSpawner      { func spawn(task: TaskRef, block: ExecutionBlock, lease: AccountLease?, firstPrompt: String) async -> Result<SessionRef, SpawnError> }   // FlightDeck target
 protocol UsageMeterSource  { var readings: AsyncStream<UsageReading> { get } }
 ```
 
