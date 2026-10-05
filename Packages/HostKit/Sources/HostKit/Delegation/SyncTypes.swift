@@ -93,9 +93,18 @@ public protocol WorkspaceStore: Sendable {
     func release(_ lease: CheckoutLease) async
     /// Commits the run's non-ignored changes as a child of the snapshot under
     /// `refs/fd/results/<runID>`; nil when nothing changed.
+    ///
+    /// **Ordering (for the host router):** call `resultCommit`, then `captureArtifacts`, and
+    /// only then `release`. Once the slot is released the next run's apply cleans it, and
+    /// whatever the finished run changed is gone.
     func resultCommit(lease: CheckoutLease, runID: String) async throws -> String?
-    /// A bundle of that one result commit, for the controller to fetch; nil if none exists.
+    /// A bundle of that one result commit, for the controller to fetch. nil when the run
+    /// changed nothing; throws `result_expired` when the result is unknown, already acked, or
+    /// past its 24h TTL. Making a bundle changes nothing, so a dropped transfer can ask again.
     func resultBundle(controller: UUID, repoRoot: String, runID: String) async throws -> URL?
+    /// The controller has fetched and stored the result: the host drops it now. Until then it
+    /// survives (for retries) up to the TTL. Idempotent. (Added in C2 fix round 1.)
+    func ackResult(controller: UUID, repoRoot: String, runID: String) async throws
     /// Tars the checkout's paths matching `globs` (relative to the checkout root) into
     /// `runs/<runID>/`, at exit and before the slot is released: the next run in the slot
     /// would otherwise overwrite them before the controller asks. Nil when nothing matched.
