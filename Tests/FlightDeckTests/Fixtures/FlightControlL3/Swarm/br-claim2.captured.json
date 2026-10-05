@@ -1,0 +1,12 @@
+{
+  "error": {
+    "code": "VALIDATION_FAILED",
+    "message": "Validation failed: claim: issue probe-g4q already assigned to ProbeOne",
+    "hint": null,
+    "retryable": true,
+    "context": {
+      "field": "claim",
+      "reason": "issue probe-g4q already assigned to ProbeOne"
+    }
+  }
+}

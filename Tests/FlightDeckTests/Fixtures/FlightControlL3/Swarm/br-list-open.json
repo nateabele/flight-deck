@@ -1,0 +1,6 @@
+{"issues":[
+ {"id":"fx-a","title":"Add snapshot tests","status":"open","priority":1,
+  "agent_context":"{\"flight_deck\":{\"execution\":{\"harness\":\"codex\",\"host\":null,\"kind\":\"tests\",\"knobs\":{\"effort\":\"high\"},\"model\":\"gpt-6-sol\",\"pinned\":false,\"pool\":\"codex-subs\",\"source\":{\"at\":\"2026-10-04T18:00:00Z\",\"by\":\"rule\",\"reason\":\"r\",\"ruleId\":\"r1\"},\"v\":1}}}"},
+ {"id":"fx-b","title":"Rewrite the scheduler","status":"open","priority":2},
+ {"id":"fx-c","title":"Fix the parser","status":"open","priority":0,"agent_context":"{\"instructions\":\"keep\"}"}
+],"total":3,"limit":0,"offset":0,"has_more":false}

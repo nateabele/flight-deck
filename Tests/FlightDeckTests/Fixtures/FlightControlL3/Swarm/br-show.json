@@ -1,0 +1,2 @@
+[{"id":"fx-a","title":"Add snapshot tests","status":"in_progress","assignee":"BlueLake",
+  "description":"Cover the parser with snapshot tests.","acceptance_criteria":"- every fixture has a snapshot\n- CI passes"}]
