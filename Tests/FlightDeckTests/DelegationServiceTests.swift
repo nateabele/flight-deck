@@ -249,7 +249,7 @@ final class DelegationServiceTests: XCTestCase {
                 if seconds >= 60 { try await Task.sleep(nanoseconds: 3_600_000_000_000) }
             },
             directory: FileManager.default.temporaryDirectory.appendingPathComponent("fd-deleg-\(UUID().uuidString)"),
-            replayIdle: 0.05)
+            replayIdle: 0.05, replayFirstEvent: 0.2)
     }
 
     private func makeService(worktrees: any WorktreeLocating) {
@@ -796,6 +796,27 @@ final class DelegationServiceTests: XCTestCase {
         try await until { stopped.all.contains(where: terminal) }
         XCTAssertEqual(stopped.all.last, .ack(cid: 1))
         XCTAssertEqual(fresh.requests, [.runCancel(runID: "h1")])
+    }
+
+    /// A run that finished before a relaunch: a reattach answers its code at once, rather than
+    /// waiting on an end nothing will ever publish.
+    func testAReattachToARunThatEndedBeforeARelaunchAnswersAtOnce() async throws {
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("fd-reg-\(UUID().uuidString).json")
+        service = DelegationService(registry: RunRegistry(file: file), dependencies: dependencies())
+        let frames = send(.run(WireDelegateRun(cwd: "/w/proj", host: "mini", command: ["make"], detach: true)))
+        let id = try await started(frames)
+        mini.emit(hostRunID(), .output(stream: .stdout, offset: 0, data: Data("x".utf8)))
+        mini.emit(hostRunID(), .exited(.code(3)))
+        try await until { self.service.registry.run(id)?.status == 3 }
+
+        // The relaunched app's link has none of the old events (no mirror, the host's spool
+        // gone): nothing will replay the end, so only the record can supply it.
+        hosts.links["mini"] = FakeHostLink(name: "mini")
+        service = DelegationService(registry: RunRegistry(file: file), dependencies: dependencies())
+        let resumed = send(.wait(run: id, timeout: 600, from: 1))
+        try await until { resumed.all.contains(where: terminal) }
+        XCTAssertEqual(resumed.all.last, .delegateExit(cid: 1, status: 3))
+        XCTAssertEqual(resumed.all.count, 1, "\(resumed.all)")
     }
 
     // MARK: Helpers
