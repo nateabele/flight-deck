@@ -1229,6 +1229,20 @@ final class SessionStore: ObservableObject {
     /// server that judges it can verify. Only consulted when `controlSocket` is also set.
     var controlSecret: Data?
 
+    /// Route shims for every launched tab, and the tab-close notice (`DelegationBootstrap`).
+    /// Nil under a UITest reset and in tests that are not about delegation, where tabs launch
+    /// exactly as before. Read at launch time, so it must be set before `restore()` — the
+    /// convenience initializer takes it for that reason.
+    var delegationHooks: DelegationSessionHooks?
+
+    /// Claude tabs whose agent was already running in its daemon when this run restored them
+    /// (`restore`'s `isLive`). Only these can hold a plugin older than this bundle's, since a
+    /// tab this run launches loads the current one itself. See `armPluginReload`.
+    private var adoptedClaudeTabs: Set<UUID> = []
+    /// Which adopted tabs still need `/reload-plugins` (C7 probe P1). Empty until
+    /// `armPluginReload` runs, so a store nobody arms never types it.
+    private var pluginReload = PluginReload(adopted: [], pluginChanged: false)
+
     /// The path calculator for `fd-abduco` sockets/pidfiles/binary — see its doc comment.
     /// Injected (default `SessionDaemon()`) so tests can point it at a temp directory with a
     /// fake executable, matching `daemonControl` below.
@@ -1731,6 +1745,16 @@ final class SessionStore: ObservableObject {
             for (key, value) in ControlEnvironment.variables(
                 for: session.id, socket: controlSocket, secret: controlSecret) { environment[key] = value }
         }
+        // After the Shell pane, so the shim directory goes in front of whatever `PATH` the
+        // user configured there rather than being replaced by it. This also (re)builds the
+        // tab's shim directory, the one side effect this function has: every surface a tab
+        // gets passes through here, a reattach included, so it is the one place that sees
+        // every tab that could type a routed command.
+        if let delegationHooks {
+            environment = delegationHooks.launchEnvironment(
+                environment, session: session.id,
+                projectRoot: URL(fileURLWithPath: session.workingDirectory, isDirectory: true))
+        }
         return environment
     }
 
@@ -1760,6 +1784,8 @@ final class SessionStore: ObservableObject {
             launchFailureReporter.report(.terminalUnavailable(displayAsleep: false))
             return .failed
         }
+        // A fresh shell, so a fresh agent that loads the current plugin itself.
+        pluginReload.forget(id)
         // Same ordering and reason as `insertSession`: before anything is typed, so the child
         // is not left talking to libghostty's placeholder 800x600 grid.
         report(terminalSize, to: id)
@@ -2068,7 +2094,8 @@ final class SessionStore: ObservableObject {
         transcriptsRoot: URL? = nil,
         statusIsAlive: ((pid_t) -> Bool)? = nil,
         daemon: SessionDaemon = SessionDaemon(),
-        intakesRoot: URL? = nil
+        intakesRoot: URL? = nil,
+        delegationHooks: DelegationSessionHooks? = nil
     ) {
         self.init(
             provider: ghostty,
@@ -2102,6 +2129,9 @@ final class SessionStore: ObservableObject {
         if let statusRoot { statusRootOverride = statusRoot }
         // Before `restore()`, which attaches a transcript watcher per restored session.
         if let transcriptsRoot { transcriptsRootOverride = transcriptsRoot }
+        // Before `restore()` too: it launches every restored tab, and a tab launched without
+        // its shim directory on `PATH` never routes a command for the life of its shell.
+        self.delegationHooks = delegationHooks
         self.statusIsAlive = statusIsAlive
         // Before the sweep below, which reports through it.
         if let reapReporter { self.reapReporter = reapReporter }
@@ -3367,6 +3397,9 @@ final class SessionStore: ObservableObject {
             // "already running" as a live Claude one, and neither reads the daemon's answer
             // differently.
             let isLive = daemonControl.isLive(entry.id)
+            // `--plugin-dir` is claude's alone; codex picks its skill up from `CODEX_HOME`,
+            // which `CodexDelegateSkill` keeps current without a command.
+            if isLive, !orphaned, session.agent == .claude { adoptedClaudeTabs.insert(entry.id) }
             let initialInput: String
             if orphaned || deferred || isLive {
                 initialInput = ""
@@ -4226,6 +4259,8 @@ final class SessionStore: ObservableObject {
         }
         repos[repoIndex].sessions.remove(at: sessionIndex)
         emit(.sessionRemoved(id: id))
+        delegationHooks?.sessionClosed(id)
+        pluginReload.forget(id)
 
         // Detach and park rather than release. Two reasons this is not just `= nil`:
         //
@@ -6979,6 +7014,38 @@ final class SessionStore: ObservableObject {
         }
     }
 
+    /// Sends `/reload-plugins` to the claude tabs adopted at launch when the bundled plugin
+    /// changed since the previous run (C7's probe P1: a `--plugin-dir` skill added mid-session
+    /// never appears without it). `adopted` defaults to what `restore` recorded; a tab closed
+    /// since then is dropped.
+    func armPluginReload(pluginChanged: Bool, adopted: Set<UUID>? = nil) {
+        let live = (adopted ?? adoptedClaudeTabs).filter { session(for: $0) != nil }
+        pluginReload = PluginReload(adopted: live, pluginChanged: pluginChanged)
+    }
+
+    /// The tabs that may be sent `/reload-plugins` right now: pending, and idle by the status
+    /// registry. Idle, not just showing a composer, which is all `inject`'s own gate asks:
+    /// whether claude runs a `/reload-plugins` queued mid-turn as a command is unprobed, and a
+    /// tab with a user's rename or prompt still queued gets those first.
+    func pluginReloadsDue() -> [UUID] {
+        pluginReload.pending.filter {
+            statuses[$0]?.activity == .idle && pendingRenames[$0] == nil && pendingPrompts[$0] == nil
+                && (promptQueue[$0]?.isEmpty ?? true)
+        }.sorted { $0.uuidString < $1.uuidString }
+    }
+
+    private func flushPluginReloads() {
+        for id in pluginReloadsDue() {
+            inject(
+                PluginReload.command,
+                into: id,
+                // Re-asked after the settle: a turn that started meanwhile makes it wait.
+                stillWanted: { [weak self] in self?.pluginReloadsDue().contains(id) ?? false },
+                onSent: { [weak self] in self?.pluginReload.sent(id) }
+            )
+        }
+    }
+
     /// Drops a queued prompt for any session that has started working on its own.
     ///
     /// Covers both the user getting there first and a resumed `claude` picking its own turn
@@ -7558,6 +7625,9 @@ final class SessionStore: ObservableObject {
         // is invisible, and the extra pass gives `cancelSupersededPrompts` one more chance to
         // drop a nudge for a session that started working in the meantime.
         flushRetryBackoff()
+        // After every queue above, so a user's own text always reaches an idle composer
+        // first; `inject` refuses a tab already mid-drive, and this retries next tick.
+        flushPluginReloads()
     }
 
     /// Rebuilds `statuses` from a registry scan and keeps each tab's anchor current.

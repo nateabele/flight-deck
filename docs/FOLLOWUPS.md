@@ -2365,10 +2365,10 @@ What is open, in the order it will bite:
   last one, check `hosts.json` holds the host's `100.x` address *before* leaving the LAN: hosts now
   advertise their own addresses in `helloAck` (ARCHITECTURE.md, "Reaching a host off the LAN"),
   which is unit-tested against a scripted network only.
-- **P3 (does XCTest UI run from a hostd LaunchAgent?) is unverified** until sub-project C.
-- **Sub-project C is the next plan:** sync, the `run`/`exec`/`up`/`ps`/`recipe` CLI, execution and
-  services, preflight, `delegate.toml`, the agent skill, and deleting `workspaces/<slot>/` on
-  revoke (nothing to delete until C exists). B and D get their own specs.
+- **P3 (does XCTest UI run from a hostd LaunchAgent?) is still unverified.** Sub-project C built
+  screen runs on that assumption but could not run the probe; see the next section.
+- **Sub-project C landed** (next section). Deleting `workspaces/<slot>/` on revoke did not: it is
+  listed there. B and D get their own specs.
 - **Never run against real hardware:** the Linux systemd path is tested only against stub
   `systemctl`/`loginctl`; the installer's tarballs are not reproducible (two builds differ).
 - **The full macOS suite has no baseline for this branch.** Task 2's full run showed about 11
@@ -2432,3 +2432,123 @@ What is open, in the order it will bite:
 - The three MUST-FIX items are at the top of this section. Lesser: give a failed
   `systemctl enable --now` its own `die` message.
 
+## From remote hosts, sub-project C: delegated execution (2026-10-05)
+
+`flightdeck run|exec|up|down|restart|sync|ps|wait|logs|stop|diff|apply|recipe` on top of the
+paired-host link (plan: [the delegated-execution plan](superpowers/plans/2026-10-05-delegated-execution.md);
+as built: ARCHITECTURE.md, "Delegated execution"). Built in parallel tracks C0–C8. Every result
+below comes from unit tests and in-process loopback; **nothing has run against a real second
+machine.**
+
+### Unverified live, and the maintainer's
+
+- **P3: does an XCTest UI suite run from the hostd LaunchAgent, and fail from a plain SSH child?**
+  The placement of the macOS hostd rests on it. Procedure in [DELEGATION-PROBES.md](DELEGATION-PROBES.md).
+- **P4: does `CGSessionCopyCurrentDictionary` report the locked screen reliably from the hostd?**
+  The screen preflight (`screen_locked`) reads nothing else. Same document.
+- **The spec's manual checks (§10):** a real UI test on a second Mac (the "don't touch" panel shows
+  while the lease is held, and a second screen run queues behind the first), and a Linux pairing
+  from the pasted command followed by a `flightdeck run` there.
+- **`SMAppService` registration of the hostd from an installed build** has never run (sub-project A
+  item above); every delegation run on a Mac host depends on it.
+- **A routed command in a real tab.** Whether a login profile that prepends to `PATH`
+  (`fish_add_path`, `brew shellenv`, `path_helper` in zsh's `/etc/zprofile`) pushes the shim
+  directory off the front is unchecked. Check with `command -v xcodebuild` in a tab of a project
+  that routes it. A fix would be shell-side (a fish `conf.d` snippet that re-prepends
+  `$FLIGHTDECK_SHIM_DIR`).
+- **`/reload-plugins` at a busy composer** is unprobed, which is why the app sends it only to an
+  idle tab. **A codex TUI already running** when its skill is installed or refreshed may not see
+  it; new tabs do.
+
+### Not built, or out of v1 by ruling
+
+- **Revoking a controller does not delete its `workspaces/<slot>/`** on the host (spec §3.5). Its
+  checkouts, and any `include`d secret in them, stay until removed by hand or by
+  `flightdeck host prune`.
+- **Submodules are refused** (`submodules_unsupported`, ruling 7), like LFS. Spec §4.2 step 4 is
+  deferred.
+- **Phones cannot delegate.** Every `delegate.*` from a paired phone is `out_of_scope` (ruling 4).
+  A phone feature needs a ruling first.
+- **A service's port forwards are not rebuilt after an app relaunch.** The service is still listed
+  and can be downed; its `localhost` ports are gone until `restart`.
+- **`exec` still takes a local snapshot** only to learn the workspace identity for
+  `run.start apply:false`. `existingCheckout` on the host makes a cheaper identity call possible.
+- **`queued(.slot)` always reports position 1 with no holder:** `WorkspaceStore` gives `acquire` no
+  queue information.
+- **Stale shim directories.** A tab closed while the app was not running (a crash, a hand-edited
+  `sessions.json`) leaves `route-shims/<id>/` behind: a few dangling symlinks, never pruned.
+- **Spec §8 wording.** The shim runs `flightdeck route-exec <name> -- <args>` and the CLI does the
+  matching; the spec says the shim runs `flightdeck run <recipe> -- <argv>`. Same behaviour.
+- **Unknown future `RunEvent` kinds** make the whole `event` frame fail to decode, and `HostLink`
+  drops it. Fine for 1.x skew, but adding an event kind is a minor bump older controllers ignore.
+
+### Deferred minors, by area
+
+**Channel mux**
+- The unclaimed-channel cap is skipped once an `accept()` stream exists (controller side only).
+- `closedIDs` grows by one tombstone per channel ever closed on a connection; a busy forwarded
+  port accumulates them until the link drops. Tombstoning only above a low-water mark would bound it.
+- Throughput is about one 256 KiB window per round trip per channel (about 5 MiB/s on a 50 ms
+  tailnet path). A larger or adaptive window is the lever if bundles or forwards prove slow.
+
+**Sync and results**
+- `ResultApplier`'s `.git` check is case-insensitive but does not cover HFS-ignorable Unicode
+  variants; git's own `verify_path` does, at checkout.
+- A symlink planted *during* an apply makes it throw `unsafe_path` after earlier paths were written,
+  and a time-of-check gap remains between the parent walk and the rename (Foundation has no portable
+  `openat`/`O_NOFOLLOW` write).
+- An apply stages the result inside `.git`, using about the result's size until it finishes.
+
+**Runner**
+- A pty run's output ends at the first quiet 100 ms after the leader exits; a later write is cut off
+  (Darwin discards unread master output once the slave closes).
+- In a Linux container, where PID 1 never reaps, a zombie grandchild counts as dead. A hostd under
+  systemd is unaffected.
+
+**Config and routing shims**
+- The shim's probe watchdog (`sleep 2`) can linger up to 2 s after the probe returns; `exec sleep`
+  would end it with the probe.
+- The inline-table deep-key test asserts only that it throws.
+- A CLI found on `PATH` (not this build's) costs one extra process start per routed command for the
+  `route-exec` probe.
+- `recipe add` drops comments inside the recipe's own table when it replaces it, and cannot replace a
+  recipe defined only through root-level dotted keys (it throws rather than duplicate it).
+- The TOML subset has no multi-line strings, floats or dates; each is a parse error naming its line.
+- Route matching exists twice: the app uses HostKit's `RouteMatcher`, the CLI (which does not link
+  HostKit) a copy held to the same answers by `DelegationRouteParityTests`.
+
+**Preflight and port forwarding**
+- On a failure after step 4, `release()` returns before the listeners have closed; awaiting
+  `released()` (or fixing the comment in `Preflight.run`) would make it exact. `released()` has no
+  timeout.
+- An established connection with no listener makes the local bind retry for 30 s and then report
+  TIME_WAIT, which is the wrong reason.
+- The `MemoryPipe` test fake can spin.
+- `testForeignTimeWaitIsRetriedUntilItClears` costs about 30 s per run: the kernel's TIME_WAIT.
+
+**App service and CLI**
+- After a `slow_reader`, the app keeps the dead `cid`'s subscriber until the run ends (its replies
+  are dropped).
+- The CLI's 30 reconnects (about 30 s) after a dropped app are a guess at how long a relaunch takes.
+- A `long` recipe is known only to the app, so the CLI reads `recipe.ls` first to set `detach`. If
+  that read fails while the run succeeds, the CLI waits for a terminal frame that never comes.
+
+**Agent skill and plugin reload**
+- The plugin fingerprint lives in the defaults domain Debug and Release share, so running one after
+  the other can send one extra, harmless `/reload-plugins` to idle adopted tabs.
+- The fingerprint is recorded at launch, before any tab is reloaded: a crash before then costs those
+  tabs their reload until the next plugin change.
+- A Debug build's codex start writes the real `~/.codex/skills/flightdeck-delegate/`; a Debug build
+  with different skill text refreshes it, and the next Release start refreshes it back.
+- Deleting the whole `flightdeck-delegate/` directory (sidecar included) reinstalls the skill; the
+  permanent opt-out is deleting `SKILL.md` and keeping the sidecar. The skill also survives an app
+  uninstall. The maintainer may want a Preferences opt-out.
+- `CodexDelegateSkill`'s `CODEX_HOME` environment fallback is dead code (it matches the app's
+  convention elsewhere).
+
+**Tests and tooling**
+- `scripts/test-unit.sh`'s class check can report a real class as unknown under load
+  (`printf … | rg -qx` under `pipefail`: `rg -q` exits on its match and `printf` takes SIGPIPE).
+  Suggested fix: `rg -qx "$cls" <<<"$ALL_CLASSES"`.
+- `PromptDeliveredLoopbackTests.testPromptTypedFollowsTheAckOverTheWire` is load-flaky (passes alone
+  and with the delegation contract reverted).

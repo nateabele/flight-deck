@@ -66,6 +66,27 @@ with a bind error or a half-written build tree, neither of which points at the r
 `build-boringssl.sh` and `build-boringssl-linux.sh` are different artifacts: the first is the
 macOS/iOS xcframework `FleetKit` links, the second is the Linux static library only the hostd uses.
 
+### Delegated execution (sub-project C)
+
+Delegation adds no build step: its HostKit half builds with the app and both hostds, and its app
+half is ordinary `FlightDeck` sources. What it does add:
+
+| Script / mode | Does | Notes |
+|---|---|---|
+| `scripts/test-hostkit.sh` | Also runs every delegation class in `Packages/HostKit/Tests/HostKitTests/` (`ChannelMux`, `Snapshotter`, `Workspace`, `ResultApplier`, `Runner`, `OutputSpool`, `ScreenLease`, `PortCheck`, `Preflight`, the TOML parser, writer and route matcher, the wire), on macOS and in `swift:6.3-noble` | The sync tests drive real git against temp repos and need **git 2.40 or later** on both sides (`merge-tree --write-tree --merge-base`); so does a real host. |
+| `FD_TEST_FILTER=… ./scripts/test-unit.sh` | The app's delegation classes: `DelegationServiceTests`, `DelegationStreamTests`, `DelegationCLIRunnerTests`, `DelegationCLIArgumentsTests`, `DelegationFleetServiceTests`, `DelegationControlWireTests`, `DelegationBootstrapTests`, `RouteShimsTests`, `PluginReloadTests`, `DelegateSkillTests` | Exits 0 even when a test fails: `rg -n "error:\|failed \("` the output. `RouteShimsTests` runs the real shim script under bash; its hang case takes about 3 s by design. |
+| `scripts/delegation-probes/p1_plugin_reload.py <trusted-dir> [plugin-dir]` | Probe P1: drives a real interactive `claude` in a pty and reads its slash-command autocomplete before and after `/reload-plugins` | Needs a venv with `pyte` (the usage line is in its docstring). Spends no model tokens, but it is a real claude process: run it from a folder claude already trusts. |
+| `scripts/delegation-probes/p2_skill_roots.py <codex>` | Probe P2a: which directories codex's skill loader scans, over `codex app-server` stdio | Zero tokens; sandboxed `HOME`/`CODEX_HOME`. Run it for **both** codex installs. |
+| `scripts/delegation-probes/p2_fake_upstream.py <codex> skill\|devinst` | Probe P2b: what `codex exec` actually sends the model, captured by a local server that answers 500 | Zero tokens. |
+
+P3 and P4 (an XCTest UI suite from the hostd LaunchAgent, and the screen-lock read) have no
+script: they need a real second Mac and are the maintainer's, written up as procedures in
+[DELEGATION-PROBES.md](DELEGATION-PROBES.md).
+
+**Route shims at run time.** A Debug build writes its shims under its own state directory
+(`Application Support/Flight Deck (Debug)/route-shims/`), and a UITest reset writes none. To run a
+routed command locally in a tab, set `FLIGHTDECK_NO_ROUTE=1`.
+
 ## Running tests
 
 **Unit tests** (fast, no special permission):
