@@ -145,6 +145,8 @@ struct ObserveDrawer: View {
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
+        // Without .contain the id is stamped onto every child, hiding the lanes' own ids.
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("observe-drawer-collapsed")
     }
 
@@ -171,6 +173,8 @@ struct ObserveDrawer: View {
                 .font(.caption)
         }
         .padding(8)
+        // Without .contain the id is stamped onto every child, hiding the lanes' own ids.
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("observe-drawer-expanded")
     }
 
