@@ -186,11 +186,16 @@ while IFS= read -r FIRST; do
   TEXT="$FIRST"
   while IFS= read -r -t 0.5 MORE; do TEXT="$TEXT"$'\n'"$MORE"; done
   printf '\n'
+  # FD clears the composer first (ctrl-E ctrl-U as kitty CSI-u: ESC[5;5u ESC[21;5u) and may wrap
+  # the text in bracketed-paste markers, so the first line arrives with escapes in front of it.
+  # Strip CSI sequences, then any stray control byte but newline, before matching anything.
+  ESC=$(printf '\033')
+  TEXT=$(printf '%s' "$TEXT" | sed -E "s/${ESC}\[[0-9;?]*[A-Za-z~]//g" | tr -d '\000-\011\013-\037')
   echo "$(date +%T) agent ${AGENT_NAME:-?} prompt: ${TEXT%%$'\n'*}" >> "$LOG"
   case "$TEXT" in
     /clear*|/new*) printf '\033[2J\033[H'; status idle; box; continue ;;
   esac
-  TASK=$(printf '%s' "$TEXT" | sed -nE 's/^Your task is ([^:]+):.*/\1/p' | head -1)
+  TASK=$(printf '%s' "$TEXT" | sed -nE 's/.*Your task is ([^:]+):.*/\1/p' | head -1)
   status busy
   printf '⏺ %s\n' "${TEXT%%$'\n'*}"
   if [ -n "$TASK" ]; then
