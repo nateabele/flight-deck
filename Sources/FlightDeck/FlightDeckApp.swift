@@ -173,7 +173,10 @@ struct FlightDeckApp: App {
         // evaluation, which is the very hazard `_store` is deferred to avoid). `deferredStore`
         // is the shared, call-once seam both thunks resolve through instead, so whichever of
         // the two SwiftUI happens to evaluate first builds the store and the other reuses it.
-        let deferredStore = DeferredOnce { Self.makeStore(preferences: preferences) }
+        // Eager like `hosts` below, and before the store, which launches its restored tabs
+        // inside its own initializer and needs the route shims by then. Nil under a reset.
+        let delegation = Self.makeDelegationBootstrap()
+        let deferredStore = DeferredOnce { Self.makeStore(preferences: preferences, delegation: delegation) }
         _store = StateObject(wrappedValue: deferredStore())
         // Eager, unlike the store: it touches neither `NSApp` nor the session store, and
         // being built here — not in a `@StateObject` thunk SwiftUI may evaluate whenever —
@@ -184,8 +187,17 @@ struct FlightDeckApp: App {
         _hosts = StateObject(wrappedValue: hosts)
         _hosting = StateObject(wrappedValue: Self.makeHostingController())
         _fleet = StateObject(wrappedValue: Self.makeFleetService(
-            store: deferredStore(), preferences: preferences, hosts: hosts
+            store: deferredStore(), preferences: preferences, hosts: hosts, delegation: delegation
         ))
+    }
+
+    /// Route shims and delegated execution (`DelegationBootstrap`). Nil under a UITest reset,
+    /// for the reason `makeHostService` gives its reset run nothing real: a GUI test must not
+    /// write shims into the state directory or reach a paired host.
+    @MainActor
+    private static func makeDelegationBootstrap() -> DelegationBootstrap? {
+        guard !isResettingState else { return nil }
+        return DelegationBootstrap(stateDirectory: stateDirectory() ?? FileSessionPersistence.defaultDirectory())
     }
 
     /// Builds the host service beside `FleetService` and starts its links. Cannot hold up
@@ -236,12 +248,15 @@ struct FlightDeckApp: App {
     /// `Task` it starts are.
     @MainActor
     private static func makeFleetService(store: SessionStore, preferences: PreferencesStore,
-                                         hosts: HostService) -> FleetService {
+                                         hosts: HostService, delegation: DelegationBootstrap?) -> FleetService {
         let service = FleetService(store: store, preferences: preferences, armer: PairingArmer(),
                                    hosts: hosts)
         // The UITest gate is hermetic: a listener advertising this Mac on the real LAN
         // during a GUI test would be a live service, not a test fixture.
         guard !isResettingState else { return service }
+        // Before either socket starts, so no `delegate.*` request is ever answered
+        // `not_implemented` by a fleet that simply had not been handed its service yet.
+        delegation?.connect(fleet: service, hosts: hosts)
         Task {
             do {
                 try await service.start()
@@ -267,7 +282,7 @@ struct FlightDeckApp: App {
     }
 
     @MainActor
-    private static func makeStore(preferences: PreferencesStore) -> SessionStore {
+    private static func makeStore(preferences: PreferencesStore, delegation: DelegationBootstrap?) -> SessionStore {
         let resetState = Self.isResettingState
         // Built here rather than inside the store: `UNUserNotificationCenter` traps
         // outside a signed bundle, and `SessionStore`'s convenience init is reachable
@@ -326,8 +341,17 @@ struct FlightDeckApp: App {
             // search index does, so a debug instance pointed at a copy of a real deck never
             // triages into the real one's intakes.
             intakesRoot: (Self.stateDirectory() ?? FileSessionPersistence.defaultDirectory())
-                .appendingPathComponent("intakes", isDirectory: true)
+                .appendingPathComponent("intakes", isDirectory: true),
+            delegationHooks: delegation
         )
+
+        // After `restore()` (inside the initializer above), which is what records the claude
+        // tabs adopted from the previous run. Not under a reset: the fingerprint record lives
+        // in the real defaults domain, and a reset run has no adopted tabs anyway.
+        if !resetState, let plugin = ClaudePluginLocation.directory(bundle: .main) {
+            store.armPluginReload(pluginChanged: PluginReload.pluginChanged(
+                current: PluginReload.fingerprint(of: plugin), defaults: .standard))
+        }
 
         // Test-only second project, so the sidebar has something to reorder. Guarded by
         // `resetState` as well as its own flag: a reset run reads and writes no persistence,
