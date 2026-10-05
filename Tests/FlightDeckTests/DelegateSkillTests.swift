@@ -54,55 +54,169 @@ final class DelegateSkillTests: XCTestCase {
         }
     }
 
+    /// 125 is shared: the remote command may exit 125 itself, so only 125 plus a `flightdeck:`
+    /// line is a delegation failure. An agent told "125 means nothing ran" would treat a real
+    /// remote failure as a harmless retry.
+    func testSkillReadsExitCodesTheWayTheCLIWritesThem() throws {
+        let text = try String(contentsOf: try bundledSkill(), encoding: .utf8)
+        XCTAssertFalse(text.contains("nothing ran"))
+        for phrase in ["125 with a stderr line starting `flightdeck:`",
+                       "A 125 without that line is the remote command's own exit code",
+                       "exits with the run's own exit code",
+                       "`include` list in `.flightdeck/delegate.toml`",
+                       #"apply = "auto""#] {
+            XCTAssertTrue(text.contains(phrase), "the skill must say: \(phrase)")
+        }
+    }
+
     // MARK: - The codex copy
 
+    private var target: URL { CodexDelegateSkill.destination(codexHome: tempHome) }
+    private var marker: URL { CodexDelegateSkill.sidecar(codexHome: tempHome) }
+
+    private func put(_ text: String, at url: URL) throws {
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
+                                                withIntermediateDirectories: true)
+        try Data(text.utf8).write(to: url)
+    }
+
+    private func install() throws -> CodexDelegateSkill.Outcome {
+        try CodexDelegateSkill.install(from: try bundledSkill(), codexHome: tempHome)
+    }
+
     func testInstallPutsTheSameBytesInTheCodexHomeSkillsDirectory() throws {
-        let source = try bundledSkill()
-        XCTAssertTrue(try CodexDelegateSkill.install(from: source, codexHome: tempHome))
-        let target = tempHome.appendingPathComponent("skills/flightdeck-delegate/SKILL.md")
-        XCTAssertEqual(CodexDelegateSkill.destination(codexHome: tempHome), target)
-        XCTAssertEqual(try Data(contentsOf: target), try Data(contentsOf: source),
+        XCTAssertEqual(try install(), .installed)
+        XCTAssertEqual(target, tempHome.appendingPathComponent("skills/flightdeck-delegate/SKILL.md"))
+        XCTAssertEqual(try Data(contentsOf: target), try Data(contentsOf: try bundledSkill()),
                        "codex must read byte-for-byte what claude reads")
+        XCTAssertEqual(try String(contentsOf: marker, encoding: .utf8),
+                       CodexDelegateSkill.digest(try Data(contentsOf: target)) + "\n")
     }
 
     func testInstallLeavesACurrentCopyAlone() throws {
-        let source = try bundledSkill()
-        try CodexDelegateSkill.install(from: source, codexHome: tempHome)
-        XCTAssertFalse(try CodexDelegateSkill.install(from: source, codexHome: tempHome))
+        _ = try install()
+        XCTAssertEqual(try install(), .current)
     }
 
-    func testInstallReplacesAStaleCopy() throws {
-        let source = try bundledSkill()
-        let target = CodexDelegateSkill.destination(codexHome: tempHome)
-        try FileManager.default.createDirectory(at: target.deletingLastPathComponent(),
-                                                withIntermediateDirectories: true)
-        try Data("an older build's text".utf8).write(to: target)
-        XCTAssertTrue(try CodexDelegateSkill.install(from: source, codexHome: tempHome),
-                      "an app update must reach codex, not be skipped because a file exists")
-        XCTAssertEqual(try Data(contentsOf: target), try Data(contentsOf: source))
+    /// Our own older text, untouched by the user since we wrote it, is refreshed. An app
+    /// update must reach codex, not be skipped because a file exists.
+    func testInstallRefreshesOurStaleCopy() throws {
+        let old = "an older build's text"
+        try put(old, at: target)
+        try put(CodexDelegateSkill.digest(Data(old.utf8)), at: marker)
+        XCTAssertEqual(try install(), .refreshed)
+        XCTAssertEqual(try Data(contentsOf: target), try Data(contentsOf: try bundledSkill()))
+    }
+
+    func testInstallLeavesAUserEditedCopyAlone() throws {
+        _ = try install()
+        try put("the user's own edit", at: target)
+        XCTAssertEqual(try install(), .userEdited)
+        XCTAssertEqual(try String(contentsOf: target, encoding: .utf8), "the user's own edit")
+    }
+
+    func testInstallNeverRecreatesACopyTheUserDeleted() throws {
+        _ = try install()
+        try FileManager.default.removeItem(at: target)
+        XCTAssertEqual(try install(), .userDeleted)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: target.path))
+    }
+
+    /// No sidecar means Flight Deck never wrote this file, so it is the user's.
+    func testInstallLeavesAnUnmanagedFileAlone() throws {
+        try put("written by hand", at: target)
+        XCTAssertEqual(try install(), .userOwned)
+        XCTAssertEqual(try String(contentsOf: target, encoding: .utf8), "written by hand")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
+    }
+
+    /// An unmanaged file that is byte-for-byte ours is adopted. This also covers a crash
+    /// between writing SKILL.md and its sidecar.
+    func testInstallAdoptsAnUnmanagedFileThatIsExactlyOurs() throws {
+        try put(try String(contentsOf: try bundledSkill(), encoding: .utf8), at: target)
+        XCTAssertEqual(try install(), .adopted)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path))
+        try put("edited later", at: target)
+        XCTAssertEqual(try install(), .userEdited, "once adopted, an edit still sticks")
     }
 
     func testInstallNeverTouchesTheUsersOwnDelegateSkill() throws {
         let mine = tempHome.appendingPathComponent("skills/delegate/SKILL.md")
-        try FileManager.default.createDirectory(at: mine.deletingLastPathComponent(),
-                                                withIntermediateDirectories: true)
-        try Data("the user's own".utf8).write(to: mine)
-        try CodexDelegateSkill.install(from: try bundledSkill(), codexHome: tempHome)
+        try put("the user's own", at: mine)
+        _ = try install()
         XCTAssertEqual(try String(contentsOf: mine, encoding: .utf8), "the user's own")
     }
 
-    /// Under xctest `Bundle.main` is the test tool, which carries no plugin, so the production
-    /// entry point must write nothing. That is also what keeps a test run that reaches
-    /// `CodexProcessTransport.start()` out of the developer's real `~/.codex`.
-    func testInstallBundledWritesNothingWithoutAPluginInTheBundle() {
-        CodexDelegateSkill.installBundled(codexHome: tempHome, bundle: .main)
-        XCTAssertFalse(FileManager.default.fileExists(
-            atPath: CodexDelegateSkill.destination(codexHome: tempHome).path))
+    // MARK: - Uninstall
+
+    func testUninstallRemovesOurCopyAndItsDirectory() throws {
+        _ = try install()
+        XCTAssertTrue(try CodexDelegateSkill.uninstall(home: tempHome))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: target.deletingLastPathComponent().path))
     }
 
-    func testInstallBundledCopiesFromAPluginBundle() {
-        CodexDelegateSkill.installBundled(codexHome: tempHome, bundle: Bundle(for: Self.self))
-        XCTAssertTrue(FileManager.default.fileExists(
-            atPath: CodexDelegateSkill.destination(codexHome: tempHome).path))
+    func testUninstallKeepsAUserEditedCopy() throws {
+        _ = try install()
+        try put("the user's own edit", at: target)
+        XCTAssertFalse(try CodexDelegateSkill.uninstall(home: tempHome))
+        XCTAssertEqual(try String(contentsOf: target, encoding: .utf8), "the user's own edit")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path))
     }
+
+    func testUninstallKeepsAnUnmanagedFile() throws {
+        try put("written by hand", at: target)
+        XCTAssertFalse(try CodexDelegateSkill.uninstall(home: tempHome))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: target.path))
+    }
+
+    func testUninstallClearsALoneSidecarSoALaterInstallStartsFresh() throws {
+        _ = try install()
+        try FileManager.default.removeItem(at: target)
+        XCTAssertTrue(try CodexDelegateSkill.uninstall(home: tempHome))
+        XCTAssertEqual(try install(), .installed)
+    }
+
+    // MARK: - The production entry point
+
+    /// Under xctest `Bundle.main` is the test tool, which carries no plugin, so the production
+    /// entry point must write nothing. That is also what keeps a test run that reaches
+    /// `SessionStore.startCodex` out of the developer's real `~/.codex`.
+    func testInstallBundledWritesNothingWithoutAPluginInTheBundle() async {
+        await CodexDelegateSkill.installBundledOffMainActor(codexHome: tempHome, bundle: .main)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: target.path))
+    }
+
+    func testInstallBundledCopiesFromAPluginBundle() async {
+        await CodexDelegateSkill.installBundledOffMainActor(
+            codexHome: tempHome, bundle: Bundle(for: Self.self))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: target.path))
+    }
+
+    /// The copy runs off the main thread, so `startCodex` never blocks the UI on disk I/O.
+    @MainActor
+    func testInstallBundledRunsTheCopyOffTheMainThread() async {
+        let onMain = Flag()
+        await CodexDelegateSkill.installBundledOffMainActor(
+            codexHome: tempHome, bundle: Bundle(for: Self.self),
+            perform: { _, _ in onMain.set(Thread.isMainThread); return .current })
+        XCTAssertEqual(onMain.value, false)
+    }
+
+    /// A stalled codex home (say, a hung network volume) must not wedge `startCodex`, whose
+    /// task is memoized per account. The caller unblocks at the deadline.
+    func testInstallBundledReturnsAtTheDeadlineWhenTheCopyStalls() async {
+        let started = Date()
+        await CodexDelegateSkill.installBundledOffMainActor(
+            codexHome: tempHome, bundle: Bundle(for: Self.self), timeoutSeconds: 0.2,
+            perform: { _, _ in Thread.sleep(forTimeInterval: 3); return .current })
+        XCTAssertLessThan(Date().timeIntervalSince(started), 2)
+    }
+}
+
+/// A thread-safe box the off-main test writes into from the copy's own thread.
+private final class Flag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: Bool?
+    var value: Bool? { lock.lock(); defer { lock.unlock() }; return stored }
+    func set(_ value: Bool) { lock.lock(); stored = value; lock.unlock() }
 }

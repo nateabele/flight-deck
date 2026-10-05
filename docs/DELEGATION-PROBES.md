@@ -31,6 +31,11 @@ The driver waits for the composer box before sending any key, because a trust di
 to "No, exit". Skills are read off the TUI's own slash-command autocomplete: type `/p1probe:`,
 read the screen, then `^U` to clear. That listing is local, so **no model turn is spent**.
 
+**Repeat it:** `scripts/delegation-probes/p1_plugin_reload.py <trusted-dir> [plugin-dir]`. Its
+docstring has the venv line for `pyte`. Plugins load a beat after the composer draws, so the
+driver polls the autocomplete, and aborts if the control skill never shows. One early
+single-read run reported an empty T0 under load, and an empty list is no verdict.
+
 | Step | `/p1probe:` autocomplete shows |
 |---|---|
 | T0, at launch | `alphaprobe` |
@@ -46,8 +51,8 @@ still names the bundle path whose contents just changed. `PluginReload`
 the adopted tabs that need `/reload-plugins` when that fingerprint differs from the previous
 run's. `SessionStore` sends the command through the gated `inject`, while the tab is idle.
 
-**Real skill check.** `claude --plugin-dir Resources/ClaudePlugin` (same driver) offers
-`/flight-deck:delegate` with the skill's description in autocomplete.
+**Real skill check.** `p1_plugin_reload.py <trusted-dir> Resources/ClaudePlugin` reports that
+autocomplete offers `delegate`, as `/flight-deck:delegate` with the skill's description.
 
 ## P2: codex loads SKILL.md skills, from four roots
 
@@ -68,6 +73,9 @@ with `cwd` = a scratch repo:
 
 Plus codex's own `.system` skills under `$CODEX_HOME/skills/.system/`.
 
+**Repeat it:** `scripts/delegation-probes/p2_skill_roots.py <codex>`. Its docstring lists the
+exact JSON-RPC lines.
+
 **Does the skill reach the model? A fake upstream, also zero tokens.** The sandboxed
 `config.toml` points codex at a local HTTP server that records each POST body and answers 500:
 
@@ -86,6 +94,9 @@ open, `exec` waits on it until the timeout. On both installs, the request's
 `<skills_instructions>` lists `- delegate: <description> (file: …/flightdeck-delegate/SKILL.md)`.
 The body is **not** inlined; the model opens it on demand.
 
+**Repeat it:** `scripts/delegation-probes/p2_fake_upstream.py <codex> skill`, and the
+`developer_instructions` measurement below with `… <codex> devinst`. Run both for both installs.
+
 **Why not `developer_instructions`.** The fake upstream measured how it merges. With
 `developer_instructions = "USER-MARK…"` in `config.toml` and `-c developer_instructions="FD-MARK…"`
 on the command line, the request carried only FD-MARK. **The `-c` value replaces the user's
@@ -98,10 +109,33 @@ process, which Flight Deck's app-server never reaches.
 
 **Wiring chosen.** `CodexDelegateSkill` (`Sources/FlightDeck/Agents/Codex/CodexDelegateSkill.swift`)
 copies the bundled `ClaudePlugin/skills/delegate/SKILL.md` to
-`<CODEX_HOME>/skills/flightdeck-delegate/SKILL.md`, rewriting it only when the bytes differ.
-`CodexProcessTransport.start()` calls it for the account's home just before spawning the
-app-server. So nothing is written for a user who never opens a codex tab. Both agents read one
-file. The `flightdeck-` prefix keeps it clear of a user skill named `delegate`.
+`<CODEX_HOME>/skills/flightdeck-delegate/SKILL.md`. Both agents read one file. The
+`flightdeck-` prefix keeps it clear of a user skill named `delegate`.
+- **When:** `SessionStore.startCodex` awaits `installBundledOffMainActor` for the account's home
+  just before spawning the app-server. So nothing is written for a user who never opens a codex
+  tab.
+- **How:** it runs off the main actor, raced against a 2 s deadline, so a stalled home cannot
+  wedge the account's memoized start.
+
+**The copy belongs to the user once they touch it.** A sidecar,
+`skills/flightdeck-delegate/.flightdeck-managed`, holds the SHA-256 of the bytes Flight Deck last
+wrote:
+
+| On disk | What `install` does |
+|---|---|
+| Nothing | Writes the file and the sidecar |
+| The file still hashes to the sidecar | Refreshes it if the app ships new text, otherwise leaves it |
+| The file hashes to something else | Leaves it: the user edited it |
+| The sidecar, but no file | Leaves it: the user deleted it, and it is never recreated |
+| The file, but no sidecar | Leaves it: it is the user's own. If its bytes equal ours exactly, it is adopted by writing the sidecar. |
+
+**Removing it.** `CodexDelegateSkill.uninstall(home:)` deletes the file, the sidecar and the
+then-empty directory, but only while the file still hashes to the sidecar. A lone sidecar is
+cleared too, so a later install starts fresh. It has no UI yet. By hand there are two ways, and they differ:
+- `rm "${CODEX_HOME:-$HOME/.codex}/skills/flightdeck-delegate/SKILL.md"` opts out **for good**:
+  the sidecar stays, and records that the file was deleted.
+- `rm -r` of the whole directory removes the record too, so the next codex start installs the
+  skill again.
 
 **Not probed:** whether a codex TUI that is **already running** notices a newly installed skill.
 `skills/list` has a `forceReload` flag, which implies a cache. New tabs certainly see it.

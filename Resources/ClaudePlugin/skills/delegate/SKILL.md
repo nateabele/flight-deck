@@ -20,19 +20,19 @@ Never guess host or recipe names. They change; ask every time.
 
 - `flightdeck run <recipe>` runs a named recipe. Extra arguments go after `--`.
 - `flightdeck run --on <host> -- <cmd…>` runs an ad-hoc command.
-- `--include <path>` sends a git-ignored file (for example `.env`); ignored files are never sent otherwise.
+- `--include <path>` sends a git-ignored file (for example `.env`); ignored files are never sent otherwise. The project's `include` list in `.flightdeck/delegate.toml` is sent on every run.
 - `--fetch <glob>` brings build outputs back (for example `build/**/*.xcresult`).
 - `--env K=V` sets a variable on the host. Your local environment is never sent.
 - `--screen` is for UI tests. It waits for the host's screen if another run holds it.
 - `--pty` is for a command that needs a terminal.
 
-Files the command changes on the host come back as a patch. Read it with `flightdeck diff <run>`, then `flightdeck apply <run>`. Apply merges against your current tree and leaves conflict markers rather than overwriting.
+Files the command changes on the host come back as a patch. Read it with `flightdeck diff <run>`, then `flightdeck apply <run>`. Apply merges against your current tree and leaves conflict markers rather than overwriting. A recipe with `apply = "auto"` applies its patch by itself; check `git status` afterwards.
 
 ## Long runs
 
 A recipe marked `long`, or `--detach`, prints a run id and returns at once. Then:
 
-- `flightdeck wait <run>` blocks for up to 9 minutes (`--timeout` to change). Exit 124 means it is still running: call `wait` again.
+- `flightdeck wait <run>` blocks until the run ends, then exits with the run's own exit code. It gives up after 9 minutes (`--timeout` to change) with exit 124, which means the run is still going: call `wait` again.
 - `flightdeck logs <run>` replays the output.
 - `flightdeck stop <run>` cancels it.
 - `flightdeck ps` lists this session's runs and services.
@@ -51,7 +51,7 @@ A recipe marked `long`, or `--detach`, prints a run id and returns at once. Then
 
 ## Exit codes
 
-- **125** means delegation itself failed: nothing ran and nothing changed. Read the single `flightdeck:` line on stderr and do exactly what it says (another `--port`, `--include <path>`, wait for the host to come online). Do not retry blindly.
+- **125 with a stderr line starting `flightdeck:`** means delegation itself failed. Do exactly what that line says (another `--port`, `--include <path>`, wait for the host to come online); do not retry blindly. A failure in the checks before syncing changed nothing on either machine. A 125 without that line is the remote command's own exit code.
 - **124** comes from `wait` and means the run is still going.
 - **128+n** means the run was killed by signal n.
 - Any other code is the remote command's own.

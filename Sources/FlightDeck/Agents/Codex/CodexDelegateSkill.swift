@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import os
 
@@ -20,10 +21,27 @@ import os
 /// `skills/delegate/SKILL.md` inside the app bundle. Nothing here holds skill text, so the two
 /// agents cannot drift apart.
 ///
+/// **The file is the user's the moment they touch it.** It lives in the user's own home, so
+/// the user may edit it or delete it, and either choice has to stick. A sidecar,
+/// `.flightdeck-managed`, holds the SHA-256 of the bytes Flight Deck last wrote:
+/// - A file that still hashes to that value is ours, and is refreshed when the app ships new
+///   text.
+/// - A file that hashes to anything else was edited, and is left alone.
+/// - A sidecar with no file beside it means the user deleted the file, which is never undone.
+/// - A file with no sidecar is the user's own and is left alone. The exception is a file
+///   whose bytes equal ours exactly; it is adopted, since nothing the user wrote can be lost.
+///
 /// **The directory is prefixed.** A user skill named `delegate` in the same home must never be
 /// overwritten; `flightdeck-delegate` is Flight Deck's own name and nothing else's.
 enum CodexDelegateSkill {
     static let directoryName = "flightdeck-delegate"
+    static let sidecarName = ".flightdeck-managed"
+
+    /// What one `install` did. Each case names a branch a test pins, because the wrong branch
+    /// either clobbers a user's edit or resurrects a file they deleted.
+    enum Outcome: Equatable {
+        case installed, refreshed, adopted, current, userEdited, userDeleted, userOwned
+    }
 
     private static let logger = Logger(subsystem: "dev.flightdeck.FlightDeck", category: "codex")
 
@@ -44,40 +62,141 @@ enum CodexDelegateSkill {
             .appendingPathComponent("SKILL.md")
     }
 
-    /// Writes the skill only when the copy is missing or differs, and returns whether it wrote.
-    /// It compares bytes rather than skipping whenever a file exists, so an app update that
-    /// changes the skill reaches codex on the next spawn rather than never.
-    @discardableResult
-    static func install(from source: URL, codexHome: URL) throws -> Bool {
-        let data = try Data(contentsOf: source)
+    static func sidecar(codexHome: URL) -> URL {
+        destination(codexHome: codexHome).deletingLastPathComponent().appendingPathComponent(sidecarName)
+    }
+
+    static func digest(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    static func install(from source: URL, codexHome: URL) throws -> Outcome {
+        let ours = try Data(contentsOf: source)
         let target = destination(codexHome: codexHome)
-        if (try? Data(contentsOf: target)) == data { return false }
+        let onDisk = try? Data(contentsOf: target)
+        let recorded = (try? String(contentsOf: sidecar(codexHome: codexHome), encoding: .utf8))?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        switch (onDisk, recorded) {
+        case (nil, nil):
+            try write(ours, codexHome: codexHome)
+            return .installed
+        case (nil, _?):
+            return .userDeleted
+        case (let disk?, nil):
+            guard disk == ours else { return .userOwned }
+            try writeSidecar(for: ours, codexHome: codexHome)
+            return .adopted
+        case (let disk?, let hash?):
+            // Equal bytes are checked before the hash. This also heals a crash between the two
+            // writes in `write`: SKILL.md is written first, so an interrupted refresh leaves our
+            // exact bytes beside a stale sidecar, and that must read as ours, not as an edit.
+            if disk == ours {
+                if hash != digest(ours) { try writeSidecar(for: ours, codexHome: codexHome) }
+                return .current
+            }
+            guard digest(disk) == hash else { return .userEdited }
+            try write(ours, codexHome: codexHome)
+            return .refreshed
+        }
+    }
+
+    /// Removes the skill only while it is still Flight Deck's. Returns whether anything was
+    /// removed. An edited or adopted-elsewhere file stays; a lone sidecar (the user already
+    /// deleted SKILL.md) is cleared, so a later install starts fresh.
+    @discardableResult
+    static func uninstall(home codexHome: URL) throws -> Bool {
+        let target = destination(codexHome: codexHome)
+        let marker = sidecar(codexHome: codexHome)
+        guard let hash = (try? String(contentsOf: marker, encoding: .utf8))?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        else { return false }
+        let fm = FileManager.default
+        if let disk = try? Data(contentsOf: target) {
+            guard digest(disk) == hash else { return false }
+            try fm.removeItem(at: target)
+        }
+        try fm.removeItem(at: marker)
+        let directory = target.deletingLastPathComponent()
+        if (try? fm.contentsOfDirectory(atPath: directory.path))?.isEmpty == true {
+            try fm.removeItem(at: directory)
+        }
+        return true
+    }
+
+    private static func write(_ data: Data, codexHome: URL) throws {
+        let target = destination(codexHome: codexHome)
         try FileManager.default.createDirectory(
             at: target.deletingLastPathComponent(), withIntermediateDirectories: true
         )
         try data.write(to: target, options: .atomic)
-        return true
+        try writeSidecar(for: data, codexHome: codexHome)
     }
 
-    /// The production entry point, called just before an account's app-server is spawned.
-    /// The codex tabs of that account run under the same `CODEX_HOME`, so they see the skill
-    /// when their TUI starts. It never throws: a missing skill costs the agent one capability,
-    /// while a failed spawn would cost the user the whole tab.
-    ///
-    /// `home` is nil for a transport that inherits Flight Deck's own environment, and that
-    /// resolves the way codex itself would: `CODEX_HOME`, then `~/.codex`.
-    static func installBundled(codexHome home: URL?, bundle: Bundle = .main) {
-        guard let source = bundledSource(bundle: bundle) else { return }
-        let codexHome = home
+    private static func writeSidecar(for data: Data, codexHome: URL) throws {
+        try Data((digest(data) + "\n").utf8).write(to: sidecar(codexHome: codexHome), options: .atomic)
+    }
+
+    /// The home a transport with no explicit one inherits, resolved the way codex itself does:
+    /// `CODEX_HOME`, then `~/.codex`.
+    static func resolvedHome(_ home: URL?) -> URL {
+        home
             ?? ProcessInfo.processInfo.environment[AgentID.codex.homeEnvironmentKey]
                 .map { URL(fileURLWithPath: $0, isDirectory: true) }
             ?? AgentID.codex.builtInHome
-        do {
-            if try install(from: source, codexHome: codexHome) {
-                logger.info("installed the delegate skill into \(codexHome.path, privacy: .public)")
+    }
+
+    /// The production entry point. `SessionStore.startCodex` awaits it just before an account's
+    /// app-server is spawned. The codex tabs of that account run under the same `CODEX_HOME`,
+    /// so they see the skill when their TUI starts. It never throws: a missing skill costs the
+    /// agent one capability, while a failed spawn would cost the user the whole tab.
+    ///
+    /// **Off the main actor, and bounded.** It is disk I/O in a user-controlled directory, and
+    /// `CODEX_HOME` can sit on a network volume that stalls. `startCodex`'s task is memoized
+    /// per account, so a stall here would wedge every codex creation on the account, not just
+    /// this one. That is the same reason `CodexVersionProbe.checkOffMainActor` races a deadline.
+    /// The copy is detached and raced rather than awaited structurally, because blocking file
+    /// I/O cannot be cancelled. A copy that loses the race finishes on its own thread, and a
+    /// late copy is harmless.
+    static func installBundledOffMainActor(
+        codexHome home: URL?,
+        bundle: Bundle = .main,
+        timeoutSeconds: Double = 2,
+        perform: @escaping @Sendable (URL, URL) throws -> Outcome = install(from:codexHome:)
+    ) async {
+        guard let source = bundledSource(bundle: bundle) else { return }
+        let codexHome = resolvedHome(home)
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            let once = ResumeOnce(continuation)
+            Task.detached {
+                do {
+                    let outcome = try perform(source, codexHome)
+                    logger.info("delegate skill in \(codexHome.path, privacy: .public): \(String(describing: outcome), privacy: .public)")
+                } catch {
+                    logger.error("could not install the delegate skill into \(codexHome.path, privacy: .public): \(String(describing: error), privacy: .public)")
+                }
+                once.resume()
             }
-        } catch {
-            logger.error("could not install the delegate skill into \(codexHome.path, privacy: .public): \(String(describing: error), privacy: .public)")
+            DispatchQueue.global().asyncAfter(deadline: .now() + timeoutSeconds) {
+                once.resume()
+            }
+        }
+    }
+
+    /// Resumes its continuation exactly once, whichever of the copy or the deadline gets there
+    /// first. Resuming a continuation twice is a crash.
+    private final class ResumeOnce: @unchecked Sendable {
+        private let lock = NSLock()
+        private var continuation: CheckedContinuation<Void, Never>?
+
+        init(_ continuation: CheckedContinuation<Void, Never>) { self.continuation = continuation }
+
+        func resume() {
+            lock.lock()
+            let pending = continuation
+            continuation = nil
+            lock.unlock()
+            pending?.resume()
         }
     }
 }
