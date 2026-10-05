@@ -147,6 +147,15 @@ struct FlightDeckApp: App {
         if Self.isResettingState, let fixture = Self.fixture {
             preferences.preferences.shell.shellOverride = fixture.shellURL.path
         }
+        #if DEBUG
+        // L3-S UI tests: Flight Control on for the fixture project, in the hermetic (nil
+        // persistence) preferences a reset run uses — so nothing reaches `preferences.v1`.
+        if Self.isResettingState, let backend = FlightControlFixtureBackend.fromDefaults() {
+            var settings = preferences.projectSettings(backend.projectPath)
+            settings.flywheelEnabled = true
+            preferences.setProjectSettings(backend.projectPath, settings)
+        }
+        #endif
         _preferences = StateObject(wrappedValue: preferences)
 
         // `wrappedValue` is an @autoclosure: this call is NOT evaluated here. That is
@@ -244,6 +253,17 @@ struct FlightDeckApp: App {
         // hermetic, because `isResettingState` gave that store a nil persistence above.
         let fixture = resetState ? Self.fixture : nil
 
+        var flywheelTools = FlywheelToolPaths.system
+        // Beside `intakes/`, honouring `-FlightDeckStateDir`; a reset run gets a scratch root.
+        var swarmsRoot: URL? = resetState ? nil : (Self.stateDirectory() ?? FileSessionPersistence.defaultDirectory())
+        #if DEBUG
+        let flightControlFixture = resetState ? FlightControlFixtureBackend.fromDefaults() : nil
+        if let flightControlFixture {
+            flywheelTools = flightControlFixture.tools
+            swarmsRoot = flightControlFixture.swarmsRoot
+        }
+        #endif
+
         let store = SessionStore(
             ghostty: GhosttyApp.shared,
             resetState: resetState && fixture == nil,
@@ -272,9 +292,8 @@ struct FlightDeckApp: App {
             // triages into the real one's intakes.
             intakesRoot: (Self.stateDirectory() ?? FileSessionPersistence.defaultDirectory())
                 .appendingPathComponent("intakes", isDirectory: true),
-            // Beside `intakes/`, honouring `-FlightDeckStateDir` the same way. A reset run gets a
-            // scratch root (nil), so a UI test never restores the developer's swarms.
-            swarmsRoot: resetState ? nil : (Self.stateDirectory() ?? FileSessionPersistence.defaultDirectory())
+            flywheelTools: flywheelTools,
+            swarmsRoot: swarmsRoot
         )
 
         // Test-only second project, so the sidebar has something to reorder. Guarded by
@@ -293,6 +312,10 @@ struct FlightDeckApp: App {
             store?.session(project: project, agentName: agentName)?.id
         }
         store.flywheelNotifier = flywheelNotifier
+
+        #if DEBUG
+        if let flightControlFixture { store.swarmDependencies = flightControlFixture.dependencies() }
+        #endif
 
         return store
     }

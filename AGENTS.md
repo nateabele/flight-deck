@@ -49,6 +49,7 @@ or revert blind — check `git status` and leave changes that aren't yours alone
 ./scripts/test-unit.sh          # headless unit suite — your normal TDD loop
 ./scripts/test-adapters.sh      # re-derives the adapter capability matrix against live claude/codex, exits non-zero on drift; default tier `cheap` spends no tokens (see scripts/adapterprobe/README.md for `--tier full` — and its baseline note before assuming a red run is your bug)
 ./scripts/smoke.sh              # GUI UITest, ends "SMOKE PASS" (see rule 4)
+./scripts/test-ui-flight-control.sh  # SwarmUITests on a stub br/am/agent fixture; takes the foreground, throttled like smoke.sh — never loop it
 
 # Flake hunting — loops one suspect sequence 20x in a single launch (rule 4).
 # The TEST_RUNNER_ prefix is mandatory; without it the case is silently SKIPPED.
