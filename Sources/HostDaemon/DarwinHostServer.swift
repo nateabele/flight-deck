@@ -76,6 +76,12 @@ final class DarwinHostServer: @unchecked Sendable {
     private var keyedSlots: Set<UUID> = []
     private var rebinding = false
     private var rebindAgain = false
+    private var backoff = RebindBackoff()
+    /// Connections accepted but not yet `.ready` (TLS and the WebSocket upgrade both done).
+    /// Keyed by a token per connection rather than its address, so a deadline that outlives
+    /// its connection can never cancel a newer one that reused the address. Holds the
+    /// connection so `stop()` can cancel the ones still handshaking.
+    private var pending: [UUID: NWConnection] = [:]
     private var pairing: PairingListener?
     private var stopped = false
 
@@ -90,6 +96,13 @@ final class DarwinHostServer: @unchecked Sendable {
     /// client gives up first); without this a TCP connect that never speaks TLS holds a
     /// socket for the life of the process.
     private static let handshakeDeadline: TimeInterval = 10
+
+    /// The cap on `pending`, `FleetSocketServer`'s `maxPending` and for its reason: accept
+    /// fires at TCP connect, so every pending entry is anonymous, and without a cap anyone on
+    /// the LAN or the tailnet could hold sockets without end — exhausting fds, and churning the
+    /// 64-entry identity table until real controllers' handshake records were evicted.
+    /// Sixteen slots held at most `handshakeDeadline` each is what a squatter can take.
+    static let maxPending = 16
 
     init(root: URL, port: NWEndpoint.Port?, hostName: @escaping @Sendable () -> String) {
         self.root = root
@@ -144,6 +157,8 @@ final class DarwinHostServer: @unchecked Sendable {
         core.onControllerName = nil
         queue.sync {
             stopped = true
+            for connection in pending.values { connection.cancel() }
+            pending.removeAll()
             pairing?.stop()
             pairing = nil
             pairingBoundPort = nil
@@ -188,7 +203,14 @@ final class DarwinHostServer: @unchecked Sendable {
             self?.finishBind(.failure(DarwinHostError.didNotBind), done)
         }
         listener.stateUpdateHandler = { [weak self] state in
-            guard !resumed, let self else { return }
+            guard let self else { return }
+            // After the bind resolved, a `.failed` is the listener dying under a live host
+            // (an interface going away, the network stack resetting). Without this the host
+            // stops answering until the next pair or revoke happens to rebind it.
+            if resumed {
+                if case .failed(let error) = state { listenerDidFail(listener, error) }
+                return
+            }
             switch state {
             case .ready:
                 guard let port = listener.port, port != .any else { return }
@@ -216,9 +238,6 @@ final class DarwinHostServer: @unchecked Sendable {
                             _ done: @Sendable (Result<NWEndpoint.Port, Error>) -> Void) {
         dispatchPrecondition(condition: .onQueue(queue))
         rebinding = false
-        if case .failure(let error) = result {
-            FileHandle.standardError.write(Data("hostd: listener did not bind: \(error)\n".utf8))
-        }
         done(result)
         if rebindAgain {
             rebindAgain = false
@@ -240,13 +259,45 @@ final class DarwinHostServer: @unchecked Sendable {
         guard !rebinding else { rebindAgain = true; return }
         rebinding = true
         releaseListener { [weak self] in
-            self?.bind { [weak self] result in
-                // A port still draining past the 2 s release bound would otherwise leave the
-                // host with no listener at all until the next pair or revoke.
-                guard case .failure = result, let self else { return }
-                queue.asyncAfter(deadline: .now() + 1) { [weak self] in self?.rebind() }
-            }
+            self?.bind { [weak self] result in self?.rebound(result) }
         }
+    }
+
+    /// A failed rebind retries, because a port still draining past the 2 s release bound would
+    /// otherwise leave the host with no listener until the next pair or revoke. Backed off
+    /// (`RebindBackoff`), and logged only where an outage starts and ends: a port held by
+    /// another process would otherwise retry and log every second forever.
+    private func rebound(_ result: Result<NWEndpoint.Port, Error>) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        switch result {
+        case .success(let port):
+            if backoff.succeeded() { log("listener back on port \(port)") }
+        case .failure(let error):
+            let (delay, startsOutage) = backoff.failed()
+            if startsOutage { log("listener did not rebind (\(error)); retrying with backoff") }
+            queue.asyncAfter(deadline: .now() + delay) { [weak self] in self?.rebind() }
+        }
+    }
+
+    private func listenerDidFail(_ failed: NWListener, _ error: NWError) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard failed === listener, !stopped else { return }
+        // Counted as the outage's first failure, so a rebind that then fails is not logged
+        // twice and a rebind that succeeds is logged as the recovery.
+        if backoff.failed().startsOutage { log("listener failed (\(error)); rebinding") }
+        rebind()
+    }
+
+    /// Test seams. Nothing a test can do makes a bound `NWListener` fail on its own, so a test
+    /// stands in for the network stack by handing the live listener's own state handler a
+    /// state, on the queue Network.framework would call it on.
+    var currentListener: NWListener? { queue.sync { listener } }
+    func deliverListenerState(_ state: NWListener.State) {
+        queue.async { [self] in listener?.stateUpdateHandler?(state) }
+    }
+
+    private func log(_ line: String) {
+        FileHandle.standardError.write(Data("hostd: \(line)\n".utf8))
     }
 
     /// `FleetSocketServer.releaseListenerOnQueue`'s wait-for-cancel: `cancel()` releases the
@@ -281,17 +332,22 @@ final class DarwinHostServer: @unchecked Sendable {
 
     private func accept(_ connection: NWConnection) {
         dispatchPrecondition(condition: .onQueue(queue))
-        let id = ObjectIdentifier(connection)
-        queue.asyncAfter(deadline: .now() + Self.handshakeDeadline) { [weak self, weak connection] in
-            guard let self, let connection, peers[id] == nil else { return }
-            if case .ready = connection.state { return }
-            connection.cancel()
+        // Refused before `start`, so a connection past the cap costs no TLS work at all.
+        guard pending.count < Self.maxPending else { return connection.cancel() }
+        let token = UUID()
+        pending[token] = connection
+        queue.asyncAfter(deadline: .now() + Self.handshakeDeadline) { [weak self] in
+            self?.pending.removeValue(forKey: token)?.cancel()
         }
         connection.stateUpdateHandler = { [weak self, weak connection] state in
             guard let self, let connection else { return }
             switch state {
-            case .ready: authenticated(connection)
-            case .failed, .cancelled: closed(connection)
+            case .ready:
+                pending.removeValue(forKey: token)
+                authenticated(connection)
+            case .failed, .cancelled:
+                pending.removeValue(forKey: token)
+                closed(connection)
             default: break
             }
         }
@@ -500,6 +556,31 @@ final class DarwinHostServer: @unchecked Sendable {
         pairing?.stop()
         pairing = nil
         pairingBoundPort = nil
+    }
+}
+
+/// The rebind retry schedule: 1 s, doubling, capped at 30 s, back to 1 s after a success.
+/// `startsOutage` and `succeeded()`'s answer mark the only two moments worth a log line.
+struct RebindBackoff {
+    static let initial: TimeInterval = 1
+    static let cap: TimeInterval = 30
+
+    private(set) var failing = false
+    private var next = initial
+
+    /// The delay before the next attempt, and whether this failure is the outage's first.
+    mutating func failed() -> (delay: TimeInterval, startsOutage: Bool) {
+        let startsOutage = !failing
+        failing = true
+        let delay = next
+        next = min(next * 2, Self.cap)
+        return (delay, startsOutage)
+    }
+
+    /// True when this success ends an outage.
+    mutating func succeeded() -> Bool {
+        defer { failing = false; next = Self.initial }
+        return failing
     }
 }
 

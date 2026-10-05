@@ -47,12 +47,16 @@ final class PSKWebSocketServer: @unchecked Sendable {
     private let onText: @Sendable (Connection, String) -> Void
     private let onClose: (@Sendable (Connection) -> Void)?
     private let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+    private let gate: HandshakeGate
 
     /// `keys` is read on every handshake, so a slot added or revoked while the server runs
     /// takes effect on the next connection. `onClose` fires once per upgraded connection, on
-    /// its event loop, after its last `onText`.
+    /// its event loop, after its last `onText`. `maxPending` and `handshakeDeadline` are
+    /// settable only so a test need not open sixteen sockets and wait ten seconds.
     init(host: String, port: Int,
          keys: @escaping @Sendable () -> [String: [UInt8]],
+         maxPending: Int = HandshakeGate.maxPending,
+         handshakeDeadline: TimeAmount = HandshakeGate.deadline,
          onText: @escaping @Sendable (Connection, String) -> Void,
          onClose: (@Sendable (Connection) -> Void)? = nil) {
         self.host = host
@@ -60,6 +64,7 @@ final class PSKWebSocketServer: @unchecked Sendable {
         self.keys = keys
         self.onText = onText
         self.onClose = onClose
+        gate = HandshakeGate(limit: maxPending, deadline: handshakeDeadline)
     }
 
     /// Binds and returns the bound channel; the caller waits on its `closeFuture`.
@@ -67,6 +72,7 @@ final class PSKWebSocketServer: @unchecked Sendable {
         let keys = self.keys
         let onText = self.onText
         let onClose = self.onClose
+        let gate = self.gate
         // Built once up front and discarded, so a configuration BoringSSL rejects (a cipher
         // string it has no suite for) fails the daemon at launch rather than every handshake.
         _ = try NIOSSLContext(configuration: Self.tls(keys: keys, into: SlotAttribute()))
@@ -74,6 +80,11 @@ final class PSKWebSocketServer: @unchecked Sendable {
             .serverChannelOption(.backlog, value: 64)
             .serverChannelOption(.socketOption(.so_reuseaddr), value: 1)
             .childChannelInitializer { channel in
+                // Before any TLS work: a peer past the cap costs us one accept and a close.
+                guard gate.admit(channel) else {
+                    channel.close(promise: nil)
+                    return channel.eventLoop.makeSucceededVoidFuture()
+                }
                 // A context per connection, not one shared: BoringSSL's PSK callback is handed
                 // the SSL object but nothing NIO can map back to a channel, so the only place
                 // to catch *which* identity this peer used is a closure that already knows
@@ -90,6 +101,7 @@ final class PSKWebSocketServer: @unchecked Sendable {
                     maxFrameSize: 16 << 20,
                     shouldUpgrade: { channel, _ in channel.eventLoop.makeSucceededFuture(HTTPHeaders()) },
                     upgradePipelineHandler: { channel, _ in
+                        gate.upgraded(channel)
                         let connection = Connection(identity: slot.identity ?? "", channel: channel)
                         // Synchronously, on the loop this closure already runs on: the handlers
                         // are not Sendable, so they must not cross into the async addHandlers.
@@ -147,6 +159,59 @@ final class PSKWebSocketServer: @unchecked Sendable {
                                         maxAccumulatedFrameSize: maxMessageBytes),
             WebSocketFrameHandler(connection: connection, onText: onText, onClose: onClose),
         ]
+    }
+}
+
+/// Bounds the connections that have not finished the TLS handshake and the WebSocket upgrade.
+///
+/// Every one of them is anonymous: accept fires at TCP connect, before the peer has proved it
+/// holds any key, so without a cap anyone on the LAN or the tailnet can hold sockets without
+/// end, exhausting fds and starving real controllers. The same pair of numbers as
+/// `FleetSocketServer` (`maxPending` 16) and the macOS hostd (`DarwinHostServer`): sixteen
+/// slots, each held at most ten seconds, after which a peer that has not upgraded is closed.
+/// A real controller gives up on its own handshake well inside that.
+///
+/// `@unchecked Sendable`: the server has one event loop, but the lock keeps this correct if
+/// that ever changes.
+final class HandshakeGate: @unchecked Sendable {
+    static let maxPending = 16
+    static let deadline = TimeAmount.seconds(10)
+
+    private let limit: Int
+    private let deadline: TimeAmount
+    private let lock = NSLock()
+    private var pending: Set<ObjectIdentifier> = []
+
+    init(limit: Int, deadline: TimeAmount) {
+        self.limit = limit
+        self.deadline = deadline
+    }
+
+    var count: Int { lock.lock(); defer { lock.unlock() }; return pending.count }
+
+    /// False past the cap. Otherwise the channel is counted until `upgraded` or its close,
+    /// whichever comes first, and closed at the deadline if it is still counted. Keyed by the
+    /// channel's identity, which cannot be reused while the close callback still holds it.
+    func admit(_ channel: Channel) -> Bool {
+        let id = ObjectIdentifier(channel)
+        lock.lock()
+        guard pending.count < limit else { lock.unlock(); return false }
+        pending.insert(id)
+        lock.unlock()
+        channel.closeFuture.whenComplete { [self] _ in release(id) }
+        channel.eventLoop.scheduleTask(in: deadline) { [self] in
+            if release(id) { channel.close(promise: nil) }
+        }
+        return true
+    }
+
+    func upgraded(_ channel: Channel) { release(ObjectIdentifier(channel)) }
+
+    /// True when `id` was still pending.
+    @discardableResult
+    private func release(_ id: ObjectIdentifier) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return pending.remove(id) != nil
     }
 }
 

@@ -82,7 +82,7 @@ final class HostTransportLoopbackTests: XCTestCase {
         _ = try await LinuxHostdInteropTests.roundTrip(c, text: hello("t"))
         let closed = closedExpectation(c, "closed")
         XCTAssertEqual(try AdminSocketClient.send(.revoke(slot: key.slot), path: adminPath), .ok)
-        await fulfillment(of: [closed], timeout: 2)
+        await fulfillment(of: [closed], timeout: 1)  // the ruling's bound
         c.cancel()
     }
 
@@ -105,7 +105,7 @@ final class HostTransportLoopbackTests: XCTestCase {
 
         let aClosed = closedExpectation(a, "doomed closed")
         XCTAssertEqual(try AdminSocketClient.send(.revoke(slot: doomed.slot), path: adminPath), .ok)
-        await fulfillment(of: [aClosed], timeout: 2)
+        await fulfillment(of: [aClosed], timeout: 1)  // the ruling's bound
 
         // Still answering on the same socket after the revoke rebuilt the listener.
         let request = try HostWire.encode(HostClientFrame.request(id: 1, .hostInfo))
@@ -208,6 +208,78 @@ final class HostTransportLoopbackTests: XCTestCase {
         XCTAssertNil(armedUntil)
         XCTAssertNotNil(listening)
         XCTAssertEqual(name, "loop")
+    }
+
+    /// Sixteen TCP connects that never speak TLS fill the pending pool: the seventeenth is
+    /// closed at once, a real controller is refused too while it is full, and closing one
+    /// squatter frees a slot the controller then gets. Without the cap every one of them is
+    /// held, and the identity table they churn is the one real handshakes are read from.
+    func testPendingHandshakesAreCappedAndAFreedSlotAdmitsAController() async throws {
+        let key = FleetDeviceKey.mint()
+        try ControllerStore(root: root).add(.init(slot: key.slot, name: "t", secret: key.secret, pairedAt: Date()))
+        let server = DarwinHostServer(root: root, port: nil, hostName: { "loop" })
+        let port = try await server.start(); defer { server.stop() }
+
+        var squatters: [NWConnection] = []
+        defer { squatters.forEach { $0.cancel() } }
+        for i in 0..<DarwinHostServer.maxPending {
+            let raw = NWConnection(host: "127.0.0.1", port: port, using: .tcp)
+            let ready = expectation(description: "squatter \(i)")
+            raw.stateUpdateHandler = { if case .ready = $0 { ready.fulfill() } }
+            raw.start(queue: .global())
+            await fulfillment(of: [ready], timeout: 5)
+            squatters.append(raw)
+        }
+        let first = closedExpectation(squatters[0], "an admitted squatter")
+        first.isInverted = true
+
+        let extra = NWConnection(host: "127.0.0.1", port: port, using: .tcp)
+        defer { extra.cancel() }
+        extra.start(queue: .global())
+        let refused = closedExpectation(extra, "the seventeenth closed")
+        await fulfillment(of: [refused, first], timeout: 1)
+
+        let blocked = connection(to: port, key: key)
+        do { _ = try await LinuxHostdInteropTests.roundTrip(blocked, text: hello("t"), timeout: 2); XCTFail("got past a full pool") } catch {}
+        blocked.cancel()
+
+        squatters.removeFirst().cancel()
+        var ack: String?
+        for _ in 0..<10 where ack == nil {
+            let c = connection(to: port, key: key)
+            ack = try? await LinuxHostdInteropTests.roundTrip(c, text: hello("t"), timeout: 1)
+            c.cancel()
+        }
+        XCTAssertNotNil(ack, "a freed pending slot never admitted the controller")
+    }
+
+    /// A listener that dies after it bound (an interface going away) is rebuilt on the same
+    /// port; before this a host stayed deaf until the next pair or revoke.
+    func testAListenerThatFailsAfterBindingIsRebuiltOnTheSamePort() async throws {
+        let key = FleetDeviceKey.mint()
+        try ControllerStore(root: root).add(.init(slot: key.slot, name: "t", secret: key.secret, pairedAt: Date()))
+        let server = DarwinHostServer(root: root, port: nil, hostName: { "loop" })
+        let port = try await server.start(); defer { server.stop() }
+        let original = try XCTUnwrap(server.currentListener)
+
+        server.deliverListenerState(.failed(.posix(.ENETDOWN)))
+        try await eventually { server.currentListener.map { $0 !== original && $0.port == port } ?? false }
+
+        let c = connection(to: port, key: key)
+        _ = try await LinuxHostdInteropTests.roundTrip(c, text: hello("t"))
+        c.cancel()
+    }
+
+    func testRebindBackoffDoublesToThirtySecondsAndMarksOnlyTheOutageEdges() {
+        var backoff = RebindBackoff()
+        let runs = (0..<8).map { _ in backoff.failed() }
+        XCTAssertEqual(runs.map(\.delay), [1, 2, 4, 8, 16, 30, 30, 30])
+        XCTAssertEqual(runs.map(\.startsOutage), [true] + Array(repeating: false, count: 7))
+        XCTAssertTrue(backoff.succeeded(), "the first success ends the outage")
+        XCTAssertFalse(backoff.succeeded(), "a healthy rebind is not a recovery")
+        let again = backoff.failed()
+        XCTAssertEqual(again.delay, 1)
+        XCTAssertTrue(again.startsOutage)
     }
 
     /// One more text frame on an already-open connection, and its reply.

@@ -146,3 +146,54 @@ final class PairingVerdictTests: XCTestCase {
         _ = try? await second.value
     }
 }
+
+/// The listener's anonymous population: TCP connects that have not finished TLS and the
+/// WebSocket upgrade. Raw sockets that never send a byte are exactly the squatter the cap is
+/// for, and need no PSK client to drive.
+final class HandshakeGateTests: XCTestCase {
+    private func connectRaw(_ port: Int) throws -> Int32 {
+        let fd = socket(AF_INET, Int32(SOCK_STREAM.rawValue), 0)
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = in_port_t(UInt16(port).bigEndian)
+        addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+        let rc = withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        guard rc == 0 else { throw POSIXError(.ECONNREFUSED) }
+        return fd
+    }
+
+    /// True when the server closed `fd` (EOF or reset) within `seconds`.
+    private func closedByPeer(_ fd: Int32, within seconds: Double) -> Bool {
+        var p = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+        guard poll(&p, 1, Int32(seconds * 1000)) == 1 else { return false }
+        var byte: UInt8 = 0
+        return recv(fd, &byte, 1, 0) <= 0
+    }
+
+    func testConnectionsPastTheCapAreClosedAndTheDeadlineFreesASlot() throws {
+        let server = PSKWebSocketServer(host: "127.0.0.1", port: 0, keys: { [:] },
+                                        maxPending: 2, handshakeDeadline: .seconds(2),
+                                        onText: { _, _ in })
+        let channel = try server.start()
+        defer { channel.close(promise: nil) }
+        let port = try XCTUnwrap(channel.localAddress?.port)
+
+        let a = try connectRaw(port), b = try connectRaw(port)
+        defer { close(a); close(b) }
+        let c = try connectRaw(port)
+        defer { close(c) }
+        XCTAssertTrue(closedByPeer(c, within: 1), "a connection past the cap was kept")
+        XCTAssertFalse(closedByPeer(a, within: 0.2), "an admitted connection was closed early")
+
+        // The squatters are cut at the deadline, which is what frees the slots.
+        XCTAssertTrue(closedByPeer(a, within: 4), "the handshake deadline never fired")
+        XCTAssertTrue(closedByPeer(b, within: 1))
+        let d = try connectRaw(port)
+        defer { close(d) }
+        XCTAssertFalse(closedByPeer(d, within: 0.3), "a freed slot was not reusable")
+    }
+}

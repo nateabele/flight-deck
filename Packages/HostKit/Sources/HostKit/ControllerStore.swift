@@ -47,13 +47,23 @@ public final class ControllerStore: @unchecked Sendable {
         do {
             return try decoder.decode([PairedController].self, from: Data(contentsOf: file))
         } catch {
-            if !FileManager.default.fileExists(atPath: file.path) { return [] }
+            // "Missing" is decided from the read's own error, not a second look at the path:
+            // checking `fileExists` afterwards raced the first `persist` of another store on
+            // the same root — the read missed the file, the rename then created it, and this
+            // moved the just-written controllers aside as "corrupt", un-pairing them on disk.
+            if Self.isMissingFile(error) { return [] }
             let aside = root.appendingPathComponent("controllers.json.corrupt-\(Int(Date().timeIntervalSince1970))")
             FileHandle.standardError.write(Data(
                 "ControllerStore: \(file.path) unreadable (\(error)); moving to \(aside.lastPathComponent)\n".utf8))
             if posixRename(file.path, aside.path) == 0 { chmod(aside.path, 0o600) }
             return []
         }
+    }
+
+    static func isMissingFile(_ error: Error) -> Bool {
+        if let cocoa = error as? CocoaError, cocoa.code == .fileReadNoSuchFile { return true }
+        let underlying = (error as NSError).userInfo[NSUnderlyingErrorKey] as? NSError
+        return underlying?.domain == NSPOSIXErrorDomain && underlying?.code == Int(ENOENT)
     }
 
     public func all() -> [PairedController] {

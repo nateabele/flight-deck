@@ -45,6 +45,38 @@ final class ControllerStoreTests: XCTestCase {
         XCTAssertEqual((attrs[.posixPermissions] as! NSNumber).intValue & 0o777, 0o600)
     }
 
+    /// A store opened while another store on the same root writes its first controller must
+    /// see the file or nothing, never move it aside. Deciding "missing" by a second
+    /// `fileExists` look after the failed read raced that write: the read missed the file, the
+    /// write's rename landed, and the reader renamed the fresh controllers.json to a
+    /// `corrupt-` file — seen live in the macOS hostd's loopback tests under load.
+    func testAReaderRacingTheFirstWriteNeverMovesItAside() throws {
+        for round in 0..<200 {
+            let dir = root.appendingPathComponent("r\(round)")
+            let writer = Thread {
+                try? ControllerStore(root: dir).add(.init(slot: UUID(), name: "x",
+                                                          secret: PortableRandom.bytes(32), pairedAt: Date()))
+            }
+            writer.start()
+            let deadline = Date().addingTimeInterval(1)
+            while ControllerStore(root: dir).all().isEmpty, Date() < deadline {}
+            let names = (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []
+            XCTAssertFalse(names.contains { $0.hasPrefix("controllers.json.corrupt-") },
+                           "round \(round): a racing reader moved the fresh file aside")
+            XCTAssertTrue(names.contains("controllers.json"), "round \(round)")
+        }
+    }
+
+    func testOnlyAMissingFileReadsAsMissing() throws {
+        let missing = root.appendingPathComponent("nope.json")
+        XCTAssertThrowsError(try Data(contentsOf: missing)) {
+            XCTAssertTrue(ControllerStore.isMissingFile($0))
+        }
+        XCTAssertFalse(ControllerStore.isMissingFile(CocoaError(.fileReadCorruptFile)))
+        XCTAssertFalse(ControllerStore.isMissingFile(DecodingError.dataCorrupted(
+            .init(codingPath: [], debugDescription: "x"))))
+    }
+
     /// A root that pre-exists with a wider mode (created by something else) is tightened.
     func testExistingRootIsTightenedTo0700() throws {
         try FileManager.default.createDirectory(
