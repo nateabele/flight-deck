@@ -10,8 +10,10 @@ protocol DelegationTransport: AnyObject {
     var isOnline: Bool { get }
     /// What the host advertised in its helloAck; nil while no connection is live.
     var capabilities: Set<HostCapability>? { get }
-    /// One request. A host `err` throws `HostLinkError.remote`; a drop, `.offline`.
-    func send(_ request: DelegationRequest, timeout: TimeInterval) async throws -> DelegationReply
+    /// One request. A host `err` throws `HostLinkError.remote`; a drop, `.offline`. With
+    /// `progress`, `timeout` is an idle timeout from the last activity it reports.
+    func send(_ request: DelegationRequest, timeout: TimeInterval,
+              progress: (@MainActor () -> Date)?) async throws -> DelegationReply
     func openChannel() async throws -> any ByteChannel
 }
 
@@ -39,12 +41,24 @@ final class LiveHostLink: HostLinking {
     /// Runs whose feed ended and was let go. A replay already in flight can still deliver its
     /// tail afterwards; without this, that tail would look like a new run starting.
     private var retired: Set<String> = []
+    /// Channels this link opened, by id, so a request naming one can time out on the
+    /// transfer going quiet rather than on a fixed bound. Weak: a forward's channels are never
+    /// named by such a request and must not be kept alive here.
+    private var transfers: [ChannelID: WeakTransfer] = [:]
+    /// The §5 line for this host while it is not connected ("mini is offline (last seen 4m
+    /// ago)"), from the directory. A link is handed out offline so `logs` on a finished run
+    /// can still answer from its copy on disk; everything that needs the host refuses with this.
+    var unavailable: (() -> DelegationError)?
 
     /// For a request whose reply waits on bulk work on the host — a whole bundle received and
     /// unpacked, a result streamed, a `downCommand` run, checkouts measured or deleted — or on
     /// a replay sent ahead of it. `HostLink.requestTimeout` (10 s) would fail those mid-transfer
     /// while the host is still working; a link that really died fails them `.offline` anyway.
     static let bulkReplyTimeout: TimeInterval = 3600
+    /// How long a channel transfer (`sync.push`, `run.result`, `run.artifacts`) may move no
+    /// bytes before its request fails. No bound on the whole: a big first sync over a slow
+    /// link legitimately takes as long as it takes.
+    static let transferIdleTimeout: TimeInterval = 60
 
     private static let logger = Logger(subsystem: "dev.flightdeck.FlightDeck", category: "delegation")
 
@@ -62,9 +76,14 @@ final class LiveHostLink: HostLinking {
     // MARK: Requests
 
     func request(_ request: DelegationRequest) async throws -> DelegationReply {
+        try requireOnline()
         let reply: DelegationReply
         do {
-            reply = try await transport.send(request, timeout: Self.timeout(for: request))
+            if let channel = Self.transferChannel(of: request), let transfer = transfers[channel]?.channel {
+                reply = try await transport.send(request, timeout: Self.transferIdleTimeout) { transfer.lastActivity }
+            } else {
+                reply = try await transport.send(request, timeout: Self.timeout(for: request), progress: nil)
+            }
         } catch HostLinkError.offline {
             throw DelegationError(code: "host_unavailable",
                                   message: "\(name) went offline before answering \(Self.op(request)) — rerun once flightdeck host ls shows it online")
@@ -80,7 +99,26 @@ final class LiveHostLink: HostLinking {
     }
 
     func openChannel() async throws -> any ByteChannel {
-        try await transport.openChannel()
+        try requireOnline()
+        let channel = TransferChannel(try await transport.openChannel())
+        transfers = transfers.filter { $0.value.channel != nil }
+        transfers[channel.id] = WeakTransfer(channel: channel)
+        return channel
+    }
+
+    func requireOnline() throws {
+        guard transport.isOnline else {
+            throw unavailable?() ?? DelegationError(code: "host_offline",
+                                                    message: "\(name) is offline — check flightdeck host ls, then rerun")
+        }
+    }
+
+    /// The channel a request moves its payload over, when its reply waits on that transfer.
+    static func transferChannel(of request: DelegationRequest) -> ChannelID? {
+        switch request {
+        case .syncPush(_, let channel), .runResult(_, let channel), .runArtifacts(_, _, let channel): return channel
+        default: return nil
+        }
     }
 
     /// The wire op (`sync.push`), for a failure line; only ever built on an error path.
@@ -208,7 +246,8 @@ final class LiveHostLink: HostLinking {
         guard transport.isOnline, let offset = feed.attachNeeded() else { return }
         Task { @MainActor in
             do {
-                _ = try await self.transport.send(.runAttach(runID: runID, offset: offset), timeout: Self.bulkReplyTimeout)
+                _ = try await self.transport.send(.runAttach(runID: runID, offset: offset), timeout: Self.bulkReplyTimeout,
+                                                  progress: nil)
             } catch HostLinkError.remote(let code, let message) {
                 // `unknown_run`: the host no longer has it (pruned, or its state was reset).
                 guard self.feeds[runID] === feed else { return }
@@ -223,6 +262,38 @@ final class LiveHostLink: HostLinking {
             }
         }
     }
+}
+
+private struct WeakTransfer {
+    weak var channel: TransferChannel?
+}
+
+/// A channel that remembers when bytes last moved through it, for its request's idle timeout.
+final class TransferChannel: ByteChannel, @unchecked Sendable {
+    private let base: any ByteChannel
+    private let lock = NSLock()
+    private var last = Date()
+
+    init(_ base: any ByteChannel) { self.base = base }
+
+    var id: ChannelID { base.id }
+    var lastActivity: Date { lock.withLock { last } }
+
+    func write(_ data: Data) async throws {
+        try await base.write(data)
+        touch()
+    }
+
+    func read() async throws -> Data? {
+        let data = try await base.read()
+        touch()
+        return data
+    }
+
+    func finish() async { await base.finish() }
+    func cancel() { base.cancel() }
+
+    private func touch() { lock.withLock { last = Date() } }
 }
 
 /// One run's events on one link, fanned out by offset from its `RunMirror`.

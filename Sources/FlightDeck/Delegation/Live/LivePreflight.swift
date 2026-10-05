@@ -9,6 +9,9 @@ struct LivePreflight: Preflighting {
     var git = GitRunner()
 
     func preflight(_ plan: DelegationPlan, link: any HostLinking) async throws -> any PortReservation {
+        // An offline host's line is the directory's ("mini is offline (last seen 4m ago)"),
+        // not `Preflight.run`'s generic "not connected".
+        if let live = link as? LiveHostLink { try await live.requireOnline() }
         let checks = LivePreflightChecks(plan: plan, link: LinkBox(link), forwarder: forwarder, git: git)
         let reservation = try await Preflight.run(checks)
         return reservation.ports ?? NoPorts()

@@ -9,8 +9,9 @@ extension HostLink: DelegationTransport {
         return false
     }
 
-    func send(_ request: DelegationRequest, timeout: TimeInterval) async throws -> DelegationReply {
-        switch try await self.request(.delegation(request), timeout: timeout) {
+    func send(_ request: DelegationRequest, timeout: TimeInterval,
+              progress: (@MainActor () -> Date)?) async throws -> DelegationReply {
+        switch try await self.request(.delegation(request), timeout: timeout, progress: progress) {
         case .delegation(let reply):
             return reply
         case .hostInfo:

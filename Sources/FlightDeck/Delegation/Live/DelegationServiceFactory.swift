@@ -8,6 +8,11 @@ enum DelegationServiceFactory {
     /// same resolution, so a Debug build keeps its runs and output copies in
     /// "Flight Deck (Debug)". `sessionTitle` names a tab for the host's screen-queue message;
     /// without it every run is labelled "terminal".
+    ///
+    /// Each run's output copy (`RunMirror`, ruling 21) is
+    /// `<stateDirectory>/delegation/<host slot>-<host run id>.out`: host run ids are `r<N>` on
+    /// every host, so the slot keeps two hosts' `r3` apart. `LiveHostDirectory.prune(host:runIDs:)`
+    /// takes host run ids (`DelegatedRun.hostRunID`) for that reason.
     static func live(hostService: HostService, stateDirectory: URL? = nil,
                      sessionTitle: @escaping (UUID) -> String? = { _ in nil },
                      forwarder: PortForwarder = PortForwarder()) -> DelegationService {

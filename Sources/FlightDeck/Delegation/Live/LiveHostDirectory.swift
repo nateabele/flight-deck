@@ -28,20 +28,29 @@ final class LiveHostDirectory: DelegationHostDirectory {
 
     /// The §5 lines when it cannot be used: `HostProjection`'s, so `flightdeck run --on mini`
     /// and `flightdeck host info mini` word an offline or unknown host the same way.
+    ///
+    /// **An offline host still gets a link.** Its runs' output is on this Mac (`RunMirror`),
+    /// so `logs` on a finished run answers from that copy; every request and channel refuses
+    /// with the offline line, and a run still going waits for the link to come back. Only a
+    /// host with no link at all (its key not read yet, or missing) is refused here.
     func link(named name: String) throws -> any HostLinking {
         let record: HostRecord
         do { record = try hostService.registry.resolve(name: name).get() } catch {
             throw refusal(error, name: name)
         }
-        guard let host = hostService.link(slot: record.slot), host.isOnline else {
+        guard let host = hostService.link(slot: record.slot) else {
             throw refusal(HostLinkError.offline, name: name)
         }
         if let cached = links[record.slot], cached.host === host { return cached.live }
         let live = LiveHostLink(name: record.name, transport: host, mirrors: mirrors,
                                 mirrorPrefix: record.slot.uuidString)
+        live.unavailable = { [weak self] in
+            self?.refusal(HostLinkError.offline, name: name)
+                ?? DelegationError(code: "host_offline", message: "\(name) is offline")
+        }
         host.onEvent = { [weak live] runID, event in live?.received(runID: runID, event) }
         links[record.slot] = (host, live)
-        online[record.slot] = true
+        online[record.slot] = host.isOnline
         return live
     }
 

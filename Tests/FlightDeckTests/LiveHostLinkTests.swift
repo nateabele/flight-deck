@@ -11,6 +11,7 @@ final class ScriptedTransport: DelegationTransport {
     var capabilities: Set<HostCapability>? = [.hostInfo, .run, .sync, .service, .screen]
     var sent: [(request: DelegationRequest, timeout: TimeInterval)] = []
     var failNext: Error?
+    var progresses: [(@MainActor () -> Date)?] = []
     var attachError: Error?
     /// Answers anything the script below does not.
     var answer: ((DelegationRequest) -> DelegationReply?)?
@@ -19,8 +20,10 @@ final class ScriptedTransport: DelegationTransport {
         sent.compactMap { if case .runAttach(_, let offset) = $0.request { return offset } else { return nil } }
     }
 
-    func send(_ request: DelegationRequest, timeout: TimeInterval) async throws -> DelegationReply {
+    func send(_ request: DelegationRequest, timeout: TimeInterval,
+              progress: (@MainActor () -> Date)?) async throws -> DelegationReply {
         sent.append((request, timeout))
+        progresses.append(progress)
         if let failNext {
             self.failNext = nil
             throw failNext
@@ -36,7 +39,11 @@ final class ScriptedTransport: DelegationTransport {
         }
     }
 
-    func openChannel() async throws -> any ByteChannel { throw HostLinkError.offline }
+    private var nextChannel: ChannelID = 1
+    func openChannel() async throws -> any ByteChannel {
+        defer { nextChannel += 2 }
+        return FakeByteChannel(id: nextChannel, toRead: [])
+    }
 }
 
 @MainActor
@@ -274,12 +281,39 @@ final class LiveHostLinkTests: XCTestCase {
         }
     }
 
-    func testBulkRepliesGetTheLongTimeout() async throws {
+    func testATransferTimesOutOnIdlenessAndOtherBulkRepliesGetTheLongBound() async throws {
         let link = makeLink()
         let ref = SnapshotRef(repoRoot: "a", wtKey: "k", worktreeName: "w", commit: "b", tree: "c")
-        _ = try await link.request(.syncPush(ref: ref, channel: 1))
+        let channel = try await link.openChannel()
+        let before = Date()
+        try await channel.write(Data("bundle".utf8))
+        _ = try await link.request(.syncPush(ref: ref, channel: channel.id))
+        _ = try await link.request(.serviceDown(service: "r1"))
         _ = try await link.request(.runCancel(runID: "r1"))
-        XCTAssertEqual(transport.sent.map(\.timeout), [LiveHostLink.bulkReplyTimeout, HostLink.requestTimeout])
+        XCTAssertEqual(transport.sent.map(\.timeout),
+                       [LiveHostLink.transferIdleTimeout, LiveHostLink.bulkReplyTimeout, HostLink.requestTimeout])
+        let progress = try XCTUnwrap(transport.progresses[0], "the push times out on the channel going quiet")
+        XCTAssertGreaterThanOrEqual(progress(), before, "the write counted as activity")
+        XCTAssertNil(transport.progresses[1])
+    }
+
+    func testAnOfflineHostRefusesWithTheDirectorysLineButStillReplaysItsCopy() async throws {
+        do {
+            let link = makeLink()
+            try await start(link)
+            link.received(runID: "r1", out(0, "kept"))
+            link.received(runID: "r1", .exited(.code(0)))
+        }
+        transport = ScriptedTransport()
+        transport.isOnline = false
+        let link = makeLink()
+        link.unavailable = { DelegationError(code: "host_offline", message: "mini is offline (last seen 4m ago)") }
+        do { _ = try await link.request(.runCancel(runID: "r1")); XCTFail() } catch let error as DelegationError {
+            XCTAssertEqual(error.message, "mini is offline (last seen 4m ago)")
+        }
+        let seen = try await collect(link.events(runID: "r1", from: 0))
+        XCTAssertEqual(seen, ["0:kept", "exited 0"])
+        XCTAssertTrue(transport.sent.isEmpty)
     }
 }
 
