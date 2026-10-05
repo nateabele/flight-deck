@@ -392,6 +392,10 @@ targets:
         embed: false
       - package: HostKit
         product: HostKit
+      # The Darwin-only half (power assertions, screen lock state) the macOS host's runner
+      # needs for screen runs. Linked now, while empty, so filling it touches no build file.
+      - package: HostKit
+        product: HostKitDarwin
     settings:
       base:
         SWIFT_VERSION: "6.0"

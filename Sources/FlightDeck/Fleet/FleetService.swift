@@ -703,6 +703,12 @@ final class FleetService: ObservableObject {
                     reply(.err(cid: cid, code: refusal.code, message: refusal.message))
                 }
             }
+        case .delegate:
+            // The contract is frozen (task C0); `DelegationService` (task C6) answers these.
+            // Until then every one is refused by name, so a CLI built ahead of the app fails at
+            // once with a reason rather than waiting on an answer that never comes.
+            reply(.err(cid: cid, code: "not_implemented",
+                       message: "delegated execution is not implemented in this Flight Deck yet"))
         }
     }
 

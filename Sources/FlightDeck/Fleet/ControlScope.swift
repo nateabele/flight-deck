@@ -112,8 +112,9 @@ enum ControlScope {
     }
 
     /// Exhaustive with no `default`, same reasoning as the command overload. `.openConversation`
-    /// is the one request that writes — it opens a tab — so it follows the fleet-wide command
-    /// rule (`.full` or `.human` only); every other request only reads and is always allowed.
+    /// is a request that writes — it opens a tab — so it follows the fleet-wide command rule
+    /// (`.full` or `.human` only). The delegation requests that write follow the own-session
+    /// rule instead (see their arm). Every other request only reads and is always allowed.
     static func permits(_ request: FleetRequest, level: ControlScopeLevel, caller: ControlCaller) -> Bool {
         switch request {
         case .timeline, .newSessionOptions, .recentlyClosed, .macEndpoints, .conversations, .search,
@@ -125,6 +126,21 @@ enum ControlScope {
             return true
         case .openConversation:
             return level == .full || caller == .human
+        case .delegate(let delegate):
+            // `ps`, `logs`, `diff` and `recipe ls` only read. Every other delegation request
+            // starts, stops or applies work, so it is a write — but one that belongs to the
+            // asking session, the way `prompt` does, not a fleet-wide one like
+            // `openConversation`: a run is owned by the tab whose token started it, and the
+            // app reads that tab from the token, never from the request. So it is allowed
+            // wherever a session may write to itself: `.full`, a human shell, and a valid
+            // session token under `.ownSession`. `.readOnly` and an `.invalid` token refuse.
+            //
+            // Not checked here: whether a run named by id (`stop`, `wait`, `apply`) is the
+            // caller's own. Only `DelegationService` knows a run's owner, so under
+            // `.ownSession` it must refuse another tab's run itself.
+            if delegate.isReadOnly || level == .full || caller == .human { return true }
+            guard case .session = caller else { return false }
+            return level == .ownSession
         }
     }
 }

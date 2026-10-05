@@ -720,15 +720,45 @@ public enum ServerFrame: Codable, Equatable, Sendable {
     /// The reply to `FleetRequest.hostInfo`. Unsequenced, like `page`.
     case hostInfo(cid: Int, WireHostInfo)
 
+    // The replies to `FleetRequest.delegate` (see `DelegationControlWire.swift`). All
+    // unsequenced, like `page`: a run is not fleet state. Only the local CLI asks, so none is
+    // ever sent to a phone. Unlike every reply above, one request may draw several of them on
+    // its `cid` (started, notices, output, then exit), which is what makes a run a stream.
+
+    /// `run`/`exec`/`up`/`restart` accepted; the first frame of a stream.
+    case delegateStarted(cid: Int, WireDelegateStarted)
+    /// A line for the CLI's stderr from Flight Deck itself, not the run: the screen queue,
+    /// a reconnect. Printed as `flightdeck: <message>`.
+    case delegateNotice(cid: Int, message: String)
+    /// Run output. `stream` is "stdout" | "stderr" | "pty", a `String` for `WireHost.status`'s
+    /// reason.
+    case delegateOutput(cid: Int, stream: String, data: Data)
+    /// The run ended; `status` is what the CLI exits with (the code, or 128+signal). The last
+    /// frame of a stream.
+    case delegateExit(cid: Int, status: Int32)
+    /// The reply to `delegate.ps`.
+    case delegateRuns(cid: Int, [WireDelegateRunRow])
+    /// The reply to `delegate.diff`.
+    case delegatePatch(cid: Int, WireDelegatePatch)
+    /// The reply to `delegate.apply`.
+    case delegateApplied(cid: Int, WireDelegateApplied)
+    /// The reply to `recipe.ls`.
+    case recipes(cid: Int, WireRecipeBook)
+    /// The reply to `recipe.check`: one line per problem, empty when the file is valid.
+    case recipeCheck(cid: Int, problems: [String])
+
     enum CodingKeys: String, CodingKey {
         case t, seq, fleet, reason, cid, code, message, page, options, endpoints
         case conversations, hits, session, closed, detail, plan, hosts, info
+        case run, stream, data, status, runs, patch, applied, recipes, problems
     }
 
     /// Undotted, deliberately, and the newer five along with it — see the decoder below.
     private enum Tag: String, Codable {
         case snapshot, ack, err, page, options, endpoints, conversations, hits, session
         case ask, closed, intakeDetail, intakePlan, hosts, hostInfo
+        case delegateStarted, delegateNotice, delegateOutput, delegateExit, delegateRuns
+        case delegatePatch, delegateApplied, recipes, recipeCheck
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -803,6 +833,43 @@ public enum ServerFrame: Codable, Equatable, Sendable {
             try c.encode(Tag.hostInfo, forKey: .t)
             try c.encode(cid, forKey: .cid)
             try c.encode(info, forKey: .info)
+        case .delegateStarted(let cid, let started):
+            try c.encode(Tag.delegateStarted, forKey: .t)
+            try c.encode(cid, forKey: .cid)
+            try c.encode(started, forKey: .run)
+        case .delegateNotice(let cid, let message):
+            try c.encode(Tag.delegateNotice, forKey: .t)
+            try c.encode(cid, forKey: .cid)
+            try c.encode(message, forKey: .message)
+        case .delegateOutput(let cid, let stream, let data):
+            try c.encode(Tag.delegateOutput, forKey: .t)
+            try c.encode(cid, forKey: .cid)
+            try c.encode(stream, forKey: .stream)
+            try c.encode(data, forKey: .data)
+        case .delegateExit(let cid, let status):
+            try c.encode(Tag.delegateExit, forKey: .t)
+            try c.encode(cid, forKey: .cid)
+            try c.encode(status, forKey: .status)
+        case .delegateRuns(let cid, let runs):
+            try c.encode(Tag.delegateRuns, forKey: .t)
+            try c.encode(cid, forKey: .cid)
+            try c.encode(runs, forKey: .runs)
+        case .delegatePatch(let cid, let patch):
+            try c.encode(Tag.delegatePatch, forKey: .t)
+            try c.encode(cid, forKey: .cid)
+            try c.encode(patch, forKey: .patch)
+        case .delegateApplied(let cid, let applied):
+            try c.encode(Tag.delegateApplied, forKey: .t)
+            try c.encode(cid, forKey: .cid)
+            try c.encode(applied, forKey: .applied)
+        case .recipes(let cid, let book):
+            try c.encode(Tag.recipes, forKey: .t)
+            try c.encode(cid, forKey: .cid)
+            try c.encode(book, forKey: .recipes)
+        case .recipeCheck(let cid, let problems):
+            try c.encode(Tag.recipeCheck, forKey: .t)
+            try c.encode(cid, forKey: .cid)
+            try c.encode(problems, forKey: .problems)
         }
     }
 
@@ -874,6 +941,34 @@ public enum ServerFrame: Codable, Equatable, Sendable {
             case .hostInfo:
                 self = .hostInfo(cid: try c.decode(Int.self, forKey: .cid),
                                  try c.decode(WireHostInfo.self, forKey: .info))
+            case .delegateStarted:
+                self = .delegateStarted(cid: try c.decode(Int.self, forKey: .cid),
+                                        try c.decode(WireDelegateStarted.self, forKey: .run))
+            case .delegateNotice:
+                self = .delegateNotice(cid: try c.decode(Int.self, forKey: .cid),
+                                       message: try c.decode(String.self, forKey: .message))
+            case .delegateOutput:
+                self = .delegateOutput(cid: try c.decode(Int.self, forKey: .cid),
+                                       stream: try c.decode(String.self, forKey: .stream),
+                                       data: try c.decode(Data.self, forKey: .data))
+            case .delegateExit:
+                self = .delegateExit(cid: try c.decode(Int.self, forKey: .cid),
+                                     status: try c.decode(Int32.self, forKey: .status))
+            case .delegateRuns:
+                self = .delegateRuns(cid: try c.decode(Int.self, forKey: .cid),
+                                     try c.decode([WireDelegateRunRow].self, forKey: .runs))
+            case .delegatePatch:
+                self = .delegatePatch(cid: try c.decode(Int.self, forKey: .cid),
+                                      try c.decode(WireDelegatePatch.self, forKey: .patch))
+            case .delegateApplied:
+                self = .delegateApplied(cid: try c.decode(Int.self, forKey: .cid),
+                                        try c.decode(WireDelegateApplied.self, forKey: .applied))
+            case .recipes:
+                self = .recipes(cid: try c.decode(Int.self, forKey: .cid),
+                                try c.decode(WireRecipeBook.self, forKey: .recipes))
+            case .recipeCheck:
+                self = .recipeCheck(cid: try c.decode(Int.self, forKey: .cid),
+                                    problems: try c.decode([String].self, forKey: .problems))
             }
             return
         }
@@ -893,7 +988,10 @@ public extension ServerFrame {
              .macEndpoints(let cid, _), .recentlyClosed(let cid, _), .conversations(let cid, _),
              .searchHits(let cid, _), .session(let cid, _), .phoneRequest(let cid, _),
              .intakeDetail(let cid, _), .intakePlan(let cid, _), .hostList(let cid, _),
-             .hostInfo(let cid, _):
+             .hostInfo(let cid, _), .delegateStarted(let cid, _), .delegateNotice(let cid, _),
+             .delegateOutput(let cid, _, _), .delegateExit(let cid, _), .delegateRuns(let cid, _),
+             .delegatePatch(let cid, _), .delegateApplied(let cid, _), .recipes(let cid, _),
+             .recipeCheck(let cid, _):
             return cid
         }
     }

@@ -266,6 +266,11 @@ final class HostLink {
             case .reply(let id, let reply): resolve(id, .success(reply))
             case .error(let id, let code, let message): resolve(id, .failure(.remote(code: code, message: message)))
             case .helloAck, .refused: break
+            case .event:
+                // A run's event (protocol 1.1). Nothing attaches to runs until delegation
+                // lands (tasks C1/C6), so a host cannot have a reason to send one yet; it
+                // still counts as proof of life above.
+                break
             }
         } else if case .helloAck(_, _, let hostName, let advertised) = frame {
             win(connection, hostName: hostName, advertised: advertised)

@@ -208,6 +208,11 @@ public enum FleetRequest: Codable, Equatable, Sendable {
     /// `name` is matched exactly and case-insensitively, never as a prefix: a CLI that picked
     /// "mini-2" for "mini" would run work on the wrong machine.
     case hostInfo(name: String)
+    /// A delegated-execution subcommand (`flightdeck run`, `ps`, `recipe ls`, …). One case
+    /// forwarding to `DelegateRequest` rather than fifteen here: its ops encode flat beside
+    /// `op` exactly as these do, so the wire is the same, and every switch over requests
+    /// gains one arm instead of fifteen.
+    case delegate(DelegateRequest)
 
     enum CodingKeys: String, CodingKey {
         case op, session, anchor, cursor, limit, project
@@ -271,6 +276,8 @@ public enum FleetRequest: Codable, Equatable, Sendable {
         case .hostInfo(let name):
             try c.encode(Op.hostInfo, forKey: .op)
             try c.encode(name, forKey: .name)
+        case .delegate(let request):
+            try request.encode(to: encoder)
         }
     }
 
@@ -279,7 +286,14 @@ public enum FleetRequest: Codable, Equatable, Sendable {
     /// cannot be understood cannot be answered, and guessing at it answers the wrong question.
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        switch try c.decode(Op.self, forKey: .op) {
+        let op = try c.decode(String.self, forKey: .op)
+        guard let known = Op(rawValue: op) else {
+            // Not one of ours: a delegation op, or one nobody knows, which still throws
+            // (`DelegateRequest`'s own `Op` fails to decode it).
+            self = .delegate(try DelegateRequest(from: decoder))
+            return
+        }
+        switch known {
         case .timeline:
             let name = try c.decode(String.self, forKey: .anchor)
             let cursor = try c.decodeIfPresent(Int.self, forKey: .cursor)

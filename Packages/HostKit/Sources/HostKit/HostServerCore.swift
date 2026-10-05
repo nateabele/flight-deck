@@ -93,6 +93,13 @@ public final class HostServerCore: @unchecked Sendable {
                 var info = probe.gather()
                 info.hostName = hostName()
                 send(.reply(id: id, .hostInfo(info)), to: peer)
+            case .delegation:
+                // Contract only (task C0): the router that serves these lands with tracks
+                // C2–C5. Answered by id rather than dropped, so a controller that sends one
+                // early fails at once instead of waiting out its request timeout. helloAck
+                // does not advertise the capabilities yet, so a correct controller never asks.
+                send(.error(id: id, code: "not_implemented", message: "delegation is not implemented on this host yet"),
+                     to: peer)
             }
         }
     }

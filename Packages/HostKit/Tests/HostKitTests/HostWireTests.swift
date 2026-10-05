@@ -49,10 +49,10 @@ final class HostWireTests: XCTestCase {
     func testHelloAndAckShapesArePinned() throws {
         XCTAssertEqual(
             try HostWire.encode(HostClientFrame.hello(protocolVersion: .current, capabilities: [.hostInfo], controllerName: "laptop")),
-            #"{"caps":["host.info"],"name":"laptop","t":"hello","v":{"major":1,"minor":0}}"#)
+            #"{"caps":["host.info"],"name":"laptop","t":"hello","v":{"major":1,"minor":1}}"#)
         XCTAssertEqual(
             try HostWire.encode(HostServerFrame.helloAck(protocolVersion: .current, capabilities: [.hostInfo], hostName: "mini")),
-            #"{"caps":["host.info"],"name":"mini","t":"helloAck","v":{"major":1,"minor":0}}"#)
+            #"{"caps":["host.info"],"name":"mini","t":"helloAck","v":{"major":1,"minor":1}}"#)
     }
 
     /// A host's own addresses ride on helloAck so a controller that only ever reached it over
@@ -64,7 +64,7 @@ final class HostWireTests: XCTestCase {
             try HostWire.encode(HostServerFrame.helloAck(
                 protocolVersion: .current, capabilities: [.hostInfo], hostName: "mini",
                 endpoints: ["100.100.1.2:47410", "[fd7a::1]:47410"])),
-            #"{"caps":["host.info"],"endpoints":["100.100.1.2:47410","[fd7a::1]:47410"],"name":"mini","t":"helloAck","v":{"major":1,"minor":0}}"#)
+            #"{"caps":["host.info"],"endpoints":["100.100.1.2:47410","[fd7a::1]:47410"],"name":"mini","t":"helloAck","v":{"major":1,"minor":1}}"#)
     }
 
     /// A hostd built before `endpoints` existed sends no key at all. That must decode to an
@@ -73,7 +73,7 @@ final class HostWireTests: XCTestCase {
     func testHelloAckWithoutEndpointsStillDecodes() throws {
         let ack = try HostWire.decode(HostServerFrame.self,
             from: #"{"t":"helloAck","v":{"major":1,"minor":0},"caps":["host.info"],"name":"mini"}"#)
-        XCTAssertEqual(ack, .helloAck(protocolVersion: .current, capabilities: [.hostInfo],
+        XCTAssertEqual(ack, .helloAck(protocolVersion: ProtocolVersion(major: 1, minor: 0), capabilities: [.hostInfo],
                                       hostName: "mini", endpoints: []))
     }
 

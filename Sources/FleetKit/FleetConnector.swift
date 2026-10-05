@@ -764,6 +764,14 @@ public final class FleetConnector: @unchecked Sendable {
             // one arriving here is a stray, and a stray reply must never move the resume
             // point either.
             return
+        case .delegateStarted, .delegateNotice, .delegateOutput, .delegateExit, .delegateRuns,
+             .delegatePatch, .delegateApplied, .recipes, .recipeCheck:
+            // Delegated execution's replies, which answer only `delegate.*` and `recipe.*`
+            // requests the phone never sends, and go only to the connection that asked. A
+            // stray is dropped like the host replies above: never folded, never moving the
+            // resume point. (An installed phone from before these tags cannot decode them at
+            // all; it is safe because the Mac never sends it one, not because of this arm.)
+            return
         }
         onFleet?(fleet)
     }

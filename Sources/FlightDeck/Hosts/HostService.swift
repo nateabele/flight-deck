@@ -80,6 +80,10 @@ final class HostService: ObservableObject {
         let record = try registry.resolve(name: name).get()
         guard let link = links[record.slot] else { throw HostLinkError.offline }
         switch try await link.request(.hostInfo) {
+        case .delegation:
+            // A host answering `host.info` with a delegation reply is a host bug; refused
+            // rather than trusted, under the code a malformed answer would get.
+            throw HostLinkError.remote(code: "unexpected_reply", message: "\(name) answered host.info with something else")
         case .hostInfo(let info):
             var current = registry.hosts.first { $0.slot == record.slot } ?? record
             if current.platform != info.platform {

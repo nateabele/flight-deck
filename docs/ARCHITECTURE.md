@@ -136,6 +136,7 @@ three ways, by what each side can link:
 | Piece | Compiles on | Holds |
 |---|---|---|
 | `Packages/HostKit` | macOS and Linux | Everything that is not transport: the host wire, `HostServerCore` (answers `hello`/`host.info`, owns peers by slot), `ControllerStore`, `HostInfoProbe`, `PairingWindow`, the admin socket, and `HostEndpoints` (the `getifaddrs` walk and the address ranking the phone's `LocalEndpoints` and both hostds share). Foundation only. |
+| `Packages/HostKit` target `HostKitDarwin` | macOS (an empty module on Linux) | The macOS host's IOKit power assertions and CoreGraphics console/lock checks for screen runs. Its own target so HostKit proper stays Foundation-only; every source is wrapped in `#if os(macOS)`. Linked into `HostDaemon`. |
 | `Sources/HostDaemon` | macOS | `DarwinHostServer`: `HostTransport` (Network.framework TLS-PSK + WebSocket) feeding `HostServerCore`. Embedded in the app and registered as a LaunchAgent. |
 | `Packages/HostDaemonLinux` | Linux | The same wiring on SwiftNIO (`PSKWebSocketServer`), the SPAKE2 responder (`NIOPairingResponder`), the CLI. A standalone SwiftPM package, built only in Docker. |
 
@@ -226,6 +227,16 @@ three, not a sequence. Unverified live: the unit tests drive a scripted network
 move is on the maintainer's GUI checklist. A major-version mismatch is refused with "Update Flight Deck on
 <name>". The Mac's own control socket answers `host.list` and `host.info` for the CLI
 (`HostProjection`), and the phone's connector ignores those replies.
+
+**Delegated execution's contract (protocol 1.1, task C0 of sub-project C).** The host wire's
+ops, replies, `event` frame and channel-frame layout are in
+`Packages/HostKit/Sources/HostKit/Delegation/` (`DelegationWire.swift` has the table), beside the
+sync, run, service and config types the tracks implement. `HostRequest`/`HostReply` forward every
+op but `host.info` there. The CLI's half is `FleetRequest.delegate(DelegateRequest)` and nine
+`ServerFrame` replies, tabled in `Sources/FleetKit/DelegationControlWire.swift`. Until the tracks
+land, the host answers every delegation op `not_implemented` (and advertises none of the new
+capabilities), the app does the same for every `delegate.*`/`recipe.*` request, and the phone's
+connector drops the new replies, which the Mac never sends it.
 
 ## Preferences
 

@@ -11,6 +11,11 @@ import Foundation
 //     refused   {"t":"refused","reason":{"kind":"majorVersionMismatch","host":{major,minor}}}
 //     reply     {"t":"reply","id":int,"rep":{"op":string,"info":{...}}}
 //     err       {"t":"err","id":int,"code":string,"message":string}
+//     event     {"t":"event","runID":string,"ev":{"kind":string,…}}       (1.1)
+//
+// The delegated-execution ops, replies and events (1.1) are tabled in
+// Delegation/DelegationWire.swift; `HostRequest`/`HostReply` forward every `op` but
+// `host.info` to it.
 //
 // `v` is an object, not a "1.0" string, so no peer ever parses a version out of text and a
 // minor of 10 cannot sort before 9. Unknown capability strings are dropped on decode; an
@@ -37,7 +42,10 @@ public struct ProtocolVersion: Codable, Sendable, Equatable, Comparable {
         self.minor = minor
     }
 
-    public static let current = ProtocolVersion(major: 1, minor: 0)
+    /// 1.1 added delegated execution: the `run`, `sync`, `service` and `screen` capabilities,
+    /// their ops, and the `event` frame. Additive, so a 1.0 peer still connects; it simply
+    /// never advertises the new capabilities, and nothing that needs them is sent to it.
+    public static let current = ProtocolVersion(major: 1, minor: 1)
 
     // Explicit raw values: a Swift rename must not change the wire.
     enum CodingKeys: String, CodingKey {
@@ -52,6 +60,14 @@ public struct ProtocolVersion: Codable, Sendable, Equatable, Comparable {
 
 public enum HostCapability: String, Codable, Sendable {
     case hostInfo = "host.info"
+    /// `run.*`: start, attach, signal, cancel, results and artifacts (1.1).
+    case run = "run"
+    /// `sync.*`: the workspace store (1.1).
+    case sync = "sync"
+    /// `port.*` and `service.*`: services and their forwards (1.1).
+    case service = "service"
+    /// `screen.status` and `RunSpec.screen` (1.1). A Linux host never advertises it.
+    case screen = "screen"
 }
 
 extension KeyedDecodingContainer {
@@ -108,20 +124,29 @@ public enum HostClientFrame: Codable, Sendable, Equatable {
 /// `{"op":"host.info"}`. Keyed by `op` so later requests can add their own fields beside it.
 public enum HostRequest: Codable, Sendable, Equatable {
     case hostInfo
+    /// Every other op (1.1), encoded flat beside `op` by `DelegationRequest`.
+    case delegation(DelegationRequest)
 
     enum CodingKeys: String, CodingKey { case op }
 
     public func encode(to encoder: any Encoder) throws {
-        var c = encoder.container(keyedBy: CodingKeys.self)
         switch self {
-        case .hostInfo: try c.encode(HostCapability.hostInfo, forKey: .op)
+        case .hostInfo:
+            var c = encoder.container(keyedBy: CodingKeys.self)
+            try c.encode(HostCapability.hostInfo, forKey: .op)
+        case .delegation(let request):
+            try request.encode(to: encoder)
         }
     }
 
+    /// `op` is read as a string, not a `HostCapability`: the delegation ops are not
+    /// capabilities, and an op this build lacks still throws, from `DelegationRequest`.
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        switch try c.decode(HostCapability.self, forKey: .op) {
-        case .hostInfo: self = .hostInfo
+        if try c.decode(String.self, forKey: .op) == HostCapability.hostInfo.rawValue {
+            self = .hostInfo
+        } else {
+            self = .delegation(try DelegationRequest(from: decoder))
         }
     }
 }
@@ -133,10 +158,13 @@ public enum HostServerFrame: Codable, Sendable, Equatable {
     case refused(reason: HostRefusal)
     case reply(id: Int, HostReply)
     case error(id: Int, code: String, message: String)
+    /// Something happened to run `runID` (1.1). Unsolicited, so it carries no request `id`;
+    /// sent only to a controller attached to that run.
+    case event(runID: String, RunEvent)
 
-    enum CodingKeys: String, CodingKey { case t, v, caps, name, endpoints, reason, id, rep, code, message }
+    enum CodingKeys: String, CodingKey { case t, v, caps, name, endpoints, reason, id, rep, code, message, runID, ev }
 
-    private enum Tag: String, Codable { case helloAck, refused, reply, err }
+    private enum Tag: String, Codable { case helloAck, refused, reply, err, event }
 
     public func encode(to encoder: any Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
@@ -159,6 +187,10 @@ public enum HostServerFrame: Codable, Sendable, Equatable {
             try c.encode(id, forKey: .id)
             try c.encode(code, forKey: .code)
             try c.encode(message, forKey: .message)
+        case .event(let runID, let event):
+            try c.encode(Tag.event, forKey: .t)
+            try c.encode(runID, forKey: .runID)
+            try c.encode(event, forKey: .ev)
         }
     }
 
@@ -183,6 +215,9 @@ public enum HostServerFrame: Codable, Sendable, Equatable {
                 code: try c.decode(String.self, forKey: .code),
                 message: try c.decode(String.self, forKey: .message)
             )
+        case .event:
+            self = .event(runID: try c.decode(String.self, forKey: .runID),
+                          try c.decode(RunEvent.self, forKey: .ev))
         }
     }
 }
@@ -190,22 +225,29 @@ public enum HostServerFrame: Codable, Sendable, Equatable {
 /// `{"op":"host.info","info":{…}}`; `op` echoes the request so a reply is self-describing.
 public enum HostReply: Codable, Sendable, Equatable {
     case hostInfo(HostInfo)
+    /// Every other op's reply (1.1), encoded flat beside `op` by `DelegationReply`.
+    case delegation(DelegationReply)
 
     enum CodingKeys: String, CodingKey { case op, info }
 
     public func encode(to encoder: any Encoder) throws {
-        var c = encoder.container(keyedBy: CodingKeys.self)
         switch self {
         case .hostInfo(let info):
+            var c = encoder.container(keyedBy: CodingKeys.self)
             try c.encode(HostCapability.hostInfo, forKey: .op)
             try c.encode(info, forKey: .info)
+        case .delegation(let reply):
+            try reply.encode(to: encoder)
         }
     }
 
+    /// As `HostRequest`'s: `op` as a string, and anything but `host.info` is a delegation reply.
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        switch try c.decode(HostCapability.self, forKey: .op) {
-        case .hostInfo: self = .hostInfo(try c.decode(HostInfo.self, forKey: .info))
+        if try c.decode(String.self, forKey: .op) == HostCapability.hostInfo.rawValue {
+            self = .hostInfo(try c.decode(HostInfo.self, forKey: .info))
+        } else {
+            self = .delegation(try DelegationReply(from: decoder))
         }
     }
 }
