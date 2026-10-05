@@ -166,6 +166,10 @@ final class HostService: ObservableObject {
 
     // MARK: - Links
 
+    /// The open link to a paired host, for delegation's `LiveHostDirectory`; nil before
+    /// `start()` has read its key, or once it is forgotten.
+    func link(slot: UUID) -> HostLink? { links[slot] }
+
     private func open(_ record: HostRecord, key: FleetDeviceKey) {
         // Forgotten while its key was being read, or already open.
         guard links[record.slot] == nil, registry.hosts.contains(where: { $0.slot == record.slot })
