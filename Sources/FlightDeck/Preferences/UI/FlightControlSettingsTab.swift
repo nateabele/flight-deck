@@ -46,10 +46,17 @@ struct FlightControlSettingsTab: View {
             }
             .padding(12)
             Divider()
-            switch section {
-            case .routing: FlightControlRoutingPane(routing: routing, preferences: preferences, project: project)
-            case .kinds: TaskKindsPane(routing: routing, project: project)
+            // Identity per project: both panes keep @State (selection, rename text, weights,
+            // drafts) that SwiftUI would otherwise carry across a project switch. A same-id kind
+            // in the new project never fires onChange(of: selection), so Rename/Re-weight would
+            // write the previous project's name/weights into it.
+            Group {
+                switch section {
+                case .routing: FlightControlRoutingPane(routing: routing, preferences: preferences, project: project)
+                case .kinds: TaskKindsPane(routing: routing, project: project)
+                }
             }
+            .id(project)
         }
         .onAppear {
             if project == nil { project = routing.fixtureProjects?.first ?? paths.first }

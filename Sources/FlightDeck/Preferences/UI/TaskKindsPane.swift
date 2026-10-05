@@ -150,6 +150,8 @@ struct TaskKindsPane: View {
                                 Task {
                                     error = await routing.merge(kind.id, into: target, project: project)
                                     mergeTarget = nil
+                                    // A merged kind must not keep offering Rename/Re-weight/Merge.
+                                    if error == nil { selection = nil }
                                     counts = await routing.openCounts(project: project)
                                 }
                             }
