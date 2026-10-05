@@ -86,25 +86,35 @@ final class RoutingCapabilityRegistry {
 final class ClaudeRoutingCapabilities: AgentRoutingCapabilities {
     let harness: HarnessID = AgentID.claude.harnessID
     let accountModel: AccountModel = .login
+    /// Attached by `SessionStore` (`attachCommandSink`); weak because the store owns the registry.
+    weak var commands: SessionCommandSink?
     var knobSchema: [String: [String]] { [:] }
     func modelCatalog() async -> RoutingCapability<[ModelEntry]> { .unsupported(reason: "filled in by L3-R") }
     func usageMeterSource(account: AgentAccount?) -> RoutingCapability<any UsageMeterSource> { .unsupported(reason: "filled in by L3-U") }
     func transcriptPointer(for session: Session) -> RoutingCapability<TranscriptPointer> { .unsupported(reason: "filled in by L3-U") }
-    func resetContext(_ session: Session) async throws -> RoutingCapability<Void> { .unsupported(reason: "filled in by L3-S") }
+    func resetContext(_ session: Session) async throws -> RoutingCapability<Void> {
+        try ContextReset.typing(ContextReset.claudeCommand, into: session, via: commands)
+    }
     func applying(_ overrides: LaunchOverrides, to options: AgentOptions) -> RoutingCapability<AgentOptions> {
         ClaudeLaunchOverrides.apply(overrides, to: options)
     }
 }
 
+extension ClaudeRoutingCapabilities: CommandSinkAttachable {}
+
 @MainActor
 final class CodexRoutingCapabilities: AgentRoutingCapabilities {
     let harness: HarnessID = AgentID.codex.harnessID
     let accountModel: AccountModel = .login
+    /// Attached by `SessionStore` (`attachCommandSink`); weak because the store owns the registry.
+    weak var commands: SessionCommandSink?
     var knobSchema: [String: [String]] { [:] }
     func modelCatalog() async -> RoutingCapability<[ModelEntry]> { .unsupported(reason: "filled in by L3-R") }
     func usageMeterSource(account: AgentAccount?) -> RoutingCapability<any UsageMeterSource> { .unsupported(reason: "filled in by L3-U") }
     func transcriptPointer(for session: Session) -> RoutingCapability<TranscriptPointer> { .unsupported(reason: "filled in by L3-U") }
-    func resetContext(_ session: Session) async throws -> RoutingCapability<Void> { .unsupported(reason: "filled in by L3-S") }
+    func resetContext(_ session: Session) async throws -> RoutingCapability<Void> {
+        try ContextReset.typing(ContextReset.codexCommand, into: session, via: commands)
+    }
     func applying(_ overrides: LaunchOverrides, to options: AgentOptions) -> RoutingCapability<AgentOptions> {
         CodexLaunchOverrides.apply(overrides, to: options)
     }
@@ -116,3 +126,4 @@ final class CodexRoutingCapabilities: AgentRoutingCapabilities {
 protocol SwarmSpawner: AnyObject {
     func spawn(task: TaskRef, block: ExecutionBlock, lease: AccountLease?, firstPrompt: String) async -> Result<SessionRef, SpawnError>
 }
+extension CodexRoutingCapabilities: CommandSinkAttachable {}

@@ -33,3 +33,40 @@ enum CodexLaunchOverrides {
         return .supported(.codex(thread))
     }
 }
+
+/// The one way a routing capability may type into a tab: the store's own prompt gate, which
+/// waits for a real composer and queues behind a running turn.
+@MainActor
+protocol SessionCommandSink: AnyObject {
+    func submitCommand(_ text: String, to session: UUID) -> SessionStore.PromptDispatch
+}
+
+/// Capabilities are built by `RoutingCapabilityRegistry.standard()` with no arguments, so the
+/// sink is attached afterwards rather than injected.
+@MainActor
+protocol CommandSinkAttachable: AnyObject {
+    var commands: SessionCommandSink? { get set }
+}
+
+extension RoutingCapabilityRegistry {
+    func attachCommandSink(_ sink: SessionCommandSink) {
+        for harness in harnesses { (capabilities(for: harness) as? CommandSinkAttachable)?.commands = sink }
+    }
+}
+
+enum ContextResetError: Error, Equatable { case refused(String) }
+
+/// A context reset is a slash command typed into the agent's own composer: `/clear` for claude,
+/// `/new` for codex (a new thread, which `CodexPinReconciler` follows).
+@MainActor
+enum ContextReset {
+    static let claudeCommand = "/clear"
+    static let codexCommand = "/new"
+
+    static func typing(_ command: String, into session: Session, via sink: SessionCommandSink?) throws -> RoutingCapability<Void> {
+        guard let sink else { return .unsupported(reason: "no command channel attached") }
+        let dispatch = sink.submitCommand(command, to: session.id)
+        if let code = dispatch.errorCode { throw ContextResetError.refused(code) }
+        return .supported(())
+    }
+}

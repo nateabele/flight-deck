@@ -1363,7 +1363,11 @@ final class SessionStore: ObservableObject {
 
     /// Every agent's Level 3 capabilities, keyed by harness. Lazily the standard set; settable so
     /// a test can register a fake harness and the integration branch can swap in real conformers.
-    lazy var routingCapabilities: RoutingCapabilityRegistry = .standard()
+    lazy var routingCapabilities: RoutingCapabilityRegistry = {
+        let registry = RoutingCapabilityRegistry.standard()
+        registry.attachCommandSink(self)
+        return registry
+    }()
 
     /// Guards the lazy notification-authorization request `startObserving(project:)`
     /// makes: the underlying `Notifying.requestAuthorization()` should fire once, the
@@ -5698,6 +5702,12 @@ final class SessionStore: ObservableObject {
     private var acceptedPromptTokens: [UUID: [UUID]] = [:]
     static let maxRememberedPromptTokens = 16
 
+    /// A capability's slash command (a context reset), typed through `submitPrompt`'s gate with a
+    /// fresh token — each reset is its own message, never a retry of the last one.
+    func submitCommand(_ text: String, to session: UUID) -> PromptDispatch {
+        submitPrompt(text, token: UUID(), to: session)
+    }
+
     /// A client asked for text to be typed into a live agent and submitted.
     ///
     /// **Only an agent with a text channel, and that question is asked of the agent rather
@@ -9065,3 +9075,5 @@ enum AnswerAbortLog {
 /// subscribers by object identity — registering the store itself would replace its other
 /// registration.
 final class IntakeRetentionTicker {}
+
+extension SessionStore: SessionCommandSink {}
