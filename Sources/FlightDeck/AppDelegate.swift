@@ -91,6 +91,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 if let store = note.object as? SessionStore {
                     self?.startSearch(store: store)
                     self?.startAnswerTrigger(store: store)
+                    self?.startUsage(store: store)
                 }
             }
         }
@@ -117,7 +118,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let store = store ?? SessionStore.current {
             startSearch(store: store)
             startAnswerTrigger(store: store)
+            startUsage(store: store)
         }
+    }
+
+    /// Starts Flight Control's usage meters. Reached from both store-ready hops for the reason
+    /// `startSearch` is, and idempotent for the same reason (`UsageService.attach` guards).
+    @MainActor
+    private func startUsage(store: SessionStore) {
+        guard let preferences = store.preferences, !UsageService.shared.isAttached else { return }
+        UsageService.shared.attach(store: store, preferences: preferences)
     }
 
     /// Opens the answer trigger's socket, if this launch was told to.

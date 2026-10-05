@@ -80,16 +80,23 @@ final class RoutingCapabilityRegistry {
     }
 }
 
-/// Stubs until L3-R (catalog, knobs, overrides), L3-U (meter, transcript) and L3-S (reset) fill
-/// them in. Each says "unsupported" with the spec that owns it.
+/// Stubs until L3-R (catalog, knobs, overrides) and L3-S (reset) fill them in; L3-U's two
+/// (meter, transcript) are filled. Each says "unsupported" with the spec that owns it.
 @MainActor
 final class ClaudeRoutingCapabilities: AgentRoutingCapabilities {
     let harness: HarnessID = AgentID.claude.harnessID
     let accountModel: AccountModel = .login
     var knobSchema: [String: [String]] { [:] }
     func modelCatalog() async -> RoutingCapability<[ModelEntry]> { .unsupported(reason: "filled in by L3-R") }
-    func usageMeterSource(account: AgentAccount?) -> RoutingCapability<any UsageMeterSource> { .unsupported(reason: "filled in by L3-U") }
-    func transcriptPointer(for session: Session) -> RoutingCapability<TranscriptPointer> { .unsupported(reason: "filled in by L3-U") }
+    func usageMeterSource(account: AgentAccount?) -> RoutingCapability<any UsageMeterSource> {
+        .supported(UsageService.shared.tap(agent: .claude, account: account))
+    }
+    func transcriptPointer(for session: Session) -> RoutingCapability<TranscriptPointer> {
+        guard let pointer = TranscriptPointers.claude(session: session, projectsRoot: UsageService.shared.claudeProjectsRoot(for: session)) else {
+            return .unsupported(reason: "no transcript file on disk for this conversation")
+        }
+        return .supported(pointer)
+    }
     func resetContext(_ session: Session) async throws -> RoutingCapability<Void> { .unsupported(reason: "filled in by L3-S") }
     func applying(_ overrides: LaunchOverrides, to options: AgentOptions) -> RoutingCapability<AgentOptions> { .unsupported(reason: "filled in by L3-S") }
 }
@@ -100,8 +107,15 @@ final class CodexRoutingCapabilities: AgentRoutingCapabilities {
     let accountModel: AccountModel = .login
     var knobSchema: [String: [String]] { [:] }
     func modelCatalog() async -> RoutingCapability<[ModelEntry]> { .unsupported(reason: "filled in by L3-R") }
-    func usageMeterSource(account: AgentAccount?) -> RoutingCapability<any UsageMeterSource> { .unsupported(reason: "filled in by L3-U") }
-    func transcriptPointer(for session: Session) -> RoutingCapability<TranscriptPointer> { .unsupported(reason: "filled in by L3-U") }
+    func usageMeterSource(account: AgentAccount?) -> RoutingCapability<any UsageMeterSource> {
+        .supported(UsageService.shared.tap(agent: .codex, account: account))
+    }
+    func transcriptPointer(for session: Session) -> RoutingCapability<TranscriptPointer> {
+        guard let pointer = TranscriptPointers.codex(session: session) else {
+            return .unsupported(reason: "codex has not reported a rollout path for this tab")
+        }
+        return .supported(pointer)
+    }
     func resetContext(_ session: Session) async throws -> RoutingCapability<Void> { .unsupported(reason: "filled in by L3-S") }
     func applying(_ overrides: LaunchOverrides, to options: AgentOptions) -> RoutingCapability<AgentOptions> { .unsupported(reason: "filled in by L3-S") }
 }
