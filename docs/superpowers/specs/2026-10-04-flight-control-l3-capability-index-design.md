@@ -141,7 +141,25 @@ A real `CapabilityIndex` conformer, the refresh scheduler, and the Settings pane
 ## 11. Files
 
 - `Sources/IntakeKit/FlightControl/CapabilityScoring.swift`, `IndexSnapshot.swift`,
-  `ExtractionValidator.swift`, `AliasTable.swift`
+  `ExtractionValidator.swift`, `AliasTable.swift`, `CapabilityHints.swift`,
+  `IndexSnapshotStore.swift`, `IndexSources.swift`, `IndexExtraction.swift`
 - `Sources/FlightDeck/FlightControl/CapabilityIndexService.swift`, `IndexRefreshRunner.swift`
-- `Sources/FlightDeck/Preferences/UI/CapabilityIndexPane.swift`
+- `Sources/FlightDeck/Preferences/UI/CapabilityIndexPane.swift`, `CapabilityIndexSettingsTab.swift`
 - `Tests/FlightDeckTests/FlightControlL3/Index/…`, `UITests/FlightDeckUITests/CapabilityIndexUITests.swift`
+
+## 12. As built (plan `2026-10-04-flight-control-l3-i-capability-index.md`)
+
+- **Snapshot names** are a UTC date-time stamp, `capability-index/2026-10-04T060000Z.json`, not a bare date: two snapshots a day must not overwrite each other, and a timezone change must not reorder them. A write never sorts before an existing snapshot, even after the clock moves back.
+- **Rollback** renames the current file to `<stamp>.rolledback.json`; the newest valid snapshot stays the only definition of current.
+- **Snapshots hold computed scores only.** Hand-entered and inherited scores are overlaid live from `capability-index/config.json`. Precedence per dimension: manual > computed > inherited; inheritance is one level.
+- **Confirming, rejecting or editing an alias** rescoring writes a new snapshot from the current rows (no agent run), so it can be rolled back. A rescore whose scores and unmapped names are unchanged writes no snapshot, so a settings edit that changes nothing never pushes a real refresh out of the 12 kept.
+- **One source = one metric in one unit.** The speed and price tracker is two sources; vendor model cards feed context windows only. SWT-bench was added for `test-authoring`. `docs-prose` has no source and stays unknown unless entered by hand. Machine-readable as probed on 2026-10-04: SWE-bench Verified (JSON) and Aider Polyglot (YAML); the rest are pages.
+- **A benchmark with fewer than two rows contributes nothing.** Unmapped names still count in a benchmark's percentile population. Two names mapped to one model in one source keep the better row.
+- **`rank`:** a candidate without knobs matches every scored knob variant of its model and returns the best one, knobs included.
+- **The refresh agent is claude only** (`-p`, tools exactly WebSearch and WebFetch, `--restricted`, `--strict-mcp-config`, `dontAsk`); model, effort and the token cap (default 1,500,000) are settings. The cap counts every token the agent processes, including cached input that it re-reads each turn. A source that returns only rejected rows counts as failed. A finished refresh is rescored with the aliases and sources as they are when it writes, so an edit made during a run is not overwritten.
+- **The first refresh is manual**; the weekly check (on the shared `WatchClock`) starts after the first attempt, and every attempt is recorded so a failing run waits a week.
+- **Rule hints** are `hints(for:assigned:candidates:) -> [CapabilityHint]` on `SnapshotCapabilityIndex`, `LiveCapabilityIndex` and `CapabilityIndexService`; L3-R calls it at integration. Only the rule's dimension keys are compared.
+- **Integration hands L3-R `SessionStore.capabilityIndexService?.live`** as its `CapabilityIndex`. Until L3-R fills `modelCatalog()`, refreshes see empty catalogs and propose no aliases.
+- **Settings:** a temporary top-level `PreferencesTab.capabilityIndex` / `CapabilityIndexSettingsTab`, labelled "Capability Index" (identifier `prefs-capability-index`). L3-R uses that same label and identifier for its tab, so both coexist until integration moves `CapabilityIndexPane` into L3-R's `FlightControlSettingsTab` and deletes the temporary tab.
+- **UI test:** `CapabilityIndexUITests` skips unless `INDEX_UI=1` (as `TEST_RUNNER_INDEX_UI=1`), so `smoke.sh`, which runs the whole UI bundle, does not run it. Run it with `TEST_RUNNER_INDEX_UI=1 xcodebuild … test -only-testing:FlightDeckUITests/CapabilityIndexUITests`. Its reads use `value` for static text.
+- **Live probe, 2026-10-05:** claude 2.1.289 (Claude Code); aider-polyglot via WebFetch under `--restricted` — 69 rows accepted, all cited and figure-matched; 18,347 tokens; 66 s.

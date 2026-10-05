@@ -2282,6 +2282,14 @@ flagged as most likely to differ from the tests. The maintainer's to run.
   launch, contested visibility, and the account strip (as pools and meters). They replace the
   fleet table with annotations on existing surfaces. Still deferred: the remaining tending
   actions, the Agent Mail inbox and the convergence gauge below. Original list, kept for history:
+  - **L3-I capability index — built** on its own branch (2026-10-04 plan
+    `superpowers/plans/2026-10-04-flight-control-l3-i-capability-index.md`), not merged.
+    Pure scoring/validation/storage in `Sources/IntakeKit/FlightControl/`, service and runner in
+    `Sources/FlightDeck/FlightControl/`, pane under Settings → Capability Index (temporary tab). Open for
+    integration: hand `capabilityIndexService.live` to L3-R's router and its `hints(for:…)` to
+    L3-R's rule list; move `CapabilityIndexPane` into L3-R's `FlightControlSettingsTab`; real catalogs
+    arrive with L3-R's `modelCatalog()`. The UI test is opt-in (`TEST_RUNNER_INDEX_UI=1`), not in
+    `smoke.sh`. The live probe is `INDEX_LIVE=1 FD_TEST_FILTER=IndexLiveProbeTests ./scripts/test-unit.sh`.
   - **Launch a swarm from released tasks** — pick with `bv`, claim, spawn agents into the
     project's sessions.
   - **A fleet table** — agent × current task × state × last active × account, a row jumping to
