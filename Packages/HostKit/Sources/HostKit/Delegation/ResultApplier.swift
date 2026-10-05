@@ -49,17 +49,29 @@ public struct ResultApplier: Sendable {
 
     /// Fetches a host result bundle into the worktree's repository as the run's pending result
     /// and returns the result commit.
+    ///
+    /// Unbundled by hand rather than with `git fetch`: the pack goes through
+    /// `index-pack --strict`, so git validates every object the host sent (duplicate tree
+    /// entries, `.git` in any case or HFS/NTFS spelling, `..`) before any of it is stored, a
+    /// second wall in front of the path checks `apply` makes on its own. `fetch.fsckObjects`
+    /// would say the same, but git ignores it for bundles before 2.46, and the Linux image ships
+    /// 2.43 (verified: a `.GIT` tree was accepted there).
     public func fetch(bundle: URL, worktree: URL, runID: String) async throws -> String {
         let runID = try SyncName.validate(runID)
         return try await GitRunner.offload { [git] in
-            let heads = try git.text(["bundle", "list-heads", bundle.path], in: worktree).split(separator: "\n")
-            guard let head = heads.first, let space = head.firstIndex(of: " ") else {
-                throw SyncError.bundleLacksSnapshot(runID)
-            }
-            try git.run(["fetch", "-q", "--no-tags", "--no-write-fetch-head", bundle.path,
-                         "+\(head[head.index(after: space)...]):\(Self.ref(runID))"], in: worktree,
-                        timeout: GitRunner.longTimeout)
-            return String(head[..<space])
+            let data = try Data(contentsOf: bundle, options: .mappedIfSafe)
+            guard let end = data.range(of: Data("\n\n".utf8)) else { throw SyncError.bundleLacksSnapshot(runID) }
+            let header = String(decoding: data[..<end.lowerBound], as: UTF8.self).split(separator: "\n")
+            guard let signature = header.first, signature.hasPrefix("# v2 git bundle") || signature.hasPrefix("# v3 git bundle"),
+                  let head = header.dropFirst().first(where: { !$0.hasPrefix("-") && !$0.hasPrefix("@") }),
+                  let commit = head.split(separator: " ").first.flatMap({ try? SyncName.objectID(String($0)) })
+            else { throw SyncError.bundleLacksSnapshot(runID) }
+            try git.run(["-c", "core.protectHFS=true", "-c", "core.protectNTFS=true",
+                         "index-pack", "--stdin", "--strict", "--fix-thin"], in: worktree,
+                        input: Data(data[end.upperBound...]), timeout: GitRunner.longTimeout)
+            try git.run(["cat-file", "-e", "\(commit)^{commit}"], in: worktree)
+            try git.run(["update-ref", Self.ref(runID), commit], in: worktree)
+            return commit
         }
     }
 
@@ -122,6 +134,10 @@ public struct ResultApplier: Sendable {
         try Self.refuseFoldingCollisions(changes)
         var skip = Set<String>()
         var seen: [String: FileSignature?] = [:]
+        // Directories the result turns into a file or symlink (`d/` -> `d -> a.txt`): their
+        // tracked contents are deleted by this same result, so they may be replaced, but only
+        // if nothing else (an ignored build product, say) is left in them by then.
+        var replacing = Set<String>()
         let current = try currentIDs(changes, in: top)
         for change in changes {
             let signature = FileSignature(of: top.appendingPathComponent(change.path))
@@ -129,33 +145,57 @@ public struct ResultApplier: Sendable {
             // The file must still be what "ours" recorded: a save after "ours" was taken would
             // otherwise be thrown away. Absent in ours means it must be absent on disk too (an
             // ignored local file sits there, and is not ours to replace).
-            let unchanged = change.oldMode == Self.absent ? signature == nil : current[change.path] == change.oldID
-            if !unchanged { skip.insert(change.path) }
+            if change.oldMode == Self.absent {
+                if signature?.type == .typeDirectory && change.newMode != Self.absent {
+                    replacing.insert(change.path)
+                } else if signature != nil {
+                    skip.insert(change.path)
+                }
+            } else if current[change.path] != change.oldID {
+                skip.insert(change.path)
+            }
         }
         let staging = try stage(changes.filter { !skip.contains($0.path) && $0.status != "D" }, of: mergedTree, gitDir: gitDir, in: top)
         defer { try? FileManager.default.removeItem(at: staging) }
 
         beforeWrite?()
-        for change in changes where !skip.contains(change.path) {
+        // Deletions first, so a directory being replaced is empty by the time its replacement
+        // is written, and no parent walk mistakes a just-written symlink for an attack.
+        let ordered = changes.filter { $0.status == "D" } + changes.filter { $0.status != "D" }
+        let fm = FileManager.default
+        for change in ordered where !skip.contains(change.path) {
             let file = top.appendingPathComponent(change.path)
             // Again, at the last moment: a symlink made since the checks above (by the user, or
             // by a write earlier in this loop on a case- or normalization-folding file system)
             // must not carry this write out of the worktree.
             try Self.checkSafe(change.path, under: realTop)
-            guard FileSignature(of: file) == seen[change.path] ?? nil else {
+            if replacing.contains(change.path) {
+                let leftovers = (try? fm.contentsOfDirectory(atPath: file.path)) ?? []
+                guard leftovers.isEmpty else {
+                    skip.insert(change.path)
+                    continue
+                }
+                try? fm.removeItem(at: file)
+            } else if FileSignature(of: file) != seen[change.path] ?? nil {
                 skip.insert(change.path)
                 continue
             }
-            let fm = FileManager.default
             if change.status == "D" {
                 try? fm.removeItem(at: file)
-            } else {
-                let staged = staging.appendingPathComponent(change.path)
-                guard (try? fm.attributesOfItem(atPath: staged.path)) != nil else { continue }   // a gitlink stages nothing
-                try fm.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
-                try? fm.removeItem(at: file)
-                try fm.moveItem(at: staged, to: file)
+                Self.removeEmptyParents(of: file, below: top)
+                continue
             }
+            let staged = staging.appendingPathComponent(change.path)
+            guard (try? fm.attributesOfItem(atPath: staged.path)) != nil else {
+                // Only a gitlink legitimately stages nothing. Anything else missing lost a
+                // collision in staging (on APFS, `Notes/bar` and `notes` from a case-sensitive
+                // host are one entry): report it and keep the result, never drop it silently.
+                if change.newMode != "160000" { skip.insert(change.path) }
+                continue
+            }
+            try fm.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try? fm.removeItem(at: file)
+            try fm.moveItem(at: staged, to: file)
         }
         conflicts.formUnion(skip)
         if mergedTree == oursTree && conflicts.isEmpty {
@@ -190,11 +230,20 @@ public struct ResultApplier: Sendable {
     /// case- or normalization-insensitive file system) `A` and `a`, or NFC and NFD `café`, are
     /// one directory entry: writing `A -> .git` first and then `a/hooks/pre-commit` plants a
     /// git hook, even though every name passes the per-path checks.
+    ///
+    /// The folding here is full Unicode case folding on the NFC form, which catches final sigma,
+    /// sharp s and ligatures that `lowercased()` misses. It is still not APFS's own table, so it
+    /// is the early, whole-result refusal; the real guard is the `lstat` parent walk repeated
+    /// before every write, which asks the file system itself. Deleted paths are left out: a
+    /// result that replaces `d/` with `d -> a.txt` deletes `d/…`, it does not write beneath it.
     static func refuseFoldingCollisions(_ changes: [Change]) throws {
-        func fold(_ path: String) -> String { path.precomposedStringWithCanonicalMapping.lowercased() }
+        func fold(_ path: String) -> String {
+            path.precomposedStringWithCanonicalMapping.folding(options: [.caseInsensitive], locale: nil)
+                .precomposedStringWithCanonicalMapping
+        }
         let links = changes.filter { $0.newMode == "120000" }
         guard !links.isEmpty else { return }
-        let folded = changes.map { (path: $0.path, key: fold($0.path)) }
+        let folded = changes.filter { $0.newMode != absent }.map { (path: $0.path, key: fold($0.path)) }
         for link in links {
             let key = fold(link.path)
             if let other = folded.first(where: { $0.path != link.path && ($0.key == key || $0.key.hasPrefix(key + "/")) }) {
@@ -222,10 +271,43 @@ public struct ResultApplier: Sendable {
         }
         guard !regular.isEmpty else { return ids }
         // Paths are newline-separated here; `checkSafe` has already refused any containing one.
-        let hashed = try git.text(["hash-object", "--stdin-paths"], in: top, input: Data((regular.joined(separator: "\n") + "\n").utf8))
+        let lines = regular.map(Self.stdinPathLine).joined(separator: "\n") + "\n"
+        let hashed = try git.text(["hash-object", "--stdin-paths"], in: top, input: Data(lines.utf8))
             .split(separator: "\n").map(String.init)
         for (path, id) in zip(regular, hashed) { ids[path] = id }
         return ids
+    }
+
+    /// One path as a `--stdin-paths` line. git C-unquotes a line that starts with `"` and drops
+    /// a trailing CR, so such a name is sent C-quoted; any other name goes verbatim. Unquoted,
+    /// a tracked `"odd` failed the whole apply ("badly quoted") and `cr<CR>` hashed `cr`.
+    static func stdinPathLine(_ path: String) -> String {
+        guard path.hasPrefix("\"") || path.contains("\r") else { return path }
+        var quoted = "\""
+        for byte in path.utf8 {
+            switch byte {
+            case UInt8(ascii: "\""): quoted += "\\\""
+            case UInt8(ascii: "\\"): quoted += "\\\\"
+            case 0x0d: quoted += "\\r"
+            case 0x09: quoted += "\\t"
+            case 0..<0x20, 0x7f, 0x80...: quoted += String(format: "\\%03o", byte)
+            default: quoted += String(UnicodeScalar(byte))
+            }
+        }
+        return quoted + "\""
+    }
+
+    /// After a deletion, removes the parent directories it left empty, as a checkout does,
+    /// stopping at the worktree root.
+    static func removeEmptyParents(of file: URL, below top: URL) {
+        let fm = FileManager.default
+        var dir = file.deletingLastPathComponent().standardizedFileURL
+        let root = top.standardizedFileURL.path
+        while dir.path.count > root.count, dir.path.hasPrefix(root + "/"),
+              (try? fm.contentsOfDirectory(atPath: dir.path))?.isEmpty == true {
+            try? fm.removeItem(at: dir)
+            dir = dir.deletingLastPathComponent()
+        }
     }
 
     /// Writes every file to be applied into a staging directory exactly as a checkout would
