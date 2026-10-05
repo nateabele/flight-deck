@@ -24,9 +24,19 @@ extension HostPeer {
 /// Threading contract: the transport must call `receive` and `peerClosed` serially per
 /// connection, and off its event loop, because `host.info` is answered synchronously and
 /// shells out (up to ~7s if docker wedges). Different connections may run concurrently.
+/// `receive(binary:from:)` is the exception: the transport calls it straight from its delivery
+/// thread, in arrival order, never through that serial queue (see there).
+///
+/// With a `delegation` router, nothing a request does holds the serial queue: delegation
+/// requests are answered from tasks of their own, and `host.info` from a global queue. A
+/// `sync.push` queued behind a 7 s `host.info` would otherwise leave its bundle's bytes piling
+/// up in the mux, and the controller's writes stalled on credit, until the probe finished.
 public final class HostServerCore: @unchecked Sendable {
     private let hostName: @Sendable () -> String
     private let probe: HostInfoProbe
+    /// Serves every op but `host.info`. Nil (the 1.0 host, and tests of the core alone)
+    /// answers them `not_implemented` and advertises only `host.info`.
+    private let delegation: DelegationHost?
     /// This host's own `host:port` addresses for `helloAck`, asked on every hello: a host's
     /// addresses change under it (a laptop host joining the tailnet), and a list read once at
     /// launch would keep advertising the network it booted on.
@@ -48,10 +58,11 @@ public final class HostServerCore: @unchecked Sendable {
     /// `endpoints` defaults to none, which a controller reads as "nothing to learn"; both
     /// hostds pass their real interface list.
     public init(hostName: @escaping @Sendable () -> String, probe: HostInfoProbe,
-                endpoints: @escaping @Sendable () -> [String] = { [] }) {
+                endpoints: @escaping @Sendable () -> [String] = { [] }, delegation: DelegationHost? = nil) {
         self.hostName = hostName
         self.probe = probe
         self.endpoints = endpoints
+        self.delegation = delegation
     }
 
     /// Replies are sent before this returns; see the type's threading contract.
@@ -92,25 +103,28 @@ public final class HostServerCore: @unchecked Sendable {
             peers[key] = (peer, true)
             let notify = _onControllerName
             lock.unlock()
-            send(.helloAck(protocolVersion: .current, capabilities: [.hostInfo], hostName: hostName(),
-                           endpoints: endpoints()), to: peer)
+            // The mux exists before the ack leaves: a controller may open a channel the moment
+            // it reads the ack, and a frame for a connection with no mux is dropped.
+            delegation?.connected(peer)
+            send(.helloAck(protocolVersion: .current, capabilities: [.hostInfo] + (delegation?.capabilities ?? []),
+                           hostName: hostName(), endpoints: endpoints()), to: peer)
             notify?(peer.slot, name)
         case .request(let id, let req):
             guard isHelloed(key) else { return refuseNoHello(id: id, peer: peer) }
             switch req {
             case .hostInfo:
-                // The core's name wins over the probe's: the controller must see the same
-                // name in helloAck and host.info, or one host shows up under two names.
-                var info = probe.gather()
-                info.hostName = hostName()
-                send(.reply(id: id, .hostInfo(info)), to: peer)
-            case .delegation:
-                // Contract only (task C0): the router that serves these lands with tracks
-                // C2–C5. Answered by id rather than dropped, so a controller that sends one
-                // early fails at once instead of waiting out its request timeout. helloAck
-                // does not advertise the capabilities yet, so a correct controller never asks.
-                send(.error(id: id, code: "not_implemented", message: "delegation is not implemented on this host yet"),
-                     to: peer)
+                guard delegation != nil else { return answerHostInfo(id, to: peer) }
+                // Off the serial queue, for the type comment's reason.
+                DispatchQueue.global(qos: .userInitiated).async { [self] in answerHostInfo(id, to: peer) }
+            case .delegation(let request):
+                guard let delegation else {
+                    // A 1.0-style host. Answered by id rather than dropped, so a controller
+                    // that sends one anyway fails at once instead of waiting out its request
+                    // timeout; helloAck did not advertise it, so a correct controller never asks.
+                    return send(.error(id: id, code: "not_implemented",
+                                       message: "delegation is not implemented on this host yet"), to: peer)
+                }
+                delegation.handle(id: id, request, from: peer)
             }
         }
     }
@@ -121,10 +135,21 @@ public final class HostServerCore: @unchecked Sendable {
         let doomed = peers.values.map(\.peer).filter { $0.slot == slot }
         for p in doomed { peers[ObjectIdentifier(p)] = nil }
         lock.unlock()
-        for p in doomed { p.close() }
+        for p in doomed {
+            delegation?.disconnected(p)
+            p.close()
+        }
     }
 
     public func peerClosed(_ peer: HostPeer) { forget(peer) }
+
+    /// One binary WebSocket message (a `ChannelMux` frame). Called by the transport straight
+    /// from its delivery thread, in arrival order, and never through the per-connection serial
+    /// queue: a request on that queue may be waiting for these very bytes. Dropped for a peer
+    /// that has no mux (no hello yet, or already closed).
+    public func receive(binary data: Data, from peer: HostPeer) {
+        delegation?.receive(binary: data, from: peer)
+    }
 
     // MARK: - Private
 
@@ -157,8 +182,19 @@ public final class HostServerCore: @unchecked Sendable {
         return peers[key]?.helloed ?? false
     }
 
+    /// Also ends the peer's delegation state (its mux and event subscriptions), on every
+    /// path that drops it: closed, refused, revoked.
     private func forget(_ peer: HostPeer) {
         lock.lock(); peers[ObjectIdentifier(peer)] = nil; lock.unlock()
+        delegation?.disconnected(peer)
+    }
+
+    /// The core's name wins over the probe's: the controller must see the same name in
+    /// helloAck and host.info, or one host shows up under two names.
+    private func answerHostInfo(_ id: Int, to peer: HostPeer) {
+        var info = probe.gather()
+        info.hostName = hostName()
+        send(.reply(id: id, .hostInfo(info)), to: peer)
     }
 
     private func send(_ frame: HostServerFrame, to peer: HostPeer) {
