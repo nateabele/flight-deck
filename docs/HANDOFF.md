@@ -151,7 +151,7 @@ Codex tabs (codex 0.155.1 or newer) reach `flightdeck` through a narrow sandbox 
 
 ## Remote hosts (sub-project A)
 
-**State:** built on branch `host-foundation` (not merged, not pushed), 12 tasks. A Flight Deck can pair
+**State:** merged to master (12 tasks). A Flight Deck can pair
 a second Mac or a Linux box as a *host*, keep an authenticated link to it, and read its toolchain
 with `flightdeck host ls` and `flightdeck host info <name>`. Settings has two new tabs: Hosts
 (paired hosts, Add Host) and Hosting (this Mac as a host). Running commands on a host is
@@ -170,8 +170,8 @@ sub-project C, the next section.
 
 ## Delegated execution (sub-project C)
 
-**State:** built in parallel tracks C0–C8 and integrated on branch `c8-int` (not merged to master,
-not pushed).
+**State:** built in parallel tracks C0–C8, integrated on branch `c8-int`, and merged to master
+with the final-review fixes (not pushed).
 A tab runs a command on a paired host as if locally: `flightdeck run --on mini -- xcodebuild test`
 syncs the tab's uncommitted worktree through git, streams the output, and exits with the remote
 code (125 with one `flightdeck:` line when delegation itself failed). `up`/`down` keep a service
@@ -191,8 +191,57 @@ intercepted by per-tab shims on `PATH`. Claude and codex tabs learn all of it fr
   UI-test run there (the "don't touch" panel, a second screen run queueing), a Linux pairing plus a
   `flightdeck run`, and `command -v <routed command>` in a real tab to see the shim is first on
   `PATH` (FOLLOWUPS lists all of it).
+- **Not from this repo.** Flight Deck's own repo has submodules (`vendor/ghostty`,
+  `vendor/boringssl`), and v1 refuses any repo with submodules (`submodules_unsupported`, exit 125).
+  Try it from a project without them.
 - **Debug builds:** shims go under `Flight Deck (Debug)/route-shims/`; a UITest reset builds no
-  delegation at all. A Debug codex start still writes the real `~/.codex/skills/flightdeck-delegate/`.
+  delegation at all; a Debug codex start does not install the skill into the real `~/.codex`.
+
+### Use a second Mac today
+
+The laptop is the *controller*, the other Mac (here, `mini`) the *host*. Both need **git 2.40 or
+later at `/usr/bin/git`**: the hostd is started by launchd with launchd's `PATH`, so it runs
+`/usr/bin/git` (the Xcode or Command Line Tools git, whichever `xcode-select -p` names) and never a
+Homebrew one. `/usr/bin/git --version` on each machine; anything older refuses every run with
+`git_too_old`. The repo you run from must have no submodules and no LFS.
+
+1. **Install the same build on the mini.** Copy the laptop's `/Applications/Flight Deck.app` there
+   (a different major version is refused with "Update Flight Deck on <name>"). Someone must stay
+   logged in on the mini: the hostd is a LaunchAgent and stops at logout.
+2. **On the mini: Settings → Hosting → "Let other Macs use this Mac" on.** Approve it if macOS asks
+   (System Settings → General → Login Items); the tab then says "Running on port 47410". Click +
+   under Controllers to show a pairing code (it expires in 2 minutes).
+3. **On the laptop: Settings → Hosts → Add Host (+ under Paired Hosts), choose Mac,** pick the mini
+   from the Macs showing a code, and type the code.
+4. **Check the link from a tab on the laptop:** `flightdeck host ls` shows the mini online under the
+   name you will pass to `--on`, and `flightdeck host info mini` lists its Xcode versions.
+5. **A first run.** From a tab whose working directory is inside a git repo (uncommitted edits
+   included): `flightdeck run --on mini -- 'uname -n && pwd'` (quoted, so the `&&` runs
+   on the mini). It syncs the
+   worktree, prints the mini's output, and exits with the remote code; a delegation failure is
+   exit 125 with one `flightdeck:` line saying what to do. Then a real one, e.g.
+   `flightdeck run --on mini -- xcodebuild test -scheme App`. `flightdeck diff <run>` /
+   `flightdeck apply <run>` bring back what it changed.
+6. **Optional: `.flightdeck/delegate.toml`** in the repo, so agents need no flags:
+
+   ```toml
+   default_host = "mini"
+
+   [recipe.ui-tests]
+   run = "xcodebuild test -scheme App -only-testing:AppUITests"
+   screen = true      # waits for the mini's one screen; needs it logged in and unlocked
+   long = true        # prints the run id and exits; `flightdeck wait <id>` picks it up
+
+   [[route]]
+   match = "xcodebuild test *"
+   recipe = "ui-tests"
+   ```
+
+   `flightdeck recipe check` validates it. Tabs opened in the project after that route a typed
+   `xcodebuild test …` to the mini; `FLIGHTDECK_NO_ROUTE=1` runs one locally.
+
+Stopping Hosting on the mini (or an update that restarts its hostd) stops its delegated runs and
+services cleanly; see [AGENT-OPERATIONS.md](AGENT-OPERATIONS.md), "Delegated runs".
 
 ## Releasing the Linux host (`flightdeck-hostd`)
 

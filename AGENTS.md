@@ -63,7 +63,8 @@ TEST_RUNNER_FLIGHTDECK_FLAKE_HUNT=1 FLIGHTDECK_TEST_THROTTLE=0 ./scripts/smoke.s
 ./scripts/test-hostd-install.sh      # the pasted installer, end to end in ubuntu:24.04; ends INSTALL PASS
 # (scripts/hostd-install.sh is the installer itself, not a command you run.)
 # Interop runs bind fixed ports 47410/47411 and share Packages/HostDaemonLinux/.build:
-# never run two at once, and never alongside test-hostd-linux.sh.
+# never run two at once, and never alongside test-hostd-linux.sh. serve and run publish 47410,
+# this Mac's own hostd port: turn Settings → Hosting off first.
 
 ./scripts/build-ios.sh          # builds FleetKitiOS + FlightDeckMobile + its test bundle — run after touching Sources/FleetKit or Sources/FlightDeckMobile
 ./scripts/test-ios.sh           # runs FlightDeckMobileTests on a simulator this script creates and deletes

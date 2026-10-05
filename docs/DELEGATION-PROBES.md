@@ -156,17 +156,17 @@ login session.
 
 **Steps.**
 
-1. Make a minimal UI-test project on the host, or use a Flight Deck checkout:
-   `-scheme FlightDeck -only-testing:UITests`. The trivial `XCUIApplication().launch()` case
-   is enough.
-2. **LaunchAgent half, before C8 lands.** Emulate hostd with a throwaway agent:
+1. Make a minimal UI-test project on the host; the trivial `XCUIApplication().launch()` case
+   is enough. A Flight Deck checkout (`-scheme FlightDeck -only-testing:UITests`) works for steps
+   2 and 4 but not step 3: delegation refuses repos with submodules (`submodules_unsupported`).
+2. **LaunchAgent half, emulated.** A throwaway agent in the hostd's place, which needs no pairing:
    - Write `~/Library/LaunchAgents/dev.flightdeck.p3.plist`. Set `ProgramArguments` =
      `/bin/zsh -lc "cd <proj> && xcodebuild test -scheme <S> -destination 'platform=macOS' -derivedDataPath /tmp/p3dd > /tmp/p3-agent.log 2>&1; echo EXIT $? >> /tmp/p3-agent.log"`.
    - Run `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.flightdeck.p3.plist`, then
      `launchctl kickstart gui/$(id -u)/dev.flightdeck.p3`.
    - Wait for `EXIT` in `/tmp/p3-agent.log`.
    - Clean up with `launchctl bootout gui/$(id -u)/dev.flightdeck.p3` and remove the plist.
-3. **LaunchAgent half, after C8.** From this Mac:
+3. **LaunchAgent half, through the real hostd.** With the host paired, from this Mac:
    `flightdeck run --on <host> --screen -- xcodebuild test -scheme <S> -destination 'platform=macOS'`.
 4. **SSH half.** From this Mac:
    `ssh <host> "cd <proj> && xcodebuild test -scheme <S> -destination 'platform=macOS' -derivedDataPath /tmp/p3dd-ssh"; echo $?`.

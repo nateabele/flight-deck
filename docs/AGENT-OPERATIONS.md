@@ -222,6 +222,42 @@ keeps an admin socket at `<state root>/admin.sock`.
   package's one `.build`: **never run two at once, and never alongside `test-hostd-linux.sh`.**
   The loser reports a bind failure or a corrupted build tree that has nothing to do with its code.
   They also fail if a real hostd is already holding 47410 on the same machine.
+- **Turn Hosting off before `test-hostd-linux-interop.sh run` (and `serve`).** Both publish the
+  container's hostd on `127.0.0.1:47410`, the port this Mac's own hostd listens on whenever
+  Settings → Hosting is on. With both up, the publish fails, or the Darwin side of the gate dials
+  the live hostd instead of the container; either way the failure says nothing about the code.
+  `FD_INTEROP_PORT` moves the gate to another port when Hosting has to stay on.
+
+### Delegated runs (sub-project C)
+
+With Hosting on, this Mac runs other Macs' `flightdeck run|up` commands, and its own tabs can send
+theirs elsewhere. Four consequences for anyone working here:
+
+- **The hostd runs user commands that outlive the app.** A delegated run or service is a process
+  group under the hostd, not under Flight Deck, so quitting or swapping the app does not stop it. A
+  service (`up`) runs until `down`, until its tab closes, or until no controller has been connected
+  for its orphan timeout (30 minutes by default). Stopping the hostd (the Hosting toggle,
+  `launchctl bootout`, an update that restarts it) stops its work cleanly: on SIGTERM it downs
+  every service, running its `down` command, and cancels every run within launchd's 20 s exit
+  timeout, and a hostd that crashed kills the process groups it had recorded when it next starts.
+  To see what is running, `flightdeck ps` from a plain shell on the controller lists every tab's
+  runs.
+- **Screen runs keep the display awake.** While a `screen = true` run holds the host's screen, the
+  hostd holds a display-sleep assertion and shows a "don't touch" panel; every run also holds an
+  idle-sleep assertion. `pmset -g assertions` names them (`Flight Deck screen run <id>`,
+  `Flight Deck run <id>`). A run that never ends keeps the Mac awake until it is stopped
+  (`flightdeck stop <id>` from the controller) or Hosting is turned off.
+- **Agent tabs get route shims.** Every tab's `PATH` starts with
+  `<state dir>/route-shims/<session id>/` (Debug: under `Flight Deck (Debug)/`), and the shell's
+  startup snippet puts it back in front after the user's own profile has run. In a project whose
+  `.flightdeck/delegate.toml` has `[[route]]` rules, a matching command typed by an agent (say
+  `xcodebuild test …`) runs on a host, not here. `FLIGHTDECK_NO_ROUTE=1` (any non-empty value other
+  than `0`) bypasses routing for that command. This repo has no `delegate.toml`, and could not
+  delegate anyway: it has submodules, which v1 refuses (`submodules_unsupported`).
+- **Debug builds do not write `~/.codex`.** A Debug codex start skips installing the `delegate`
+  skill into the real `~/.codex/skills/` (it logs once); only a Release build installs or
+  refreshes it. A Debug build that predates this fix did write it, and the next Release start
+  rewrites it.
 
 ## 4. State: where it lives, what never to delete
 
@@ -232,6 +268,8 @@ keeps an admin socket at `<state root>/admin.sock`.
 | Window geometry | `UserDefaults` + `~/Library/Saved Application State/…` |
 | Paired hosts (controller side) | `~/Library/Application Support/Flight Deck/hosts.json` (never in `sessions.json`); their secrets in the login Keychain, service `dev.flightdeck.host`, one item per slot |
 | Paired controllers (host side) | `~/Library/Application Support/Flight Deck Host/controllers.json`, mode 0600 in a 0700 directory (Linux: `$XDG_DATA_HOME` or `~/.local/share/flightdeck-hostd`) |
+| Delegated runs (controller side) | `~/Library/Application Support/Flight Deck/delegation.json` (the run registry), `delegation/` beside it (each run's output copy and result bundles), `route-shims/<session id>/` (per-tab shims, rebuilt at launch) |
+| Delegated work (host side) | Under the hostd's state root: `workspaces/<controller slot>/` (object stores and checkouts, cleared only by `flightdeck host prune`) and `runs/<id>/` (spooled output, pruned after 24 h) |
 
 - **Never `defaults delete dev.flightdeck.FlightDeck`.** It nukes preferences; it used to nuke
   every session too, on every smoke run. Delete individual geometry keys only — the list

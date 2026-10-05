@@ -99,6 +99,43 @@ Build order: **A → C → B → D**. B and D get their own specs.
 - Hosts never trust each other. If B later needs host → host delegation, it goes host → controller → host.
 - hostd runs as the user who enabled it. Nothing runs as root.
 - The controller's environment is never sent. Only `--env` values and recipe `env` values are sent.
+- *As built:* per-controller scoping on a host is hygiene, not isolation (§2.3, item 6).
+
+### 2.3 As built: deviations recorded while building sub-project C (2026-10-05)
+
+Decided during the build of §4–§9; the sections below are left as designed, each with a pointer here.
+
+1. **Results are kept until acked, not until fetched** (§4.1, §4.5). The host keeps
+   `refs/fd/results/<run-id>` until the controller sends `run.ack {runID, repoRoot}` after it has
+   stored the bundle on its own disk, or for 24 h. Dropping it at fetch time would lose every result
+   whose connection died between the host's last write and the controller's copy landing.
+2. **Submodules are refused** (§4.2 step 4), with `submodules_unsupported` and exit 125, like LFS,
+   to keep sync bounded in v1. That includes Flight Deck's own repo. §10's "submodules round-trip"
+   is replaced by a test that they are refused.
+3. **The shim calls `flightdeck route-exec <name> -- <args>`** (§8), not `flightdeck run <recipe>`.
+   The CLI does the matching: on a match it delegates, otherwise it execs the real binary from
+   `PATH` minus the shim directory. Because login-shell startup files reorder `PATH`, the shell
+   re-prepends the shim directory after them (fish, zsh and bash snippets). `FLIGHTDECK_NO_ROUTE`
+   set to anything but empty or `0` bypasses routing.
+4. **The controller keeps a disk copy of every run's output** (`delegation/` in its state
+   directory, up to the spool's 64 MiB cap, oldest bytes dropped first). A `wait`, `logs` or
+   reattach replays the copy, then follows live; the host is asked only for the range the copy
+   lacks, and `logs` of a finished run answers with the host offline. Copies are pruned with the
+   run registry (finished runs older than 14 days, or beyond the newest 500 per host).
+5. **Host run ids are unique across hostd lifetimes:** `<boot epoch, base 36>-r<n>`. A counter that
+   restarted at `r1` reissued ids whose result refs and controller records still existed. The ids
+   stay opaque strings; nothing parses them.
+6. **Scoping is hygiene, not isolation** (§2.2). A run belongs to the controller slot that started
+   it, and other slots get `unknown_run`, but every controller's commands run as the host user: a
+   paired controller's run can read `controllers.json` (every controller's key), drive the admin
+   socket, and reach other controllers' `workspaces/` and processes. Pair only machines you would
+   give a shell. Revoking a controller cancels its runs and downs its services at once.
+7. **A run does not outlive the hostd** (§6.1). On SIGTERM the hostd downs services (running their
+   `down`) and cancels runs inside launchd's exit timeout; after a crash it kills the recorded
+   process groups when it next starts. Before this, launchd killed only the hostd's own process
+   group, so runs lived on in slots the new hostd handed out again.
+8. **Wire names** (§4.3): `sync.begin` is `sync.tips` (the host's tips) plus `sync.push` (the bundle
+   on a channel). Paired phones are refused every `delegate.*` request (`out_of_scope`).
 
 ## 3. Pairing, discovery, connectivity
 
@@ -155,7 +192,7 @@ workspaces/<controller-slot>/<repo-root-commit>/
   store.git/                        bare repo: the object store
     refs/fd/heads/<wt-key>          the local HEAD each worktree last sent
     refs/fd/snapshots/<wt-key>/<n>  last K snapshot commits per worktree (K=5)
-    refs/fd/results/<run-id>        result commits until fetched or 24h old
+    refs/fd/results/<run-id>        result commits until acked or 24h old (§2.3, item 1)
   checkouts/<wt-key>-<slot>/<worktree-basename>/   one `git worktree` per pool slot
 runs/<run-id>/                      output spool, metadata, result
 ```
@@ -170,7 +207,7 @@ Every run, on the session's current worktree:
 1. A temporary `GIT_INDEX_FILE` is seeded from `HEAD`. Then `git add -A` runs (it honors `.gitignore`), followed by `git add -f` for each `include` path. `git write-tree` and `git commit-tree -p HEAD` produce the snapshot commit.
 2. The user's index, stash, reflog and branches are never touched.
 3. The snapshot is kept under `refs/flightdeck/snapshots/<host>/<n>` so `gc` can't prune it. Older ones are trimmed to K.
-4. Submodules are handled recursively. Each submodule is its own workspace, and the snapshot pins its gitlink.
+4. Submodules are handled recursively. Each submodule is its own workspace, and the snapshot pins its gitlink. *As built: refused in v1 (§2.3, item 2).*
 5. A repo that uses LFS (a `filter=lfs` attribute on any tracked path) fails with `flightdeck: LFS repos are not supported for delegation yet`.
 
 ### 4.3 Transfer
@@ -309,7 +346,7 @@ recipe = "ui-tests"
 
 **Routing shims:**
 - At session launch, Flight Deck puts a per-session shim directory at the front of `PATH`, holding one shim for each command name that a `route` names.
-- A shim matches its argv against the routes. On a match, it runs `flightdeck run <recipe> -- <argv>`. Otherwise it `exec`s the real binary, found by searching `PATH` without the shim directory.
+- A shim matches its argv against the routes. On a match, it runs `flightdeck run <recipe> -- <argv>`. Otherwise it `exec`s the real binary, found by searching `PATH` without the shim directory. *As built: the shim calls `flightdeck route-exec`, which matches (§2.3, item 3).*
 - `FLIGHTDECK_NO_ROUTE=1` bypasses all routes.
 - The shim directory is rebuilt when `delegate.toml` changes.
 
@@ -339,7 +376,7 @@ recipe = "ui-tests"
   - ignored build output survives an apply;
   - the result patch three-way merges cleanly, and gives conflict markers when you edited during the run;
   - an LFS repo is refused;
-  - submodules round-trip.
+  - submodules round-trip (*as built: refused, §2.3 item 2*).
 - **Preflight:**
   - a held local port fails before any sync;
   - `auto` picks a free port;

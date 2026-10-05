@@ -2323,7 +2323,7 @@ flagged as most likely to differ from the tests. The maintainer's to run.
 ## From remote hosts, sub-project A: host foundation (2026-10-05)
 
 Pairing, a live link to each host, and `flightdeck host ls|info` landed on branch
-`host-foundation` (plan: [the host-foundation plan](superpowers/plans/2026-10-04-host-foundation.md)).
+`host-foundation`, now merged to master (plan: [the host-foundation plan](superpowers/plans/2026-10-04-host-foundation.md)).
 What is open, in the order it will bite:
 
 ### Not built, not done
@@ -2455,24 +2455,38 @@ container; **nothing has run against a real second machine.**
   while a screen lease is held, and that it never takes focus from the UI test it guards.
 - **`SMAppService` registration of the hostd from an installed build** has never run (sub-project A
   item above); every delegation run on a Mac host depends on it.
-- **A routed command in a real tab.** Whether a login profile that prepends to `PATH`
-  (`fish_add_path`, `brew shellenv`, `path_helper` in zsh's `/etc/zprofile`) pushes the shim
-  directory off the front is unchecked. Check with `command -v xcodebuild` in a tab of a project
-  that routes it. A fix would be shell-side (a fish `conf.d` snippet that re-prepends
-  `$FLIGHTDECK_SHIM_DIR`).
+- **A routed command in a real tab.** Login-shell startup files do push the shim directory off
+  the front (measured with real login shells: 40th of 43 entries under fish, 18th under zsh), so
+  the shell now re-prepends `$FLIGHTDECK_SHIM_DIR` after its startup files (fish `vendor_conf.d`,
+  zsh `ZDOTDIR` wrapper, bash `PROMPT_COMMAND`; ARCHITECTURE.md, "`delegate.toml` and transparent
+  routing"). That is tested against real login shells, not in a Flight Deck tab: check
+  `command -v xcodebuild` in a tab of a project that routes it.
+- **Linux delegation under a real systemd is unverified.** The idle-sleep assertion is
+  `systemd-inhibit`, and the claim that a hostd under systemd reaps zombie grandchildren (unlike a
+  container's PID 1) rests on systemd's design, not a run: every Linux delegation test is in a
+  `swift:6.3-noble` container with no systemd. Check both on a real host: `systemd-inhibit --list`
+  during a run, and a run whose grandchild exits before it.
 - **`/reload-plugins` at a busy composer** is unprobed, which is why the app sends it only to an
   idle tab. **A codex TUI already running** when its skill is installed or refreshed may not see
   it; new tabs do.
 
-### Not built, or out of v1 by ruling
+### Not built, or out of v1 by decision
 
 - **Revoking a controller does not delete its `workspaces/<slot>/`** on the host (spec §3.5). Its
   checkouts, and any `include`d secret in them, stay until removed by hand or by
   `flightdeck host prune`.
-- **Submodules are refused** (`submodules_unsupported`, ruling 7), like LFS. Spec §4.2 step 4 is
-  deferred.
-- **Phones cannot delegate.** Every `delegate.*` from a paired phone is `out_of_scope` (ruling 4).
-  A phone feature needs a ruling first.
+- **Submodules are refused** (`submodules_unsupported`), like LFS: decided during the build to keep
+  sync bounded. Spec §4.2 step 4 (recursive submodules) is deferred. **This includes Flight Deck's
+  own repo** (`vendor/ghostty`, `vendor/boringssl`), so `flightdeck run` from any Flight Deck
+  worktree exits 125 until submodules are supported.
+- **Phones cannot delegate.** Every `delegate.*` from a paired phone is `out_of_scope`: the phone
+  has no UI for it, and delegation runs code on hosts. A phone feature needs that decision
+  revisited first.
+- **Controller scoping on a host is hygiene, not isolation.** Every controller's runs execute as
+  the host user, so one paired controller can read `controllers.json` (every controller's key), use
+  `admin.sock` to arm, list and revoke, and touch other controllers' `workspaces/` and processes.
+  `screen.status` and `queued` events also show another controller's session title and run id, by
+  design (spec §6.3). Real isolation would need a user per controller.
 - **A service's port forwards are not rebuilt after an app relaunch.** The service is still listed
   and can be downed; its `localhost` ports are gone until `restart`.
 - **`exec` still takes a local snapshot** only to learn the workspace identity for
@@ -2495,21 +2509,35 @@ container; **nothing has run against a real second machine.**
 - **No event-send backpressure on the host.** `HostPeer.send(text:)` is fire-and-forget and
   `Runner.events` buffers without limit: replaying a full 64 MiB spool to a slow link holds about
   85 MiB in hostd.
-- **`unknown_run` after a hostd restart.** The run-to-repo map is in memory and runs do not survive
-  a restart, so `run.result`/`run.artifacts` for an older run answer `unknown_run`. `run.ack` carries
-  `repoRoot`, so an ack still reaches the store.
+- **`unknown_run` after a hostd restart.** Runs do not outlive the hostd: stopping it stops them
+  cleanly (on SIGTERM it downs every service, running its `down` command, and cancels every run
+  within launchd's 20 s exit timeout; after a crash it kills the recorded process groups when it
+  next starts). The run-to-repo map is in memory, so `run.result`/`run.artifacts` for a run from
+  before the restart answer `unknown_run`, and the controller ends that run as died (exit 125).
+  `run.ack` carries `repoRoot`, so an ack still reaches the store.
 - **The 60 s idle limit counts only channel bytes.** `sync.push`, `run.result` and `run.artifacts`
   fail `host_timeout` after 60 s with no bytes moving, and the host moves none while it unpacks a
   pushed bundle or builds a result bundle. A very large repo could hit it; a host keepalive (credit
-  frames while it works) is the fix.
+  frames while it works) is the fix. A retry heals it (the host finishes `receive` anyway, so the
+  next bundle is small). The per-store lock also covers `apply` and the hourly `gc --auto`, so a
+  long checkout can stall a second worktree's `sync.push` past 60 s the same way.
+- `run.ack` is best effort: an ack lost with its connection leaves the result on the host until its
+  24 h expiry, which costs disk, not data.
 - `run.result` tells a run still going (`run_active`) by `(runner as? Runner)?.phase`:
   `RunControlling` has no phase query.
 - `port.open` checks the run's owner, not that it is a service still running; a finished run's port
   simply gets `dial_failed`.
 
+**Host workspace**
+- **Same-snapshot runs share one checkout** (`Workspace.claimSlot`, as spec §4.6 asks). Concurrent
+  runs on one snapshot cross-contaminate each other's result commits, and two `xcodebuild`s in one
+  checkout share DerivedData, so the second fails with "database is locked". Sharing only for
+  `exec` is worth considering.
+- **Host disk grows without bound across worktrees.** Each new worktree gets up to `pool` full
+  checkouts plus their build output, and nothing ages them out; `flightdeck host prune` is the only
+  cleanup, and it is fleet-wide. An LRU age-out of idle slots in the hourly `gc` would bound it.
+
 **Controller adapters**
-- `RunMirror` writes on the main actor (small appends; a compaction rewrites at most 32 MiB once per
-  32 MiB of output), and a late subscriber's replay is read in full into an unbounded stream.
 - A replay is recognised when offsets go backwards or a state event arrives, so a `queued`→`started`
   landing just before the replay begins can be taken for its start and leave a hole in the copy
   until the next replay.
@@ -2533,7 +2561,7 @@ container; **nothing has run against a real second machine.**
 - A pty run's output ends at the first quiet 100 ms after the leader exits; a later write is cut off
   (Darwin discards unread master output once the slave closes).
 - In a Linux container, where PID 1 never reaps, a zombie grandchild counts as dead. A hostd under
-  systemd is unaffected.
+  systemd should be unaffected, but that is unverified (see "Unverified live" above).
 
 **Config and routing shims**
 - The shim's probe watchdog (`sleep 2`) can linger up to 2 s after the probe returns; `exec sleep`
@@ -2544,6 +2572,8 @@ container; **nothing has run against a real second machine.**
 - `recipe add` drops comments inside the recipe's own table when it replaces it, and cannot replace a
   recipe defined only through root-level dotted keys (it throws rather than duplicate it).
 - The TOML subset has no multi-line strings, floats or dates; each is a parse error naming its line.
+- `delegate.toml` is parsed on the main actor once per tab launch (and per `.flightdeck/` change);
+  small files, but a restore of many tabs in one project parses it once per tab.
 - Route matching exists twice: the app uses HostKit's `RouteMatcher`, the CLI (which does not link
   HostKit) a copy held to the same answers by `DelegationRouteParityTests`.
 
@@ -2564,12 +2594,10 @@ container; **nothing has run against a real second machine.**
   that read fails while the run succeeds, the CLI waits for a terminal frame that never comes.
 
 **Agent skill and plugin reload**
-- The plugin fingerprint lives in the defaults domain Debug and Release share, so running one after
-  the other can send one extra, harmless `/reload-plugins` to idle adopted tabs.
+- **The first launch after this merge sends `/reload-plugins` to every idle adopted claude tab:** a
+  missing fingerprint counts as changed. Intended, but expect it.
 - The fingerprint is recorded at launch, before any tab is reloaded: a crash before then costs those
   tabs their reload until the next plugin change.
-- A Debug build's codex start writes the real `~/.codex/skills/flightdeck-delegate/`; a Debug build
-  with different skill text refreshes it, and the next Release start refreshes it back.
 - Deleting the whole `flightdeck-delegate/` directory (sidecar included) reinstalls the skill; the
   permanent opt-out is deleting `SKILL.md` and keeping the sidecar. The skill also survives an app
   uninstall. The maintainer may want a Preferences opt-out.
@@ -2582,3 +2610,19 @@ container; **nothing has run against a real second machine.**
   Suggested fix: `rg -qx "$cls" <<<"$ALL_CLASSES"`.
 - `PromptDeliveredLoopbackTests.testPromptTypedFollowsTheAckOverTheWire` is load-flaky (passes alone
   and with the delegation contract reverted).
+- **"Listeners are released after any later failure" is checked only against a recording fake**
+  (`testEachFailureStopsLaterStepsAndReleasesPorts`), never with real sockets; this is the same gap
+  as the `release()`-before-close minor under Preflight.
+- `DelegationServiceTests` runs its fake service with real-time replay thresholds
+  (`replayIdle: 0.05`, `replayFirstEvent: 0.2`), which can be tight under heavy load, and two
+  negative assertions (`testLongRecipeDetaches`, `testAReattachHasNoTimeout`) wait 20–30 ms for
+  something not to happen, so under load they pass without proving anything.
+- `testRunSurvivesControllerDrop` drops the link with a graceful `link.stop()`, not a half-dead TCP
+  connection; the ping timeout path (three missed pings) is covered only by `HostLinkTests`.
+- The in-process `DarwinHostServer` in the loopback tests advertises itself over Bonjour as "mini"
+  on the LAN for the test's duration, so it can rename-collide with a real host named "mini".
+- `test-hostd-linux-interop.sh run|serve` publish `127.0.0.1:47410`, which this Mac's own hostd
+  holds while Hosting is on (AGENT-OPERATIONS.md says to turn it off first). The script could check
+  the port and refuse with that advice instead of failing later.
+- The HostKit `Delegation/*` file headers still say "Implemented by track Cn", which means nothing
+  after the merge.
