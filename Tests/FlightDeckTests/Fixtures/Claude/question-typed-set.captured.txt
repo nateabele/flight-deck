@@ -1,0 +1,34 @@
+ ▐▛███▛█   Claude Code v2.1.289                                                                                                         
+▝▜██████▀  Opus 5.5 · Claude Max                                                                                                        
+ ▝▝   ▝▝   /…/claude-501/-Users-me-Projects-flight-deck/8a334862-0e05-4951-b162-f08508f22e45/scratchpad/probe-ws       
+                                                                                                                                        
+                                                                                                                                        
+❯ Use the AskUserQuestion tool with TWO questions in one call: first which color (red, green, blue), second which animal (cat, dog,     
+  bird). Single-select each, short descriptions. Do nothing else, just ask.                                                             
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+←  ☐ Color  ☐ Animal  ✔ Submit  →                                                                                                       
+                                                                                                                                        
+Which color do you prefer?                                                                                                              
+                                                                                                                                        
+  1. Red                                                                                                                                
+     Warm and bold                                                                                                                      
+  2. Green                                                                                                                              
+     Natural and calm                                                                                                                   
+  3. Blue                                                                                                                               
+     Cool and steady                                                                                                                    
+❯ 4. teal                                                                                                                               
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  5. Chat about this                                                                                                                    
+                                                                                                                                        
+Enter to select · Tab/Arrow keys to navigate · ctrl+g to edit in Cursor · Esc to cancel                                                 
+                                                                                                                                        
+                                                                                                                                        
+                                                                                                                                        
+                                                                                                                                        
+                                                                                                                                        
+                                                                                                                                        
+                                                                                                                                        
+                                                                                                                                        
+                                                                                                                                        
+                                                                                                                                        
+                                                                                                                                        

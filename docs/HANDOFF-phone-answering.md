@@ -276,11 +276,39 @@ same thing `TextInjecting.readViewport` hands the driver.
 - **The interlock's list stops at the action row.** `Chat about this` sits below the closing
   full-width rule, so `row(n+2, reads: "Chat about this")` is `false` on every checkbox capture —
   a run ends at that rule, and this is the same rule the deferral leans on.
-- After the last question a **review** screen lists every answer and asks to submit. Nothing
-  commits until then, which is why a mid-drive abort is safe.
+- After the last question of a **set or checkbox question**, a **review** screen lists every
+  answer and asks to submit. Nothing commits until then, which is why a mid-drive abort is safe
+  there. **A lone single-select question has no review**: its one Return commits, and no "Submit"
+  tab is drawn in its strip. `AnswerPlan` therefore gives it no `.submit` step. Before 2026-10-04 it
+  did, and that extra Return landed on whatever claude drew next. In the 2.1.289 probe that was
+  claude's own "Teach auto mode?" list, whose first row is Yes
+  (`question-single-committed-no-review`).
 - **The hint line is not a discriminator.** It gained `ctrl+g to edit in Cursor` between captures
   — it varies with installed tooling — and reads `Tab/Arrow keys to navigate` inside a set where a
   lone question reads `↑/↓ to navigate`. Use the checkbox glyphs and the tab strip.
+
+## Typed answers — the "Type something" row (2026-10-04, claude 2.1.289)
+
+The phone draws a "Type something" field under each question's options, as the terminal does.
+The field shows only when the Mac sends `WireSession.acceptsTypedAnswers`. On the wire a typed
+answer is `AnswerSelection.typed(text, optionCount:)`: `index` is n (the row), `label` is empty,
+and `text` holds the words. A Mac built before this ignores `text` and refuses index n in its
+label check, so it presses no key.
+
+Measured live in a pty, with the captures in `typed-answers.captured.provenance.json`:
+
+| Shape | On the row | Then | Recorded `answers` |
+|---|---|---|---|
+| single-select | the paste sits in the row (`question-typed-single`) | Return answers and advances, or commits a lone question | `"teal 3 ok"` |
+| multiSelect | the paste **ticks the box** by itself (`question-typed-checkbox`) | Down to the action row; **no Return**, which would untick it | `"Nuts, pretzels"` |
+
+- The words go in through `sendText`, a **bracketed paste**. The probe compared it with
+  keystrokes: digits stay text (no number-key shortcut fires), and quotes and accents arrive
+  verbatim. A 3000-character paste was recorded intact, with no `[Pasted text]` collapse.
+- **Control characters are refused** (`AnswerPlan.acceptsTyped`): in that one-line field a
+  newline is Return, and an Escape ends the paste and cancels the dialog. The phone flattens a
+  pasted newline to a space (`PromptCard.typedAnswer`) so that the answer stays sendable.
+- The typed row is always the last pick in a checkbox question, so every arrow goes down.
 
 ## Ruled out, with evidence — do not re-investigate
 
@@ -288,7 +316,8 @@ same thing `TextInjecting.readViewport` hands the driver.
   `maxItemBytes`; largest of 374 was 9.9 KB) and **not** a parse failure (0 of 374 fail).
 - There is **no** structural way to answer `AskUserQuestion` from outside: no hook fires for it
   (`Permission required: No`, so `PermissionRequest` never sees it), the SDK's `canUseTool`
-  never fires for it, and the free-text result shape is undocumented. Driving the TUI is the
+  never fires for it, and the free-text result shape is undocumented (it is now observed: the
+  typed words become the answer string verbatim — see "Typed answers"). Driving the TUI is the
   only mechanism, which is why the captures are load-bearing.
 - 16% of real `AskUserQuestion` calls (62 of 374) carry more than one question, so the
   multi-question path is not an edge case.

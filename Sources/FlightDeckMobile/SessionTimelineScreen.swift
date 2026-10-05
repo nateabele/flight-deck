@@ -342,6 +342,7 @@ struct SessionTimelineScreen: View {
                     model: model,
                     blockedChaseExhausted: model.blockedChaseExhausted,
                     allowsBlockedAbort: session?.allowsBlockedAbort ?? false,
+                    acceptsTypedAnswers: session?.acceptsTypedAnswers ?? false,
                     // The two liveness inputs `showsBlocked` needs, read from the same
                     // `session` as the status pushed into `model.blockedPrompt` above so the
                     // card's "is this session still blocked, and does the Mac still agree it

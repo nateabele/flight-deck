@@ -312,9 +312,91 @@ final class AnswerPromptTests: XCTestCase {
             ),
             .dispatched
         )
-        XCTAssertEqual(spy.events, [.arrow(1), .arrow(1), .ret, .ret],
-                       "two rows down to 'Level 2: Author', press, then the review's submit")
-        XCTAssertEqual(spy.screensAdvanced, 2, "both presses landed on a screen")
+        XCTAssertEqual(spy.events, [.arrow(1), .arrow(1), .ret],
+                       "two rows down to 'Level 2: Author' and press — a lone question has no "
+                           + "review screen, so that press is the commit")
+        XCTAssertEqual(spy.screensAdvanced, 1)
+    }
+
+    // MARK: answers — typed words on the "Type something" row
+
+    private func colours() -> [PromptQuestion] {
+        [PromptQuestion(header: "Color", question: "Which color do you like best?",
+                        options: ["Red", "Green", "Blue"].map { .init(label: $0) })]
+    }
+
+    /// **Down to the row, paste, press — in that order.** The paste has to land after the
+    /// cursor reaches the row, because that is when the row becomes a text field; a Return
+    /// before it would answer an empty row. `question-typed-single.captured.txt` is the screen
+    /// the paste produces.
+    func testATypedAnswerIsPastedOnTheRowUnderTheOptionsThenPressed() throws {
+        let (store, spy, id) = makeStore(activity: .waiting)
+        spy.script([try TimelineFixtureTests.text("question-typed-focused.captured", in: "Claude")])
+        XCTAssertEqual(
+            store.answerPrompt(.question(callID: "toolu_A", colours()),
+                               with: .answers([[.typed("teal 3 ok", optionCount: 3)]]),
+                               in: id, token: UUID()),
+            .dispatched
+        )
+        XCTAssertEqual(spy.events, [.arrow(1), .arrow(1), .arrow(1), .text("teal 3 ok"), .ret])
+    }
+
+    /// **The paste ticks the box; nothing presses it.** Nuts is toggled with Return as ever,
+    /// then the cursor carries down to the typed row, the words go in, and the next key is the
+    /// arrow to Submit — not a Return, which would untick the row the paste just ticked.
+    func testATypedCheckboxAnswerIsPastedAndLeftTickedBeforeTheActionRow() throws {
+        let (store, spy, id) = makeStore(activity: .waiting)
+        let questions = [PromptQuestion(
+            header: "Snacks", question: "Which snacks do you want?",
+            options: ["Chips", "Nuts", "Fruit"].map { .init(label: $0) }, multiSelect: true
+        )]
+        spy.script([
+            try TimelineFixtureTests.text("question-checkbox.captured", in: "Claude"),
+            try TimelineFixtureTests.text("question-typed-checkbox.captured", in: "Claude"),
+            try TimelineFixtureTests.text("question-typed-checkbox-review.captured", in: "Claude"),
+        ])
+        XCTAssertEqual(
+            store.answerPrompt(
+                .question(callID: "toolu_A", questions),
+                with: .answers([[AnswerSelection(index: 1, label: "Nuts"),
+                                 .typed("pretzels", optionCount: 3)]]),
+                in: id, token: UUID()
+            ),
+            .dispatched
+        )
+        XCTAssertEqual(spy.events, [
+            .arrow(1), .ret,                         // tick Nuts
+            .arrow(1), .arrow(1), .text("pretzels"), // down to Type something, paste
+            .arrow(1), .ret,                         // Submit
+            .ret,                                    // Submit answers on the review
+        ])
+        XCTAssertEqual(spy.screensAdvanced, 3)
+    }
+
+    /// A typed answer has no label to check, so its position is what is held to account: an
+    /// index anywhere but the "Type something" row is refused before a key moves.
+    func testATypedAnswerOffItsRowIsRefusedBeforeAnyKey() {
+        let (store, spy, id) = makeStore(activity: .waiting)
+        XCTAssertEqual(
+            store.answerPrompt(.question(callID: "toolu_A", colours()),
+                               with: .answers([[AnswerSelection(index: 0, label: "", text: "teal")]]),
+                               in: id, token: UUID()),
+            .unreadableScreen
+        )
+        XCTAssertTrue(spy.events.isEmpty)
+    }
+
+    /// Words that would be keystrokes — here a newline, which is Return in that field — never
+    /// reach the terminal.
+    func testATypedAnswerCarryingANewlineIsRefusedBeforeAnyKey() {
+        let (store, spy, id) = makeStore(activity: .waiting)
+        XCTAssertEqual(
+            store.answerPrompt(.question(callID: "toolu_A", colours()),
+                               with: .answers([[.typed("teal\nblue", optionCount: 3)]]),
+                               in: id, token: UUID()),
+            .unanswerable
+        )
+        XCTAssertTrue(spy.events.isEmpty)
     }
 
     /// **The answer the phone could not give, on the screen it could not give it on.**

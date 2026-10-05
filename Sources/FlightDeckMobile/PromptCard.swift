@@ -41,6 +41,10 @@ struct PromptCard: View {
     /// assumed — a Mac too old to run the driver that honours `FleetCommand.abortPrompt` has
     /// nothing on the other end of this button.
     let allowsBlockedAbort: Bool
+    /// Whether the Mac drives a question's "Type something" row, straight off the wire
+    /// (`WireSession.acceptsTypedAnswers`). Off for a Mac built before it, which would refuse
+    /// the answer — so the field is not drawn rather than drawn and failed.
+    let acceptsTypedAnswers: Bool
     /// The Mac's own `activity` for this session, straight off the wire, and the Mac's own
     /// verdict on whether it can name a dialog there. Both are `showsBlocked` inputs, and
     /// neither is derived here — see that predicate for what each rules out.
@@ -130,13 +134,18 @@ struct PromptCard: View {
         exhausted && allowsAbort && !hasCard && activity == "waiting" && call == .noPrompt
     }
 
+    /// Forget every choice made for an earlier dialog. See `picks`.
+    private func adopt(_ call: String) {
+        guard picksFor != call else { return }
+        picks = [:]
+        typed = [:]
+        page = 0
+        picksFor = call
+    }
+
     /// Record a tap. Single-select replaces; multiSelect toggles.
     private func choose(question: Int, option: Int, multiSelect: Bool, call: String) {
-        if picksFor != call {
-            picks = [:]
-            page = 0
-            picksFor = call
-        }
+        adopt(call)
         var chosen = picks[question, default: []]
         if multiSelect {
             if chosen.contains(option) { chosen.remove(option) } else { chosen.insert(option) }
@@ -168,13 +177,8 @@ struct PromptCard: View {
             }
             if isLast {
                 Button {
-                    let selections = questions.indices.map { question in
-                        picks[question, default: []].sorted().map {
-                            AnswerSelection(index: $0,
-                                            label: questions[question].options[$0].label)
-                        }
-                    }
-                    model.answerSet(selections, to: call)
+                    model.answerSet(Self.selections(for: questions, picks: picks, typed: typed),
+                                    to: call)
                 } label: {
                     Text(questions.count == 1 ? "Send answer" : "Send answers")
                         .frame(maxWidth: .infinity)
@@ -218,6 +222,42 @@ struct PromptCard: View {
     }
 
     static let sentFootnote = "Sent to your Mac."
+
+    /// The reader's words as they will be pasted into the "Type something" row, or `nil` when
+    /// there is nothing there worth sending.
+    ///
+    /// **A control character becomes a space rather than refusing the answer.** The field is
+    /// one line, but a paste can still carry a newline into it, and the Mac refuses one
+    /// outright (`AnswerPlan.acceptsTyped`) because in claude's field it is Return. Flattening
+    /// it here keeps a pasted paragraph answerable. Only `Cc`: the zero-width joiner inside an
+    /// emoji is `Cf`, and is text.
+    static func typedAnswer(_ text: String) -> String? {
+        let scalars = text.unicodeScalars.map {
+            $0.properties.generalCategory == .control ? " " : $0
+        }
+        let flat = String(String.UnicodeScalarView(scalars))
+            .trimmingCharacters(in: .whitespaces)
+        return AnswerPlan.acceptsTyped(flat) ? flat : nil
+    }
+
+    /// Every question's picks as the wire carries them, in question order.
+    ///
+    /// A pick one past the options is the "Type something" row, and goes out as the reader's
+    /// words (`AnswerSelection.typed`) rather than as a label nothing in the transcript holds.
+    static func selections(
+        for questions: [PromptQuestion], picks: [Int: Set<Int>], typed: [Int: String]
+    ) -> [[AnswerSelection]] {
+        questions.indices.map { question in
+            let options = questions[question].options
+            return picks[question, default: []].sorted().compactMap { pick in
+                guard options.indices.contains(pick) else {
+                    return typedAnswer(typed[question] ?? "")
+                        .map { AnswerSelection.typed($0, optionCount: options.count) }
+                }
+                return AnswerSelection(index: pick, label: options[pick].label)
+            }
+        }
+    }
 
     /// **The agent's own name, from the wire, never a literal.** This used to say "Claude"
     /// whatever was on the other end — which was a lie the moment any other agent could reach
@@ -264,6 +304,9 @@ struct PromptCard: View {
     /// no longer looking at.
     @State private var picks: [Int: Set<Int>] = [:]
     @State private var picksFor: String?
+    /// What the reader has typed into each question's "Type something" field. Cleared with
+    /// the picks; whether the row counts as picked lives in `picks`, as its row index.
+    @State private var typed: [Int: String] = [:]
     /// Which question is on screen. Reset with the picks, for the same reason: a page left
     /// over from the last dialog would open this one part-way through.
     @State private var page = 0
@@ -459,6 +502,11 @@ struct PromptCard: View {
                 }
             }
 
+            if acceptsTypedAnswers {
+                typedRow(question: question, index: index, call: call,
+                         immediate: immediate, enabled: enabled)
+            }
+
             if !immediate {
                 navigation(call: call, questions: questions, index: index,
                            isLast: isLast, enabled: enabled)
@@ -481,6 +529,74 @@ struct PromptCard: View {
             .disabled(!enabled)
             .opacity(enabled ? 1 : 0.5)
         }
+    }
+}
+
+extension PromptCard {
+    /// The terminal's "Type something" row: the reader's own words in place of, or on a
+    /// checkbox question beside, the options.
+    ///
+    /// **Picked by typing, not by a tap**, because that is what the terminal does — the row is a
+    /// text field the moment the cursor reaches it, and on a checkbox question the first
+    /// character ticks its box. So words in the field pick the row and an emptied field
+    /// unpicks it; a single-select option tapped afterwards takes the pick back without
+    /// throwing the words away.
+    ///
+    /// A lone single-select question has no Send button to wait for — its options answer on
+    /// the tap — so this row carries its own.
+    @ViewBuilder
+    fileprivate func typedRow(
+        question: PromptQuestion, index: Int, call: String, immediate: Bool, enabled: Bool
+    ) -> some View {
+        let row = question.options.count
+        let text = picksFor == call ? typed[index] ?? "" : ""
+        let words = Self.typedAnswer(text)
+        let send = {
+            guard let words else { return }
+            model.answerSet([[.typed(words, optionCount: row)]], to: call)
+        }
+        HStack(spacing: 8) {
+            TextField("Type something", text: Binding(
+                get: { text },
+                set: { new in
+                    adopt(call)
+                    typed[index] = new
+                    var chosen = picks[index, default: []]
+                    if Self.typedAnswer(new) != nil {
+                        if !question.multiSelect { chosen = [] }
+                        chosen.insert(row)
+                    } else {
+                        chosen.remove(row)
+                    }
+                    picks[index] = chosen
+                }
+            ))
+            .font(.footnote)
+            .submitLabel(immediate ? .send : .done)
+            .onSubmit { if immediate { send() } }
+            if immediate {
+                Button(action: send) {
+                    Image(systemName: "arrow.up.circle.fill").font(.title3)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(words == nil ? Color.secondary : Color.orange)
+                .disabled(words == nil)
+                .accessibilityLabel("Send answer")
+            } else if picks[index, default: []].contains(row) {
+                Image(systemName: question.multiSelect
+                      ? "checkmark.square.fill" : "largecircle.fill.circle")
+                    .font(.footnote)
+                    .foregroundStyle(.orange)
+            }
+        }
+        .padding(.vertical, 8)
+        .padding(.horizontal, 10)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color(.tertiarySystemBackground))
+        )
+        .disabled(!enabled)
+        .opacity(enabled ? 1 : 0.5)
     }
 }
 

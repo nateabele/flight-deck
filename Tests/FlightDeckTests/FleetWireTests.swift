@@ -94,6 +94,22 @@ final class FleetWireTests: XCTestCase {
         XCTAssertFalse(session.answerless)
     }
 
+    /// A Mac built before typed answers sends no `acceptsTypedAnswers`, and the phone must then
+    /// draw no field: that Mac would refuse what it sent.
+    func testWireSessionDecodesWithoutTheTypedAnswersKeyAsFalse() throws {
+        let json = #"""
+        {"id":"00000000-0000-0000-0000-0000000000AB","title":"t","agent":"claude",
+         "activity":"waiting","subagentCount":0,"isUnread":false}
+        """#
+        let session = try JSONDecoder().decode(WireSession.self, from: Data(json.utf8))
+        XCTAssertFalse(session.acceptsTypedAnswers)
+        var on = session
+        on.acceptsTypedAnswers = true
+        XCTAssertEqual(try JSONDecoder().decode(
+            WireSession.self, from: JSONEncoder().encode(on)
+        ).acceptsTypedAnswers, true)
+    }
+
     /// A newer Mac's assertion round-trips, in both the snapshot and the incremental frame —
     /// `testActivityChangedRoundTripsAnswerless` below covers the latter.
     func testWireSessionRoundTripsAnswerless() throws {

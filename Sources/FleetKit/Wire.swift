@@ -183,6 +183,13 @@ public struct WireSession: Codable, Equatable, Sendable, Identifiable {
     /// never flips this true. `false` by default, like `hasBackgroundWork`: a snapshot from an
     /// older Mac, or any tab this Mac has not judged, keeps today's "Waiting for you" wording.
     public var answerless: Bool = false
+    /// Whether this Mac drives a question's "Type something" row — `AnswerSelection.text`.
+    ///
+    /// A fact about the Mac's build rather than any one tab, carried per session like
+    /// `allowsBlockedAbort` because that is the only Mac-to-phone channel a session's card
+    /// reads. Defaulted off so an older Mac draws no field it would refuse: its decoder drops
+    /// `text`, and the bare index one past the options fails its label check.
+    public var acceptsTypedAnswers: Bool = false
 
     public init(
         id: UUID, title: String, agent: String,
@@ -193,7 +200,8 @@ public struct WireSession: Codable, Equatable, Sendable, Identifiable {
         openPromptCall: OpenPromptIdentity = .unreported,
         apiError: SessionAPIError? = nil,
         allowsBlockedAbort: Bool = false,
-        answerless: Bool = false
+        answerless: Bool = false,
+        acceptsTypedAnswers: Bool = false
     ) {
         self.id = id
         self.title = title
@@ -208,6 +216,7 @@ public struct WireSession: Codable, Equatable, Sendable, Identifiable {
         self.apiError = apiError
         self.allowsBlockedAbort = allowsBlockedAbort
         self.answerless = answerless
+        self.acceptsTypedAnswers = acceptsTypedAnswers
     }
 
     /// Spelled out rather than synthesized, because `openPromptCall` is not `Codable` — its
@@ -225,7 +234,7 @@ public struct WireSession: Codable, Equatable, Sendable, Identifiable {
     enum CodingKeys: String, CodingKey {
         case id, title, agent, activity, waitingFor, subagentCount, isUnread
         case hasBackgroundWork, planGate, openPromptCall, apiError, allowsBlockedAbort
-        case answerless
+        case answerless, acceptsTypedAnswers
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -247,6 +256,7 @@ public struct WireSession: Codable, Equatable, Sendable, Identifiable {
         try c.encodeIfPresent(apiError, forKey: .apiError)
         try c.encode(allowsBlockedAbort, forKey: .allowsBlockedAbort)
         try c.encode(answerless, forKey: .answerless)
+        try c.encode(acceptsTypedAnswers, forKey: .acceptsTypedAnswers)
     }
 
     public init(from decoder: any Decoder) throws {
@@ -301,6 +311,8 @@ public struct WireSession: Codable, Equatable, Sendable, Identifiable {
         // answerless — both decode `false`, which is today's "Waiting for you" wording. No
         // wire version bump, matching `hasBackgroundWork`/`allowsBlockedAbort` directly above.
         answerless = try c.decodeIfPresent(Bool.self, forKey: .answerless) ?? false
+        // Absent from a Mac built before typed answers — off, for the reason on the field.
+        acceptsTypedAnswers = try c.decodeIfPresent(Bool.self, forKey: .acceptsTypedAnswers) ?? false
     }
 }
 

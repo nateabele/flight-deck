@@ -87,6 +87,7 @@ final class AnswerFrameCodingTests: XCTestCase {
         for answer: PromptAnswer in [
             .option(index: 0, label: "Yes"), .allow, .deny,
             .answers([[.init(index: 1, label: "Go")], [.init(index: 0, label: "Vim")]]),
+            .answers([[.init(index: 1, label: "Go"), .typed("pretzels", optionCount: 2)]]),
         ] {
             let sent = ClientFrame.cmd(cid: 9, .answerPrompt(
                 id: session, token: token, call: "toolu_A", answer: answer
@@ -94,6 +95,25 @@ final class AnswerFrameCodingTests: XCTestCase {
             let data = try JSONEncoder().encode(sent)
             XCTAssertEqual(try JSONDecoder().decode(ClientFrame.self, from: data), sent)
         }
+    }
+
+    /// **An option selection carries no `text` key,** so the bytes a Mac built before typed
+    /// answers receives for one are exactly the bytes it always has — and a selection from such
+    /// a phone, with no key, decodes as an option rather than failing.
+    func testAnOptionSelectionCarriesNoTextKeyAndAnOldOneStillDecodes() throws {
+        let data = try JSONEncoder().encode(AnswerSelection(index: 1, label: "Go"))
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertEqual(Set(json.keys), ["index", "label"])
+        XCTAssertNil(try JSONDecoder().decode(
+            AnswerSelection.self, from: Data(#"{"index":1,"label":"Go"}"#.utf8)
+        ).text)
+    }
+
+    /// The typed row is the one past the options, with no label: a Mac that ignores `text`
+    /// therefore fails its label check on an index outside the options, and types nothing.
+    func testATypedSelectionNamesTheRowPastTheOptionsAndNoLabel() {
+        XCTAssertEqual(AnswerSelection.typed("teal", optionCount: 3),
+                       AnswerSelection(index: 3, label: "", text: "teal"))
     }
 
     /// **No `call` key at all, which is the whole point of the case.** Unlike `deny`, whose

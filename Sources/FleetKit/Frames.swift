@@ -44,13 +44,31 @@ public enum SnapshotReason: String, Codable, Equatable, Sendable {
 /// The label travels beside the index for the reason `PromptAnswer.option` carries one: the
 /// Mac checks the label against its own copy of the transcript before it counts a single
 /// arrow, so a phone naming words this transcript never held is refused rather than trusted.
+///
+/// **Or the reader's own words.** `text` non-nil is the dialog's "Type something" row, which
+/// claude draws under every question's options and writes into no transcript — so there is no
+/// label to cross-check, and `index` is pinned to the row's position (the question's option
+/// count) and `label` left empty. Use `typed(_:optionCount:)` rather than spelling that out.
+///
+/// **An older Mac refuses it without a keystroke.** Its synthesized decoder ignores `text`, and
+/// an index one past the options fails the label check in `SessionStore.answerPrompt` before a
+/// key moves — so the phone gating on `WireSession.acceptsTypedAnswers` is a courtesy, not the
+/// safety property.
 public struct AnswerSelection: Codable, Equatable, Sendable {
     public let index: Int
     public let label: String
+    /// What the reader typed, or `nil` for one of the question's own options.
+    public let text: String?
 
-    public init(index: Int, label: String) {
+    public init(index: Int, label: String, text: String? = nil) {
         self.index = index
         self.label = label
+        self.text = text
+    }
+
+    /// The "Type something" row, answered with `text`.
+    public static func typed(_ text: String, optionCount: Int) -> AnswerSelection {
+        AnswerSelection(index: optionCount, label: "", text: text)
     }
 }
 

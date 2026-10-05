@@ -90,6 +90,14 @@ final class FleetProjectionTests: XCTestCase {
         XCTAssertTrue(snapshot.projects.flatMap(\.sessions).allSatisfy(\.allowsBlockedAbort))
     }
 
+    /// This build drives the "Type something" row, so every session says so.
+    func testTheProjectionSaysThisMacTakesTypedAnswers() {
+        let store = store()
+        _ = store.newSession(in: URL(fileURLWithPath: "/w/alpha"))
+        let snapshot = FleetProjection.snapshot(of: store)
+        XCTAssertTrue(snapshot.projects.flatMap(\.sessions).allSatisfy(\.acceptsTypedAnswers))
+    }
+
     /// The default: a store built with no preferences configured must not turn the switch on
     /// by accident — off is the safe direction for a control that drives a terminal.
     func testTheProjectionDefaultsThePreferenceToOff() {

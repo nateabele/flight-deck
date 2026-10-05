@@ -506,6 +506,13 @@ page.
     several boxes, send, and watch the Mac tick exactly those and press the row underneath.
     Then do it as the FIRST of two questions: that row reads "Next" there and "Submit" when the
     question is alone, and pressing the wrong one either commits early or fails to commit.
+    **Then answer in your own words.** Every question card has a "Type something" field under
+    its options. On a lone single-select question, type a word and tap the orange arrow; the
+    terminal must show your words on its row and then commit them. On a checkbox question,
+    tick one box and type in the field; its tick appears. Send, and the Mac must tick the box,
+    paste your words (its row ticks with no Return), then press Submit and the review. Check
+    that the keyboard does not hide the field. The suites cannot see the keyboard, so this
+    check is manual.
 70. **Interfere while it drives.** Send a set, and while the Mac is walking the dialog, move
     the cursor in the terminal yourself. The drive must STOP — no further keys — rather than
     counting arrows from where you left it. Nothing is committed until the review is submitted,

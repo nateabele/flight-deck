@@ -216,26 +216,23 @@ final class AnswerDiagnosticsTests: XCTestCase {
     ///
     /// Here the reader chose "Yes" (index 0) and the marker is sitting on "Maybe". The plan's
     /// step is `0→0`, so no arrow is sent and Return selects the row the marker is actually on.
-    /// The plan's unconditional `.submit` step then presses a second time — against this fake,
-    /// into the same rendered list, because nothing here scripts the review screen claude would
-    /// have drawn. **What is asserted is therefore the press, not the commit**: a Return went out
-    /// while the marker sat on a row the reader did not choose, and nothing was filed about it.
-    /// That is the strongest pin available from a fake that models no commit; the rest of the
-    /// account is in `SessionStore.drive(_:driver:injector:id:token:)`, including why "the review
-    /// screen means nothing commits" bounds a drive that STOPS and not one that continues wrong.
+    /// A lone single-select question has no review screen, so that one Return IS the commit —
+    /// there is no later step to stop. **What is asserted is the press**, since this fake
+    /// models no commit: a Return went out while the marker sat on a row the reader did not
+    /// choose, and nothing was filed about it. The rest of the account is in
+    /// `SessionStore.drive(_:driver:injector:id:token:)`.
     func testACursorSomewhereElseCommitsTheWrongAnswer() {
         let (store, spy, id, log) = makeStore()
         spy.showOptions(["Yes", "No", "Maybe"], selected: 2)
         drive(store, single(["Yes", "No", "Maybe"]), [[0]], in: id)
 
         XCTAssertTrue(log.aborts.isEmpty, "nothing refused")
-        XCTAssertEqual(spy.events, [.ret, .ret],
-                       "the plan's step 0 is 0→0, so it presses where it planned to, "
-                       + "then presses again on the review")
+        XCTAssertEqual(spy.events, [.ret],
+                       "the plan's one step is 0→0, so it presses where it planned to")
         XCTAssertEqual(spy.selected, 2, "no arrow moved the marker off the row it was on")
         XCTAssertEqual(spy.options[spy.selected], "Maybe",
                        "and 'Maybe' is what that Return answered, against a reader who chose "
-                       + "'Yes' — a wrong answer, committed by the submit step")
+                       + "'Yes' — a wrong answer, committed by that press")
     }
 
     /// The same for the label: a row reading something else is no longer compared, so there is
@@ -247,7 +244,7 @@ final class AnswerDiagnosticsTests: XCTestCase {
         drive(store, single(["Yes", "No"]), [[1]], in: id)
 
         XCTAssertTrue(log.aborts.isEmpty)
-        XCTAssertEqual(spy.events, [.arrow(1), .ret, .ret])
+        XCTAssertEqual(spy.events, [.arrow(1), .ret])
     }
 
     /// **The observed failure, and what became of it.** A four-option multiSelect question with
@@ -276,8 +273,8 @@ final class AnswerDiagnosticsTests: XCTestCase {
 
     /// **The arrows went out and the marker did not follow, and the planned drive presses
     /// anyway.** It used to re-read after the move and file `post-move-landing`; the re-read is
-    /// gone with the rest of the per-step screen reading. The residual is bounded the same way
-    /// everything else on this path is — nothing commits before the review screen.
+    /// gone with the rest of the per-step screen reading. On a lone single-select question, as
+    /// here, nothing bounds the residual: that press is the commit.
     ///
     /// `.allow` and `.option` still have this check: they walk `drive(from:to:confirm:)`, which
     /// is unchanged, and the two tests further down assert it there.
@@ -289,7 +286,7 @@ final class AnswerDiagnosticsTests: XCTestCase {
 
         XCTAssertTrue(log.aborts.isEmpty)
         XCTAssertEqual(spy.selected, 0, "the fixture is only meaningful if nothing moved")
-        XCTAssertEqual(spy.events, [.arrow(1), .arrow(1), .ret, .ret])
+        XCTAssertEqual(spy.events, [.arrow(1), .arrow(1), .ret])
     }
 
     /// A screen readable before the arrows and not after — the settle is where that happens, so
@@ -303,12 +300,13 @@ final class AnswerDiagnosticsTests: XCTestCase {
             spy.viewportIsReadable = false
             work()
         }
-        drive(store, single(["Yes", "No", "Maybe"]), [[1]], in: id)
+        // A set, so there IS a next step: a lone question's plan ends on its one press.
+        drive(store, single(["Yes", "No", "Maybe"]) + single(["Red", "Blue"]), [[1], [0]], in: id)
 
         let abort = try XCTUnwrap(log.aborts.first)
         XCTAssertEqual(abort.check, .unreadableBeforePress)
         XCTAssertEqual(abort.step, 1)
-        XCTAssertEqual(abort.purpose, .submit)
+        XCTAssertEqual(abort.purpose, .option(question: 1, option: 0))
         XCTAssertNil(abort.viewport)
         XCTAssertEqual(spy.events, [.arrow(1), .ret], "moved, pressed, and stopped there")
     }

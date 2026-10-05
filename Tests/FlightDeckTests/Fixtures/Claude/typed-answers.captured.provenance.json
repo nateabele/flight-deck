@@ -1,0 +1,26 @@
+{
+  "files": [
+    "question-typed-focused.captured.txt",
+    "question-typed-single.captured.txt",
+    "question-typed-single-committed.captured.txt",
+    "question-typed-checkbox.captured.txt",
+    "question-typed-checkbox-submit-focused.captured.txt",
+    "question-typed-checkbox-review.captured.txt",
+    "question-typed-set.captured.txt",
+    "question-single-committed-no-review.captured.txt"
+  ],
+  "isVerbatimCapturedOutput": true,
+  "claudeVersion": "2.1.289 (Claude Code)",
+  "capturedOn": "2026-10-04",
+  "method": "pyte 136x34 screen over a real `claude` TUI (scripts/adapterprobe/ptyscreen.py), keys sent as raw bytes: Down arrows to the 'Type something' row, then typed or bracketed-paste text, then Return / Down. The recorded toolUseResult.answers for each run held exactly the typed text (single: \"teal 3 ok\"; checkbox: \"Nuts, pretzels\"; set: \"teal\" then \"Cat\"; plain: \"Green\"). A 3000-character bracketed paste was also recorded intact, uncollapsed.",
+  "sha256": {
+    "question-typed-focused.captured.txt": "59ded5209fd8ebad1561846f86d71906850ec27566a1b464e12c7ee8326c02b1",
+    "question-typed-single.captured.txt": "148cfd33a7701e89228c2cc83e5e605debdb814f49d944a29bfa4a89360ab867",
+    "question-typed-single-committed.captured.txt": "d373a00d6b84a6c5a2618370e4ddbf9fea0773e6d32b927a6fb0874c659527bc",
+    "question-typed-checkbox.captured.txt": "fe6075a72676ab423c48df711a2e2b34e589d6615d759d4251581ca333f421a5",
+    "question-typed-checkbox-submit-focused.captured.txt": "3ea8d829bac5e6e7b9f74542363505a2003b9c6a9d7fc284b53f930a8df061cb",
+    "question-typed-checkbox-review.captured.txt": "350fe2613d316b6475250594a291c44fddb82c93a8e410535c06612df7a0a7b2",
+    "question-typed-set.captured.txt": "5200ee32e2b374a60b91e32133285d9bc3c5c7f5947d7c988cc0087ceea8344f",
+    "question-single-committed-no-review.captured.txt": "f6c314ed7539960be1415b285fa29daa3685a7e0a6a95585b0ecf26a33e759cf"
+  }
+}
