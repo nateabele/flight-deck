@@ -266,4 +266,41 @@ final class HandoffDriverTests: XCTestCase {
         XCTAssertEqual(host.reassigned.count, 0)
         XCTAssertTrue(host.log.first?.detail?.contains("assignee") ?? false)
     }
+
+    /// An agent that leaves the snapshot and returns is on a new crossing: the old deadline must
+    /// not interrupt it at once.
+    func testAnOldWaitDoesNotSurviveTheAgentLeavingTheList() async {
+        host.activities[oldID] = .busy
+        let d = driver()
+        await d.evaluate([agent])
+        clock.advance(1000)
+        await d.evaluate([])
+        XCTAssertNil(d.phases[oldID])
+        await d.evaluate([agent])
+        XCTAssertEqual(host.interrupted, [], "the deadline restarts: the old `since` is gone")
+        XCTAssertEqual(d.phases[oldID], .waitingForBoundary(since: clock.now))
+    }
+
+    func testAnOldDeclineAndConfirmationDoNotSurviveTheAgentLeavingTheList() async {
+        settings.confirm = true; host.confirmAnswer = false
+        host.activities[oldID] = .idle
+        let d = driver()
+        await d.evaluate([agent])
+        XCTAssertEqual(d.phases[oldID], .declined)
+        await d.evaluate([])
+        await d.evaluate([agent])
+        XCTAssertEqual(host.confirmations.count, 2, "a new crossing asks again")
+    }
+
+    func testARateLimitedBusyAgentIsRetriedAfterAFailedSpawn() async {
+        spawner.results = [.failure(.launchFailed("no composer")), .success(SessionRef(id: newID, agentName: "GreenFox"))]
+        allocator.leases["claude-default"] = [newLease, newLease]
+        host.activities[oldID] = .idle
+        let d = driver()
+        await d.evaluate([agent])
+        XCTAssertEqual(d.phases[oldID], .failed)
+        host.activities[oldID] = .busy; host.rateLimited = [oldID]
+        await d.evaluate([agent])
+        XCTAssertEqual(spawner.calls.count, 2, "a refusal is a boundary even while the agent reads busy")
+    }
 }

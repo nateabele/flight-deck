@@ -38,6 +38,15 @@ final class HandoffDriver {
     }
 
     func evaluate(_ agents: [SwarmAgentSnapshot]) async {
+        // An agent that leaves the snapshot ends its crossing. Keeping its state would let it come
+        // back on a NEW crossing with an old `since` (deadline already past, so a busy agent is
+        // interrupted at once), an old decline (never asked again) or an old confirmation
+        // (asked never) — and the maps would grow for the life of the app. A finished (`.done`)
+        // hand-off is pruned too: its old agent is stopped and gone, and nothing reads it after.
+        let present = Set(agents.map(\.session.id))
+        for id in Array(phases.keys) where !present.contains(id) && !inFlight.contains(id) { phases[id] = nil }
+        confirmed.formIntersection(present.union(inFlight))
+        workedSinceFailure.formIntersection(present.union(inFlight))
         for agent in agents { await evaluate(agent) }
     }
 
@@ -58,7 +67,10 @@ final class HandoffDriver {
         case .failed?:
             // "Retried at the next boundary" (§7): the agent must work again and stop again, or a
             // spawn that keeps failing would be retried on every tick.
-            if activity == .busy { workedSinceFailure.insert(id); return }
+            // A rate-limit refusal is a boundary even while the agent still reads busy: it has
+            // necessarily worked on the exhausted account, and "busy" would otherwise defer it forever.
+            if host.isRateLimited(agent.session) { workedSinceFailure.insert(id) }
+            else if activity == .busy { workedSinceFailure.insert(id); return }
             guard workedSinceFailure.contains(id), isBoundary(activity, agent) else { return }
             workedSinceFailure.remove(id)
             await handOff(agent, request)
