@@ -12,6 +12,8 @@ final class FakePeer: HostPeer, @unchecked Sendable {
 /// The callback is @Sendable (Swift 6), so it cannot capture a local var.
 final class NamedBox: @unchecked Sendable { var named: (UUID, String)? }
 
+final class EndpointBox: @unchecked Sendable { var value: [String] = [] }
+
 final class HostServerCoreTests: XCTestCase {
     let probe = HostInfoProbe(stateRoot: FileManager.default.temporaryDirectory, hostdVersion: "1.0") { _, _ in nil }
     func core() -> HostServerCore { HostServerCore(hostName: { "mini" }, probe: probe) }
@@ -27,6 +29,25 @@ final class HostServerCoreTests: XCTestCase {
         XCTAssertEqual(f[0], .helloAck(protocolVersion: .current, capabilities: [.hostInfo], hostName: "mini"))
         guard case .reply(3, .hostInfo(let info)) = f[1] else { return XCTFail("\(f)") }
         XCTAssertEqual(info.hostName, "mini")
+    }
+
+    /// The core asks its provider on every hello rather than caching one answer, because a
+    /// host's addresses change under it (a laptop host joining the tailnet).
+    func testHelloAckCarriesTheProvidersEndpoints() throws {
+        let box = EndpointBox()
+        let c = HostServerCore(hostName: { "mini" }, probe: probe, endpoints: { box.value })
+        let p = FakePeer()
+        box.value = ["100.100.1.2:47410", "10.0.0.5:47410"]
+        c.receive(text: try hello(), from: p)
+        box.value = ["10.0.0.6:47410"]
+        let q = FakePeer()
+        c.receive(text: try hello(), from: q)
+        XCTAssertEqual(try p.frames().first, .helloAck(
+            protocolVersion: .current, capabilities: [.hostInfo], hostName: "mini",
+            endpoints: ["100.100.1.2:47410", "10.0.0.5:47410"]))
+        XCTAssertEqual(try q.frames().first, .helloAck(
+            protocolVersion: .current, capabilities: [.hostInfo], hostName: "mini",
+            endpoints: ["10.0.0.6:47410"]))
     }
 
     func testRequestBeforeHelloIsRefusedAndClosed() throws {

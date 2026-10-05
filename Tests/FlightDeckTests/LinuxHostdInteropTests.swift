@@ -101,8 +101,12 @@ final class LinuxHostdInteropTests: XCTestCase {
         let c = NWConnection(to: HostTransport.endpoint(for: ep), using: HostTransport.clientParameters(key: .init(slot: Self.slot, secret: Self.secret)))
         let hello = try HostWire.encode(HostClientFrame.hello(protocolVersion: .current, capabilities: [.hostInfo], controllerName: "interop"))
         let ack = try HostWire.decode(HostServerFrame.self, from: try await Self.roundTrip(c, text: hello))
-        guard case .helloAck(_, _, let name) = ack else { return XCTFail("\(ack)") }
+        guard case .helloAck(_, _, let name, let endpoints) = ack else { return XCTFail("\(ack)") }
         XCTAssertFalse(name.isEmpty)
+        // The Linux hostd's own getifaddrs walk, over the real wire: the container has an
+        // eth0, so the list is non-empty, on the serving port, and never loopback.
+        XCTAssertFalse(endpoints.isEmpty, "the Linux hostd advertised no addresses")
+        XCTAssertTrue(endpoints.allSatisfy { $0.hasSuffix(":47410") && !$0.hasPrefix("127.") }, "\(endpoints)")
         let info = try HostWire.decode(HostServerFrame.self, from: try await Self.next(c, sending: HostWire.encode(HostClientFrame.request(id: 1, .hostInfo))))
         guard case .reply(1, .hostInfo(let i)) = info else { return XCTFail("\(info)") }
         XCTAssertEqual(i.platform, "Linux")

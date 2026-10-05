@@ -1,4 +1,5 @@
 import Foundation
+import HostKit
 import SystemConfiguration
 
 /// Every address this Mac can currently be reached on, ranked best-first, as `host:port`
@@ -28,23 +29,20 @@ import SystemConfiguration
 /// it, so every path that reaches a client goes through `routable` — both the `mac.endpoints`
 /// reply and `FleetService.arm()`.** `current` is the unfiltered list, and nothing but
 /// `routable` should call it.
+///
+/// **The ranking itself lives in HostKit's `HostEndpoints`**, the one module the app, the macOS
+/// hostd and the Linux hostd all link, so what a phone is told and what a host advertises to a
+/// controller in `helloAck` cannot rank differently. This file keeps the macOS-only half —
+/// `SCDynamicStore`'s primary interface — and is compiled into the `HostDaemon` target too
+/// (project.yml), which is how the macOS hostd answers with the same list the phone gets.
 enum LocalEndpoints {
-    /// One interface as the ranking sees it.
-    ///
-    /// A plain struct rather than `ifaddrs`, so `ranked` is a pure function that can be
-    /// tested against a machine's exact interface shape without that machine.
-    struct Interface: Equatable {
-        var name: String
-        var address: String
-        var isPointToPoint: Bool
-        var isBroadcast: Bool
-        var isLoopback: Bool
-    }
+    /// One interface as the ranking sees it; see `HostEndpoints.Interface`.
+    typealias Interface = HostEndpoints.Interface
 
     /// The full ranked list, loopback included and last. The input to `routable`, and not
     /// something to hand a client directly — see the type's doc comment.
     static func current(port: UInt16) -> [String] {
-        ranked(enumerate(), primary: primaryInterfaceName(), port: port)
+        ranked(HostEndpoints.enumerate(), primary: primaryInterfaceName(), port: port)
     }
 
     /// What a connected client is told: ranked, loopback dropped, capped.
@@ -58,10 +56,17 @@ enum LocalEndpoints {
 
     /// Split out so a test can drive it without a network.
     static func routable(from ranked: [String], limit: Int) -> [String] {
-        Array(ranked.filter { !$0.hasPrefix("127.") }.prefix(limit))
+        HostEndpoints.routable(from: ranked, limit: limit)
     }
 
-    /// Ranks best-first. Stable within a rank, by construction rather than by sort.
+    /// What the macOS hostd puts in `helloAck`: the same ranking, minus loopback and
+    /// link-local (`HostEndpoints.advertised`). Read per hello, so a Mac host that joins the
+    /// tailnet advertises it to the next controller that connects.
+    static func advertised(port: UInt16) -> [String] {
+        HostEndpoints.advertised(HostEndpoints.enumerate(), primary: primaryInterfaceName(), port: port)
+    }
+
+    /// Ranks best-first, stable within a rank. See `HostEndpoints.ranked`.
     ///
     /// Bucketed rather than sorted, and that is the point: `Array.sorted(by:)` makes no
     /// stability guarantee, so ordering equal-rank candidates through it would rest on an
@@ -72,40 +77,13 @@ enum LocalEndpoints {
     /// by definition, so concatenating one bucket per rank is stable by construction, and
     /// there is no tiebreak key left for a refactor to "simplify" away.
     static func ranked(_ interfaces: [Interface], primary: String?, port: UInt16) -> [String] {
-        (0...Self.lastRank).flatMap { rank in
-            interfaces.filter { self.rank(of: $0, primary: primary) == rank }
-        }
-        .map { "\($0.address):\(port)" }
+        HostEndpoints.ranked(interfaces, primary: primary, port: port)
     }
 
-    /// The worst (highest) value `rank(of:primary:)` can return. Kept alongside it so the
-    /// bucket range in `ranked` and the rank scale itself cannot drift apart — a rank above
-    /// this would silently vanish from the output rather than merely sort last.
-    private static let lastRank = 4
-
-    /// 0 is best. See the type's doc comment for why these two signals and not a name.
-    private static func rank(of interface: Interface, primary: String?) -> Int {
-        // Checked first: a loopback interface is never a useful candidate whatever else it is.
-        if interface.isLoopback { return 4 }
-        // A tunnel reaches this Mac from anywhere the client is signed in, which is the whole
-        // point of the change. CGNAT distinguishes Tailscale from another VPN only to order
-        // two tunnels; either still outranks the LAN.
-        if interface.isPointToPoint { return isCGNAT(interface.address) ? 0 : 1 }
-        // macOS's own answer for "the interface that reaches the internet".
-        if let primary, interface.name == primary { return 2 }
-        if interface.isBroadcast { return 3 }
-        // Neither a tunnel, nor primary, nor a broadcast segment. Last resort, with loopback.
-        return 4
-    }
-
-    /// `100.64.0.0/10` — the shared address space Tailscale assigns from.
-    ///
-    /// The mask matters: `100.128.0.1` is ordinary public space and a naive `hasPrefix("100.")`
-    /// would rank a public address as a tunnel.
+    /// `100.64.0.0/10` — the shared address space Tailscale assigns from. See
+    /// `HostEndpoints.isCGNAT`.
     static func isCGNAT(_ address: String) -> Bool {
-        let octets = address.split(separator: ".").compactMap { UInt8($0) }
-        guard octets.count == 4, octets[0] == 100 else { return false }
-        return (64...127).contains(octets[1])
+        HostEndpoints.isCGNAT(address)
     }
 
     /// The interface macOS considers primary, or nil when there is no network.
@@ -118,34 +96,5 @@ enum LocalEndpoints {
         ) as? [String: Any]
         else { return nil }
         return global["PrimaryInterface"] as? String
-    }
-
-    /// IPv4 only. A link-local IPv6 address needs a zone index to be dialable and would
-    /// produce candidates that can never connect — noise in a race that is already parallel.
-    private static func enumerate() -> [Interface] {
-        var interfaces: [Interface] = []
-        var head: UnsafeMutablePointer<ifaddrs>?
-        guard getifaddrs(&head) == 0, let first = head else { return [] }
-        defer { freeifaddrs(head) }
-
-        for entry in sequence(first: first, next: { $0.pointee.ifa_next }) {
-            let flags = Int32(entry.pointee.ifa_flags)
-            guard flags & IFF_UP != 0, let raw = entry.pointee.ifa_addr,
-                  raw.pointee.sa_family == UInt8(AF_INET)
-            else { continue }
-            var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-            guard getnameinfo(
-                raw, socklen_t(raw.pointee.sa_len), &host, socklen_t(host.count),
-                nil, 0, NI_NUMERICHOST
-            ) == 0 else { continue }
-            interfaces.append(Interface(
-                name: String(cString: entry.pointee.ifa_name),
-                address: String(cString: host),
-                isPointToPoint: flags & IFF_POINTOPOINT != 0,
-                isBroadcast: flags & IFF_BROADCAST != 0,
-                isLoopback: flags & IFF_LOOPBACK != 0
-            ))
-        }
-        return interfaces
     }
 }

@@ -36,7 +36,7 @@ final class HostRegistry {
              endpoints: [String]) throws -> HostRecord {
         let record = HostRecord(
             slot: key.slot, name: uniqueName(name), serviceName: serviceName,
-            endpoints: Array(endpoints.prefix(PairingPayload.maxEndpoints)),
+            endpoints: Array(endpoints.prefix(HostRecord.maxEndpoints)),
             platform: nil, pairedAt: Date())
         try secrets.set(key.secret, for: key.slot)
         do {

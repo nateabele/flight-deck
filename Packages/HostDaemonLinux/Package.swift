@@ -72,6 +72,7 @@ let package = Package(
             dependencies: [
                 "HostDaemonLinux",
                 "PairingCore",
+                .product(name: "HostKit", package: "HostKit"),
                 .product(name: "NIOEmbedded", package: "swift-nio"),
             ],
             swiftSettings: [.unsafeFlags(["-Xcc", "-I\(boringSSLInclude)"])]

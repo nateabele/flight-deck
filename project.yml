@@ -383,6 +383,10 @@ targets:
     sources:
       - path: Sources/HostDaemon
         excludes: ["*.plist"]
+      # The app's own address list (its macOS-only half: SCDynamicStore's primary interface;
+      # the ranking is HostKit's), so the hostd advertises in helloAck exactly what the phone
+      # is told. A file reference rather than a copy, so the two cannot drift.
+      - path: Sources/FlightDeck/Fleet/LocalEndpoints.swift
     dependencies:
       - target: FleetKit
         embed: false

@@ -125,9 +125,11 @@ final class HostLink {
         didSet { if state != oldValue { onStateChange?(state) } }
     }
     var onStateChange: ((HostLinkState) -> Void)?
-    /// A winning `host:port` the record does not already hold. The link does not store it
-    /// itself; `HostService` persists it and assigns `record`.
-    var onEndpointLearned: ((String) -> Void)?
+    /// The record's endpoints as they should now be, after a win taught the link something:
+    /// the address that answered, and the host's own list from `helloAck`. Fired only when
+    /// that differs from `record.endpoints`. The link does not store it itself; `HostService`
+    /// persists it and assigns `record`.
+    var onEndpointsChanged: (([String]) -> Void)?
 
     private let key: FleetDeviceKey
     private let controllerName: String
@@ -265,12 +267,12 @@ final class HostLink {
             case .error(let id, let code, let message): resolve(id, .failure(.remote(code: code, message: message)))
             case .helloAck, .refused: break
             }
-        } else if case .helloAck(_, _, let hostName) = frame {
-            win(connection, hostName: hostName)
+        } else if case .helloAck(_, _, let hostName, let advertised) = frame {
+            win(connection, hostName: hostName, advertised: advertised)
         }
     }
 
-    private func win(_ connection: HostLinkConnection, hostName: String) {
+    private func win(_ connection: HostLinkConnection, hostName: String, advertised: [String]) {
         winner = connection
         cancelRacers()
         raceTimer?.cancel()
@@ -279,10 +281,9 @@ final class HostLink {
         attempt = 0
         missedPongs = 0
         lastSeen = clock.now
-        if let address = connection.remoteAddress, !record.endpoints.contains(address),
-           !Self.isLoopback(address) {
-            onEndpointLearned?(address)
-        }
+        let merged = Self.mergedEndpoints(won: connection.remoteAddress, advertised: advertised,
+                                          stored: record.endpoints)
+        if merged != record.endpoints { onEndpointsChanged?(merged) }
         schedulePing()
         state = .online(hostName: hostName)
     }
@@ -438,6 +439,37 @@ final class HostLink {
         return .hostPort(host: NWEndpoint.Host(host), port: port)
     }
 
+    /// What a win makes of the stored list: the address that just answered first, then the
+    /// host's own advertised list (its ranking: tailnet first), then what was stored, without
+    /// repeats, at most `HostRecord.maxEndpoints`.
+    ///
+    /// **A LAN address and a tailnet address both survive the cap** when the inputs hold both.
+    /// A plain prefix would not promise that: a host with two VM bridges ranked between them,
+    /// or a controller whose winner and stored list are all LAN, could push the one tailnet
+    /// address off the end — and that is the one address that still works after the laptop
+    /// leaves the room (spec §3.3). Loopback from the host or the winner is dropped (it names
+    /// this Mac anywhere else); a stored entry is kept as the user or pairing put it there.
+    static func mergedEndpoints(won: String?, advertised: [String], stored: [String]) -> [String] {
+        var ordered: [String] = []
+        for text in [won].compactMap({ $0 }) + advertised where !isLoopback(text) && !ordered.contains(text) {
+            ordered.append(text)
+        }
+        for text in stored where !ordered.contains(text) { ordered.append(text) }
+        guard ordered.count > HostRecord.maxEndpoints else { return ordered }
+
+        let tailnet = { (text: String) in HostEndpoints.isCGNAT(hostPart(text)) }
+        var kept = Set([ordered.first(where: tailnet), ordered.first(where: { !tailnet($0) })]
+            .compactMap { $0 })
+        for text in ordered where kept.count < HostRecord.maxEndpoints { kept.insert(text) }
+        return ordered.filter(kept.contains)
+    }
+
+    /// `host` out of `host:port`, brackets off an IPv6 literal.
+    private static func hostPart(_ text: String) -> String {
+        guard let colon = text.lastIndex(of: ":") else { return text }
+        return text[..<colon].trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+    }
+
     /// A loopback address names *this* Mac on any other network, so it is never learned.
     private static func isLoopback(_ text: String) -> Bool {
         guard case .hostPort(let host, _) = endpoint(from: text) else { return false }
@@ -518,6 +550,9 @@ final class NetworkHostConnection: HostLinkConnection {
     var remoteAddress: String? {
         guard case .hostPort(let host, let port) = connection.currentPath?.remoteEndpoint
         else { return nil }
+        // Bracketed, as a paired IPv6 address is, so the stored text splits at its last colon
+        // and dedupes against the same address written by pairing or by the host's helloAck.
+        if case .ipv6 = host { return "[\(host)]:\(port.rawValue)" }
         return "\(host):\(port.rawValue)"
     }
 

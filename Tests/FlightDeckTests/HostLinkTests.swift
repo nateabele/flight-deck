@@ -298,9 +298,9 @@ final class HostLinkBehaviourTests: XCTestCase {
     }
 
     func testANewWinningAddressIsLearnedButStoredAndLoopbackOnesAreNot() {
-        var learned: [String] = []
+        var learned: [[String]] = []
         let link = makeLink(endpoints: ["10.0.0.5:47410", "10.0.0.6:47410"])
-        link.onEndpointLearned = { learned.append($0) }
+        link.onEndpointsChanged = { learned.append($0) }
         link.start()
         dialed(0).remoteAddress = "10.0.0.5:47410"
         ack(dialed(0))
@@ -317,7 +317,32 @@ final class HostLinkBehaviourTests: XCTestCase {
         clock.advance(by: 1)
         dialed(4).remoteAddress = "192.168.1.9:47410"
         ack(dialed(4))
-        XCTAssertEqual(learned, ["192.168.1.9:47410"])
+        XCTAssertEqual(learned, [["192.168.1.9:47410", "10.0.0.5:47410", "10.0.0.6:47410"]])
+    }
+
+    /// The winner first, then what the host says about itself, then what was stored — and
+    /// when that overflows the cap, a LAN address and a tailnet address both survive, because
+    /// those two are the pair that covers "in the room" and "anywhere else".
+    func testMergeKeepsTheWinnerAndBothALANAndATailnetAddress() {
+        XCTAssertEqual(
+            HostLink.mergedEndpoints(won: "192.168.1.9:47410",
+                                     advertised: ["100.100.1.2:47410", "192.168.1.9:47410"], stored: []),
+            ["192.168.1.9:47410", "100.100.1.2:47410"])
+        XCTAssertEqual(
+            HostLink.mergedEndpoints(won: "10.0.0.9:47410",
+                                     advertised: ["10.1.1.1:47410", "10.2.2.2:47410", "10.3.3.3:47410",
+                                                  "100.100.1.2:47410"],
+                                     stored: ["box.local:47410"]),
+            ["10.0.0.9:47410", "10.1.1.1:47410", "10.2.2.2:47410", "100.100.1.2:47410"])
+        XCTAssertEqual(
+            HostLink.mergedEndpoints(won: "100.100.1.2:47410", advertised: [],
+                                     stored: ["10.0.0.5:47410"]),
+            ["100.100.1.2:47410", "10.0.0.5:47410"])
+        XCTAssertEqual(
+            HostLink.mergedEndpoints(won: "127.0.0.1:47410", advertised: ["127.0.0.1:47410"],
+                                     stored: ["10.0.0.5:47410"]),
+            ["10.0.0.5:47410"], "loopback names this Mac, never the host")
+        XCTAssertEqual(HostRecord.maxEndpoints, 4)
     }
 
     /// A stale stored address refused at once must not end every race before Bonjour finds
@@ -415,7 +440,7 @@ final class HostServiceTests: XCTestCase {
         c.onReady?()
         c.say(.helloAck(protocolVersion: .current, capabilities: [.hostInfo], hostName: "mini"))
         XCTAssertEqual(service.statuses[record.slot], .online(hostName: "mini"))
-        XCTAssertEqual(registry.hosts[0].endpoints, ["10.0.0.9:47410", "10.0.0.5:47410"])
+        XCTAssertEqual(registry.hosts[0].endpoints, ["10.0.0.9:47410", "10.0.0.5:47410", "10.0.0.6:47410"])
         XCTAssertEqual(registry.hosts[0].lastSeenAt, clock.now)
 
         // The first online asks `host.info` for the platform.
@@ -426,14 +451,47 @@ final class HostServiceTests: XCTestCase {
         try await waitUntil { registry.hosts[0].platform == "Linux" }
 
         let reloaded = HostRegistry(fileURL: url, secrets: InMemoryHostSecretStore()).hosts[0]
-        XCTAssertEqual(reloaded.endpoints, ["10.0.0.9:47410", "10.0.0.5:47410"])
+        XCTAssertEqual(reloaded.endpoints, ["10.0.0.9:47410", "10.0.0.5:47410", "10.0.0.6:47410"])
         XCTAssertEqual(reloaded.platform, "Linux")
 
         // The next race dials the learned address first.
         c.hostClosed()
         clock.advance(by: 1)
-        XCTAssertEqual(dialer.connections.suffix(2).map(\.endpoint),
-                       ["10.0.0.9:47410", "10.0.0.5:47410"].compactMap(HostLink.endpoint(from:)))
+        XCTAssertEqual(dialer.connections.suffix(3).map(\.endpoint),
+                       ["10.0.0.9:47410", "10.0.0.5:47410", "10.0.0.6:47410"].compactMap(HostLink.endpoint(from:)))
+        service.forget(slot: record.slot)
+    }
+
+    /// Spec §3.3's "laptop moves to Tailscale": a host known only by its LAN address says in
+    /// helloAck that it also has a tailnet one; that is stored; and when the LAN address goes
+    /// stale the next race reaches the host through the advertised address, with no re-pair.
+    func testAdvertisedTailnetAddressReachesTheHostOnceTheLANOneGoesStale() async throws {
+        let registry = HostRegistry(fileURL: url, secrets: InMemoryHostSecretStore())
+        let record = try registry.add(key: .mint(), name: "mini", serviceName: "mini",
+                                      endpoints: ["192.168.1.9:47410"])
+        let service = HostService(registry: registry, controllerName: "c", dial: dialer, clock: clock)
+        service.start()
+        try await waitUntil { dialer.connections.count == 1 }
+
+        let lan = dialer.connections[0]
+        lan.remoteAddress = "192.168.1.9:47410"
+        lan.onReady?()
+        lan.say(.helloAck(protocolVersion: .current, capabilities: [.hostInfo], hostName: "mini",
+                          endpoints: ["100.100.1.2:47410", "192.168.1.9:47410"]))
+        XCTAssertEqual(registry.hosts[0].endpoints, ["192.168.1.9:47410", "100.100.1.2:47410"])
+        XCTAssertEqual(HostRegistry(fileURL: url, secrets: InMemoryHostSecretStore()).hosts[0].endpoints,
+                       ["192.168.1.9:47410", "100.100.1.2:47410"], "persisted")
+
+        // Off the LAN: the stored address is refused, the advertised one answers.
+        lan.hostClosed()
+        clock.advance(by: 1)
+        let race = Array(dialer.connections.suffix(2))
+        XCTAssertEqual(race.map(\.endpoint),
+                       ["192.168.1.9:47410", "100.100.1.2:47410"].compactMap(HostLink.endpoint(from:)))
+        race[0].hostClosed()
+        race[1].onReady?()
+        race[1].say(.helloAck(protocolVersion: .current, capabilities: [.hostInfo], hostName: "mini"))
+        XCTAssertEqual(service.statuses[record.slot], .online(hostName: "mini"))
         service.forget(slot: record.slot)
     }
 

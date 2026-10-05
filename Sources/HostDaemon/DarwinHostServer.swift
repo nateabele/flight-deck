@@ -104,15 +104,27 @@ final class DarwinHostServer: @unchecked Sendable {
     /// Sixteen slots held at most `handshakeDeadline` each is what a squatter can take.
     static let maxPending = 16
 
-    init(root: URL, port: NWEndpoint.Port?, hostName: @escaping @Sendable () -> String) {
+    /// `endpoints` maps the bound port to this Mac's addresses for `helloAck`; `main.swift`
+    /// passes `LocalEndpoints.advertised`. Defaults to none so a loopback test's controller is
+    /// not handed the developer's real interfaces to store.
+    init(root: URL, port: NWEndpoint.Port?, hostName: @escaping @Sendable () -> String,
+         endpoints: @escaping @Sendable (UInt16) -> [String] = { _ in [] }) {
         self.root = root
         requestedPort = port
         self.hostName = hostName
         store = ControllerStore(root: root)
+        // The core asks off `queue` (on a peer's queue), so the port it advertises is read
+        // through a lock rather than from `boundPort`, which only `queue` may touch.
+        let advertisedPort = LockedPort()
+        self.advertisedPort = advertisedPort
         core = HostServerCore(hostName: hostName,
-                              probe: HostInfoProbe(stateRoot: root, hostdVersion: darwinHostdVersion))
+                              probe: HostInfoProbe(stateRoot: root, hostdVersion: darwinHostdVersion),
+                              endpoints: { advertisedPort.value.map(endpoints) ?? [] })
         identities = HostTransport.PeerIdentities(queue: queue)
     }
+
+    /// `boundPort`, readable from any thread. Nil until the first bind lands.
+    private let advertisedPort: LockedPort
 
     /// The pairing listener's port while a window is armed. Tests dial it directly; a real
     /// controller finds it through `_fd-host-pair._tcp`.
@@ -217,6 +229,7 @@ final class DarwinHostServer: @unchecked Sendable {
                 resumed = true
                 timeout.cancel()
                 boundPort = port
+                advertisedPort.value = port.rawValue
                 finishBind(.success(port), done)
             case .failed(let error):
                 resumed = true
@@ -581,6 +594,17 @@ struct RebindBackoff {
     mutating func succeeded() -> Bool {
         defer { failing = false; next = Self.initial }
         return failing
+    }
+}
+
+/// One port behind a lock, for the core's endpoints provider: it runs on a peer's queue,
+/// never on the listener's.
+private final class LockedPort: @unchecked Sendable {
+    private let lock = NSLock()
+    private var port: UInt16?
+    var value: UInt16? {
+        get { lock.lock(); defer { lock.unlock() }; return port }
+        set { lock.lock(); port = newValue; lock.unlock() }
     }
 }
 

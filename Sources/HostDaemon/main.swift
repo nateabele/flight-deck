@@ -30,7 +30,10 @@ nonisolated(unsafe) var activity: NSObjectProtocol?
 /// next launch.
 let hostName = Host.current().localizedName ?? ProcessInfo.processInfo.hostName
 
-let server = DarwinHostServer(root: HostStateRoot.default(), port: 47410, hostName: { hostName })
+// Advertised in every helloAck, so a controller that paired over Bonjour on the LAN also
+// learns this Mac's tailnet address and can still reach it after leaving the room.
+let server = DarwinHostServer(root: HostStateRoot.default(), port: 47410, hostName: { hostName },
+                              endpoints: { LocalEndpoints.advertised(port: $0) })
 server.onConnectionCountChanged = { count in
     if count > 0, activity == nil {
         activity = ProcessInfo.processInfo.beginActivity(

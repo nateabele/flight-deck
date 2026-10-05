@@ -71,8 +71,21 @@ final class LinuxHostd: @unchecked Sendable {
         self.hostName = hostName
         store = ControllerStore(root: root)
         core = HostServerCore(hostName: { hostName },
-                              probe: HostInfoProbe(stateRoot: root, hostdVersion: hostdVersion))
+                              probe: HostInfoProbe(stateRoot: root, hostdVersion: hostdVersion),
+                              endpoints: { Self.advertisedEndpoints(from: HostEndpoints.enumerate(), port: port) })
         knownSlots = Set(store.all().map(\.slot))
+    }
+
+    /// This box's `host:port` list for `helloAck`, from a `getifaddrs` walk: loopback and
+    /// link-local dropped, a Tailscale (CGNAT) address kept and ranked first, on the port
+    /// `serve` listens on. Without it a controller that paired by typing a LAN address never
+    /// learns the tailnet one, and loses the host the moment it leaves the LAN.
+    ///
+    /// No primary interface, unlike the Mac's: Linux has no `SCDynamicStore`, and the tunnel
+    /// still outranks the LAN by `IFF_POINTOPOINT` (`tailscale0` is a point-to-point TUN).
+    /// Pure, so a test can pin the filter on a fixed interface list.
+    static func advertisedEndpoints(from interfaces: [HostEndpoints.Interface], port: Int) -> [String] {
+        HostEndpoints.advertised(interfaces, primary: nil, port: UInt16(port))
     }
 
     /// Binds everything, prints `listening on <port>` once the admin socket also answers (so a

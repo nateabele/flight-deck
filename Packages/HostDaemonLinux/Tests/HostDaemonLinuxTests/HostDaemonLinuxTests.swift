@@ -1,4 +1,5 @@
 import Foundation
+import HostKit
 import NIOCore
 import NIOEmbedded
 import NIOWebSocket
@@ -33,6 +34,30 @@ final class AvahiPublisherTests: XCTestCase {
         publisher.stop(process)
         process.waitUntilExit()
         XCTAssertFalse(process.isRunning)
+    }
+}
+
+/// What a Linux host advertises in `helloAck`, on the interface list a real box with Tailscale,
+/// Docker and an unconfigured second NIC reports. The filter is pure so this pins it without
+/// that box.
+final class AdvertisedEndpointsTests: XCTestCase {
+    func testLinuxFilterDropsLoopbackAndLinkLocalAndKeepsTheTailnetFirst() {
+        let box: [HostEndpoints.Interface] = [
+            .init(name: "lo", address: "127.0.0.1", isPointToPoint: false, isBroadcast: false, isLoopback: true),
+            .init(name: "eth0", address: "192.168.1.40", isPointToPoint: false, isBroadcast: true, isLoopback: false),
+            .init(name: "eth1", address: "169.254.3.3", isPointToPoint: false, isBroadcast: true, isLoopback: false),
+            .init(name: "docker0", address: "172.17.0.1", isPointToPoint: false, isBroadcast: true, isLoopback: false),
+            .init(name: "tailscale0", address: "100.88.1.2", isPointToPoint: true, isBroadcast: false, isLoopback: false),
+        ]
+        XCTAssertEqual(LinuxHostd.advertisedEndpoints(from: box, port: HostdPorts.serve),
+                       ["100.88.1.2:47410", "192.168.1.40:47410", "172.17.0.1:47410"])
+    }
+
+    /// The live walk inside the test container: whatever it finds, never loopback.
+    func testLiveWalkNeverAdvertisesLoopback() {
+        let live = LinuxHostd.advertisedEndpoints(from: HostEndpoints.enumerate(), port: HostdPorts.serve)
+        XCTAssertFalse(live.contains { $0.hasPrefix("127.") }, "\(live)")
+        XCTAssertTrue(live.allSatisfy { $0.hasSuffix(":47410") }, "\(live)")
     }
 }
 

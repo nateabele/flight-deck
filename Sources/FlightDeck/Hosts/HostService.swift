@@ -96,7 +96,8 @@ final class HostService: ObservableObject {
         let paired = try await awaitPairing { settle in
             let runner = PairingRunner(profile: .host)
             runner.onPaired = { key, serviceName, hostName in
-                // No address yet: the link finds the host by `serviceName` and learns one.
+                // No address yet: the link finds the host by `serviceName`, then learns the
+                // address that answered and the host's own list from helloAck.
                 settle(.success((key, serviceName, hostName, [])))
             }
             runner.onProgress = { progress in
@@ -152,7 +153,7 @@ final class HostService: ObservableObject {
         if let link = links.removeValue(forKey: slot) {
             // Detached first, or `stop()`'s own `.offline` report would put the status back.
             link.onStateChange = nil
-            link.onEndpointLearned = nil
+            link.onEndpointsChanged = nil
             link.stop()
         }
         statuses.removeValue(forKey: slot)
@@ -169,7 +170,7 @@ final class HostService: ObservableObject {
                             dial: dial, clock: clock)
         let slot = record.slot
         link.onStateChange = { [weak self] state in self?.linkChanged(slot, state) }
-        link.onEndpointLearned = { [weak self] address in self?.learned(slot, address) }
+        link.onEndpointsChanged = { [weak self] endpoints in self?.learned(slot, endpoints) }
         links[slot] = link
         statuses[slot] = link.state
         link.start()
@@ -194,11 +195,11 @@ final class HostService: ObservableObject {
         }
     }
 
-    /// Front of the list, at most `PairingPayload.maxEndpoints`, as the phone keeps a Mac's.
-    private func learned(_ slot: UUID, _ address: String) {
+    /// The link's merge (`HostLink.mergedEndpoints`), persisted so the next launch dials the
+    /// host's tailnet address even if this run never needed it.
+    private func learned(_ slot: UUID, _ endpoints: [String]) {
         guard var record = registry.hosts.first(where: { $0.slot == slot }) else { return }
-        record.endpoints = Array(([address] + record.endpoints.filter { $0 != address })
-            .prefix(PairingPayload.maxEndpoints))
+        record.endpoints = endpoints
         save(record)
     }
 

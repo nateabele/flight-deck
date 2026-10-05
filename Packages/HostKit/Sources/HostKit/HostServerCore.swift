@@ -16,6 +16,10 @@ public protocol HostPeer: AnyObject, Sendable {
 public final class HostServerCore: @unchecked Sendable {
     private let hostName: @Sendable () -> String
     private let probe: HostInfoProbe
+    /// This host's own `host:port` addresses for `helloAck`, asked on every hello: a host's
+    /// addresses change under it (a laptop host joining the tailnet), and a list read once at
+    /// launch would keep advertising the network it booted on.
+    private let endpoints: @Sendable () -> [String]
     private let lock = NSLock()
     private var peers: [ObjectIdentifier: (peer: HostPeer, helloed: Bool)] = [:]
     /// Slots revoked via `disconnect`. `peers` only knows peers that have said hello, so
@@ -30,9 +34,13 @@ public final class HostServerCore: @unchecked Sendable {
         set { lock.lock(); defer { lock.unlock() }; _onControllerName = newValue }
     }
 
-    public init(hostName: @escaping @Sendable () -> String, probe: HostInfoProbe) {
+    /// `endpoints` defaults to none, which a controller reads as "nothing to learn"; both
+    /// hostds pass their real interface list.
+    public init(hostName: @escaping @Sendable () -> String, probe: HostInfoProbe,
+                endpoints: @escaping @Sendable () -> [String] = { [] }) {
         self.hostName = hostName
         self.probe = probe
+        self.endpoints = endpoints
     }
 
     /// Replies are sent before this returns; see the type's threading contract.
@@ -72,7 +80,8 @@ public final class HostServerCore: @unchecked Sendable {
             peers[key] = (peer, true)
             let notify = _onControllerName
             lock.unlock()
-            send(.helloAck(protocolVersion: .current, capabilities: [.hostInfo], hostName: hostName()), to: peer)
+            send(.helloAck(protocolVersion: .current, capabilities: [.hostInfo], hostName: hostName(),
+                           endpoints: endpoints()), to: peer)
             notify?(peer.slot, name)
         case .request(let id, let req):
             guard isHelloed(key) else { return refuseNoHello(id: id, peer: peer) }

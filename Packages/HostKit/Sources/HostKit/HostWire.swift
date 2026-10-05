@@ -6,7 +6,8 @@ import Foundation
 //     hello     {"t":"hello","v":{major,minor},"caps":[string],"name":string}
 //     req       {"t":"req","id":int,"req":{"op":string}}
 //   host -> controller
-//     helloAck  {"t":"helloAck","v":{major,minor},"caps":[string],"name":string}
+//     helloAck  {"t":"helloAck","v":{major,minor},"caps":[string],"name":string,
+//                "endpoints":[string]?}
 //     refused   {"t":"refused","reason":{"kind":"majorVersionMismatch","host":{major,minor}}}
 //     reply     {"t":"reply","id":int,"rep":{"op":string,"info":{...}}}
 //     err       {"t":"err","id":int,"code":string,"message":string}
@@ -14,6 +15,12 @@ import Foundation
 // `v` is an object, not a "1.0" string, so no peer ever parses a version out of text and a
 // minor of 10 cannot sort before 9. Unknown capability strings are dropped on decode; an
 // unknown frame tag or `op` throws.
+//
+// `endpoints` is the host's own `host:port` list (IPv6 bracketed), best first, so a controller
+// learns a tailnet address it has never dialled. Without it a host paired over Bonjour is known
+// only by the LAN address that won, and is lost the moment the controller leaves the LAN. It
+// is optional both ways: omitted when empty, so a host with nothing to say sends what a build
+// from before the field sent, and absent decodes to [], so an older host still acks.
 //
 // Hand-rolled `t`-tagged Codable, as in FleetKit's PairingFrames: the tag strings are the wire
 // contract between a Linux hostd and a Mac controller built months apart, so they are spelled
@@ -121,23 +128,25 @@ public enum HostRequest: Codable, Sendable, Equatable {
 
 /// Host → controller.
 public enum HostServerFrame: Codable, Sendable, Equatable {
-    case helloAck(protocolVersion: ProtocolVersion, capabilities: [HostCapability], hostName: String)
+    case helloAck(protocolVersion: ProtocolVersion, capabilities: [HostCapability], hostName: String,
+                  endpoints: [String] = [])
     case refused(reason: HostRefusal)
     case reply(id: Int, HostReply)
     case error(id: Int, code: String, message: String)
 
-    enum CodingKeys: String, CodingKey { case t, v, caps, name, reason, id, rep, code, message }
+    enum CodingKeys: String, CodingKey { case t, v, caps, name, endpoints, reason, id, rep, code, message }
 
     private enum Tag: String, Codable { case helloAck, refused, reply, err }
 
     public func encode(to encoder: any Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         switch self {
-        case .helloAck(let v, let caps, let name):
+        case .helloAck(let v, let caps, let name, let endpoints):
             try c.encode(Tag.helloAck, forKey: .t)
             try c.encode(v, forKey: .v)
             try c.encode(caps, forKey: .caps)
             try c.encode(name, forKey: .name)
+            if !endpoints.isEmpty { try c.encode(endpoints, forKey: .endpoints) }
         case .refused(let reason):
             try c.encode(Tag.refused, forKey: .t)
             try c.encode(reason, forKey: .reason)
@@ -160,7 +169,8 @@ public enum HostServerFrame: Codable, Sendable, Equatable {
             self = .helloAck(
                 protocolVersion: try c.decode(ProtocolVersion.self, forKey: .v),
                 capabilities: try c.decodeCapabilities(forKey: .caps),
-                hostName: try c.decode(String.self, forKey: .name)
+                hostName: try c.decode(String.self, forKey: .name),
+                endpoints: try c.decodeIfPresent([String].self, forKey: .endpoints) ?? []
             )
         case .refused:
             self = .refused(reason: try c.decode(HostRefusal.self, forKey: .reason))

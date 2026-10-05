@@ -17,6 +17,8 @@ final class HostWireTests: XCTestCase {
                             hostdVersion: "1.0", xcode: ["26.4"], docker: nil, diskFreeBytes: 42)
         let frames: [HostServerFrame] = [
             .helloAck(protocolVersion: .current, capabilities: [.hostInfo], hostName: "mini"),
+            .helloAck(protocolVersion: .current, capabilities: [.hostInfo], hostName: "mini",
+                      endpoints: ["100.100.1.2:47410", "[fd7a::1]:47410"]),
             .refused(reason: .majorVersionMismatch(host: .init(major: 2, minor: 0))),
             .reply(id: 7, .hostInfo(info)),
             .error(id: 7, code: "unsupported", message: "nope"),
@@ -51,6 +53,28 @@ final class HostWireTests: XCTestCase {
         XCTAssertEqual(
             try HostWire.encode(HostServerFrame.helloAck(protocolVersion: .current, capabilities: [.hostInfo], hostName: "mini")),
             #"{"caps":["host.info"],"name":"mini","t":"helloAck","v":{"major":1,"minor":0}}"#)
+    }
+
+    /// A host's own addresses ride on helloAck so a controller that only ever reached it over
+    /// the LAN still learns its tailnet address before it leaves the room. Pinned populated;
+    /// the empty case above is pinned *without* the key, so a host with nothing to advertise
+    /// sends exactly the bytes a build from before this field did.
+    func testHelloAckEndpointsArePinned() throws {
+        XCTAssertEqual(
+            try HostWire.encode(HostServerFrame.helloAck(
+                protocolVersion: .current, capabilities: [.hostInfo], hostName: "mini",
+                endpoints: ["100.100.1.2:47410", "[fd7a::1]:47410"])),
+            #"{"caps":["host.info"],"endpoints":["100.100.1.2:47410","[fd7a::1]:47410"],"name":"mini","t":"helloAck","v":{"major":1,"minor":0}}"#)
+    }
+
+    /// A hostd built before `endpoints` existed sends no key at all. That must decode to an
+    /// empty list, not throw: a throw here is a controller that can no longer reach any host
+    /// it has not updated.
+    func testHelloAckWithoutEndpointsStillDecodes() throws {
+        let ack = try HostWire.decode(HostServerFrame.self,
+            from: #"{"t":"helloAck","v":{"major":1,"minor":0},"caps":["host.info"],"name":"mini"}"#)
+        XCTAssertEqual(ack, .helloAck(protocolVersion: .current, capabilities: [.hostInfo],
+                                      hostName: "mini", endpoints: []))
     }
 
     func testRefusedAndErrShapesArePinned() throws {
