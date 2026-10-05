@@ -525,4 +525,36 @@ final class FleetModelSwarmCommandTests: XCTestCase {
         XCTAssertTrue(m.swarmInFlight.isEmpty)
         XCTAssertEqual(m.swarmMessages[project], CommandCopy.message(for: nil))
     }
+
+    /// A's late answer must not touch B: it arrives after A timed out and the user tapped again.
+    func testALateAnswerToATimedOutSendDoesNotTouchTheNextSend() async {
+        let m = model(timeout: .milliseconds(50)); let project = UUID()
+        m.setSwarmPaused(true, project: project)
+        for _ in 0..<100 where m.swarmInFlight.contains(project) { try? await Task.sleep(for: .milliseconds(20)) }
+        XCTAssertTrue(m.swarmInFlight.isEmpty)
+
+        m.swarmTimeout = .milliseconds(400)
+        m.setSwarmPaused(false, project: project)
+        XCTAssertNil(m.swarmMessages[project])
+        pending.removeFirst()(.failure(.server(code: "not_allowed")))   // A, late
+        XCTAssertTrue(m.swarmInFlight.contains(project), "A's answer must not clear B")
+        XCTAssertNil(m.swarmMessages[project], "A's answer must not write B's message")
+
+        for _ in 0..<100 where m.swarmInFlight.contains(project) { try? await Task.sleep(for: .milliseconds(20)) }
+        XCTAssertTrue(m.swarmInFlight.isEmpty, "B's own deadline must still fire")
+        XCTAssertEqual(m.swarmMessages[project], CommandCopy.message(for: nil))
+    }
+
+    func testTheCurrentSendsAnswerStillClears() async {
+        let m = model(timeout: .milliseconds(50)); let project = UUID()
+        m.setSwarmPaused(true, project: project)
+        for _ in 0..<100 where m.swarmInFlight.contains(project) { try? await Task.sleep(for: .milliseconds(20)) }
+        m.swarmTimeout = .seconds(60)
+        m.setSwarmPaused(false, project: project)
+        pending.removeFirst()(.success(()))   // A, late: ignored
+        XCTAssertTrue(m.swarmInFlight.contains(project))
+        pending.removeFirst()(.success(()))   // B
+        XCTAssertTrue(m.swarmInFlight.isEmpty)
+        XCTAssertNil(m.swarmMessages[project])
+    }
 }

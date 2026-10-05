@@ -635,6 +635,9 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
     @ObservationIgnored var swarmSender: ((FleetCommand, @escaping (Result<Void, FleetRequestError>) -> Void) -> Void)?
     @ObservationIgnored var swarmTimeout: Duration = .seconds(10)
     @ObservationIgnored private var swarmDeadlines: [UUID: Task<Void, Never>] = [:]
+    /// The send each project's in-flight mark belongs to. A late answer to a send that already
+    /// timed out must not clear, or write a message over, the send the user made after it.
+    @ObservationIgnored private var swarmSends: [UUID: UUID] = [:]
 
     /// The Mac's ack clears the in-flight mark. A failure clears it with `CommandCopy`'s message,
     /// and so does silence past `swarmTimeout`: without a deadline an ack that never comes would
@@ -643,8 +646,11 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
         guard !swarmInFlight.contains(project) else { return }
         swarmInFlight.insert(project)
         swarmMessages[project] = nil
+        let send = UUID()
+        swarmSends[project] = send
         let finish: (String?) -> Void = { [weak self] message in
-            guard let self, self.swarmInFlight.contains(project) else { return }
+            guard let self, self.swarmSends[project] == send else { return }
+            self.swarmSends[project] = nil
             self.swarmDeadlines.removeValue(forKey: project)?.cancel()
             self.swarmInFlight.remove(project)
             self.swarmMessages[project] = message
