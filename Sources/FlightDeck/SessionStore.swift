@@ -5781,6 +5781,20 @@ final class SessionStore: ObservableObject {
         return promptQueue[id]?.contains { $0.token == token } == true ? .queued : .sent
     }
 
+    /// Whether a prompt accepted as `.queued` is still waiting to be typed. The swarm's first
+    /// prompt waits on this rather than on an event, because "typed" is the queue letting go.
+    func isPromptQueued(_ token: UUID, for id: UUID) -> Bool {
+        promptQueue[id]?.contains { $0.token == token } == true
+    }
+
+    /// Takes back a queued prompt nobody should receive any more — a swarm agent that never
+    /// showed a composer has had its claim returned to open, and its task prompt must not be
+    /// typed into it minutes later.
+    func withdrawQueuedPrompt(_ token: UUID, from id: UUID) {
+        promptQueue[id]?.removeAll { $0.token == token }
+        if promptQueue[id]?.isEmpty == true { promptQueue[id] = nil }
+    }
+
     /// Classifies what the tab's live surface reads as, for the typing-path instrumentation.
     /// A pure read (no fleet-state mutation), same contract as `viewport(of:)`.
     func promptTypingComposerState(for id: UUID) -> String {
