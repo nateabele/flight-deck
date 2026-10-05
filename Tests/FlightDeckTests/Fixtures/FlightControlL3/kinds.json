@@ -1,0 +1,6 @@
+{"v":1,"kinds":[
+ {"id":"tests","name":"Tests","description":"Unit and integration tests","dimensions":{"test-authoring":0.9,"agentic-coding":0.4},"origin":"seed","status":"active","createdAt":"2026-10-04T18:00:00Z"},
+ {"id":"snapshot-tests","name":"Snapshot tests","description":"Write or update snapshot/golden-file tests","dimensions":{"test-authoring":0.8,"agentic-coding":0.3},"origin":"planning","status":"active","createdAt":"2026-10-04T18:00:00Z"},
+ {"id":"golden-tests","name":"Golden tests","description":"Duplicate of snapshot tests","dimensions":{"test-authoring":0.8},"origin":"planning","status":"merged:snapshot-tests","createdAt":"2026-10-04T18:00:00Z"},
+ {"id":"algorithm","name":"Algorithm","description":"Non-trivial algorithms","dimensions":{"algorithmic-reasoning":0.9,"agentic-coding":0.3},"origin":"seed","status":"active","createdAt":"2026-10-04T18:00:00Z"}
+]}

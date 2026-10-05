@@ -1,0 +1,11 @@
+{"total":5,"issues":[
+ {"id":"fx-valid","title":"Add snapshot tests for the parser","status":"open","priority":1,"issue_type":"task","labels":[],"created_at":"2026-10-04T18:00:00Z","updated_at":"2026-10-04T18:00:00Z",
+  "agent_context":"{\"flight_deck\":{\"execution\":{\"harness\":\"codex\",\"host\":null,\"kind\":\"snapshot-tests\",\"knobs\":{\"effort\":\"high\"},\"model\":\"gpt-6-sol\",\"pinned\":false,\"pool\":\"codex-subs\",\"source\":{\"at\":\"2026-10-04T18:00:00Z\",\"by\":\"rule\",\"reason\":\"test-authoring 0.8 → codex\",\"ruleId\":\"r3\"},\"v\":1}},\"instructions\":\"keep\"}"},
+ {"id":"fx-pinned","title":"Rewrite the scheduler","status":"open","priority":2,"issue_type":"task","labels":[],"created_at":"2026-10-04T18:00:00Z","updated_at":"2026-10-04T18:00:00Z",
+  "agent_context":"{\"flight_deck\":{\"execution\":{\"harness\":\"claude\",\"kind\":\"algorithm\",\"knobs\":{\"effort\":\"high\"},\"model\":\"opus\",\"pinned\":true,\"pool\":\"claude-subs\",\"source\":{\"at\":\"2026-10-04T18:00:00Z\",\"by\":\"manual\",\"reason\":\"pinned by the maintainer\"},\"v\":1}}}"},
+ {"id":"fx-invalid","title":"Broken block","status":"open","priority":2,"issue_type":"task","labels":[],"created_at":"2026-10-04T18:00:00Z","updated_at":"2026-10-04T18:00:00Z",
+  "agent_context":"{\"flight_deck\":{\"execution\":{\"v\":1,\"kind\":\"tests\",\"harness\":\"codex\",\"pool\":\"codex-subs\",\"source\":{\"by\":\"rule\",\"reason\":\"r\",\"at\":\"2026-10-04T18:00:00Z\"}}}}"},
+ {"id":"fx-none","title":"No block yet","status":"open","priority":3,"issue_type":"task","labels":[],"created_at":"2026-10-04T18:00:00Z","updated_at":"2026-10-04T18:00:00Z"},
+ {"id":"fx-newer","title":"From the future","status":"open","priority":3,"issue_type":"task","labels":[],"created_at":"2026-10-04T18:00:00Z","updated_at":"2026-10-04T18:00:00Z",
+  "agent_context":"{\"flight_deck\":{\"execution\":{\"v\":2}}}"}
+]}
