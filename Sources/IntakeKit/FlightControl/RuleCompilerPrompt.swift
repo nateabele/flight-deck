@@ -61,8 +61,11 @@ public enum RuleCompilerPrompt {
         {dimension, atLeast} — the task kind weighs at least atLeast on that dimension — or \
         {kind} — the task is that kind or a kind merged into it. Set the unused fields of a \
         condition to null.
-        - Prefer dimension conditions for general descriptions ("tests", "complex algorithms"), \
-        so kinds added later match too. Add a kind condition when the sentence names a listed kind.
+        - Use dimension conditions for every description of work in plain words ("tests", \
+        "complex algorithms", "docs"): pick the dimension that describes it, with atLeast about \
+        0.5 to 0.6. Never turn such a description into a kind condition, even when a listed kind \
+        has a similar name, because kinds added later must match too. Use a kind condition only \
+        when the sentence quotes a listed kind id exactly.
         - mode is "any" when any one condition is enough, "all" when every condition must hold.
         - harness is the agent the sentence names. model is the model it names, matched to that \
         agent's list; if it names none, use that agent's default model and set modelDefaulted to true.
