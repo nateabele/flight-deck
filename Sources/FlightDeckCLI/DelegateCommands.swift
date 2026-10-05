@@ -257,6 +257,11 @@ final class DelegateCommandRunner {
         let cid = hooks.send(.delegate(request))
         hooks.expect(cid) { frame in
             guard !self.finished else { return }
+            // A resumed stream that delivers anything has reached the app and the host: the
+            // reconnect budget is for the next outage, not spent across all of them.
+            if self.resuming, frame.continuesStream || { if case .delegateExit = frame { return true }; return false }() {
+                self.reconnects = 0
+            }
             switch frame {
             case .delegateStarted(_, let started):
                 let first = self.runID == nil

@@ -397,6 +397,25 @@ final class DelegationCLIRunnerTests: XCTestCase {
         XCTAssertTrue(err.last?.hasSuffix("flightdeck wait r8") == true, "\(err)")
     }
 
+    /// The reconnect budget is per outage: a resumed stream that delivers resets it, so a long
+    /// run that rides out many app restarts is not ended by the sum of them.
+    func testTheReconnectBudgetResetsOnceAResumeDelivers() {
+        let t = FakeTransport()
+        _ = runner("exec", "--on", "mini", "--", "make", transport: t)
+        t.push(.delegateStarted(cid: lastCID(t), WireDelegateStarted(runID: "r5", host: "mini")))
+        for round in 0..<3 {
+            for _ in 0..<(DelegateCommandRunner.reconnectLimit - 1) {
+                t.onDisconnect?(nil)
+                guard !scheduled.isEmpty else { return XCTFail("gave up in round \(round): \(err)") }
+                scheduled.removeFirst().1()
+                scheduled = scheduled.filter { $0.0 != 1 + DelegateCommandRunner.snapshotDeadline }
+            }
+            t.push(.snapshot(seq: 1, fleet: FleetSnapshot(), reason: .initial))
+            t.push(.delegateOutput(cid: lastCID(t), stream: "stdout", offset: Int64(round), data: Data("x".utf8)))
+            XCTAssertNil(code, "round \(round)")
+        }
+    }
+
     func testRouteResolutionSkipsTheShimDirectory() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("fd-route-\(UUID().uuidString.prefix(6))")
         let shim = root.appendingPathComponent("shim"), real = root.appendingPathComponent("bin")

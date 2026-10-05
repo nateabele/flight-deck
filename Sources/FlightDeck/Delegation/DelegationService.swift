@@ -778,7 +778,12 @@ final class DelegationService {
                 finish(Self.refusal(cid: cid, Self.named(error, host: record.host)))
             }
         }
-        if !follow, !knowsEnd, !ended {
+        // Two replays have no end of their own to wait for, so they end when it goes quiet: a
+        // `logs` of a run this app did not watch, and a reattach to a run that had already
+        // ended — whose replay may never send `exited` (no mirror after a relaunch, the host's
+        // spool expired), while its end is already known here.
+        let endsWhenQuiet = endFromRun && ended
+        if (!follow && !knowsEnd && !ended) || endsWhenQuiet {
             let idle = deps.replayIdle
             let first = deps.replayFirstEvent
             Task { @MainActor in
@@ -795,7 +800,9 @@ final class DelegationService {
                     seen = lastEvent
                     try? await Task.sleep(nanoseconds: UInt64(idle * 1e9))
                 }
-                finish(.ack(cid: cid))
+                guard endsWhenQuiet else { return finish(.ack(cid: cid)) }
+                replayDone = true
+                endIfReady()
             }
         }
         guard let timeout else { return }
@@ -827,7 +834,13 @@ final class DelegationService {
     private func ensureLive(_ record: DelegatedRun) throws -> LiveRun {
         let liveRun = try live[record.id] ?? LiveRun(link: link(for: record), watchedFromStart: false)
         live[record.id] = liveRun
-        if liveRun.ended != nil || record.state == .exited || record.state == .died { return liveRun }
+        if liveRun.ended == nil, record.state == .exited || record.state == .died {
+            // Finished before this app instance existed: nothing will ever publish its end, so
+            // it is seeded from the record, or a reattach would wait on it forever. No hint:
+            // that was the attached run's to give, at the time.
+            liveRun.ended = (record.status ?? 0, nil)
+        }
+        if liveRun.ended != nil { return liveRun }
         // A watcher that lost its link restarts on whatever link the directory has now.
         if liveRun.monitor == nil { liveRun.link = try link(for: record) }
         monitor(record.id, liveRun)
