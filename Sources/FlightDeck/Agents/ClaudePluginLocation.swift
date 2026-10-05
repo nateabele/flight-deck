@@ -32,6 +32,59 @@ enum ClaudePluginLocation {
             .appendingPathComponent("hook-events-\(buildTag)", isDirectory: true)
     }
 
+    /// Where Flight Deck runs its plugin from, when the engine writes into plugin folders.
+    ///
+    /// Claude lays its type declarations into `<plugin>/.claude-plugin/types/` every time it loads
+    /// a `--plugin-dir` folder the user owns (probe 1, Outcome 3C). The bundle copy lives inside
+    /// `/Applications/Flight Deck.app`, which the user owns and which is code-signed: that write
+    /// would invalidate the signature on the first claude tab. So the bundle is the source and
+    /// this copy is what claude is pointed at.
+    static var materializedDirectory: URL {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        return base
+            .appendingPathComponent("Flight Deck", isDirectory: true)
+            .appendingPathComponent("claude-plugin-\(buildTag)", isDirectory: true)
+    }
+
+    /// Mirrors `source` into `destination`: copies new and changed files, removes files the
+    /// source no longer ships, and never touches `.claude-plugin/types/`, which is the engine's.
+    /// Compares bytes rather than dates so a reinstall of the same build rewrites nothing — a
+    /// rewrite would hot-reload the module in every open claude tab for no reason.
+    @discardableResult
+    static func materialize(from source: URL, to destination: URL = materializedDirectory) throws -> URL {
+        let fm = FileManager.default
+        try fm.createDirectory(at: destination, withIntermediateDirectories: true)
+        let shipped = try relativeFiles(under: source)
+        for path in shipped {
+            let from = source.appendingPathComponent(path), to = destination.appendingPathComponent(path)
+            let bytes = try Data(contentsOf: from)
+            if (try? Data(contentsOf: to)) != bytes {
+                try fm.createDirectory(at: to.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try bytes.write(to: to, options: .atomic)
+            }
+            if let perms = try fm.attributesOfItem(atPath: from.path)[.posixPermissions] {
+                try fm.setAttributes([.posixPermissions: perms], ofItemAtPath: to.path)
+            }
+        }
+        for path in try relativeFiles(under: destination)
+        where !shipped.contains(path) && !path.hasPrefix(".claude-plugin/types/") {
+            try fm.removeItem(at: destination.appendingPathComponent(path))
+        }
+        return destination
+    }
+
+    private static func relativeFiles(under root: URL) throws -> Set<String> {
+        let base = root.standardizedFileURL.resolvingSymlinksInPath().path
+        guard let walker = FileManager.default.enumerator(at: root, includingPropertiesForKeys: [.isRegularFileKey]) else { return [] }
+        var out: Set<String> = []
+        for case let url as URL in walker {
+            guard try url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile == true else { continue }
+            let full = url.standardizedFileURL.resolvingSymlinksInPath().path
+            out.insert(String(full.dropFirst(base.count + 1)))
+        }
+        return out
+    }
+
     /// Appends the bundled plugin to whatever `--plugin-dir` entries the user already set.
     /// Idempotent: a resume re-resolves options and must not accumulate duplicates.
     static func injecting(into flags: FlagSet, pluginDirectory: URL) -> FlagSet {
@@ -60,6 +113,10 @@ enum ClaudePluginLocation {
         guard case .claude(let flags) = options, let plugin = directory(bundle: bundle) else {
             return options
         }
-        return .claude(injecting(into: flags, pluginDirectory: plugin))
+        // Outcome 3C: run the owned copy, never the signed bundle. A failed copy falls back to
+        // the bundle — a broken signature is recoverable, a claude tab with no hooks is the
+        // silent failure `record.sh`'s header warns about.
+        let runnable = (try? materialize(from: plugin)) ?? plugin
+        return .claude(injecting(into: flags, pluginDirectory: runnable))
     }
 }
