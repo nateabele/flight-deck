@@ -1,28 +1,50 @@
 import Foundation
+import HostKit
 import PairingCore
 
-// The §3.2 interop gates' server, one subcommand per gate:
+// flightdeck-hostd for Linux. The CLI contract `hostd-install.sh` relies on:
+//   serve [--port 47410] [--root DIR]
+//       the host: prints "listening on <port>" once it accepts controllers and admin requests.
+//   pair [--root DIR]
+//       arms a pairing window through the admin socket, prints the code, and waits.
+//       Exit 0 when a controller paired, 1 when the code expired (or burned), 2 when hostd is
+//       not running.
+//   status [--root DIR]      the admin status reply, as JSON. Exit 2 when hostd is not running.
+//   revoke SLOT [--root DIR] unpairs SLOT and cuts its live connections. Exit 1 when SLOT is not
+//                            paired, 2 when hostd is not running.
+//
+// And the §3.2 interop gates' servers:
 //   echo --port N --slot UUID --secret-hex HEX
 //       gate 1: one paired slot, every text frame answered with "echo:" + text.
 //   pair-test --port N --slot UUID --secret-hex HEX --code XXXX-XXXX-XXXX
 //       gate 2: one host-profile pairing window that seals that slot and secret under the
 //       name "interop-host", then exits 0 — or exits 1 when the window burns or expires.
-// Later subcommands (serve) grow from the same listeners.
 
 func usage() -> Never {
     FileHandle.standardError.write(Data("""
-        usage: HostDaemonLinux echo --port N --slot UUID --secret-hex HEX
+        usage: HostDaemonLinux serve [--port N] [--root DIR]
+               HostDaemonLinux pair [--root DIR]
+               HostDaemonLinux status [--root DIR]
+               HostDaemonLinux revoke SLOT [--root DIR]
+               HostDaemonLinux echo --port N --slot UUID --secret-hex HEX
                HostDaemonLinux pair-test --port N --slot UUID --secret-hex HEX --code CODE
 
         """.utf8))
     exit(64)
 }
 
-/// Straight to the fd, not `print`: stdout is block-buffered under `docker run -d`, and the
-/// interop script waits on this exact line in `docker logs`.
-func announceListening(_ port: Int) {
-    FileHandle.standardOutput.write(Data("listening on \(port)\n".utf8))
+/// Straight to the fd, not `print`: stdout is block-buffered under `docker run -d` and under a
+/// pipe, and both the interop script and `hostd-install.sh` wait on these exact lines.
+func say(_ line: String) {
+    FileHandle.standardOutput.write(Data((line + "\n").utf8))
 }
+
+func fail(_ message: String, code: Int32) -> Never {
+    FileHandle.standardError.write(Data("flightdeck-hostd: \(message)\n".utf8))
+    exit(code)
+}
+
+func announceListening(_ port: Int) { say("listening on \(port)") }
 
 func option(_ name: String, in args: [String]) -> String? {
     guard let i = args.firstIndex(of: name), i + 1 < args.count else { return nil }
@@ -42,29 +64,147 @@ func bytes(hex: String) -> [UInt8]? {
     return out
 }
 
+func stateRoot(_ args: [String]) -> URL {
+    option("--root", in: args).map { URL(fileURLWithPath: $0) } ?? HostStateRoot.default()
+}
+
+/// The gates' one paired slot, from `--slot` and `--secret-hex`.
+func gateKey(_ args: [String]) -> (port: Int, slot: UUID, secret: [UInt8]) {
+    guard let port = option("--port", in: args).flatMap(Int.init),
+          let slot = option("--slot", in: args).flatMap(UUID.init(uuidString:)),
+          let secret = option("--secret-hex", in: args).flatMap(bytes(hex:))
+    else { usage() }
+    return (port, slot, secret)
+}
+
 let args = Array(CommandLine.arguments.dropFirst())
-guard let port = option("--port", in: args).flatMap(Int.init),
-      let slot = option("--slot", in: args).flatMap(UUID.init(uuidString:)),
-      let secret = option("--secret-hex", in: args).flatMap(bytes(hex:))
-else { usage() }
 
 switch args.first {
+case "serve":
+    try await serve(args)
+case "pair":
+    pair(root: stateRoot(args))
+case "status":
+    let reply = adminRequest(.status, root: stateRoot(args))
+    say((try? HostWire.encode(reply)) ?? "{}")
+case "revoke":
+    guard args.count > 1, let slot = UUID(uuidString: args[1]) else { usage() }
+    switch adminRequest(.revoke(slot: slot), root: stateRoot(args)) {
+    case .ok: say("revoked \(slot.uuidString)")
+    case .failed(let message): fail(message, code: 1)
+    case let other: fail("unexpected reply \(other)", code: 1)
+    }
 case "echo":
-    try await echo(port: port, slot: slot, secret: secret)
+    let gate = gateKey(args)
+    try await echo(port: gate.port, slot: gate.slot, secret: gate.secret)
 case "pair-test":
+    let gate = gateKey(args)
     guard let code = option("--code", in: args).flatMap(PairingCode.init(normalizing:)) else { usage() }
     do {
         try await NIOPairingResponder.run(
-            code: code, key: FleetDeviceKey(slot: slot, secret: Data(secret)),
-            hostName: "interop-host", port: port, onListening: { announceListening(port) }
+            code: code, key: FleetDeviceKey(slot: gate.slot, secret: Data(gate.secret)),
+            hostName: "interop-host", port: gate.port, onListening: { announceListening(gate.port) }
         )
-        FileHandle.standardOutput.write(Data("paired\n".utf8))
+        say("paired")
     } catch {
         FileHandle.standardError.write(Data("pairing window ended: \(error)\n".utf8))
         exit(1)
     }
 default:
     usage()
+}
+
+func serve(_ args: [String]) async throws {
+    let port = option("--port", in: args).map { Int($0) ?? -1 } ?? HostdPorts.serve
+    guard (1...65535).contains(port) else { usage() }
+    let root = stateRoot(args)
+    // 0700 before anything else touches it: AdminSocketServer refuses a parent that group or
+    // other can write, and controllers.json holds every controller's secret.
+    do {
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true,
+                                                attributes: [.posixPermissions: 0o700])
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: root.path)
+    } catch {
+        fail("cannot prepare state root \(root.path): \(error)", code: 1)
+    }
+    let hostd = LinuxHostd(root: root, port: port, hostName: localHostName())
+    if let seed = option("--test-controller", in: args) {
+        try seedTestController(seed, into: hostd.store)
+    }
+    try await hostd.run()
+}
+
+/// `--test-controller SLOT:HEX` pairs a known key without a SPAKE2 exchange, so the interop
+/// tests can dial `serve` directly. Behind FD_HOSTD_TEST=1 because on a real host it is a way
+/// to install a key nobody paired: a typo'd service file must fail loudly, not open a door.
+func seedTestController(_ spec: String, into store: ControllerStore) throws {
+    guard ProcessInfo.processInfo.environment["FD_HOSTD_TEST"] == "1" else {
+        fail("--test-controller is only accepted when FD_HOSTD_TEST=1", code: 64)
+    }
+    let parts = spec.split(separator: ":", maxSplits: 1).map(String.init)
+    guard parts.count == 2, let slot = UUID(uuidString: parts[0]), let secret = bytes(hex: parts[1]),
+          !secret.isEmpty
+    else { fail("--test-controller wants SLOT:HEX, got \(spec)", code: 64) }
+    // A restarted test container keeps its root; adding the slot twice would list it twice.
+    guard !store.all().contains(where: { $0.slot == slot }) else { return }
+    try store.add(PairedController(slot: slot, name: "test-controller", secret: Data(secret),
+                                   pairedAt: Date()))
+}
+
+/// One admin round trip, exiting 2 when hostd is not running — the code `pair`, `status` and
+/// `revoke` share, so `hostd-install.sh` can tell "start it first" from every other failure.
+func adminRequest(_ request: AdminRequest, root: URL) -> AdminReply {
+    let path = root.appendingPathComponent("admin.sock").path
+    do {
+        return try AdminSocketClient.send(request, path: path)
+    } catch AdminSocketError.notRunning {
+        fail("hostd is not running (no admin socket at \(path))", code: 2)
+    } catch {
+        fail("admin request failed: \(error)", code: 1)
+    }
+}
+
+func pair(root: URL) -> Never {
+    // The baseline before arming: a controller that pairs between the arm and the first poll
+    // still counts, because the count is compared against this.
+    guard case .status(let baseline, _, _, _) = adminRequest(.status, root: root) else {
+        fail("unexpected status reply", code: 1)
+    }
+    guard case .armed(let code, let expiresAt) = adminRequest(.arm, root: root) else {
+        fail("hostd did not arm a pairing window", code: 1)
+    }
+    // An abandoned `pair` must not leave its code live for the rest of the two minutes.
+    signal(SIGINT, SIG_IGN)
+    let interrupt = DispatchSource.makeSignalSource(signal: SIGINT, queue: .global())
+    interrupt.setEventHandler {
+        _ = try? AdminSocketClient.send(.cancelArm, path: root.appendingPathComponent("admin.sock").path)
+        exit(1)
+    }
+    interrupt.resume()
+    say("Pairing code: \(code) (valid 2 minutes)")
+    while true {
+        Thread.sleep(forTimeInterval: 1)
+        guard case .status(let paired, let armedUntil, _, _) = adminRequest(.status, root: root) else {
+            fail("unexpected status reply", code: 1)
+        }
+        if paired > baseline {
+            say("Paired.")
+            exit(0)
+        }
+        // nil also covers a window that burned its three attempts or was cancelled:
+        // either way this code can no longer pair.
+        if armedUntil == nil || Date() > expiresAt {
+            say("The code expired.")
+            exit(1)
+        }
+        // Another `pair` armed a fresh code, which replaced this one (PairingWindow's rule), so
+        // waiting out this code's two minutes would only hide that it can never pair. Compared
+        // with a tolerance because the expiry crossed the wire as a double.
+        if let armedUntil, abs(armedUntil.timeIntervalSince(expiresAt)) > 0.001 {
+            say("The code was replaced by a newer one.")
+            exit(1)
+        }
+    }
 }
 
 func echo(port: Int, slot: UUID, secret: [UInt8]) async throws {

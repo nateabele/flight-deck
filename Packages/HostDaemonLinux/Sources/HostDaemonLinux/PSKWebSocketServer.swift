@@ -30,27 +30,43 @@ final class PSKWebSocketServer: @unchecked Sendable {
                                       promise: nil)
             }
         }
+
+        /// Safe from any thread: `Channel.close` hops to the channel's loop itself.
+        func close() {
+            channel.close(promise: nil)
+        }
     }
+
+    /// The cap on one assembled message, fragments included. The upgrader's `maxFrameSize`
+    /// bounds one frame; without this a peer could stream continuation frames without end.
+    static let maxMessageBytes = 16 << 20
 
     private let host: String
     private let port: Int
     private let keys: @Sendable () -> [String: [UInt8]]
     private let onText: @Sendable (Connection, String) -> Void
+    private let onClose: (@Sendable (Connection) -> Void)?
     private let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
 
+    /// `keys` is read on every handshake, so a slot added or revoked while the server runs
+    /// takes effect on the next connection. `onClose` fires once per upgraded connection, on
+    /// its event loop, after its last `onText`.
     init(host: String, port: Int,
          keys: @escaping @Sendable () -> [String: [UInt8]],
-         onText: @escaping @Sendable (Connection, String) -> Void) {
+         onText: @escaping @Sendable (Connection, String) -> Void,
+         onClose: (@Sendable (Connection) -> Void)? = nil) {
         self.host = host
         self.port = port
         self.keys = keys
         self.onText = onText
+        self.onClose = onClose
     }
 
     /// Binds and returns the bound channel; the caller waits on its `closeFuture`.
     func start() throws -> Channel {
         let keys = self.keys
         let onText = self.onText
+        let onClose = self.onClose
         // Built once up front and discarded, so a configuration BoringSSL rejects (a cipher
         // string it has no suite for) fails the daemon at launch rather than every handshake.
         _ = try NIOSSLContext(configuration: Self.tls(keys: keys, into: SlotAttribute()))
@@ -75,8 +91,13 @@ final class PSKWebSocketServer: @unchecked Sendable {
                     shouldUpgrade: { channel, _ in channel.eventLoop.makeSucceededFuture(HTTPHeaders()) },
                     upgradePipelineHandler: { channel, _ in
                         let connection = Connection(identity: slot.identity ?? "", channel: channel)
-                        return channel.pipeline.addHandler(
-                            WebSocketFrameHandler(connection: connection, onText: onText))
+                        // Synchronously, on the loop this closure already runs on: the handlers
+                        // are not Sendable, so they must not cross into the async addHandlers.
+                        return channel.eventLoop.makeCompletedFuture {
+                            try channel.pipeline.syncOperations.addHandlers(Self.frameHandlers(
+                                connection: connection, maxMessageBytes: Self.maxMessageBytes,
+                                onText: onText, onClose: onClose))
+                        }
                     }
                 )
                 return channel.pipeline.configureHTTPServerPipeline(
@@ -109,6 +130,24 @@ final class PSKWebSocketServer: @unchecked Sendable {
     }
 
     struct UnknownIdentity: Error { let identity: String }
+
+    /// Everything behind the WebSocket upgrade. The aggregator first, because a controller
+    /// may split one message across frames (RFC 6455 §5.4) and the frame handler sees only
+    /// whole ones: before it, the first fragment reached `onText` alone and every continuation
+    /// was dropped, so a large frame arrived as truncated JSON. Its limit errors reach the
+    /// frame handler's `errorCaught`, which closes the connection.
+    static func frameHandlers(connection: Connection, maxMessageBytes: Int,
+                              onText: @escaping @Sendable (Connection, String) -> Void,
+                              onClose: (@Sendable (Connection) -> Void)?) -> [ChannelHandler] {
+        [
+            // No minimum fragment size: the count cap and the byte cap already bound what a
+            // peer can make us hold, and a floor would refuse a legal small trailing fragment
+            // from a client that fragments at its own boundaries.
+            NIOWebSocketFrameAggregator(minNonFinalFragmentSize: 0, maxAccumulatedFrameCount: 4096,
+                                        maxAccumulatedFrameSize: maxMessageBytes),
+            WebSocketFrameHandler(connection: connection, onText: onText, onClose: onClose),
+        ]
+    }
 }
 
 /// Holds the PSK identity a connection's handshake authenticated with. A pass-through handler so
@@ -128,19 +167,30 @@ final class SlotAttribute: ChannelInboundHandler, @unchecked Sendable {
     }
 }
 
-/// Text frames to `onText`; pings answered with pongs (the Darwin side sets `autoReplyPing`, so
-/// the two ends keep each other alive symmetrically); a close is echoed and the channel closed.
+/// Whole text messages to `onText` (fragments are joined ahead of this by the aggregator);
+/// pings answered with pongs (the Darwin side sets `autoReplyPing`, so the two ends keep each
+/// other alive symmetrically); a close is echoed and the channel closed.
 final class WebSocketFrameHandler: ChannelInboundHandler, @unchecked Sendable {
     typealias InboundIn = WebSocketFrame
     typealias OutboundOut = WebSocketFrame
 
     private let connection: PSKWebSocketServer.Connection
     private let onText: @Sendable (PSKWebSocketServer.Connection, String) -> Void
+    private let onClose: (@Sendable (PSKWebSocketServer.Connection) -> Void)?
 
     init(connection: PSKWebSocketServer.Connection,
-         onText: @escaping @Sendable (PSKWebSocketServer.Connection, String) -> Void) {
+         onText: @escaping @Sendable (PSKWebSocketServer.Connection, String) -> Void,
+         onClose: (@Sendable (PSKWebSocketServer.Connection) -> Void)? = nil) {
         self.connection = connection
         self.onText = onText
+        self.onClose = onClose
+    }
+
+    /// Every way a connection ends — the peer's close, a revoke, a TLS or limit error — passes
+    /// through here exactly once, so the host core always hears that the peer is gone.
+    func channelInactive(context: ChannelHandlerContext) {
+        onClose?(connection)
+        context.fireChannelInactive()
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {

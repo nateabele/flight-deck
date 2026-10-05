@@ -40,6 +40,11 @@ packages:
   MarkdownUI:
     url: https://github.com/gonzalezreal/swift-markdown-ui
     exactVersion: 2.4.1
+  # HostKit (Packages/HostKit) is the Foundation-only host protocol shared with the Linux hostd,
+  # which builds it with SwiftPM in a container; a local package rather than an xcodegen
+  # target so both builds compile the one manifest and cannot drift in sources or settings.
+  HostKit:
+    path: Packages/HostKit
 targets:
   FlightDeck:
     type: application
@@ -187,6 +192,10 @@ targets:
       # objects — harmless duplication, and the price of the link test being a real link test.
       - framework: vendor/boringssl-artifacts/BoringSSL.xcframework
         embed: false
+      # The Linux hostd interop tests speak HostWire and read the hostd's controller store
+      # from the Darwin side, so they need the same types the hostd was built from.
+      - package: HostKit
+        product: HostKit
     settings:
       base:
         GENERATE_INFOPLIST_FILE: "YES"

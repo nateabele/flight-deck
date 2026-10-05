@@ -47,6 +47,10 @@ enum NIOPairingResponder {
     /// Opens one window on `port` and returns once the sealed key is out — from the sealed
     /// frame's own write completion, as `PairingListener.onPaired` fires — or throws when the
     /// window burns or expires. `onListening` fires once the port is bound.
+    ///
+    /// Cancelling the calling task ends the window at once with `CancellationError` and
+    /// releases the port: `serve` re-arms by cancelling the old window and binding the same
+    /// port again, and a window that waited out its own deadline would refuse that bind.
     static func run(
         code: PairingCode, key: FleetDeviceKey, hostName: String, port: Int,
         deadline: TimeInterval = 120, onListening: (@Sendable () -> Void)? = nil
@@ -114,13 +118,19 @@ enum NIOPairingResponder {
             .get()
         onListening?()
 
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            loop.execute {
-                window.open(server: server, continuation: continuation)
-                loop.scheduleTask(in: .milliseconds(Int64(deadline * 1000))) {
-                    window.finish(.failure(Failure.windowExpired))
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                loop.execute {
+                    window.open(server: server, continuation: continuation)
+                    loop.scheduleTask(in: .milliseconds(Int64(deadline * 1000))) {
+                        window.finish(.failure(Failure.windowExpired))
+                    }
                 }
             }
+        } onCancel: {
+            // Queued behind `open` on the same loop, and `finish` keeps a verdict reached before
+            // `open`, so a cancel at any point resumes the continuation exactly once.
+            loop.execute { window.finish(.failure(CancellationError())) }
         }
     }
 
@@ -158,7 +168,8 @@ enum NIOPairingResponder {
         /// The verdict, reached once; a deadline or a frame arriving after it changes nothing.
         /// Kept, not just flagged, because peers are accepted from the moment the port binds and
         /// `open` hands over the continuation a moment later — a verdict in between must wait.
-        private var verdict: Result<Void, Error>?
+        /// Readable (not settable) outside so a test can see the verdict without a socket.
+        private(set) var verdict: Result<Void, Error>?
         private var finished: Bool { verdict != nil }
 
         init(loop: EventLoop, code: PairingCode, key: FleetDeviceKey, hostName: String) {
@@ -207,7 +218,12 @@ enum NIOPairingResponder {
             guard !finished else { return drop(peer) }
             guard !peer.paired else { return }
             guard attemptsSpent < NIOPairingResponder.maxAttempts else {
-                return reply(.reject(.attemptsExhausted), to: peer)
+                // Unreachable while the verdict below is reached unconditionally, but a spent
+                // budget with no verdict is exactly the state that left the window open forever,
+                // so this guard ends it too rather than only answering.
+                return reply(.reject(.attemptsExhausted), to: peer) { [self] in
+                    finish(.failure(Failure.attemptsExhausted))
+                }
             }
             switch frame {
             case .pake(let peerMessage):
@@ -236,7 +252,9 @@ enum NIOPairingResponder {
                     attemptsSpent += 1
                     let exhausted = attemptsSpent >= NIOPairingResponder.maxAttempts
                     // The verdict waits on the reject's own write, so the frame that tells the
-                    // controller to ask for a new code is out before the window closes under it.
+                    // controller to ask for a new code is out before the window closes under it
+                    // — but waits on its *completion*, not its success: a peer that hung up
+                    // fails the write, and the budget is spent all the same.
                     reply(.reject(exhausted ? .attemptsExhausted : .badCode), to: peer) { [self] in
                         if exhausted { finish(.failure(Failure.attemptsExhausted)) }
                     }
@@ -280,28 +298,39 @@ enum NIOPairingResponder {
         }
 
         /// One last frame, then close — never a send followed by a close on the next line.
+        /// `then` runs once the write has *completed*, whether or not it succeeded: a reject
+        /// carries no secret, so a failed one changes nothing about what the window decided.
         private func reply(_ frame: PairingServerFrame, to peer: Peer, then: (@Sendable () -> Void)? = nil) {
-            send(frame, to: peer) { [self] in
+            write(frame, to: peer) { [self] _ in
                 drop(peer)
                 then?()
             }
         }
 
+        /// `onSent` runs only on a successful write. A write that failed delivered nothing, so
+        /// it must not count as delivery: success with an unsent key would tell the operator a
+        /// controller paired when none did.
         private func send(_ frame: PairingServerFrame, to peer: Peer, onSent: (@Sendable () -> Void)? = nil) {
+            write(frame, to: peer) { [self] delivered in
+                guard delivered else { return drop(peer) }
+                onSent?()
+            }
+        }
+
+        /// `completed(delivered)` runs on the loop when the write finishes; it runs with false
+        /// straight away for a frame that will not encode.
+        private func write(_ frame: PairingServerFrame, to peer: Peer,
+                           completed: @escaping @Sendable (Bool) -> Void) {
             guard let data = try? JSONEncoder().encode(frame) else {
-                return drop(peer)
+                return completed(false)
             }
             let channel = peer.channel
             let buffer = channel.allocator.buffer(bytes: data)
-            let written = channel.writeAndFlush(WebSocketFrame(fin: true, opcode: .text, data: buffer))
-            guard let onSent else { return }
-            written.whenComplete { [self] outcome in
-                // A write that failed delivered nothing, so it must not count as delivery:
-                // success with an unsent key would tell the operator a controller paired when
-                // none did.
-                if case .failure = outcome { return drop(peer) }
-                onSent()
-            }
+            channel.writeAndFlush(WebSocketFrame(fin: true, opcode: .text, data: buffer))
+                .whenComplete { outcome in
+                    if case .failure = outcome { return completed(false) }
+                    completed(true)
+                }
         }
     }
 }

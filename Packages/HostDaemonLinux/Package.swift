@@ -25,6 +25,9 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.80.0"),
         .package(url: "https://github.com/apple/swift-nio-ssl.git", from: "2.29.0"),
         .package(url: "https://github.com/apple/swift-crypto.git", from: "3.10.0"),
+        // The host protocol core, controller store and admin socket — the same sources the
+        // macOS hostd and the app build, so the two hostds cannot disagree on a frame.
+        .package(path: "../HostKit"),
     ],
     targets: [
         // SPAKE2 from the *pinned* BoringSSL — the same source the Mac and the phone link —
@@ -58,8 +61,20 @@ let package = Package(
                 .product(name: "NIOHTTP1", package: "swift-nio"),
                 .product(name: "NIOWebSocket", package: "swift-nio"),
                 .product(name: "NIOSSL", package: "swift-nio-ssl"),
+                .product(name: "HostKit", package: "HostKit"),
                 "PairingCore",
             ]
+        ),
+        // Linux-only like the rest of the package: run by scripts/test-hostd-linux.sh in the
+        // same container image the interop script builds in.
+        .testTarget(
+            name: "HostDaemonLinuxTests",
+            dependencies: [
+                "HostDaemonLinux",
+                "PairingCore",
+                .product(name: "NIOEmbedded", package: "swift-nio"),
+            ],
+            swiftSettings: [.unsafeFlags(["-Xcc", "-I\(boringSSLInclude)"])]
         ),
     ]
 )
