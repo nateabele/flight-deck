@@ -758,9 +758,11 @@ public final class FleetConnector: @unchecked Sendable {
             serve(request, cid: cid)
             return
         case .hostList, .hostInfo:
-            // Answers to `flightdeck host …`, which only the local CLI asks. The phone has no
-            // pending table for them, so one arriving here is a stray, and a stray reply must
-            // never move the resume point either.
+            // Answers to `flightdeck host …`, which only the local CLI asks today. This connector
+            // is the phone's and has no pending table for them (the phone app never sends
+            // `host.list`/`host.info`, though a paired phone that did would be answered), so
+            // one arriving here is a stray, and a stray reply must never move the resume
+            // point either.
             return
         }
         onFleet?(fleet)

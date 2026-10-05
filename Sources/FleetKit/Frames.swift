@@ -695,7 +695,9 @@ public enum ServerFrame: Codable, Equatable, Sendable {
     /// The reply to `FleetRequest.intakePlan`. Unsequenced, like `page`.
     case intakePlan(cid: Int, WireIntakePlan)
     /// The reply to `FleetRequest.hostList`. Unsequenced, like `page`: link state is not
-    /// fleet state. Never sent to the phone, which never asks.
+    /// fleet state. Only the local CLI asks today; a paired phone that sent
+    /// `host.list` would be answered like any other client, so nothing here depends on the
+    /// phone staying silent. The phone app simply has no screen for it.
     case hostList(cid: Int, [WireHost])
     /// The reply to `FleetRequest.hostInfo`. Unsequenced, like `page`.
     case hostInfo(cid: Int, WireHostInfo)

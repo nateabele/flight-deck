@@ -43,6 +43,29 @@ You should see a "Flight Deck" window with a live shell prompt.
 | `scripts/test-unit.sh` | Runs the headless unit test suite (`FlightDeckTests`) | The actually-working path for unit tests — see below. Needs both xcframeworks staged first, same as `build.sh`. |
 | `scripts/smoke.sh` | Clears saved window *geometry* → `build.sh` → `xcodegen generate` → runs the UI smoke test → prints `SMOKE PASS` | See "One-time UI-automation grant" below. It deliberately does **not** clear sessions or preferences — the app isolates those itself via `-FlightDeckResetState`. |
 
+### The host scripts (HostKit, the Linux hostd)
+
+These need **Docker** (OrbStack here): the Linux hostd builds and tests in `swift:6.3-noble`.
+None of them is part of `build.sh`; `HostKit` and the macOS `HostDaemon` build with the app, and
+the Linux package (`Packages/HostDaemonLinux`) is never seen by Xcode.
+
+| Script | Does | Notes |
+|---|---|---|
+| `scripts/build-boringssl-linux.sh [aarch64\|x86_64]` | Builds `libcrypto.a` from the pinned `vendor/boringssl` → `vendor/boringssl-artifacts/linux-<arch>/` | The Linux hostd's SPAKE2. Separate from swift-nio-ssl's own prefixed BoringSSL, so the two link side by side. Run once per checkout before the interop script or `test-hostd-linux.sh`. Default arch is this machine's. |
+| `scripts/test-hostkit.sh` | `swift test` in `Packages/HostKit` on macOS, then in `swift:6.3-noble` | HostKit is Foundation-only so it compiles on both; the Linux pass is what stops a Darwin-only API creeping in. |
+| `scripts/test-hostd-linux.sh` | `Packages/HostDaemonLinux`'s own tests in `swift:6.3-noble` | Linux only: the package links Linux libcrypto. Shares the package's `.build` with the interop script. |
+| `scripts/test-hostd-linux-interop.sh <mode>` | Builds the Linux hostd, runs it in a container on a published port, then runs the Darwin side through `test-unit.sh` scoped to `LinuxHostdInteropTests` | Modes: `echo` (gate 1: Darwin TLS-PSK to swift-nio-ssl over 0xCCAC, plus a wrong-key refusal), `pair` (gate 2: a Darwin `PairingInitiator(profile: .host)` pairs with the Linux SPAKE2 responder), `pair-wrong` (three wrong codes exhaust the window; the container must exit 1), `serve` (a full hostd on 47410 with pairing on 47411: hello, `host.info`, revoke, pair-then-hello). A gate test that is skipped or not run **fails** the script. |
+| `scripts/build-hostd-linux.sh [arch ...]` | Builds the release assets in `build/hostd-release/`: a static-stdlib tarball per architecture, `hostd-install.sh` with the release URL baked in, `SHA256SUMS`, and `installer.xcconfig` | Default is both architectures; x86_64 is emulated and slow. Run it with **no arguments** before a Release build (see AGENT-OPERATIONS.md §2). Uploads nothing. |
+| `scripts/test-hostd-install.sh` | Runs the pasted install command in `ubuntu:24.04` against a local HTTP server; ends `INSTALL PASS` | Rebuilds aarch64 only and **empties `build/hostd-release/`**; `FD_HOSTD_SKIP_BUILD=1` reuses what is there. |
+| `scripts/hostd-install.sh` | The installer itself, not a build step | The source copy has an `@FD_HOSTD_ASSET_BASE@` placeholder and needs `--asset-base`; `build-hostd-linux.sh` stamps the release URL into the copy that ships. |
+
+**Never run two interop runs at once, or one next to `test-hostd-linux.sh`.** They bind fixed
+host ports (47410, 47411) and share `Packages/HostDaemonLinux/.build`, so the second one fails
+with a bind error or a half-written build tree, neither of which points at the real cause.
+
+`build-boringssl.sh` and `build-boringssl-linux.sh` are different artifacts: the first is the
+macOS/iOS xcframework `FleetKit` links, the second is the Linux static library only the hostd uses.
+
 ## Running tests
 
 **Unit tests** (fast, no special permission):

@@ -79,9 +79,11 @@ final class PairingProfileTests: XCTestCase {
         await fulfillment(of: [paired], timeout: 15)
     }
 
-    /// The phone's bootstrap is byte-for-byte what it was before profiles existed, so a real
-    /// `PairingListener(profile: .phone)` dialled with the public phone client still settles on
-    /// 0x00A8. A drift here would mean every shipped phone negotiating something new.
+    /// A real `PairingListener(profile: .phone)` dialled with the public phone client still
+    /// settles on 0x00A8. This pins what the *listener* chooses, not what the client offers: a
+    /// client mutated to offer 0xCCAC alone would still negotiate 0x00A8 here, because the
+    /// listener appends only 0x00A8. The "same offer as before profiles" claim rests on
+    /// `.phone` carrying `[0x00A8]` (`testProfilesCarryTheirTransportsSuites`), not on this test.
     func testPhonePairingBootstrapStillNegotiatesPSKAES128GCM() async throws {
         let port = try await arm(.phone)
         let negotiated = try await handshake(port, FleetTLS.pairingClientParameters())

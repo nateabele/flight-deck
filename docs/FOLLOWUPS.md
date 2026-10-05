@@ -2312,3 +2312,95 @@ flagged as most likely to differ from the tests. The maintainer's to run.
   The phone now confirms before an Approve that would drop them and offers "Request changes"
   instead, as Plannotator's browser does. Revisit if Claude Code's `PermissionRequest` allow
   decision gains a message.
+
+## From remote hosts, sub-project A: host foundation (2026-10-05)
+
+Pairing, a live link to each host, and `flightdeck host ls|info` landed on branch
+`host-foundation` (plan: [the host-foundation plan](superpowers/plans/2026-10-04-host-foundation.md)).
+What is open, in the order it will bite:
+
+### Not built, not done
+
+- **`flightdeck host update` (spec §3.4) is not built.** The major-version refusal and its
+  "Update Flight Deck on <name>" message are; the command that pushes a new hostd to a host is not.
+  Until it exists, updating a Linux host is re-running the pasted installer.
+- **The hostd release is unpublished.** `build-hostd-linux.sh` makes the assets; nothing uploads
+  them. The Add Host → Linux sheet says the installer is not published until a Release build embeds
+  the digest. Publishing `hostd-v<MARKETING_VERSION>` is the maintainer's step (HANDOFF.md, "Releasing the
+  Linux host").
+- **x86_64 has never been built.** The `swift:6.3-noble` amd64 image pull hangs in OrbStack, so
+  `build-hostd-linux.sh x86_64`, `build-boringssl-linux.sh x86_64` and the `#if arch` branch in the
+  package are untested. A release needs both; do not publish on aarch64 alone.
+- **Linux has no Bonjour without `avahi-publish`.** The hostd publishes `_fd-host._tcp` and
+  `_fd-host-pair._tcp` by running it. A minimal server or container has none, so the user types the
+  address into Add Host → Linux. Pair-by-address dials 47411, so it reaches Linux hosts only; a Mac
+  host is found through Bonjour (its pairing port is random).
+- **The GUI end-to-end checklist is the maintainer's.** Agents cannot run it here (AGENTS.md rule 2). The four
+  checks: pair a second Mac (Settings → Hosting on the target, Hosts → Add Host on the controller,
+  `flightdeck host info <name>` lists Xcode versions); revoke from the host's Hosting tab (controller
+  shows offline within seconds, reconnect refused); pair a Linux box with the pasted command; move
+  the laptop from Wi-Fi to Tailscale and see the host return online with no re-pairing.
+- **P3 (does XCTest UI run from a hostd LaunchAgent?) is unverified** until sub-project C.
+- **Sub-project C is the next plan:** sync, the `run`/`exec`/`up`/`ps`/`recipe` CLI, execution and
+  services, preflight, `delegate.toml`, the agent skill, and deleting `workspaces/<slot>/` on
+  revoke (nothing to delete until C exists). B and D get their own specs.
+- **Never run against real hardware:** the Linux systemd path is tested only against stub
+  `systemctl`/`loginctl`; the installer's tarballs are not reproducible (two builds differ).
+- **The full macOS suite has no baseline for this branch.** Task 2's full run showed about 11
+  failures in unrelated classes (editor and planning timing budgets) at a load average of ~300;
+  nobody ran `56fc926` quiet to prove they are load. Baseline when the machine is idle.
+
+### Deferred minors, by area
+
+**Pairing and the admin socket**
+- `PairingWindow` has no per-window attempt cap of its own; the 3-attempt limit lives in each
+  transport's responder.
+- Admin socket: `writeAll` with `n == 0` leaves a stale `errno`; the accept loop spins without backoff
+  on a persistent accept failure; `acceptThread` is not nil'd after `stop()`.
+- Admin socket: two hostds starting simultaneously can race between the liveness probe and the
+  unlink. A full Darwin backlog may report `ECONNREFUSED`, so `requireDead` could misjudge a
+  saturated live server, and the EAGAIN comment is not accurate for Darwin.
+- Linux `pair`: Ctrl-C's bare `cancelArm` can cancel another `pair`'s newer code; a bind failure on
+  47411 is reported as "code expired".
+- Linux hostd: SIGTERM while a window is armed orphans the `_fd-host-pair` `avahi-publish` child
+  (`exit(0)` skips the `defer`).
+- A pairing that completes after the window was consumed is delivered but not stored. The macOS
+  hostd revokes the just-sealed slot (a late `consume` fails); confirm the Linux responder gates
+  `consume` before the seal in the same way.
+
+**Host core and the stores**
+- `HostServerCore`: a frame with a known op but bad fields is also labelled "unsupported".
+- `ControllerStore.load` returns `[]` silently if the corrupt-aside rename itself fails, and the aside
+  name has 1 s granularity. Two `ControllerStore`s on one root are last-writer-wins.
+- `HostInfoProbe.runCommand`: a timed-out reader thread stays pinned while a wedged grandchild holds
+  the pipe (bounded by the grandchild's life).
+- `PeerIdentities.slot(of:)` trusts the caller to call it after `.ready`; the app does.
+
+**Transports (macOS and Linux)**
+- A macOS listener that repeatedly reaches `.ready` and then fails rebinds without backoff, and a
+  timed-out bind's late `.failed` can double-rebind.
+
+**Controller side (`HostLink`, `HostService`, `HostRegistry`)**
+- A host that acknowledges and immediately closes causes a hot reconnect loop: the attempt counter
+  resets on the win, and a Bonjour re-add cancels the backoff. Fix: reset the attempt only after one
+  stable ping interval.
+- `Handle` and `NetworkHostConnection` have no `deinit` teardown when released without `stop()` (no
+  leak in the app today).
+- The sync-settling pairing driver is retained; IPv6 learned endpoints are unbracketed where paired
+  ones are bracketed; the `endpoints` doc "most recently winning first" overstates.
+- A hostd's error code is passed through unprefixed into the Mac `err` namespace; the relative-date
+  helper is duplicated.
+
+**Settings UI**
+- The UITest reset still registers the real `SMAppServiceAgent`, so its comment overclaims hermeticity.
+- After `.failed` the Hosting tab keeps stale controllers and their Revoke buttons; the revoke
+  read-back uses the current generation.
+- An in-flight pairing survives closing the Add Host sheet (no `cancelPairing` on disappear), and the
+  countdown reaching zero can send `cancelArm` more than once.
+
+**Installer and release**
+- Wrap `hostd-install.sh`'s body in `main()` so a truncated `curl | sh` runs nothing; write
+  `installer.xcconfig` only after a full two-architecture build (a partial run writes a digest the
+  published release cannot match); require an `https` asset base on the app side; give a failed
+  `systemctl enable --now` its own `die` message.
+

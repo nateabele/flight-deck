@@ -54,6 +54,19 @@ What the script guarantees, and why each guarantee exists:
 
 Log: `~/Library/Logs/flight-deck-swap.log`. Rollback is printed at the end of every run.
 
+**Before a Release build, rebuild the Linux hostd for BOTH architectures.** Run
+`./scripts/build-hostd-linux.sh` with no arguments first. It writes
+`build/hostd-release/installer.xcconfig`, which the Release config includes so the app embeds the
+digest of that exact `SHA256SUMS`; a build from a one-architecture run (`build-hostd-linux.sh
+aarch64`, or `test-hostd-install.sh`, which empties the directory and rebuilds aarch64 only)
+would embed a digest the published release cannot match, and every pasted install command would
+then refuse with "checksum mismatch". The script writes the xcconfig even after a partial run (a
+known gap, in FOLLOWUPS), which is why a stale one-architecture xcconfig was deleted from the
+host-foundation worktree. The
+assets must then be uploaded, unchanged, as the GitHub release `hostd-v<MARKETING_VERSION>`;
+**publishing is the maintainer's step**, no script does it ([HANDOFF.md](HANDOFF.md), "Releasing the
+Linux host").
+
 ### Debug bundles fork the fleet — the daemon-root split
 
 `bundle_flavor()` returns one of three outcomes, each refused with its own wording unless
@@ -178,6 +191,34 @@ play and a second instance would be exactly the collision described.
 - `scripts/hangwatch.sh [outdir]` auto-captures a symbolicated stack sample when the main
   thread stalls (beach ball). Leave it running, use the app, samples land in the outdir.
 
+### The host daemon (`flightdeck-hostd`)
+
+Flight Deck can run a second long-lived process of its own: the **hostd**, which lets other Flight
+Decks pair with this machine and run `host info` against it. It is a LaunchAgent
+(`dev.flightdeck.hostd`, registered through `SMAppService` from Settings → Hosting), a child of
+`launchd` and not of the app, so quitting or swapping Flight Deck does not stop it and it
+survives `swap-release.sh`. It listens on **47410** (the host connection) and, only while a
+pairing window is armed, on a second port (47411 on Linux; an ephemeral one on a Mac), and it
+keeps an admin socket at `<state root>/admin.sock`.
+
+- **Stop it with the Hosting toggle** (Settings → Hosting → "Let other Macs use this Mac" off), or
+  from a shell: `launchctl bootout gui/$UID/dev.flightdeck.hostd`. It exits 0 on SIGTERM and
+  unlinks its admin socket. Do not `kill -9` it, least of all mid-pairing: the admin socket file
+  is left behind, and a window that was armed dies with the code the user was reading.
+- **Debug and Release share ONE hostd.** The label, port 47410 and the state root
+  (`~/Library/Application Support/Flight Deck Host`) are the same in both, so there is no
+  "Debug hostd". Enabling Hosting from a Debug build registers the agent from that bundle, so a
+  Release build may find it already registered and running the other build's binary (inferred
+  from the shared label; not observed live). If hosting looks wrong after switching builds, toggle it off and on from the
+  build you mean to use. This is unlike `sessions.json`, which Debug splits off on purpose (see
+  "Debug bundles fork the fleet").
+- **Never launch the hostd binary by hand from `DerivedData/` to "try it".** It binds 47410 and
+  the admin socket in the real state root, which belong to the live hostd.
+- Interop tests (`test-hostd-linux-interop.sh`) bind fixed ports (47410, 47411) and share the
+  package's one `.build`: **never run two at once, and never alongside `test-hostd-linux.sh`.**
+  The loser reports a bind failure or a corrupted build tree that has nothing to do with its code.
+  They also fail if a real hostd is already holding 47410 on the same machine.
+
 ## 4. State: where it lives, what never to delete
 
 | What | Where |
@@ -185,6 +226,8 @@ play and a second instance would be exactly the collision described.
 | Sessions, projects, order, collapse, pins | `~/Library/Application Support/Flight Deck/sessions.json` (atomic write) |
 | Preferences (`preferences.v1`) | `UserDefaults`, domain `dev.flightdeck.FlightDeck` |
 | Window geometry | `UserDefaults` + `~/Library/Saved Application State/…` |
+| Paired hosts (controller side) | `~/Library/Application Support/Flight Deck/hosts.json` (never in `sessions.json`); their secrets in the login Keychain, service `dev.flightdeck.host`, one item per slot |
+| Paired controllers (host side) | `~/Library/Application Support/Flight Deck Host/controllers.json`, mode 0600 in a 0700 directory (Linux: `$XDG_DATA_HOME` or `~/.local/share/flightdeck-hostd`) |
 
 - **Never `defaults delete dev.flightdeck.FlightDeck`.** It nukes preferences; it used to nuke
   every session too, on every smoke run. Delete individual geometry keys only — the list
@@ -192,6 +235,11 @@ play and a second instance would be exactly the collision described.
 - Sessions moved *out* of `UserDefaults` deliberately: `defaults delete` is a routine debugging
   gesture, `cfprefsd` coalesces writes so a `SIGKILL` can drop the last one, and the snapshot
   grows with sessions × projects.
+- **`kSecAttrAccessible` on the host secrets is probably advisory.** `HostSecretStore` sets
+  `AfterFirstUnlockThisDeviceOnly`, but the macOS file-based login keychain (which an
+  unentitled app uses) does not appear to enforce data-protection classes the way the iOS
+  keychain does. Treat the Keychain as "an app-ACL-protected file", not as hardware-bound. Not
+  verified against a data-protection keychain.
 - Test isolation is the **`-FlightDeckResetState YES`** launch argument, not deletion. It makes
   the app start from a fresh slate without touching anything stored.
 

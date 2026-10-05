@@ -129,8 +129,9 @@ public enum FleetTLS {
     /// implement 0x00A8 at all. Its only PSK suites are 0x008C, 0x008D, 0xC035, 0xC036 and
     /// 0xCCAC, and Darwin's default PSK offer (0x00A8/A9/AF/AE) contains none of them. A host
     /// dialled with the phone's suite fails with `NO_SHARED_CIPHER` on the server and `-9824`
-    /// here. Of the shared suites, 0xCCAC is the only AEAD one, and it is the only one with
-    /// forward secrecy (ECDHE).
+    /// here. Of the shared suites, 0xCCAC is the only one that is both AEAD
+    /// and ECDHE (0xC035 and 0xC036 are ECDHE too, but CBC; 0x008C and 0x008D are CBC with no
+    /// forward secrecy).
     static let hostSuites = [
         tls_ciphersuite_t(rawValue: numericCast(TLS_ECDHE_PSK_WITH_CHACHA20_POLY1305_SHA256))!
     ]

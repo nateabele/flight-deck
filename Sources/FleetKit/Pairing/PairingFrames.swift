@@ -24,9 +24,10 @@ import Foundation
 
 /// Phone → Mac, on the pairing channel only.
 ///
-/// **Internal, and that is invariant 3 (spec §6) expressed as visibility.** This vocabulary
-/// contains no `hello` and no `cmd`, and no code outside FleetKit can construct any pairing
-/// frame at all — so "a bootstrap connection must never reach `SessionStore`" is a property of
+/// **SPI-gated, and that is invariant 3 (spec §6) expressed as visibility.** This vocabulary
+/// contains no `hello` and no `cmd`, and no code that has not opted in with
+/// `@_spi(HostPairing) import FleetKit` (only the Linux hostd and the tests do) can construct
+/// any pairing frame at all — so "a bootstrap connection must never reach `SessionStore`" is a property of
 /// what can be said on this socket rather than a check somebody has to remember to write.
 @_spi(HostPairing) public enum PairingClientFrame: Codable, Equatable, Sendable {
     /// The phone's SPAKE2 message, 32 bytes. First frame on the connection.

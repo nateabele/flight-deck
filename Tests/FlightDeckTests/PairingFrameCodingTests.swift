@@ -2,10 +2,12 @@ import Foundation
 import XCTest
 @_spi(HostPairing) @testable import FleetKit
 
-/// `@testable`, deliberately: the pairing frames are internal to FleetKit. Nothing outside
-/// the module can construct one, which is the visibility half of invariant 3 — a caller in
-/// the app cannot accidentally hand a `hello` to the pairing socket because it cannot express
-/// one in this vocabulary at all.
+/// `@_spi(HostPairing) @testable`, deliberately: the pairing frames are SPI, not internal,
+/// because the Linux hostd compiles against them. Only a module that opts in with
+/// `@_spi(HostPairing) import FleetKit` (the app does not) can construct one, which is the
+/// visibility half of invariant 3 — a caller in the app cannot accidentally hand a `hello` to
+/// the pairing socket because it cannot express one in this vocabulary at all. `@testable`
+/// alone would not grant the SPI, which is why both are needed here.
 final class PairingFrameCodingTests: XCTestCase {
     private func roundTrip<Frame: Codable & Equatable>(_ frame: Frame) throws -> Frame {
         try JSONDecoder().decode(Frame.self, from: JSONEncoder().encode(frame))

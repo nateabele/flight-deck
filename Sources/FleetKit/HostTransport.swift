@@ -7,9 +7,12 @@ import Network
 /// exposing the composition rather than its parts keeps a host from being dialled over bare
 /// TLS, which the Linux server would answer with handshake silence.
 ///
-/// Both ends offer `FleetTLS.hostSuites` (0xCCAC), not the phone link's 0x00A8, because the
-/// Linux hostd's BoringSSL has no 0x00A8 (see `hostSuites`). Mac hosts use the same suite, so
-/// a controller has one host transport rather than one per host OS. The phone paths
+/// Both ends lead with `FleetTLS.hostSuites` (0xCCAC), not the phone link's 0x00A8, because
+/// the Linux hostd's BoringSSL has no 0x00A8 (see `hostSuites`). Darwin can only *append* to
+/// its default offer, so this does not pin the suite on a Mac: a Mac listener would still
+/// accept 0x00A8 from a client that offered it. The suite is pinned only on the Linux end
+/// (its BoringSSL cipher list is exactly 0xCCAC, TLS 1.2) and preferred on Darwin. Mac hosts
+/// use the same suite, so a controller has one host transport rather than one per host OS. The phone paths
 /// (`FleetTLS.listenerParameters(keys:)` / `clientParameters(key:)`) are untouched.
 public enum HostTransport {
     /// Authorizes any paired key but records nothing about which one a peer used, so every

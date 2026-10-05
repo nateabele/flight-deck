@@ -7,6 +7,10 @@ import Foundation
 
 /// The constants the two ends of a pairing exchange must agree on byte for byte.
 ///
+/// **The Linux hostd compiles this file** (symlinked into `Packages/HostDaemonLinux`), so keep it
+/// Foundation-only apart from the CryptoKit/swift-crypto switch above: an `import Network` or
+/// Security call here breaks the Linux build, which no macOS or iOS build will catch.
+///
 /// One file, shared by both binaries, because every value here is a place where "the Mac and
 /// the phone each wrote their own" produces a failure that looks like a wrong code: a
 /// different name reaches the SPAKE2 transcript, a different service type finds nothing, a

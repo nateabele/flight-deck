@@ -121,6 +121,89 @@ makes those events invisible to a running `claude`/`codex`: the agent's own pid 
   (replay backpressure, nested-binary code-signing validation) and the debug/release
   socket-directory sharing caveat.
 
+## Hosts (`HostKit` / `HostDaemon` / `HostDaemonLinux` / `Sources/FlightDeck/Hosts/`)
+
+Sub-project A of [the remote-hosts spec](superpowers/specs/2026-10-03-remote-hosts-delegation-design.md):
+pair other machines (a Mac or a Linux box) to this Flight Deck and keep an authenticated link to each.
+It stops at `flightdeck host ls` and `flightdeck host info <name>`; syncing a workspace and running
+commands on a host are sub-project C. Plan: [the host-foundation plan](superpowers/plans/2026-10-04-host-foundation.md).
+
+**The split, and why Xcode never sees NIO.** The Linux hostd needs a server stack Apple's
+frameworks do not give it (SwiftNIO, swift-nio-ssl, swift-nio-websocket), and putting those in
+the Xcode project would pull them, and a second BoringSSL, into the app. So the code is split
+three ways, by what each side can link:
+
+| Piece | Compiles on | Holds |
+|---|---|---|
+| `Packages/HostKit` | macOS and Linux | Everything that is not transport: the host wire, `HostServerCore` (answers `hello`/`host.info`, owns peers by slot), `ControllerStore`, `HostInfoProbe`, `PairingWindow`, the admin socket. Foundation only. |
+| `Sources/HostDaemon` | macOS | `DarwinHostServer`: `HostTransport` (Network.framework TLS-PSK + WebSocket) feeding `HostServerCore`. Embedded in the app and registered as a LaunchAgent. |
+| `Packages/HostDaemonLinux` | Linux | The same wiring on SwiftNIO (`PSKWebSocketServer`), the SPAKE2 responder (`NIOPairingResponder`), the CLI. A standalone SwiftPM package, built only in Docker. |
+
+`HostKit` is also a `FlightDeckTests` dependency, so the core is tested on macOS and again in a Linux
+container. FleetKit's pairing files (`PairingChannel`, `PairingSecrets`, `PairingCode`,
+`FleetDeviceKey`, `PairingFrames`, `PairingProfile`, `SPAKE2Session`) are symlinked into the Linux package as `PairingCore`, so the
+SPAKE2 transcript is one source file compiled twice, not two copies that could drift into a
+"wrong code" failure.
+
+**The two gates.** Both were run against a real Linux container before any other Linux work
+(`scripts/test-hostd-linux-interop.sh`):
+
+- **Gate 1, transport.** Failed as first written: swift-nio-ssl's BoringSSL has no
+  `TLS_PSK_WITH_AES_128_GCM_SHA256` (0x00A8), the phone link's suite. Its PSK suites are 0x008C,
+  0x008D, 0xC035, 0xC036 and 0xCCAC; Darwin's default offer is 0x00A8/A9/AF/AE, so the handshake
+  died with `NO_SHARED_CIPHER`. The maintainer's ruling: **host connections and host pairing use 0xCCAC
+  (`ECDHE-PSK-CHACHA20-POLY1305`) over TLS 1.2; the phone keeps 0x00A8.** Result: Darwin
+  negotiated 0xCCAC against swift-nio-ssl, a handshake plus echo round trip took 13 ms, a wrong
+  key is refused. Darwin can only *append* suites, so a Mac host listener would still accept
+  0x00A8 from a client that offered it; the suite is pinned on the Linux end and preferred on
+  Darwin (`HostTransport`, `FleetTLS.hostSuites`). Never pin a TLS 1.3 minimum: Darwin's PSK
+  silently breaks.
+- **Gate 2, pairing.** A Darwin `PairingInitiator(profile: .host)` completes the SPAKE2 exchange
+  with the Linux `NIOPairingResponder`, both using the pinned `vendor/boringssl`; three wrong
+  codes exhaust the window and the Linux process exits 1.
+
+**Pairing profiles and domain separation.** `PairingProfile` (`Sources/FleetKit/Pairing/`) carries
+what a pairing run must agree on: Bonjour type, the SPAKE2 identity names, and the TLS suites.
+`.phone` is the shipped constants (`_flightdeck-pair._tcp`, 0x00A8); `.host` is `_fd-host-pair._tcp`,
+`flightdeck-controller`/`flightdeck-host`, 0xCCAC. Different names reach the SPAKE2 transcript, so a
+host code cannot be confirmed by a phone listener and the reverse (`testHostInitiatorFailsAgainstPhoneListener`):
+a code read off the wrong screen fails as a wrong code, not as a successful pairing to the wrong kind
+of peer. The pairing frames are `@_spi(HostPairing)` because the Linux module needs to build them and
+the app must not.
+
+**Ports and Bonjour.** The host connection is **47410**. Pairing runs on its own listener, open
+only while a window is armed (2 minutes, 3 attempts): **47411** on Linux, an ephemeral port on a
+Mac (found through Bonjour). Types: `_fd-host._tcp` (a hostd, for the controller's `HostLink`) and
+`_fd-host-pair._tcp` (a window is open, so its presence *is* the "pairable now" signal). Both are
+under the 15-character label limit. On Linux, avahi's `avahi-publish` is used if it is installed;
+without it nothing is advertised and the user types the address.
+
+**The admin socket's trust model.** `<state root>/admin.sock` is how the Hosting tab and
+`flightdeck-hostd pair|status|revoke` drive a *running* hostd (arm, list, revoke). The boundary is
+the filesystem: a `0600` unix socket in a directory the user owns and that is not group- or
+other-writable, checked before bind. It is not authenticated beyond that, so anything running as the
+same user can arm a window, which is already equivalent to that user's other powers. A new hostd
+never takes over a live admin socket and never unlinks its successor's.
+
+**Where secrets live.** Controller side: `hosts.json` (Application Support, never `sessions.json`)
+holds names and addresses; each host's PSK is a Keychain item (`dev.flightdeck.host`). Host side: the
+controllers' PSKs are in `controllers.json`, mode `0600` in a `0700` state root, on both platforms
+(Mac: `~/Library/Application Support/Flight Deck Host`; Linux: `$XDG_DATA_HOME/flightdeck-hostd`
+or `~/.local/share/flightdeck-hostd`). A pairing is one slot per controller; revoking closes that
+controller's live connection within a second and refuses its next connect.
+
+**Placement, and the open question.** The macOS hostd is a LaunchAgent, so it runs in the GUI login
+session (it stops at logout, which the Hosting tab says). That placement is the spec's bet for
+sub-project C: XCTest UI runs need a GUI session. **That bet (probe P3) is unverified** until C
+runs a UI suite from a hostd. Linux is a systemd *user* unit with linger enabled.
+
+**Controller link.** `HostLink` races every stored endpoint plus any Bonjour result in parallel; the
+first `helloAck` wins. It pings every 15 s and drops after three unanswered pings, backs off 1, 2, 4,
+8, 16 then 30 s, and an `NWPathMonitor` change resets the backoff, so an address change (Wi-Fi to
+Tailscale) needs no re-pairing. A major-version mismatch is refused with "Update Flight Deck on
+<name>". The Mac's own control socket answers `host.list` and `host.info` for the CLI
+(`HostProjection`), and the phone's connector ignores those replies.
+
 ## Preferences
 
 `Sources/FlightDeck/Preferences/` holds a pure core and a SwiftUI shell over it.

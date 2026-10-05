@@ -149,6 +149,25 @@ Full command table, wire mapping, and the `--help` output: **[design spec](super
 
 Codex tabs (codex 0.155.1 or newer) reach `flightdeck` through a narrow sandbox grant, for the control socket file only, that Flight Deck adds to their launch line (not when you chose a codex sandbox in Preferences); a blocked agent gets exit `77`. After a codex update, run `./scripts/test-codex-live.sh` to check the grant still holds — see ARCHITECTURE.md, "Codex tabs".
 
+## Remote hosts (sub-project A)
+
+**State:** built on branch `host-foundation` (not merged, not pushed), 12 tasks. A Flight Deck can pair
+a second Mac or a Linux box as a *host*, keep an authenticated link to it, and read its toolchain
+with `flightdeck host ls` and `flightdeck host info <name>`. Settings has two new tabs: Hosts
+(paired hosts, Add Host) and Hosting (this Mac as a host). Nothing executes on a host yet.
+
+- Design: [the remote-hosts spec](superpowers/specs/2026-10-03-remote-hosts-delegation-design.md)
+  (its §3.2 lists the deviations decided while building, including the 0xCCAC ruling).
+- Plan: [the host-foundation plan](superpowers/plans/2026-10-04-host-foundation.md).
+- As built: [ARCHITECTURE.md, "Hosts"](ARCHITECTURE.md#hosts-hostkit--hostdaemon--hostdaemonlinux--sourcesflightdeckhosts);
+  scripts in [BUILD.md](BUILD.md); the hostd process hazards in
+  [AGENT-OPERATIONS.md](AGENT-OPERATIONS.md); open items in [FOLLOWUPS.md](FOLLOWUPS.md).
+- **Next plan: sub-project C** (sync, the `run`/`exec`/`up`/`ps`/`recipe` CLI, execution and services,
+  preflight, `delegate.toml`, the agent skill). It also owns probe P3, the one placement
+  assumption still unverified.
+- **The maintainer's before merging:** the GUI end-to-end checklist (FOLLOWUPS), building both Linux
+  architectures, and publishing the release (next section).
+
 ## Releasing the Linux host (`flightdeck-hostd`)
 
 Settings → Hosts → Add Host → Linux shows one command, `curl -fsSL <base>/hostd-install.sh | sh

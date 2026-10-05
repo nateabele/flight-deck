@@ -54,6 +54,17 @@ or revert blind — check `git status` and leave changes that aren't yours alone
 # The TEST_RUNNER_ prefix is mandatory; without it the case is silently SKIPPED.
 TEST_RUNNER_FLIGHTDECK_FLAKE_HUNT=1 FLIGHTDECK_TEST_THROTTLE=0 ./scripts/smoke.sh
 
+# Hosts (remote machines) — need Docker. See docs/BUILD.md "The host scripts".
+./scripts/build-boringssl-linux.sh   # once per checkout: libcrypto.a for the Linux hostd's SPAKE2
+./scripts/test-hostkit.sh            # Packages/HostKit on macOS, then in swift:6.3-noble
+./scripts/test-hostd-linux.sh        # Packages/HostDaemonLinux's own tests, in a Linux container
+./scripts/test-hostd-linux-interop.sh echo|pair|pair-wrong|serve   # Darwin <-> Linux hostd gates; ONE at a time
+./scripts/build-hostd-linux.sh       # release assets, BOTH arches, into build/hostd-release/ — before a Release build
+./scripts/test-hostd-install.sh      # the pasted installer, end to end in ubuntu:24.04; ends INSTALL PASS
+# (scripts/hostd-install.sh is the installer itself, not a command you run.)
+# Interop runs bind fixed ports 47410/47411 and share Packages/HostDaemonLinux/.build:
+# never run two at once, and never alongside test-hostd-linux.sh.
+
 ./scripts/build-ios.sh          # builds FleetKitiOS + FlightDeckMobile + its test bundle — run after touching Sources/FleetKit or Sources/FlightDeckMobile
 ./scripts/test-ios.sh           # runs FlightDeckMobileTests on a simulator this script creates and deletes
 ./scripts/deploy-phone.sh       # builds, installs and RELAUNCHES on a real device; --release for an optimised build, --no-build to install what is already there
@@ -99,6 +110,10 @@ Releases go through `scripts/swap-release.sh`, run detached — see
 | `Sources/FlightDeck/Preferences/` | Pure flag catalog/parser/serializer/merge + SwiftUI shell. |
 | `Sources/FleetKit/` | Wire types, event fold, pairing payload, and both socket halves — plus both platforms' pairing stores. Swift 6, `Foundation`, `Network`, and `Security` only — compiled for iOS too, which is what enforces that. |
 | `Sources/FlightDeck/Fleet/` | The desktop side: projection, replicator, arming window, and the service that binds the store to the socket. |
+| `Packages/HostKit/` | The host's brain, Foundation-only Swift 6, no Network/Security/CryptoKit so it builds on Linux: the host wire (`hello`, `host.info`), `HostServerCore`, `ControllerStore` (`controllers.json`, 0600), `HostInfoProbe`, `PairingWindow`, and the admin socket. Tested by `scripts/test-hostkit.sh`. |
+| `Packages/HostDaemonLinux/` | The Linux `flightdeck-hostd`: SwiftNIO + swift-nio-ssl transport, the SPAKE2 pairing responder, `main.swift` (`serve`, `pair`, `status`, `revoke`). **Never in the Xcode project** — it is a standalone SwiftPM package built in Docker, so Xcode never sees NIO. |
+| `Sources/HostDaemon/` | The macOS `flightdeck-hostd`: `DarwinHostServer` over `HostTransport`, and the LaunchAgent plist. Embedded in the app bundle. |
+| `Sources/FlightDeck/Hosts/` | The controller side: `HostRegistry` (`hosts.json`), `HostSecretStore` (Keychain), `HostLink` (one live link per host), `HostService`, and the Hosting tab's `HostAdminClient`. |
 | `Sources/FlightDeckMobile/` | The iOS companion app: pairing screen (QR scan or typed code), fleet list. **Keep it flat** — `build-ios.sh`'s type-check fallback globs `*.swift` only, so a subdirectory goes silently unchecked on a machine with no iOS platform. See `docs/MOBILE.md`. |
 | `Tests/FlightDeckTests/` | Headless unit tests. `UITests/` drives the real app. |
 | `Tests/FlightDeckMobileTests/` | The phone app's unit suite, hosted by `FlightDeckMobile` on the simulator. Logic only — SwiftUI layout, the caret and the camera are not reachable; those stay on `docs/MOBILE.md`'s checklists. |
