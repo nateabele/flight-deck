@@ -124,6 +124,21 @@ public final class Runner: RunControlling, @unchecked Sendable {
     private var runs: [String: Run] = [:]
     private var nextNumber = 1
 
+    /// Finished runs kept for `events` and `ps`. Older ones are forgotten (their spool stays on
+    /// disk until the day-old prune): unbounded, a hostd that runs for weeks grows without end.
+    static let retainedFinishedRuns = 200
+    /// Spools untouched for this long are deleted, at startup and at most hourly afterwards.
+    static let spoolRetention: TimeInterval = 24 * 3600
+    private var finishedOrder: [String] = []
+    private var lastPrune = Date.distantPast
+    var retainedRunCount: Int { lock.withLock { runs.count } }
+    /// Test seam: runs before every spool append (a slow or failing disk).
+    var appendHook: (@Sendable () throws -> Void)? {
+        get { lock.withLock { _appendHook } }
+        set { lock.withLock { _appendHook = newValue } }
+    }
+    private var _appendHook: (@Sendable () throws -> Void)?
+
     /// - Parameters:
     ///   - runsRoot: `runs/` under the host's state root; each run spools to `runs/<id>/`.
     ///   - shell: the host user's login shell (§6.1).
@@ -150,6 +165,7 @@ public final class Runner: RunControlling, @unchecked Sendable {
         self.lifecycle = lifecycle
         self.spoolCap = spoolCap
         screen.observe { [weak self] in self?.screenQueueChanged() }
+        pruneOldSpools()
     }
 
     /// `$SHELL` when set, else the passwd entry: hostd under launchd or systemd often has no
@@ -228,17 +244,22 @@ public final class Runner: RunControlling, @unchecked Sendable {
 
     public func cancel(runID: String) {
         guard let run = lock.withLock({ runs[runID] }) else { return }
-        let (phase, alreadyCancelling): (RunPhase, Bool) = lock.withLock {
+        let (phase, alreadyCancelling, launching): (RunPhase, Bool, Bool) = lock.withLock {
             defer { run.cancelRequested = true }
-            return (run.phase, run.cancelRequested)
+            return (run.phase, run.cancelRequested, run.launching)
         }
         switch phase {
         case .queued(.screen):
-            screen.release(runID)
-            update(run) { $0.phase = .exited(.signal(SIGINT)) }
+            terminate(run, .exited(.signal(SIGINT)))
+        case .queued(.slot) where launching:
+            // `launch` already holds the slot and reads `cancelRequested` as it publishes
+            // `.running`, then escalates; ending the run here would orphan its process.
+            break
         case .queued(.slot):
-            // `beginAcquire` sees `cancelRequested` when `acquire` returns or throws, and
-            // releases a slot that arrived too late.
+            // Ends now, not when `acquire` returns: a slot that never frees up would otherwise
+            // leave a cancelled run "queued" forever. A slot that arrives later goes straight
+            // back (`beginAcquire`).
+            terminate(run, .exited(.signal(SIGINT)))
             lock.withLock { run.acquireTask }?.cancel()
         case .running:
             guard !alreadyCancelling else { return }
@@ -283,14 +304,18 @@ public final class Runner: RunControlling, @unchecked Sendable {
     // MARK: - Queueing
 
     private func screenGranted(_ run: Run) {
-        let cancelled: Bool = lock.withLock { run.cancelRequested }
-        if cancelled {
+        // Taken outside the runner lock: an IOKit call has no business under a lock every
+        // `events` subscriber contends on.
+        let display = power.hold(.displaySleep, reason: "Flight Deck screen run \(run.id)")
+        let keep: Bool = lock.withLock {
+            guard !run.phase.isTerminal, !run.cancelRequested else { return false }
+            run.assertions.append(display)
+            return true
+        }
+        guard keep else {
+            display.release()
             screen.release(run.id)
             return
-        }
-        lock.withLock {
-            run.holdsScreen = true
-            run.assertions.append(power.hold(.displaySleep, reason: "Flight Deck screen run \(run.id)"))
         }
         beginAcquire(run)
     }
@@ -301,36 +326,44 @@ public final class Runner: RunControlling, @unchecked Sendable {
     }
 
     private func beginAcquire(_ run: Run) {
-        update(run) { $0.phase = .queued(.slot) }
-        let notice = Task { [weak self] in
-            try await Task.sleep(nanoseconds: Self.slotNoticeDelay)
-            self?.update(run) { $0.slotWaitVisible = true }
-        }
-        let task = Task { [weak self] in
-            let result: Result<CheckoutLease, Error>
-            do { result = .success(try await run.acquire()) } catch { result = .failure(error) }
-            notice.cancel()
-            guard let self else { return }
-            let cancelled = self.lock.withLock { run.cancelRequested }
-            switch result {
-            case .success(let lease) where cancelled:
-                await self.lifecycle.release(lease)
-                self.cancelledBeforeStart(run)
-            case .success(let lease):
-                self.launch(run, in: lease)
-            case .failure where cancelled:
-                self.cancelledBeforeStart(run)
-            case .failure(let error):
-                self.fail(run, error)
+        // The task is stored in the same critical section that publishes `.queued(.slot)`, so a
+        // cancel that sees the phase always finds the task to cancel.
+        update(run) {
+            $0.phase = .queued(.slot)
+            $0.acquireTask = Task { [weak self] in
+                let notice = Task { [weak self] in
+                    try await Task.sleep(nanoseconds: Self.slotNoticeDelay)
+                    self?.update(run) { $0.slotWaitVisible = true }
+                }
+                let result: Result<CheckoutLease, Error>
+                do { result = .success(try await run.acquire()) } catch { result = .failure(error) }
+                notice.cancel()
+                guard let self else { return }
+                switch result {
+                case .success(let lease):
+                    guard self.claimLaunch(run) else {
+                        await self.lifecycle.release(lease)
+                        self.terminate(run, .exited(.signal(SIGINT)))
+                        return
+                    }
+                    self.launch(run, in: lease)
+                case .failure where self.lock.withLock({ run.cancelRequested }):
+                    self.terminate(run, .exited(.signal(SIGINT)))
+                case .failure(let error):
+                    self.fail(run, error)
+                }
             }
         }
-        lock.withLock { run.acquireTask = task }
     }
 
-    private func cancelledBeforeStart(_ run: Run) {
-        if lock.withLock({ run.holdsScreen }) { screen.release(run.id) }
-        releaseAssertions(run)
-        update(run) { $0.phase = .exited(.signal(SIGINT)) }
+    /// Commits the run to starting, unless a cancel got there first. Atomic with `cancel`'s
+    /// read of `launching`, so exactly one of them owns ending the run.
+    private func claimLaunch(_ run: Run) -> Bool {
+        lock.withLock {
+            guard !run.phase.isTerminal, !run.cancelRequested else { return false }
+            run.launching = true
+            return true
+        }
     }
 
     // MARK: - Running
@@ -346,15 +379,12 @@ public final class Runner: RunControlling, @unchecked Sendable {
                                         pty: spec.pty ? (spec.ptySize ?? TerminalSize(columns: 80, rows: 24)) : nil)
         } catch {
             Task { await lifecycle.release(lease) }
-            if lock.withLock({ run.holdsScreen }) { screen.release(run.id) }
             fail(run, error)
             return
         }
         let idle = power.hold(.idleSleep, reason: "Flight Deck run \(run.id)")
         let pump = OutputPump(fds: process.fds) { [weak self] stream, data in
-            guard let self else { return }
-            _ = try? lock.withLock { run.spool }?.append(data, to: stream)
-            update(run) { _ in }
+            self?.appendOutput(run, stream, data)
         }
         // Read in the same critical section that publishes `.running`: a cancel that set the
         // flag earlier saw `.queued` and left the group alone, so it is ours to escalate; one
@@ -382,20 +412,12 @@ public final class Runner: RunControlling, @unchecked Sendable {
     /// On the run's reaper thread, after its leader exited.
     private func finish(_ run: Run, leader exit: RunExit, pump: OutputPump, ptySlave: Int32?) {
         let pgid = lock.withLock { run.pgid }
-        // A pty never reports EOF while hostd holds its slave (see `Spawner`), so it ends when
-        // it goes quiet instead.
-        if ptySlave != nil { pump.finishWhenIdle() }
-        defer { if let ptySlave { close(ptySlave) } }
         // Anything left in the group is a leftover (a background job, a daemon that did not
         // setsid). It would hold the output pipe open, so the run never ends, and keep writing
         // into a checkout the next run is about to reuse.
-        if groupAlive(pgid) { signalGroup(pgid, SIGTERM) }
-        if !pump.waitDone(seconds: 2) {
-            signalGroup(pgid, SIGKILL)
-            // A process that escaped the group (setsid) can still hold a pipe; stop reading.
-            if !pump.waitDone(seconds: 1) { pump.stop() }
-        }
-        if groupAlive(pgid) { signalGroup(pgid, SIGKILL) }
+        reapGroup(pgid)
+        drain(pump)
+        if let ptySlave { close(ptySlave) }
 
         let (spec, lease, cwd, downRequested, cancelRequested) = lock.withLock {
             (run.spec, run.lease, run.cwd, run.downRequested, run.cancelRequested)
@@ -408,16 +430,47 @@ public final class Runner: RunControlling, @unchecked Sendable {
                 do {
                     try await self.lifecycle.atExit(lease, run.id, spec)
                 } catch {
-                    _ = try? self.lock.withLock { run.spool }?.append(
-                        Data("flightdeck: collecting the run's results failed: \(error)\n".utf8), to: spec.pty ? .pty : .stderr)
+                    self.appendOutput(run, spec.pty ? .pty : .stderr,
+                                      Data("flightdeck: collecting the run's results failed: \(error)\n".utf8))
                 }
                 await self.lifecycle.release(lease)
             }
         }
-        if lock.withLock({ run.holdsScreen }) { screen.release(run.id) }
-        releaseAssertions(run)
         let asked = downRequested || cancelRequested
-        update(run) { $0.phase = spec.service && !asked ? .died(exit) : .exited(exit) }
+        terminate(run, spec.service && !asked ? .died(exit) : .exited(exit))
+    }
+
+    /// TERM to whatever is left of the group, KILL if it outlives the grace. Waits on the
+    /// group itself, not the output: a slow disk behind the spool is not a reason to kill.
+    private func reapGroup(_ pgid: pid_t) {
+        func gone(within seconds: Double) -> Bool {
+            let deadline = Date().addingTimeInterval(seconds)
+            while groupAlive(pgid) {
+                if Date() >= deadline { return false }
+                usleep(20_000)
+            }
+            return true
+        }
+        guard groupAlive(pgid) else { return }
+        signalGroup(pgid, SIGTERM)
+        if !gone(within: 2) {
+            signalGroup(pgid, SIGKILL)
+            _ = gone(within: 1)
+        }
+    }
+
+    /// Reads the run's output to its end once its group is gone. What is still in the pipes is
+    /// the run's tail and is always read; the pump ends at EOF, or at the first quiet 100 ms
+    /// for a writer that escaped the group (setsid) and for a pty (which never reports EOF
+    /// while hostd holds its slave). Returns only once the pump thread has exited, so nothing
+    /// can be appended after the run reports its exit.
+    private func drain(_ pump: OutputPump) {
+        pump.finishWhenIdle()
+        // Bounded only against an escapee that never stops writing.
+        if !pump.waitDone(seconds: 60) {
+            pump.stop()
+            _ = pump.waitDone(seconds: .infinity)
+        }
     }
 
     /// The recipe's `down` (§6.2), e.g. `docker compose down`, after the service's group has
@@ -427,13 +480,12 @@ public final class Runner: RunControlling, @unchecked Sendable {
                                                env: hostEnvironment.merging(run.spec.env) { $1 }, pty: nil)
         else { return }
         let pump = OutputPump(fds: process.fds) { [weak self] stream, data in
-            guard let self else { return }
-            _ = try? lock.withLock { run.spool }?.append(data, to: stream)
-            update(run) { _ in }
+            self?.appendOutput(run, stream, data)
         }
         pump.start()
         _ = Spawner.wait(process.pid)
-        if !pump.waitDone(seconds: 2) { pump.stop() }
+        reapGroup(process.pid)
+        drain(pump)
     }
 
     /// Sends `signals[0]` now and each next one after the grace, while the group lives.
@@ -471,7 +523,9 @@ public final class Runner: RunControlling, @unchecked Sendable {
             // 1. Current state.
             switch phase {
             case .queued(.screen):
-                let ev = RunEvent.queued(position: screen.position(of: runID) ?? 1, on: .screen, holder: screen.holder)
+                // At least 1: in the instant between a grant and `.queued(.slot)` the position is 0.
+                let ev = RunEvent.queued(position: max(1, screen.position(of: runID) ?? 1), on: .screen,
+                                         holder: screen.holder)
                 if ev != lastQueued { continuation.yield(ev); lastQueued = ev }
             case .queued(.slot) where visible:
                 let ev = RunEvent.queued(position: 1, on: .slot, holder: nil)
@@ -546,11 +600,81 @@ public final class Runner: RunControlling, @unchecked Sendable {
     }
 
     private func fail(_ run: Run, _ error: Error) {
+        terminate(run, .failed("\(error)"), failure: error)
+    }
+
+    /// The one way a run ends. Every path goes through here so none can leak what the run
+    /// held: the screen lease (a failed screen run would otherwise wedge every later one),
+    /// its power assertions, or its spool's file handles (hostd's soft limit is 256 fds).
+    /// The first terminal phase wins.
+    private func terminate(_ run: Run, _ phase: RunPhase, failure: Error? = nil) {
+        screen.release(run.id)   // a no-op unless the run holds or waits for it
         releaseAssertions(run)
-        update(run) {
-            $0.failure = error
-            $0.phase = .failed("\(error)")
+        let (spool, lost, lostError) = lock.withLock { (run.spool, run.lostBytes, run.lostError) }
+        if lost > 0 {
+            try? spool?.append(Self.lostMarker(lost, lostError), to: run.spec.pty ? .pty : .stderr)
         }
+        spool?.closeHandles()
+        var prune = false
+        update(run) {
+            guard !$0.phase.isTerminal else { return }
+            $0.failure = failure
+            $0.phase = phase
+            // Retired in the same critical section that publishes the end, so the retention
+            // cap holds the moment a subscriber sees the exit.
+            finishedOrder.append($0.id)
+            while finishedOrder.count > Self.retainedFinishedRuns {
+                runs.removeValue(forKey: finishedOrder.removeFirst())
+            }
+            prune = Date().timeIntervalSince(lastPrune) > 3600
+        }
+        if prune { pruneOldSpools() }
+    }
+
+    private func pruneOldSpools() {
+        let fm = FileManager.default
+        let cutoff = Date().addingTimeInterval(-Self.spoolRetention)
+        let live: Set<String> = lock.withLock {
+            lastPrune = Date()
+            return Set(runs.values.filter { !$0.phase.isTerminal }.map(\.id))
+        }
+        guard let names = try? fm.contentsOfDirectory(atPath: runsRoot.path) else { return }
+        for name in names where !live.contains(name) {
+            let dir = runsRoot.appendingPathComponent(name)
+            // The newest of the directory and its files: appending to a spool file does not
+            // touch the directory's own mtime.
+            let files = (try? fm.contentsOfDirectory(atPath: dir.path)) ?? []
+            let newest = ([dir] + files.map { dir.appendingPathComponent($0) })
+                .compactMap { (try? fm.attributesOfItem(atPath: $0.path))?[.modificationDate] as? Date }
+                .max() ?? .distantFuture
+            if newest < cutoff { try? fm.removeItem(at: dir) }
+        }
+    }
+
+    /// Spools `data`, never losing a failure silently: bytes that could not be written (a full
+    /// disk) are counted, and the next write that succeeds is preceded by a marker saying so.
+    private func appendOutput(_ run: Run, _ stream: RunOutputStream, _ data: Data) {
+        let (spool, hook) = lock.withLock { (run.spool, _appendHook) }
+        guard let spool else { return }
+        do {
+            try hook?()
+            let (lost, why) = lock.withLock { (run.lostBytes, run.lostError) }
+            if lost > 0 {
+                try spool.append(Self.lostMarker(lost, why), to: stream)
+                lock.withLock { run.lostBytes = 0 }
+            }
+            try spool.append(data, to: stream)
+        } catch {
+            lock.withLock {
+                run.lostBytes += data.count
+                run.lostError = "\(error)"
+            }
+        }
+        update(run) { _ in }
+    }
+
+    private static func lostMarker(_ bytes: Int, _ why: String) -> Data {
+        Data("\n[flightdeck: \(bytes) bytes of output lost writing the spool: \(why)]\n".utf8)
     }
 
     private func releaseAssertions(_ run: Run) {
@@ -629,7 +753,9 @@ private final class Run: @unchecked Sendable {
     var lease: CheckoutLease?
     var cwd: String?
     var pgid: pid_t = 0
-    var holdsScreen = false
+    var launching = false
+    var lostBytes = 0
+    var lostError = ""
     var assertions: [PowerAssertion] = []
     var cancelRequested = false
     var downRequested = false
@@ -677,7 +803,11 @@ private final class OutputPump: @unchecked Sendable {
     /// True once every fd hit EOF (or the pump was stopped and has closed them).
     func waitDone(seconds: Double) -> Bool {
         if lock.withLock({ finished }) { return true }
-        guard done.wait(timeout: .now() + seconds) == .success else { return false }
+        if seconds.isInfinite {
+            done.wait()
+        } else {
+            guard done.wait(timeout: .now() + seconds) == .success else { return false }
+        }
         lock.withLock { finished = true }
         return true
     }
@@ -721,19 +851,15 @@ private struct SpawnedProcess {
     let ptySlave: Int32?
 }
 
+/// Only fds 0–2 ever reach a run. A run that inherited another run's pipe would hold it open,
+/// so that run never saw EOF; one that inherited hostd's socket could talk to the controller.
+/// The child side closes everything else (`POSIX_SPAWN_CLOEXEC_DEFAULT` on Darwin,
+/// `addclosefrom_np(3)` on glibc ≥ 2.34), and on Linux the parent's own fds are created
+/// close-on-exec atomically (`pipe2`, `O_CLOEXEC`), so a `Process` spawned elsewhere in hostd
+/// cannot catch one mid-setup either.
 private enum Spawner {
-    /// Serializes fd creation with spawning. On Linux there is no CLOEXEC-by-default spawn, so
-    /// a pipe made by one run between `pipe()` and `fcntl(FD_CLOEXEC)` could leak into another
-    /// run's child, which would then hold it open and keep the first run from ever seeing EOF.
-    private static let spawnLock = NSLock()
-
     static func spawn(shell: String, command: String, cwd: String, env: [String: String],
                       pty: TerminalSize?) throws -> SpawnedProcess {
-        try spawnLock.withLock { try spawnLocked(shell: shell, command: command, cwd: cwd, env: env, pty: pty) }
-    }
-
-    private static func spawnLocked(shell: String, command: String, cwd: String, env: [String: String],
-                                    pty: TerminalSize?) throws -> SpawnedProcess {
         #if canImport(Glibc)
         var actions = posix_spawn_file_actions_t()
         var attr = posix_spawnattr_t()
@@ -763,7 +889,7 @@ private enum Spawner {
             // whatever the master has not read yet when the last slave descriptor closes, so
             // without this a run's final lines could vanish as it exits. It is also where the
             // size is set: Darwin resets a size set on the master when the slave first opens.
-            let slave = open(master.slavePath, O_RDWR | O_NOCTTY)
+            let slave = open(master.slavePath, O_RDWR | O_NOCTTY | O_CLOEXEC)
             guard slave >= 0 else {
                 let e = errno
                 close(master.fd)
@@ -791,7 +917,17 @@ private enum Spawner {
                 throw error
             }
         }
-        _ = posix_spawn_file_actions_addchdir_np(&actions, cwd)
+        let chdirRC = posix_spawn_file_actions_addchdir_np(&actions, cwd)
+        #if canImport(Glibc)
+        let closeRC = posix_spawn_file_actions_addclosefrom_np(&actions, 3)
+        #else
+        let closeRC: Int32 = 0
+        #endif
+        guard chdirRC == 0, closeRC == 0 else {
+            cleanup()
+            if let ptySlave { close(ptySlave) }
+            throw RunnerError.spawnFailed(chdirRC != 0 ? chdirRC : closeRC)
+        }
 
         // Default dispositions and an empty mask: hostd ignores SIGPIPE (a dead peer must not
         // kill it), and an ignored signal is inherited across exec, so without this every
@@ -845,7 +981,11 @@ private enum Spawner {
 
     private static func makePipe() throws -> (read: Int32, write: Int32) {
         var fds: [Int32] = [0, 0]
+        #if canImport(Glibc)
+        guard Libc.pipe2(&fds, O_CLOEXEC) == 0 else { throw RunnerError.spawnFailed(errno) }
+        #else
         guard pipe(&fds) == 0 else { throw RunnerError.spawnFailed(errno) }
+        #endif
         return (try cloexecAboveStdio(fds[0]), try cloexecAboveStdio(fds[1]))
     }
 
@@ -854,7 +994,7 @@ private enum Spawner {
     static func cloexecAboveStdio(_ fd: Int32) throws -> Int32 {
         var fd = fd
         if fd <= 2 {
-            let moved = fcntl(fd, F_DUPFD, 3)
+            let moved = fcntl(fd, F_DUPFD_CLOEXEC, 3)
             close(fd)
             guard moved >= 0 else { throw RunnerError.spawnFailed(errno) }
             fd = moved
@@ -885,7 +1025,11 @@ private enum Pty {
     }
 
     static func openMaster() throws -> Master {
+        #if canImport(Glibc)
+        let fd = openpt(O_RDWR | O_NOCTTY | O_CLOEXEC)   // glibc passes flags to open(2)
+        #else
         let fd = openpt(O_RDWR | O_NOCTTY)
+        #endif
         guard fd >= 0 else { throw RunnerError.spawnFailed(errno) }
         var buf = [CChar](repeating: 0, count: 128)
         guard grant(fd) == 0, unlock(fd) == 0, name(fd, &buf, buf.count) == 0 else {
@@ -902,14 +1046,10 @@ private enum Pty {
     // exports them, so they are looked up at runtime instead of hardcoding Linux ioctl numbers.
     private typealias FdCall = @convention(c) (Int32) -> Int32
     private typealias NameCall = @convention(c) (Int32, UnsafeMutablePointer<CChar>?, Int) -> Int32
-    private static func symbol<T>(_ name: String, _ type: T.Type) -> T {
-        // The main program's handle searches every loaded library, libc included.
-        unsafeBitCast(dlsym(dlopen(nil, RTLD_NOW), name)!, to: type)
-    }
-    private static let openpt = symbol("posix_openpt", FdCall.self)
-    private static let grant = symbol("grantpt", FdCall.self)
-    private static let unlock = symbol("unlockpt", FdCall.self)
-    private static let name = symbol("ptsname_r", NameCall.self)
+    private static let openpt = Libc.symbol("posix_openpt", FdCall.self)
+    private static let grant = Libc.symbol("grantpt", FdCall.self)
+    private static let unlock = Libc.symbol("unlockpt", FdCall.self)
+    private static let name = Libc.symbol("ptsname_r", NameCall.self)
     #else
     private static func openpt(_ flags: Int32) -> Int32 { posix_openpt(flags) }
     private static func grant(_ fd: Int32) -> Int32 { grantpt(fd) }
@@ -921,3 +1061,18 @@ private enum Pty {
     }
     #endif
 }
+
+#if canImport(Glibc)
+/// libc calls Swift's Glibc import hides (the XSI pty calls need `_XOPEN_SOURCE`, `pipe2`
+/// needs `_GNU_SOURCE`). libc exports them, so they are looked up at runtime instead of
+/// hardcoding Linux ioctl numbers or syscalls.
+private enum Libc {
+    static func symbol<T>(_ name: String, _ type: T.Type) -> T {
+        // The main program's handle searches every loaded library, libc included.
+        unsafeBitCast(dlsym(dlopen(nil, RTLD_NOW), name)!, to: type)
+    }
+    private typealias Pipe2Call = @convention(c) (UnsafeMutablePointer<Int32>?, Int32) -> Int32
+    private static let pipe2Fn = symbol("pipe2", Pipe2Call.self)
+    static func pipe2(_ fds: inout [Int32], _ flags: Int32) -> Int32 { pipe2Fn(&fds, flags) }
+}
+#endif

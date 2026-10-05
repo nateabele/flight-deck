@@ -551,6 +551,117 @@ final class RunnerTests: XCTestCase {
         XCTAssertNil(r.owner(runID: "nope"))
     }
 
+    // MARK: - Review fix round 1
+
+    private func openFDCount() -> Int {
+        (try? FileManager.default.contentsOfDirectory(atPath: "/dev/fd").count) ?? -1
+    }
+
+    /// hostd is a LaunchAgent with a soft limit of 256 fds: a spool that kept its handles after
+    /// the run ended made `pipe()` fail with EMFILE after about 100 runs, and every run after.
+    func testFinishedRunsLeaveOpenFdCountFlat() async throws {
+        let r = try runner()
+        let lease = try checkout()
+        for _ in 0..<10 { _ = try await collect(r, start(r, spec("echo warm; echo up >&2"), lease)) }
+        let before = openFDCount()
+        for _ in 0..<300 { _ = try await collect(r, start(r, spec("echo out; echo err >&2"), lease)) }
+        let after = openFDCount()
+        XCTAssertLessThanOrEqual(after, before + 2, "fds before \(before), after \(after)")
+        XCTAssertLessThanOrEqual(r.retainedRunCount, Runner.retainedFinishedRuns)
+    }
+
+    func testPrunesRunDirectoriesOlderThanADay() throws {
+        let root = try tempDir("runs")
+        let old = root.appendingPathComponent("r1"), fresh = root.appendingPathComponent("r2")
+        for dir in [old, fresh] { try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true) }
+        try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(-25 * 3600)], ofItemAtPath: old.path)
+        _ = Runner(runsRoot: root, shell: "/bin/sh", hostEnvironment: hostEnv, console: FixedConsole(state: consoleAvailable))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: old.path), "a day-old spool is pruned")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fresh.path))
+    }
+
+    /// A screen run whose slot never came must give the screen back, or every later screen
+    /// run on the host waits forever.
+    func testFailedScreenAcquireReleasesTheLease() async throws {
+        let r = try runner()
+        struct NoSlot: Error {}
+        let failed = r.start(spec("echo never", screen: true),
+                             owner: LeaseHolderOwner(controller: controllerID, session: "A")) { throw NoSlot() }
+        do {
+            _ = try await collect(r, failed)
+            XCTFail("the acquire error ends the run")
+        } catch is NoSlot {}
+        XCTAssertNil(r.screenStatus().holder)
+
+        let next = try await collect(r, start(r, spec("echo next-ran", screen: true), try checkout()))
+        XCTAssertTrue(output(next).contains("next-ran"))
+        XCTAssertEqual(exit(next), .code(0))
+    }
+
+    /// The leader exits with a burst still in the pipe and a slow disk behind the spool: the
+    /// run must wait for EOF, not escalate on a timer and cut the tail, and nothing may be
+    /// appended once the exit is reported.
+    func testSlowSpoolKeepsTheFinalBurstAndNothingFollowsExit() async throws {
+        let r = try runner()
+        // Each append outlasts the old fixed 3 s drain budget on its own.
+        r.appendHook = { usleep(3_500_000) }
+        let id = start(r, spec("head -c 150000 /dev/zero | tr '\\0' a"), try checkout())
+        let events = try await collect(r, id, timeout: 120)
+        XCTAssertEqual(output(events, .stdout).count, 150_000)
+        XCTAssertEqual(events.last, .exited(.code(0)))
+        let replay = try await collect(r, id)
+        try await Task.sleep(nanoseconds: 500_000_000)
+        let later = try await collect(r, id)
+        XCTAssertEqual(output(replay).count, 150_000)
+        XCTAssertEqual(later, replay, "the spool did not grow after the exit")
+    }
+
+    /// A cancelled run waiting on a slot that never arrives ends at once.
+    func testCancelWhileSlotNeverArrivesEndsAtOnce() async throws {
+        let r = try runner()
+        let gate = Gate()
+        let id = r.start(spec("echo must-not-run"), owner: LeaseHolderOwner(controller: controllerID, session: "A")) {
+            await gate.wait()
+            throw CancellationError()
+        }
+        r.cancel(runID: id)
+        let events = try await collect(r, id, timeout: 5)
+        XCTAssertEqual(events, [.exited(.signal(SIGINT))])
+        XCTAssertEqual(r.phase(runID: id), .exited(.signal(SIGINT)))
+    }
+
+    /// Only fds 0–2 reach a run: hostd's sockets and other runs' pipes stay out of it.
+    func testParentFdWithoutCloexecIsNotInherited() async throws {
+        let base = open("/dev/null", O_RDONLY)
+        XCTAssertGreaterThanOrEqual(base, 0)
+        let fd = fcntl(base, F_DUPFD, 150)   // no CLOEXEC on purpose
+        close(base)
+        defer { close(fd) }
+        let r = try runner()
+        let events = try await collect(r, start(r, spec("if [ -e /dev/fd/\(fd) ]; then echo leaked; else echo clean; fi"),
+                                                try checkout()))
+        XCTAssertEqual(output(events, .stdout), "clean\n")
+    }
+
+    /// A spool write that fails (disk full) is reported in the stream, not silently lost.
+    func testFailedAppendLeavesAMarker() async throws {
+        let r = try runner()
+        let failures = Counter(limit: 1)
+        struct DiskFull: Error {}
+        r.appendHook = { if failures.take() { throw DiskFull() } }
+        let events = try await collect(r, start(r, spec("echo first; sleep 0.2; echo second"), try checkout()))
+        let text = output(events)
+        XCTAssertTrue(text.contains("lost"), text)
+        XCTAssertTrue(text.contains("second"), text)
+    }
+
+    private final class Counter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var left: Int
+        init(limit: Int) { left = limit }
+        func take() -> Bool { lock.withLock { left > 0 ? { left -= 1; return true }() : false } }
+    }
+
     // MARK: - Power
 
     func testEveryRunHoldsIdleSleepUntilItEnds() async throws {

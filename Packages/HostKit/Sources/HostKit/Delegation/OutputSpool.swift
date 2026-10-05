@@ -30,7 +30,12 @@ public struct SpoolChunk: Sendable, Equatable {
 /// about one copied byte per byte written; trimming to exactly the cap would rewrite up to
 /// 64 MiB on every chunk of a chatty build.
 ///
-/// **Marker.** A read from before the retained window starts with a synthetic marker line on
+/// **Handles.** Open while the run writes; `closeHandles()` at its end, after which each read
+/// opens and closes what it needs. hostd's soft limit is 256 fds, and a spool per finished
+/// run holding its files open would exhaust it within about a hundred runs.
+///
+/// **Marker.** Synthesized on every read and never written to the files: a read from before
+/// the retained window starts with a marker line on
 /// `markerStream`, placed so it *ends* exactly at the first retained byte. A client resuming at
 /// `offset + count` therefore lands on retained output and never skips any of it; the marker
 /// stands in for the tail of what was dropped.
@@ -53,6 +58,7 @@ public final class OutputSpool: @unchecked Sendable {
     private let lock = NSLock()
     private var entries: [Entry] = []
     private var handles: [RunOutputStream: FileHandle] = [:]
+    private var keepHandles = true
     private var fileSizes: [RunOutputStream: UInt64] = [:]
     private var _start: Int64 = 0
     private var _end: Int64 = 0
@@ -73,11 +79,20 @@ public final class OutputSpool: @unchecked Sendable {
     /// One past the last byte ever appended: every byte the run produced, dropped or not.
     public var end: Int64 { lock.withLock { _end } }
 
+    /// Closes the stream files; later reads reopen them only for as long as they need.
+    public func closeHandles() {
+        lock.withLock {
+            keepHandles = false
+            closeIdleHandles()
+        }
+    }
+
     /// Appends `data` and returns its run-wide offset.
     @discardableResult
     public func append(_ data: Data, to stream: RunOutputStream) throws -> Int64 {
         guard !data.isEmpty else { return end }
         return try lock.withLock {
+            defer { closeIdleHandles() }
             let handle = try handle(for: stream)
             let fileOffset = fileSizes[stream, default: 0]
             try handle.seek(toOffset: fileOffset)
@@ -95,6 +110,7 @@ public final class OutputSpool: @unchecked Sendable {
     /// any output lies past `offset`), none larger than `maxChunk`.
     public func read(from offset: Int64, maxBytes: Int = 1 << 20) throws -> [SpoolChunk] {
         try lock.withLock {
+            defer { closeIdleHandles() }
             var out: [SpoolChunk] = []
             var budget = maxBytes
             var pos = max(offset, 0)
@@ -134,6 +150,12 @@ public final class OutputSpool: @unchecked Sendable {
         let h = try FileHandle(forUpdating: url)
         handles[stream] = h
         return h
+    }
+
+    private func closeIdleHandles() {
+        guard !keepHandles else { return }
+        for handle in handles.values { try? handle.close() }
+        handles = [:]
     }
 
     private func firstEntry(containing pos: Int64) -> Int {
@@ -188,8 +210,10 @@ public final class OutputSpool: @unchecked Sendable {
             rewritten.append(Entry(stream: e.stream, offset: e.offset, fileOffset: at, length: e.length))
             newSizes[e.stream] = at + UInt64(e.length)
         }
-        for (stream, h) in handles {
-            try h.close()
+        // Every stream ever written, not just those with an open handle, so a stream with
+        // nothing retained is still emptied.
+        for stream in Set(fileSizes.keys).union(handles.keys) {
+            try handles[stream]?.close()
             let url = directory.appendingPathComponent(stream.rawValue)
             let tmp = directory.appendingPathComponent(stream.rawValue + ".compact")
             if let t = temps.removeValue(forKey: stream) {
