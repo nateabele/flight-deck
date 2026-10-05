@@ -228,9 +228,11 @@ def write_executable(path, body):
 def guard_message():
     path = os.path.join(CAPTURED, "guard-block.txt")
     if os.path.exists(path):
-        for line in open(path):
-            if "file reservation conflict detected" in line:
-                return line.strip()
+        # The whole block, not one line: the guard wraps, and the file, pattern and holder AgentOutputScan
+        # needs are on the line after the "conflict detected!" marker.
+        text = open(path).read().strip()
+        if "file reservation conflict detected" in text:
+            return text
     return SPIKE_MESSAGE
 
 
