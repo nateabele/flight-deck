@@ -333,6 +333,11 @@ final class CodexProcessTransport: CodexTransport {
     /// case is expected to have already been rejected by a prior `CodexVersionProbe.check`,
     /// since `env` succeeds at launching even when the *target* it names does not exist.
     func start() throws {
+        // Here rather than at app launch, so a user who never opens a codex tab never gets a
+        // file written into their codex home. It also runs before any of this account's tabs
+        // spawns its TUI, so even the first tab starts with the skill already on disk.
+        CodexDelegateSkill.installBundled(codexHome: home)
+
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
         process.arguments = [executable, "app-server"]
         process.standardInput = stdin
