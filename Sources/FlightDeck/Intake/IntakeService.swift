@@ -308,6 +308,12 @@ final class IntakeService: ObservableObject {
     /// Speaks a state change to VoiceOver (spec §14's live regions) — `postAnnouncement` in the
     /// app, a recorder in tests. Called only with `announcement(from:to:)`'s words.
     private let announce: (String) -> Void
+
+    /// L3-R: who routes the tasks a release creates. Resolved at release time rather than passed
+    /// to `init`: `SessionStore` builds this service lazily, and its routing is attached by
+    /// `FlightDeckApp` after the store exists. nil releases tasks with no block; the launch-time
+    /// re-route (L3-S) routes them then.
+    var encodeRouting: () -> (any EncodeRoutingProviding)? = { nil }
     /// The deferred launch recovery, so tests (and nothing else) can await it.
     private(set) var launchRecovery: Task<Void, Never>?
 
@@ -1403,8 +1409,11 @@ final class IntakeService: ObservableObject {
 
         let actor = "flightdeck-intake:\(id.uuidString)"
         let steps = ApplyPlanner.plan(validated, skipping: [])
+        // Routed before the first write, so a create lands with its block in one `br create`
+        // instead of a create plus an update that a failure between them could split.
+        let contexts = await encodeRouting()?.agentContexts(for: steps, project: i.projectPath) ?? [:]
         let outcome = await BeadWriter(runner: processRunner, brPath: brPath, actor: actor)
-            .apply(steps, project: i.projectPath)
+            .apply(steps, project: i.projectPath, agentContexts: contexts)
 
         // The plan is ordered and BeadWriter stops at the first failure, so exactly
         // `steps[..<applied]` landed. A notice says "this bead changed", so it goes only to
@@ -1749,7 +1758,8 @@ final class IntakeService: ObservableObject {
         }
         return Triage.initialPrompt(
             intent: i.intent, graphFile: files.graph.path, triageFile: files.bv.path,
-            agentsFile: existing("AGENTS.md"), readmeFile: existing("README.md"), observedAt: observedAt)
+            agentsFile: existing("AGENTS.md"), readmeFile: existing("README.md"), observedAt: observedAt,
+            kinds: KindRegistryStore.promptKinds(project: URL(fileURLWithPath: i.projectPath, isDirectory: true)))
     }
 
     // MARK: - Plumbing

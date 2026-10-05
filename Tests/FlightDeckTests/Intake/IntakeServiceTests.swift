@@ -543,3 +543,50 @@ final class SystemHeadlessRunnerTests: XCTestCase {
         XCTAssertTrue(out.stderr.contains("signal 9"), out.stderr)
     }
 }
+
+@MainActor
+private final class FakeEncodeRouting: EncodeRoutingProviding {
+    var contexts: [String: String] = [:]
+    private(set) var calls: [(steps: [ApplyStep], project: String)] = []
+    func agentContexts(for steps: [ApplyStep], project: String) async -> [String: String] {
+        calls.append((steps, project))
+        return contexts
+    }
+}
+
+/// L3-R §4: release asks routing for each created task's block and hands it to the writer, and
+/// triage — which encodes at single-task fidelity — is told the project's kinds.
+extension IntakeServiceTests {
+    func testReleaseWritesTheRoutedAgentContextOnCreate() async {
+        let br = MutableRunner(Self.brReplies(Self.openGraph).merging(
+            ["br create": (#"{"id":"b9"}"#, 0), "br sync": ("", 0)]) { $1 })
+        let svc = makeService(headless: FakeHeadlessRunner([Self.codex(Self.beadRec(Self.createOp))]), br: br)
+        let routing = FakeEncodeRouting()
+        routing.contexts = ["n1": #"{"flight_deck":{"execution":{"v":1}}}"#]
+        svc.encodeRouting = { routing }
+        let id = await capture(svc)
+        await svc.release(id)
+        XCTAssertEqual(intake(svc, id).state, .released)
+        XCTAssertEqual(routing.calls.first?.project, "/p")
+        let create = br.calls.first { $0.prefix(2) == ["br", "create"] }!
+        XCTAssertEqual(create[create.firstIndex(of: "--agent-context")! + 1], #"{"flight_deck":{"execution":{"v":1}}}"#)
+    }
+
+    func testReleaseWithoutRoutingWritesNoAgentContext() async {
+        let br = MutableRunner(Self.brReplies(Self.openGraph).merging(
+            ["br create": (#"{"id":"b9"}"#, 0), "br sync": ("", 0)]) { $1 })
+        let svc = makeService(headless: FakeHeadlessRunner([Self.codex(Self.beadRec(Self.createOp))]), br: br)
+        let id = await capture(svc)
+        await svc.release(id)
+        XCTAssertEqual(intake(svc, id).state, .released)
+        XCTAssertFalse(br.calls.first { $0.prefix(2) == ["br", "create"] }!.contains("--agent-context"))
+    }
+
+    func testTriageIsToldTheProjectsKinds() async {
+        let headless = FakeHeadlessRunner([Self.codex(Self.questions)])
+        let svc = makeService(headless: headless, br: MutableRunner(Self.brReplies(Self.openGraph)))
+        _ = await capture(svc)
+        let prompt = headless.commands.first?.arguments.last ?? ""
+        XCTAssertTrue(prompt.contains("- `implement-simple` — "), "a project with no kinds.json is offered the seed set")
+    }
+}
