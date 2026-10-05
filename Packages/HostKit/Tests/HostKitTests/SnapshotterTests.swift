@@ -270,6 +270,28 @@ final class SnapshotterTests: XCTestCase {
         XCTAssertEqual(try repo.git("for-each-ref", "refs/flightdeck/"), "", "a refused snapshot records nothing")
     }
 
+    /// The root commit cache must not outlive the repository it describes: a repo re-created
+    /// at the same path (a fresh clone, `rm -rf` + `init`) has a different root and must name
+    /// a different host store.
+    func testRootCommitCacheFollowsTheRepositoryNotThePath() async throws {
+        let scratch = TempRepo.scratch()
+        let path = scratch.appendingPathComponent("repo")
+        let first = try TempRepo(at: path)
+        first.write("a.txt", "one\n")
+        try first.commitAll("one")
+        let r1 = try await Snapshotter().snapshot(worktree: path, host: "mini", include: [])
+        // Moved, not deleted, so its .git keeps its inode and the new one cannot reuse it.
+        try FileManager.default.moveItem(at: path, to: scratch.appendingPathComponent("old"))
+        let second = try TempRepo(at: path)
+        second.write("b.txt", "two\n")
+        try second.commitAll("two")
+
+        let r2 = try await Snapshotter().snapshot(worktree: path, host: "mini", include: [])
+
+        XCTAssertEqual(r2.repoRoot, try second.git("rev-parse", "HEAD"))
+        XCTAssertNotEqual(r2.repoRoot, r1.repoRoot)
+    }
+
     /// LFS is refused *before* `add`: with git-lfs installed, `add` runs its clean filter over
     /// every matching file (slow, and it writes LFS objects into the user's repo) only to be
     /// refused afterwards. The filter here leaves a marker if it ever runs.
@@ -436,6 +458,44 @@ final class GitRunnerTests: XCTestCase {
         XCTAssertLessThan(Date().timeIntervalSince(start), 8)
         for _ in 0..<100 where openFDs() > before { try await Task.sleep(nanoseconds: 100_000_000) }
         XCTAssertLessThanOrEqual(openFDs(), before)
+    }
+
+    /// One failed `git --version` (a transient fork failure, a wrapper's hiccup) must not be
+    /// cached as "too old" and refuse every sync until the process restarts.
+    func testFailedVersionProbeIsNotCached() throws {
+        let dir = TempRepo.scratch()
+        let marker = dir.appendingPathComponent("first")
+        let script = dir.appendingPathComponent("git")
+        let real = try TempRepo.git(["--exec-path"], in: dir)   // proves a real git exists
+        XCTAssertFalse(real.isEmpty)
+        let gitPath = ["/usr/bin/git", "/opt/homebrew/bin/git", "/usr/local/bin/git"].first { FileManager.default.isExecutableFile(atPath: $0) }!
+        try "#!/bin/sh\nif [ ! -e '\(marker.path)' ]; then touch '\(marker.path)'; exit 1; fi\nexec \(gitPath) \"$@\"\n"
+            .write(to: script, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
+        let old = ProcessInfo.processInfo.environment["PATH"]!
+        setenv("PATH", "\(dir.path):\(old)", 1)
+        let git = GitRunner()
+        setenv("PATH", old, 1)
+
+        for _ in 0..<3 {
+            XCTAssertTrue(try git.text(["--version"]).hasPrefix("git version"))
+        }
+    }
+
+    /// Children the process spawns later (the hostd's runs and services) must get SIGPIPE's
+    /// default action: an ignored SIGPIPE is inherited across exec, and `producer | head`
+    /// would then spin on EPIPE instead of dying quietly.
+    func testChildrenKeepDefaultSIGPIPE() throws {
+        _ = try GitRunner().run(["hash-object", "--stdin"], input: Data(count: 1 << 20))
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/sh")
+        p.arguments = ["-c", "kill -PIPE $$; echo survived"]
+        let out = Pipe()
+        p.standardOutput = out
+        try p.run()
+        let text = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        p.waitUntilExit()
+        XCTAssertEqual(text, "", "the child ignored SIGPIPE: it was inherited")
     }
 
     /// git exiting without reading its stdin must not kill the caller with SIGPIPE: in the

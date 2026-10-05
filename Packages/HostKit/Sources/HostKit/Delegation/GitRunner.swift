@@ -148,6 +148,11 @@ public struct GitRunner: Sendable {
             .first { FileManager.default.isExecutableFile(atPath: $0.path) }
     }
 
+    /// The most paths one command line carries. NSTask refuses more than 4,096 arguments with an
+    /// Objective-C exception Swift cannot catch (the process aborts), and long paths reach the
+    /// kernel's ARG_MAX sooner still; a path list longer than this is split or sent on stdin.
+    static let argumentBatch = 500
+
     /// For the calls that move a whole repository: a first `bundle create`, its `fetch`, and a
     /// big `checkout` can legitimately take far longer than the default.
     public static let longTimeout: TimeInterval = 3600
@@ -165,7 +170,6 @@ public struct GitRunner: Sendable {
 
     private func execute(_ executable: URL, _ args: [String], in dir: URL?, env: [String: String], input: Data?,
                          accept: Set<Int32>, timeout: TimeInterval) throws -> Output {
-        Self.ignoreSIGPIPE
         let p = Process()
         p.executableURL = executable
         p.arguments = args
@@ -198,10 +202,7 @@ public struct GitRunner: Sendable {
         }
         if let inPipe, let input {
             DispatchQueue.global().async {
-                // A git that exits without reading all of stdin makes this write fail with
-                // EPIPE; with SIGPIPE ignored that is an error we drop, not a dead process.
-                try? inPipe.fileHandleForWriting.write(contentsOf: input)
-                try? inPipe.fileHandleForWriting.close()
+                Self.writeWithoutSIGPIPE(input, to: inPipe.fileHandleForWriting)
             }
         }
 
@@ -224,30 +225,65 @@ public struct GitRunner: Sendable {
         return result
     }
 
-    /// SIGPIPE's default action kills the whole process, and in the hostd that is every run and
-    /// service on the host. Writing stdin to a git that has already exited raises it, so the
-    /// process ignores it once and write errors surface as EPIPE instead. Process-wide by
-    /// nature; every server process wants this anyway.
-    private static let ignoreSIGPIPE: Void = { signal(SIGPIPE, SIG_IGN) }()
+    /// Writes `data` and closes `handle` without SIGPIPE. git can exit without reading all of
+    /// its stdin, and the write then raises SIGPIPE, whose default action kills the whole
+    /// process: in the hostd, every run and service on the host. Ignoring it process-wide
+    /// instead would be inherited across exec by everything the process later spawns, so
+    /// `producer | head` in a delegated run would spin on EPIPE. So the signal is suppressed
+    /// for this one write, and the write fails with EPIPE (dropped: git's exit status is what
+    /// matters).
+    ///
+    /// macOS raises it process-wide, so masking one thread would only move it to another;
+    /// `F_SETNOSIGPIPE` turns it off for this descriptor. Linux raises it at the writing
+    /// thread, so it is blocked there and the pending signal consumed before the mask returns.
+    private static func writeWithoutSIGPIPE(_ data: Data, to handle: FileHandle) {
+        #if canImport(Darwin)
+        _ = fcntl(handle.fileDescriptor, F_SETNOSIGPIPE, 1)
+        try? handle.write(contentsOf: data)
+        try? handle.close()
+        #else
+        var pipeOnly = sigset_t()
+        sigemptyset(&pipeOnly)
+        sigaddset(&pipeOnly, SIGPIPE)
+        var previous = sigset_t()
+        pthread_sigmask(SIG_BLOCK, &pipeOnly, &previous)
+        try? handle.write(contentsOf: data)
+        try? handle.close()
+        var pending = sigset_t()
+        sigpending(&pending)
+        if sigismember(&pending, SIGPIPE) == 1 {
+            var caught: Int32 = 0
+            sigwait(&pipeOnly, &caught)
+        }
+        pthread_sigmask(SIG_SETMASK, &previous, nil)
+        #endif
+    }
 
     private static let versionLock = NSLock()
-    nonisolated(unsafe) private static var checkedVersions: [String: String?] = [:]
+    /// Executables whose version parsed and was new enough. Only a *parsed* verdict is
+    /// cached: one failed `--version` (a transient fork failure, a wrapper's hiccup) must not
+    /// pin "too old" on the executable for the rest of the process's life.
+    nonisolated(unsafe) private static var supported: Set<String> = []
 
     /// Checks `git --version` once per executable. `merge-tree --write-tree --merge-base`
     /// (apply) needs 2.40; an older git would otherwise fail deep inside an apply with a usage
-    /// error that names neither the cause nor the fix.
+    /// error that names neither the cause nor the fix. An unparseable answer refuses nothing:
+    /// the real command runs and fails, or not, on its own terms, and the next call asks again.
     private static func requireSupported(_ executable: URL, environment: [String: String]) throws {
-        let cached = versionLock.withLock { checkedVersions[executable.path] }
-        if let cached {
-            if let tooOld = cached { throw SyncError.gitTooOld(tooOld) }
-            return
-        }
+        if versionLock.withLock({ supported.contains(executable.path) }) { return }
         let probe = GitRunner(isolated: true)
         let text = (try? probe.execute(executable, ["--version"], in: nil, env: environment, input: nil,
                                        accept: [0], timeout: 30).text) ?? ""
-        let verdict: String? = isSupported(versionOutput: text) ? nil : (text.split(separator: " ").dropFirst(2).first.map(String.init) ?? text)
-        versionLock.withLock { checkedVersions[executable.path] = .some(verdict) }
-        if let verdict { throw SyncError.gitTooOld(verdict) }
+        guard let version = parsedVersion(text) else { return }
+        guard isSupported(versionOutput: text) else { throw SyncError.gitTooOld(version) }
+        versionLock.withLock { _ = supported.insert(executable.path) }
+    }
+
+    /// The `X.Y.Z` of `git version X.Y.Z…`, or nil when the output is not that.
+    private static func parsedVersion(_ output: String) -> String? {
+        let words = output.split(separator: " ")
+        guard words.count >= 3, words[0] == "git", words[1] == "version", words[2].first?.isNumber == true else { return nil }
+        return String(words[2])
     }
 
     /// True for `git version X.Y…` with X.Y ≥ 2.40.
@@ -315,5 +351,12 @@ enum SyncName {
             throw SyncError.invalidName(id)
         }
         return id
+    }
+}
+
+extension Array {
+    /// Consecutive slices of at most `size` elements.
+    func chunked(_ size: Int) -> [ArraySlice<Element>] {
+        stride(from: 0, to: count, by: size).map { self[$0..<Swift.min($0 + size, count)] }
     }
 }

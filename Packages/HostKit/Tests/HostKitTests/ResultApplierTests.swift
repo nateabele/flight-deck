@@ -230,4 +230,85 @@ final class ResultApplierTests: XCTestCase {
         XCTAssertEqual(outcome, .clean)
         XCTAssertEqual(repo.read("new.crlf"), "a\r\nb\r\n")
     }
+
+    // MARK: - Fix round 2 (reviewer's probes, ZProbeTests)
+
+    func blob(_ repo: TempRepo, _ text: String) throws -> String {
+        try repo.git("hash-object", "-w", "--stdin", input: text)
+    }
+
+    /// APFS folds case: a forged `A -> .git` symlink written first makes `a/hooks/pre-commit`
+    /// land in `.git/hooks`. A check that ran once, before the symlink existed, saw nothing.
+    func testCaseVariantSymlinkCannotPlantHook() async throws {
+        let repo = try makeRepo()
+        let hooks = try repo.git("mktree", input: "100755 blob \(try blob(repo, "#!/bin/sh\necho PWNED\n"))\tpre-commit\n")
+        let a = try repo.git("mktree", input: "040000 tree \(hooks)\thooks\n")
+        try forge(repo, runID: "r1", extra: [("120000", "blob", try blob(repo, ".git"), "A"), ("040000", "tree", a, "a")])
+
+        let error = await thrown { try await ResultApplier().apply(worktree: repo.url, runID: "r1") }
+
+        guard case .unsafePath? = error as? SyncError else { return XCTFail(String(describing: error)) }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: repo.url.appendingPathComponent(".git/hooks/pre-commit").path))
+        XCTAssertNil(try? FileManager.default.destinationOfSymbolicLink(atPath: repo.url.appendingPathComponent("A").path))
+    }
+
+    /// APFS also folds Unicode normalization: NFC `café` and NFD `café` are one directory entry.
+    func testNormalizationVariantSymlinkCannotEscape() async throws {
+        let repo = try makeRepo()
+        let outside = TempRepo.scratch()
+        let payload = try repo.git("mktree", input: "100644 blob \(try blob(repo, "evil\n"))\tpayload\n")
+        try forge(repo, runID: "r1", extra: [("120000", "blob", try blob(repo, outside.path), "caf\u{e9}"),
+                                             ("040000", "tree", payload, "cafe\u{301}")])
+
+        let error = await thrown { try await ResultApplier().apply(worktree: repo.url, runID: "r1") }
+
+        guard case .unsafePath? = error as? SyncError else { return XCTFail(String(describing: error)) }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: outside.appendingPathComponent("payload").path))
+    }
+
+    /// The same collision aimed at an absolute target outside the repository.
+    func testAbsoluteTargetSymlinkCollisionRefused() async throws {
+        let repo = try makeRepo()
+        let outside = TempRepo.scratch()
+        let payload = try repo.git("mktree", input: "100644 blob \(try blob(repo, "evil\n"))\tpayload\n")
+        try forge(repo, runID: "r1", extra: [("120000", "blob", try blob(repo, outside.path), "Out"),
+                                             ("040000", "tree", payload, "out")])
+
+        let error = await thrown { try await ResultApplier().apply(worktree: repo.url, runID: "r1") }
+
+        guard case .unsafePath? = error as? SyncError else { return XCTFail(String(describing: error)) }
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: outside.path), [])
+    }
+
+    /// A symlink planted on disk *during* the apply (after every up-front check) must still
+    /// stop the write beneath it: the parent walk is repeated right before each write.
+    func testSymlinkAppearingMidApplyStopsTheWrite() async throws {
+        let repo = try makeRepo()
+        let outside = TempRepo.scratch()
+        try forge(repo, runID: "r1", extra: [("040000", "tree", try repo.git("mktree", input: "100644 blob \(try blob(repo, "x\n"))\tpayload\n"), "late")])
+        let link = repo.url.appendingPathComponent("late")
+        let applier = ResultApplier(beforeWrite: { try? FileManager.default.createSymbolicLink(at: link, withDestinationURL: outside) })
+
+        let error = await thrown { try await applier.apply(worktree: repo.url, runID: "r1") }
+
+        guard case .unsafePath? = error as? SyncError else { return XCTFail(String(describing: error)) }
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: outside.path), [])
+    }
+
+    /// NSTask refuses more than 4,096 arguments with an exception Swift cannot catch: one argv
+    /// carrying every changed path aborted the app on a result with ~4,090 paths.
+    func testEightThousandPathsApply() async throws {
+        let repo = try makeRepo()
+        let b = try blob(repo, "y\n")
+        let pad = String(repeating: "p", count: 150)
+        let files = (0..<8000).map { "100644 blob \(b)\t\(pad)\($0).txt" }
+        let dir = try repo.git("mktree", input: files.joined(separator: "\n") + "\n")
+        try forge(repo, runID: "r1", extra: [("040000", "tree", dir, "many")])
+
+        let outcome = try await ResultApplier().apply(worktree: repo.url, runID: "r1")
+
+        XCTAssertEqual(outcome, .clean)
+        XCTAssertEqual(repo.read("many/\(pad)7999.txt"), "y\n")
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: repo.url.appendingPathComponent("many").path).count, 8000)
+    }
 }

@@ -51,8 +51,8 @@ public struct Snapshotter: SnapshotMaking {
         let includes = include.filter { FileManager.default.fileExists(atPath: top.appendingPathComponent($0).path) }
         try refuseLFS(top: top, env: index.env, includes: includes)
         try git.run(["add", "-A"], in: top, env: index.env)
-        if !includes.isEmpty {
-            try git.run(["add", "-f", "--"] + includes, in: top, env: index.env)
+        for batch in includes.chunked(GitRunner.argumentBatch) {
+            try git.run(["add", "-f", "--"] + batch, in: top, env: index.env)
         }
         // After `add`: a nested repository only becomes a gitlink by being added.
         let staged = try git.fields(["ls-files", "-s", "-z"], in: top, env: index.env)
@@ -75,8 +75,8 @@ public struct Snapshotter: SnapshotMaking {
     /// into the user's repo, all for a snapshot about to be refused.
     private func refuseLFS(top: URL, env: [String: String], includes: [String]) throws {
         var paths = try git.fields(["ls-files", "-z", "--cached", "--others", "--exclude-standard"], in: top, env: env)
-        if !includes.isEmpty {
-            paths += try git.fields(["ls-files", "-z", "--others", "--"] + includes, in: top, env: env)
+        for batch in includes.chunked(GitRunner.argumentBatch) {
+            paths += try git.fields(["ls-files", "-z", "--others", "--"] + batch, in: top, env: env)
         }
         guard !paths.isEmpty else { return }
         let input = Data(paths.joined(separator: "\0").utf8 + [0])
@@ -132,9 +132,14 @@ public struct Snapshotter: SnapshotMaking {
 
     /// The repo's oldest root commit (§4.1): a repo with several roots (a merged-in history)
     /// must name the same store from every clone, whichever root `rev-list` happens to list first.
-    /// Cached per toplevel: it walks all of history, and a repo's roots do not change.
+    /// Cached, because it walks all of history and a repository's roots do not change. Keyed
+    /// by the toplevel *and* its `.git`'s inode, not the path alone: a repo re-created at the
+    /// same path (a fresh clone) has other roots, and a stale cache would send its snapshots
+    /// to the old repo's host store, where every bundle's prerequisites are missing.
     private func rootCommit(top: URL) throws -> String {
-        if let cached = Self.rootLock.withLock({ Self.roots[top.path] }) { return cached }
+        let inode = (try? FileManager.default.attributesOfItem(atPath: top.appendingPathComponent(".git").path))?[.systemFileNumber]
+        let key = "\(top.path)#\(inode.map { "\($0)" } ?? "?")"
+        if let cached = Self.rootLock.withLock({ Self.roots[key] }) { return cached }
         let roots = try git.text(["rev-list", "--max-parents=0", "--timestamp", "HEAD"], in: top)
             .split(separator: "\n").compactMap { line -> (Int, String)? in
                 let parts = line.split(separator: " ")
@@ -142,7 +147,7 @@ public struct Snapshotter: SnapshotMaking {
                 return (ts, String(parts[1]))
             }
         let root = roots.min { $0.0 != $1.0 ? $0.0 < $1.0 : $0.1 < $1.1 }!.1
-        Self.rootLock.withLock { Self.roots[top.path] = root }
+        Self.rootLock.withLock { Self.roots[key] = root }
         return root
     }
 

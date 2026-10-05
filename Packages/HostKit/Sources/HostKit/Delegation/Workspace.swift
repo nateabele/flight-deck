@@ -258,12 +258,13 @@ public final class Workspace: WorkspaceStore, @unchecked Sendable {
     /// `exclusive` (no other holder of the slot) permits recovery. A git SIGKILLed mid-checkout
     /// (our own timeout escalation, an OOM kill, power loss) leaves `index.lock` and possibly
     /// `locked` behind, and every later run on the slot would fail on them forever. With nobody
-    /// else in the slot they can only be stale, so they are removed; and if the in-place apply
-    /// still fails, the slot is rebuilt from scratch rather than left wedged. With a sharer
-    /// (an `exec` beside a service) its git may be live, so nothing is touched.
+    /// else in the slot they can only be stale, so they are removed; and if any step of the
+    /// in-place apply still fails (checkout, excludes, clean, or the tree check), the slot is
+    /// rebuilt from scratch and the whole apply runs once more, rather than left wedged. A real
+    /// tree mismatch fails again after the rebuild and is reported as such. With a sharer (an
+    /// `exec` beside a service) its git may be live, so nothing is touched.
     private func apply(_ ref: SnapshotRef, at path: URL, store: URL, exclusive: Bool) throws {
         let fm = FileManager.default
-        var applied = false
         if let admin = Self.adminDir(path), fm.fileExists(atPath: admin.path) {
             if exclusive {
                 try? fm.removeItem(at: admin.appendingPathComponent("index.lock"))
@@ -275,20 +276,25 @@ public final class Workspace: WorkspaceStore, @unchecked Sendable {
                 // and forcing a rebuild. Refreshing first re-hashes those and finds them clean.
                 try git.run(["update-index", "-q", "--refresh"], in: path, accept: [0, 1])
                 try git.run(["checkout", "-q", "--force", "--detach", ref.commit], in: path, timeout: GitRunner.longTimeout)
-                applied = true
+                try finish(ref, at: path)
+                return
             } catch {
                 if !exclusive { throw error }
             }
         }
-        if !applied {
-            // A slot with no usable worktree: a leftover from a prune, a crash mid-add, or a
-            // checkout that failed for a reason no lock removal fixed.
-            try? fm.removeItem(at: path)
-            try fm.createDirectory(at: path.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try git.run(["worktree", "prune"], in: store)
-            try git.run(["worktree", "add", "-q", "--detach", "--force", path.path, ref.commit], in: store,
-                        timeout: GitRunner.longTimeout)
-        }
+        // No usable worktree: a leftover from a prune, a crash mid-add, or an apply that failed
+        // for a reason no lock removal fixed.
+        try? fm.removeItem(at: path)
+        try fm.createDirectory(at: path.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try git.run(["worktree", "prune"], in: store)
+        try git.run(["worktree", "add", "-q", "--detach", "--force", path.path, ref.commit], in: store,
+                    timeout: GitRunner.longTimeout)
+        try finish(ref, at: path)
+    }
+
+    /// The steps after the checkout: the controller's excludes into the admin dir, `clean`
+    /// with them, then the tree check (§4.4.3) before anything can run.
+    private func finish(_ ref: SnapshotRef, at path: URL) throws {
         guard let admin = Self.adminDir(path) else { throw SyncError.noCheckout }
         let message = try git.text(["log", "-1", "--format=%B", ref.commit], in: path)
         let excludes = admin.appendingPathComponent("flightdeck-excludes")

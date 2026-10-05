@@ -114,27 +114,50 @@ public struct ResultApplier: Sendable {
         let mergedTree = fields[0]
         var conflicts = Set(merged.status == 1 ? Array(fields.dropFirst().prefix { !$0.isEmpty }) : [])
 
-        let changes = try git.fields(["diff-tree", "-r", "-z", "--no-renames", "--name-status", oursTree, mergedTree], in: top)
-        let pairs = stride(from: 0, to: changes.count - 1, by: 2).map { (status: changes[$0], path: changes[$0 + 1]) }
+        let changes = try Self.changes(try git.run(["diff-tree", "-r", "-z", "--no-renames", "--raw", oursTree, mergedTree], in: top).stdout)
         let realTop = top.resolvingSymlinksInPath()
-        for (_, path) in pairs { try Self.checkSafe(path, under: realTop) }
-        let before = try entries(of: oursTree, paths: pairs.map(\.path), in: top)
+
+        // Every check runs before the first write, so a refusal never leaves a partial apply.
+        for change in changes { try Self.checkSafe(change.path, under: realTop) }
+        try Self.refuseFoldingCollisions(changes)
+        var skip = Set<String>()
+        var seen: [String: FileSignature?] = [:]
+        let current = try currentIDs(changes, in: top)
+        for change in changes {
+            let signature = FileSignature(of: top.appendingPathComponent(change.path))
+            seen[change.path] = signature
+            // The file must still be what "ours" recorded: a save after "ours" was taken would
+            // otherwise be thrown away. Absent in ours means it must be absent on disk too (an
+            // ignored local file sits there, and is not ours to replace).
+            let unchanged = change.oldMode == Self.absent ? signature == nil : current[change.path] == change.oldID
+            if !unchanged { skip.insert(change.path) }
+        }
+        let staging = try stage(changes.filter { !skip.contains($0.path) && $0.status != "D" }, of: mergedTree, gitDir: gitDir, in: top)
+        defer { try? FileManager.default.removeItem(at: staging) }
 
         beforeWrite?()
-        for (status, path) in pairs {
-            let file = top.appendingPathComponent(path)
-            // The file must still be what "ours" recorded, or the user saved it after the merge
-            // was computed: writing now would throw that save away.
-            guard try isUnchanged(file, path: path, since: before[path], in: top) else {
-                conflicts.insert(path)
+        for change in changes where !skip.contains(change.path) {
+            let file = top.appendingPathComponent(change.path)
+            // Again, at the last moment: a symlink made since the checks above (by the user, or
+            // by a write earlier in this loop on a case- or normalization-folding file system)
+            // must not carry this write out of the worktree.
+            try Self.checkSafe(change.path, under: realTop)
+            guard FileSignature(of: file) == seen[change.path] ?? nil else {
+                skip.insert(change.path)
                 continue
             }
-            if status == "D" {
-                try? FileManager.default.removeItem(at: file)
+            let fm = FileManager.default
+            if change.status == "D" {
+                try? fm.removeItem(at: file)
             } else {
-                try write(path, from: mergedTree, to: file, in: top)
+                let staged = staging.appendingPathComponent(change.path)
+                guard (try? fm.attributesOfItem(atPath: staged.path)) != nil else { continue }   // a gitlink stages nothing
+                try fm.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try? fm.removeItem(at: file)
+                try fm.moveItem(at: staged, to: file)
             }
         }
+        conflicts.formUnion(skip)
         if mergedTree == oursTree && conflicts.isEmpty {
             try git.run(["update-ref", "-d", Self.ref(runID)], in: top)
             return .nothing
@@ -144,12 +167,97 @@ public struct ResultApplier: Sendable {
         return .clean
     }
 
+    private static let absent = "000000"
+
+    /// One changed path, both sides, from `diff-tree --raw -z`.
+    struct Change {
+        let oldMode: String, newMode: String, oldID: String, newID: String, status: String, path: String
+    }
+
+    /// Parses `:<old mode> <new mode> <old id> <new id> <status>` NUL `<path>` NUL pairs.
+    static func changes(_ raw: Data) -> [Change] {
+        let fields = raw.split(separator: 0, omittingEmptySubsequences: false).map { String(decoding: $0, as: UTF8.self) }
+        return stride(from: 0, to: fields.count - 1, by: 2).compactMap { i in
+            let meta = fields[i].dropFirst().split(separator: " ")
+            guard fields[i].hasPrefix(":"), meta.count == 5 else { return nil }
+            return Change(oldMode: String(meta[0]), newMode: String(meta[1]), oldID: String(meta[2]),
+                          newID: String(meta[3]), status: String(meta[4].prefix(1)), path: fields[i + 1])
+        }
+    }
+
+    /// Refuses a result that writes a symlink whose name, case-folded and NFC-normalised,
+    /// equals another path in the result or one of its leading directories. On APFS (and any
+    /// case- or normalization-insensitive file system) `A` and `a`, or NFC and NFD `café`, are
+    /// one directory entry: writing `A -> .git` first and then `a/hooks/pre-commit` plants a
+    /// git hook, even though every name passes the per-path checks.
+    static func refuseFoldingCollisions(_ changes: [Change]) throws {
+        func fold(_ path: String) -> String { path.precomposedStringWithCanonicalMapping.lowercased() }
+        let links = changes.filter { $0.newMode == "120000" }
+        guard !links.isEmpty else { return }
+        let folded = changes.map { (path: $0.path, key: fold($0.path)) }
+        for link in links {
+            let key = fold(link.path)
+            if let other = folded.first(where: { $0.path != link.path && ($0.key == key || $0.key.hasPrefix(key + "/")) }) {
+                throw SyncError.unsafePath(other.path)
+            }
+        }
+    }
+
+    /// The object id of each changed path's file *on disk*, hashed as `add` would hash it
+    /// (through its clean filters), in one `hash-object --stdin-paths` for regular files.
+    /// A path whose disk entry is missing or of another kind gets no id, which reads as changed.
+    private func currentIDs(_ changes: [Change], in top: URL) throws -> [String: String] {
+        let fm = FileManager.default
+        var regular: [String] = []
+        var ids: [String: String] = [:]
+        for change in changes where change.oldMode != Self.absent {
+            let file = top.appendingPathComponent(change.path)
+            let type = (try? fm.attributesOfItem(atPath: file.path))?[.type] as? FileAttributeType
+            if change.oldMode == "120000" {
+                guard type == .typeSymbolicLink, let target = try? fm.destinationOfSymbolicLink(atPath: file.path) else { continue }
+                ids[change.path] = try? git.text(["hash-object", "--stdin"], in: top, input: Data(target.utf8))
+            } else if type == .typeRegular {
+                regular.append(change.path)
+            }
+        }
+        guard !regular.isEmpty else { return ids }
+        // Paths are newline-separated here; `checkSafe` has already refused any containing one.
+        let hashed = try git.text(["hash-object", "--stdin-paths"], in: top, input: Data((regular.joined(separator: "\n") + "\n").utf8))
+            .split(separator: "\n").map(String.init)
+        for (path, id) in zip(regular, hashed) { ids[path] = id }
+        return ids
+    }
+
+    /// Writes every file to be applied into a staging directory exactly as a checkout would
+    /// (smudge and eol filters, executable bit, symlinks), in one `checkout-index` fed the
+    /// paths on stdin, so no path list ever reaches a command line. The staging directory is
+    /// inside the git dir, on the worktree's volume, so each file then moves into place with an
+    /// atomic rename. `checkout-index` runs git's own path checks as well, a second guard
+    /// behind `checkSafe`. (`cat-file --batch --filters` cannot do this: its header reports
+    /// the unfiltered size, so a filtered body cannot be framed.)
+    private func stage(_ changes: [Change], of tree: String, gitDir: URL, in top: URL) throws -> URL {
+        let staging = gitDir.appendingPathComponent("flightdeck-apply-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
+        guard !changes.isEmpty else { return staging }
+        let index = staging.appendingPathExtension("index")
+        defer { try? FileManager.default.removeItem(at: index) }
+        let env = ["GIT_INDEX_FILE": index.path]
+        try git.run(["read-tree", tree], in: top, env: env)
+        let paths = Data(changes.map(\.path).joined(separator: "\0").utf8 + [0])
+        try git.run(["checkout-index", "-f", "-z", "--stdin", "--prefix=\(staging.path)/"], in: top, env: env, input: paths,
+                    timeout: GitRunner.longTimeout)
+        return staging
+    }
+
     /// Refuses a host-supplied path that could write outside the worktree or into git's own
     /// files: absolute, a `.`/`..`/`.git` component (any case: macOS's file system folds it),
-    /// or an existing parent that is a symlink, which would carry the write wherever it points.
+    /// or an existing parent that is a symlink (checked with `lstat`, component by component),
+    /// which would carry the write wherever it points. A newline is refused too: the batched
+    /// git calls take paths one per line.
     static func checkSafe(_ path: String, under top: URL) throws {
         let parts = path.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
-        guard !path.hasPrefix("/"), !parts.contains(where: { $0.isEmpty || $0 == "." || $0 == ".." || $0.lowercased() == ".git" })
+        guard !path.hasPrefix("/"), !path.contains("\n"),
+              !parts.contains(where: { $0.isEmpty || $0 == "." || $0 == ".." || $0.lowercased() == ".git" })
         else { throw SyncError.unsafePath(path) }
         var dir = top
         let fm = FileManager.default
@@ -160,50 +268,21 @@ public struct ResultApplier: Sendable {
         }
     }
 
-    /// `path -> (mode, object id)` in `tree`, for the given paths.
-    private func entries(of tree: String, paths: [String], in top: URL) throws -> [String: (mode: String, id: String)] {
-        guard !paths.isEmpty else { return [:] }
-        let rows = try git.fields(["ls-tree", "-r", "-z", "--full-tree", tree, "--"] + paths.map { ":(literal)\($0)" }, in: top)
-        var out: [String: (mode: String, id: String)] = [:]
-        for row in rows {
-            let halves = row.split(separator: "\t", maxSplits: 1)
-            let meta = halves.first?.split(separator: " ") ?? []
-            guard halves.count == 2, meta.count == 3 else { continue }
-            out[String(halves[1])] = (String(meta[0]), String(meta[2]))
-        }
-        return out
-    }
+}
 
-    /// Whether the file on disk is still what "ours" recorded for it (absent, when ours had no
-    /// entry). Hashed with the path's clean filters, the way `add` saw it.
-    private func isUnchanged(_ file: URL, path: String, since entry: (mode: String, id: String)?, in top: URL) throws -> Bool {
-        let fm = FileManager.default
-        let attrs = try? fm.attributesOfItem(atPath: file.path)
-        guard let entry else { return attrs == nil }
-        guard let attrs else { return false }
-        if entry.mode == "120000" {
-            guard attrs[.type] as? FileAttributeType == .typeSymbolicLink,
-                  let target = try? fm.destinationOfSymbolicLink(atPath: file.path) else { return false }
-            return try git.text(["hash-object", "--stdin"], in: top, input: Data(target.utf8)) == entry.id
-        }
-        return try git.text(["hash-object", "--path=\(path)", file.path], in: top) == entry.id
-    }
+/// What `lstat` says about a path, to notice it changing between the checks and the write.
+/// nil (at the call sites) means nothing is there.
+struct FileSignature: Equatable {
+    let type: FileAttributeType?
+    let size: Int64?
+    let modified: Date?
+    let inode: Int?
 
-    /// Writes one blob from `tree` to `file` as a checkout would: through the path's smudge
-    /// and eol filters, with git's two modes (executable bit and symlink). A gitlink is
-    /// skipped: submodules are refused at snapshot time anyway.
-    private func write(_ path: String, from tree: String, to file: URL, in top: URL) throws {
-        guard let entry = try entries(of: tree, paths: [path], in: top)[path] else { return }
-        let fm = FileManager.default
-        try fm.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try? fm.removeItem(at: file)
-        if entry.mode == "120000" {
-            let target = try git.run(["cat-file", "blob", entry.id], in: top).stdout
-            try fm.createSymbolicLink(atPath: file.path, withDestinationPath: String(decoding: target, as: UTF8.self))
-        } else if entry.mode.hasPrefix("100") {
-            let data = try git.run(["cat-file", "--filters", "--path=\(path)", entry.id], in: top).stdout
-            try data.write(to: file)
-            try fm.setAttributes([.posixPermissions: entry.mode == "100755" ? 0o755 : 0o644], ofItemAtPath: file.path)
-        }
+    init?(of url: URL) {
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path) else { return nil }
+        type = attrs[.type] as? FileAttributeType
+        size = (attrs[.size] as? NSNumber)?.int64Value
+        modified = attrs[.modificationDate] as? Date
+        inode = (attrs[.systemFileNumber] as? NSNumber)?.intValue
     }
 }

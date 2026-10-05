@@ -150,6 +150,22 @@ final class WorkspaceTests: XCTestCase {
         XCTAssertEqual(text(second, "a.txt"), "rebuilt\n")
     }
 
+    /// Recovery covers the whole apply, not only the checkout: a slot whose admin dir is broken
+    /// in a way only the later steps hit (here, writing the excludes file) is rebuilt too.
+    func testFailureAfterCheckoutStillRebuildsSlot() async throws {
+        let repo = try makeRepo()
+        let store = Workspace(root: TempRepo.scratch(), poolSize: 1)
+        let first = try await store.checkout(controller: controller, ref: try await push(repo, to: store), pin: false)
+        let gitDir = try TempRepo.git(["rev-parse", "--absolute-git-dir"], in: first.path)
+        await store.release(first)
+        try FileManager.default.removeItem(atPath: gitDir + "/flightdeck-excludes")
+        try FileManager.default.createDirectory(atPath: gitDir + "/flightdeck-excludes/blocker", withIntermediateDirectories: true)
+
+        repo.write("a.txt", "recovered\n")
+        let second = try await store.checkout(controller: controller, ref: try await push(repo, to: store), pin: false)
+        XCTAssertEqual(text(second, "a.txt"), "recovered\n")
+    }
+
     /// The host must ignore what the controller ignores. A path ignored only by the
     /// controller's `info/exclude` (or global excludes file) is not ignored by `.gitignore` on
     /// the host, so without shipping those rules every apply's `clean -fd` deletes it (no

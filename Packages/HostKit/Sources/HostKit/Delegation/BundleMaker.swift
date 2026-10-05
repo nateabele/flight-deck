@@ -30,7 +30,10 @@ public struct BundleMaker: BundleMaking {
         defer { if existing == nil { _ = try? git.run(["update-ref", "-d", ref], in: worktree) } }
 
         let out = FileManager.default.temporaryDirectory.appendingPathComponent("fd-\(UUID().uuidString).bundle")
-        try git.run(["bundle", "create", "-q", out.path, ref] + (present.isEmpty ? [] : ["--not"] + present), in: worktree,
+        // The revisions go on stdin: the host's tips grow with every worktree it has seen, and
+        // one argv per tip would eventually trip NSTask's argument limit (an uncatchable abort).
+        let revs = ([ref] + present.map { "^\($0)" }).joined(separator: "\n") + "\n"
+        try git.run(["bundle", "create", "-q", out.path, "--stdin"], in: worktree, input: Data(revs.utf8),
                     timeout: GitRunner.longTimeout)
         return out
     }
