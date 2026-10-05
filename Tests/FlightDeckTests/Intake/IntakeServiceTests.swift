@@ -554,6 +554,16 @@ private final class FakeEncodeRouting: EncodeRoutingProviding {
     }
 }
 
+@MainActor
+private final class CancellingEncodeRouting: EncodeRoutingProviding {
+    private(set) var calls = 0
+    func agentContexts(for steps: [ApplyStep], project: String) async -> [String: String] {
+        calls += 1
+        withUnsafeCurrentTask { $0?.cancel() }
+        return [:]
+    }
+}
+
 /// L3-R §4: release asks routing for each created task's block and hands it to the writer, and
 /// triage — which encodes at single-task fidelity — is told the project's kinds.
 extension IntakeServiceTests {
@@ -570,6 +580,21 @@ extension IntakeServiceTests {
         XCTAssertEqual(routing.calls.first?.project, "/p")
         let create = br.calls.first { $0.prefix(2) == ["br", "create"] }!
         XCTAssertEqual(create[create.firstIndex(of: "--agent-context")! + 1], #"{"flight_deck":{"execution":{"v":1}}}"#)
+    }
+
+    /// Routing suspends after release's last cancellation check. A discard or retry that lands
+    /// while the router works must not still create the tasks.
+    func testReleaseCancelledWhileRoutingWritesNothing() async {
+        let br = MutableRunner(Self.brReplies(Self.openGraph).merging(
+            ["br create": (#"{"id":"b9"}"#, 0), "br sync": ("", 0)]) { $1 })
+        let svc = makeService(headless: FakeHeadlessRunner([Self.codex(Self.beadRec(Self.createOp))]), br: br)
+        let routing = CancellingEncodeRouting()
+        svc.encodeRouting = { routing }
+        let id = await capture(svc)
+        await Task { await svc.release(id) }.value
+        XCTAssertEqual(routing.calls, 1, "the router was reached, so the guard after it is what is under test")
+        XCTAssertNil(br.calls.first { $0.prefix(2) == ["br", "create"] }, "a cancelled release must not write")
+        XCTAssertNotEqual(intake(svc, id).state, .released)
     }
 
     func testReleaseWithoutRoutingWritesNoAgentContext() async {

@@ -4,6 +4,7 @@ struct PreferencesView: View {
     @ObservedObject var preferences: PreferencesStore
     @ObservedObject var sessions: SessionStore
     @ObservedObject var fleet: FleetService
+    @ObservedObject var routing: RoutingService
 
     var body: some View {
         // Bound rather than unbound, and every pane tagged: without a selection binding there
@@ -34,6 +35,11 @@ struct PreferencesView: View {
                 .tabItem { Label("Devices", systemImage: "iphone.and.arrow.forward") }
                 .accessibilityIdentifier("prefs-devices")
                 .tag(PreferencesTab.devices)
+
+            FlightControlSettingsTab(preferences: preferences, sessions: sessions, routing: routing)
+                .tabItem { Label("Flight Control", systemImage: "airplane") }
+                .accessibilityIdentifier("prefs-flight-control")
+                .tag(PreferencesTab.flightControl)
         }
         .frame(width: 720, height: 560)
     }

@@ -7,6 +7,7 @@ struct FlightDeckApp: App {
     @StateObject private var preferences: PreferencesStore
     @StateObject private var store: SessionStore
     @StateObject private var fleet: FleetService
+    @StateObject private var routing: RoutingService
 
     private static let logger = Logger(subsystem: "dev.flightdeck.FlightDeck", category: "fleet")
 
@@ -148,6 +149,10 @@ struct FlightDeckApp: App {
             preferences.preferences.shell.shellOverride = fixture.shellURL.path
         }
         _preferences = StateObject(wrappedValue: preferences)
+        // Eager like `preferences`, for the same reason: the Settings scene and the store need
+        // the same instance. Building it spawns nothing.
+        let routing = RoutingService.make(preferences: preferences)
+        _routing = StateObject(wrappedValue: routing)
 
         // `wrappedValue` is an @autoclosure: this call is NOT evaluated here. That is
         // load-bearing for two unrelated reasons:
@@ -171,7 +176,7 @@ struct FlightDeckApp: App {
         // evaluation, which is the very hazard `_store` is deferred to avoid). `deferredStore`
         // is the shared, call-once seam both thunks resolve through instead, so whichever of
         // the two SwiftUI happens to evaluate first builds the store and the other reuses it.
-        let deferredStore = DeferredOnce { Self.makeStore(preferences: preferences) }
+        let deferredStore = DeferredOnce { Self.makeStore(preferences: preferences, routing: routing) }
         _store = StateObject(wrappedValue: deferredStore())
         _fleet = StateObject(wrappedValue: Self.makeFleetService(
             store: deferredStore(), preferences: preferences
@@ -212,7 +217,7 @@ struct FlightDeckApp: App {
     }
 
     @MainActor
-    private static func makeStore(preferences: PreferencesStore) -> SessionStore {
+    private static func makeStore(preferences: PreferencesStore, routing: RoutingService) -> SessionStore {
         let resetState = Self.isResettingState
         // Built here rather than inside the store: `UNUserNotificationCenter` traps
         // outside a signed bundle, and `SessionStore`'s convenience init is reachable
@@ -290,6 +295,8 @@ struct FlightDeckApp: App {
             store?.session(project: project, agentName: agentName)?.id
         }
         store.flywheelNotifier = flywheelNotifier
+        // Intake release asks the store's routing for each created task's block (L3-R §4).
+        store.flightControlRouting = routing
 
         return store
     }
@@ -309,7 +316,7 @@ struct FlightDeckApp: App {
 
         // A `Settings` scene gives ⌘, and the standard Preferences window for free.
         Settings {
-            PreferencesView(preferences: preferences, sessions: store, fleet: fleet)
+            PreferencesView(preferences: preferences, sessions: store, fleet: fleet, routing: routing)
         }
     }
 }

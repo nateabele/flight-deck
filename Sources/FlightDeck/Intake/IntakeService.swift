@@ -1412,6 +1412,9 @@ final class IntakeService: ObservableObject {
         // Routed before the first write, so a create lands with its block in one `br create`
         // instead of a create plus an update that a failure between them could split.
         let contexts = await encodeRouting()?.agentContexts(for: steps, project: i.projectPath) ?? [:]
+        // Routing suspends, and the guard above ran before it: a release discarded or retried
+        // while the router was working would otherwise still write its tasks.
+        guard !Task.isCancelled else { return }
         let outcome = await BeadWriter(runner: processRunner, brPath: brPath, actor: actor)
             .apply(steps, project: i.projectPath, agentContexts: contexts)
 

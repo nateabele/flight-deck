@@ -1318,6 +1318,11 @@ final class SessionStore: ObservableObject {
     /// real `IntakeRunnerController` sharing this store's `daemon`/`daemonControl` — so a
     /// runner's socket lives in the directory `SessionDaemon` already manages, and a fake-daemon
     /// test's control is the one the runner is probed through too.
+    /// L3-R routing: rules, kinds, the compiler and the router. Attached by
+    /// `FlightDeckApp.makeStore` right after this store is built; nil in every store a test builds
+    /// directly, whose releases then write tasks with no execution block, as before Level 3.
+    var flightControlRouting: RoutingService?
+
     private(set) lazy var intakeService: IntakeService = {
         let root = resolvedIntakesRoot
         let service = IntakeService(
@@ -1332,6 +1337,9 @@ final class SessionStore: ObservableObject {
             hasSession: { [weak self] project, agent in
                 self?.session(project: project, agentName: agent) != nil
             })
+        // Resolved at each release, not captured now: this service is built lazily — often
+        // before `FlightDeckApp` attaches routing — and must still see it.
+        service.encodeRouting = { [weak self] in self?.flightControlRouting }
         intakeChangeForward = service.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
         // Straight to the summary refresh, never through `objectWillChange`: a seat settling
         // must not redraw every view of the store (see `SeatFeed`), only reach the phone.
