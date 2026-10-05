@@ -49,12 +49,11 @@ public final class LedgerHandoffPlanner: HandoffPlanner, @unchecked Sendable {
 
     public func request(for agent: SwarmAgentSnapshot) -> HandoffRequest? {
         // A slot lease (`id == nil`) is a local pool's concurrency, never quota.
-        guard let lease = agent.lease, let accountID = lease.account.id, let task = agent.task else { return nil }
-        // By id and harness, not the whole `AccountRef`: its label is display text and changes
-        // on rename.
-        let mine = reader.headroom(pool: lease.pool).first {
-            $0.account.id == accountID && $0.account.harness == lease.account.harness
-        }
+        guard let lease = agent.lease, let task = agent.task else { return nil }
+        // AccountRef == compares harness + id, so a renamed account still matches its lease.
+        // The id guard keeps an id-less (label-keyed) lease from matching by ==.
+        guard lease.account.id != nil else { return nil }
+        let mine = reader.headroom(pool: lease.pool).first { $0.account == lease.account }
         guard mine?.state == .overHard else { return nil }
         return HandoffRequest(task: task, block: agent.block, oldAgent: agent.agentName, oldSession: agent.session,
                               transcript: transcript(agent.session), reservedFiles: reservedFiles(agent),

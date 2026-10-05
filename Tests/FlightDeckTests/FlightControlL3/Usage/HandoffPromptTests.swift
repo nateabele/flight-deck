@@ -35,6 +35,14 @@ final class HandoffPromptTests: XCTestCase {
         XCTAssertTrue(text.contains("Its transcript is available from `opencode export ses_1` (OpenCode session export, JSON). Read it to understand what was done and decided."))
     }
 
+    func testHowToReadIsOmittedWhenEmpty() {
+        let p = TranscriptPointer(locator: .path("/t.jsonl"), format: "JSONL", howToRead: "")
+        let text = HandoffPrompt.render(request(transcript: p, files: ["a"]))
+        XCTAssertTrue(text.contains("Its transcript is at /t.jsonl (JSONL). Read it to understand what was done and decided."))
+        let lines = text.split(separator: "\n")
+        XCTAssertFalse(text.contains("\n\n"), "no blank line from omitted howToRead")
+    }
+
     func testAMissingTranscriptLeansOnGitAndTheTaskNotes() {
         let text = HandoffPrompt.render(request(transcript: nil, files: ["a"]))
         XCTAssertTrue(text.contains("Its transcript is not available. Lean on `git diff` and the task's notes in `br show fd-3x9` to understand what was done and decided."))
