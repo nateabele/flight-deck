@@ -109,14 +109,19 @@ enum ClaudePluginLocation {
     /// real call site's `Bundle.main` is the `xctest` tool under `scripts/test-unit.sh` and
     /// never would). `.codex` and a bundle without the plugin both pass `options` through
     /// unchanged.
-    static func applying(to options: AgentOptions, bundle: Bundle) -> AgentOptions {
+    static func applying(to options: AgentOptions, bundle: Bundle, pluginDestination: URL = materializedDirectory) -> AgentOptions {
         guard case .claude(let flags) = options, let plugin = directory(bundle: bundle) else {
             return options
         }
         // Outcome 3C: run the owned copy, never the signed bundle. A failed copy falls back to
         // the bundle — a broken signature is recoverable, a claude tab with no hooks is the
         // silent failure `record.sh`'s header warns about.
-        let runnable = (try? materialize(from: plugin)) ?? plugin
-        return .claude(injecting(into: flags, pluginDirectory: runnable))
+        do {
+            let runnable = try materialize(from: plugin, to: pluginDestination)
+            return .claude(injecting(into: flags, pluginDirectory: runnable))
+        } catch {
+            NSLog("[ClaudePluginLocation] failed to materialize plugin from \(plugin.path) to \(pluginDestination.path): \(error) — falling back to signed bundle")
+            return .claude(injecting(into: flags, pluginDirectory: plugin))
+        }
     }
 }
