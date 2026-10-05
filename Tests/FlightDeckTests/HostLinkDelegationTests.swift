@@ -117,6 +117,31 @@ final class HostLinkDelegationTests: XCTestCase {
         XCTAssertNil(service.link(slot: record.slot))
     }
 
+    func testTheDirectoryRefusesAnUnreachableHostAsHostOfflineAndReportsItComingUp() async throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("hosts-\(UUID()).json")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let registry = HostRegistry(fileURL: url, secrets: InMemoryHostSecretStore())
+        let record = try registry.add(key: .mint(), name: "mini", serviceName: "mini", endpoints: ["10.0.0.5:47410"])
+        let service = HostService(registry: registry, controllerName: "c", dial: dialer, clock: clock)
+        let directory = LiveHostDirectory(hostService: service, mirrors: FileManager.default.temporaryDirectory)
+        var cameUp = 0
+        directory.onHostOnline = { cameUp += 1 }
+        do { _ = try directory.link(named: "mini"); XCTFail() } catch let error as DelegationError {
+            XCTAssertEqual(error.code, "host_offline")
+            XCTAssertEqual(error.message, "mini is offline (never seen)")
+        }
+        service.start()
+        try await waitUntil { dialer.connections.count == 1 }
+        let link = try directory.link(named: "mini")
+        XCTAssertFalse(link.isConnected)
+        let c = dialer.connections[0]
+        c.onReady?()
+        c.say(.helloAck(protocolVersion: .current, capabilities: [.hostInfo, .run], hostName: "mini"))
+        try await waitUntil { cameUp == 1 }
+        XCTAssertTrue(link.isConnected)
+        service.forget(slot: record.slot)
+    }
+
     /// Ruling 21's point: a finished run's output is on this Mac, so `logs` answers with the
     /// host offline, and nothing is asked of it.
     func testLogsOfAFinishedRunAnswerFromTheCopyWithTheHostOffline() async throws {
