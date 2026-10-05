@@ -2281,7 +2281,16 @@ flagged as most likely to differ from the tests. The maintainer's to run.
   swarm ([L3-S](superpowers/specs/2026-10-04-flight-control-l3-swarm-design.md)). They cover
   launch, contested visibility, and the account strip (as pools and meters). They replace the
   fleet table with annotations on existing surfaces. Still deferred: the remaining tending
-  actions, the Agent Mail inbox and the convergence gauge below. Original list, kept for history:
+  actions, the Agent Mail inbox and the convergence gauge below.
+  L3-U (usage and rollover) built on branch `l3-usage` (5ee2091): pools, meters (codex app-server
+  read every 2 min, the bundled claude mod via `session.measure`, headless seats, the fleet's
+  rate-limit API errors), the capacity ledger, the hand-off driver and Settings → Capacity. Not
+  yet wired to a swarm (integration). The maintainer's checks after integration: open Settings → Capacity
+  and confirm each account's bar matches `/usage` (claude) and codex's own status; run one
+  swarm agent on an account near its limit and watch it hand off; confirm a manual tab gets one
+  notification and stays put; run the real claude-tab meter (the mod in an FD-spawned
+  interactive tab) against `/usage`. Open L3-U items, each a bullet below. Original list of
+  the rest, kept for history:
   - **Launch a swarm from released tasks** — pick with `bv`, claim, spawn agents into the
     project's sessions.
   - **A fleet table** — agent × current task × state × last active × account, a row jumping to
@@ -2300,6 +2309,23 @@ flagged as most likely to differ from the tests. The maintainer's to run.
     whether `ntm serve`'s event stream is worth a transport spike (its schema was never
     inspected; [FLYWHEEL-SPIKE-FINDINGS.md](FLYWHEEL-SPIKE-FINDINGS.md) already ruled it out as
     FD's own runner).
+  - **L3-U: local-pool capacity cannot see load from outside Flight Deck** (spec §3, by design).
+  - **L3-U: claude hook modules sit behind a remote rollout switch** (spec §12 deviation 18). A
+    user whose switch is off has no claude meter, only the "mod is not loaded" source error.
+  - **L3-U: codex usage-limit `codex_error_info` spellings are unverified.**
+    `RateLimitClassifier.kinds` was never checked against a real rollout, so the fleet API-error
+    path may never mark a codex account over hard; the 120 s read's `rateLimitReachedType` is
+    the authoritative codex signal.
+  - **L3-U: `spendControlReached` in codex's read is ignored**, so a spend-control stop is not a
+    hard rejection.
+  - **L3-U: the silent-mod check is suppressed by any other reading on the account** (headless
+    seat, API error), so a tab with an unloaded mod on a busy account is not flagged.
+  - **L3-U: a codex read that never returns stops that account's polling until restart**; its
+    source error stays visible (spec §12 deviation 20).
+  - **L3-U: the OpenCode transcript command interpolates its session id and server URL
+    unquoted.** Quote them when the OpenCode adapter lands.
+  - **L3-U: `/usage` shows a third window ("Current week (Fable)")** that `session.measure` does
+    not report, so the bar can omit a window the user sees.
 
 ## Plan comments from the phone (2026-09-30)
 
