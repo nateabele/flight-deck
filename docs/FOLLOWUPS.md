@@ -2272,9 +2272,16 @@ flagged as most likely to differ from the tests. The maintainer's to run.
   [FLIGHT-CONTROL-COVERAGE-HANDOFF.md](FLIGHT-CONTROL-COVERAGE-HANDOFF.md).
 - **Flight Control on the phone — BUILT (see "known gaps and limits" above).** Originally: Handoff:
   [FLIGHT-CONTROL-MOBILE-HANDOFF.md](FLIGHT-CONTROL-MOBILE-HANDOFF.md).
-- **Level 3 "Operate" — not started.** Flight Deck as the swarm console rather than its
-  observer. Design handoff: [FLIGHT-CONTROL-LEVEL3-HANDOFF.md](FLIGHT-CONTROL-LEVEL3-HANDOFF.md). The branch-strategy ruling is recorded above ("Level 3 swarm: branch strategy");
-  the rest, none of it designed:
+- **Level 3 "Operate" — DESIGNED (2026-10-04); L3-0 contract MERGED (28e79fb, 2026-10-05), L3-R/I/U/S building in parallel worktrees.** Five specs, built in parallel after
+  the contract lands: overview and contract
+  ([L3-0](superpowers/specs/2026-10-04-flight-control-l3-overview-contract-design.md)), routing
+  ([L3-R](superpowers/specs/2026-10-04-flight-control-l3-routing-design.md)), capability index
+  ([L3-I](superpowers/specs/2026-10-04-flight-control-l3-capability-index-design.md)), usage and
+  rollover ([L3-U](superpowers/specs/2026-10-04-flight-control-l3-usage-rollover-design.md)) and
+  swarm ([L3-S](superpowers/specs/2026-10-04-flight-control-l3-swarm-design.md)). They cover
+  launch, contested visibility, and the account strip (as pools and meters). They replace the
+  fleet table with annotations on existing surfaces. Still deferred: the remaining tending
+  actions, the Agent Mail inbox and the convergence gauge below. Original list, kept for history:
   - **Launch a swarm from released tasks** — pick with `bv`, claim, spawn agents into the
     project's sessions.
   - **A fleet table** — agent × current task × state × last active × account, a row jumping to
