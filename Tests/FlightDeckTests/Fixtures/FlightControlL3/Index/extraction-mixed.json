@@ -1,0 +1,8 @@
+{"source":"terminal-bench","rows":[
+ {"benchmarkModel":"GPT-6 Sol (high)","score":61.3,"unit":"percent","url":"https://www.tbench.ai/leaderboard","retrievedAt":"2026-10-04T06:00:00Z","quotedFigure":"61.3%"},
+ {"benchmarkModel":"No Citation","score":40.0,"unit":"percent","retrievedAt":"2026-10-04T06:00:00Z","quotedFigure":"40.0%"},
+ {"benchmarkModel":"Figure Mismatch","score":71.0,"unit":"percent","url":"https://www.tbench.ai/leaderboard","retrievedAt":"2026-10-04T06:00:00Z","quotedFigure":"17.0%"},
+ {"benchmarkModel":"Odd Unit","score":3.0,"unit":"stars","url":"https://www.tbench.ai/leaderboard","retrievedAt":"2026-10-04T06:00:00Z","quotedFigure":"3 stars"},
+ {"benchmarkModel":"Wrong Unit","score":1200,"unit":"elo","url":"https://www.tbench.ai/leaderboard","retrievedAt":"2026-10-04T06:00:00Z","quotedFigure":"1200"},
+ {"benchmarkModel":"Empty Url","score":30.0,"unit":"percent","url":"","retrievedAt":"2026-10-04T06:00:00Z","quotedFigure":"30%"}
+]}
