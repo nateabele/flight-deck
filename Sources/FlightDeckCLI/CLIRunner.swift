@@ -521,7 +521,7 @@ final class CLIRunner {
                 self.out(self.wantsJSON ? CLIOutput.json(info) : CLIOutput.hostInfo(info))
             case .ack, .snapshot, .event, .phoneRequest: self.out(CLIOutput.line(frame))
             case .delegateStarted, .delegateNotice, .delegateOutput, .delegateExit, .delegateRuns,
-                 .delegatePatch, .delegateApplied, .recipes, .recipeCheck:
+                 .delegatePatch, .delegateApplied, .recipes, .recipeCheck, .hostDisk:
                 // Nothing parses a delegation subcommand yet (task C6), so no request here
                 // draws one; printed raw like the arm above rather than dropped. C6 replaces
                 // this with real output, and with streaming: these may arrive several to a

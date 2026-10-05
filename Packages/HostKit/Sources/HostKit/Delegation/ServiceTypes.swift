@@ -56,6 +56,19 @@ public struct PortMapping: Codable, Sendable, Equatable {
         case local = "local"
         case remote = "remote"
     }
+
+    /// Refuses port 0 on either side, as `parse` does: the wire must not admit a mapping the
+    /// command line cannot, or a peer bug would reach the forwarder as "any port".
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let local = try c.decode(Local.self, forKey: .local)
+        let remote = try c.decode(UInt16.self, forKey: .remote)
+        if remote == 0 || local == .fixed(0) {
+            throw DecodingError.dataCorruptedError(forKey: remote == 0 ? .remote : .local, in: c,
+                                                   debugDescription: "port 0 is not a port")
+        }
+        self.init(local: local, remote: remote)
+    }
 }
 
 public enum PortMappingError: Error, Equatable, CustomStringConvertible {
@@ -99,7 +112,8 @@ public struct PortStatus: Codable, Sendable, Equatable {
 }
 
 /// Names the holder of a port on this machine: the Mac's local preflight (step 4) and the
-/// host's `port.check` (step 5) both answer through it.
+/// host's `port.check` (step 5) both answer through it. Async because naming a holder shells
+/// out (`lsof`, `docker ps`), which must not hold a cooperative thread.
 public protocol PortChecking: Sendable {
-    func holder(of port: UInt16) -> PortHolder
+    func holder(of port: UInt16) async -> PortHolder
 }
