@@ -236,6 +236,10 @@ def session(sid, title, cwd):
 
 def main(root, seeded):
     if os.path.exists(root):
+        real = os.path.realpath(root)
+        safe = ("/DerivedData/", "/tmp/", "/private/tmp/", "/var/folders/", "/.fd-l3s-fixture.")
+        if not any(marker in real + "/" for marker in safe):
+            sys.exit("refusing to delete %s: not under DerivedData or a temp directory" % real)
         shutil.rmtree(root)
     project = os.path.join(root, "project")
     for d in ("bin", "status", "projects", "state", "project/.beads"):

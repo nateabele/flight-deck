@@ -24,11 +24,17 @@ done
 LOG="scripts/.flight-control-ui.log"
 : > "$LOG"
 ROOT="$PWD/DerivedData/flight-control-fixture"
+# Short, because a daemon socket is <dir>/<uuid>.sock and macOS caps sun_path at 104 bytes;
+# a path under $ROOT overflows it. Both fixtures' tabs share it (the cases run one at a time).
+DAEMONS="/tmp/fdfc-ui-$(id -u)"
 cleanup() {
   # The fixture's tabs run under detached daemons that outlive the app; reap them by path.
+  pkill -f "$DAEMONS" 2>/dev/null || true
   pkill -f "$ROOT" 2>/dev/null || true
+  rm -rf "$DAEMONS"
 }
 trap cleanup EXIT
+rm -rf "$DAEMONS"; mkdir -p "$DAEMONS"
 python3 scripts/make-flight-control-fixture.py "$ROOT/live" >>"$LOG" 2>&1
 python3 scripts/make-flight-control-fixture.py "$ROOT/seeded" --seeded >>"$LOG" 2>&1
 xcodegen generate >>"$LOG" 2>&1
@@ -37,7 +43,7 @@ RESULTS="$PWD/DerivedData/flight-control-ui.xcresult"
 rm -rf "$RESULTS"
 echo "[flight-control-ui] running SwarmUITests… (full output → $LOG)"
 set +e
-TEST_RUNNER_FLIGHT_CONTROL_FIXTURE="$ROOT/live" TEST_RUNNER_FLIGHT_CONTROL_SEEDED="$ROOT/seeded" \
+TEST_RUNNER_FLIGHT_CONTROL_DAEMONS="$DAEMONS" TEST_RUNNER_FLIGHT_CONTROL_FIXTURE="$ROOT/live" TEST_RUNNER_FLIGHT_CONTROL_SEEDED="$ROOT/seeded" \
 xcodebuild -project FlightDeck.xcodeproj -scheme FlightDeck -destination 'platform=macOS' \
   -derivedDataPath DerivedData -resultBundlePath "$RESULTS" \
   test -only-testing:FlightDeckUITests/SwarmUITests >>"$LOG" 2>&1

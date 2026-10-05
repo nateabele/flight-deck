@@ -253,15 +253,15 @@ struct FlightDeckApp: App {
         // hermetic, because `isResettingState` gave that store a nil persistence above.
         let fixture = resetState ? Self.fixture : nil
 
-        var flywheelTools = FlywheelToolPaths.system
         // Beside `intakes/`, honouring `-FlightDeckStateDir`; a reset run gets a scratch root.
-        var swarmsRoot: URL? = resetState ? nil : (Self.stateDirectory() ?? FileSessionPersistence.defaultDirectory())
+        let defaultSwarmsRoot: URL? = resetState ? nil : (Self.stateDirectory() ?? FileSessionPersistence.defaultDirectory())
         #if DEBUG
         let flightControlFixture = resetState ? FlightControlFixtureBackend.fromDefaults() : nil
-        if let flightControlFixture {
-            flywheelTools = flightControlFixture.tools
-            swarmsRoot = flightControlFixture.swarmsRoot
-        }
+        let flywheelTools = flightControlFixture?.tools ?? .system
+        let swarmsRoot = flightControlFixture?.swarmsRoot ?? defaultSwarmsRoot
+        #else
+        let flywheelTools = FlywheelToolPaths.system
+        let swarmsRoot = defaultSwarmsRoot
         #endif
 
         let store = SessionStore(

@@ -14,13 +14,20 @@ final class SwarmUITests: XCTestCase {
         return environment[name] ?? environment["TEST_RUNNER_\(name)"]
     }
 
+    /// Short on purpose: a daemon socket is `<dir>/<uuid>.sock` and macOS caps `sun_path` at 104
+    /// bytes, which a path under the fixture root overflows ("File name too long"). The runner
+    /// creates and reaps it.
+    private var daemonDirectory: String {
+        environmentValue("FLIGHT_CONTROL_DAEMONS") ?? "/tmp/fdfc-ui-\(getuid())"
+    }
+
     override func setUp() { continueAfterFailure = false }
 
     private func launch(_ fixture: String) -> XCUIApplication {
         let app = XCUIApplication()
         app.launchArguments += ["-ApplePersistenceIgnoreState", "YES", "-FlightDeckResetState", "YES",
                                 "-FlightDeckFixture", fixture, "-FlightControlFixtureBackend", fixture,
-                                "-FlightDeckDaemonDir", fixture + "/daemons"]
+                                "-FlightDeckDaemonDir", daemonDirectory]
         app.launch()
         app.activate()
         XCTAssertTrue(app.windows.firstMatch.waitForExistence(timeout: 20), "no window appeared")
