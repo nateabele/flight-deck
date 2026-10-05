@@ -51,6 +51,12 @@ final class SessionStore: ObservableObject {
     /// is the whole point of the badge.
     @Published private(set) var apiErrors: [UUID: SessionAPIError] = [:]
 
+    /// When each tab last changed activity. Beside `statuses`, not inside `SessionStatus`: that
+    /// type is compared for equality in `commitStatuses`' change diff and across the suite, and a
+    /// timestamp in it would make every tick a change. Plain, not `@Published` — every write
+    /// coincides with a `statuses` change, which already republishes.
+    private var lastActiveAtByID: [UUID: Date] = [:]
+
     /// Which dialog each blocked tab is on, by the blocked call's `tool_use_id`. Absent for
     /// every tab this Mac cannot name a dialog for, which is nearly all of them.
     ///
@@ -4302,6 +4308,7 @@ final class SessionStore: ObservableObject {
         acceptedPromptTokens.removeValue(forKey: id)
         answeredPromptTokens.removeValue(forKey: id)
         anchors.removeValue(forKey: id)
+        lastActiveAtByID[id] = nil
         // `applyReadState` no longer clears a mark when a session's status disappears — a
         // mark now outlives its process. But closing a tab removes its id from `repos`
         // entirely, so no future tick will ever see it again; leaving the mark in
@@ -8117,6 +8124,8 @@ final class SessionStore: ObservableObject {
         emit(events)
     }
 
+    func lastActiveAt(for id: UUID) -> Date? { lastActiveAtByID[id] }
+
     /// The single writer of `statuses`, and the one place a status change turns into its
     /// consequences.
     ///
@@ -8130,6 +8139,12 @@ final class SessionStore: ObservableObject {
         let previous = statuses
         let previousBackgroundWork = backgroundWorkSessions
         let previousOpenPromptCalls = openPromptCalls
+        // Stamped before any early return below: an activity transition is news for the row's
+        // "active N min ago" even on a tick whose published fields end up equal.
+        let stamp = now()
+        for (id, status) in next where previous[id]?.activity != status.activity {
+            lastActiveAtByID[id] = stamp
+        }
         // Shadowed, mutable: `derivedOpenPromptCalls` fills in `answerless` on every `waiting`
         // entry below, ahead of every comparison this function makes — a tick where only that
         // field moves must be recognized as a change exactly like any other, not smuggled in
