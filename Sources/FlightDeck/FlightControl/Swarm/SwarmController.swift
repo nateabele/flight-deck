@@ -98,7 +98,9 @@ final class SwarmController {
     }
 
     /// Reuse is checked before leasing (deviation 3): an idle agent already holds a lease on an
-    /// account under soft, and leasing first would hold two for one agent.
+    /// account under soft, and leasing first would hold two for one agent. Then: a lease in the
+    /// block's pool if the pool is under its own cap; else, unless the block is pinned, L3-R's
+    /// spill for this one spawn; else the task waits, with why.
     func plan(_ task: ReadyTask, block: ExecutionBlock, allowReuse: Bool = true) async -> LaunchPlan {
         if allowReuse, let agent = SwarmPlanner.reuseCandidate(
             for: ConfigKey(block), in: record.agents,
@@ -106,8 +108,37 @@ final class SwarmController {
             headroom: { [weak self] in self?.headroom(of: $0) ?? .unknown }) {
             return .reuse(session: agent.session)
         }
-        if let lease = deps.allocator.lease(pool: block.pool) { return .spawn(block: block, lease: lease) }
-        return .waiting("no account in \(block.pool) is under its soft limit")
+        if let lease = leaseIfRoom(block.pool) { return .spawn(block: block, lease: lease) }
+        // A pinned block is a human's decision; L3-0 says it never spills.
+        if block.pinned { return .waiting("pinned to \(block.pool), which has no account under its soft limit") }
+        guard let kind = resolveKind(block.kind) else {
+            return .waiting("\(block.pool) is full and kind \(block.kind) is unknown")
+        }
+        let catalogs = await deps.catalogs()
+        let spill = deps.router.spill(block, kind: kind, project: project, exhausted: [block.pool],
+                                      catalogs: catalogs, now: now())
+        // An unroutable spill has pool "": leasing it would hand out nothing and name no pool.
+        guard let spill, !spill.isUnroutable else {
+            return .waiting("\(block.pool) is full and \(spill?.unroutableReason ?? "nothing else fits")")
+        }
+        let spilled = spill.block
+        guard let lease = leaseIfRoom(spilled.pool) else {
+            return .waiting("\(block.pool) is full and \(spilled.pool) is full too")
+        }
+        log(.spill, task: task.id, detail: "\(block.pool) → \(spilled.pool) (\(spilled.model))")
+        return .spawn(block: spilled, lease: lease)
+    }
+
+    /// A pool at its own cap is full without asking the allocator: the cap is about concurrency
+    /// (a local model serves one agent at a time), which no account's headroom can answer.
+    private func leaseIfRoom(_ pool: PoolID) -> AccountLease? {
+        if let cap = record.poolCap(pool), record.load(of: pool) + (pendingSpawns[pool] ?? 0) >= cap { return nil }
+        return deps.allocator.lease(pool: pool)
+    }
+
+    private func resolveKind(_ id: KindID) -> TaskKind? {
+        guard let kinds = try? deps.kinds.kinds(project: project) else { return nil }
+        return KindResolution.resolve(id, in: kinds)
     }
 
     private func start(_ plan: LaunchPlan, for task: ReadyTask) {
