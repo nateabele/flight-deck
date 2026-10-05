@@ -21,6 +21,8 @@ final class FakeSwarmBackend: SwarmBackend {
     /// Runs inside `releaseReservations`, so a test can act while a reuse is mid-flight.
     var onReleaseReservations: (() -> Void)?
     var statuses: [String: TaskStatusReading] = [:]
+    /// Tasks whose `returnToOpen` fails (leaving the status untouched) until the test clears them.
+    var returnToOpenFails: Set<String> = []
     var details: [String: TaskDetail] = [:]
     struct ClaimCall: Equatable { let task: String; let actor: String }
     struct WriteCall: Equatable { let task: String; let block: ExecutionBlock }
@@ -48,6 +50,7 @@ final class FakeSwarmBackend: SwarmBackend {
         return outcome
     }
     func returnToOpen(_ id: String, project: URL) async -> Bool {
+        if returnToOpenFails.contains(id) { return false }
         returned.append(id); log.add("open \(id)")
         statuses[id] = TaskStatusReading(status: "open", assignee: nil)
         return true

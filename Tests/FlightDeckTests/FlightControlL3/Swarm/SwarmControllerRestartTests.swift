@@ -86,4 +86,54 @@ final class SwarmControllerRestartTests: XCTestCase {
         await c.resume(); await c.settle()
         XCTAssertEqual(rig.backend.claims.map(\.task), ["fx-1"])
     }
+
+    func testAnUnreadableRestoredClaimIsRetriedOnTheNextTickEvenWhilePaused() async {
+        let rig = SwarmRig()
+        var a = rig.agent("BlueLake", state: .starting)
+        a.pendingClaim = "fx-1"
+        let c = rig.controller(rig.record(state: .paused, agents: [a]))
+        await c.reconcileAfterRestart()
+        XCTAssertEqual(c.record.agent(a.session)?.state, .starting)
+        rig.backend.statuses["fx-1"] = TaskStatusReading(status: "in_progress", assignee: "BlueLake")
+        await c.tick()
+        XCTAssertEqual(rig.backend.returned, ["fx-1"])
+        XCTAssertEqual(c.record.agent(a.session)?.state, .idle)
+        XCTAssertNil(c.record.agent(a.session)?.pendingClaim)
+        await c.tick()
+        XCTAssertEqual(rig.backend.returned, ["fx-1"], "reconciled once, never again")
+    }
+
+    func testAFailedReopenLeavesTheRestoredAgentUntouchedUntilItSucceeds() async {
+        let rig = SwarmRig()
+        var a = rig.agent("BlueLake", state: .starting)
+        a.pendingClaim = "fx-1"
+        rig.backend.statuses["fx-1"] = TaskStatusReading(status: "in_progress", assignee: "BlueLake")
+        rig.backend.returnToOpenFails = ["fx-1"]
+        let c = rig.controller(rig.record(state: .paused, agents: [a]))
+        await c.reconcileAfterRestart()
+        XCTAssertEqual(c.record.agent(a.session)?.pendingClaim, "fx-1")
+        XCTAssertEqual(c.record.agent(a.session)?.state, .starting)
+        rig.backend.returnToOpenFails = []
+        await c.tick()
+        XCTAssertEqual(rig.backend.returned, ["fx-1"])
+        XCTAssertNil(c.record.agent(a.session)?.pendingClaim)
+        XCTAssertEqual(c.record.agent(a.session)?.state, .idle)
+    }
+
+    func testAFailedReopenOfAClosedTabsClaimKeepsItsRecordUntilItSucceeds() async {
+        let rig = SwarmRig()
+        let a = rig.agent("BlueLake", state: .working, task: "fx-1")
+        rig.backend.statuses["fx-1"] = TaskStatusReading(status: "in_progress", assignee: "BlueLake")
+        rig.backend.returnToOpenFails = ["fx-1"]
+        let c = rig.controller(rig.record(state: .running, agents: [a]))
+        rig.host.existing.remove(a.session)
+        await c.tick()
+        XCTAssertEqual(c.record.agent(a.session)?.task, "fx-1")
+        XCTAssertEqual(c.record.agent(a.session)?.state, .working)
+        rig.backend.returnToOpenFails = []
+        await c.tick()
+        XCTAssertEqual(rig.backend.returned, ["fx-1"])
+        XCTAssertNil(c.record.agent(a.session)?.task)
+        XCTAssertEqual(c.record.agent(a.session)?.state, .done)
+    }
 }

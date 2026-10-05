@@ -35,6 +35,8 @@ final class SwarmController {
     /// Spawns whose agent record does not exist yet, per pool — they hold a slot and pool load.
     private var pendingSpawns: [PoolID: Int] = [:]
     private var isTicking = false
+    /// Restored agents whose claim could not be read or reopened; every tick retries exactly these.
+    private var unreconciled: Set<UUID> = []
 
     init(record: SwarmRecord, store: SwarmStore, deps: Dependencies, now: @escaping () -> Date = Date.init) {
         self.record = record; self.store = store; self.deps = deps; self.now = now
@@ -53,6 +55,7 @@ final class SwarmController {
         guard !isTicking else { return }
         isTicking = true
         defer { isTicking = false }
+        await retryUnreconciled()
         await sweepClosedTabs()
         switch record.state {
         case .running: await fillSlots()
@@ -93,23 +96,10 @@ final class SwarmController {
     private func sweepClosedTabs() async {
         for agent in record.agents where [.starting, .working, .idle].contains(agent.state)
             && !deps.host.sessionExists(agent.session) {
-            // Read every task first: a status that could not be read (br show failed) must never
-            // be treated as "open and ours". The agent stays untouched, lease included, so the
-            // next tick re-reads it and the slot accounting stays consistent meanwhile.
-            var readings: [(task: String, reading: TaskStatusReading)] = []
-            var unreadable = false
-            for task in Set([agent.task, agent.pendingClaim].compactMap { $0 }).sorted() {
-                guard let reading = await deps.backend.status(task, project: project) else { unreadable = true; break }
-                readings.append((task, reading))
+            let settled = await giveBackHeldTasks(of: agent, detail: "\(agent.agentName)'s tab was closed") { reading in
+                reading.status != "closed" && (reading.assignee == nil || reading.assignee == agent.agentName)
             }
-            if unreadable { continue }
-            for (task, reading) in readings {
-                let ours = reading.assignee == nil || reading.assignee == agent.agentName
-                if reading.status != "closed", ours {
-                    _ = await deps.backend.returnToOpen(task, project: project)
-                    log(.released, task: task, session: agent.session, detail: "\(agent.agentName)'s tab was closed")
-                }
-            }
+            if !settled { continue }
             if let lease = agent.lease { deps.allocator.release(lease.lease) }
             record.update(agent.session) {
                 $0.state = .done; $0.task = nil; $0.pendingClaim = nil; $0.marker = "tab closed"; $0.stateSince = now()
@@ -414,24 +404,49 @@ final class SwarmController {
     /// Run once for a swarm restored from disk (`SwarmService` calls it). A `starting` agent or one
     /// with a `pendingClaim` was cut off before its prompt landed: any claim it holds goes back
     /// to open, because the agent never heard about the task, and the agent becomes idle.
-    /// A status that cannot be read is never treated as "ours": that agent is left untouched,
-    /// pendingClaim included, for a later retry.
+    /// An agent whose claim cannot be read or reopened is left untouched and retried each tick.
     func reconcileAfterRestart() async {
         for agent in record.agents where agent.state == .starting || agent.pendingClaim != nil {
-            var readings: [(task: String, reading: TaskStatusReading)] = []
-            var unreadable = false
-            for task in Set([agent.pendingClaim, agent.task].compactMap { $0 }).sorted() {
-                guard let reading = await deps.backend.status(task, project: project) else { unreadable = true; break }
-                readings.append((task, reading))
-            }
-            if unreadable { continue }
-            for (task, reading) in readings where reading.status == "in_progress" && reading.assignee == agent.agentName {
-                _ = await deps.backend.returnToOpen(task, project: project)
-                log(.released, task: task, session: agent.session, detail: "claimed before a restart but never prompted")
-            }
-            becomeIdle(agent.session)
+            await reconcileRestored(agent)
         }
         changed()
+    }
+
+    private func retryUnreconciled() async {
+        for session in unreconciled {
+            guard let agent = record.agent(session), agent.state == .starting || agent.pendingClaim != nil else {
+                unreconciled.remove(session); continue
+            }
+            await reconcileRestored(agent)
+        }
+    }
+
+    private func reconcileRestored(_ agent: SwarmAgentRecord) async {
+        let settled = await giveBackHeldTasks(of: agent, detail: "claimed before a restart but never prompted") {
+            $0.status == "in_progress" && $0.assignee == agent.agentName
+        }
+        if settled { unreconciled.remove(agent.session); becomeIdle(agent.session) }
+        else { unreconciled.insert(agent.session) }
+    }
+
+    /// Returns every task the agent holds (`task`, `pendingClaim`) that `shouldReopen` accepts to
+    /// open. False means nothing may be concluded yet and the agent must stay untouched: a status
+    /// that could not be read is never treated as "open and ours", and a reopen that failed leaves
+    /// the task in_progress under that name, so clearing the record would orphan it.
+    private func giveBackHeldTasks(of agent: SwarmAgentRecord, detail: String,
+                                   shouldReopen: (TaskStatusReading) -> Bool) async -> Bool {
+        var readings: [(task: String, reading: TaskStatusReading)] = []
+        for task in Set([agent.task, agent.pendingClaim].compactMap { $0 }).sorted() {
+            guard let reading = await deps.backend.status(task, project: project) else { return false }
+            readings.append((task, reading))
+        }
+        var allReopened = true
+        for (task, reading) in readings where shouldReopen(reading) {
+            if await deps.backend.returnToOpen(task, project: project) {
+                log(.released, task: task, session: agent.session, detail: detail)
+            } else { allReopened = false }
+        }
+        return allReopened
     }
 
     private func becomeIdle(_ session: UUID) {
