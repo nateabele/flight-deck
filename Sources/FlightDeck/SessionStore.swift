@@ -8865,6 +8865,13 @@ final class SessionStore: ObservableObject {
         case .subagentCount(let count): applySubagentCount(tabID, count)
         case .turnEnded: applyTurnEnded(to: tabID)
         case .turnAborted: applyTurnAborted(to: tabID)
+        case .outputSignals(let signals):
+            // Contested detection (L3-S §7). Only flywheel tabs count: building the service adds a
+            // permanent WatchClock subscriber, which a stray `BLOCKED:` line in an ordinary tab
+            // must never cause. A flywheel tab builds it, because the Observe enrichment reads
+            // signals for any agent in the project, swarm or not.
+            guard session(for: tabID)?.flywheelIdentity != nil else { break }
+            swarmService.recordSignals(signals, session: tabID)
         // Persisted only when it actually changed. The watcher already suppresses an unchanged
         // report (`TranscriptWatcher.lastAPIError`), so this guard is the second line: it also
         // covers a restore-seeded error re-reported identically by the first live scan, which

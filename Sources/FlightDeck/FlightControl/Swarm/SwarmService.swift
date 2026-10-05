@@ -42,9 +42,13 @@ final class SwarmService: ObservableObject {
     var onChange: (() -> Void)?
     weak var handoffDecisions: HandoffDecisionSink?
 
-    /// Whether a session is contested right now. Set by contested detection (Task 11d); until
-    /// then nothing is contested, which is the truth for a swarm with no guard blocks.
+    /// Whether a session is contested right now: wired in `init` to `contest(for:)`; a test may
+    /// override it.
     var isContested: (UUID) -> Bool = { _ in false }
+    /// The last guard block and BLOCKED: line per session (spec §7.4).
+    private(set) var signals: [UUID: SessionSignals] = [:]
+    /// The project's held reservations, from the Observe projection (wired by `SessionStore`).
+    var reservationsLookup: (String) -> [HeldReservation] = { _ in [] }
 
     let store: SwarmStore
     let backend: SwarmBackend
@@ -75,6 +79,7 @@ final class SwarmService: ObservableObject {
             records[key] = record
             if record.state != .stopped { needsReconcile.insert(key) }
         }
+        isContested = { [weak self] in self?.contest(for: $0) != nil }
         clock?.add(self) { [weak self] in self?.clockTick() }
     }
 
@@ -82,6 +87,7 @@ final class SwarmService: ObservableObject {
 
     func record(forProject path: String) -> SwarmRecord? { records[Self.key(path)] }
     func controller(forProject path: String) -> SwarmController? { controllers[Self.key(path)] }
+    var currentTime: Date { now() }
     var allRecords: [SwarmRecord] { records.values.sorted { $0.createdAt < $1.createdAt } }
 
     /// At most one swarm per project (spec §2): a stopped one is replaced, a live one refuses.
@@ -233,5 +239,48 @@ private final class WeakSwarmHost: SwarmHost {
     func lastActiveAt(for id: UUID) -> Date? { host?.lastActiveAt(for: id) }
     func flywheelAgents(inProject project: String) -> [(session: UUID, agentName: String)] {
         host?.flywheelAgents(inProject: project) ?? []
+    }
+}
+
+extension SwarmService {
+    func recordSignals(_ new: [AgentOutputSignal], session: UUID) {
+        guard !new.isEmpty else { return }
+        var current = signals[session] ?? SessionSignals()
+        for signal in new {
+            switch signal {
+            case .guardBlock(let block): current.guardBlock = block; current.guardBlockAt = now()
+            case .blocked(let text): current.blocked = text; current.blockedAt = now()
+            }
+        }
+        signals[session] = current
+        objectWillChange.send()
+        onChange?()
+    }
+
+    func contest(for session: UUID) -> Contest? {
+        guard let signals = signals[session], let (record, agent) = agentRecord(session) else { return nil }
+        return ContestedRelation.contest(agent: agent.agentName, signals: signals,
+                                         reservations: reservationsLookup(Self.key(record.project)), now: currentTime)
+    }
+
+    /// Agent name to contest, for every flywheel tab in the project: the Observe enrichment's input.
+    func contests(project: String) -> [String: Contest] {
+        let key = Self.key(project)
+        var out: [String: Contest] = [:]
+        for (session, name) in host?.flywheelAgents(inProject: key) ?? [] {
+            guard let s = signals[session],
+                  let c = ContestedRelation.contest(agent: name, signals: s, reservations: reservationsLookup(key), now: currentTime)
+            else { continue }
+            out[name] = c
+        }
+        return out
+    }
+
+    /// Agents that said BLOCKED: and have not started working since: the notifier's block trigger.
+    func declaredBlocked(project: String) -> Set<String> {
+        Set((host?.flywheelAgents(inProject: Self.key(project)) ?? []).compactMap { session, name in
+            guard signals[session]?.blocked != nil, host?.isAgentIdle(session) == true else { return nil }
+            return name
+        })
     }
 }

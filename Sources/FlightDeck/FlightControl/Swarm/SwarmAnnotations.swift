@@ -269,10 +269,20 @@ extension SwarmService {
     func assignment(for session: UUID, now: Date = Date()) -> SwarmAssignmentDetail? {
         guard let (record, agent) = agentRecord(session) else { return nil }
         let headroom = agent.lease.flatMap { dependencies?.capacity.headroom(for: $0.lease) }
-        return SwarmAnnotations.assignment(
+        var detail = SwarmAnnotations.assignment(
             agent: agent, headroom: headroom,
             previous: agent.handedOffFrom.flatMap { record.agent($0) },
             next: agent.handedOffTo.flatMap { record.agent($0) },
             lastActive: lastActiveAt(for: session), now: now)
+        if let contest = contest(for: session) { detail.lines += SwarmAnnotations.contestLines(contest, now: now) }
+        return detail
+    }
+}
+
+extension SwarmAnnotations {
+    /// Spec §7.5's drawer sentence and the quoted message.
+    static func contestLines(_ contest: Contest, now: Date) -> [String] {
+        let minutes = Int(now.timeIntervalSince(contest.heldSince ?? contest.at) / 60)
+        return ["waits on \(contest.file), held by \(contest.holder) · \(minutes) min", "“\(contest.message)”"]
     }
 }

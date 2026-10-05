@@ -1,4 +1,5 @@
 import Foundation
+import IntakeKit
 
 /// Tails one codex thread's rollout `.jsonl` and reports turn boundaries.
 ///
@@ -179,6 +180,8 @@ struct CodexScan: Sendable {
             else { continue }
 
             result.events += CodexEventMapper.events(inRecord: record)
+            let signals = AgentOutputScan.signals(line: line, record: record)
+            if !signals.isEmpty { result.events.append(.outputSignals(signals)) }
             if wantsMessages {
                 result.messages += CodexSearchCorpus.indexedMessages(
                     inObject: record, conversationID: conversationID.uuidString.lowercased(),

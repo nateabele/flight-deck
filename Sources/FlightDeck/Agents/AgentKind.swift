@@ -1,5 +1,7 @@
 import FleetKit
 import Foundation
+import IntakeKit
+import IntakeKit
 
 /// Which coding agent a tab runs. The raw value is a storage format — it is written into
 /// `sessions.json` — so it is spelled explicitly rather than derived from the case name.
@@ -79,6 +81,10 @@ enum AgentEvent: Equatable, Sendable {
     /// interrupt record performs. Codex is the asymmetric case because its rollout reports
     /// `turn_aborted` as a record type of its own and clears no error.
     case turnAborted
+    /// Guard blocks and `BLOCKED:` lines found in the agent's own output (L3-S contested
+    /// detection). Carried as an event so claude's transcript tail and codex's rollout tail reach
+    /// the store through the one channel every agent report already takes.
+    case outputSignals([AgentOutputSignal])
 }
 
 /// Per-agent settings payload.

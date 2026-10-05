@@ -1,5 +1,6 @@
 import FleetKit
 import Foundation
+import IntakeKit
 
 /// Tails one session's Claude transcript and reports the newest `customTitle`.
 ///
@@ -30,6 +31,8 @@ final class TranscriptWatcher {
     private let onTitle: (String) -> Void
     private let onSubagentCount: (Int) -> Void
     private let onAPIError: (SessionAPIError?) -> Void
+    /// Guard blocks and `BLOCKED:` lines in this pass's records (L3-S contested detection).
+    private let onSignals: (([AgentOutputSignal]) -> Void)?
     /// Reports conversation text to the search index. A genuine optional, not a defaulted
     /// no-op: `Scan.read` checks `onMessages != nil` and skips
     /// `TranscriptExtractor.messages(inObject:)` entirely when nothing is subscribed, so a
@@ -76,6 +79,7 @@ final class TranscriptWatcher {
         onTitle: @escaping (String) -> Void,
         onSubagentCount: @escaping (Int) -> Void = { _ in },
         onAPIError: @escaping (SessionAPIError?) -> Void = { _ in },
+        onSignals: (([AgentOutputSignal]) -> Void)? = nil,
         onMessages: (([IndexedMessage]) -> Void)? = nil
     ) {
         self.sessionID = sessionID
@@ -84,6 +88,7 @@ final class TranscriptWatcher {
         self.onTitle = onTitle
         self.onSubagentCount = onSubagentCount
         self.onAPIError = onAPIError
+        self.onSignals = onSignals
         self.onMessages = onMessages
     }
 
@@ -190,6 +195,7 @@ final class TranscriptWatcher {
             lastAPIError = apiErrorOutcome
             onAPIError(outcome)
         }
+        if !scan.signals.isEmpty { onSignals?(scan.signals) }
         if !scan.messages.isEmpty { onMessages?(scan.messages) }
     }
 }
@@ -203,6 +209,7 @@ struct Scan: Sendable {
     var offset: UInt64
     var hasChosenStart: Bool
     var events: [ClaudeSession.TranscriptEvent] = []
+    var signals: [AgentOutputSignal] = []
     /// Conversation text found in this pass, for the search index.
     ///
     /// Collected here rather than in a second reader because this pass has already paid for
@@ -242,6 +249,7 @@ struct Scan: Sendable {
             else { continue }
 
             result.events += ClaudeSession.events(inObject: obj, sessionID: sessionID)
+            result.signals += AgentOutputScan.signals(line: line, record: obj)
             if wantsMessages {
                 result.messages += TranscriptExtractor.messages(
                     inObject: obj, conversationID: sessionID.uuidString.lowercased(),
