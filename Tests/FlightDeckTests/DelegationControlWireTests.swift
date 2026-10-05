@@ -27,9 +27,11 @@ final class DelegationControlWireTests: XCTestCase {
     private let everyRequest: [DelegateRequest] = [
         .run(WireDelegateRun(cwd: "/r")), .exec(WireDelegateRun(cwd: "/r")), .up(WireDelegateRun(cwd: "/r")),
         .down(service: "db", cwd: "/r"), .restart(service: "db", cwd: "/r"), .sync(service: "db", cwd: "/r"),
-        .ps, .wait(run: "r1", timeout: 60), .wait(run: "r1", timeout: nil), .logs(run: "r1", follow: true),
-        .stop(run: "r1"), .diff(run: "r1"), .apply(run: "r1"), .recipeList(cwd: "/r"),
+        .ps, .wait(run: "r1", timeout: 60, from: nil), .wait(run: "r1", timeout: nil, from: 4096),
+        .logs(run: "r1", follow: true, from: nil), .stop(run: "r1"), .diff(run: "r1"), .apply(run: "r1"),
+        .recipeList(cwd: "/r"),
         .recipeAdd(cwd: "/r", name: "t", recipe: WireRecipe(name: "t", run: "make")), .recipeCheck(cwd: "/r"),
+        .hostDisk(host: "mini"), .hostPrune(host: "mini", repo: nil),
     ]
 
     // MARK: Requests
@@ -62,19 +64,29 @@ final class DelegationControlWireTests: XCTestCase {
         XCTAssertEqual(ops, ["delegate.run", "delegate.exec", "delegate.up", "delegate.down", "delegate.restart",
                              "delegate.sync", "delegate.ps", "delegate.wait", "delegate.wait", "delegate.logs",
                              "delegate.stop", "delegate.diff", "delegate.apply", "recipe.ls", "recipe.add",
-                             "recipe.check"])
+                             "recipe.check", "host.disk", "host.prune"])
     }
 
     func testTargetedRequestShapesArePinned() throws {
         XCTAssertEqual(try sorted(FleetRequest.delegate(.down(service: "db", cwd: "/r"))),
                        #"{"cwd":"/r","op":"delegate.down","service":"db"}"#)
         XCTAssertEqual(try sorted(FleetRequest.delegate(.ps)), #"{"op":"delegate.ps"}"#)
-        XCTAssertEqual(try sorted(FleetRequest.delegate(.wait(run: "r1", timeout: 60))),
+        XCTAssertEqual(try sorted(FleetRequest.delegate(.wait(run: "r1", timeout: 60, from: nil))),
                        #"{"op":"delegate.wait","run":"r1","timeout":60}"#)
-        XCTAssertEqual(try sorted(FleetRequest.delegate(.wait(run: "r1", timeout: nil))),
+        XCTAssertEqual(try sorted(FleetRequest.delegate(.wait(run: "r1", timeout: nil, from: nil))),
                        #"{"op":"delegate.wait","run":"r1"}"#)
-        XCTAssertEqual(try sorted(FleetRequest.delegate(.logs(run: "r1", follow: true))),
+        XCTAssertEqual(try sorted(FleetRequest.delegate(.wait(run: "r1", timeout: 60, from: 4096))),
+                       #"{"from":4096,"op":"delegate.wait","run":"r1","timeout":60}"#)
+        XCTAssertEqual(try sorted(FleetRequest.delegate(.logs(run: "r1", follow: true, from: nil))),
                        #"{"follow":true,"op":"delegate.logs","run":"r1"}"#)
+        XCTAssertEqual(try sorted(FleetRequest.delegate(.logs(run: "r1", follow: false, from: 1 << 33))),
+                       #"{"follow":false,"from":8589934592,"op":"delegate.logs","run":"r1"}"#)
+        XCTAssertEqual(try sorted(FleetRequest.delegate(.hostDisk(host: "mini"))),
+                       #"{"host":"mini","op":"host.disk"}"#)
+        XCTAssertEqual(try sorted(FleetRequest.delegate(.hostPrune(host: "mini", repo: "/w/app"))),
+                       #"{"host":"mini","op":"host.prune","repo":"/w/app"}"#)
+        XCTAssertEqual(try sorted(FleetRequest.delegate(.hostPrune(host: "mini", repo: nil))),
+                       #"{"host":"mini","op":"host.prune"}"#)
         XCTAssertEqual(try sorted(FleetRequest.delegate(.recipeAdd(cwd: "/r", name: "t",
                                                                    recipe: WireRecipe(name: "t", run: "make")))),
                        #"{"cwd":"/r","name":"t","op":"recipe.add","recipe":{"apply":"review","env":{},"fetch":[],"#
@@ -95,16 +107,26 @@ final class DelegationControlWireTests: XCTestCase {
     // MARK: Replies
 
     func testReplyShapesArePinned() throws {
+        XCTAssertEqual(try sorted(ServerFrame.delegateStarted(cid: 3, WireDelegateStarted(
+                           runID: "r1", host: "mini", ports: [WirePortBinding(local: 54012, remote: 5432)]))),
+                       #"{"cid":3,"run":{"host":"mini","ports":[{"local":54012,"remote":5432}],"runID":"r1"},"t":"delegateStarted"}"#)
         XCTAssertEqual(try sorted(ServerFrame.delegateStarted(cid: 3, WireDelegateStarted(runID: "r1", host: "mini"))),
-                       #"{"cid":3,"run":{"host":"mini","runID":"r1"},"t":"delegateStarted"}"#)
+                       #"{"cid":3,"run":{"host":"mini","ports":[],"runID":"r1"},"t":"delegateStarted"}"#)
         XCTAssertEqual(try sorted(ServerFrame.delegateNotice(cid: 3, message: "waiting for mini's screen")),
                        #"{"cid":3,"message":"waiting for mini's screen","t":"delegateNotice"}"#)
-        XCTAssertEqual(try sorted(ServerFrame.delegateOutput(cid: 3, stream: "stdout", data: Data("hi".utf8))),
-                       #"{"cid":3,"data":"aGk=","stream":"stdout","t":"delegateOutput"}"#)
+        XCTAssertEqual(try sorted(ServerFrame.delegateOutput(cid: 3, stream: "stdout", offset: 70000, data: Data("hi".utf8))),
+                       #"{"cid":3,"data":"aGk=","offset":70000,"stream":"stdout","t":"delegateOutput"}"#)
         XCTAssertEqual(try sorted(ServerFrame.delegateExit(cid: 3, status: 137)),
                        #"{"cid":3,"status":137,"t":"delegateExit"}"#)
         XCTAssertEqual(try sorted(ServerFrame.delegatePatch(cid: 3, WireDelegatePatch(runID: "r1", patch: "diff"))),
                        #"{"cid":3,"patch":{"patch":"diff","runID":"r1"},"t":"delegatePatch"}"#)
+        // Over 1 MiB: a path instead of the text, and the absent one is omitted, never null.
+        XCTAssertEqual(try sorted(ServerFrame.delegatePatch(cid: 3, WireDelegatePatch(
+                           runID: "r1", patchPath: "/Users/u/Library/Application Support/Flight Deck/delegation/r1.patch"))),
+                       #"{"cid":3,"patch":{"patchPath":"/Users/u/Library/Application Support/Flight Deck/delegation/r1.patch","runID":"r1"},"t":"delegatePatch"}"#)
+        XCTAssertEqual(try sorted(ServerFrame.hostDisk(cid: 3, [WireWorkspaceUsage(repoRoot: "r00t", worktreeName: "app",
+                                                                                 bytes: 1 << 33)])),
+                       #"{"cid":3,"t":"hostDisk","usage":[{"bytes":8589934592,"repoRoot":"r00t","worktreeName":"app"}]}"#)
         XCTAssertEqual(try sorted(ServerFrame.delegateApplied(cid: 3, WireDelegateApplied(runID: "r1", conflicts: ["a.swift"]))),
                        #"{"applied":{"conflicts":["a.swift"],"runID":"r1"},"cid":3,"t":"delegateApplied"}"#)
         XCTAssertEqual(try sorted(ServerFrame.recipeCheck(cid: 3, problems: [])),
@@ -123,11 +145,14 @@ final class DelegationControlWireTests: XCTestCase {
     func testEveryReplyRoundTripsAndIsCorrelated() throws {
         let frames: [ServerFrame] = [
             .delegateStarted(cid: 5, WireDelegateStarted(runID: "r", host: "h")),
+            .delegateStarted(cid: 5, WireDelegateStarted(runID: "r", host: "h", ports: [WirePortBinding(local: 1, remote: 2)])),
             .delegateNotice(cid: 5, message: "m"),
-            .delegateOutput(cid: 5, stream: "pty", data: Data([0, 255])),
+            .delegateOutput(cid: 5, stream: "pty", offset: 0, data: Data([0, 255])),
             .delegateExit(cid: 5, status: 0),
             .delegateRuns(cid: 5, []),
             .delegatePatch(cid: 5, WireDelegatePatch(runID: "r", patch: "")),
+            .delegatePatch(cid: 5, WireDelegatePatch(runID: "r", patchPath: "/p")),
+            .hostDisk(cid: 5, []),
             .delegateApplied(cid: 5, WireDelegateApplied(runID: "r", conflicts: [])),
             .recipes(cid: 5, WireRecipeBook(defaultHost: nil, include: [], recipes: [WireRecipe(name: "n", run: "r")],
                                             routes: [])),
@@ -144,10 +169,19 @@ final class DelegationControlWireTests: XCTestCase {
     private let me = UUID()
     private var writes: [DelegateRequest] { everyRequest.filter { !$0.isReadOnly } }
 
-    /// The ruling: `ps`, `logs`, `diff` and `recipe ls` read; everything else writes.
+    /// The ruling: `ps`, `logs`, `diff`, `recipe ls` and `host ls --disk` read; everything else
+    /// writes.
     func testReadOnlySetIsExactlyTheRuling() {
         XCTAssertEqual(everyRequest.filter(\.isReadOnly),
-                       [.ps, .logs(run: "r1", follow: true), .diff(run: "r1"), .recipeList(cwd: "/r")])
+                       [.ps, .logs(run: "r1", follow: true, from: nil), .diff(run: "r1"), .recipeList(cwd: "/r"),
+                        .hostDisk(host: "mini")])
+    }
+
+    /// C0's `delegateStarted` had no `ports`; a frame without it still reads, as no forwards.
+    func testDelegateStartedDecodesWithoutPorts() throws {
+        XCTAssertEqual(try JSONDecoder().decode(ServerFrame.self, from: Data(
+                           #"{"cid":3,"run":{"host":"mini","runID":"r1"},"t":"delegateStarted"}"#.utf8)),
+                       .delegateStarted(cid: 3, WireDelegateStarted(runID: "r1", host: "mini")))
     }
 
     func testDelegateReadsArePermittedEverywhere() {
@@ -164,7 +198,7 @@ final class DelegationControlWireTests: XCTestCase {
     /// valid session at `.full` and `.ownSession` — unlike `openConversation`, which a session
     /// may not reach under `.ownSession`.
     func testDelegateWritesFollowTheOwnSessionRule() {
-        for r in writes {
+        for r in writes where r != .hostPrune(host: "mini", repo: nil) {
             for level in ControlScopeLevel.allCases {
                 XCTAssertTrue(ControlScope.permits(.delegate(r), level: level, caller: .human), "\(level) \(r)")
             }
@@ -174,6 +208,17 @@ final class DelegationControlWireTests: XCTestCase {
             XCTAssertFalse(ControlScope.permits(.delegate(r), level: .ownSession, caller: .invalid), "\(r)")
             XCTAssertFalse(ControlScope.permits(.delegate(r), level: .readOnly, caller: .invalid), "\(r)")
         }
+    }
+
+    /// `host prune` deletes every tab's checkouts on the host, so no one session owns it: it
+    /// follows the fleet-wide rule (`.full` or a human), like `openConversation`.
+    func testHostPruneFollowsTheFleetWideRule() {
+        let prune = FleetRequest.delegate(.hostPrune(host: "mini", repo: nil))
+        for level in ControlScopeLevel.allCases {
+            XCTAssertTrue(ControlScope.permits(prune, level: level, caller: .human), "\(level)")
+            XCTAssertEqual(ControlScope.permits(prune, level: level, caller: .session(me)), level == .full, "\(level)")
+        }
+        XCTAssertFalse(ControlScope.permits(prune, level: .ownSession, caller: .invalid))
     }
 
     // MARK: Service

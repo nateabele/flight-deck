@@ -32,10 +32,12 @@ final class DelegationWireTests: XCTestCase {
                            service: true, downCommand: "make down",
                            ports: [PortMapping(local: .fixed(15432), remote: 5432),
                                    PortMapping(local: .auto, remote: 3000)],
-                           ptySize: TerminalSize(columns: 120, rows: 40))
+                           ptySize: TerminalSize(columns: 120, rows: 40), fetch: ["build/*.log"], pool: 3,
+                           orphanTimeout: 600)
         XCTAssertEqual(try req(.runStart(ref: ref, spec: spec, owner: "laptop/tab", apply: true)),
                        #"{"id":1,"req":{"apply":true,"op":"run.start","owner":"laptop/tab","ref":"# + refJSON
                        + #","spec":{"command":"make test","downCommand":"make down","env":{"A":"1"},"#
+                       + #""fetch":["build/*.log"],"orphanTimeout":600,"pool":3,"#
                        + #""ports":[{"local":15432,"remote":5432},{"local":"auto","remote":3000}],"#
                        + #""pty":true,"ptySize":{"columns":120,"rows":40},"screen":false,"service":true,"subdir":"pkg"}},"t":"req"}"#)
     }
@@ -46,7 +48,27 @@ final class DelegationWireTests: XCTestCase {
         let spec = RunSpec(command: "true", subdir: "", env: [:], pty: false, screen: false, service: false,
                            downCommand: nil, ports: [])
         XCTAssertEqual(try HostWire.encode(spec),
-                       #"{"command":"true","env":{},"ports":[],"pty":false,"screen":false,"service":false,"subdir":""}"#)
+                       #"{"command":"true","env":{},"fetch":[],"ports":[],"pty":false,"screen":false,"service":false,"subdir":""}"#)
+    }
+
+    /// Every field added after the first wire version decodes when absent, so a 1.1 peer built
+    /// before it (C0's shape) is still read: `fetch` as [], the optionals as nil.
+    func testRunSpecDecodesTheFirstVersionsShape() throws {
+        let spec = try HostWire.decode(RunSpec.self, from:
+            #"{"command":"true","env":{},"ports":[],"pty":false,"screen":false,"service":false,"subdir":""}"#)
+        XCTAssertEqual(spec, RunSpec(command: "true", subdir: "", env: [:], pty: false, screen: false,
+                                     service: false, downCommand: nil, ports: []))
+        XCTAssertEqual(spec.fetch, [])
+        XCTAssertNil(spec.pool)
+        XCTAssertNil(spec.orphanTimeout)
+        XCTAssertNil(spec.ptySize)
+    }
+
+    func testSnapshotRefAndScreenStatusDecodeTheFirstVersionsShape() throws {
+        XCTAssertEqual(try HostWire.decode(SnapshotRef.self, from: refJSON), ref)
+        XCTAssertEqual(try HostWire.decode(ScreenStatus.self, from:
+                        #"{"consoleUser":true,"locked":false,"queued":0,"supported":true}"#),
+                       ScreenStatus(supported: true, consoleUser: true, locked: false, holder: nil, queued: 0))
     }
 
     func testRunControlRequestShapesArePinned() throws {
@@ -75,6 +97,16 @@ final class DelegationWireTests: XCTestCase {
                        #"{"id":1,"req":{"op":"screen.status"},"t":"req"}"#)
     }
 
+    func testWorkspaceRequestShapesArePinned() throws {
+        XCTAssertEqual(try req(.workspaceUsage),
+                       #"{"id":1,"req":{"op":"workspace.usage"},"t":"req"}"#)
+        XCTAssertEqual(try req(.workspacePrune(repoRoot: "r00t")),
+                       #"{"id":1,"req":{"op":"workspace.prune","repoRoot":"r00t"},"t":"req"}"#)
+        // Absent, not null: the whole controller's workspace.
+        XCTAssertEqual(try req(.workspacePrune(repoRoot: nil)),
+                       #"{"id":1,"req":{"op":"workspace.prune"},"t":"req"}"#)
+    }
+
     // MARK: Replies
 
     func testReplyShapesArePinned() throws {
@@ -95,6 +127,9 @@ final class DelegationWireTests: XCTestCase {
         XCTAssertEqual(try rep(.portOpen), #"{"id":1,"rep":{"op":"port.open"},"t":"reply"}"#)
         XCTAssertEqual(try rep(.serviceDown), #"{"id":1,"rep":{"op":"service.down"},"t":"reply"}"#)
         XCTAssertEqual(try rep(.serviceSync), #"{"id":1,"rep":{"op":"service.sync"},"t":"reply"}"#)
+        XCTAssertEqual(try rep(.usage([WorkspaceUsage(repoRoot: "r00t", worktreeName: "flight-deck", bytes: 1 << 33)])),
+                       #"{"id":1,"rep":{"op":"workspace.usage","usage":[{"bytes":8589934592,"repoRoot":"r00t","worktreeName":"flight-deck"}]},"t":"reply"}"#)
+        XCTAssertEqual(try rep(.workspacePrune), #"{"id":1,"rep":{"op":"workspace.prune"},"t":"reply"}"#)
     }
 
     func testPortCheckReplyShapeIsPinned() throws {
@@ -114,8 +149,9 @@ final class DelegationWireTests: XCTestCase {
 
     func testScreenStatusReplyShapeIsPinned() throws {
         XCTAssertEqual(try rep(.screenStatus(ScreenStatus(supported: true, consoleUser: true, locked: false,
-                                                          holder: "r7", queued: 1))),
-                       #"{"id":1,"rep":{"op":"screen.status","screen":{"consoleUser":true,"holder":"r7","locked":false,"queued":1,"supported":true}},"t":"reply"}"#)
+                                                          holder: LeaseHolder(runID: "r7", session: "ui tests"),
+                                                          queued: 1))),
+                       #"{"id":1,"rep":{"op":"screen.status","screen":{"consoleUser":true,"holder":{"runID":"r7","session":"ui tests"},"locked":false,"queued":1,"supported":true}},"t":"reply"}"#)
         XCTAssertEqual(try HostWire.encode(ScreenStatus(supported: false, consoleUser: false, locked: false,
                                                        holder: nil, queued: 0)),
                        #"{"consoleUser":false,"locked":false,"queued":0,"supported":false}"#)
@@ -125,10 +161,10 @@ final class DelegationWireTests: XCTestCase {
 
     func testEventShapesArePinned() throws {
         func ev(_ e: RunEvent) throws -> String { try HostWire.encode(HostServerFrame.event(runID: "r1", e)) }
-        XCTAssertEqual(try ev(.queued(position: 2, holder: "r0 (session \"ui\")")),
-                       #"{"ev":{"holder":"r0 (session \"ui\")","kind":"queued","position":2},"runID":"r1","t":"event"}"#)
-        XCTAssertEqual(try ev(.queued(position: 1, holder: nil)),
-                       #"{"ev":{"kind":"queued","position":1},"runID":"r1","t":"event"}"#)
+        XCTAssertEqual(try ev(.queued(position: 2, on: .screen, holder: LeaseHolder(runID: "r0", session: "ui"))),
+                       #"{"ev":{"holder":{"runID":"r0","session":"ui"},"kind":"queued","on":"screen","position":2},"runID":"r1","t":"event"}"#)
+        XCTAssertEqual(try ev(.queued(position: 1, on: .slot, holder: nil)),
+                       #"{"ev":{"kind":"queued","on":"slot","position":1},"runID":"r1","t":"event"}"#)
         XCTAssertEqual(try ev(.started(runID: "r1")),
                        #"{"ev":{"kind":"started","runID":"r1"},"runID":"r1","t":"event"}"#)
         XCTAssertEqual(try ev(.output(stream: .stderr, offset: 10, data: Data("hi".utf8))),
@@ -154,7 +190,8 @@ final class DelegationWireTests: XCTestCase {
             .runSignal(runID: "r", signal: 15), .runCancel(runID: "r"), .runResult(runID: "r", channel: 2),
             .runArtifacts(runID: "r", globs: [], channel: 3), .portCheck(ports: [1]),
             .portOpen(service: "s", remote: 2, channel: 4), .serviceDown(service: "s"),
-            .serviceSync(service: "s", ref: ref), .screenStatus,
+            .serviceSync(service: "s", ref: ref), .screenStatus, .workspaceUsage,
+            .workspacePrune(repoRoot: nil), .workspacePrune(repoRoot: "r"),
         ]
         for r in requests {
             let frame = HostClientFrame.request(id: 9, .delegation(r))
@@ -166,13 +203,15 @@ final class DelegationWireTests: XCTestCase {
             .portCheck([PortStatus(port: 1, holder: .process(name: "n", pid: 2))]), .portOpen, .serviceDown,
             .serviceSync,
             .screenStatus(ScreenStatus(supported: true, consoleUser: false, locked: true, holder: nil, queued: 0)),
+            .usage([]), .usage([WorkspaceUsage(repoRoot: "r", worktreeName: "w", bytes: 0)]), .workspacePrune,
         ]
         for r in replies {
             let frame = HostServerFrame.reply(id: 9, .delegation(r))
             XCTAssertEqual(try HostWire.decode(HostServerFrame.self, from: HostWire.encode(frame)), frame)
         }
         let events: [RunEvent] = [
-            .queued(position: 1, holder: nil), .queued(position: 3, holder: "h"), .started(runID: "r"),
+            .queued(position: 1, on: .slot, holder: nil),
+            .queued(position: 3, on: .screen, holder: LeaseHolder(runID: "r0", session: "s")), .started(runID: "r"),
             .output(stream: .pty, offset: 1 << 40, data: Data([0, 255, 10])), .exited(.code(0)),
             .exited(.signal(15)), .serviceDied(.code(1)),
         ]
@@ -225,6 +264,12 @@ final class DelegationWireTests: XCTestCase {
         XCTAssertEqual(DelegationRequest.portCheck(ports: []).capability, .service)
         XCTAssertEqual(DelegationRequest.serviceSync(service: "", ref: ref).capability, .service)
         XCTAssertEqual(DelegationRequest.screenStatus.capability, .screen)
+        XCTAssertEqual(DelegationRequest.workspaceUsage.capability, .sync)
+        XCTAssertEqual(DelegationRequest.workspacePrune(repoRoot: nil).capability, .sync)
+    }
+
+    func testWaitReasonRawValuesArePinned() {
+        XCTAssertEqual([WaitReason.screen, .slot].map(\.rawValue), ["screen", "slot"])
     }
 
     // MARK: RunExit.cliStatus
@@ -252,6 +297,16 @@ final class DelegationWireTests: XCTestCase {
         }
     }
 
+    /// The wire refuses port 0 as `parse` does, on either side, so a peer bug cannot reach the
+    /// forwarder as a mapping the command line could never have produced.
+    func testPortMappingDecodeRefusesPortZero() throws {
+        XCTAssertEqual(try HostWire.decode(PortMapping.self, from: #"{"local":"auto","remote":5432}"#),
+                       PortMapping(local: .auto, remote: 5432))
+        for bad in [#"{"local":0,"remote":5432}"#, #"{"local":15432,"remote":0}"#, #"{"local":"auto","remote":0}"#] {
+            XCTAssertThrowsError(try HostWire.decode(PortMapping.self, from: bad), "accepted \(bad)")
+        }
+    }
+
     func testPortMappingNotationRoundTripsThroughParse() throws {
         for text in ["5432:5432", "15432:5432", "auto:3000"] {
             XCTAssertEqual(try PortMapping.parse(text).notation, text)
@@ -271,6 +326,7 @@ final class DelegationWireTests: XCTestCase {
         XCTAssertEqual(Array(ChannelFrame(channel: 7, kind: .eof).encoded()), [0, 0, 0, 7, 2])
         XCTAssertEqual(Array(ChannelFrame(channel: 7, kind: .close).encoded()), [0, 0, 0, 7, 3])
         XCTAssertEqual(ChannelFrame.initialCredit, 256 * 1024)
+        XCTAssertEqual(ChannelFrame.maxPayload, 64 * 1024)
     }
 
     func testChannelFrameDecodes() throws {

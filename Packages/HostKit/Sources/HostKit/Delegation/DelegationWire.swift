@@ -16,10 +16,36 @@ import Foundation
 //     service.down   {service}                                  -> {}
 //     service.sync   {service, ref}                             -> {}
 //     screen.status  {}                                         -> {screen:{…}}
+//     workspace.usage {}                                        -> {usage:[{repoRoot, worktreeName, bytes}]}
+//     workspace.prune {repoRoot?}                               -> {}
 //   HostReply     {"op":<the request's op>, …}  in `reply`; an `{}` above is `{"op":…}` alone.
 //   HostServerFrame event  {"t":"event","runID":string,"ev":{"kind":…}}
-//     kind queued {position, holder?} | started {runID} | output {stream, offset, data(base64)}
+//     kind queued {position, on, holder?} | started {runID} | output {stream, offset, data(base64)}
 //          | exited {exit} | serviceDied {exit};  exit = {"code":n} | {"signal":n}
+//     on = "screen" | "slot";  holder = {runID, session}  (session: the tab's display title)
+//
+// Output rides in `event` frames, at most 64 KiB of raw bytes per `output` event, base64 inside
+// the JSON. The ~33% inflation is accepted for v1: build and test logs are small next to the
+// sync bundle, which takes a binary channel, and one framing for every event keeps the
+// replay-from-offset logic in one place. A bigger chunk would hold the connection's single
+// text stream long enough to delay every other run's events behind it.
+//
+// Error codes (`err` frames, `{"t":"err","id":…,"code":…,"message":…}`). The CLI maps each to
+// its §5 line; a code not listed here is a bug on whichever side sent it.
+//   tree_mismatch           the checkout's tree is not the snapshot's after apply (§4.4)
+//   lfs_unsupported         the snapshot is of an LFS repo; out of v1
+//   submodules_unsupported  the snapshot's tree has a gitlink; out of v1
+//   screen_locked           `screen` asked of a host whose console session is locked
+//   no_console_user         `screen` asked of a host with nobody logged in at the console
+//   screen_unsupported      `screen` asked of a host that has none (Linux)
+//   no_checkout             `exec` for a worktree never synced to this host
+//   unknown_run             no such run, or a run another controller owns: the host never
+//                           confirms that someone else's run exists
+//   run_active              the request needs the run ended (a result, a re-sync of a busy slot)
+//   port_held               a forward's port is held on the host (§7 step 5)
+//   dial_failed             `port.open` could not connect to the remote port
+//   unsupported             an op or frame this host does not know (`HostServerCore`)
+//   not_implemented         an op this host knows of but does not serve yet
 //
 // `run.start` with `apply: false` is `flightdeck exec`: run in the worktree's existing checkout
 // without applying `ref`, whose commit and tree are then the controller's view only and are
@@ -30,7 +56,14 @@ import Foundation
 // every controller connection attached to it, so a dropped one loses nothing it can't replay.
 //
 // Every channel named here is opened by the controller (`ChannelOpening`), and the host claims
-// it by id (`ChannelAccepting`).
+// it by id (`ChannelAccepting`). A request that fails names a channel both sides then cancel;
+// see `ChannelProtocols.swift` for the rest of the channel rules.
+//
+// Runs are scoped by controller: `run.attach`, `run.signal`, `run.cancel` and `service.down`
+// for a run another controller started fail `unknown_run` (`RunControlling.owner(runID:)`).
+//
+// `RunSpec.pty` is output-only in v1: the run writes to a terminal, but no stdin is forwarded
+// and it is never resized after start.
 //
 // Hand-rolled like the rest of `HostWire`, for its reason: these strings are the contract
 // between a Linux hostd and a Mac controller built months apart. Optionals are omitted, never
@@ -51,11 +84,13 @@ private enum DelegationOp: String, Codable {
     case serviceDown = "service.down"
     case serviceSync = "service.sync"
     case screenStatus = "screen.status"
+    case workspaceUsage = "workspace.usage"
+    case workspacePrune = "workspace.prune"
 }
 
 private enum DelegationKey: String, CodingKey {
     case op, repoRoot, wtKey, ref, channel, spec, owner, apply, runID, offset, signal
-    case globs, ports, service, remote, tips, commit, found, screen
+    case globs, ports, service, remote, tips, commit, found, screen, usage
 }
 
 /// Controller → host, the delegated-execution half of `HostRequest`.
@@ -75,13 +110,17 @@ public enum DelegationRequest: Codable, Sendable, Equatable {
     /// Re-applies `ref` to the service's pinned checkout in place (`flightdeck sync`, §6.2).
     case serviceSync(service: String, ref: SnapshotRef)
     case screenStatus
+    /// Disk use of this controller's checkouts (`host ls --disk`, §4.7).
+    case workspaceUsage
+    /// Deletes this controller's workspace, or one repo's (`host prune`, §4.7).
+    case workspacePrune(repoRoot: String?)
 
     /// The capability a host must have advertised in `helloAck` for this request. Checked
     /// before sending, so a 1.1 controller never sends `run.start` to a 1.0 host and waits on
     /// an answer it cannot get.
     public var capability: HostCapability {
         switch self {
-        case .syncTips, .syncPush: return .sync
+        case .syncTips, .syncPush, .workspaceUsage, .workspacePrune: return .sync
         case .runStart, .runAttach, .runSignal, .runCancel, .runResult, .runArtifacts: return .run
         case .portCheck, .portOpen, .serviceDown, .serviceSync: return .service
         case .screenStatus: return .screen
@@ -142,6 +181,11 @@ public enum DelegationRequest: Codable, Sendable, Equatable {
             try c.encode(ref, forKey: .ref)
         case .screenStatus:
             try c.encode(DelegationOp.screenStatus, forKey: .op)
+        case .workspaceUsage:
+            try c.encode(DelegationOp.workspaceUsage, forKey: .op)
+        case .workspacePrune(let repoRoot):
+            try c.encode(DelegationOp.workspacePrune, forKey: .op)
+            try c.encodeIfPresent(repoRoot, forKey: .repoRoot)
         }
     }
 
@@ -187,6 +231,10 @@ public enum DelegationRequest: Codable, Sendable, Equatable {
                                 ref: try c.decode(SnapshotRef.self, forKey: .ref))
         case .screenStatus:
             self = .screenStatus
+        case .workspaceUsage:
+            self = .workspaceUsage
+        case .workspacePrune:
+            self = .workspacePrune(repoRoot: try c.decodeIfPresent(String.self, forKey: .repoRoot))
         }
     }
 }
@@ -210,6 +258,9 @@ public enum DelegationReply: Codable, Sendable, Equatable {
     case serviceDown
     case serviceSync
     case screenStatus(ScreenStatus)
+    case usage([WorkspaceUsage])
+    /// `workspace.prune` done.
+    case workspacePrune
 
     public func encode(to encoder: any Encoder) throws {
         var c = encoder.container(keyedBy: DelegationKey.self)
@@ -239,6 +290,10 @@ public enum DelegationReply: Codable, Sendable, Equatable {
         case .screenStatus(let status):
             try c.encode(DelegationOp.screenStatus, forKey: .op)
             try c.encode(status, forKey: .screen)
+        case .usage(let usage):
+            try c.encode(DelegationOp.workspaceUsage, forKey: .op)
+            try c.encode(usage, forKey: .usage)
+        case .workspacePrune: try c.encode(DelegationOp.workspacePrune, forKey: .op)
         }
     }
 
@@ -258,6 +313,8 @@ public enum DelegationReply: Codable, Sendable, Equatable {
         case .serviceDown: self = .serviceDown
         case .serviceSync: self = .serviceSync
         case .screenStatus: self = .screenStatus(try c.decode(ScreenStatus.self, forKey: .screen))
+        case .workspaceUsage: self = .usage(try c.decode([WorkspaceUsage].self, forKey: .usage))
+        case .workspacePrune: self = .workspacePrune
         }
     }
 }
@@ -265,7 +322,7 @@ public enum DelegationReply: Codable, Sendable, Equatable {
 // MARK: - Run events
 
 private enum EventKey: String, CodingKey {
-    case kind, position, holder, runID, stream, offset, data, exit
+    case kind, position, on, holder, runID, stream, offset, data, exit
 }
 
 extension RunEvent: Codable {
@@ -274,9 +331,10 @@ extension RunEvent: Codable {
     public func encode(to encoder: any Encoder) throws {
         var c = encoder.container(keyedBy: EventKey.self)
         switch self {
-        case .queued(let position, let holder):
+        case .queued(let position, let on, let holder):
             try c.encode(Kind.queued, forKey: .kind)
             try c.encode(position, forKey: .position)
+            try c.encode(on, forKey: .on)
             try c.encodeIfPresent(holder, forKey: .holder)
         case .started(let runID):
             try c.encode(Kind.started, forKey: .kind)
@@ -301,7 +359,8 @@ extension RunEvent: Codable {
         switch try c.decode(Kind.self, forKey: .kind) {
         case .queued:
             self = .queued(position: try c.decode(Int.self, forKey: .position),
-                           holder: try c.decodeIfPresent(String.self, forKey: .holder))
+                           on: try c.decode(WaitReason.self, forKey: .on),
+                           holder: try c.decodeIfPresent(LeaseHolder.self, forKey: .holder))
         case .started:
             self = .started(runID: try c.decode(String.self, forKey: .runID))
         case .output:
