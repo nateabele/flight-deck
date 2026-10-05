@@ -54,6 +54,10 @@ public enum CLICommand: Equatable {
     case hostList
     /// `name` is passed through unresolved: only the Mac's registry knows which hosts exist.
     case hostInfo(name: String)
+    /// Every delegated-execution verb (spec §5): `run`, `exec`, `up`, `ps`, `wait <run>`, …
+    /// One case rather than fifteen so the verbs' parsing and output live together in
+    /// `DelegateArguments.swift`/`DelegateCommands.swift`.
+    case delegate(DelegateCommand)
 }
 
 /// A fully parsed command line: the command itself, plus the two globals (`--json`,
@@ -155,14 +159,23 @@ public enum CLIArguments {
             let session = try c.requirePositional("wait: missing session")
             var condition: String?
             var timeout: TimeInterval?
+            var from: Int64?
             while let flag = c.nextFlag() {
                 switch flag {
                 case "--for": condition = try c.require(after: flag)
                 case "--timeout": timeout = TimeInterval(try c.int(after: flag))
+                case "--from" where DelegateArguments.isRunID(session): from = Int64(try c.int(after: flag))
                 default: throw Cursor.unknownFlag(flag, in: "wait")
                 }
             }
+            // `wait r7` is a delegated run's (§6.1). Told apart from a session by the run id's
+            // shape alone, and only without `--for`, so every existing `wait S --for …` reads
+            // exactly as it did, and a session titled "r7" is still reachable with `--for`.
+            if condition == nil, DelegateArguments.isRunID(session) {
+                return .delegate(.wait(run: session, timeout: timeout.map { Int($0) }, from: from))
+            }
             guard let condition else { throw CLIUsageError("wait: --for is required") }
+            if from != nil { throw Cursor.unknownFlag("--from", in: "wait") }
             guard waitConditions.contains(condition) else {
                 throw CLIUsageError("wait: --for must be idle, busy, waiting or gone, got \"\(condition)\"")
             }
@@ -309,6 +322,10 @@ public enum CLIArguments {
         case "host":
             return try parseHost(&c)
 
+        case "run", "exec", "up", "down", "restart", "sync", "ps", "logs", "stop", "diff", "apply",
+             "recipe", "route-exec":
+            return .delegate(try DelegateArguments.parse(verb, &c))
+
         default:
             throw CLIUsageError("unknown command \"\(verb)\"")
         }
@@ -349,7 +366,24 @@ public enum CLIArguments {
         let sub = try c.requirePositional("host: missing subcommand")
         switch sub {
         case "ls":
-            return .hostList
+            var disk = false
+            while let flag = c.nextFlag() {
+                switch flag {
+                case "--disk": disk = true
+                default: throw Cursor.unknownFlag(flag, in: "host ls")
+                }
+            }
+            return disk ? .delegate(.hostDisk(host: c.optionalPositional())) : .hostList
+        case "prune":
+            let host = try c.requirePositional("host prune: missing host")
+            var repo: String?
+            while let flag = c.nextFlag() {
+                switch flag {
+                case "--repo": repo = try c.require(after: flag)
+                default: throw Cursor.unknownFlag(flag, in: "host prune")
+                }
+            }
+            return .delegate(.hostPrune(host: host, repo: repo))
         case "info":
             return .hostInfo(name: try c.requirePositional("host info: missing host"))
         default:
@@ -402,6 +436,9 @@ public enum CLIArguments {
         "--session", "--since", "--for", "--timeout", "--agent", "--account", "--call",
         "--before", "--after", "--around", "--limit", "--project", "--feedback", "--block",
         "--root",
+        // Delegation (DelegateArguments).
+        "--on", "--include", "--fetch", "--env", "--port", "--host", "--run", "--down", "--apply",
+        "--pool", "--repo", "--from",
     ]
 
     /// One verb's tokens, split up front into two streams: operands (session, text, …) and
@@ -412,8 +449,11 @@ public enum CLIArguments {
     /// Before a `--`, every dash-led token (other than a bare `-`) is a flag, so an unknown
     /// one is refused by the verb rather than typed into an agent as text. After `--`,
     /// nothing is a flag and nothing is a flag's value.
-    private struct Cursor {
+    struct Cursor {
         private var operands: [String] = []
+        /// How many operands came before `--`. `run RECIPE -- extra` and `run -- cmd` differ
+        /// only in which side of it their first operand sits.
+        private var operandsBeforeLiteral = 0
         private var flags: [String] = []
         private var operandIndex = 0
         private var flagIndex = 0
@@ -432,9 +472,26 @@ public enum CLIArguments {
                     }
                 } else {
                     operands.append(token)
+                    if i < boundary { operandsBeforeLiteral = operands.count }
                 }
                 i += 1
             }
+        }
+
+        /// The next operand only if it was written before `--`.
+        mutating func positionalBeforeLiteral() -> String? {
+            guard operandIndex < operandsBeforeLiteral else { return nil }
+            return optionalPositional()
+        }
+
+        /// Every operand written after `--`, verbatim. Refuses an unconsumed operand before it,
+        /// which would otherwise be silently folded into the command.
+        mutating func literalTail(verb: String) throws -> [String] {
+            if operandIndex < operandsBeforeLiteral {
+                throw CLIUsageError("\(verb): unexpected argument \"\(operands[operandIndex])\" (the command goes after --)")
+            }
+            defer { operandIndex = operands.count }
+            return Array(operands[operandIndex...])
         }
 
         /// The error for a flag the verb does not take, naming the form that does work for the

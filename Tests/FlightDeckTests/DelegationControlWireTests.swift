@@ -171,10 +171,13 @@ final class DelegationControlWireTests: XCTestCase {
 
     /// The ruling: `ps`, `logs`, `diff`, `recipe ls` and `host ls --disk` read; everything else
     /// writes.
+    /// RULING 3: `wait` and `recipe check` change nothing either, so a `.readOnly` agent may
+    /// wait on its own detached run and validate its recipes.
     func testReadOnlySetIsExactlyTheRuling() {
         XCTAssertEqual(everyRequest.filter(\.isReadOnly),
-                       [.ps, .logs(run: "r1", follow: true, from: nil), .diff(run: "r1"), .recipeList(cwd: "/r"),
-                        .hostDisk(host: "mini")])
+                       [.ps, .wait(run: "r1", timeout: 60, from: nil), .wait(run: "r1", timeout: nil, from: 4096),
+                        .logs(run: "r1", follow: true, from: nil), .diff(run: "r1"), .recipeList(cwd: "/r"),
+                        .recipeCheck(cwd: "/r"), .hostDisk(host: "mini")])
     }
 
     /// C0's `delegateStarted` had no `ports`; a frame without it still reads, as no forwards.

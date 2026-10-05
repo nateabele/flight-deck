@@ -104,9 +104,9 @@ public enum DelegateRequest: Codable, Equatable, Sendable {
     /// `ControlScope` lets these through at every level; the rest start, stop, or apply work.
     public var isReadOnly: Bool {
         switch self {
-        case .ps, .logs, .diff, .recipeList, .hostDisk: return true
-        case .run, .exec, .up, .down, .restart, .sync, .wait, .stop, .apply, .recipeAdd, .recipeCheck,
-             .hostPrune:
+        // `wait` and `recipe check` (ruling 3) only watch and validate.
+        case .ps, .wait, .logs, .diff, .recipeList, .recipeCheck, .hostDisk: return true
+        case .run, .exec, .up, .down, .restart, .sync, .stop, .apply, .recipeAdd, .hostPrune:
             return false
         }
     }
