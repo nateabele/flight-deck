@@ -1,0 +1,271 @@
+{
+ "v": 1,
+ "createdAt": "2026-09-27T06:00:00Z",
+ "sources": [
+  {
+   "sourceID": "swt-bench",
+   "stale": false,
+   "refreshedAt": "2026-09-27T06:00:00Z",
+   "tokens": 12000,
+   "rejected": [],
+   "rows": [
+    {
+     "benchmarkModel": "Model A",
+     "score": 30.0,
+     "unit": "percent",
+     "url": "https://swtbench.com/",
+     "retrievedAt": "2026-09-27T06:00:00Z",
+     "quotedFigure": "30.0%"
+    },
+    {
+     "benchmarkModel": "Model B",
+     "score": 35.0,
+     "unit": "percent",
+     "url": "https://swtbench.com/",
+     "retrievedAt": "2026-09-27T06:00:00Z",
+     "quotedFigure": "35.0%"
+    },
+    {
+     "benchmarkModel": "Model C",
+     "score": 38.0,
+     "unit": "percent",
+     "url": "https://swtbench.com/",
+     "retrievedAt": "2026-09-27T06:00:00Z",
+     "quotedFigure": "38.0%"
+    },
+    {
+     "benchmarkModel": "GPT-6 Sol (high)",
+     "score": 41.0,
+     "unit": "percent",
+     "url": "https://swtbench.com/",
+     "retrievedAt": "2026-09-27T06:00:00Z",
+     "quotedFigure": "41.0%"
+    },
+    {
+     "benchmarkModel": "Opus 5 (high)",
+     "score": 45.0,
+     "unit": "percent",
+     "url": "https://swtbench.com/",
+     "retrievedAt": "2026-09-27T06:00:00Z",
+     "quotedFigure": "45.0%"
+    },
+    {
+     "benchmarkModel": "Model D",
+     "score": 50.0,
+     "unit": "percent",
+     "url": "https://swtbench.com/",
+     "retrievedAt": "2026-09-27T06:00:00Z",
+     "quotedFigure": "50.0%"
+    }
+   ]
+  },
+  {
+   "sourceID": "terminal-bench",
+   "stale": false,
+   "refreshedAt": "2026-09-27T06:00:00Z",
+   "tokens": 15000,
+   "rejected": [],
+   "rows": [
+    {
+     "benchmarkModel": "GPT-6 Sol (high)",
+     "score": 55.0,
+     "unit": "percent",
+     "url": "https://www.tbench.ai/leaderboard",
+     "retrievedAt": "2026-09-27T06:00:00Z",
+     "quotedFigure": "55.0%"
+    },
+    {
+     "benchmarkModel": "Opus 5 (high)",
+     "score": 58.0,
+     "unit": "percent",
+     "url": "https://www.tbench.ai/leaderboard",
+     "retrievedAt": "2026-09-27T06:00:00Z",
+     "quotedFigure": "58.0%"
+    },
+    {
+     "benchmarkModel": "Sonnet 5",
+     "score": 40.0,
+     "unit": "percent",
+     "url": "https://www.tbench.ai/leaderboard",
+     "retrievedAt": "2026-09-27T06:00:00Z",
+     "quotedFigure": "40.0%"
+    }
+   ]
+  }
+ ],
+ "aliases": [
+  {
+   "source": "swt-bench",
+   "benchmarkModel": "GPT-6 Sol (high)",
+   "status": "confirmed",
+   "model": {
+    "harness": "codex",
+    "model": "gpt-6-sol",
+    "knobs": {
+     "effort": "high"
+    }
+   }
+  },
+  {
+   "source": "swt-bench",
+   "benchmarkModel": "Opus 5 (high)",
+   "status": "confirmed",
+   "model": {
+    "harness": "claude",
+    "model": "opus",
+    "knobs": {
+     "effort": "high"
+    }
+   }
+  },
+  {
+   "source": "terminal-bench",
+   "benchmarkModel": "GPT-6 Sol (high)",
+   "status": "confirmed",
+   "model": {
+    "harness": "codex",
+    "model": "gpt-6-sol",
+    "knobs": {
+     "effort": "high"
+    }
+   }
+  },
+  {
+   "source": "terminal-bench",
+   "benchmarkModel": "Opus 5 (high)",
+   "status": "confirmed",
+   "model": {
+    "harness": "claude",
+    "model": "opus",
+    "knobs": {
+     "effort": "high"
+    }
+   }
+  },
+  {
+   "source": "terminal-bench",
+   "benchmarkModel": "Sonnet 5",
+   "status": "confirmed",
+   "model": {
+    "harness": "claude",
+    "model": "sonnet",
+    "knobs": {}
+   }
+  }
+ ],
+ "scores": [
+  {
+   "model": {
+    "harness": "claude",
+    "model": "opus",
+    "knobs": {
+     "effort": "high"
+    }
+   },
+   "dimensions": {
+    "test-authoring": {
+     "score": 0.8,
+     "confidence": 1.0,
+     "origin": "computed",
+     "sources": [
+      "swt-bench"
+     ]
+    },
+    "tool-use-reliability": {
+     "score": 1.0,
+     "confidence": 1.0,
+     "origin": "computed",
+     "sources": [
+      "terminal-bench"
+     ]
+    },
+    "agentic-coding": {
+     "score": 1.0,
+     "confidence": 0.16666666666666666,
+     "origin": "computed",
+     "sources": [
+      "terminal-bench"
+     ]
+    }
+   }
+  },
+  {
+   "model": {
+    "harness": "claude",
+    "model": "sonnet",
+    "knobs": {}
+   },
+   "dimensions": {
+    "tool-use-reliability": {
+     "score": 0.0,
+     "confidence": 1.0,
+     "origin": "computed",
+     "sources": [
+      "terminal-bench"
+     ]
+    },
+    "agentic-coding": {
+     "score": 0.0,
+     "confidence": 0.16666666666666666,
+     "origin": "computed",
+     "sources": [
+      "terminal-bench"
+     ]
+    }
+   }
+  },
+  {
+   "model": {
+    "harness": "codex",
+    "model": "gpt-6-sol",
+    "knobs": {
+     "effort": "high"
+    }
+   },
+   "dimensions": {
+    "test-authoring": {
+     "score": 0.6,
+     "confidence": 1.0,
+     "origin": "computed",
+     "sources": [
+      "swt-bench"
+     ]
+    },
+    "tool-use-reliability": {
+     "score": 0.5,
+     "confidence": 1.0,
+     "origin": "computed",
+     "sources": [
+      "terminal-bench"
+     ]
+    },
+    "agentic-coding": {
+     "score": 0.5,
+     "confidence": 0.16666666666666666,
+     "origin": "computed",
+     "sources": [
+      "terminal-bench"
+     ]
+    }
+   }
+  }
+ ],
+ "unmapped": [
+  {
+   "source": "swt-bench",
+   "benchmarkModel": "Model A"
+  },
+  {
+   "source": "swt-bench",
+   "benchmarkModel": "Model B"
+  },
+  {
+   "source": "swt-bench",
+   "benchmarkModel": "Model C"
+  },
+  {
+   "source": "swt-bench",
+   "benchmarkModel": "Model D"
+  }
+ ]
+}
