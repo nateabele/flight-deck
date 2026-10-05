@@ -143,8 +143,12 @@ final class CapabilityIndexService: ObservableObject {
         let outcome = await runner.refresh(plan)
         mutateConfig { $0.aliases.addProposals(outcome.proposals) }
         lastLog = outcome.log
+        // The plan captured aliases and sources before a run that can last minutes. Re-score with
+        // the config as it is NOW: an edit made mid-run otherwise leaves a newer snapshot scored
+        // with the old mapping as current, and the config and the displayed scores disagree.
+        let written = IndexRefreshRunner.rescore(outcome.snapshot, sources: config.sources, aliases: config.aliases, now: outcome.snapshot.createdAt)
         do {
-            try store.write(outcome.snapshot)
+            try store.write(written)
             try store.prune()
         } catch {
             problem = "Could not save the snapshot: \(error.localizedDescription)"

@@ -178,4 +178,22 @@ final class CapabilityIndexServiceTests: XCTestCase {
         service.setSourceEnabled("a", true)
         XCTAssertEqual(IndexSnapshotStore(directory: dir).list().count, 2)
     }
+
+    /// The plan captures the aliases before a long agent run; an edit made during the run must
+    /// still govern the snapshot the run writes, or config and displayed scores disagree until
+    /// the next edit or weekly refresh.
+    func testAliasEditDuringRefreshGovernsTheWrittenSnapshot() async throws {
+        try seedConfig()
+        let gate = GatedIndexHeadless(answer: IndexFixtures.stream(IndexFixtures.payloadJSON("a", [("GPT-6 Sol (high)", 61.3), ("Opus 5 (high)", 58.0)])))
+        let t = now
+        let service = CapabilityIndexService(directory: dir, runner: IndexRefreshRunner(headless: gate, now: { t }),
+                                             catalogs: { IndexFixtures.catalogs() }, now: { t })
+        let task = service.startRefresh()
+        while !gate.hasStarted { try await Task.sleep(nanoseconds: 1_000_000) }
+        service.rejectAlias(source: "a", benchmarkModel: "GPT-6 Sol (high)")
+        gate.release()
+        await task?.value
+        XCTAssertNil(service.scores.first { $0.model == IndexFixtures.sol }, "the mid-run rejection must unscore the model in the written snapshot")
+        XCTAssertNil(service.current?.scores.first { $0.model == IndexFixtures.sol })
+    }
 }

@@ -68,3 +68,27 @@ final class StreamingIndexHeadless: HeadlessRunner, @unchecked Sendable {
         return (Data(), "timed out waiting for cancel", 1)
     }
 }
+
+/// A headless runner that parks inside `run` until the test calls `release()`, then answers
+/// like `ScriptedIndexHeadless`. Exists to hold a refresh in flight so a test can edit the
+/// config mid-run; the wait is bounded so a regression fails instead of hanging the suite.
+final class GatedIndexHeadless: HeadlessRunner, @unchecked Sendable {
+    private let lock = NSLock()
+    private var started = false
+    private var released = false
+    let answer: Data
+    init(answer: Data) { self.answer = answer }
+
+    var hasStarted: Bool { lock.withLock { started } }
+    func release() { lock.withLock { released = true } }
+
+    func run(_ command: (executable: String, arguments: [String], unsetEnvironment: [String]),
+             cwd: URL) async throws -> (stdout: Data, stderr: String, exitCode: Int32) {
+        lock.withLock { started = true }
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline, !lock.withLock({ released }) {
+            try? await Task.sleep(nanoseconds: 1_000_000)
+        }
+        return (answer, "", 0)
+    }
+}
