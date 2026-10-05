@@ -274,11 +274,12 @@ struct FlightDeckApp: App {
                 .appendingPathComponent("intakes", isDirectory: true)
         )
 
+        // Set after the store exists: the service schedules itself on the store's `WatchClock`.
+        store.capabilityIndexService = Self.makeCapabilityIndexService(store: store, resetState: resetState)
+
         // Test-only second project, so the sidebar has something to reorder. Guarded by
         // `resetState` as well as its own flag: a reset run reads and writes no persistence,
         // so this can never reach the developer's real `sessions.json`.
-        store.capabilityIndexService = Self.makeCapabilityIndexService(store: store, resetState: resetState)
-
         if resetState, Self.isSeedingSecondProject {
             store.newSession(in: FileManager.default.temporaryDirectory)
         }
@@ -298,8 +299,8 @@ struct FlightDeckApp: App {
 
     /// The capability index. A UITest reset run gets a scratch directory — seeded from
     /// `-FlightDeckCapabilityIndexFixture <dir>` when given, copied so a rollback in the test
-    /// never edits the fixture in the repo — and is NEVER scheduled, so no UI test can start a
-    /// refresh that spends tokens. A real launch uses `<state dir>/capability-index`, which
+    /// never edits the fixture in the repo — and is NEVER scheduled. Its runner always throws, so
+    /// even a click on "Refresh now" in a reset or UI-test launch fails fast and spends no tokens. A real launch uses `<state dir>/capability-index`, which
     /// already differs between Debug and Release builds.
     @MainActor
     private static func makeCapabilityIndexService(store: SessionStore, resetState: Bool) -> CapabilityIndexService {
@@ -309,7 +310,7 @@ struct FlightDeckApp: App {
             if let path = UserDefaults.standard.string(forKey: "FlightDeckCapabilityIndexFixture"), !path.isEmpty {
                 try? FileManager.default.copyItem(at: URL(fileURLWithPath: path, isDirectory: true), to: scratch)
             }
-            return CapabilityIndexService(directory: scratch)
+            return CapabilityIndexService(directory: scratch, runner: IndexRefreshRunner(headless: RefreshDisabledHeadlessRunner()))
         }
         let root = Self.stateDirectory() ?? FileSessionPersistence.defaultDirectory()
         let service = CapabilityIndexService(
@@ -319,6 +320,16 @@ struct FlightDeckApp: App {
             catalogs: { await RoutingCapabilityRegistry.standard().catalogs(enabled: Set(AgentID.allCases.map(\.harnessID))) })
         service.startScheduling(clock: store.watchClock)
         return service
+    }
+
+    /// The capability index's runner in reset and UI-test launches. A real `claude -p` there would
+    /// spend tokens from a test, so every run throws and is recorded as a failed refresh.
+    private struct RefreshDisabledHeadlessRunner: HeadlessRunner {
+        struct Disabled: LocalizedError { var errorDescription: String? { "refresh is disabled in reset/test launches" } }
+        func run(_ command: (executable: String, arguments: [String], unsetEnvironment: [String]), cwd: URL)
+            async throws -> (stdout: Data, stderr: String, exitCode: Int32) { throw Disabled() }
+        func run(_ command: (executable: String, arguments: [String], unsetEnvironment: [String]), cwd: URL,
+                 onStdout: (@Sendable (Data) -> Void)?) async throws -> (stdout: Data, stderr: String, exitCode: Int32) { throw Disabled() }
     }
 
     var body: some Scene {
