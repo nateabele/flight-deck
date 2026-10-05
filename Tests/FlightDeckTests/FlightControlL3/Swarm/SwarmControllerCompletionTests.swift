@@ -90,4 +90,33 @@ final class SwarmControllerCompletionTests: XCTestCase {
         await rig.run(c)
         XCTAssertTrue(rig.backend.returned.isEmpty)
     }
+
+    func testAClosedTabWhoseTaskCannotBeReadIsNotReopenedAndIsRetriedNextTick() async {
+        let rig = SwarmRig()
+        let (c, a) = await working(rig)
+        let lease = c.record.agent(a)?.lease?.lease
+        rig.host.existing.remove(a)
+        rig.backend.statuses["fx-1"] = nil               // br show failed
+        await rig.run(c)
+        XCTAssertTrue(rig.backend.returned.isEmpty, "a task whose state was never read is not reopened")
+        XCTAssertEqual(c.record.agent(a)?.state, .working, "left as-is so the next tick re-reads it")
+        XCTAssertEqual(c.record.agent(a)?.task, "fx-1")
+        XCTAssertFalse(rig.allocator.released.contains(lease!))
+
+        rig.backend.statuses["fx-1"] = TaskStatusReading(status: "in_progress", assignee: "Agent1")
+        await rig.run(c)
+        XCTAssertEqual(rig.backend.returned, ["fx-1"])
+        XCTAssertEqual(c.record.agent(a)?.state, .done)
+        XCTAssertTrue(rig.allocator.released.contains(lease!))
+    }
+
+    func testAClosedTabWhoseTaskAnotherAgentHoldsReturnsNothing() async {
+        let rig = SwarmRig()
+        let (c, a) = await working(rig)
+        rig.host.existing.remove(a)
+        rig.backend.statuses["fx-1"] = TaskStatusReading(status: "in_progress", assignee: "Someone Else")
+        await rig.run(c)
+        XCTAssertTrue(rig.backend.returned.isEmpty)
+        XCTAssertEqual(c.record.agent(a)?.state, .done)
+    }
 }

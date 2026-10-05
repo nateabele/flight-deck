@@ -92,10 +92,19 @@ final class SwarmController {
     private func sweepClosedTabs() async {
         for agent in record.agents where [.starting, .working, .idle].contains(agent.state)
             && !deps.host.sessionExists(agent.session) {
-            for task in Set([agent.task, agent.pendingClaim].compactMap { $0 }) {
-                let reading = await deps.backend.status(task, project: project)
-                let ours = reading?.assignee == nil || reading?.assignee == agent.agentName
-                if reading?.status != "closed", ours {
+            // Read every task first: a status that could not be read (br show failed) must never
+            // be treated as "open and ours". The agent stays untouched, lease included, so the
+            // next tick re-reads it and the slot accounting stays consistent meanwhile.
+            var readings: [(task: String, reading: TaskStatusReading)] = []
+            var unreadable = false
+            for task in Set([agent.task, agent.pendingClaim].compactMap { $0 }).sorted() {
+                guard let reading = await deps.backend.status(task, project: project) else { unreadable = true; break }
+                readings.append((task, reading))
+            }
+            if unreadable { continue }
+            for (task, reading) in readings {
+                let ours = reading.assignee == nil || reading.assignee == agent.agentName
+                if reading.status != "closed", ours {
                     _ = await deps.backend.returnToOpen(task, project: project)
                     log(.released, task: task, session: agent.session, detail: "\(agent.agentName)'s tab was closed")
                 }
