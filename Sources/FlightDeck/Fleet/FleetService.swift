@@ -489,24 +489,10 @@ final class FleetService: ObservableObject {
             // Presence is a phone's, and a CLI tailing a tab is not a phone looking at it.
             if case .viewing = command { return reply(.ack(cid: cid)) }
         }
-        // The ONLY command that can need to wait, and only when its project still
-        // exists and the display is not already drawable — which is to say, almost
-        // never. Gated on `store.projectPath(project) != nil` too: `apply`'s own
-        // `.newSession` arm checks the project before the terminal on purpose (see its
-        // comment), so a stale phone naming a project the Mac no longer has must still
-        // get `unknown_project` without this ever waking the screen or asking the waker
-        // anything. Every other command, and every creation on an awake Mac or against a
-        // dead project, still answers on the way out of the frame handler exactly as
-        // before.
-        if case .newSession(let project, _, _) = command,
-           self.store.projectPath(project) != nil,
-           !self.store.canCreateTerminal {
-            Task { @MainActor in
-                guard await self.store.awaitTerminalCreatable() else {
-                    return reply(.err(cid: cid, code: "terminal_unavailable"))
-                }
-                reply(self.apply(command, from: client, cid: cid))
-            }
+        // `session.new` answers AFTER the tab exists, with its id (spec §5), so the CLI and the
+        // phone can address what they started. The one command whose reply waits.
+        if case .newSession = command {
+            Task { @MainActor in reply(await self.createSession(command, cid: cid)) }
             return
         }
         reply(self.apply(command, from: client, cid: cid))
@@ -1086,6 +1072,41 @@ final class FleetService: ObservableObject {
         }
     }
 
+    /// The old `apply` arm, now awaited to the end so the reply can name the tab. The checks and
+    /// their order are unchanged: project first (a stale phone gets `unknown_project` without the
+    /// Mac waking its display), then the display, then the menu row re-resolved against today's
+    /// menu, falling back to the project's defaults rather than an account nobody chose.
+    private func createSession(_ command: FleetCommand, cid: Int) async -> ServerFrame {
+        guard case .newSession(let project, let agent, let accountIndex) = command else {
+            return .err(cid: cid, code: "unhandled")
+        }
+        guard let path = store.projectPath(project) else { return .err(cid: cid, code: "unknown_project") }
+        if !store.canCreateTerminal, !(await store.awaitTerminalCreatable()) {
+            return .err(cid: cid, code: "terminal_unavailable")
+        }
+        guard store.ensureTerminalCreatable() else { return .err(cid: cid, code: "terminal_unavailable") }
+
+        if let agent, let accountIndex, let picked = AgentID(rawValue: agent),
+           let account = NewSessionOptionsProjection.account(forAgent: agent, index: accountIndex,
+                                                             in: menuEntries(forProjectAt: path)) {
+            // `selecting: false`: a client's `+` must not move the desk's selection.
+            switch await store.createSession(agent: picked, in: path, account: account, selecting: false) {
+            case .success(let id) where store.sessionExists(id):
+                return .session(cid: cid, id)
+            case .success:
+                return .err(cid: cid, code: "launch_failed")
+            case .failure(let error):
+                Self.logger.error("new session from a client failed to launch: \(String(describing: error), privacy: .public)")
+                return .err(cid: cid, code: "launch_failed")
+            }
+        }
+        // A plain `+`, or a menu row that no longer matches: the project's defaults.
+        guard let session = store.newSession(inProject: project) else { return .err(cid: cid, code: "unknown_project") }
+        // `newSession` returns an unfiled draft when it refuses a launch; that is not a tab.
+        guard store.sessionExists(session.id) else { return .err(cid: cid, code: "launch_failed") }
+        return .session(cid: cid, session.id)
+    }
+
     private func apply(
         _ command: FleetCommand, from client: FleetAttachment, cid: Int
     ) -> ServerFrame {
@@ -1133,69 +1154,10 @@ final class FleetService: ObservableObject {
         case .setProjectCollapsed(let id, let isCollapsed):
             guard store.projectExists(id) else { return .err(cid: cid, code: "unknown_project") }
             store.setCollapsed(isCollapsed, forProjectAt: id)
-        case .newSession(let project, let agent, let accountIndex):
-            guard let path = store.projectPath(project) else {
-                return .err(cid: cid, code: "unknown_project")
-            }
-            // After the project lookup, so an unknown project still says so rather than being
-            // masked by this. Checked once, ahead of both branches below (the plain `+` tap and
-            // the agent/account variant): `store.newSession`/`createSession` would otherwise
-            // refuse silently — `newSession(inProject:)` still returns a non-nil `Session`, an
-            // un-inserted one, so the phone would see an ordinary ack for a tab that was never
-            // created. `ensureTerminalCreatable`, not `canCreateTerminal`: this is the phone's
-            // only creation command, so this is the one call that must attempt a wake first
-            // rather than just reading whether the display already happens to be drawable.
-            guard store.ensureTerminalCreatable() else {
-                return .err(cid: cid, code: "terminal_unavailable")
-            }
-            // Both nil is a plain `+` tap: the project's defaults, exactly as before this
-            // feature existed and exactly what an older phone sends.
-            guard let agent, let accountIndex, let picked = AgentID(rawValue: agent) else {
-                guard store.newSession(inProject: project) != nil else {
-                    return .err(cid: cid, code: "unknown_project")
-                }
-                break
-            }
-            // Re-resolved now, not read from anything the phone sent: the row it tapped was
-            // described from a menu that may since have changed shape. A row whose agent no
-            // longer matches falls back to the project's default rather than opening as an
-            // account nobody chose — `NewSessionOptionsProjection.account` is where that
-            // judgement lives and why.
-            let account = NewSessionOptionsProjection.account(
-                forAgent: agent, index: accountIndex, in: menuEntries(forProjectAt: path)
-            )
-            guard account != nil else {
-                guard store.newSession(inProject: project) != nil else {
-                    return .err(cid: cid, code: "unknown_project")
-                }
-                break
-            }
-            // **`createSession(agent:in:…)`, not `createFromMenu`.** The latter is the *menu
-            // bar's* entry point and it chooses the directory itself — the active tab's, else
-            // the last active project, else the first repo — because a menu click carries no
-            // project with it. A tap on the phone does: it names the project it was made on,
-            // and routing it through the menu's chooser created the tab in whichever project
-            // happened to be selected on the Mac instead. It also swallowed the launch result,
-            // so a login that could not start still produced a tab — one with no agent behind
-            // it, which the phone correctly draws with no composer at all ("There's no agent
-            // running in this tab right now") and which is indistinguishable from a bug in the
-            // composer. That is the report this comment exists for.
-            Task { @MainActor in
-                // `selecting: false`: a client's `+` must not move the desk's selection off
-                // whatever is on screen — see `SessionStore.select(_:selecting:)`.
-                let created = await self.store.createSession(
-                    agent: picked, in: path, account: account, selecting: false
-                )
-                if case .failure(let error) = created {
-                    // The `ack` for this command has already gone — a create is dispatched,
-                    // like every other command (§4). Logged rather than dropped so a login
-                    // that cannot launch leaves a trace on the Mac rather than only a silent
-                    // tab on the phone.
-                    Self.logger.error(
-                        "new session from phone failed to launch: \(String(describing: error), privacy: .public)"
-                    )
-                }
-            }
+        case .newSession:
+            // Routed to `createSession(_:cid:)` by `handleCommand` before `apply` is ever reached.
+            assertionFailure("session.new is answered by createSession(_:cid:)")
+            return .err(cid: cid, code: "unhandled")
         case .prompt(let id, let token, let text):
             // Every refusal, "no such tab" included, is the store's to make: it is the only
             // thing that knows the tab's agent, its status and whether it has a surface, and

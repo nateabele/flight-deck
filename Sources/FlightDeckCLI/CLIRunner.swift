@@ -382,26 +382,37 @@ final class CLIRunner {
     }
 
     private func launch(_ projectID: UUID, agent: String?, account: Int?) {
-        // Two facts, in either order: the ack (the Mac took it) and the tab itself. The event
-        // may beat the ack onto the wire, so neither is assumed to come first.
-        var acked = false
-        var added: WireSession?
+        // The Mac names the tab it made (`.session`, spec §5). Its row arrives as `sessionAdded`,
+        // possibly before the reply; only `--json` needs the row. An older Mac acks before it
+        // creates and names nothing: then the first tab in this project is the best answer left,
+        // which is what this command always printed.
+        var created: UUID?
+        var legacyAcked = false
+        var firstAdded: WireSession?
+        var added: [UUID: WireSession] = [:]
         let settle = {
-            guard acked, let added else { return }
-            self.out(self.wantsJSON ? CLIOutput.json(added) : added.id.uuidString)
+            guard let id = created ?? (legacyAcked ? firstAdded?.id : nil) else { return }
+            if !self.wantsJSON {
+                self.out(id.uuidString)
+                return self.finish(0)
+            }
+            guard let session = added[id] ?? self.session(id) else { return }
+            self.out(CLIOutput.json(session))
             self.finish(0)
         }
         onEvent = { event in
-            // Only a tab in the project asked for: another client's `new` elsewhere is not ours.
-            guard added == nil, case .sessionAdded(let session, projectID, _) = event else { return }
-            added = session
+            guard case .sessionAdded(let session, projectID, _) = event else { return }
+            added[session.id] = session
+            if firstAdded == nil { firstAdded = session }
             settle()
         }
         let cid = transport.send(.newSession(project: projectID, agent: agent, accountIndex: account))
         replies[cid] = { frame in
-            if case .err(_, let code) = frame { return self.fail(code) }
-            acked = true
-            settle()
+            switch frame {
+            case .err(_, let code): self.fail(code)
+            case .session(_, let id): created = id; settle()
+            default: legacyAcked = true; settle()
+            }
         }
         schedule(Self.launchTimeout) { self.fail("launch_unconfirmed") }
     }

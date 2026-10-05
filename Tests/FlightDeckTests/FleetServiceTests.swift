@@ -168,7 +168,7 @@ final class FleetServiceTests: XCTestCase {
             if case .snapshot = frame {
                 _ = client.send(.newSession(project: target.id, agent: "claude", accountIndex: 0))
             }
-            if case .ack = frame { acked.fulfill() }
+            if case .session = frame { acked.fulfill() }
         }
         client.connect(to: .hostPort(host: "127.0.0.1", port: port), lastSeq: 0)
         await fulfillment(of: [acked], timeout: 10)
@@ -359,7 +359,7 @@ final class FleetServiceTests: XCTestCase {
             if case .err(_, "terminal_unavailable") = frame {
                 XCTFail("a display that can be woken must not be refused")
             }
-            if case .ack = frame { acked.fulfill() }
+            if case .session = frame { acked.fulfill() }
         }
         client.connect(to: .hostPort(host: "127.0.0.1", port: port), lastSeq: 0)
         await fulfillment(of: [acked], timeout: 10)
@@ -423,7 +423,7 @@ final class FleetServiceTests: XCTestCase {
             if case .err(_, "terminal_unavailable") = frame {
                 XCTFail("a display that can be woken must not be refused")
             }
-            if case .ack = frame { acked.fulfill() }
+            if case .session = frame { acked.fulfill() }
         }
         client.connect(to: .hostPort(host: "127.0.0.1", port: port), lastSeq: 0)
         await fulfillment(of: [acked], timeout: 10)
@@ -505,7 +505,7 @@ final class FleetServiceTests: XCTestCase {
             if case .snapshot = frame {
                 _ = client.send(.newSession(project: project, agent: nil, accountIndex: nil))
             }
-            if case .ack = frame { acked.fulfill() }
+            if case .session = frame { acked.fulfill() }
         }
         client.connect(to: .hostPort(host: "127.0.0.1", port: port), lastSeq: 0)
         await fulfillment(of: [acked], timeout: 10)
@@ -760,7 +760,7 @@ final class FleetServiceTests: XCTestCase {
             if case .snapshot = frame {
                 _ = client.send(.newSession(project: project, agent: nil, accountIndex: nil))
             }
-            if case .ack = frame { acked.fulfill() }
+            if case .session = frame { acked.fulfill() }
         }
         client.connect(to: .hostPort(host: "127.0.0.1", port: port), lastSeq: 0)
         await fulfillment(of: [acked], timeout: 10)
