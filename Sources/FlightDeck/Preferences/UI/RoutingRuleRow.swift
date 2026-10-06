@@ -138,21 +138,26 @@ struct RoutingRuleRow: View {
         }
     }
 
+    /// Wraps like tokens instead of truncating: in the real Settings window a middle-truncated
+    /// "test-a…ng ≥ 0.5" hid which dimension a condition was on. Each joiner travels with the pill
+    /// after it, and the arrow with the target, so a wrap never strands an "or" or a "→".
     private var pills: some View {
-        HStack(spacing: 4) {
+        PillFlow(spacing: 4, lineSpacing: 5) {
             ForEach(presentation.conditions, id: \.index) { c in
-                if c.index > 0 {
-                    Text(presentation.joiner).font(.caption).foregroundStyle(.tertiary)
-                }
-                Button(c.text) { open = .condition(c.index) }
-                    .buttonStyle(PillStyle())
-                    .focusEffectDisabled()
-                    .accessibilityLabel(c.accessibilityLabel)
-                    .accessibilityHint("Opens a popover to change this condition")
-                    .accessibilityIdentifier("routing-condition-\(rule.id)-\(c.index)")
-                    .popover(isPresented: binding(.condition(c.index)), arrowEdge: .bottom) {
-                        conditionEditor(index: c.index)
+                HStack(spacing: 4) {
+                    if c.index > 0 {
+                        Text(presentation.joiner).font(.caption).foregroundStyle(.tertiary)
                     }
+                    Button(c.text) { open = .condition(c.index) }
+                        .buttonStyle(PillStyle())
+                        .focusEffectDisabled()
+                        .accessibilityLabel(c.accessibilityLabel)
+                        .accessibilityHint("Opens a popover to change this condition")
+                        .accessibilityIdentifier("routing-condition-\(rule.id)-\(c.index)")
+                        .popover(isPresented: binding(.condition(c.index)), arrowEdge: .bottom) {
+                            conditionEditor(index: c.index)
+                        }
+                }
             }
             Button { open = .newCondition } label: { Image(systemName: "plus") }
                 .buttonStyle(PillStyle(compact: true, dashed: true))
@@ -161,22 +166,22 @@ struct RoutingRuleRow: View {
                 .accessibilityLabel("Add condition")
                 .accessibilityIdentifier("routing-add-condition-\(rule.id)")
                 .popover(isPresented: binding(.newCondition), arrowEdge: .bottom) { conditionEditor(index: nil) }
-            Image(systemName: "arrow.right")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.tertiary)
-                .padding(.horizontal, 2)
-                .accessibilityHidden(true)
             if let target = presentation.target, let assign = rule.compiled?.assign {
-                Button(target) { open = .target }
-                    .buttonStyle(PillStyle(prominent: true))
-                    .focusEffectDisabled()
-                    .layoutPriority(1)
-                    .accessibilityLabel(presentation.targetAccessibility ?? target)
-                    .accessibilityHint("Opens a popover to change the agent, model, effort and accounts")
-                    .accessibilityIdentifier("routing-target-\(rule.id)")
-                    .popover(isPresented: binding(.target), arrowEdge: .bottom) {
-                        RoutingTargetEditor(routing: routing, ruleID: rule.id, scope: scope, assign: assign)
-                    }
+                HStack(spacing: 6) {
+                    Image(systemName: "arrow.right")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.tertiary)
+                        .accessibilityHidden(true)
+                    Button(target) { open = .target }
+                        .buttonStyle(PillStyle(prominent: true))
+                        .focusEffectDisabled()
+                        .accessibilityLabel(presentation.targetAccessibility ?? target)
+                        .accessibilityHint("Opens a popover to change the agent, model, effort and accounts")
+                        .accessibilityIdentifier("routing-target-\(rule.id)")
+                        .popover(isPresented: binding(.target), arrowEdge: .bottom) {
+                            RoutingTargetEditor(routing: routing, ruleID: rule.id, scope: scope, assign: assign)
+                        }
+                }
             }
         }
         .help(presentation.tooltip ?? "")
@@ -306,7 +311,6 @@ struct PillStyle: ButtonStyle {
         configuration.label
             .font(compact ? .caption.weight(.semibold) : .subheadline.weight(.medium))
             .lineLimit(1)
-            .truncationMode(.middle)
             .padding(.horizontal, compact ? 6 : 8)
             .padding(.vertical, 2)
             .frame(minHeight: 20)
@@ -334,5 +338,54 @@ struct PillStyle: ButtonStyle {
         let base = prominent ? 0.16 : 0.06
         if pressed { return base + 0.12 }
         return hovering ? base + 0.06 : base
+    }
+}
+
+/// Lays its children out left to right and wraps to a new line when the next one would not fit,
+/// each line's items centred on one another.
+struct PillFlow: Layout {
+    var spacing: CGFloat
+    var lineSpacing: CGFloat
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        arrange(width: proposal.width ?? .infinity, subviews).size
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        for (subview, frame) in zip(subviews, arrange(width: bounds.width, subviews).frames) {
+            subview.place(at: CGPoint(x: bounds.minX + frame.minX, y: bounds.minY + frame.minY),
+                          proposal: ProposedViewSize(frame.size))
+        }
+    }
+
+    private func arrange(width: CGFloat, _ subviews: Subviews) -> (frames: [CGRect], size: CGSize) {
+        var frames: [CGRect] = []
+        var line: [Int] = []
+        var x: CGFloat = 0, y: CGFloat = 0, lineHeight: CGFloat = 0, widest: CGFloat = 0
+
+        func finishLine() {
+            // Centre each item on its line: the joiner text is shorter than a pill.
+            for i in line { frames[i].origin.y = y + (lineHeight - frames[i].height) / 2 }
+            y += lineHeight
+            line = []
+        }
+
+        for subview in subviews {
+            var size = subview.sizeThatFits(.unspecified)
+            size.width = min(size.width, width)
+            if x > 0, x + size.width > width {
+                finishLine()
+                y += lineSpacing
+                x = 0
+                lineHeight = 0
+            }
+            frames.append(CGRect(origin: CGPoint(x: x, y: y), size: size))
+            line.append(frames.count - 1)
+            widest = max(widest, x + size.width)
+            x += size.width + spacing
+            lineHeight = max(lineHeight, size.height)
+        }
+        finishLine()
+        return (frames, CGSize(width: widest, height: y))
     }
 }

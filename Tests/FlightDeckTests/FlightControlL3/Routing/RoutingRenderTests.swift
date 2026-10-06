@@ -90,6 +90,11 @@ final class RoutingRenderTests: XCTestCase {
         for (name, appearance) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
             let tab = FlightControlSettingsTab(preferences: prefs, sessions: sessions, routing: svc)
             try Self.write(tab, size: size, appearance: appearance, to: out.appendingPathComponent("routing-\(name).png"))
+            // Narrower than the Settings window, as its grouped form's wider insets leave it in
+            // practice: the pills must wrap here, never truncate.
+            try Self.write(FlightControlSettingsTab(preferences: prefs, sessions: sessions, routing: svc),
+                           size: NSSize(width: 560, height: 640), appearance: appearance,
+                           to: out.appendingPathComponent("routing-narrow-\(name).png"))
             try Self.write(FlightControlSettingsTab(preferences: prefs, sessions: sessions, routing: svc, initialSection: .kinds),
                            size: size, appearance: appearance, to: out.appendingPathComponent("kinds-\(name).png"))
 
