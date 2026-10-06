@@ -258,7 +258,7 @@ enum MeterPreviewData {
     static let pools: [PoolMeterModel] = [
         PoolMeterModel(id: "claude-default", title: "Claude default", isLocal: false, accounts: [
             AccountMeterModel(id: "a", label: "Work", fraction: 0.82, state: .overSoft, soft: 0.8, hard: 0.95,
-                              resetText: "resets 11:00 PM", sourceText: "claude mod · 3 min ago", detail: nil),
+                              resetText: "resets 11:00 PM", sourceText: "claude status line · 3 min ago", detail: nil),
             AccountMeterModel(id: "b", label: "Spare", fraction: nil, state: .unknown, soft: 0.8, hard: 0.95,
                               resetText: nil, sourceText: nil, detail: "no reading"),
         ], note: nil),

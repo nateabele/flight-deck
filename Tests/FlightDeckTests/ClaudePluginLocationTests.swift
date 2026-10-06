@@ -48,6 +48,26 @@ final class ClaudePluginLocationTests: XCTestCase {
         XCTAssertEqual(items, [tempDir.path])
     }
 
+    /// The usage meter's status line runs from the same owned copy as `--plugin-dir`: the signed
+    /// bundle must not be what claude executes, and a stale copy must not be either.
+    func testApplyingPointsTheStatusLineAtTheOwnedCopy() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("fd test \(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let user = ClaudeStatusLine.User(command: "mine", padding: 3)
+        let out = ClaudePluginLocation.applying(to: .claude(FlagSet()), bundle: Bundle(for: Self.self),
+                                                pluginDestination: tempDir, userStatusLine: user)
+        guard case .claude(let flags) = out, case .value(let raw)? = flags.values["--settings"],
+              let settings = try JSONSerialization.jsonObject(with: Data(raw.utf8)) as? [String: Any],
+              let line = settings["statusLine"] as? [String: Any] else {
+            return XCTFail("expected a claude payload carrying --settings with a statusLine")
+        }
+        let script = tempDir.appendingPathComponent(ClaudeStatusLine.scriptPath)
+        XCTAssertEqual(line["command"] as? String, "'\(script.path)'")
+        XCTAssertEqual(line["padding"] as? Int, 3)
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: script.path), "the copy must carry the script, executable")
+    }
+
     /// After an update the bundle's plugin changes; adopted tabs run the copy, so the startup
     /// path must refresh it before `/reload-plugins` is armed or the reload re-reads old bytes.
     func testStartupRefreshBringsTheCopyToTheBundlesBytes() throws {

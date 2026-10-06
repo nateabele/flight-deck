@@ -75,7 +75,7 @@ final class UsageServiceTests: XCTestCase {
         let svc = service()
         await svc.tick()
         let r = try XCTUnwrap(svc.ledger.latestReading(account: UsageRefs.spareID))
-        XCTAssertEqual(r.source, "claude mod")
+        XCTAssertEqual(r.source, "claude status line")
         XCTAssertEqual(r.worstWindow?.utilization ?? 0, 0.42, accuracy: 1e-9)
         XCTAssertNil(svc.ledger.latestReading(account: UsageRefs.workID))
     }
@@ -231,7 +231,7 @@ final class UsageServiceTests: XCTestCase {
         clock.advance(14 * 60); await svc.tick()
         XCTAssertNil(svc.ledger.sourceError(account: UsageRefs.spareID))
         clock.advance(60); await svc.tick()
-        XCTAssertEqual(svc.ledger.sourceError(account: UsageRefs.spareID), UsageService.modSilenceMessage)
+        XCTAssertEqual(svc.ledger.sourceError(account: UsageRefs.spareID), UsageService.statusLineSilenceMessage)
         try writeModFile(named: tab.id.uuidString, percent: 5, readAt: clock.now)
         await svc.tick()
         XCTAssertNil(svc.ledger.sourceError(account: UsageRefs.spareID))

@@ -186,15 +186,17 @@ final class ClaudePluginPayloadTests: XCTestCase {
 
     private var staged: [URL] = []
 
-    /// The usage mod is data the engine loads, so nothing else would notice it went missing from
-    /// the bundle until every claude account read "no reading" (Flight Control L3-U).
-    func testHooksManifestLoadsTheUsageModule() throws {
+    /// The usage mod is gone: the status line replaced it (`ClaudeStatusLine`). A stale
+    /// `modules` entry would make claude load a file that no longer ships, and a mod the engine
+    /// switched off would blank every claude meter with nothing here to notice.
+    func testHooksManifestLoadsNoModuleAndTheStatusLineShips() throws {
         let root = try pluginRoot()
         let obj = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contentsOf: root.appendingPathComponent("hooks/hooks.json"))) as? [String: Any])
-        XCTAssertEqual(obj["modules"] as? [String], ["./register.ts"])
-        let module = try String(contentsOf: root.appendingPathComponent("hooks/register.ts"), encoding: .utf8)
-        XCTAssertTrue(module.contains("'session.measure'"))
-        XCTAssertTrue(module.contains("'FLIGHT_DECK_USAGE_DIR'"))
+        XCTAssertNil(obj["modules"])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("hooks/register.ts").path))
+        let script = try String(contentsOf: root.appendingPathComponent(ClaudeStatusLine.scriptPath), encoding: .utf8)
+        XCTAssertTrue(script.contains("FLIGHT_DECK_USAGE_DIR"))
+        XCTAssertTrue(script.contains(ClaudeStatusLine.userCommandVariable))
     }
 
     override func tearDownWithError() throws {

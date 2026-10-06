@@ -32,7 +32,7 @@ enum ClaudePluginLocation {
             .appendingPathComponent("hook-events-\(buildTag)", isDirectory: true)
     }
 
-    /// Where the usage mod writes one file per tab (Flight Control L3-U). Beside the hook-event
+    /// Where the plugin's status line writes one usage file per tab (Flight Control L3-U). Beside the hook-event
     /// directory and split by build for the same reason: a debug build must never read the
     /// release fleet's meters as its own.
     static var usageDirectory: URL {
@@ -70,7 +70,7 @@ enum ClaudePluginLocation {
     /// with a stale version's.
     /// Compares bytes rather than dates, and sets permissions only when they differ, so a
     /// reinstall of the same build touches nothing — a rewrite (or even a chmod, which bumps
-    /// ctime) risks hot-reloading the module in every open claude tab for no reason.
+    /// ctime) risks hot-reloading the plugin in every open claude tab for no reason.
     @discardableResult
     static func materialize(from source: URL, to destination: URL = materializedDirectory) throws -> URL {
         let fm = FileManager.default
@@ -161,19 +161,29 @@ enum ClaudePluginLocation {
     /// real call site's `Bundle.main` is the `xctest` tool under `scripts/test-unit.sh` and
     /// never would). `.codex` and a bundle without the plugin both pass `options` through
     /// unchanged.
-    static func applying(to options: AgentOptions, bundle: Bundle, pluginDestination: URL = materializedDirectory) -> AgentOptions {
+    ///
+    /// The plugin's status line rides in the same way, as a `--settings` entry pointing at the
+    /// same copy (see `ClaudeStatusLine`). `userStatusLine` carries the user's layout settings
+    /// (padding and the like) over; the user's command itself reaches the wrapper through the
+    /// tab's environment.
+    static func applying(to options: AgentOptions, bundle: Bundle, pluginDestination: URL = materializedDirectory,
+                         userStatusLine: ClaudeStatusLine.User? = nil, projectDirectory: URL? = nil) -> AgentOptions {
         guard case .claude(let flags) = options, let plugin = directory(bundle: bundle) else {
             return options
         }
         // Outcome 3C: run the owned copy, never the signed bundle. A failed copy falls back to
         // the bundle — a broken signature is recoverable, a claude tab with no hooks is the
         // silent failure `record.sh`'s header warns about.
+        let runnable: URL
         do {
-            let runnable = try materialize(from: plugin, to: pluginDestination)
-            return .claude(injecting(into: flags, pluginDirectory: runnable))
+            runnable = try materialize(from: plugin, to: pluginDestination)
         } catch {
             NSLog("[ClaudePluginLocation] failed to materialize plugin from \(plugin.path) to \(pluginDestination.path): \(error) — falling back to signed bundle")
-            return .claude(injecting(into: flags, pluginDirectory: plugin))
+            runnable = plugin
         }
+        return .claude(ClaudeStatusLine.injecting(
+            into: injecting(into: flags, pluginDirectory: runnable),
+            wrapper: runnable.appendingPathComponent(ClaudeStatusLine.scriptPath),
+            user: userStatusLine, projectDirectory: projectDirectory))
     }
 }

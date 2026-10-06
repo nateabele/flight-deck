@@ -533,7 +533,25 @@ final class SessionStore: ObservableObject {
         // for `.codex`, and for `.claude` under `scripts/test-unit.sh`, where `Bundle.main`
         // is the `xctest` tool rather than the app — see `ClaudePluginLocationTests` for the
         // composition exercised against a bundle that does carry the plugin.
-        return ClaudePluginLocation.applying(to: options, bundle: .main)
+        //
+        // The status line's layout settings are the user's for the account a new tab here would
+        // run as. A restored tab on another account can differ in padding only: its command is
+        // resolved against its own account in `launchEnvironment`.
+        guard agent == .claude else { return options }
+        return ClaudePluginLocation.applying(
+            to: options, bundle: .main,
+            userStatusLine: claudeUserStatusLine(project: project, account: preferences?.account(for: .claude, project: project)),
+            projectDirectory: URL(fileURLWithPath: project, isDirectory: true))
+    }
+
+    /// The status line a claude tab would show without Flight Deck: the command our wrapper must
+    /// keep running. Resolved from the user's flags, not the launch options, because those
+    /// already carry our own `--settings`.
+    private func claudeUserStatusLine(project: String, account: AgentAccount?) -> ClaudeStatusLine.User? {
+        var flags = FlagSet()
+        if case .claude(let f)? = preferences?.resolvedOptions(for: .claude, project: project) { flags = f }
+        return ClaudeStatusLine.user(flags: flags, configHome: account?.home ?? AgentID.claude.builtInHome,
+                                     projectDirectory: URL(fileURLWithPath: project, isDirectory: true))
     }
 
     /// The options a tab launches with: the project's resolved preferences, with a swarm task's
@@ -2015,6 +2033,15 @@ final class SessionStore: ObservableObject {
                 for: orphaned ? nil : account(for: session), flywheel: session.flywheelIdentity
             ) ?? [:]
         for (key, value) in adapter.launchEnvironment { environment[key] = value }
+        // The user's own status line, for the wrapper `options(for:project:)` installs to run
+        // (`ClaudeStatusLine`). Here rather than in the options because this is where the tab's
+        // real account is known, and the account's settings.json is where a status line usually
+        // lives. Set or removed, never left as typed in the Shell pane: a stale value there would
+        // draw someone else's status line.
+        if session.agent == .claude {
+            environment[ClaudeStatusLine.userCommandVariable] = claudeUserStatusLine(
+                project: session.workingDirectory, account: orphaned ? nil : account(for: session))?.command
+        }
         // Last, like the adapter's half and for the same reason: a variable typed into the Shell
         // pane must not repoint a tab at another app instance's socket or claim another tab.
         if let controlSocket, let controlSecret {

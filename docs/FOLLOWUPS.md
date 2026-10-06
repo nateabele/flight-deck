@@ -2336,7 +2336,7 @@ flagged as most likely to differ from the tests. The maintainer's to run.
       from a relative `granted_at`; codex usage-limit `codex_error_info` spellings
       (`RateLimitClassifier.kinds`), so the fleet API-error path may never mark a codex account
       over hard (the 120 s `rateLimitReachedType` read is the authoritative signal); the real
-      claude-tab meter (the mod in an FD-spawned tab) against `/usage`; the hook log's
+      claude-tab meter (the status line in an FD-spawned tab) against `/usage`; the hook log's
       failed-tool event for claude (transcript used instead).
     - Capability index: the validator trims spaces but not newlines; the proposer proposes the
       bare model for a non-knob bracketed setting; the confidence denominator counts sources that
@@ -2352,13 +2352,15 @@ flagged as most likely to differ from the tests. The maintainer's to run.
       across models, so a rule can validate with an effort one model rejects.
       `ProjectViewInspectorLiveTests` failed once in `l3-routing`'s full run (passes on master
       and on the integration branch).
-    - Usage: local-pool capacity cannot see load from outside Flight Deck (by design); claude hook
-      modules sit behind a remote rollout switch (no meter when it is off); `spendControlReached`
-      is ignored; the silent-mod check is suppressed by any other reading on the account; a codex
+    - Usage: local-pool capacity cannot see load from outside Flight Deck (by design); the claude
+      meter now comes from the status line (2026-10-06), so the hook-module rollout switch no
+      longer matters; managed settings that set a status line override ours and leave the account
+      with no claude meter; `spendControlReached`
+      is ignored; the silent-status-line check is suppressed by any other reading on the account; a codex
       read that never returns stops that account's polling until restart; the OpenCode transcript
       command interpolates its session id and server URL unquoted (quote them when the adapter
-      lands); `/usage` shows a third window ("Current week (Fable)") that `session.measure` does
-      not report; `UsageService.revision` bumps on every tick, so swarm rows re-evaluate each tick.
+      lands); `/usage` shows a third window ("Current week (Fable)") that the status line's
+      `rate_limits` does not report either; `UsageService.revision` bumps on every tick, so swarm rows re-evaluate each tick.
     - Swarm: the Observe events lane is a nil stub (activity stands in); the Assignment lane is
       hidden when the tab has no Observe (am) agent row; claude/codex accept only the hard-coded
       `effort` knob; an agent `stop()` retired gets no "done" marker and a stopped swarm's summary

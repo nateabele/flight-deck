@@ -1,5 +1,5 @@
 {
   "name": "flight-deck",
   "version": "1.0.0",
-  "description": "Reports Claude Code lifecycle events to Flight Deck."
+  "description": "Reports Claude Code lifecycle events and account usage to Flight Deck."
 }

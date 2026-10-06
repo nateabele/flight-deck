@@ -29,13 +29,13 @@ final class MeterFormatterTests: XCTestCase {
     func testAFreshAccount() {
         let now = usageISO("2026-10-04T19:00:00Z")
         let reading = UsageReading(account: UsageRefs.work, windows: [UsageWindow(name: "five_hour", utilization: 0.824, resetsAt: usageISO("2026-10-04T23:00:00Z"))],
-                                   readAt: now.addingTimeInterval(-180), source: "claude mod", hardRejection: false)
+                                   readAt: now.addingTimeInterval(-180), source: "claude status line", hardRejection: false)
         let h = AccountHeadroom(account: UsageRefs.work, worstUtilization: 0.824, state: .overSoft, resetsAt: usageISO("2026-10-04T23:00:00Z"))
         let m = MeterFormatter.account(h, pool: pool, reading: reading, error: nil, now: now, timeZone: utc, locale: posix)
         XCTAssertEqual(m.percentText, "82%")
         XCTAssertEqual(m.soft, 0.80); XCTAssertEqual(m.hard, 0.95)
         XCTAssertEqual(m.resetText, "resets 11:00 PM")
-        XCTAssertEqual(m.sourceText, "claude mod · 3 min ago")
+        XCTAssertEqual(m.sourceText, "claude status line · 3 min ago")
         XCTAssertNil(m.detail)
         XCTAssertEqual(m.accessibilityValue, "82 percent used, past its soft limit, resets 11:00 PM")
     }
@@ -81,7 +81,7 @@ final class MeterFormatterTests: XCTestCase {
     func testRejectionWithMeter() {
         let now = usageISO("2026-10-04T19:00:00Z")
         let reading = UsageReading(account: UsageRefs.work, windows: [UsageWindow(name: "five_hour", utilization: 0.10, resetsAt: usageISO("2026-10-04T23:00:00Z"))],
-                                   readAt: now.addingTimeInterval(-180), source: "claude mod", hardRejection: false)
+                                   readAt: now.addingTimeInterval(-180), source: "claude status line", hardRejection: false)
         let rejection = Rejection(at: now.addingTimeInterval(-60), until: now.addingTimeInterval(600), source: "Claude API: 429")
         let h = AccountHeadroom(account: UsageRefs.work, worstUtilization: 1, state: .overHard, resetsAt: rejection.expiry)
         let m = MeterFormatter.account(h, pool: pool, reading: reading, error: nil, now: now, rejection: rejection, timeZone: utc, locale: posix)
@@ -108,13 +108,13 @@ final class MeterFormatterTests: XCTestCase {
     func testExpiredRejectionShowsNormalMeter() {
         let now = usageISO("2026-10-04T19:00:00Z")
         let reading = UsageReading(account: UsageRefs.work, windows: [UsageWindow(name: "five_hour", utilization: 0.30, resetsAt: usageISO("2026-10-04T23:00:00Z"))],
-                                   readAt: now.addingTimeInterval(-180), source: "claude mod", hardRejection: false)
+                                   readAt: now.addingTimeInterval(-180), source: "claude status line", hardRejection: false)
         let rejection = Rejection(at: now.addingTimeInterval(-1000), until: now.addingTimeInterval(-100), source: "expired")
         let h = AccountHeadroom(account: UsageRefs.work, worstUtilization: 0.30, state: .overSoft, resetsAt: usageISO("2026-10-04T23:00:00Z"))
         let m = MeterFormatter.account(h, pool: pool, reading: reading, error: nil, now: now, rejection: rejection, timeZone: utc, locale: posix)
         XCTAssertEqual(m.state, .overSoft, "expired rejection does not override state")
         XCTAssertEqual(m.fraction, 0.30)
-        XCTAssertEqual(m.sourceText, "claude mod · 3 min ago", "shows normal meter source, not rejection")
+        XCTAssertEqual(m.sourceText, "claude status line · 3 min ago", "shows normal meter source, not rejection")
         XCTAssertNil(m.detail, "no rejection detail when rejection is expired")
     }
 }
