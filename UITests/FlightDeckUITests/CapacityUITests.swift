@@ -90,14 +90,15 @@ final class CapacityUITests: XCTestCase {
         XCTContext.runActivity(named: "Settings → Capacity lists the default pools and takes edits") { _ in
             app.typeKey(",", modifierFlags: .command)
             // No identifier on the tab itself (a container identifier would shadow its children),
-            // so find the window by the tab button's "Capacity" title, as the smoke tests do for "Agents".
-            let prefs = app.windows.containing(.button, identifier: "Capacity").firstMatch
+            // so find the window by the "Agents" tab button, as the smoke tests do for "Agents".
+            let prefs = app.windows.containing(.button, identifier: "Agents").firstMatch
             guard prefs.waitForExistence(timeout: 10) else {
                 attachTree(app.windows.firstMatch, "settings-tree")
-                XCTFail("Settings did not open with a Capacity tab")
+                XCTFail("Settings did not open")
                 return
             }
-            prefs.buttons["Capacity"].click()
+            prefs.buttons["Flight Control"].click()
+            prefs.buttons["fc-section-capacity"].click()
             XCTAssertTrue(prefs.descendants(matching: .any).matching(identifier: "capacity-pool-list").firstMatch.waitForExistence(timeout: 5))
             XCTAssertTrue(text("Claude default", in: prefs).exists)
             XCTAssertTrue(text("Codex default", in: prefs).exists)

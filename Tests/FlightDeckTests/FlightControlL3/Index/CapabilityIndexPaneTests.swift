@@ -16,10 +16,10 @@ final class CapabilityIndexPaneTests: XCTestCase {
 
     /// Replaces a tautological `allCases.contains` check: what matters is that the opener can
     /// actually land Settings on this pane, which is the path anything that links here uses.
-    func testOpeningSettingsAtTheCapabilityIndexSelectsIt() {
+    func testOpeningSettingsAtFlightControlSelectsIt() {
         let store = PreferencesStore(persistence: MemoryPersistence())
-        PreferencesOpener.select(store, tab: .capabilityIndex)
-        XCTAssertEqual(store.selectedTab, .capabilityIndex)
+        PreferencesOpener.select(store, tab: .flightControl)
+        XCTAssertEqual(store.selectedTab, .flightControl)
     }
 
     func testCellIdentifierIsStable() {
