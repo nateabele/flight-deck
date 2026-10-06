@@ -50,4 +50,17 @@ final class HandoffReservationsTests: XCTestCase {
         XCTAssertFalse(handoff.firstPrompt.contains("held no file reservations"), handoff.firstPrompt)
         XCTAssertTrue(handoff.firstPrompt.contains("could not be read"), handoff.firstPrompt)
     }
+
+    /// The store's real lookup with no Observe projection for the project (Observe off, or not
+    /// read yet): nobody knows what the old agent holds, so the prompt must not say "none".
+    /// Before, the store mapped a missing projection to `[]` and the composition passed that on.
+    func testAnAbsentObserveProjectionDoesNotClaimNone() async throws {
+        // The rig's swarm still carries `SessionStore.useSwarmService`'s lookup; the rig never
+        // turns Observe on, so there is no projection.
+        _ = try await rig.launchAndCrossHard()
+        let handoff = try XCTUnwrap(rig.spawns.dropFirst().first)
+        XCTAssertFalse(handoff.firstPrompt.contains("held no file reservations"), handoff.firstPrompt)
+        XCTAssertTrue(handoff.firstPrompt.contains("could not be read"), handoff.firstPrompt)
+    }
 }
+

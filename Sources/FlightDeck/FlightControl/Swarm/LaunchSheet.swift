@@ -49,6 +49,10 @@ final class LaunchSheetModel: ObservableObject {
     }
 
     @Published private(set) var rows: [Row] = []
+    /// The agents the Override picker offers: those enabled in the catalogs routing uses (Settings'
+    /// agents), never every registered harness — an override to an agent the user turned off
+    /// would launch it anyway.
+    @Published private(set) var harnesses: [HarnessID] = []
     @Published private(set) var loading = false
     @Published private(set) var error: String?
     @Published var cap: Int = 3
@@ -101,6 +105,7 @@ final class LaunchSheetModel: ObservableObject {
         let router = deps.makeRouter()
         let kinds = (try? deps.kinds.kinds(project: projectURL)) ?? []
         let catalogs = await (deps.catalogs ?? { await self.registry.catalogs(enabled: Set(self.registry.harnesses)) })()
+        harnesses = catalogs.order.filter { catalogs.byHarness[$0]?.enabled == true }
         rows = tasks.filter { request.filter.admits($0.id) }
             .map { route($0, router: router, kinds: kinds, catalogs: catalogs) }
         // Spec §3: a local pool (every slot has no account) defaults to its own slot count.
@@ -200,7 +205,6 @@ final class LaunchSheetModel: ObservableObject {
 
 struct LaunchSheet: View {
     @StateObject var model: LaunchSheetModel
-    let harnesses: [HarnessID]
     let onClose: () -> Void
     @State private var editing: String?
     @State private var draftHarness: HarnessID = "claude"
@@ -265,7 +269,7 @@ struct LaunchSheet: View {
     private func overrideEditor(_ id: String) -> some View {
         HStack {
             Picker("Agent", selection: $draftHarness) {
-                ForEach(harnesses, id: \.self) { Text($0.rawValue).tag($0) }
+                ForEach(model.harnesses, id: \.self) { Text($0.rawValue).tag($0) }
             }.frame(width: 140)
             .onChange(of: draftHarness) { harness in
                 draftPool = model.pool(afterChangingTo: harness)

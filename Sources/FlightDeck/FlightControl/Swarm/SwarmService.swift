@@ -65,7 +65,9 @@ final class SwarmService: ObservableObject {
     /// The last guard block and BLOCKED: line per session (spec §7.4).
     private(set) var signals: [UUID: SessionSignals] = [:]
     /// The project's held reservations, from the Observe projection (wired by `SessionStore.useSwarmService`).
-    var reservationsLookup: (String) -> [HeldReservation] = { _ in [] }
+    /// Nil when there is no projection to read (Observe off, or not read yet) — not `[]`: a
+    /// hand-off prompt told "none" would let the new agent skip re-reserving files it needs.
+    var reservationsLookup: (String) -> [HeldReservation]? = { _ in nil }
 
     let store: SwarmStore
     let backend: SwarmBackend
@@ -310,7 +312,7 @@ extension SwarmService {
     func contest(for session: UUID) -> Contest? {
         guard let signals = signals[session], let (record, agent) = agentRecord(session) else { return nil }
         return ContestedRelation.contest(agent: agent.agentName, signals: signals,
-                                         reservations: reservationsLookup(Self.key(record.project)), now: currentTime)
+                                         reservations: reservationsLookup(Self.key(record.project)) ?? [], now: currentTime)
     }
 
     /// Agent name to contest, for every flywheel tab in the project: the Observe enrichment's input.
@@ -319,7 +321,7 @@ extension SwarmService {
         var out: [String: Contest] = [:]
         for (session, name) in host?.flywheelAgents(inProject: key) ?? [] {
             guard let s = signals[session],
-                  let c = ContestedRelation.contest(agent: name, signals: s, reservations: reservationsLookup(key), now: currentTime)
+                  let c = ContestedRelation.contest(agent: name, signals: s, reservations: reservationsLookup(key) ?? [], now: currentTime)
             else { continue }
             out[name] = c
         }

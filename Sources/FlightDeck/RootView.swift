@@ -98,7 +98,6 @@ struct RootView: View {
         .sheet(item: $store.swarmLaunchRequest) { request in
             LaunchSheet(model: LaunchSheetModel(request: request, backend: store.swarmService.backend,
                                                 service: store.swarmService, registry: store.routingCapabilities),
-                        harnesses: store.routingCapabilities.harnesses,
                         onClose: { store.swarmLaunchRequest = nil })
         }
         // Over the whole window, not the detail column: the scrim has to cover the sidebar too,

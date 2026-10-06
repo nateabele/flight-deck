@@ -249,4 +249,22 @@ final class HandoffHostTests: XCTestCase {
         let dec = JSONDecoder(); dec.dateDecodingStrategy = .iso8601
         XCTAssertEqual(try dec.decode(HandoffLogEntry.self, from: Data(lines[0].utf8)), entry)
     }
+
+    /// A `-FlightDeckResetState` run (every UI test) must not append to the real
+    /// `~/Library/Application Support/Flight Deck/swarm-log`. Writer and reader
+    /// (`HandoffHistoryCache.shared`) both use this URL, so it must also be stable in-process.
+    func testAResetRunLogsToAScratchDirectory() throws {
+        let suite = "HandoffHostTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].path
+
+        XCTAssertTrue(StoreHandoffHost.defaultLogURL(defaults: defaults).path.hasPrefix(appSupport))
+        defaults.set(true, forKey: "FlightDeckResetState")
+        let reset = StoreHandoffHost.defaultLogURL(defaults: defaults)
+        XCTAssertFalse(reset.path.hasPrefix(appSupport), reset.path)
+        XCTAssertTrue(reset.path.hasPrefix(FileManager.default.temporaryDirectory.path), reset.path)
+        XCTAssertEqual(StoreHandoffHost.defaultLogURL(defaults: defaults), reset, "the reader finds what the writer wrote")
+    }
 }
+

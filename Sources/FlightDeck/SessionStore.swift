@@ -1439,7 +1439,9 @@ final class SessionStore: ObservableObject {
         swarmServiceStorage = service
         if service.dependencies == nil { service.dependencies = swarmDependencies }
         service.reservationsLookup = { [weak self] key in
-            (self?.observeService.projection(forProject: key)?.reservations ?? []).map {
+            // No projection is "unknown", not "none" (see `SwarmService.reservationsLookup`).
+            guard let projection = self?.observeService.projection(forProject: key) else { return nil }
+            return (projection.reservations ?? []).map {
                 HeldReservation(pattern: $0.file, holder: $0.holder, since: $0.since == .distantPast ? nil : $0.since)
             }
         }

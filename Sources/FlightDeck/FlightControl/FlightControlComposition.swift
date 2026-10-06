@@ -71,7 +71,7 @@ enum FlightControlComposition {
         usage.setSwarmPredicate { [weak store] id in store?.swarmServiceIfBuilt?.agentRecord(id) != nil }
 
         let graph = FlightControlGraph(store: store, preferences: preferences, routing: routing, usage: usage,
-                                       allocator: allocator, commands: commands, logURL: logURL, now: now)
+                                       allocator: allocator, pools: pools, commands: commands, logURL: logURL, now: now)
         store.flightControlGraph = graph
         if let swarm = store.swarmServiceIfBuilt { graph.attach(swarm: swarm) }
         return graph
@@ -95,14 +95,16 @@ final class FlightControlGraph {
     private weak var preferences: PreferencesStore?
     private weak var attached: SwarmService?
     private let allocator: any PoolAllocator
+    private let pools: any PoolDirectory
     private let commands: BrAmHandoffCommands
     private let logURL: URL
     private let now: () -> Date
 
     init(store: SessionStore, preferences: PreferencesStore, routing: RoutingService, usage: UsageService,
-         allocator: any PoolAllocator, commands: BrAmHandoffCommands, logURL: URL, now: @escaping () -> Date) {
+         allocator: any PoolAllocator, pools: any PoolDirectory, commands: BrAmHandoffCommands, logURL: URL,
+         now: @escaping () -> Date) {
         self.store = store; self.preferences = preferences; self.routing = routing; self.usage = usage
-        self.allocator = allocator; self.commands = commands; self.logURL = logURL; self.now = now
+        self.allocator = allocator; self.pools = pools; self.commands = commands; self.logURL = logURL; self.now = now
     }
 
     /// L3-U's driver over L3-S's spawner and records. Once per service.
@@ -115,10 +117,11 @@ final class FlightControlGraph {
         host.kindLookup = { [weak routing] block, project in routing?.kind(for: block, project: project) }
         host.catalogProvider = { [weak routing] in await routing?.catalogs() ?? AdapterCatalogs([]) }
         // What the old agent holds, from the same Observe projection the swarm reads. Nil (keep
-        // the planner's list) only when there is no swarm to ask.
+        // the planner's list, or say it could not be read) when there is no swarm to ask or no
+        // projection to read: an absent projection is not "holds none".
         host.reservationLookup = { [weak swarm] agent, project in
-            guard let swarm else { return nil }
-            return swarm.reservationsLookup(SwarmService.key(project.path)).filter { $0.holder == agent }.map(\.pattern)
+            guard let swarm, let held = swarm.reservationsLookup(SwarmService.key(project.path)) else { return nil }
+            return held.filter { $0.holder == agent }.map(\.pattern)
         }
         let allocator = self.allocator
         let now = self.now
@@ -153,6 +156,8 @@ final class FlightControlGraph {
                 (preferences?.capacity ?? CapacityPreferences())
                     .handoffSettings(confirmSurfaceExists: self?.confirmSurfaceExists ?? CapacityPreferences.confirmSurfaceExists)
             },
+            // The swarm's own directory, so a deleted pool waits in both with one reason.
+            pools: pools,
             now: now)
         swarm.handoffDecisions = driver
         // One pass over every swarm's working agents (see `SwarmService.onTick`). Every hand-off
@@ -208,10 +213,21 @@ private final class HandoffClaimSpawner: SwarmSpawner {
     func spawn(task: TaskRef, block: ExecutionBlock, lease: AccountLease?, firstPrompt: String) async -> Result<SessionRef, SpawnError> {
         guard let swarm else { return .failure(.launchFailed("the swarm is gone")) }
         let project = task.project.path
+        // The pass took its snapshot before this agent's turn; Stop or Turn Off may have landed
+        // since. A stopped swarm let its agents go (their claims stay with them): spawning a
+        // replacement and retiring the old agent then hands the task to an agent no swarm
+        // records. A paused or draining swarm still hands off: its agents keep working.
+        guard Self.isLive(swarm, project) else { return .failure(.launchFailed(Self.stopped)) }
         let holder = swarm.record(forProject: project)?.agents
             .first { $0.task == task.id && ($0.state == .working || $0.state == .idle) }?.agentName
         swarm.beginHandoff(project: project, task: task.id)
         _ = await swarm.returnClaimToOpen(project: project, task: task.id)
+        // ...or during that await: the claim goes back to the agent that held it, as stop() left it.
+        guard Self.isLive(swarm, project) else {
+            if let holder { _ = await swarm.backend.claim(task.id, actor: holder, project: task.project) }
+            swarm.endHandoff(project: project, task: task.id)
+            return .failure(.launchFailed(Self.stopped))
+        }
         let result = await inner.spawn(task: task, block: block, lease: lease, firstPrompt: firstPrompt)
         if case .failure = result {
             if let holder {
@@ -225,5 +241,12 @@ private final class HandoffClaimSpawner: SwarmSpawner {
             swarm.endHandoff(project: project, task: task.id)
         }
         return result
+    }
+
+    private static let stopped = "the swarm was stopped before the new agent started"
+
+    private static func isLive(_ swarm: SwarmService, _ project: String) -> Bool {
+        guard let state = swarm.record(forProject: project)?.state else { return false }
+        return state != .stopped
     }
 }

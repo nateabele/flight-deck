@@ -236,4 +236,21 @@ final class LaunchSheetModelTests: XCTestCase {
         XCTAssertEqual(LaunchSheetModel.parseKnobs(""), [:])
         XCTAssertNil(LaunchSheetModel.parseKnobs("effort"))
     }
+
+    /// The Override picker offers the agents Settings has enabled — the catalogs routing uses —
+    /// not every registered harness: an override to a disabled agent would launch something
+    /// the user turned off.
+    func testTheOverridePickerOffersOnlyEnabledAgents() async throws {
+        let (_, service, model, _) = try rig()
+        let deps = try XCTUnwrap(service.dependencies)
+        service.dependencies = SwarmDependencies(
+            makeRouter: deps.makeRouter, kinds: deps.kinds, allocator: deps.allocator, capacity: deps.capacity, pools: deps.pools,
+            catalogs: {
+                AdapterCatalogs([AdapterCatalog(harness: "codex", models: [], knobSchema: [:], defaultModel: nil, enabled: false),
+                                 AdapterCatalog(harness: "claude", models: [], knobSchema: [:], defaultModel: nil, enabled: true)])
+            })
+        await model.load()
+        XCTAssertEqual(model.harnesses, ["claude"])
+    }
 }
+
