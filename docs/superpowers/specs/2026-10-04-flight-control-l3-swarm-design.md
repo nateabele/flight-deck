@@ -260,3 +260,80 @@ the wire changes, the phone views, and disable.
 - `Sources/FlightDeckMobile/…`: flat, per the mobile rule
 - `Tests/FlightDeckTests/FlightControlL3/Swarm/…`, `UITests/FlightDeckUITests/SwarmUITests.swift`,
   `scripts/test-ui-flight-control.sh`
+
+## 15. Deviations recorded while planning and building
+
+From `docs/superpowers/plans/2026-10-04-flight-control-l3-s-swarm.md`:
+
+1. `session.new` replies with the existing `ServerFrame.session(cid:UUID)` after creation (or an
+   `err`), not a new frame case; old phones send it fire-and-forget, old CLIs treat any non-err as
+   the ack.
+2. `lastActiveAt` is `SessionStore.lastActiveAt(for:)`, stamped in `commitStatuses`, not a
+   `SessionStatus` field (status equality stays clock-free).
+3. Reuse is checked before leasing; a reused agent keeps its own lease.
+4. `StoreSwarmSpawner` also exposes create/deliver/reset (`SwarmAgentLauncher`) so the controller
+   can claim between spawn and prompt; the contract `spawn` composes them with an injected claim.
+5. Claude guard blocks are read from the transcript tail, not the hook record script; codex from
+   its rollout tail; both through `AgentEvent.outputSignals`.
+6. The UI test's fake adapter is the claude adapter running a stub shell (`-FlightDeckFixture`).
+7. Turn Off lives in the project header menu; Preferences has no Flight Control control.
+8. As built: the header's swarm summary chip is plain Text. Pause/Resume/Drain/Stop and Swarm
+   Details live in the header's context menu, and the details popover opens from there (no inline
+   button, because of `ProjectHeaderRow`'s drag constraint).
+9. Swarm commands carry no idempotency token.
+10. Tab activity stands in for the empty Observe events lane in stall detection.
+11. `TaskPrompt` lives in IntakeKit.
+
+Found while building (evidence in brackets):
+
+12. See item 8: it amends the plan's inline-button design.
+13. A failed or undecodable `br list` makes the ready read fail (no tick fill) instead of treating
+    tasks as block-less, because a pinned block is binding [Task 2 review].
+14. `PromptDelivery` fails ("the tab is gone") when the tab closes while its first prompt is queued,
+    instead of reporting success [Task 5 review].
+15. The codex `effort` knob travels as `config.model_reasoning_effort`. UNVERIFIED:
+    `codex app-server generate-json-schema` (codex 0.160.0) lists no effort key [Task 4a probe].
+16. The codex context reset types `/new`, inferred from the codex 0.160.0 binary's command
+    descriptions ("start a new chat during a conversation"); NOT driven live [Task 4b probe].
+17. Reuse/restore robustness beyond the plan: a nil `br show` reading never reopens a task; a failed
+    `returnToOpen` never clears the claim record; unreadable restored claims are retried each tick,
+    also while paused [Tasks 7d, 7g].
+18. In-flight launches recheck the swarm state before claiming: paused or draining goes idle with no
+    claim; stopped releases the lease and ends the agent [Task 7e]; a spawn-failure pause never
+    resurrects a stopped swarm [7f].
+19. The router dependency is a factory, `makeRouter: () -> any Router`, called per plan, spill and
+    sheet open and never cached (for L3-R's `RoutingService.makeRouter()`).
+20. Launch sheet: unroutable rows use the contract's `Assignment.isUnroutable`/`unroutableReason`;
+    `changed` compares routing identity only (kind, harness, model, knobs, pool, source.by, ruleId);
+    a failed write-back aborts the launch; Override pool is a picker over `PoolDirectory` (free text
+    only when there is none); Override is disabled for blocks written by a newer Flight Deck [Task 8].
+21. Reservation time comes from the relative `granted_at` ("5s ago") anchored on the envelope's
+    `_meta.timestamp`: the real `am reservations --all --json` row (am 0.3.35 probe, Task 11a) has
+    keys agent, path, exclusive, remaining_seconds, remaining, granted_at and no absolute time. The
+    read is flagged "unattested" when no Agent Mail server runs, yet the row is present.
+22. Guard-block parsing allows any whitespace after "detected!": the real guard refusal wraps onto a
+    second line [captured guard-block.txt, Task 11c].
+23. Output signals reach the swarm only for tabs with a Flight Control identity; a Flight Control
+    tab's first signal builds the swarm service [Task 11d].
+24. Observe now runs four reads per repoll (agents, in-progress, am reservations, br graph --all),
+    still mtime-gated [Task 11e].
+25. Turn Off drains then stops at once (claims of still-working agents return to open immediately),
+    deviating from §9 "drain ... then stop", because waiting could block Turn Off indefinitely
+    [Task 13].
+26. Remove from Repo runs `br agents --remove --force` first (which leaves `AGENTS.md.bak`), falling
+    back to removing the section between a `<!-- br-agent-instructions-v1 -->`-style opener and the
+    probed closer `<!-- end-br-agent-instructions -->` (no -v1) [Task 13 probe].
+27. The plan's test fixture key `am file_reservations release` could never match MultiRunner (it
+    keys on exe plus the first two args); `am file_reservations` is used [Task 2].
+28. UI test runner: fixture daemons use a short `/tmp/fdfc-ui-<uid>` dir (DerivedData paths exceed
+    the 104-byte socket limit), and the stub agent strips the kitty CSI-u key escapes Flight Deck
+    sends to clear the composer [Task 14].
+29. `ObserveDrawer`'s `observe-drawer-expanded`/`-collapsed` container ids now use
+    `.accessibilityElement(children: .contain)`; a container id otherwise stamps every child.
+
+UI-test status: `scripts/test-ui-flight-control.sh` ends FLIGHT CONTROL UI PASS on run 6 (both
+`SwarmUITests` cases: `testHandOffMarkerFromASeededSwarm`,
+`testLaunchReuseContestedPauseResumeAndRestart`), against the stub fixture backend only. Runs 1-5
+failed for harness reasons, each fixed (items 28, 29, a screen lock, and a stub that wrote only the
+first line of the guard message). It has not run against the real stack (real claude/codex/am/br
+plus L3-R/L3-U conformers); that is the integration branch's job and the maintainer's checklist.
