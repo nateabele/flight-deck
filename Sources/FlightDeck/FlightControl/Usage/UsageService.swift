@@ -78,14 +78,15 @@ final class UsageMeterTap: UsageMeterSource, @unchecked Sendable {
 /// Funnels every meter into `CapacityLedger` and keeps the account states current (L3-U §3).
 ///
 /// One per app (`shared`), attached once to the store and preferences from `AppDelegate`'s
-/// store-ready hops. It ticks every 5 s: scan the mod's files, fold headless seats, turn
-/// rate-limit API errors into refusals, poll codex at most every 120 s per account with a live
-/// codex tab, flag a silent mod, and tell manual tabs once when their account crosses hard.
+/// store-ready hops. It ticks every 30 s — usage windows move over hours, so a faster beat only
+/// spends the main actor — and each tick it scans the mod's files, folds headless seats, turns
+/// rate-limit API errors into refusals, polls codex at most every 120 s per account with a live
+/// codex tab, flags a silent mod, and tells manual tabs once when their account crosses hard.
 @MainActor
 final class UsageService: ObservableObject {
     static let shared = UsageService()
 
-    static let tickInterval: Duration = .seconds(5)
+    static let tickInterval: Duration = .seconds(30)
     static let codexPollInterval: TimeInterval = 120
     /// A stuck app-server must not hold the tick: `CodexRPC.request` has no timeout of its own.
     static let defaultCodexReadTimeout: TimeInterval = 20
