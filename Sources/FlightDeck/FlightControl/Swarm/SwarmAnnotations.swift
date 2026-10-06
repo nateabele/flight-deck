@@ -190,9 +190,8 @@ struct SwarmPopover: View {
     }
 }
 
-/// One account row of a pool's headroom. Serves only the phone path now (the Mac popover draws
-/// `PoolMeterModel`s). It is the phone's `WireSwarmMeter` carries it. The Mac popover
-/// draws `PoolMeterModel`s instead; both read the same ledger.
+/// One account row of a pool's headroom, as the phone's `WireSwarmMeter` carries it. It serves
+/// only the phone path now: the Mac popover draws `PoolMeterModel`s instead, from the same ledger.
 struct SwarmMeterRow: Hashable {
     let pool: String
     let label: String

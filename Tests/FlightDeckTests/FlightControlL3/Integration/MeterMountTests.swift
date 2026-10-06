@@ -73,12 +73,18 @@ final class MeterMountTests: XCTestCase {
 
     // MARK: - mounted views follow the ledger
 
-    /// The row's width with nothing but the meter in it: 0 with no meter, wider with one.
-    private func fittingWidth(_ host: NSHostingView<SwarmRowChips>) async -> CGFloat {
-        // SwiftUI applies a published change on the next runloop turn.
-        try? await Task.sleep(nanoseconds: 100_000_000)
+    /// Re-lays-out the host until `done` holds, for at most two seconds. SwiftUI applies a published
+    /// change on a later runloop turn, so a fixed sleep either flakes under load or wastes time;
+    /// a bounded poll is as fast as the machine allows and still fails when the view never updates.
+    private func settle(_ host: NSView, until done: () -> Bool) async -> Bool {
+        let deadline = Date().addingTimeInterval(2)
+        repeat {
+            host.layoutSubtreeIfNeeded()
+            if done() { return true }
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        } while Date() < deadline
         host.layoutSubtreeIfNeeded()
-        return host.fittingSize.width
+        return done()
     }
 
     func testRowMeterAppearsAndDisappearsWithReadingsAlone() async throws {
@@ -90,13 +96,14 @@ final class MeterMountTests: XCTestCase {
                                             marker: nil, lastActive: nil)
         let host = NSHostingView(rootView: SwarmRowChips(annotation: frozen, usage: rig.usage))
         host.frame = NSRect(x: 0, y: 0, width: 200, height: 20)
-        let under = await fittingWidth(host)
+        host.layoutSubtreeIfNeeded()
+        let under = host.fittingSize.width
         rig.feed(account: "Work", utilization: 0.85)
-        let over = await fittingWidth(host)
-        XCTAssertGreaterThan(over, under, "crossing soft must draw the meter with no other state change")
+        let appeared = await settle(host) { host.fittingSize.width > under }
+        XCTAssertTrue(appeared, "crossing soft must draw the meter with no other state change")
         rig.feed(account: "Work", utilization: 0.40)
-        let back = await fittingWidth(host)
-        XCTAssertEqual(back, under, "dropping under soft must remove it, though the cached annotation never changed")
+        let gone = await settle(host) { host.fittingSize.width == under }
+        XCTAssertTrue(gone, "dropping under soft must remove it, though the cached annotation never changed")
     }
 
     func testRowMeterDoesNotLingerWhenTheCachedAnnotationSaidOverSoft() async throws {
@@ -107,8 +114,8 @@ final class MeterMountTests: XCTestCase {
                                            marker: nil, lastActive: nil)
         let host = NSHostingView(rootView: SwarmRowChips(annotation: stale, usage: rig.usage))
         host.frame = NSRect(x: 0, y: 0, width: 200, height: 20)
-        let width = await fittingWidth(host)
-        XCTAssertEqual(width, 0, accuracy: 0.5, "the live ledger is under soft, whatever the cache says")
+        host.layoutSubtreeIfNeeded()
+        XCTAssertEqual(host.fittingSize.width, 0, accuracy: 0.5, "the live ledger is under soft, whatever the cache says")
     }
 
     func testDrawerAssignmentMeterIsPopulatedForALeasedAgentAndLive() async throws {
@@ -125,6 +132,46 @@ final class MeterMountTests: XCTestCase {
         let model = try XCTUnwrap(ref.model(ledger: rig.usage.ledger, now: rig.now))
         XCTAssertEqual(try XCTUnwrap(model.fraction), 0.85, accuracy: 0.001, "built from the live ledger, not frozen at assignment time")
         XCTAssertEqual(model.state, .overSoft)
+    }
+
+    /// The host's pixels. Accessibility is not reachable for an unshown hosting view, but a
+    /// drawn bar and its text are, and "different pixels" is exactly what is asserted.
+    private func pixels(_ host: NSView) -> Data? {
+        host.layoutSubtreeIfNeeded()
+        guard let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) else { return nil }
+        host.cacheDisplay(in: host.bounds, to: rep)
+        return rep.tiffRepresentation
+    }
+
+    private func mountDrawer(_ detail: SwarmAssignmentDetail, usage: UsageService) -> NSHostingView<ObserveDrawer> {
+        let agent = FlywheelProjection.Agent(name: "BlueLake", bead: nil, status: .active, holds: [], waitsOn: [],
+                                             lastEventAt: nil, stalledSince: nil)
+        let host = NSHostingView(rootView: ObserveDrawer(
+            agent: agent, collapsed: false, onToggleCollapse: {}, onJumpToRootCause: {}, onOpenDAG: {},
+            assignment: detail, usage: usage))
+        host.frame = NSRect(x: 0, y: 0, width: 600, height: 400)
+        return host
+    }
+
+    /// The assignment lane mounted for real: the meter bar must be there for a leased agent and
+    /// must follow a reading with nothing else changing. A drawer that dropped its
+    /// `UsageService` observation, or the bar, would pass every model test and fail this one.
+    func testDrawerAssignmentLaneDrawsTheMeterBarAndFollowsReadings() async throws {
+        let rig = try L3IntegrationRig.standard()
+        rig.feed(account: "Work", utilization: 0.30)
+        try await rig.launch(cap: 1)
+        await rig.tick()
+        let spawn = try XCTUnwrap(rig.spawns.first)
+        let detail = try XCTUnwrap(rig.swarm.assignment(for: spawn.session.id, now: rig.now))
+        var bare = detail
+        bare.meter = nil
+        let without = try XCTUnwrap(pixels(mountDrawer(bare, usage: rig.usage)))
+        let host = mountDrawer(detail, usage: rig.usage)
+        let low = try XCTUnwrap(pixels(host))
+        XCTAssertNotEqual(low, without, "the leased account's meter bar is drawn in the lane")
+        rig.feed(account: "Work", utilization: 0.85)
+        let followed = await settle(host) { self.pixels(host) != low }
+        XCTAssertTrue(followed, "the bar follows a reading with no other state change")
     }
 
     func testPopoverPoolsFollowTheLiveLedger() async throws {
@@ -144,9 +191,8 @@ final class MeterMountTests: XCTestCase {
         host.frame = NSRect(x: 0, y: 0, width: 400, height: 300)
         host.layoutSubtreeIfNeeded()
         rig.feed(account: "Work", utilization: 0.85)
-        try? await Task.sleep(nanoseconds: 100_000_000)
-        host.layoutSubtreeIfNeeded()
-        XCTAssertEqual(seen.last ?? nil, 0.85, "an open popover re-reads the ledger when a reading lands")
+        let followed = await settle(host) { (seen.last ?? nil) == 0.85 }
+        XCTAssertTrue(followed, "an open popover re-reads the ledger when a reading lands (saw \(seen))")
     }
 
     func testCacheSurvivesAMissingFileThenPicksItUp() async throws {
