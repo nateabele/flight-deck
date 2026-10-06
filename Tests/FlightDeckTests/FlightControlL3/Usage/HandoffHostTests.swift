@@ -169,6 +169,26 @@ final class HandoffHostTests: XCTestCase {
         XCTAssertEqual(spy.sent, ["/exit"])
     }
 
+    /// `.queued` is accepted for delivery (the exit goes out once the composer is back), so it counts.
+    func testStopAgentCountsAQueuedExitAsDelivered() async throws {
+        let (store, id, spy) = try await storeWithTab(SessionStatus(activity: .waiting))
+        spy.viewportOverride = "Do you want to proceed?\n❯ 1. Yes\n  2. No"
+        XCTAssertEqual(store.retireAgent(id), .queued)
+        let host = StoreHandoffHost(store: store, logURL: FileManager.default.temporaryDirectory.appendingPathComponent("unused.jsonl"))
+        spy.viewportOverride = "Do you want to proceed?\n❯ 1. Yes\n  2. No"
+        let ok = await host.stopAgent(SessionRef(id: id, agentName: nil))
+        XCTAssertTrue(ok)
+    }
+
+    func testStopAgentCountsANotRunningTabAsUndelivered() async throws {
+        let (store, _, _) = try await storeWithTab(SessionStatus(activity: .idle))
+        let bare = store.newSession(in: root).id
+        XCTAssertEqual(store.retireAgent(bare), .notRunning)
+        let host = StoreHandoffHost(store: store, logURL: FileManager.default.temporaryDirectory.appendingPathComponent("unused.jsonl"))
+        let ok = await host.stopAgent(SessionRef(id: bare, agentName: nil))
+        XCTAssertFalse(ok)
+    }
+
     func testBrAndAmArgvAndWorkingDirectory() async {
         let runner = UsageRecordingRunner()
         let commands = BrAmHandoffCommands(runner: runner)

@@ -15,7 +15,9 @@ final class HandoffDriver {
         case waitingForCapacity(String)
         case declined
         case failed
-        /// The new agent exists but the old one could not be told to exit. Terminal for this crossing.
+        /// The new agent exists but the old one could not be told to exit. Unlike every other phase it
+        /// survives a dip below hard and ends only when the old agent leaves the snapshot: the
+        /// replacement already holds the task, so a re-crossing must not spawn another one.
         case stopFailed
         case done(SessionRef)
     }
@@ -58,6 +60,9 @@ final class HandoffDriver {
         if case .done? = phases[id] { return }
         let activity = host.activity(of: agent.session)
         guard let request = planner.request(for: agent) else {
+            // `.stopFailed` outlives the crossing (see `Phase.stopFailed`): clearing it here would
+            // let the next crossing hand the same task off a second time.
+            if phases[id] == .stopFailed { return }
             // Below hard again: this crossing is over. A decline, a failure or a wait from it must
             // not carry into the next one (§5.2: "does not ask again *for this crossing*").
             phases[id] = nil; confirmed.remove(id); workedSinceFailure.remove(id)
@@ -156,9 +161,9 @@ final class HandoffDriver {
                 // whole hand-off and would spawn a second replacement.
                 phases[id] = .stopFailed
                 record(.stopFailed, agent, request, to: lease.account, fresh: fresh,
-                       detail: "exit command was not delivered to the old tab; \(agent.agentName) is still running")
+                       detail: "exit command was refused (not running or not accepted); \(agent.agentName) is probably still running")
                 host.notify(title: "Hand-off needs a manual stop",
-                            body: "\(fresh.agentName ?? "A new agent") took task \(request.task.id), but \(agent.agentName)'s tab is still running on \(request.fromAccount.label). Stop it by hand.",
+                            body: "\(fresh.agentName ?? "A new agent") took task \(request.task.id), but \(agent.agentName)'s exit command was not accepted, so its tab is probably still running on \(request.fromAccount.label). Check it and stop it by hand.",
                             session: agent.session)
                 return
             }
