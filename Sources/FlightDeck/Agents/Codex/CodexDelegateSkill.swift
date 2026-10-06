@@ -158,12 +158,26 @@ enum CodexDelegateSkill {
     /// The copy is detached and raced rather than awaited structurally, because blocking file
     /// I/O cannot be cancelled. A copy that loses the race finishes on its own thread, and a
     /// late copy is harmless.
+    ///
+    /// **Not from a Debug build.** A codex home is the user's real one (`~/.codex`, or an
+    /// account's own), shared with their installed Flight Deck. A Debug build writing there
+    /// would put a development copy of the skill in front of every codex tab the release app
+    /// runs, and its sidecar would then read the release copy as the user's own edit, so the
+    /// release app would never refresh it again. Logged once, so a developer testing the
+    /// skill knows why it is missing.
     static func installBundledOffMainActor(
         codexHome home: URL?,
         bundle: Bundle = .main,
         timeoutSeconds: Double = 2,
+        debugBuild: Bool = SessionDaemon.isDebugBuild,
         perform: @escaping @Sendable (URL, URL) throws -> Outcome = install(from:codexHome:)
     ) async {
+        guard !debugBuild else {
+            if !loggedDebugSkip.swap(true) {
+                logger.info("a Debug build does not install the delegate skill into a codex home; use a Release build to test it")
+            }
+            return
+        }
         guard let source = bundledSource(bundle: bundle) else { return }
         let codexHome = resolvedHome(home)
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
@@ -181,6 +195,16 @@ enum CodexDelegateSkill {
                 once.resume()
             }
         }
+    }
+
+    private static let loggedDebugSkip = OnceFlag()
+
+    /// Set once, from any thread: `installBundledOffMainActor` runs per codex account.
+    private final class OnceFlag: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = false
+        /// Sets the flag and returns what it was.
+        func swap(_ new: Bool) -> Bool { lock.withLock { defer { value = new }; return value } }
     }
 
     /// Resumes its continuation exactly once, whichever of the copy or the deadline gets there

@@ -73,11 +73,20 @@ final class PluginReloadTests: XCTestCase {
 
     func testUnreadablePluginNeverTriggersAReload() {
         XCTAssertFalse(PluginReload.pluginChanged(current: nil, defaults: defaults))
-        XCTAssertNil(defaults.string(forKey: PluginReload.fingerprintDefaultsKey),
+        XCTAssertNil(defaults.string(forKey: PluginReload.fingerprintDefaultsKey()),
                      "a nil must not overwrite the record, or the next good run reloads everything")
     }
 
     // MARK: - Which tabs
+
+    /// Debug and Release share a defaults domain: launching one must not make the other read
+    /// its own unchanged plugin as changed.
+    func testEachBuildKeepsItsOwnFingerprint() {
+        _ = PluginReload.pluginChanged(current: "release", defaults: defaults, debug: false)
+        XCTAssertTrue(PluginReload.pluginChanged(current: "debug", defaults: defaults, debug: true))
+        XCTAssertFalse(PluginReload.pluginChanged(current: "release", defaults: defaults, debug: false))
+        XCTAssertEqual(defaults.string(forKey: "ClaudePluginFingerprint"), "release", "Release keeps the key it always had")
+    }
 
     func testAdoptedTabsNeedAReloadOnlyWhenThePluginChanged() {
         let a = UUID(), b = UUID()

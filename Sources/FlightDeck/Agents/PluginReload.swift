@@ -18,8 +18,13 @@ import Foundation
 struct PluginReload {
     static let command = "/reload-plugins"
 
-    /// The `UserDefaults` key holding the plugin fingerprint the previous app run shipped.
-    static let fingerprintDefaultsKey = "ClaudePluginFingerprint"
+    /// The `UserDefaults` key holding the plugin fingerprint the previous app run of this
+    /// build shipped. Per build because Debug and Release share one defaults domain but not
+    /// tabs or plugin bytes: one key would read every switch between the two as a plugin
+    /// change, and reload every adopted tab of the build launched next for nothing.
+    static func fingerprintDefaultsKey(debug: Bool = SessionDaemon.isDebugBuild) -> String {
+        debug ? "ClaudePluginFingerprint.Debug" : "ClaudePluginFingerprint"
+    }
 
     /// Tabs that still need the command. A `Set` because each tab needs it once, however many
     /// registry ticks find it idle before the injection lands.
@@ -75,10 +80,12 @@ struct PluginReload {
     /// then costs those tabs their reload until the next plugin change. A tab can always be
     /// relaunched, and a record that waited on every tab would re-reload on every launch
     /// while any one of them stayed busy.
-    static func pluginChanged(current: String?, defaults: UserDefaults) -> Bool {
+    static func pluginChanged(current: String?, defaults: UserDefaults,
+                              debug: Bool = SessionDaemon.isDebugBuild) -> Bool {
         guard let current else { return false }
-        let previous = defaults.string(forKey: fingerprintDefaultsKey)
-        defaults.set(current, forKey: fingerprintDefaultsKey)
+        let key = fingerprintDefaultsKey(debug: debug)
+        let previous = defaults.string(forKey: key)
+        defaults.set(current, forKey: key)
         return previous != current
     }
 }
