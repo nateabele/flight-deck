@@ -2272,7 +2272,7 @@ flagged as most likely to differ from the tests. The maintainer's to run.
   [FLIGHT-CONTROL-COVERAGE-HANDOFF.md](FLIGHT-CONTROL-COVERAGE-HANDOFF.md).
 - **Flight Control on the phone — BUILT (see "known gaps and limits" above).** Originally: Handoff:
   [FLIGHT-CONTROL-MOBILE-HANDOFF.md](FLIGHT-CONTROL-MOBILE-HANDOFF.md).
-- **Level 3 "Operate" — BUILT (2026-10-06), integrated on branch l3-integration (not merged), GUI-unverified.**
+- **Level 3 "Operate" — BUILT and MERGED to master (1a3e3d79, 2026-10-06), GUI-unverified.**
   Five specs: overview and contract
   ([L3-0](superpowers/specs/2026-10-04-flight-control-l3-overview-contract-design.md)), routing
   ([L3-R](superpowers/specs/2026-10-04-flight-control-l3-routing-design.md)), capability index
@@ -2382,6 +2382,12 @@ flagged as most likely to differ from the tests. The maintainer's to run.
     - Test flakes seen under load, each passing alone: `PlanEditorKeystrokeTests` frame budget
       (16.1 to 16.7 ms), `PlanningRenderTests.testASeatBeatRedrawsTheLiveCardAlone`,
       `DelegationLifecycleTests.testUnknownRunFromTheHostEndsTheRunAsDied`.
+    - `testASeatBeatRedrawsTheLiveCardAlone` was hunted before the merge: 0/100 failures run alone
+      (25 idle + 25 under full CPU load, on both l3-integration and master, interleaved). The
+      full-suite failure is `clarifications: 1` plus a stray `liveCard: 1` in the publish window
+      (`PlanningRenderTests.swift:370`): the seat beat's redraw lands after the test's fixed 0.5 s
+      wait and spills into the next measurement. A timing leak in the test, not a Level 3
+      regression; the fix is to settle on a condition instead of a fixed sleep.
   - **Still deferred (Level 3 follow-on, unchanged):** the remaining tending actions (reclaim and
     respawn a stuck task, "fresh eyes", "reread AGENTS.md", a tend-cadence nudge), the Agent Mail
     inbox anchored to tasks, and the task-graph convergence gauge. Unresolved: whether
