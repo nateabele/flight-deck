@@ -194,7 +194,8 @@ private struct SessionRow: View {
             }
             // Last before the close button on purpose: flush right at rest, and the button
             // appearing on hover is what slides it left — no offset or hover state of its own.
-            SubagentCount(status: store.status(for: session.id))
+            SubagentCount(status: store.status(for: session.id),
+                          tree: store.subagentTree(for: session.id))
             // Absent rather than hidden until hover, as it always was — but the reason has
             // changed with the status icon's move. It used to be that inserting the button is
             // what pushed the status icon left, so no manual offset was needed. The icon is on

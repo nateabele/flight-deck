@@ -86,6 +86,22 @@ struct SubagentTree: Equatable, Sendable {
     }
 }
 
+/// The popover's rows: every node depth-first by `parentID`, nothing collapsed.
+enum SubagentOutline {
+    static func rows(_ tree: SubagentTree) -> [(node: SubagentNode, depth: Int)] {
+        var out: [(node: SubagentNode, depth: Int)] = []
+        var seen = Set<String>()
+        func walk(_ node: SubagentNode, _ depth: Int) {
+            // `seen` stops a parent cycle in corrupt meta files from recursing forever.
+            guard seen.insert(node.id).inserted else { return }
+            out.append((node, depth))
+            for child in tree.nodes where child.parentID == node.id { walk(child, depth + 1) }
+        }
+        for root in tree.nodes where root.parentID == nil { walk(root, 0) }
+        return out
+    }
+}
+
 enum SubagentFiles {
     static func meta(at url: URL) -> SubagentMeta? {
         guard let data = try? Data(contentsOf: url),

@@ -102,4 +102,17 @@ final class SubagentTreeTests: XCTestCase {
         XCTAssertEqual(tree.node("a1")?.state, .blocked(callID: "toolu_X"))
         XCTAssertEqual(tree.node("a2")?.state, .running)
     }
+
+    func testOutlineRowsAreDepthFirstWithEveryNodeExpanded() {
+        let now = Date()
+        let tree = SubagentTree.build(
+            metas: ["a0": .init(type: "controller", description: "d", parentID: nil),
+                    "a1": .init(type: "implementer", description: "d", parentID: "a0"),
+                    "a2": .init(type: "reviewer", description: "d", parentID: "a0")],
+            states: ["a0": (.running, now), "a1": (.running, now.addingTimeInterval(1)),
+                     "a2": (.running, now.addingTimeInterval(2))], keepDoneSince: nil)
+        let rows = SubagentOutline.rows(tree)
+        XCTAssertEqual(rows.map(\.node.id), ["a0", "a1", "a2"])
+        XCTAssertEqual(rows.map(\.depth), [0, 1, 1])
+    }
 }

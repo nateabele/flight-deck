@@ -118,15 +118,48 @@ struct SessionStatusIcon: View {
 /// "Working — N subagents", and a bare numeral read after the title would say it twice.
 struct SubagentCount: View {
     let status: SessionStatus?
+    let tree: SubagentTree
+    /// Click the count to see which subagents those are; a bare numeral answered "how many"
+    /// but never "which one is blocked on me".
+    @State private var showing = false
 
     var body: some View {
         if let status, status.activity == .busy, status.subagentCount > 0 {
-            Text("\(status.subagentCount)")
-                .font(.caption2)
-                .monospacedDigit()
-                .foregroundStyle(.tint)
-                .help(status.tooltip)
-                .accessibilityHidden(true)
+            Button { showing.toggle() } label: {
+                Text("\(status.subagentCount)")
+                    .font(.caption2)
+                    .monospacedDigit()
+                    .foregroundStyle(.tint)
+            }
+            .buttonStyle(.plain)
+            .help(status.tooltip)
+            .accessibilityHidden(true)
+            .popover(isPresented: $showing) { outline }
+        }
+    }
+
+    private var outline: some View {
+        let rows = SubagentOutline.rows(tree)
+        return VStack(alignment: .leading, spacing: 6) {
+            ForEach(rows, id: \.node.id) { row in
+                HStack(spacing: 6) {
+                    stateSymbol(row.node.state)
+                    Text(row.node.type).fontWeight(.medium)
+                    Text(row.node.description).foregroundStyle(.secondary).lineLimit(1)
+                }
+                .padding(.leading, CGFloat(row.depth) * 12)
+            }
+        }
+        .padding(12)
+        .frame(minWidth: 260, alignment: .leading)
+    }
+
+    @ViewBuilder
+    private func stateSymbol(_ state: SubagentNode.State) -> some View {
+        switch state {
+        case .running: Image(systemName: "circle.fill").foregroundStyle(.tint)
+        case .blocked: Image(systemName: "exclamationmark.circle.fill").foregroundStyle(.orange)
+        case .done: Image(systemName: "checkmark.circle").foregroundStyle(.secondary)
         }
     }
 }

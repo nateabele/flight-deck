@@ -8301,6 +8301,10 @@ final class SessionStore: ObservableObject {
         // downstream ever clears, since `derivedOpenPromptCalls` only visits `waiting` tabs.
         for id in next.compactMap({ $0.value.activity == .waiting ? $0.key : nil }) {
             next[id]?.answerless = statuses[id]?.answerless ?? false
+            // Seeded like `answerless`, for the same reason: the field is recomputed below
+            // after the probe, and without the seed the pre-probe assignment would differ from
+            // `statuses` on every tick of an attributed prompt and publish twice per tick.
+            next[id]?.blockedSubagentType = statuses[id]?.blockedSubagentType
         }
         // Installed **above** the guard rather than below it, because the third axis is
         // derived FROM them: `openPromptProbe` asks this store what each tab is doing, and
@@ -8321,6 +8325,10 @@ final class SessionStore: ObservableObject {
         // episode, is every tick until the episode ends.
         if next != statuses { statuses = next }
         let derived = derivedOpenPromptCalls(&next)
+        // Every waiting tab, every tick (nil when unattributed), so an unchanged tick stays equal.
+        for id in next.compactMap({ $0.value.activity == .waiting ? $0.key : nil }) {
+            next[id]?.blockedSubagentType = derived.agents[id].flatMap { subagentTrees[id]?.node($0)?.type }
+        }
         if next != statuses { statuses = next }
         if backgroundWork != backgroundWorkSessions { backgroundWorkSessions = backgroundWork }
         openPromptCalls = derived.calls
