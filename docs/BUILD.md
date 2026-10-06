@@ -41,7 +41,8 @@ You should see a "Flight Deck" window with a live shell prompt.
 | `scripts/build-fd-abduco.sh` | Builds the `fd-abduco` fork (a plain C daemon binary, no Xcode involved) → stages `vendor/fd-abduco-artifacts/fd-abduco` | Universal (`arm64`+`x86_64`) Mach-O, built in seconds with the system `cc`. `project.yml`'s `FlightDeck` target copies this into the app bundle at **`Contents/Resources/fd-abduco`** (a Copy Files build phase, executable bit preserved) — that is the exact bundle-relative path a later phase resolves via `Bundle.main.url(forResource: "fd-abduco", withExtension: nil)` and execs. Must run before `scripts/build.sh` (or the app builds with no `fd-abduco` to copy — the Copy Files phase input simply won't exist yet). Re-run only if the binary is missing or `vendor/fd-abduco` changes. |
 | `scripts/build.sh` | `export DEVELOPER_DIR` → `xcodegen generate` → `xcodebuild ... build` | Builds the app. Assumes both xcframeworks already exist (run `build-libghostty.sh` and `build-boringssl.sh` once first) and, since this fork, that `vendor/fd-abduco-artifacts/fd-abduco` exists too (run `build-fd-abduco.sh` once first). |
 | `scripts/test-unit.sh` | Runs the headless unit test suite (`FlightDeckTests`) | The actually-working path for unit tests — see below. Needs both xcframeworks staged first, same as `build.sh`. |
-| `scripts/smoke.sh` | Clears saved window *geometry* → `build.sh` → `xcodegen generate` → runs the UI smoke test → prints `SMOKE PASS` | See "One-time UI-automation grant" below. It deliberately does **not** clear sessions or preferences — the app isolates those itself via `-FlightDeckResetState`. |
+| `scripts/smoke.sh` | Runs `smoke-remote.sh` (below). With `FD_SMOKE_LOCAL=1` instead: clears saved window *geometry* → `build.sh` → `xcodegen generate` → runs the UI smoke test on THIS Mac → prints `SMOKE PASS` | The local path takes over the screen for minutes; see "One-time UI-automation grant" below. It deliberately does **not** clear sessions or preferences — the app isolates those itself via `-FlightDeckResetState`. |
+| `scripts/smoke-remote.sh` | Locks the UI-test Mac (`FD_UITEST_HOST`, default `user@uitest-mac`) → `build-for-testing` here → rsyncs the products and this Xcode's test frameworks (`xctest26/`) there → `scripts/patch-xctestrun.py` → `xcodebuild test-without-building` there → copies the log and `.xcresult` back to `DerivedData/smoke-remote/` → reaps the run's leftover daemons and agents → prints `SMOKE PASS` | Fails rather than falling back to this Mac when the host is unreachable. The `xctest26` shim exists because the remote Xcode is older and would otherwise load its own XCTest into a runner built against this one; it is re-shipped automatically when this Xcode's build number changes. Full mechanics: AGENT-OPERATIONS.md §5, "The UI suite runs on another Mac". |
 
 ### The host scripts (HostKit, the Linux hostd)
 
@@ -97,11 +98,19 @@ routed command locally in a tab, set `FLIGHTDECK_NO_ROUTE=1`.
 # → all FlightDeckTests pass (count grows over time; see the script's own output)
 ```
 
-**Smoke test** (launches the app, asserts the window renders):
+**Smoke test** (the UI suite, on the UI-test Mac):
 
 ```bash
-./scripts/smoke.sh          # → ends with: SMOKE PASS
+./scripts/smoke.sh                          # → ends with: SMOKE PASS
+FD_UITEST_HOST=me@other-mac ./scripts/smoke.sh   # a different UI-test Mac
+FD_SMOKE_LOCAL=1 ./scripts/smoke.sh         # on THIS Mac; takes over the screen
 ```
+
+A UI-test Mac needs: ssh key login for `FD_UITEST_HOST`, an Xcode (any version new enough to run
+`test-without-building`; this Mac's XCTest is shipped alongside), the UI-automation grant below,
+a logged-in GUI session with the screen unlocked, and, for the claude and codex
+investigations, `claude` and a `codex` at least `CodexProcessTransport.minimumVersion` on the
+login shell's PATH.
 
 **`fd-abduco` tests** (build + unit trim + live create/attach/replay/budget-trim of the
 detached-session daemon; no app build needed):
@@ -116,6 +125,7 @@ bash Tests/fd-abduco/run_all.sh
 The first time the XCUITest runs, macOS shows **"XCTest is trying to Enable UI Automation —
 Touch ID or enter your password."** Approve it once (Touch ID / password); it's a persistent
 TCC grant, so subsequent `smoke.sh` runs (and CI, if the machine is pre-authorized) don't prompt.
+It is per machine: the UI-test Mac has its own, already granted.
 
 ## Troubleshooting
 

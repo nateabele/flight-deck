@@ -2796,3 +2796,33 @@ Still open:
 - **The registry poll itself** (`SessionStatusWatcher.drain`, mtime-cached) and the rest of the
   tick were ~4.5% of a core in the same sample. An FSEvents or `DISPATCH_SOURCE_TYPE_VNODE` watch
   on the status directory could replace the 500ms rescan. Not done: it is a separate, smaller win.
+
+## UI suite on the UI-test Mac (2026-10-06)
+
+`smoke.sh` now runs on the UI-test Mac; see AGENT-OPERATIONS.md §5. The failures
+it still reports there, each diagnosed from the run's `.xcresult` screen recording:
+
+- **Both codex tests: the UI-test Mac's environment.** an older codex-cli is below
+  `CodexProcessTransport.minimumVersion` (0.142.4), so creating a codex session is refused and the
+  tests fail with "creating a codex session added no row". Upgrading codex on the UI-test Mac fixes it.
+- **`testProjectHeadingsReorderByDragging`, "clicking a project's chevron did not collapse it":
+  macOS 15 sidebar geometry.** The recording shows the click landing just right of the chevron
+  glyph and selecting the project instead. On macOS 15 the `NSTableRowView` starts at the window
+  edge and the heading content (chevron at ~15–22pt) is inset 16pt inside it, so the test's
+  "element left edge + 10pt" is 26pt into the row, past `SidebarClickIntent.chevronZoneWidth`
+  (22pt). The test's comment assumes the row edge is "a few points" left of the element, which
+  is true of macOS 26. This is also a product issue on macOS 14/15 (the deployment target is
+  14.0): the collapse target there is roughly the glyph alone. Measuring the zone from the
+  heading's content edge rather than the row view's would fix both; not done here because it
+  changes product hit-testing and needs a run on macOS 26 too.
+- **`testTheWholeShellInOneSession`, "dragging blank row space did not reorder either": macOS 15
+  accessibility frames.** `blankSpace(inRow:)` presses 40pt right of the session title's frame;
+  on macOS 15 that frame spans the cell, so the press lands in the terminal pane (visible in the
+  recording), and the title-drag group after it has no control to stand on.
+- **Same test, "the context menu renames a session": undiagnosed.** The Rename menu item is
+  clicked, no `session-title-field` appears, and the recording shows the session order changing
+  (to 3, 2, 1) at that moment, as if a drop from the earlier drag groups landed late. Not chased
+  further within the time box.
+- **`testPermissionBypassConfirmationUnderChurn` (the flake hunt) on the UI-test Mac:** fails at once with
+  "Unable to find hit point for ScrollView" at y≈2600: the Preferences command field is off the UI-test Mac's
+  1125pt-tall screen. A screen-size environment failure, not the race it hunts.
