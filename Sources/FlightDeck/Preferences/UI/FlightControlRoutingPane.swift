@@ -1,173 +1,269 @@
 import IntakeKit
 import SwiftUI
+import UniformTypeIdentifiers
 
-/// Settings → Flight Control → Routing (spec L3-R §2, §3, §7): the project's rules — checked
-/// first — then the global list. Each rule shows its sentence, its state, its compiled form in
-/// plain words, and the buttons that move it on. `RoutingUITests` drives this pane.
+/// Settings → Flight Control → Routing (spec L3-R §2, §3, §7): one grouped form, a section per
+/// scope — the project's rules (checked first), then all projects'. Each row is the sentence
+/// over its compiled pills and one status. Return in "New rule…" adds and compiles; pills open
+/// popovers that adjust the compiled rule; the sentence edits inline. No detail sheet exists.
+/// `RoutingUITests` drives this pane.
 struct FlightControlRoutingPane: View {
     @ObservedObject var routing: RoutingService
     @ObservedObject var preferences: PreferencesStore
     let project: String?
-    @State private var newGlobal = ""
-    @State private var newProject = ""
 
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                if let project {
-                    ruleList(title: "This project — checked first", scope: .project(project), draft: $newProject,
-                             suffix: "project", error: routing.projectRulesError(project))
-                }
-                ruleList(title: "All projects", scope: .global, draft: $newGlobal, suffix: "global", error: nil)
-                compilerFooter
-            }
-            .padding(16)
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        // Loads the catalogs on open, so rule hints have something to compare against. Codex's
-        // costs one app-server spawn per launch and is cached after that.
-        .task { _ = await routing.catalogs() }
-    }
-
-    private func ruleList(title: String, scope: RuleScope, draft: Binding<String>, suffix: String, error: String?) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(title).font(.headline)
-            if let error {
-                Text("routing.json could not be read, so these rules are not routing: \(error)")
-                    .font(.callout)
-                    .foregroundStyle(.red)
-                    .accessibilityIdentifier("routing-project-error")
-            }
-            let rules = routing.rules(scope)
-            if rules.isEmpty && error == nil {
-                Text("No rules yet.").foregroundStyle(.secondary)
-            }
-            ForEach(rules) { rule in
-                RuleRow(routing: routing, rule: rule, scope: scope)
-            }
-            HStack {
-                TextField("Use Codex for unit and integration tests, and for complex algorithms", text: draft)
-                    .textFieldStyle(.roundedBorder)
-                    .onSubmit { add(draft, to: scope) }
-                    .accessibilityIdentifier("routing-add-field-\(suffix)")
-                Button("Add") { add(draft, to: scope) }
-                    .disabled(draft.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || error != nil)
-                    .accessibilityIdentifier("routing-add-\(suffix)")
-            }
-        }
-    }
-
-    private func add(_ draft: Binding<String>, to scope: RuleScope) {
-        if routing.addRule(draft.wrappedValue, to: scope) != nil { draft.wrappedValue = "" }
-    }
-
-    /// Which headless model compiles sentences (spec §3: "default `claude -p` haiku, configurable").
-    private var compilerFooter: some View {
-        HStack(spacing: 8) {
-            Text("Rules compile with").foregroundStyle(.secondary)
-            Picker("Agent", selection: Binding(get: { preferences.routingCompilerSettings.harness },
-                                               set: { preferences.routingCompilerSettings.harness = $0 })) {
-                Text("Claude").tag(Harness.claude)
-                Text("Codex").tag(Harness.codex)
-            }
-            .labelsHidden()
-            .frame(width: 110)
-            .accessibilityIdentifier("routing-compiler-agent")
-            TextField("Model", text: Binding(get: { preferences.routingCompilerSettings.model },
-                                             set: { preferences.routingCompilerSettings.model = $0 }))
-                .textFieldStyle(.roundedBorder)
-                .frame(width: 140)
-                .accessibilityIdentifier("routing-compiler-model")
-            Spacer()
-        }
-        .font(.callout)
-    }
-}
-
-/// One rule: its editable sentence, state, compiled form, failure or compiler note, hint, and
-/// actions. The sentence commits on Return, which sends the rule back to draft (spec §2).
-struct RuleRow: View {
-    @ObservedObject var routing: RoutingService
-    let rule: RoutingRule
-    let scope: RuleScope
+    @FocusState private var focus: RoutingFocus?
+    @State private var selection: String?
     @State private var editing: String?
+    @State private var drafts: [RuleScope: String] = [:]
+    @State private var dragging: String?
+    @State private var drop: DropMark?
+    @State private var showsCompiler = false
+
+    /// Where a dragged rule would land: just above `before`, or last in `scope` when nil.
+    struct DropMark: Equatable {
+        var scope: RuleScope
+        var before: String?
+        /// The row the line is drawn on, and on which edge.
+        var row: String?
+        var bottom: Bool
+    }
+
+    private var scopes: [RuleScope] {
+        (project.map { [RuleScope.project($0)] } ?? []) + [.global]
+    }
 
     var body: some View {
-        let p = RuleRowPresentation(rule: rule, compiling: routing.compiling.contains(rule.id), note: routing.notes[rule.id],
-                                   hasUncommittedEdit: editing != nil && editing != rule.sentence)
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .firstTextBaseline) {
-                TextField("Sentence", text: Binding(get: { editing ?? rule.sentence }, set: { editing = $0 }))
-                    .textFieldStyle(.roundedBorder)
-                    .onSubmit(commit)
-                    .accessibilityIdentifier("routing-sentence-\(rule.id)")
-                Text(p.stateLabel)
-                    .font(.caption)
-                    .foregroundStyle(color(rule.state))
-                    .accessibilityIdentifier("routing-state-\(rule.id)")
-            }
-            if let text = p.compiledText {
-                Text((try? AttributedString(markdown: text)) ?? AttributedString(text))
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .accessibilityIdentifier("routing-compiled-\(rule.id)")
-            }
-            if let failure = p.failureText {
-                Text(failure).font(.callout).foregroundStyle(.red).accessibilityIdentifier("routing-failure-\(rule.id)")
-            }
-            if let note = p.note {
-                Text(note).font(.caption).foregroundStyle(.orange).accessibilityIdentifier("routing-note-\(rule.id)")
-            }
-            if let hint = routing.hint(for: rule, scope: scope) {
-                HStack(spacing: 6) {
-                    Image(systemName: "lightbulb")
-                    Text(hint.text).accessibilityIdentifier("routing-hint-\(rule.id)")
-                    Button("Dismiss") { routing.dismissHint(hint) }
-                        .buttonStyle(.link)
-                        .accessibilityIdentifier("routing-hint-dismiss-\(rule.id)")
+        Form {
+            ForEach(scopes, id: \.self) { scope in
+                Section {
+                    rows(scope)
+                } header: {
+                    Text(header(scope))
+                } footer: {
+                    if scope == .global { footer }
                 }
-                .font(.caption)
-            }
-            HStack {
-                Button("Compile") {
-                    // Commit a typed-but-unsubmitted sentence first, or this compiles the old words.
-                    commit()
-                    Task { await routing.compile(rule.id, in: scope) }
-                }
-                    .disabled(!p.canCompile)
-                    .accessibilityIdentifier("routing-compile-\(rule.id)")
-                Button("Confirm") { routing.confirm(rule.id, in: scope) }
-                    .disabled(!p.canConfirm)
-                    .accessibilityIdentifier("routing-confirm-\(rule.id)")
-                Spacer()
-                Button { routing.moveRule(rule.id, by: -1, in: scope) } label: { Image(systemName: "arrow.up") }
-                    .help("Check this rule earlier")
-                    .accessibilityIdentifier("routing-up-\(rule.id)")
-                Button { routing.moveRule(rule.id, by: 1, in: scope) } label: { Image(systemName: "arrow.down") }
-                    .help("Check this rule later")
-                    .accessibilityIdentifier("routing-down-\(rule.id)")
-                Button("Delete", role: .destructive) { routing.deleteRule(rule.id, in: scope) }
-                    .accessibilityIdentifier("routing-delete-\(rule.id)")
             }
         }
-        .padding(10)
-        .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .controlBackgroundColor)))
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("routing-rule-\(rule.id)")
+        .formStyle(.grouped)
+        // Loads the catalogs on open, so hints, pill names and the target popover have something
+        // to read. Codex's costs one app-server spawn per launch and is cached after that.
+        .task { _ = await routing.catalogs() }
+        .onChange(of: focus) { _, now in
+            if case .rule(let id) = now { selection = id }
+        }
     }
 
-    private func commit() {
-        guard let edited = editing else { return }
-        routing.editSentence(rule.id, edited, in: scope)
-        editing = nil
+    private func header(_ scope: RuleScope) -> String {
+        switch scope {
+        case .project(let path): URL(fileURLWithPath: path).lastPathComponent
+        case .global: "All projects"
+        }
     }
 
-    private func color(_ state: RuleState) -> Color {
-        switch state {
-        case .draft: return .secondary
-        case .compiled: return .orange
-        case .confirmed: return .green
-        case .failed: return .red
+    // MARK: - Rows
+
+    @ViewBuilder
+    private func rows(_ scope: RuleScope) -> some View {
+        let error: String? = if case .project(let path) = scope { routing.projectRulesError(path) } else { nil }
+        if let error {
+            Label {
+                Text("routing.json could not be read, so these rules are not routing: \(error)")
+                    .accessibilityIdentifier("routing-project-error")
+            } icon: {
+                Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.red)
+            }
+            .foregroundStyle(.red)
+        } else {
+            let rules = routing.rules(scope)
+            ForEach(Array(rules.enumerated()), id: \.element.id) { i, rule in
+                RoutingRuleRow(routing: routing, rule: rule, scope: scope,
+                               presentation: presentation(rule),
+                               hint: routing.hint(for: rule, scope: scope),
+                               isSelected: selection == rule.id,
+                               isFirst: i == 0, isLast: i == rules.count - 1,
+                               focus: $focus, editing: $editing,
+                               select: { select(rule.id) },
+                               delete: { delete(rule.id, in: scope) },
+                               move: moveSelection)
+                    .overlay(alignment: drop?.bottom == true ? .bottom : .top) { dropLine(rule.id) }
+                    .onDrag {
+                        dragging = rule.id
+                        return NSItemProvider(object: rule.id as NSString)
+                    }
+                    .onDrop(of: [.text], delegate: RuleDropDelegate(pane: self, scope: scope, target: rule.id, rules: rules))
+            }
+            newRuleField(scope)
+                .overlay(alignment: .top) { if drop?.scope == scope, drop?.row == nil { line } }
+                .onDrop(of: [.text], delegate: RuleDropDelegate(pane: self, scope: scope, target: nil, rules: rules))
+        }
+    }
+
+    private func presentation(_ rule: RoutingRule) -> RuleRowPresentation {
+        RuleRowPresentation(rule: rule, compiling: routing.compiling.contains(rule.id), note: routing.notes[rule.id],
+                            catalogs: routing.lastCatalogs, defaultPools: routing.defaultPools(routing.lastCatalogs))
+    }
+
+    private func newRuleField(_ scope: RuleScope) -> some View {
+        let suffix = if case .global = scope { "global" } else { "project" }
+        let text = Binding(get: { drafts[scope] ?? "" }, set: { drafts[scope] = $0 })
+        return HStack(spacing: 8) {
+            Image(systemName: "plus")
+                .font(.body.weight(.medium))
+                .foregroundStyle(.tertiary)
+                .accessibilityHidden(true)
+            // The placeholder is drawn by hand: a plain field's own prompt renders in the
+            // primary colour inside a grouped form and reads as a rule someone typed.
+            TextField("", text: text)
+                .textFieldStyle(.plain)
+                .background(alignment: .leading) {
+                    if text.wrappedValue.isEmpty {
+                        Text("New rule…").foregroundStyle(.tertiary).allowsHitTesting(false).accessibilityHidden(true)
+                    }
+                }
+                .focused($focus, equals: .newRule(scope))
+                .onSubmit {
+                    // Add-and-compile on Return; the field keeps focus so the next rule can be
+                    // typed straight away.
+                    if routing.submitNewRule(text.wrappedValue, to: scope) != nil { text.wrappedValue = "" }
+                    focus = .newRule(scope)
+                }
+                .onExitCommand { text.wrappedValue = "" }
+                .help("Say when to use which agent, e.g. “Use Codex for tests and hard algorithms”. Return adds the rule and compiles it.")
+                .accessibilityLabel(scope == .global ? "New rule for all projects" : "New rule for this project")
+                .accessibilityIdentifier("routing-new-\(suffix)")
+        }
+        .padding(.vertical, 2)
+    }
+
+    // MARK: - Footer
+
+    private var footer: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Text("Project rules are checked first, then these, top to bottom — the first match wins. Click a pill to adjust it.")
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Button(compilerTitle) { showsCompiler = true }
+                .buttonStyle(.link)
+                .help("Choose which model turns rule sentences into routing")
+                .accessibilityIdentifier("routing-compiler")
+                .popover(isPresented: $showsCompiler, arrowEdge: .bottom) {
+                    RoutingCompilerPopover(routing: routing, preferences: preferences)
+                }
+        }
+        .font(.caption)
+    }
+
+    private var compilerTitle: String {
+        let s = preferences.routingCompilerSettings
+        let h = HarnessID(s.harness.rawValue)
+        let model = routing.lastCatalogs.byHarness[h]?.models.first { $0.id == s.model }?.displayName ?? s.model
+        return "Compiled by \(RuleRowPresentation.agentName(h)) \(model)"
+    }
+
+    // MARK: - Selection and keyboard
+
+    /// Every rule in the order the arrow keys walk: the project's, then everyone's.
+    private var order: [(id: String, scope: RuleScope)] {
+        scopes.flatMap { scope in routing.rules(scope).map { ($0.id, scope) } }
+    }
+
+    private func select(_ id: String) {
+        selection = id
+        if editing != id { focus = .rule(id) }
+    }
+
+    /// ⌫ deletes, then selects the row that took its place, so repeated ⌫ clears a list the way
+    /// it does in a Finder list.
+    private func delete(_ id: String, in scope: RuleScope) {
+        let ids = order.map(\.id)
+        let next = ids.firstIndex(of: id).flatMap { i in ids.indices.contains(i + 1) ? ids[i + 1] : (i > 0 ? ids[i - 1] : nil) }
+        if editing == id { editing = nil }
+        routing.deleteRule(id, in: scope)
+        selection = next
+        focus = next.map { .rule($0) }
+    }
+
+    func moveSelection(_ direction: MoveCommandDirection) {
+        let ids = order.map(\.id)
+        guard let current = selection, let i = ids.firstIndex(of: current) else {
+            if let first = ids.first { select(first) }
+            return
+        }
+        switch direction {
+        case .up where i > 0: select(ids[i - 1])
+        case .down where i + 1 < ids.count: select(ids[i + 1])
+        default: break
+        }
+    }
+
+    // MARK: - Drag and drop
+
+    @ViewBuilder
+    private func dropLine(_ id: String) -> some View {
+        if drop?.row == id { line }
+    }
+
+    private var line: some View {
+        Capsule()
+            .fill(Color.accentColor)
+            .frame(height: 2)
+            .padding(.horizontal, -6)
+            .offset(y: drop?.bottom == true ? 5 : -5)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+    }
+
+    /// Reorders within one section; a drop from the other section is refused, since moving a rule
+    /// between scopes would move it between files.
+    struct RuleDropDelegate: DropDelegate {
+        let pane: FlightControlRoutingPane
+        let scope: RuleScope
+        /// The row dropped on, or nil for the section's "New rule…" row (drop last).
+        let target: String?
+        let rules: [RoutingRule]
+
+        private var ids: [String] { rules.map(\.id) }
+
+        func validateDrop(info: DropInfo) -> Bool {
+            guard let dragging = pane.dragging else { return false }
+            return ids.contains(dragging)
+        }
+
+        /// Dragging down lands below the target, dragging up lands above it — what the
+        /// insertion line shows.
+        private func mark() -> DropMark? {
+            guard let dragging = pane.dragging, let from = ids.firstIndex(of: dragging) else { return nil }
+            guard let target, let to = ids.firstIndex(of: target) else {
+                return DropMark(scope: scope, before: nil, row: nil, bottom: false)
+            }
+            if to > from {
+                return DropMark(scope: scope, before: ids.indices.contains(to + 1) ? ids[to + 1] : nil, row: target, bottom: true)
+            }
+            return DropMark(scope: scope, before: target, row: target, bottom: false)
+        }
+
+        func dropEntered(info: DropInfo) {
+            guard validateDrop(info: info), pane.dragging != target else { return }
+            withAnimation(.easeOut(duration: 0.12)) { pane.drop = mark() }
+        }
+
+        func dropUpdated(info: DropInfo) -> DropProposal? {
+            DropProposal(operation: validateDrop(info: info) ? .move : .forbidden)
+        }
+
+        func dropExited(info: DropInfo) {
+            if pane.drop?.row == target, pane.drop?.scope == scope { pane.drop = nil }
+        }
+
+        func performDrop(info: DropInfo) -> Bool {
+            defer { pane.drop = nil; pane.dragging = nil }
+            guard let dragging = pane.dragging, let m = mark(), dragging != target else { return false }
+            withAnimation(.easeInOut(duration: 0.2)) {
+                pane.routing.moveRule(dragging, before: m.before, in: scope)
+            }
+            pane.select(dragging)
+            return true
         }
     }
 }

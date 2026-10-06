@@ -31,7 +31,10 @@ struct CapabilityRuleHintSource: RuleHintSource {
         let compareFrom = exact ? assigned : ModelRef(harness: assigned.harness, model: assigned.model)
         guard let best = CapabilityHints.hints(for: dims, assigned: compareFrom, candidates: candidates,
                                                scores: current.scores).first else { return nil }
-        return RuleHint(ruleID: rule.id, text: best.message, snapshotDate: current.snapshotDate)
+        // Bare: the index may have scored a knobbed variant, and "Switch to" re-validates the
+        // rule's own effort against the new model rather than adopting the scored one.
+        return RuleHint(ruleID: rule.id, text: best.message, snapshotDate: current.snapshotDate,
+                        suggested: ModelRef(harness: best.better.harness, model: best.better.model))
     }
 }
 

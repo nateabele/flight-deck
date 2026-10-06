@@ -98,7 +98,7 @@ final class CapacityUITests: XCTestCase {
                 return
             }
             prefs.buttons["Flight Control"].click()
-            prefs.buttons["fc-section-capacity"].click()
+            prefs.selectFlightControlSection("fc-section-capacity")
             XCTAssertTrue(prefs.descendants(matching: .any).matching(identifier: "capacity-pool-list").firstMatch.waitForExistence(timeout: 5))
             XCTAssertTrue(text("Claude default", in: prefs).exists)
             XCTAssertTrue(text("Codex default", in: prefs).exists)

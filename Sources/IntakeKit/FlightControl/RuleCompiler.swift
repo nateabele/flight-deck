@@ -45,9 +45,9 @@ extension RoutingRule {
     public mutating func record(_ outcome: RuleCompileOutcome, by compiler: CompilerRef, at date: Date) {
         switch outcome {
         case .compiled(let c):
-            compiled = c; state = .compiled; failure = nil; compiledAt = date; self.compiler = compiler
+            compiled = c; state = .compiled; failure = nil; compiledAt = date; self.compiler = compiler; adjusted = false
         case .failed(let why):
-            compiled = nil; state = .failed; failure = why; compiledAt = date; self.compiler = compiler
+            compiled = nil; state = .failed; failure = why; compiledAt = date; self.compiler = compiler; adjusted = false
         case .unavailable:
             break
         }

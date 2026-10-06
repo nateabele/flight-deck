@@ -44,6 +44,41 @@ The project list is checked first, then the global list. In each list, the first
 **States:** `draft` → `compiled` (waiting for you) → `confirmed`, or `failed` (shown inline with
 the reason). Only `confirmed` rules route. Editing the sentence moves the rule back to `draft`.
 
+**The pane** (redesigned 2026-10-06) is one grouped form: a section for the project's rules
+(headed by the project's name), then "All projects", then a footer that states the order ("the
+first match wins") and holds a "Compiled by …" link whose small popover picks the compiler's agent
+and model. The sections of the Flight Control tab are a native segmented control.
+
+- **Each rule is two lines and one status.** Line 1 is the sentence, on one line. Line 2 is the
+  compiled form as pills: condition pills joined by "or"/"and", a "+" pill, `→`, and one
+  accent-tinted target pill (agent · model · knobs, plus the pool only when it is not the agent's
+  default). A failed rule shows its reason on line 2 instead, written to say how to fix it
+  ("“Sonnet” matched no model in Claude's catalog — try “sonnet”, or reword the rule"); a rule
+  being compiled shows "Compiling…". The trailing status is exactly one of: a green check (live),
+  a **Use** button (compiled, not routing yet), a red warning (failed), or a spinner (compiling).
+  A lightbulb before it opens the rule's hint (§7).
+- **Adding is auto-compiled.** The last row of each section is a "New rule…" field. Return adds
+  the rule and starts compiling it at once; Escape clears the field. There is no Compile button.
+  Confirming stays a deliberate click on **Use**.
+- **Adjusting is by pill popover, never a detail sheet.** A condition pill opens a popover with
+  type (dimension or task kind), the dimension and a threshold slider (step 0.05), or the kind,
+  the match mode, and Remove Condition; the "+" pill opens it empty and adds. The target pill
+  opens agent, model, the knobs the model declares (effort as a segmented control) and the
+  account pool. Each popover is a two-column grid: right-aligned secondary labels, controls of
+  one shared width. Popovers list only what the catalogs and pools declare, and every change goes
+  through `RuleValidator` before it is saved, so an invalid rule cannot be picked. A change keeps
+  the rule's state (a live rule stays live) and sets the stored rule's `adjusted` flag; the row
+  then shows "Edited", whose tooltip says the pills no longer match the sentence word for word.
+  `adjusted` is optional on read and written only when true, so older `routing.json` files and
+  preferences decode unchanged.
+- **Rewording.** Double-click the sentence, or press Return on a selected row, to edit it inline.
+  Return commits and recompiles at once and clears `adjusted`; Escape or clicking away cancels.
+  The same words recompile only a draft or failed rule, so an idle Return never takes a live rule
+  out of routing. The context menu's Recompile from Sentence drops adjustments the same way.
+- **Order and deletion.** Drag a rule within its section to reorder (first match wins, so order
+  is routing). ⌫ deletes the selected rule; arrow keys move the selection. The context menu has
+  Use, Edit Sentence, Move Up, Move Down and Delete. No arrow or delete buttons are drawn.
+
 **Storage.** Global rules in preferences (`PreferencesStore`, the Flight Control section).
 Project rules in `.flightdeck/routing.json` in the repo, so they are versioned with the project.
 
@@ -110,7 +145,8 @@ spawn only. A pinned block never spills: it waits.
 
 ## 6. Kind management UI
 
-Settings → Flight Control → Task kinds, per project:
+Settings → Flight Control → Task Kinds, per project (the selected kind's actions sit in a grouped
+form beside the list, matching the Routing pane):
 - a list of kinds with origin, status, the dimension weights as small bars, and the count of open
   tasks;
 - **Rename**, **Re-weight** (sliders per dimension), and **Merge into…**;
@@ -120,7 +156,10 @@ Settings → Flight Control → Task kinds, per project:
 
 Each confirmed rule can show one dismissible hint from `CapabilityIndex`: "gemini-x scores 0.14
 higher on test-authoring (confidence 0.8)". L3-R draws the hint. L3-I computes it (L3-I §6).
-Hints never change routing. A dismissed hint stays dismissed until the index snapshot changes.
+Hints never change routing on their own. A dismissed hint stays dismissed until the index snapshot
+changes. The hint is a lightbulb on the rule's row; its popover offers "Switch to <model>", which
+applies the hint's suggested model as a pill adjustment (validated, state kept, marked adjusted),
+and Dismiss.
 
 ## 8. Error handling
 

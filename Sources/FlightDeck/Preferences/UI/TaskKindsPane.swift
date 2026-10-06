@@ -1,7 +1,7 @@
 import IntakeKit
 import SwiftUI
 
-/// Settings → Flight Control → Task kinds (spec L3-R §6), per project: each kind's origin,
+/// Settings → Flight Control → Task Kinds (spec L3-R §6), per project: each kind's origin,
 /// status, weights as small bars and open-task count, with Rename, Re-weight and Merge into….
 /// A planning-proposed kind is marked *new* until you open it. Re-weight and merge re-route the
 /// kind's open, unpinned tasks; the summary shows under the list.
@@ -98,70 +98,74 @@ struct TaskKindsPane: View {
     @ViewBuilder
     private func detail(_ kinds: [TaskKind], project: String) -> some View {
         if let id = selection, let kind = kinds.first(where: { $0.id == id }) {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 14) {
-                    Text(kind.name).font(.headline)
-                    Text(kind.description).font(.callout).foregroundStyle(.secondary)
-                    GroupBox("Rename") {
-                        HStack {
-                            TextField("Name", text: $renameText)
-                                .textFieldStyle(.roundedBorder)
-                                .accessibilityIdentifier("kind-rename-field")
-                            Button("Rename") { error = routing.rename(kind.id, to: renameText, project: project) }
-                                .disabled(renameText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || renameText == kind.name)
-                                .accessibilityIdentifier("kind-rename-apply")
-                        }
-                    }
-                    GroupBox("Re-weight") {
-                        VStack(alignment: .leading, spacing: 4) {
-                            ForEach(Dimensions.all, id: \.id) { d in
-                                HStack {
-                                    Text(d.id).font(.caption).frame(width: 170, alignment: .leading)
-                                    Slider(value: weight(d.id), in: 0...1, step: 0.05)
-                                        .accessibilityIdentifier("kind-weight-\(d.id)")
-                                    Text(RuleText.number(weights[d.id] ?? 0))
-                                        .font(.caption.monospacedDigit())
-                                        .frame(width: 34, alignment: .trailing)
-                                }
-                            }
-                            Button("Re-weight") {
-                                let next = weights.filter { $0.value > 0 }
-                                Task {
-                                    error = await routing.reweight(kind.id, dimensions: next, project: project)
-                                    counts = await routing.openCounts(project: project)
-                                }
-                            }
-                            .disabled(weights.filter { $0.value > 0 } == kind.dimensions)
-                            .accessibilityIdentifier("kind-reweight-apply")
-                        }
-                    }
-                    GroupBox("Merge into…") {
-                        HStack {
-                            Picker("Merge into", selection: $mergeTarget) {
-                                Text("Choose…").tag(KindID?.none)
-                                ForEach(KindRowPresentation.mergeTargets(for: kind, in: kinds)) { target in
-                                    Text(target.name).tag(KindID?.some(target.id))
-                                }
-                            }
+            // A grouped form, like Routing beside it, rather than stacked group boxes.
+            Form {
+                Section {
+                    Text(kind.description).foregroundStyle(.secondary)
+                } header: {
+                    Text(kind.name)
+                }
+                Section("Rename") {
+                    HStack {
+                        TextField("Name", text: $renameText)
                             .labelsHidden()
-                            .accessibilityIdentifier("kind-merge-picker")
-                            Button("Merge") {
-                                guard let target = mergeTarget else { return }
-                                Task {
-                                    error = await routing.merge(kind.id, into: target, project: project)
-                                    mergeTarget = nil
-                                    // A merged kind must not keep offering Rename/Re-weight/Merge.
-                                    if error == nil { selection = nil }
-                                    counts = await routing.openCounts(project: project)
-                                }
-                            }
-                            .disabled(mergeTarget == nil)
-                            .accessibilityIdentifier("kind-merge-apply")
-                        }
+                            .accessibilityIdentifier("kind-rename-field")
+                        Button("Rename") { error = routing.rename(kind.id, to: renameText, project: project) }
+                            .disabled(renameText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || renameText == kind.name)
+                            .accessibilityIdentifier("kind-rename-apply")
                     }
                 }
-                .padding(16)
+                Section("Re-weight") {
+                    ForEach(Dimensions.all, id: \.id) { d in
+                        HStack {
+                            Text(d.id).font(.callout).frame(width: 170, alignment: .leading)
+                            Slider(value: weight(d.id), in: 0...1, step: 0.05)
+                                .accessibilityLabel(d.id)
+                                .accessibilityIdentifier("kind-weight-\(d.id)")
+                            Text(RuleText.number(weights[d.id] ?? 0))
+                                .font(.callout.monospacedDigit())
+                                .frame(width: 34, alignment: .trailing)
+                        }
+                    }
+                    HStack {
+                        Spacer()
+                        Button("Re-weight") {
+                            let next = weights.filter { $0.value > 0 }
+                            Task {
+                                error = await routing.reweight(kind.id, dimensions: next, project: project)
+                                counts = await routing.openCounts(project: project)
+                            }
+                        }
+                        .disabled(weights.filter { $0.value > 0 } == kind.dimensions)
+                        .accessibilityIdentifier("kind-reweight-apply")
+                    }
+                }
+                Section("Merge into…") {
+                    HStack {
+                        Picker("Merge into", selection: $mergeTarget) {
+                            Text("Choose…").tag(KindID?.none)
+                            ForEach(KindRowPresentation.mergeTargets(for: kind, in: kinds)) { target in
+                                Text(target.name).tag(KindID?.some(target.id))
+                            }
+                        }
+                        .labelsHidden()
+                        .accessibilityIdentifier("kind-merge-picker")
+                        Button("Merge") {
+                            guard let target = mergeTarget else { return }
+                            Task {
+                                error = await routing.merge(kind.id, into: target, project: project)
+                                mergeTarget = nil
+                                // A merged kind must not keep offering Rename/Re-weight/Merge.
+                                if error == nil { selection = nil }
+                                counts = await routing.openCounts(project: project)
+                            }
+                        }
+                        .disabled(mergeTarget == nil)
+                        .accessibilityIdentifier("kind-merge-apply")
+                    }
+                }
             }
+            .formStyle(.grouped)
         } else {
             Text("Select a kind to rename, re-weight or merge it.")
                 .foregroundStyle(.secondary)

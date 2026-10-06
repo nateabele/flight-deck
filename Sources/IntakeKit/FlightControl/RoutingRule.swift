@@ -159,11 +159,46 @@ public struct RoutingRule: Codable, Equatable, Sendable, Identifiable {
     public var failure: String?
     public var compiledAt: Date?
     public var compiler: CompilerRef?
+    /// A pill popover changed `compiled` after the compiler wrote it, so the pills no longer
+    /// match the sentence word for word. Settings marks the row "edited" so a reader does not
+    /// trust the sentence over what actually routes. Cleared by rewording or recompiling.
+    public var adjusted: Bool
 
     public init(id: String, sentence: String, compiled: CompiledRule? = nil, state: RuleState = .draft,
-                failure: String? = nil, compiledAt: Date? = nil, compiler: CompilerRef? = nil) {
+                failure: String? = nil, compiledAt: Date? = nil, compiler: CompilerRef? = nil, adjusted: Bool = false) {
         self.id = id; self.sentence = sentence; self.compiled = compiled; self.state = state
-        self.failure = failure; self.compiledAt = compiledAt; self.compiler = compiler
+        self.failure = failure; self.compiledAt = compiledAt; self.compiler = compiler; self.adjusted = adjusted
+    }
+
+    private enum CodingKeys: String, CodingKey { case id, sentence, compiled, state, failure, compiledAt, compiler, adjusted }
+
+    /// Hand-written only for `adjusted`: every `routing.json` and preferences blob saved before
+    /// it existed lacks the key, and a synthesized decoder would refuse those files outright,
+    /// dropping the user's whole rule list.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        sentence = try c.decode(String.self, forKey: .sentence)
+        compiled = try c.decodeIfPresent(CompiledRule.self, forKey: .compiled)
+        state = try c.decode(RuleState.self, forKey: .state)
+        failure = try c.decodeIfPresent(String.self, forKey: .failure)
+        compiledAt = try c.decodeIfPresent(Date.self, forKey: .compiledAt)
+        compiler = try c.decodeIfPresent(CompilerRef.self, forKey: .compiler)
+        adjusted = try c.decodeIfPresent(Bool.self, forKey: .adjusted) ?? false
+    }
+
+    /// `adjusted` is written only when true, so a file nobody adjusted stays the bytes an older
+    /// Flight Deck wrote, and a checked-in `routing.json` does not churn on upgrade.
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(sentence, forKey: .sentence)
+        try c.encodeIfPresent(compiled, forKey: .compiled)
+        try c.encode(state, forKey: .state)
+        try c.encodeIfPresent(failure, forKey: .failure)
+        try c.encodeIfPresent(compiledAt, forKey: .compiledAt)
+        try c.encodeIfPresent(compiler, forKey: .compiler)
+        if adjusted { try c.encode(true, forKey: .adjusted) }
     }
 
     /// Editing the sentence moves the rule back to draft (spec §2). The compiled form is dropped,
@@ -171,7 +206,7 @@ public struct RoutingRule: Codable, Equatable, Sendable, Identifiable {
     public mutating func edit(sentence new: String) {
         guard new != sentence else { return }
         sentence = new
-        compiled = nil; state = .draft; failure = nil; compiledAt = nil; compiler = nil
+        compiled = nil; state = .draft; failure = nil; compiledAt = nil; compiler = nil; adjusted = false
     }
 
     /// Only a compiled rule that is waiting for you can be confirmed.

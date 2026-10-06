@@ -1,8 +1,10 @@
 import XCTest
 
-/// Settings → Flight Control against the app's routing fixture (`RoutingUIFixture`): add,
-/// compile, confirm and fail a rule; dismiss a hint; the *new* badge, merge and rename on task
-/// kinds — each with a screenshot attached (spec L3-R §9).
+/// Settings → Flight Control against the app's routing fixture (`RoutingUIFixture`): add a rule
+/// with Return (it compiles at once) and Use it; read a failure's actionable reason; adjust a
+/// rule through its pill popovers; reorder and delete through the context menu and ⌫; switch
+/// model from a hint's popover; the *new* badge, merge and rename on task kinds — each with a
+/// screenshot attached (spec L3-R §9).
 ///
 /// Skipped unless `TEST_RUNNER_FLIGHTDECK_ROUTING_UI=1`. `scripts/smoke.sh` runs this whole UI
 /// bundle, and these seize the foreground for a minute that gate should not pay. Run them with
@@ -35,7 +37,7 @@ final class RoutingUITests: XCTestCase {
         let prefs = app.windows.containing(.button, identifier: "Agents").firstMatch
         XCTAssertTrue(prefs.waitForExistence(timeout: 10), "Settings never opened")
         prefs.buttons["Flight Control"].click()
-        XCTAssertTrue(prefs.buttons["fc-section-routing"].waitForExistence(timeout: 5), "the Flight Control tab did not open")
+        XCTAssertTrue(prefs.flightControlSectionPicker.waitForExistence(timeout: 5), "the Flight Control tab did not open")
         return prefs
     }
 
@@ -62,55 +64,124 @@ final class RoutingUITests: XCTestCase {
         XCTAssertEqual(XCTWaiter().wait(for: [gone], timeout: 5), .completed, message, file: file, line: line)
     }
 
+    /// Rows are addressed by identifier whatever role SwiftUI gives them (a status glyph is an
+    /// image, Use is a button, the failure is static text).
+    private func element(_ id: String, in root: XCUIElement) -> XCUIElement {
+        root.descendants(matching: .any).matching(identifier: id).firstMatch
+    }
+
+    /// Types a sentence into the global "New rule…" field and presses Return, which adds the rule
+    /// and starts compiling it — there is no Add or Compile button.
     private func addGlobalRule(_ sentence: String, in prefs: XCUIElement) {
-        prefs.buttons["fc-section-routing"].click()
-        let field = prefs.textFields["routing-add-field-global"]
+        prefs.selectFlightControlSection("fc-section-routing")
+        let field = prefs.textFields["routing-new-global"]
         XCTAssertTrue(field.waitForExistence(timeout: 5))
         field.click()
-        field.typeText(sentence)
-        prefs.buttons["routing-add-global"].click()
+        field.typeText(sentence + "\n")
     }
 
-    func testAddCompileAndConfirmARule() {
+    func testReturnAddsAndCompilesAndUseConfirms() {
         let prefs = openFlightControl(launch())
         addGlobalRule("Use Codex for unit and integration tests, and for complex algorithms", in: prefs)
-        let state = prefs.staticTexts["routing-state-r1"]
-        XCTAssertTrue(state.waitForExistence(timeout: 5))
-        waitFor(state, labelContains: "Draft")
-        prefs.buttons["routing-compile-r1"].click()
-        waitFor(state, labelContains: "Compiled")
-        waitFor(prefs.staticTexts["routing-compiled-r1"], labelContains: "codex · gpt-6-sol · effort high · pool codex-default")
+        let use = prefs.buttons["routing-use-r1"]
+        XCTAssertTrue(use.waitForExistence(timeout: 10), "Return should add the rule and compile it with no further click")
+        waitFor(element("routing-target-r1", in: prefs), labelContains: "Codex · GPT-6-Sol · high")
+        XCTAssertTrue(element("routing-condition-r1-0", in: prefs).exists, "the compiled conditions show as pills")
+        XCTAssertEqual(prefs.textFields["routing-new-global"].value as? String ?? "", "", "Return clears the field")
         shot(prefs, "routing-compiled")
-        prefs.buttons["routing-confirm-r1"].click()
-        waitFor(state, labelContains: "Confirmed")
-        shot(prefs, "routing-confirmed")
+        use.click()
+        let status = element("routing-status-r1", in: prefs)
+        XCTAssertTrue(status.waitForExistence(timeout: 5))
+        waitFor(status, labelContains: "Live")
+        waitUntilGone(use, "Use goes away once the rule is live")
+        shot(prefs, "routing-live")
     }
 
-    func testACompileFailureShowsItsReason() {
+    func testACompileFailureShowsAnActionableReason() {
         let prefs = openFlightControl(launch())
-        addGlobalRule("Use Codex when a task needs teleportation", in: prefs)
-        XCTAssertTrue(prefs.buttons["routing-compile-r1"].waitForExistence(timeout: 5))
-        prefs.buttons["routing-compile-r1"].click()
-        waitFor(prefs.staticTexts["routing-state-r1"], labelContains: "Failed")
-        waitFor(prefs.staticTexts["routing-failure-r1"], labelContains: "unknown dimension teleportation")
+        addGlobalRule("Anything UI-heavy uses Sonnet", in: prefs)
+        let failure = element("routing-failure-r1", in: prefs)
+        XCTAssertTrue(failure.waitForExistence(timeout: 10))
+        waitFor(failure, labelContains: "try “sonnet”")
+        waitFor(element("routing-status-r1", in: prefs), labelContains: "Failed")
         shot(prefs, "routing-failed")
     }
 
-    func testARuleHintCanBeDismissed() {
+    func testPillPopoversAdjustTheCompiledRule() {
+        let app = launch()
+        let prefs = openFlightControl(app)
+        addGlobalRule("Use Codex for unit and integration tests, and for complex algorithms", in: prefs)
+        XCTAssertTrue(prefs.buttons["routing-use-r1"].waitForExistence(timeout: 10))
+
+        // Target pill → model pop-up. Popovers are their own windows, so query the app.
+        element("routing-target-r1", in: prefs).click()
+        let model = app.popUpButtons["routing-target-model"]
+        XCTAssertTrue(model.waitForExistence(timeout: 5), "the target pill opens its popover")
+        shot(app.windows.firstMatch, "routing-target-popover")
+        model.click()
+        app.menuItems["GPT-6-Luna"].click()
+        waitFor(element("routing-target-r1", in: prefs), labelContains: "GPT-6-Luna")
+        XCTAssertTrue(element("routing-adjusted-r1", in: prefs).waitForExistence(timeout: 5),
+                      "a hand-adjusted rule is marked as no longer matching its sentence")
+        XCTAssertTrue(prefs.buttons["routing-use-r1"].exists, "adjusting keeps the rule's state")
+        app.typeKey(.escape, modifierFlags: [])
+        waitUntilGone(model, "Escape closes the popover")
+
+        // Condition pill → threshold slider and Remove Condition.
+        element("routing-condition-r1-2", in: prefs).click()
+        let remove = app.buttons["routing-condition-remove"]
+        XCTAssertTrue(remove.waitForExistence(timeout: 5), "a condition pill opens its popover")
+        shot(app.windows.firstMatch, "routing-condition-popover")
+        remove.click()
+        waitUntilGone(element("routing-condition-r1-2", in: prefs), "the removed condition's pill is gone")
+        shot(prefs, "routing-adjusted")
+    }
+
+    func testContextMenuReordersAndDeleteKeyDeletes() {
         let prefs = openFlightControl(launch())
-        prefs.buttons["fc-section-routing"].click()
-        let hint = prefs.staticTexts["routing-hint-p1"]
-        XCTAssertTrue(hint.waitForExistence(timeout: 5), "the fixture project's confirmed rule carries a hint")
-        waitFor(hint, labelContains: "gpt-6-luna")
-        shot(prefs, "routing-hint")
-        // `.buttonStyle(.link)` exposes the button as a Link, not a Button.
-        prefs.links["routing-hint-dismiss-p1"].click()
-        waitUntilGone(hint, "a dismissed hint stays gone")
+        addGlobalRule("Use Codex for tests", in: prefs)
+        addGlobalRule("Use Codex for algorithms", in: prefs)
+        let first = element("routing-sentence-r1", in: prefs)
+        let second = element("routing-sentence-r2", in: prefs)
+        XCTAssertTrue(second.waitForExistence(timeout: 10))
+        XCTAssertLessThan(first.frame.minY, second.frame.minY)
+
+        second.rightClick()
+        prefs.menuItems["Move Up"].click()
+        let moved = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in second.frame.minY < first.frame.minY }, object: nil)
+        XCTAssertEqual(XCTWaiter().wait(for: [moved], timeout: 5), .completed, "Move Up puts r2 first: first match wins")
+        shot(prefs, "routing-reordered")
+
+        first.rightClick()
+        prefs.menuItems["Delete"].click()
+        waitUntilGone(first, "Delete in the context menu removes the rule")
+
+        second.click()
+        prefs.typeKey(.delete, modifierFlags: [])
+        waitUntilGone(second, "⌫ deletes the selected rule")
+    }
+
+    func testAHintPopoverSwitchesModel() {
+        let app = launch()
+        let prefs = openFlightControl(app)
+        prefs.selectFlightControlSection("fc-section-routing")
+        let bulb = element("routing-hint-p1", in: prefs)
+        XCTAssertTrue(bulb.waitForExistence(timeout: 5), "the fixture project's confirmed rule carries a hint")
+        bulb.click()
+        let text = app.descendants(matching: .any).matching(identifier: "routing-hint-text").firstMatch
+        XCTAssertTrue(text.waitForExistence(timeout: 5), "the lightbulb opens its popover")
+        waitFor(text, labelContains: "gpt-6-luna")
+        shot(app.windows.firstMatch, "routing-hint-popover")
+        app.buttons["routing-hint-switch"].click()
+        waitFor(element("routing-target-p1", in: prefs), labelContains: "GPT-6-Luna")
+        waitUntilGone(bulb, "the hint goes once the rule routes to the suggestion")
+        waitFor(element("routing-status-p1", in: prefs), labelContains: "Live")
+        shot(prefs, "routing-hint-applied")
     }
 
     func testTaskKindsNewBadgeMergeAndRename() {
         let prefs = openFlightControl(launch())
-        prefs.buttons["fc-section-kinds"].click()
+        prefs.selectFlightControlSection("fc-section-kinds")
         let badge = prefs.staticTexts["kind-new-snapshot-tests"]
         XCTAssertTrue(badge.waitForExistence(timeout: 5), "a planning-proposed kind starts out new")
         shot(prefs, "kinds-new")

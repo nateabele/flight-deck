@@ -100,6 +100,38 @@ final class RoutingRuleTests: XCTestCase {
         XCTAssertFalse(RuleMatch.all([]).holds(weights: ["test-authoring": 1], chain: ["tests"]))
     }
 
+    // MARK: - adjusted (a pill popover changed the compiled form)
+
+    /// Every `routing.json` and preferences blob written before pill adjustments existed has no
+    /// `adjusted` key. If that stopped decoding, a user's whole rule list would vanish on update.
+    func testARuleWrittenBeforeAdjustmentsDecodesAsNotAdjusted() throws {
+        let rule = try decoder().decode(RoutingRule.self, from: Data(specJSON.utf8))
+        XCTAssertFalse(rule.adjusted)
+        let file = try decoder().decode(RoutingRuleFile.self, from: Data(#"{"v":1,"rules":[\#(specJSON)]}"#.utf8))
+        XCTAssertEqual(file.rules.first?.adjusted, false)
+    }
+
+    /// Only an adjusted rule writes the key, so a file nobody adjusted stays byte-for-byte what
+    /// an older Flight Deck wrote and reads back the same in it.
+    func testAdjustedIsWrittenOnlyWhenTrueAndRoundTrips() throws {
+        let plain = String(decoding: try encoder().encode(specRule), as: UTF8.self)
+        XCTAssertFalse(plain.contains("adjusted"))
+        var adjusted = specRule
+        adjusted.adjusted = true
+        XCTAssertEqual(try decoder().decode(RoutingRule.self, from: encoder().encode(adjusted)), adjusted)
+    }
+
+    func testRewordingOrRecompilingClearsAdjusted() {
+        var rule = specRule
+        rule.adjusted = true
+        rule.edit(sentence: "Use Codex for tests only")
+        XCTAssertFalse(rule.adjusted, "the pills are gone with the old compiled form")
+        var recompiled = specRule
+        recompiled.adjusted = true
+        recompiled.record(.compiled(specRule.compiled!), by: CompilerRef(harness: "claude", model: "haiku"), at: Date())
+        XCTAssertFalse(recompiled.adjusted, "a fresh compile matches the sentence again")
+    }
+
     func testCompilerDefaultsToHeadlessHaiku() {
         XCTAssertEqual(RuleCompilerSettings.default, RuleCompilerSettings(harness: .claude, model: "haiku", effort: "low"))
         XCTAssertEqual(RuleCompilerSettings.default.ref, CompilerRef(harness: "claude", model: "haiku"))

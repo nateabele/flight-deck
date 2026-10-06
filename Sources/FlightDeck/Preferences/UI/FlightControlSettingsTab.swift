@@ -1,16 +1,19 @@
 import IntakeKit
 import SwiftUI
 
-/// Settings → Flight Control: Routing, Task kinds, Capability index and Capacity. Sections are buttons along the top rather than
-/// a nested `TabView`: a tab strip inside the Settings tab strip reads as two windows' chrome.
+/// Settings → Flight Control: Routing, Task Kinds, Capability Index and Capacity. The sections are
+/// a segmented control rather than a nested `TabView`: a tab strip inside the Settings tab strip
+/// reads as two windows' chrome.
 struct FlightControlSettingsTab: View {
     enum Section: String, CaseIterable, Identifiable {
         case routing = "Routing"
-        case kinds = "Task kinds"
-        case capabilityIndex = "Capability index"
+        case kinds = "Task Kinds"
+        case capabilityIndex = "Capability Index"
         case capacity = "Capacity"
         var id: String { rawValue }
-        /// What the UI tests click.
+        /// What the UI tests name a section by. A segmented `Picker`'s segments are not separate
+        /// views, so they cannot carry these as accessibility identifiers; the UI tests'
+        /// `selectFlightControlSection` maps each one to its segment's title instead.
         var identifier: String {
             switch self {
             case .routing: "fc-section-routing"
@@ -41,25 +44,33 @@ struct FlightControlSettingsTab: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 8) {
-                ForEach(Section.allCases) { s in
-                    Button(s.rawValue) { section = s }
-                        .buttonStyle(.bordered)
-                        .tint(section == s ? Color.accentColor : nil)
-                        .accessibilityIdentifier(s.identifier)
+            HStack(spacing: 12) {
+                Picker("Section", selection: $section) {
+                    ForEach(Section.allCases) { s in Text(s.rawValue).tag(s) }
                 }
-                Spacer()
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .fixedSize()
+                .accessibilityIdentifier("fc-section-picker")
+                Spacer(minLength: 12)
                 Picker("Project", selection: $project) {
                     Text("No project").tag(String?.none)
                     ForEach(paths, id: \.self) { p in
-                        Text(URL(fileURLWithPath: p).lastPathComponent).tag(String?.some(p))
+                        Label(URL(fileURLWithPath: p).lastPathComponent, systemImage: "folder").tag(String?.some(p))
                     }
                 }
-                .frame(maxWidth: 260)
+                .labelsHidden()
+                .frame(maxWidth: 220)
+                .help("The project whose rules and task kinds are shown")
+                .accessibilityLabel("Project")
                 .accessibilityIdentifier("fc-project-picker")
             }
-            .padding(12)
-            Divider()
+            .padding(.horizontal, 20)
+            .padding(.top, 14)
+            .padding(.bottom, section == .routing ? 4 : 12)
+            // Routing is a grouped form whose inset sections separate it from the bar; the other
+            // panes run edge to edge and need the line.
+            if section != .routing { Divider() }
             // Identity per project: both panes keep @State (selection, rename text, weights,
             // drafts) that SwiftUI would otherwise carry across a project switch. A same-id kind
             // in the new project never fires onChange(of: selection), so Rename/Re-weight would

@@ -7,51 +7,81 @@ import IntakeKit
 final class RoutingPresentationTests: XCTestCase {
     private typealias D = RoutingTestData
 
-    func testADraftCanCompileButNotConfirm() {
-        let p = RuleRowPresentation(rule: RoutingRule(id: "r1", sentence: "x"), compiling: false, note: nil)
-        XCTAssertEqual(p.stateLabel, "Draft")
-        XCTAssertTrue(p.canCompile); XCTAssertFalse(p.canConfirm)
-        XCTAssertNil(p.compiledText); XCTAssertNil(p.failureText)
+    private func row(_ rule: RoutingRule, compiling: Bool = false, note: String? = nil) -> RuleRowPresentation {
+        RuleRowPresentation(rule: rule, compiling: compiling, note: note, catalogs: D.catalogs, defaultPools: D.defaultPools)
     }
 
-    func testACompiledRuleShowsItsFormAndWaitsForConfirm() {
-        let rule = D.r3(state: .compiled)
-        let p = RuleRowPresentation(rule: rule, compiling: false, note: nil)
-        XCTAssertEqual(p.stateLabel, "Compiled — confirm to use")
-        XCTAssertEqual(p.compiledText, RuleText.compiled(rule.compiled!))
-        XCTAssertTrue(p.canConfirm); XCTAssertFalse(p.canCompile)
+    func testALiveRuleShowsItsPillsAndACheck() {
+        let p = row(D.r3(pool: "codex-default"))
+        XCTAssertEqual(p.status, .live)
+        XCTAssertEqual(p.statusAccessibility, "Live")
+        XCTAssertEqual(p.conditions.map(\.text), ["test-authoring ≥ 0.5", "algorithmic-reasoning ≥ 0.6", "kind: tests"])
+        XCTAssertEqual(p.joiner, "or")
+        XCTAssertEqual(p.target, "Codex · GPT-6-Sol · high", "the default pool goes unsaid, like a default anywhere")
+        XCTAssertNil(p.detail)
+        XCTAssertEqual(p.tooltip, RuleText.compiled(D.r3(pool: "codex-default").compiled!))
+        XCTAssertFalse(p.canUse)
+        XCTAssertTrue(p.canAdjust)
     }
 
-    func testAnUncommittedEditBlocksConfirmAndLetsCompileCommitIt() {
-        let p = RuleRowPresentation(rule: D.r3(state: .compiled), compiling: false, note: nil, hasUncommittedEdit: true)
-        XCTAssertFalse(p.canConfirm, "confirming would bless the old compiled form under new words")
-        XCTAssertTrue(p.canCompile)
+    func testANonDefaultPoolAndAFallbackAreNamedOnTheTarget() {
+        XCTAssertEqual(row(D.r3(pool: "codex-subs", fallbackPool: "claude-subs")).target,
+                       "Codex · GPT-6-Sol · high · codex-subs, else claude-subs")
     }
 
-    func testAConfirmedRuleOffersNeitherUntilItsSentenceChanges() {
-        let p = RuleRowPresentation(rule: D.r3(), compiling: false, note: nil)
-        XCTAssertEqual(p.stateLabel, "Confirmed")
-        XCTAssertFalse(p.canCompile); XCTAssertFalse(p.canConfirm)
-        XCTAssertNotNil(p.compiledText)
+    func testAnAllRuleJoinsWithAnd() {
+        let rule = D.rule("r1", .all([.dimension("debugging", atLeast: 0.7), .kind("docs")]), "claude", "opus", pool: "claude-default")
+        XCTAssertEqual(row(rule).joiner, "and")
+        XCTAssertEqual(row(rule).target, "Claude · Opus")
     }
 
-    func testAFailedRuleSaysWhyAndCanBeRecompiled() {
-        let rule = RoutingRule(id: "r1", sentence: "x", state: .failed, failure: "unknown dimension teleportation")
-        let p = RuleRowPresentation(rule: rule, compiling: false, note: nil)
-        XCTAssertEqual(p.stateLabel, "Failed")
-        XCTAssertEqual(p.failureText, "Failed: unknown dimension teleportation")
-        XCTAssertTrue(p.canCompile)
+    func testACompiledRuleOffersUseAndSaysItIsNotRoutingYet() {
+        let p = row(D.r3(state: .compiled))
+        XCTAssertEqual(p.status, .awaitingUse)
+        XCTAssertTrue(p.canUse)
+        XCTAssertEqual(p.statusAccessibility, "Compiled — not routing yet. Use")
     }
 
-    func testWhileCompilingNothingIsOffered() {
-        let p = RuleRowPresentation(rule: RoutingRule(id: "r1", sentence: "x"), compiling: true, note: nil)
-        XCTAssertEqual(p.stateLabel, "Compiling…")
-        XCTAssertFalse(p.canCompile); XCTAssertFalse(p.canConfirm)
+    func testAFailedRuleShowsItsReasonInsteadOfPills() {
+        let rule = RoutingRule(id: "r1", sentence: "x", state: .failed, failure: "“Sonnet” matched no model in Claude's catalog — try “sonnet”, or reword the rule")
+        let p = row(rule)
+        XCTAssertEqual(p.status, .failed)
+        XCTAssertEqual(p.detail, rule.failure)
+        XCTAssertEqual(p.statusAccessibility, "Failed: \(rule.failure!)")
+        XCTAssertTrue(p.conditions.isEmpty); XCTAssertNil(p.target)
+        XCTAssertFalse(p.canUse); XCTAssertFalse(p.canAdjust)
     }
 
-    func testTheCompilerNoteRidesAlong() {
-        let p = RuleRowPresentation(rule: RoutingRule(id: "r1", sentence: "x"), compiling: false, note: "Compiler unavailable: offline")
-        XCTAssertEqual(p.note, "Compiler unavailable: offline")
+    func testWhileCompilingTheRowSpinsAndOffersNothing() {
+        let p = row(D.r3(state: .compiled), compiling: true)
+        XCTAssertEqual(p.status, .compiling)
+        XCTAssertEqual(p.statusAccessibility, "Compiling")
+        XCTAssertEqual(p.detail, "Compiling…")
+        XCTAssertTrue(p.conditions.isEmpty, "the old pills are about to be replaced")
+        XCTAssertFalse(p.canUse); XCTAssertFalse(p.canAdjust)
+    }
+
+    /// A draft is what an unreachable compiler leaves. It says why, and how to try again,
+    /// because there is no Compile button to reach for.
+    func testADraftSaysWhyItIsNotCompiledAndHowToRetry() {
+        let p = row(RoutingRule(id: "r1", sentence: "x"), note: "Compiler unavailable: offline")
+        XCTAssertEqual(p.status, .draft)
+        XCTAssertEqual(p.detail, "Compiler unavailable: offline — press Return to try again")
+        XCTAssertEqual(row(RoutingRule(id: "r1", sentence: "x")).detail, "Not compiled — press Return to compile")
+    }
+
+    func testAnAdjustedRuleSaysSo() {
+        var rule = D.r3()
+        XCTAssertFalse(row(rule).adjusted)
+        rule.adjusted = true
+        XCTAssertTrue(row(rule).adjusted)
+    }
+
+    func testPillsCarrySpokenLabels() {
+        let p = row(D.r3(pool: "codex-default"))
+        XCTAssertEqual(p.conditions[0].accessibilityLabel, "Condition: test-authoring at least 0.5")
+        XCTAssertEqual(p.conditions[2].accessibilityLabel, "Condition: kind tests")
+        XCTAssertEqual(p.targetAccessibility, "Routes to Codex · GPT-6-Sol · high")
     }
 
     func testKindRowsLabelOriginStatusAndBars() {

@@ -59,7 +59,7 @@ final class CapabilityIndexUITests: XCTestCase {
         let prefs = preferencesWindow(app)
         XCTAssertTrue(prefs.waitForExistence(timeout: 10), "Settings never opened")
         prefs.buttons["Flight Control"].click()
-        prefs.buttons["fc-section-index"].click()
+        prefs.selectFlightControlSection("fc-section-index")
 
         let heatmap = prefs.descendants(matching: .any)["index-heatmap"]
         XCTAssertTrue(heatmap.waitForExistence(timeout: 10), "the capability index pane never appeared")
