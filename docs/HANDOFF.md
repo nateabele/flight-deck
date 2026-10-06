@@ -212,9 +212,17 @@ Homebrew one. `/usr/bin/git --version` on each machine; anything older refuses e
    logged in on the mini: the hostd is a LaunchAgent and stops at logout.
 2. **On the mini: Settings → Hosting → "Let other Macs use this Mac" on.** Approve it if macOS asks
    (System Settings → General → Login Items); the tab then says "Running on port 47410". Click +
-   under Controllers to show a pairing code (it expires in 2 minutes).
+   under Controllers to show a pairing code (it expires in 2 minutes). The sheet also lists where
+   the mini can be reached — its Tailscale address and MagicDNS name when Tailscale is up, its LAN
+   addresses, its `.local` name — each with the pairing port (47411, or the ephemeral port it fell
+   back to when 47411 was taken, called out in orange), and **Copy Pairing Details** copies
+   `<best address>:<port> <CODE>`.
 3. **On the laptop: Settings → Hosts → Add Host (+ under Paired Hosts), choose Mac,** pick the mini
-   from the Macs showing a code, and type the code.
+   from the Macs showing a code, and type the code. **Not on the same network (e.g. over
+   Tailscale)?** Bonjour stops at the LAN, so the list stays empty (after 5 s it says so). Type the
+   mini's address into the address field instead — or paste the copied pairing details there,
+   which fills the address and the code at once. The Linux tab's address field takes the same
+   paste.
 4. **Check the link from a tab on the laptop:** `flightdeck host ls` shows the mini online under the
    name you will pass to `--on`, and `flightdeck host info mini` lists its Xcode versions.
 5. **A first run.** From a tab whose working directory is inside a git repo (uncommitted edits

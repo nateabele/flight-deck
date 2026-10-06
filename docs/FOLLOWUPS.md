@@ -2355,8 +2355,16 @@ What is open, in the order it will bite:
   package are untested. A release needs both; do not publish on aarch64 alone.
 - **Linux has no Bonjour without `avahi-publish`.** The hostd publishes `_fd-host._tcp` and
   `_fd-host-pair._tcp` by running it. A minimal server or container has none, so the user types the
-  address into Add Host → Linux. Pair-by-address dials 47411, so it reaches Linux hosts only; a Mac
-  host is found through Bonjour (its pairing port is random).
+  address into Add Host → Linux. Pair-by-address dials 47411, which both hostds now bind, so it
+  reaches a Mac host too (Add Host → Mac has its own address field). A Mac whose 47411 is taken
+  falls back to an ephemeral port, shown on its pairing sheet; the controller must then type
+  `address:port`. Not done: retrying 47411 in the background once it frees, so a long-lived
+  squatter costs every window that one extra step.
+- **The pairing sheet's address list is never verified end to end across a real tailnet.** Unit
+  tests drive `HostPairingAddresses.list` and the paste parse with fixed inputs, and loopback
+  proves an address-only controller pairs at `127.0.0.1:47411`; a second Mac over Tailscale is the
+  maintainer's check. The list is gathered once per arm, so an interface that changes while a
+  code is up is not reflected until the next code.
 - **The GUI end-to-end checklist is the maintainer's.** Agents cannot run it here (AGENTS.md rule 2). The four
   checks: pair a second Mac (Settings → Hosting on the target, Hosts → Add Host on the controller,
   `flightdeck host info <name>` lists Xcode versions); revoke from the host's Hosting tab (controller

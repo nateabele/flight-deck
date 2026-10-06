@@ -59,8 +59,12 @@ final class HostingController: ObservableObject {
     }
 
     @Published private(set) var state: State = .off
-    /// The code to show while a pairing window is open, `PairingCode.formatted`.
-    @Published private(set) var armed: (code: String, expiresAt: Date)?
+    /// The code to show while a pairing window is open, `PairingCode.formatted`, and the port
+    /// its listener bound — 47411 unless that was taken (`DarwinHostServer.pairingPort`).
+    @Published private(set) var armed: (code: String, expiresAt: Date, port: Int)?
+    /// Where the other Mac can reach this one at `armed.port`, best first. Filled a moment
+    /// after `armed`, because the Tailscale CLI it asks can take up to its 2 s bound.
+    @Published private(set) var pairingAddresses: [HostPairingAddresses.Entry] = []
     @Published private(set) var controllers: [AdminController] = []
     /// The hostd's own name for this Mac, shown on the pairing sheet.
     @Published private(set) var hostName: String?
@@ -76,6 +80,9 @@ final class HostingController: ObservableObject {
 
     private let service: AgentServiceRegistering
     private let adminPath: String
+    /// `HostPairingAddresses.current`, injectable so a test lists fixed addresses rather than
+    /// this Mac's interfaces and whatever its Tailscale says.
+    private let addresses: @Sendable (Int) -> [HostPairingAddresses.Entry]
     /// How long after enabling a silent admin socket still reads as `.starting`. launchd takes
     /// a moment to spawn the hostd, and the first refresh runs straight after `register()`, so
     /// without this every enable flashed "not running" before the host came up.
@@ -93,9 +100,11 @@ final class HostingController: ObservableObject {
     private var refreshing: Task<Void, Never>?
 
     init(service: AgentServiceRegistering = SMAppServiceAgent(plistName: "dev.flightdeck.hostd.plist"),
-         adminPath: String, startingGrace: TimeInterval = 5) {
+         adminPath: String, startingGrace: TimeInterval = 5,
+         addresses: @escaping @Sendable (Int) -> [HostPairingAddresses.Entry] = { HostPairingAddresses.current(port: $0) }) {
         self.service = service
         self.adminPath = adminPath
+        self.addresses = addresses
         self.startingGrace = startingGrace
     }
 
@@ -150,10 +159,17 @@ final class HostingController: ObservableObject {
             let reply = await Self.send(.arm, path: path)
             guard let self else { return }
             switch reply {
-            case .success(.armed(let code, let expiresAt)):
+            case .success(.armed(let code, let expiresAt, let reported)):
                 armSequence += 1
                 if case .on(let paired, _) = state { pairedAtArm = paired } else { pairedAtArm = nil }
-                armed = (code, expiresAt)
+                // No port named: a hostd from before the field, which (like Linux) means 47411.
+                let port = reported ?? Int(HostService.pairingPort)
+                armed = (code, expiresAt, port)
+                pairingAddresses = []
+                let sequence = armSequence, addresses = addresses
+                let list = await Task.detached(priority: .userInitiated) { addresses(port) }.value
+                // A window closed or replaced while the CLI ran keeps its own list, or none.
+                if sequence == armSequence { pairingAddresses = list }
             case .success(.failed(let message)):
                 actionError = message
             case .failure(AdminSocketError.notRunning):
@@ -191,6 +207,13 @@ final class HostingController: ObservableObject {
             // Read back rather than trusted: the list is the hostd's, not ours.
             await loadControllers(generation: generation)
         }
+    }
+
+    /// What "Copy pairing details" copies: the best address, at the window's port, and the
+    /// code — one paste into the other Mac's address field fills both of its fields.
+    var pairingDetails: String? {
+        guard let armed, let best = pairingAddresses.first else { return nil }
+        return PairingDetails.format(endpoint: best.endpoint, code: armed.code)
     }
 
     // MARK: - Refresh
@@ -267,6 +290,7 @@ final class HostingController: ObservableObject {
         guard armed != nil else { return }
         armSequence += 1
         armed = nil
+        pairingAddresses = []
         pairedAtArm = nil
     }
 

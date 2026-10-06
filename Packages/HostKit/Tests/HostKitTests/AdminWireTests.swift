@@ -37,10 +37,23 @@ final class AdminWireTests: XCTestCase {
             .status(paired: 1, armedUntil: t10, listeningPort: 1, hostName: "h"),
             .status(paired: 1, armedUntil: nil, listeningPort: nil, hostName: "h"),
             .armed(code: "X", expiresAt: t10),
+            .armed(code: "X", expiresAt: t10, pairingPort: 47411),
             .controllers([AdminController(slot: slot, name: "n", pairedAt: t10)]),
             .ok, .failed("x"),
         ]
         for r in reps { XCTAssertEqual(try HostWire.decode(AdminReply.self, from: HostWire.encode(r)), r) }
+    }
+
+    /// The pairing port rides on `armed` as an optional key, so the shape an older peer wrote
+    /// (no `pairingPort`) still decodes, and a reply that names no port encodes exactly as
+    /// before: a Linux `flightdeck-hostd pair` built before the field reads it unchanged.
+    func testArmedCarriesAnOptionalPairingPort() throws {
+        XCTAssertEqual(try HostWire.encode(AdminReply.armed(code: "AAAA-BBBB-CCCC", expiresAt: t10, pairingPort: 52001)),
+                       #"{"code":"AAAA-BBBB-CCCC","expiresAt":10,"pairingPort":52001,"t":"armed"}"#)
+        XCTAssertEqual(try HostWire.decode(AdminReply.self, from: #"{"code":"X","expiresAt":10,"t":"armed"}"#),
+                       .armed(code: "X", expiresAt: t10, pairingPort: nil))
+        XCTAssertEqual(try HostWire.decode(AdminReply.self, from: #"{"code":"X","expiresAt":10,"pairingPort":47411,"t":"armed"}"#),
+                       .armed(code: "X", expiresAt: t10, pairingPort: 47411))
     }
 
     func testUnknownTagThrows() {

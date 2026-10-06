@@ -198,7 +198,8 @@ Decks pair with this machine and run `host info` against it. It is a LaunchAgent
 (`dev.flightdeck.hostd`, registered through `SMAppService` from Settings → Hosting), a child of
 `launchd` and not of the app, so quitting or swapping Flight Deck does not stop it and it
 survives `swap-release.sh`. It listens on **47410** (the host connection) and, only while a
-pairing window is armed, on a second port (47411 on Linux; an ephemeral one on a Mac), and it
+pairing window is armed, on a second port (47411; a Mac falls back to an ephemeral one when
+47411 is taken — including by a test that binds it), and it
 keeps an admin socket at `<state root>/admin.sock`.
 
 It ships as its own helper app, `Flight Deck.app/Contents/Library/LoginItems/Flight Deck Host.app`

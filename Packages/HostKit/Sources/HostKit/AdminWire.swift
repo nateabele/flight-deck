@@ -5,7 +5,7 @@ import Foundation
 //   request  {"t":"status"} | {"t":"arm"} | {"t":"cancelArm"} | {"t":"ls"}
 //            {"t":"revoke","slot":uuid}
 //   reply    {"t":"status","paired":int,"armedUntil":date?,"listeningPort":int?,"hostName":string}
-//            {"t":"armed","code":string,"expiresAt":date}
+//            {"t":"armed","code":string,"expiresAt":date,"pairingPort":int?}
 //            {"t":"controllers","controllers":[{"slot":uuid,"name":string,"pairedAt":date}]}
 //            {"t":"ok"} | {"t":"failed","message":string}
 //
@@ -69,14 +69,17 @@ public struct AdminController: Codable, Sendable, Equatable {
 
 public enum AdminReply: Codable, Sendable, Equatable {
     case status(paired: Int, armedUntil: Date?, listeningPort: Int?, hostName: String)
-    /// `code` is `PairingCode.formatted`.
-    case armed(code: String, expiresAt: Date)
+    /// `code` is `PairingCode.formatted`. `pairingPort` is the port the window's listener
+    /// actually bound, so the host can show it when it is not the 47411 a controller assumes
+    /// for a typed address. Optional, and omitted when nil, because it was added after the
+    /// first release: an older peer's reply decodes as nil and an older decoder ignores the key.
+    case armed(code: String, expiresAt: Date, pairingPort: Int? = nil)
     case controllers([AdminController])
     case ok
     case failed(String)
 
     enum CodingKeys: String, CodingKey {
-        case t, paired, armedUntil, listeningPort, hostName, code, expiresAt, controllers, message
+        case t, paired, armedUntil, listeningPort, hostName, code, expiresAt, pairingPort, controllers, message
     }
 
     private enum Tag: String, Codable { case status, armed, controllers, ok, failed }
@@ -90,10 +93,11 @@ public enum AdminReply: Codable, Sendable, Equatable {
             try c.encodeIfPresent(until, forKey: .armedUntil)
             try c.encodeIfPresent(port, forKey: .listeningPort)
             try c.encode(name, forKey: .hostName)
-        case .armed(let code, let expiresAt):
+        case .armed(let code, let expiresAt, let pairingPort):
             try c.encode(Tag.armed, forKey: .t)
             try c.encode(code, forKey: .code)
             try c.encode(expiresAt, forKey: .expiresAt)
+            try c.encodeIfPresent(pairingPort, forKey: .pairingPort)
         case .controllers(let list):
             try c.encode(Tag.controllers, forKey: .t)
             try c.encode(list, forKey: .controllers)
@@ -114,7 +118,8 @@ public enum AdminReply: Codable, Sendable, Equatable {
                            hostName: try c.decode(String.self, forKey: .hostName))
         case .armed:
             self = .armed(code: try c.decode(String.self, forKey: .code),
-                          expiresAt: try c.decode(Date.self, forKey: .expiresAt))
+                          expiresAt: try c.decode(Date.self, forKey: .expiresAt),
+                          pairingPort: try c.decodeIfPresent(Int.self, forKey: .pairingPort))
         case .controllers: self = .controllers(try c.decode([AdminController].self, forKey: .controllers))
         case .ok: self = .ok
         case .failed: self = .failed(try c.decode(String.self, forKey: .message))

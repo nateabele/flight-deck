@@ -1,3 +1,4 @@
+import AppKit
 import HostKit
 import ServiceManagement
 import SwiftUI
@@ -90,7 +91,7 @@ struct HostingSettingsTab: View {
         )) {
             if let armed = controller.armed {
                 ControllerPairingSheet(controller: controller, code: armed.code,
-                                       expiresAt: armed.expiresAt)
+                                       expiresAt: armed.expiresAt, port: armed.port)
             }
         }
         .confirmationDialog(
@@ -184,7 +185,8 @@ struct HostingSettingsTab: View {
     }
 }
 
-/// The code a controller types into its own Add Host sheet, and its countdown.
+/// The code a controller types into its own Add Host sheet, its countdown, and where the
+/// controller can reach this Mac when Bonjour cannot find it (across a tailnet).
 ///
 /// Closes itself when the controller clears `armed`: a controller that paired grows the
 /// host's count, and a window that expired or was taken stops being held — either way the
@@ -193,6 +195,7 @@ struct ControllerPairingSheet: View {
     @ObservedObject var controller: HostingController
     let code: String
     let expiresAt: Date
+    let port: Int
 
     @State private var now = Date()
     private let timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
@@ -239,16 +242,93 @@ struct ControllerPairingSheet: View {
                 .foregroundStyle(.secondary)
                 .accessibilityIdentifier("hosting-pairing-countdown")
 
-            Button("Cancel") { controller.cancelArm() }
-                .keyboardShortcut(.cancelAction)
-                .accessibilityIdentifier("hosting-pairing-cancel")
+            addresses
+
+            HStack {
+                Button("Copy Pairing Details") {
+                    if let details = controller.pairingDetails { Self.copy(details) }
+                }
+                .disabled(controller.pairingDetails == nil)
+                .help("Copies this Mac's best address and the code, to paste into the other Mac's address field")
+                .accessibilityIdentifier("hosting-copy-pairing")
+                Spacer()
+                Button("Cancel") { controller.cancelArm() }
+                    .keyboardShortcut(.cancelAction)
+                    .accessibilityIdentifier("hosting-pairing-cancel")
+            }
         }
         .padding(24)
-        .frame(width: 380)
+        .frame(width: 420)
         .onReceive(timer) { tick in
             now = tick
             // The hostd stops answering at `expiresAt` on its own; this only stops showing it.
             if remainingSeconds == 0 { controller.cancelArm() }
         }
+    }
+
+    /// For a Mac Bonjour cannot reach: every address this one answers on, at the window's
+    /// port, each copyable on its own. Port included even when it is 47411, so what is
+    /// copied always dials, whatever the other Mac assumes.
+    @ViewBuilder
+    private var addresses: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Not on the same network? On the other Mac, enter one of these addresses with the code, or paste the pairing details into its address field.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if let note = Self.portNote(port: port) {
+                Text(note)
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("hosting-pairing-port")
+            }
+
+            if controller.pairingAddresses.isEmpty {
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small)
+                    Text("Finding this Mac's addresses…").font(.caption).foregroundStyle(.secondary)
+                }
+            } else {
+                ForEach(Array(controller.pairingAddresses.enumerated()), id: \.element.id) { index, entry in
+                    HStack(spacing: 8) {
+                        Text(entry.kind.label)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .frame(width: 92, alignment: .leading)
+                        Text(entry.endpoint)
+                            .font(.system(.callout, design: .monospaced))
+                            .textSelection(.enabled)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Spacer(minLength: 0)
+                        Button {
+                            Self.copy(entry.endpoint)
+                        } label: {
+                            Image(systemName: "doc.on.doc")
+                        }
+                        .buttonStyle(.borderless)
+                        .help("Copy")
+                    }
+                    .accessibilityElement(children: .contain)
+                    .accessibilityIdentifier("hosting-address-\(index)")
+                }
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 6).fill(Color(nsColor: .quaternarySystemFill)))
+    }
+
+    /// Said only when the port is not the 47411 a controller assumes for a bare address.
+    static func portNote(port: Int) -> String? {
+        guard port != Int(HostService.pairingPort) else { return nil }
+        return "Pairing on port \(port) because 47411 is in use. Include it when you type this Mac's address."
+    }
+
+    private static func copy(_ text: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
     }
 }
