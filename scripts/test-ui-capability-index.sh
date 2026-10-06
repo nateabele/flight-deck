@@ -12,9 +12,22 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-HOST=${FD_UITEST_HOST:-user@uitest-mac}
-KEY=${FD_UITEST_SSH_KEY:-$HOME/.ssh/id_rsa}
-SSH_OPTS=(-o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=5 -i "$KEY")
+source scripts/lib-local-env.sh
+fd_load_local_env
+# No default host: the UI-test Mac is machine-specific and must never be written into a committed
+# file. Without this check an empty host fails later as an opaque ssh usage error.
+if [ -z "${FD_UITEST_HOST:-}" ]; then
+  echo "CAPABILITY INDEX UI FAIL: no UI-test host configured."
+  echo "            cp scripts/local.env.example scripts/local.env and set FD_UITEST_HOST"
+  echo "            (and FD_UITEST_SSH_KEY if ssh needs an explicit identity file)."
+  exit 2
+fi
+
+HOST=$FD_UITEST_HOST
+SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=5)
+# IdentitiesOnly with an explicit key: an agent holding many keys otherwise exhausts the server's
+# auth attempts before offering the right one. Without a key, ssh's own defaults apply.
+[ -n "${FD_UITEST_SSH_KEY:-}" ] && SSH_OPTS+=(-o IdentitiesOnly=yes -i "$FD_UITEST_SSH_KEY")
 SRC="Tests/FlightDeckTests/Fixtures/FlightControlL3/Index/ui"
 REMOTE_REL="flightdeck-uitests/index-fixture"
 OUT="DerivedData/smoke-remote"

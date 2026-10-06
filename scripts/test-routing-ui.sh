@@ -10,6 +10,17 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+source scripts/lib-local-env.sh
+fd_load_local_env
+# No default host: the UI-test Mac is machine-specific and must never be written into a committed
+# file. Without this check an empty host fails later as an opaque ssh usage error.
+if [ -z "${FD_UITEST_HOST:-}" ]; then
+  echo "ROUTING UI FAIL: no UI-test host configured."
+  echo "            cp scripts/local.env.example scripts/local.env and set FD_UITEST_HOST"
+  echo "            (and FD_UITEST_SSH_KEY if ssh needs an explicit identity file)."
+  exit 2
+fi
+
 OUT="DerivedData/smoke-remote"
 SHOTS="DerivedData/routing-ui-shots"
 rm -rf "$SHOTS"
