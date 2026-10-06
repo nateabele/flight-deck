@@ -182,4 +182,20 @@ final class SessionStoreSubagentLifecycleTests: XCTestCase {
         store.applySubagents(session.id, tree())
         XCTAssertGreaterThan(published, 0)
     }
+
+    // MARK: 5. Only a wire-visible change is an event
+
+    func testATreeDifferingOnlyInModifiedEmitsNothing() {
+        let (store, session) = make()
+        store.applyRegistryForTesting([session.id: SessionStatus(activity: .busy, subagentCount: 1)])
+        store.applySubagents(session.id, tree(modified: Date(timeIntervalSince1970: 1_000)))
+        let replicator = attachedReplicator(to: store)
+        let later = Date(timeIntervalSince1970: 2_000)
+        store.applySubagents(session.id, tree(modified: later))
+        XCTAssertTrue(replicator.recorded.isEmpty, "\(replicator.recorded)")
+        XCTAssertEqual(store.subagentTree(for: session.id).node("a28ad87b")?.modified, later,
+                       "the latest tree is still stored")
+        store.applySubagents(session.id, tree(modified: later, childState: .done))
+        XCTAssertEqual(activityEvents(replicator, session.id).count, 1)
+    }
 }
