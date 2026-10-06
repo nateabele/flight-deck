@@ -465,6 +465,45 @@ final class IntakeServiceShapingTests: XCTestCase {
         XCTAssertEqual(runner.ensured.count, 2)
     }
 
+    /// The sidebar asks `attentionCount` several times per redraw and the clock asks
+    /// `resumeIfStalled` every tick, and each used to re-read and re-decode `commands.jsonl`:
+    /// ~2.6% of a core on the main thread, measured 2026-10-05. An unchanged file (and an
+    /// unchanged ack) cannot have a different answer. Proven by making the file unreadable
+    /// without touching its size or mtime: a re-read would find no commands and flip the
+    /// count back to 1.
+    func testAnUnchangedCommandsFileIsNotReadAgain() async throws {
+        let seeded = try seed(.shaping)
+        try saveTape(seeded.id, .paused)
+        let store = tapeStore(seeded.id)
+        _ = try store.appendCommand(.step)
+        var tape = store.loadTape()
+        tape.ackedCommandSeq = 1          // the one command is acked: nothing pending
+        try store.saveTape(tape)
+        // A whole-second mtime, so putting it back below restores it exactly — `Date` cannot
+        // carry the nanoseconds a fresh write leaves, and the memo keys on them.
+        let mtime = Date(timeIntervalSince1970: 1_700_000_000)
+        try FileManager.default.setAttributes([.modificationDate: mtime], ofItemAtPath: store.commandsURL.path)
+        let svc = makeService()
+        await svc.launchRecovery?.value
+        XCTAssertEqual(svc.tapes[seeded.id]?.status, .paused)
+        XCTAssertEqual(svc.attentionCount(forProject: "/p"), 1, "paused, nothing pending: waiting on you")
+
+        // Rewrite the command's seq to one past the ack — same size, same inode, mtime put
+        // back — so a re-read would see a pending command and drop the count to 0.
+        let url = store.commandsURL
+        let original = try Data(contentsOf: url)
+        let edited = Data(String(decoding: original, as: UTF8.self)
+            .replacingOccurrences(of: "\"seq\":1", with: "\"seq\":2").utf8)
+        XCTAssertNotEqual(edited, original)
+        XCTAssertEqual(edited.count, original.count)
+        let handle = try FileHandle(forWritingTo: url)
+        try handle.write(contentsOf: edited)
+        try handle.close()
+        try FileManager.default.setAttributes([.modificationDate: mtime], ofItemAtPath: url.path)
+
+        XCTAssertEqual(svc.attentionCount(forProject: "/p"), 1, "answered from memory, not re-read")
+    }
+
     func testTapeChangesArePublishedOnTheClockTick() async throws {
         let seeded = try seed(.shaping)
         let svc = makeService()

@@ -117,4 +117,26 @@ final class TailReaderTests: XCTestCase {
         XCTAssertEqual(read.lines, ["A", "B"])
         XCTAssertEqual(read.lineOffsets, [0, 3], "B's true offset is 3 (A, its \\n, the blank line's \\n) — not 2, which is what summing only the emitted lines' lengths would give")
     }
+    // MARK: The no-news fast path (2026-10-05)
+
+    /// Every tab's transcript watcher opened its file on every 500ms tick just to learn it had
+    /// not grown: ~1.5% of a core in `FileHandle` construction alone with 78 tabs. A `stat` that
+    /// says the file is exactly as long as the offset already held answers that without an open.
+    func testNothingNewIsAnsweredFromTheFileSizeAlone() throws {
+        let url = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent(UUID().uuidString)
+        try Data("one\n".utf8).write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        XCTAssertTrue(TailReader.hasNothingNew(url: url, offset: 4, hasChosenStart: true))
+        XCTAssertFalse(TailReader.hasNothingNew(url: url, offset: 2, hasChosenStart: true),
+                       "grown past the offset: there is something to read")
+        XCTAssertFalse(TailReader.hasNothingNew(url: url, offset: 9, hasChosenStart: true),
+                       "shorter than the offset: a replacement, which `read` must handle")
+        XCTAssertFalse(TailReader.hasNothingNew(url: url, offset: 4, hasChosenStart: false),
+                       "the first look decides where reading starts, so it must run")
+        let missing = url.appendingPathExtension("gone")
+        XCTAssertTrue(TailReader.hasNothingNew(url: missing, offset: 0, hasChosenStart: true),
+                      "an absent file with the start already chosen is nothing new, as `read` says")
+        XCTAssertFalse(TailReader.hasNothingNew(url: missing, offset: 0, hasChosenStart: false))
+    }
 }

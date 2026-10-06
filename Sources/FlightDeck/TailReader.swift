@@ -39,6 +39,21 @@ struct TailRead: Sendable {
 /// bug: where a first look starts reading, what a shrinking file means, and never consuming
 /// a trailing line that has no newline yet.
 enum TailReader {
+    /// Whether `read` with these arguments would return them unchanged, answered from one
+    /// `stat` — no open. True only when the start is already chosen and the file is exactly
+    /// `offset` bytes long, or absent (which `read` also treats as nothing new). A file
+    /// shorter than `offset` is a replacement and longer is news, so both read in full.
+    ///
+    /// Exists because every tab's watcher asked `read` this on every 500ms tick and nearly
+    /// always heard "nothing": with 78 tabs, `FileHandle` construction alone was ~1.5% of a
+    /// core (measured 2026-10-05).
+    static func hasNothingNew(url: URL, offset: UInt64, hasChosenStart: Bool) -> Bool {
+        guard hasChosenStart else { return false }
+        var info = stat()
+        guard stat(url.path, &info) == 0 else { return true }
+        return UInt64(info.st_size) == offset
+    }
+
     static func read(
         url: URL,
         offset: UInt64,
@@ -46,6 +61,7 @@ enum TailReader {
         truncation: TailTruncationPolicy = .restartFromZero
     ) -> TailRead {
         var result = TailRead(offset: offset, hasChosenStart: hasChosenStart)
+        if hasNothingNew(url: url, offset: offset, hasChosenStart: hasChosenStart) { return result }
 
         guard let handle = try? FileHandle(forReadingFrom: url) else {
             // Nothing on disk, but that settles where reading will start: a file that does

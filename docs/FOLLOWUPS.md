@@ -2451,6 +2451,55 @@ the lookups run at most every 5s (`evaluationInterval`). The idle clock is still
 Still open: whether smart sleep can ever sleep a claude tab whose agent has MCP-server children.
 `hasLiveDescendants` counts them, and that is unverified.
 
+**Later the same day, also fixed:** `TranscriptWatcher` opened every tab's transcript every tick
+just to learn it had not grown (~1.5% of a core in `FileHandle` construction alone). It now
+skips the tick on a `stat` (`TailReader.hasNothingNew`). And the intake attention badge and
+`resumeIfStalled` each re-read `commands.jsonl` per call (~2.6% of a core). That answer is now
+memoized on the file's stat and the tape's ack. After all of this, Flight Deck idles at
+roughly 5–10% of a core with 78 tabs.
+
+### Not done: event-driven status registry (FSEvents)
+
+**What it costs today.** `SessionStatusWatcher.drain` runs on every `WatchClock` beat: 500ms
+when the app is active, 2s in the background. Each run lists `~/.claude/sessions/` (57 `.json`
+files and 114 entries on 2026-10-05, including leftovers from dead pids), calls
+`kill(pid, 0)` for every file, and reads each file's mtime with `resourceValues`. It decodes only
+the files whose mtime moved, then hands the whole map to `SessionStore.applyRegistry`. Measured
+over 10s with 78 tabs: `drain` 55 samples plus `applyRegistry` 49, about 1.9% of a core on the
+main thread. Small, but it is the largest remaining fixed per-tick cost, and it grows with the
+number of status files, not the number of tabs.
+
+**What an event-driven version must handle.** These are the facts that shape the design; the
+first one rules out the obvious approach:
+
+1. **claude writes status files in place.** Birth time precedes mtime by hours on every live
+   file, so updates are not atomic renames. A `DISPATCH_SOURCE_TYPE_VNODE` source on the
+   *directory* fires on create, delete and rename only, so it would miss every status change.
+   Either use FSEvents with `kFSEventStreamCreateFlagFileEvents` on the directory, or keep one
+   vnode source per file (`.write | .extend | .delete | .rename`) and re-arm them as files come
+   and go. FSEvents is the simpler of the two. Use a short latency (~0.1s) so a `waiting` edge
+   is not delayed: the phone card and the notification both hang off it.
+2. **Process death does not touch the file.** A crashed claude leaves its `<pid>.json` behind,
+   which is why `drain` calls `kill(pid, 0)` for every file. Events alone would leave a dead
+   session showing its last status forever. Pair the watch with `EVFILT_PROC`/`NOTE_EXIT` per
+   pid (a `DispatchSource.makeProcessSource`), or keep a slow liveness sweep (every 5–10s).
+3. **The tick must not disappear entirely.** `commitStatuses` drives time-based state, not just
+   file edges: the stuck-prompt episode and its `answerless` rung at 5s
+   (`stuckPromptReportLadder`) and `checkStuckPrompts`' report ladder. Something must still run
+   them while any tab is `waiting`. A timer armed only while a `waiting` episode exists is enough.
+4. **Accounts multiply the roots.** `startStatusWatching(account:)` starts one watcher per
+   claude account home, so it would be one stream per root. Codex status comes from
+   elsewhere (`CodexRolloutWatcher`, `CodexNameWatcher`), which is out of scope here.
+5. **Keep `drain()` as the reconciler.** Have events *schedule* a `drain()` (coalesced onto the
+   main actor) instead of parsing individual events. The mtime cache already makes a no-change
+   drain cheap, the existing tests drive `drain()` directly, and FSEvents may drop or coalesce
+   events (`kFSEventStreamEventFlagMustScanSubDirs`), which a full drain absorbs.
+
+**Expected win:** most of that ~1.9%, plus fewer main-thread wakeups while idle, which matters
+more for energy than for CPU percentage. **Why it was not done:** it touches the status spine
+every phone and notification feature depends on, for under 2% of a core. Worth doing alongside
+other work in `SessionStatusWatcher`, not on its own.
+
 ## Open-prompt probe CPU (2026-10-05)
 
 A tab that claude reported as `waiting` ("permission prompt") had no open call in its transcript.
