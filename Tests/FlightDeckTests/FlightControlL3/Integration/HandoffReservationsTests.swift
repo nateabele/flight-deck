@@ -39,4 +39,15 @@ final class HandoffReservationsTests: XCTestCase {
         XCTAssertTrue(handoff.firstPrompt.contains("held no file reservations"), handoff.firstPrompt)
         XCTAssertFalse(handoff.firstPrompt.contains("Other.swift"), handoff.firstPrompt)
     }
+
+    /// nil is "could not read" (no swarm to ask), not "holds none": the prompt must not assert
+    /// the second when only the first is true.
+    func testAnUnreadableReservationLookupDoesNotClaimNone() async throws {
+        let host = try XCTUnwrap(rig.store.flightControlGraph?.host)
+        host.reservationLookup = { _, _ in nil }
+        _ = try await rig.launchAndCrossHard()
+        let handoff = try XCTUnwrap(rig.spawns.dropFirst().first)
+        XCTAssertFalse(handoff.firstPrompt.contains("held no file reservations"), handoff.firstPrompt)
+        XCTAssertTrue(handoff.firstPrompt.contains("could not be read"), handoff.firstPrompt)
+    }
 }
