@@ -708,7 +708,7 @@ struct FleetListScreen: View {
     /// name their own font survive.)
     ///
     /// So every `Text` in this file names its own font — the section headers, the banners,
-    /// the empty state and the glyph's subagent count already did, and the title was the one
+    /// the empty state and the trailing subagent count already did, and the title was the one
     /// that did not. The terminal idiom is deliberate (see the headers' `.monospaced()`), so
     /// it is stated where it has to hold rather than inherited from a container that cannot
     /// be relied on to pass it down.
@@ -755,6 +755,7 @@ struct FleetListScreen: View {
                 }
             }
             Spacer()
+            SubagentCountBadge(session: session)
         }
     }
 

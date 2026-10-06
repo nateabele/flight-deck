@@ -78,18 +78,10 @@ struct SessionStatusGlyph: View {
                 label: label
             )
         case "busy":
-            glyph(
-                HStack(spacing: 2) {
-                    ProgressView().controlSize(.mini)
-                    // Through `subagentSummary` rather than off `subagentCount` directly, so
-                    // this column and the timeline header cannot disagree: a codex tab's 0
-                    // means "unknown", and neither screen may render it as "none".
-                    if session.subagentSummary != nil {
-                        Text("\(session.subagentCount)").font(.caption2.monospacedDigit())
-                    }
-                },
-                label: label
-            )
+            // The sub-agent count is not drawn here — see `SubagentCountBadge`, which the row
+            // places at its trailing edge, as the Mac does. Inside this 18pt column the numeral
+            // was squeezed against the spinner and clipped by the title beside it.
+            glyph(ProgressView().controlSize(.mini), label: label)
         case "waiting":
             glyph(
                 Image(systemName: "questionmark.circle.fill").font(.caption)
@@ -191,5 +183,30 @@ struct SessionStatusGlyph: View {
             .frame(width: 18, alignment: .center)
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(label)
+    }
+}
+
+/// A busy session's sub-agent count, drawn at the row's trailing edge — the phone's copy of
+/// the Mac's `SubagentCount` (`Sources/FlightDeck/SessionStatusIcon.swift`): same placement,
+/// font, monospaced digits and tint, so the two devices draw the same row the same way.
+///
+/// Trailing rather than beside the status glyph for the Mac's reason, and a sharper one here:
+/// the glyph column is a fixed 18pt so titles line up, and a spinner plus a numeral does not
+/// fit in it — the count rendered squished and cut off between the spinner and the title.
+///
+/// Through `subagentSummary` rather than off `subagentCount` directly, so this badge and the
+/// timeline header cannot disagree: a codex tab's 0 means "unknown", and neither screen may
+/// render it as "none". Hidden from accessibility — `SessionStatusGlyph.label` already says
+/// "Working — N subagents", and a bare numeral read after the title would say it twice.
+struct SubagentCountBadge: View {
+    let session: WireSession
+
+    var body: some View {
+        if session.activity == "busy", session.subagentSummary != nil {
+            Text("\(session.subagentCount)")
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(.tint)
+                .accessibilityHidden(true)
+        }
     }
 }
