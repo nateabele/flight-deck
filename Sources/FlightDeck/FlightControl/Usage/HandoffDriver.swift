@@ -205,7 +205,8 @@ final class HandoffDriver: HandoffDecisionSink {
                             session: agent.session)
                 return
             }
-            host.markHandedOff(CompletedHandoff(old: agent.session, new: fresh, task: request.task, block: block, lease: lease))
+            host.markHandedOff(CompletedHandoff(old: agent.session, new: fresh, task: request.task, block: block, lease: lease,
+                                                fromAccount: request.fromAccount))
             // The driver is the old lease's only owner in a hand-off: it alone knows the exit
             // command went out (`.stopFailed` above keeps the lease, since the old agent still
             // runs on it). The swarm's `recordHandoff` used to release it as well, which freed

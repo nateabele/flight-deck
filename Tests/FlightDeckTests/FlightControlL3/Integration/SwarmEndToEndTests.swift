@@ -138,4 +138,77 @@ final class SwarmEndToEndTests: XCTestCase {
         XCTAssertTrue(decisions === rig.store.flightControlGraph?.driver)
         XCTAssertNotNil(rig.swarm.onTick)
     }
+
+    // MARK: - Fix round 1
+
+    /// The driver prunes every agent missing from what it is given. Called once per project,
+    /// project A's pass wiped project B's pending confirmation (and a `.stopFailed`, or a
+    /// decline), so B was re-asked forever and a phone "confirm" for it answered false.
+    func testTwoProjectsKeepEachOthersHandoffState() async throws {
+        rig.preferences.updateCapacity { $0.confirmHandoffs = true }
+        rig.feed(account: "Work", utilization: 0.30)
+        rig.feed(account: "Personal", utilization: 0.10)
+        try await rig.launch(cap: 1)
+        try await rig.launch(cap: 1, project: rig.secondProjectURL.path)
+        await rig.tick()
+        XCTAssertEqual(rig.spawns.count, 2)
+        let a = try XCTUnwrap(rig.spawns.first?.session)
+        let b = try XCTUnwrap(rig.spawns.dropFirst().first?.session)
+        rig.feed(account: "Work", utilization: 0.97)
+        rig.markIdle(a); rig.markIdle(b)
+        await rig.tick()
+        await rig.tick()
+        let driver = try XCTUnwrap(rig.store.flightControlGraph?.driver)
+        XCTAssertEqual(driver.pendingHandoffs, [a.id, b.id], "each project's pending question survives the other's pass")
+        XCTAssertTrue(rig.swarm.confirmHandoff(session: a.id))
+        XCTAssertTrue(rig.swarm.confirmHandoff(session: b.id))
+    }
+
+    /// Between the old claim going back to open and the new agent's claim, br reads the task as
+    /// open. The Observe watcher reporting that must not reset the old agent (which would leave
+    /// the new one recorded with no task) or let the swarm claim the task for someone else.
+    func testTaskInHandoffIsNotReclaimedWhenItReadsOpen() async throws {
+        rig.feed(account: "Work", utilization: 0.30)
+        rig.feed(account: "Personal", utilization: 0.10)
+        try await rig.launch(cap: 1)
+        await rig.tick()
+        let first = try XCTUnwrap(rig.spawns.first)
+        rig.feed(account: "Work", utilization: 0.97)
+        rig.markIdle(first.session)
+        rig.brShows("fx-valid", status: "open", assignee: nil)
+        rig.spawner.onSpawn = { [rig] in
+            rig?.spawner.onSpawn = nil
+            await rig?.watcherSeesNothingInProgress()
+        }
+        let before = rig.runner.argv.count
+        await rig.tick()
+        let claims = rig.runner.argv.dropFirst(before).filter { $0.starts(with: ["br", "update", "fx-valid", "--claim"]) }
+        XCTAssertEqual(claims.count, 1, "only the hand-off's own claim: \(claims)")
+        XCTAssertTrue(rig.isHandedOff(first.session))
+        let successor = rig.swarm.record(forProject: rig.project)?.agents.first { $0.handedOffFrom == first.session.id }
+        XCTAssertEqual(successor?.task, "fx-valid", "the new agent carries the task forward")
+    }
+
+    /// A hand-off spawn that fails after the old claim went back to open gives it back to the
+    /// old agent, which is still running and still recorded as holding it.
+    func testAFailedHandoffSpawnClaimsTheTaskBackForTheOldAgent() async throws {
+        rig.feed(account: "Work", utilization: 0.30)
+        rig.feed(account: "Personal", utilization: 0.10)
+        try await rig.launch(cap: 1)
+        await rig.tick()
+        let first = try XCTUnwrap(rig.spawns.first)
+        let oldName = try XCTUnwrap(first.session.agentName)
+        rig.feed(account: "Work", utilization: 0.97)
+        rig.markIdle(first.session)
+        rig.failNextCreate = true
+        let before = rig.runner.argv.count
+        await rig.tick()
+        let after = Array(rig.runner.argv.dropFirst(before))
+        let reopen = after.firstIndex { $0.starts(with: ["br", "update", "fx-valid", "--status", "open"]) }
+        let claimBack = after.firstIndex { $0.starts(with: ["br", "update", "fx-valid", "--claim", "--actor", oldName]) }
+        XCTAssertNotNil(reopen, "\(after)")
+        XCTAssertNotNil(claimBack, "\(after)")
+        if let reopen, let claimBack { XCTAssertLessThan(reopen, claimBack) }
+        XCTAssertFalse(rig.isHandedOff(first.session))
+    }
 }

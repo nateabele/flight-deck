@@ -181,6 +181,8 @@ final class SwarmRig {
     var catalogs = AdapterCatalogs([])
     /// The pools Settings defines, for the deleted-pool check; nil skips it.
     var pools: (any PoolDirectory)?
+    /// Tasks a hand-off is moving right now.
+    var inHandoff: Set<String> = []
     /// Runs when the controller asks for catalogs, so a test can act inside `plan`'s await.
     var onCatalogs: (() -> Void)?
     var projectURL: URL { URL(fileURLWithPath: SwarmFixtures.project, isDirectory: true) }
@@ -198,7 +200,8 @@ final class SwarmRig {
         let catalogs = self.catalogs
         return .init(backend: backend, launcher: launcher, host: host, makeRouter: { [router] in router }, kinds: kinds,
                      allocator: allocator, capacity: capacity,
-                     catalogs: { [weak self] in self?.onCatalogs?(); return catalogs }, pools: pools)
+                     catalogs: { [weak self] in self?.onCatalogs?(); return catalogs }, pools: pools,
+                     inHandoff: { [weak self] in self?.inHandoff.contains($0) ?? false })
     }
 
     @discardableResult

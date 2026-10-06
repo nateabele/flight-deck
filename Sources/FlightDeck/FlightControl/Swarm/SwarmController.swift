@@ -19,6 +19,10 @@ final class SwarmController {
         /// The pools Settings defines. Only asked when a lease fails, to tell "full" from "gone";
         /// nil skips the question (tests that predate it, and any caller with no directory).
         var pools: (any PoolDirectory)? = nil
+        /// Whether a hand-off is moving this task between agents right now. Such a task reads as
+        /// open in br for a moment; it is not "back to open", not claimable, and its old agent's
+        /// tab closing does not give it back.
+        var inHandoff: (String) -> Bool = { _ in false }
     }
 
     enum LaunchPlan: Equatable {
@@ -75,13 +79,13 @@ final class SwarmController {
     func taskSetChanged(inProgress: Set<String>) async {
         var freed = false
         for agent in record.agents where agent.state == .working {
-            guard let task = agent.task, !inProgress.contains(task),
+            guard let task = agent.task, !inProgress.contains(task), !deps.inHandoff(task),
                   let reading = await deps.backend.status(task, project: project) else { continue }
             // The loop walks a snapshot. A sweep (closed tab) or stop() may have retired this
             // agent during the read, releasing its lease; setting it idle again would revive it
             // with that lease, and the next sweep would release it a second time.
             guard isLive(agent.session), let current = record.agent(agent.session),
-                  current.state == .working, current.task == task else { continue }
+                  current.state == .working, current.task == task, !deps.inHandoff(task) else { continue }
             if reading.status == "closed" {
                 record.update(agent.session) { $0.state = .idle; $0.lastTask = task; $0.task = nil; $0.stateSince = now() }
                 log(.close, task: task, session: agent.session, detail: agent.agentName)
@@ -104,7 +108,7 @@ final class SwarmController {
     /// already closed or someone else holds it, its lease is released, and it leaves the swarm.
     private func sweepClosedTabs() async {
         for agent in record.agents where [.starting, .working, .idle].contains(agent.state)
-            && !deps.host.sessionExists(agent.session) {
+            && !deps.host.sessionExists(agent.session) && !(agent.task.map(deps.inHandoff) ?? false) {
             let settled = await giveBackHeldTasks(of: agent, detail: "\(agent.agentName)'s tab was closed") { reading in
                 reading.status != "closed" && (reading.assignee == nil || reading.assignee == agent.agentName)
             }
@@ -140,6 +144,7 @@ final class SwarmController {
             .union(record.agents.compactMap(\.pendingClaim))
             .union(inFlightTasks)
         let candidates = SwarmPlanner.candidates(ready, filter: record.filter, excluding: taken)
+            .filter { !deps.inHandoff($0.id) }
         var waiting: [WaitingTask] = []
         var unroutable: [WaitingTask] = []
         for task in candidates {
