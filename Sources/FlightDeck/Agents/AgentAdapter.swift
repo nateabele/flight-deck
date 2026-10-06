@@ -276,8 +276,8 @@ protocol AgentAdapter {
 
     /// **How this agent's history becomes searchable — or `nil`, the refusal.**
     ///
-    /// The fourth capability object, and the only one that is not `@MainActor` — see
-    /// `AgentSearchCorpus`'s own doc comment for why. `nil` means this agent contributes
+    /// The fourth capability object, and one of the two that are not `@MainActor` (with
+    /// `AgentOpenPromptReader`) — see `AgentSearchCorpus`'s own doc comment for why. `nil` means this agent contributes
     /// nothing to ⌘K, which is an answer the overlay can state rather than a gap that reads
     /// as "you have no conversations here".
     ///
@@ -300,8 +300,12 @@ protocol AgentAdapter {
 /// caller (`PromptService.openPrompt(inSession:)`) is what widens the window when that happens;
 /// this protocol's `openPrompt(inTranscriptTail:activity:)` stays a pure, single-window
 /// derivation and returns `nil` for "not in this window", not "does not exist".
-@MainActor
-protocol AgentOpenPromptReader {
+///
+/// **`Sendable` and not `@MainActor`**, because `PromptService` runs a widened read on a
+/// background queue: on a transcript with no open call that read is a scan of up to 8MB, and
+/// on the main actor it pinned Flight Deck at 112% CPU. A conformer is a pure function of its
+/// arguments, so this costs it nothing.
+protocol AgentOpenPromptReader: Sendable {
     func openPrompt(inTranscriptTail lines: [SourceLine], activity: SessionActivity?) -> OpenPrompt?
 }
 

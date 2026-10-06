@@ -532,4 +532,193 @@ final class PromptServiceTests: XCTestCase {
                        "no growth after the first widen attempt means stop, not spin to the ceiling")
     }
 
+    // MARK: The scheduled probe — the 2026-10-05 CPU regression
+
+    /// Writes `lines` to the transcript the store resolves for `id`, so the probe's file stamp
+    /// has a real file to stat. The content is irrelevant to the derivation — `tail` is stubbed
+    /// in every test below — only the file's identity and size are read off it.
+    private func writeTranscript(for store: SessionStore, _ id: UUID, _ lines: [String]) throws {
+        guard case .file(_, let url) = store.timelineSource(of: id) else {
+            return XCTFail("a claude tab resolves to a transcript file")
+        }
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(), withIntermediateDirectories: true
+        )
+        try (lines.joined(separator: "\n") + "\n").write(to: url, atomically: false, encoding: .utf8)
+    }
+
+    private func appendTranscript(for store: SessionStore, _ id: UUID, _ line: String) throws {
+        guard case .file(_, let url) = store.timelineSource(of: id) else {
+            return XCTFail("a claude tab resolves to a transcript file")
+        }
+        let handle = try FileHandle(forWritingTo: url)
+        defer { try? handle.close() }
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data((line + "\n").utf8))
+    }
+
+    /// **The live failure.** A `waiting` tab whose transcript held no open call was re-read
+    /// on every registry tick — 7 MB, twice over through the widen loop, every 500ms, on the
+    /// main thread, for as long as the tab stayed `waiting`. Flight Deck sat at 112% CPU. A
+    /// file that has not changed cannot have a different answer, so the second ask of an
+    /// unchanged transcript must read nothing.
+    func testThePushedProbeDoesNotRereadAnUnchangedTranscript() throws {
+        let (service, store, _, id) = makeService(activity: .waiting)
+        try writeTranscript(for: store, id, [bookkeepingLine()])
+        let reads = ReadCount()
+        let lines = [SourceLine(offset: 0, text: bookkeepingLine())]
+        service.tail = { _, _ in
+            reads.value += 1
+            return (lines, false)
+        }
+        for _ in 0..<5 {
+            guard case .failure(let code) = service.pushedOpenPrompt(inSession: id) else {
+                return XCTFail("nothing is open in a bookkeeping-only tail")
+            }
+            XCTAssertEqual(code.code, "prompt_changed")
+        }
+        XCTAssertEqual(reads.value, 1, "four of five asks were of an unchanged file")
+    }
+
+    /// The other half of the cache's contract, and the one the "no cache" rule above was
+    /// written to protect: claude answering one dialog and raising the next **appends** — so
+    /// the file changes, and a changed file is re-derived. A cache keyed on anything that
+    /// survives an append would hand the phone the dialog that is gone.
+    func testThePushedProbeRederivesOnceTheTranscriptChanges() throws {
+        let (service, store, _, id) = makeService(activity: .waiting)
+        try writeTranscript(for: store, id, [bashLine("toolu_A")])
+        let current = ReadCount()  // 0 → toolu_A, 1 → toolu_B
+        let a = [SourceLine(offset: 0, text: bashLine("toolu_A"))]
+        let b = a + [SourceLine(offset: 1, text: resultLine("toolu_A")),
+                     SourceLine(offset: 2, text: bashLine("toolu_B"))]
+        service.tail = { _, _ in (current.value == 0 ? a : b, false) }
+
+        XCTAssertEqual(try service.pushedOpenPrompt(inSession: id).get().callID, "toolu_A")
+        current.value = 1
+        XCTAssertEqual(try service.pushedOpenPrompt(inSession: id).get().callID, "toolu_A",
+                       "unchanged file: the cached answer, even though the stub has moved on")
+        try appendTranscript(for: store, id, resultLine("toolu_A"))
+        XCTAssertEqual(try service.pushedOpenPrompt(inSession: id).get().callID, "toolu_B",
+                       "an appended file is a new question")
+    }
+
+    /// **The widen leaves the main thread.** The first, small read stays inline — it answers
+    /// the overwhelmingly common case in one window, and doing it inline is what keeps a
+    /// freshly-blocked tab's card from arriving a poll late. A miss that needs widening is
+    /// the expensive case (up to the pager's 8 MB scan ceiling), and that one runs off the
+    /// main actor; the poll that launched it is told "not known yet" rather than waiting.
+    func testThePolledProbeWidensOffTheMainThreadAndReportsWhenSettled() async throws {
+        let (service, store, _, id) = makeService(activity: .waiting)
+        try writeTranscript(for: store, id, [askLine("toolu_REAL")])
+        let small = (0..<8).map { _ in SourceLine(offset: 0, text: bookkeepingLine()) }
+        let widened = [SourceLine(offset: 0, text: askLine("toolu_REAL"))] + small
+        let firstLimit = PromptService.tailRecords
+        let wideReadsOffMain = ReadCount()
+        let narrowReadsOnMain = ReadCount()
+        service.tail = { _, limit in
+            if limit == firstLimit {
+                if Thread.isMainThread { narrowReadsOnMain.value += 1 }
+                return (small, true)
+            }
+            if !Thread.isMainThread { wideReadsOffMain.value += 1 }
+            return (widened, false)
+        }
+        let settled = expectation(description: "the widen reports back")
+        service.onPolledSettled = { settled.fulfill() }
+
+        XCTAssertNil(service.polledOpenPrompt(inSession: id),
+                     "a poll does not wait on a widen; nothing is known yet")
+        XCTAssertEqual(narrowReadsOnMain.value, 1, "the first window is read inline")
+
+        await fulfillment(of: [settled], timeout: 5)
+        XCTAssertGreaterThan(wideReadsOffMain.value, 0, "the widened read ran off the main thread")
+        XCTAssertEqual(try service.polledOpenPrompt(inSession: id)?.get().callID, "toolu_REAL")
+        XCTAssertEqual(narrowReadsOnMain.value, 1, "and the settled answer is served from cache")
+    }
+
+    /// While a re-widen is in flight, an earlier *refusal* for the same tab is still served,
+    /// so a stuck episode is not reset by a transcript that keeps growing under it — a reset
+    /// on every append would mean `answerless` could never reach its 5s rung on exactly the
+    /// tabs it exists for. An earlier *call* is not served: offering a phone a dialog that
+    /// may be gone is the dangerous direction, and "not known yet" is the safe one.
+    func testAPendingWidenServesTheLastRefusalButNeverTheLastCall() async throws {
+        let (service, store, _, id) = makeService(activity: .waiting)
+        try writeTranscript(for: store, id, [bookkeepingLine()])
+        let small = (0..<8).map { _ in SourceLine(offset: 0, text: bookkeepingLine()) }
+        let firstLimit = PromptService.tailRecords
+        let gate = DispatchSemaphore(value: 0)
+        let blockWide = ReadCount()  // 1 → the off-main read waits on `gate`
+        service.tail = { _, limit in
+            if limit == firstLimit { return (small, true) }
+            if blockWide.value == 1 { gate.wait() }
+            return (small, false)
+        }
+
+        var settled = expectation(description: "first widen")
+        service.onPolledSettled = { settled.fulfill() }
+        XCTAssertNil(service.polledOpenPrompt(inSession: id))
+        await fulfillment(of: [settled], timeout: 5)
+        guard case .failure(let refusal)? = service.polledOpenPrompt(inSession: id) else {
+            return XCTFail("bookkeeping all the way up is a refusal")
+        }
+        XCTAssertEqual(refusal.code, "prompt_changed")
+
+        blockWide.value = 1
+        settled = expectation(description: "second widen")
+        try appendTranscript(for: store, id, bookkeepingLine())
+        guard case .failure(let stale)? = service.polledOpenPrompt(inSession: id) else {
+            return XCTFail("the last refusal stands while the re-read is in flight")
+        }
+        XCTAssertEqual(stale.code, "prompt_changed")
+        gate.signal()
+        await fulfillment(of: [settled], timeout: 5)
+    }
+
+    /// The other half of the rule above: a cached *call* is never served while a re-widen is
+    /// in flight. The dialog it names may be the one the user just answered in the terminal.
+    func testAPendingWidenNeverServesTheLastCall() async throws {
+        let (service, store, _, id) = makeService(activity: .waiting)
+        try writeTranscript(for: store, id, [bashLine("toolu_A")])
+        let small = (0..<8).map { _ in SourceLine(offset: 0, text: bookkeepingLine()) }
+        let open = [SourceLine(offset: 0, text: bashLine("toolu_A"))]
+        let firstLimit = PromptService.tailRecords
+        let phase = ReadCount()  // 0 → the call is in the first window; 1 → it has scrolled out
+        service.tail = { _, limit in
+            if phase.value == 0 { return (open, false) }
+            return limit == firstLimit ? (small, true) : (small, false)
+        }
+        XCTAssertEqual(try service.polledOpenPrompt(inSession: id)?.get().callID, "toolu_A")
+
+        phase.value = 1
+        let settled = expectation(description: "the re-widen lands")
+        service.onPolledSettled = { settled.fulfill() }
+        try appendTranscript(for: store, id, bookkeepingLine())
+        XCTAssertNil(service.polledOpenPrompt(inSession: id),
+                     "not known yet — never the call the file has since moved past")
+        await fulfillment(of: [settled], timeout: 5)
+    }
+}
+
+/// The store half of the scheduled probe: an answer that arrives *between* registry ticks
+/// must reach the wire without waiting for one.
+@MainActor
+final class SessionStoreRecommitTests: XCTestCase {
+    private final class StubProvider: SurfaceProvider {
+        func makeSurface(_ config: Ghostty.SurfaceConfiguration) -> Ghostty.SurfaceView? { nil }
+        func tick() {}
+        var defaultFontSize: Float { 12 }
+    }
+
+    func testRecommittingPicksUpAProbeAnswerThatArrivedBetweenTicks() {
+        let store = SessionStore(provider: StubProvider(), persistence: nil)
+        let session = store.newSession(in: URL(fileURLWithPath: NSTemporaryDirectory()))
+        var answer: Result<String, TimelineErrorCode>?
+        store.openPromptProbe = { _ in answer }
+        store.applyRegistryForTesting([session.id: SessionStatus(activity: .waiting)])
+        XCTAssertNil(store.openPromptCalls[session.id], "nothing known on the tick itself")
+
+        answer = .success("toolu_LATE")
+        store.recommitStatuses()
+        XCTAssertEqual(store.openPromptCalls[session.id], "toolu_LATE")
+    }
 }

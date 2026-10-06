@@ -30,16 +30,20 @@ Connect the repo in the Pages dashboard, then add `flightdeckapp.dev` as a custo
 domain. Because there's no build step, `wrangler pages deploy site` works just as
 well for a one-off publish.
 
-## Before it goes live
+## On each release
 
-**The download link is a placeholder.** Two occurrences of
-`/download/FlightDeck-latest.dmg` in `index.html` (hero and closing CTA), each
-marked with a `PLACEHOLDER:` comment. Point them at the real release artifact
-once shipping is set up:
+**The download link names the release asset directly.** Two occurrences in
+`index.html` (hero and closing CTA) point at the GitHub release asset,
+`releases/download/vX.Y.Z/FlightDeck-vX.Y.Z-macOS-arm64.zip`. Bump the tag and
+the file name together when a new release is published. `releases/latest/download/`
+can't stand in for it, because the asset name carries the version:
 
 ```bash
-rg -n 'FlightDeck-latest.dmg' index.html
+rg -n 'releases/download' index.html
 ```
+
+The build is signed but not notarized, so the closing CTA tells visitors to
+right-click → Open on first launch. Drop that line once releases are notarized.
 
 Everything else on the page is accurate as written — see below.
 
@@ -151,12 +155,24 @@ way through it.
 
 The sidebar in the demo mirrors the real app deliberately: row geometry, the
 hover-revealed close button, the collapsed-project rollup that surfaces the most
-demanding child state, and the four status glyphs from
-`Sources/FlightDeck/SessionStatusIcon.swift` (grey `circle.fill` idle, accent
-`circle.fill` unread, indeterminate spinner + subagent count busy, orange
-`questionmark.circle.fill` waiting, green `terminal.fill` shell). SF Symbols
-aren't available on the web, so those are redrawn as inline SVG in `demo.js`.
-If the app's status vocabulary changes, change it here too.
+demanding child state, and the status vocabulary from
+`Sources/FlightDeck/SessionStatusIcon.swift`: a leading glyph (faint `circle.fill`
+idle, accent `circle.fill` unread, indeterminate spinner busy, orange
+`questionmark.circle.fill` waiting), the sub-agent count at the trailing edge, and a
+green `terminal.fill` badge beside the title for a session with background work
+(a decoration on any state, not a status of its own — a session's `bg` flag). The
+selected row is the unemphasized gray fill, because the terminal holds focus. SF
+Symbols aren't available on the web, so the glyphs are redrawn as inline SVG in
+`demo.js`. If the app's status vocabulary changes, change it here too.
+
+The terminal pane is Claude Code as it actually draws itself, measured off a live
+`claude` in tmux (`capture-pane -p -e`), not remembered: `⏺` bullets (white for the
+model, grey/green/pink as a tool runs/succeeds/fails), the `⎿` result gutter, numbered
+`Update(file)` diffs, the `✶` spinner row, the `─` ruled composer and the `╌` ruled
+permission dialog. `T` holds one body per session; the pane then follows the
+session's status in the beat — spinner while busy, the permission dialog while
+waiting, `✻ Crunched for …` once idle (plus `1 shell still running` and the footer's
+`1 shell` when `bg`). Re-capture rather than eyeballing when Claude Code's UI changes.
 
 ## Notes
 
