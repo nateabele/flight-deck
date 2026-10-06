@@ -1154,8 +1154,9 @@ final class SessionStore: ObservableObject {
     private var subagentCounts: [UUID: Int] = [:]
 
     /// Each tab's background-agent tree, rebuilt from `subagents/` files by `ClaudeRuntime`.
-    /// Kept beside `subagentCounts` and cleared wherever it is, so a closed or retargeted tab
-    /// never shows the previous conversation's agents.
+    /// Cleared at close, repin and retarget, so a tab never shows the previous conversation's
+    /// agents — but, unlike `subagentCounts`, NOT when the registry loses the tab's row (see
+    /// `commitStatuses`): the watcher would never republish a blocked agent's unchanged tree.
     private(set) var subagentTrees: [UUID: SubagentTree] = [:]
 
     /// When the user last submitted a prompt, by conversation id. Filled by the prompt-submit
@@ -8387,9 +8388,14 @@ final class SessionStore: ObservableObject {
         // UUID does not inherit a count from the dead one. Counts for sessions that
         // never had a status are deliberately left alone — that is the
         // count-arrives-before-registry case.
+        //
+        // The tree is NOT dropped here: its lifetime follows the runtime attachment (cleared at
+        // repin, retarget and close through `applySubagents(tab, .empty)`), not the registry
+        // row. `SubagentWatcher` republishes only when its own tree changes, and a blocked
+        // agent writes nothing — so a tree dropped on a registry blink came back as
+        // `subagents: []` on the phone for good, in exactly the case this feature is for.
         for id in previous.keys where next[id] == nil {
             subagentCounts.removeValue(forKey: id)
-            subagentTrees.removeValue(forKey: id)
         }
         // Also `emitActivity`'s second and third axes, below: a tick can move either of these
         // alone, with every `SessionStatus` unchanged, and that tick still has to reach the

@@ -111,4 +111,20 @@ final class SessionStoreSubagentLifecycleTests: XCTestCase {
         store.ingestDialogChangesForTesting([.cleared(session.pinnedConversationID)])
         XCTAssertNil(store.pendingDialog(for: session.id))
     }
+
+    // MARK: 2. The tree outlives a lost registry row
+
+    /// A blocked agent writes nothing, so the watcher never republishes; a tree dropped on a
+    /// registry blink would leave the phone holding `[]` for exactly the agent it needs.
+    func testATreeSurvivesTheRegistryLosingTheTab() {
+        let (store, session) = make()
+        store.applyRegistryForTesting([session.id: SessionStatus(activity: .busy, subagentCount: 1)])
+        store.applySubagents(session.id, tree())
+        let replicator = attachedReplicator(to: store)
+        store.applyRegistryForTesting([:])
+        store.applyRegistryForTesting([session.id: SessionStatus(activity: .busy, subagentCount: 1)])
+        XCTAssertEqual(activityEvents(replicator, session.id).last, wireTree,
+                       "\(replicator.recorded)")
+        XCTAssertEqual(wireSession(store, session.id)?.subagents, wireTree)
+    }
 }
