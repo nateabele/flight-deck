@@ -1152,6 +1152,18 @@ final class SessionStore: ObservableObject {
     /// hook (a later task); until then empty, and the tree falls back to the process start.
     var lastPromptSubmits: [UUID: Date] = [:]
 
+    /// The agent and call behind the permission dialog a conversation is showing, by
+    /// conversation id. Raised by the record-only `PermissionRequest` hook; Esc fires no hook,
+    /// so this can outlive a dismissed dialog until the next prompt or tool result.
+    private(set) var pendingDialogs: [UUID: PendingDialog] = [:]
+
+    func pendingDialog(forConversation id: UUID) -> PendingDialog? { pendingDialogs[id] }
+
+    func pendingDialog(for tab: UUID) -> PendingDialog? {
+        guard let at = locate(tab) else { return nil }
+        return pendingDialogs[repos[at.repo].sessions[at.session].pinnedConversationID]
+    }
+
     func subagentTree(for tab: UUID) -> SubagentTree { subagentTrees[tab] ?? .empty }
 
     /// One registry watcher per account with a live claude tab, keyed like every other
@@ -7456,6 +7468,7 @@ final class SessionStore: ObservableObject {
     private func resetComposerReadiness(for tabID: UUID, conversation: UUID) {
         composerReadinessByTab.removeValue(forKey: tabID)
         hookEventWatcher?.forget(conversation)
+        pendingDialogs[conversation] = nil
     }
 
     /// The registry tick's half of the same rule, which is a *demotion* and not a reset: it
@@ -7531,6 +7544,7 @@ final class SessionStore: ObservableObject {
             composerReadinessByTab.removeValue(forKey: tabID)
         }
         hookEventWatcher?.forget(conversation)
+        pendingDialogs[conversation] = nil
     }
 
     /// The tab's terminal screen, or nil when there is no surface or it cannot be read.
@@ -7601,12 +7615,27 @@ final class SessionStore: ObservableObject {
         guard isStatusWatchingEnabled, hookEventWatcher == nil else { return }
         let watcher = HookEventWatcher(
             directory: hookEventDirectory,
-            clock: clock
-        ) { [weak self] readiness in
-            self?.ingestHookEvents(readiness)
-        }
+            clock: clock,
+            onChange: { [weak self] readiness in
+                self?.ingestHookEvents(readiness)
+            },
+            onDialog: { [weak self] in self?.ingestDialogChanges($0) }
+        )
         watcher.start()
         hookEventWatcher = watcher
+    }
+
+    private func ingestDialogChanges(_ changes: [DialogAttribution.Change]) {
+        for change in changes {
+            switch change {
+            case .raised(let conversation, let dialog): pendingDialogs[conversation] = dialog
+            case .cleared(let conversation): pendingDialogs[conversation] = nil
+            case .promptSubmitted(let conversation, let at):
+                pendingDialogs[conversation] = nil
+                lastPromptSubmits[conversation] = at
+            }
+        }
+        recommitStatuses()
     }
 
     /// Fans one hook-log tick out to every live claude runtime. The log carries no account —
