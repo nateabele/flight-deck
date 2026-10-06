@@ -36,7 +36,9 @@ A swarm is a persisted record. There is at most one swarm per project.
 
 - Stored in `~/Library/Application Support/Flight Deck/swarms.json`. Every action is appended to
   `swarm-log/<swarm id>.jsonl` (claim, spawn, reuse, prompt, close, hand-off, spill, pause,
-  error).
+  error). A `swarms.json` that does not decode, or that a newer build wrote, is moved aside
+  (`swarms.json.corrupt-<time>`, `swarms.json.v<N>-<time>`) before the app starts with no swarms,
+  so the next save never overwrites it.
 - **After an app restart, a swarm comes back `paused`**, with a banner on the project header:
   "Swarm paused after restart · Resume". The agents themselves survive (fd-abduco). FD does not
   start claiming again until you say so.
@@ -193,9 +195,10 @@ Pause/Resume and the meters. Launch and rule editing stay on the Mac.
   the swarm pauses with a banner.
 - **The claim races:** the next task is taken (§4).
 - **No composer-ready within 2 min:** the agent is marked *stuck at start* and its claim is
-  returned to open. The agent is not killed.
+  returned to open. The agent is not killed. It counts as a failed launch toward the three in a
+  row, and its account lease is released, since it is never reused.
 - **`resetContext` fails:** spawn a new agent instead. The old agent stays idle and is not reused
-  again.
+  again; its account lease is released.
 - **An unroutable block:** skipped, shown in the launch sheet and the header popover.
 
 ## 11. Testing
@@ -265,7 +268,7 @@ the wire changes, the phone views, and disable.
 
 From `docs/superpowers/plans/2026-10-04-flight-control-l3-s-swarm.md`:
 
-1. `session.new` replies with the existing `ServerFrame.session(cid:UUID)` after creation (or an
+1. `session.new` replies with the existing `ServerFrame.session(cid: Int, UUID)` after creation (or an
    `err`), not a new frame case; old phones send it fire-and-forget, old CLIs treat any non-err as
    the ack.
 2. `lastActiveAt` is `SessionStore.lastActiveAt(for:)`, stamped in `commitStatuses`, not a
@@ -320,7 +323,8 @@ Found while building (evidence in brackets):
 25. Turn Off drains then stops at once (claims of still-working agents return to open immediately),
     deviating from §9 "drain ... then stop", because waiting could block Turn Off indefinitely
     [Task 13].
-26. Remove from Repo runs `br agents --remove --force` first (which leaves `AGENTS.md.bak`), falling
+26. Remove from Repo runs `br agents --remove --force` first (which leaves `AGENTS.md.bak`; FD
+    deletes that backup unless one was already there), falling
     back to removing the section between a `<!-- br-agent-instructions-v1 -->`-style opener and the
     probed closer `<!-- end-br-agent-instructions -->` (no -v1) [Task 13 probe].
 27. The plan's test fixture key `am file_reservations release` could never match MultiRunner (it
@@ -330,6 +334,17 @@ Found while building (evidence in brackets):
     sends to clear the composer [Task 14].
 29. `ObserveDrawer`'s `observe-drawer-expanded`/`-collapsed` container ids now use
     `.accessibilityElement(children: .contain)`; a container id otherwise stamps every child.
+30. Final-review fixes [final fix wave]: every controller path re-checks, after each await, that
+    its agent is still live (in the swarm, not retired, swarm not stopped), so stop() or a
+    closed-tab sweep is never undone and no lease is released twice; a claim that lands after
+    stop() goes back to open and nothing is typed. Paused swarms tick (fill nothing; retry restored
+    claims, sweep closed tabs). A launch rechecks `running` before opening a tab, and a reuse before
+    waking or resetting one. A stuck-at-start or prompt failure counts toward the three-in-a-row
+    pause (a prompt that lands resets the count, not the tab opening), and an agent excluded from
+    reuse gives its lease back. Turn Off reads claims from the record, so it works with no
+    controller (it then stops the record directly). The hand-off `spawn` refuses without a claim,
+    which `SessionStore.useSwarmService` wires to the service's backend; a hand-off to a session
+    with no agent name is refused.
 
 UI-test status: `scripts/test-ui-flight-control.sh` ends FLIGHT CONTROL UI PASS on run 6 (both
 `SwarmUITests` cases: `testHandOffMarkerFromASeededSwarm`,

@@ -22,6 +22,8 @@ scripts/.release-build.log
 scripts/.adapterprobe.log
 scripts/.flight-control-ui.log
 scripts/adapterprobe/corpus/
+# FixtureBackendTests runs the fixture stub with python3, which writes bytecode beside it.
+scripts/__pycache__/
 .superpowers/
 .claude/
 .aider*

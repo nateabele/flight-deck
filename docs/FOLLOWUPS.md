@@ -2303,6 +2303,10 @@ flagged as most likely to differ from the tests. The maintainer's to run.
     live: codex `effort` and `/new` (spec §15 items 15-16), and reservations time is parsed from a
     relative `granted_at` (item 21). UI test: FLIGHT CONTROL UI PASS on run 6 against the stub
     backend only (runs 1-5 failed for harness reasons, see spec §15).
+  - Known L3-S follow-ups from the final review: an agent `stop()` retired gets no "done" marker
+    in `SwarmAnnotations`, and a stopped swarm's summary is not visible after it stops.
+    `SwarmService.applyProjections` awaits each project's `taskSetChanged` in turn, so one slow
+    `br show` delays completion detection for every other project.
   - **Launch a swarm from released tasks** — pick with `bv`, claim, spawn agents into the
     project's sessions.
   - **A fleet table** — agent × current task × state × last active × account, a row jumping to

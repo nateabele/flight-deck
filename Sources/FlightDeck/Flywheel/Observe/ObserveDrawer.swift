@@ -24,7 +24,8 @@ struct ObserveLaneRow: Equatable, Sendable {
     var links: [ObserveLaneLink] = []
 }
 
-/// Pure reduction from a projected `Agent` to the drawer's four rows. No SwiftUI, no I/O —
+/// Pure reduction from a projected `Agent` to the drawer's rows: four, plus the Assignment lane
+/// first for a swarm agent. No SwiftUI, no I/O —
 /// `ObserveDrawer` is a thin wiring of this plus the collapse/toggle callbacks, so every
 /// decision here is unit-testable without a view host (AGENTS.md rule 2: agents can't drive
 /// the real GUI, so logic that lived in the view body would be unverifiable by an agent).
@@ -45,7 +46,7 @@ struct ObserveLaneModel {
 
     /// `nil` agent means the tab's identity never showed up in this poll (the external
     /// case documented on `FlywheelProjection.agent(for:)`) — there is no per-lane data to
-    /// degrade, so the drawer itself is absent rather than showing four unavailable rows.
+    /// degrade, so the drawer itself is absent rather than showing a column of unavailable rows.
     static func lanes(for agent: FlywheelProjection.Agent?, assignment: SwarmAssignmentDetail? = nil,
                       unavailable: Set<String>) -> [ObserveLaneRow] {
         guard let agent else { return [] }
