@@ -62,7 +62,9 @@ enum FlightControlComposition {
         // Swarm: routes through L3-R, leases through L3-U. `makeRouter` asks the service every
         // time — it snapshots the rules, so a cached router would route on stale rules.
         store.swarmDependencies = SwarmDependencies(makeRouter: { routing.makeRouter() }, kinds: routing.kindStore,
-                                                    allocator: allocator, capacity: allocator, pools: pools)
+                                                    allocator: allocator, capacity: allocator, pools: pools,
+                                                    // Settings' enabled agents, like release and validation: not every registered harness.
+                                                    catalogs: { [weak routing] in await routing?.catalogs() ?? AdapterCatalogs([]) })
 
         // Usage: which tabs are swarm agents, so manual tabs alone get the over-limit notice.
         // Never builds the lazy swarm service: a Mac that never ran a swarm has no swarm tabs.

@@ -452,7 +452,10 @@ struct FlightDeckApp: App {
         let root = Self.stateDirectory() ?? FileSessionPersistence.defaultDirectory()
         let service = CapabilityIndexService(
             directory: CapabilityIndexService.directory(stateRoot: root),
-            // Every registered harness. Until L3-R fills `modelCatalog()` these are the L3-0
+            // Every registered harness, deliberately: the index scores models whether or not the
+            // user enabled their agent today (enabling one later should not wait for a refresh).
+            // Routing, spills and the launch sheet use `RoutingService.catalogs()`, which honors
+            // Settings. Until L3-R fills `modelCatalog()` these are the L3-0
             // stubs' empty catalogs, so a refresh proposes no aliases before integration.
             catalogs: { await RoutingCapabilityRegistry.standard().catalogs(enabled: Set(AgentID.allCases.map(\.harnessID))) })
         service.startScheduling(clock: store.watchClock)

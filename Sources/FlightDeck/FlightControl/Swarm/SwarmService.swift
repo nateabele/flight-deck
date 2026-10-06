@@ -20,6 +20,10 @@ struct SwarmDependencies {
     var capacity: any CapacityReader
     /// The pools the launch sheet's Override picker offers; L3-U's pool store replaces the stand-in.
     var pools: any PoolDirectory = DefaultPoolDirectory(harnesses: ["claude", "codex"])
+    /// The model catalogs a spill and the launch sheet route against. Integration sets this to
+    /// `RoutingService.catalogs()`, so a harness disabled in Settings is never a target. Nil
+    /// (fixtures, tests that stub the router) falls back to every registered harness enabled.
+    var catalogs: (() async -> AdapterCatalogs)? = nil
 }
 
 /// L3-U's hand-off driver answers these; L3-S only routes the phone's decision to it.
@@ -239,7 +243,7 @@ final class SwarmService: ObservableObject {
             record: record, store: store,
             deps: .init(backend: backend, launcher: launcher, host: WeakSwarmHost(host), makeRouter: deps.makeRouter, kinds: deps.kinds,
                         allocator: deps.allocator, capacity: deps.capacity,
-                        catalogs: { await registry.catalogs(enabled: Set(registry.harnesses)) }, pools: deps.pools,
+                        catalogs: deps.catalogs ?? { await registry.catalogs(enabled: Set(registry.harnesses)) }, pools: deps.pools,
                         inHandoff: { [weak self] task in self?.handoffTasks[key]?.contains(task) ?? false }),
             now: now)
         // A rebuild orphans the old controller, which may still have launches in flight; only
