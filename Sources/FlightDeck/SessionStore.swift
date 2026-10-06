@@ -1007,6 +1007,20 @@ final class SessionStore: ObservableObject {
             workingDirectory: { [weak self] conversationID in
                 self?.repos.flatMap(\.sessions)
                     .first { $0.pinnedConversationID == conversationID }?.transcriptDirectory
+            },
+            // Both resolve conversation -> tab live, for the same reason as the two above. The
+            // process start bounds which `subagents/` files are this run's agents: a resumed
+            // conversation's folder still holds every agent of its earlier runs.
+            agentStartedAt: { [weak self] conversationID in
+                guard let self,
+                      let tab = self.repos.flatMap(\.sessions)
+                          .first(where: { $0.pinnedConversationID == conversationID })?.id,
+                      let pid = self.claudePID(of: tab),
+                      let micros = ProcessTree().startTime(of: pid) else { return nil }
+                return Date(timeIntervalSince1970: TimeInterval(micros) / 1_000_000)
+            },
+            lastPromptSubmit: { [weak self] conversationID in
+                self?.lastPromptSubmits[conversationID]
             })
         runtimes[instance] = runtime
         return runtime
@@ -1128,6 +1142,17 @@ final class SessionStore: ObservableObject {
     /// Sub-agent counts kept separately so one arriving before the registry has been
     /// read is not lost, and so a registry refresh never clobbers it.
     private var subagentCounts: [UUID: Int] = [:]
+
+    /// Each tab's background-agent tree, rebuilt from `subagents/` files by `ClaudeRuntime`.
+    /// Kept beside `subagentCounts` and cleared wherever it is, so a closed or retargeted tab
+    /// never shows the previous conversation's agents.
+    private(set) var subagentTrees: [UUID: SubagentTree] = [:]
+
+    /// When the user last submitted a prompt, by conversation id. Filled by the prompt-submit
+    /// hook (a later task); until then empty, and the tree falls back to the process start.
+    var lastPromptSubmits: [UUID: Date] = [:]
+
+    func subagentTree(for tab: UUID) -> SubagentTree { subagentTrees[tab] ?? .empty }
 
     /// One registry watcher per account with a live claude tab, keyed like every other
     /// registry here.
@@ -4311,6 +4336,7 @@ final class SessionStore: ObservableObject {
         stopStatusWatchingIfUnused(account: closed.account)
         statuses.removeValue(forKey: id)
         subagentCounts.removeValue(forKey: id)
+        subagentTrees.removeValue(forKey: id)
         resetComposerReadiness(for: id, conversation: closedConversation)
         // A queued prompt for a tab that no longer exists is the most literal case of "text
         // that will never be typed", and its tokens go with it: `acceptedPromptTokens` is
@@ -8272,6 +8298,7 @@ final class SessionStore: ObservableObject {
         // count-arrives-before-registry case.
         for id in previous.keys where next[id] == nil {
             subagentCounts.removeValue(forKey: id)
+            subagentTrees.removeValue(forKey: id)
         }
         // Also `emitActivity`'s second and third axes, below: a tick can move either of these
         // alone, with every `SessionStatus` unchanged, and that tick still has to reach the
@@ -8552,6 +8579,12 @@ final class SessionStore: ObservableObject {
         }
     }
 
+    /// Stored per tab. The wire half lands in a later task; until then this only stores.
+    func applySubagents(_ id: UUID, _ tree: SubagentTree) {
+        guard subagentTrees[id] != tree else { return }
+        subagentTrees[id] = tree
+    }
+
     /// Applied from a transcript watcher. Stored even when the registry has not yet
     /// reported this session, so the next `applyRegistry` picks it up.
     func applySubagentCount(_ id: UUID, _ count: Int) {
@@ -8637,6 +8670,7 @@ final class SessionStore: ObservableObject {
         // and diffs the result against the pre-call snapshot to decide notifications.
         // Editing `statuses` here would corrupt that "before" picture.
         subagentCounts[tabID] = 0
+        subagentTrees[tabID] = nil
 
         stopWatching(tabID)
 
@@ -8700,6 +8734,7 @@ final class SessionStore: ObservableObject {
         // never fires. The badge would sit at its pre-retarget value until the new watcher
         // happens to count something itself, which may be never.
         subagentCounts[tabID] = 0
+        subagentTrees[tabID] = nil
 
         stopWatching(tabID)
         startWatching(tabID: tabID)
@@ -8844,6 +8879,7 @@ final class SessionStore: ObservableObject {
         case .title(let title): applyExternalTitle(tabID, title)
         case .activity(let activity): applyActivity(activity, to: tabID)
         case .subagentCount(let count): applySubagentCount(tabID, count)
+        case .subagents(let tree): applySubagents(tabID, tree)
         case .turnEnded: applyTurnEnded(to: tabID)
         case .turnAborted: applyTurnAborted(to: tabID)
         // Persisted only when it actually changed. The watcher already suppresses an unchanged
