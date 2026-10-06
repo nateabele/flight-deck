@@ -33,12 +33,17 @@ struct DialogAttribution {
             recent[r.sessionID] = Array(list.suffix(32))
             return nil
         case "PermissionRequest":
+            // A subagent's request always carries agent_id, so an id-less one is the main
+            // agent's: matching nil == nil keeps a main-agent dialog from being attributed to
+            // a subagent's identical recent call.
             let callID = r.toolUseID ?? recent[r.sessionID]?.last(where: {
-                $0.tool == r.toolName && $0.input == r.toolInput
-                    && (r.agentID == nil || $0.agentID == r.agentID)
+                $0.tool == r.toolName && $0.input == r.toolInput && $0.agentID == r.agentID
             })?.toolUseID
             guard let callID else { return nil }
-            let agent = r.agentID ?? recent[r.sessionID]?.last { $0.toolUseID == callID }?.agentID
+            // A request carrying its own tool_use_id but no agent_id: that id is unique, so
+            // the PreToolUse with the same id names the agent.
+            let agent = r.agentID
+                ?? (r.toolUseID != nil ? recent[r.sessionID]?.last { $0.toolUseID == callID }?.agentID : nil)
             let dialog = PendingDialog(agentID: agent, callID: callID)
             pending[r.sessionID] = dialog
             return .raised(r.sessionID, dialog)
