@@ -352,3 +352,5 @@ UI-test status: `scripts/test-ui-flight-control.sh` ends FLIGHT CONTROL UI PASS 
 failed for harness reasons, each fixed (items 28, 29, a screen lock, and a stub that wrote only the
 first line of the guard message). It has not run against the real stack (real claude/codex/am/br
 plus L3-R/L3-U conformers); that is the integration branch's job and the maintainer's checklist.
+
+**Integrated (2026-10-06):** integration branch `l3-integration`, code head 4db609f0 (not merged to master). The real graph is built in one place, `FlightControlComposition`; see `docs/FOLLOWUPS.md` for what is still open.

@@ -233,3 +233,5 @@ in a scratch repo.
   `Tests/FlightDeckTests/Fixtures/FlightControlL3/` (`br-list-with-blocks.json`, `kinds.json`,
   `usage-timeline.json`)
 - `docs/FOLLOWUPS.md`: replace "Level 3 'Operate' — not started" with pointers to these specs
+
+**Integrated (2026-10-06):** integration branch `l3-integration`, code head 4db609f0 (not merged to master). The real graph is built in one place, `FlightControlComposition`; see `docs/FOLLOWUPS.md` for what is still open.

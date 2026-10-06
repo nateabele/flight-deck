@@ -1,9 +1,11 @@
 # Flight Control Level 3 — swarm checklist (L3-S)
 
-Real tasks to try once L3-S (and the integration branch that wires L3-R/L3-U's real conformers)
-is merged and a Release build is installed. Spec §12. Agents cannot drive the GUI here
-(AGENTS.md rule 2); `scripts/test-ui-flight-control.sh` covers the same surfaces against stubs
-only (it passed against the stub fixture backend, never against real claude/codex/am/br).
+Real tasks to try once the `l3-integration` branch (which wires L3-R/L3-I/L3-U's real conformers
+into the swarm) is merged and a Release build is installed. Spec §12. Agents cannot drive the GUI
+here (AGENTS.md rule 2); the UI suites (`scripts/test-ui-flight-control.sh` and the others) run
+under `-FlightControlFixtureBackend`, which skips `FlightControlComposition`, so they passed
+without ever touching the real joined graph or real claude/codex/am/br. These tasks are the only
+real-stack check.
 
 Use a scratch project with Flight Control on ("Set Up Flight Control…" in the project header's
 context menu, on a throwaway repo under your home directory).
@@ -37,3 +39,16 @@ Also look at, once each:
   or task-sync hook is still installed): the confirmation lists the guard, the task-sync hook and
   the AGENTS.md section, and says the task data stays. Afterwards expect an `AGENTS.md.bak` next to
   `AGENTS.md`: `br agents --remove` writes it, and Flight Deck does not delete it.
+
+Level 3 integration checks (routing, capacity and capability index, joined by
+`FlightControlComposition`):
+
+6. **Routing rule.** In Settings → Flight Control → Routing, write "Use Codex for unit and
+   integration tests" and confirm it. Release an intake with a test task, and check that the
+   task's routing chip says *rule*.
+7. **Capacity and spill.** In Settings → Flight Control → Capacity, put two claude accounts in one
+   pool. Run a swarm agent on the first until its bar passes the soft tick. Check that the next
+   task starts on the second account. If "Confirm hand-offs" is on, the confirmation arrives on
+   the phone only; the old tab then shows "handed off →" and is no longer driven.
+8. **Capability index.** In Settings → Flight Control → Capability index, click **Refresh now**
+   (this spends tokens). Check that the heatmap fills in and each cell links to its source.

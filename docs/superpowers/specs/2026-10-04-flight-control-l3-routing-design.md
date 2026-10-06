@@ -199,3 +199,5 @@ Plan: `docs/superpowers/plans/2026-10-04-flight-control-l3-r-routing.md`.
 14. (Plan deviation 15.) The encode fixture is written in the shape of an encode output, not recorded live.
 15. Follow-up ops (non-create) carry no kind: the schema forces `taskKind` null. Any block they
     would need routes as `implement-simple` with "no kind from planning;" (review finding M7).
+
+**Integrated (2026-10-06):** integration branch `l3-integration`, code head 4db609f0 (not merged to master). The real graph is built in one place, `FlightControlComposition`; see `docs/FOLLOWUPS.md` for what is still open.
