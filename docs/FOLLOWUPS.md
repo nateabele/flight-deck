@@ -2282,7 +2282,28 @@ flagged as most likely to differ from the tests. The maintainer's to run.
   swarm ([L3-S](superpowers/specs/2026-10-04-flight-control-l3-swarm-design.md)). They cover
   launch, contested visibility, and the account strip (as pools and meters). They replace the
   fleet table with annotations on existing surfaces. Still deferred: the remaining tending
-  actions, the Agent Mail inbox and the convergence gauge below. Original list, kept for history:
+  actions, the Agent Mail inbox and the convergence gauge below.
+  - **L3-I capability index — built** on its own branch (2026-10-04 plan
+    `superpowers/plans/2026-10-04-flight-control-l3-i-capability-index.md`), not merged.
+    Pure scoring/validation/storage in `Sources/IntakeKit/FlightControl/`, service and runner in
+    `Sources/FlightDeck/FlightControl/`, pane under Settings → Capability Index (temporary tab). Open for
+    integration: hand `capabilityIndexService.live` to L3-R's router and its `hints(for:…)` to
+    L3-R's rule list; move `CapabilityIndexPane` into L3-R's `FlightControlSettingsTab`; real catalogs
+    arrive with L3-R's `modelCatalog()`. The UI test is opt-in (`TEST_RUNNER_INDEX_UI=1`), not in
+    `smoke.sh`. The live probe is `INDEX_LIVE=1 FD_TEST_FILTER=IndexLiveProbeTests ./scripts/test-unit.sh`.
+    Known gaps (deferred):
+    - The validator trims spaces but not newlines (applied the same way in alias matching).
+    - The proposer proposes the bare model when a bracketed setting is not a known knob.
+    - The confidence denominator counts sources that returned no data.
+    - A model-supplied `retrievedAt` is kept as row provenance; the trusted time is `SourceResult.refreshedAt`.
+    - A refresh has no timeout or cancel, so a hung `claude` leaves Roll back disabled until relaunch.
+    - A refresh where every source failed still writes a snapshot, which can push real ones out of the 12 kept.
+    - The agent model field accepts an empty model and a token cap of 0, and saves on every keystroke.
+    - `knownCatalogs` is filled only by a refresh in the session; load it at service init on integration.
+    - A `prune()` failure after a good write is reported as a snapshot save failure.
+    - The manual-score discount field is not clamped to 0...1.
+    - `CapabilityIndexUITests` has not yet run live (the screen was locked).
+  Original list, kept for history:
   - **Launch a swarm from released tasks** — pick with `bv`, claim, spawn agents into the
     project's sessions.
   - **A fleet table** — agent × current task × state × last active × account, a row jumping to

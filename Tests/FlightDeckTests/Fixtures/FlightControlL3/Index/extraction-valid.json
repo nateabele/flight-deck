@@ -1,0 +1,5 @@
+{"source":"terminal-bench","rows":[
+ {"benchmarkModel":"GPT-6 Sol (high)","score":61.3,"unit":"percent","url":"https://www.tbench.ai/leaderboard","retrievedAt":"2026-10-04T06:00:00Z","quotedFigure":"61.3%"},
+ {"benchmarkModel":"Opus 5 (high)","score":58.0,"unit":"percent","url":"https://www.tbench.ai/leaderboard","retrievedAt":"2026-10-04T06:00:00Z","quotedFigure":"58.0%"},
+ {"benchmarkModel":"Sonnet 5","score":49.75,"unit":"percent","url":"https://www.tbench.ai/leaderboard","retrievedAt":"2026-10-04T06:00:00Z","quotedFigure":"49.75 %"}
+]}

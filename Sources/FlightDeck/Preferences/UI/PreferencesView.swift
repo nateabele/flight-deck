@@ -54,6 +54,9 @@ struct PreferencesView: View {
                 // every descendant, which renamed the section buttons, the project picker and the
                 // scroll view to "prefs-flight-control" and hid `fc-section-routing` from XCUITest.
                 .tag(PreferencesTab.flightControl)
+            CapabilityIndexSettingsTab(index: sessions.capabilityIndexService)
+                .tabItem { Label("Capability Index", systemImage: "chart.bar.xaxis") }
+                .tag(PreferencesTab.capabilityIndex)
         }
         .frame(width: 720, height: 560)
     }
