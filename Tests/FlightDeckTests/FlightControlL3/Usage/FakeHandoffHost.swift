@@ -21,6 +21,7 @@ final class FakeHandoffHost: HandoffHost {
     private(set) var released: [String] = []
     private(set) var stopped: [UUID] = []
     private(set) var marked: [(old: UUID, new: UUID)] = []
+    private(set) var handoffs: [CompletedHandoff] = []
     private(set) var log: [HandoffLogEntry] = []
     private(set) var notices: [String] = []
 
@@ -41,7 +42,9 @@ final class FakeHandoffHost: HandoffHost {
     /// Whether the exit command "was delivered"; scripted false to model a tab that refused it.
     var stopDelivered = true
     func stopAgent(_ session: SessionRef) async -> Bool { events.append("stop"); stopped.append(session.id); return stopDelivered }
-    func markHandedOff(_ old: SessionRef, to new: SessionRef) { events.append("mark"); marked.append((old.id, new.id)) }
+    func markHandedOff(_ handoff: CompletedHandoff) {
+        events.append("mark"); marked.append((handoff.old.id, handoff.new.id)); handoffs.append(handoff)
+    }
     func record(_ entry: HandoffLogEntry) { events.append("record:\(entry.outcome.rawValue)"); log.append(entry) }
     func notify(title: String, body: String, session: SessionRef) { events.append("notify"); notices.append(title) }
 }

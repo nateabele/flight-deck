@@ -22,9 +22,21 @@ protocol HandoffHost: AnyObject {
     func releaseReservations(of agent: String, project: URL) async -> String?
     /// True only when the exit command was accepted for delivery (not proof the agent exited); false means it is still running.
     func stopAgent(_ session: SessionRef) async -> Bool
-    func markHandedOff(_ old: SessionRef, to new: SessionRef)
+    func markHandedOff(_ handoff: CompletedHandoff)
     func record(_ entry: HandoffLogEntry)
     func notify(title: String, body: String, session: SessionRef)
+}
+
+/// A hand-off that finished: the old agent was told to exit and the new one holds the task.
+/// Carries what the swarm needs to record the new agent — the block and lease it was actually
+/// spawned on (a spill changes both) and the task, whose project names the swarm. Two session
+/// refs alone could not: the swarm would have recorded the old agent's block and lease.
+struct CompletedHandoff: Equatable {
+    var old: SessionRef
+    var new: SessionRef
+    var task: TaskRef
+    var block: ExecutionBlock
+    var lease: AccountLease
 }
 
 /// One line of the hand-off log (L3-U §5.8): both tabs and both accounts, so "where did my
@@ -76,8 +88,8 @@ struct BrAmHandoffCommands {
 
 /// The production host. The parts only the swarm knows — a task's
 /// kind for spill, the catalogs, an agent's reservations, marking the old tab "handed off →",
-/// where the swarm log lives — are hooks L3-S sets at integration; their defaults are the safe
-/// answer (no spill, keep the planner's list, a log file of its own).
+/// where the swarm log lives — are hooks `FlightControlGraph.attach` sets; their defaults are the
+/// safe answer (no spill, keep the planner's list, a log file of its own).
 @MainActor
 final class StoreHandoffHost: HandoffHost {
     private weak var store: SessionStore?
@@ -87,7 +99,7 @@ final class StoreHandoffHost: HandoffHost {
     var kindLookup: (ExecutionBlock, URL) -> TaskKind? = { _, _ in nil }
     var catalogProvider: () async -> AdapterCatalogs = { AdapterCatalogs([]) }
     var reservationLookup: (String, URL) async -> [String]? = { _, _ in nil }
-    var onHandedOff: (SessionRef, SessionRef) -> Void = { _, _ in }
+    var onHandedOff: (CompletedHandoff) -> Void = { _ in }
 
     init(store: SessionStore, commands: BrAmHandoffCommands = BrAmHandoffCommands(), logURL: URL = StoreHandoffHost.defaultLogURL) {
         self.store = store; self.commands = commands; self.logURL = logURL
@@ -134,7 +146,7 @@ final class StoreHandoffHost: HandoffHost {
         default: return false
         }
     }
-    func markHandedOff(_ old: SessionRef, to new: SessionRef) { onHandedOff(old, new) }
+    func markHandedOff(_ handoff: CompletedHandoff) { onHandedOff(handoff) }
 
     func record(_ entry: HandoffLogEntry) {
         let enc = JSONEncoder()
