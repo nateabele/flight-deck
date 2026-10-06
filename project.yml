@@ -8,6 +8,12 @@ settings:
   base:
     SWIFT_VERSION: "5.0"
     MACOSX_DEPLOYMENT_TARGET: "14.0"
+    # arm64 only. BoringSSL.xcframework (scripts/build-boringssl.sh) ships an arm64-only macOS
+    # slice, so an x86_64 slice of FleetKit cannot link (undefined _SPAKE2_*). Release builds
+    # were arm64-only by accident while xcodebuild synthesized the FlightDeck scheme; declaring
+    # that scheme explicitly (to switch off its code coverage) made Release build universal and
+    # fail. Pinning it here keeps the build what it always effectively was.
+    ARCHS[sdk=macosx*]: arm64
     # Where `import BoringSSLShim` resolves: the directory holding the module.modulemap that
     # names it (Sources/FleetKit/SPAKE2/module.modulemap). A path alone would only let clang
     # FIND the header — Swift cannot import a bare header, so the modulemap beside it is what
