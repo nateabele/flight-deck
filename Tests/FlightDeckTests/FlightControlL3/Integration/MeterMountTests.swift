@@ -1,3 +1,5 @@
+import AppKit
+import SwiftUI
 import XCTest
 import FleetKit
 import IntakeKit
@@ -67,6 +69,100 @@ final class MeterMountTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(work.utilization), 0.85, accuracy: 0.001)
         XCTAssertEqual(work.state, "overSoft")
         XCTAssertEqual(work.pool, "codex-default")
+    }
+
+    // MARK: - mounted views follow the ledger
+
+    /// The row's width with nothing but the meter in it: 0 with no meter, wider with one.
+    private func fittingWidth(_ host: NSHostingView<SwarmRowChips>) async -> CGFloat {
+        // SwiftUI applies a published change on the next runloop turn.
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        host.layoutSubtreeIfNeeded()
+        return host.fittingSize.width
+    }
+
+    func testRowMeterAppearsAndDisappearsWithReadingsAlone() async throws {
+        let rig = try L3IntegrationRig.standard()
+        let work = try XCTUnwrap(rig.accountID("Work"))
+        rig.feed(account: "Work", utilization: 0.30)
+        // The annotation is deliberately frozen with NO cached meter: only the live ledger moves.
+        let frozen = SwarmSessionAnnotation(taskChip: nil, contested: false, meter: nil, meterAccount: work,
+                                            marker: nil, lastActive: nil)
+        let host = NSHostingView(rootView: SwarmRowChips(annotation: frozen, usage: rig.usage))
+        host.frame = NSRect(x: 0, y: 0, width: 200, height: 20)
+        let under = await fittingWidth(host)
+        rig.feed(account: "Work", utilization: 0.85)
+        let over = await fittingWidth(host)
+        XCTAssertGreaterThan(over, under, "crossing soft must draw the meter with no other state change")
+        rig.feed(account: "Work", utilization: 0.40)
+        let back = await fittingWidth(host)
+        XCTAssertEqual(back, under, "dropping under soft must remove it, though the cached annotation never changed")
+    }
+
+    func testRowMeterDoesNotLingerWhenTheCachedAnnotationSaidOverSoft() async throws {
+        let rig = try L3IntegrationRig.standard()
+        let work = try XCTUnwrap(rig.accountID("Work"))
+        rig.feed(account: "Work", utilization: 0.30)
+        let stale = SwarmSessionAnnotation(taskChip: nil, contested: false, meter: 0.9, meterAccount: work,
+                                           marker: nil, lastActive: nil)
+        let host = NSHostingView(rootView: SwarmRowChips(annotation: stale, usage: rig.usage))
+        host.frame = NSRect(x: 0, y: 0, width: 200, height: 20)
+        let width = await fittingWidth(host)
+        XCTAssertEqual(width, 0, accuracy: 0.5, "the live ledger is under soft, whatever the cache says")
+    }
+
+    func testDrawerAssignmentMeterIsPopulatedForALeasedAgentAndLive() async throws {
+        let rig = try L3IntegrationRig.standard()
+        rig.feed(account: "Work", utilization: 0.30)
+        try await rig.launch(cap: 1)
+        await rig.tick()
+        let spawn = try XCTUnwrap(rig.spawns.first)
+        let detail = try XCTUnwrap(rig.swarm.assignment(for: spawn.session.id, now: rig.now))
+        let ref = try XCTUnwrap(detail.meter, "a leased agent's assignment lane carries its account meter")
+        XCTAssertEqual(ref.account, rig.accountID("Work"))
+        XCTAssertEqual(ref.pool, "codex-default")
+        rig.feed(account: "Work", utilization: 0.85)
+        let model = try XCTUnwrap(ref.model(ledger: rig.usage.ledger, now: rig.now))
+        XCTAssertEqual(try XCTUnwrap(model.fraction), 0.85, accuracy: 0.001, "built from the live ledger, not frozen at assignment time")
+        XCTAssertEqual(model.state, .overSoft)
+    }
+
+    func testPopoverPoolsFollowTheLiveLedger() async throws {
+        let rig = try L3IntegrationRig.standard()
+        rig.feed(account: "Work", utilization: 0.30)
+        try await rig.launch(cap: 1)
+        await rig.tick()
+        let record = try XCTUnwrap(rig.swarm.record(forProject: rig.project))
+        let summary = try XCTUnwrap(rig.swarm.summary(forProject: rig.project))
+        var seen: [Double?] = []
+        let view = SwarmPopover(record: record, pools: { ledger, now in
+            let pools = rig.swarm.meterPools(forProject: rig.project, ledger: ledger, now: now)
+            seen.append(pools.first?.accounts.first { $0.label == "Work" }?.fraction)
+            return pools
+        }, usage: rig.usage, summary: summary, onPause: {}, onResume: {})
+        let host = NSHostingView(rootView: view)
+        host.frame = NSRect(x: 0, y: 0, width: 400, height: 300)
+        host.layoutSubtreeIfNeeded()
+        rig.feed(account: "Work", utilization: 0.85)
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        host.layoutSubtreeIfNeeded()
+        XCTAssertEqual(seen.last ?? nil, 0.85, "an open popover re-reads the ledger when a reading lands")
+    }
+
+    func testCacheSurvivesAMissingFileThenPicksItUp() async throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("fd-handoff-missing-\(UUID().uuidString).jsonl")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let cache = HandoffHistoryCache(logURL: url)
+        await cache.refresh()
+        XCTAssertTrue(cache.all.isEmpty)
+        let a = UUID()
+        let enc = JSONEncoder()
+        enc.dateEncodingStrategy = .iso8601
+        var data = try enc.encode(entry(old: a, new: UUID()))
+        data.append(0x0A)
+        try data.write(to: url)
+        await cache.refresh()
+        XCTAssertEqual(cache.entries(for: a).count, 1)
     }
 
     // MARK: - hand-off history
