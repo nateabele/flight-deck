@@ -127,4 +127,19 @@ final class SessionStoreSubagentLifecycleTests: XCTestCase {
                        "\(replicator.recorded)")
         XCTAssertEqual(wireSession(store, session.id)?.subagents, wireTree)
     }
+
+    // MARK: 3b. No status, no tree on the wire
+
+    func testATreeForATabWithNoStatusIsNotProjectedUntilTheStatusArrives() {
+        let (store, session) = make()
+        let replicator = attachedReplicator(to: store)
+        store.applySubagents(session.id, tree())
+        XCTAssertEqual(wireSession(store, session.id)?.subagents, [],
+                       "still modelled, but the tree was never emitted")
+        // Any later batch runs the drift check against what the phone was told.
+        store.rename(session.id, to: "renamed")
+        store.applyRegistryForTesting([session.id: SessionStatus(activity: .busy, subagentCount: 1)])
+        XCTAssertEqual(activityEvents(replicator, session.id).last, wireTree)
+        XCTAssertEqual(wireSession(store, session.id)?.subagents, wireTree)
+    }
 }
