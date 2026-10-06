@@ -1,10 +1,11 @@
 {
-  "description": "Flight Deck lifecycle reporting. Every command quotes ${CLAUDE_PLUGIN_ROOT}: in production it expands to /Applications/Flight Deck.app/... and Claude Code runs hook commands through a shell, so unquoted it splits at the space and every hook dies with 127. See scripts/record.sh.",
+  "description": "Flight Deck lifecycle reporting. Every command quotes ${CLAUDE_PLUGIN_ROOT}: in production it expands to /Applications/Flight Deck.app/... and Claude Code runs hook commands through a shell, so unquoted it splits at the space and every hook dies with 127. See scripts/record.sh. record.sh prints nothing to stdout, so the PermissionRequest hook makes no permission decision and cannot race Plannotator's PermissionRequest hook.",
   "hooks": {
     "SessionStart": [{"hooks": [{"type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/record.sh\""}]}],
     "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/record.sh\""}]}],
     "PreToolUse": [{"hooks": [{"type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/record.sh\""}]}],
     "PostToolUse": [{"hooks": [{"type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/record.sh\""}]}],
+    "PermissionRequest": [{"hooks": [{"type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/record.sh\""}]}],
     "Stop": [{"hooks": [{"type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/record.sh\""}]}],
     "SessionEnd": [{"hooks": [{"type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/record.sh\""}]}]
   }
