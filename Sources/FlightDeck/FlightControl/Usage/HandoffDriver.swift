@@ -46,12 +46,15 @@ final class HandoffDriver: HandoffDecisionSink {
     private let spawner: SwarmSpawner
     private let host: HandoffHost
     private let settings: () -> HandoffSettings
+    /// The pools Settings defines, asked only when a lease fails, to tell "full" from "gone" —
+    /// the same question `SwarmController.plan` asks. Nil skips it.
+    private let pools: (any PoolDirectory)?
     private let now: () -> Date
 
     init(planner: HandoffPlanner, allocator: PoolAllocator, router: Router?, spawner: SwarmSpawner, host: HandoffHost,
-         settings: @escaping () -> HandoffSettings, now: @escaping () -> Date = Date.init) {
+         settings: @escaping () -> HandoffSettings, pools: (any PoolDirectory)? = nil, now: @escaping () -> Date = Date.init) {
         self.planner = planner; self.allocator = allocator; self.router = router; self.spawner = spawner
-        self.host = host; self.settings = settings; self.now = now
+        self.host = host; self.settings = settings; self.pools = pools; self.now = now
     }
 
     func evaluate(_ agents: [SwarmAgentSnapshot]) async {
@@ -247,6 +250,12 @@ final class HandoffDriver: HandoffDecisionSink {
     private func capacity(for agent: SwarmAgentSnapshot, _ request: HandoffRequest) async -> (ExecutionBlock, AccountLease)? {
         let pool = agent.block.pool
         if let lease = allocator.lease(pool: pool) { return (agent.block, lease) }
+        // A pool deleted in Settings is not "full". `SwarmController.plan` makes such a task wait
+        // with this same reason and never spills; spilling here would quietly route a hand-off
+        // around a block that names a pool nobody has, and the two would disagree on screen.
+        if let pools, !pools.pools().contains(where: { $0.id == pool }) {
+            return wait(agent, request, "pool \(pool) no longer exists")
+        }
         if agent.block.pinned {
             return wait(agent, request, "pinned to pool \(pool), and every account in it is past its limit")
         }

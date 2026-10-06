@@ -1,8 +1,10 @@
 import Foundation
 import IntakeKit
 
-/// Routing's view of the pools Settings → Flight Control → Capacity defines. Read through a
-/// closure on every call, so a pool added in Settings is routable without rebuilding the router.
+/// Routing's view of the pools Settings → Flight Control → Capacity defines: one
+/// `<agent>-default` per agent with a live account, then the user's own pools
+/// (`CapacityPreferences.effectivePools`). Read through a closure on every call, so a pool added
+/// in Settings is routable without rebuilding the router.
 struct CapacityPoolDirectory: PoolDirectory {
     let source: @Sendable () -> [CapacityPool]
     init(pools: @escaping @Sendable () -> [CapacityPool]) { source = pools }

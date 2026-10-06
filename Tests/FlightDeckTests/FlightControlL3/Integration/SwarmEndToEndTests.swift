@@ -93,6 +93,17 @@ final class SwarmEndToEndTests: XCTestCase {
         XCTAssertEqual(rig.waitingReason(task: "fx-valid"), "pool gone no longer exists")
     }
 
+    /// The unpinned case is the one that matters: a pinned block never spills anyway, so only
+    /// an unpinned one proves a deleted pool is not quietly spilled around.
+    func testDeletedPoolMakesAnUnpinnedTaskWaitInsteadOfSpilling() async throws {
+        rig.feed(account: "Work", utilization: 0.10)
+        rig.setBlockPool(task: "fx-valid", pool: "gone", pinned: false)
+        try await rig.launch(cap: 1)
+        await rig.tick()
+        XCTAssertTrue(rig.spawns.isEmpty, "no spill: \(rig.spawns.map(\.block.pool))")
+        XCTAssertEqual(rig.waitingReason(task: "fx-valid"), "pool gone no longer exists")
+    }
+
     // MARK: - Composition seams (controller rulings 5, 6 and the driver's lifetime)
 
     /// Ruling 6: the driver and the swarm controller both used to release the old lease. The
@@ -325,6 +336,43 @@ final class SwarmEndToEndTests: XCTestCase {
                       "\(rig.handoffLog.map(\.outcome))")
         XCTAssertTrue(rig.notifier.notes.contains { $0.title == "Hand-off not recorded" && $0.session == fresh.session.id },
                       "\(rig.notifier.notes.map(\.title))")
+    }
+
+    /// Turn Off (or Stop) lands after the pass took its snapshot but before the hand-off spawns.
+    /// The swarm let its agents go; a new agent must not be started for it, nor the old one
+    /// retired for a hand-off that no longer has a swarm to record it.
+    func testAStoppedSwarmIsNotHandedOffMidPass() async throws {
+        rig.feed(account: "Work", utilization: 0.30)
+        rig.feed(account: "Personal", utilization: 0.10)
+        try await rig.launch(cap: 1)
+        await rig.tick()
+        let first = try XCTUnwrap(rig.spawns.first)
+        rig.feed(account: "Work", utilization: 0.97)
+        rig.markIdle(first.session)
+        rig.clock.advance(SwarmService.tickInterval)
+        rig.watch.fire()            // the pass is scheduled with the working agent in its snapshot
+        rig.swarm.stop(project: rig.project)
+        await rig.swarm.settle()
+        XCTAssertEqual(rig.spawns.count, 1, "no new agent for a stopped swarm")
+        XCTAssertFalse(rig.isHandedOff(first.session))
+        XCTAssertFalse(rig.handoffLog.contains { $0.outcome == .handedOff || $0.outcome == .unrecorded },
+                       "no hand-off ran: \(rig.handoffLog.map(\.outcome))")
+    }
+
+    /// Pause still hands off (see `testPausedSwarmStillHandsOff`); a drain lets running agents
+    /// finish their work, so it hands off too.
+    func testADrainingSwarmStillHandsOff() async throws {
+        rig.feed(account: "Work", utilization: 0.30)
+        rig.feed(account: "Personal", utilization: 0.10)
+        try await rig.launch(cap: 1)
+        await rig.tick()
+        let first = try XCTUnwrap(rig.spawns.first)
+        rig.swarm.drain(project: rig.project)
+        rig.feed(account: "Work", utilization: 0.97)
+        rig.markIdle(first.session)
+        await rig.tick()
+        XCTAssertEqual(rig.spawns.count, 2)
+        XCTAssertTrue(rig.isHandedOff(first.session))
     }
 }
 

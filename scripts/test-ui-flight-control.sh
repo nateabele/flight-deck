@@ -23,7 +23,12 @@ KEY=${FD_UITEST_SSH_KEY:-$HOME/.ssh/id_rsa}
 SSH_OPTS=(-o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=5 -i "$KEY")
 RSYNC_SSH="ssh ${SSH_OPTS[*]}"
 REMOTE_DIR=flightdeck-uitests
-GEN="$REMOTE_DIR/fc-gen"
+# Every remote path this script creates, kills by or deletes is unique to this run. Another
+# session's run may be waiting on, or holding, smoke-remote.sh's lock: shared paths let this
+# run's reap (before the lock, or from the EXIT trap after a refused run) kill that run's
+# fixture daemons, and its `rm -rf` delete that run's fixture mid-test.
+RUN="$(date +%s | tail -c 5)$$"
+GEN="$REMOTE_DIR/fc-gen-$RUN"
 CAPTURED="Tests/FlightDeckTests/Fixtures/FlightControlL3/Swarm"
 OUT="DerivedData/smoke-remote"
 SHOTS="DerivedData/flight-control-ui"
@@ -38,23 +43,30 @@ if ! REMOTE_HOME=$(remote <<<'echo "$HOME"'); then
 fi
 # Short, because a daemon socket is <dir>/<uuid>.sock and macOS caps sun_path at 104 bytes.
 # Both fixtures' tabs share it (the cases run one at a time).
-DAEMONS=$(remote <<<'echo "/tmp/fdfc-ui-$(id -u)"')
-ROOT="$REMOTE_HOME/$REMOTE_DIR/DerivedData/fc-fixture"
+DAEMONS=$(remote <<<"echo \"/tmp/fdfc-ui-\$(id -u)-$RUN\"")
+ROOT="$REMOTE_HOME/$REMOTE_DIR/DerivedData/fc-fixture-$RUN"
 
 reap_remote() {
+  # An empty path would make `pkill -f ""` match every process on the UI-test Mac, and
+  # `rm -rf ""`-style deletes run against the wrong directory: refuse rather than guess.
+  if [ -z "$DAEMONS" ] || [ -z "$REMOTE_HOME" ] || [ -z "$RUN" ]; then
+    echo "[flight-control-ui] not reaping: a fixture path is empty" >&2
+    return 0
+  fi
   # The fixture's tabs run under detached daemons that outlive the app; reap them by path. The
   # paths are expanded HERE, into the script text, never passed as arguments: `pkill -f` matches
-  # full command lines, so a `bash -s -- <path>` carrying the path would kill itself.
+  # full command lines, so a `bash -s -- <path>` carrying the path would kill itself. Only this
+  # run's paths, so another run's daemons are never touched; nothing of this run's exists before
+  # it starts, so there is no reap before the run.
   remote >/dev/null 2>&1 <<REMOTE || true
 pkill -f "$DAEMONS" 2>/dev/null
 pkill -f "$ROOT" 2>/dev/null
-rm -rf "$DAEMONS"
+rm -rf "$DAEMONS" "$ROOT" "\$HOME/$GEN"
 exit 0
 REMOTE
 }
 trap reap_remote EXIT
 
-reap_remote
 remote <<REMOTE
 set -e
 rm -rf "$GEN"
@@ -79,7 +91,7 @@ rc=$?
 set -e
 
 xcrun xcresulttool export attachments --path "$OUT/run.xcresult" --output-path "$SHOTS" >/dev/null 2>&1 || true
-rsync -a -e "$RSYNC_SSH" "$HOST:$REMOTE_DIR/DerivedData/fc-fixture/live/stub.log" "$SHOTS/stub.log" >/dev/null 2>&1 || true
+rsync -a -e "$RSYNC_SSH" "$HOST:$ROOT/live/stub.log" "$SHOTS/stub.log" >/dev/null 2>&1 || true
 echo "[flight-control-ui] screenshots and stub log -> $SHOTS"
 
 if [ "$rc" -ne 0 ]; then

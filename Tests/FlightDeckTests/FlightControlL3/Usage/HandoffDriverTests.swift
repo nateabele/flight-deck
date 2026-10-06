@@ -28,6 +28,8 @@ final class HandoffDriverTests: XCTestCase {
     private var spawner: FakeSwarmSpawner!
     private var host: FakeHandoffHost!
     private var settings = HandoffSettings(confirm: false, deadline: 600)
+    /// Nil skips the "pool deleted" question, as the swarm controller's does.
+    private var pools: (any PoolDirectory)?
 
     private let oldID = UUID(), newID = UUID()
     private let project = URL(fileURLWithPath: "/p/proj")
@@ -55,7 +57,7 @@ final class HandoffDriverTests: XCTestCase {
         let c = clock!
         return HandoffDriver(planner: planner, allocator: allocator, router: router,
                              spawner: OrderedSpawner(spawner, host), host: host,
-                             settings: { [unowned self] in self.settings }, now: { c.now })
+                             settings: { [unowned self] in self.settings }, pools: pools, now: { c.now })
     }
 
     func testAnIdleAgentIsHandedOffAtOnceInSpecOrder() async {
@@ -502,5 +504,43 @@ final class HandoffDriverTests: XCTestCase {
         XCTAssertEqual(allocator.released, [oldLease])
         await d.evaluate([])
         XCTAssertEqual(allocator.released, [oldLease], "released once")
+    }
+
+    /// A pool deleted in Settings is not "full": the swarm controller makes such a task wait with
+    /// "pool … no longer exists" and never spills; the driver must agree, or a hand-off quietly
+    /// routes around a block that names a pool nobody has.
+    func testADeletedPoolWaitsWithTheSwarmsReasonAndNeverSpills() async {
+        allocator.leases["claude-default"] = []
+        host.kinds["tests"] = TaskKind(id: "tests", name: "Tests", description: "d", dimensions: [:], origin: .seed,
+                                       createdAt: Date(timeIntervalSince1970: 0))
+        router.spills["tests"] = Assignment(block: ExecutionBlock(kind: "tests", harness: "codex", model: "gpt-6-sol", pool: "codex-default",
+                                                                  source: AssignmentSource(by: .spill, reason: "s", at: Date(timeIntervalSince1970: 0))))
+        allocator.leases["codex-default"] = [AccountLease(pool: "codex-default", account: UsageRefs.codex)]
+        let directory = FakePoolDirectory()
+        directory.summaries = [PoolSummary(id: "codex-default", harness: "codex", label: "Codex default")]
+        pools = directory
+        host.activities[oldID] = .idle
+        let d = driver()
+        await d.evaluate([agent])
+        XCTAssertEqual(d.phases[oldID], .waitingForCapacity("pool claude-default no longer exists"))
+        XCTAssertEqual(router.spillCalls.count, 0)
+        XCTAssertEqual(spawner.calls.count, 0)
+    }
+
+    /// The control: a pool that exists but is full still spills.
+    func testAnExistingFullPoolStillSpills() async {
+        allocator.leases["claude-default"] = []
+        host.kinds["tests"] = TaskKind(id: "tests", name: "Tests", description: "d", dimensions: [:], origin: .seed,
+                                       createdAt: Date(timeIntervalSince1970: 0))
+        router.spills["tests"] = Assignment(block: ExecutionBlock(kind: "tests", harness: "codex", model: "gpt-6-sol", pool: "codex-default",
+                                                                  source: AssignmentSource(by: .spill, reason: "s", at: Date(timeIntervalSince1970: 0))))
+        allocator.leases["codex-default"] = [AccountLease(pool: "codex-default", account: UsageRefs.codex)]
+        let directory = FakePoolDirectory()
+        directory.summaries = [PoolSummary(id: "claude-default", harness: "claude", label: "Claude default"),
+                               PoolSummary(id: "codex-default", harness: "codex", label: "Codex default")]
+        pools = directory
+        host.activities[oldID] = .idle
+        await driver().evaluate([agent])
+        XCTAssertEqual(spawner.calls.count, 1)
     }
 }

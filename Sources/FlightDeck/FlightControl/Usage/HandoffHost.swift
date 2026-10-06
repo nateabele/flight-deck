@@ -113,12 +113,22 @@ final class StoreHandoffHost: HandoffHost {
 
     /// Split by build like every other Flight Deck runtime file, so a debug build's hand-offs
     /// never appear in the real fleet's history.
-    nonisolated static var defaultLogURL: URL {
+    nonisolated static var defaultLogURL: URL { defaultLogURL(defaults: .standard) }
+
+    /// Under `-FlightDeckResetState` (every UI test) a scratch file for this process: the real
+    /// `swarm-log` would collect a test run's hand-offs, and the Observe lane would show them
+    /// in the user's history. The same file every call, so the reader finds what was written.
+    nonisolated static func defaultLogURL(defaults: UserDefaults) -> URL {
+        if defaults.bool(forKey: "FlightDeckResetState") { return resetLogURL }
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         return base.appendingPathComponent("Flight Deck", isDirectory: true)
             .appendingPathComponent("swarm-log", isDirectory: true)
             .appendingPathComponent("handoffs-\(ClaudePluginLocation.buildTag).jsonl")
     }
+
+    private nonisolated static let resetLogURL = FileManager.default.temporaryDirectory
+        .appendingPathComponent("FlightDeck-swarm-log-\(UUID().uuidString)", isDirectory: true)
+        .appendingPathComponent("handoffs-\(ClaudePluginLocation.buildTag).jsonl")
 
     func activity(of session: SessionRef) -> SessionActivity? { store?.statuses[session.id]?.activity }
     func sessionExists(_ session: SessionRef) -> Bool { store?.sessionExists(session.id) ?? false }
