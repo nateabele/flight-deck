@@ -172,7 +172,7 @@ final class PromptServiceTests: XCTestCase {
         service.tail = { _, _ in (lines, false) }
         spy.showOptions(["Yes", "No"], selected: 0)
         XCTAssertNil(
-            code(service.answer(session: id, call: "toolu_A",
+            code(service.answer(session: id, agent: nil, call: "toolu_A",
                                 answer: .option(index: 1, label: "No"), token: UUID()))
         )
         XCTAssertEqual(spy.events, [.arrow(1), .ret])
@@ -191,7 +191,7 @@ final class PromptServiceTests: XCTestCase {
         service.tail = { _, _ in (lines, false) }
         spy.showOptions(["Yes", "No"], selected: 0)
         XCTAssertEqual(
-            code(service.answer(session: id, call: "toolu_A",
+            code(service.answer(session: id, agent: nil, call: "toolu_A",
                                 answer: .option(index: 0, label: "Yes"), token: UUID())),
             "prompt_changed"
         )
@@ -221,7 +221,7 @@ final class PromptServiceTests: XCTestCase {
         service.tail = { _, _ in (lines, false) }
         spy.showOptions(["Yes", "No"], selected: 0)
         XCTAssertEqual(
-            code(service.answer(session: id, call: "toolu_ONE", answer: .allow, token: UUID())),
+            code(service.answer(session: id, agent: nil, call: "toolu_ONE", answer: .allow, token: UUID())),
             "prompt_changed"
         )
         XCTAssertTrue(spy.events.isEmpty, "nothing may be typed at a dialog nobody read")
@@ -244,14 +244,14 @@ final class PromptServiceTests: XCTestCase {
         spy.showOptions(["Yes", "No"], selected: 0)
 
         service.tail = { _, _ in (one, false) }
-        XCTAssertNil(code(service.answer(session: id, call: "toolu_ONE", answer: .allow,
+        XCTAssertNil(code(service.answer(session: id, agent: nil, call: "toolu_ONE", answer: .allow,
                                          token: UUID())))
         XCTAssertEqual(spy.events, [.ret], "the first tap is the one that lands")
 
         spy.events.removeAll()
         service.tail = { _, _ in (two, false) }
         XCTAssertEqual(
-            code(service.answer(session: id, call: "toolu_ONE", answer: .allow, token: UUID())),
+            code(service.answer(session: id, agent: nil, call: "toolu_ONE", answer: .allow, token: UUID())),
             "prompt_changed"
         )
         XCTAssertTrue(spy.events.isEmpty, "the card is stale; prompt 2 is not what was read")
@@ -266,7 +266,7 @@ final class PromptServiceTests: XCTestCase {
         let lines = [SourceLine(offset: 0, text: bashLine("toolu_A"))]
         service.tail = { _, _ in (lines, false) }
         XCTAssertEqual(
-            code(service.answer(session: id, call: "toolu_A", answer: .deny, token: UUID())),
+            code(service.answer(session: id, agent: nil, call: "toolu_A", answer: .deny, token: UUID())),
             "not_waiting"
         )
         XCTAssertTrue(spy.events.isEmpty)
@@ -275,7 +275,7 @@ final class PromptServiceTests: XCTestCase {
     func testAnUnknownSessionIsRefused() {
         let (service, _, _, _) = makeService(activity: .waiting)
         XCTAssertEqual(
-            code(service.answer(session: UUID(), call: "toolu_A", answer: .deny, token: UUID())),
+            code(service.answer(session: UUID(), agent: nil, call: "toolu_A", answer: .deny, token: UUID())),
             "unknown_session"
         )
     }
@@ -292,9 +292,9 @@ final class PromptServiceTests: XCTestCase {
             reads.value += 1
             return (lines, false)
         }
-        XCTAssertNil(code(service.answer(session: id, call: "toolu_A", answer: .deny,
+        XCTAssertNil(code(service.answer(session: id, agent: nil, call: "toolu_A", answer: .deny,
                                          token: UUID())))
-        XCTAssertNil(code(service.answer(session: id, call: "toolu_A", answer: .deny,
+        XCTAssertNil(code(service.answer(session: id, agent: nil, call: "toolu_A", answer: .deny,
                                          token: UUID())))
         XCTAssertEqual(reads.value, 2)
         XCTAssertEqual(spy.events, [.escape, .escape], "both answers were carried out")
@@ -311,7 +311,7 @@ final class PromptServiceTests: XCTestCase {
         service.tail = { _, _ in (lines, false) }
         spy.showOptions(["Yes", "No"], selected: 0)
         XCTAssertEqual(
-            code(service.answer(session: id, call: "toolu_A",
+            code(service.answer(session: id, agent: nil, call: "toolu_A",
                                 answer: .option(index: 0, label: "Yes"), token: UUID())),
             "unanswerable"
         )
@@ -327,9 +327,9 @@ final class PromptServiceTests: XCTestCase {
         let lines = [SourceLine(offset: 0, text: bashLine("toolu_A"))]
         service.tail = { _, _ in (lines, false) }
         let token = UUID()
-        XCTAssertNil(code(service.answer(session: id, call: "toolu_A", answer: .deny,
+        XCTAssertNil(code(service.answer(session: id, agent: nil, call: "toolu_A", answer: .deny,
                                          token: token)))
-        XCTAssertNil(code(service.answer(session: id, call: "toolu_A", answer: .deny,
+        XCTAssertNil(code(service.answer(session: id, agent: nil, call: "toolu_A", answer: .deny,
                                          token: token)))
         XCTAssertEqual(spy.events, [.escape], "the retry is answered, not carried out twice")
     }
@@ -360,7 +360,7 @@ final class PromptServiceTests: XCTestCase {
         let lines = [SourceLine(offset: 0, text: bashLine("toolu_A"))]
         service.tail = { _, _ in (lines, false) }
         XCTAssertEqual(
-            code(service.answer(session: id, call: "toolu_A", answer: .deny, token: UUID())),
+            code(service.answer(session: id, agent: nil, call: "toolu_A", answer: .deny, token: UUID())),
             "unsupported_agent"
         )
         XCTAssertTrue(
@@ -420,7 +420,7 @@ final class PromptServiceTests: XCTestCase {
         service.tail = { _, _ in (lines, false) }
 
         XCTAssertEqual(
-            code(service.answer(session: session.id, call: "toolu_A", answer: .deny, token: UUID())),
+            code(service.answer(session: session.id, agent: nil, call: "toolu_A", answer: .deny, token: UUID())),
             "unsupported_agent"
         )
         XCTAssertTrue(spy.events.isEmpty, "no Escape into a codex TUI this build cannot read")
@@ -461,7 +461,7 @@ final class PromptServiceTests: XCTestCase {
             reads.value += 1
             return (lines, false)
         }
-        XCTAssertEqual(code(service.answer(session: id, call: "toolu_A", answer: .deny,
+        XCTAssertEqual(code(service.answer(session: id, agent: nil, call: "toolu_A", answer: .deny,
                                            token: UUID())), "prompt_changed")
         XCTAssertEqual(reads.value, 1, "no history above the first read means no reason to widen")
     }
@@ -484,7 +484,7 @@ final class PromptServiceTests: XCTestCase {
             let lines = (0..<limit).map { _ in SourceLine(offset: 0, text: bookkeeping) }
             return (lines, true)
         }
-        XCTAssertEqual(code(service.answer(session: id, call: "toolu_A", answer: .deny,
+        XCTAssertEqual(code(service.answer(session: id, agent: nil, call: "toolu_A", answer: .deny,
                                            token: UUID())), "prompt_changed")
         XCTAssertEqual(limitsSeen, [8, 64, 512, 4096],
                        "8, 64, 512, 4096 — ×8 each step, and the loop must stop there, not spin")
@@ -526,7 +526,7 @@ final class PromptServiceTests: XCTestCase {
             reads.value += 1
             return (lines, true) // same count every time, despite `hasMore` staying true
         }
-        XCTAssertEqual(code(service.answer(session: id, call: "toolu_A", answer: .deny,
+        XCTAssertEqual(code(service.answer(session: id, agent: nil, call: "toolu_A", answer: .deny,
                                            token: UUID())), "prompt_changed")
         XCTAssertEqual(reads.value, 2,
                        "no growth after the first widen attempt means stop, not spin to the ceiling")
@@ -822,6 +822,85 @@ final class PromptServiceTests: XCTestCase {
     }
 
     private struct NotARefusal: Error {}
+
+    // MARK: Attributed subagent dialogs (Task 5)
+
+    func testAnAttributedSubagentCallIsTheOpenPrompt() throws {
+        let (service, store, _, id) = makeService(activity: .waiting)
+        try writeTranscript(for: store, id, [bookkeepingLine()])
+        try writeSubagent(for: store, id, agent: "a28ad87b", [sidechain(bashLine("toolu_SUB"))])
+        service.pendingDialog = { _ in PendingDialog(agentID: "a28ad87b", callID: "toolu_SUB") }
+        let parent = [SourceLine(offset: 0, text: bookkeepingLine())]
+        let sub = [SourceLine(offset: 0, text: sidechain(bashLine("toolu_SUB")))]
+        service.tail = { url, _ in (url.path.contains("/subagents/") ? sub : parent, false) }
+        XCTAssertEqual(try service.pushedOpenPrompt(inSession: id).get().callID, "toolu_SUB")
+        XCTAssertEqual(service.openPromptAgent(inSession: id), "a28ad87b")
+    }
+
+    /// Review Focus 3.
+    func testWithoutAPendingDialogTheRefusalIsSubagentPrompt() throws {
+        let (service, store, _, id) = makeService(activity: .waiting)
+        try writeTranscript(for: store, id, [bookkeepingLine()])
+        try writeSubagent(for: store, id, agent: "a28ad87b", [sidechain(bashLine("toolu_SUB"))])
+        service.pendingDialog = { _ in nil }
+        let parent = [SourceLine(offset: 0, text: bookkeepingLine())]
+        let sub = [SourceLine(offset: 0, text: sidechain(bashLine("toolu_SUB")))]
+        service.tail = { url, _ in (url.path.contains("/subagents/") ? sub : parent, false) }
+        XCTAssertEqual(try? failureCode(service.pushedOpenPrompt(inSession: id)), "subagent_prompt")
+    }
+
+    /// Review Focus 4.
+    func testAResolvedSubagentCallIsNoLongerOffered() throws {
+        let (service, store, _, id) = makeService(activity: .waiting)
+        try writeTranscript(for: store, id, [bookkeepingLine()])
+        try writeSubagent(for: store, id, agent: "a28ad87b",
+                          [sidechain(bashLine("toolu_SUB")), sidechain(resultLine("toolu_SUB"))])
+        service.pendingDialog = { _ in PendingDialog(agentID: "a28ad87b", callID: "toolu_SUB") }
+        let parent = [SourceLine(offset: 0, text: bookkeepingLine())]
+        let sub = [SourceLine(offset: 0, text: sidechain(bashLine("toolu_SUB"))),
+                   SourceLine(offset: 1, text: sidechain(resultLine("toolu_SUB")))]
+        service.tail = { url, _ in (url.path.contains("/subagents/") ? sub : parent, false) }
+        XCTAssertEqual(try? failureCode(service.pushedOpenPrompt(inSession: id)), "prompt_changed")
+    }
+
+    func testAnsweringASubagentsDialogDrivesTheTerminal() throws {
+        let (service, store, spy, id) = makeService(activity: .waiting)
+        try writeTranscript(for: store, id, [bookkeepingLine()])
+        try writeSubagent(for: store, id, agent: "a28ad87b", [sidechain(bashLine("toolu_SUB"))])
+        service.pendingDialog = { _ in PendingDialog(agentID: "a28ad87b", callID: "toolu_SUB") }
+        let parent = [SourceLine(offset: 0, text: bookkeepingLine())]
+        let sub = [SourceLine(offset: 0, text: sidechain(bashLine("toolu_SUB")))]
+        service.tail = { url, _ in (url.path.contains("/subagents/") ? sub : parent, false) }
+        spy.showOptions(["Yes", "No"], selected: 0)
+        XCTAssertNil(code(service.answer(session: id, agent: "a28ad87b", call: "toolu_SUB",
+                                         answer: .allow, token: UUID())))
+        XCTAssertFalse(spy.events.isEmpty, "the dialog was driven")
+    }
+
+    /// Review Focus 2: an open call that no PermissionRequest named is a running tool.
+    func testAnAnswerForASubagentWithNoPendingDialogIsRefused() throws {
+        let (service, store, spy, id) = makeService(activity: .waiting)
+        try writeTranscript(for: store, id, [bookkeepingLine()])
+        try writeSubagent(for: store, id, agent: "a28ad87b", [sidechain(bashLine("toolu_SUB"))])
+        service.pendingDialog = { _ in PendingDialog(agentID: "a9999999", callID: "toolu_OTHER") }
+        let sub = [SourceLine(offset: 0, text: sidechain(bashLine("toolu_SUB")))]
+        service.tail = { _, _ in (sub, false) }
+        spy.showOptions(["Yes", "No"], selected: 0)
+        XCTAssertEqual(code(service.answer(session: id, agent: "a28ad87b", call: "toolu_SUB",
+                                           answer: .allow, token: UUID())), "prompt_changed")
+        XCTAssertTrue(spy.events.isEmpty)
+    }
+
+    /// Review Focus 1.
+    func testATraversalAgentIDIsRefusedBeforeAnyRead() {
+        let (service, _, spy, id) = makeService(activity: .waiting)
+        let reads = ReadCount()
+        service.tail = { _, _ in reads.value += 1; return ([], false) }
+        XCTAssertEqual(code(service.answer(session: id, agent: "../../etc", call: "toolu_X",
+                                           answer: .allow, token: UUID())), "unknown_agent")
+        XCTAssertEqual(reads.value, 0)
+        XCTAssertTrue(spy.events.isEmpty)
+    }
 
     private func failureCode(_ result: Result<OpenPrompt, TimelineErrorCode>) throws -> String {
         guard case .failure(let code) = result else { throw NotARefusal() }

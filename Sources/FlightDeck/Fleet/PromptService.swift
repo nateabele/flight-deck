@@ -130,6 +130,7 @@ final class PromptService {
 
     init(store: SessionStore) {
         self.store = store
+        pendingDialog = { [weak store] in store?.pendingDialog(for: $0) }
         agentStartedAt = { [weak store] id in
             guard let pid = store?.claudePID(of: id),
                   let micros = ProcessTree().startTime(of: pid) else { return nil }
@@ -156,9 +157,32 @@ final class PromptService {
     /// to *see* the open dialog reads it through the same gauntlet this answers against — see
     /// that method for why it is not a second copy.
     func answer(
-        session: UUID, call: String, answer: PromptAnswer, token: UUID
+        session: UUID, agent: String?, call: String, answer: PromptAnswer, token: UUID
     ) -> Result<Void, TimelineErrorCode> {
-        switch openPrompt(inSession: session) {
+        let derived: Result<OpenPrompt, TimelineErrorCode>
+        if let agent {
+            // Checked before any path is built: this id came off the wire.
+            guard SubagentID.isValid(agent) else {
+                record(session, sent: call, open: nil, code: "unknown_agent")
+                return .failure("unknown_agent")
+            }
+            // A subagent's open call is only a dialog if the hook log named it; otherwise it
+            // may be a running tool, and typing an answer would land in the wrong place.
+            guard let dialog = pendingDialog(session), dialog.agentID == agent,
+                  dialog.callID == call else {
+                record(session, sent: call, open: nil, code: "prompt_changed")
+                return .failure("prompt_changed")
+            }
+            switch preflight(session) {
+            case .failure(let code): derived = .failure(code)
+            case .success:
+                derived = subagentOpenPrompt(session, agent: agent)
+                    .map { .success($0) } ?? .failure("prompt_changed")
+            }
+        } else {
+            derived = openPrompt(inSession: session)
+        }
+        switch derived {
         case .failure(let code):
             // **The pairing the prompt log exists for, in the case that produces the report.**
             // A tap refused here reaches the phone as *"Your Mac has moved on from this"* with
@@ -226,8 +250,10 @@ final class PromptService {
         return attributingSubagents(session, derive(session, polled: true))
     }
 
-    /// Turns the tab's own "nothing open" into `"subagent_prompt"` when one of its background
-    /// subagents holds an unresolved call.
+    /// The tab's own derivation missed. If the hook log named a subagent's call
+    /// (`pendingDialog`) and that call is still unresolved in the subagent's file, THAT is the
+    /// open prompt. If a subagent holds an open call the hook did not name, refuse
+    /// `"subagent_prompt"` — never `answerless`, never an answerable call.
     ///
     /// **The failure this exists for (2026-10-05, "Flywheel Planning").** A background
     /// implementer subagent hit a Bash permission dialog. claude drew it in the parent's TUI and
@@ -235,25 +261,45 @@ final class PromptService {
     /// `subagents/agent-<id>.jsonl`. The parent's transcript ended on a finished turn, so this
     /// refused `prompt_changed`, `answerless` fired five seconds later, and the Mac and phone
     /// both said "Still working (no response needed)" for 90 minutes over a dialog waiting on a
-    /// human. The registry flipped to `waiting` within 70ms of the subagent writing the call.
+    /// human.
     ///
-    /// **A refusal, not the call.** The phone derives its card from the parent's feed, which
-    /// does not hold this call, and its Allow/Deny would be checked against an id it never saw.
-    /// The code exists so `SessionStore.derivedOpenPromptCalls` does not read the tab as
-    /// "nothing open" (it gates `answerless` on `prompt_changed` alone), which leaves claude's
-    /// own reason ("Waiting for you — permission prompt") on screen. `answer` never sees this
-    /// code: it reads through `openPrompt`, so a tap still refuses `prompt_changed`.
-    ///
-    /// **It cannot tell a blocked call from a running one.** A subagent mid-Bash has an
-    /// unresolved `tool_use` too, so while any subagent is working the tab is never called
-    /// `answerless`. That errs toward claude's own wording, which is the safe direction.
+    /// **An open call alone is not a dialog.** A subagent mid-Bash has an unresolved `tool_use`
+    /// too, and offering the phone Allow/Deny for a running tool would type into the wrong
+    /// screen. Only a call the PermissionRequest hook NAMED is offered, which is what
+    /// `pendingDialog` carries; every other open call stays the `"subagent_prompt"` refusal,
+    /// which errs toward claude's own wording on screen.
     private func attributingSubagents(
         _ session: UUID, _ result: Result<OpenPrompt, TimelineErrorCode>?
     ) -> Result<OpenPrompt, TimelineErrorCode>? {
-        guard case .failure(let code)? = result, code.code == "prompt_changed",
-              subagentHoldsOpenCall(session)
-        else { return result }
-        return .failure("subagent_prompt")
+        guard case .failure(let code)? = result, code.code == "prompt_changed" else {
+            if case .success? = result { attributedAgents[session] = nil }
+            return result
+        }
+        if let dialog = pendingDialog(session), let agent = dialog.agentID,
+           let open = subagentOpenPrompt(session, agent: agent), open.callID == dialog.callID {
+            attributedAgents[session] = agent
+            return .success(open)
+        }
+        attributedAgents[session] = nil
+        return subagentHoldsOpenCall(session) ? .failure("subagent_prompt") : result
+    }
+
+    /// The subagent whose file held the call the last push/poll derivation returned. Written
+    /// by `attributingSubagents`, read by `SessionStore` right after the probe succeeds.
+    private var attributedAgents: [UUID: String] = [:]
+    func openPromptAgent(inSession session: UUID) -> String? { attributedAgents[session] }
+
+    /// The hook log's current dialog for a tab. A seam, like `agentStartedAt`.
+    var pendingDialog: (UUID) -> PendingDialog?
+
+    /// One window of the subagent's own file, read as `waiting`. Nil for an invalid id, a tab
+    /// that is not waiting, or no transcript. The id is validated here too because it reaches
+    /// a path; the wire edge refuses it first, but this is the layer that builds the path.
+    private func subagentOpenPrompt(_ session: UUID, agent: String) -> OpenPrompt? {
+        guard SubagentID.isValid(agent), case .success(let read) = preflight(session),
+              let dir = read.reader.subagentTranscripts(for: read.url) else { return nil }
+        let lines = tail(dir.appendingPathComponent("agent-\(agent).jsonl"), Self.tailRecords).lines
+        return read.reader.openPrompt(inSubagentTail: lines)
     }
 
     /// Per-tab, per-file answers for `subagentHoldsOpenCall`, keyed on each file's stamp the
@@ -327,6 +373,7 @@ final class PromptService {
         // stale refusal at the start of the tab's next episode.
         derived = derived.filter { store.status(for: $0.key)?.activity == .waiting }
         subagentScans = subagentScans.filter { store.status(for: $0.key)?.activity == .waiting }
+        attributedAgents = attributedAgents.filter { store.status(for: $0.key)?.activity == .waiting }
         let read: TranscriptRead
         switch preflight(session) {
         case .failure(let code): return .failure(code)

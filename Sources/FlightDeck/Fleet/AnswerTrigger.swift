@@ -193,7 +193,7 @@ final class AnswerTrigger {
         // what this answer wrote.
         let cursor = answerLogLength()
         let result = prompts.answer(
-            session: session, call: call, answer: .answers(picked), token: UUID()
+            session: session, agent: nil, call: call, answer: .answers(picked), token: UUID()
         )
         if case .failure(let code) = result {
             return .failure(op: "answer", error: code.code, detail: nil)

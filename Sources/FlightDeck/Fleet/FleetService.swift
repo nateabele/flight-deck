@@ -192,6 +192,9 @@ final class FleetService: ObservableObject {
         store.openPromptProbe = { [weak prompts] id in
             prompts?.polledOpenPrompt(inSession: id)?.map(\.callID)
         }
+        store.openPromptAgentProbe = { [weak prompts] id in
+            prompts?.openPromptAgent(inSession: id)
+        }
         prompts.onPolledSettled = { [weak store] in store?.recommitStatuses() }
         store.openPromptProbeInline = { [weak prompts] id in
             prompts?.pushedOpenPrompt(inSession: id).map(\.callID)
@@ -558,7 +561,7 @@ final class FleetService: ObservableObject {
             // broadcast, and nothing new for `FleetReplicator`'s drift check to guard.
             Task { @MainActor in
                 switch await self.timeline.page(
-                    session: session, anchor: anchor, limit: limit
+                    session: session, agent: nil, anchor: anchor, limit: limit
                 ) {
                 case .success(let page): reply(.page(cid: cid, page))
                 // `.code` is the wire spelling, verbatim — see `TimelineErrorCode`.
@@ -1300,7 +1303,7 @@ final class FleetService: ObservableObject {
             // always answers inline on the way out of `apply`, and `PromptService.answer`'s
             // read is a tail sized for exactly that.
             if case .failure(let code) = prompts.answer(
-                session: id, call: call, answer: answer, token: token
+                session: id, agent: nil, call: call, answer: answer, token: token
             ) {
                 return .err(cid: cid, code: code.code)
             }
