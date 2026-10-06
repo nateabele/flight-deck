@@ -20,6 +20,19 @@ struct FlightControlRoutingPane: View {
     @State private var drop: DropMark?
     @State private var showsCompiler = false
 
+    init(routing: RoutingService, preferences: PreferencesStore, project: String?) {
+        self.init(routing: routing, preferences: preferences, project: project, drafts: [:], editing: nil)
+    }
+
+    /// `drafts` and `editing` start the pane mid-typing, for `RoutingRenderTests`: both trap
+    /// layouts this pane has hit (text pushed to the trailing edge) only show with text in a field.
+    init(routing: RoutingService, preferences: PreferencesStore, project: String?,
+         drafts: [RuleScope: String], editing: String?) {
+        self.routing = routing; self.preferences = preferences; self.project = project
+        _drafts = State(initialValue: drafts)
+        _editing = State(initialValue: editing)
+    }
+
     /// Where a dragged rule would land: just above `before`, or last in `scope` when nil.
     struct DropMark: Equatable {
         var scope: RuleScope
@@ -114,8 +127,13 @@ struct FlightControlRoutingPane: View {
                 .accessibilityHidden(true)
             // The placeholder is drawn by hand: a plain field's own prompt renders in the
             // primary colour inside a grouped form and reads as a rule someone typed.
+            // labelsHidden + leading: inside a grouped form a TextField is laid out as a label
+            // and a trailing-aligned field, which put the caret and typed text at the row's far
+            // right, away from the placeholder (seen on the UI-test Mac).
             TextField("", text: text)
                 .textFieldStyle(.plain)
+                .labelsHidden()
+                .multilineTextAlignment(.leading)
                 .background(alignment: .leading) {
                     if text.wrappedValue.isEmpty {
                         Text("New rule…").foregroundStyle(.tertiary).allowsHitTesting(false).accessibilityHidden(true)

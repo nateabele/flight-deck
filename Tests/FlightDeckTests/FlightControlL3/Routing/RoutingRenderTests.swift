@@ -90,6 +90,11 @@ final class RoutingRenderTests: XCTestCase {
         for (name, appearance) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
             let tab = FlightControlSettingsTab(preferences: prefs, sessions: sessions, routing: svc)
             try Self.write(tab, size: size, appearance: appearance, to: out.appendingPathComponent("routing-\(name).png"))
+            // Mid-typing: a sentence being reworded inline and a new rule half typed. A grouped
+            // form pushes a TextField's text to the trailing edge unless told otherwise.
+            try Self.write(FlightControlRoutingPane(routing: svc, preferences: prefs, project: project,
+                                                    drafts: [.global: "Use Claude for frontend work"], editing: "g2"),
+                           size: size, appearance: appearance, to: out.appendingPathComponent("routing-typing-\(name).png"))
             // Narrower than the Settings window, as its grouped form's wider insets leave it in
             // practice: the pills must wrap here, never truncate.
             try Self.write(FlightControlSettingsTab(preferences: prefs, sessions: sessions, routing: svc),
