@@ -60,8 +60,19 @@ final class CapacityPreferencesTests: XCTestCase {
 
     func testHandoffSettingsDefaults() {
         XCTAssertEqual(CapacityPreferences().handoffSettings, HandoffSettings(confirm: false, deadline: 600))
-        XCTAssertEqual(CapacityPreferences(confirmHandoffs: true, handoffDeadlineSeconds: 120).handoffSettings,
-                       HandoffSettings(confirm: true, deadline: 120))
+        XCTAssertEqual(CapacityPreferences(handoffDeadlineSeconds: 120).handoffSettings,
+                       HandoffSettings(confirm: false, deadline: 120))
+    }
+
+    /// Nothing can answer a hand-off confirmation yet (the phone shows no Confirm/Decline and the
+    /// Mac has no action), so a stored "Confirm hand-offs" — set before the toggle was disabled,
+    /// or by hand — would park every over-limit agent on its exhausted account forever.
+    func testConfirmIsOffEvenWhenTheStoredFlagIsOn() {
+        let stored = CapacityPreferences(confirmHandoffs: true, handoffDeadlineSeconds: 120)
+        XCTAssertFalse(stored.handoffSettings.confirm)
+        XCTAssertEqual(stored.handoffSettings.deadline, 120)
+        XCTAssertTrue(stored.handoffSettings(confirmSurfaceExists: true).confirm,
+                      "the stored flag is kept for when a confirm surface exists")
     }
 
     func testAnOldPreferencesBlobStillDecodes() throws {

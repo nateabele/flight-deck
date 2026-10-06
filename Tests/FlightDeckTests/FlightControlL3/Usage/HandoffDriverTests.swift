@@ -466,4 +466,22 @@ final class HandoffDriverTests: XCTestCase {
         await d.evaluate([agent])
         XCTAssertTrue(d.pendingHandoffs.isEmpty)
     }
+
+    /// An agent already parked for a confirmation when confirm goes off (the toggle disabled
+    /// until a confirm surface exists, or Settings changed) must not wait for an answer nothing
+    /// can give: the next pass hands it off without asking again.
+    func testConfirmTurnedOffWhilePendingProceeds() async {
+        settings.confirm = true
+        host.activities[oldID] = .idle
+        let d = driver()
+        await d.evaluate([agent])
+        XCTAssertEqual(d.phases[oldID], .awaitingConfirmation)
+        XCTAssertEqual(spawner.calls.count, 0)
+        settings.confirm = false
+        await d.evaluate([agent])
+        XCTAssertEqual(spawner.calls.count, 1)
+        XCTAssertEqual(host.stopped, [oldID])
+        XCTAssertTrue(d.pendingHandoffs.isEmpty)
+        XCTAssertEqual(host.confirmations.count, 1, "never asked again")
+    }
 }

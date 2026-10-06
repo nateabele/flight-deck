@@ -139,12 +139,34 @@ final class SwarmEndToEndTests: XCTestCase {
         XCTAssertNotNil(rig.swarm.onTick)
     }
 
+    /// Nothing can answer a hand-off confirmation yet: the phone shows no Confirm/Decline and
+    /// the Mac has no action. A stored "Confirm hand-offs" must not park the agent on its
+    /// over-hard account, burning it while it waits for an answer that never comes.
+    func testAStoredConfirmFlagNeverParksAnAgent() async throws {
+        rig.preferences.updateCapacity { $0.confirmHandoffs = true }
+        rig.feed(account: "Work", utilization: 0.30)
+        rig.feed(account: "Personal", utilization: 0.10)
+        try await rig.launch(cap: 1)
+        await rig.tick()
+        let first = try XCTUnwrap(rig.spawns.first)
+        rig.feed(account: "Work", utilization: 0.97)
+        rig.markIdle(first.session)
+        await rig.tick()
+        let driver = try XCTUnwrap(rig.store.flightControlGraph?.driver)
+        XCTAssertTrue(driver.pendingHandoffs.isEmpty, "nobody can answer, so nobody is asked")
+        XCTAssertEqual(rig.spawns.count, 2)
+        XCTAssertTrue(rig.isHandedOff(first.session))
+    }
+
     // MARK: - Fix round 1
 
     /// The driver prunes every agent missing from what it is given. Called once per project,
     /// project A's pass wiped project B's pending confirmation (and a `.stopFailed`, or a
     /// decline), so B was re-asked forever and a phone "confirm" for it answered false.
     func testTwoProjectsKeepEachOthersHandoffState() async throws {
+        // The driver's confirmation machinery, which production keeps off until a confirm
+        // surface exists (see `testAStoredConfirmFlagNeverParksAnAgent`).
+        rig.store.flightControlGraph?.confirmSurfaceExists = true
         rig.preferences.updateCapacity { $0.confirmHandoffs = true }
         rig.feed(account: "Work", utilization: 0.30)
         rig.feed(account: "Personal", utilization: 0.10)
