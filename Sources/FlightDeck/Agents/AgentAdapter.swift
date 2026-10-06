@@ -307,6 +307,16 @@ protocol AgentAdapter {
 /// arguments, so this costs it nothing.
 protocol AgentOpenPromptReader: Sendable {
     func openPrompt(inTranscriptTail lines: [SourceLine], activity: SessionActivity?) -> OpenPrompt?
+
+    /// Where this agent writes its background subagents' transcripts for the conversation in
+    /// `transcript`, or nil if it has none.
+    ///
+    /// **A dialog can be on screen with its call in one of these files and not in the tab's
+    /// own transcript.** claude draws a background subagent's permission dialog in the parent's
+    /// TUI and sets the parent `waiting`, but writes the `tool_use` to the subagent's file.
+    /// `PromptService` looks here so it does not report such a tab as having nothing open.
+    /// No default: an agent that has subagents and answers nil would bring that bug back.
+    func subagentTranscripts(for transcript: URL) -> URL?
 }
 
 /// **Typing a message into a live agent and submitting it.**

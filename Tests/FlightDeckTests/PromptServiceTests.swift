@@ -697,6 +697,129 @@ final class PromptServiceTests: XCTestCase {
                      "not known yet — never the call the file has since moved past")
         await fulfillment(of: [settled], timeout: 5)
     }
+
+    // MARK: Background subagents — the "Flywheel Planning" report (2026-10-05)
+
+    /// Writes a subagent transcript beside the tab's own, where claude puts a background
+    /// Agent's: `<conversation>/subagents/agent-<id>.jsonl`.
+    @discardableResult
+    private func writeSubagent(
+        for store: SessionStore, _ id: UUID, agent: String, _ lines: [String]
+    ) throws -> URL {
+        guard case .file(_, let url) = store.timelineSource(of: id) else {
+            XCTFail("a claude tab resolves to a transcript file")
+            return URL(fileURLWithPath: "/")
+        }
+        let dir = url.deletingPathExtension().appendingPathComponent("subagents", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let file = dir.appendingPathComponent("agent-\(agent).jsonl")
+        try (lines.joined(separator: "\n") + "\n").write(to: file, atomically: false, encoding: .utf8)
+        return file
+    }
+
+    /// **The live failure.** A background implementer subagent hit a Bash permission dialog.
+    /// claude drew it in the parent's TUI ("Bash command · from the implementer agent") and set
+    /// the parent `waiting` / "permission prompt", but wrote the `tool_use` to the subagent's own
+    /// transcript. The parent's transcript ended on a finished turn, so the probe refused
+    /// `prompt_changed`, and five seconds later the Mac and phone both said "Still working (no
+    /// response needed)" over a dialog that had been waiting on a human for 90 minutes.
+    ///
+    /// A subagent holding an open call is a dialog this Mac can see but not yet name, so the
+    /// refusal must be one `answerless` does not fire on.
+    func testASubagentsOpenCallIsNotReportedAsNothingOpen() throws {
+        let (service, store, _, id) = makeService(activity: .waiting)
+        try writeTranscript(for: store, id, [bookkeepingLine()])
+        try writeSubagent(for: store, id, agent: "a1", [bashLine("toolu_SUB")])
+        let parent = [SourceLine(offset: 0, text: bookkeepingLine())]
+        let subagent = [SourceLine(offset: 0, text: bashLine("toolu_SUB"))]
+        service.tail = { url, _ in
+            (url.path.contains("/subagents/") ? subagent : parent, false)
+        }
+        guard case .failure(let pushed) = service.pushedOpenPrompt(inSession: id) else {
+            return XCTFail("the subagent's call is not one the phone can be offered")
+        }
+        XCTAssertEqual(pushed.code, "subagent_prompt")
+        guard case .failure(let polled)? = service.polledOpenPrompt(inSession: id) else {
+            return XCTFail("the polled probe asks the same question")
+        }
+        XCTAssertEqual(polled.code, "subagent_prompt")
+    }
+
+    /// A subagent whose last call has its result is not blocked on anything, so the tab is
+    /// back to the ordinary "nothing open" refusal.
+    func testAFinishedSubagentLeavesTheRefusalAsNothingOpen() throws {
+        let (service, store, _, id) = makeService(activity: .waiting)
+        try writeTranscript(for: store, id, [bookkeepingLine()])
+        try writeSubagent(for: store, id, agent: "a1",
+                          [bashLine("toolu_SUB"), resultLine("toolu_SUB")])
+        let parent = [SourceLine(offset: 0, text: bookkeepingLine())]
+        let subagent = [SourceLine(offset: 0, text: bashLine("toolu_SUB")),
+                        SourceLine(offset: 1, text: resultLine("toolu_SUB"))]
+        service.tail = { url, _ in
+            (url.path.contains("/subagents/") ? subagent : parent, false)
+        }
+        guard case .failure(let code) = service.pushedOpenPrompt(inSession: id) else {
+            return XCTFail("nothing is open anywhere")
+        }
+        XCTAssertEqual(code.code, "prompt_changed")
+    }
+
+    /// A subagent killed mid-call by an earlier claude process (a crash, a network drop, a
+    /// quit) leaves an unresolved `tool_use` in its file forever. Only files the tab's current
+    /// process has written can hold the dialog on screen now.
+    func testASubagentFileFromAnEarlierProcessIsIgnored() throws {
+        let (service, store, _, id) = makeService(activity: .waiting)
+        try writeTranscript(for: store, id, [bookkeepingLine()])
+        try writeSubagent(for: store, id, agent: "a1", [bashLine("toolu_DEAD")])
+        service.agentStartedAt = { _ in Date().addingTimeInterval(60) }
+        let parent = [SourceLine(offset: 0, text: bookkeepingLine())]
+        let subagent = [SourceLine(offset: 0, text: bashLine("toolu_DEAD"))]
+        service.tail = { url, _ in
+            (url.path.contains("/subagents/") ? subagent : parent, false)
+        }
+        guard case .failure(let code) = service.pushedOpenPrompt(inSession: id) else {
+            return XCTFail("nothing is open in this process")
+        }
+        XCTAssertEqual(code.code, "prompt_changed")
+    }
+
+    /// The subagent check rides the same per-file stamp rule as the parent's: a subagent file
+    /// that has not changed is not re-read, and one that has is.
+    func testASubagentFileIsRereadOnlyWhenItChanges() throws {
+        let (service, store, _, id) = makeService(activity: .waiting)
+        try writeTranscript(for: store, id, [bookkeepingLine()])
+        let file = try writeSubagent(for: store, id, agent: "a1", [bashLine("toolu_SUB")])
+        let subagentReads = ReadCount()
+        let answered = ReadCount()  // 0 → open, 1 → answered
+        let parent = [SourceLine(offset: 0, text: bookkeepingLine())]
+        let open = [SourceLine(offset: 0, text: bashLine("toolu_SUB"))]
+        let done = open + [SourceLine(offset: 1, text: resultLine("toolu_SUB"))]
+        service.tail = { url, _ in
+            guard url.path.contains("/subagents/") else { return (parent, false) }
+            subagentReads.value += 1
+            return (answered.value == 0 ? open : done, false)
+        }
+        for _ in 0..<3 {
+            XCTAssertEqual(try? failureCode(service.pushedOpenPrompt(inSession: id)),
+                           "subagent_prompt")
+        }
+        XCTAssertEqual(subagentReads.value, 1, "two of three asks were of an unchanged file")
+
+        answered.value = 1
+        let handle = try FileHandle(forWritingTo: file)
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data((resultLine("toolu_SUB") + "\n").utf8))
+        try handle.close()
+        XCTAssertEqual(try? failureCode(service.pushedOpenPrompt(inSession: id)), "prompt_changed")
+        XCTAssertEqual(subagentReads.value, 2)
+    }
+
+    private struct NotARefusal: Error {}
+
+    private func failureCode(_ result: Result<OpenPrompt, TimelineErrorCode>) throws -> String {
+        guard case .failure(let code) = result else { throw NotARefusal() }
+        return code.code
+    }
 }
 
 /// The store half of the scheduled probe: an answer that arrives *between* registry ticks
