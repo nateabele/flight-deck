@@ -91,6 +91,17 @@ final class SessionStoreAnswerlessTests: XCTestCase {
         XCTAssertFalse(store.status(for: id)?.answerless ?? true)
     }
 
+    /// `"subagent_prompt"` is a dialog this Mac can see in a background subagent's transcript
+    /// but cannot offer the phone. Something IS waiting on a human, so this must never become
+    /// "Still working (no response needed)".
+    func testAnswerlessStaysFalseWhileASubagentHoldsAnOpenCall() {
+        let (store, id) = makeStore(probe: { _ in .failure("subagent_prompt") })
+        store.applyRegistryForTesting([id: SessionStatus(activity: .waiting)])
+        advance(30)
+        store.applyRegistryForTesting([id: SessionStatus(activity: .waiting)])
+        XCTAssertFalse(store.status(for: id)?.answerless ?? true)
+    }
+
     /// Any other refusal code is the same story as `"unsupported_agent"`: only the specific
     /// `"prompt_changed"` refusal is this Mac asserting there is nothing open.
     func testAnswerlessStaysFalseForOtherFailureCodes() {

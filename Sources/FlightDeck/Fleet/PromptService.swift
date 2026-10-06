@@ -124,8 +124,17 @@ final class PromptService {
         label: "dev.flightdeck.prompt-widen", qos: .utility, attributes: .concurrent
     )
 
+    /// When the claude process behind a tab started, or nil if unknown. A test seam: see
+    /// `subagentHoldsOpenCall`.
+    var agentStartedAt: (UUID) -> Date?
+
     init(store: SessionStore) {
         self.store = store
+        agentStartedAt = { [weak store] id in
+            guard let pid = store?.claudePID(of: id),
+                  let micros = ProcessTree().startTime(of: pid) else { return nil }
+            return Date(timeIntervalSince1970: TimeInterval(micros) / 1_000_000)
+        }
     }
 
     /// Answer the dialog `session` is blocked on, if `call` still names it.
@@ -202,7 +211,8 @@ final class PromptService {
               agent.openPromptReader != nil
         else { return .failure("unsupported_agent") }
         // Never nil: an unpolled derive always settles inline.
-        return derive(session, polled: false) ?? .failure("prompt_changed")
+        return attributingSubagents(session, derive(session, polled: false))
+            ?? .failure("prompt_changed")
     }
 
     /// `pushedOpenPrompt` for `SessionStore`'s registry tick, which must never block the main
@@ -213,7 +223,81 @@ final class PromptService {
               agent.dialogDriver != nil,
               agent.openPromptReader != nil
         else { return .failure("unsupported_agent") }
-        return derive(session, polled: true)
+        return attributingSubagents(session, derive(session, polled: true))
+    }
+
+    /// Turns the tab's own "nothing open" into `"subagent_prompt"` when one of its background
+    /// subagents holds an unresolved call.
+    ///
+    /// **The failure this exists for (2026-10-05, "Flywheel Planning").** A background
+    /// implementer subagent hit a Bash permission dialog. claude drew it in the parent's TUI and
+    /// set the parent `waiting` / "permission prompt", but the `tool_use` went to
+    /// `subagents/agent-<id>.jsonl`. The parent's transcript ended on a finished turn, so this
+    /// refused `prompt_changed`, `answerless` fired five seconds later, and the Mac and phone
+    /// both said "Still working (no response needed)" for 90 minutes over a dialog waiting on a
+    /// human. The registry flipped to `waiting` within 70ms of the subagent writing the call.
+    ///
+    /// **A refusal, not the call.** The phone derives its card from the parent's feed, which
+    /// does not hold this call, and its Allow/Deny would be checked against an id it never saw.
+    /// The code exists so `SessionStore.derivedOpenPromptCalls` does not read the tab as
+    /// "nothing open" (it gates `answerless` on `prompt_changed` alone), which leaves claude's
+    /// own reason ("Waiting for you — permission prompt") on screen. `answer` never sees this
+    /// code: it reads through `openPrompt`, so a tap still refuses `prompt_changed`.
+    ///
+    /// **It cannot tell a blocked call from a running one.** A subagent mid-Bash has an
+    /// unresolved `tool_use` too, so while any subagent is working the tab is never called
+    /// `answerless`. That errs toward claude's own wording, which is the safe direction.
+    private func attributingSubagents(
+        _ session: UUID, _ result: Result<OpenPrompt, TimelineErrorCode>?
+    ) -> Result<OpenPrompt, TimelineErrorCode>? {
+        guard case .failure(let code)? = result, code.code == "prompt_changed",
+              subagentHoldsOpenCall(session)
+        else { return result }
+        return .failure("subagent_prompt")
+    }
+
+    /// Per-tab, per-file answers for `subagentHoldsOpenCall`, keyed on each file's stamp the
+    /// way `derived` is keyed on the parent's, so a file that has not changed is one `stat`.
+    /// Rebuilt on every pass from the files that pass looked at, and dropped with `derived`
+    /// when the tab stops waiting, so it never outgrows the subagents currently in play.
+    private var subagentScans: [UUID: [URL: (stamp: TranscriptStamp, open: Bool)]] = [:]
+
+    /// Whether any subagent transcript the tab's current claude process has written ends on an
+    /// unresolved call.
+    ///
+    /// Files last written before that process started are skipped: a subagent killed mid-call
+    /// by an earlier process (a quit, a crash, a network drop) leaves its `tool_use` unresolved
+    /// forever. In the live conversation that prompted this, 2 of 237 subagent files ended on an
+    /// open call, and both were live. If the start time is unknown, every file is considered,
+    /// which can only withhold `answerless`, never assert it.
+    ///
+    /// Each file gets one `tailRecords` window and no widen. A subagent file holds none of the
+    /// bookkeeping lines that crowd the parent's tail, so its open call is its last record.
+    private func subagentHoldsOpenCall(_ session: UUID) -> Bool {
+        guard case .success(let read) = preflight(session),
+              let dir = read.reader.subagentTranscripts(for: read.url),
+              let files = try? FileManager.default.contentsOfDirectory(
+                  at: dir, includingPropertiesForKeys: nil
+              )
+        else { return false }
+        let since = agentStartedAt(session)
+        let previous = subagentScans[session] ?? [:]
+        var scans: [URL: (stamp: TranscriptStamp, open: Bool)] = [:]
+        for file in files where file.pathExtension == "jsonl" {
+            guard let stamp = TranscriptStamp(of: file) else { continue }
+            if let since, stamp.modified < since { continue }
+            if let hit = previous[file], hit.stamp == stamp {
+                scans[file] = hit
+                continue
+            }
+            let lines = tail(file, Self.tailRecords).lines
+            let open = read.reader.openPrompt(inTranscriptTail: lines, activity: .waiting) != nil
+            scans[file] = (stamp, open)
+        }
+        // Not an early return on the first open file: every live file's stamp is recorded this
+        // pass, so the next tick re-reads only the files that changed.
+        subagentScans[session] = scans
+        return scans.values.contains { $0.open }
     }
 
     /// The scheduled side's read, cached on the transcript's stamp.
@@ -242,6 +326,7 @@ final class PromptService {
         // Entries for tabs no longer waiting are dead weight and, worse, would be served as a
         // stale refusal at the start of the tab's next episode.
         derived = derived.filter { store.status(for: $0.key)?.activity == .waiting }
+        subagentScans = subagentScans.filter { store.status(for: $0.key)?.activity == .waiting }
         let read: TranscriptRead
         switch preflight(session) {
         case .failure(let code): return .failure(code)
@@ -462,6 +547,12 @@ struct TranscriptStamp: Equatable, Sendable {
         size = info.st_size
         mtimeSeconds = info.st_mtimespec.tv_sec
         mtimeNanoseconds = info.st_mtimespec.tv_nsec
+    }
+
+    /// The mtime as a `Date`, for comparing against a process start.
+    var modified: Date {
+        Date(timeIntervalSince1970: TimeInterval(mtimeSeconds)
+            + TimeInterval(mtimeNanoseconds) / 1_000_000_000)
     }
 }
 
