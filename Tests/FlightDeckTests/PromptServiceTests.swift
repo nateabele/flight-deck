@@ -891,6 +891,40 @@ final class PromptServiceTests: XCTestCase {
         XCTAssertTrue(spy.events.isEmpty)
     }
 
+    /// The three halves of the check above, one at a time: each alone must refuse, so no one
+    /// of them can be deleted with the suite still green. The file holds exactly the call
+    /// being answered, open — the shape `testAnsweringASubagentsDialogDrivesTheTerminal` shows
+    /// WOULD be typed — so the pending-dialog check is the only thing that can refuse.
+    private func refusesSubagentAnswer(pending: PendingDialog?, agent: String, call: String,
+                                       file: StaticString = #filePath, line: UInt = #line) throws {
+        let (service, store, spy, id) = makeService(activity: .waiting)
+        try writeTranscript(for: store, id, [bookkeepingLine()])
+        try writeSubagent(for: store, id, agent: "a28ad87b", [sidechain(bashLine("toolu_SUB"))])
+        service.pendingDialog = { _ in pending }
+        let parent = [SourceLine(offset: 0, text: bookkeepingLine())]
+        let sub = [SourceLine(offset: 0, text: sidechain(bashLine("toolu_SUB")))]
+        service.tail = { url, _ in (url.path.contains("/subagents/") ? sub : parent, false) }
+        spy.showOptions(["Yes", "No"], selected: 0)
+        XCTAssertEqual(code(service.answer(session: id, agent: agent, call: call,
+                                           answer: .allow, token: UUID())), "prompt_changed",
+                       file: file, line: line)
+        XCTAssertTrue(spy.events.isEmpty, "nothing typed", file: file, line: line)
+    }
+
+    func testAMatchingAgentWithADifferentCallIsRefused() throws {
+        try refusesSubagentAnswer(pending: PendingDialog(agentID: "a28ad87b", callID: "toolu_TWO"),
+                                  agent: "a28ad87b", call: "toolu_SUB")
+    }
+
+    func testAMatchingCallUnderADifferentAgentIsRefused() throws {
+        try refusesSubagentAnswer(pending: PendingDialog(agentID: "a9999999", callID: "toolu_SUB"),
+                                  agent: "a28ad87b", call: "toolu_SUB")
+    }
+
+    func testAnAgentAnswerWithNoPendingDialogAtAllIsRefused() throws {
+        try refusesSubagentAnswer(pending: nil, agent: "a28ad87b", call: "toolu_SUB")
+    }
+
     /// Review Focus 1.
     func testATraversalAgentIDIsRefusedBeforeAnyRead() {
         let (service, _, spy, id) = makeService(activity: .waiting)
