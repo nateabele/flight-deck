@@ -66,7 +66,7 @@ enum FleetProjection {
                     apiError: apiErrors[$0.id],
                     planGates: planGates,
                     allowsBlockedAbort: allowsBlockedAbort,
-                    subagents: subagentModel(of: $0, trees: subagentTrees),
+                    subagents: subagentModel(of: $0, trees: subagentTrees, status: statuses[$0.id]),
                     openPromptAgent: openPromptAgents[$0.id]
                 )
             },
@@ -122,9 +122,19 @@ enum FleetProjection {
     /// empty — `[]` on the wire says "this Mac models subagents and there are none", which a
     /// phone must be able to tell from a codex tab (nil: not modelled). Collapsing the two
     /// would hide a non-zero `subagentCount` behind an empty list on every codex tab.
+    ///
+    /// **No status, no tree** — still `[]`, never the stored tree. `applySubagents` emits only
+    /// for a tab with a status (an event needs one to carry), and the tree now outlives a lost
+    /// registry row; projecting it anyway made the snapshot disagree with what was emitted
+    /// (`FleetReplicator`'s drift assertion) and showed a reconnecting phone a tree a
+    /// connected one never got. When the status appears, `emitActivity` carries the tree.
     @MainActor
-    static func subagentModel(of session: Session, trees: [UUID: SubagentTree]) -> SubagentTree? {
-        session.agent == .claude ? (trees[session.id] ?? .empty) : nil
+    static func subagentModel(
+        of session: Session, trees: [UUID: SubagentTree], status: SessionStatus?
+    ) -> SubagentTree? {
+        guard session.agent == .claude else { return nil }
+        guard status != nil else { return .empty }
+        return trees[session.id] ?? .empty
     }
 
     /// The tree as the wire carries it, with the node that owns the open dialog marked

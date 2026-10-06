@@ -1620,7 +1620,8 @@ final class SessionStore: ObservableObject {
             openPromptCall: openPromptCalls[session.id],
             apiError: apiErrors[session.id],
             planGates: planGates,
-            subagents: FleetProjection.subagentModel(of: session, trees: subagentTrees),
+            subagents: FleetProjection.subagentModel(
+                of: session, trees: subagentTrees, status: statuses[session.id]),
             openPromptAgent: openPromptAgents[session.id]
         )
     }
@@ -8750,7 +8751,8 @@ final class SessionStore: ObservableObject {
     /// phone's tree with nil.
     private func wireSubagents(of id: UUID) -> [WireSubagent]? {
         guard let session = session(for: id),
-              let tree = FleetProjection.subagentModel(of: session, trees: subagentTrees)
+              let tree = FleetProjection.subagentModel(
+                  of: session, trees: subagentTrees, status: statuses[id])
         else { return nil }
         return FleetProjection.wire(
             tree, blocked: openPromptAgents[id], call: openPromptCalls[id])
