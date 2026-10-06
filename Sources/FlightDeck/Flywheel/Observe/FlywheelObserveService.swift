@@ -20,6 +20,9 @@ final class FlywheelObserveService: ObservableObject {
     /// fleet-wide notifier hook (distinct from `@Published projections`, which drives
     /// SwiftUI observation directly).
     var onProjectionsChanged: (([String: FlywheelProjection]) -> Void)?
+    /// Adds what Observe cannot read itself — guard-block waiters, tab activity, BLOCKED:
+    /// declarations — before the projection is computed. Set by `SessionStore` (L3-S).
+    var enrich: ((String, FlywheelSnapshot) -> FlywheelSnapshot)?
 
     init(reads: FlywheelReadCommands = FlywheelReadCommands(), clock: WatchClock? = nil,
          stallThreshold: TimeInterval = 600, now: @escaping () -> Date = Date.init) {
@@ -52,7 +55,8 @@ final class FlywheelObserveService: ObservableObject {
             // source of truth: once `disable` has run, the entry is gone and this closure
             // drops the late result instead of writing it back into the maps.
             guard let self, self.watchers[key] != nil else { return }
-            let projection = FlywheelProjection.project(snapshot, now: self.now(),
+            let enriched = self.enrich?(key, snapshot) ?? snapshot
+            let projection = FlywheelProjection.project(enriched, now: self.now(),
                                                           stallThreshold: self.stallThreshold,
                                                           previous: self.projections[key])
             self.projections[key] = projection

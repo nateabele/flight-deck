@@ -2311,6 +2311,31 @@ flagged as most likely to differ from the tests. The maintainer's to run.
   swarm agent on an account near its limit and watch it hand off; confirm a manual tab gets one
   notification and stays put; run the real claude-tab meter (the mod in an FD-spawned
   interactive tab) against `/usage`. Open L3-U items, each a bullet below.
+  - **L3-S swarm built** (branch `l3-swarm`, 2f23691f plus docs commit). Integration must: set
+    `SessionStore.swarmDependencies` to L3-R's router factory and `KindRegistry` and L3-U's
+    `PoolAllocator`/`CapacityReader`. The router is a factory, `makeRouter: () -> any Router`: plug
+    in L3-R's `RoutingService.makeRouter()` and never cache a router. `SwarmDependencies.pools`
+    takes a `PoolDirectory`, and `DefaultPoolDirectory(harnesses: ["claude","codex"])` is a
+    stand-in until L3-R/L3-U's pool store is wired. Set `SwarmService.handoffDecisions` to L3-U's
+    driver and give that driver `SwarmService.spawner`, `agentSnapshots(project:)`,
+    `recordHandoff(project:from:to:block:lease:)` and `returnClaimToOpen(project:task:)`; replace
+    `MinimalMeter` with L3-U's meter view; merge the adjacent edits to
+    `ClaudeRoutingCapabilities`/`CodexRoutingCapabilities` (L3-R catalog, L3-U meter/transcript,
+    L3-S overrides/reset). Then run `scripts/test-ui-flight-control.sh` against the real stack and
+    the maintainer's [FLIGHT-CONTROL-L3-CHECKLIST.md](FLIGHT-CONTROL-L3-CHECKLIST.md).
+  - Open from L3-S: the Observe events lane is still a nil stub (activity stands in); the hook log's
+    failed-tool event for claude is unverified (transcript used instead); OpenCode feeds
+    `AgentOutputScan` once its adapter lands. The Observe Assignment lane is hidden when the tab has
+    no Observe (am) agent row (`lanes(for:)` returns []). claude/codex accept only the hard-coded
+    `effort` knob: an L3-R knobSchema knob other than effort is refused at launch. Phone: the
+    hand-off decision API (`decideHandoff`, `handoffPending`) has no UI caller yet (L3-U). Unverified
+    live: codex `effort` and `/new` (spec §15 items 15-16), and reservations time is parsed from a
+    relative `granted_at` (item 21). UI test: FLIGHT CONTROL UI PASS on run 6 against the stub
+    backend only (runs 1-5 failed for harness reasons, see spec §15).
+  - Known L3-S follow-ups from the final review: an agent `stop()` retired gets no "done" marker
+    in `SwarmAnnotations`, and a stopped swarm's summary is not visible after it stops.
+    `SwarmService.applyProjections` awaits each project's `taskSetChanged` in turn, so one slow
+    `br show` delays completion detection for every other project.
   Original list of the rest, kept for history:
   - **Launch a swarm from released tasks** — pick with `bv`, claim, spawn agents into the
     project's sessions.

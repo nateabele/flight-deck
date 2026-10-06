@@ -192,11 +192,14 @@ public enum FleetCapability {
     /// Mac withholds `project.intakes` from any peer without it (spec §6).
     public static let flightControl = "flightControl"
 
+    /// This peer decodes the `project.swarm` event (L3-S). Withheld from peers without it.
+    public static let swarm = "swarm"
+
     /// Everything this build of FleetKit can answer when asked. Sent verbatim in `hello`.
     ///
     /// Claimed by the FleetKit half rather than by the app, because the frame handling is
     /// what is actually being advertised: a phone whose app forgot to install a log provider
     /// still answers, with `unhandled`, which is a refusal the Mac can print rather than a
     /// request that never comes back.
-    public static let supported = [logs, flightControl]
+    public static let supported = [logs, flightControl, swarm]
 }

@@ -3,10 +3,10 @@ import XCTest
 
 @MainActor
 final class FlywheelWatcherTests: XCTestCase {
-    /// The number of `reads.*` calls one repoll makes. Task 2 shipped only two live lanes
-    /// (`agents`, `inProgressBeads`) — `reservations`/`depEdges`/`events` are nil-stubs that
-    /// never invoke the runner, so a repoll shells out exactly twice.
-    let expectedReadsPerPoll = 2
+    /// The number of `reads.*` calls one repoll makes. Four lanes are live (`agents`,
+    /// `inProgressBeads`, `reservations`, `depEdges`) — `events` is a nil-stub that never
+    /// invokes the runner, so a repoll shells out exactly four times.
+    let expectedReadsPerPoll = 4
 
     func testUnchangedMtimeDoesNotRepoll() async {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

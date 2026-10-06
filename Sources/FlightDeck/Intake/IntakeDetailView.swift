@@ -22,6 +22,8 @@ struct IntakeDetailView: View {
     /// lives on `ProjectView`, not here, because `ReleaseReviewView` loads its review model
     /// independently in a `.task` keyed on the id ProjectView hands it.
     let onOpenReview: () -> Void
+    /// Opens the launch sheet for the tasks this intake released (L3-S). Nil hides the button.
+    var onRunTasks: (([String]) -> Void)? = nil
     /// Per project, held by `IntakeService` (`inspectorShown(forProject:)`); `ProjectView`'s
     /// toolbar button (⌥⌘I) toggles it, and Edit in Inspector and the notes open it.
     @Binding var showsInspector: Bool
@@ -110,6 +112,7 @@ struct IntakeDetailView: View {
     private let opensConvergenceCard: Bool
 
     init(service: IntakeService, intake: Intake, onOpenReview: @escaping () -> Void,
+         onRunTasks: (([String]) -> Void)? = nil,
          showsInspector: Binding<Bool> = .constant(false), expandedRounds: Set<Int> = [], requestExpanded: Bool = false,
          selectedSeat: String? = nil,
          heatmap: HeatmapFocus? = nil, opensConvergenceCard: Bool = false) {
@@ -118,6 +121,7 @@ struct IntakeDetailView: View {
         self.service = service
         self.intake = intake
         self.onOpenReview = onOpenReview
+        self.onRunTasks = onRunTasks
         _showsInspector = showsInspector
         _columnPresented = State(initialValue: showsInspector.wrappedValue)
         _expandedRounds = State(initialValue: expandedRounds)
@@ -763,6 +767,10 @@ struct IntakeDetailView: View {
                         }
                     }
                 }
+            }
+            if let record = intake.release, let onRunTasks, !record.idMap.isEmpty {
+                Button("Run Tasks…") { onRunTasks(record.idMap.values.sorted()) }
+                    .accessibilityIdentifier("intake-run-tasks")
             }
         }
     }

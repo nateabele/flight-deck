@@ -299,6 +299,15 @@ public enum FleetCommand: Codable, Equatable, Sendable {
                     checkpoint: Int?, block: Int?, quote: String?)
     case intakeRemoveNote(id: UUID, token: UUID, noteID: UUID)
 
+    /// Pause or resume project `project`'s swarm (L3-S §8). Idempotent by state, so no token.
+    /// Sent only for a project whose snapshot carries `swarm`, which an older Mac never sends —
+    /// an unknown `op` would end the socket.
+    case swarmPause(project: UUID)
+    case swarmResume(project: UUID)
+    /// Confirm or decline a pending hand-off on session `id` (L3-U's driver decides; L3-S routes).
+    case handoffConfirm(id: UUID)
+    case handoffDecline(id: UUID)
+
     enum CodingKeys: String, CodingKey {
         case op, id, token, text, call, answer, index, label
         case isCollapsed, project, title, agent, accountIndex
@@ -324,6 +333,10 @@ public enum FleetCommand: Codable, Equatable, Sendable {
         case intakeDefaultPlay = "intake.defaultPlay"
         case intakeNote = "intake.note"
         case intakeRemoveNote = "intake.removeNote"
+        case swarmPause = "swarm.pause"
+        case swarmResume = "swarm.resume"
+        case handoffConfirm = "handoff.confirm"
+        case handoffDecline = "handoff.decline"
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -419,6 +432,14 @@ public enum FleetCommand: Codable, Equatable, Sendable {
             try c.encode(id, forKey: .id)
             try c.encode(token, forKey: .token)
             try c.encode(noteID, forKey: .noteID)
+        case .swarmPause(let project):
+            try c.encode(Op.swarmPause, forKey: .op); try c.encode(project, forKey: .project)
+        case .swarmResume(let project):
+            try c.encode(Op.swarmResume, forKey: .op); try c.encode(project, forKey: .project)
+        case .handoffConfirm(let id):
+            try c.encode(Op.handoffConfirm, forKey: .op); try c.encode(id, forKey: .id)
+        case .handoffDecline(let id):
+            try c.encode(Op.handoffDecline, forKey: .op); try c.encode(id, forKey: .id)
         case .abortPrompt(let id, let token):
             try c.encode(Op.abortPrompt, forKey: .op)
             try c.encode(id, forKey: .id)
@@ -537,6 +558,10 @@ public enum FleetCommand: Codable, Equatable, Sendable {
                 token: try c.decode(UUID.self, forKey: .token),
                 noteID: try c.decode(UUID.self, forKey: .noteID)
             )
+        case .swarmPause: self = .swarmPause(project: try c.decode(UUID.self, forKey: .project))
+        case .swarmResume: self = .swarmResume(project: try c.decode(UUID.self, forKey: .project))
+        case .handoffConfirm: self = .handoffConfirm(id: try c.decode(UUID.self, forKey: .id))
+        case .handoffDecline: self = .handoffDecline(id: try c.decode(UUID.self, forKey: .id))
         }
     }
 }
