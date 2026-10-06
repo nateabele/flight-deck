@@ -158,7 +158,7 @@ final class HookEventWatcherDialogTests: XCTestCase {
                                        onDialog: { got += $0 })
         let base = #""session_id":"\#(sid.uuidString.lowercased())","tool_name":"Bash","tool_input":{"command":"rm -rf x"}"#
         let lines = #"{"hook_event_name":"PreToolUse",\#(base),"agent_id":"a28ad87b","tool_use_id":"toolu_X"}"# + "\n"
-            + #"{"hook_event_name":"PermissionRequest",\#(base)}"# + "\n"
+            + #"{"hook_event_name":"PermissionRequest",\#(base),"agent_id":"a28ad87b"}"# + "\n"
         try Data(lines.utf8).write(to: dir.appendingPathComponent("events.ndjson"))
         watcher.drain()
         XCTAssertEqual(got, [.raised(sid, PendingDialog(agentID: "a28ad87b", callID: "toolu_X"))])
