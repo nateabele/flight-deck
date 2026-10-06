@@ -1391,6 +1391,12 @@ final class SessionStore: ObservableObject {
             }
         }
         service.onChange = { [weak self] in self?.scheduleSwarmRefresh() }
+        // The hand-off spawn claims through the same backend the swarm does. Captured by value:
+        // the service owns the spawner, so capturing the service here would be a retain cycle.
+        if let spawner = service.spawner as? StoreSwarmSpawner, spawner.claim == nil {
+            let backend = service.backend
+            spawner.claim = { task, name in await backend.claim(task.id, actor: name, project: task.project) }
+        }
         swarmChangeForward = service.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
     }
 

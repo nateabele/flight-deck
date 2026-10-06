@@ -81,9 +81,20 @@ final class StoreSwarmSpawnerTests: XCTestCase {
     }
 
     func testContractSpawnReportsAComposerTimeout() async {
-        let r = await spawner(created: .success(UUID()), deliverSucceeds: false)
-            .spawn(task: task, block: block(), lease: nil, firstPrompt: "go")
+        let s = spawner(created: .success(UUID()), deliverSucceeds: false)
+        s.claim = { _, _ in .claimed }
+        let r = await s.spawn(task: task, block: block(), lease: nil, firstPrompt: "go")
         XCTAssertEqual(r, .failure(.composerTimeout))
+    }
+
+    /// A hand-off spawn that never claims leaves the task open, and the swarm then claims it for
+    /// a second agent. With no claim wired, the spawn refuses before it opens a tab.
+    func testContractSpawnWithNoClaimConfiguredOpensNoTab() async {
+        var seen: [Call] = []
+        let s = spawner(created: .success(UUID()), calls: { seen.append($0) })
+        let r = await s.spawn(task: task, block: block(), lease: nil, firstPrompt: "go")
+        XCTAssertEqual(r, .failure(.launchFailed("no claim configured")))
+        XCTAssertTrue(seen.isEmpty)
     }
 
     func testResetGoesThroughTheRegistry() async {

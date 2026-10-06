@@ -74,4 +74,23 @@ final class SwarmStoreWiringTests: XCTestCase {
         XCTAssertEqual(agents.map(\.agentName), ["BlueLake"])
         XCTAssertEqual(agents.map(\.session), [s.id])
     }
+
+    /// The live spawner is L3-U's hand-off path; its claim must reach the service's backend.
+    func testTheInstalledSpawnerClaimsThroughTheServicesBackend() async throws {
+        let store = SessionStore(provider: nil, persistence: nil, swarmsRoot: root)
+        let rig = SwarmRig()
+        let spawner = StoreSwarmSpawner.live(store: store)
+        let service = SwarmService(store: rig.store, backend: rig.backend, launcher: spawner, spawner: spawner,
+                                   host: store, registry: store.routingCapabilities, clock: nil)
+        store.useSwarmService(service)
+        let claim = try XCTUnwrap(spawner.claim)
+        let outcome = await claim(TaskRef(id: "fx-1", project: URL(fileURLWithPath: "/tmp/p", isDirectory: true)), "BlueLake")
+        XCTAssertEqual(outcome, .claimed)
+        XCTAssertEqual(rig.backend.claims, [FakeSwarmBackend.ClaimCall(task: "fx-1", actor: "BlueLake")])
+    }
+
+    func testTheBuiltServicesSpawnerCanClaim() {
+        let store = SessionStore(provider: nil, persistence: nil, swarmsRoot: root)
+        XCTAssertNotNil((store.swarmService.spawner as? StoreSwarmSpawner)?.claim)
+    }
 }
