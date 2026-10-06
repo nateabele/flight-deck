@@ -181,6 +181,12 @@ second, differently-derived answer would be free to disagree with it.
 fires for permission prompts as well as idle, so neither can carry a state
 transition honestly. The veto covers what they would have covered.
 
+*Update 2026-10-06:* the subagent-model spec
+(`2026-10-06-subagent-model-design.md`) wires `PermissionRequest` record-only,
+to attribute a permission dialog to the subagent that raised it. It still never
+changes `ComposerReadiness`: `ComposerReadiness.applying` falls through its
+default arm for that event, so the argument above stands.
+
 `.unknown` is load-bearing, not a placeholder: it is a session restored from an
 older build's snapshot, one whose plugin failed to load, and one in an
 untrusted folder. It falls back to today's full screen grammar, so the change

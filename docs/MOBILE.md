@@ -496,6 +496,13 @@ page.
     contains a `<system-reminder>` or a peer message: it must stay inside your row as you
     pasted it, not split into a notice.
 
+67c. **A background subagent hits a Bash permission dialog.** The session's Subagents section
+    expands to it, the blocked agent's row is orange, and the card reads "From <type> —
+    <description>". Allow from the phone resolves the dialog on the Mac and the card goes. The
+    row's caption reads "Waiting for you — <type>: <what it waits for>". Collapse the section
+    while nothing is blocked: it stays collapsed. A session whose subagents are all done shows
+    them until the next prompt, then drops them.
+
 68. **Answer a two-question prompt from the phone.** Ask claude something with two questions
     in one `AskUserQuestion`. The card shows BOTH, each with its options; tapping records a
     choice rather than sending one, and "Send answers" stays disabled until every question has

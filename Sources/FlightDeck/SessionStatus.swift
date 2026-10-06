@@ -57,8 +57,10 @@ struct SessionStatus: Equatable {
     ///
     /// **"Nothing in the transcript tail" is not "nothing on screen".** A background subagent's
     /// permission dialog sets the parent `waiting` / `"permission prompt"` with the call in the
-    /// subagent's own transcript. That refuses `"subagent_prompt"` (see
-    /// `PromptService.attributingSubagents`), so it never sets this.
+    /// subagent's own transcript. When the `PermissionRequest` hook has attributed it, that call
+    /// IS the open prompt (`PromptService.openPromptAgent`). Only an UNATTRIBUTED open subagent
+    /// call (no hook, or no match) refuses `"subagent_prompt"` (see
+    /// `PromptService.attributingSubagents`). Neither sets this.
     var answerless: Bool
     /// The type of the subagent whose dialog is the one this tab is waiting on, so the tooltip
     /// can say "implementer" rather than only "permission prompt". Set by
