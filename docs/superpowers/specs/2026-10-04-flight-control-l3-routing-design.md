@@ -155,3 +155,47 @@ A real `Router` and `KindRegistry`, the `BeadWriter` change, and the Settings pa
 - `Sources/FlightDeck/Intake/BeadWriter.swift`: `--agent-context` with the merge
 - `Sources/FlightDeck/Preferences/UI/FlightControlRoutingPane.swift`, `TaskKindsPane.swift`
 - `Tests/FlightDeckTests/FlightControlL3/Routing/…`, `UITests/FlightDeckUITests/RoutingUITests.swift`
+
+## 12. As built (deviations recorded while planning, 2026-10-04)
+
+Plan: `docs/superpowers/plans/2026-10-04-flight-control-l3-r-routing.md`.
+
+1. The create op carries the kind as `taskKind` (not `kind`, which is `addEdge`'s edge kind in the
+   same flat op schema) and `kindProposal`; proposal weights travel as `[{dimension, weight}]`.
+2. Pools come from the L3-0 contract (`PoolSummary`, `PoolDirectory`, `DefaultPoolDirectory` in
+   ContractValues/ContractProtocols; `<agent>-default` pools until L3-U's store conforms). Rule
+   hints (`RuleHint` / `RuleHintSource` / `NoRuleHints`) are this branch's seam until L3-I
+   conforms. `NullCapabilityIndex` stands in for L3-I's index.
+3. `RuleRouter.assign` (the contract's non-optional `Router.assign`) returns
+   `Assignment.unroutable(kind:reason:at:)` for an unroutable task: empty harness, model and pool,
+   and a reason reading `unroutable: …`. Consumers detect it with `Assignment.isUnroutable`.
+   `RouterCore.assign` returns `RouteOutcome`; encode never writes an unroutable block (the codec
+   refuses it).
+4. Global rules compile against the seed kinds; project rules against the project registry.
+5. An unclassified create (no kind, unknown id, or a proposal named only punctuation) routes as
+   `implement-simple`, its reason prefixed `no kind from planning;`.
+6. Claude's catalog is its `--model` aliases (opus first); codex's is `model/list` from a
+   short-lived app-server, cached per launch; codex's knob schema is the union of its models'
+   efforts.
+7. A compiled rule always names a pool (the agent's default when the sentence names none).
+8. Global rules are stored at `Preferences.flightControlRouting`; Settings gains a Flight Control
+   tab with Routing and Task kinds sections. Rules can be reordered.
+9. Kind re-routing runs on merge and re-weight over `br list --status open --json`; released
+   tasks' edits carry no kind. `br update --agent-context` gets `--force` only when the new value
+   is under half the old length (br 0.6.0 refuses that otherwise).
+10. Routing UI tests run from `scripts/test-routing-ui.sh` and skip under `smoke.sh`; they are gated on `TEST_RUNNER_FLIGHTDECK_ROUTING_UI=1`.
+11. Spill reasons say "exhausted", not "over hard limit": the router knows only that a pool was excluded.
+12. Controller rulings during the build:
+    (a) `extension PoolDirectory { defaultPools(for:) }` in RoutingSeams.swift holds the one copy
+    of the default-pool loop.
+    (b) `extension TaskKind { isLive; weightsText }` in TaskKind+Routing.swift; kinds with no
+    weights print `none`.
+    (c) The compiler prompt's dimension bullet was tightened after the live haiku probe compiled
+    the spec sentence to kind terms (run 1 failed, run 2 passed). It deliberately prefers dimension
+    terms over the spec §2 example's `{kind: tests}` form.
+    (d) The re-route note counts writer-side pinned skips and names failed task ids.
+    (e) Release re-checks cancellation after the routing await.
+13. (Plan deviation 14.) L3-0's `testUnsupportedCatalogYieldsAnEmptyDisabledCatalog` was rewritten against a fake.
+14. (Plan deviation 15.) The encode fixture is written in the shape of an encode output, not recorded live.
+15. Follow-up ops (non-create) carry no kind: the schema forces `taskKind` null. Any block they
+    would need routes as `implement-simple` with "no kind from planning;" (review finding M7).

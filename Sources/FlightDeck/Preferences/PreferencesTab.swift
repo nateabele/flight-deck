@@ -17,4 +17,5 @@ enum PreferencesTab: Hashable, CaseIterable {
     case devices
     case hosts
     case hosting
+    case flightControl
 }

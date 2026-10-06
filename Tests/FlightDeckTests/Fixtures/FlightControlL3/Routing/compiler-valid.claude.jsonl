@@ -1,0 +1,2 @@
+{"type":"system","subtype":"init","session_id":"rc-fixture-1","model":"claude-haiku"}
+{"type":"result","subtype":"success","is_error":false,"session_id":"rc-fixture-1","result":"","structured_output":{"ok":true,"reason":null,"mode":"any","terms":[{"dimension":"test-authoring","atLeast":0.5,"kind":null},{"dimension":"algorithmic-reasoning","atLeast":0.6,"kind":null},{"dimension":null,"atLeast":null,"kind":"tests"}],"harness":"codex","model":"gpt-6-sol","modelDefaulted":false,"knobs":[{"name":"effort","value":"high"}],"pool":"codex-subs","fallbackPool":null}}

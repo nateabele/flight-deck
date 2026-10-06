@@ -156,6 +156,10 @@ struct Preferences: Codable, Equatable {
     /// Points. Optional for exactly the reason `confirmations` is — see that property's comment.
     /// `nil` means "never changed", which resolves to libghostty's configured `font-size`.
     var terminalFontSize: Float?
+    /// Flight Control routing (L3-R): the global rule list, the rule compiler, which planning
+    /// kinds you have seen and which rule hints you dismissed. Optional for exactly the reason
+    /// `confirmations` is — see that property's comment.
+    var flightControlRouting: RoutingPreferences?
 
     init(
         globalFlags: FlagSet = FlagSet(),
@@ -170,7 +174,8 @@ struct Preferences: Codable, Equatable {
         pairedDevices: [PairedDevice]? = nil,
         installID: UUID? = nil,
         fleetPort: UInt16? = nil,
-        terminalFontSize: Float? = nil
+        terminalFontSize: Float? = nil,
+        flightControlRouting: RoutingPreferences? = nil
     ) {
         self.globalFlags = globalFlags
         self.projectFlags = projectFlags
@@ -185,6 +190,7 @@ struct Preferences: Codable, Equatable {
         self.installID = installID
         self.fleetPort = fleetPort
         self.terminalFontSize = terminalFontSize
+        self.flightControlRouting = flightControlRouting
     }
 
     /// Falls back to claude-then-codex so a `Preferences` that has never been migrated

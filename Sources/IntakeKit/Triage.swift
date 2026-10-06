@@ -14,9 +14,13 @@ public enum Triage {
 
     private static let nullableString = #"{"type":["string","null"]}"#
     private static let pre = #"{"type":["object","null"],"additionalProperties":false,"required":["status","assignee"],"properties":{"status":{"type":"string"},"assignee":{"type":["string","null"]}}}"#
+    /// `kindProposal` (spec L3-R §4). A static literal, not built from `Dimensions.all`, so the
+    /// schema stays byte-stable for `triage-schema.json`; an unknown dimension is dropped when
+    /// the proposal is registered instead of rejected by the CLI.
+    private static let kindProposal = #"{"type":["object","null"],"additionalProperties":false,"required":["name","description","dimensions"],"properties":{"name":{"type":"string"},"description":{"type":"string"},"dimensions":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["dimension","weight"],"properties":{"dimension":{"type":"string"},"weight":{"type":"number"}}}}}}"#
     private static let op = """
     {"type":"object","additionalProperties":false,
-     "required":["op","tempId","title","type","priority","description","acceptance","labels","from","to","kind","id","set","pre","delivery","reason","of"],
+     "required":["op","tempId","title","type","priority","description","acceptance","labels","from","to","kind","id","set","pre","delivery","reason","of","taskKind","kindProposal"],
      "properties":{
       "op":{"type":"string","enum":["createBead","addEdge","editBead","reopen","followUp"]},
       "tempId":\(nullableString),"title":\(nullableString),"type":\(nullableString),
@@ -30,7 +34,8 @@ public enum Triage {
       "pre":\(pre),
       "delivery":{"type":["object","null"],"additionalProperties":false,"required":["rating","reason"],
                   "properties":{"rating":{"type":"string","enum":["clarifying","scopeChange","invalidating"]},"reason":{"type":"string"}}},
-      "reason":\(nullableString),"of":\(nullableString)}}
+      "reason":\(nullableString),"of":\(nullableString),
+      "taskKind":\(nullableString),"kindProposal":\(kindProposal)}}
     """
 
     /// The `changeSet` object on its own — a nullable `{graphObservedAt, ops}` shape, `ops`
@@ -98,7 +103,7 @@ public enum Triage {
     /// The change-set rules (spec §4). `RoundPrompts.encode`/`polish`/`freshEyes`/`dedup`
     /// reuse this verbatim — they all produce the same change-set shape triage does at Bead
     /// fidelity, so a second wording of the same rules is a second place for them to drift.
-    public static func changeSetRulesText(observedAt: Date) -> String {
+    public static func changeSetRulesText(observedAt: Date, kinds: [TaskKind] = []) -> String {
         """
         Change-set rules, whenever you return a change set:
         - Set `changeSet.graphObservedAt` to exactly "\(IntakeJSON.string(from: observedAt))"
@@ -132,6 +137,28 @@ public enum Triage {
           `pre`; also `delivery` when the bead you are editing is `in_progress`.
         - `reopen`: `id`, `reason`, and `pre`.
         - `followUp`: `tempId`, `of`, `title`, `description`, and `pre`.
+        """ + kindsRulesText(kinds)
+    }
+
+    /// The project's kinds, for every round that creates tasks (spec L3-R §4). Empty when there
+    /// are none, so a project without a registry gets exactly the rules it always had. Merged
+    /// kinds are left out: a new task classified into one would only ever resolve to its target.
+    public static func kindsRulesText(_ kinds: [TaskKind]) -> String {
+        let live = kinds.filter(\.isLive)
+        guard !live.isEmpty else { return "" }
+        let list = live.map { "- `\($0.id.rawValue)` — \($0.name): \($0.description) (\($0.weightsText))" }
+            .joined(separator: "\n")
+        let dimensions = Dimensions.all.map(\.id).joined(separator: ", ")
+        return """
+
+
+        Task kinds. Classify every task a `createBead` op creates:
+        - Set `taskKind` to the id of the kind below that fits it best.
+        - When none fits, set `taskKind` to null and fill `kindProposal`: a short `name`, a \
+        one-line `description`, and `dimensions` as `[{"dimension": <id>, "weight": 0 to 1}]` over \
+        these dimensions: \(dimensions).
+        - Every other op sets both `taskKind` and `kindProposal` to null.
+        \(list)
         """
     }
 
@@ -146,7 +173,7 @@ public enum Triage {
     /// call at best and a triage that stalls on "where are the instructions?" at worst.
     public static func initialPrompt(
         intent: String, graphFile: String, triageFile: String, agentsFile: String?, readmeFile: String?,
-        observedAt: Date
+        observedAt: Date, kinds: [TaskKind] = []
     ) -> String {
         var files = """
         - Live bead graph: \(graphFile)
@@ -190,7 +217,7 @@ public enum Triage {
         If you recommend Bead fidelity, also return the full change set now — Bead has no
         later encode step, so this is the only chance to produce it.
 
-        \(changeSetRulesText(observedAt: observedAt))
+        \(changeSetRulesText(observedAt: observedAt, kinds: kinds))
 
         Return only JSON matching the provided schema. Do not write prose.
         """

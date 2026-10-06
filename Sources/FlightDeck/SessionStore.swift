@@ -1326,6 +1326,11 @@ final class SessionStore: ObservableObject {
         ?? FileManager.default.temporaryDirectory
             .appendingPathComponent("FlightDeck-intakes-\(UUID().uuidString)", isDirectory: true)
 
+    /// L3-R routing: rules, kinds, the compiler and the router. Attached by
+    /// `FlightDeckApp.makeStore` right after this store is built; nil in every store a test builds
+    /// directly, whose releases then write tasks with no execution block, as before Level 3.
+    var flightControlRouting: RoutingService?
+
     /// Owns every project's intakes (triage, review, release). Lazy for the same reason as
     /// `observeService`, and one more: its init reads and writes its root, so a host that
     /// never touches intakes never creates that directory. The root is `resolvedIntakesRoot`.
@@ -1357,6 +1362,9 @@ final class SessionStore: ObservableObject {
             hasSession: { [weak self] project, agent in
                 self?.session(project: project, agentName: agent) != nil
             })
+        // Resolved at each release, not captured now: this service is built lazily — often
+        // before `FlightDeckApp` attaches routing — and must still see it.
+        service.encodeRouting = { [weak self] in self?.flightControlRouting }
         intakeChangeForward = service.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
         // Straight to the summary refresh, never through `objectWillChange`: a seat settling
         // must not redraw every view of the store (see `SeatFeed`), only reach the phone.

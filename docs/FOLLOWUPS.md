@@ -2272,7 +2272,8 @@ flagged as most likely to differ from the tests. The maintainer's to run.
   [FLIGHT-CONTROL-COVERAGE-HANDOFF.md](FLIGHT-CONTROL-COVERAGE-HANDOFF.md).
 - **Flight Control on the phone — BUILT (see "known gaps and limits" above).** Originally: Handoff:
   [FLIGHT-CONTROL-MOBILE-HANDOFF.md](FLIGHT-CONTROL-MOBILE-HANDOFF.md).
-- **Level 3 "Operate" — DESIGNED (2026-10-04); L3-0 contract MERGED (28e79fb, 2026-10-05), L3-R/I/U/S building in parallel worktrees.** Five specs, built in parallel after
+- **Level 3 "Operate" — DESIGNED (2026-10-04); L3-0 contract MERGED (28e79fb, 2026-10-05), L3-R/I/U/S building in parallel worktrees.**
+  Five specs, built in parallel after
   the contract lands: overview and contract
   ([L3-0](superpowers/specs/2026-10-04-flight-control-l3-overview-contract-design.md)), routing
   ([L3-R](superpowers/specs/2026-10-04-flight-control-l3-routing-design.md)), capability index
@@ -2300,6 +2301,24 @@ flagged as most likely to differ from the tests. The maintainer's to run.
     whether `ntm serve`'s event stream is worth a transport spike (its schema was never
     inspected; [FLYWHEEL-SPIKE-FINDINGS.md](FLYWHEEL-SPIKE-FINDINGS.md) already ruled it out as
     FD's own runner).
+  - **L3-R routing BUILT on branch `l3-routing` (3dc46df), not merged.** Rules →
+    compile → confirm in Settings → Flight Control → Routing; encode-time kinds and proposals; the
+    real `Router` and `KindRegistry`; Task kinds pane. Integration owes: L3-U's pool store
+    conforming to `PoolDirectory`, L3-I's hints to `RuleHintSource` and its index replacing
+    `NullCapabilityIndex`, and one Settings → Flight Control tab holding every branch's sections.
+    The maintainer's checklist: compile a real sentence with haiku from Settings; release a planned intake and
+    read one created task's `agent_context` with `br show`; merge a kind with an open task and see it
+    re-routed. Not done: claude full model ids (aliases only). Known gaps:
+    (a) RoutingUITests have not executed yet (screen locked during the build); run
+    `scripts/test-routing-ui.sh` once.
+    (b) The changed triage/change-set strict-mode schema (`taskKind`/`kindProposal`) was never
+    probed live against claude and codex; probe once per CLI before merging to master, since every
+    planning round shares that schema.
+    (c) `ProjectViewInspectorLiveTests` failed in this branch's full run and was not run on master
+    (believed pre-existing or machine-dependent, see FLIGHT-CONTROL-MOBILE-PHASE3-HANDOFF.md item
+    2); run it on master.
+    (d) Codex's effort knob schema is the union across models, so a rule can validate with an
+    effort one model rejects.
 
 ## Plan comments from the phone (2026-09-30)
 

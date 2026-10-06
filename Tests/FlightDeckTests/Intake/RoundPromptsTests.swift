@@ -106,9 +106,10 @@ final class RoundPromptsTests: XCTestCase {
         XCTAssertEqual(embeddedData, fragmentData)
     }
 
-    /// `Triage.schemaJSON` must stay byte-identical after the refactor that extracted
-    /// `changeSetSchemaFragment` out of it — this compares against a copy captured from the
-    /// pre-refactor source (see task-4-report.md for how it was captured).
+    /// `Triage.schemaJSON` byte for byte. Captured from the source when `changeSetSchemaFragment`
+    /// was extracted (see task-4-report.md), then deliberately regenerated when L3-R added
+    /// `taskKind` and `kindProposal` to the op. A change to the schema must be a change to this
+    /// file too: both CLIs were probed against exactly these bytes.
     func testTriageSchemaJSONUnchangedByTheRefactor() throws {
         let url = try XCTUnwrap(Bundle(for: Self.self).url(
             forResource: "triage-schema", withExtension: "json", subdirectory: "Fixtures/Intake"))

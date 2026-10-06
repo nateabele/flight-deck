@@ -25,11 +25,15 @@ final class RoutingCapabilityRegistryTests: XCTestCase {
         XCTAssertEqual(cats.enabledModels, [ModelRef(harness: "fake", model: "fake-1")])
     }
 
+    /// Rewritten by L3-R: claude's and codex's catalogs are real now, and asking the standard
+    /// registry for codex's spawns `codex app-server` — never from a unit test. The behavior
+    /// pinned is unchanged: an unsupported catalog is an empty, disabled one.
     func testUnsupportedCatalogYieldsAnEmptyDisabledCatalog() async {
-        let reg = RoutingCapabilityRegistry.standard()
-        let cats = await reg.catalogs(enabled: ["claude", "codex"])
-        XCTAssertEqual(cats.byHarness["claude"]?.models, [])
-        XCTAssertEqual(cats.enabledModels, [], "a stub conformer must never pretend to have models")
+        let stub = FakeRoutingCapabilities()
+        stub.catalog = .unsupported(reason: "not yet")
+        let cats = await RoutingCapabilityRegistry([stub]).catalogs(enabled: ["fake"])
+        XCTAssertEqual(cats.byHarness["fake"]?.models, [])
+        XCTAssertEqual(cats.enabledModels, [], "an unsupported catalog must never pretend to have models")
     }
 
     func testStubsSayUnsupportedRatherThanFake() {

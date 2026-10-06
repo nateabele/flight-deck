@@ -703,7 +703,10 @@ public struct RoundExecutor: Sendable {
                             agentsFile: existing("AGENTS.md"), readmeFile: existing("README.md"),
                             notes: inputs.tape.pendingNotes,
                             humanEdits: userEdits(inputs).map { PlanLayers.promptDiff(generated: $0.generated, edited: $0.edited) },
-                            observedAt: observedAt)
+                            observedAt: observedAt,
+                            // Read fresh every round, like AGENTS.md: a kind proposed and released
+                            // by another intake is offered to this one's next round.
+                            kinds: KindRegistryStore.promptKinds(project: inputs.project))
     }
 
     /// The head plan checkpoint's two layers when the human has edited it — read fresh each
