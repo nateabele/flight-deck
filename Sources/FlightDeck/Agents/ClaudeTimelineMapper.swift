@@ -22,7 +22,10 @@ import Foundation
 enum ClaudeTimelineMapper {
     /// `offset` is the byte offset of this line in the transcript, and it is what makes an
     /// item addressable — see `TimelineItem.id`.
-    static func items(inLine line: String, at offset: Int) -> [TimelineItem] {
+    ///
+    /// `sidechain` is true only when `line` comes from a subagent's OWN file, where every
+    /// record is marked `isSidechain` — see the guard below.
+    static func items(inLine line: String, at offset: Int, sidechain: Bool = false) -> [TimelineItem] {
         guard let data = line.data(using: .utf8),
               let record = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
               let type = record["type"] as? String
@@ -52,8 +55,10 @@ enum ClaudeTimelineMapper {
         guard record["isCompactSummary"] as? Bool != true else { return [] }
         // Sub-agent records belong in `<conversationId>/subagents/agent-*.jsonl`, which
         // nothing reads. One in the main transcript means claude moved them, and mapping it
-        // would interleave a sub-agent's conversation into its parent's.
-        guard record["isSidechain"] as? Bool != true else { return [] }
+        // would interleave a sub-agent's conversation into its parent's. Reading a subagent's
+        // own file (`PromptService`'s subagent check) is the exception: there every record is
+        // a sidechain, and skipping them hid a live permission dialog.
+        guard sidechain || record["isSidechain"] as? Bool != true else { return [] }
 
         let at = record["timestamp"] as? String
         if type == "attachment" { return typedMidTurn(record, offset: offset, at: at) }

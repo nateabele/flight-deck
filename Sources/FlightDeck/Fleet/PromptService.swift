@@ -291,7 +291,7 @@ final class PromptService {
                 continue
             }
             let lines = tail(file, Self.tailRecords).lines
-            let open = read.reader.openPrompt(inTranscriptTail: lines, activity: .waiting) != nil
+            let open = read.reader.openPrompt(inSubagentTail: lines) != nil
             scans[file] = (stamp, open)
         }
         // Not an early return on the first open file: every live file's stamp is recorded this

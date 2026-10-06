@@ -700,6 +700,13 @@ final class PromptServiceTests: XCTestCase {
 
     // MARK: Background subagents — the "Flywheel Planning" report (2026-10-05)
 
+    /// Every record in a subagent's own file carries `"isSidechain":true` (claude 2.1.289).
+    /// The first version of these fixtures left it out and passed, while the real files were
+    /// dropped whole by `ClaudeTimelineMapper`'s sidechain guard: the fix found nothing live.
+    private func sidechain(_ line: String) -> String {
+        "{\"isSidechain\":true," + line.dropFirst()
+    }
+
     /// Writes a subagent transcript beside the tab's own, where claude puts a background
     /// Agent's: `<conversation>/subagents/agent-<id>.jsonl`.
     @discardableResult
@@ -729,9 +736,9 @@ final class PromptServiceTests: XCTestCase {
     func testASubagentsOpenCallIsNotReportedAsNothingOpen() throws {
         let (service, store, _, id) = makeService(activity: .waiting)
         try writeTranscript(for: store, id, [bookkeepingLine()])
-        try writeSubagent(for: store, id, agent: "a1", [bashLine("toolu_SUB")])
+        try writeSubagent(for: store, id, agent: "a1", [sidechain(bashLine("toolu_SUB"))])
         let parent = [SourceLine(offset: 0, text: bookkeepingLine())]
-        let subagent = [SourceLine(offset: 0, text: bashLine("toolu_SUB"))]
+        let subagent = [SourceLine(offset: 0, text: sidechain(bashLine("toolu_SUB")))]
         service.tail = { url, _ in
             (url.path.contains("/subagents/") ? subagent : parent, false)
         }
@@ -751,10 +758,10 @@ final class PromptServiceTests: XCTestCase {
         let (service, store, _, id) = makeService(activity: .waiting)
         try writeTranscript(for: store, id, [bookkeepingLine()])
         try writeSubagent(for: store, id, agent: "a1",
-                          [bashLine("toolu_SUB"), resultLine("toolu_SUB")])
+                          [sidechain(bashLine("toolu_SUB")), sidechain(resultLine("toolu_SUB"))])
         let parent = [SourceLine(offset: 0, text: bookkeepingLine())]
-        let subagent = [SourceLine(offset: 0, text: bashLine("toolu_SUB")),
-                        SourceLine(offset: 1, text: resultLine("toolu_SUB"))]
+        let subagent = [SourceLine(offset: 0, text: sidechain(bashLine("toolu_SUB"))),
+                        SourceLine(offset: 1, text: sidechain(resultLine("toolu_SUB")))]
         service.tail = { url, _ in
             (url.path.contains("/subagents/") ? subagent : parent, false)
         }
@@ -770,10 +777,10 @@ final class PromptServiceTests: XCTestCase {
     func testASubagentFileFromAnEarlierProcessIsIgnored() throws {
         let (service, store, _, id) = makeService(activity: .waiting)
         try writeTranscript(for: store, id, [bookkeepingLine()])
-        try writeSubagent(for: store, id, agent: "a1", [bashLine("toolu_DEAD")])
+        try writeSubagent(for: store, id, agent: "a1", [sidechain(bashLine("toolu_DEAD"))])
         service.agentStartedAt = { _ in Date().addingTimeInterval(60) }
         let parent = [SourceLine(offset: 0, text: bookkeepingLine())]
-        let subagent = [SourceLine(offset: 0, text: bashLine("toolu_DEAD"))]
+        let subagent = [SourceLine(offset: 0, text: sidechain(bashLine("toolu_DEAD")))]
         service.tail = { url, _ in
             (url.path.contains("/subagents/") ? subagent : parent, false)
         }
@@ -788,12 +795,12 @@ final class PromptServiceTests: XCTestCase {
     func testASubagentFileIsRereadOnlyWhenItChanges() throws {
         let (service, store, _, id) = makeService(activity: .waiting)
         try writeTranscript(for: store, id, [bookkeepingLine()])
-        let file = try writeSubagent(for: store, id, agent: "a1", [bashLine("toolu_SUB")])
+        let file = try writeSubagent(for: store, id, agent: "a1", [sidechain(bashLine("toolu_SUB"))])
         let subagentReads = ReadCount()
         let answered = ReadCount()  // 0 → open, 1 → answered
         let parent = [SourceLine(offset: 0, text: bookkeepingLine())]
-        let open = [SourceLine(offset: 0, text: bashLine("toolu_SUB"))]
-        let done = open + [SourceLine(offset: 1, text: resultLine("toolu_SUB"))]
+        let open = [SourceLine(offset: 0, text: sidechain(bashLine("toolu_SUB")))]
+        let done = open + [SourceLine(offset: 1, text: sidechain(resultLine("toolu_SUB")))]
         service.tail = { url, _ in
             guard url.path.contains("/subagents/") else { return (parent, false) }
             subagentReads.value += 1
@@ -808,7 +815,7 @@ final class PromptServiceTests: XCTestCase {
         answered.value = 1
         let handle = try FileHandle(forWritingTo: file)
         try handle.seekToEnd()
-        try handle.write(contentsOf: Data((resultLine("toolu_SUB") + "\n").utf8))
+        try handle.write(contentsOf: Data((sidechain(resultLine("toolu_SUB")) + "\n").utf8))
         try handle.close()
         XCTAssertEqual(try? failureCode(service.pushedOpenPrompt(inSession: id)), "prompt_changed")
         XCTAssertEqual(subagentReads.value, 2)

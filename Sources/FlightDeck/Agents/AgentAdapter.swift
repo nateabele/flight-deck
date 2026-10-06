@@ -317,6 +317,11 @@ protocol AgentOpenPromptReader: Sendable {
     /// `PromptService` looks here so it does not report such a tab as having nothing open.
     /// No default: an agent that has subagents and answers nil would bring that bug back.
     func subagentTranscripts(for transcript: URL) -> URL?
+
+    /// The open call at the end of a window of one of those subagent files, read as `waiting`.
+    /// Separate from `openPrompt(inTranscriptTail:activity:)` because claude marks every
+    /// record in a subagent's file as a sidechain, which the main-transcript reading skips.
+    func openPrompt(inSubagentTail lines: [SourceLine]) -> OpenPrompt?
 }
 
 /// **Typing a message into a live agent and submitting it.**

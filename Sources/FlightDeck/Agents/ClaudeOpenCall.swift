@@ -21,8 +21,13 @@ import Foundation
 /// when a read finds nothing here but reports more history above; this function itself stays a
 /// pure, single-window derivation and does not know about retrying.
 enum ClaudeOpenCall {
-    static func find(in lines: [SourceLine], activity: SessionActivity?) -> OpenPrompt? {
-        let items = lines.flatMap { ClaudeTimelineMapper.items(inLine: $0.text, at: $0.offset) }
+    /// `sidechain` is true for a subagent's own file; see `ClaudeTimelineMapper.items`.
+    static func find(
+        in lines: [SourceLine], activity: SessionActivity?, sidechain: Bool = false
+    ) -> OpenPrompt? {
+        let items = lines.flatMap {
+            ClaudeTimelineMapper.items(inLine: $0.text, at: $0.offset, sidechain: sidechain)
+        }
         return OpenPrompt.find(
             in: items, agent: AgentID.claude.rawValue, activity: activity?.rawValue
         )
@@ -37,6 +42,10 @@ struct ClaudeOpenPromptReader: AgentOpenPromptReader {
         inTranscriptTail lines: [SourceLine], activity: SessionActivity?
     ) -> OpenPrompt? {
         ClaudeOpenCall.find(in: lines, activity: activity)
+    }
+
+    func openPrompt(inSubagentTail lines: [SourceLine]) -> OpenPrompt? {
+        ClaudeOpenCall.find(in: lines, activity: .waiting, sidechain: true)
     }
 
     /// `~/.claude/projects/<dir>/<conversation>/subagents/`, holding one `agent-<id>.jsonl` per
