@@ -48,6 +48,23 @@ final class ClaudePluginLocationTests: XCTestCase {
         XCTAssertEqual(items, [tempDir.path])
     }
 
+    /// After an update the bundle's plugin changes; adopted tabs run the copy, so the startup
+    /// path must refresh it before `/reload-plugins` is armed or the reload re-reads old bytes.
+    func testStartupRefreshBringsTheCopyToTheBundlesBytes() throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent("fd-refresh-\(UUID().uuidString)")
+        defer { try? fm.removeItem(at: root) }
+        let source = root.appendingPathComponent("bundle"), copy = root.appendingPathComponent("copy")
+        try fm.createDirectory(at: source, withIntermediateDirectories: true)
+        try Data("v1".utf8).write(to: source.appendingPathComponent("skill.md"))
+        try ClaudePluginLocation.materialize(from: source, to: copy)
+        try Data("v2".utf8).write(to: source.appendingPathComponent("skill.md"))
+        // Compared by file, not fingerprint: the copy also holds the materialize manifest.
+        XCTAssertEqual(try String(contentsOf: copy.appendingPathComponent("skill.md"), encoding: .utf8), "v1")
+        XCTAssertTrue(ClaudePluginLocation.refreshMaterialized(from: source, to: copy))
+        XCTAssertEqual(try String(contentsOf: copy.appendingPathComponent("skill.md"), encoding: .utf8), "v2")
+    }
+
     func testApplyingLeavesACodexPayloadUntouched() {
         let options = AgentOptions.codex(CodexThreadOptions())
         XCTAssertEqual(

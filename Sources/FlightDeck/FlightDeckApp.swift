@@ -380,6 +380,8 @@ struct FlightDeckApp: App {
         // tabs adopted from the previous run. Not under a reset: the fingerprint record lives
         // in the real defaults domain, and a reset run has no adopted tabs anyway.
         if !resetState, let plugin = ClaudePluginLocation.directory(bundle: .main) {
+            // Refresh the copy first, so the `/reload-plugins` this arms reads the new bytes.
+            ClaudePluginLocation.refreshMaterialized(from: plugin)
             store.armPluginReload(pluginChanged: PluginReload.pluginChanged(
                 current: PluginReload.fingerprint(of: plugin), defaults: .standard))
         }

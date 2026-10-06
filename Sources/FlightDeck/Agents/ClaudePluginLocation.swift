@@ -105,6 +105,26 @@ enum ClaudePluginLocation {
         return destination
     }
 
+    /// Brings the owned copy up to date at app startup, before `PluginReload` is armed.
+    ///
+    /// Why: `applying(...)` refreshes the copy only when a tab launches. Tabs adopted from the
+    /// previous run are not relaunched, and those that build launched run `--plugin-dir` at this
+    /// copy, not the bundle. After an app update `/reload-plugins` would re-read the OLD copy
+    /// while `PluginReload` recorded the new bundle fingerprint as handled, so the delegate skill
+    /// never reached them and no later launch would retry. The fingerprint stays the bundle's:
+    /// the copy also holds engine-written files (`.claude-plugin/types/`) that would read as a
+    /// change on every run. A failed refresh is logged and leaves the old copy, as `applying` does.
+    @discardableResult
+    static func refreshMaterialized(from source: URL, to destination: URL = materializedDirectory) -> Bool {
+        do {
+            try materialize(from: source, to: destination)
+            return true
+        } catch {
+            NSLog("[ClaudePluginLocation] startup refresh of \(destination.path) from \(source.path) failed: \(error)")
+            return false
+        }
+    }
+
     private static func relativeFiles(under root: URL) throws -> Set<String> {
         let base = root.standardizedFileURL.resolvingSymlinksInPath().path
         guard let walker = FileManager.default.enumerator(at: root, includingPropertiesForKeys: [.isRegularFileKey]) else { return [] }
