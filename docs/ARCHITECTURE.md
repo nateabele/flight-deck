@@ -545,20 +545,34 @@ claude tab closes, so two logins' registries are never merged into one scan.
   (`^a[0-9a-f]{6,40}$`) guards any id joined onto a path. `SubagentWatcher` is one per
   conversation, owned by `ClaudeRuntime`. A steady tick stats the folder and the non-done files
   (`poll()`), and a full rescan runs when the folder's stamp changes or every 10s. Files older than the claude process start are ignored, and
-  done agents stay until the session's next `UserPromptSubmit`.
+  done agents stay until the session's next `UserPromptSubmit`. While the process start is
+  unknown (before the first registry row pins the tab, and always after claude exits) the
+  watcher reads no files and publishes nothing, keeping its last tree: "unknown" is not "all
+  history", which would show an earlier run's half-finished agents as running. The store keeps a
+  tab's tree across a lost registry row (the tree's lifetime is the runtime attachment, cleared
+  at close, repin and retarget), because a blocked agent writes nothing and the watcher would
+  never republish it. `applySubagents` stores every new tree but emits `activityChanged` only
+  when the wire form changes; `modified` alone moves on every append to a live agent's file.
+  On the Mac, `displaySubagentTree(for:)` marks the attributed node `blocked` (the rule
+  `FleetProjection.wire` uses), and the count badge also shows while an agent is blocked.
 - **Dialog attribution** — the plugin registers a record-only `PermissionRequest` hook
   (`Resources/ClaudePlugin/hooks/hooks.json`). It never decides anything and never changes
   `ComposerReadiness`. `DialogAttribution` matches the event to the preceding `PreToolUse` with
   the same `agent_id`, `tool_name` and canonical `tool_input`, because a subagent's
   `PermissionRequest` carries no `tool_use_id`. The result is `SessionStore.pendingDialogs`,
-  cleared on `PostToolUse`, `UserPromptSubmit` and `SessionEnd`. Esc fires no hook, so
+  cleared on `PostToolUse`, `UserPromptSubmit` and `SessionEnd`, and by `commitStatuses` on an
+  observed end of the wait: the tab going from `waiting` to anything else (or losing its
+  status), or a waiting tab's `waitingFor` changing. Never on "not waiting now":
+  `PermissionRequest` lands ~70ms before the registry flips the tab to `waiting`. Esc fires no hook, so
   `PromptService` also requires the call to be unresolved in the owning file. An attributed
   subagent call still unresolved in its own file is the open prompt (`openPromptAgent`). An
   unattributed open subagent call still refuses `subagent_prompt`. `answer(session:agent:…)`
   needs a valid id and a matching `pendingDialog`, else it refuses (`unknown_agent`,
   `prompt_changed`).
 - **Subagents on the wire** — `WireSession.subagents` (`[]` for claude, `nil` for codex and older
-  Macs) and `openPromptAgent`, both carried by `activityChanged`. `timeline.page` and
+  Macs) and `openPromptAgent`, both carried by `activityChanged`. A claude tab with no status
+  projects `[]`, never its stored tree, since no event could have carried it; the tree goes out
+  with the `activityChanged` that brings the status back. `timeline.page` and
   `prompt.answer` take an optional `agent`; `TimelineService` then pages
   `subagents/agent-<id>.jsonl` with `sidechain: true`. All fields are optional, with no new event
   tag. The prompt is still never sent: the phone derives the card from the blocked agent's own
