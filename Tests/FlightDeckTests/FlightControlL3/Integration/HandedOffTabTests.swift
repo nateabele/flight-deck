@@ -37,7 +37,10 @@ final class HandedOffTabTests: XCTestCase {
         XCTAssertTrue(snapshots.contains(successor.session.id))
 
         // A new task becomes ready with a free slot (cap 2, one active) and the old tab idle,
-        // under the same config: reuse must not pick it, nor may the swarm claim for it.
+        // under the same config: reuse must not pick it, nor may the swarm claim for it. Work
+        // drops back under soft first: while it is over hard, headroom alone refuses reuse, so
+        // the state check would go unproven (an agent wrongly left .idle would still not be reused).
+        rig.feed(account: "Work", utilization: 0.30)
         try rig.release("fx-two")
         let before = rig.runner.argv.count
         await rig.tick()
