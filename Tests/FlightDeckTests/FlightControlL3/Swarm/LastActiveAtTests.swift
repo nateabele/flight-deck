@@ -33,8 +33,20 @@ final class LastActiveAtTests: XCTestCase {
         XCTAssertNil(store.lastActiveAt(for: s.id))
     }
 
-    func testStatusEqualityIsUntouched() {
-        XCTAssertEqual(SessionStatus(activity: .idle), SessionStatus(activity: .idle),
-                       "the timestamp lives beside SessionStatus, never inside it (deviation 2)")
+    /// Deviation 2 (ruling R23): the stamp lives beside `SessionStatus`, never inside it, so time
+    /// passing on an unchanged tick publishes nothing. Inside it, every tick would invalidate the
+    /// sidebar and replicate to the phone.
+    func testAnUnchangedTickPublishesNoStatusesChangeAsTheClockAdvances() {
+        let store = SessionStore(provider: nil, persistence: nil)
+        var clock = Date(timeIntervalSince1970: 1_790_000_000)
+        store.now = { clock }
+        let s = store.newSession(in: URL(fileURLWithPath: "/tmp/p", isDirectory: true))
+        store.applyRegistryForTesting([s.id: SessionStatus(activity: .busy)])
+        var published = 0
+        let sink = store.$statuses.dropFirst().sink { _ in published += 1 }
+        clock += 600
+        store.applyRegistryForTesting([s.id: SessionStatus(activity: .busy)])
+        XCTAssertEqual(published, 0)
+        sink.cancel()
     }
 }

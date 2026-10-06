@@ -23,7 +23,8 @@ import Foundation
 /// The read is a tail — `tailRecords` records the overwhelmingly common time, widening (see
 /// `maxTailRecords`) up to a handful of times only when a smaller read proves inconclusive —
 /// done once per human tap, on the main queue, inline in `FleetService.apply`'s `.answerPrompt`
-/// arm, which (unlike `.newSession`) always answers synchronously. That is a deliberate trade
+/// arm, which always answers synchronously (unlike `.newSession`, which always answers after
+/// awaiting its tab's creation). That is a deliberate trade
 /// against a cache and it is the cheaper of the two in the ordinary case: `TimelineService`
 /// takes its read off the main actor because a *page* is parsed on every activity change, which
 /// is two orders of magnitude more often and larger. A widened read is not cheap — see
