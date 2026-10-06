@@ -7664,7 +7664,9 @@ final class SessionStore: ObservableObject {
     private func ingestDialogChanges(_ changes: [DialogAttribution.Change]) {
         for change in changes {
             switch change {
-            case .raised(let conversation, let dialog): pendingDialogs[conversation] = dialog
+            case .raised(let conversation, let dialog):
+                pendingDialogs[conversation] = dialog
+                pendingDialogRaisedAt[conversation] = now()
             case .cleared(let conversation): pendingDialogs[conversation] = nil
             case .promptSubmitted(let conversation, let at):
                 pendingDialogs[conversation] = nil
@@ -7690,15 +7692,37 @@ final class SessionStore: ObservableObject {
     /// ~70ms BEFORE the registry flips the tab to `waiting`, and `ingestDialogChanges` then
     /// recommits while the tab still reads `busy`. A rule of "clear while not waiting" would
     /// erase every fresh attribution in that window, before the wait it belongs to began.
+    ///
+    /// **Two edges that are not this dialog's, and are skipped.**
+    /// - A reason filling in where there was none (`waitingFor` nil or empty → a value) is the
+    ///   same wait: the registry may write `waiting` before it writes why. Only a change between
+    ///   two non-empty reasons is a new wait.
+    /// - A dialog raised within `dialogRetireGrace` of the edge belongs to the NEXT wait. With
+    ///   back-to-back dialogs, B's PermissionRequest is ingested on the same 500ms tick as a
+    ///   registry read that still says `busy`; the waiting → busy edge is A's. Retiring on it
+    ///   dropped B's attribution for roughly 1 in 7 consecutive subagent dialogs. No human
+    ///   answers a dialog within a second of it appearing, so the window costs nothing real.
     private func retireEndedDialogs(previous: [UUID: SessionStatus], next: [UUID: SessionStatus]) {
+        let now = now()
         for (id, old) in previous where old.activity == .waiting {
             let new = next[id]
             let left = new?.activity != .waiting
-            let moved = !left && new?.waitingFor != old.waitingFor
+            let before = old.waitingFor ?? "", after = new?.waitingFor ?? ""
+            let moved = !left && !before.isEmpty && !after.isEmpty && before != after
             guard left || moved, let at = locate(id) else { continue }
-            pendingDialogs[repos[at.repo].sessions[at.session].pinnedConversationID] = nil
+            let conversation = repos[at.repo].sessions[at.session].pinnedConversationID
+            if let raised = pendingDialogRaisedAt[conversation],
+               now.timeIntervalSince(raised) < Self.dialogRetireGrace { continue }
+            pendingDialogs[conversation] = nil
+            pendingDialogRaisedAt[conversation] = nil
         }
     }
+
+    /// See `retireEndedDialogs`: two registry ticks of margin over the hook's ~70ms lead.
+    static let dialogRetireGrace: TimeInterval = 1.0
+
+    /// When each conversation's pending dialog was ingested, for `dialogRetireGrace`.
+    private var pendingDialogRaisedAt: [UUID: Date] = [:]
 
     /// Fans one hook-log tick out to every live claude runtime. The log carries no account —
     /// only the conversation id each `ClaudeRuntime.sources` is keyed by — so unlike
