@@ -92,6 +92,9 @@ extension SwarmService {
 /// mouse-down here breaks the row's drag and rename (see `SessionRow`'s comments).
 struct SwarmRowChips: View {
     let annotation: SwarmSessionAnnotation
+    /// Observed so a reading that crosses soft redraws the meter with no other state changing;
+    /// `UsageService` bumps `revision` on every reading and tick. Injectable for tests.
+    @ObservedObject var usage: UsageService = .shared
 
     var body: some View {
         HStack(spacing: 4) {
@@ -112,8 +115,10 @@ struct SwarmRowChips: View {
             }
             // The formatter, not the annotation, decides what is drawn: it answers per account
             // across every pool, so the row and the Capacity pane can never disagree.
-            if annotation.meter != nil, let account = annotation.meterAccount,
-               let model = MeterFormatter.rowMeter(account: account, ledger: UsageService.shared.ledger, now: Date()) {
+            // Gated on the live result alone: `annotation.meter` is a snapshot from the last
+            // sidebar render and would leave a meter lingering (or missing) after a reading.
+            if let account = annotation.meterAccount,
+               let model = MeterFormatter.rowMeter(account: account, ledger: usage.ledger, now: Date()) {
                 RowMiniMeter(model: model)
                     .accessibilityElement(children: .ignore)
                     .accessibilityLabel("\(model.label) usage")
@@ -149,7 +154,9 @@ struct SwarmHeaderChip: View {
 /// Pool meters (L3-U's `PoolMeterList`, for the pools this swarm leases from) and the tasks the swarm cannot start, with why.
 struct SwarmPopover: View {
     let record: SwarmRecord
-    let pools: [PoolMeterModel]
+    /// Rebuilt from the live ledger on every render, so an open popover follows the readings.
+    let pools: (CapacityLedger, Date) -> [PoolMeterModel]
+    @ObservedObject var usage: UsageService = .shared
     let summary: SwarmHeaderSummary
     let onPause: () -> Void
     let onResume: () -> Void
@@ -162,7 +169,8 @@ struct SwarmPopover: View {
         VStack(alignment: .leading, spacing: 8) {
             Text(summary.text).font(.headline)
             if let banner = summary.banner { Text(banner).foregroundStyle(.orange) }
-            if !pools.isEmpty { PoolMeterList(pools: pools) }
+            let models = pools(usage.ledger, Date())
+            if !models.isEmpty { PoolMeterList(pools: models) }
             let waiting = Self.lines(for: record)
             if !waiting.isEmpty {
                 Text("Waiting").font(.subheadline)
@@ -182,7 +190,8 @@ struct SwarmPopover: View {
     }
 }
 
-/// One account row of a pool's headroom, as the phone's `WireSwarmMeter` carries it. The Mac popover
+/// One account row of a pool's headroom. Serves only the phone path now (the Mac popover draws
+/// `PoolMeterModel`s). It is the phone's `WireSwarmMeter` carries it. The Mac popover
 /// draws `PoolMeterModel`s instead; both read the same ledger.
 struct SwarmMeterRow: Hashable {
     let pool: String
@@ -215,8 +224,20 @@ extension SwarmService {
 struct SwarmAssignmentDetail: Equatable {
     var lines: [String]
     var links: [ObserveLaneLink]
-    /// The leased account's meter, drawn under the lines. Filled by `SwarmService.assignment`.
-    var meter: AccountMeterModel? = nil
+    /// The leased account's meter, drawn under the lines. Only the reference is held here: the
+    /// drawer builds the model from the live ledger so it does not go stale.
+    var meter: AssignmentMeterRef? = nil
+}
+
+struct AssignmentMeterRef: Equatable {
+    let pool: PoolID
+    let account: UUID
+
+    /// Nil when the pool or account is gone from the ledger.
+    func model(ledger: CapacityLedger, now: Date) -> AccountMeterModel? {
+        MeterFormatter.pools(ledger, now: now).first { $0.id == pool }?
+            .accounts.first { $0.id.hasSuffix("|\(account.uuidString)") }
+    }
 }
 
 extension SwarmAnnotations {
@@ -263,8 +284,7 @@ extension SwarmService {
             next: agent.handedOffTo.flatMap { record.agent($0) },
             lastActive: lastActiveAt(for: session), now: now)
         if let lease = agent.lease?.lease, let id = lease.account.id {
-            detail.meter = MeterFormatter.pools(UsageService.shared.ledger, now: now)
-                .first { $0.id == lease.pool }?.accounts.first { $0.id.hasSuffix("|\(id.uuidString)") }
+            detail.meter = AssignmentMeterRef(pool: lease.pool, account: id)
         }
         if let contest = contest(for: session) { detail.lines += SwarmAnnotations.contestLines(contest, now: now) }
         return detail

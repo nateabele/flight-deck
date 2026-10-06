@@ -60,6 +60,7 @@ struct RootView: View {
                                       onOpenDAG: { store.presentObserveDAG() },
                                       assignment: store.focusedSwarmAssignment(),
                                       session: store.selectedSessionID,
+                                      swarmRevision: store.swarmServiceIfBuilt?.revision ?? 0,
                                       onJumpToSession: { store.selectedSessionID = $0 })
                     }
                 }

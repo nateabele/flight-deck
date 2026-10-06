@@ -113,6 +113,8 @@ struct ObserveLaneModel {
 /// the collapse/jump/open callbacks into SwiftUI, per AGENTS.md rule 2 (this view is
 /// GUI-verified by hand in Task 13, not by an agent).
 struct ObserveDrawer: View {
+    private struct HistoryKey: Equatable { let session: UUID?; let revision: Int }
+
     let agent: FlywheelProjection.Agent?
     let collapsed: Bool
     let onToggleCollapse: () -> Void
@@ -123,6 +125,10 @@ struct ObserveDrawer: View {
     var session: UUID? = nil
     /// Read from memory on every render; refreshed off the main thread by `.task` below.
     @ObservedObject private var handoffs = HandoffHistoryCache.shared
+    /// Observed so the assignment meter follows readings, like the row's.
+    @ObservedObject var usage: UsageService = .shared
+    /// The swarm service's revision: a hand-off bumps it, and the log is re-read then.
+    var swarmRevision: Int = 0
     var onJumpToSession: (UUID) -> Void = { _ in }
 
     var body: some View {
@@ -181,7 +187,7 @@ struct ObserveDrawer: View {
         // Without .contain the id is stamped onto every child, hiding the lanes' own ids.
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("observe-drawer-expanded")
-        .task(id: session) { if session != nil { await handoffs.refresh() } }
+        .task(id: HistoryKey(session: session, revision: swarmRevision)) { if session != nil { await handoffs.refresh() } }
     }
 
     private func laneRow(_ row: ObserveLaneRow) -> some View {
@@ -192,7 +198,7 @@ struct ObserveDrawer: View {
             if row.lane == .assignment {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(row.detail).font(.caption).textSelection(.enabled)
-                    if let meter = assignment?.meter { AccountMeterBar(model: meter) }
+                    if let model = assignment?.meter?.model(ledger: usage.ledger, now: Date()) { AccountMeterBar(model: model) }
                     if let session {
                         ForEach(HandoffHistory.lines(for: session, entries: handoffs.entries(for: session)), id: \.self) {
                             Text($0).font(.caption2).foregroundStyle(.secondary)
