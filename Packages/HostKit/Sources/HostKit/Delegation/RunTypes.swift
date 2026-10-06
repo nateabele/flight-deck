@@ -198,6 +198,15 @@ public protocol RunControlling: Sendable {
     /// `signal`, `cancel` and `down`, and answers another controller's run `unknown_run`, so
     /// one paired Mac can neither see nor stop another's work.
     func owner(runID: String) -> LeaseHolderOwner?
+    /// `controller`'s runs that are still queued or running, services included. Revoking a
+    /// controller ends exactly these.
+    func liveRuns(controller: UUID) -> [String]
+    /// hostd is stopping: every service is downed (`downCommand` included) and every other run
+    /// ended, SIGTERM now and SIGKILL to any group still alive after `grace` seconds. Returns
+    /// once every run has ended, or after `deadline` seconds, whichever is first; a run that
+    /// starts meanwhile fails at once. Nothing else would end them: each run leads its own
+    /// process group, and launchd and a plain `kill` signal only hostd's.
+    func shutdown(grace: Double, deadline: Double) async
 }
 
 /// The host's screen, for `screen.status` and the §7 preflight.

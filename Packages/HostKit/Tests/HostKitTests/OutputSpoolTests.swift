@@ -85,3 +85,46 @@ final class OutputSpoolTests: XCTestCase {
         XCTAssertFalse(first.isEmpty)
     }
 }
+
+extension OutputSpoolTests {
+    /// The pump appends whatever one `read(2)` returned, so a chatty build is many small
+    /// appends. An index entry per append grew hostd's memory with every line a run ever
+    /// printed; contiguous appends to one stream now share an entry, up to one read chunk.
+    func testContiguousAppendsShareAnIndexEntry() throws {
+        let spool = try OutputSpool(directory: try tempDir())
+        var expected = Data()
+        for i in 0..<100_000 {
+            let line = Data("l\(i % 10)\n".utf8)
+            try spool.append(line, to: .stdout)
+            expected.append(line)
+        }
+        // 300 KB in 64 KiB entries.
+        XCTAssertLessThanOrEqual(spool.entryCount, 5)
+
+        var replay = Data()
+        var pos: Int64 = 0
+        while case let chunks = try spool.read(from: pos), !chunks.isEmpty {
+            for c in chunks {
+                XCTAssertEqual(c.offset, pos)
+                XCTAssertLessThanOrEqual(c.data.count, OutputSpool.maxChunk)
+                replay.append(c.data)
+                pos += Int64(c.data.count)
+            }
+        }
+        XCTAssertEqual(replay, expected)
+
+        // A switch of stream starts a new entry, so interleaved output keeps its order.
+        try spool.append(Data("e".utf8), to: .stderr)
+        try spool.append(Data("o".utf8), to: .stdout)
+        XCTAssertEqual(try spool.read(from: Int64(expected.count)).map(\.stream), [.stderr, .stdout])
+    }
+
+    /// Merged entries still let the cap drop old output: an entry never outgrows one chunk.
+    func testMergedEntriesStillCompactUnderTheCap() throws {
+        let cap: Int64 = 256 << 10
+        let spool = try OutputSpool(directory: try tempDir(), cap: cap)
+        for _ in 0..<20_000 { try spool.append(Data(repeating: 0x61, count: 64), to: .stdout) }
+        XCTAssertLessThanOrEqual(spool.end - spool.start, cap)
+        XCTAssertGreaterThan(spool.start, 0)
+    }
+}

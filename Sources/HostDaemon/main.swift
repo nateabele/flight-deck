@@ -61,12 +61,21 @@ server.onConnectionCountChanged = { count in
 
 // SIGTERM (launchd's stop, and `SMAppService.unregister`) runs this instead of killing the
 // process outright, so the admin socket file is unlinked rather than left for the next
-// launch to probe and clear.
+// launch to probe and clear, and every delegated run and service is ended. Each run leads its
+// own process group, which launchd's stop never reaches: without `shutdown` they ran on
+// unowned while the next hostd handed their slots to new runs. Its defaults finish inside
+// launchd's 20 s ExitTimeOut (the plist), after which launchd SIGKILLs hostd alone.
 let signals = [SIGTERM, SIGINT].map { sig in
     signal(sig, SIG_IGN)
     let source = DispatchSource.makeSignalSource(signal: sig, queue: .global())
     source.setEventHandler {
         server.stop()
+        let done = DispatchSemaphore(value: 0)
+        Task {
+            await delegation.shutdown()
+            done.signal()
+        }
+        done.wait()
         exit(0)
     }
     source.resume()

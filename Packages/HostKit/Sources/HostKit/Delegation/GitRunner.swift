@@ -108,7 +108,11 @@ public struct GitRunner: Sendable {
     ///
     /// Both sides disable hooks (a user's `reference-transaction` or `post-checkout` hook
     /// must not fire on Flight Deck's internal refs and checkouts) and pin a fixed identity,
-    /// so `commit-tree` works on a host that has never configured `user.name`.
+    /// so `commit-tree` works on a host that has never configured `user.name`. Both turn
+    /// signing off: these commits are plumbing nobody verifies, and a user's `commit.gpgSign`
+    /// with a key gpg cannot use, or a pinentry nobody can answer from hostd, would fail every
+    /// snapshot and result. `commit-tree` ignores the setting since git 2.15; this holds for
+    /// any commit or tag path, and for a repo-local setting the isolated host would still read.
     public init(isolated: Bool = false, timeout: TimeInterval = 600) {
         self.executable = GitRunner.locate()
         self.timeout = timeout
@@ -123,7 +127,7 @@ public struct GitRunner: Sendable {
         env["GIT_OPTIONAL_LOCKS"] = "0"
         env["GIT_AUTHOR_NAME"] = "Flight Deck"; env["GIT_AUTHOR_EMAIL"] = "flightdeck@localhost"
         env["GIT_COMMITTER_NAME"] = "Flight Deck"; env["GIT_COMMITTER_EMAIL"] = "flightdeck@localhost"
-        var config = [("core.hooksPath", "/dev/null")]
+        var config = [("core.hooksPath", "/dev/null"), ("commit.gpgSign", "false"), ("tag.gpgSign", "false")]
         if isolated {
             env["GIT_CONFIG_NOSYSTEM"] = "1"
             env["GIT_CONFIG_GLOBAL"] = "/dev/null"

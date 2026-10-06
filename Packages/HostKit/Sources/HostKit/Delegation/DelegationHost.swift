@@ -39,11 +39,15 @@ public final class DelegationHost: @unchecked Sendable {
     private let lock = NSLock()
     private var connections: [ObjectIdentifier: Connection] = [:]
     /// The repo each run's result lives under: `run.result` names only the run, and the store
-    /// keys results by repo. In memory, because a run does not outlive hostd.
+    /// keys results by repo. In memory, because a run does not outlive hostd (`shutdown`, and
+    /// `Runner`'s startup kill of groups a crashed hostd left).
     private var runRepos: [String: String] = [:]
     /// Runs that ended without ever running (a failed checkout, a locked screen). Their
     /// `run.result` is "nothing changed", not `result_expired`: there never was a result.
     private var failedRuns: Set<String> = []
+    /// Slots whose pairing was revoked. A `run.start` from one that was already being routed
+    /// when the revoke landed must not start anything afterwards.
+    private var revokedSlots: Set<UUID> = []
 
     public init(runner: any RunControlling, workspace: any WorkspaceStore, screen: ScreenLease,
                 portCheck: any PortChecking, screenSupported: Bool) {
@@ -78,6 +82,28 @@ public final class DelegationHost: @unchecked Sendable {
         }
         return DelegationHost(runner: runner, workspace: workspace, screen: screen, portCheck: PortCheck(),
                               screenSupported: screenSupported)
+    }
+
+    /// hostd is stopping (its SIGTERM path): every service downed, `down` command and all,
+    /// and every other run ended, SIGTERM then SIGKILL after `grace`. Returns within
+    /// `deadline`. The defaults fit launchd's 20 s ExitTimeOut, after which it SIGKILLs hostd
+    /// alone and leaves every run's group (each its own) running unowned, while the next hostd
+    /// hands their slots to new runs.
+    public func shutdown(grace: Double = 5, deadline: Double = 15) async {
+        await runner.shutdown(grace: grace, deadline: deadline)
+    }
+
+    /// `slot`'s pairing was revoked (`HostServerCore.disconnect`). Its runs are cancelled and its
+    /// services downed now, not after the orphan timeout: nothing a key the user no longer
+    /// trusts started keeps running or holding a port.
+    public func revoked(_ slot: UUID) {
+        lock.withLock { _ = revokedSlots.insert(slot) }
+        // Services go down through the services, and only there: a cancel would end one
+        // without its `down` command.
+        let serviceIDs = services.serviceIDs(controller: slot)
+        for id in runner.liveRuns(controller: slot) where !serviceIDs.contains(id) { runner.cancel(runID: id) }
+        let services = self.services
+        Task { await services.revoked(slot) }
     }
 
     // MARK: - Connections (called by HostServerCore)
@@ -161,17 +187,25 @@ public final class DelegationHost: @unchecked Sendable {
         case .runStart(let ref, let spec, let owner, let apply):
             let owner = LeaseHolderOwner(controller: slot, session: owner)
             let acquire = try await acquire(ref, spec, apply: apply, controller: slot)
+            try notRevoked(slot)
             // A service starts through the services, which call the runner themselves: they
             // must hold its pinned slot (for `service.sync`) and know which controller's
             // services to down when its orphan timeout runs out, and the runner exposes neither.
             let runID = spec.service ? services.startService(spec, owner: owner, acquire: acquire)
                                      : runner.start(spec, owner: owner, acquire: acquire)
-            lock.withLock {
+            let revokedMeanwhile: Bool = lock.withLock {
                 // Pruned to the runs the runner still knows, so a hostd up for weeks does not
                 // keep a row per run it ever started.
                 runRepos = runRepos.filter { runner.owner(runID: $0.key) != nil }
                 failedRuns = failedRuns.filter { runner.owner(runID: $0) != nil }
                 runRepos[runID] = ref.repoRoot
+                return revokedSlots.contains(slot)
+            }
+            // A revoke between the check above and the start: its sweep may have listed the
+            // slot's runs before this one existed.
+            if revokedMeanwhile {
+                if spec.service { try? await runner.down(runID: runID) } else { runner.cancel(runID: runID) }
+                try notRevoked(slot)
             }
             return Routed(reply: .runStart(runID: runID)) { [self] in attach(runID, from: 0, on: connection) }
 
@@ -312,6 +346,12 @@ public final class DelegationHost: @unchecked Sendable {
         }
     }
 
+    private func notRevoked(_ slot: UUID) throws {
+        guard !lock.withLock({ revokedSlots.contains(slot) }) else {
+            throw DelegationError(code: "unsupported", message: "this controller's pairing was revoked")
+        }
+    }
+
     private func owned(_ runID: String, by controller: UUID) throws {
         guard runner.owner(runID: runID)?.controller == controller else { throw RunnerError.unknownRun(runID) }
     }
@@ -391,6 +431,9 @@ public final class DelegationHost: @unchecked Sendable {
         let handle = try FileHandle(forWritingTo: file)
         defer { try? handle.close() }
         while let chunk = try await channel.read() { try handle.write(contentsOf: chunk) }
+        // Our side's EOF too: a channel retires only once both ends have finished, and without
+        // it every push left an entry in both muxes for as long as the connection lived.
+        await channel.finish()
     }
 
     /// `file` onto `channel`, then EOF. A write waits on the controller's credit, so a slow
@@ -416,7 +459,7 @@ public final class DelegationHost: @unchecked Sendable {
             case .screenUnsupported: return ("screen_unsupported", e.description)
             case .noConsoleUser: return ("no_console_user", e.description)
             case .screenLocked: return ("screen_locked", e.description)
-            case .subdirEscapes, .missingSubdir, .spawnFailed: return ("unsupported", e.description)
+            case .subdirEscapes, .missingSubdir, .spawnFailed, .shuttingDown: return ("unsupported", e.description)
             }
         default: return ("unsupported", "\(error)")
         }

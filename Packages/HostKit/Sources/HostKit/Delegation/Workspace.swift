@@ -19,9 +19,10 @@ import Foundation
 /// event loop (NIO, the Darwin transport) stays responsive; it must still not *block* waiting
 /// for the result. `checkout` suspends, without holding a thread, while the pool is full.
 ///
-/// Pool state (who holds which slot) is in memory: a hostd restart ends every run anyway, so
-/// there is nothing to recover except the checkouts themselves, which `existingCheckout`
-/// rediscovers from disk.
+/// Pool state (who holds which slot) is in memory: a hostd restart ends every run (hostd ends
+/// them as it stops, and the next one kills whatever a crashed one left, before it hands out a
+/// slot), so there is nothing to recover except the checkouts themselves, which
+/// `existingCheckout` rediscovers from disk.
 public final class Workspace: WorkspaceStore, @unchecked Sendable {
     public let root: URL
     public let poolSize: Int
@@ -38,6 +39,12 @@ public final class Workspace: WorkspaceStore, @unchecked Sendable {
     private var queues: [PoolKey: [UUID]] = [:]
     private var generation: [PoolKey: Int] = [:]
     private var storeLocks: [String: NSLock] = [:]
+    /// Test seam: runs as a checkout starts applying into its slot, off the lock (a slow apply).
+    var applyHook: (@Sendable () -> Void)? {
+        get { lock.withLock { _applyHook } }
+        set { lock.withLock { _applyHook = newValue } }
+    }
+    private var _applyHook: (@Sendable () -> Void)?
 
     public init(root: URL, poolSize: Int = 2, keep: Int = 5, resultTTL: TimeInterval = 24 * 3600,
                 git: GitRunner = GitRunner(isolated: true)) {
@@ -152,7 +159,8 @@ public final class Workspace: WorkspaceStore, @unchecked Sendable {
             case .apply(let slot, let path):
                 do {
                     try await GitRunner.offload { [self] in
-                        try withStore(storeURL(controller: controller, repoRoot: ref.repoRoot)) {
+                        applyHook?()
+                        return try withStore(storeURL(controller: controller, repoRoot: ref.repoRoot)) {
                             try apply(ref, at: path, store: storeURL(controller: controller, repoRoot: ref.repoRoot), exclusive: true)
                         }
                     }
@@ -346,7 +354,10 @@ public final class Workspace: WorkspaceStore, @unchecked Sendable {
         }
         return try lock.withLock {
             if let lease = joinExisting(key, id) { return lease }
-            guard let (index, path, ref, applied) = found.max(by: { $0.3 < $1.3 }) else { throw SyncError.noCheckout }
+            // A slot this hostd is applying into right now is on disk too, half written; it
+            // becomes ready (and joinable above) once its apply is done.
+            let settled = found.filter { pools[key]?[$0.0]?.ready != false }
+            guard let (index, path, ref, applied) = settled.max(by: { $0.3 < $1.3 }) else { throw SyncError.noCheckout }
             let slot = pools[key]?[index] ?? Slot(path: path)
             slot.ref = ref
             slot.ready = true

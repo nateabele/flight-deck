@@ -456,3 +456,150 @@ private final class Once: @unchecked Sendable {
     private var done = false
     func first() -> Bool { lock.withLock { defer { done = true }; return !done } }
 }
+
+// MARK: - Final review: stop, revoke, transfer channels
+
+extension DelegationHostTests {
+    private struct Parts {
+        let core: HostServerCore
+        let delegation: DelegationHost
+        let runner: Runner
+    }
+
+    private func parts() throws -> Parts {
+        let root = try tempDir("fd-host")
+        let workspace = Workspace(root: root)
+        let screen = ScreenLease()
+        let runner = Runner(runsRoot: root.appendingPathComponent("runs"), shell: "/bin/sh",
+                            hostEnvironment: ["PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": NSTemporaryDirectory()],
+                            power: NoPowerAssertions(), console: UnsupportedConsoleSession(), screen: screen,
+                            lifecycle: .workspace(workspace))
+        let delegation = DelegationHost(runner: runner, workspace: workspace, screen: screen,
+                                        portCheck: PortCheck(run: { _, _ in nil }), screenSupported: false)
+        let core = HostServerCore(hostName: { "mini" }, probe: HostInfoProbe(stateRoot: root, hostdVersion: "t") { _, _ in nil },
+                                  delegation: delegation)
+        return Parts(core: core, delegation: delegation, runner: runner)
+    }
+
+    private func service(_ command: String, down: String) -> RunSpec {
+        var s = spec(command)
+        s.service = true
+        s.downCommand = down
+        return s
+    }
+
+    private func startService(_ spec: RunSpec, _ ref: SnapshotRef, over c: Controller) async throws -> String {
+        guard case .runStart(let runID) = try await c.request(.runStart(ref: ref, spec: spec, owner: "tab", apply: true)) else {
+            throw CocoaError(.featureUnsupported)
+        }
+        return runID
+    }
+
+    private func waitTerminal(_ runner: Runner, _ ids: [String], within seconds: TimeInterval) async throws {
+        let deadline = Date().addingTimeInterval(seconds)
+        while Date() < deadline {
+            if ids.allSatisfy({ runner.phase(runID: $0).map { $0 != .running && !$0.isQueued } ?? true }) { return }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTFail("still live after \(seconds)s: \(ids.map { runner.phase(runID: $0).map { "\($0)" } ?? "gone" })")
+    }
+
+    /// Revoking a controller used to close its connections and nothing else: its runs kept
+    /// running and its services kept their ports for the whole orphan timeout, for a key the
+    /// user had just said they no longer trust.
+    func testRevokeCancelsTheSlotsRunsAndDownsItsServicesAtOnce() async throws {
+        let repo = try repo()
+        let p = try parts()
+        let c = Controller(core: p.core), other = Controller(core: p.core)
+        _ = try await c.hello()
+        _ = try await other.hello()
+        let ref = try await sync(repo, over: c)
+        let otherRef = try await sync(repo, over: other)
+        let marker = try tempDir("down").appendingPathComponent("down-ran")
+
+        let run = try await start("echo ready; while :; do sleep 0.1; done", ref, over: c)
+        let svc = try await startService(service("echo up; while :; do sleep 0.1; done", down: "touch '\(marker.path)'"), ref, over: c)
+        let bystander = try await start("echo ready; while :; do sleep 0.1; done", otherRef, over: other)
+        try await c.started(run)
+        try await c.started(svc)
+        try await other.started(bystander)
+
+        p.core.disconnect(slot: c.slot)
+        try await waitTerminal(p.runner, [run, svc], within: 20)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path), "the revoked controller's service was downed")
+        XCTAssertEqual(p.runner.phase(runID: bystander), .running, "another controller's work is not touched")
+        await p.delegation.shutdown(grace: 0.2, deadline: 5)
+    }
+
+    /// A `run.start` already being routed when the revoke lands (its exec probe or checkout
+    /// was awaiting) must not start a run for the revoked key afterwards.
+    func testRunStartForARevokedSlotIsRefused() async throws {
+        let repo = try repo()
+        let p = try parts()
+        let c = Controller(core: p.core)
+        _ = try await c.hello()
+        let ref = try await sync(repo, over: c)
+        // The router hears the revoke; the connection, as seen by the router, is still there.
+        p.delegation.revoked(c.slot)
+        let refused = await remote { try await self.start("echo never", ref, over: c) }
+        XCTAssertNotNil(refused)
+        XCTAssertEqual(p.runner.liveRuns(controller: c.slot), [])
+    }
+
+    /// The hostd's SIGTERM path: services downed with their `down` command, runs ended, all
+    /// within launchd's ExitTimeOut.
+    func testShutdownDownsServicesAndEndsRuns() async throws {
+        let repo = try repo()
+        let p = try parts()
+        let c = Controller(core: p.core)
+        _ = try await c.hello()
+        let ref = try await sync(repo, over: c)
+        let marker = try tempDir("down").appendingPathComponent("down-ran")
+        let run = try await start("trap '' TERM INT; echo ready; while :; do sleep 0.1; done", ref, over: c)
+        let svc = try await startService(service("echo up; while :; do sleep 0.1; done", down: "touch '\(marker.path)'"), ref, over: c)
+        try await c.started(run)
+        try await c.started(svc)
+
+        let began = Date()
+        await p.delegation.shutdown(grace: 0.5, deadline: 10)
+        XCTAssertLessThan(Date().timeIntervalSince(began), 8)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path))
+        XCTAssertEqual(p.runner.phase(runID: run), .exited(.signal(SIGKILL)))
+        XCTAssertEqual(p.runner.phase(runID: svc).map { if case .died = $0 { return true }; return false }, false)
+    }
+
+    /// The host read a pushed bundle to EOF but never sent its own, so the channel stayed
+    /// half-open on both ends, and a mux entry per push lived as long as the connection.
+    func testSyncPushRetiresItsChannel() async throws {
+        let repo = try repo()
+        let c = Controller(core: try host())
+        _ = try await c.hello()
+        let ref = try await Snapshotter().snapshot(worktree: repo.url, host: "mini", include: [])
+        let bundle = try await BundleMaker().bundle(worktree: repo.url, snapshot: ref, haves: [])
+        defer { try? FileManager.default.removeItem(at: bundle) }
+        let channel = try await c.mux.open()
+        let id = c.post(.delegation(.syncPush(ref: ref, channel: channel.id)))
+        try await channel.write(try Data(contentsOf: bundle))
+        await channel.finish()
+        let pushed = try await c.reply(to: id)
+        XCTAssertEqual(pushed, .delegation(.syncPush))
+
+        // Polled rather than awaited: on a host that never finishes, the read never returns.
+        let sawEOF = EOFFlag()
+        Task { if (try? await channel.read()) == .some(nil) { sawEOF.set() } }
+        let deadline = Date().addingTimeInterval(5)
+        while !sawEOF.isSet && Date() < deadline { try await Task.sleep(nanoseconds: 20_000_000) }
+        XCTAssertTrue(sawEOF.isSet, "the host finishes its side once it has the whole bundle")
+    }
+}
+
+private extension RunPhase {
+    var isQueued: Bool { if case .queued = self { return true }; return false }
+}
+
+private final class EOFFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var raised = false
+    func set() { lock.withLock { raised = true } }
+    var isSet: Bool { lock.withLock { raised } }
+}

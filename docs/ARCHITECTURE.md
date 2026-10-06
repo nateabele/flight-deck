@@ -279,13 +279,14 @@ checkouts (two per worktree by default), each a `git worktree` named after the l
 `docker compose` project names match. An apply is `checkout --force --detach` then `clean -fd`
 (never `-x`), so ignored build output survives and builds stay incremental; the tree hash is checked
 before anything runs. Refused up front: LFS repos (`lfs_unsupported`), repos with submodules
-(`submodules_unsupported`, out of v1 by ruling), and git older than 2.40 (`git_too_old`).
+(`submodules_unsupported`: v1 refuses them, like LFS, instead of the spec's recursive handling, to
+keep sync bounded), and git older than 2.40 (`git_too_old`).
 
 **Results come back two ways.** Tracked changes are committed on the host as a child of the
 snapshot (`refs/fd/results/<run>`) and fetched as a one-commit bundle. The host keeps it until the
-controller sends `run.ack` after storing that bundle, or for 24 h (ruling 24: a host that dropped it
-after its own last write would lose every result whose connection died before the Mac's copy
-landed). It is shown by `flightdeck diff` or merged by `flightdeck apply` three-way against the *current*
+controller sends `run.ack` after storing that bundle, or for 24 h. The spec had the host drop it
+once fetched; a host that dropped it after its own last write would lose every result whose
+connection died before the Mac's copy landed, so the controller's ack is what releases it. It is shown by `flightdeck diff` or merged by `flightdeck apply` three-way against the *current*
 worktree, so edits made during the run conflict instead of being overwritten. `apply = "auto"`
 applies on completion and falls back to review on a conflict. `ResultApplier` trusts nothing the
 host sends: a path into `.git`, through a symlink, or colliding with another after case and NFC
@@ -297,9 +298,15 @@ in the checkout plus the CLI's relative subdirectory, with the host's login envi
 `--env` and recipe `env`; the controller's environment is never sent. Output is spooled to
 `runs/<id>/` (64 MiB cap, oldest dropped first) and carried in `event` frames of at most 64 KiB, each
 with its byte offset, so a CLI or an app that reconnects resumes exactly where it left off. A run
-outlives its controller's connection. Cancel is SIGINT, then SIGTERM after 10 s, then SIGKILL after
-10 s more. `--pty` is output-only in v1. Every run holds an idle-sleep assertion (IOKit on macOS,
-`systemd-inhibit` on Linux).
+outlives its controller's connection, but not the hostd: on SIGTERM the hostd downs every service
+(running its `down` command) and cancels every run inside launchd's 20 s exit timeout, and each
+run's process group is recorded under `runs/<id>/` so a hostd that crashed kills the survivors when
+it next starts (launchd kills only the hostd's own group, and every run leads its own). Run ids are
+`<boot epoch, base 36>-r<n>`, unique across hostd lifetimes, so a restarted hostd can never hand an
+old id (and its result ref) to a new run. Cancel is SIGINT, then SIGTERM after 10 s, then SIGKILL
+after 10 s more. `--pty` is output-only in v1. Every run holds an idle-sleep assertion (IOKit on
+macOS; on Linux `systemd-inhibit`, which has never run under a real systemd: **unverified live**,
+like child reaping there, FOLLOWUPS).
 
 **Exit codes are the contract an agent reads.** The remote command's own code; `128+n` for a
 signal; **125** with one `flightdeck:` stderr line naming the host and the next step when delegation
@@ -332,8 +339,14 @@ checklist in [DELEGATION-PROBES.md](DELEGATION-PROBES.md).
 `wait`, `recipe ls|check` and `host ls --disk` are read-only scopes; every other delegate request is
 an own-session write, and `host prune` (every tab's checkouts) is fleet-wide. Paired phones are
 refused (`out_of_scope`). On the host, a run belongs to the controller slot that started it, and any
-other slot gets `unknown_run`. The app's runs persist in `delegation.json` beside `sessions.json`
-(`RunRegistry`), with ids (`r7`) never reused.
+other slot gets `unknown_run`. Revoking a controller stops its work at once: its runs are cancelled,
+its services downed, and a `run.start` still in flight is refused. **That scoping is hygiene, not
+isolation:** every controller's commands run as the host user, so a paired controller's run can read
+`controllers.json` (every controller's key), drive the admin socket, and reach other controllers'
+`workspaces/` and processes. Pair only machines you would give a shell. The app's runs persist in
+`delegation.json` beside `sessions.json` (`RunRegistry`), with its own ids (`r7`) never reused;
+finished runs older than 14 days, or beyond the newest 500 per host, are pruned together with their
+output copy and result bundle, and saves are coalesced and written off the main actor.
 
 **`delegate.toml` and transparent routing** (`DelegateConfigParser`, `RecipeWriter`,
 `RouteMatcher`, `RouteShims`). `.flightdeck/delegate.toml` holds `default_host`, `include`,
@@ -346,16 +359,20 @@ the real binary from `PATH` minus the shim directory. `DelegationBootstrap` buil
 `SessionStore.launchEnvironment` (fresh launches and reattaches alike), sets `FLIGHTDECK_CLI` (this
 build's CLI, so an older `flightdeck` on `PATH` is never the one asked) and `FLIGHTDECK_SHIM_DIR`,
 rebuilds every tab of a project when its `.flightdeck/` changes (one `RouteShimWatcher` per project),
-and removes the directory when the tab closes. `FLIGHTDECK_NO_ROUTE=1` bypasses routing. The
-bootstrap is built before the store, because the store launches its restored tabs inside its own
-initializer, and never under a UITest reset. **Unverified live:** whether a login shell profile
-that prepends to `PATH` (`fish_add_path`, `brew shellenv`, `path_helper`) pushes the shim directory
-off the front in a real tab.
+and removes the directory when the tab closes. `FLIGHTDECK_NO_ROUTE` set to anything but empty or
+`0` bypasses routing (the shim and the CLI agree). The bootstrap is built before the store, because
+the store launches its restored tabs inside its own initializer, and never under a UITest reset.
+A login shell's own startup files put the system directories back in front (measured: under fish the
+shim directory ended 40th of 43 entries, under zsh 18th), so the shell re-prepends
+`$FLIGHTDECK_SHIM_DIR` after they ran, from snippets in `Resources/RouteShim/`: fish through a
+`vendor_conf.d` file reached by `XDG_DATA_DIRS`, zsh through a `ZDOTDIR` wrapper that sources the
+user's own files first, bash through `PROMPT_COMMAND`, each also on every prompt. Tested with real
+login shells; **unverified live** in a real tab.
 
 **Agents learn it from a skill** (spec §9). Claude gets `Resources/ClaudePlugin/skills/delegate/`
 through the plugin it is already launched with (`/flight-deck:delegate`); codex gets the same file
 copied to `$CODEX_HOME/skills/flightdeck-delegate/` (`CodexDelegateSkill`, which leaves a copy the
-user edited or deleted alone). Probe P1 showed a skill added under `--plugin-dir` does not appear in
+user edited or deleted alone; a Debug build skips the copy, so it never writes the real `~/.codex`). Probe P1 showed a skill added under `--plugin-dir` does not appear in
 a running claude until `/reload-plugins`, and under fd-abduco a tab's claude outlives an app update.
 So at launch the app fingerprints the bundled plugin (`PluginReload`); when it changed, every claude
 tab whose daemon was already live is sent `/reload-plugins` through the gated `inject`, only while
@@ -365,15 +382,18 @@ the status registry says idle and after any queued rename or prompt.
 `DelegationServiceFactory.live(hostService:sessionTitle:)` builds, before either socket starts.
 The service's `init` calls `resumeWatching()`, and the factory points `LiveHostDirectory.onHostOnline`
 at it, so a run or service from before a relaunch is watched again as soon as its host is up,
-without anyone having to `wait` on it first. Each run's output is mirrored to disk
-(`<state dir>/delegation/<host slot>-<host run id>.out`, `RunMirror`), so a reattach asks the host
-only for the bytes the copy lacks, and `logs` of a finished run answers with the host offline.
+without anyone having to `wait` on it first. Each run's output is mirrored to disk under
+`<state dir>/delegation/`, keyed by this Mac's run id (`RunMirror`), so a reattach asks the host
+only for the bytes the copy lacks, and `logs` of a finished run answers with the host offline. A
+reattach that gets `unknown_run` (the hostd restarted, so the run is gone) ends the run as died,
+exit 125, instead of leaving it running forever; `down` treats it as already down.
 
 **A run that never ran** (a tree mismatch, a locked screen) is reported by the host as one
 synthesized `flightdeck: <reason>` output line and `exited(125)`: the wire has no failure event.
 
 **Tested end to end** by `DelegationLoopbackTests` (the factory-built service over a real TLS link to
-an in-process `DarwinHostServer`, real processes in temp repos) and, against the Linux hostd in a
+an in-process `DarwinHostServer`, real processes in temp repos, including `logs` replay across a
+relaunch and a real service downed by a shortened orphan timeout) and, against the Linux hostd in a
 container, by `test-hostd-linux-interop.sh run`. Neither has crossed to a real second machine.
 
 ## Preferences

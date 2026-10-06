@@ -51,6 +51,8 @@ final class LinuxHostd: @unchecked Sendable {
     let hostName: String
     let store: ControllerStore
     let core: HostServerCore
+    /// Kept beside the core, which holds it privately, for the SIGTERM path's `shutdown`.
+    private let delegation: DelegationHost
     private let window = PairingWindow()
     private let avahi = AvahiPublisher()
 
@@ -72,10 +74,12 @@ final class LinuxHostd: @unchecked Sendable {
         self.port = port
         self.hostName = hostName
         store = ControllerStore(root: root)
+        let delegation = delegation ?? .standard(root: root, screenSupported: false)
+        self.delegation = delegation
         core = HostServerCore(hostName: { hostName },
                               probe: HostInfoProbe(stateRoot: root, hostdVersion: hostdVersion),
                               endpoints: { Self.advertisedEndpoints(from: HostEndpoints.enumerate(), port: port) },
-                              delegation: delegation ?? .standard(root: root, screenSupported: false))
+                              delegation: delegation)
         knownSlots = Set(store.all().map(\.slot))
     }
 
@@ -116,9 +120,17 @@ final class LinuxHostd: @unchecked Sendable {
             [weak self] request in self?.handle(request) ?? .failed("hostd is shutting down")
         }
         let advert = avahi.publish(AvahiPublisher.serviceArguments(hostName: hostName, port: port))
-        let signals = Self.onTermination { [avahi] in
+        let signals = Self.onTermination { [avahi, delegation] in
             avahi.stop(advert)
             admin.stop()
+            // Every run leads its own process group, so stopping hostd alone would leave them
+            // running unowned, in slots the next hostd hands to new runs.
+            let done = DispatchSemaphore(value: 0)
+            Task {
+                await delegation.shutdown()
+                done.signal()
+            }
+            done.wait()
             exit(0)
         }
         FileHandle.standardOutput.write(Data("listening on \(port)\n".utf8))
@@ -129,8 +141,8 @@ final class LinuxHostd: @unchecked Sendable {
     }
 
     /// SIGTERM/SIGINT run `body` instead of killing the process outright, so the admin socket
-    /// file is unlinked and the avahi children (which would otherwise outlive hostd and keep
-    /// advertising a dead port) are stopped.
+    /// file is unlinked, the avahi children (which would otherwise outlive hostd and keep
+    /// advertising a dead port) are stopped, and delegated runs and services are ended.
     private static func onTermination(_ body: @escaping @Sendable () -> Void) -> [DispatchSourceSignal] {
         [SIGTERM, SIGINT].map { sig in
             signal(sig, SIG_IGN)

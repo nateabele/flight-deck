@@ -745,3 +745,106 @@ final class RunnerTests: XCTestCase {
         }
     }
 }
+
+// MARK: - Final review: hostd stop, crash and restart
+
+extension RunnerTests {
+    /// A run id names the run's spool, its result ref and the controller's records of it. One
+    /// that restarted at `r1` with every hostd launch reused a name a live result ref or a
+    /// controller's mirror still held (Ruling 27), so the old run's data answered for the new.
+    func testRunIDsAreUniqueAcrossRunnerLifetimes() async throws {
+        let root = try tempDir("runs")
+        let first = Runner(runsRoot: root, shell: "/bin/sh", hostEnvironment: hostEnv, console: FixedConsole(state: consoleAvailable))
+        let a = start(first, spec("true"), try checkout())
+        _ = try await collect(first, a)
+        // The day-old prune took its spool, which is all the old scheme checked for.
+        try FileManager.default.removeItem(at: root.appendingPathComponent(a))
+
+        let second = Runner(runsRoot: root, shell: "/bin/sh", hostEnvironment: hostEnv, console: FixedConsole(state: consoleAvailable))
+        let b = start(second, spec("true"), try checkout())
+        _ = try await collect(second, b)
+        XCTAssertNotEqual(a, b)
+        for id in [a, b] {
+            let parts = id.split(separator: "-")
+            XCTAssertEqual(parts.count, 2, id)
+            XCTAssertTrue(parts.first.map { !$0.isEmpty && $0.allSatisfy { $0.isLetter || $0.isNumber } } ?? false, id)
+            XCTAssertTrue(parts.last?.hasPrefix("r") ?? false, id)
+            XCTAssertNoThrow(try SyncName.validate(id), "a run id names a ref and a directory")
+        }
+    }
+
+    /// launchd stops hostd with SIGTERM to hostd alone, not its runs' groups (each run leads
+    /// its own), so without `shutdown` every run and service carried on unowned while the next
+    /// hostd handed their slots to new runs.
+    func testShutdownDownsServicesAndKillsRunsWithinTheGrace() async throws {
+        let r = try runner(clock: ManualClock())
+        let marker = try tempDir("down").appendingPathComponent("down-ran")
+        var service = spec("trap 'exit 0' TERM; echo up; while :; do sleep 0.1; done")
+        service.service = true
+        service.downCommand = "touch '\(marker.path)'"
+        let svc = start(r, service, try checkout())
+        // Ignores TERM, so only the KILL after the grace ends it.
+        let stubborn = start(r, spec("trap '' TERM INT; echo ready; while :; do sleep 0.1; done"), try checkout())
+        _ = try await waitForOutput(r, svc) { $0.contains("up") }
+        _ = try await waitForOutput(r, stubborn) { $0.contains("ready") }
+
+        let began = Date()
+        await r.shutdown(grace: 0.5, deadline: 10)
+        XCTAssertLessThan(Date().timeIntervalSince(began), 8, "KILL follows the grace, not the 10 s escalation clock")
+        XCTAssertEqual(r.phase(runID: svc), .exited(.code(0)), "a downed service, not one that died")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path), "the service's down command ran")
+        XCTAssertEqual(r.phase(runID: stubborn), .exited(.signal(SIGKILL)))
+
+        let late = start(r, spec("echo never"), try checkout())
+        do {
+            _ = try await collect(r, late)
+            XCTFail("a run started during shutdown must not run")
+        } catch RunnerError.shuttingDown {}
+    }
+
+    /// A hostd that crashed (or was SIGKILLed past launchd's ExitTimeOut) never ran `shutdown`.
+    /// The next one finds each live run's recorded group and kills it before any slot is
+    /// handed out again: the old run would otherwise keep writing into a reused checkout.
+    func testStartupKillsAGroupACrashedHostdLeftRunning() async throws {
+        let root = try tempDir("runs")
+        let crashed = Runner(runsRoot: root, shell: "/bin/sh", hostEnvironment: hostEnv, clock: ManualClock(),
+                             console: FixedConsole(state: consoleAvailable))
+        let id = start(crashed, spec("sleep 300 & echo $!; wait"), try checkout())
+        let line = try await waitForOutput(crashed, id) { $0.hasSuffix("\n") }
+        let grandchild = try XCTUnwrap(pid_t(line.trimmingCharacters(in: .whitespacesAndNewlines)))
+        let recorded = root.appendingPathComponent(id).appendingPathComponent("pgid")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: recorded.path), "a running run records its group")
+
+        _ = Runner(runsRoot: root, shell: "/bin/sh", hostEnvironment: hostEnv, console: FixedConsole(state: consoleAvailable))
+        let deadline = Date().addingTimeInterval(10)
+        while !isDead(grandchild) && Date() < deadline { usleep(50_000) }
+        XCTAssertTrue(isDead(grandchild), "the orphaned group was killed at startup")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: recorded.path))
+        let died = try String(contentsOf: root.appendingPathComponent(id).appendingPathComponent("died"), encoding: .utf8)
+        XCTAssertFalse(died.isEmpty, "the run is marked died")
+    }
+
+    /// The record goes once the group is gone: a later hostd must never signal a pgid the
+    /// kernel has since handed to someone else.
+    func testAFinishedRunLeavesNoGroupRecord() async throws {
+        let root = try tempDir("runs")
+        let r = Runner(runsRoot: root, shell: "/bin/sh", hostEnvironment: hostEnv, console: FixedConsole(state: consoleAvailable))
+        let id = start(r, spec("echo hi"), try checkout())
+        _ = try await collect(r, id)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent(id).appendingPathComponent("pgid").path))
+    }
+
+    /// Revoking a controller ends its work: the router asks which runs are still live.
+    func testLiveRunsAreListedByController() async throws {
+        let r = try runner(clock: ManualClock())
+        let other = UUID()
+        let mine = start(r, spec("sleep 300"), try checkout())
+        let lease = try checkout()
+        let theirs = r.start(spec("sleep 300"), owner: LeaseHolderOwner(controller: other, session: "B"), acquire: { lease })
+        let done = start(r, spec("true"), try checkout())
+        _ = try await collect(r, done)
+        XCTAssertEqual(r.liveRuns(controller: controllerID), [mine])
+        XCTAssertEqual(r.liveRuns(controller: other), [theirs])
+        await r.shutdown(grace: 0.2, deadline: 5)
+    }
+}

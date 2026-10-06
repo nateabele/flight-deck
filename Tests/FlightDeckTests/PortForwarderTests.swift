@@ -172,6 +172,12 @@ final class PortForwarderTests: XCTestCase {
             return c
         }
         let host = try await opener.nextHostEnd()
+        // The bound only means something once the forwarder has had the bytes to exceed it:
+        // first the window fills (the sender is running and the forwarder is reading), then,
+        // with the host still reading nothing, it must stay put.
+        let deadline = Date().addingTimeInterval(10)
+        while host.accepted < window, Date() < deadline { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertGreaterThanOrEqual(host.accepted, window, "the forwarder never filled the window")
         try await Task.sleep(for: .milliseconds(500))
         XCTAssertLessThanOrEqual(host.accepted, window + 64 * 1024, "the forwarder kept reading a host that was not")
         var received = 0

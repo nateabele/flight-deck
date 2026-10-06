@@ -126,7 +126,7 @@ public struct ResultApplier: Sendable {
         let mergedTree = fields[0]
         var conflicts = Set(merged.status == 1 ? Array(fields.dropFirst().prefix { !$0.isEmpty }) : [])
 
-        let changes = try Self.changes(try git.run(["diff-tree", "-r", "-z", "--no-renames", "--raw", oursTree, mergedTree], in: top).stdout)
+        let changes = Self.changes(try git.run(["diff-tree", "-r", "-z", "--no-renames", "--raw", oursTree, mergedTree], in: top).stdout)
         let realTop = top.resolvingSymlinksInPath()
 
         // Every check runs before the first write, so a refusal never leaves a partial apply.

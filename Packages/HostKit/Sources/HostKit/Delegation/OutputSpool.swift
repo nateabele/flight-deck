@@ -22,8 +22,9 @@ public struct SpoolChunk: Sendable, Equatable {
 /// One file per stream under `runs/<id>/`, plus an in-memory index that orders the chunks
 /// across streams by a single run-wide offset.
 ///
-/// The index is not persisted: a run does not outlive hostd (its pipes end with it), so there
-/// is never a spool to reopen.
+/// The index is not persisted: a run does not outlive hostd, so there is never a spool to
+/// reopen. hostd ends every run as it stops (`Runner.shutdown`), and one that crashed has its
+/// runs' groups killed by the next (`runs/<id>/pgid`); its pipes closing would not do it.
 ///
 /// **Cap.** Past `cap` retained bytes the oldest chunks are dropped, down to half the cap, by
 /// rewriting the stream files. Dropping half rather than just enough keeps the rewrite cost to
@@ -49,7 +50,7 @@ public final class OutputSpool: @unchecked Sendable {
         let offset: Int64
         /// Where the bytes sit in the stream's file.
         let fileOffset: UInt64
-        let length: Int
+        var length: Int
     }
 
     private let directory: URL
@@ -73,6 +74,9 @@ public final class OutputSpool: @unchecked Sendable {
     deinit {
         for handle in handles.values { try? handle.close() }
     }
+
+    /// Index entries held in memory (a test seam).
+    var entryCount: Int { lock.withLock { entries.count } }
 
     /// The first retained offset.
     public var start: Int64 { lock.withLock { _start } }
@@ -99,7 +103,18 @@ public final class OutputSpool: @unchecked Sendable {
             try handle.write(contentsOf: data)
             fileSizes[stream] = fileOffset + UInt64(data.count)
             let offset = _end
-            entries.append(Entry(stream: stream, offset: offset, fileOffset: fileOffset, length: data.count))
+            // Extends the last entry when this continues it (same stream, next bytes of its
+            // file). The pump appends whatever one read(2) returned, so an entry per append
+            // grew hostd's memory with every line a long build printed. Bounded by one read
+            // chunk and an eighth of the cap, so `compact`, which drops whole entries, can
+            // still bring a small spool under its cap; reads split an entry into chunks.
+            if let last = entries.last, last.stream == stream,
+               last.fileOffset + UInt64(last.length) == fileOffset, last.offset + Int64(last.length) == offset,
+               Int64(last.length + data.count) <= min(Int64(Self.maxChunk), cap / 8) {
+                entries[entries.count - 1].length += data.count
+            } else {
+                entries.append(Entry(stream: stream, offset: offset, fileOffset: fileOffset, length: data.count))
+            }
             _end += Int64(data.count)
             if _end - _start > cap { try compact() }
             return offset
