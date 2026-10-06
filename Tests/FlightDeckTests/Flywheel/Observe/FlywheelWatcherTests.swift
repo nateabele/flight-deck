@@ -53,22 +53,33 @@ final class FlywheelWatcherTests: XCTestCase {
     private final class WriteDuringReadRunner: FlywheelProcessRunner, @unchecked Sendable {
         let watchedPath: URL
         var responses: [String: (String, Int32)] = [:]
-        private(set) var argv: [[String]] = []
+        /// Locked: a repoll issues its four reads concurrently (`async let`), so `argv.append` and
+        /// the `hasWritten` check-then-set raced across tasks. The unguarded append corrupted the
+        /// array and segfaulted a unit shard (`Segmentation fault: 11` in
+        /// `testWriteDuringInFlightReadIsNotDropped`) once `expectedReadsPerPoll` reached 4 —
+        /// the same failure `MultiRunner` was locked for. Locking `hasWritten` also keeps the
+        /// "first call writes, exactly once" contract this test depends on.
+        private let lock = NSLock()
+        private var recorded: [[String]] = []
         private var hasWritten = false
+        var argv: [[String]] { lock.withLock { recorded } }
 
         init(watchedPath: URL) { self.watchedPath = watchedPath }
 
         func run(_ exe: String, _ args: [String], cwd: String?) async throws -> (stdout: String, exitCode: Int32) {
-            argv.append([exe] + args)
-            if !hasWritten {
-                hasWritten = true
+            let isFirst: Bool = lock.withLock {
+                recorded.append([exe] + args)
+                defer { hasWritten = true }
+                return !hasWritten
+            }
+            if isFirst {
                 // Mutates synchronously, before `run` returns — guarantees this write
                 // happens-before the `await` in `repollNow()` completes, so the race is
                 // deterministic rather than timing-dependent.
                 try? "changed-during-read".write(to: watchedPath, atomically: true, encoding: .utf8)
             }
             let key = ([exe] + args.prefix(2)).joined(separator: " ")
-            return responses[key] ?? ("", 127)
+            return lock.withLock { responses[key] ?? ("", 127) }
         }
     }
 
