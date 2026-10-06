@@ -59,6 +59,7 @@ struct RootView: View {
                                       onJumpToRootCause: { store.jumpToObserveRootCause() },
                                       onOpenDAG: { store.presentObserveDAG() },
                                       assignment: store.focusedSwarmAssignment(),
+                                      session: store.selectedSessionID,
                                       onJumpToSession: { store.selectedSessionID = $0 })
                     }
                 }

@@ -7,6 +7,9 @@ struct SwarmSessionAnnotation: Equatable {
     var contested: Bool
     /// The account's worst-window utilization, only once it is past soft.
     var meter: Double?
+    /// The leased account, so the row can ask `MeterFormatter` for the real meter. The Double above
+    /// only decides whether there is anything to draw.
+    var meterAccount: UUID? = nil
     /// waiting / done <task> / handed off → / a failure note.
     var marker: String?
     var lastActive: String?
@@ -47,7 +50,7 @@ enum SwarmAnnotations {
         }
         return SwarmSessionAnnotation(
             taskChip: agent.task.map { "\($0) · \(agent.block.block.kind)" },
-            contested: contested, meter: meter, marker: marker,
+            contested: contested, meter: meter, meterAccount: agent.lease?.account.id, marker: marker,
             lastActive: activeAgo(lastActive, now: now))
     }
 
@@ -107,13 +110,14 @@ struct SwarmRowChips: View {
                     .accessibilityLabel("contested")
                     .accessibilityIdentifier("swarm-contested")
             }
-            if let meter = annotation.meter {
-                MinimalMeter(value: meter)
-                    .frame(width: 22, height: 4)
-                    .help("Account at \(Int(meter * 100))%")
+            // The formatter, not the annotation, decides what is drawn: it answers per account
+            // across every pool, so the row and the Capacity pane can never disagree.
+            if annotation.meter != nil, let account = annotation.meterAccount,
+               let model = MeterFormatter.rowMeter(account: account, ledger: UsageService.shared.ledger, now: Date()) {
+                RowMiniMeter(model: model)
                     .accessibilityElement(children: .ignore)
-                    .accessibilityLabel("account at \(Int(meter * 100)) percent")
-                    .accessibilityValue("\(Int(meter * 100)) percent")
+                    .accessibilityLabel("\(model.label) usage")
+                    .accessibilityValue(model.accessibilityValue)
                     .accessibilityIdentifier("swarm-meter")
             }
             if let marker = annotation.marker {
@@ -123,21 +127,6 @@ struct SwarmRowChips: View {
             if let ago = annotation.lastActive {
                 Text(ago).font(.caption2).foregroundStyle(.tertiary)
                     .accessibilityIdentifier("swarm-last-active")
-            }
-        }
-    }
-}
-
-/// A minimal meter drawn from `AccountHeadroom`. Integration swaps in L3-U's standalone meter
-/// view; this exists so L3-S's own UI and UI tests have something real to show.
-struct MinimalMeter: View {
-    let value: Double
-    var body: some View {
-        GeometryReader { geometry in
-            ZStack(alignment: .leading) {
-                Capsule().fill(.quaternary)
-                Capsule().fill(value >= 1 ? Color.red : .orange)
-                    .frame(width: geometry.size.width * min(1, max(0, value)))
             }
         }
     }
@@ -157,11 +146,10 @@ struct SwarmHeaderChip: View {
     }
 }
 
-/// Pool meters (from capacity headroom — L3-U's meter view replaces `MinimalMeter` at
-/// integration) and the tasks the swarm cannot start, with why.
+/// Pool meters (L3-U's `PoolMeterList`, for the pools this swarm leases from) and the tasks the swarm cannot start, with why.
 struct SwarmPopover: View {
     let record: SwarmRecord
-    let meters: [SwarmMeterRow]
+    let pools: [PoolMeterModel]
     let summary: SwarmHeaderSummary
     let onPause: () -> Void
     let onResume: () -> Void
@@ -174,18 +162,7 @@ struct SwarmPopover: View {
         VStack(alignment: .leading, spacing: 8) {
             Text(summary.text).font(.headline)
             if let banner = summary.banner { Text(banner).foregroundStyle(.orange) }
-            ForEach(meters, id: \.self) { meter in
-                HStack {
-                    Text("\(meter.pool) · \(meter.label)").font(.caption)
-                    Spacer()
-                    if let value = meter.value {
-                        MinimalMeter(value: value).frame(width: 80, height: 5)
-                        Text("\(Int(value * 100))%").font(.caption.monospacedDigit())
-                    } else {
-                        Text("no reading").font(.caption).foregroundStyle(.secondary)
-                    }
-                }
-            }
+            if !pools.isEmpty { PoolMeterList(pools: pools) }
             let waiting = Self.lines(for: record)
             if !waiting.isEmpty {
                 Text("Waiting").font(.subheadline)
@@ -205,7 +182,8 @@ struct SwarmPopover: View {
     }
 }
 
-/// One account row of a pool meter: the popover's and the phone's.
+/// One account row of a pool's headroom, as the phone's `WireSwarmMeter` carries it. The Mac popover
+/// draws `PoolMeterModel`s instead; both read the same ledger.
 struct SwarmMeterRow: Hashable {
     let pool: String
     let label: String
@@ -214,6 +192,14 @@ struct SwarmMeterRow: Hashable {
 }
 
 extension SwarmService {
+    /// The meter models for the pools this swarm's agents lease from, not every pool in the
+    /// ledger: a project's popover answering for pools it never touches would bury its own.
+    func meterPools(forProject path: String, ledger: CapacityLedger, now: Date) -> [PoolMeterModel] {
+        guard let record = record(forProject: path) else { return [] }
+        let used = Set(record.agents.compactMap { $0.lease?.pool })
+        return MeterFormatter.pools(ledger, now: now).filter { used.contains($0.id) }
+    }
+
     /// One row per account in every pool the swarm's agents lease from.
     func meters(forProject path: String) -> [SwarmMeterRow] {
         guard let record = record(forProject: path), let capacity = dependencies?.capacity else { return [] }
@@ -229,6 +215,8 @@ extension SwarmService {
 struct SwarmAssignmentDetail: Equatable {
     var lines: [String]
     var links: [ObserveLaneLink]
+    /// The leased account's meter, drawn under the lines. Filled by `SwarmService.assignment`.
+    var meter: AccountMeterModel? = nil
 }
 
 extension SwarmAnnotations {
@@ -274,6 +262,10 @@ extension SwarmService {
             previous: agent.handedOffFrom.flatMap { record.agent($0) },
             next: agent.handedOffTo.flatMap { record.agent($0) },
             lastActive: lastActiveAt(for: session), now: now)
+        if let lease = agent.lease?.lease, let id = lease.account.id {
+            detail.meter = MeterFormatter.pools(UsageService.shared.ledger, now: now)
+                .first { $0.id == lease.pool }?.accounts.first { $0.id.hasSuffix("|\(id.uuidString)") }
+        }
         if let contest = contest(for: session) { detail.lines += SwarmAnnotations.contestLines(contest, now: now) }
         return detail
     }

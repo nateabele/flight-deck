@@ -119,6 +119,10 @@ struct ObserveDrawer: View {
     let onJumpToRootCause: () -> Void
     let onOpenDAG: () -> Void
     var assignment: SwarmAssignmentDetail? = nil
+    /// The focused tab, for its hand-off history. Nil outside a swarm.
+    var session: UUID? = nil
+    /// Read from memory on every render; refreshed off the main thread by `.task` below.
+    @ObservedObject private var handoffs = HandoffHistoryCache.shared
     var onJumpToSession: (UUID) -> Void = { _ in }
 
     var body: some View {
@@ -177,6 +181,7 @@ struct ObserveDrawer: View {
         // Without .contain the id is stamped onto every child, hiding the lanes' own ids.
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("observe-drawer-expanded")
+        .task(id: session) { if session != nil { await handoffs.refresh() } }
     }
 
     private func laneRow(_ row: ObserveLaneRow) -> some View {
@@ -187,6 +192,13 @@ struct ObserveDrawer: View {
             if row.lane == .assignment {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(row.detail).font(.caption).textSelection(.enabled)
+                    if let meter = assignment?.meter { AccountMeterBar(model: meter) }
+                    if let session {
+                        ForEach(HandoffHistory.lines(for: session, entries: handoffs.entries(for: session)), id: \.self) {
+                            Text($0).font(.caption2).foregroundStyle(.secondary)
+                                .accessibilityIdentifier("observe-handoff-history")
+                        }
+                    }
                     HStack {
                         ForEach(row.links, id: \.session) { link in
                             Button(link.title) { onJumpToSession(link.session) }
