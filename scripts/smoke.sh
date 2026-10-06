@@ -3,6 +3,15 @@ set -euo pipefail
 export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 cd "$(dirname "$0")/.."
 
+# The suite runs on the dedicated UI-test Mac by default (scripts/smoke-remote.sh), because a
+# run here seizes this Mac's foreground for minutes and the developer's typing lands in the test
+# as phantom failures. Everything below this line is the LOCAL path, kept for a machine with no
+# UI-test host: FD_SMOKE_LOCAL=1. smoke-remote.sh fails outright when the host is unreachable
+# rather than falling through to here, so a dead host never silently takes over this screen.
+if [ "${FD_SMOKE_LOCAL:-}" != 1 ]; then
+  exec ./scripts/smoke-remote.sh "$@"
+fi
+
 . scripts/throttle.sh
 
 # Fresh-launch guard: the UI tests assert the window is present on the primary
