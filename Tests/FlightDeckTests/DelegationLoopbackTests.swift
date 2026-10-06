@@ -436,6 +436,10 @@ final class DelegationLoopbackTests: XCTestCase {
         XCTAssertEqual(logs.output(), lines)
         assertContiguous(logs)
 
+        // What quitting does before any relaunch (the factory flushes on `willTerminate`):
+        // `delegation.json` saves are coalesced, so without it the relaunched app reads a
+        // registry from before this run and answers `not_found`.
+        service.registry.flush()
         service = DelegationServiceFactory.live(hostService: hostService, stateDirectory: state,
                                                 sessionTitle: { [tabA] in $0 == tabA ? "alpha" : nil })
         let whole = send(.logs(run: id, follow: false, from: nil), as: tabA)
