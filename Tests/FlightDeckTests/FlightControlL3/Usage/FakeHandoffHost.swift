@@ -11,7 +11,6 @@ import IntakeKit
 final class FakeHandoffHost: HandoffHost {
     var activities: [UUID: SessionActivity] = [:]
     var rateLimited: Set<UUID> = []
-    var confirmAnswer = true
     var kinds: [KindID: TaskKind] = [:]
     var reserved: [String]?
     var reassignWarning: String?
@@ -31,7 +30,7 @@ final class FakeHandoffHost: HandoffHost {
     func isRateLimited(_ session: SessionRef) -> Bool { rateLimited.contains(session.id) }
     var interruptSucceeds = true
     func interrupt(_ session: SessionRef) -> Bool { events.append("interrupt"); interrupted.append(session.id); return interruptSucceeds }
-    func confirm(_ request: HandoffRequest) async -> Bool { events.append("confirm"); confirmations.append(request); return confirmAnswer }
+    func requestConfirmation(_ request: HandoffRequest) { events.append("confirm"); confirmations.append(request) }
     func kind(for block: ExecutionBlock, project: URL) -> TaskKind? { kinds[block.kind] }
     func catalogs() async -> AdapterCatalogs { AdapterCatalogs([]) }
     func reservedFiles(of agent: String, project: URL) async -> [String]? { reserved }

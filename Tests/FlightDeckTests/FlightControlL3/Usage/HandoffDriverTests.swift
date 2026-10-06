@@ -174,19 +174,27 @@ final class HandoffDriverTests: XCTestCase {
         XCTAssertEqual(host.interrupted, [])
     }
 
-    func testConfirmOnAsksOnceThenProceeds() async {
+    func testConfirmOnAsksOnceThenProceedsOnceConfirmed() async {
         settings.confirm = true
         host.activities[oldID] = .idle
-        await driver().evaluate([agent])
+        let d = driver()
+        await d.evaluate([agent])
+        await d.evaluate([agent])
+        XCTAssertEqual(host.confirmations.count, 1, "asked once, not on every pass")
+        XCTAssertEqual(spawner.calls.count, 0)
+        XCTAssertTrue(d.confirmHandoff(session: oldID))
+        await d.evaluate([agent])
         XCTAssertEqual(host.confirmations.count, 1)
         XCTAssertEqual(spawner.calls.count, 1)
     }
 
     func testDeclineLeavesTheAgentAndDoesNotAskAgainThisCrossing() async {
-        settings.confirm = true; host.confirmAnswer = false
+        settings.confirm = true
         host.activities[oldID] = .idle
         let d = driver()
-        await d.evaluate([agent]); await d.evaluate([agent])
+        await d.evaluate([agent])
+        XCTAssertTrue(d.declineHandoff(session: oldID))
+        await d.evaluate([agent])
         XCTAssertEqual(host.confirmations.count, 1)
         XCTAssertEqual(spawner.calls.count, 0)
         XCTAssertEqual(host.stopped, [])
@@ -195,10 +203,11 @@ final class HandoffDriverTests: XCTestCase {
     }
 
     func testANewCrossingAsksAgain() async {
-        settings.confirm = true; host.confirmAnswer = false
+        settings.confirm = true
         host.activities[oldID] = .idle
         let d = driver()
         await d.evaluate([agent])
+        XCTAssertTrue(d.declineHandoff(session: oldID))
         planner.requests[oldID] = nil
         await d.evaluate([agent])
         XCTAssertNil(d.phases[oldID], "below hard: the crossing is over")
@@ -327,10 +336,11 @@ final class HandoffDriverTests: XCTestCase {
     }
 
     func testAnOldDeclineAndConfirmationDoNotSurviveTheAgentLeavingTheList() async {
-        settings.confirm = true; host.confirmAnswer = false
+        settings.confirm = true
         host.activities[oldID] = .idle
         let d = driver()
         await d.evaluate([agent])
+        XCTAssertTrue(d.declineHandoff(session: oldID))
         XCTAssertEqual(d.phases[oldID], .declined)
         await d.evaluate([])
         await d.evaluate([agent])
@@ -347,5 +357,91 @@ final class HandoffDriverTests: XCTestCase {
         host.activities[oldID] = .busy; host.rateLimited = [oldID]
         await d.evaluate([agent])
         XCTAssertEqual(spawner.calls.count, 2, "a refusal is a boundary even while the agent reads busy")
+    }
+
+    // MARK: confirmation never holds up the pass
+
+    private func twoAgents() -> (SwarmAgentSnapshot, SwarmAgentSnapshot, UUID) {
+        let bID = UUID()
+        let b = SwarmAgentSnapshot(session: SessionRef(id: bID, agentName: "RedOwl"), agentName: "RedOwl", block: block,
+                                   lease: oldLease, task: TaskRef(id: "fd-4y1", project: project))
+        var rb = request; rb.oldAgent = "RedOwl"; rb.oldSession = b.session; rb.task = b.task!
+        planner.requests[bID] = rb
+        host.activities[bID] = .idle; host.activities[oldID] = .idle
+        allocator.leases["claude-default"] = [newLease, newLease]
+        return (agent, b, bID)
+    }
+
+    func testPendingConfirmationDoesNotBlockOtherAgents() async {
+        settings.confirm = true
+        let (a, b, bID) = twoAgents()
+        let d = driver()
+        await d.evaluate([a, b])
+        XCTAssertEqual(d.pendingHandoffs, [oldID, bID])
+        XCTAssertEqual(host.confirmations.count, 2)
+        XCTAssertEqual(d.phases[oldID], .awaitingConfirmation)
+        XCTAssertEqual(spawner.calls.count, 0)
+    }
+
+    func testConfirmedHandoffProceedsOnNextPass() async {
+        settings.confirm = true
+        let (a, b, bID) = twoAgents()
+        let d = driver()
+        await d.evaluate([a, b])
+        XCTAssertTrue(d.confirmHandoff(session: oldID))
+        XCTAssertEqual(d.pendingHandoffs, [bID])
+        await d.evaluate([a, b])
+        XCTAssertEqual(spawner.calls.count, 1)
+        XCTAssertEqual(host.stopped, [oldID])
+        XCTAssertEqual(d.pendingHandoffs, [bID])
+        XCTAssertEqual(host.confirmations.count, 2, "a confirmed agent is not asked again")
+    }
+
+    func testDeclinedHandoffIsLoggedAndNotRetried() async {
+        settings.confirm = true
+        host.activities[oldID] = .idle
+        let d = driver()
+        await d.evaluate([agent])
+        XCTAssertTrue(d.declineHandoff(session: oldID))
+        XCTAssertTrue(d.pendingHandoffs.isEmpty)
+        XCTAssertEqual(d.phases[oldID], .declined)
+        XCTAssertEqual(host.log.map(\.outcome), [.declined])
+        XCTAssertEqual(host.log.first?.oldAgent, "BlueLake")
+        await d.evaluate([agent])
+        XCTAssertEqual(spawner.calls.count, 0)
+        XCTAssertEqual(host.confirmations.count, 1)
+    }
+
+    func testUnknownSessionDecisionsReturnFalse() async {
+        settings.confirm = true
+        let d = driver()
+        XCTAssertFalse(d.confirmHandoff(session: UUID()))
+        XCTAssertFalse(d.declineHandoff(session: UUID()))
+        host.activities[oldID] = .idle
+        await d.evaluate([agent])
+        XCTAssertTrue(d.confirmHandoff(session: oldID))
+        XCTAssertFalse(d.confirmHandoff(session: oldID), "already decided")
+        XCTAssertFalse(d.declineHandoff(session: oldID))
+    }
+
+    func testAPendingAgentThatLeavesTheSnapshotIsNoLongerPending() async {
+        settings.confirm = true
+        host.activities[oldID] = .idle
+        let d = driver()
+        await d.evaluate([agent])
+        XCTAssertEqual(d.pendingHandoffs, [oldID])
+        await d.evaluate([])
+        XCTAssertTrue(d.pendingHandoffs.isEmpty)
+        XCTAssertFalse(d.confirmHandoff(session: oldID))
+    }
+
+    func testAPendingAgentBackBelowHardIsNoLongerPending() async {
+        settings.confirm = true
+        host.activities[oldID] = .idle
+        let d = driver()
+        await d.evaluate([agent])
+        planner.requests[oldID] = nil
+        await d.evaluate([agent])
+        XCTAssertTrue(d.pendingHandoffs.isEmpty)
     }
 }
