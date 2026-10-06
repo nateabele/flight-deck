@@ -27,7 +27,13 @@ protocol AgentLaunchFailureReporting {
 struct NSAlertAgentLaunchFailureReporter: AgentLaunchFailureReporting {
     /// Injectable so a test can say which window — and so the no-window case is reachable
     /// without one.
-    var window: () -> NSWindow? = { NSApp.keyWindow ?? NSApp.mainWindow }
+    ///
+    /// `NSApp?` rather than `NSApp`: it is an implicitly unwrapped global that stays nil until
+    /// something instantiates `NSApplication`, and a headless unit run that reaches a refused
+    /// creation first (a shard whose earlier classes never touched AppKit) trapped here and took
+    /// the whole shard's remaining tests with it. Nil means "no window", which is already the
+    /// no-sheet path below.
+    var window: () -> NSWindow? = { NSApp?.keyWindow ?? NSApp?.mainWindow }
 
     func report(_ error: AgentLaunchError) {
         let text = error.errorDescription ?? "\(error)"
