@@ -39,8 +39,8 @@ struct FlightControlRepoRemoval {
     static let agentsSectionStart = FlywheelSetup.agentsSectionMarker
     /// Probed with br 0.6.0: the section closes with this line (note: no `-v1`, unlike the opener).
     static let agentsSectionEnd: String? = "<!-- end-br-agent-instructions -->"
-    /// Probed: `br agents --remove` exists (it backs up to AGENTS.md.bak). The string surgery below
-    /// is the fallback when it exits non-zero.
+    /// Probed: `br agents --remove` exists (it backs up to AGENTS.md.bak, which `remove` deletes
+    /// when it was not there before). The string surgery below is the fallback when it exits non-zero.
     static let brAgentsRemoveArgs: [String]? = ["agents", "--remove", "--force"]
     /// Probed: `am guard uninstall <REPO>` exists.
     static let guardUninstallArgs: [String]? = ["guard", "uninstall"]
@@ -73,9 +73,15 @@ struct FlightControlRepoRemoval {
             done.append("hook")
         }
         if agentsSectionRange(repo) != nil {
+            // `br agents --remove` backs AGENTS.md up to AGENTS.md.bak and leaves it in the
+            // user's repo. A backup this removal created is ours to delete; one that was
+            // already there is the user's and stays.
+            let backup = repo.appendingPathComponent("AGENTS.md.bak")
+            let hadBackup = FileManager.default.fileExists(atPath: backup.path)
             if let args = Self.brAgentsRemoveArgs,
                (try? await runner.run(brPath, args, cwd: repo.path))?.exitCode == 0,
                agentsSectionRange(repo) == nil {
+                if !hadBackup { try? FileManager.default.removeItem(at: backup) }
                 done.append("agents")
             } else if removeAgentsSectionByHand(repo) {
                 done.append("agents")

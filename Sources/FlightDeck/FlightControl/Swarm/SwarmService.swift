@@ -64,7 +64,9 @@ final class SwarmService: ObservableObject {
     private var controllers: [String: SwarmController] = [:]
     private var needsReconcile: Set<String> = []
     private var lastClockTick = Date.distantPast
-    private var work: [Task<Void, Never>] = []
+    /// Keyed so each task can drop itself when it finishes: one starts per throttled tick and per
+    /// projection change, and a list only `settle()` pruned grew without bound in a long-running app.
+    private var work: [UUID: Task<Void, Never>] = [:]
 
     var dependencies: SwarmDependencies? {
         didSet { rebuildControllers() }
@@ -138,12 +140,12 @@ final class SwarmService: ObservableObject {
         }
     }
 
+    /// Test seam: tasks this service started that have not finished.
+    var pendingWorkCount: Int { work.count }
+
     /// Waits for every task this service started and every launch its controllers started.
     func settle() async {
-        while !work.isEmpty {
-            let pending = work; work = []
-            for task in pending { await task.value }
-        }
+        while let next = work.values.first { await next.value }
         for controller in controllers.values { await controller.settle() }
     }
 
@@ -174,10 +176,13 @@ final class SwarmService: ObservableObject {
 
     // MARK: Internals
 
+    /// Paused swarms tick too: `tick()` fills no slots while paused, but its restored-claim retry
+    /// and closed-tab sweep must still run — and a restored swarm is always paused, so without
+    /// this its unreadable claims were never retried.
     private func clockTick() {
         guard now().timeIntervalSince(lastClockTick) >= Self.tickInterval else { return }
         lastClockTick = now()
-        for controller in controllers.values where controller.record.state == .running || controller.record.state == .draining {
+        for controller in controllers.values where controller.record.state != .stopped {
             track { await controller.tick() }
         }
     }
@@ -214,8 +219,14 @@ final class SwarmService: ObservableObject {
         return controller
     }
 
+    /// The task cannot finish before it is filed: both run on the main actor, and this function
+    /// does not suspend between creating it and storing it.
     private func track(_ body: @escaping @MainActor () async -> Void) {
-        work.append(Task { await body() })
+        let id = UUID()
+        work[id] = Task { [weak self] in
+            await body()
+            self?.work[id] = nil
+        }
     }
 
     private func persist() { store.save(allRecords) }
@@ -292,18 +303,36 @@ extension SwarmService {
     /// A status that cannot be read is not "not closed": it is left alone, as is a task whose
     /// return-to-open failed (it is not reported as reopened), so a br hiccup never reopens work
     /// that finished and never claims a reopen that did not happen.
+    ///
+    /// The claims are read from the record, not a controller: after a relaunch with no routing
+    /// dependencies there is no controller, and Turn Off must still give back what the swarm
+    /// took. Without one, the record is stopped directly so a later launch does not restore it;
+    /// its leases belong to an allocator this run never had.
     func turnOff(project: String) async -> [String] {
-        guard let controller = controller(forProject: project) else { return [] }
-        let url = URL(fileURLWithPath: Self.key(project), isDirectory: true)
-        let held = Set(controller.record.agents.flatMap { [$0.task, $0.pendingClaim].compactMap { $0 } })
-        controller.drain()
-        controller.stop(reason: "Flight Control turned off")
+        let key = Self.key(project)
+        guard let record = records[key] else { return [] }
+        let url = URL(fileURLWithPath: key, isDirectory: true)
+        let held = Set(record.agents.flatMap { [$0.task, $0.pendingClaim].compactMap { $0 } })
+        if let controller = controllers[key] {
+            controller.drain()
+            controller.stop(reason: "Flight Control turned off")
+        } else if record.state != .stopped {
+            var stopped = record
+            stopped.state = .stopped
+            for agent in stopped.agents where agent.state != .done && agent.state != .handedOff {
+                stopped.update(agent.session) { $0.state = .done; $0.stateSince = now() }
+            }
+            records[key] = stopped
+            store.append(SwarmLogEntry(at: now(), kind: .stop, detail: "Flight Control turned off"), swarm: record.id)
+            persist(); publish()
+        }
         var reopened: [String] = []
         for task in held.sorted() {
             guard let reading = await backend.status(task, project: url), reading.status != "closed" else { continue }
             if await backend.returnToOpen(task, project: url) { reopened.append(task) }
         }
-        controller.log(.released, detail: "returned to open: \(reopened.joined(separator: ", "))")
+        store.append(SwarmLogEntry(at: now(), kind: .released, detail: "returned to open: \(reopened.joined(separator: ", "))"),
+                     swarm: record.id)
         return reopened
     }
 }
