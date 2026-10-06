@@ -2735,5 +2735,13 @@ Still open:
 Known gaps in the subagent model (2026-10-06):
 - `AskUserQuestion` raised by a subagent is out of scope. Only permission dialogs are attributed.
 - A second tab that joins an existing conversation gets no tree replay until the tree changes.
+- A subagent dialog already open when Flight Deck relaunches is never attributed: the hook
+  watcher starts at the end of the log, so the `PermissionRequest` that raised it is never read.
+  That dialog falls back to the `subagent_prompt` refusal.
+- Closed 2026-10-06 (final fix wave): a stale attributed dialog outliving an approve-in-terminal,
+  an empty tree after the registry briefly lost a tab, every historical agent read while the
+  process start was unknown, a tree projected for a tab with no status (drift), the Mac hiding
+  a blocked agent's count while the parent waited, and a byte-identical event on every subagent
+  file write.
 - The phone's Subagents section and card have not been checked on a real device. The GUI check
   (`docs/MOBILE.md`, item 67c) is Nate's.
