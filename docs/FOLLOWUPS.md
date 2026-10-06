@@ -2745,6 +2745,22 @@ Known gaps in the subagent model (2026-10-06):
   file write.
 - The phone's Subagents section and card have not been checked on a real device. The GUI check
   (`docs/MOBILE.md`, item 67c) is Nate's.
+- **`SessionStore.retireEndedDialogs` can retire a fresh attribution** (found by the final
+  re-review, not fixed). Two cases:
+  - If the registry writes `waiting` before it fills `waitingFor` (nil to "permission prompt"),
+    the fill-in counts as a change and clears the dialog on its first wait. Whether claude writes
+    in that order is unmeasured.
+  - Back-to-back dialogs race: when the next dialog's `PermissionRequest` and a stale `busy`
+    registry read land in the same 500ms tick, the waiting-to-busy edge retires the new dialog.
+    This hits roughly 1 in 7 consecutive subagent dialogs.
+
+  Both fail safe: no card, the `subagent_prompt` refusal, nothing typed. Fix: do not count a
+  fill-in from nil or empty as a change, and retire only dialogs raised before the observed wait
+  began (compare a raise sequence number with a wait-entry sequence number).
+- **`@Published subagentTrees` publishes trees that differ only in `SubagentNode.modified`.** This
+  invalidates the sidebar up to 2 Hz for each conversation with a writing agent. The cost is not
+  measured. Fix: keep the raw tree unpublished, and publish only when the display projection
+  changes.
 
 ## UI suite on the UI-test Mac (2026-10-06)
 
