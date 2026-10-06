@@ -54,16 +54,6 @@ struct PreferencesView: View {
                 // every descendant, which renamed the section buttons, the project picker and the
                 // scroll view to "prefs-flight-control" and hid `fc-section-routing` from XCUITest.
                 .tag(PreferencesTab.flightControl)
-            CapabilityIndexSettingsTab(index: sessions.capabilityIndexService)
-                .tabItem { Label("Capability Index", systemImage: "chart.bar.xaxis") }
-                .tag(PreferencesTab.capabilityIndex)
-
-            // No container-level accessibilityIdentifier on this tab: SwiftUI stamps it onto every
-            // child and hides the leaf controls' own identifiers from the UI test.
-            CapacityPane(preferences: preferences, usage: UsageService.shared,
-                         localHarnesses: CapacityPane.defaultLocalHarnesses())
-                .tabItem { Label("Capacity", systemImage: "gauge.with.dots.needle.33percent") }
-                .tag(PreferencesTab.capacity)
         }
         .frame(width: 720, height: 560)
     }
