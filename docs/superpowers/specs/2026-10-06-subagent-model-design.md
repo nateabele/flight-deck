@@ -63,12 +63,33 @@ Verified on the live 2026-10-05 conversation (claude 2.1.289) unless marked:
   all while the dialog is open (probe 2026-09-24, main agent only).
 - Denying with Esc fires no hook (probe 2026-09-19).
 
-**Not yet verified** (Task 1 of the plan):
+**Verified by probe** (Task 1, claude 2.1.291, 2026-10-06; a record-only plugin hook on a
+background `general-purpose` subagent running `touch /tmp/...`, once denied with Esc and once
+allowed with `1`):
 
-- What `PermissionRequest` carries for a *subagent's* dialog. In particular, does it have
-  `agent_id` and `tool_use_id`?
-- What a denied subagent call writes to the subagent's file (a `tool_result` with
-  `is_error`, or nothing).
+- `PermissionRequest` for a subagent's dialog carries `agent_id` and `agent_type`, and its
+  `tool_input` is byte-for-byte equal to the preceding `PreToolUse.tool_input` of the same
+  agent (both runs). It does **not** carry `tool_use_id`: the keys are `session_id`,
+  `transcript_path`, `cwd`, `scratchpad_dir`, `prompt_id`, `permission_mode`, `agent_id`,
+  `agent_type`, `effort`, `hook_event_name`, `tool_name`, `tool_input`,
+  `permission_suggestions`. So the attribution join is `agent_id` + `tool_input` against the
+  agent's unresolved `tool_use`, not `tool_use_id`.
+- Order while the dialog is open: `PreToolUse` (has `tool_use_id`) → `PermissionRequest`. No
+  `Notification` fired in either run. Allow then fires `PostToolUse`; deny fires nothing (as
+  before).
+- Esc-deny writes this record to the subagent's `agent-<id>.jsonl`: a `user` record with
+  `isSidechain: true`, `message.content[0]` = `{type: "tool_result", is_error: true,
+  tool_use_id, content: "Permission for this tool use was denied. ..."}`, plus top-level
+  `toolUseResult: "Error: Permission for this tool use was denied. ..."`,
+  `toolDenialKind: "user-rejected"` and `sourceToolAssistantUUID`. The subagent then continues
+  (it wrote a final text report), so a denial resolves the call, it does not stop the agent.
+- `agent-<id>.meta.json` is written in the same second as the first record, about 2s before
+  the first `tool_use`. It is present before the first tool call. Its keys there were
+  `agentType`, `description`, `toolUseId`, `spawnDepth`, `requestShape` (`"background"`),
+  `requestNonInteractive`; `model` was absent, so treat it as optional.
+- Internal helper agents also fire `PreToolUse`/`SubagentStop` with an `agent_id` but write no
+  file under `subagents/` and sometimes lack `agent_type`. An `agent_id` with no matching
+  `agent-<id>.jsonl` is not a tree node.
 
 ## 4. Design
 
