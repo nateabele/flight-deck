@@ -142,6 +142,8 @@ struct FlightControlRoutingPane: View {
         HStack(alignment: .firstTextBaseline, spacing: 12) {
             Text("Project rules are checked first, then these, top to bottom — the first match wins. Click a pill to adjust it.")
                 .foregroundStyle(.secondary)
+                // A grouped form's footer aligns wrapped lines to the trailing edge otherwise.
+                .multilineTextAlignment(.leading)
                 .frame(maxWidth: .infinity, alignment: .leading)
             Button(compilerTitle) { showsCompiler = true }
                 .buttonStyle(.link)
