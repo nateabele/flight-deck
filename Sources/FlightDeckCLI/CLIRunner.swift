@@ -131,7 +131,7 @@ final class CLIRunner {
             }
         case .wait(_, _, let timeout?), .send(_, _, true, let timeout?):
             schedule(timeout) { self.fail("timed_out") }
-        case .delegate(.routeExec(let argv0, let args)) where context.environment["FLIGHTDECK_NO_ROUTE"] == "1":
+        case .delegate(.routeExec(let argv0, let args)) where Self.bypassesRouting(context.environment):
             // The bypass needs no app at all: not even a connect, which would cost a routed
             // command its latency for nothing.
             return execReal(argv0, args)
@@ -142,6 +142,15 @@ final class CLIRunner {
         transport.onFrame = { self.handle($0) }
         transport.onDisconnect = { self.disconnected($0) }
         transport.connect(lastSeq: lastSeq)
+    }
+
+    /// `FLIGHTDECK_NO_ROUTE` set to anything but empty or `0`: the shim's own rule
+    /// (`flightdeck-route-shim.sh`), so `=true` or `=yes` never bypasses in one and routes in
+    /// the other. Before, only `1` bypassed here, and the shim's other values reached a CLI
+    /// that routed them anyway.
+    static func bypassesRouting(_ environment: [String: String]) -> Bool {
+        guard let value = environment["FLIGHTDECK_NO_ROUTE"] else { return false }
+        return !value.isEmpty && value != "0"
     }
 
     // MARK: Frames

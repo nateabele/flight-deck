@@ -430,7 +430,7 @@ final class DelegateCommandRunner {
                         json[host.name] = usage
                         sections.append("\(host.name):\n" + DelegateOutput.disk(usage))
                     case .err(_, let code, let message):
-                        sections.append("\(host.name): \(message ?? code)")
+                        sections.append("\(host.name): \(Self.line(code: code, message: message))")
                     default:
                         sections.append("\(host.name): unexpected reply")
                     }
@@ -464,7 +464,7 @@ final class DelegateCommandRunner {
     /// Every delegation failure is 125 and one `flightdeck:` line (§5); a `wait` that timed
     /// out is 124 with the run still going.
     private func refused(_ code: String, _ message: String?) {
-        var line = message ?? code
+        var line = Self.line(code: code, message: message)
         // On a reattach the run is still going, wherever this CLI lost it: the line ends on
         // the one step that gets it back.
         if resuming, let runID, !line.contains("flightdeck wait \(runID)") { line += " — flightdeck wait \(runID)" }
@@ -474,6 +474,22 @@ final class DelegateCommandRunner {
         // Not a failure to delegate: the run is fine, it just left nothing to apply.
         case "nothing_to_apply": finish(1)
         default: finish(125)
+        }
+    }
+
+    /// The line for a refusal. A bare code is all a Flight Deck too old to know a request
+    /// sends back, so those say what to do about it rather than printing the code alone
+    /// ("flightdeck: unsupported"). Each still keeps a message when there is one: a host's
+    /// `unsupported` reaches here already worded by the app, naming the host to update.
+    static func line(code: String, message: String?) -> String {
+        if let message, !message.isEmpty { return message }
+        switch code {
+        case "unsupported", "unhandled", "not_implemented":
+            return "this Flight Deck is too old for delegation — update it"
+        case "out_of_scope":
+            return "this tab may not do that — Settings › Devices › \"Agents in tabs may control\" sets what a tab's agent can reach; your own shell is never limited"
+        default:
+            return code
         }
     }
 
