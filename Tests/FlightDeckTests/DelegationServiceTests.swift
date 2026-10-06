@@ -19,10 +19,10 @@ final class FakeByteChannel: ByteChannel, @unchecked Sendable {
     func cancel() { cancelled = true }
 }
 
-/// A host, keeping exactly the `HostLinking.events` contract C8's adapter must (ruling 6):
-/// events buffered from the start, any number of concurrent subscribers each from its own
-/// offset, a chunk straddling the offset cut to start there, and replay in the order state,
-/// output, end.
+/// A host, keeping exactly the `HostLinking.events` contract `LiveHostLink` must (Ruling 18:
+/// one host attach per run, fanned out to every local subscriber): events buffered from the
+/// start, any number of concurrent subscribers each from its own offset, a chunk straddling
+/// the offset cut to start there, and replay in the order state, output, end.
 @MainActor
 final class FakeHostLink: HostLinking {
     let name: String
@@ -35,6 +35,8 @@ final class FakeHostLink: HostLinking {
     var nextChannel: ChannelID = 1
     /// Thrown by the next `run.start`, as a host `err` reaches the controller.
     var failStart: Error?
+    /// Thrown by every `service.down`.
+    var downError: Error?
     var channels: [FakeByteChannel] = []
     private var events: [String: [RunEvent]] = [:]
     private var continuations: [String: [UUID: (Int64, AsyncThrowingStream<RunEvent, Error>.Continuation)]] = [:]
@@ -57,6 +59,7 @@ final class FakeHostLink: HostLinking {
         case .runArtifacts: return .runArtifacts(found: false)
         case .runAck: return .runAck
         case .serviceDown(let id):
+            if let downError { throw downError }
             emit(id, .exited(.signal(15)))
             return .serviceDown
         case .serviceSync: return .serviceSync
@@ -72,7 +75,7 @@ final class FakeHostLink: HostLinking {
         return channel
     }
 
-    nonisolated func events(runID: String, from offset: Int64) -> AsyncThrowingStream<RunEvent, Error> {
+    nonisolated func events(runID: String, localID: String, from offset: Int64) -> AsyncThrowingStream<RunEvent, Error> {
         AsyncThrowingStream { continuation in
             Task { @MainActor in
                 let history = self.events[runID, default: []]
@@ -105,6 +108,13 @@ final class FakeHostLink: HostLinking {
         if Self.isEnd(event) { continuations[runID] = nil }
     }
 
+    /// Ends every open stream for `runID` with `error`, as `LiveHostLink` does when the host
+    /// answers a `run.attach` with `unknown_run`.
+    func fail(_ runID: String, _ error: Error) {
+        for (_, continuation) in continuations[runID, default: [:]].values { continuation.finish(throwing: error) }
+        continuations[runID] = nil
+    }
+
     private static func isEnd(_ event: RunEvent) -> Bool {
         switch event {
         case .exited, .serviceDied: return true
@@ -135,6 +145,9 @@ final class FakeHosts: DelegationHostDirectory {
         }
         return link
     }
+    /// What retention let go, in order.
+    var forgotten: [DelegatedRun] = []
+    func forget(_ runs: [DelegatedRun]) { forgotten += runs }
 }
 
 final class FakeReservation: PortReservation, @unchecked Sendable {
@@ -409,7 +422,7 @@ final class DelegationServiceTests: XCTestCase {
     func testMissingIgnoredFileHint() async throws {
         let repo = try Self.tempRepo(ignored: [".env"], files: [".env", "tracked.txt", "build/out.log"],
                                      gitignore: ".env\nbuild/\n")
-        makeService(worktrees: GitWorktreeLocator())
+        makeService(worktrees: LiveWorktreeLocator())
         // Names an ignored local file that wasn't sent: the hint.
         let failed = send(.run(WireDelegateRun(cwd: repo.path, host: "mini", command: ["make"])))
         _ = try await started(failed)
@@ -635,6 +648,7 @@ final class DelegationServiceTests: XCTestCase {
         let id = try await started(frames)
         mini.emit(hostRunID(), .output(stream: .stdout, offset: 0, data: Data("built".utf8)))
 
+        service.registry.flush() // what quitting does
         service = DelegationService(registry: RunRegistry(file: file), dependencies: dependencies())
         let logs = send(.logs(run: id, follow: false, from: nil))
         try await until { logs.all.contains(where: terminal) }
@@ -664,7 +678,7 @@ final class DelegationServiceTests: XCTestCase {
                                      .delegateExit(cid: 1, status: 0)])
     }
 
-    /// Ruling 6: an attached run, a `wait {from}` and the monitor all subscribe to one run at
+    /// Ruling 18: an attached run, a `wait {from}` and the monitor all subscribe to one run at
     /// once, each from its own offset, and none sees another's bytes.
     func testConcurrentSubscriptionsKeepTheirOwnOffsets() async throws {
         let attached = send(.run(WireDelegateRun(cwd: "/w/proj", host: "mini", command: ["make"])))
@@ -700,7 +714,7 @@ final class DelegationServiceTests: XCTestCase {
     /// sent nothing at all.
     func testHintRespectsDirectoryIncludesAndSkipsExec() async throws {
         let repo = try Self.tempRepo(ignored: [], files: ["config/secrets.json", ".env"], gitignore: "config/\n.env\n")
-        makeService(worktrees: GitWorktreeLocator())
+        makeService(worktrees: LiveWorktreeLocator())
         for request in [DelegateRequest.run(WireDelegateRun(cwd: repo.path, host: "mini", command: ["make"], include: ["config/"])),
                         .exec(WireDelegateRun(cwd: repo.path, host: "mini", command: ["make"]))] {
             let frames = send(request)
@@ -740,7 +754,8 @@ final class DelegationServiceTests: XCTestCase {
         try await until { diff.all.contains(where: terminal) }
         let applied = send(.apply(run: id))
         try await until { applied.all.contains(where: terminal) }
-        XCTAssertEqual(results.ranOnMain, [false, false])
+        // The end-of-run "changed N files" notice reads the patch too, then `diff`, then `apply`.
+        XCTAssertEqual(results.ranOnMain, [false, false, false])
     }
 
     /// A service's forwards open `port.open` channels named for its host run.
@@ -756,9 +771,11 @@ final class DelegationServiceTests: XCTestCase {
     /// Every run still going is watched again at launch, so its end is recorded unasked.
     func testALaunchWatchesRunsStillGoing() async throws {
         let file = FileManager.default.temporaryDirectory.appendingPathComponent("fd-reg-\(UUID().uuidString).json")
-        service = DelegationService(registry: RunRegistry(file: file), dependencies: dependencies())
+        let before = RunRegistry(file: file)
+        service = DelegationService(registry: before, dependencies: dependencies())
         let frames = send(.run(WireDelegateRun(cwd: "/w/proj", host: "mini", command: ["make"], detach: true)))
         let id = try await started(frames)
+        before.flush() // what quitting does
         service = DelegationService(registry: RunRegistry(file: file), dependencies: dependencies())
         mini.emit(hostRunID(), .exited(.code(7)))
         try await until { self.service.registry.run(id)?.status == 7 }
@@ -843,6 +860,7 @@ final class DelegationServiceTests: XCTestCase {
         // The relaunched app's link has none of the old events (no mirror, the host's spool
         // gone): nothing will replay the end, so only the record can supply it.
         hosts.links["mini"] = FakeHostLink(name: "mini")
+        service.registry.flush() // what quitting does
         service = DelegationService(registry: RunRegistry(file: file), dependencies: dependencies())
         let resumed = send(.wait(run: id, timeout: 600, from: 1))
         try await until { resumed.all.contains(where: terminal) }

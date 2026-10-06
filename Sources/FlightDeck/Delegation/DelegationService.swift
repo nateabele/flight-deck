@@ -8,9 +8,9 @@ import os
 //
 // Every piece that touches git, a socket or a host is behind one of the protocols below, so
 // the whole flow — resolve, preflight, sync, start, stream, result — runs in a unit test
-// against in-memory fakes. Track C8 plugs in the real ones: `HostLink` + the channel mux for
-// `HostLinking`, C2's `Snapshotter`/`BundleMaker`/`ResultApplier`, C5's preflight and port
-// forwarder, C4's TOML parser.
+// against in-memory fakes. The real ones are under `Live/` (`DelegationServiceFactory` wires
+// them): `LiveHostLink` over `HostLink` and its channel mux, and the git, preflight, port
+// forwarding and `delegate.toml` adapters.
 //
 // Streaming (DelegationControlWire.swift's "Streams"): a `run` answers its `cid` with
 // `delegateStarted`, any `delegateNotice`s and `delegateOutput`s, and ends it with exactly one
@@ -24,9 +24,10 @@ import os
 
 // MARK: - Seams
 
-/// A paired, connected host, as delegation drives it. C8's adapter wraps `HostLink` and the
-/// channel mux. A host's `err` reaches here as `HostLinkError.remote(code:message:)`, whose
-/// codes `DelegationService.hostLine` turns into the §5 lines.
+/// A paired, connected host, as delegation drives it. `LiveHostLink` is the real one, over
+/// `HostLink` and its channel mux. A host's `err` reaches here as
+/// `HostLinkError.remote(code:message:)`, whose codes `DelegationService.hostLine` turns into
+/// the §5 lines.
 @MainActor
 protocol HostLinking: AnyObject {
     /// The registry name, for every message that names the host.
@@ -38,11 +39,13 @@ protocol HostLinking: AnyObject {
     func request(_ request: DelegationRequest) async throws -> DelegationReply
     /// A fresh channel whose id a following request names (`sync.push`, `run.result`, …).
     func openChannel() async throws -> any ByteChannel
-    /// Every event for `runID` whose output lies at or past byte `offset`, then live ones until
-    /// it exits. The contract the adapter must keep (rulings 6 and 21); `FakeHostLink` keeps
-    /// the subscription half of it:
-    /// - **A disk mirror is the replay source** (ruling 21). The adapter keeps each run's
-    ///   output under `Application Support/Flight Deck/delegation/<runID>.out`, bounded at
+    /// Every event for the host's `runID` whose output lies at or past byte `offset`, then live
+    /// ones until it exits. `localID` is this Mac's id for the same run, which names its copy
+    /// on disk. The contract the adapter must keep (Ruling 18: concurrent subscribers share one
+    /// host attach, each at its own offset; Ruling 21: a disk copy is the replay source);
+    /// `FakeHostLink` keeps the subscription half of it:
+    /// - **A disk mirror is the replay source** (Ruling 21). The adapter keeps each run's
+    ///   output under `Application Support/Flight Deck/delegation/<localID>.out`, bounded at
     ///   64 MiB per run with the oldest dropped first, as the host spool is. `events(from:)`
     ///   replays from the mirror, then goes live. It attaches to the host only for a range the
     ///   mirror lacks (a fresh install, a range dropped from the mirror). The mirror survives a
@@ -63,7 +66,7 @@ protocol HostLinking: AnyObject {
     ///   first output can beat the reply naming the run; the adapter buffers it.
     /// - **Reconnect.** After a dropped link it re-sends `run.attach` from the last offset it
     ///   holds, so a laptop that slept mid-run loses nothing and repeats nothing.
-    func events(runID: String, from offset: Int64) -> AsyncThrowingStream<RunEvent, Error>
+    func events(runID: String, localID: String, from offset: Int64) -> AsyncThrowingStream<RunEvent, Error>
 }
 
 /// The paired hosts, by name.
@@ -74,6 +77,9 @@ protocol DelegationHostDirectory: AnyObject {
     /// The link to `name`. Throws `DelegationError` with the §5 line when it is unknown or
     /// offline ("mini is offline (last seen 4m ago)").
     func link(named name: String) throws -> any HostLinking
+    /// Deletes these runs' output copies and ends anyone still reading them: retention is
+    /// letting them go (`DelegationService.pruneExpired`). Works with their host offline.
+    func forget(_ runs: [DelegatedRun])
 }
 
 /// Everything §7 checks, resolved: what the preflight is asked to clear.
@@ -212,6 +218,8 @@ final class DelegationService {
     init(registry: RunRegistry, dependencies: Dependencies) {
         self.registry = registry
         self.deps = dependencies
+        sweep()
+        pruneExpired()
         resumeWatching()
     }
 
@@ -251,8 +259,8 @@ final class DelegationService {
 
     /// Watches again every run the registry still has going — after a relaunch, so services
     /// that die and runs that finish are recorded without anyone asking first. A host that is
-    /// not connected yet is skipped; a later `wait`/`logs` (or C8 calling this again once the
-    /// link is up) picks it up.
+    /// not connected yet is skipped; a later `wait`/`logs`, or `LiveHostDirectory.onHostOnline`
+    /// calling this again once the link is up, picks it up.
     func resumeWatching() {
         for record in registry.runs where record.state == .running || record.state == .queued {
             _ = try? ensureLive(record)
@@ -360,6 +368,50 @@ final class DelegationService {
         }
     }
 
+    // MARK: Retention
+
+    /// Lets go of every run retention expires (`RunRegistry.expired`: finished over 14 days
+    /// ago, or past the newest 500 finished on its host), and everything kept for it, in one
+    /// place: its registry entry, its output copy, and its result bundle and other scratch
+    /// files. Separately, each would leak the others: a bundle no registry entry names is
+    /// never applied or deleted, and a copy no entry names is never read again.
+    func pruneExpired(now: Date = Date()) {
+        let expired = registry.expired(now: now)
+        guard !expired.isEmpty else { return }
+        deps.hosts.forget(expired)
+        let files = expired.flatMap { run in
+            scratchFiles(run.id) + (run.resultBundle.map { [URL(fileURLWithPath: $0)] } ?? [])
+        }
+        for run in expired { live[run.id] = nil }
+        registry.remove(Set(expired.map(\.id)))
+        Task.detached { for file in files { try? FileManager.default.removeItem(at: file) } }
+    }
+
+    /// The scratch files `directory` may hold for a run: everything is named for its local id.
+    private func scratchFiles(_ id: String) -> [URL] {
+        ["\(id).bundle", "\(id)-artifacts.tar", "\(id).patch"].map(scratchFile)
+    }
+
+    /// At launch: deletes what `directory` holds for no run in the registry. That is a run
+    /// pruned while the app was not running to see it, an output copy under a name from before
+    /// copies were keyed by local id (`<host slot>-<host run id>.out`, which a host that reused
+    /// its ids could overwrite), and a provisional copy whose run never got its id. Listed
+    /// now, deleted off the main actor: a file any run makes from here on is not in the list.
+    private func sweep() {
+        let known = Set(registry.runs.map(\.id))
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: deps.directory.path)) ?? []
+        let stale = names.filter { name in
+            guard let match = name.wholeMatch(of: #/(r\d+)(\.out|\.out\.compact|\.bundle|-artifacts\.tar|\.patch)/#)
+            else { return name.hasSuffix(".out") || name.hasSuffix(".out.compact") }
+            return !known.contains(String(match.1))
+        }.map { deps.directory.appendingPathComponent($0) }
+        guard !stale.isEmpty else { return }
+        Task.detached {
+            RunMirror.waitForIO()
+            for file in stale { try? FileManager.default.removeItem(at: file) }
+        }
+    }
+
     // MARK: run / exec / up
 
     private enum Mode { case run, exec, up }
@@ -395,7 +447,8 @@ final class DelegationService {
             pty: run.pty, screen: run.screen || recipe?.screen == true, service: service,
             downCommand: recipe?.down, ports: try Preflight.mergePorts(recipe: recipe?.ports ?? [], cli: run.ports),
             ptySize: run.columns.flatMap { columns in run.rows.map { TerminalSize(columns: columns, rows: $0) } },
-            fetch: fetch, pool: recipe?.pool)
+            // Only a service is kept alive past a lost controller, so only a service's counts.
+            fetch: fetch, pool: recipe?.pool, orphanTimeout: service ? recipe?.orphanTimeout : nil)
         let link = try deps.hosts.link(named: host)
 
         // §7 steps 2–7. A preflight failure's message is already the finished §5 line, host
@@ -485,7 +538,7 @@ final class DelegationService {
         guard liveRun.monitor == nil, let record = registry.run(id) else { return }
         liveRun.monitor = Task { @MainActor [weak self] in
             do {
-                for try await event in liveRun.link.events(runID: record.hostRunID, from: 0) {
+                for try await event in liveRun.link.events(runID: record.hostRunID, localID: record.id, from: 0) {
                     guard let self, liveRun.ended == nil else { return }
                     switch event {
                     case .queued(let position, let reason, let holder):
@@ -512,6 +565,15 @@ final class DelegationService {
                         return
                     }
                 }
+            } catch let error as DelegationError where error.code == "unknown_run" {
+                // The host no longer has the run: hostd restarted (its runs die with it) or
+                // pruned it. Nothing will ever report its end, so it ends here, or every
+                // `wait` on it would hang and `ps` would show it running forever.
+                guard let self else { return }
+                liveRun.reservation?.release()
+                self.registry.update(id) { $0.state = .died; $0.status = 125 }
+                liveRun.publish(.notice("\(record.host) restarted and \(id) is gone — rerun it"))
+                self.end(liveRun, status: 125, hint: nil)
             } catch {
                 // Cleared so the next `wait`/`logs` (`ensureLive`) starts watching again.
                 Self.logger.error("lost \(id, privacy: .public): \(String(describing: error), privacy: .public)")
@@ -528,7 +590,7 @@ final class DelegationService {
         if record.kind == .run, let snapshot = record.snapshot {
             await fetchResult(record, snapshot: snapshot, liveRun)
             if !record.fetch.isEmpty { await fetchArtifacts(record, globs: record.fetch, liveRun) }
-            if record.applyMode == .auto { await autoApply(id, liveRun) }
+            if record.applyMode == .auto { await autoApply(id, liveRun) } else { await announceChanges(id, liveRun) }
         }
         // Only a synced run: `exec` sent nothing, so "wasn't sent" would be no clue at all.
         var hint: String?
@@ -543,6 +605,7 @@ final class DelegationService {
         }
         registry.update(id) { $0.state = .exited; $0.status = status }
         end(liveRun, status: status, hint: hint)
+        pruneExpired()
     }
 
     private static func subdir(of record: DelegatedRun) -> String {
@@ -572,8 +635,9 @@ final class DelegationService {
             }
             guard case .runResult(let commit?) = reply else { return }
             registry.update(record.id) { $0.resultCommit = commit; $0.resultBundle = file.path }
-            // Only now may the host drop its copy (ruling 24): until the bundle is on disk and
-            // in the registry, a cut transfer is fetched again. Best effort — a lost ack, or a
+            // Only now may the host drop its copy (Ruling 24: the controller acks a result with
+            // `run.ack` only once it is stored, so a result dropped after sending is not lost).
+            // Until the bundle is on disk and in the registry, a cut transfer is fetched again. Best effort — a lost ack, or a
             // host too old to know the op, only leaves the copy to the host's 24 h expiry.
             _ = try? await hostRequest(.runAck(runID: record.hostRunID, repoRoot: snapshot.repoRoot), on: liveRun.link)
         } catch {
@@ -617,6 +681,20 @@ final class DelegationService {
         } catch {
             liveRun.publish(.notice("couldn't apply \(id)'s changes (\(Self.describe(error))) — kept for review: flightdeck diff \(id)"))
         }
+    }
+
+    /// `apply = "review"` (the default): the changes wait for `diff`/`apply`, and nothing else
+    /// would tell an agent there are any. A run that changed nothing, or whose diff cannot be
+    /// read, says nothing.
+    private func announceChanges(_ id: String, _ liveRun: LiveRun) async {
+        guard let record = registry.run(id), let commit = record.resultCommit, let bundle = record.resultBundle,
+              let snapshot = record.snapshot,
+              let patch = try? await deps.results.patch(bundle: URL(fileURLWithPath: bundle), commit: commit,
+                                                        snapshot: snapshot, worktree: URL(fileURLWithPath: record.worktree))
+        else { return }
+        let files = patch.split(separator: "\n").filter { $0.hasPrefix("diff --git ") }.count
+        guard files > 0 else { return }
+        liveRun.publish(.notice("\(id) changed \(files) file\(files == 1 ? "" : "s") — flightdeck diff \(id)"))
     }
 
     private func diff(_ record: DelegatedRun) async throws -> WireDelegatePatch {
@@ -759,7 +837,7 @@ final class DelegationService {
         replay = Task { @MainActor in
             defer { self.activeReplays -= 1 }
             do {
-                for try await event in liveRun.link.events(runID: record.hostRunID, from: from) {
+                for try await event in liveRun.link.events(runID: record.hostRunID, localID: record.id, from: from) {
                     guard !done else { return }
                     lastEvent += 1
                     switch event {
@@ -856,7 +934,12 @@ final class DelegationService {
     /// Stops a service, and ends it for everyone watching: its `wait` answers at once rather
     /// than hanging on an `exited` the host may word differently.
     private func down(_ record: DelegatedRun) async throws {
-        _ = try await hostRequest(.serviceDown(service: record.hostRunID), on: try link(for: record))
+        do {
+            _ = try await hostRequest(.serviceDown(service: record.hostRunID), on: try link(for: record))
+        } catch let error as DelegationError where error.code == "unknown_run" {
+            // The host has no such service any more (hostd restarted, and its services with
+            // it): already down, which is all `down` asks for.
+        }
         live[record.id]?.reservation?.release()
         registry.update(record.id) { $0.state = .exited; $0.status = $0.status ?? 0 }
         if let liveRun = live[record.id] { end(liveRun, status: 0, hint: nil) }
@@ -1072,6 +1155,9 @@ final class DelegationService {
         let handle = try FileHandle(forWritingTo: file)
         defer { try? handle.close() }
         while let chunk = try await channel.read() { try handle.write(contentsOf: chunk) }
+        // Our half closed too, so the channel retires on both ends: a half-open one stays in
+        // the mux's table for the life of the link, one per fetched result.
+        await channel.finish()
     }
 
     private func scratchFile(_ name: String) -> URL { deps.directory.appendingPathComponent(name) }
@@ -1084,7 +1170,11 @@ final class DelegationService {
             return "waiting for a free checkout on \(host)"
         case .screen:
             guard let holder else { return "waiting for \(host)'s screen (position \(position))" }
-            let ours = registry.runs.first { $0.host == host && $0.hostRunID == holder.runID }?.id
+            // The newest live run under that host id: a host from before unique run ids (Ruling
+            // 27) reused them across restarts, and only a run still going can hold the screen.
+            let ours = registry.runs.last {
+                $0.host == host && $0.hostRunID == holder.runID && !$0.state.isFinished
+            }?.id
             return "waiting for \(host)'s screen — held by \(ours ?? holder.runID) (session \"\(holder.session)\")"
         }
     }
@@ -1146,50 +1236,5 @@ final class DelegationService {
         if let failure = error as? DelegationError { return failure.message }
         if let localized = error as? LocalizedError, let text = localized.errorDescription { return text }
         return String(describing: error)
-    }
-}
-
-// MARK: - Git
-
-/// `WorktreeLocating` through the `git` CLI, as everything in delegation reaches git. Each call
-/// is a `git` process; `async` and nonisolated, so it never runs on the main actor.
-struct GitWorktreeLocator: WorktreeLocating {
-    func locate(cwd: URL) async throws -> (worktree: URL, subdir: String) {
-        let lines = try Self.git(["rev-parse", "--show-toplevel", "--show-prefix"], in: cwd)
-            .split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
-        guard let root = lines.first, !root.isEmpty else {
-            throw DelegationError(code: "not_a_repo", message: "\(cwd.path) is not in a git worktree")
-        }
-        let prefix = lines.count > 1 ? lines[1] : ""
-        return (URL(fileURLWithPath: root), prefix.hasSuffix("/") ? String(prefix.dropLast()) : prefix)
-    }
-
-    func ignored(_ paths: [String], in worktree: URL) async -> Set<String> {
-        guard !paths.isEmpty,
-              let out = try? Self.git(["check-ignore", "--stdin"], in: worktree,
-                                      input: paths.joined(separator: "\n") + "\n", okStatuses: [0, 1])
-        else { return [] }
-        return Set(out.split(separator: "\n").map(String.init))
-    }
-
-    private static func git(_ args: [String], in dir: URL, input: String? = nil, okStatuses: Set<Int32> = [0]) throws -> String {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        process.arguments = ["git"] + args
-        process.currentDirectoryURL = dir
-        let out = Pipe()
-        let inPipe = Pipe()
-        process.standardOutput = out
-        process.standardError = FileHandle.nullDevice
-        process.standardInput = inPipe
-        try process.run()
-        if let input { try inPipe.fileHandleForWriting.write(contentsOf: Data(input.utf8)) }
-        try inPipe.fileHandleForWriting.close()
-        let data = out.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        guard okStatuses.contains(process.terminationStatus) else {
-            throw DelegationError(code: "git_failed", message: "git \(args.first ?? "") failed in \(dir.path)")
-        }
-        return String(decoding: data, as: UTF8.self).trimmingCharacters(in: .newlines)
     }
 }

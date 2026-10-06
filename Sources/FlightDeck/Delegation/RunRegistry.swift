@@ -7,10 +7,13 @@ import os
 /// `RunRegistry` writes every one to `delegation.json`: a service outlives an app relaunch on
 /// the host, and a registry that forgot it would leave `flightdeck down` with nothing to name,
 /// and the service running until `orphan_timeout`.
-struct DelegatedRun: Codable, Equatable {
-    enum Kind: String, Codable { case run, service }
+struct DelegatedRun: Codable, Equatable, Sendable {
+    enum Kind: String, Codable, Sendable { case run, service }
     /// The wire's `WireDelegateRunRow.state` spellings, verbatim.
-    enum State: String, Codable { case queued, running, exited, died }
+    enum State: String, Codable, Sendable {
+        case queued, running, exited, died
+        var isFinished: Bool { self == .exited || self == .died }
+    }
 
     /// The id the CLI uses: `r` plus a number this Mac never reuses. Local rather than the
     /// host's own id so it is short enough to type, and so `flightdeck wait r7` can be told
@@ -69,7 +72,7 @@ struct DelegatedRun: Codable, Equatable {
 
     enum CodingKeys: String, CodingKey {
         case id, hostRunID, host, owner, kind, command, recipe, state, status, ports, startedAt, worktree
-        case snapshot, applyMode, request, include, fetch, resultCommit, resultBundle
+        case snapshot, applyMode, request, include, fetch, resultCommit, resultBundle, endedAt
     }
 
     /// `include` and `fetch` came after the first file was written: absent reads as none, so
@@ -89,11 +92,15 @@ struct DelegatedRun: Codable, Equatable {
                   resultBundle: try c.decodeIfPresent(String.self, forKey: .resultBundle))
         include = try c.decodeIfPresent([String].self, forKey: .include) ?? []
         fetch = try c.decodeIfPresent([String].self, forKey: .fetch) ?? []
+        endedAt = try c.decodeIfPresent(Date.self, forKey: .endedAt)
     }
     /// The result commit and the bundle holding it, once fetched and until applied. Nil when
     /// the run changed nothing, or before it ended.
     var resultCommit: String?
     var resultBundle: String?
+    /// When this Mac learned it ended, for retention: a service that ran for a month must not
+    /// lose its logs the moment it stops. Nil while running, and in a file from before it existed.
+    var endedAt: Date?
 
     var row: WireDelegateRunRow {
         WireDelegateRunRow(runID: id, host: host, command: command, recipe: recipe, kind: kind.rawValue,
@@ -110,24 +117,43 @@ struct DelegatedRun: Codable, Equatable {
 
 /// The app's delegated runs and services, persisted to `delegation.json` beside
 /// `sessions.json`. Plain value storage: `DelegationService` decides what the runs mean.
+///
+/// **Saves are coalesced and written off the main actor.** Every state change saves, and the
+/// whole file is rewritten each time: measured at 11 ms a save with 1k runs and 111 ms with
+/// 10k, all on main. So a change only marks the registry dirty; one write per `saveDelay`
+/// window carries every change made in it, encoded and written on a serial queue (in order,
+/// so an older snapshot can never land over a newer one). `flush()` writes now, for app quit.
+/// Retention (`expired`) keeps the file from growing without bound in the first place.
 @MainActor
 final class RunRegistry {
-    private static let logger = Logger(subsystem: "dev.flightdeck.FlightDeck", category: "delegation")
+    nonisolated private static let logger = Logger(subsystem: "dev.flightdeck.FlightDeck", category: "delegation")
 
-    private struct Stored: Codable {
+    /// Finished runs are kept this long after they end, for `logs`, `diff` and `apply`.
+    static let retention: TimeInterval = 14 * 24 * 3600
+    /// And at most this many finished runs per host, newest first, however recent.
+    static let retainedPerHost = 500
+
+    private struct Stored: Codable, Sendable {
         var next: Int
         var runs: [DelegatedRun]
     }
 
     private let file: URL?
     private var stored: Stored
+    /// How long a change waits for others to share its write.
+    private let saveDelay: TimeInterval
+    private var saveScheduled = false
+    /// Writes handed to the queue, for the tests that pin the coalescing.
+    private(set) var writes = 0
+    private let writer = DispatchQueue(label: "dev.flightdeck.delegation.registry", qos: .utility)
 
     /// `file` nil keeps everything in memory, for the tests that are not about persistence.
     /// A file that is missing or unreadable starts empty rather than failing the app's launch:
     /// what is lost is the ability to `down` a service by name, which `orphan_timeout` on the
     /// host still covers.
-    init(file: URL?) {
+    init(file: URL?, saveDelay: TimeInterval = 0.25) {
         self.file = file
+        self.saveDelay = saveDelay
         stored = Stored(next: 1, runs: [])
         guard let file, let data = try? Data(contentsOf: file) else { return }
         var salvaged = 0
@@ -172,14 +198,58 @@ final class RunRegistry {
 
     func run(_ id: String) -> DelegatedRun? { stored.runs.first { $0.id == id } }
 
+    /// Changes a run; the moment it first reads as finished is stamped as its end.
     func update(_ id: String, _ change: (inout DelegatedRun) -> Void) {
         guard let index = stored.runs.firstIndex(where: { $0.id == id }) else { return }
         change(&stored.runs[index])
+        if stored.runs[index].state.isFinished, stored.runs[index].endedAt == nil { stored.runs[index].endedAt = Date() }
         save()
     }
 
-    private func save() {
+    /// Forgets runs. Their copies on disk are `DelegationService.prune`'s to delete.
+    func remove(_ ids: Set<String>) {
+        guard !ids.isEmpty else { return }
+        stored.runs.removeAll { ids.contains($0.id) }
+        save()
+    }
+
+    /// The finished runs retention lets go: ended over `retention` ago, or past the newest
+    /// `retainedPerHost` finished ones on their host. A run still going is never one of them.
+    /// A finished run from before `endedAt` existed counts from its start.
+    func expired(now: Date = Date()) -> [DelegatedRun] {
+        let finished = stored.runs.filter(\.state.isFinished)
+        var expired = Set(finished.filter { now.timeIntervalSince($0.endedAt ?? $0.startedAt) > Self.retention }.map(\.id))
+        for runs in Dictionary(grouping: finished, by: \.host).values where runs.count > Self.retainedPerHost {
+            let newestFirst = runs.sorted { ($0.endedAt ?? $0.startedAt) > ($1.endedAt ?? $1.startedAt) }
+            expired.formUnion(newestFirst.dropFirst(Self.retainedPerHost).map(\.id))
+        }
+        return stored.runs.filter { expired.contains($0.id) }
+    }
+
+    /// Writes now, and waits for it: for app quit, where a save still waiting out its delay
+    /// would otherwise be lost with the process.
+    func flush() {
         guard let file else { return }
+        saveScheduled = false
+        let snapshot = stored
+        writes += 1
+        writer.sync { Self.write(snapshot, to: file) }
+    }
+
+    private func save() {
+        guard file != nil, !saveScheduled else { return }
+        saveScheduled = true
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64((self?.saveDelay ?? 0) * 1e9))
+            guard let self, self.saveScheduled, let file = self.file else { return }
+            self.saveScheduled = false
+            let snapshot = self.stored
+            self.writes += 1
+            self.writer.async { Self.write(snapshot, to: file) }
+        }
+    }
+
+    private nonisolated static func write(_ stored: Stored, to file: URL) {
         do {
             try FileManager.default.createDirectory(at: file.deletingLastPathComponent(),
                                                     withIntermediateDirectories: true)
@@ -187,7 +257,7 @@ final class RunRegistry {
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
             try encoder.encode(stored).write(to: file, options: .atomic)
         } catch {
-            Self.logger.error("could not save delegation.json: \(error.localizedDescription, privacy: .public)")
+            logger.error("could not save delegation.json: \(error.localizedDescription, privacy: .public)")
         }
     }
 }

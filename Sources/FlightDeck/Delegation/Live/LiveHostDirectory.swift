@@ -60,13 +60,16 @@ final class LiveHostDirectory: DelegationHostDirectory {
         return live
     }
 
-    /// Deletes the output copies of `host`'s runs `runIDs` (host run ids), for the registry when
-    /// it forgets runs. Works with the host offline: the copies are this Mac's.
-    func prune(host: String, runIDs: [String]) {
-        guard let record = try? hostService.registry.resolve(name: host).get() else { return }
-        if let live = links[record.slot]?.live { return live.prune(runIDs: runIDs) }
-        for runID in runIDs {
-            RunMirror(url: LiveHostLink.mirrorURL(in: mirrors, prefix: record.slot.uuidString, runID: runID)).delete()
+    func forget(_ runs: [DelegatedRun]) {
+        for (host, runs) in Dictionary(grouping: runs, by: \.host) {
+            let pairs = runs.map { (hostRunID: $0.hostRunID, localID: $0.id) }
+            // The live link ends any reader of these copies; a host no longer paired, or never
+            // linked this launch, has none, and its copies are plain files.
+            if let slot = try? hostService.registry.resolve(name: host).get().slot, let live = links[slot]?.live {
+                live.prune(pairs)
+            } else {
+                for run in pairs { RunMirror(url: LiveHostLink.mirrorURL(in: mirrors, localID: run.localID)).delete() }
+            }
         }
     }
 

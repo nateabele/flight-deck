@@ -139,6 +139,7 @@ public enum DelegateConfigParser {
             case "ports": recipe.ports = try ports(node, field)
             case "env": recipe.env = try env(node, field)
             case "pool": recipe.pool = try int(node, field)
+            case "orphan_timeout": recipe.orphanTimeout = try int(node, field)
             case "apply":
                 guard let mode = ApplyMode(rawValue: try string(node, field)) else {
                     throw DelegateConfigIssue(.error, line: node.line, "\(field) must be \"review\" or \"auto\"")
@@ -273,6 +274,9 @@ extension DelegateConfig {
             }
             if let pool = recipe.pool, pool < 1 {
                 issues.append(DelegateConfigIssue(.error, "\(path).pool must be at least 1, not \(pool)"))
+            }
+            if let timeout = recipe.orphanTimeout, timeout < 1 {
+                issues.append(DelegateConfigIssue(.error, "\(path).orphan_timeout must be at least 1 second, not \(timeout)"))
             }
             if let hosts, let host = recipe.host, hosts[host] == nil {
                 issues.append(DelegateConfigIssue(.warning, "\(path).host \"\(host)\" is not a paired host"))

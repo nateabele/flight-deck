@@ -154,15 +154,15 @@ final class HostLinkDelegationTests: XCTestCase {
         hostService.start()
         try await waitUntil { hostService.link(slot: host.slot) != nil }
 
+        let runs = RunRegistry(file: nil)
+        let id = runs.mintID()
         let mirrors = root.appendingPathComponent("delegation")
-        let mirror = RunMirror(url: LiveHostLink.mirrorURL(in: mirrors, prefix: host.slot.uuidString, runID: "h1"))
+        let mirror = RunMirror(url: LiveHostLink.mirrorURL(in: mirrors, localID: id))
         mirror.reset(origin: 0)
         mirror.record(.started(runID: "h1"))
         mirror.append(RunMirror.Chunk(stream: .stdout, offset: 0, data: Data("built ok\n".utf8)))
         mirror.record(.exited(.code(0)))
 
-        let runs = RunRegistry(file: nil)
-        let id = runs.mintID()
         runs.add(DelegatedRun(id: id, hostRunID: "h1", host: "mini", owner: nil, kind: .run, command: "make",
                               recipe: nil, state: .exited, status: 0, ports: [], startedAt: Date(), worktree: "/w",
                               snapshot: nil, applyMode: .review, request: WireDelegateRun(cwd: "/w"),
