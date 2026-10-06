@@ -235,10 +235,11 @@ final class SwarmServiceTests: XCTestCase {
         XCTAssertEqual(s.record(forProject: SwarmFixtures.project)?.agents.count, 1)
     }
 
-    /// Integration ruling 7: the hand-off driver runs on the swarm's clock, once per project
-    /// that has working agents — paused swarms included, because pause stops claims, not
-    /// hand-offs. A project with no working agent has nothing to hand off.
-    func testOnTickRunsPerProjectWithWorkingAgentsEvenWhilePaused() async {
+    /// Integration ruling 7 (fix round 1): the hand-off driver runs on the swarm's clock ONCE
+    /// per tick with every swarm's working agents together — paused swarms included, because
+    /// pause stops claims, not hand-offs. The driver prunes whatever is absent from its argument,
+    /// so a per-project call wiped every other project's hand-off state.
+    func testOnTickPassesEveryProjectsWorkingAgentsInOneCallEvenWhilePaused() async {
         let rig = SwarmRig()
         let a = rig.agent("BlueLake", state: .working, task: "fx-1")
         let other = "/tmp/swarm-project-idle"
@@ -249,11 +250,11 @@ final class SwarmServiceTests: XCTestCase {
         let clock = WatchClock(appIsActive: { true })
         let s = service(rig, clock: clock)
         await s.settle()
-        var ticked: [String] = []
-        s.onTick = { ticked.append($0) }
+        var ticked: [[String]] = []
+        s.onTick = { ticked.append($0.map(\.agentName)) }
         rig.now += SwarmService.tickInterval
         clock.fire(); await s.settle()
-        XCTAssertEqual(ticked, [SwarmService.key(SwarmFixtures.project)])
+        XCTAssertEqual(ticked, [["BlueLake"]], "one call; the idle agent has nothing to hand off")
         clock.fire(); await s.settle()
         XCTAssertEqual(ticked.count, 1, "throttled with the swarm's own tick")
     }

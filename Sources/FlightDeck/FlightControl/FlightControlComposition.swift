@@ -115,11 +115,29 @@ final class FlightControlGraph {
             guard let swarm else { return nil }
             return swarm.reservationsLookup(SwarmService.key(project.path)).filter { $0.holder == agent }.map(\.pattern)
         }
-        host.onHandedOff = { [weak swarm] done in
-            // False only for a session with no name or an old agent the swarm no longer holds;
-            // the driver has already logged the hand-off, so there is nothing to undo here.
-            _ = swarm?.recordHandoff(project: done.task.project.path, from: done.old.id, to: done.new,
-                                     block: done.block, lease: done.lease)
+        let allocator = self.allocator
+        let now = self.now
+        host.onHandedOff = { [weak swarm, weak host] done in
+            // The task is recorded on the new agent now (or never will be): it stops being "in
+            // hand-off" either way.
+            defer { swarm?.endHandoff(project: done.task.project.path, task: done.task.id) }
+            guard let swarm, !swarm.recordHandoff(project: done.task.project.path, from: done.old.id, to: done.new,
+                                                  block: done.block, lease: done.lease) else { return }
+            // Refused: the new session has no name, or the swarm no longer holds the old agent
+            // (stopped or swept mid-hand-off). The new agent runs with the task but outside the
+            // swarm. Its lease is released: no record holds it, so nothing (stop, the sweep, a
+            // later hand-off) would ever release it, and a lease held forever takes a slot out
+            // of a local pool for the life of the app. The agent itself keeps running; a hosted
+            // account's capacity follows its readings, not its leases.
+            allocator.release(done.lease)
+            host?.record(HandoffLogEntry(at: now(), outcome: .unrecorded, task: done.task.id, oldSession: done.old.id,
+                                         oldAgent: done.old.agentName ?? "", newSession: done.new.id,
+                                         newAgent: done.new.agentName, fromAccount: done.fromAccount.label,
+                                         toAccount: done.lease.account.label,
+                                         detail: "the swarm could not record the new agent; it runs outside the swarm"))
+            host?.notify(title: "Hand-off not recorded",
+                         body: "\(done.new.agentName ?? "The new agent") took task \(done.task.id), but the swarm could not record it, so Flight Control will not manage that tab. Check it in its tab.",
+                         session: done.new)
         }
 
         let driver = HandoffDriver(
@@ -129,9 +147,13 @@ final class FlightControlGraph {
             settings: { [weak preferences] in preferences?.capacity.handoffSettings ?? CapacityPreferences().handoffSettings },
             now: now)
         swarm.handoffDecisions = driver
-        swarm.onTick = { [weak swarm, weak driver] project in
-            guard let swarm, let driver else { return }
-            await driver.evaluate(swarm.agentSnapshots(project: project))
+        // One pass over every swarm's working agents (see `SwarmService.onTick`). Every hand-off
+        // the pass began has finished when `evaluate` returns, and passes never overlap, so any
+        // mark still set — a `.stopFailed` never reaches `onHandedOff` — is cleared here.
+        swarm.onTick = { [weak swarm, weak driver] agents in
+            guard let driver else { return }
+            await driver.evaluate(agents)
+            swarm?.endAllHandoffs()
         }
         self.host = host
         self.driver = driver
@@ -154,10 +176,19 @@ private struct FreshRouter: Router {
 
 /// The hand-off's spawn, given back the old agent's claim first. The old agent holds the task in
 /// br (`in_progress`, assigned to it), and the spawner's `br update --claim` for the new agent
-/// is refused as a conflict while it does — so without this every hand-off failed. If the spawn
-/// fails anyway, the claim goes back to the agent that held it: the driver's promise is that a
-/// failed spawn leaves the old agent running and still assigned, and an open task held by a
-/// running agent would be released by the swarm as "back to open" and claimed by another.
+/// is refused as a conflict while it does — so without this every hand-off failed.
+///
+/// The task is marked "in hand-off" on the swarm before the claim goes back: from then until the
+/// new agent is recorded, br reads it as open, and the swarm must neither treat that as "back to
+/// open" (resetting the old agent, so the new one would be recorded with no task) nor claim it for
+/// another agent. The mark ends in `onHandedOff`, here on a failed spawn, or after the pass.
+///
+/// If the spawn fails, the claim goes back to the agent the swarm records as holding the task:
+/// the driver's promise is that a failed spawn leaves the old agent running and still assigned.
+/// The holder comes from the swarm's record, not a br read, so an unreadable br cannot lose it.
+/// No holder means the swarm already let the task go (stopped or swept): nobody to give it to,
+/// and an open task is then the right state. A claim-back refused because someone outside the
+/// swarm took the task in that moment is left to `taskSetChanged`, which sees it taken over.
 @MainActor
 private final class HandoffClaimSpawner: SwarmSpawner {
     private let inner: SwarmSpawner
@@ -167,11 +198,15 @@ private final class HandoffClaimSpawner: SwarmSpawner {
 
     func spawn(task: TaskRef, block: ExecutionBlock, lease: AccountLease?, firstPrompt: String) async -> Result<SessionRef, SpawnError> {
         guard let swarm else { return .failure(.launchFailed("the swarm is gone")) }
-        let held = await swarm.backend.status(task.id, project: task.project)
-        _ = await swarm.returnClaimToOpen(project: task.project.path, task: task.id)
+        let project = task.project.path
+        let holder = swarm.record(forProject: project)?.agents
+            .first { $0.task == task.id && ($0.state == .working || $0.state == .idle) }?.agentName
+        swarm.beginHandoff(project: project, task: task.id)
+        _ = await swarm.returnClaimToOpen(project: project, task: task.id)
         let result = await inner.spawn(task: task, block: block, lease: lease, firstPrompt: firstPrompt)
-        if case .failure = result, let held, held.status == "in_progress", let holder = held.assignee, !holder.isEmpty {
-            _ = await swarm.backend.claim(task.id, actor: holder, project: task.project)
+        if case .failure = result {
+            if let holder { _ = await swarm.backend.claim(task.id, actor: holder, project: task.project) }
+            swarm.endHandoff(project: project, task: task.id)
         }
         return result
     }

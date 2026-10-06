@@ -37,12 +37,14 @@ struct CompletedHandoff: Equatable {
     var task: TaskRef
     var block: ExecutionBlock
     var lease: AccountLease
+    /// The account the old agent ran on, for a log line written after the fact.
+    var fromAccount: AccountRef
 }
 
 /// One line of the hand-off log (L3-U §5.8): both tabs and both accounts, so "where did my
 /// agent go" has an answer after the fact.
 struct HandoffLogEntry: Codable, Equatable {
-    enum Outcome: String, Codable { case handedOff, spawnFailed, waitingForCapacity, declined, interrupted, stopFailed }
+    enum Outcome: String, Codable { case handedOff, spawnFailed, waitingForCapacity, declined, interrupted, stopFailed, unrecorded }
     var at: Date
     var outcome: Outcome
     var task: String

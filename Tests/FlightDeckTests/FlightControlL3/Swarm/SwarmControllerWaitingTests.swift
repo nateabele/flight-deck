@@ -127,4 +127,22 @@ final class SwarmControllerWaitingTests: XCTestCase {
         await rig.run(c)
         XCTAssertEqual(rig.launcher.created.count, 1)
     }
+
+    /// Fix round 1: a task a hand-off is moving reads as open and ready in br for a moment. The
+    /// swarm must not claim it for a new agent, and its old agent must not be reset as if the
+    /// task had gone back to open.
+    func testATaskInHandoffIsNeitherClaimedNorTreatedAsReopened() async {
+        let rig = SwarmRig()
+        rig.leases("codex-subs", 2)
+        let old = rig.agent("BlueLake", state: .working, task: "fx-1")
+        rig.inHandoff = ["fx-1"]
+        rig.backend.ready = [SwarmFixtures.task("fx-1", SwarmFixtures.block())]
+        rig.backend.statuses["fx-1"] = TaskStatusReading(status: "open", assignee: nil)
+        let c = rig.controller(rig.record(cap: 2, agents: [old]))
+        await c.taskSetChanged(inProgress: [])
+        await rig.run(c)
+        XCTAssertTrue(rig.backend.claims.isEmpty)
+        XCTAssertEqual(c.record.agent(old.session)?.state, .working)
+        XCTAssertEqual(c.record.agent(old.session)?.task, "fx-1")
+    }
 }

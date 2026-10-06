@@ -41,10 +41,19 @@ final class SwarmService: ObservableObject {
     @Published private(set) var revision = 0
     var onChange: (() -> Void)?
     weak var handoffDecisions: HandoffDecisionSink?
-    /// L3-U's hand-off driver, run on this service's clock: called with the project key of every
-    /// swarm that has working agents, on each (throttled) tick — paused swarms included, because
-    /// pause stops new claims, not hand-offs. Set by `FlightControlComposition`.
-    var onTick: ((String) async -> Void)?
+    /// L3-U's hand-off driver, run on this service's clock: called ONCE per (throttled) tick with
+    /// every swarm's working agents together — paused swarms included, because pause stops new
+    /// claims, not hand-offs. One call, not one per project: the driver forgets every agent
+    /// missing from its argument, so a per-project call wiped the other projects' pending
+    /// confirmations, declines and `.stopFailed`. Called with an empty list too, so agents that
+    /// left are forgotten. A pass still running when the next tick lands is not overlapped.
+    /// Set by `FlightControlComposition`.
+    var onTick: (([SwarmAgentSnapshot]) async -> Void)?
+    private var handoffPassRunning = false
+    /// Project key → tasks a hand-off is moving between agents right now. Between the old claim
+    /// going back to open and the new one landing br reads such a task as open; the controllers
+    /// must neither reset its old agent for that nor claim it for anyone else.
+    private var handoffTasks: [String: Set<String>] = [:]
 
     /// Whether a session is contested right now: wired in `init` to `contest(for:)`; a test may
     /// override it.
@@ -175,6 +184,18 @@ final class SwarmService: ObservableObject {
         await backend.returnToOpen(task, project: URL(fileURLWithPath: Self.key(project), isDirectory: true))
     }
 
+    /// Marks `task` as moving between agents until `endHandoff` (see `handoffTasks`).
+    func beginHandoff(project: String, task: String) { handoffTasks[Self.key(project), default: []].insert(task) }
+    func endHandoff(project: String, task: String) {
+        let key = Self.key(project)
+        handoffTasks[key]?.remove(task)
+        if handoffTasks[key]?.isEmpty == true { handoffTasks[key] = nil }
+    }
+    /// After a driver pass every hand-off it began has ended one way or another — including a
+    /// `.stopFailed`, which never reaches the success hook that ends its mark.
+    func endAllHandoffs() { handoffTasks = [:] }
+    func isHandingOff(project: String, task: String) -> Bool { handoffTasks[Self.key(project)]?.contains(task) ?? false }
+
     func confirmHandoff(session: UUID) -> Bool { handoffDecisions?.confirmHandoff(session: session) ?? false }
     func declineHandoff(session: UUID) -> Bool { handoffDecisions?.declineHandoff(session: session) ?? false }
 
@@ -189,9 +210,12 @@ final class SwarmService: ObservableObject {
         for controller in controllers.values where controller.record.state != .stopped {
             track { await controller.tick() }
         }
-        guard let onTick else { return }
-        for key in records.keys.sorted() where !agentSnapshots(project: key).isEmpty {
-            track { await onTick(key) }
+        guard let onTick, !handoffPassRunning else { return }
+        let agents = records.keys.sorted().flatMap { agentSnapshots(project: $0) }
+        handoffPassRunning = true
+        track { [weak self] in
+            await onTick(agents)
+            self?.handoffPassRunning = false
         }
     }
 
@@ -210,11 +234,13 @@ final class SwarmService: ObservableObject {
     private func makeController(_ record: SwarmRecord) -> SwarmController? {
         guard let deps = dependencies else { return nil }
         let registry = self.registry
+        let key = Self.key(record.project)
         let controller = SwarmController(
             record: record, store: store,
             deps: .init(backend: backend, launcher: launcher, host: WeakSwarmHost(host), makeRouter: deps.makeRouter, kinds: deps.kinds,
                         allocator: deps.allocator, capacity: deps.capacity,
-                        catalogs: { await registry.catalogs(enabled: Set(registry.harnesses)) }, pools: deps.pools),
+                        catalogs: { await registry.catalogs(enabled: Set(registry.harnesses)) }, pools: deps.pools,
+                        inHandoff: { [weak self] task in self?.handoffTasks[key]?.contains(task) ?? false }),
             now: now)
         // A rebuild orphans the old controller, which may still have launches in flight; only
         // the controller the service currently owns may write the record.

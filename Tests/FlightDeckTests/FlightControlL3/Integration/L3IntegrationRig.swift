@@ -35,8 +35,12 @@ final class L3IntegrationRig {
     final class RigSpawner: SwarmSpawner {
         let launcher: FakeSwarmAgentLauncher
         let backend: SwarmBackend
+        /// Runs at the start of every hand-off spawn: the window between the old claim going
+        /// back to open and the new one landing, where a test plays the Observe watcher.
+        var onSpawn: (() async -> Void)?
         init(launcher: FakeSwarmAgentLauncher, backend: SwarmBackend) { self.launcher = launcher; self.backend = backend }
         func spawn(task: TaskRef, block: ExecutionBlock, lease: AccountLease?, firstPrompt: String) async -> Result<SessionRef, SpawnError> {
+            await onSpawn?()
             let created = await launcher.createAgent(task: task, block: block, lease: lease)
             guard case .success(let ref) = created else { return created }
             switch await backend.claim(task.id, actor: ref.agentName ?? "", project: task.project) {
@@ -77,7 +81,12 @@ final class L3IntegrationRig {
     let runner = MultiRunner()
     let log = SwarmCallLog()
     let launcher: FakeSwarmAgentLauncher
+    let spawner: RigSpawner
     let swarm: SwarmService
+    /// The next tab creation fails, as a launch that never got a tab would.
+    var failNextCreate = false
+    /// A second Flight Control project, for state that must not leak between swarms.
+    let secondProjectURL: URL
     let allocator: CountingAllocator
     let watch = WatchClock(appIsActive: { true })
     let spy = SpyInjector()
@@ -92,6 +101,8 @@ final class L3IntegrationRig {
         self.root = root
         projectURL = root.appendingPathComponent("project", isDirectory: true).standardizedFileURL
         try FileManager.default.createDirectory(at: projectURL, withIntermediateDirectories: true)
+        secondProjectURL = root.appendingPathComponent("project-b", isDirectory: true).standardizedFileURL
+        try FileManager.default.createDirectory(at: secondProjectURL, withIntermediateDirectories: true)
 
         // Hermetic: a nil persistence never reads or writes the real preferences domain.
         preferences = PreferencesStore(persistence: nil)
@@ -129,8 +140,9 @@ final class L3IntegrationRig {
 
         launcher = FakeSwarmAgentLauncher(log: log)
         let backend = BrSwarmBackend(runner: runner)
+        spawner = RigSpawner(launcher: launcher, backend: backend)
         swarm = SwarmService(store: SwarmStore(root: root.appendingPathComponent("swarms", isDirectory: true)),
-                             backend: backend, launcher: launcher, spawner: RigSpawner(launcher: launcher, backend: backend),
+                             backend: backend, launcher: launcher, spawner: spawner,
                              host: store, registry: RoutingCapabilityRegistry([]), clock: watch, now: { clock.now })
         launcher.onCreateAttempt = { [weak self] in self?.openTab() }
     }
@@ -170,8 +182,8 @@ final class L3IntegrationRig {
                                   readAt: clock.now, source: "rig", hardRejection: false))
     }
 
-    func launch(cap: Int) async throws {
-        guard swarm.launch(project: project, cap: cap, poolCaps: [:], filter: .allReady) != nil else {
+    func launch(cap: Int, project: String? = nil) async throws {
+        guard swarm.launch(project: project ?? self.project, cap: cap, poolCaps: [:], filter: .allReady) != nil else {
             throw CocoaError(.featureUnsupported)
         }
         await swarm.settle()
@@ -213,6 +225,23 @@ final class L3IntegrationRig {
         }
     }
 
+    /// The Observe watcher's projection change, with nothing in progress: what it reports once a
+    /// claim goes back to open.
+    func watcherSeesNothingInProgress() async {
+        let empty = FlywheelProjection.project(
+            FlywheelSnapshot(agents: [], beads: [], reservations: nil, depEdges: nil, events: nil),
+            now: clock.now, stallThreshold: 600, previous: nil)
+        await swarm.applyProjections([SwarmService.key(project): empty])
+    }
+
+    /// `br show` from now on answers with this status and assignee, as br would after a write.
+    func brShows(_ task: String, status: String, assignee: String?) {
+        var detail: [String: Any] = ["id": task, "title": titles[task] ?? task, "status": status,
+                                     "description": "Synthetic description.", "acceptance_criteria": "- synthetic"]
+        if let assignee { detail["assignee"] = assignee }
+        runner.responses["br show \(task)"] = (json([detail]), 0)
+    }
+
     func waitingReason(task: String) -> String? {
         swarm.record(forProject: project)?.waiting.first { $0.task == task }?.reason
     }
@@ -231,6 +260,11 @@ final class L3IntegrationRig {
     /// A real tab for every spawn the launcher is asked for, busy at its first turn, with a
     /// transcript file where the claude pointer looks, so the hand-off prompt can name it.
     private func openTab() {
+        if failNextCreate {
+            failNextCreate = false
+            launcher.createResults = [.failure(.launchFailed("rig: no tab"))]
+            return
+        }
         let session = store.newSession(in: projectURL, selecting: false)
         let ref = SessionRef(id: session.id, agentName: "Agent\(createdSessions.count + 1)")
         createdSessions.append(ref)
