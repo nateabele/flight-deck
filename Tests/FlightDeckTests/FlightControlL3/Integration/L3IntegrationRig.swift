@@ -143,8 +143,22 @@ final class L3IntegrationRig {
         spawner = RigSpawner(launcher: launcher, backend: backend)
         swarm = SwarmService(store: SwarmStore(root: root.appendingPathComponent("swarms", isDirectory: true)),
                              backend: backend, launcher: launcher, spawner: spawner,
-                             host: store, registry: RoutingCapabilityRegistry([]), clock: watch, now: { clock.now })
+                             host: store, registry: L3IntegrationRig.catalogRegistry(), clock: watch, now: { clock.now })
         launcher.onCreateAttempt = { [weak self] in self?.openTab() }
+    }
+
+    /// The model catalogs the swarm reads at a spill (`SwarmService` takes them from this
+    /// registry, not from `RoutingService`): the same ones routing's tests use, so a spill can
+    /// land on a model that exists. An empty registry made every spill "nothing else fits".
+    private static func catalogRegistry() -> RoutingCapabilityRegistry {
+        RoutingCapabilityRegistry(RoutingTestData.catalogs.order.compactMap { harness -> (any AgentRoutingCapabilities)? in
+            guard let catalog = RoutingTestData.catalogs.byHarness[harness] else { return nil }
+            let fake = FakeRoutingCapabilities()
+            fake.harness = harness
+            fake.knobSchema = catalog.knobSchema
+            fake.catalog = .supported(catalog.models)
+            return fake
+        })
     }
 
     static func make(accounts: [String], harness: HarnessID, rule: RoutingRule, readyTasks: [String]) throws -> L3IntegrationRig {
