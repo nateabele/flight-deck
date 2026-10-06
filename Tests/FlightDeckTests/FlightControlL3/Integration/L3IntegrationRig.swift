@@ -160,16 +160,19 @@ final class L3IntegrationRig {
             allocator: rig.allocator, now: { [clock = rig.clock] in clock.now })
         // "Released": each task's block is what the real router, holding the confirmed rule and
         // the capacity pools install wired in, assigns to its kind — as intake release writes it.
-        let router = rig.routing.makeRouter()
-        let kinds = try rig.routing.kindStore.kinds(project: rig.projectURL)
-        let tests = try XCTUnwrapRig(KindResolution.resolve("tests", in: kinds))
-        for id in readyTasks {
-            rig.blocks[id] = router.assign(kind: tests, project: rig.projectURL, catalogs: RoutingTestData.catalogs,
-                                           now: rig.clock.now).block
-            rig.titles[id] = "Synthetic task \(id)"
-        }
-        rig.scriptBr()
+        for id in readyTasks { try rig.release(id) }
         return rig
+    }
+
+    /// Another released task, routed by whatever rules are in force now. For a task that becomes
+    /// ready mid-test.
+    func release(_ id: String) throws {
+        let kinds = try routing.kindStore.kinds(project: projectURL)
+        let tests = try XCTUnwrapRig(KindResolution.resolve("tests", in: kinds))
+        blocks[id] = routing.makeRouter().assign(kind: tests, project: projectURL, catalogs: RoutingTestData.catalogs,
+                                                 now: clock.now).block
+        titles[id] = "Synthetic task \(id)"
+        scriptBr()
     }
 
     // MARK: - Driving
