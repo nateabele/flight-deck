@@ -104,6 +104,11 @@ struct SessionTimelineScreen: View {
     var body: some View {
         ScrollViewReader { scroll in
             List {
+                // At the head, so a reader sees which background agent is asking for them
+                // before scrolling a long conversation.
+                if let subs = session?.subagents, !subs.isEmpty {
+                    SubagentTreeSection(nodes: subs)
+                }
                 // Notices sit ABOVE the conversation whenever there is a conversation, because
                 // the fetch a reader can still trigger with content on screen — returning to a
                 // kept screen, which re-reads the live edge — has no row of its own, and the
@@ -317,7 +322,8 @@ struct SessionTimelineScreen: View {
         // opening at all. See `TimelinePaging`.
         .task(id: model.sessionID) {
             model.updateStatus(agent: session?.agent, activity: session?.activity,
-                               call: session?.openPromptCall ?? .unreported)
+                               call: session?.openPromptCall ?? .unreported,
+                               promptAgent: session?.openPromptAgent)
             model.open()
         }
         // Reported from the SCREEN rather than the model: the model is cached per tab and
@@ -350,7 +356,8 @@ struct SessionTimelineScreen: View {
                     activity: session?.activity,
                     openPromptCall: session?.openPromptCall ?? .unreported,
                     answerless: session?.answerless ?? false,
-                    onAbortBlocked: { await onAbortBlocked(model.sessionID) }
+                    onAbortBlocked: { await onAbortBlocked(model.sessionID) },
+                    fromSubagent: session?.blockedSubagent
                 )
                 PromptComposer(session: session, model: model)
             }
@@ -392,7 +399,8 @@ struct SessionTimelineScreen: View {
         .onChange(of: session?.activity) { _, _ in
             model.loadNewer()
             model.updateStatus(agent: session?.agent, activity: session?.activity,
-                               call: session?.openPromptCall ?? .unreported)
+                               call: session?.openPromptCall ?? .unreported,
+                               promptAgent: session?.openPromptAgent)
         }
         // The second event trigger, and it fires where the first cannot. A dialog answered at
         // the keyboard with the next one raised immediately never leaves `waiting`, so
@@ -403,7 +411,13 @@ struct SessionTimelineScreen: View {
         .onChange(of: session?.openPromptCall) { _, _ in
             model.loadNewer()
             model.updateStatus(agent: session?.agent, activity: session?.activity,
-                               call: session?.openPromptCall ?? .unreported)
+                               call: session?.openPromptCall ?? .unreported,
+                               promptAgent: session?.openPromptAgent)
+        }
+        .onChange(of: session?.openPromptAgent) { _, _ in
+            model.updateStatus(agent: session?.agent, activity: session?.activity,
+                               call: session?.openPromptCall ?? .unreported,
+                               promptAgent: session?.openPromptAgent)
         }
         // The timer, and it is not redundant with the event above: `emitActivity` on the Mac
         // filters to genuine transitions, so a turn that runs busy for four minutes emits
@@ -840,8 +854,12 @@ struct SessionTimelineScreen: View {
     private struct BlockedState: Equatable {
         let activity: String?
         let call: OpenPromptIdentity
+        /// A dialog moving between agents with the same call id is not possible, but the chase
+        /// must also restart when the agent whose file it reads changes.
+        let promptAgent: String?
 
         init(_ session: WireSession?) {
+            promptAgent = session?.openPromptAgent
             activity = session?.activity
             call = session?.openPromptCall ?? .unreported
         }

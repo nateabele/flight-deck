@@ -134,6 +134,9 @@ struct SessionStatusGlyph: View {
             // either way, for the same reason it does there — it is this Mac's own verdict
             // that nothing is open, which is truer than whatever string `claude` gave.
             guard !session.answerless else { return "Still working (no response needed)" }
+            if let sub = session.blockedSubagent, let waitingFor = session.waitingFor, !waitingFor.isEmpty {
+                return "Waiting for you — \(sub.type): \(waitingFor)"
+            }
             guard let waitingFor = session.waitingFor, !waitingFor.isEmpty else {
                 return "Waiting for you"
             }
@@ -157,6 +160,10 @@ struct SessionStatusGlyph: View {
     /// sentence while the visible orange caption still said "input needed".
     static func waitingCaption(for session: WireSession) -> String? {
         guard session.waitingFor != nil else { return nil }
+        if !session.answerless, let sub = session.blockedSubagent, let waitingFor = session.waitingFor,
+           !waitingFor.isEmpty {
+            return "\(sub.type): \(waitingFor)"
+        }
         return session.answerless ? baseLabel(for: session) : session.waitingFor
     }
 
