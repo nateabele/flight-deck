@@ -6,6 +6,8 @@ import IntakeKit
 @MainActor
 protocol HandoffHost: AnyObject {
     func activity(of session: SessionRef) -> SessionActivity?
+    /// Whether the tab still exists. After `.stopFailed` the old agent's lease is held until it does not.
+    func sessionExists(_ session: SessionRef) -> Bool
     func isRateLimited(_ session: SessionRef) -> Bool
     /// True only when Escape was actually sent; the store refuses an idle composer or a dialog.
     @discardableResult
@@ -27,7 +29,9 @@ protocol HandoffHost: AnyObject {
     func notify(title: String, body: String, session: SessionRef)
 }
 
-/// A hand-off that finished: the old agent was told to exit and the new one holds the task.
+/// A hand-off that finished: the new agent holds the task, and the old one was told to exit (or,
+/// after `.stopFailed`, could not be told and may still run — the swarm records the new agent
+/// either way, since it is the one holding the task).
 /// Carries what the swarm needs to record the new agent — the block and lease it was actually
 /// spawned on (a spill changes both) and the task, whose project names the swarm. Two session
 /// refs alone could not: the swarm would have recorded the old agent's block and lease.
@@ -117,6 +121,7 @@ final class StoreHandoffHost: HandoffHost {
     }
 
     func activity(of session: SessionRef) -> SessionActivity? { store?.statuses[session.id]?.activity }
+    func sessionExists(_ session: SessionRef) -> Bool { store?.sessionExists(session.id) ?? false }
 
     func isRateLimited(_ session: SessionRef) -> Bool {
         guard let e = store?.apiErrors[session.id] else { return false }

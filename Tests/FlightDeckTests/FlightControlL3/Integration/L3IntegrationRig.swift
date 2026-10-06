@@ -91,6 +91,10 @@ final class L3IntegrationRig {
     let allocator: CountingAllocator
     let watch = WatchClock(appIsActive: { true })
     let spy = SpyInjector()
+    /// Every notification the store raised (the hand-off host notifies through it).
+    let notifier = UsageSpyNotifier()
+    /// The name the next opened tab's agent gets instead of `AgentN` (e.g. "" for a nameless one).
+    var nextAgentName: String?
     private(set) var createdSessions: [SessionRef] = []
     private var tabStatuses: [UUID: SessionStatus] = [:]
     private var blocks: [String: ExecutionBlock] = [:]
@@ -127,6 +131,7 @@ final class L3IntegrationRig {
         store.launchFailureReporter = SilentReporter()
         store.injectorOverride = spy
         store.injectionSettle = { $0() }
+        store.notifier = notifier
 
         let clock = self.clock
         let prefs = preferences
@@ -218,6 +223,13 @@ final class L3IntegrationRig {
         store.applyRegistryForTesting(tabStatuses)
     }
 
+    /// The tab reports no status at all: a boundary for the driver, and a tab the exit command
+    /// cannot be typed into (`submitPrompt` answers `notRunning`), so stopping it fails.
+    func clearStatus(_ session: SessionRef) {
+        tabStatuses[session.id] = nil
+        store.applyRegistryForTesting(tabStatuses)
+    }
+
     func addPool(id: PoolID, accounts labels: [String]) {
         let ids = preferences.preferences.accounts.filter { labels.contains($0.displayName) }.map(\.id)
         let harness = preferences.preferences.accounts.first { labels.contains($0.displayName) }?.agent.harnessID ?? "codex"
@@ -267,6 +279,11 @@ final class L3IntegrationRig {
         swarm.agentRecord(session.id)?.1.state == .handedOff
     }
 
+    /// The hand-off log the composition writes (`HandoffLogEntry`, one per line).
+    var handoffLog: [HandoffLogEntry] {
+        (try? Data(contentsOf: root.appendingPathComponent("handoffs.jsonl"))).map(HandoffHistory.parse) ?? []
+    }
+
     func transcriptPath(of session: SessionRef) -> String {
         guard case .path(let path)? = usage.transcriptPointer(for: session)?.locator else { return "<no transcript>" }
         return path
@@ -283,7 +300,8 @@ final class L3IntegrationRig {
             return
         }
         let session = store.newSession(in: projectURL, selecting: false)
-        let ref = SessionRef(id: session.id, agentName: "Agent\(createdSessions.count + 1)")
+        let ref = SessionRef(id: session.id, agentName: nextAgentName ?? "Agent\(createdSessions.count + 1)")
+        nextAgentName = nil
         createdSessions.append(ref)
         launcher.createResults = [.success(ref)]
         tabStatuses[session.id] = SessionStatus(activity: .busy)

@@ -85,14 +85,17 @@ final class HandoffDriverTests: XCTestCase {
         XCTAssertEqual(host.events, ["spawn", "reassign", "release", "stop", "mark", "record:handedOff"])
     }
 
-    /// The old agent keeps running on the over-limit account if its exit command was refused, so
-    /// calling the hand-off done would leave two agents on one task.
-    func testUndeliveredExitDoesNotMarkHandedOff() async {
+    /// The old agent keeps running on the over-limit account if its exit command was refused.
+    /// The new agent already holds the task, so the swarm must still own it (record it, and
+    /// with it its lease) — left unrecorded, its lease was never released and it was invisible
+    /// to the swarm. The old lease stays held while the old tab runs on that account.
+    func testUndeliveredExitRecordsTheNewAgentAndKeepsTheOldLease() async {
         host.activities[oldID] = .idle
         host.stopDelivered = false
         let d = driver()
         await d.evaluate([agent])
-        XCTAssertEqual(host.marked.count, 0)
+        XCTAssertEqual(host.marked.map(\.new), [newID], "the swarm records the new agent")
+        XCTAssertEqual(host.handoffs.first?.lease, newLease)
         XCTAssertEqual(host.log.map(\.outcome), [.stopFailed])
         XCTAssertNotNil(host.log.first?.detail)
         XCTAssertEqual(host.notices.count, 1)
@@ -483,5 +486,21 @@ final class HandoffDriverTests: XCTestCase {
         XCTAssertEqual(host.stopped, [oldID])
         XCTAssertTrue(d.pendingHandoffs.isEmpty)
         XCTAssertEqual(host.confirmations.count, 1, "never asked again")
+    }
+
+    /// After `.stopFailed` the driver keeps the old lease while the old tab still runs on that
+    /// account, and releases it once (and only once) that tab is gone.
+    func testAStopFailedOldLeaseIsReleasedOnceItsTabIsGone() async {
+        host.activities[oldID] = .idle
+        host.stopDelivered = false
+        let d = driver()
+        await d.evaluate([agent])
+        await d.evaluate([])
+        XCTAssertEqual(allocator.released, [], "the old tab still exists: its account is still in use")
+        host.gone.insert(oldID)
+        await d.evaluate([])
+        XCTAssertEqual(allocator.released, [oldLease])
+        await d.evaluate([])
+        XCTAssertEqual(allocator.released, [oldLease], "released once")
     }
 }

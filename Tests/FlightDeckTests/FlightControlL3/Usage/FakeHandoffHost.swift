@@ -27,6 +27,10 @@ final class FakeHandoffHost: HandoffHost {
 
     func noteSpawn() { events.append("spawn") }
 
+    /// Sessions whose tab is gone; every other session exists.
+    var gone: Set<UUID> = []
+    func sessionExists(_ session: SessionRef) -> Bool { !gone.contains(session.id) }
+
     func activity(of session: SessionRef) -> SessionActivity? { activities[session.id] }
     func isRateLimited(_ session: SessionRef) -> Bool { rateLimited.contains(session.id) }
     var interruptSucceeds = true

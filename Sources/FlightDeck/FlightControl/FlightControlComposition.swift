@@ -157,7 +157,7 @@ final class FlightControlGraph {
         swarm.handoffDecisions = driver
         // One pass over every swarm's working agents (see `SwarmService.onTick`). Every hand-off
         // the pass began has finished when `evaluate` returns, and passes never overlap, so any
-        // mark still set — a `.stopFailed` never reaches `onHandedOff` — is cleared here.
+        // mark still set (a path that returned before `onHandedOff`) is cleared here.
         swarm.onTick = { [weak swarm, weak driver] agents in
             guard let driver else { return }
             await driver.evaluate(agents)
