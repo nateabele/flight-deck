@@ -2443,8 +2443,16 @@ What is open, in the order it will bite:
   package are untested. A release needs both; do not publish on aarch64 alone.
 - **Linux has no Bonjour without `avahi-publish`.** The hostd publishes `_fd-host._tcp` and
   `_fd-host-pair._tcp` by running it. A minimal server or container has none, so the user types the
-  address into Add Host → Linux. Pair-by-address dials 47411, so it reaches Linux hosts only; a Mac
-  host is found through Bonjour (its pairing port is random).
+  address into Add Host → Linux. Pair-by-address dials 47411, which both hostds now bind, so it
+  reaches a Mac host too (Add Host → Mac has its own address field). A Mac whose 47411 is taken
+  falls back to an ephemeral port, shown on its pairing sheet; the controller must then type
+  `address:port`. Not done: retrying 47411 in the background once it frees, so a long-lived
+  squatter costs every window that one extra step.
+- **The pairing sheet's address list is never verified end to end across a real tailnet.** Unit
+  tests drive `HostPairingAddresses.list` and the paste parse with fixed inputs, and loopback
+  proves an address-only controller pairs at `127.0.0.1:47411`; a second Mac over Tailscale is the
+  maintainer's check. The list is gathered once per arm, so an interface that changes while a
+  code is up is not reflected until the next code.
 - **The GUI end-to-end checklist is the maintainer's.** Agents cannot run it here (AGENTS.md rule 2). The four
   checks: pair a second Mac (Settings → Hosting on the target, Hosts → Add Host on the controller,
   `flightdeck host info <name>` lists Xcode versions); revoke from the host's Hosting tab (controller
@@ -2807,15 +2815,42 @@ Still open:
   than `prompt_changed` when one ends on an unresolved call, so `answerless` does not fire and
   claude's own "Waiting for you — permission prompt" stays up. Cost on the live 238-file
   directory: 1.2ms a tick while the tab is in that state.
-- **A subagent's dialog still cannot be answered from the phone.** The phone derives its card
-  from the parent's feed, which does not hold the call, and the Mac cannot tell the blocked
-  subagent from one that is merely running a tool (both end on an unresolved `tool_use`). The
-  dialog header names the agent *type*, not its id. A `PermissionRequest` hook (not registered by
-  the plugin today) or reading the dialog header off the screen could disambiguate. Either needs
-  a wire decision, because the prompt is derived on both ends and never sent.
+- **Resolved 2026-10-06 (5af1598a..1412d846, branch `subagent-model`): a subagent's dialog can
+  now be answered from the phone.** The plugin registers a record-only `PermissionRequest` hook.
+  `DialogAttribution` matches it to the preceding `PreToolUse` with the same `agent_id`,
+  `tool_name` and tool input, because claude 2.1.291's subagent `PermissionRequest` carries an
+  `agent_id` but no `tool_use_id`. `PromptService` then treats the attributed call, still
+  unresolved in that subagent's own file, as the open prompt (`openPromptAgent`). The phone reads
+  that agent's page with `timeline.page(agent:)` and answers with `prompt.answer(agent:)`.
+  `subagent_prompt` stays as the fallback when no hook attributed the call (older plugin, hook not
+  loaded, no match): an unattributed open subagent call still refuses it rather than guessing.
 - **The registry poll itself** (`SessionStatusWatcher.drain`, mtime-cached) and the rest of the
   tick were ~4.5% of a core in the same sample. An FSEvents or `DISPATCH_SOURCE_TYPE_VNODE` watch
   on the status directory could replace the 500ms rescan. Not done: it is a separate, smaller win.
+
+Known gaps in the subagent model (2026-10-06):
+- `AskUserQuestion` raised by a subagent is out of scope. Only permission dialogs are attributed.
+- A second tab that joins an existing conversation gets no tree replay until the tree changes.
+- A subagent dialog already open when Flight Deck relaunches is never attributed: the hook
+  watcher starts at the end of the log, so the `PermissionRequest` that raised it is never read.
+  That dialog falls back to the `subagent_prompt` refusal.
+- Closed 2026-10-06 (final fix wave): a stale attributed dialog outliving an approve-in-terminal,
+  an empty tree after the registry briefly lost a tab, every historical agent read while the
+  process start was unknown, a tree projected for a tab with no status (drift), the Mac hiding
+  a blocked agent's count while the parent waited, and a byte-identical event on every subagent
+  file write.
+- The phone's Subagents section and card have not been checked on a real device. The GUI check
+  (`docs/MOBILE.md`, item 67c) is Nate's.
+- **Fixed (2026-10-06): `retireEndedDialogs` dropped a fresh attribution.** Two causes: a
+  `waitingFor` filling in from nothing counted as a new wait, and a back-to-back dialog lost its
+  attribution to its predecessor's waiting-to-busy edge (about 1 in 7 consecutive subagent
+  dialogs). A fill-in is no longer a change, and an edge skips a dialog raised within
+  `SessionStore.dialogRetireGrace` (1s). Remaining limit: a dialog answered within 1s of
+  appearing keeps its attribution until the next edge.
+- **`@Published subagentTrees` publishes trees that differ only in `SubagentNode.modified`.** This
+  invalidates the sidebar up to 2 Hz for each conversation with a writing agent. The cost is not
+  measured. Fix: keep the raw tree unpublished, and publish only when the display projection
+  changes.
 
 ## UI suite on the UI-test Mac (2026-10-06)
 

@@ -63,7 +63,7 @@ final class SessionStatusIconLayoutTests: XCTestCase {
     }
 
     private func countWidth(_ status: SessionStatus?) -> CGFloat {
-        let host = NSHostingView(rootView: SubagentCount(status: status))
+        let host = NSHostingView(rootView: SubagentCount(status: status, tree: .empty))
         host.layoutSubtreeIfNeeded()
         return host.fittingSize.width
     }

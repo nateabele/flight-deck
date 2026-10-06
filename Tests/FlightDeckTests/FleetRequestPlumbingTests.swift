@@ -61,7 +61,7 @@ final class FleetRequestPlumbingTests: XCTestCase {
         let endpoint = try await start()
         let expected = page()
         server.onRequest = { _, cid, request, reply in
-            guard case .timeline(let id, let anchor, let limit) = request else {
+            guard case .timeline(let id, let anchor, let limit, _) = request else {
                 return XCTFail("wrong request")
             }
             XCTAssertEqual(id, self.session)

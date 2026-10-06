@@ -120,6 +120,16 @@ final class SessionStore: ObservableObject {
     /// Nil falls back to `openPromptProbe`, which is what a test that installs only that gets.
     var openPromptProbeInline: ((UUID) -> Result<String, TimelineErrorCode>?)?
 
+    /// Which subagent's file holds the call `openPromptCalls` names for a tab, or absent when
+    /// it is the tab's own. Asked straight after `openPromptProbe` succeeds, so the two answer
+    /// about the same derivation. Without it the phone would page the PARENT's feed for a call
+    /// that lives in a subagent's file and never find the card's tool call.
+    var openPromptAgentProbe: ((UUID) -> String?)?
+
+    /// This tick's owning subagent for each tab in `openPromptCalls` that a subagent owns.
+    /// Rebuilt wholesale by every `commitStatuses`, like `openPromptCalls` beside it.
+    private(set) var openPromptAgents: [UUID: String] = [:]
+
     /// Session ids in most-recently-active order (index 0 == current selection).
     /// Consulted by `closeSession` so closing the active tab returns to the tab you
     /// were on before it rather than the top of the sidebar. Not persisted: after a
@@ -1053,6 +1063,20 @@ final class SessionStore: ObservableObject {
             workingDirectory: { [weak self] conversationID in
                 self?.repos.flatMap(\.sessions)
                     .first { $0.pinnedConversationID == conversationID }?.transcriptDirectory
+            },
+            // Both resolve conversation -> tab live, for the same reason as the two above. The
+            // process start bounds which `subagents/` files are this run's agents: a resumed
+            // conversation's folder still holds every agent of its earlier runs.
+            agentStartedAt: { [weak self] conversationID in
+                guard let self,
+                      let tab = self.repos.flatMap(\.sessions)
+                          .first(where: { $0.pinnedConversationID == conversationID })?.id,
+                      let pid = self.claudePID(of: tab),
+                      let micros = ProcessTree().startTime(of: pid) else { return nil }
+                return Date(timeIntervalSince1970: TimeInterval(micros) / 1_000_000)
+            },
+            lastPromptSubmit: { [weak self] conversationID in
+                self?.lastPromptSubmits[conversationID]
             })
         runtimes[instance] = runtime
         return runtime
@@ -1174,6 +1198,45 @@ final class SessionStore: ObservableObject {
     /// Sub-agent counts kept separately so one arriving before the registry has been
     /// read is not lost, and so a registry refresh never clobbers it.
     private var subagentCounts: [UUID: Int] = [:]
+
+    /// Each tab's background-agent tree, rebuilt from `subagents/` files by `ClaudeRuntime`.
+    /// Cleared at close, repin and retarget, so a tab never shows the previous conversation's
+    /// agents — but, unlike `subagentCounts`, NOT when the registry loses the tab's row (see
+    /// `commitStatuses`): the watcher would never republish a blocked agent's unchanged tree.
+    ///
+    /// `@Published` so an open popover follows a node appearing or finishing: no other
+    /// published field moves when only the tree does.
+    @Published private(set) var subagentTrees: [UUID: SubagentTree] = [:]
+
+    /// When the user last submitted a prompt, by conversation id. Filled by the prompt-submit
+    /// hook (a later task); until then empty, and the tree falls back to the process start.
+    var lastPromptSubmits: [UUID: Date] = [:]
+
+    /// The agent and call behind the permission dialog a conversation is showing, by
+    /// conversation id. Raised by the record-only `PermissionRequest` hook; Esc fires no hook,
+    /// so the hook log alone can leave it outliving a dismissed or approved dialog —
+    /// `commitStatuses` also retires it when the tab's wait ends (`retireEndedDialogs`).
+    private(set) var pendingDialogs: [UUID: PendingDialog] = [:]
+
+    func pendingDialog(forConversation id: UUID) -> PendingDialog? { pendingDialogs[id] }
+
+    func pendingDialog(for tab: UUID) -> PendingDialog? {
+        guard let at = locate(tab) else { return nil }
+        return pendingDialogs[repos[at.repo].sessions[at.session].pinnedConversationID]
+    }
+
+    func subagentTree(for tab: UUID) -> SubagentTree { subagentTrees[tab] ?? .empty }
+
+    /// The tree as the Mac shows it: the node that owns the tab's open dialog marked
+    /// `.blocked`, by the same rule `FleetProjection.wire` applies for the phone. The stored
+    /// tree is rebuilt from files and never says "blocked" — that comes from the transcript
+    /// call `openPromptAgents` ties to it — so a popover reading the raw tree could never
+    /// show the one agent that is waiting on you.
+    func displaySubagentTree(for tab: UUID) -> SubagentTree {
+        let tree = subagentTree(for: tab)
+        guard let agent = openPromptAgents[tab], let call = openPromptCalls[tab] else { return tree }
+        return tree.marking(blocked: agent, call: call)
+    }
 
     /// One registry watcher per account with a live claude tab, keyed like every other
     /// registry here.
@@ -1766,7 +1829,10 @@ final class SessionStore: ObservableObject {
             hasBackgroundWork: backgroundWorkSessions.contains(session.id),
             openPromptCall: openPromptCalls[session.id],
             apiError: apiErrors[session.id],
-            planGates: planGates
+            planGates: planGates,
+            subagents: FleetProjection.subagentModel(
+                of: session, trees: subagentTrees, status: statuses[session.id]),
+            openPromptAgent: openPromptAgents[session.id]
         )
     }
 
@@ -3423,7 +3489,8 @@ final class SessionStore: ObservableObject {
                     repos[repoIndex], statuses: statuses, unread: unreadIdle,
                     backgroundWork: backgroundWorkSessions,
                     openPromptCalls: openPromptCalls, apiErrors: apiErrors,
-                    planGates: planGates
+                    planGates: planGates,
+                    subagentTrees: subagentTrees, openPromptAgents: openPromptAgents
                 ),
                 at: repoIndex
             ))
@@ -4563,6 +4630,7 @@ final class SessionStore: ObservableObject {
         stopStatusWatchingIfUnused(account: closed.account)
         statuses.removeValue(forKey: id)
         subagentCounts.removeValue(forKey: id)
+        subagentTrees.removeValue(forKey: id)
         resetComposerReadiness(for: id, conversation: closedConversation)
         // A queued prompt for a tab that no longer exists is the most literal case of "text
         // that will never be typed", and its tokens go with it: `acceptedPromptTokens` is
@@ -4968,7 +5036,8 @@ final class SessionStore: ObservableObject {
                         repo, statuses: statuses, unread: unreadIdle,
                         backgroundWork: backgroundWorkSessions,
                         openPromptCalls: openPromptCalls, apiErrors: apiErrors,
-                        planGates: planGates
+                        planGates: planGates,
+                        subagentTrees: subagentTrees, openPromptAgents: openPromptAgents
                     ), at: at
                 ))
             }
@@ -5538,6 +5607,11 @@ final class SessionStore: ObservableObject {
 
     func applyRegistryForTesting(_ next: [UUID: SessionStatus]) {
         commitStatuses(next, backgroundWork: backgroundWorkSessions)
+    }
+
+    /// The hook watcher's dialog feed, without a hook log on disk.
+    func ingestDialogChangesForTesting(_ changes: [DialogAttribution.Change]) {
+        ingestDialogChanges(changes)
     }
 
     /// Test seams. Production drives both from `applyRegistry`; a test that only cares about
@@ -7703,6 +7777,7 @@ final class SessionStore: ObservableObject {
     private func resetComposerReadiness(for tabID: UUID, conversation: UUID) {
         composerReadinessByTab.removeValue(forKey: tabID)
         hookEventWatcher?.forget(conversation)
+        pendingDialogs[conversation] = nil
     }
 
     /// The registry tick's half of the same rule, which is a *demotion* and not a reset: it
@@ -7778,6 +7853,7 @@ final class SessionStore: ObservableObject {
             composerReadinessByTab.removeValue(forKey: tabID)
         }
         hookEventWatcher?.forget(conversation)
+        pendingDialogs[conversation] = nil
     }
 
     /// The tab's terminal screen, or nil when there is no surface or it cannot be read.
@@ -7848,13 +7924,78 @@ final class SessionStore: ObservableObject {
         guard isStatusWatchingEnabled, hookEventWatcher == nil else { return }
         let watcher = HookEventWatcher(
             directory: hookEventDirectory,
-            clock: clock
-        ) { [weak self] readiness in
-            self?.ingestHookEvents(readiness)
-        }
+            clock: clock,
+            onChange: { [weak self] readiness in
+                self?.ingestHookEvents(readiness)
+            },
+            onDialog: { [weak self] in self?.ingestDialogChanges($0) }
+        )
         watcher.start()
         hookEventWatcher = watcher
     }
+
+    private func ingestDialogChanges(_ changes: [DialogAttribution.Change]) {
+        for change in changes {
+            switch change {
+            case .raised(let conversation, let dialog):
+                pendingDialogs[conversation] = dialog
+                pendingDialogRaisedAt[conversation] = now()
+            case .cleared(let conversation): pendingDialogs[conversation] = nil
+            case .promptSubmitted(let conversation, let at):
+                pendingDialogs[conversation] = nil
+                lastPromptSubmits[conversation] = at
+            }
+        }
+        recommitStatuses()
+    }
+
+    /// Retires a tab's attributed dialog when the wait it was raised for has observably ended:
+    /// the tab went from `waiting` to anything else (or lost its status), or a tab still
+    /// waiting changed what it waits for.
+    ///
+    /// **Why the hook log alone is not enough.** It clears on PostToolUse, UserPromptSubmit
+    /// and SessionEnd. Approving a long-running subagent Bash in the terminal fires none of
+    /// those until the tool finishes, so the call stays unresolved and still named. If the
+    /// parent then waits on something that raises no PermissionRequest — an AskUserQuestion
+    /// (written only at resolve) or claude's own select list after Stop —
+    /// `PromptService.attributingSubagents` would offer the stale call, and an Allow tap would
+    /// pass every check and press Return on whatever list is on screen.
+    ///
+    /// **Why only on an observed edge, never on "not waiting now".** PermissionRequest fires
+    /// ~70ms BEFORE the registry flips the tab to `waiting`, and `ingestDialogChanges` then
+    /// recommits while the tab still reads `busy`. A rule of "clear while not waiting" would
+    /// erase every fresh attribution in that window, before the wait it belongs to began.
+    ///
+    /// **Two edges that are not this dialog's, and are skipped.**
+    /// - A reason filling in where there was none (`waitingFor` nil or empty → a value) is the
+    ///   same wait: the registry may write `waiting` before it writes why. Only a change between
+    ///   two non-empty reasons is a new wait.
+    /// - A dialog raised within `dialogRetireGrace` of the edge belongs to the NEXT wait. With
+    ///   back-to-back dialogs, B's PermissionRequest is ingested on the same 500ms tick as a
+    ///   registry read that still says `busy`; the waiting → busy edge is A's. Retiring on it
+    ///   dropped B's attribution for roughly 1 in 7 consecutive subagent dialogs. No human
+    ///   answers a dialog within a second of it appearing, so the window costs nothing real.
+    private func retireEndedDialogs(previous: [UUID: SessionStatus], next: [UUID: SessionStatus]) {
+        let now = now()
+        for (id, old) in previous where old.activity == .waiting {
+            let new = next[id]
+            let left = new?.activity != .waiting
+            let before = old.waitingFor ?? "", after = new?.waitingFor ?? ""
+            let moved = !left && !before.isEmpty && !after.isEmpty && before != after
+            guard left || moved, let at = locate(id) else { continue }
+            let conversation = repos[at.repo].sessions[at.session].pinnedConversationID
+            if let raised = pendingDialogRaisedAt[conversation],
+               now.timeIntervalSince(raised) < Self.dialogRetireGrace { continue }
+            pendingDialogs[conversation] = nil
+            pendingDialogRaisedAt[conversation] = nil
+        }
+    }
+
+    /// See `retireEndedDialogs`: two registry ticks of margin over the hook's ~70ms lead.
+    static let dialogRetireGrace: TimeInterval = 1.0
+
+    /// When each conversation's pending dialog was ingested, for `dialogRetireGrace`.
+    private var pendingDialogRaisedAt: [UUID: Date] = [:]
 
     /// Fans one hook-log tick out to every live claude runtime. The log carries no account —
     /// only the conversation id each `ClaudeRuntime.sources` is keyed by — so unlike
@@ -8489,6 +8630,7 @@ final class SessionStore: ObservableObject {
         for (id, status) in next where previous[id]?.activity != status.activity {
             lastActiveAtByID[id] = stamp
         }
+        let previousOpenPromptAgents = openPromptAgents
         // Shadowed, mutable: `derivedOpenPromptCalls` fills in `answerless` on every `waiting`
         // entry below, ahead of every comparison this function makes — a tick where only that
         // field moves must be recognized as a change exactly like any other, not smuggled in
@@ -8512,7 +8654,14 @@ final class SessionStore: ObservableObject {
         // downstream ever clears, since `derivedOpenPromptCalls` only visits `waiting` tabs.
         for id in next.compactMap({ $0.value.activity == .waiting ? $0.key : nil }) {
             next[id]?.answerless = statuses[id]?.answerless ?? false
+            // Seeded like `answerless`, for the same reason: the field is recomputed below
+            // after the probe, and without the seed the pre-probe assignment would differ from
+            // `statuses` on every tick of an attributed prompt and publish twice per tick.
+            next[id]?.blockedSubagentType = statuses[id]?.blockedSubagentType
         }
+        // Ahead of `derivedOpenPromptCalls`, so a dialog this tick retires is not offered by
+        // the very probe that runs against it below.
+        retireEndedDialogs(previous: previous, next: next)
         // Installed **above** the guard rather than below it, because the third axis is
         // derived FROM them: `openPromptProbe` asks this store what each tab is doing, and
         // asking it against the statuses this tick is replacing would report no dialog on
@@ -8532,9 +8681,14 @@ final class SessionStore: ObservableObject {
         // episode, is every tick until the episode ends.
         if next != statuses { statuses = next }
         let derived = derivedOpenPromptCalls(&next)
+        // Every waiting tab, every tick (nil when unattributed), so an unchanged tick stays equal.
+        for id in next.compactMap({ $0.value.activity == .waiting ? $0.key : nil }) {
+            next[id]?.blockedSubagentType = derived.agents[id].flatMap { subagentTrees[id]?.node($0)?.type }
+        }
         if next != statuses { statuses = next }
         if backgroundWork != backgroundWorkSessions { backgroundWorkSessions = backgroundWork }
         openPromptCalls = derived.calls
+        openPromptAgents = derived.agents
         openPromptFailureCodes = derived.codes
         // THREE axes, not one. A task starting or ending under an otherwise-idle tab moves
         // only `backgroundWork` — guarding on `statuses` alone swallowed that tick entirely,
@@ -8545,12 +8699,21 @@ final class SessionStore: ObservableObject {
         guard next != previous
             || backgroundWork != previousBackgroundWork
             || openPromptCalls != previousOpenPromptCalls
+            // The same call id moving from the parent to a subagent (or between subagents)
+            // changes where the phone must read it, so it is a change even though the id is not.
+            || openPromptAgents != previousOpenPromptAgents
         else { return }
         // A session that HAD a status and no longer does means its `claude` exited.
         // Drop its sub-agent count too, so a later process reusing the same session
         // UUID does not inherit a count from the dead one. Counts for sessions that
         // never had a status are deliberately left alone — that is the
         // count-arrives-before-registry case.
+        //
+        // The tree is NOT dropped here: its lifetime follows the runtime attachment (cleared at
+        // repin, retarget and close through `applySubagents(tab, .empty)`), not the registry
+        // row. `SubagentWatcher` republishes only when its own tree changes, and a blocked
+        // agent writes nothing — so a tree dropped on a registry blink came back as
+        // `subagents: []` on the phone for good, in exactly the case this feature is for.
         for id in previous.keys where next[id] == nil {
             subagentCounts.removeValue(forKey: id)
         }
@@ -8558,8 +8721,12 @@ final class SessionStore: ObservableObject {
         // alone, with every `SessionStatus` unchanged, and that tick still has to reach the
         // wire.
         let backgroundWorkChanged = previousBackgroundWork.symmetricDifference(backgroundWork)
+        // The agent that owns the dialog is part of the same fact: the same call id moving
+        // between files changes where a phone must read it and which node it marks blocked.
         let openPromptChanged = Set(previousOpenPromptCalls.keys).union(openPromptCalls.keys)
             .filter { previousOpenPromptCalls[$0] != openPromptCalls[$0] }
+            .union(Set(previousOpenPromptAgents.keys).union(openPromptAgents.keys)
+                .filter { previousOpenPromptAgents[$0] != openPromptAgents[$0] })
         // `openPromptChanged` is deliberately not unioned in: a tab with a dialog has a status,
         // so it is already in `next.keys`, and adding it would only be a way for this set to
         // disagree with itself.
@@ -8683,7 +8850,9 @@ final class SessionStore: ObservableObject {
                 subagentCount: transition.new?.subagentCount ?? 0,
                 hasBackgroundWork: backgroundWorkSessions.contains(transition.id),
                 openPromptCall: openPromptIdentity(of: transition.id),
-                answerless: transition.new?.answerless ?? false
+                answerless: transition.new?.answerless ?? false,
+                subagents: wireSubagents(of: transition.id),
+                openPromptAgent: openPromptAgents[transition.id]
             )
         })
     }
@@ -8728,8 +8897,9 @@ final class SessionStore: ObservableObject {
     /// two can never read as two different moments for what is one underlying fact.
     private func derivedOpenPromptCalls(
         _ next: inout [UUID: SessionStatus]
-    ) -> (calls: [UUID: String], codes: [UUID: String]) {
+    ) -> (calls: [UUID: String], codes: [UUID: String], agents: [UUID: String]) {
         var calls: [UUID: String] = [:]
+        var agents: [UUID: String] = [:]
         var codes: [UUID: String] = [:]
         let now = now()
         // Snapshotted before the loop, deliberately: the loop below mutates `next[id]` on every
@@ -8743,6 +8913,7 @@ final class SessionStore: ObservableObject {
             switch openPromptProbe.flatMap({ $0(id) }) {
             case .success(let callID):
                 calls[id] = callID
+                agents[id] = openPromptAgentProbe?(id)
                 stuckPromptEpisodes[id] = nil
                 next[id]?.answerless = false
             case .failure(let code) where code.code == "prompt_changed":
@@ -8768,7 +8939,7 @@ final class SessionStore: ObservableObject {
         for id in staleEpisodeIDs {
             stuckPromptEpisodes[id] = nil
         }
-        return (calls, codes)
+        return (calls, codes, agents)
     }
 
     /// One tab's identity as it goes on the wire. Never `.unreported` — this build always
@@ -8833,6 +9004,31 @@ final class SessionStore: ObservableObject {
         }
     }
 
+    /// Stored per tab, and told to the fleet. A node appearing or finishing moves no status
+    /// field, so without its own emission a connected phone would hold yesterday's tree until
+    /// some unrelated tick happened to carry it. Skipped when there is no status yet, like
+    /// `applySubagentCount`: the first `commitStatuses` emission carries the tree then.
+    ///
+    /// **Emitted only when the WIRE form moves.** `SubagentNode.modified` is part of tree
+    /// equality, so every append to a live agent's file is a "new" tree; emitting on that sent
+    /// a byte-identical `activityChanged` to every phone, and took a replay-ring slot, on each
+    /// write. The latest tree is still stored: the Mac's popover reads it directly.
+    func applySubagents(_ id: UUID, _ tree: SubagentTree) {
+        guard subagentTrees[id] != tree else { return }
+        let before = wireSubagents(of: id)
+        subagentTrees[id] = tree
+        guard let status = statuses[id], wireSubagents(of: id) != before else { return }
+        emit(.activityChanged(
+            id: id, activity: status.activity.rawValue,
+            waitingFor: status.waitingFor, subagentCount: status.subagentCount,
+            hasBackgroundWork: backgroundWorkSessions.contains(id),
+            openPromptCall: openPromptIdentity(of: id),
+            answerless: status.answerless,
+            subagents: wireSubagents(of: id),
+            openPromptAgent: openPromptAgents[id]
+        ))
+    }
+
     /// Applied from a transcript watcher. Stored even when the registry has not yet
     /// reported this session, so the next `applyRegistry` picks it up.
     func applySubagentCount(_ id: UUID, _ count: Int) {
@@ -8868,8 +9064,23 @@ final class SessionStore: ObservableObject {
             // Carried for the same reason: a sub-agent count is not news about whether a dialog
             // is nameable, so `status.answerless` — already current, `commitStatuses` is the
             // only writer of it — rides along unchanged.
-            answerless: status.answerless
+            answerless: status.answerless,
+            subagents: wireSubagents(of: id),
+            openPromptAgent: openPromptAgents[id]
         ))
+    }
+
+    /// A tab's subagents as they go on the wire right now, or nil for an agent this build does
+    /// not model them for. Shared by every `activityChanged` emission because the fold
+    /// overwrites `subagents` unconditionally: one emission that left it out would replace a
+    /// phone's tree with nil.
+    private func wireSubagents(of id: UUID) -> [WireSubagent]? {
+        guard let session = session(for: id),
+              let tree = FleetProjection.subagentModel(
+                  of: session, trees: subagentTrees, status: statuses[id])
+        else { return nil }
+        return FleetProjection.wire(
+            tree, blocked: openPromptAgents[id], call: openPromptCalls[id])
     }
 
     private func injector(for id: UUID) -> TextInjecting? {
@@ -8937,6 +9148,9 @@ final class SessionStore: ObservableObject {
         // and diffs the result against the pre-call snapshot to decide notifications.
         // Editing `statuses` here would corrupt that "before" picture.
         subagentCounts[tabID] = 0
+        // Through `applySubagents`, not a bare removal: a tree of finished agents leaves the
+        // count at 0 already, so no later status tick would tell a phone the tree is gone.
+        applySubagents(tabID, .empty)
 
         stopWatching(tabID)
 
@@ -9000,6 +9214,9 @@ final class SessionStore: ObservableObject {
         // never fires. The badge would sit at its pre-retarget value until the new watcher
         // happens to count something itself, which may be never.
         subagentCounts[tabID] = 0
+        // Through `applySubagents`, not a bare removal: a tree of finished agents leaves the
+        // count at 0 already, so no later status tick would tell a phone the tree is gone.
+        applySubagents(tabID, .empty)
 
         stopWatching(tabID)
         startWatching(tabID: tabID)
@@ -9045,7 +9262,8 @@ final class SessionStore: ObservableObject {
                     repos[destination], statuses: statuses, unread: unreadIdle,
                     backgroundWork: backgroundWorkSessions,
                     openPromptCalls: openPromptCalls, apiErrors: apiErrors,
-                    planGates: planGates
+                    planGates: planGates,
+                    subagentTrees: subagentTrees, openPromptAgents: openPromptAgents
                 ),
                 at: destination
             ))
@@ -9144,6 +9362,7 @@ final class SessionStore: ObservableObject {
         case .title(let title): applyExternalTitle(tabID, title)
         case .activity(let activity): applyActivity(activity, to: tabID)
         case .subagentCount(let count): applySubagentCount(tabID, count)
+        case .subagents(let tree): applySubagents(tabID, tree)
         case .turnEnded: applyTurnEnded(to: tabID)
         case .turnAborted: applyTurnAborted(to: tabID)
         case .outputSignals(let signals):

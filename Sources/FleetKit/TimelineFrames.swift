@@ -146,7 +146,7 @@ public struct TimelinePage: Codable, Equatable, Sendable {
 public enum FleetRequest: Codable, Equatable, Sendable {
     /// `limit` counts source **records**, not items — one record can carry several. Clamped
     /// to `TimelineLimits.maxLimit` by the reader rather than refused here.
-    case timeline(session: UUID, anchor: TimelineAnchor, limit: Int)
+    case timeline(session: UUID, anchor: TimelineAnchor, limit: Int, agent: String? = nil)
 
     /// The rows of project `project`'s New Session menu.
     ///
@@ -217,7 +217,7 @@ public enum FleetRequest: Codable, Equatable, Sendable {
     enum CodingKeys: String, CodingKey {
         case op, session, anchor, cursor, limit, project
         case query, conversationID, projectPath
-        case intake, ifNot, checkpoint, changes, name
+        case intake, ifNot, checkpoint, changes, name, agent
     }
 
     private enum Op: String, Codable {
@@ -237,7 +237,7 @@ public enum FleetRequest: Codable, Equatable, Sendable {
     public func encode(to encoder: any Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         switch self {
-        case .timeline(let session, let anchor, let limit):
+        case .timeline(let session, let anchor, let limit, let agent):
             try c.encode(Op.timeline, forKey: .op)
             try c.encode(session, forKey: .session)
             try c.encode(anchor.name, forKey: .anchor)
@@ -245,6 +245,9 @@ public enum FleetRequest: Codable, Equatable, Sendable {
             // would invite a reader to treat it as offset 0 — the opposite end of the file.
             try c.encodeIfPresent(anchor.cursor, forKey: .cursor)
             try c.encode(limit, forKey: .limit)
+            // Absent for the conversation's own feed, so an older Mac sees the request it
+            // has always seen; present only to ask for one subagent's file instead.
+            try c.encodeIfPresent(agent, forKey: .agent)
         case .newSessionOptions(let project):
             try c.encode(Op.newSessionOptions, forKey: .op)
             try c.encode(project, forKey: .project)
@@ -307,7 +310,8 @@ public enum FleetRequest: Codable, Equatable, Sendable {
             self = .timeline(
                 session: try c.decode(UUID.self, forKey: .session),
                 anchor: anchor,
-                limit: try c.decode(Int.self, forKey: .limit)
+                limit: try c.decode(Int.self, forKey: .limit),
+                agent: try c.decodeIfPresent(String.self, forKey: .agent)
             )
         case .newSessionOptions:
             self = .newSessionOptions(project: try c.decode(UUID.self, forKey: .project))

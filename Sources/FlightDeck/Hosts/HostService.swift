@@ -23,9 +23,10 @@ final class HostService: ObservableObject {
     @Published private(set) var statuses: [UUID: HostLinkState] = [:]
     let registry: HostRegistry
 
-    /// The Linux hostd's pairing listener port. A Mac host's listener is ephemeral and is
-    /// found through `_fd-host-pair._tcp`, so typing an address only reaches Linux hosts.
-    static let pairingPort: UInt16 = 47411
+    /// Every hostd's pairing listener port, Linux and Mac (`DarwinHostServer.pairingPort`), so
+    /// an address typed without a port reaches either. A Mac host that found 47411 taken falls
+    /// back to an ephemeral port and shows it on its pairing sheet, for `address:port`.
+    nonisolated static let pairingPort: UInt16 = 47411
 
     private let controllerName: String
     private let dial: HostLinkDialing
@@ -117,8 +118,8 @@ final class HostService: ObservableObject {
         return try adopt(paired)
     }
 
-    /// Pairing by address, for a host Bonjour cannot reach (a Linux box without Avahi, or one
-    /// across a tailnet). `address` is `host` or `host:port`; the port defaults to 47411.
+    /// Pairing by address, for a host Bonjour cannot reach (a Linux box without Avahi, or
+    /// either kind of host across a tailnet). `address` is `host` or `host:port`; the port defaults to 47411.
     func pair(code: PairingCode, address: String) async throws -> HostRecord {
         guard let endpoint = Self.pairingEndpoint(address),
               case .hostPort(let host, _) = endpoint
@@ -141,7 +142,7 @@ final class HostService: ObservableObject {
 
     /// `host`, `host:port`, `[v6]` or `[v6]:port`. A bare IPv6 literal has several colons and
     /// no port, so only one colon, or `]:`, means a port was given.
-    static func pairingEndpoint(_ address: String) -> NWEndpoint? {
+    nonisolated static func pairingEndpoint(_ address: String) -> NWEndpoint? {
         let text = address.trimmingCharacters(in: .whitespacesAndNewlines)
         let hasPort = text.hasPrefix("[") ? text.contains("]:") : text.filter { $0 == ":" }.count == 1
         return HostLink.endpoint(from: hasPort ? text : "\(text):\(pairingPort)")

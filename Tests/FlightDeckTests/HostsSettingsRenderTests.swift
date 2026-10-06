@@ -61,14 +61,26 @@ final class HostsSettingsRenderTests: XCTestCase {
                                  to: dir.appendingPathComponent("hosts-row-states-light.png"), appearance: .aqua)
     }
 
-    func testRenderAddHostSheet() throws {
+    func testRenderAddHostSheet() async throws {
         let dir = try outputDirectory()
         let file = FileManager.default.temporaryDirectory.appendingPathComponent("hosts-\(UUID()).json")
         let service = HostService(registry: HostRegistry(fileURL: file, secrets: InMemoryHostSecretStore()),
                                   controllerName: "render")
         try PlanningRender.write(AddHostSheet(hostService: service, kind: .mac),
-                                 size: NSSize(width: 460, height: 380),
+                                 size: NSSize(width: 460, height: 420),
                                  to: dir.appendingPathComponent("add-host-mac.png"))
+        // The Mac tab after the search has given up on Bonjour: hint up, address field in use.
+        final class Silent: HostPairingBrowsing {
+            var onResults: (([PairingBrowser.DiscoveredMac]) -> Void)?
+            func start() {}
+            func stop() {}
+        }
+        let hinted = AddHostModel(browser: Silent(), notFoundDelay: 0)
+        await hinted.start().value
+        hinted.address = "100.64.0.7:47411 K7QM-2XPA-9TRB"
+        try PlanningRender.write(AddHostSheet(hostService: service, kind: .mac, model: hinted),
+                                 size: NSSize(width: 460, height: 420),
+                                 to: dir.appendingPathComponent("add-host-mac-not-found.png"))
         try PlanningRender.write(AddHostSheet(hostService: service, kind: .linux),
                                  size: NSSize(width: 460, height: 420),
                                  to: dir.appendingPathComponent("add-host-linux.png"))
@@ -101,16 +113,30 @@ final class HostsSettingsRenderTests: XCTestCase {
             AdminController(slot: UUID(), name: "laptop", pairedAt: Date().addingTimeInterval(-86_400 * 3)),
             AdminController(slot: UUID(), name: "studio", pairedAt: Date().addingTimeInterval(-600)),
         ]
+        final class Arms: @unchecked Sendable {
+            private let lock = NSLock()
+            private var ports = [47411, 52001]
+            func next() -> Int { lock.lock(); defer { lock.unlock() }; return ports.count > 1 ? ports.removeFirst() : ports[0] }
+        }
+        let arms = Arms()
         let server = try AdminSocketServer(path: path) { r in
             switch r {
             case .status: .status(paired: 2, armedUntil: .distantFuture, listeningPort: 47410, hostName: "Dana's MacBook Pro")
             case .listControllers: .controllers(controllers)
-            case .arm: .armed(code: "7KQ2-M9XD-4RTA", expiresAt: Date().addingTimeInterval(118))
+            // The second arm is the fallback: 47411 taken, an ephemeral port reported.
+            case .arm: .armed(code: "7KQ2-M9XD-4RTA", expiresAt: Date().addingTimeInterval(118),
+                              pairingPort: arms.next())
             default: .ok
             }
         }
         defer { server.stop() }
-        let on = HostingController(service: Agent(.enabled), adminPath: path)
+        let on = HostingController(service: Agent(.enabled), adminPath: path, addresses: { port in
+            HostPairingAddresses.list(
+                tailscale: .init(ipv4: ["100.64.0.7"], dnsName: "danas-mbp.tail1234.ts.net."),
+                interfaces: [.init(name: "en0", address: "192.0.2.20", isPointToPoint: false,
+                                   isBroadcast: true, isLoopback: false)],
+                primary: "en0", localHostName: "Danas-MacBook-Pro", port: port)
+        })
         await on.refresh().value
         try PlanningRender.write(HostingSettingsTab(controller: on), size: tabSize,
                                  to: dir.appendingPathComponent("hosting-on.png"))
@@ -119,8 +145,15 @@ final class HostsSettingsRenderTests: XCTestCase {
 
         await on.arm().value
         guard let armed = on.armed else { return XCTFail("arm opened no window") }
-        try PlanningRender.write(ControllerPairingSheet(controller: on, code: armed.code, expiresAt: armed.expiresAt),
-                                 size: NSSize(width: 380, height: 330),
+        try PlanningRender.write(ControllerPairingSheet(controller: on, code: armed.code, expiresAt: armed.expiresAt,
+                                                        port: armed.port),
+                                 size: NSSize(width: 420, height: 560),
                                  to: dir.appendingPathComponent("hosting-pair-sheet.png"))
+        await on.arm().value
+        guard let fallback = on.armed else { return XCTFail("second arm opened no window") }
+        try PlanningRender.write(ControllerPairingSheet(controller: on, code: fallback.code, expiresAt: fallback.expiresAt,
+                                                        port: fallback.port),
+                                 size: NSSize(width: 420, height: 600),
+                                 to: dir.appendingPathComponent("hosting-pair-sheet-fallback-port.png"))
     }
 }

@@ -142,3 +142,25 @@ final class HookEventWatcherTests: XCTestCase {
         XCTAssertEqual(seen[b], .live, "an event appended after construction is still read")
     }
 }
+
+@MainActor
+final class HookEventWatcherDialogTests: XCTestCase {
+    /// The dialog callback is fed by the same drain as readiness: a PermissionRequest that
+    /// carries no call id is attributed through the PreToolUse logged just before it.
+    func testPermissionRequestIsAttributedThroughTheWatcher() throws {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("fd-hook-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let sid = UUID()
+        var got: [DialogAttribution.Change] = []
+        let watcher = HookEventWatcher(directory: dir, clock: nil, onChange: { _ in },
+                                       onDialog: { got += $0 })
+        let base = #""session_id":"\#(sid.uuidString.lowercased())","tool_name":"Bash","tool_input":{"command":"rm -rf x"}"#
+        let lines = #"{"hook_event_name":"PreToolUse",\#(base),"agent_id":"a28ad87b","tool_use_id":"toolu_X"}"# + "\n"
+            + #"{"hook_event_name":"PermissionRequest",\#(base),"agent_id":"a28ad87b"}"# + "\n"
+        try Data(lines.utf8).write(to: dir.appendingPathComponent("events.ndjson"))
+        watcher.drain()
+        XCTAssertEqual(got, [.raised(sid, PendingDialog(agentID: "a28ad87b", callID: "toolu_X"))])
+    }
+}

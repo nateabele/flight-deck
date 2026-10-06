@@ -200,9 +200,9 @@ final class CLIRunnerTests: XCTestCase {
         let t = FakeTransport()
         _ = runner("answer", "alpha", "[[1]]", transport: t)
         t.push(.snapshot(seq: 1, fleet: fleet(activity: "waiting"), reason: .initial))
-        guard case .req(let cid, .timeline(a, .latest, 200)) = t.sent.last else { return XCTFail("\(t.sent)") }
+        guard case .req(let cid, .timeline(a, .latest, 200, nil)) = t.sent.last else { return XCTFail("\(t.sent)") }
         t.push(.page(cid: cid, questionPage()))
-        guard case .cmd(_, .answerPrompt(a, _, "toolu_q", let answer)) = t.sent.last else { return XCTFail("\(t.sent)") }
+        guard case .cmd(_, .answerPrompt(a, _, "toolu_q", let answer, _)) = t.sent.last else { return XCTFail("\(t.sent)") }
         XCTAssertEqual(answer, .answers([[AnswerSelection(index: 1, label: "Blue")]]))
     }
 
@@ -346,7 +346,7 @@ final class CLIRunnerTests: XCTestCase {
         let t = FakeTransport()
         _ = runner("timeline", "alpha", transport: t)
         t.push(.snapshot(seq: 1, fleet: fleet(), reason: .initial))
-        guard case .req(let cid, .timeline(a, .latest, 40)) = t.sent.last else { return XCTFail("\(t.sent)") }
+        guard case .req(let cid, .timeline(a, .latest, 40, nil)) = t.sent.last else { return XCTFail("\(t.sent)") }
         let page = questionPage()
         t.push(.page(cid: cid, page))
         XCTAssertEqual(code, 0)

@@ -192,6 +192,9 @@ final class FleetService: ObservableObject {
         store.openPromptProbe = { [weak prompts] id in
             prompts?.polledOpenPrompt(inSession: id)?.map(\.callID)
         }
+        store.openPromptAgentProbe = { [weak prompts] id in
+            prompts?.openPromptAgent(inSession: id)
+        }
         prompts.onPolledSettled = { [weak store] in store?.recommitStatuses() }
         store.openPromptProbeInline = { [weak prompts] id in
             prompts?.pushedOpenPrompt(inSession: id).map(\.callID)
@@ -533,7 +536,7 @@ final class FleetService: ObservableObject {
             }
         }
         switch request {
-        case .timeline(let session, let anchor, let limit):
+        case .timeline(let session, let anchor, let limit, let agent):
             // A `Task` rather than a synchronous answer, because reading a page is file
             // I/O: `TimelineService` hands the parse to a detached task and resumes here
             // on the main actor, which is `queue`. `reply` is therefore called on
@@ -546,7 +549,7 @@ final class FleetService: ObservableObject {
             // broadcast, and nothing new for `FleetReplicator`'s drift check to guard.
             Task { @MainActor in
                 switch await self.timeline.page(
-                    session: session, anchor: anchor, limit: limit
+                    session: session, agent: agent, anchor: anchor, limit: limit
                 ) {
                 case .success(let page): reply(.page(cid: cid, page))
                 // `.code` is the wire spelling, verbatim — see `TimelineErrorCode`.
@@ -1262,7 +1265,7 @@ final class FleetService: ObservableObject {
             guard store.swarmServiceIfBuilt?.confirmHandoff(session: id) == true else { return .err(cid: cid, code: "no_handoff") }
         case .handoffDecline(let id):
             guard store.swarmServiceIfBuilt?.declineHandoff(session: id) == true else { return .err(cid: cid, code: "no_handoff") }
-        case .answerPrompt(let id, let token, let call, let answer):
+        case .answerPrompt(let id, let token, let call, let answer, let agent):
             // Every refusal is the service's and the store's to make, for the reason `.prompt`
             // states: they are the only things that know the tab's agent, its status, its
             // transcript and its screen, and splitting the checks across two files is how they
@@ -1274,7 +1277,7 @@ final class FleetService: ObservableObject {
             // always answers inline on the way out of `apply`, and `PromptService.answer`'s
             // read is a tail sized for exactly that.
             if case .failure(let code) = prompts.answer(
-                session: id, call: call, answer: answer, token: token
+                session: id, agent: agent, call: call, answer: answer, token: token
             ) {
                 return .err(cid: cid, code: code.code)
             }

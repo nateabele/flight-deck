@@ -28,7 +28,8 @@ enum TimelineReadFailure: Error, Equatable, Sendable {
 /// at the moment an agent is producing output is a visible stall.
 enum TimelineReader: Sendable {
     static func page(
-        session: UUID, agent: AgentID, url: URL, anchor: TimelineAnchor, limit: Int
+        session: UUID, agent: AgentID, url: URL, anchor: TimelineAnchor, limit: Int,
+        sidechain: Bool = false
     ) -> Result<TimelinePage, TimelineReadFailure> {
         // Clamped at BOTH ends, here. Downward because a limit is a hint about what a screen
         // wants and refusing an over-eager client turns a mildly greedy request into a broken
@@ -59,7 +60,7 @@ enum TimelineReader: Sendable {
         // switched on here, so this stays a file about paging and budgets. `nonisolated`
         // there is what lets it be called from this `Sendable` type off the main actor.
         let mapped: [(line: SourceLine, items: [TimelineItem])] = source.lines.map {
-            ($0, agent.timelineItems(inLine: $0.text, at: $0.offset).map(capped))
+            ($0, agent.timelineItems(inLine: $0.text, at: $0.offset, sidechain: sidechain).map(capped))
         }
 
         // Backwards anchors trim the oldest end and move `start`; forwards trims the newest

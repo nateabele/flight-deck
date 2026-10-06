@@ -109,7 +109,8 @@ struct SessionStatusIcon: View {
     }
 }
 
-/// A busy session's sub-agent count, drawn at the row's trailing edge.
+/// A busy session's sub-agent count — or a waiting one's, while an agent is blocked — drawn
+/// at the row's trailing edge.
 ///
 /// Trailing rather than beside the status glyph: inline, the numeral widened the leading
 /// status column and pushed that one row's title right of every other. Placed immediately
@@ -118,15 +119,62 @@ struct SessionStatusIcon: View {
 /// "Working — N subagents", and a bare numeral read after the title would say it twice.
 struct SubagentCount: View {
     let status: SessionStatus?
+    let tree: SubagentTree
+    /// Click the count to see which subagents those are; a bare numeral answered "how many"
+    /// but never "which one is blocked on me".
+    @State private var showing = false
+
+    /// The numeral to draw, or nil for no badge. Busy with agents, as before — OR any agent
+    /// blocked, whatever the parent's activity: while a subagent's dialog is up the parent
+    /// reads `waiting`, and a busy-only rule hid the count (and its popover) exactly when the
+    /// user needed to see which agent was asking. A blocked agent is a live one, so the count
+    /// never reads 0 then.
+    static func badge(status: SessionStatus?, tree: SubagentTree) -> Int? {
+        guard let status else { return nil }
+        if status.activity == .busy, status.subagentCount > 0 { return status.subagentCount }
+        let blocked = tree.nodes.contains {
+            if case .blocked = $0.state { return true } else { return false }
+        }
+        return blocked ? max(status.subagentCount, 1) : nil
+    }
 
     var body: some View {
-        if let status, status.activity == .busy, status.subagentCount > 0 {
-            Text("\(status.subagentCount)")
-                .font(.caption2)
-                .monospacedDigit()
-                .foregroundStyle(.tint)
-                .help(status.tooltip)
-                .accessibilityHidden(true)
+        if let status, let count = Self.badge(status: status, tree: tree) {
+            Button { showing.toggle() } label: {
+                Text("\(count)")
+                    .font(.caption2)
+                    .monospacedDigit()
+                    .foregroundStyle(.tint)
+            }
+            .buttonStyle(.plain)
+            .help(status.tooltip)
+            .accessibilityHidden(true)
+            .popover(isPresented: $showing) { outline }
+        }
+    }
+
+    private var outline: some View {
+        let rows = SubagentOutline.rows(tree)
+        return VStack(alignment: .leading, spacing: 6) {
+            ForEach(rows, id: \.node.id) { row in
+                HStack(spacing: 6) {
+                    stateSymbol(row.node.state)
+                    Text(row.node.type).fontWeight(.medium)
+                    Text(row.node.description).foregroundStyle(.secondary).lineLimit(1)
+                }
+                .padding(.leading, CGFloat(row.depth) * 12)
+            }
+        }
+        .padding(12)
+        .frame(minWidth: 260, alignment: .leading)
+    }
+
+    @ViewBuilder
+    private func stateSymbol(_ state: SubagentNode.State) -> some View {
+        switch state {
+        case .running: Image(systemName: "circle.fill").foregroundStyle(.tint)
+        case .blocked: Image(systemName: "exclamationmark.circle.fill").foregroundStyle(.orange)
+        case .done: Image(systemName: "checkmark.circle").foregroundStyle(.secondary)
         }
     }
 }

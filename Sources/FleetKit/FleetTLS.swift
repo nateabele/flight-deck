@@ -153,8 +153,8 @@ public enum FleetTLS {
     static func pairingListenerParameters(profile: PairingProfile) -> NWParameters {
         let parameters = bootstrapParameters(suites: ciphersuites(profile.tlsSuites))
         // Same narrow purpose as on the fleet listener: a socket the OS is still draining
-        // from a previous run of this process. The pairing listener always takes a fresh
-        // OS-assigned port, so it never rebinds one of its own.
+        // from a previous run of this process — which matters now that the macOS hostd binds
+        // the fixed 47411 for every window (a phone's window still takes an ephemeral port).
         parameters.allowLocalEndpointReuse = true
         return parameters
     }

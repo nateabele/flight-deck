@@ -9,7 +9,7 @@ final class ClaudePluginPayloadTests: XCTestCase {
         return try XCTUnwrap(url, "ClaudePlugin must be bundled as a folder reference")
     }
 
-    func testHooksManifestNamesExactlyTheSixLifecycleEvents() throws {
+    func testHooksManifestNamesExactlyTheSevenWiredEvents() throws {
         let url = try pluginRoot().appendingPathComponent("hooks/hooks.json")
         let data = try Data(contentsOf: url)
         let obj = try XCTUnwrap(
@@ -18,9 +18,11 @@ final class ClaudePluginPayloadTests: XCTestCase {
         let hooks = try XCTUnwrap(obj["hooks"] as? [String: Any])
         XCTAssertEqual(
             Set(hooks.keys),
-            ["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop", "SessionEnd"],
-            "PermissionRequest has no observable clear and Notification fires for permission "
-                + "prompts too — see the spec. Neither may be wired."
+            ["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "PermissionRequest",
+             "Stop", "SessionEnd"],
+            "PermissionRequest is wired record-only, to attribute a dialog to an agent and call; "
+                + "it has no observable clear, so it never drives readiness. Notification fires "
+                + "for permission prompts too and must stay unwired."
         )
     }
 
@@ -113,7 +115,7 @@ final class ClaudePluginPayloadTests: XCTestCase {
                 }
             }
         }
-        XCTAssertEqual(commands.count, 6, "the premise: six wired events, six commands")
+        XCTAssertEqual(commands.count, 7, "the premise: seven wired events, seven commands")
 
         let session = UUID()
         for command in commands {

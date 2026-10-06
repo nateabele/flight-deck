@@ -25,6 +25,14 @@ enum ComposerReadiness: Equatable, Sendable {
 struct HookEventRecord: Equatable {
     let sessionID: UUID
     let event: String
+    // `var … = nil`, not `let`: Swift's memberwise init skips a `let` that has a default, and
+    // existing `HookEventRecord(sessionID:event:)` call sites must keep compiling.
+    var agentID: String? = nil
+    var toolUseID: String? = nil
+    var toolName: String? = nil
+    /// Canonical JSON (keys sorted), so a PermissionRequest's input compares equal to the
+    /// PreToolUse's for the same call.
+    var toolInput: String? = nil
 
     /// Fails closed: anything unrecognised yields nil and the caller keeps its last state.
     static func decode(_ line: String) -> HookEventRecord? {
@@ -34,7 +42,13 @@ struct HookEventRecord: Equatable {
               let sessionID = UUID(uuidString: rawID),
               let event = obj["hook_event_name"] as? String
         else { return nil }
-        return HookEventRecord(sessionID: sessionID, event: event)
+        let input = obj["tool_input"].flatMap {
+            try? JSONSerialization.data(withJSONObject: $0, options: [.sortedKeys, .fragmentsAllowed])
+        }.flatMap { String(data: $0, encoding: .utf8) }
+        return HookEventRecord(sessionID: sessionID, event: event,
+                               agentID: (obj["agent_id"] as? String).flatMap { SubagentID.isValid($0) ? $0 : nil },
+                               toolUseID: obj["tool_use_id"] as? String,
+                               toolName: obj["tool_name"] as? String, toolInput: input)
     }
 }
 

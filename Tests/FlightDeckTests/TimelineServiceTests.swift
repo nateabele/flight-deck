@@ -148,6 +148,51 @@ final class TimelineServiceTests: XCTestCase {
         XCTAssertEqual(store.timelineSource(of: session.id), .noTranscript)
     }
 
+    /// The agent id came off the wire: it is refused before any path is built or read.
+    func testATraversalSubagentIDIsRefusedWithoutReading() async throws {
+        let url = try writeTranscript()
+        let (store, session) = store(transcript: url)
+        let service = TimelineService(store: store)
+        let calls = CallBox()
+        service.reader = { _, _, _, _, _, _ in
+            calls.record(nil, false)
+            return .failure(.unreadable)
+        }
+        let result = await service.page(session: session.id, agent: "../x", anchor: .latest, limit: 8)
+        guard case .failure(let code) = result else { return XCTFail("expected a refusal") }
+        XCTAssertEqual(code.code, "unknown_agent")
+        XCTAssertEqual(calls.count, 0)
+    }
+
+    /// A subagent's feed is its own file, mapped as a sidechain.
+    func testASubagentPageReadsItsOwnFileAsASidechain() async throws {
+        let url = try writeTranscript()
+        let (store, session) = store(transcript: url)
+        let service = TimelineService(store: store)
+        let calls = CallBox()
+        service.reader = { _, _, url, _, _, sidechain in
+            calls.record(url, sidechain)
+            return .failure(.unreadable)
+        }
+        _ = await service.page(session: session.id, agent: "a28ad87b", anchor: .latest, limit: 8)
+        let expected = url.deletingPathExtension()
+            .appendingPathComponent("subagents/agent-a28ad87b.jsonl")
+        XCTAssertEqual(calls.url?.path, expected.path)
+        XCTAssertEqual(calls.sidechain, true)
+    }
+
+    private final class CallBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _count = 0, _url: URL?, _sidechain: Bool?
+        func record(_ url: URL?, _ sidechain: Bool) {
+            lock.lock(); defer { lock.unlock() }
+            _count += 1; _url = url; _sidechain = sidechain
+        }
+        var count: Int { lock.lock(); defer { lock.unlock() }; return _count }
+        var url: URL? { lock.lock(); defer { lock.unlock() }; return _url }
+        var sidechain: Bool? { lock.lock(); defer { lock.unlock() }; return _sidechain }
+    }
+
     /// Every field of the page, not just its text. The cursors are what the next request is
     /// made from, so a page whose content is right and whose `end` is one byte off is a
     /// conversation the client can never page past — and the content assertion alone would
@@ -156,7 +201,7 @@ final class TimelineServiceTests: XCTestCase {
         let url = try writeTranscript()
         let (store, session) = store(transcript: url)
         let page = try await TimelineService(store: store)
-            .page(session: session.id, anchor: .latest, limit: 40).get()
+            .page(session: session.id, agent: nil, anchor: .latest, limit: 40).get()
         XCTAssertEqual(page.items.map(\.body.text), ["hello", "hi"])
         // `"<offset>#<block>"`: the user line begins the file, the assistant line begins one
         // byte past its 79-byte predecessor.
@@ -172,19 +217,19 @@ final class TimelineServiceTests: XCTestCase {
         let (emptyStore, _) = store(transcript: nil)
         let service = TimelineService(store: emptyStore)
 
-        let unknown = await service.page(session: UUID(), anchor: .latest, limit: 40)
+        let unknown = await service.page(session: UUID(), agent: nil, anchor: .latest, limit: 40)
         XCTAssertEqual(unknown, .failure("unknown_session"))
 
         let (noneStore, noneSession) = store(transcript: nil)
         let missing = await TimelineService(store: noneStore)
-            .page(session: noneSession.id, anchor: .latest, limit: 40)
+            .page(session: noneSession.id, agent: nil, anchor: .latest, limit: 40)
         XCTAssertEqual(missing, .failure("no_transcript"))
 
         let (pendingStore, pendingSession) = store(
             transcript: directory.appendingPathComponent("not-written-yet.jsonl")
         )
         let pending = await TimelineService(store: pendingStore)
-            .page(session: pendingSession.id, anchor: .latest, limit: 40)
+            .page(session: pendingSession.id, agent: nil, anchor: .latest, limit: 40)
         XCTAssertEqual(pending, .failure("unreadable"),
                        "a claude tab before its first turn: claude creates the transcript "
                        + "only when it first has something to persist")
@@ -200,7 +245,7 @@ final class TimelineServiceTests: XCTestCase {
         let replicator = attachedReplicator(to: store)
         let before = replicator.seq
         _ = await TimelineService(store: store)
-            .page(session: session.id, anchor: .latest, limit: 40)
+            .page(session: session.id, agent: nil, anchor: .latest, limit: 40)
         XCTAssertEqual(replicator.seq, before, "reading a transcript is not a fleet mutation")
     }
 
@@ -216,14 +261,14 @@ final class TimelineServiceTests: XCTestCase {
         let (store, session) = store(transcript: url)
         let service = TimelineService(store: store)
         let offMainActor = DispatchSemaphore(value: 0)
-        service.reader = { session, agent, url, anchor, limit in
+        service.reader = { session, agent, url, anchor, limit, _ in
             if !Thread.isMainThread { offMainActor.signal() }
             return TimelineReader.page(
                 session: session, agent: agent, url: url, anchor: anchor, limit: limit
             )
         }
 
-        let page = try await service.page(session: session.id, anchor: .latest, limit: 40).get()
+        let page = try await service.page(session: session.id, agent: nil, anchor: .latest, limit: 40).get()
 
         XCTAssertEqual(page.items.map(\.body.text), ["hello", "hi"],
                        "the substituted reader must still be the real one")
@@ -254,7 +299,7 @@ final class TimelineServiceTests: XCTestCase {
         let reading = DispatchSemaphore(value: 0)
         let closed = DispatchSemaphore(value: 0)
         let closedMidRead = DispatchSemaphore(value: 0)
-        service.reader = { session, agent, url, anchor, limit in
+        service.reader = { session, agent, url, anchor, limit, _ in
             reading.signal()
             if closed.wait(timeout: .now() + Self.readerRelease) == .success {
                 closedMidRead.signal()
@@ -264,7 +309,7 @@ final class TimelineServiceTests: XCTestCase {
             )
         }
 
-        let inFlight = Task { await service.page(session: session.id, anchor: .latest, limit: 40) }
+        let inFlight = Task { await service.page(session: session.id, agent: nil, anchor: .latest, limit: 40) }
         let started = await arrived(reading)
         XCTAssertTrue(started, "the read must be dispatched before the tab is closed")
 
@@ -306,7 +351,7 @@ final class TimelineServiceTests: XCTestCase {
         let latestReading = DispatchSemaphore(value: 0)
         let afterReading = DispatchSemaphore(value: 0)
         let overlapped = DispatchSemaphore(value: 0)
-        service.reader = { session, agent, url, anchor, limit in
+        service.reader = { session, agent, url, anchor, limit, _ in
             let mine = anchor == .latest ? latestReading : afterReading
             let theirs = anchor == .latest ? afterReading : latestReading
             mine.signal()
@@ -318,8 +363,8 @@ final class TimelineServiceTests: XCTestCase {
             )
         }
 
-        let latest = Task { await service.page(session: session.id, anchor: .latest, limit: 40) }
-        let after = Task { await service.page(session: session.id, anchor: .after(0), limit: 40) }
+        let latest = Task { await service.page(session: session.id, agent: nil, anchor: .latest, limit: 40) }
+        let after = Task { await service.page(session: session.id, agent: nil, anchor: .after(0), limit: 40) }
         let pages = [try await latest.value.get(), try await after.value.get()]
 
         XCTAssertEqual(overlapped.wait(timeout: .now()), .success)

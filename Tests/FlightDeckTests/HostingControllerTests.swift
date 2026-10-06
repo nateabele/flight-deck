@@ -97,6 +97,52 @@ final class HostingControllerTests: XCTestCase {
         XCTAssertEqual(c.hostName, "m")
     }
 
+    /// The sheet lists where to reach this Mac at the port the window really bound, and the
+    /// copy button's string is the best of those plus the code: a pairing port that fell back
+    /// to an ephemeral one must not be shown, or copied, as 47411.
+    func testArmListsAddressesAtTheReportedPortAndCopiesTheBest() async throws {
+        let path = socketPath()
+        let server = try AdminSocketServer(path: path) { r in
+            switch r {
+            case .arm: .armed(code: "K7QM-2XPA-9TRB", expiresAt: .distantFuture, pairingPort: 52001)
+            default: .ok
+            }
+        }
+        defer { server.stop() }
+        let a = FakeAgent(); a.status = .enabled
+        let c = HostingController(service: a, adminPath: path, addresses: { port in
+            HostPairingAddresses.list(tailscale: .init(ipv4: ["100.64.0.7"], dnsName: nil),
+                                      interfaces: [], primary: nil, localHostName: "studio", port: port)
+        })
+        await c.arm().value
+        XCTAssertEqual(c.armed?.port, 52001)
+        XCTAssertEqual(c.pairingAddresses.map(\.endpoint), ["100.64.0.7:52001", "studio.local:52001"])
+        XCTAssertEqual(c.pairingDetails, "100.64.0.7:52001 K7QM-2XPA-9TRB")
+    }
+
+    /// A hostd that names no port (a Linux one, or one built before the field) listens on the
+    /// fixed 47411, and only a port other than that one earns its own line on the sheet.
+    func testAnUnreportedPortIsTheFixedOneAndOnlyAnotherIsCalledOut() async throws {
+        let path = socketPath()
+        let server = try AdminSocketServer(path: path) { r in
+            switch r {
+            case .arm: .armed(code: "K7QM-2XPA-9TRB", expiresAt: .distantFuture)
+            default: .ok
+            }
+        }
+        defer { server.stop() }
+        let a = FakeAgent(); a.status = .enabled
+        let c = HostingController(service: a, adminPath: path, addresses: { port in
+            HostPairingAddresses.list(tailscale: nil, interfaces: [], primary: nil, localHostName: "m", port: port)
+        })
+        await c.arm().value
+        XCTAssertEqual(c.armed?.port, 47411)
+        XCTAssertEqual(c.pairingDetails, "m.local:47411 K7QM-2XPA-9TRB")
+        XCTAssertNil(ControllerPairingSheet.portNote(port: 47411))
+        XCTAssertEqual(ControllerPairingSheet.portNote(port: 52001),
+                       "Pairing on port 52001 because 47411 is in use. Include it when you type this Mac's address.")
+    }
+
     /// The pairing sheet closes itself on this: a controller that paired grows the count.
     func testTheWindowClosesOnceAControllerPairs() async throws {
         let path = socketPath()

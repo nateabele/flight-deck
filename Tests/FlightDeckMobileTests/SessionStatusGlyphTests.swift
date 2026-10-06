@@ -196,4 +196,16 @@ final class SessionStatusGlyphTests: XCTestCase {
             answerless: answerless
         )
     }
+
+    /// Task 8 pins the identical literal against the Mac's `SessionStatus.tooltip`.
+    func testAWaitingSessionBlockedOnASubagentNamesIt() {
+        let implementer = WireSubagent(id: "a1", parent: nil, type: "implementer",
+                                       description: "Task 14", state: "blocked")
+        var s = session(activity: "waiting", waitingFor: "permission prompt")
+        s.subagents = [implementer]
+        s.openPromptAgent = "a1"
+        XCTAssertEqual(SessionStatusGlyph.label(for: s),
+                       "Waiting for you — implementer: permission prompt")
+        XCTAssertEqual(SessionStatusGlyph.waitingCaption(for: s), "implementer: permission prompt")
+    }
 }

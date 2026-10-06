@@ -375,7 +375,7 @@ final class PromptLifecycleTests: XCTestCase {
         // screen nothing could read — the trap `PromptServiceTests` documents at length.
         spy.showOptions(["Yes", "No"], selected: 0)
 
-        _ = service.answer(session: id, call: "toolu_STALE", answer: .allow, token: UUID())
+        _ = service.answer(session: id, agent: nil, call: "toolu_STALE", answer: .allow, token: UUID())
 
         XCTAssertEqual(recorder.events, [
             .answer(sent: "toolu_STALE", open: "toolu_OPEN", code: "prompt_changed"),
@@ -388,7 +388,7 @@ final class PromptLifecycleTests: XCTestCase {
     func testAnAnswerAgainstATabWithNoOpenDialogRecordsOpenAsNone() throws {
         let (service, recorder, _, id) = makeService(activity: .idle)
 
-        _ = service.answer(session: id, call: "toolu_GHOST", answer: .allow, token: UUID())
+        _ = service.answer(session: id, agent: nil, call: "toolu_GHOST", answer: .allow, token: UUID())
 
         XCTAssertEqual(recorder.events, [
             .answer(sent: "toolu_GHOST", open: nil, code: "not_waiting"),
@@ -403,7 +403,7 @@ final class PromptLifecycleTests: XCTestCase {
         service.tail = { _, _ in (lines, false) }
         spy.showOptions(["Yes", "No"], selected: 0)
 
-        _ = service.answer(session: id, call: "toolu_BASH", answer: .allow, token: UUID())
+        _ = service.answer(session: id, agent: nil, call: "toolu_BASH", answer: .allow, token: UUID())
 
         XCTAssertEqual(recorder.events, [
             .answer(sent: "toolu_BASH", open: "toolu_BASH", code: nil),
@@ -421,7 +421,7 @@ final class PromptLifecycleTests: XCTestCase {
         // The screen cannot be read at all, so the store refuses after the call ids matched.
         spy.viewportIsReadable = false
 
-        _ = service.answer(session: id, call: "toolu_BASH", answer: .allow, token: UUID())
+        _ = service.answer(session: id, agent: nil, call: "toolu_BASH", answer: .allow, token: UUID())
 
         XCTAssertEqual(recorder.events, [
             .answer(sent: "toolu_BASH", open: "toolu_BASH", code: "unreadable_screen"),

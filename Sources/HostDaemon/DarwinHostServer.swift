@@ -51,9 +51,13 @@ final class DarwinHostPeer: HostPeer, @unchecked Sendable {
 /// callbacks on per-peer queues; both reach this state only through `queue`.
 final class DarwinHostServer: @unchecked Sendable {
     static let serviceType = "_fd-host._tcp"
+    /// The pairing listener's port, the Linux hostd's (`LinuxHostd.Ports.pairing`) and the one
+    /// `HostService.pairingEndpoint` assumes for an address typed without a port.
+    static let pairingPort: NWEndpoint.Port = 47411
 
     let root: URL
     private let requestedPort: NWEndpoint.Port?
+    private let requestedPairingPort: NWEndpoint.Port?
     private let hostName: @Sendable () -> String
     private let store: ControllerStore
     private let core: HostServerCore
@@ -118,13 +122,18 @@ final class DarwinHostServer: @unchecked Sendable {
     /// passes `LocalEndpoints.advertised`. Defaults to none so a loopback test's controller is
     /// not handed the developer's real interfaces to store.
     /// `probe` is injectable only so a test can make `host.info` slow on purpose.
+    /// `pairingPort` is where each pairing window listens first; `main.swift` passes
+    /// `Self.pairingPort`. Nil (the default) is ephemeral, so a loopback test never contends
+    /// for 47411 with the developer's own hostd or a sibling test shard.
     /// `delegation` is the run/sync/service router (`main.swift` passes
     /// `DelegationHost.standard`); nil serves `host.info` alone, as a 1.0 host did.
     init(root: URL, port: NWEndpoint.Port?, hostName: @escaping @Sendable () -> String,
          endpoints: @escaping @Sendable (UInt16) -> [String] = { _ in [] },
-         probe: HostInfoProbe? = nil, delegation: DelegationHost? = nil) {
+         probe: HostInfoProbe? = nil, delegation: DelegationHost? = nil,
+         pairingPort: NWEndpoint.Port? = nil) {
         self.root = root
         requestedPort = port
+        requestedPairingPort = pairingPort
         self.hostName = hostName
         store = ControllerStore(root: root)
         // The core asks off `queue` (on a peer's queue), so the port it advertises is read
@@ -142,7 +151,8 @@ final class DarwinHostServer: @unchecked Sendable {
     private let advertisedPort: LockedPort
 
     /// The pairing listener's port while a window is armed. Tests dial it directly; a real
-    /// controller finds it through `_fd-host-pair._tcp`.
+    /// controller finds it through `_fd-host-pair._tcp`, or dials the address the user typed
+    /// at `pairingPort` (47411) — which is why the listener is not left ephemeral.
     var pairingPort: NWEndpoint.Port? {
         queue.sync { pairingBoundPort }
     }
@@ -511,16 +521,19 @@ final class DarwinHostServer: @unchecked Sendable {
 
         let name = hostName()
         let bound = BlockingResult<NWEndpoint.Port>()
-        Task {
+        let fixed = requestedPairingPort
+        Task { [self] in
             do {
-                bound.set(.success(try await pairing.start(
-                    code: code, key: key, macName: name, serviceName: name, port: nil)))
+                bound.set(.success(try await bindPairing(pairing, fixed: fixed) {
+                    try await pairing.start(code: code, key: key, macName: name, serviceName: name, port: $0)
+                }))
             } catch {
                 bound.set(.failure(error))
             }
         }
-        // `PairingListener.start` bounds its own bind at 5 s; this only guards a scheduler
-        // that never runs the Task, inside the admin client's own 5 s timeout.
+        // `PairingListener.start` bounds each bind at 5 s, but a refused port fails at once,
+        // so the retries plus the fallback fit; this only guards a scheduler that never runs
+        // the Task, inside the admin client's own 5 s timeout.
         guard case .success(let port) = bound.wait(timeout: 6) else {
             closeWindow(code: code)
             queue.sync { if self.pairing === pairing { closePairing() } }
@@ -538,8 +551,37 @@ final class DarwinHostServer: @unchecked Sendable {
                 closePairing()
             }
         }
-        return .armed(code: code.formatted, expiresAt: expiresAt)
+        return .armed(code: code.formatted, expiresAt: expiresAt, pairingPort: Int(port.rawValue))
     }
+
+    /// Binds `fixed` if it can, else an ephemeral port. `start` is one `PairingListener.start`.
+    ///
+    /// Retried before falling back, because the commonest way to find it taken is our own
+    /// previous window: a re-arm stops the old listener a moment earlier, Network.framework
+    /// releases the port asynchronously (~80 ms measured), and an immediate bind fails with
+    /// EADDRINUSE. A port another process holds costs this whole schedule once per arm, about
+    /// a second, well inside the admin client's 5 s.
+    private func bindPairing(_ pairing: PairingListener, fixed: NWEndpoint.Port?,
+                             start: (NWEndpoint.Port?) async throws -> NWEndpoint.Port) async throws -> NWEndpoint.Port {
+        guard let fixed else { return try await start(nil) }
+        for delay in Self.pairingPortRetries {
+            if delay > 0 { try? await Task.sleep(for: .seconds(delay)) }
+            // A window cancelled or replaced meanwhile must not go on to bind anything.
+            guard queue.sync(execute: { self.pairing === pairing }) else { throw FleetSocketError.didNotBind }
+            do { return try await start(fixed) } catch {
+                // `start` leaves the failed listener registered; drop it before the next try.
+                queue.sync { pairing.stop() }
+            }
+        }
+        // Somebody else's port. An ephemeral window still pairs, by Bonjour on the LAN or by
+        // `address:port` typed from the port the `armed` reply now carries.
+        FileHandle.standardError.write(Data("hostd: pairing port \(fixed) is taken; using an ephemeral port\n".utf8))
+        return try await start(nil)
+    }
+
+    /// Seconds to wait before each try at the fixed pairing port: one at once, then up to a
+    /// second for our own previous listener to finish releasing it.
+    static let pairingPortRetries: [TimeInterval] = [0, 0.1, 0.15, 0.25, 0.5]
 
     /// The sealed key is already out when this runs: the Darwin `PairingListener` fires
     /// `onPaired` from the seal's send completion and offers no gate before it, so a window

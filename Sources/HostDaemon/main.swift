@@ -42,7 +42,10 @@ let delegation = DelegationHost.standard(root: root, power: IOKitPowerAssertions
 // Advertised in every helloAck, so a controller that paired over Bonjour on the LAN also
 // learns this Mac's tailnet address and can still reach it after leaving the room.
 let server = DarwinHostServer(root: root, port: 47410, hostName: { hostName },
-                              endpoints: { LocalEndpoints.advertised(port: $0) }, delegation: delegation)
+                              endpoints: { LocalEndpoints.advertised(port: $0) }, delegation: delegation,
+                              // Fixed, so a controller across a tailnet (no Bonjour) can pair
+                              // by typing this Mac's address alone, as it does a Linux host.
+                              pairingPort: DarwinHostServer.pairingPort)
 
 // The "UI tests running — don't touch" panel is up exactly while a run holds the screen lease
 // (§6.3), so whoever sits at the Mac does not grab the mouse mid-test.

@@ -8,6 +8,11 @@ final class ClaudeRuntime: AgentRuntime {
     private struct Source {
         let subscribers: SubscriberList
         let watcher: TranscriptWatcher?
+        /// Rebuilt from `subagents/` files, so it sees agents launched before this attach.
+        let subagents: SubagentWatcher?
+        /// The transcript fold's count: it sees a launch the instant it is written, before the
+        /// agent's own file exists.
+        var foldCount = 0
     }
 
     private var sources: [UUID: Source] = [:]
@@ -29,17 +34,27 @@ final class ClaudeRuntime: AgentRuntime {
     /// tab that follows its agent into a worktree mid-life must credit the worktree it is in
     /// now, not the directory its watcher happened to start in.
     private let workingDirectory: (UUID) -> String?
+    /// When this conversation's agent process started, keyed by conversation id. Subagent files
+    /// older than it belong to a previous run of the conversation and are not this run's agents.
+    private let agentStartedAt: (UUID) -> Date?
+    /// When the user last submitted a prompt in this conversation: finished agents older than
+    /// it are dropped from the tree.
+    private let lastPromptSubmit: (UUID) -> Date?
 
     init(
         clock: WatchClock? = nil,
         searchIndex: @escaping () -> SearchIndex? = { nil },
         projectPath: @escaping (UUID) -> String? = { _ in nil },
-        workingDirectory: @escaping (UUID) -> String? = { _ in nil }
+        workingDirectory: @escaping (UUID) -> String? = { _ in nil },
+        agentStartedAt: @escaping (UUID) -> Date? = { _ in nil },
+        lastPromptSubmit: @escaping (UUID) -> Date? = { _ in nil }
     ) {
         self.clock = clock
         self.searchIndex = searchIndex
         self.projectPath = projectPath
         self.workingDirectory = workingDirectory
+        self.agentStartedAt = agentStartedAt
+        self.lastPromptSubmit = lastPromptSubmit
     }
 
     /// Subscribes `tab` to `binding`'s conversation, starting a watcher if this is the first
@@ -66,13 +81,22 @@ final class ClaudeRuntime: AgentRuntime {
         subscribers.add(token, onEvent)
 
         var watcher: TranscriptWatcher?
+        var subagents: SubagentWatcher?
         if let url = binding.transcriptURL {
+            let directory = url.deletingPathExtension()
+                .appendingPathComponent("subagents", isDirectory: true)
+            subagents = SubagentWatcher(
+                directory: directory, clock: clock,
+                startedAt: { [weak self] in self?.agentStartedAt(id) },
+                keepDoneSince: { [weak self] in self?.lastPromptSubmit(id) ?? self?.agentStartedAt(id) },
+                onChange: { [weak self] tree in self?.publish(tree, for: id) }
+            )
             watcher = TranscriptWatcher(
                 sessionID: id,
                 url: url,
                 clock: clock,
                 onTitle: { subscribers.emit(.title($0)) },
-                onSubagentCount: { subscribers.emit(.subagentCount($0)) },
+                onSubagentCount: { [weak self] in self?.fold($0, for: id) },
                 onAPIError: { subscribers.emit(.apiError($0)) },
                 onSignals: { subscribers.emit(.outputSignals($0)) },
                 // `onMessages` is passed unconditionally, never `nil` — so `wantsMessages` (see
@@ -114,8 +138,30 @@ final class ClaudeRuntime: AgentRuntime {
             )
             watcher?.start()
         }
-        sources[id] = Source(subscribers: subscribers, watcher: watcher)
+        sources[id] = Source(subscribers: subscribers, watcher: watcher, subagents: subagents)
+        subagents?.start()
+        subagents?.rescan()
         return token
+    }
+
+    /// The count is the larger of the transcript fold and the tree. The fold sees a launch
+    /// the instant it is written, before the agent's own file exists; the tree sees agents
+    /// launched before this attach, which the fold (it starts at end of file) never will.
+    private func fold(_ count: Int, for id: UUID) {
+        sources[id]?.foldCount = count
+        sources[id]?.subagents?.rescan()
+        emitCount(for: id)
+    }
+
+    private func publish(_ tree: SubagentTree, for id: UUID) {
+        sources[id]?.subscribers.emit(.subagents(tree))
+        emitCount(for: id)
+    }
+
+    private func emitCount(for id: UUID) {
+        guard let source = sources[id] else { return }
+        let count = max(source.foldCount, source.subagents?.tree.liveTopLevelCount ?? 0)
+        source.subscribers.emit(.subagentCount(count))
     }
 
     /// Drops one subscriber, and the watcher only when it was the last.
@@ -129,6 +175,7 @@ final class ClaudeRuntime: AgentRuntime {
         source.subscribers.remove(token)
         guard source.subscribers.isEmpty else { return }
         source.watcher?.stop()
+        source.subagents?.stop()
         sources[token.conversationID] = nil
     }
 
@@ -152,6 +199,9 @@ final class ClaudeRuntime: AgentRuntime {
 
     /// Test seam mirroring `TranscriptWatcher.drain()`, so runtime tests need no clock.
     func drainForTesting() {
-        for source in sources.values { source.watcher?.drain() }
+        for source in sources.values {
+            source.watcher?.drain()
+            source.subagents?.rescan()
+        }
     }
 }
