@@ -138,4 +138,18 @@ final class RoutingServiceKindsTests: XCTestCase {
         XCTAssertEqual(contexts, [:])
         XCTAssertEqual(loads, 0, "codex's catalog spawns a process; a release with no creates must not pay for it")
     }
+
+    /// Integration ruling 1: the hand-off driver spills through `kind(for:project:)`, so a
+    /// block naming a merged kind must resolve to the kind it was merged into — the same answer
+    /// the swarm's own launch gets — and an unknown kind is nil (no spill), never a guess.
+    func testKindForABlockResolvesThroughTheProjectRegistry() throws {
+        let svc = RoutingServiceSupport.make()
+        func block(_ kind: KindID) -> ExecutionBlock {
+            ExecutionBlock(kind: kind, harness: "claude", model: "opus", pool: "claude-default",
+                           source: AssignmentSource(by: .default, reason: "r", at: D.at))
+        }
+        XCTAssertEqual(svc.kind(for: block("tests"), project: project)?.id, "tests")
+        XCTAssertEqual(svc.kind(for: block("golden-tests"), project: project)?.id, "snapshot-tests")
+        XCTAssertNil(svc.kind(for: block("no-such-kind"), project: project))
+    }
 }

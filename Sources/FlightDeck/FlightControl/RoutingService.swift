@@ -30,9 +30,13 @@ final class RoutingService: ObservableObject {
     /// A closure, not a compiler: the compiler settings can change between compiles.
     let makeCompiler: @MainActor () -> any RuleCompiling
     let loadCatalogs: @MainActor () async -> AdapterCatalogs
-    let pools: any PoolDirectory
-    let index: any CapabilityIndex
-    let hints: any RuleHintSource
+    /// `var` for one writer: `FlightControlComposition.install` swaps the stand-ins a fresh
+    /// service starts with (default pools, no index, no hints) for the real L3-U/L3-I ones once
+    /// the app has built them. Nothing else assigns these; every router reads them at
+    /// `makeRouter()` time, so an assignment applies to the next route.
+    var pools: any PoolDirectory
+    var index: any CapabilityIndex
+    var hints: any RuleHintSource
     let tasks: any OpenTaskReading
     let writer: any BlockWriting
     /// Projects the panes offer with no session open: the UI-test fixture's. nil in a real launch.

@@ -14,6 +14,15 @@ extension RoutingService {
         catch { return .unreadable("\(error)") }
     }
 
+    /// The kind a block names, as the project's registry resolves it today (a merged kind
+    /// answers as the kind it was merged into) — the same lookup the swarm's launch makes, so a
+    /// hand-off spills on the kind its launch would have. Nil when the registry cannot be read
+    /// or does not know the kind: the caller then does not spill rather than guess.
+    func kind(for block: ExecutionBlock, project: URL) -> TaskKind? {
+        guard let kinds = try? kindStore.kinds(project: project) else { return nil }
+        return KindResolution.resolve(block.kind, in: kinds)
+    }
+
     /// *New* until you open it (spec §6): only planning proposals, which arrive unasked.
     func isNew(_ kind: TaskKind, project: String) -> Bool {
         kind.origin == .planning && !preferences.seenKinds(project: project).contains(kind.id)
