@@ -107,6 +107,11 @@ final class DelegationBootstrapTests: XCTestCase {
         XCTAssertEqual(try FileManager.default.destinationOfSymbolicLink(
             atPath: dir.appendingPathComponent("xcodebuild").path), Self.script.path)
         XCTAssertEqual(hooks.trackedSessions(in: root), [session.id])
+        // And each shell is pointed at the snippet that keeps it first after its startup files.
+        let integration = Self.script.deletingLastPathComponent()
+        XCTAssertEqual(env["ZDOTDIR"], integration.appendingPathComponent("zsh").path)
+        XCTAssertEqual(env["XDG_DATA_DIRS"]?.hasPrefix(integration.path + ":"), true)
+        XCTAssertEqual(env["PROMPT_COMMAND"]?.contains("bash/flightdeck-route-shim.bash"), true)
     }
 
     func testWithoutHooksATabLaunchesExactlyAsBefore() {

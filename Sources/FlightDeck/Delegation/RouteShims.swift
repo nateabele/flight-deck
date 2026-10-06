@@ -17,7 +17,8 @@ import HostKit
 /// The contents are the project's, which is why the watcher below rebuilds every session of a
 /// project together.
 struct RouteShims {
-    /// Spec §8: set to `1` in a tab to run every routed command locally.
+    /// Spec §8: set in a tab to run every routed command locally. Any value but empty or `0`,
+    /// in the shim and the CLI alike (`CLIRunner.bypassesRouting`).
     static let bypassVariable = "FLIGHTDECK_NO_ROUTE"
     /// The CLI the shim should run. Whatever `flightdeck` is first on a tab's PATH is often an
     /// older install with no `route-exec`, which broke every routed command; naming this
@@ -113,6 +114,60 @@ struct RouteShims {
         result["PATH"] = current.isEmpty
             ? dir.path : ([dir.path] + entries.filter { $0 != dir.path }).joined(separator: ":")
         return result
+    }
+
+    /// Saves the user's own `ZDOTDIR` while zsh runs Flight Deck's wrapper dotfiles.
+    static let userZDOTDIRVariable = "FLIGHTDECK_USER_ZDOTDIR"
+    /// What `XDG_DATA_DIRS` means when it is unset (the XDG base-directory spec's default, and
+    /// what fish falls back to), kept behind ours so setting it hides no vendor directory.
+    static let defaultDataDirs = "/usr/local/share:/usr/share"
+
+    /// `Contents/Resources/RouteShim/`: the shim script and, beside it, one snippet per shell.
+    var integration: URL { script.deletingLastPathComponent() }
+
+    /// `environment` with each shell pointed at the snippet that keeps the shim directory first
+    /// on `PATH` after its startup files have run (the snippets under `Resources/RouteShim/`).
+    ///
+    /// **Why `environment(prepending:)` is not enough.** A tab's shell is a login shell, and
+    /// its startup files rebuild `PATH` in front of what it was launched with: macOS's
+    /// `path_helper` puts `/etc/paths` first, and every `PATH=/x:$PATH` in a dotfile goes
+    /// first too. Measured, the shim directory ended up 40th of 43 entries under fish and 18th
+    /// under zsh, so a routed command ran the real binary and never reached its shim. Only the
+    /// shell can put it back, after those files:
+    /// - **fish** reads `<dir>/fish/vendor_conf.d/*.fish` for each `XDG_DATA_DIRS` entry.
+    /// - **zsh** reads its dotfiles from `ZDOTDIR`; ours source the user's (`ZDOTDIR` saved as
+    ///   `FLIGHTDECK_USER_ZDOTDIR`) and hand `ZDOTDIR` back after the last one.
+    /// - **bash** has neither, so `PROMPT_COMMAND` runs ours before every prompt.
+    ///
+    /// Idempotent, like `environment(prepending:)`: a second pass changes nothing.
+    static func shellIntegration(
+        _ environment: [String: String], integration: URL,
+        inherited: [String: String] = ProcessInfo.processInfo.environment
+    ) -> [String: String] {
+        var result = environment
+        func current(_ key: String) -> String? { environment[key] ?? inherited[key] }
+
+        let dataDirs = current("XDG_DATA_DIRS").flatMap { $0.isEmpty ? nil : $0 } ?? defaultDataDirs
+        if !dataDirs.split(separator: ":").contains(Substring(integration.path)) {
+            result["XDG_DATA_DIRS"] = integration.path + ":" + dataDirs
+        }
+
+        let zsh = integration.appendingPathComponent("zsh", isDirectory: true).path
+        if current("ZDOTDIR") != zsh {
+            // Unset stays unset: the wrapper then reads the user's files from `$HOME`, as zsh would.
+            if let user = current("ZDOTDIR") { result[userZDOTDIRVariable] = user }
+            result["ZDOTDIR"] = zsh
+        }
+
+        let bash = ". " + shellQuote(integration.appendingPathComponent("bash/flightdeck-route-shim.bash").path)
+        let prompt = current("PROMPT_COMMAND") ?? ""
+        if !prompt.contains(bash) { result["PROMPT_COMMAND"] = prompt.isEmpty ? bash : bash + "; " + prompt }
+        return result
+    }
+
+    /// Single-quoted for a POSIX shell: the bundle's path has a space in it.
+    private static func shellQuote(_ text: String) -> String {
+        "'" + text.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 }
 

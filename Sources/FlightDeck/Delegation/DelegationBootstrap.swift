@@ -76,7 +76,9 @@ final class DelegationBootstrap: DelegationSessionHooks {
         watch(project)
         var result = RouteShims.environment(environment, prepending: shims.directory(for: session), cli: cli)
         result[Self.shimDirVariable] = shims.directory(for: session).path
-        return result
+        // First on `PATH` only until the login shell's startup files run; the shell snippets
+        // put it back after them (see `shellIntegration`).
+        return RouteShims.shellIntegration(result, integration: shims.integration)
     }
 
     /// Removes the tab's shim directory and, with its project's last tab, the watcher.
