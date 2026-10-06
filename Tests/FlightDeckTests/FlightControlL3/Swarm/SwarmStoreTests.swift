@@ -61,4 +61,31 @@ final class SwarmStoreTests: XCTestCase {
         let custom = URL(fileURLWithPath: "/tmp/custom-state", isDirectory: true)
         XCTAssertEqual(SwarmStore.defaultRoot(stateDirectory: custom), custom)
     }
+
+    /// A file that does not decode loads empty (the app must launch), and the next save would
+    /// overwrite the only copy of every swarm in it. It is moved aside first.
+    func testACorruptFileIsMovedAsideNotOverwritten() throws {
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try Data("not json".utf8).write(to: root.appendingPathComponent("swarms.json"))
+        let store = SwarmStore(root: root)
+        XCTAssertEqual(store.load(), [])
+        store.save([record(.running)])
+        let aside = try XCTUnwrap(try FileManager.default.contentsOfDirectory(atPath: root.path)
+            .first { $0.hasPrefix("swarms.json.corrupt-") })
+        XCTAssertEqual(try String(contentsOf: root.appendingPathComponent(aside), encoding: .utf8), "not json")
+        XCTAssertEqual(store.load().count, 1)
+    }
+
+    /// A newer build's file is not this build's to rewrite in the old format.
+    func testANewerVersionsFileIsMovedAsideNotOverwritten() throws {
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let newer = #"{"v":2,"swarms":[]}"#
+        try Data(newer.utf8).write(to: root.appendingPathComponent("swarms.json"))
+        let store = SwarmStore(root: root)
+        XCTAssertEqual(store.load(), [])
+        store.save([record(.running)])
+        let aside = try XCTUnwrap(try FileManager.default.contentsOfDirectory(atPath: root.path)
+            .first { $0.hasPrefix("swarms.json.v2-") })
+        XCTAssertEqual(try String(contentsOf: root.appendingPathComponent(aside), encoding: .utf8), newer)
+    }
 }
