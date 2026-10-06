@@ -4,8 +4,8 @@ import FleetKit
 import HostKit
 
 /// Reported in `host.info`. A constant bumped with the wire, as on Linux (`hostdVersion` in
-/// LinuxHostd.swift): a tool inside the app's `Contents/MacOS` has no `Bundle.main` of its own
-/// to read a version from, and two hosts of one build must report the same string.
+/// LinuxHostd.swift): the Linux hostd has no bundle to read a version from, and both must
+/// report a string that moves with the wire rather than with the helper app's Info.plist.
 let darwinHostdVersion = "0.1.0"
 
 /// One NWConnection as `HostServerCore` sees it.

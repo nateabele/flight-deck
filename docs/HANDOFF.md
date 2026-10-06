@@ -161,7 +161,9 @@ sub-project C, the next section.
   (its §3.2 lists the deviations decided while building, including the 0xCCAC ruling).
 - Plan: [the host-foundation plan](superpowers/plans/2026-10-04-host-foundation.md).
 - As built: [ARCHITECTURE.md, "Hosts"](ARCHITECTURE.md#hosts-hostkit--hostdaemon--hostdaemonlinux--sourcesflightdeckhosts);
-  scripts in [BUILD.md](BUILD.md); the hostd process hazards in
+  scripts in [BUILD.md](BUILD.md); the macOS hostd ships as the helper app
+  `Contents/Library/LoginItems/Flight Deck Host.app` (`dev.flightdeck.hostd`) so it never borrows
+  the app's identity; the hostd process hazards in
   [AGENT-OPERATIONS.md](AGENT-OPERATIONS.md); open items in [FOLLOWUPS.md](FOLLOWUPS.md).
 - **Sub-project C is built** (next section); probe P3, the one placement assumption, is still
   unverified.

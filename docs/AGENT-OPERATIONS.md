@@ -201,6 +201,17 @@ survives `swap-release.sh`. It listens on **47410** (the host connection) and, o
 pairing window is armed, on a second port (47411 on Linux; an ephemeral one on a Mac), and it
 keeps an admin socket at `<state root>/admin.sock`.
 
+It ships as its own helper app, `Flight Deck.app/Contents/Library/LoginItems/Flight Deck Host.app`
+(bundle id `dev.flightdeck.hostd`, `LSUIElement`), executable `flightdeck-hostd`. Through the
+build that kept it bare at `Contents/MacOS/flightdeck-hostd`, a host Mac could not open Flight Deck
+at all: hostd's `NSApplication` checked in with LaunchServices as `dev.flightdeck.FlightDeck`, so
+`open -a`, Finder and the Dock activated hostd instead of launching the app.
+
+- **After installing the first build with the helper layout over an older one, toggle Hosting off
+  and on** on a host Mac. The registered agent's job was loaded with the old `BundleProgram`, a
+  path the new bundle no longer has, so a restart of that job cannot find its binary until the
+  agent is re-registered (inferred from how launchd loads a job; not observed live).
+
 - **Stop it with the Hosting toggle** (Settings → Hosting → "Let other Macs use this Mac" off), or
   from a shell: `launchctl bootout gui/$UID/dev.flightdeck.hostd`. It exits 0 on SIGTERM and
   unlinks its admin socket. Do not `kill -9` it, least of all mid-pairing: the admin socket file
@@ -216,7 +227,7 @@ keeps an admin socket at `<state root>/admin.sock`.
   paired controller as `SLOT<TAB>NAME<TAB>PAIRED-AT` (`--json` for JSON); `flightdeck-hostd revoke
   SLOT` unpairs one and cuts its live connection. Both exit 2 when hostd is not running. A Mac host
   does the same from Settings → Hosting.
-- **Never launch the hostd binary by hand from `DerivedData/` to "try it".** It binds 47410 and
+- **Never launch the hostd binary or `Flight Deck Host.app` by hand from `DerivedData/` to "try it".** It binds 47410 and
   the admin socket in the real state root, which belong to the live hostd.
 - Interop tests (`test-hostd-linux-interop.sh`) bind fixed ports (47410, 47411) and share the
   package's one `.build`: **never run two at once, and never alongside `test-hostd-linux.sh`.**
