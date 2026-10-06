@@ -191,6 +191,13 @@ final class L3IntegrationRig {
 
     // MARK: - Driving
 
+    var now: Date { clock.now }
+
+    /// The id the capacity ledger and `MeterFormatter` know the account by.
+    func accountID(_ label: String) -> UUID? {
+        preferences.preferences.accounts.first { $0.displayName == label }?.id
+    }
+
     func feed(account label: String, utilization: Double) {
         guard let account = preferences.preferences.accounts.first(where: { $0.displayName == label }) else { return }
         clock.advance(1)

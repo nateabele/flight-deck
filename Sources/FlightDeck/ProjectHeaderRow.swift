@@ -308,7 +308,9 @@ struct ProjectHeaderRow: View {
             if let service = store.swarmServiceIfBuilt,
                let record = service.record(forProject: repo.url.standardizedFileURL.path),
                let summary = swarmSummary {
-                SwarmPopover(record: record, meters: service.meters(forProject: record.project), summary: summary,
+                SwarmPopover(record: record,
+                             pools: service.meterPools(forProject: record.project, ledger: UsageService.shared.ledger, now: Date()),
+                             summary: summary,
                              onPause: { service.pause(project: record.project) },
                              onResume: { service.resume(project: record.project) })
             }
