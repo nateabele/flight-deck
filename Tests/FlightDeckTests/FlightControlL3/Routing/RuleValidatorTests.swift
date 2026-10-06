@@ -23,6 +23,18 @@ final class RuleValidatorTests: XCTestCase {
         XCTAssertTrue(c.assign.modelDefaulted)
     }
 
+    /// A failed rule's reason is the only thing the row shows on its second line, so it must say
+    /// how to fix the rule, not just what went wrong.
+    func testAModelThatDiffersOnlyInCaseIsNamedAsTheFix() {
+        XCTAssertEqual(validate { $0.model = "GPT-6-Luna" }, .failure(.unknownModel("codex", "GPT-6-Luna", suggestion: "gpt-6-luna")))
+        XCTAssertEqual(RuleValidationError.unknownModel("claude", "Sonnet", suggestion: "sonnet").message,
+                       "“Sonnet” matched no model in Claude's catalog — try “sonnet”, or reword the rule")
+        XCTAssertEqual(RuleValidationError.unknownModel("codex", "gpt-9", suggestion: nil).message,
+                       "“gpt-9” matched no model in Codex's catalog — reword the rule to name one it lists")
+        XCTAssertEqual(RuleValidationError.unknownDimension("teleportation").message,
+                       "“teleportation” is not a skill Flight Control scores — reword the rule around a task kind or skill")
+    }
+
     func testANamelessPoolTakesTheAgentsDefaultPool() throws {
         XCTAssertEqual(try validate { $0.pool = nil }.get().assign.pool, "codex-default")
     }
@@ -44,7 +56,7 @@ final class RuleValidatorTests: XCTestCase {
             ("mode", { $0.mode = "some" }, .unknownMode("some")),
             ("no agent", { $0.harness = nil }, .missingHarness),
             ("agent", { $0.harness = "gemini" }, .unknownHarness("gemini")),
-            ("model", { $0.model = "gpt-9" }, .unknownModel("codex", "gpt-9")),
+            ("model", { $0.model = "gpt-9" }, .unknownModel("codex", "gpt-9", suggestion: nil)),
             ("knob value", { $0.knobs = [.init(name: "effort", value: "max")] }, .knobRejected("codex", "gpt-6-sol", "effort", "max")),
             ("knob name", { $0.knobs = [.init(name: "agent", value: "build")] }, .knobRejected("codex", "gpt-6-sol", "agent", "build")),
             ("pool", { $0.pool = "nowhere" }, .unknownPool("nowhere")),
@@ -74,9 +86,9 @@ final class RuleValidatorTests: XCTestCase {
     }
 
     func testMessagesReadAsSentences() {
-        XCTAssertEqual(RuleValidationError.unknownDimension("teleportation").message, "unknown dimension teleportation")
         XCTAssertEqual(RuleValidationError.poolBelongsElsewhere("claude-subs", owner: "claude", harness: "codex").message,
                        "pool claude-subs belongs to claude, not codex")
-        XCTAssertEqual(RuleValidationError.unknownModel("codex", "gpt-9").message, "gpt-9 is not in codex's model list")
+        XCTAssertEqual(RuleValidationError.harnessDisabled("codex").message,
+                       "Codex is turned off — enable it under Agents, or name another agent")
     }
 }

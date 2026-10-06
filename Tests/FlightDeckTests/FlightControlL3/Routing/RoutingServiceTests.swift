@@ -45,7 +45,8 @@ final class RoutingServiceTests: XCTestCase {
         let id = try XCTUnwrap(svc.addRule("Use Codex when a task needs teleportation", to: .global))
         await svc.compile(id, in: .global)
         XCTAssertEqual(svc.rules(.global).first?.state, .failed)
-        XCTAssertEqual(svc.rules(.global).first?.failure, "unknown dimension teleportation")
+        XCTAssertEqual(svc.rules(.global).first?.failure,
+                       "“teleportation” is not a skill Flight Control scores — reword the rule around a task kind or skill")
     }
 
     func testAnUnavailableCompilerLeavesTheRuleADraftAndSaysWhy() async throws {

@@ -63,7 +63,9 @@ public enum RuleValidationError: Error, Equatable, Sendable {
     case unknownHarness(String)
     case harnessDisabled(String)
     case noDefaultModel(String)
-    case unknownModel(String, String)
+    /// `suggestion` is a catalog id that differs only in case — the usual way a model is
+    /// misnamed ("Sonnet" for `sonnet`) — so the failure can name the fix.
+    case unknownModel(String, String, suggestion: String?)
     case knobRejected(String, String, String, String)
     case noPool(String)
     case unknownPool(String)
@@ -71,27 +73,36 @@ public enum RuleValidationError: Error, Equatable, Sendable {
     case fallbackIsPrimary(String)
 
     /// Shown inline under a failed rule (spec §2: "failed (shown inline with the reason)").
+    /// It is the row's whole second line, and the row has no Compile button, so the common
+    /// failures say what to do next, not only what went wrong.
     public var message: String {
         switch self {
         case .declined(let why): return why
         case .malformedTerm: return "a condition names neither one dimension nor one kind"
-        case .unknownDimension(let d): return "unknown dimension \(d)"
+        case .unknownDimension(let d): return "“\(d)” is not a skill Flight Control scores — reword the rule around a task kind or skill"
         case .thresholdOutOfRange(let d): return "\(d) needs a threshold between 0 and 1"
-        case .unknownKind(let k): return "unknown task kind \(k)"
+        case .unknownKind(let k): return "there is no task kind “\(k)” — reword the rule, or add the kind under Task Kinds"
         case .emptyMatch: return "the rule has no conditions"
         case .unknownMode(let m): return "unknown match mode \(m)"
         case .missingHarness: return "the rule names no agent"
         case .unknownHarness(let h): return "\(h) is not a registered agent"
-        case .harnessDisabled(let h): return "\(h) is not enabled"
+        case .harnessDisabled(let h): return "\(Self.agent(h)) is turned off — enable it under Agents, or name another agent"
         case .noDefaultModel(let h): return "\(h) has no default model to fall back to"
-        case .unknownModel(let h, let m): return "\(m) is not in \(h)'s model list"
+        case .unknownModel(let h, let m, let suggestion?):
+            return "“\(m)” matched no model in \(Self.agent(h))'s catalog — try “\(suggestion)”, or reword the rule"
+        case .unknownModel(let h, let m, nil):
+            return "“\(m)” matched no model in \(Self.agent(h))'s catalog — reword the rule to name one it lists"
         case .knobRejected(let h, let m, let k, let v): return "\(h) · \(m) does not accept \(k) \(v)"
         case .noPool(let h): return "\(h) has no pool"
-        case .unknownPool(let p): return "unknown pool \(p)"
+        case .unknownPool(let p): return "there is no account pool “\(p)” — set one up under Capacity, or leave the pool out"
         case .poolBelongsElsewhere(let p, let owner, let h): return "pool \(p) belongs to \(owner), not \(h)"
         case .fallbackIsPrimary(let p): return "the fallback pool \(p) is the rule's own pool"
         }
     }
+
+    /// "claude" → "Claude", for prose. IntakeKit has no agent display names, and a raw id
+    /// mid-sentence reads like a typo.
+    static func agent(_ id: String) -> String { id.prefix(1).uppercased() + id.dropFirst() }
 }
 
 /// Checks a compiler answer against the dimensions, the project's kinds, the registered
@@ -135,7 +146,10 @@ public enum RuleValidator {
             defaulted = true
         }
         guard let model = modelName else { return .failure(.noDefaultModel(harnessName)) }
-        guard catalog.models.contains(where: { $0.id == model }) else { return .failure(.unknownModel(harnessName, model)) }
+        guard catalog.models.contains(where: { $0.id == model }) else {
+            let near = catalog.models.first { $0.id.caseInsensitiveCompare(model) == .orderedSame }?.id
+            return .failure(.unknownModel(harnessName, model, suggestion: near))
+        }
 
         var knobs: [String: String] = [:]
         for k in w.knobs { knobs[k.name] = k.value }

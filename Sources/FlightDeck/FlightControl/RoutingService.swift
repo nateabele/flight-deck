@@ -42,6 +42,9 @@ final class RoutingService: ObservableObject {
     /// Projects the panes offer with no session open: the UI-test fixture's. nil in a real launch.
     let fixtureProjects: [String]?
     private let makeRuleID: () -> String
+    private var compileTasks: [String: Task<Void, Never>] = [:]
+    /// Rules reworded while their old words were compiling.
+    var recompileWhenDone: Set<String> = []
     let now: () -> Date
     /// What the last catalog load saw — hints are drawn from it, because a view cannot await.
     private(set) var lastCatalogs = AdapterCatalogs([])
@@ -111,26 +114,65 @@ final class RoutingService: ObservableObject {
         }
     }
 
+    /// A drag-and-drop move: `id` lands just above `target`, or last when `target` is nil.
+    func moveRule(_ id: String, before target: String?, in scope: RuleScope) {
+        guard id != target else { return }
+        mutate(scope) { rules in
+            guard let from = rules.firstIndex(where: { $0.id == id }) else { return }
+            if let target, !rules.contains(where: { $0.id == target }) { return }
+            let rule = rules.remove(at: from)
+            if let target, let to = rules.firstIndex(where: { $0.id == target }) {
+                rules.insert(rule, at: to)
+            } else {
+                rules.append(rule)
+            }
+        }
+    }
+
     func confirm(_ id: String, in scope: RuleScope) {
         mutate(scope) { rules in
             if let i = rules.firstIndex(where: { $0.id == id }) { rules[i].confirm() }
         }
     }
 
-    func compile(_ id: String, in scope: RuleScope) async {
-        guard !compiling.contains(id), let rule = rules(scope).first(where: { $0.id == id }) else { return }
+    /// Starts compiling and returns at once, with `compiling` already holding the id, so the row
+    /// draws its spinner on the next frame instead of flashing an unexplained draft first.
+    /// False when the rule is gone or already compiling.
+    @discardableResult
+    func startCompile(_ id: String, in scope: RuleScope) -> Bool {
+        guard !compiling.contains(id), let rule = rules(scope).first(where: { $0.id == id }) else { return false }
         compiling.insert(id)
-        defer { compiling.remove(id) }
-        let input = await compilerInput(sentence: rule.sentence, scope: scope)
+        let sentence = rule.sentence
+        compileTasks[id] = Task { [weak self] in await self?.runCompile(id, sentence: sentence, in: scope) }
+        return true
+    }
+
+    func compile(_ id: String, in scope: RuleScope) async {
+        guard startCompile(id, in: scope) else { return }
+        await waitForCompile(id)
+    }
+
+    /// Returns when the rule's current compile, and any recompile queued behind it, is done.
+    func waitForCompile(_ id: String) async {
+        while let task = compileTasks[id] { await task.value }
+    }
+
+    private func runCompile(_ id: String, sentence: String, in scope: RuleScope) async {
+        let input = await compilerInput(sentence: sentence, scope: scope)
         let compiler = makeCompiler()
         let proposal = await compiler.propose(input)
         let outcome = RuleCompilation.finish(proposal, input: input)
         mutate(scope) { rules in
             // An edit made while the compiler ran wins: its words are not the ones compiled.
-            guard let i = rules.firstIndex(where: { $0.id == id }), rules[i].sentence == rule.sentence else { return }
+            guard let i = rules.firstIndex(where: { $0.id == id }), rules[i].sentence == sentence else { return }
             rules[i].record(outcome, by: compiler.ref, at: now())
         }
         if case .unavailable(let why) = outcome { notes[id] = "Compiler unavailable: \(why)" } else { notes[id] = nil }
+        compiling.remove(id)
+        compileTasks[id] = nil
+        // A reword that landed mid-compile threw this result away above; compile the new words
+        // now, or the rule would sit as a draft the user believes is compiling.
+        if recompileWhenDone.remove(id) != nil { startCompile(id, in: scope) }
     }
 
     func compilerInput(sentence: String, scope: RuleScope) async -> RuleCompilerInput {
@@ -160,7 +202,7 @@ final class RoutingService: ObservableObject {
     /// The one write path for both lists. A project whose `routing.json` is invalid is refused:
     /// that file is the user's to fix, and saving Settings' view over it would destroy it.
     @discardableResult
-    private func mutate(_ scope: RuleScope, _ body: (inout [RoutingRule]) -> Void) -> Bool {
+    func mutate(_ scope: RuleScope, _ body: (inout [RoutingRule]) -> Void) -> Bool {
         switch scope {
         case .global:
             var rules = preferences.globalRoutingRules

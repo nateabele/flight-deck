@@ -31,6 +31,9 @@ final class CapabilityRuleHintSourceTests: XCTestCase {
         XCTAssertEqual(hint.ruleID, "r3")
         XCTAssertEqual(hint.snapshotDate, snap1)
         XCTAssertTrue(hint.text.hasPrefix("opus scores 0.18 higher on test-authoring"), hint.text)
+        // Bare: "Switch to opus" re-targets the rule's model, and the rule's own effort is
+        // re-validated against it rather than inheriting whatever variant the index scored.
+        XCTAssertEqual(hint.suggested, ModelRef(harness: "claude", model: "opus"))
     }
 
     func testNoHintWithoutIndexOrBelowMargin() {

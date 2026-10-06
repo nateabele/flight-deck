@@ -75,6 +75,13 @@ struct FixtureRuleCompiler: RuleCompiling {
                                           harness: "codex", model: "gpt-6-sol", modelDefaulted: false, knobs: [],
                                           pool: nil, fallbackPool: nil))
         }
+        // "Sonnet" is the capitalised alias a person types; the catalog lists `sonnet`. The
+        // validator's case-only suggestion is what the UI test reads as the actionable failure.
+        if input.sentence.localizedCaseInsensitiveContains("sonnet") {
+            return .wire(RuleCompilerWire(ok: true, reason: nil, mode: "any", terms: [term("frontend-ui", 0.5)],
+                                          harness: "claude", model: "Sonnet", modelDefaulted: false, knobs: [],
+                                          pool: nil, fallbackPool: nil))
+        }
         if input.sentence.localizedCaseInsensitiveContains("codex") {
             return .wire(RuleCompilerWire(ok: true, reason: nil, mode: "any",
                                           terms: [term("test-authoring", 0.5), term("algorithmic-reasoning", 0.6),
@@ -89,9 +96,10 @@ struct FixtureRuleCompiler: RuleCompiling {
 struct FixtureHints: RuleHintSource {
     private static let snapshot = Date(timeIntervalSince1970: 1_790_000_000)
     func hint(for rule: RoutingRule, kinds: [TaskKind], catalogs: AdapterCatalogs) -> RuleHint? {
-        guard rule.id == "p1" else { return nil }
+        // Gone once the rule routes to the suggestion, as the real index's hint would be.
+        guard rule.id == "p1", rule.compiled?.assign.model != "gpt-6-luna" else { return nil }
         return RuleHint(ruleID: "p1", text: "gpt-6-luna scores 0.14 higher on docs-prose (confidence 0.8)",
-                        snapshotDate: Self.snapshot)
+                        snapshotDate: Self.snapshot, suggested: ModelRef(harness: "codex", model: "gpt-6-luna"))
     }
 }
 

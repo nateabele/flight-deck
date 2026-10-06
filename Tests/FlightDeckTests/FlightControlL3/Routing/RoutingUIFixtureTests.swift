@@ -32,7 +32,21 @@ final class RoutingUIFixtureTests: XCTestCase {
         XCTAssertTrue(RuleText.compiled(compiled).contains("codex · gpt-6-sol · effort high · pool codex-default"))
         let b = try XCTUnwrap(svc.addRule("Use Codex when a task needs teleportation", to: .global))
         await svc.compile(b, in: .global)
-        XCTAssertEqual(svc.rules(.global).last?.failure, "unknown dimension teleportation")
+        XCTAssertEqual(svc.rules(.global).last?.failure,
+                       "“teleportation” is not a skill Flight Control scores — reword the rule around a task kind or skill")
+    }
+
+    /// `RoutingUITests` clicks "Switch to gpt-6-luna" in the hint popover and reads the
+    /// actionable failure line, so both need the fixture to produce them.
+    func testTheFixtureHintSuggestsAModelAndAMisspelledModelFailsWithAFix() async throws {
+        let svc = RoutingUIFixture.service(preferences: PreferencesStore(persistence: nil), root: root)
+        let project = try XCTUnwrap(svc.fixtureProjects?.first)
+        let rule = try XCTUnwrap(svc.rules(.project(project)).first)
+        XCTAssertEqual(svc.hint(for: rule, scope: .project(project))?.suggested, ModelRef(harness: "codex", model: "gpt-6-luna"))
+        let id = try XCTUnwrap(svc.submitNewRule("Anything UI-heavy uses Sonnet", to: .global))
+        await svc.waitForCompile(id)
+        XCTAssertEqual(svc.rules(.global).first?.failure,
+                       "“Sonnet” matched no model in Claude's catalog — try “sonnet”, or reword the rule")
     }
 
     /// Only the no-flags case: the flags are launch arguments, which a unit run cannot set.

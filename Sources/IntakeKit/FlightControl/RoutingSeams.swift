@@ -21,8 +21,11 @@ public struct RuleHint: Equatable, Sendable {
     public var ruleID: String
     public var text: String
     public var snapshotDate: Date
-    public init(ruleID: String, text: String, snapshotDate: Date) {
-        self.ruleID = ruleID; self.text = text; self.snapshotDate = snapshotDate
+    /// The better model, bare (no knobs), for the hint popover's "Switch to …". nil when a
+    /// source can only describe the hint, in which case the popover offers Dismiss alone.
+    public var suggested: ModelRef?
+    public init(ruleID: String, text: String, snapshotDate: Date, suggested: ModelRef? = nil) {
+        self.ruleID = ruleID; self.text = text; self.snapshotDate = snapshotDate; self.suggested = suggested
     }
 }
 
