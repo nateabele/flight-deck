@@ -1157,7 +1157,10 @@ final class SessionStore: ObservableObject {
     /// Cleared at close, repin and retarget, so a tab never shows the previous conversation's
     /// agents — but, unlike `subagentCounts`, NOT when the registry loses the tab's row (see
     /// `commitStatuses`): the watcher would never republish a blocked agent's unchanged tree.
-    private(set) var subagentTrees: [UUID: SubagentTree] = [:]
+    ///
+    /// `@Published` so an open popover follows a node appearing or finishing: no other
+    /// published field moves when only the tree does.
+    @Published private(set) var subagentTrees: [UUID: SubagentTree] = [:]
 
     /// When the user last submitted a prompt, by conversation id. Filled by the prompt-submit
     /// hook (a later task); until then empty, and the tree falls back to the process start.
@@ -1177,6 +1180,17 @@ final class SessionStore: ObservableObject {
     }
 
     func subagentTree(for tab: UUID) -> SubagentTree { subagentTrees[tab] ?? .empty }
+
+    /// The tree as the Mac shows it: the node that owns the tab's open dialog marked
+    /// `.blocked`, by the same rule `FleetProjection.wire` applies for the phone. The stored
+    /// tree is rebuilt from files and never says "blocked" — that comes from the transcript
+    /// call `openPromptAgents` ties to it — so a popover reading the raw tree could never
+    /// show the one agent that is waiting on you.
+    func displaySubagentTree(for tab: UUID) -> SubagentTree {
+        let tree = subagentTree(for: tab)
+        guard let agent = openPromptAgents[tab], let call = openPromptCalls[tab] else { return tree }
+        return tree.marking(blocked: agent, call: call)
+    }
 
     /// One registry watcher per account with a live claude tab, keyed like every other
     /// registry here.

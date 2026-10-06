@@ -109,7 +109,8 @@ struct SessionStatusIcon: View {
     }
 }
 
-/// A busy session's sub-agent count, drawn at the row's trailing edge.
+/// A busy session's sub-agent count — or a waiting one's, while an agent is blocked — drawn
+/// at the row's trailing edge.
 ///
 /// Trailing rather than beside the status glyph: inline, the numeral widened the leading
 /// status column and pushed that one row's title right of every other. Placed immediately
@@ -123,10 +124,24 @@ struct SubagentCount: View {
     /// but never "which one is blocked on me".
     @State private var showing = false
 
+    /// The numeral to draw, or nil for no badge. Busy with agents, as before — OR any agent
+    /// blocked, whatever the parent's activity: while a subagent's dialog is up the parent
+    /// reads `waiting`, and a busy-only rule hid the count (and its popover) exactly when the
+    /// user needed to see which agent was asking. A blocked agent is a live one, so the count
+    /// never reads 0 then.
+    static func badge(status: SessionStatus?, tree: SubagentTree) -> Int? {
+        guard let status else { return nil }
+        if status.activity == .busy, status.subagentCount > 0 { return status.subagentCount }
+        let blocked = tree.nodes.contains {
+            if case .blocked = $0.state { return true } else { return false }
+        }
+        return blocked ? max(status.subagentCount, 1) : nil
+    }
+
     var body: some View {
-        if let status, status.activity == .busy, status.subagentCount > 0 {
+        if let status, let count = Self.badge(status: status, tree: tree) {
             Button { showing.toggle() } label: {
-                Text("\(status.subagentCount)")
+                Text("\(count)")
                     .font(.caption2)
                     .monospacedDigit()
                     .foregroundStyle(.tint)
