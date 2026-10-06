@@ -148,10 +148,11 @@ final class FleetWireTests: XCTestCase {
             hasBackgroundWork: false, openPromptCall: .call("toolu_SUB"), answerless: false,
             subagents: tree, openPromptAgent: "a28ad87b")
         XCTAssertEqual(try roundTrip(event), event)
-        let old = Data(#"{"t":"session.activity","id":"\#(UUID().uuidString)","activity":"busy","subagentCount":0,"openPromptCall":null}"#.utf8)
-        guard case .activityChanged(_, _, _, _, _, _, _, let subs, let agent) =
+        let old = Data(#"{"t":"session.activity","id":"\#(UUID().uuidString)","activity":"busy","subagentCount":0}"#.utf8)
+        guard case .activityChanged(_, _, _, _, _, let call, _, let subs, let agent) =
                 try JSONDecoder().decode(FleetEvent.self, from: old) else { return XCTFail() }
         XCTAssertNil(subs); XCTAssertNil(agent)
+        XCTAssertEqual(call, .unreported, "an absent key is a peer that predates the field")
     }
 
     func testActivityChangedRoundTripsBackgroundWork() throws {
