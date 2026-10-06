@@ -31,6 +31,19 @@ final class AnswerFrameCodingTests: XCTestCase {
         )
     }
 
+    /// An answer to a subagent's dialog names the agent whose file holds the call; one to the
+    /// parent's names nothing, so an older Mac still sees exactly the bytes it always has.
+    func testAnAnswerCarriesAnAgentOnlyWhenOneIsNamed() throws {
+        let named = ClientFrame.cmd(cid: 3, .answerPrompt(
+            id: session, token: token, call: "toolu_SUB", answer: .allow, agent: "a28ad87b"))
+        let data = try JSONEncoder().encode(named)
+        XCTAssertEqual(try JSONDecoder().decode(ClientFrame.self, from: data), named)
+        XCTAssertEqual(try object(named)["agent"] as? String, "a28ad87b")
+        let bare = ClientFrame.cmd(cid: 3, .answerPrompt(
+            id: session, token: token, call: "toolu_A", answer: .allow))
+        XCTAssertNil(try object(bare)["agent"])
+    }
+
     /// **Deny carries nothing, and that is the point.** It is delivered as a single Escape on
     /// the Mac with no screen read, so there is nothing for it to name and nothing a client
     /// could get wrong about it.

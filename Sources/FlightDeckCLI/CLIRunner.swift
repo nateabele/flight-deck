@@ -431,7 +431,7 @@ final class CLIRunner {
                 self.fail("prompt_expired")
             case .sessionRemoved(id):
                 self.fail("gone")
-            case .activityChanged(id, let activity, _, _, _, _, _) where typed:
+            case .activityChanged(id, let activity, _, _, _, _, _, _, _) where typed:
                 guard started else { started = activity != nil && activity != "idle"; return }
                 guard activity == "idle" || activity == "waiting", let current = self.session(id) else { return }
                 self.out(CLIOutput.json(current))

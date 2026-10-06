@@ -61,7 +61,8 @@ extension FleetSnapshot {
             mutate(id) { $0.title = title }
 
         case .activityChanged(let id, let activity, let waitingFor, let subagentCount,
-                              let hasBackgroundWork, let openPromptCall, let answerless):
+                              let hasBackgroundWork, let openPromptCall, let answerless,
+                              let subagents, let openPromptAgent):
             // The wire version was deliberately not bumped for the `hasBackgroundWork`
             // split, so an older Mac can still send the pre-decomposition `"shell"` string
             // here, on the incremental path rather than a fresh snapshot. Same
@@ -83,6 +84,11 @@ extension FleetSnapshot {
                 // to `false`, so a Mac that stops asserting `answerless` (a new call arrived,
                 // the tab left `waiting`) is not left behind by a fold that only ever sets it.
                 $0.answerless = answerless
+                // Overwritten unconditionally, like `openPromptCall`: a Mac that stops
+                // naming a blocked agent (the dialog was answered) must clear it here, or the
+                // phone keeps routing an answer to a subagent file that no longer holds it.
+                $0.subagents = subagents
+                $0.openPromptAgent = openPromptAgent
             }
 
         case .unreadChanged(let id, let isUnread):

@@ -190,6 +190,15 @@ public struct WireSession: Codable, Equatable, Sendable, Identifiable {
     /// reads. Defaulted off so an older Mac draws no field it would refuse: its decoder drops
     /// `text`, and the bare index one past the options fails its label check.
     public var acceptsTypedAnswers: Bool = false
+    /// This conversation's background agents, at every depth. **`nil` means this Mac does not
+    /// model them** (an older build, or a codex tab); `[]` means it does and there are none.
+    /// The two must stay distinct: a phone that read an older Mac's absence as "no subagents"
+    /// would hide a count (`subagentCount`) it can still see non-zero.
+    public var subagents: [WireSubagent]?
+    /// The subagent whose file holds the dialog `openPromptCall` names, or nil when the dialog
+    /// is the conversation's own. Without it a phone pages the parent's feed for a call that
+    /// lives in a subagent's file and never finds the card's tool call.
+    public var openPromptAgent: String?
 
     public init(
         id: UUID, title: String, agent: String,
@@ -201,7 +210,9 @@ public struct WireSession: Codable, Equatable, Sendable, Identifiable {
         apiError: SessionAPIError? = nil,
         allowsBlockedAbort: Bool = false,
         answerless: Bool = false,
-        acceptsTypedAnswers: Bool = false
+        acceptsTypedAnswers: Bool = false,
+        subagents: [WireSubagent]? = nil,
+        openPromptAgent: String? = nil
     ) {
         self.id = id
         self.title = title
@@ -217,6 +228,8 @@ public struct WireSession: Codable, Equatable, Sendable, Identifiable {
         self.allowsBlockedAbort = allowsBlockedAbort
         self.answerless = answerless
         self.acceptsTypedAnswers = acceptsTypedAnswers
+        self.subagents = subagents
+        self.openPromptAgent = openPromptAgent
     }
 
     /// Spelled out rather than synthesized, because `openPromptCall` is not `Codable` — its
@@ -234,7 +247,7 @@ public struct WireSession: Codable, Equatable, Sendable, Identifiable {
     enum CodingKeys: String, CodingKey {
         case id, title, agent, activity, waitingFor, subagentCount, isUnread
         case hasBackgroundWork, planGate, openPromptCall, apiError, allowsBlockedAbort
-        case answerless, acceptsTypedAnswers
+        case answerless, acceptsTypedAnswers, subagents, openPromptAgent
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -257,6 +270,10 @@ public struct WireSession: Codable, Equatable, Sendable, Identifiable {
         try c.encode(allowsBlockedAbort, forKey: .allowsBlockedAbort)
         try c.encode(answerless, forKey: .answerless)
         try c.encode(acceptsTypedAnswers, forKey: .acceptsTypedAnswers)
+        // Absent, not `null`: absence is what "this Mac does not model subagents" decodes
+        // from, so a codex tab must not write a key an older phone would have to ignore.
+        try c.encodeIfPresent(subagents, forKey: .subagents)
+        try c.encodeIfPresent(openPromptAgent, forKey: .openPromptAgent)
     }
 
     public init(from decoder: any Decoder) throws {
@@ -313,6 +330,10 @@ public struct WireSession: Codable, Equatable, Sendable, Identifiable {
         answerless = try c.decodeIfPresent(Bool.self, forKey: .answerless) ?? false
         // Absent from a Mac built before typed answers — off, for the reason on the field.
         acceptsTypedAnswers = try c.decodeIfPresent(Bool.self, forKey: .acceptsTypedAnswers) ?? false
+        // Absent from an older Mac, and kept nil rather than defaulted to `[]`: nil is "no
+        // subagent model", which tells the phone to fall back on `subagentCount` alone.
+        subagents = try c.decodeIfPresent([WireSubagent].self, forKey: .subagents)
+        openPromptAgent = try c.decodeIfPresent(String.self, forKey: .openPromptAgent)
     }
 }
 

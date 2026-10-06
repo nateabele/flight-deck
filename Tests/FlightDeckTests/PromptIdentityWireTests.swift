@@ -163,7 +163,8 @@ final class PromptIdentityWireTests: XCTestCase {
         XCTAssertEqual(f.sink.events, [
             .activityChanged(
                 id: f.session, activity: "waiting", waitingFor: "permission", subagentCount: 0,
-                hasBackgroundWork: false, openPromptCall: .call("toolu_B")
+                hasBackgroundWork: false, openPromptCall: .call("toolu_B"),
+                subagents: []
             ),
         ])
     }
@@ -187,7 +188,8 @@ final class PromptIdentityWireTests: XCTestCase {
         XCTAssertEqual(f.sink.events, [
             .activityChanged(
                 id: f.session, activity: "waiting", waitingFor: "permission", subagentCount: 0,
-                hasBackgroundWork: false, openPromptCall: .noPrompt
+                hasBackgroundWork: false, openPromptCall: .noPrompt,
+                subagents: []
             ),
         ])
     }
@@ -267,7 +269,8 @@ final class PromptIdentityWireTests: XCTestCase {
         XCTAssertEqual(f.sink.events, [
             .activityChanged(
                 id: f.session, activity: "busy", waitingFor: nil, subagentCount: 0,
-                hasBackgroundWork: false, openPromptCall: .noPrompt
+                hasBackgroundWork: false, openPromptCall: .noPrompt,
+                subagents: []
             ),
         ])
     }

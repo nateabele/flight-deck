@@ -117,7 +117,7 @@ final class FleetConnectorRequestTests: XCTestCase {
         let newer = page("newer", start: 20, end: 30)
         var deferred: [() -> Void] = []
         server.onRequest = { _, cid, request, reply in
-            guard case .timeline(_, let anchor, _) = request else { return XCTFail("wrong verb") }
+            guard case .timeline(_, let anchor, _, _) = request else { return XCTFail("wrong verb") }
             let page = anchor == .before(10) ? older : newer
             deferred.append { reply(.page(cid: cid, page)) }
             // Both held until both have arrived, then answered youngest-first.
@@ -167,7 +167,7 @@ final class FleetConnectorRequestTests: XCTestCase {
         let reached = expectation(description: "both requests reached the server")
         reached.expectedFulfillmentCount = 2
         server.onRequest = { _, cid, request, reply in
-            guard case .timeline(_, let anchor, _) = request else { return XCTFail("wrong verb") }
+            guard case .timeline(_, let anchor, _, _) = request else { return XCTFail("wrong verb") }
             if anchor == .before(4_096) {
                 refuse = { reply(.err(cid: cid, code: "unsupported")) }
             } else {
