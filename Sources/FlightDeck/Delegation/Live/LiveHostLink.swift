@@ -18,7 +18,9 @@ protocol DelegationTransport: AnyObject {
 }
 
 /// `HostLinking` over one host's connection: requests, channels, and run events fanned out to
-/// any number of local subscribers (the contract on `HostLinking.events`, rulings 18 and 21).
+/// any number of local subscribers (the contract on `HostLinking.events`: Ruling 18, one host
+/// attach per run fanned out to every local subscriber, and Ruling 21, a disk copy that
+/// replays first).
 ///
 /// **One host attach per run, and a copy on disk.** The host streams a run's events to the
 /// connection that started it, or that last sent `run.attach` for it, from wherever that
@@ -62,8 +64,8 @@ final class LiveHostLink: HostLinking {
 
     private static let logger = Logger(subsystem: "dev.flightdeck.FlightDeck", category: "delegation")
 
-    /// `mirrors` is `Application Support/Flight Deck/delegation/`. `mirrorPrefix` tells this
-    /// host's runs from another's: host run ids are `r<N>` on every host.
+    /// `mirrors` is `Application Support/Flight Deck/delegation/`. `mirrorPrefix` (the host's
+    /// slot) keeps one host's provisional copy names apart from another's.
     init(name: String, transport: any DelegationTransport, mirrors: URL, mirrorPrefix: String) {
         self.name = name
         self.transport = transport
@@ -91,7 +93,7 @@ final class LiveHostLink: HostLinking {
                 reply = try await transport.send(request, timeout: Self.timeout(for: request), progress: nil)
             }
         } catch HostLinkError.offline {
-            // One code for "the host is not there" however it was found out (C6 round 2), so
+            // One code for "the host is not there" however it was found out, so
             // the CLI's retry list keys on `host_offline` alone.
             throw unavailable?() ?? DelegationError(code: "host_offline",
                                                     message: "\(name) went offline before answering \(Self.op(request)) — rerun once flightdeck host ls shows it online")
@@ -99,10 +101,7 @@ final class LiveHostLink: HostLinking {
             throw DelegationError(code: "host_timeout",
                                   message: "\(name) did not answer \(Self.op(request)) in time — check that hostd is running on \(name), then rerun")
         }
-        // `run.start` attaches this connection from byte 0 (A2), so its feed exists from here
-        // and the monitor that subscribes next sends no second attach. Its first events may
-        // already have started it.
-        if case .runStart(let runID) = reply, feeds[runID] == nil { startFeed(runID) }
+        if case .runStart(let runID) = reply { started(runID) }
         return reply
     }
 
@@ -150,9 +149,27 @@ final class LiveHostLink: HostLinking {
 
     // MARK: Events
 
-    func events(runID: String, from offset: Int64) -> AsyncThrowingStream<RunEvent, Error> {
+    func events(runID: String, localID: String, from offset: Int64) -> AsyncThrowingStream<RunEvent, Error> {
         let (stream, continuation) = AsyncThrowingStream<RunEvent, Error>.makeStream()
-        let feed = feeds[runID] ?? openFeed(runID)
+        let feed: RunFeed
+        if let existing = feeds[runID], existing.localID == nil || existing.localID == localID {
+            // `run.start`'s feed, named now that the service has given the run its id.
+            if existing.localID == nil { existing.bind(localID, to: mirrorURL(localID)) }
+            feed = existing
+        } else if let bound = feeds[runID]?.localID, let asked = Int(localID.dropFirst()),
+                  let other = Int(bound.dropFirst()) {
+            // Bound to another run under the same host id: a host from before unique run ids
+            // (Ruling 27: `<boot epoch>-r<n>`) restarted and reused the id. Only the newer of
+            // the two (local ids only grow) can still be on the host; the older is gone from it.
+            guard asked > other else {
+                continuation.finish(throwing: gone)
+                return stream
+            }
+            feeds[runID]?.fail(gone)
+            feed = openFeed(runID, localID: localID)
+        } else {
+            feed = openFeed(runID, localID: localID)
+        }
         let token = feed.subscribe(from: max(0, offset), continuation)
         continuation.onTermination = { [weak self] _ in
             Task { @MainActor in self?.unsubscribe(runID, token) }
@@ -194,47 +211,90 @@ final class LiveHostLink: HostLinking {
         }
     }
 
-    /// Deletes these runs' copies (host run ids), for the registry when it forgets runs. A
-    /// subscriber still reading one is ended.
-    func prune(runIDs: [String]) {
-        for runID in runIDs {
-            feeds.removeValue(forKey: runID)?.fail(CancellationError())
-            retired.insert(runID)
-            RunMirror(url: mirrorURL(runID)).delete()
+    /// Deletes these runs' copies, for retention when the registry forgets them. A subscriber
+    /// still reading one is ended.
+    func prune(_ runs: [(hostRunID: String, localID: String)]) {
+        for run in runs {
+            if let feed = feeds[run.hostRunID], feed.localID == run.localID {
+                feeds[run.hostRunID] = nil
+                feed.fail(CancellationError())
+                retired.insert(run.hostRunID)
+            }
+            RunMirror(url: mirrorURL(run.localID)).delete()
         }
     }
 
-    func mirrorURL(_ runID: String) -> URL {
-        Self.mirrorURL(in: mirrors, prefix: mirrorPrefix, runID: runID)
+    func mirrorURL(_ localID: String) -> URL {
+        Self.mirrorURL(in: mirrors, localID: localID)
     }
 
-    /// `<slot>-<host run id>.out`: host run ids are `r<N>` on every host, so the host's slot
-    /// keeps one host's `r3` from overwriting another's.
-    nonisolated static func mirrorURL(in directory: URL, prefix: String, runID: String) -> URL {
-        directory.appendingPathComponent("\(prefix)-\(runID).out")
+    /// `<local run id>.out`. The local id, not the host's: this Mac never reuses one, while a
+    /// host's ids were unique only per hostd lifetime before Ruling 27, and a reused one used
+    /// to start the old run's copy over with the new run's output.
+    nonisolated static func mirrorURL(in directory: URL, localID: String) -> URL {
+        directory.appendingPathComponent("\(localID).out")
+    }
+
+    /// Where a run's copy lives until the service names it: its first output can beat the
+    /// `run.start` reply that tells anyone its local id.
+    /// What a run's readers are ended with when the host can no longer have it.
+    private var gone: DelegationError {
+        DelegationError(code: "unknown_run", message: DelegationService.hostLine(code: "unknown_run", message: "", host: name))
+    }
+
+    private func provisionalURL(_ runID: String) -> URL {
+        mirrors.appendingPathComponent("pending-\(mirrorPrefix)-\(runID).out")
     }
 
     // MARK: Feeds
 
-    /// A feed for a run this link just started: its copy starts over at byte 0, since a host
-    /// whose state was reset numbers its runs from `r1` again and an old copy under the same
-    /// id would be another run's output.
+    /// `run.start` answered. It attaches this connection from byte 0 (A2), so the run's feed
+    /// exists from here and the monitor that subscribes next sends no second attach.
+    ///
+    /// The id leaves `retired` first, whatever else happens: a feed let go under this id (an
+    /// earlier run, on a host that reused it) must not swallow this run's events. If it was
+    /// there, the events that beat this reply were dropped as that old run's tail, so the host
+    /// is asked to replay the run from its start.
+    private func started(_ runID: String) {
+        let dropped = retired.remove(runID) != nil
+        if let existing = feeds[runID], existing.localID != nil {
+            // Bound to an older run under the same host id: that run is gone from the host.
+            existing.fail(gone)
+            feeds[runID] = nil
+        }
+        if feeds[runID] == nil { startFeed(runID) }
+        if dropped {
+            feeds[runID]?.replayFromStart()
+            settle(runID)
+        }
+    }
+
+    /// A feed for a run whose output is arriving before anyone has asked for it: its copy
+    /// starts at byte 0, under a provisional name.
     private func startFeed(_ runID: String) {
-        let mirror = RunMirror(url: mirrorURL(runID))
+        let mirror = RunMirror(url: provisionalURL(runID))
         mirror.reset(origin: 0)
-        let feed = RunFeed(mirror: mirror)
+        let feed = RunFeed(mirror: mirror, localID: nil)
         feed.attachedFromStart()
         retired.remove(runID)
-        feeds[runID] = feed
+        install(feed, runID)
     }
 
     /// A feed for a run asked about: whatever copy is on disk, from an earlier launch or an
     /// earlier subscriber.
-    private func openFeed(_ runID: String) -> RunFeed {
-        let feed = RunFeed(mirror: RunMirror(url: mirrorURL(runID)))
+    private func openFeed(_ runID: String, localID: String) -> RunFeed {
+        let feed = RunFeed(mirror: RunMirror(url: mirrorURL(localID)), localID: localID)
         retired.remove(runID)
-        feeds[runID] = feed
+        install(feed, runID)
         return feed
+    }
+
+    private func install(_ feed: RunFeed, _ runID: String) {
+        feed.changed = { [weak self, weak feed] in
+            guard let self, let feed, self.feeds[runID] === feed else { return }
+            self.settle(runID)
+        }
+        feeds[runID] = feed
     }
 
     private func unsubscribe(_ runID: String, _ token: UUID) {
@@ -315,6 +375,9 @@ final class RunFeed {
         /// The last `queued`/`started` it was given: a replay re-sends the state first, and
         /// the same state twice is noise.
         var state: RunEvent?
+        /// Still being served from the copy on disk. Live output is not handed to it until it
+        /// has caught up: the replay reads that output back from the copy, in order.
+        var replay: Task<Void, Never>?
 
         init(_ continuation: AsyncThrowingStream<RunEvent, Error>.Continuation, next: Int64) {
             self.continuation = continuation
@@ -323,6 +386,9 @@ final class RunFeed {
     }
 
     private let mirror: RunMirror
+    /// The local run id the copy is named for; nil for a run whose `run.start` reply (and so
+    /// its local id) is still on its way, whose copy has a provisional name until then.
+    private(set) var localID: String?
     private var subscribers: [UUID: Subscriber] = [:]
     private var everSubscribed = false
     /// True while the host has a subscription for this run on the live connection.
@@ -332,13 +398,25 @@ final class RunFeed {
     /// A `run.attach` sent while the stream was already flowing, to replay from here. Until
     /// the replay begins, what still arrives is the old stream, which the replay repeats.
     private var replay: Int64?
+    /// A replay owed but not yet asked for (`replayFromStart`).
+    private var owedReplay: Int64?
+    /// Called when something changed that the link must act on: a replay from the copy
+    /// finished, so the feed may be done, or may need the host for what the copy lacked.
+    var changed: (() -> Void)?
 
-    init(mirror: RunMirror) {
+    init(mirror: RunMirror, localID: String?) {
         self.mirror = mirror
+        self.localID = localID
     }
 
     /// Nothing more to deliver, and nobody to deliver it to.
     var isDone: Bool { mirror.exit != nil && subscribers.isEmpty && everSubscribed }
+
+    /// Names the copy for `localID` once the service knows it.
+    func bind(_ localID: String, to url: URL) {
+        self.localID = localID
+        mirror.move(to: url)
+    }
 
     // MARK: Subscribers
 
@@ -349,16 +427,35 @@ final class RunFeed {
         everSubscribed = true
         // A2's replay order: the state, then output from the offset, then the end.
         if let state = mirror.state { give(state, to: subscriber) }
-        if mirror.covers(offset) {
-            for chunk in mirror.read(from: offset) { give(chunk, to: subscriber) }
-            subscriber.next = max(subscriber.next, mirror.end)
+        if mirror.covers(offset), offset < mirror.end {
+            subscriber.replay = Task { @MainActor [weak self] in await self?.replay(token) }
+        } else {
+            finishIfOwed(token)
         }
-        finishIfOwed(token)
         return token
     }
 
+    /// Serves `token` from the copy, one chunk per disk read, until it has caught up with
+    /// everything held; it then takes live output like any other subscriber. A chunk at a time
+    /// keeps a large replay from landing on the control socket as one burst: the socket ends a
+    /// stream with `slow_reader` past 4 MiB in flight, and a copy holds up to 64 MiB.
+    private func replay(_ token: UUID) async {
+        while let subscriber = subscribers[token], !Task.isCancelled {
+            // A host replay reset the copy under it: the live path (and an attach) takes over.
+            guard mirror.covers(subscriber.next), subscriber.next < mirror.end,
+                  let chunk = await mirror.chunk(from: subscriber.next)
+            else { break }
+            guard subscribers[token] === subscriber, !Task.isCancelled else { return }
+            give(chunk, to: subscriber)
+        }
+        guard let subscriber = subscribers[token] else { return }
+        subscriber.replay = nil
+        finishIfOwed(token)
+        changed?()
+    }
+
     func unsubscribe(_ token: UUID) {
-        subscribers[token] = nil
+        subscribers.removeValue(forKey: token)?.replay?.cancel()
     }
 
     // MARK: The host's stream
@@ -367,6 +464,12 @@ final class RunFeed {
     func attachedFromStart() {
         attached = true
         hostAt = 0
+    }
+
+    /// The run's first events may have been dropped before its `run.start` reply arrived (see
+    /// `LiveHostLink.request`), so the host is asked to send it all again.
+    func replayFromStart() {
+        owedReplay = 0
     }
 
     func receive(_ event: RunEvent) {
@@ -397,7 +500,8 @@ final class RunFeed {
         // spool (a replay of dropped output starts with a marker ending at the first byte it
         // kept), so a subscriber waiting in that gap moves on with this chunk.
         let from = hostAt ?? chunk.offset
-        for subscriber in subscribers.values where subscriber.next >= from && subscriber.next < chunk.end {
+        for subscriber in subscribers.values
+        where subscriber.replay == nil && subscriber.next >= from && subscriber.next < chunk.end {
             give(chunk, to: subscriber)
         }
         mirror.append(chunk)
@@ -416,8 +520,9 @@ final class RunFeed {
     /// feed, a reconnect). One at a time — a second sent before the first replay began would
     /// make its start impossible to tell apart.
     func attachNeeded() -> Int64? {
-        let missing = subscribers.values.map(\.next).filter { !mirror.covers($0) }
+        let missing = subscribers.values.filter { $0.replay == nil }.map(\.next).filter { !mirror.covers($0) }
         if !attached {
+            owedReplay = nil
             if let from = missing.min() {
                 mirror.reset(origin: from)
                 return attach(from)
@@ -426,7 +531,8 @@ final class RunFeed {
             guard mirror.exit == nil, mirror.covers(mirror.end) else { return nil }
             return attach(mirror.end)
         }
-        guard replay == nil, let from = missing.min() else { return nil }
+        guard replay == nil, let from = [owedReplay, missing.min()].compactMap({ $0 }).min() else { return nil }
+        owedReplay = nil
         replay = from
         return from
     }
@@ -446,7 +552,10 @@ final class RunFeed {
     }
 
     func fail(_ error: Error) {
-        for subscriber in subscribers.values { subscriber.continuation.finish(throwing: error) }
+        for subscriber in subscribers.values {
+            subscriber.replay?.cancel()
+            subscriber.continuation.finish(throwing: error)
+        }
         subscribers = [:]
     }
 
@@ -468,9 +577,10 @@ final class RunFeed {
         subscriber.next = chunk.end
     }
 
-    /// Ends a subscriber that has every byte up to the run's end.
+    /// Ends a subscriber that has every byte up to the run's end. One still replaying ends
+    /// when its replay does.
     private func finishIfOwed(_ token: UUID) {
-        guard let exit = mirror.exit, let subscriber = subscribers[token],
+        guard let exit = mirror.exit, let subscriber = subscribers[token], subscriber.replay == nil,
               mirror.covers(subscriber.next), subscriber.next >= mirror.end
         else { return }
         subscriber.continuation.yield(exit)

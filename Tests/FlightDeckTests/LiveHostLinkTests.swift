@@ -102,7 +102,7 @@ final class LiveHostLinkTests: XCTestCase {
         link.received(runID: "r1", .started(runID: "r1"))
         link.received(runID: "r1", out(0, "hello "))
         try await start(link)
-        let stream = link.events(runID: "r1", from: 0)
+        let stream = link.events(runID: "r1", localID: "r1", from: 0)
         link.received(runID: "r1", out(6, "world"))
         link.received(runID: "r1", .exited(.code(0)))
         let seen = try await collect(stream)
@@ -115,10 +115,10 @@ final class LiveHostLinkTests: XCTestCase {
         try await start(link)
         link.received(runID: "r1", .started(runID: "r1"))
         link.received(runID: "r1", out(0, "0123456789"))
-        let fromStart = link.events(runID: "r1", from: 0)
-        let fromFour = link.events(runID: "r1", from: 4)
+        let fromStart = link.events(runID: "r1", localID: "r1", from: 0)
+        let fromFour = link.events(runID: "r1", localID: "r1", from: 4)
         // Live, straddling a third subscriber's offset.
-        let fromTwelve = link.events(runID: "r1", from: 12)
+        let fromTwelve = link.events(runID: "r1", localID: "r1", from: 12)
         link.received(runID: "r1", out(10, "abcde", .stderr))
         link.received(runID: "r1", .exited(.signal(15)))
         let a = try await collect(fromStart)
@@ -136,9 +136,9 @@ final class LiveHostLinkTests: XCTestCase {
         link.received(runID: "r1", .started(runID: "r1"))
         link.received(runID: "r1", out(0, "built\n"))
         link.received(runID: "r1", .exited(.code(2)))
-        let late = try await collect(link.events(runID: "r1", from: 0))
+        let late = try await collect(link.events(runID: "r1", localID: "r1", from: 0))
         XCTAssertEqual(late, ["started", "0:built\n", "exited 2"])
-        let tail = try await collect(link.events(runID: "r1", from: 3))
+        let tail = try await collect(link.events(runID: "r1", localID: "r1", from: 3))
         XCTAssertEqual(tail, ["started", "3:lt\n", "exited 2"])
         XCTAssertEqual(transport.attaches, [])
     }
@@ -151,10 +151,12 @@ final class LiveHostLinkTests: XCTestCase {
             link.received(runID: "r1", out(0, "one "))
             link.received(runID: "r1", out(4, "two", .stderr))
             link.received(runID: "r1", .exited(.code(0)))
+            // The service's monitor, which names the copy for the run's local id.
+            _ = try await collect(link.events(runID: "r1", localID: "r1", from: 0))
         }
         transport = ScriptedTransport()
         let relaunched = makeLink()
-        let seen = try await collect(relaunched.events(runID: "r1", from: 0))
+        let seen = try await collect(relaunched.events(runID: "r1", localID: "r1", from: 0))
         XCTAssertEqual(seen, ["started", "0:one ", "4:two", "exited 0"])
         XCTAssertEqual(transport.attaches, [], "the copy on disk answers; the host is not asked")
     }
@@ -162,8 +164,8 @@ final class LiveHostLinkTests: XCTestCase {
     func testAMissingRangeTriggersExactlyOneAttach() async throws {
         // A fresh install: no copy of r1 at all. Two subscribers ask before the host answers.
         let link = makeLink()
-        let first = link.events(runID: "r1", from: 0)
-        let second = link.events(runID: "r1", from: 3)
+        let first = link.events(runID: "r1", localID: "r1", from: 0)
+        let second = link.events(runID: "r1", localID: "r1", from: 3)
         await drain()
         XCTAssertEqual(transport.attaches, [0])
         link.received(runID: "r1", .started(runID: "r1"))
@@ -179,12 +181,12 @@ final class LiveHostLinkTests: XCTestCase {
     func testASubscriberFromBeforeTheCopyReplaysOnceWhileLiveOutputContinues() async throws {
         // This install first saw r1 from byte 6 (a `logs` from there); now a monitor wants it all.
         let link = makeLink()
-        let tail = link.events(runID: "r1", from: 6)
+        let tail = link.events(runID: "r1", localID: "r1", from: 6)
         await drain()
         XCTAssertEqual(transport.attaches, [6])
         link.received(runID: "r1", .started(runID: "r1"))
         link.received(runID: "r1", out(6, "ghi"))
-        let whole = link.events(runID: "r1", from: 0)
+        let whole = link.events(runID: "r1", localID: "r1", from: 0)
         await drain()
         XCTAssertEqual(transport.attaches, [6, 0])
         // The old stream is still flowing until the host switches; the replay repeats it.
@@ -203,7 +205,7 @@ final class LiveHostLinkTests: XCTestCase {
     func testAReconnectReattachesFromTheLastOffsetWithNoGapAndNoDuplicate() async throws {
         let link = makeLink()
         try await start(link)
-        let stream = link.events(runID: "r1", from: 0)
+        let stream = link.events(runID: "r1", localID: "r1", from: 0)
         link.received(runID: "r1", .started(runID: "r1"))
         link.received(runID: "r1", out(0, "abcde"))
         transport.isOnline = false
@@ -222,7 +224,7 @@ final class LiveHostLinkTests: XCTestCase {
 
     func testOutputTheHostDroppedIsSkippedRatherThanAwaited() async throws {
         let link = makeLink()
-        let stream = link.events(runID: "r1", from: 0)
+        let stream = link.events(runID: "r1", localID: "r1", from: 0)
         await drain()
         // The spool kept only from 100: its marker ends exactly there.
         link.received(runID: "r1", .started(runID: "r1"))
@@ -237,7 +239,7 @@ final class LiveHostLinkTests: XCTestCase {
         transport.attachError = HostLinkError.remote(code: "unknown_run", message: "no run r1")
         let link = makeLink()
         do {
-            _ = try await collect(link.events(runID: "r1", from: 0))
+            _ = try await collect(link.events(runID: "r1", localID: "r1", from: 0))
             XCTFail("expected unknown_run")
         } catch let error as DelegationError {
             XCTAssertEqual(error.code, "unknown_run")
@@ -250,16 +252,109 @@ final class LiveHostLinkTests: XCTestCase {
         try await start(link)
         link.received(runID: "r1", out(0, "x"))
         link.received(runID: "r1", .exited(.code(0)))
-        _ = try await collect(link.events(runID: "r1", from: 0))
+        _ = try await collect(link.events(runID: "r1", localID: "r1", from: 0))
+        RunMirror.waitForIO()
         XCTAssertTrue(FileManager.default.fileExists(atPath: link.mirrorURL("r1").path))
-        link.prune(runIDs: ["r1"])
+        link.prune([(hostRunID: "r1", localID: "r1")])
+        RunMirror.waitForIO()
         XCTAssertFalse(FileManager.default.fileExists(atPath: link.mirrorURL("r1").path))
-        let again = link.events(runID: "r1", from: 0)
+        let again = link.events(runID: "r1", localID: "r1", from: 0)
         await drain()
         XCTAssertEqual(transport.attaches, [0])
         link.received(runID: "r1", out(0, "x"))
         link.received(runID: "r1", .exited(.code(0)))
         _ = try await collect(again)
+    }
+
+    // MARK: Local ids (Ruling 27)
+
+    /// The copy is named for the run's local id, which this Mac never reuses, not the host's.
+    func testTheCopyIsNamedForTheLocalRunID() async throws {
+        let link = makeLink()
+        link.received(runID: "r1", out(0, "early"))
+        try await start(link)
+        let stream = link.events(runID: "r1", localID: "r7", from: 0)
+        link.received(runID: "r1", .exited(.code(0)))
+        _ = try await collect(stream)
+        RunMirror.waitForIO()
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path), ["r7.out"])
+    }
+
+    /// A host that reused an id: the old run's feed was let go (`retired`), so the new run's
+    /// first output, beating its `run.start` reply, was dropped as the old run's tail. The
+    /// reply clears the id and asks the host for the run again from byte 0.
+    func testARunStartReplyForARetiredIDReplaysWhatWasDropped() async throws {
+        let link = makeLink()
+        try await start(link)
+        let first = link.events(runID: "r1", localID: "r1", from: 0)
+        link.received(runID: "r1", out(0, "old"))
+        link.received(runID: "r1", .exited(.code(0)))
+        _ = try await collect(first)
+        await drain()
+
+        link.received(runID: "r1", .started(runID: "r1"))
+        link.received(runID: "r1", out(0, "new"))
+        try await start(link)
+        await drain()
+        XCTAssertEqual(transport.attaches, [0], "asked again from the start")
+        let second = link.events(runID: "r1", localID: "r2", from: 0)
+        link.received(runID: "r1", .started(runID: "r1"))
+        link.received(runID: "r1", out(0, "new run"))
+        link.received(runID: "r1", .exited(.code(3)))
+        let seen = try await collect(second)
+        XCTAssertEqual(seen, ["started", "0:new run", "exited 3"])
+    }
+
+    /// Two local runs under one reused host id: only the newer can still be on the host.
+    func testAnOlderRunUnderAReusedHostIDIsGone() async throws {
+        let link = makeLink()
+        try await start(link)
+        let newer = link.events(runID: "r1", localID: "r9", from: 0)
+        do {
+            _ = try await collect(link.events(runID: "r1", localID: "r3", from: 0))
+            XCTFail("expected unknown_run")
+        } catch let error as DelegationError {
+            XCTAssertEqual(error.code, "unknown_run")
+        }
+        link.received(runID: "r1", out(0, "x"))
+        link.received(runID: "r1", .exited(.code(0)))
+        let seen = try await collect(newer)
+        XCTAssertEqual(seen, ["0:x", "exited 0"], "the newer run's feed is untouched")
+    }
+
+    // MARK: Replay pacing
+
+    /// A replay of a big copy goes out a chunk at a time, with the main actor free between
+    /// chunks to hear the socket take what it was given. Counted as `ReplyStream` counts it:
+    /// bytes in flight from the hand-off until a main-queue callback says they were sent. A
+    /// replay delivered in one burst put the whole copy in flight at once, past the 4 MiB at
+    /// which the socket ends the stream as a `slow_reader`.
+    func testABigReplayNeverHasMoreThanAFewChunksInFlight() async throws {
+        let link = makeLink()
+        try await start(link)
+        let total = 8 << 20
+        var offset = 0
+        let block = Data(repeating: 0x61, count: 64 << 10)
+        while offset < total {
+            link.received(runID: "r1", .output(stream: .stdout, offset: Int64(offset), data: block))
+            offset += block.count
+        }
+        link.received(runID: "r1", .exited(.code(0)))
+        _ = try await collect(link.events(runID: "r1", localID: "r1", from: 0))
+
+        var inFlight = 0
+        var peak = 0
+        var received = 0
+        for try await event in link.events(runID: "r1", localID: "r1", from: 0) {
+            guard case .output(_, _, let data) = event else { continue }
+            inFlight += data.count
+            received += data.count
+            peak = max(peak, inFlight)
+            let bytes = data.count
+            DispatchQueue.main.async { inFlight -= bytes }
+        }
+        XCTAssertEqual(received, total)
+        XCTAssertLessThan(peak, 1 << 20, "peak \(peak) bytes in flight; the socket gives up at 4 MiB")
     }
 
     // MARK: request
@@ -313,6 +408,7 @@ final class LiveHostLinkTests: XCTestCase {
             try await start(link)
             link.received(runID: "r1", out(0, "kept"))
             link.received(runID: "r1", .exited(.code(0)))
+            _ = try await collect(link.events(runID: "r1", localID: "r1", from: 0))
         }
         transport = ScriptedTransport()
         transport.isOnline = false
@@ -321,7 +417,7 @@ final class LiveHostLinkTests: XCTestCase {
         do { _ = try await link.request(.runCancel(runID: "r1")); XCTFail() } catch let error as DelegationError {
             XCTAssertEqual(error.message, "mini is offline (last seen 4m ago)")
         }
-        let seen = try await collect(link.events(runID: "r1", from: 0))
+        let seen = try await collect(link.events(runID: "r1", localID: "r1", from: 0))
         XCTAssertEqual(seen, ["0:kept", "exited 0"])
         XCTAssertTrue(transport.sent.isEmpty)
     }
@@ -329,7 +425,7 @@ final class LiveHostLinkTests: XCTestCase {
 
 @MainActor
 final class RunMirrorTests: XCTestCase {
-    func testTheCapDropsTheOldestOutputAsTheSpoolDoes() throws {
+    func testTheCapDropsTheOldestOutputAsTheSpoolDoes() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("mirror-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: directory) }
         let cap: Int64 = 1000
@@ -345,27 +441,45 @@ final class RunMirrorTests: XCTestCase {
         XCTAssertEqual(mirror.start, spool.start)
         XCTAssertEqual(mirror.end, spool.end)
         let fromSpool = try spool.read(from: 0, maxBytes: .max).map { RunMirror.Chunk(stream: $0.stream, offset: $0.offset, data: $0.data) }
-        XCTAssertEqual(mirror.read(from: 0), fromSpool, "same marker, same retained bytes")
+        let held = await mirror.readAll()
+        XCTAssertEqual(held, fromSpool, "same marker, same retained bytes")
 
         // And reopened from disk, as after a relaunch.
         let reopened = RunMirror(url: directory.appendingPathComponent("r1.out"), cap: cap)
-        XCTAssertEqual(reopened.read(from: 0), fromSpool)
+        let reread = await reopened.readAll()
+        XCTAssertEqual(reread, fromSpool)
         XCTAssertEqual(reopened.origin, 0)
     }
 
-    func testATornLastRecordIsDroppedOnOpen() throws {
+    func testATornLastRecordIsDroppedOnOpen() async throws {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("mirror-\(UUID().uuidString).out")
         defer { try? FileManager.default.removeItem(at: url) }
         let mirror = RunMirror(url: url)
         mirror.reset(origin: 0)
         mirror.append(RunMirror.Chunk(stream: .stdout, offset: 0, data: Data("whole".utf8)))
+        RunMirror.waitForIO()
         let handle = try FileHandle(forWritingTo: url)
         try handle.seekToEnd()
         try handle.write(contentsOf: Data([1, 0, 0, 0, 50, 0]))
         try handle.close()
         let reopened = RunMirror(url: url)
-        XCTAssertEqual(reopened.read(from: 0), [RunMirror.Chunk(stream: .stdout, offset: 0, data: Data("whole".utf8))])
+        let whole = await reopened.readAll()
+        XCTAssertEqual(whole, [RunMirror.Chunk(stream: .stdout, offset: 0, data: Data("whole".utf8))])
         reopened.append(RunMirror.Chunk(stream: .stdout, offset: 5, data: Data("!".utf8)))
-        XCTAssertEqual(RunMirror(url: url).read(from: 0).count, 2)
+        let both = await RunMirror(url: url).readAll()
+        XCTAssertEqual(both.count, 2)
+    }
+}
+
+extension RunMirror {
+    /// Every chunk held from `offset` on, as a replay reads them.
+    func readAll(from offset: Int64 = 0) async -> [Chunk] {
+        var out: [Chunk] = []
+        var at = offset
+        while let chunk = await chunk(from: at) {
+            out.append(chunk)
+            at = chunk.end
+        }
+        return out
     }
 }

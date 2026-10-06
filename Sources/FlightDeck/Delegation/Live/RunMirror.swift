@@ -1,7 +1,8 @@
 import Foundation
 import HostKit
 
-/// This Mac's copy of one run's output and events, on disk (ruling 21), so a subscriber from
+/// This Mac's copy of one run's output and events, on disk (Ruling 21: the app keeps a copy of
+/// every run's output, replays from it, and asks the host only for what it lacks), so a subscriber from
 /// any offset — after the run ended, or after the app relaunched — is served without asking the
 /// host again. The host's spool is not enough on its own: the host streams a run's events to
 /// each attached connection from wherever it attached, so behind that point only a copy kept
@@ -25,8 +26,14 @@ import HostKit
 /// before the retained window (but after the origin) starts with the spool's marker line,
 /// ending exactly at the first retained byte.
 ///
-/// Main-actor confined, through `RunFeed`. Its writes are small appends; the rewrite at the cap
-/// copies at most half the cap, once per half-cap of output.
+/// **Its index is main-actor confined, its file I/O is not.** `RunFeed` drives it on the main
+/// actor, and every append, rewrite and replay read would otherwise be a syscall there per
+/// output chunk. So the index (`entries`, `size`) is updated at once, on main, and the bytes
+/// go to and from the file on `io`, one serial queue for every mirror: each operation is laid
+/// out against the index as it stood when it was queued, and the queue runs them in that same
+/// order, so a read always finds the file the index describes. Opening a mirror waits for the
+/// queue first, so a copy reopened (a pruned feed, a relaunch in a test) sees every write
+/// made through the one before it.
 @MainActor
 final class RunMirror {
     struct Chunk: Equatable {
@@ -44,9 +51,12 @@ final class RunMirror {
         /// Where the bytes start in the file.
         let filePosition: UInt64
         let length: Int
+        var end: Int64 { offset + Int64(length) }
     }
 
-    let url: URL
+    nonisolated private static let io = DispatchQueue(label: "dev.flightdeck.delegation.mirror", qos: .utility)
+
+    private(set) var url: URL
     private let cap: Int64
     private var entries: [Entry] = []
     private var size: UInt64 = 0
@@ -65,6 +75,10 @@ final class RunMirror {
         self.cap = cap
         load()
     }
+
+    /// Blocks until every queued write has reached the disk: for tests that read a mirror's
+    /// file directly, and for a sweep that must not delete a file mid-write.
+    nonisolated static func waitForIO() { io.sync {} }
 
     /// The first retained offset: past the origin once the cap has dropped output.
     var start: Int64 { entries.first?.offset ?? end }
@@ -96,7 +110,7 @@ final class RunMirror {
         var payload = Data([Self.code(chunk.stream)])
         payload.append(Self.bytes(offset))
         payload.append(data)
-        guard let position = write(.output, payload) else { return }
+        let position = write(.output, payload)
         entries.append(Entry(stream: chunk.stream, offset: offset, filePosition: position + 14, length: data.count))
         end = chunk.end
         if end - start > cap { compact() }
@@ -113,36 +127,58 @@ final class RunMirror {
         write(.event, json)
     }
 
-    /// Everything held from `offset` on, oldest first, in chunks of at most
-    /// `OutputSpool.maxChunk`; the spool's marker first when the cap dropped what was asked for.
-    func read(from offset: Int64) -> [Chunk] {
-        guard let origin, offset < end else { return [] }
-        var out: [Chunk] = []
-        var position = max(offset, origin)
-        if position < start {
-            out.append(marker(from: position))
-            position = start
+    /// The held output at or after `offset`, at most `OutputSpool.maxChunk` of it, read off the
+    /// main actor: the spool's marker when the cap dropped what was asked for, then the bytes
+    /// from there (or from the next byte held, past a gap the host dropped). Nil once there is
+    /// nothing more, or the disk would not give it back.
+    ///
+    /// One chunk per call, so a replay of a whole copy goes out a chunk at a time with the
+    /// main actor free between them, rather than as one burst that outruns the socket.
+    func chunk(from offset: Int64) async -> Chunk? {
+        guard let origin, offset < end else { return nil }
+        let position = max(offset, origin)
+        if position < start { return marker(from: position) }
+        // Binary search: a 64 MiB copy holds tens of thousands of records.
+        var low = 0, high = entries.count
+        while low < high {
+            let mid = (low + high) / 2
+            if entries[mid].end <= position { low = mid + 1 } else { high = mid }
         }
-        guard let handle = try? FileHandle(forReadingFrom: url) else { return out }
-        defer { try? handle.close() }
-        for entry in entries where entry.offset + Int64(entry.length) > position {
-            var at = max(position, entry.offset)
-            while at < entry.offset + Int64(entry.length) {
-                let skip = Int(at - entry.offset)
-                let take = min(entry.length - skip, OutputSpool.maxChunk)
-                guard (try? handle.seek(toOffset: entry.filePosition + UInt64(skip))) != nil,
-                      let data = try? handle.read(upToCount: take), data.count == take
-                else { return out }
-                out.append(Chunk(stream: entry.stream, offset: at, data: data))
-                at += Int64(take)
+        guard low < entries.count else { return nil }
+        let entry = entries[low]
+        let at = max(position, entry.offset)
+        let skip = Int(at - entry.offset)
+        let take = min(entry.length - skip, OutputSpool.maxChunk)
+        let url = url
+        let filePosition = entry.filePosition + UInt64(skip)
+        let data: Data? = await withCheckedContinuation { continuation in
+            Self.io.async {
+                guard let handle = try? FileHandle(forReadingFrom: url) else { return continuation.resume(returning: nil) }
+                defer { try? handle.close() }
+                guard (try? handle.seek(toOffset: filePosition)) != nil else { return continuation.resume(returning: nil) }
+                continuation.resume(returning: try? handle.read(upToCount: take))
             }
-            position = at
         }
-        return out
+        guard let data, data.count == take else { return nil }
+        return Chunk(stream: entry.stream, offset: at, data: data)
+    }
+
+    /// Renames the copy, for a run whose local id was not known when its first output arrived.
+    func move(to destination: URL) {
+        guard destination != url else { return }
+        let source = url
+        url = destination
+        Self.io.async {
+            let fm = FileManager.default
+            try? fm.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try? fm.removeItem(at: destination)
+            try? fm.moveItem(at: source, to: destination)
+        }
     }
 
     func delete() {
-        try? FileManager.default.removeItem(at: url)
+        let url = url
+        Self.io.async { try? FileManager.default.removeItem(at: url) }
         entries = []
         size = 0
         origin = nil
@@ -153,25 +189,28 @@ final class RunMirror {
 
     // MARK: File
 
+    /// Reads the index back: record headers only, plus the small event records. The output
+    /// bytes stay on disk (mapped, never copied) until a reader asks for them.
     private func load() {
-        guard let data = try? Data(contentsOf: url, options: .mappedIfSafe) else { return }
+        let url = url
+        guard let data = Self.io.sync(execute: { try? Data(contentsOf: url, options: .alwaysMapped) }) else { return }
         var at = 0
         while at + 5 <= data.count {
             let kind = data[data.startIndex + at]
             let length = Int(Self.uint32(data, at + 1))
             let body = at + 5
             guard body + length <= data.count else { break }
-            let payload = data.subdata(in: (data.startIndex + body)..<(data.startIndex + body + length))
             switch Kind(rawValue: kind) {
             case .origin where length == 8:
-                origin = Self.int64(payload, 0)
+                origin = Self.int64(data, body)
                 end = origin ?? 0
             case .output where length >= 9:
-                guard let stream = Self.stream(payload[payload.startIndex]) else { break }
-                let offset = Self.int64(payload, 1)
+                guard let stream = Self.stream(data[data.startIndex + body]) else { break }
+                let offset = Self.int64(data, body + 1)
                 entries.append(Entry(stream: stream, offset: offset, filePosition: UInt64(body + 9), length: length - 9))
                 end = offset + Int64(length - 9)
             case .event:
+                let payload = data.subdata(in: (data.startIndex + body)..<(data.startIndex + body + length))
                 switch try? JSONDecoder().decode(RunEvent.self, from: payload) {
                 case .some(let event):
                     switch event {
@@ -187,35 +226,39 @@ final class RunMirror {
             at = body + length
         }
         size = UInt64(at)
-        if at < data.count, let handle = try? FileHandle(forWritingTo: url) {
+        if at < data.count {
             // A record a crash cut short: dropped, so the next append lands after a whole one.
-            try? handle.truncate(atOffset: size)
-            try? handle.close()
+            let size = size
+            Self.io.async {
+                guard let handle = try? FileHandle(forWritingTo: url) else { return }
+                try? handle.truncate(atOffset: size)
+                try? handle.close()
+            }
         }
     }
 
-    /// Appends one record; returns where it starts, nil when the disk refused it (the copy then
-    /// simply holds less, and a later subscriber is served by the host).
+    /// Appends one record and returns where it starts. Laid out now, written on `io`; a write
+    /// the disk refuses leaves the copy holding less than its index says, so a replay of that
+    /// range ends early and a later subscriber is served by the host.
     @discardableResult
-    private func write(_ kind: Kind, _ payload: Data) -> UInt64? {
+    private func write(_ kind: Kind, _ payload: Data) -> UInt64 {
         var record = Data([kind.rawValue])
         record.append(Self.bytes(UInt32(payload.count)))
         record.append(payload)
-        let fm = FileManager.default
-        if !fm.fileExists(atPath: url.path) {
-            try? fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-            fm.createFile(atPath: url.path, contents: nil)
-        }
-        guard let handle = try? FileHandle(forWritingTo: url) else { return nil }
-        defer { try? handle.close() }
         let position = size
-        do {
-            try handle.seek(toOffset: position)
-            try handle.write(contentsOf: record)
-        } catch {
-            return nil
-        }
         size += UInt64(record.count)
+        let url = url
+        Self.io.async {
+            let fm = FileManager.default
+            if !fm.fileExists(atPath: url.path) {
+                try? fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+                fm.createFile(atPath: url.path, contents: nil)
+            }
+            guard let handle = try? FileHandle(forWritingTo: url) else { return }
+            defer { try? handle.close() }
+            try? handle.seek(toOffset: position)
+            try? handle.write(contentsOf: record)
+        }
         return position
     }
 
@@ -232,39 +275,50 @@ final class RunMirror {
     }
 
     /// Writes the file afresh — origin, state, end, then `kept` — and renames it over the old
-    /// one, so a crash mid-rewrite leaves the previous copy whole.
+    /// one, so a crash mid-rewrite leaves the previous copy whole. The new layout is fixed here;
+    /// the kept bytes are copied out of the old file on `io`.
     private func rewrite(keeping kept: [Entry]) {
-        var old: FileHandle?
-        if !kept.isEmpty { old = try? FileHandle(forReadingFrom: url) }
-        defer { try? old?.close() }
-        var out = Data()
-        var rewritten: [Entry] = []
+        var header = Data()
         func put(_ kind: Kind, _ payload: Data) {
-            out.append(kind.rawValue)
-            out.append(Self.bytes(UInt32(payload.count)))
-            out.append(payload)
+            header.append(kind.rawValue)
+            header.append(Self.bytes(UInt32(payload.count)))
+            header.append(payload)
         }
         if let origin { put(.origin, Self.bytes(origin)) }
         for event in [state, exit].compactMap({ $0 }) {
             if let json = try? JSONEncoder().encode(event) { put(.event, json) }
         }
+        var position = UInt64(header.count)
+        var rewritten: [Entry] = []
         for entry in kept {
-            guard let old, (try? old.seek(toOffset: entry.filePosition)) != nil,
-                  let data = try? old.read(upToCount: entry.length), data.count == entry.length
-            else { break }
-            var payload = Data([Self.code(entry.stream)])
-            payload.append(Self.bytes(entry.offset))
-            payload.append(data)
-            let position = UInt64(out.count)
-            put(.output, payload)
             rewritten.append(Entry(stream: entry.stream, offset: entry.offset, filePosition: position + 14, length: entry.length))
+            position += 14 + UInt64(entry.length)
         }
-        let fm = FileManager.default
-        try? fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        let temp = url.appendingPathExtension("compact")
-        guard (try? out.write(to: temp)) != nil, rename(temp.path, url.path) == 0 else { return }
+        let url = url
+        Self.io.async {
+            var out = header
+            if !kept.isEmpty {
+                guard let old = try? FileHandle(forReadingFrom: url) else { return }
+                defer { try? old.close() }
+                for entry in kept {
+                    guard (try? old.seek(toOffset: entry.filePosition)) != nil,
+                          let data = try? old.read(upToCount: entry.length), data.count == entry.length
+                    else { return }
+                    out.append(Kind.output.rawValue)
+                    out.append(Self.bytes(UInt32(9 + entry.length)))
+                    out.append(Self.code(entry.stream))
+                    out.append(Self.bytes(entry.offset))
+                    out.append(data)
+                }
+            }
+            let fm = FileManager.default
+            try? fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            let temp = url.appendingPathExtension("compact")
+            guard (try? out.write(to: temp)) != nil else { return }
+            _ = rename(temp.path, url.path)
+        }
         entries = rewritten
-        size = UInt64(out.count)
+        size = position
     }
 
     /// The spool's marker, so a reader cannot tell which copy answered.
@@ -277,18 +331,18 @@ final class RunMirror {
 
     // MARK: Encoding
 
-    private static let streams: [RunOutputStream] = [.stdout, .stderr, .pty]
-    private static func code(_ stream: RunOutputStream) -> UInt8 { UInt8(streams.firstIndex(of: stream) ?? 0) }
-    private static func stream(_ code: UInt8) -> RunOutputStream? { Int(code) < streams.count ? streams[Int(code)] : nil }
+    nonisolated private static let streams: [RunOutputStream] = [.stdout, .stderr, .pty]
+    nonisolated private static func code(_ stream: RunOutputStream) -> UInt8 { UInt8(streams.firstIndex(of: stream) ?? 0) }
+    nonisolated private static func stream(_ code: UInt8) -> RunOutputStream? { Int(code) < streams.count ? streams[Int(code)] : nil }
 
-    private static func bytes(_ value: Int64) -> Data { withUnsafeBytes(of: value.bigEndian) { Data($0) } }
-    private static func bytes(_ value: UInt32) -> Data { withUnsafeBytes(of: value.bigEndian) { Data($0) } }
+    nonisolated private static func bytes(_ value: Int64) -> Data { withUnsafeBytes(of: value.bigEndian) { Data($0) } }
+    nonisolated private static func bytes(_ value: UInt32) -> Data { withUnsafeBytes(of: value.bigEndian) { Data($0) } }
 
-    private static func int64(_ data: Data, _ at: Int) -> Int64 {
+    nonisolated private static func int64(_ data: Data, _ at: Int) -> Int64 {
         data.subdata(in: (data.startIndex + at)..<(data.startIndex + at + 8)).reduce(Int64(0)) { $0 << 8 | Int64($1) }
     }
 
-    private static func uint32(_ data: Data, _ at: Int) -> UInt32 {
+    nonisolated private static func uint32(_ data: Data, _ at: Int) -> UInt32 {
         data.subdata(in: (data.startIndex + at)..<(data.startIndex + at + 4)).reduce(UInt32(0)) { $0 << 8 | UInt32($1) }
     }
 }

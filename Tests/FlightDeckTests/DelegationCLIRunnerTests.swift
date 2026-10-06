@@ -199,6 +199,45 @@ final class DelegationCLIRunnerTests: XCTestCase {
         XCTAssertEqual(execs.last?.1, ["x"])
     }
 
+    /// The shim bypasses routing for any value but empty or `0`; the CLI must agree, or a
+    /// `FLIGHTDECK_NO_ROUTE=true` that the shim passes through gets routed after all.
+    func testNoRouteMeansWhatTheShimMeans() {
+        for value in ["1", "true", "yes"] {
+            XCTAssertTrue(CLIRunner.bypassesRouting(["FLIGHTDECK_NO_ROUTE": value]), value)
+        }
+        for env in [[:], ["FLIGHTDECK_NO_ROUTE": ""], ["FLIGHTDECK_NO_ROUTE": "0"]] {
+            XCTAssertFalse(CLIRunner.bypassesRouting(env), "\(env)")
+        }
+        let bypass = FakeTransport()
+        _ = runner("route-exec", "make", "--", "x", transport: bypass, env: ["FLIGHTDECK_NO_ROUTE": "true"])
+        XCTAssertTrue(bypass.connects.isEmpty)
+        XCTAssertEqual(execs.last?.0, "make")
+    }
+
+    /// A Flight Deck too old to know a delegation request answers with a bare code; the line
+    /// says what to do about it, not just the code.
+    func testABareRefusalFromAnOldFlightDeckSaysToUpdateIt() {
+        for refusal in ["unsupported", "unhandled", "not_implemented"] {
+            let t = FakeTransport()
+            err = []
+            _ = runner("ps", transport: t)
+            t.push(.err(cid: lastCID(t), code: refusal))
+            XCTAssertEqual(err, ["flightdeck: this Flight Deck is too old for delegation — update it"], refusal)
+            XCTAssertEqual(code, 125, refusal)
+        }
+        // A worded one is kept: the app names the host that needs updating.
+        XCTAssertEqual(DelegateCommandRunner.line(code: "unsupported", message: "mini does not support this yet — update Flight Deck on mini"),
+                       "mini does not support this yet — update Flight Deck on mini")
+    }
+
+    func testOutOfScopeSaysWhereTheSettingIs() {
+        let t = FakeTransport()
+        _ = runner("stop", "r1", transport: t)
+        t.push(.err(cid: lastCID(t), code: "out_of_scope"))
+        XCTAssertEqual(err.count, 1)
+        XCTAssertTrue(err[0].contains("Agents in tabs may control"), err[0])
+    }
+
     /// A run that never started is a delegation failure: 125, one line, the next step.
     func testADropBeforeStartedIs125() {
         let t = FakeTransport()

@@ -182,14 +182,22 @@ final class DelegateSkillTests: XCTestCase {
     /// entry point must write nothing. That is also what keeps a test run that reaches
     /// `SessionStore.startCodex` out of the developer's real `~/.codex`.
     func testInstallBundledWritesNothingWithoutAPluginInTheBundle() async {
-        await CodexDelegateSkill.installBundledOffMainActor(codexHome: tempHome, bundle: .main)
+        await CodexDelegateSkill.installBundledOffMainActor(codexHome: tempHome, bundle: .main, debugBuild: false)
         XCTAssertFalse(FileManager.default.fileExists(atPath: target.path))
     }
 
     func testInstallBundledCopiesFromAPluginBundle() async {
         await CodexDelegateSkill.installBundledOffMainActor(
-            codexHome: tempHome, bundle: Bundle(for: Self.self))
+            codexHome: tempHome, bundle: Bundle(for: Self.self), debugBuild: false)
         XCTAssertTrue(FileManager.default.fileExists(atPath: target.path))
+    }
+
+    /// A Debug build never writes into a codex home: it is the user's real one, shared with
+    /// their installed Flight Deck.
+    func testADebugBuildInstallsNothing() async {
+        await CodexDelegateSkill.installBundledOffMainActor(
+            codexHome: tempHome, bundle: Bundle(for: Self.self), debugBuild: true)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: target.path))
     }
 
     /// The copy runs off the main thread, so `startCodex` never blocks the UI on disk I/O.
@@ -197,7 +205,7 @@ final class DelegateSkillTests: XCTestCase {
     func testInstallBundledRunsTheCopyOffTheMainThread() async {
         let onMain = Flag()
         await CodexDelegateSkill.installBundledOffMainActor(
-            codexHome: tempHome, bundle: Bundle(for: Self.self),
+            codexHome: tempHome, bundle: Bundle(for: Self.self), debugBuild: false,
             perform: { _, _ in onMain.set(Thread.isMainThread); return .current })
         XCTAssertEqual(onMain.value, false)
     }
@@ -207,7 +215,7 @@ final class DelegateSkillTests: XCTestCase {
     func testInstallBundledReturnsAtTheDeadlineWhenTheCopyStalls() async {
         let started = Date()
         await CodexDelegateSkill.installBundledOffMainActor(
-            codexHome: tempHome, bundle: Bundle(for: Self.self), timeoutSeconds: 0.2,
+            codexHome: tempHome, bundle: Bundle(for: Self.self), timeoutSeconds: 0.2, debugBuild: false,
             perform: { _, _ in Thread.sleep(forTimeInterval: 3); return .current })
         XCTAssertLessThan(Date().timeIntervalSince(started), 2)
     }

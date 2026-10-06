@@ -136,6 +136,7 @@ public enum RecipeWriter {
         }
         if recipe.apply != .review { lines.append("apply = \(quote(recipe.apply.rawValue))") }
         if let pool = recipe.pool { lines.append("pool = \(pool)") }
+        if let timeout = recipe.orphanTimeout { lines.append("orphan_timeout = \(timeout)") }
         return lines
     }
 
