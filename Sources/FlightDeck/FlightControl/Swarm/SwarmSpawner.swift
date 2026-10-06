@@ -79,7 +79,8 @@ final class StoreSwarmSpawner: SwarmSpawner, SwarmAgentLauncher {
     private let lookupSession: (UUID) -> Session?
     private let registry: RoutingCapabilityRegistry
     private let delivery: PromptDelivery
-    /// Used by the contract's `spawn` only (L3-U's hand-off path). The controller claims itself.
+    /// Used by the contract's `spawn` only (L3-U's hand-off path); the controller claims itself.
+    /// Wired by `SessionStore.useSwarmService` to the service's backend. Nil makes `spawn` refuse.
     var claim: ((TaskRef, String) async -> ClaimOutcome)?
 
     init(create: @escaping Create, exists: @escaping (UUID) -> Bool, identity: @escaping (UUID) -> FlywheelIdentity?,
@@ -137,14 +138,16 @@ final class StoreSwarmSpawner: SwarmSpawner, SwarmAgentLauncher {
 
     /// The contract's one-call spawn (L3-0): create → claim → prompt. A hand-off driver returns
     /// the old agent's claim to open first, so this claim does not race the agent it replaces.
+    ///
+    /// Without a claim it refuses before opening a tab: a spawn that only prompts leaves the
+    /// task open after the hand-off returned it, and the swarm then claims it for a second agent.
     func spawn(task: TaskRef, block: ExecutionBlock, lease: AccountLease?, firstPrompt: String) async -> Result<SessionRef, SpawnError> {
+        guard let claim else { return .failure(.launchFailed("no claim configured")) }
         let created = await createAgent(task: task, block: block, lease: lease)
         guard case .success(let ref) = created else { return created }
-        if let claim {
-            switch await claim(task, ref.agentName ?? "") {
-            case .claimed: break
-            case .conflict, .failed: return .failure(.claimConflict(task.id))
-            }
+        switch await claim(task, ref.agentName ?? "") {
+        case .claimed: break
+        case .conflict, .failed: return .failure(.claimConflict(task.id))
         }
         switch await deliver(firstPrompt, to: ref.id) {
         case .success: return .success(ref)
