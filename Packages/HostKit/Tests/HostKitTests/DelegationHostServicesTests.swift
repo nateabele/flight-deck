@@ -204,6 +204,10 @@ final class DelegationHostServicesTests: XCTestCase {
                                        acquire: { throw CancellationError() })
 
         services.controllerDisconnected(controller)
+        // The first drop's timer must be the clock's first sleeper, or `advance` below could
+        // wake the second's: the two timer tasks otherwise start in either order (seen once in
+        // a loaded Linux run).
+        try await waitFor { clock.requested.count == 1 }
         services.controllerConnected(controller)
         services.controllerDisconnected(controller)
         try await clock.advance()   // the first drop's sleeper
@@ -212,6 +216,28 @@ final class DelegationHostServicesTests: XCTestCase {
 
         try await clock.advance()   // the second's
         try await waitFor { runner.downs == [id] }
+    }
+
+    /// A revoked controller's services go down now, `down` command and all, not after the
+    /// orphan timeout: the key is no longer trusted, so nothing it started keeps a port. The
+    /// timer its disconnect started must not down them a second time.
+    func testRevokedDownsTheSlotsServicesAtOnce() async throws {
+        let runner = FakeRunner()
+        let clock = ManualClock()
+        let services = makeServices(runner: runner, clock: clock)
+        let mine = services.startService(serviceSpec(), owner: LeaseHolderOwner(controller: controller, session: "A"),
+                                         acquire: { throw CancellationError() })
+        let theirs = services.startService(serviceSpec(), owner: LeaseHolderOwner(controller: stranger, session: "B"),
+                                           acquire: { throw CancellationError() })
+
+        services.controllerDisconnected(controller)
+        let downed = await services.revoked(controller)
+        XCTAssertEqual(downed, [mine])
+        XCTAssertEqual(runner.downs, [mine])
+        try await clock.advance()   // the disconnect's orphan timer
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(runner.downs, [mine], "downed once")
+        XCTAssertFalse(runner.downs.contains(theirs))
     }
 
     // MARK: - port.open
@@ -429,6 +455,10 @@ private final class FakeRunner: RunControlling, @unchecked Sendable {
     func cancel(runID: String) {}
     func down(runID: String) async throws { lock.withLock { _downs.append(runID) } }
     func owner(runID: String) -> LeaseHolderOwner? { lock.withLock { _owners[runID] } }
+    func liveRuns(controller: UUID) -> [String] {
+        lock.withLock { _owners.filter { $0.value.controller == controller && !_downs.contains($0.key) }.map(\.key).sorted() }
+    }
+    func shutdown(grace: Double, deadline: Double) async {}
 }
 
 private struct FakePorts: PortChecking {

@@ -8,4 +8,7 @@
   <key>LimitLoadToSessionType</key><string>Aqua</string>
   <key>KeepAlive</key><true/>
   <key>ProcessType</key><string>Interactive</string>
+  <!-- launchd's default, spelled out because DelegationHost.shutdown's defaults are sized to
+       it: on SIGTERM hostd downs services and ends runs, and launchd SIGKILLs it after this. -->
+  <key>ExitTimeOut</key><integer>20</integer>
 </dict></plist>

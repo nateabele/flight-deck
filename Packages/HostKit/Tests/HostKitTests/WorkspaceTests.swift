@@ -518,3 +518,36 @@ private final class Flag: @unchecked Sendable {
     func set() { lock.lock(); raised = true; lock.unlock() }
     var value: Bool { lock.lock(); defer { lock.unlock() }; return raised }
 }
+
+extension WorkspaceTests {
+    /// `exec` on a freshly started hostd rediscovers checkouts from disk. One a `run` is
+    /// applying into at that moment is on disk too, half written; marking it ready handed
+    /// `exec` (and every `run` sharing that snapshot) a tree mid-checkout.
+    func testExistingCheckoutSkipsASlotStillBeingApplied() async throws {
+        let repo = try makeRepo()
+        let root = TempRepo.scratch()
+        let before = Workspace(root: root, poolSize: 1)
+        let s1 = try await push(repo, to: before)
+        await before.release(try await before.checkout(controller: controller, ref: s1, pin: false))
+
+        let restarted = Workspace(root: root, poolSize: 1)
+        let applying = DispatchSemaphore(value: 0), proceed = DispatchSemaphore(value: 0)
+        restarted.applyHook = {
+            applying.signal()
+            proceed.wait()
+        }
+        let controller = self.controller
+        let run = Task { try await restarted.checkout(controller: controller, ref: s1, pin: false) }
+        XCTAssertEqual(applying.wait(timeout: .now() + 30), .success)
+
+        let exec = await thrown {
+            try await restarted.existingCheckout(controller: controller, repoRoot: s1.repoRoot, wtKey: s1.wtKey)
+        }
+        XCTAssertEqual(exec as? SyncError, .noCheckout, "a slot mid-apply is never handed to exec")
+
+        restarted.applyHook = nil
+        proceed.signal()
+        let lease = try await run.value
+        XCTAssertEqual(text(lease, "a.txt"), "a\n")
+    }
+}

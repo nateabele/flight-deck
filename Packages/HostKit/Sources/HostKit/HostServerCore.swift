@@ -129,6 +129,8 @@ public final class HostServerCore: @unchecked Sendable {
         }
     }
 
+    /// `slot` was revoked: its connections close, and the router stops its runs and services
+    /// at once, connected or not. A revoked key's work must not run on for the orphan timeout.
     public func disconnect(slot: UUID) {
         lock.lock()
         revokedSlots.insert(slot)
@@ -139,6 +141,7 @@ public final class HostServerCore: @unchecked Sendable {
             delegation?.disconnected(p)
             p.close()
         }
+        delegation?.revoked(slot)
     }
 
     public func peerClosed(_ peer: HostPeer) { forget(peer) }

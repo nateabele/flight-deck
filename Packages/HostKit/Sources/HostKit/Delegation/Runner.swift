@@ -18,6 +18,12 @@ import Glibc
 // Blocking work (waitpid, draining pipes, the down command) runs on a dedicated thread per
 // run, never on Swift's cooperative pool, so a hundred long runs cannot starve the host's
 // async code.
+//
+// A run never outlives hostd. Each leads its own process group, so neither launchd's stop nor
+// a crash reaches it: hostd's SIGTERM path calls `shutdown`, and a running run records its
+// group in `runs/<id>/pgid`, which the next `Runner` kills if a crashed hostd left it alive.
+// Otherwise the next hostd hands the run's slot to a new run while the old one still writes
+// into it.
 
 /// The escalation clock, injected so tests can step through the 10 s graces instantly.
 public protocol RunClock: Sendable {
@@ -41,6 +47,8 @@ public enum RunnerError: Error, Equatable, CustomStringConvertible {
     case noConsoleUser
     case screenLocked
     case spawnFailed(Int32)
+    /// hostd is stopping (`shutdown`); the run never started.
+    case shuttingDown
 
     public var description: String {
         switch self {
@@ -51,6 +59,7 @@ public enum RunnerError: Error, Equatable, CustomStringConvertible {
         case .noConsoleUser: return "nobody is logged in at the host's console; log in and retry"
         case .screenLocked: return "the host's screen is locked; unlock it and retry"
         case .spawnFailed(let e): return "could not start the command (errno \(e))"
+        case .shuttingDown: return "the host is shutting down; retry once it is back"
         }
     }
 }
@@ -123,6 +132,12 @@ public final class Runner: RunControlling, @unchecked Sendable {
     private let lock = NSLock()
     private var runs: [String: Run] = [:]
     private var nextNumber = 1
+    /// This runner's start time (epoch milliseconds, base 36), the first half of every run id
+    /// it issues. Ids are opaque, but they name spools, result refs and the controller's
+    /// records, so a hostd that restarted at `r1` reused names whose old data was still around
+    /// (Ruling 27). Milliseconds, so two runners in one process (tests) differ too.
+    private let idPrefix = String(UInt64(Date().timeIntervalSince1970 * 1000), radix: 36)
+    private var shuttingDown = false
 
     /// Finished runs kept for `events` and `ps`. Older ones are forgotten (their spool stays on
     /// disk until the day-old prune): unbounded, a hostd that runs for weeks grows without end.
@@ -171,6 +186,9 @@ public final class Runner: RunControlling, @unchecked Sendable {
         self.lifecycle = lifecycle
         self.spoolCap = spoolCap
         screen.observe { [weak self] in self?.screenQueueChanged() }
+        // Before anything can start: a slot is only safe to hand out once nothing a previous
+        // hostd started still runs in it.
+        killOrphanedGroups()
         pruneOldSpools()
     }
 
@@ -190,15 +208,20 @@ public final class Runner: RunControlling, @unchecked Sendable {
 
     public func start(_ spec: RunSpec, owner: LeaseHolderOwner,
                       acquire: @escaping @Sendable () async throws -> CheckoutLease) -> String {
-        let (id, run): (String, Run) = lock.withLock {
+        let (id, run, refused): (String, Run, Bool) = lock.withLock {
             var id: String
             repeat {
-                id = "r\(nextNumber)"
+                id = "\(idPrefix)-r\(nextNumber)"
                 nextNumber += 1
             } while runs[id] != nil || FileManager.default.fileExists(atPath: runsRoot.appendingPathComponent(id).path)
             let run = Run(id: id, spec: spec, owner: owner, acquire: acquire)
             runs[id] = run
-            return (id, run)
+            // Read with the registration, so `shutdown` either sees this run or it is refused.
+            return (id, run, shuttingDown)
+        }
+        if refused {
+            fail(run, RunnerError.shuttingDown)
+            return id
         }
 
         do {
@@ -287,6 +310,48 @@ public final class Runner: RunControlling, @unchecked Sendable {
         case .exited, .died, .failed: return
         }
         await waitUntilTerminal(run)
+    }
+
+    public func liveRuns(controller: UUID) -> [String] {
+        lock.withLock { runs.values.filter { $0.owner.controller == controller && !$0.phase.isTerminal }.map(\.id).sorted() }
+    }
+
+    /// Ends everything at once rather than through `cancel`'s 10 s INT→TERM→KILL ladder, which
+    /// would outlast launchd's 20 s ExitTimeOut. A service is marked down, so `finish` runs its
+    /// `down` command once its group is gone; queued runs end without starting.
+    public func shutdown(grace: Double, deadline: Double) async {
+        let began = Date()
+        let live: [Run] = lock.withLock {
+            shuttingDown = true
+            return runs.values.filter { !$0.phase.isTerminal }
+        }
+        for run in live {
+            let (phase, pgid): (RunPhase, pid_t) = lock.withLock {
+                if run.spec.service { run.downRequested = true }
+                return (run.phase, run.pgid)
+            }
+            switch phase {
+            case .queued:
+                cancel(runID: run.id)
+            case .running:
+                lock.withLock { run.cancelRequested = true }
+                signalGroup(pgid, SIGTERM)
+            case .exited, .died, .failed:
+                break
+            }
+        }
+        await waitEnded(live, until: began.addingTimeInterval(grace))
+        for run in live {
+            let (running, pgid) = lock.withLock { (run.phase == .running, run.pgid) }
+            if running { signalGroup(pgid, SIGKILL) }
+        }
+        await waitEnded(live, until: began.addingTimeInterval(deadline))
+    }
+
+    private func waitEnded(_ runs: [Run], until deadline: Date) async {
+        while Date() < deadline, lock.withLock({ runs.contains { !$0.phase.isTerminal } }) {
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
     }
 
     // MARK: - Queries
@@ -413,6 +478,7 @@ public final class Runner: RunControlling, @unchecked Sendable {
             $0.phase = .running
             cancelledWhileQueued = $0.cancelRequested
         }
+        recordGroup(run.id, process.pid)
         pump.start()
         if cancelledWhileQueued { escalate(run, [SIGINT, SIGTERM, SIGKILL]) }
 
@@ -431,6 +497,9 @@ public final class Runner: RunControlling, @unchecked Sendable {
         // setsid). It would hold the output pipe open, so the run never ends, and keep writing
         // into a checkout the next run is about to reuse.
         reapGroup(pgid)
+        // Gone, so the record goes: a later hostd must never signal a pgid the kernel has
+        // since handed to someone else.
+        try? FileManager.default.removeItem(at: groupRecord(run.id))
         drain(pump)
         if let ptySlave { close(ptySlave) }
 
@@ -568,7 +637,8 @@ public final class Runner: RunControlling, @unchecked Sendable {
             case .exited(let e): continuation.yield(.exited(e)); continuation.finish(); return
             case .died(let e): continuation.yield(.serviceDied(e)); continuation.finish(); return
             case .failed:
-                continuation.finish(throwing: lock.withLock { run.failure } ?? RunnerError.spawnFailed(0))
+                let failure: Error? = lock.withLock { run.failure }
+                continuation.finish(throwing: failure ?? RunnerError.spawnFailed(0))
                 return
             case .queued, .running:
                 await waitForChange(run, after: generation)
@@ -632,7 +702,7 @@ public final class Runner: RunControlling, @unchecked Sendable {
             return (run.spool, run.lostBytes, run.lostError)
         }
         if lost > 0 {
-            try? spool?.append(Self.lostMarker(lost, lostError), to: run.spec.pty ? .pty : .stderr)
+            _ = try? spool?.append(Self.lostMarker(lost, lostError), to: run.spec.pty ? .pty : .stderr)
         }
         spool?.closeHandles()
         var prune = false
@@ -650,6 +720,72 @@ public final class Runner: RunControlling, @unchecked Sendable {
         }
         if prune { pruneOldSpools() }
     }
+
+    // MARK: - Groups a previous hostd left
+
+    private func groupRecord(_ runID: String) -> URL {
+        runsRoot.appendingPathComponent(runID).appendingPathComponent("pgid")
+    }
+
+    /// `<pgid> <boot time>`: the boot time keeps a hostd after a reboot from signalling an
+    /// unrelated group that happens to have the same id.
+    private func recordGroup(_ runID: String, _ pgid: pid_t) {
+        let boot = Self.bootTime().map(String.init) ?? "?"
+        try? Data("\(pgid) \(boot)\n".utf8).write(to: groupRecord(runID))
+    }
+
+    /// At startup: every recorded group still alive belongs to a run whose hostd crashed (or
+    /// was SIGKILLed past launchd's ExitTimeOut) before `shutdown` could end it. TERM to all,
+    /// KILL to whatever is left after 2 s, and the run marked died in `runs/<id>/died`.
+    private func killOrphanedGroups() {
+        let fm = FileManager.default
+        guard let names = try? fm.contentsOfDirectory(atPath: runsRoot.path) else { return }
+        let boot = Self.bootTime()
+        var orphans: [(dir: URL, pgid: pid_t)] = []
+        for name in names {
+            let record = groupRecord(name)
+            guard let text = try? String(contentsOf: record, encoding: .utf8) else { continue }
+            let fields = text.split(whereSeparator: \.isWhitespace)
+            let pgid = fields.first.flatMap { pid_t($0) } ?? 0
+            let recordedBoot = fields.dropFirst().first.flatMap { Int($0) }
+            // Within a few seconds: both clocks derive boot time from the wall clock, which
+            // NTP may have nudged in between.
+            let sameBoot = boot != nil && recordedBoot != nil && abs(boot! - recordedBoot!) <= 10
+            if sameBoot, groupAlive(pgid) {
+                signalGroup(pgid, SIGTERM)
+                orphans.append((runsRoot.appendingPathComponent(name), pgid))
+            } else {
+                try? fm.removeItem(at: record)
+            }
+        }
+        guard !orphans.isEmpty else { return }
+        let deadline = Date().addingTimeInterval(2)
+        while Date() < deadline, orphans.contains(where: { groupAlive($0.pgid) }) { usleep(20_000) }
+        for orphan in orphans {
+            if groupAlive(orphan.pgid) { signalGroup(orphan.pgid, SIGKILL) }
+            try? Data("hostd stopped without ending this run; its process group \(orphan.pgid) was killed at the next start\n".utf8)
+                .write(to: orphan.dir.appendingPathComponent("died"))
+            try? fm.removeItem(at: orphan.dir.appendingPathComponent("pgid"))
+        }
+    }
+
+    /// When this machine booted, in seconds since 1970; nil if it cannot be read.
+    static func bootTime() -> Int? {
+        #if canImport(Glibc)
+        guard let stat = try? String(contentsOfFile: "/proc/stat", encoding: .utf8) else { return nil }
+        for line in stat.split(separator: "\n") where line.hasPrefix("btime ") {
+            return Int(line.dropFirst(6).trimmingCharacters(in: .whitespaces))
+        }
+        return nil
+        #else
+        var tv = timeval()
+        var size = MemoryLayout<timeval>.size
+        guard sysctlbyname("kern.boottime", &tv, &size, nil, 0) == 0 else { return nil }
+        return Int(tv.tv_sec)
+        #endif
+    }
+
+    // MARK: - Spools
 
     /// Internal for a test; otherwise at startup and at most hourly from `terminate`.
     func pruneOldSpools() {
@@ -1066,7 +1202,7 @@ private enum Pty {
             throw RunnerError.spawnFailed(e)
         }
         let master = try Spawner.cloexecAboveStdio(fd)
-        return Master(fd: master, slavePath: String(cString: buf))
+        return Master(fd: master, slavePath: buf.withUnsafeBufferPointer { String(cString: $0.baseAddress!) })
     }
 
     #if canImport(Glibc)
@@ -1082,10 +1218,10 @@ private enum Pty {
     private static func openpt(_ flags: Int32) -> Int32 { posix_openpt(flags) }
     private static func grant(_ fd: Int32) -> Int32 { grantpt(fd) }
     private static func unlock(_ fd: Int32) -> Int32 { unlockpt(fd) }
+    /// The reentrant form: `ptsname` returns a static buffer, and two runs starting a pty at
+    /// once on different threads could each read the other's slave path.
     private static func name(_ fd: Int32, _ buf: UnsafeMutablePointer<CChar>, _ len: Int) -> Int32 {
-        guard let p = ptsname(fd) else { return -1 }
-        strlcpy(buf, p, len)
-        return 0
+        ptsname_r(fd, buf, len)
     }
     #endif
 }

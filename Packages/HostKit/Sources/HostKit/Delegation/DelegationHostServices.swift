@@ -187,6 +187,31 @@ public final class DelegationHostServices: @unchecked Sendable {
         lock.withLock { services[runID]?.lease = updated }
     }
 
+    /// The services `controller` started that the host still tracks.
+    func serviceIDs(controller: UUID) -> Set<String> {
+        lock.withLock { Set(services.filter { $0.value.controller == controller }.keys) }
+    }
+
+    /// `slot`'s pairing was revoked: downs each of its services now, `down` command and all,
+    /// rather than after the orphan timeout, and returns their ids once they are down. The
+    /// generation bump makes the timer its disconnect started a no-op, so nothing is downed
+    /// twice.
+    @discardableResult
+    public func revoked(_ slot: UUID) async -> [String] {
+        let (mine, timers): ([String], [Task<Void, Never>]) = lock.withLock {
+            _ = bump(slot)
+            let mine = services.filter { $0.value.controller == slot }.map(\.key).sorted()
+            for id in mine { services[id] = nil }
+            return (mine, orphanTimers.removeValue(forKey: slot) ?? [])
+        }
+        timers.forEach { $0.cancel() }
+        let runner = context.runner
+        await withTaskGroup(of: Void.self) { group in
+            for id in mine { group.addTask { try? await runner.down(runID: id) } }
+        }
+        return mine
+    }
+
     // MARK: - Orphan timeout
 
     /// The router calls this when `slot`'s last connection drops. Each of its services gets
