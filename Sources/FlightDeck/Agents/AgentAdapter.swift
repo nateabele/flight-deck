@@ -694,9 +694,13 @@ extension AgentID {
     }
 
     /// See `AgentAdapter.timelineItems(inLine:at:)`. Consulted by `TimelineReader.page`.
-    func timelineItems(inLine line: String, at offset: Int) -> [TimelineItem] {
+    ///
+    /// `sidechain` is true for a line read from a subagent's own file, where every record is
+    /// flagged `isSidechain` and claude's mapper would otherwise drop all of them. Kept off the
+    /// protocol: only claude has subagent files, and codex ignores it.
+    func timelineItems(inLine line: String, at offset: Int, sidechain: Bool = false) -> [TimelineItem] {
         switch self {
-        case .claude: ClaudeAdapter.timelineItems(inLine: line, at: offset)
+        case .claude: ClaudeTimelineMapper.items(inLine: line, at: offset, sidechain: sidechain)
         case .codex: CodexAdapter.timelineItems(inLine: line, at: offset)
         }
     }

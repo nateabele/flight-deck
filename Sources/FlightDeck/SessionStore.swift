@@ -114,6 +114,16 @@ final class SessionStore: ObservableObject {
     /// Nil falls back to `openPromptProbe`, which is what a test that installs only that gets.
     var openPromptProbeInline: ((UUID) -> Result<String, TimelineErrorCode>?)?
 
+    /// Which subagent's file holds the call `openPromptCalls` names for a tab, or absent when
+    /// it is the tab's own. Asked straight after `openPromptProbe` succeeds, so the two answer
+    /// about the same derivation. Without it the phone would page the PARENT's feed for a call
+    /// that lives in a subagent's file and never find the card's tool call.
+    var openPromptAgentProbe: ((UUID) -> String?)?
+
+    /// This tick's owning subagent for each tab in `openPromptCalls` that a subagent owns.
+    /// Rebuilt wholesale by every `commitStatuses`, like `openPromptCalls` beside it.
+    private(set) var openPromptAgents: [UUID: String] = [:]
+
     /// Session ids in most-recently-active order (index 0 == current selection).
     /// Consulted by `closeSession` so closing the active tab returns to the tab you
     /// were on before it rather than the top of the sidebar. Not persisted: after a
@@ -8263,6 +8273,7 @@ final class SessionStore: ObservableObject {
         let previous = statuses
         let previousBackgroundWork = backgroundWorkSessions
         let previousOpenPromptCalls = openPromptCalls
+        let previousOpenPromptAgents = openPromptAgents
         // Shadowed, mutable: `derivedOpenPromptCalls` fills in `answerless` on every `waiting`
         // entry below, ahead of every comparison this function makes — a tick where only that
         // field moves must be recognized as a change exactly like any other, not smuggled in
@@ -8309,6 +8320,7 @@ final class SessionStore: ObservableObject {
         if next != statuses { statuses = next }
         if backgroundWork != backgroundWorkSessions { backgroundWorkSessions = backgroundWork }
         openPromptCalls = derived.calls
+        openPromptAgents = derived.agents
         openPromptFailureCodes = derived.codes
         // THREE axes, not one. A task starting or ending under an otherwise-idle tab moves
         // only `backgroundWork` — guarding on `statuses` alone swallowed that tick entirely,
@@ -8319,6 +8331,9 @@ final class SessionStore: ObservableObject {
         guard next != previous
             || backgroundWork != previousBackgroundWork
             || openPromptCalls != previousOpenPromptCalls
+            // The same call id moving from the parent to a subagent (or between subagents)
+            // changes where the phone must read it, so it is a change even though the id is not.
+            || openPromptAgents != previousOpenPromptAgents
         else { return }
         // A session that HAD a status and no longer does means its `claude` exited.
         // Drop its sub-agent count too, so a later process reusing the same session
@@ -8503,8 +8518,9 @@ final class SessionStore: ObservableObject {
     /// two can never read as two different moments for what is one underlying fact.
     private func derivedOpenPromptCalls(
         _ next: inout [UUID: SessionStatus]
-    ) -> (calls: [UUID: String], codes: [UUID: String]) {
+    ) -> (calls: [UUID: String], codes: [UUID: String], agents: [UUID: String]) {
         var calls: [UUID: String] = [:]
+        var agents: [UUID: String] = [:]
         var codes: [UUID: String] = [:]
         let now = now()
         // Snapshotted before the loop, deliberately: the loop below mutates `next[id]` on every
@@ -8518,6 +8534,7 @@ final class SessionStore: ObservableObject {
             switch openPromptProbe.flatMap({ $0(id) }) {
             case .success(let callID):
                 calls[id] = callID
+                agents[id] = openPromptAgentProbe?(id)
                 stuckPromptEpisodes[id] = nil
                 next[id]?.answerless = false
             case .failure(let code) where code.code == "prompt_changed":
@@ -8543,7 +8560,7 @@ final class SessionStore: ObservableObject {
         for id in staleEpisodeIDs {
             stuckPromptEpisodes[id] = nil
         }
-        return (calls, codes)
+        return (calls, codes, agents)
     }
 
     /// One tab's identity as it goes on the wire. Never `.unreported` — this build always
