@@ -106,10 +106,12 @@ final class CapacityUITests: XCTestCase {
             XCTAssertTrue(bar("Work", in: prefs).exists, "the pane embeds the same bar the popover draws")
             shoot(prefs, "capacity-pane")
 
+            // Disabled until a confirm surface exists: nothing can answer a confirmation, so
+            // turning it on would park every over-limit agent on its exhausted account.
             let confirm = prefs.checkBoxes["capacity-confirm-handoffs"]
             XCTAssertEqual(confirm.value as? Int, 0, "Confirm hand-offs defaults off")
-            confirm.click()
-            XCTAssertEqual(confirm.value as? Int, 1)
+            XCTAssertFalse(confirm.isEnabled, "Confirm hand-offs cannot be turned on yet")
+            XCTAssertTrue(prefs.descendants(matching: .any).matching(identifier: "capacity-confirm-unavailable").firstMatch.exists)
 
             prefs.descendants(matching: .any).matching(identifier: "capacity-add-pool").firstMatch.click()
             app.menuItems["Claude pool"].click()

@@ -27,8 +27,20 @@ struct CapacityPreferences: Codable, Equatable {
         self.handoffDeadlineSeconds = handoffDeadlineSeconds
     }
 
-    var handoffSettings: HandoffSettings {
-        HandoffSettings(confirm: confirmHandoffs ?? false,
+    /// Whether anything can answer a hand-off confirmation. Nothing can yet: the phone has no
+    /// Confirm/Decline on the swarm agent row (`FleetModel.decideHandoff` has no caller) and the
+    /// Mac has no notification action. With confirm honored, every agent that crossed hard was
+    /// parked in `.awaitingConfirmation` on its exhausted account, burning it, waiting for an
+    /// answer nobody could give. Flip this when a confirm surface ships; Settings greys the
+    /// toggle out until then.
+    static let confirmSurfaceExists = false
+
+    var handoffSettings: HandoffSettings { handoffSettings(confirmSurfaceExists: Self.confirmSurfaceExists) }
+
+    /// The stored flag is kept (and still decoded) so it applies the day a confirm surface exists;
+    /// until then confirm reads false whatever was stored.
+    func handoffSettings(confirmSurfaceExists: Bool) -> HandoffSettings {
+        HandoffSettings(confirm: confirmSurfaceExists && (confirmHandoffs ?? false),
                         deadline: TimeInterval(handoffDeadlineSeconds ?? Self.defaultDeadlineSeconds))
     }
 

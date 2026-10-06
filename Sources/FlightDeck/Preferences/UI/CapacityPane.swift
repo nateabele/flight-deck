@@ -171,7 +171,16 @@ struct CapacityPane: View {
             Text("Hand-offs").font(.headline)
             Toggle("Confirm hand-offs", isOn: Binding(get: { preferences.capacity.handoffSettings.confirm },
                                                       set: { v in preferences.updateCapacity { $0.confirmHandoffs = v } }))
+                // Greyed out until something can answer a confirmation: switched on, every agent
+                // that crossed its hard limit waited for an answer nobody could give, still
+                // running on the exhausted account (see `CapacityPreferences.confirmSurfaceExists`).
+                .disabled(!CapacityPreferences.confirmSurfaceExists)
                 .accessibilityIdentifier("capacity-confirm-handoffs")
+            if !CapacityPreferences.confirmSurfaceExists {
+                Text("Not available yet: Flight Control has no place to confirm a hand-off, so agents hand off without asking.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .accessibilityIdentifier("capacity-confirm-unavailable")
+            }
             let minutes = (preferences.capacity.handoffDeadlineSeconds ?? CapacityPreferences.defaultDeadlineSeconds) / 60
             Stepper(value: Binding(get: { minutes }, set: { m in preferences.updateCapacity { $0.handoffDeadlineSeconds = max(1, m) * 60 } }),
                     in: 1...60) {

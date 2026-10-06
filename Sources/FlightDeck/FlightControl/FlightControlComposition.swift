@@ -87,6 +87,9 @@ final class FlightControlGraph {
     let usage: UsageService
     private(set) var host: StoreHandoffHost?
     private(set) var driver: HandoffDriver?
+    /// `CapacityPreferences.confirmSurfaceExists`, settable so a test can drive the driver's
+    /// confirmation machinery, which production keeps off until something can answer it.
+    var confirmSurfaceExists = CapacityPreferences.confirmSurfaceExists
 
     private weak var store: SessionStore?
     private weak var preferences: PreferencesStore?
@@ -146,7 +149,10 @@ final class FlightControlGraph {
             planner: usage.planner, allocator: allocator,
             router: FreshRouter { MainActor.assumeIsolated { routing.makeRouter() } },
             spawner: HandoffClaimSpawner(inner: spawner, swarm: swarm), host: host,
-            settings: { [weak preferences] in preferences?.capacity.handoffSettings ?? CapacityPreferences().handoffSettings },
+            settings: { [weak self, weak preferences] in
+                (preferences?.capacity ?? CapacityPreferences())
+                    .handoffSettings(confirmSurfaceExists: self?.confirmSurfaceExists ?? CapacityPreferences.confirmSurfaceExists)
+            },
             now: now)
         swarm.handoffDecisions = driver
         // One pass over every swarm's working agents (see `SwarmService.onTick`). Every hand-off
