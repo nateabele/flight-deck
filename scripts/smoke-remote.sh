@@ -16,6 +16,9 @@
 #   FD_UITEST_SSH_KEY identity file (default ~/.ssh/id_rsa)
 #   TEST_RUNNER_*     forwarded into the runner, prefix stripped, as `xcodebuild test` does
 #   FLIGHTDECK_TEST_THROTTLE  minimum seconds between runs on the UI-test Mac (default 120)
+#   FD_UITEST_ONLY    space-separated -only-testing: identifiers (default FlightDeckUITests), so
+#                     any UI-test script can run its own selection here instead of on this
+#                     Mac's screen, e.g. FD_UITEST_ONLY="FlightDeckUITests/FlightControlUITests"
 #
 # Never falls back to running here: an unreachable host is a failure that says so.
 set -euo pipefail
@@ -32,6 +35,9 @@ REMOTE_DIR=flightdeck-uitests
 REMOTE_PRODUCTS=$REMOTE_DIR/DerivedData/Build/Products
 SSH_OPTS=(-o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=5 -o ServerAliveInterval=30 -i "$KEY")
 LOG="scripts/.smoke.log"
+read -r -a ONLY <<<"${FD_UITEST_ONLY:-FlightDeckUITests}"
+ONLY_ARGS=()
+for t in "${ONLY[@]}"; do ONLY_ARGS+=("-only-testing:$t"); done
 OUT="DerivedData/smoke-remote"
 XCTEST_SRC="$DEVELOPER_DIR/Platforms/MacOSX.platform/Developer"
 
@@ -147,7 +153,7 @@ LOCKED=1
 echo "[smoke] building for testing… (full output → $LOG)"
 if ! { xcodegen generate && xcodebuild -project FlightDeck.xcodeproj -scheme FlightDeck \
     -configuration Debug -destination 'platform=macOS' -derivedDataPath DerivedData \
-    build-for-testing -only-testing:FlightDeckUITests; } >>"$LOG" 2>&1; then
+    build-for-testing "${ONLY_ARGS[@]}"; } >>"$LOG" 2>&1; then
   echo "SMOKE FAIL: build failed — see $LOG"
   tail -n 30 "$LOG"
   exit 1
@@ -195,10 +201,10 @@ if [ "$(remote "$SHIM" <<<'cat "$1/.xcode-build" 2>/dev/null')" != "$XCODE_BUILD
 fi
 rsync -a -e "$RSYNC_SSH" "$OUT/smoke-remote.xctestrun" "$HOST:$REMOTE_PRODUCTS/" >>"$LOG" 2>&1
 
-echo "[smoke] running FlightDeckUITests on ${HOST}… (full output → $LOG)"
+echo "[smoke] running ${ONLY[*]} on ${HOST}… (full output → $LOG)"
 set +e
-remote "$REMOTE_DIR" <<'REMOTE' >>"$LOG" 2>&1
-cd "$1"
+remote "$REMOTE_DIR" "${ONLY_ARGS[@]}" <<'REMOTE' >>"$LOG" 2>&1
+cd "$1"; shift
 # The same fresh-launch guard as smoke.sh, for the same reason: a saved window frame wins over
 # `.defaultPosition(.center)` and can park the window off the primary display. Window geometry
 # ONLY — never `defaults delete` the domain, which holds this Mac's real preferences.
@@ -213,7 +219,7 @@ rm -rf ~/Library/Saved\ Application\ State/dev.flightdeck.FlightDeck.savedState
 rm -rf run.xcresult
 xcodebuild test-without-building \
   -xctestrun DerivedData/Build/Products/smoke-remote.xctestrun \
-  -destination platform=macOS -only-testing:FlightDeckUITests \
+  -destination platform=macOS "$@" \
   -resultBundlePath run.xcresult > run.log 2>&1
 rc=$?
 echo "[remote] xcodebuild rc=$rc"
