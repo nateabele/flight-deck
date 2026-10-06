@@ -21,6 +21,18 @@ final class FleetLineFramer: NWProtocolFramerImplementation {
     /// prove it fails closed.
     nonisolated(unsafe) static var maximumLineLength = TimelineLimits.maximumMessageSize
 
+    /// The current line's bytes so far. `parseInput` only hands over what the stack already
+    /// holds contiguously, which on a unix socket is one read: 8192 bytes. The framer used to
+    /// leave a newline-less buffer in place and wait, but the stack never offered more than
+    /// that first read, so a line longer than 8 KiB was neither delivered nor failed — the
+    /// connection just hung. That is how a 22.9 KB fleet snapshot froze every `flightdeck`
+    /// command (a fake server put the cutoff at exactly 8192: 8,133 B worked, 8,333 B hung).
+    /// Growing `minimumIncompleteLength` does not rescue it: probed, the stack then coalesces
+    /// exactly that many bytes and does not call back until *new* bytes arrive, so it stalls
+    /// one byte later. Consuming every read into this buffer is what lets the next read in.
+    /// Per-instance, because `NWProtocolFramer` makes one framer per connection.
+    private var pending = Data()
+
     init(framer: NWProtocolFramer.Instance) {}
     func start(framer: NWProtocolFramer.Instance) -> NWProtocolFramer.StartResult { .ready }
     func wakeup(framer: NWProtocolFramer.Instance) {}
@@ -30,21 +42,29 @@ final class FleetLineFramer: NWProtocolFramerImplementation {
     func handleInput(framer: NWProtocolFramer.Instance) -> Int {
         let cap = Self.maximumLineLength
         while true {
-            var lineLength: Int?
-            var overflow = false
+            var consumed = 0
+            var complete = false
             let parsed = framer.parseInput(minimumIncompleteLength: 1, maximumLength: cap + 1) { buffer, _ in
-                guard let buffer else { return 0 }
-                if let newline = buffer.firstIndex(of: 0x0A) { lineLength = newline }
-                else if buffer.count > cap { overflow = true }
-                return 0
+                guard let buffer, !buffer.isEmpty else { return 0 }
+                if let newline = buffer.firstIndex(of: 0x0A) {
+                    pending.append(contentsOf: buffer[..<newline])
+                    complete = true
+                    consumed = newline + 1   // the newline is framing, never part of the line
+                } else {
+                    pending.append(contentsOf: buffer)
+                    consumed = buffer.count
+                }
+                return consumed
             }
             // Failing the connection is the whole defence: a peer that never sends a newline
-            // would otherwise have the stack buffer its bytes without limit.
-            if overflow { framer.markFailed(error: .posix(.EMSGSIZE)); return 0 }
-            guard parsed, let length = lineLength else { return 0 }
+            // would otherwise have this buffer grow without limit. Checked on the accumulated
+            // line, not one read, so the cap holds at its real value above 8 KiB too.
+            if pending.count > cap { framer.markFailed(error: .posix(.EMSGSIZE)); return 0 }
+            guard parsed, consumed > 0 else { return 0 }
+            guard complete else { continue }
             let message = NWProtocolFramer.Message(definition: Self.definition)
-            _ = framer.deliverInputNoCopy(length: length, message: message, isComplete: true)
-            _ = framer.parseInput(minimumIncompleteLength: 1, maximumLength: 1) { _, _ in 1 }
+            framer.deliverInput(data: pending, message: message, isComplete: true)
+            pending = Data()
         }
     }
 

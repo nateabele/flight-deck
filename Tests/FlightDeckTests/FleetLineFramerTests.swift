@@ -19,7 +19,7 @@ final class FleetLineFramerTests: XCTestCase {
         connections.forEach { $0.cancel() }
         listener?.cancel()
         unlink(path)
-        // The 64-byte cap set by testALineLongerThanTheCapFailsTheConnection is process-wide
+        // The lowered cap set by testALineLongerThanTheCapFailsTheConnection is process-wide
         // (NWProtocolFramer instantiates FleetLineFramer itself, so the cap can't be
         // per-instance) — reset it or it leaks into whichever test runs next.
         FleetLineFramer.maximumLineLength = TimelineLimits.maximumMessageSize
@@ -83,11 +83,96 @@ final class FleetLineFramerTests: XCTestCase {
         XCTAssertEqual(got, encoded)
     }
 
+    /// Bigger than any single read the stack hands the framer (8 KiB on a unix socket). The
+    /// framer once only ever looked at one contiguous read, so a line with no newline inside
+    /// the first 8192 bytes was never delivered — a hang, not an error, which is how a
+    /// 22.9 KB fleet snapshot froze every `flightdeck` command. Every earlier test used lines
+    /// of a few bytes and could not see it.
+    func testALineLongerThanOneReadArrivesWhole() throws {
+        let line = String(repeating: "x", count: 64 * 1024)
+        let one = expectation(description: "one")
+        var got: String?
+        let client = try serve { got = $0; one.fulfill() }
+        send(line, client)
+        wait(for: [one], timeout: 3)
+        XCTAssertEqual(got?.count, line.count)
+        XCTAssertEqual(got, line)
+    }
+
+    /// Several large lines in one stream: after delivering one, the framer must start the next
+    /// from empty, or a line would carry the previous one's bytes (or a short one go missing).
+    func testBackToBackLargeLinesArriveAsSeparateMessages() throws {
+        let lines = [64 * 1024, 20_000, 9_000, 3, 40_000].enumerated().map { index, size in
+            String(repeating: Character(String(UnicodeScalar(UInt8(97 + index)))), count: size)
+        }
+        var got: [String] = []
+        let all = expectation(description: "all")
+        let client = try serve { got.append($0); if got.count == lines.count { all.fulfill() } }
+        lines.forEach { send($0, client) }
+        wait(for: [all], timeout: 3)
+        XCTAssertEqual(got.map(\.count), lines.map(\.count))
+        XCTAssertEqual(got, lines)
+    }
+
+    /// One line dribbled in over many small raw writes, so the framer sees it grow read by
+    /// read rather than as one large buffer. A raw socket, not an `NWConnection`: the framed
+    /// client appends a newline to every send, so it cannot split a line at all.
+    func testALineSplitAcrossManySmallWritesArrivesWhole() throws {
+        let line = String(repeating: "q", count: 30_000)
+        let one = expectation(description: "one")
+        var got: String?
+        _ = try serve { got = $0; one.fulfill() }
+        let fd = try rawConnect()
+        defer { close(fd) }
+        let bytes = Array((line + "\n").utf8)
+        DispatchQueue.global().async {
+            stride(from: 0, to: bytes.count, by: 997).forEach { start in
+                let chunk = bytes[start..<min(start + 997, bytes.count)]
+                _ = chunk.withUnsafeBytes { write(fd, $0.baseAddress, $0.count) }
+                usleep(500)
+            }
+        }
+        wait(for: [one], timeout: 3)
+        XCTAssertEqual(got, line)
+    }
+
+    /// A plain blocking unix-socket client to the listener `serve` started.
+    private func rawConnect() throws -> Int32 {
+        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        var address = sockaddr_un()
+        address.sun_family = sa_family_t(AF_UNIX)
+        withUnsafeMutableBytes(of: &address.sun_path) { raw in
+            _ = path.utf8CString.withUnsafeBytes { raw.copyMemory(from: $0) }
+        }
+        let result = withUnsafePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
+            }
+        }
+        guard result == 0 else { close(fd); throw POSIXError(.ECONNREFUSED) }
+        return fd
+    }
+
     func testALineLongerThanTheCapFailsTheConnection() throws {
         // Without the cap, a peer that never sends a newline makes the reader buffer forever.
+        // The cap sits well above one 8 KiB read, so this only passes if the framer keeps
+        // reading past the first read and fails at the real cap — a 64-byte cap fit inside
+        // one read and so could pass while every line over 8 KiB hung.
         let ended = expectation(description: "ended")
-        let client = try serve(maximum: 64, onMessage: { _ in }, onEnd: { _ in ended.fulfill() })
-        send(String(repeating: "z", count: 200), client)
-        wait(for: [ended], timeout: 5)
+        let client = try serve(maximum: 20_000, onMessage: { _ in }, onEnd: { _ in ended.fulfill() })
+        send(String(repeating: "z", count: 50_000), client)
+        wait(for: [ended], timeout: 3)
+    }
+
+    /// The counterpart: a line just under that same cap is still delivered, so the cap is
+    /// enforced at its value and not at whatever one read happens to hold.
+    func testALineJustUnderTheCapArrives() throws {
+        let line = String(repeating: "y", count: 19_999)
+        let one = expectation(description: "one")
+        var got: String?
+        let client = try serve(maximum: 20_000) { got = $0; one.fulfill() }
+        send(line, client)
+        wait(for: [one], timeout: 3)
+        XCTAssertEqual(got, line)
     }
 }

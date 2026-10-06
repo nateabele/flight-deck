@@ -1066,7 +1066,10 @@ phone instance's `stop()` — which every arm, expiry and revocation reaches thr
 `ECONNABORTED` before `.ready` (probed 2026-09-24, recorded in the spec). `FleetSocket.lineParameters()`
 builds newline-delimited framing instead, via `FleetLineFramer` (an `NWProtocolFramerImplementation`
 that splits on `\n` and fails the connection over `TimelineLimits.maximumMessageSize`, so a peer
-that never sends a newline cannot grow the receive buffer without bound). Everything above the
+that never sends a newline cannot grow the receive buffer without bound). It accumulates each read
+into its own per-connection buffer: `parseInput` only exposes one socket read (8 KiB), so a framer
+that waited in place for a newline hung on every line longer than that — every snapshot of a real
+fleet. Everything above the
 transport — frame types, handlers, the event/timeline/request plumbing — is unchanged; only
 `FleetSocketServer.startLocal(path:)` (server side) and `FleetClient(localCaller:)` /
 `connect(toLocal:lastSeq:)` (client side, used by the CLI) dial line parameters instead of
