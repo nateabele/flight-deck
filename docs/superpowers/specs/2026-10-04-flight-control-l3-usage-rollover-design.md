@@ -345,10 +345,19 @@ Capacity pane.
   says "claude — all accounts".
 - (Fixed in integration, task 9.) `StoreHandoffHost.stopAgent` ignored `retireAgent`'s `PromptDispatch`:
   if the exit command is not delivered, nothing logged it and the old agent could stay alive after a
-  "handed off" record. A failed stop is now the terminal phase `.stopFailed`; the old lease is kept.
+  "handed off" record. A failed stop is now the terminal phase `.stopFailed`. (Final fix wave:)
+  the swarm still records the new agent, which holds the task, and the driver keeps the old lease
+  until the old tab no longer exists, then releases it.
 - (Fixed in integration, task 10.) `HandoffDriver.evaluate` awaited `host.confirm` inline, so one
   pending human confirmation stalled every other agent's hand-off in that pass. Confirmation is now
   a non-blocking `requestConfirmation`; `HandoffDriver` is the `HandoffDecisionSink`; there is no
   Mac confirm UI (phone only).
+- (Final fix wave, 2026-10-06.) **The "Confirm hand-offs" toggle is disabled until a confirm
+  surface exists.** The phone has no Confirm/Decline yet (`FleetModel.decideHandoff` has no caller
+  and no view reads `handoffPending`) and the Mac has none, so with confirm on every agent that
+  crossed hard waited forever on its exhausted account. `CapacityPreferences.confirmSurfaceExists`
+  is false: Settings greys the toggle out with a note, and `handoffSettings.confirm` reads false
+  whatever is stored. §5's confirmation step (2) is therefore skipped in practice. The driver's
+  confirmation machinery and its tests are kept for when a surface ships.
 
 **Integrated (2026-10-06):** integration branch `l3-integration`, code head 4db609f0 (not merged to master). The real graph is built in one place, `FlightControlComposition`; see `docs/FOLLOWUPS.md` for what is still open.

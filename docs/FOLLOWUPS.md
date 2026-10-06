@@ -2284,18 +2284,36 @@ flagged as most likely to differ from the tests. The maintainer's to run.
   graph. The branch has NOT been merged to master and nothing has been swapped into /Applications.
   The maintainer's checks are [FLIGHT-CONTROL-L3-CHECKLIST.md](FLIGHT-CONTROL-L3-CHECKLIST.md)
   (eight tasks), run against a Release build.
-  - **UI runs (2026-10-06, `l3-integration` @ 4db609f0, under the global UI lock):**
+  - **UI runs (2026-10-06, `l3-integration` @ 4db609f0):**
     `RoutingUITests` 4/4 PASS (the first execution on any branch); `CapabilityIndexUITests` PASS
     (first execution, opt-in via `TEST_RUNNER_INDEX_UI=1`); `CapacityUITests` PASS;
-    `SwarmUITests` 2/2 PASS. Caveat: `SwarmUITests` runs under `-FlightControlFixtureBackend`,
+    `SwarmUITests` 2/2 PASS. Re-run the same day on the UI-test Mac (macOS 15.7) through
+    `scripts/smoke-remote.sh`, all passing: `RoutingUITests` 4/4, `CapabilityIndexUITests` 1/1,
+    `CapacityUITests` 1/1, `SwarmUITests` 2/2. UI tests are no longer run on this Mac; they run
+    only on the UI-test Mac. The final-review fix wave changed `CapacityUITests` (the confirm toggle
+    is now asserted disabled) and has not been re-run there yet. Caveat: `SwarmUITests` runs under `-FlightControlFixtureBackend`,
     which skips `FlightControlComposition`, so the UI suites do NOT exercise the real joined graph.
     The joined graph is covered by `SwarmEndToEndTests` and the `FlightControlL3/Integration` unit
     tests, against faked `br`/`am` and tabs. A real-stack GUI run is the maintainer's checklist.
   - **What integration added beyond the merge** (each has a test; see the spec as-built sections):
     - Retiring an agent honors the exit delivery: a failed exit is the terminal phase
-      `.stopFailed` (not `.failed`, which would spawn a second replacement); the old lease is kept.
+      `.stopFailed` (not `.failed`, which would spawn a second replacement). The swarm still
+      records the new agent (it holds the task); the driver keeps the old lease while the old
+      tab exists and releases it once the tab is gone.
     - Hand-off confirmation does not block the pass. `HandoffDriver` is the
-      `HandoffDecisionSink`; confirmation is phone-only, there is no Mac confirm UI.
+      `HandoffDecisionSink`. **"Confirm hand-offs" is disabled until a confirm surface exists**
+      (`CapacityPreferences.confirmSurfaceExists`): nothing can answer a confirmation yet, so with
+      it on every over-limit agent waited forever on its exhausted account. Settings greys the
+      toggle out and `handoffSettings.confirm` reads false whatever is stored. To enable it, build
+      a surface first: phone Confirm/Decline on the swarm agent row when `handoffPending` is set
+      (`FleetModel.decideHandoff` exists with no caller), or a Mac notification action.
+    - A hand-off spawn that fails after its tab exists closes that tab (`ContractSpawn`), and the
+      task is returned to open before it is claimed back for the old agent.
+    - A stopped swarm is not handed off mid-pass (pause and drain still hand off).
+    - The driver waits on a deleted pool with the swarm's reason instead of spilling.
+    - An absent Observe projection reads as "reservations unknown", not "held none".
+    - A `-FlightDeckResetState` run writes the hand-off log to a scratch file.
+    - The launch sheet's Override picker offers only agents enabled in Settings.
     - Hand-off prompts list the old agent's file reservations. An unreadable lookup says so
       instead of claiming "held no file reservations".
     - A handed-off tab is marked finished and Flight Control stops driving it (no prompt, claim
@@ -2346,19 +2364,21 @@ flagged as most likely to differ from the tests. The maintainer's to run.
       `effort` knob; an agent `stop()` retired gets no "done" marker and a stopped swarm's summary
       is not visible; `SwarmService.applyProjections` awaits each project in turn, so one slow
       `br show` delays completion detection everywhere; old phone builds get a `.session` reply to
-      `session.new`; the phone's hand-off decision API (`decideHandoff`, `handoffPending`) has no
-      UI caller yet, and there is no Mac confirm UI, so a user who turns "Confirm hand-offs" on
-      without the phone never gets hand-offs.
+      `session.new`; "Confirm hand-offs" is disabled until a confirm surface exists (see above).
     - Integration: a failed plugin refresh still arms the reload and records the fingerprint
-      (NSLog only); an absent Observe projection reads as no reservations (prompt says "held
-      none"); the debug fixture backend keeps all-harness catalogs (its router never spills);
-      `stop()` mid-hand-off can release the old lease twice (the ledger ignores the second);
+      (NSLog only); the startup plugin refresh does blocking file I/O on the main thread; the
+      debug fixture backend keeps all-harness catalogs (its router never spills); a `stop()` that
+      lands after the hand-off spawn started can still release the old lease twice (the ledger
+      ignores the second; a stop before the spawn is now refused); a stop mid-pass shows the
+      generic "Hand-off failed … tries again" notice although no retry follows;
       a hung `onTick` stops all hand-offs; the hand-off claim conflict was inferred from a fixture,
       not live `br`; the hand-off rig opens claude tabs for codex blocks; Settings'
       `.id(project)` rebuilds Capacity drafts on a project change; `PreferencesOpener` cannot
       select a Flight Control section; the awaiting agent is not re-Escaped if it resumes work
-      during a pending confirmation; no test for confirm-turned-off-while-pending; the swarm
-      drawer pixel test captures the first render without settling.
+      during a pending confirmation; the swarm drawer pixel test captures the first render without
+      settling; the task-level hold test (`testATaskInHandoffIsNeitherClaimedNorTreatedAsReopened`)
+      never ran red against the unfixed code (proved by mutation only); Tasks 9 and 10 were not
+      shown failing first; OpenCode must feed `AgentOutputScan` once its adapter lands.
     - Test flakes seen under load, each passing alone: `PlanEditorKeystrokeTests` frame budget
       (16.1 to 16.7 ms), `PlanningRenderTests.testASeatBeatRedrawsTheLiveCardAlone`,
       `DelegationLifecycleTests.testUnknownRunFromTheHostEndsTheRunAsDied`.

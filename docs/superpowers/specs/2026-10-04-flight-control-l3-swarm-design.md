@@ -329,7 +329,7 @@ Found while building (evidence in brackets):
     probed closer `<!-- end-br-agent-instructions -->` (no -v1) [Task 13 probe].
 27. The plan's test fixture key `am file_reservations release` could never match MultiRunner (it
     keys on exe plus the first two args); `am file_reservations` is used [Task 2].
-28. UI test runner: fixture daemons use a short `/tmp/fdfc-ui-<uid>` dir (DerivedData paths exceed
+28. UI test runner: fixture daemons use a short `/tmp/fdfc-ui-<uid>-<run>` dir (DerivedData paths exceed
     the 104-byte socket limit), and the stub agent strips the kitty CSI-u key escapes Flight Deck
     sends to clear the composer [Task 14].
 29. `ObserveDrawer`'s `observe-drawer-expanded`/`-collapsed` container ids now use
@@ -354,3 +354,9 @@ first line of the guard message). It has not run against the real stack (real cl
 plus L3-R/L3-U conformers); that is the integration branch's job and the maintainer's checklist.
 
 **Integrated (2026-10-06):** integration branch `l3-integration`, code head 4db609f0 (not merged to master). The real graph is built in one place, `FlightControlComposition`; see `docs/FOLLOWUPS.md` for what is still open.
+The fixture-backend UI run (`SwarmUITests` under `-FlightControlFixtureBackend`) skips that
+composition: it asserts on the fixture's own slots, router and pools. The joined graph (real
+routing, capacity, hand-off driver and swarm controller) is covered by `SwarmEndToEndTests` and the
+other `FlightControlL3/Integration` unit tests, against a faked `br`/`am` and stub tabs.
+The UI script's fixture, generator and daemon paths are unique per run, so one run's reap never
+touches another's.
