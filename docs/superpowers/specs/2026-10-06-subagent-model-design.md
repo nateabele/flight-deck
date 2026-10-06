@@ -1,6 +1,6 @@
 # Subagents as first-class children of a session — design
 
-2026-10-06. Status: proposed.
+2026-10-06. Status: approved.
 
 ## 1. Why
 
@@ -92,7 +92,7 @@ struct SubagentNode: Equatable {
   `SendMessage` resume appends a new turn, so the node returns to `running` without special
   handling.
 - **running:** anything else.
-- **blocked:** set only by attribution (§4.2), never from the file alone.
+- **blocked:** set only by attribution (§4.3), never from the file alone.
 - **Scope:** only files modified since the tab's claude process started (the
   `PromptService.agentStartedAt` bound). That hides agents an earlier process left half-done.
   Done nodes stay until the session's next `UserPromptSubmit`, so a glance shows what just
