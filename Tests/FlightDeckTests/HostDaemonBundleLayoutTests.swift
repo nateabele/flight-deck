@@ -36,6 +36,69 @@ final class HostDaemonBundleLayoutTests: XCTestCase {
             "\(url.path) is not a dictionary plist")
     }
 
+    /// Every `@rpath/…` library the helper links must resolve through one of its own `LC_RPATH`
+    /// entries, the way dyld would. Moving hostd into `LoginItems/<helper>.app` changed how many
+    /// levels up the app's `Contents/Frameworks` is; a rpath one `..` short shipped and made dyld
+    /// refuse to start hostd on a real host (`Library not loaded: @rpath/FleetKit.framework…`,
+    /// `last exit reason = OS_REASON_DYLD`), which the layout checks above could not see.
+    func testEveryRpathLibraryOfTheHelperResolvesInsideTheApp() throws {
+        let app = try builtApp()
+        let exe = app.appendingPathComponent(Self.helperPath)
+            .appendingPathComponent("Contents/MacOS/flightdeck-hostd")
+        let exeDir = exe.deletingLastPathComponent().path
+
+        // Follow @rpath dependencies transitively, as dyld does: a Debug build links the helper
+        // to its own `flightdeck-hostd.debug.dylib` first, and FleetKit hangs off that, so a
+        // one-level check passes a Debug build whose Release twin cannot start.
+        func rpaths(of image: String) throws -> [String] {
+            try otool(["-l", image]).components(separatedBy: "\n").compactMap { line -> String? in
+                let t = line.trimmingCharacters(in: .whitespaces)
+                guard t.hasPrefix("path ") else { return nil }
+                return String(t.dropFirst(5).split(separator: " ").first ?? "")
+            }
+            .map {
+                $0.replacingOccurrences(of: "@executable_path", with: exeDir)
+                    .replacingOccurrences(of: "@loader_path", with: (image as NSString).deletingLastPathComponent)
+            }
+        }
+        func rpathDeps(of image: String) throws -> [String] {
+            try otool(["-L", image]).components(separatedBy: "\n")
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { $0.hasPrefix("@rpath/") }
+                .map { String($0.dropFirst("@rpath/".count).split(separator: " ").first ?? "") }
+        }
+
+        var searched = try rpaths(of: exe.path)
+        var queue = try rpathDeps(of: exe.path)
+        var seen = Set<String>()
+        var sawFleetKit = false
+        while let dep = queue.popLast() {
+            guard seen.insert(dep).inserted else { continue }
+            let resolved = searched.lazy.map { "\($0)/\(dep)" }
+                .first { FileManager.default.fileExists(atPath: $0) }
+            guard let resolved else {
+                XCTFail("@rpath/\(dep) resolves through none of \(searched)")
+                continue
+            }
+            if dep.hasPrefix("FleetKit.framework") { sawFleetKit = true }
+            searched += try rpaths(of: resolved)
+            queue += try rpathDeps(of: resolved)
+        }
+        XCTAssertTrue(sawFleetKit, "expected the helper to load FleetKit through @rpath")
+    }
+
+    private func otool(_ args: [String]) throws -> String {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+        p.arguments = ["otool"] + args
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        try p.run()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        return String(decoding: data, as: UTF8.self)
+    }
+
     func testHostdIsItsOwnHelperBundleWithADistinctIdentity() throws {
         let app = try builtApp()
         let helper = app.appendingPathComponent(Self.helperPath)

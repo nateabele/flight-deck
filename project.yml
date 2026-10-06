@@ -436,9 +436,12 @@ targets:
         # subject for macOS 15+'s local-network gate, which never prompts without this.
         INFOPLIST_KEY_NSLocalNetworkUsageDescription: Flight Deck Host uses the local network so your other Macs can run agents on this one.
         # FleetKit.framework is not embedded here; it resolves to the enclosing app's
-        # Contents/Frameworks, four levels up from Contents/Library/LoginItems/<helper>/
-        # Contents/MacOS.
-        LD_RUNPATH_SEARCH_PATHS: "@executable_path/../Frameworks @executable_path/../../../../Frameworks"
+        # Contents/Frameworks, FIVE levels up from Contents/Library/LoginItems/<helper>/
+        # Contents/MacOS (MacOS → Contents → <helper>.app → LoginItems → Library → Contents).
+        # Four levels lands in Contents/Library/Frameworks, which does not exist: dyld then
+        # refuses to start hostd (OS_REASON_DYLD), as it did on the first host Mac. Pinned by
+        # HostDaemonBundleLayoutTests.testEveryRpathLibraryOfTheHelperResolvesInsideTheApp.
+        LD_RUNPATH_SEARCH_PATHS: "@executable_path/../Frameworks @executable_path/../../../../../Frameworks"
         HEADER_SEARCH_PATHS: $(SRCROOT)/vendor/boringssl-artifacts/include
         DEVELOPMENT_TEAM: 2T9E3N27J8
         CODE_SIGN_STYLE: Automatic
