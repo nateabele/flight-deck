@@ -54,6 +54,11 @@ struct SessionStatus: Equatable {
     /// `"prompt_changed"` — a build that cannot even ask (`"unsupported_agent"`, codex today)
     /// is a Mac that might be looking at a real dialog it simply cannot read, which is a
     /// different sentence and keeps the existing "Waiting for you" wording.
+    ///
+    /// **"Nothing in the transcript tail" is not "nothing on screen".** A background subagent's
+    /// permission dialog sets the parent `waiting` / `"permission prompt"` with the call in the
+    /// subagent's own transcript. That refuses `"subagent_prompt"` (see
+    /// `PromptService.attributingSubagents`), so it never sets this.
     var answerless: Bool
 
     init(

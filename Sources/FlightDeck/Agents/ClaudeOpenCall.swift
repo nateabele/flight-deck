@@ -38,4 +38,10 @@ struct ClaudeOpenPromptReader: AgentOpenPromptReader {
     ) -> OpenPrompt? {
         ClaudeOpenCall.find(in: lines, activity: activity)
     }
+
+    /// `~/.claude/projects/<dir>/<conversation>/subagents/`, holding one `agent-<id>.jsonl` per
+    /// background Agent (verified on claude 2.1.289).
+    func subagentTranscripts(for transcript: URL) -> URL? {
+        transcript.deletingPathExtension().appendingPathComponent("subagents", isDirectory: true)
+    }
 }

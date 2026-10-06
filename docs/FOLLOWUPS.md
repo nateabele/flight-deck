@@ -2446,9 +2446,24 @@ main actor and recommits through `SessionStore.recommitStatuses` when it lands. 
 is still uncached.
 
 Still open:
-- **Why claude reports `waiting` with nothing in the transcript is unexplained.** It contradicts
-  "blocking tool_use is written at raise". Either the dialog is one claude does not log (an MCP or
-  plugin prompt?), or the session is wedged. It needs a live repro with the screen captured.
+- **Explained: the dialog belonged to a background subagent.** A live screen capture of the same
+  tab showed "Bash command · from the implementer agent" ("Dangerous rm operation on
+  statically-unresolvable target", which bypass mode still asks about). claude draws a background
+  subagent's permission dialog in the parent's TUI and sets the parent `waiting`, but writes the
+  `tool_use` to `<conversation>/subagents/agent-<id>.jsonl`. The registry flipped 70ms after the
+  subagent wrote the call. "Blocking tool_use is written at raise" still holds, just in another
+  file. The 5s `answerless` debounce then made the Mac and phone say "Still working (no response
+  needed)" over a real dialog for 90 minutes. **Fixed:** `PromptService` checks the subagent
+  transcripts the tab's current claude process has written, and refuses `subagent_prompt` rather
+  than `prompt_changed` when one ends on an unresolved call, so `answerless` does not fire and
+  claude's own "Waiting for you — permission prompt" stays up. Cost on the live 238-file
+  directory: 1.2ms a tick while the tab is in that state.
+- **A subagent's dialog still cannot be answered from the phone.** The phone derives its card
+  from the parent's feed, which does not hold the call, and the Mac cannot tell the blocked
+  subagent from one that is merely running a tool (both end on an unresolved `tool_use`). The
+  dialog header names the agent *type*, not its id. A `PermissionRequest` hook (not registered by
+  the plugin today) or reading the dialog header off the screen could disambiguate. Either needs
+  a wire decision, because the prompt is derived on both ends and never sent.
 - **The registry poll itself** (`SessionStatusWatcher.drain`, mtime-cached) and the rest of the
   tick were ~4.5% of a core in the same sample. An FSEvents or `DISPATCH_SOURCE_TYPE_VNODE` watch
   on the status directory could replace the 500ms rescan. Not done: it is a separate, smaller win.
