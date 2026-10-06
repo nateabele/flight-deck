@@ -472,4 +472,13 @@ final class FleetModelBlockedAbortTests: XCTestCase {
             "a resolved episode (activity left \"waiting\") must not carry its token into the next"
         )
     }
+
+    func testTheOriginLineNamesTheSubagentAsking() {
+        XCTAssertEqual(
+            PromptCard.origin(WireSubagent(id: "a1", parent: nil, type: "implementer",
+                                           description: "Task 14", state: "blocked")),
+            "From implementer — Task 14"
+        )
+        XCTAssertNil(PromptCard.origin(nil))
+    }
 }

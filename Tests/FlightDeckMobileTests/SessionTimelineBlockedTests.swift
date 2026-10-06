@@ -125,6 +125,13 @@ final class SessionTimelineBlockedTests: XCTestCase {
         )
     }
 
+    private func permissionItem(callID: String) -> TimelineItem {
+        TimelineItem(
+            id: "\(abs(callID.hashValue % 90_000) + 1_000)#0", kind: .toolCall, status: .complete,
+            body: .init(text: "rm -rf x", tool: "Bash", callID: callID)
+        )
+    }
+
     private func resultItem(callID: String) -> TimelineItem {
         TimelineItem(
             id: "\(abs(callID.hashValue % 90_000) + 91_000)#0", kind: .toolResult,
@@ -569,5 +576,33 @@ final class SessionTimelineBlockedTests: XCTestCase {
         guard case .question("toolu_B", _)? =
             model.blocked(agent: "claude", activity: "waiting", call: .call("toolu_B"))
         else { return XCTFail("expected the dialog the Mac named") }
+    }
+
+    func testASubagentsDialogIsDerivedFromItsOwnPage() {
+        let (model, stub) = makeModel()
+        model.loadLatest()
+        stub.answer(.success(page([], session: model.sessionID)))
+        model.updateStatus(agent: "claude", activity: "waiting", call: .call("toolu_SUB"),
+                           promptAgent: "a28ad87b")
+        guard case .timeline(_, .latest, _, let agent)? = stub.requests.last else {
+            return XCTFail("expected a subagent page request, got \(stub.requests)")
+        }
+        XCTAssertEqual(agent, "a28ad87b")
+        stub.answer(.success(page([permissionItem(callID: "toolu_SUB")], session: model.sessionID)))
+        XCTAssertEqual(model.blockedPrompt?.callID, "toolu_SUB")
+        model.answer(.allow, to: "toolu_SUB")
+        guard case .answerPrompt(_, _, "toolu_SUB", .allow, let sentAgent)? = stub.sent else {
+            return XCTFail("expected an answer naming the agent")
+        }
+        XCTAssertEqual(sentAgent, "a28ad87b")
+    }
+
+    func testTheMainFeedIsNotTreatedAsTheSubagentsPage() {
+        let (model, stub) = makeModel()
+        model.loadLatest()
+        stub.answer(.success(page([permissionItem(callID: "toolu_MAIN")], session: model.sessionID)))
+        model.updateStatus(agent: "claude", activity: "waiting", call: .call("toolu_SUB"),
+                           promptAgent: "a28ad87b")
+        XCTAssertNil(model.blockedPrompt, "the main feed's call is not the subagent's")
     }
 }

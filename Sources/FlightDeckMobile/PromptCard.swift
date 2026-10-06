@@ -66,6 +66,13 @@ struct PromptCard: View {
     /// already covers — so there is no transition here for a stub's seam to exist for, and the
     /// token dedup this exists to trigger is asserted directly against `FleetModel` instead.
     let onAbortBlocked: () async -> Void
+    /// The subagent this dialog belongs to, when it is not the conversation's own. Without it
+    /// a reader allows a command believing the main agent asked for it.
+    var fromSubagent: WireSubagent? = nil
+
+    static func origin(_ s: WireSubagent?) -> String? {
+        s.map { "From \($0.type) — \($0.description)" }
+    }
 
     /// Whether a finger can change anything.
     ///
@@ -314,6 +321,11 @@ struct PromptCard: View {
     var body: some View {
         if let open {
             VStack(alignment: .leading, spacing: 10) {
+                if let origin = Self.origin(fromSubagent) {
+                    Text(origin)
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.orange)
+                }
                 // Only a single question's header sits up here; in a set each question draws
                 // its own beside its options, where it says which question it belongs to.
                 if case .question(_, let questions) = open, questions.count == 1,

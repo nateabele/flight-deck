@@ -152,6 +152,13 @@ final class SessionTimelineModel {
     @ObservationIgnored private var statusAgent: String?
     @ObservationIgnored private var statusActivity: String?
     @ObservationIgnored private var statusCall: OpenPromptIdentity = .unreported
+    /// The subagent whose dialog is open, when it is not the conversation's own. Its records
+    /// live in that agent's own file, so `blocked` must read `subagentPage`, not `feed`:
+    /// scanning the main feed would find the PARENT's open call (or none) and offer Allow for
+    /// the wrong command.
+    @ObservationIgnored private var statusPromptAgent: String?
+    /// The blocked subagent's own tail, kept apart from `feed` for the reason above.
+    private(set) var subagentPage: [TimelineItem] = []
 
     /// How many times `rebuild()` has run. `@ObservationIgnored` because a busy poll must not
     /// invalidate the view merely by counting, and because the recompute-count guard test asserts
@@ -542,12 +549,37 @@ final class SessionTimelineModel {
     /// The view's status inputs moved: fold them in and recompute, but only when one actually
     /// changed. A supersede — same activity, different open call — still lands here because
     /// `call` is part of the comparison.
-    func updateStatus(agent: String?, activity: String?, call: OpenPromptIdentity) {
-        guard agent != statusAgent || activity != statusActivity || call != statusCall else { return }
+    func updateStatus(agent: String?, activity: String?, call: OpenPromptIdentity,
+                      promptAgent: String? = nil) {
+        guard agent != statusAgent || activity != statusActivity || call != statusCall
+            || promptAgent != statusPromptAgent else { return }
+        let callMoved = call != statusCall
+        let agentMoved = promptAgent != statusPromptAgent
         statusAgent = agent
         statusActivity = activity
         statusCall = call
+        statusPromptAgent = promptAgent
+        if promptAgent == nil {
+            subagentPage = []
+        } else if agentMoved || callMoved {
+            // A stale page from the previous dialog must not answer for the new one.
+            if agentMoved { subagentPage = [] }
+            fetchSubagentPage()
+        }
         rebuild()
+    }
+
+    /// The blocked agent's own tail. Not merged into `feed`: it is another file with its own
+    /// offsets, and its records would read as the parent's conversation.
+    private func fetchSubagentPage() {
+        guard let agent = statusPromptAgent else { return }
+        let requested = agent
+        fleet.timelinePage(.timeline(session: sessionID, anchor: .latest,
+                                     limit: TimelineLimits.defaultLimit, agent: agent)) { [weak self] result in
+            guard let self, self.statusPromptAgent == requested else { return }
+            if case .success(let page) = result { self.subagentPage = page.items }
+            self.rebuild()
+        }
     }
 
     /// Make the screen current: the opening fetch, the fetch on coming back to a screen whose
@@ -797,6 +829,8 @@ final class SessionTimelineModel {
             try? await Task.sleep(for: delay)
             guard !Task.isCancelled else { return }
             loadNewer()
+            // A subagent's record lands in its own file, which `loadNewer` never reads.
+            if statusPromptAgent != nil { fetchSubagentPage() }
         }
         guard blocked(agent: agent, activity: activity, call: call) == nil else {
             blockedChaseExhausted = false
@@ -1022,7 +1056,8 @@ final class SessionTimelineModel {
     /// that defers to this end — see `OpenPromptIdentity`; a Mac too old to send the field
     /// still gets today's behaviour rather than a phone that shows no cards at all.
     func blocked(agent: String?, activity: String?, call: OpenPromptIdentity) -> OpenPrompt? {
-        let derived = OpenPrompt.find(in: feed.items, agent: agent, activity: activity)
+        let items = statusPromptAgent == nil ? feed.items : subagentPage
+        let derived = OpenPrompt.find(in: items, agent: agent, activity: activity)
         let shown = Self.shown(derived: derived, call: call)
         note(derived: derived, macSays: call, shown: shown)
         return shown
@@ -1121,7 +1156,8 @@ final class SessionTimelineModel {
         }
 
         fleet.answerPrompt(
-            .answerPrompt(id: sessionID, token: token, call: call, answer: answer)
+            .answerPrompt(id: sessionID, token: token, call: call, answer: answer,
+                          agent: statusPromptAgent)
         ) { [weak self] result in
             guard let self, self.claimAnswer(token) else { return }
             switch result {
