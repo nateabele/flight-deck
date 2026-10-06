@@ -2433,6 +2433,24 @@ What is open, in the order it will bite:
   `systemctl enable --now` its own `die` message.
 
 
+## Hidden tabs and idle polling CPU (2026-10-05)
+
+After the probe fix below, a `sample` of 78 tabs still showed Ghostty's renderer threads at 63.6%
+of a core. Of their busy samples, 782 of 855 were in `Metal.surfaceSize()` property reads, ahead
+of frames with nothing to draw. libghostty starts every surface focused and visible, and keeps a
+display link (a redraw at screen refresh) running for that pair. Upstream turns it off from
+`syncFocusToSurfaceTree`, which this app does not have, so every tab restored at launch and never
+shown kept its link running. **Fixed:** a surface starts hidden and unfocused, and is marked
+hidden and unfocused again whenever it leaves a window (`TerminalPane` detaches every tab but the
+selected one). Attaching it and making it first responder turn both back on.
+
+`SessionSleepController.tick` read a pidfile and walked the process tree for every idle tab
+every 500ms: ~5% of a core on the main thread. **Fixed:** the cheap policy gates run first, and
+the lookups run at most every 5s (`evaluationInterval`). The idle clock is still kept every tick.
+
+Still open: whether smart sleep can ever sleep a claude tab whose agent has MCP-server children.
+`hasLiveDescendants` counts them, and that is unverified.
+
 ## Open-prompt probe CPU (2026-10-05)
 
 A tab that claude reported as `waiting` ("permission prompt") had no open call in its transcript.

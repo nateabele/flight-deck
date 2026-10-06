@@ -441,6 +441,18 @@ extension Ghostty {
             }
             self.surfaceModel = Ghostty.Surface(cSurface: surface)
 
+            // Flight Deck: born hidden and unfocused. libghostty starts every surface
+            // focused AND visible, and its renderer runs a display link — a redraw at screen
+            // refresh rate — for exactly that combination. Upstream corrects it from
+            // `BaseTerminalController.syncFocusToSurfaceTree`, which this app does not have, so
+            // a tab restored at launch and never shown kept its link running for the life of
+            // the app: 78 such tabs cost 63.6% of a core on 2026-10-05, nearly all of it in
+            // `Metal.surfaceSize`'s property reads ahead of a frame with nothing to draw.
+            // Attaching to a window (`viewDidMoveToWindow`) and becoming first responder
+            // (`Ghostty.moveFocus`, from `TerminalPane`) turn both back on.
+            ghostty_surface_set_occlusion(surface, false)
+            focusDidChange(false)
+
             // Flight Deck: remember the content scale libghostty was just handed, because
             // `ghostty.h` exposes a setter (`ghostty_surface_set_content_scale`) and no getter
             // — the Swift side is the only place this value can be read back. Same expression
@@ -935,8 +947,16 @@ extension Ghostty {
             // this, a surface re-parented (see `TerminalPane`) into a window that's
             // already occluded would keep rendering until the window's occlusion state
             // next changes.
-            guard let window = self.window, let surface = self.surface else { return }
-            ghostty_surface_set_occlusion(surface, occlusionVisible(window.occlusionState))
+            //
+            // Flight Deck: and in no window at all is hidden. `TerminalPane` switches tabs by
+            // detaching the outgoing surface, which is no occlusion change at all, so without
+            // this a tab switched away from kept rendering as if on screen. Focus goes with
+            // it: AppKit resigns first responder for a view leaving its window, but a surface
+            // that was never first responder has nothing to resign, and focused-and-visible is
+            // what keeps libghostty's display link running. See the matching note in `init`.
+            guard let surface = self.surface else { return }
+            ghostty_surface_set_occlusion(surface, surfaceVisible(in: self.window))
+            if self.window == nil { focusDidChange(false) }
         }
 
         override func becomeFirstResponder() -> Bool {
@@ -2432,6 +2452,13 @@ extension Ghostty.SurfaceView {
 /// as a pure function so the polarity is locked by a unit test.
 func occlusionVisible(_ state: NSWindow.OcclusionState) -> Bool {
     state.contains(.visible)
+}
+
+/// Flight Deck: whether a surface sitting in `window` is on screen. A surface in no window is
+/// not — `TerminalPane` detaches every tab but the selected one, and a restored surface is
+/// created before it has ever been attached. See `viewDidMoveToWindow`.
+func surfaceVisible(in window: NSWindow?) -> Bool {
+    window.map { occlusionVisible($0.occlusionState) } ?? false
 }
 
 /// Caches a value for some period of time, evicting it automatically when that time expires.

@@ -41,4 +41,13 @@ final class SurfaceLifecycleTests: XCTestCase {
         XCTAssertTrue(occlusionVisible([.visible]))
         XCTAssertFalse(occlusionVisible([]))
     }
+
+    /// A surface in no window is not on screen, whatever the window it last sat in reports.
+    /// Tab switching detaches the outgoing surface (`TerminalPane`), and a surface restored at
+    /// launch is created before any window exists — both must read as hidden, or libghostty
+    /// keeps a display link redrawing them at refresh rate. Measured 2026-10-05: 78 hidden
+    /// surfaces doing exactly that cost 63.6% of a core.
+    func testASurfaceInNoWindowIsNotVisible() {
+        XCTAssertFalse(surfaceVisible(in: nil))
+    }
 }
