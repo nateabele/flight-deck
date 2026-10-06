@@ -640,3 +640,22 @@ schemes:
         FlightDeckMobileUITests: [test]
     test:
       targets: [FlightDeckMobileTests, FlightDeckMobileUITests]
+
+# FlightDeck is declared explicitly for the opposite reason: xcodebuild otherwise synthesizes an
+# implicit scheme for it, and that scheme GATHERS CODE COVERAGE, which compiles every target it
+# builds (FlightDeck, FleetKit, IntakeKit, flightdeck, hostd -- Release included) with
+# `-fprofile-instr-generate`. Each `flightdeck` run then dropped a `default.profraw` into the
+# caller's CWD (polluting their git repos) and hostd logged "LLVM Profile Error: Failed to write
+# file default.profraw: Read-only file system". Nothing in scripts/ reads coverage data.
+# scripts/check-no-coverage.sh guards this. The test targets are listed because the implicit
+# scheme carried them and test-unit.sh / smoke.sh depend on `-scheme FlightDeck` building and
+# running them.
+  FlightDeck:
+    build:
+      targets:
+        FlightDeck: all
+        FlightDeckTests: [test]
+        FlightDeckUITests: [test]
+    test:
+      gatherCoverageData: false
+      targets: [FlightDeckTests, FlightDeckUITests]
