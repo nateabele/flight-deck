@@ -543,8 +543,8 @@ claude tab closes, so two logins' registries are never merged into one scan.
   A node is `done` when its last conversational record is assistant text with no `tool_use`.
   `blocked` comes only from attribution, never from the file alone. `SubagentID.isValid`
   (`^a[0-9a-f]{6,40}$`) guards any id joined onto a path. `SubagentWatcher` is one per
-  conversation, owned by `ClaudeRuntime`. A steady tick stats the folder and the non-done files,
-  and a full rescan runs every 10s. Files older than the claude process start are ignored, and
+  conversation, owned by `ClaudeRuntime`. A steady tick stats the folder and the non-done files
+  (`poll()`), and a full rescan runs when the folder's stamp changes or every 10s. Files older than the claude process start are ignored, and
   done agents stay until the session's next `UserPromptSubmit`.
 - **Dialog attribution** — the plugin registers a record-only `PermissionRequest` hook
   (`Resources/ClaudePlugin/hooks/hooks.json`). It never decides anything and never changes
