@@ -533,7 +533,37 @@ claude tab closes, so two logins' registries are never merged into one scan.
   by `<tool-use-id>` or by the launch's agent id as `<task-id>`. A `SendMessage` whose result
   carries `resumedAgentId` woke a stopped agent and counts it again, keyed by that call's id.
   Not cleared at turn end (the agents outlive it); only held ids are removed, so a notification
-  for an unseen launch is a no-op.
+  for an unseen launch is a no-op. This fold alone starts at end of file on attach, so it misses
+  agents launched before a Flight Deck relaunch; `subagentCount` is therefore
+  `max(fold, SubagentWatcher's live depth-1 count)`.
+- **`SubagentTree` and `SubagentWatcher`** — subagents are modelled children, not only a count.
+  Every claude subagent at any depth writes `subagents/agent-<id>.jsonl` and `.meta.json` in its
+  conversation's folder. `SubagentTree` (pure) builds nodes (`id`, `parentID`, `type`,
+  `description`, `running` / `blocked` / `done`) from the meta file and the tail of the jsonl.
+  A node is `done` when its last conversational record is assistant text with no `tool_use`.
+  `blocked` comes only from attribution, never from the file alone. `SubagentID.isValid`
+  (`^a[0-9a-f]{6,40}$`) guards any id joined onto a path. `SubagentWatcher` is one per
+  conversation, owned by `ClaudeRuntime`. A steady tick stats the folder and the non-done files,
+  and a full rescan runs every 10s. Files older than the claude process start are ignored, and
+  done agents stay until the session's next `UserPromptSubmit`.
+- **Dialog attribution** — the plugin registers a record-only `PermissionRequest` hook
+  (`Resources/ClaudePlugin/hooks/hooks.json`). It never decides anything and never changes
+  `ComposerReadiness`. `DialogAttribution` matches the event to the preceding `PreToolUse` with
+  the same `agent_id`, `tool_name` and canonical `tool_input`, because a subagent's
+  `PermissionRequest` carries no `tool_use_id`. The result is `SessionStore.pendingDialogs`,
+  cleared on `PostToolUse`, `UserPromptSubmit` and `SessionEnd`. Esc fires no hook, so
+  `PromptService` also requires the call to be unresolved in the owning file. An attributed
+  subagent call still unresolved in its own file is the open prompt (`openPromptAgent`). An
+  unattributed open subagent call still refuses `subagent_prompt`. `answer(session:agent:…)`
+  needs a valid id and a matching `pendingDialog`, else it refuses (`unknown_agent`,
+  `prompt_changed`).
+- **Subagents on the wire** — `WireSession.subagents` (`[]` for claude, `nil` for codex and older
+  Macs) and `openPromptAgent`, both carried by `activityChanged`. `timeline.page` and
+  `prompt.answer` take an optional `agent`; `TimelineService` then pages
+  `subagents/agent-<id>.jsonl` with `sidechain: true`. All fields are optional, with no new event
+  tag. The prompt is still never sent: the phone derives the card from the blocked agent's own
+  `timeline.page(agent:)` with `OpenPrompt.find`, under "From <type> — <description>", and the
+  answer carries the agent. The Mac re-derives from the same file before typing.
 - **A session's activity is its tree's** — `SessionStatus.tree`: an agent reporting `idle` with a
   subagent still working shows `busy`, so the unread dot and "finished" notification wait for the
   last subagent. `waiting` is never lifted (it means the user must act). The agent's own report

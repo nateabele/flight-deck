@@ -2719,12 +2719,21 @@ Still open:
   than `prompt_changed` when one ends on an unresolved call, so `answerless` does not fire and
   claude's own "Waiting for you — permission prompt" stays up. Cost on the live 238-file
   directory: 1.2ms a tick while the tab is in that state.
-- **A subagent's dialog still cannot be answered from the phone.** The phone derives its card
-  from the parent's feed, which does not hold the call, and the Mac cannot tell the blocked
-  subagent from one that is merely running a tool (both end on an unresolved `tool_use`). The
-  dialog header names the agent *type*, not its id. A `PermissionRequest` hook (not registered by
-  the plugin today) or reading the dialog header off the screen could disambiguate. Either needs
-  a wire decision, because the prompt is derived on both ends and never sent.
+- **Resolved 2026-10-06 (5af1598a..1412d846, branch `subagent-model`): a subagent's dialog can
+  now be answered from the phone.** The plugin registers a record-only `PermissionRequest` hook.
+  `DialogAttribution` matches it to the preceding `PreToolUse` with the same `agent_id`,
+  `tool_name` and tool input, because claude 2.1.291's subagent `PermissionRequest` carries an
+  `agent_id` but no `tool_use_id`. `PromptService` then treats the attributed call, still
+  unresolved in that subagent's own file, as the open prompt (`openPromptAgent`). The phone reads
+  that agent's page with `timeline.page(agent:)` and answers with `prompt.answer(agent:)`.
+  `subagent_prompt` stays as the fallback when no hook attributed the call (older plugin, hook not
+  loaded, no match): an unattributed open subagent call still refuses it rather than guessing.
 - **The registry poll itself** (`SessionStatusWatcher.drain`, mtime-cached) and the rest of the
   tick were ~4.5% of a core in the same sample. An FSEvents or `DISPATCH_SOURCE_TYPE_VNODE` watch
   on the status directory could replace the 500ms rescan. Not done: it is a separate, smaller win.
+
+Known gaps in the subagent model (2026-10-06):
+- `AskUserQuestion` raised by a subagent is out of scope. Only permission dialogs are attributed.
+- A second tab that joins an existing conversation gets no tree replay until the tree changes.
+- The phone's Subagents section and card have not been checked on a real device. The GUI check
+  (`docs/MOBILE.md`, item 67c) is Nate's.
