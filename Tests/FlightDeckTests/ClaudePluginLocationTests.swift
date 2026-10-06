@@ -35,12 +35,17 @@ final class ClaudePluginLocationTests: XCTestCase {
 
     func testApplyingInjectsThePluginIntoAClaudePayload() throws {
         let bundle = Bundle(for: Self.self)
-        let plugin = try XCTUnwrap(ClaudePluginLocation.directory(bundle: bundle))
-        let out = ClaudePluginLocation.applying(to: .claude(FlagSet()), bundle: bundle)
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("fd-test-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let out = ClaudePluginLocation.applying(to: .claude(FlagSet()), bundle: bundle, pluginDestination: tempDir)
         guard case .claude(let flags) = out, case .list(let items)? = flags.values["--plugin-dir"] else {
             return XCTFail("expected a claude payload carrying --plugin-dir")
         }
-        XCTAssertEqual(items, [plugin.path])
+        // The behavior changed on purpose: claude runs the owned copy under Application Support,
+        // not the signed bundle. This test uses a temp dir, not materializedDirectory, so it is
+        // hermetic and does not mutate the developer's real Application Support folder.
+        XCTAssertEqual(items, [tempDir.path])
     }
 
     func testApplyingLeavesACodexPayloadUntouched() {

@@ -1,0 +1,6 @@
+{
+  "capturedOn": "2026-10-05",
+  "codexVersion": "codex-cli 0.160.0",
+  "capturedBy": "account/rateLimits/read over stdio, see the L3-U plan Task 1 Step 5",
+  "redacted": "accountId and rate-limit reset credit ids replaced with placeholders"
+}

@@ -576,6 +576,11 @@ final class SessionStore: ObservableObject {
     /// against a process that has not spoken yet.
     private var codexHandshake: [UUID?: Task<Void, Error>] = [:]
 
+    /// Every codex app-server notification, with the account its server answers for. Flight
+    /// Control's usage meter reads `account/rateLimits/updated` here (L3-U); with no listener
+    /// they are dropped, as they always were.
+    var onCodexNotification: (@MainActor (UUID?, String, [String: Any]) -> Void)?
+
     /// Test seam. Proves the app-server's lifetime — lazy on first codex use, gone with the
     /// last codex tab or with its process — without spawning a process to observe it.
     var hasCodexStackForTesting: Bool { !codexStacks.isEmpty }
@@ -677,8 +682,20 @@ final class SessionStore: ObservableObject {
             self.codexStacks[account] = nil
             self.codexHandshake[account] = nil
         }
+        stack.rpc.onNotification = { [weak self] method, params in
+            self?.onCodexNotification?(account, method, params)
+        }
         codexStacks[account] = stack
         return stack
+    }
+
+    /// This account's codex rate limits, asked of the app-server Flight Deck already runs for it
+    /// (L3-U). Nil when none is running: a meter must never spawn `codex app-server` — the stack
+    /// exists only while the account has a codex tab, which is exactly when its meter matters.
+    func codexRateLimitsRead(account: UUID?) async throws -> [String: Any]? {
+        guard let stack = codexStacks[account], let handshake = codexHandshake[account] else { return nil }
+        try await handshake.value
+        return try await stack.rpc.request("account/rateLimits/read", [:])
     }
 
     /// Stops one account's app-server once that account's last codex tab is gone.
@@ -8611,6 +8628,25 @@ final class SessionStore: ObservableObject {
     private func injector(for id: UUID) -> TextInjecting? {
         wakeIfAsleep(id)   // rebuilds the surface (+ SIGCONT) if this session was asleep
         return injectorOverride ?? surfaces[id]
+    }
+
+    /// Escape into a tab whose agent is mid-turn: both claude's and codex's TUIs stop the turn on
+    /// it. Flight Control's hand-off deadline uses it (L3-U §5.1).
+    ///
+    /// Refuses an idle tab — a stray Escape there clears the user's draft — and a tab sitting in
+    /// a dialog unless the caller says so, because Escape there is a *denial*, which restarts a
+    /// turn rather than ending one. Retiring an agent (`retireAgent`) is the one caller that
+    /// wants the denial.
+    @discardableResult
+    func interruptTurn(_ id: UUID, includingDialog: Bool = false) -> Bool {
+        // `.busy` is read from `agentActivity` (what the agent itself reported), not `activity`:
+        // `activity` is lifted to busy while a background subagent runs, and an agent idle at
+        // its composer would take the Escape, losing the user's draft for nothing (ruling M3).
+        guard let status = statuses[id],
+              status.agentActivity == .busy || (includingDialog && status.activity == .waiting),
+              let injector = injector(for: id) else { return false }
+        injector.sendEscape()
+        return true
     }
 
     func surface(for id: UUID) -> Ghostty.SurfaceView? { surfaces[id] }

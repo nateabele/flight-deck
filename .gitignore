@@ -25,3 +25,11 @@ scripts/adapterprobe/corpus/
 .superpowers/
 .claude/
 .aider*
+
+# Claude lays its mod type declarations into a plugin folder whenever it loads or tests one
+# ("regenerate rather than edit"). Never commit them; the installed claude is the authority.
+Resources/ClaudePlugin/.claude-plugin/types/
+Resources/ClaudeUsagePlugin/.claude-plugin/types/
+scripts/.capacity-ui.log
+scripts/.capacity-ui.xcresult/
+scripts/.capacity-ui-shots/

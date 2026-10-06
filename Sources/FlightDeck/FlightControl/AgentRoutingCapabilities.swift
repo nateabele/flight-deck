@@ -80,16 +80,23 @@ final class RoutingCapabilityRegistry {
     }
 }
 
-/// Catalog and knobs are real (L3-R, `RoutingCatalogs.swift`); the rest stay stubs
-/// until L3-U (meter, transcript) and L3-S (reset, overrides) fill them in.
+/// Catalog and knobs are real (L3-R, `RoutingCatalogs.swift`); the usage meter and transcript
+/// pointer are real (L3-U); reset and overrides stay stubs until L3-S fills them in.
 @MainActor
 final class ClaudeRoutingCapabilities: AgentRoutingCapabilities {
     let harness: HarnessID = AgentID.claude.harnessID
     let accountModel: AccountModel = .login
     var knobSchema: [String: [String]] { ClaudeRoutingCatalog.knobSchema }
     func modelCatalog() async -> RoutingCapability<[ModelEntry]> { .supported(ClaudeRoutingCatalog.models) }
-    func usageMeterSource(account: AgentAccount?) -> RoutingCapability<any UsageMeterSource> { .unsupported(reason: "filled in by L3-U") }
-    func transcriptPointer(for session: Session) -> RoutingCapability<TranscriptPointer> { .unsupported(reason: "filled in by L3-U") }
+    func usageMeterSource(account: AgentAccount?) -> RoutingCapability<any UsageMeterSource> {
+        .supported(UsageService.shared.tap(agent: .claude, account: account))
+    }
+    func transcriptPointer(for session: Session) -> RoutingCapability<TranscriptPointer> {
+        guard let pointer = TranscriptPointers.claude(session: session, projectsRoot: UsageService.shared.claudeProjectsRoot(for: session)) else {
+            return .unsupported(reason: "no transcript file on disk for this conversation")
+        }
+        return .supported(pointer)
+    }
     func resetContext(_ session: Session) async throws -> RoutingCapability<Void> { .unsupported(reason: "filled in by L3-S") }
     func applying(_ overrides: LaunchOverrides, to options: AgentOptions) -> RoutingCapability<AgentOptions> { .unsupported(reason: "filled in by L3-S") }
 }
@@ -100,8 +107,15 @@ final class CodexRoutingCapabilities: AgentRoutingCapabilities {
     let accountModel: AccountModel = .login
     var knobSchema: [String: [String]] { CodexRoutingCatalog.shared.knobSchema }
     func modelCatalog() async -> RoutingCapability<[ModelEntry]> { await CodexRoutingCatalog.shared.models() }
-    func usageMeterSource(account: AgentAccount?) -> RoutingCapability<any UsageMeterSource> { .unsupported(reason: "filled in by L3-U") }
-    func transcriptPointer(for session: Session) -> RoutingCapability<TranscriptPointer> { .unsupported(reason: "filled in by L3-U") }
+    func usageMeterSource(account: AgentAccount?) -> RoutingCapability<any UsageMeterSource> {
+        .supported(UsageService.shared.tap(agent: .codex, account: account))
+    }
+    func transcriptPointer(for session: Session) -> RoutingCapability<TranscriptPointer> {
+        guard let pointer = TranscriptPointers.codex(session: session) else {
+            return .unsupported(reason: "codex has not reported a rollout path for this tab")
+        }
+        return .supported(pointer)
+    }
     func resetContext(_ session: Session) async throws -> RoutingCapability<Void> { .unsupported(reason: "filled in by L3-S") }
     func applying(_ overrides: LaunchOverrides, to options: AgentOptions) -> RoutingCapability<AgentOptions> { .unsupported(reason: "filled in by L3-S") }
 }

@@ -26,6 +26,11 @@ final class CodexRPC {
     private var nextID = 0
     private var pending: [Int: CheckedContinuation<[String: Any], Error>] = [:]
 
+    /// Notifications (a `method` and no `id`), for whoever wants them. Flight Control's usage
+    /// meter reads `account/rateLimits/updated` (L3-U). Nil drops them, which is what every
+    /// other caller has always relied on.
+    var onNotification: (@MainActor (String, [String: Any]) -> Void)?
+
     /// Test-only observability: how many requests are still awaiting a reply. Exists so a
     /// cancellation test can assert `request`'s `onCancel` actually removed its entry from
     /// `pending`, not merely that the caller unblocked.
@@ -140,10 +145,12 @@ final class CodexRPC {
             return
         }
 
-        // Anything left is a notification: no `id`, so nothing here is waiting on it. Codex
-        // sends these regardless of whether anyone is listening, and nothing does — see
-        // `CodexRuntime`'s doc comment on why the app-server's own notifications never
-        // describe anything a user did in a `codex resume` TUI — so they are simply read
-        // off the wire and dropped, not treated as malformed.
+        // Anything left without an `id` is a notification. Codex sends these regardless of
+        // whether anyone is listening; `CodexRuntime` deliberately does not (they describe only
+        // this connection's turns, not what the user does in a `codex resume` TUI). A message
+        // with both `id` and `method` is a server *request* — not ours to answer here.
+        if obj["id"] == nil, let method = obj["method"] as? String {
+            onNotification?(method, obj["params"] as? [String: Any] ?? [:])
+        }
     }
 }

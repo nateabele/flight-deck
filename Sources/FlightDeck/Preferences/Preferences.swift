@@ -161,6 +161,11 @@ struct Preferences: Codable, Equatable {
     /// `confirmations` is — see that property's comment.
     var flightControlRouting: RoutingPreferences?
 
+    /// Flight Control's pools and hand-off settings (L3-U). Optional for exactly the reason
+    /// `confirmations` is — see that property's comment. `nil` means "never configured": the
+    /// default pools and hand-off settings.
+    var capacity: CapacityPreferences?
+
     init(
         globalFlags: FlagSet = FlagSet(),
         projectFlags: [String: FlagSet] = [:],
@@ -175,7 +180,8 @@ struct Preferences: Codable, Equatable {
         installID: UUID? = nil,
         fleetPort: UInt16? = nil,
         terminalFontSize: Float? = nil,
-        flightControlRouting: RoutingPreferences? = nil
+        flightControlRouting: RoutingPreferences? = nil,
+        capacity: CapacityPreferences? = nil
     ) {
         self.globalFlags = globalFlags
         self.projectFlags = projectFlags
@@ -191,6 +197,7 @@ struct Preferences: Codable, Equatable {
         self.fleetPort = fleetPort
         self.terminalFontSize = terminalFontSize
         self.flightControlRouting = flightControlRouting
+        self.capacity = capacity
     }
 
     /// Falls back to claude-then-codex so a `Preferences` that has never been migrated

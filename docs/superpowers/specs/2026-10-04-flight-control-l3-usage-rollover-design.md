@@ -187,3 +187,162 @@ Capacity pane.
 - `Sources/IntakeKit/SeatActivity.swift`: keep `unifiedWindows`, not just `status`
 - `Sources/FlightDeck/Preferences/UI/CapacityPane.swift`
 - `Tests/FlightDeckTests/FlightControlL3/Usage/…`, `UITests/FlightDeckUITests/CapacityUITests.swift`
+
+## 12. Follow-up notes
+
+### Probe results (L3-U plan Task 1, 2026-10-05)
+
+- Versions: claude 2.1.289 (Claude Code), codex-cli 0.160.0. Mod API types found at
+  `/private/tmp/claude-501/bundled-skills/2.1.289/<hash>/plugin-authoring/types/claude-code.d.ts`
+  (version-specific). All six patterns present: `'session.measure'`, `SessionMeasureInput`,
+  `SessionRateLimit` (`{kind, percentUsed, resetsAt?}`; `percentUsed` is 0–100 with at most one
+  decimal, past 100 on an exceeded spend limit), `$.fs.write(path, text)`, `$.env.get(name)`,
+  `$.clock.now()`.
+- Probe 1 (one `hooks.json`, shell hooks + `modules`): **Outcome 1A**. `claude plugin validate`
+  passes and lists the module (`./register.ts hooks: session.measure`, env reads
+  `FLIGHT_DECK_SESSION_ID`, `FLIGHT_DECK_USAGE_DIR`). The validator never lists command hooks —
+  it prints none for the bundled `Resources/ClaudePlugin` either — so the decisive evidence is
+  runtime: in the same session the `Stop` shell hook wrote `shell-hook.txt` *and* the module wrote
+  its usage file. Both kinds coexist in one `hooks.json`.
+- Probe 1 (prompt on load): **Outcome 3A** — an interactive `claude --plugin-dir` tab (tmux TTY,
+  child-session markers cleared) booted straight to the composer, no trust/enable/reload dialog.
+  Types laid into the plugin folder: **yes → Task 2 (Outcome 3C)**. At load (01:27:19, not at
+  `validate`) the engine created `.claude-plugin/types/{.gitignore,tsconfig.json,claude-code/,
+  claude-code-mcp/,claude-code-tools/}` inside the `--plugin-dir` folder. The bundled
+  `Resources/ClaudePlugin` (no module) got no `types/` from `validate`.
+- Probe 2 (`session.measure` in an interactive tab): **Outcome 4A**. After one turn the mod file
+  was `{"v":1,"tab":"11111111-…","session":"7050…","readAt":"2026-10-05T06:32:21.357Z",
+  "changed":["context","cost"],"rateLimits":[{"kind":"five_hour","percentUsed":1,
+  "resetsAt":"2026-10-05T11:30:00.000Z"},{"kind":"seven_day","percentUsed":58,
+  "resetsAt":"2026-10-08T21:00:00.000Z"}]}`. `/usage` (about 4 minutes later, with other
+  sessions on the same account running in parallel): Current session 2 % (resets 6:30am CDT =
+  11:30Z), Current week (all models) 58 % (resets Oct 8 4pm CDT = 21:00Z). The reset times match
+  exactly; the session figure moved one point in between, consistent with the parallel load, not
+  a parser disagreement. `/usage` also shows a third window, "Current week (Fable)" 0 %, that
+  `session.measure` does not report. Note: the first measurement's `changed` did not include
+  `rateLimits` even though `rateLimits` was populated, so the mod must write on every measure, not
+  only when `changed` contains `rateLimits`. Headless `claude -p`: **Outcome 4C** — the module
+  fired and wrote `22222222-….json` (`changed` included `rateLimits`, five_hour 2 %, seven_day
+  58 %).
+- Probe 3 (codex `account/rateLimits/read`): **Outcome 5A**. `result` carries `rateLimits` and
+  `rateLimitsByLimitId.codex` with `primary {usedPercent 0, windowDurationMins 300, resetsAt}` and
+  `secondary {usedPercent 0, windowDurationMins 10080, resetsAt}`, `planType "plus"`, plus fields
+  the plan did not name: `ordinaryUsageAllowed`, `spendControlReached`, `rateLimitReachedType`,
+  `credits`, `rateLimitResetCredits`, `accountId`, `rateLimitUpsell`. With 0 % used, `resetsAt`
+  is "now + window" and advances on every read (it moved 553 s between two reads 553 s apart):
+  an unused window has no fixed reset. Saved (account id and credit ids redacted) as
+  `Tests/FlightDeckTests/Fixtures/FlightControlL3/Usage/codex-rate-limits-read.captured.json`.
+  Pushes during this connection's own turn: **yes** — one `account/rateLimits/updated` with
+  `params.rateLimits` of the same shape (note `spendControlReached: null` in the push vs `false`
+  in the read, and an `emittedAtMs` beside `params`); saved as `codex-rate-limits-updated.captured.json`.
+  Deviation 1's 120 s poll stays, because the TUI's turns run on a different connection.
+- Probe hazard: typing `/usage` + Enter in one `send-keys` let the slash menu complete to
+  `/auto-mode-setup`; it was cancelled with Escape before anything ran. Type the command, confirm
+  the menu's first row, then send Enter.
+
+### Plan deviations (L3-U plan, 2026-10-04)
+
+1. Codex is polled (`account/rateLimits/read`, ≤ every 120 s per account with a live codex tab)
+   as well as pushed: pushes only reach the connection that ran the turn, and FD's turns run in
+   a `codex resume` TUI.
+2. Usage files live in `~/Library/Application Support/Flight Deck/usage-<debug|release>/`,
+   passed as `FLIGHT_DECK_USAGE_DIR`; a file is keyed by the FD tab id
+   (`FLIGHT_DECK_SESSION_ID`) or, without it, claude's session id.
+3. Every meter funnels through `UsageService` into `CapacityLedger`. A hard rejection is a
+   `UsageReading` with `hardRejection: true`; its worst window's `resetsAt` is when it ends.
+4. `CapacityLedger` (CapacityReader + PoolAllocator) and `LedgerHandoffPlanner` are IntakeKit
+   classes, so their `Sendable` conformance is honest.
+5. Settings has a top-level Capacity tab (`PreferencesTab.capacity`), not Flight Control →
+   Capacity.
+6. `StoreHandoffHost` does interrupt, retire (Escape for an open dialog, then `/exit` or
+   `/quit`), `br update --assignee`, `am file_reservations release`, notify and a JSONL log;
+   confirmation, kind lookup, catalogs, reservations, the "handed off →" marker and the swarm
+   log location are hooks L3-S sets. With Confirm on and no confirmation surface, it declines and
+   says so.
+7. A window whose `resetsAt` passed after it was read counts as empty; a `resetsAt` at or before
+   `readAt` is clock skew and keeps its number.
+8. An empty reservation list reads "It held no file reservations. Reserve the files you will
+   edit with Agent Mail before you edit them."
+9. At the deadline, an agent in a dialog is handed off without Escape.
+10. After a spawn failure, the retry waits until the old agent works again and reaches a new
+    boundary.
+11. "Mod not loaded" = an account's claude tab seen for 15 min with no usage file from any of
+    its tabs.
+12. The pool popover and row meter are UI-tested in a DEBUG Meter Gallery window; the pane in
+    Settings. Script: `scripts/test-ui-capacity.sh`.
+13. OpenCode: `OpenCodeAPIErrorEvent` + `OpenCodeErrorUsageSource` ship, tested with fakes; wiring
+    waits for the OpenCode branch.
+14. The engine's `.claude-plugin/types/` is git-ignored, not committed.
+15. A local pool's usage is its unreleased leases (L3-S releases one when its session ends).
+16. A failing meter source shows its error at once but keeps a still-fresh reading until it goes
+    stale.
+17. The claude mod (`Resources/ClaudePlugin`) is run from a byte-compared copy under
+    `~/Library/Application Support/Flight Deck/claude-plugin-<debug|release>/`
+    (`ClaudePluginLocation.materialize`), because claude writes `.claude-plugin/types/` into any
+    module-carrying `--plugin-dir` at load (probe Outcome 3C) and the bundle is code-signed. The
+    copy never takes the source's `.claude-plugin/types/` and never deletes the destination's.
+18. Claude gates hook modules behind a remote rollout switch: `claude plugin test` once refused
+    with "hooks modules are turned off… rollout switch saved off" until an interactive claude
+    refreshed it. A user whose switch is off gets no claude meter; the "mod is not loaded"
+    source error (deviation 11) is how that shows.
+19. A headless seat counts as refused while `SeatActivity.rateLimitedAt` is set (cleared by the
+    next assistant event), not by its last `rate_limit_event` status, which stays "rejected"
+    after recovery.
+20. Each codex rate-limit read is bounded by a timeout (`UsageService.codexReadTimeout`, 20 s)
+    with at most one read in flight per account, so one stuck app-server cannot stall the tick;
+    a read that never returns stops that account's polling until restart, with its source error
+    visible.
+21. The swarm predicate set by `setSwarmPredicate` survives `attach` (it is stored outside the
+    replaceable environment).
+22. Transcript pointers are computed from the session's agent directly in `UsageService`, not
+    through the shared registry.
+23. The hand-off deadline's Escape is gated on the agent's own activity
+    (`SessionStatus.agentActivity`), so an idle agent with a busy subagent is not interrupted;
+    `retireAgent` sends the dialog Escape through `interruptTurn(includingDialog:)`, not
+    `abortPrompt` (which refuses nameable prompts).
+24. An unroutable spill (`Assignment.isUnroutable`) is treated as no spill: the driver waits and
+    surfaces `unroutableReason`.
+25. The driver drops per-agent state (phase, confirmation, failure memory) for agents that leave
+    the snapshot, and a rate-limited agent counts as a boundary after a failed spawn.
+26. A refused account's meter shows its real reading (or none), the refusal's source and
+    "Refused by the provider", not a synthetic 100 %.
+27. A pool never holds another agent's account: `CapacityEditing.toggle` refuses it and
+    `effectivePools` drops a stored cross-harness member.
+28. Each meter bar is exposed to accessibility as one static text "<account>: <reading>"
+    (identifier `meter-bar`): on macOS an AXGroup carries no value and a Text reports its string
+    as value with an empty label (found in real XCUITest runs).
+29. The Capacity settings tab carries no container accessibility identifier (a container
+    identifier is stamped onto every child and hides theirs); the tab is found by its title.
+30. The over-hard notice is per account per crossing, for live tabs, and never fires on launch
+    for a reading already over hard.
+31. Default pools hold every live account; Remove is not offered there.
+
+### Provided at integration
+
+- `UsageService.shared.ledger` is the `CapacityReader` and `PoolAllocator`;
+  `UsageService.shared.planner` is the `HandoffPlanner`.
+- L3-S builds `HandoffDriver(planner:allocator:router:spawner:host:settings:now:)` with its
+  `SwarmSpawner`, L3-R's `Router`, a `StoreHandoffHost` with the swarm hooks set, and
+  `settings: { preferences.capacity.handoffSettings }`, and calls `evaluate(_:)` on its tick.
+- L3-S calls `UsageService.shared.setSwarmPredicate { … }`, mounts `PoolMeterList` in the
+  header popover and `RowMiniMeter(model: MeterFormatter.rowMeter(account:ledger:now:))` on
+  swarm rows, and wires `handoff.confirm`/`handoff.decline` into `StoreHandoffHost.confirmer`.
+- The Observe drawer's Assignment lane (L3-S) draws the account with `AccountMeterBar` and the
+  hand-off history from the JSONL `StoreHandoffHost` writes (`HandoffLogEntry`, one per line).
+- The OpenCode adapter returns an `OpenCodeErrorUsageSource` from `usageMeterSource(account:)`,
+  `UsageService.shared.consume(_:)`s it, and points `transcriptPointer` at
+  `TranscriptPointers.openCode(sessionID:serverURL:)`.
+- `UsageService.shared.planner` must be called on the main actor (its transcript closure uses
+  `MainActor.assumeIsolated`); the `@MainActor` `HandoffDriver` satisfies that.
+- `LedgerHandoffPlanner`'s `reservedFiles` is `{ _ in [] }` and `StoreHandoffHost.reservationLookup`
+  defaults to nil, so until L3-S wires them every hand-off prompt says "It held no file
+  reservations" (spec §5.4 wants the list).
+- Nothing in L3-U makes the old tab read-only after a hand-off (spec §5.7); `markHandedOff`
+  defaults to a no-op — L3-S's responsibility.
+- `CapacityLedger` can conform to the contract's `PoolDirectory` (`allPools` → `PoolSummary`);
+  L3-U does not. Default pool labels differ: L3-U says "Claude default", `DefaultPoolDirectory`
+  says "claude — all accounts".
+- `StoreHandoffHost.stopAgent` ignores `retireAgent`'s `PromptDispatch`: if the exit command is
+  not delivered, nothing logs it and the old agent may stay alive after a "handed off" record.
+- `HandoffDriver.evaluate` awaits `host.confirm` inline, so one pending human confirmation stalls
+  every other agent's hand-off in that pass.

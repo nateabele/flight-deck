@@ -94,11 +94,16 @@ final class ToolContextTests: XCTestCase {
             .appendingPathComponent("Flight Deck", isDirectory: true)
             .appendingPathComponent("hook-events-debug", isDirectory: true)
             .path
+        let expectedUsageDir = base
+            .appendingPathComponent("Flight Deck", isDirectory: true)
+            .appendingPathComponent("usage-debug", isDirectory: true)
+            .path
         XCTAssertEqual(
             context?.accountEnvironment,
             [
                 "CLAUDE_CONFIG_DIR": home.path,
                 "FLIGHT_DECK_EVENT_DIR": expectedEventDir,
+                "FLIGHT_DECK_USAGE_DIR": expectedUsageDir,
             ]
         )
     }

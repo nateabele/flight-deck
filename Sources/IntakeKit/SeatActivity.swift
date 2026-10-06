@@ -39,6 +39,15 @@ public struct SeatActivity: Codable, Equatable, Sendable {
     /// When claude last reported a rejecting `rate_limit_event`; cleared by the next assistant
     /// event, since the model speaking again is the only proof the limit lifted.
     public var rateLimitedAt: Date?
+    /// The windows claude's last `rate_limit_event` reported (`unifiedWindows`). claude sends one
+    /// per API call, allowed or not, so a headless seat meters the account it runs on for free
+    /// (Flight Control L3-U). Nil until the first event carrying windows; an event without
+    /// windows leaves the last ones standing.
+    public var rateLimitWindows: [UsageWindow]?
+    /// That event's `status` — `allowed`, `allowed_warning`, `rejected` — verbatim.
+    public var rateLimitStatus: String?
+    /// That event's top-level `resetsAt`: when a rejection lifts.
+    public var rateLimitResetsAt: Date?
     public var startedAt: Date
     public var lastEventAt: Date?
     /// claude's final `result.total_cost_usd`; codex reports none.
@@ -229,8 +238,12 @@ public struct ActivityParser: Sendable {
             }
         case "rate_limit_event":
             // Emitted on every call, mostly `allowed`; only a rejection is a limit worth showing.
-            let status = (obj["rate_limit_info"] as? [String: Any])?["status"] as? String ?? ""
-            if !status.hasPrefix("allowed") { activity.rateLimitedAt = now() }
+            let info = obj["rate_limit_info"] as? [String: Any] ?? [:]
+            if ClaudeRateLimitParser.isRejected(rateLimitInfo: info) { activity.rateLimitedAt = now() }
+            let windows = ClaudeRateLimitParser.windows(rateLimitInfo: info)
+            if !windows.isEmpty { activity.rateLimitWindows = windows }
+            if let status = info["status"] as? String { activity.rateLimitStatus = status }
+            if let resets = ClaudeRateLimitParser.resetsAt(rateLimitInfo: info) { activity.rateLimitResetsAt = resets }
         case "result":
             if let cost = obj["total_cost_usd"] as? Double { activity.costUSD = cost }
             if let usage = obj["usage"] as? [String: Any] {
