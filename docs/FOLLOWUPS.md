@@ -2305,13 +2305,17 @@ flagged as most likely to differ from the tests. The maintainer's to run.
     - `CapabilityIndexUITests` has not yet run live (the screen was locked).
   L3-U (usage and rollover) built on branch `l3-usage` (5ee2091): pools, meters (codex app-server
   read every 2 min, the bundled claude mod via `session.measure`, headless seats, the fleet's
-  rate-limit API errors), the capacity ledger, the hand-off driver and Settings → Capacity. Not
-  yet wired to a swarm (integration). The maintainer's checks after integration: open Settings → Capacity
+  rate-limit API errors), the capacity ledger, the hand-off driver and Settings → Capacity. Wired to
+  the swarm by `FlightControlComposition.install` (l3-integration), proven end to end only
+  against faked `br`/`am` and tabs (`SwarmEndToEndTests`). The maintainer's checks after integration: open Settings → Capacity
   and confirm each account's bar matches `/usage` (claude) and codex's own status; run one
   swarm agent on an account near its limit and watch it hand off; confirm a manual tab gets one
   notification and stays put; run the real claude-tab meter (the mod in an FD-spawned
   interactive tab) against `/usage`. Open L3-U items, each a bullet below.
-  - **L3-S swarm built** (branch `l3-swarm`, 2f23691f plus docs commit). Integration must: set
+  - **L3-S swarm built** (branch `l3-swarm`, 2f23691f plus docs commit). The wiring below is
+    done in `FlightControlComposition` (the driver owns the old lease; a hand-off gives the old
+    claim back before the new agent claims; a block naming a deleted pool waits with "pool <id>
+    no longer exists"); the meter swap and the live UI-test run remain. Integration must: set
     `SessionStore.swarmDependencies` to L3-R's router factory and `KindRegistry` and L3-U's
     `PoolAllocator`/`CapacityReader`. The router is a factory, `makeRouter: () -> any Router`: plug
     in L3-R's `RoutingService.makeRouter()` and never cache a router. `SwarmDependencies.pools`

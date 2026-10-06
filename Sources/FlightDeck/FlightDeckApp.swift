@@ -407,6 +407,26 @@ struct FlightDeckApp: App {
         // Intake release asks the store's routing for each created task's block (L3-R §4).
         store.flightControlRouting = routing
 
+        // The real Level 3 graph, now that routing and the capability index exist. Here rather
+        // than in AppDelegate's `startUsage`: that hop can run inside `SessionStore.init` (the
+        // store-ready notification), before this factory has attached routing, and its other hop
+        // is a no-op once usage is attached — so installing there could silently never happen.
+        // Nothing in the graph needs usage attached first (see `FlightControlComposition`).
+        //
+        // Skipped under two UI-test fixtures whose own graph it would overwrite: the Flight
+        // Control fixture backend installs deterministic swarm dependencies (slots, a one-model
+        // router) that SwarmUITests asserts on, and the routing fixture's service carries fixed
+        // hints and `DefaultPoolDirectory` pools that RoutingUITests asserts on. The capability
+        // index and usage fixtures only seed data the real graph reads, so they keep it.
+        #if DEBUG
+        let fixtureOwnsTheGraph = flightControlFixture != nil
+        #else
+        let fixtureOwnsTheGraph = false
+        #endif
+        if !fixtureOwnsTheGraph && !RoutingUIFixture.isActive {
+            FlightControlComposition.install(on: store, preferences: preferences)
+        }
+
         #if DEBUG
         if let flightControlFixture { store.swarmDependencies = flightControlFixture.dependencies() }
         #endif

@@ -1427,6 +1427,12 @@ final class SessionStore: ObservableObject {
 
     var swarmServiceIfBuilt: SwarmService? { swarmServiceStorage }
 
+    /// The real Level 3 graph (`FlightControlComposition.install`). Held here, strongly, because
+    /// the swarm points at the hand-off driver weakly (`handoffDecisions`) and the store is what
+    /// lives as long as the swarm does: a driver held only by the service would be gone the
+    /// moment install returned. Nil in every store a test builds unless the test installs it.
+    var flightControlGraph: FlightControlGraph?
+
     /// Installs a service — the lazy builder, tests, and the Debug fixture backend. The one place
     /// a service is wired to this store.
     func useSwarmService(_ service: SwarmService) {
@@ -1445,6 +1451,9 @@ final class SessionStore: ObservableObject {
             spawner.claim = { task, name in await backend.claim(task.id, actor: name, project: task.project) }
         }
         swarmChangeForward = service.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
+        // The service is lazy and usually built after the graph is installed (first launch,
+        // restore, or the sidebar), so the hand-off half of the graph attaches here.
+        flightControlGraph?.attach(swarm: service)
     }
 
     /// A swarm on disk shows its "paused after restart" banner at launch, so the service is built
