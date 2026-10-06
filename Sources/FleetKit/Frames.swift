@@ -255,7 +255,11 @@ public enum FleetCommand: Codable, Equatable, Sendable {
     /// `token` is the client's own idempotency key, minted once per tap, for the reason
     /// `.prompt`'s is: the socket can drop between the command landing and its `ack` being
     /// read, so a retry must be free.
-    case answerPrompt(id: UUID, token: UUID, call: String, answer: PromptAnswer)
+    ///
+    /// `agent` names the subagent whose transcript holds `call`, when the dialog is a
+    /// subagent's. Absent for the conversation's own dialog, which is every older client.
+    case answerPrompt(id: UUID, token: UUID, call: String, answer: PromptAnswer,
+                      agent: String? = nil)
 
     /// One comment on an open plan gate. `block` is an **index into the Mac's own
     /// `PlanBlocks.split` of the plan**, never the text: the Mac resolves it against its own
@@ -369,11 +373,12 @@ public enum FleetCommand: Codable, Equatable, Sendable {
             try c.encode(id, forKey: .id)
             try c.encode(token, forKey: .token)
             try c.encode(text, forKey: .text)
-        case .answerPrompt(let id, let token, let call, let answer):
+        case .answerPrompt(let id, let token, let call, let answer, let agent):
             try c.encode(Op.answerPrompt, forKey: .op)
             try c.encode(id, forKey: .id)
             try c.encode(token, forKey: .token)
             try c.encode(call, forKey: .call)
+            try c.encodeIfPresent(agent, forKey: .agent)
             // Flattened into the same object rather than nested, exactly as `ClientFrame`
             // flattens a command into a frame: two keyed containers over one encoder merge
             // into a single JSON object, and one command reading as one line is what makes a
@@ -484,7 +489,8 @@ public enum FleetCommand: Codable, Equatable, Sendable {
                 id: try c.decode(UUID.self, forKey: .id),
                 token: try c.decode(UUID.self, forKey: .token),
                 call: try c.decode(String.self, forKey: .call),
-                answer: try PromptAnswer(from: decoder)
+                answer: try PromptAnswer(from: decoder),
+                agent: try c.decodeIfPresent(String.self, forKey: .agent)
             )
         case .annotatePlan:
             self = .annotatePlan(

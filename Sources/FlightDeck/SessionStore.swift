@@ -1617,7 +1617,9 @@ final class SessionStore: ObservableObject {
             hasBackgroundWork: backgroundWorkSessions.contains(session.id),
             openPromptCall: openPromptCalls[session.id],
             apiError: apiErrors[session.id],
-            planGates: planGates
+            planGates: planGates,
+            subagents: FleetProjection.subagentModel(of: session, trees: subagentTrees),
+            openPromptAgent: openPromptAgents[session.id]
         )
     }
 
@@ -3218,7 +3220,8 @@ final class SessionStore: ObservableObject {
                     repos[repoIndex], statuses: statuses, unread: unreadIdle,
                     backgroundWork: backgroundWorkSessions,
                     openPromptCalls: openPromptCalls, apiErrors: apiErrors,
-                    planGates: planGates
+                    planGates: planGates,
+                    subagentTrees: subagentTrees, openPromptAgents: openPromptAgents
                 ),
                 at: repoIndex
             ))
@@ -4763,7 +4766,8 @@ final class SessionStore: ObservableObject {
                         repo, statuses: statuses, unread: unreadIdle,
                         backgroundWork: backgroundWorkSessions,
                         openPromptCalls: openPromptCalls, apiErrors: apiErrors,
-                        planGates: planGates
+                        planGates: planGates,
+                        subagentTrees: subagentTrees, openPromptAgents: openPromptAgents
                     ), at: at
                 ))
             }
@@ -8348,8 +8352,12 @@ final class SessionStore: ObservableObject {
         // alone, with every `SessionStatus` unchanged, and that tick still has to reach the
         // wire.
         let backgroundWorkChanged = previousBackgroundWork.symmetricDifference(backgroundWork)
+        // The agent that owns the dialog is part of the same fact: the same call id moving
+        // between files changes where a phone must read it and which node it marks blocked.
         let openPromptChanged = Set(previousOpenPromptCalls.keys).union(openPromptCalls.keys)
             .filter { previousOpenPromptCalls[$0] != openPromptCalls[$0] }
+            .union(Set(previousOpenPromptAgents.keys).union(openPromptAgents.keys)
+                .filter { previousOpenPromptAgents[$0] != openPromptAgents[$0] })
         // `openPromptChanged` is deliberately not unioned in: a tab with a dialog has a status,
         // so it is already in `next.keys`, and adding it would only be a way for this set to
         // disagree with itself.
@@ -8473,7 +8481,9 @@ final class SessionStore: ObservableObject {
                 subagentCount: transition.new?.subagentCount ?? 0,
                 hasBackgroundWork: backgroundWorkSessions.contains(transition.id),
                 openPromptCall: openPromptIdentity(of: transition.id),
-                answerless: transition.new?.answerless ?? false
+                answerless: transition.new?.answerless ?? false,
+                subagents: wireSubagents(of: transition.id),
+                openPromptAgent: openPromptAgents[transition.id]
             )
         })
     }
@@ -8625,10 +8635,23 @@ final class SessionStore: ObservableObject {
         }
     }
 
-    /// Stored per tab. The wire half lands in a later task; until then this only stores.
+    /// Stored per tab, and told to the fleet. A node appearing or finishing moves no status
+    /// field, so without its own emission a connected phone would hold yesterday's tree until
+    /// some unrelated tick happened to carry it. Skipped when there is no status yet, like
+    /// `applySubagentCount`: the first `commitStatuses` emission carries the tree then.
     func applySubagents(_ id: UUID, _ tree: SubagentTree) {
         guard subagentTrees[id] != tree else { return }
         subagentTrees[id] = tree
+        guard let status = statuses[id] else { return }
+        emit(.activityChanged(
+            id: id, activity: status.activity.rawValue,
+            waitingFor: status.waitingFor, subagentCount: status.subagentCount,
+            hasBackgroundWork: backgroundWorkSessions.contains(id),
+            openPromptCall: openPromptIdentity(of: id),
+            answerless: status.answerless,
+            subagents: wireSubagents(of: id),
+            openPromptAgent: openPromptAgents[id]
+        ))
     }
 
     /// Applied from a transcript watcher. Stored even when the registry has not yet
@@ -8666,8 +8689,22 @@ final class SessionStore: ObservableObject {
             // Carried for the same reason: a sub-agent count is not news about whether a dialog
             // is nameable, so `status.answerless` — already current, `commitStatuses` is the
             // only writer of it — rides along unchanged.
-            answerless: status.answerless
+            answerless: status.answerless,
+            subagents: wireSubagents(of: id),
+            openPromptAgent: openPromptAgents[id]
         ))
+    }
+
+    /// A tab's subagents as they go on the wire right now, or nil for an agent this build does
+    /// not model them for. Shared by every `activityChanged` emission because the fold
+    /// overwrites `subagents` unconditionally: one emission that left it out would replace a
+    /// phone's tree with nil.
+    private func wireSubagents(of id: UUID) -> [WireSubagent]? {
+        guard let session = session(for: id),
+              let tree = FleetProjection.subagentModel(of: session, trees: subagentTrees)
+        else { return nil }
+        return FleetProjection.wire(
+            tree, blocked: openPromptAgents[id], call: openPromptCalls[id])
     }
 
     private func injector(for id: UUID) -> TextInjecting? {
@@ -8716,7 +8753,9 @@ final class SessionStore: ObservableObject {
         // and diffs the result against the pre-call snapshot to decide notifications.
         // Editing `statuses` here would corrupt that "before" picture.
         subagentCounts[tabID] = 0
-        subagentTrees[tabID] = nil
+        // Through `applySubagents`, not a bare removal: a tree of finished agents leaves the
+        // count at 0 already, so no later status tick would tell a phone the tree is gone.
+        applySubagents(tabID, .empty)
 
         stopWatching(tabID)
 
@@ -8780,7 +8819,9 @@ final class SessionStore: ObservableObject {
         // never fires. The badge would sit at its pre-retarget value until the new watcher
         // happens to count something itself, which may be never.
         subagentCounts[tabID] = 0
-        subagentTrees[tabID] = nil
+        // Through `applySubagents`, not a bare removal: a tree of finished agents leaves the
+        // count at 0 already, so no later status tick would tell a phone the tree is gone.
+        applySubagents(tabID, .empty)
 
         stopWatching(tabID)
         startWatching(tabID: tabID)
@@ -8826,7 +8867,8 @@ final class SessionStore: ObservableObject {
                     repos[destination], statuses: statuses, unread: unreadIdle,
                     backgroundWork: backgroundWorkSessions,
                     openPromptCalls: openPromptCalls, apiErrors: apiErrors,
-                    planGates: planGates
+                    planGates: planGates,
+                    subagentTrees: subagentTrees, openPromptAgents: openPromptAgents
                 ),
                 at: destination
             ))

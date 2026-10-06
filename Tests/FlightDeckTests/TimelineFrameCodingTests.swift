@@ -34,6 +34,18 @@ final class TimelineFrameCodingTests: XCTestCase {
 
     // MARK: The request
 
+    /// A subagent's page is asked for by naming the agent; a parent's by naming nothing. The
+    /// absent key is what an older Mac sees for every request it already understands.
+    func testATimelineRequestCarriesAnAgentOnlyWhenOneIsNamed() throws {
+        let named = ClientFrame.req(
+            cid: 7, .timeline(session: session, anchor: .latest, limit: 8, agent: "a28ad87b"))
+        XCTAssertEqual(try roundTrip(named), named)
+        XCTAssertEqual(try fields(of: named)["agent"] as? String, "a28ad87b")
+        let bare = ClientFrame.req(cid: 7, .timeline(session: session, anchor: .latest, limit: 8))
+        XCTAssertEqual(try roundTrip(bare), bare)
+        XCTAssertNil(try fields(of: bare)["agent"])
+    }
+
     func testEveryAnchorRoundTrips() throws {
         for anchor in [TimelineAnchor.latest, .before(4096), .after(0), .around(2_048)] {
             let frame = ClientFrame.req(
@@ -69,7 +81,7 @@ final class TimelineFrameCodingTests: XCTestCase {
             return XCTFail("a req did not decode as a req")
         }
         XCTAssertEqual(cid, 9_001)
-        guard case .timeline(let decodedSession, let anchor, let limit) = request else {
+        guard case .timeline(let decodedSession, let anchor, let limit, _) = request else {
             return XCTFail("the request did not decode as a timeline request")
         }
         XCTAssertEqual(decodedSession, session)

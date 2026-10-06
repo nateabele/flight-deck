@@ -31,6 +31,7 @@ extension FleetEvent: Codable {
         case openPromptCall
         case apiError
         case answerless
+        case subagents, openPromptAgent
         case intakes
     }
 
@@ -74,7 +75,8 @@ extension FleetEvent: Codable {
             try c.encode(title, forKey: .title)
             try c.encode(origin, forKey: .origin)
         case .activityChanged(let id, let activity, let waitingFor, let subagentCount,
-                              let hasBackgroundWork, let openPromptCall, let answerless):
+                              let hasBackgroundWork, let openPromptCall, let answerless,
+                              let subagents, let openPromptAgent):
             try c.encode(FleetEventTag.activityChanged, forKey: .t)
             try c.encode(id, forKey: .id)
             // `encode` not `encodeIfPresent`: an absent key and an explicit null are the
@@ -91,6 +93,10 @@ extension FleetEvent: Codable {
             // one report 4 was.
             try c.encode(openPromptCall, forKey: .openPromptCall)
             try c.encode(answerless, forKey: .answerless)
+            // `encodeIfPresent`: nil is "this Mac does not model subagents", and an older
+            // phone must see exactly the bytes it always has for such a session.
+            try c.encodeIfPresent(subagents, forKey: .subagents)
+            try c.encodeIfPresent(openPromptAgent, forKey: .openPromptAgent)
         case .unreadChanged(let id, let isUnread):
             try c.encode(FleetEventTag.unreadChanged, forKey: .t)
             try c.encode(id, forKey: .id)
@@ -165,7 +171,10 @@ extension FleetEvent: Codable {
                 hasBackgroundWork: try c.decodeIfPresent(
                     Bool.self, forKey: .hasBackgroundWork) ?? false,
                 openPromptCall: try c.decode(OpenPromptIdentity.self, forKey: .openPromptCall),
-                answerless: try c.decodeIfPresent(Bool.self, forKey: .answerless) ?? false
+                answerless: try c.decodeIfPresent(Bool.self, forKey: .answerless) ?? false,
+                // Absent from an older Mac, and kept nil: see `WireSession.subagents`.
+                subagents: try c.decodeIfPresent([WireSubagent].self, forKey: .subagents),
+                openPromptAgent: try c.decodeIfPresent(String.self, forKey: .openPromptAgent)
             )
         case .unreadChanged:
             self = .unreadChanged(id: try c.decode(UUID.self, forKey: .id),

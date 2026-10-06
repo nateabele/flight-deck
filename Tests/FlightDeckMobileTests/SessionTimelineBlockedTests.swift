@@ -219,7 +219,7 @@ final class SessionTimelineBlockedTests: XCTestCase {
     func testTappingAnOptionSendsAnAnswerNamingTheCall() {
         let (model, stub) = makeModel()
         model.answer(.option(index: 1, label: "No"), to: "toolu_A")
-        guard case .answerPrompt(let id, _, let call, let answer)? = stub.sent
+        guard case .answerPrompt(let id, _, let call, let answer, _)? = stub.sent
         else { return XCTFail("expected an answer command") }
         XCTAssertEqual(id, model.sessionID)
         XCTAssertEqual(call, "toolu_A")
