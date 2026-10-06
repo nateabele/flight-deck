@@ -74,6 +74,11 @@ final class SwarmController {
         for agent in record.agents where agent.state == .working {
             guard let task = agent.task, !inProgress.contains(task),
                   let reading = await deps.backend.status(task, project: project) else { continue }
+            // The loop walks a snapshot. A sweep (closed tab) or stop() may have retired this
+            // agent during the read, releasing its lease; setting it idle again would revive it
+            // with that lease, and the next sweep would release it a second time.
+            guard isLive(agent.session), let current = record.agent(agent.session),
+                  current.state == .working, current.task == task else { continue }
             if reading.status == "closed" {
                 record.update(agent.session) { $0.state = .idle; $0.lastTask = task; $0.task = nil; $0.stateSince = now() }
                 log(.close, task: task, session: agent.session, detail: agent.agentName)
@@ -101,11 +106,24 @@ final class SwarmController {
                 reading.status != "closed" && (reading.assignee == nil || reading.assignee == agent.agentName)
             }
             if !settled { continue }
-            if let lease = agent.lease { deps.allocator.release(lease.lease) }
+            // Re-read after the awaits: stop() may have retired the agent meanwhile, and it
+            // released the lease then. Its held tasks were still given back, so the record
+            // drops them either way; only a live agent's lease is released here.
+            guard let current = record.agent(agent.session), current.state != .handedOff else { continue }
+            if isLive(agent.session), let lease = current.lease { deps.allocator.release(lease.lease) }
             record.update(agent.session) {
                 $0.state = .done; $0.task = nil; $0.pendingClaim = nil; $0.marker = "tab closed"; $0.stateSince = now()
             }
         }
+    }
+
+    /// Whether the controller may still act on this agent: it is in the swarm, not retired or
+    /// handed off, and the swarm is not stopped. Every path re-checks this after an await,
+    /// because stop() and the closed-tab sweep can retire the agent (and release its lease)
+    /// while br answers.
+    private func isLive(_ session: UUID) -> Bool {
+        guard record.state != .stopped, let agent = record.agent(session) else { return false }
+        return agent.state == .starting || agent.state == .working || agent.state == .idle
     }
 
     private func fillSlots() async {
@@ -197,15 +215,18 @@ final class SwarmController {
     @discardableResult
     func recordHandoff(from old: UUID, to new: SessionRef, block: ExecutionBlock, lease: AccountLease?) -> Bool {
         guard let previous = record.agent(old), previous.state == .working || previous.state == .idle else { return false }
+        // An agent named "" can neither claim nor be messaged, and would be recorded as working
+        // the task with no way to find it: refuse rather than record it.
+        guard let newName = new.agentName, !newName.isEmpty else { return false }
         record.update(old) {
             $0.state = .handedOff; $0.handedOffTo = new.id; $0.lastTask = $0.task; $0.task = nil; $0.stateSince = now()
         }
         if let held = previous.lease { deps.allocator.release(held.lease) }
-        var next = SwarmAgentRecord(session: new.id, agentName: new.agentName ?? "", block: block, lease: lease,
+        var next = SwarmAgentRecord(session: new.id, agentName: newName, block: block, lease: lease,
                                     task: previous.task, state: .working, stateSince: now())
         next.handedOffFrom = old
         record.agents.append(next)
-        log(.handoff, task: previous.task, session: new.id, detail: "\(previous.agentName) → \(new.agentName ?? "?")")
+        log(.handoff, task: previous.task, session: new.id, detail: "\(previous.agentName) → \(newName)")
         changed()
         return true
     }
@@ -295,6 +316,13 @@ final class SwarmController {
 
     private func spawn(_ block: ExecutionBlock, lease: AccountLease?, for task: ReadyTask) async {
         let key = ConfigKey(block)
+        // A launch runs as its own task, after the tick that planned it: a pause or stop that
+        // landed in between must not open a tab. The lease it was planned with goes back.
+        guard record.state == .running else {
+            pendingSpawns[block.pool] = max(0, (pendingSpawns[block.pool] ?? 1) - 1)
+            if let lease { deps.allocator.release(lease) }
+            return
+        }
         let created = await deps.launcher.createAgent(task: TaskRef(id: task.id, project: project), block: block, lease: lease)
         pendingSpawns[block.pool] = max(0, (pendingSpawns[block.pool] ?? 1) - 1)
         // An agent with no name cannot claim (br would record an empty actor), so a launch that
@@ -310,7 +338,9 @@ final class SwarmController {
             if let lease { deps.allocator.release(lease) }
             noteSpawnFailure(key, error: error)
         case .success(let (ref, name)):
-            record.spawnFailures[key.rawValue] = nil
+            // The failure count is NOT reset here: a tab that opens but never shows a composer
+            // is a failed launch too (spec §10), and resetting on the tab alone let a stuck
+            // config open a fresh tab every two minutes forever. The prompt landing resets it.
             record.agents.append(SwarmAgentRecord(session: ref.id, agentName: name, block: block,
                                                   lease: lease, task: nil, state: .starting, stateSince: now()))
             log(.spawn, task: task.id, session: ref.id, detail: "\(name) on \(key)")
@@ -327,16 +357,15 @@ final class SwarmController {
             log(.error, session: session, detail: "could not release \(agent.agentName)'s reservations")
         }
         // stop() may have retired this agent (lease released) while the release ran: never wake,
-        // reset or type into it.
-        guard record.state != .stopped, record.agent(session)?.state != .done else { return }
+        // reset or type into it. A pause or drain means no new work either — waking the tab and
+        // typing `/clear` is the start of new work — so the agent goes back to idle, reusable on
+        // resume.
+        guard isLive(session) else { return }
+        guard record.state == .running else { becomeIdle(session); return }
         deps.host.wakeIfAsleep(session)
         guard await deps.launcher.resetContext(session) else {
             // ...or while the reset ran: a retired agent stays retired.
-            if record.agent(session)?.state != .done {
-                record.update(session) {
-                    $0.state = .idle; $0.stateSince = now(); $0.excludedFromReuse = true; $0.marker = "reset failed"
-                }
-            }
+            if isLive(session) { exclude(session, marker: "reset failed") }
             log(.resetFailed, task: task.id, session: session, detail: "spawning a fresh agent instead")
             // Spec §10: spawn a new agent instead. The task is still unclaimed.
             if record.state == .running,
@@ -367,7 +396,19 @@ final class SwarmController {
         // Saved BEFORE the claim runs (Review Focus: a crash mid-claim).
         record.update(session) { $0.pendingClaim = task.id }
         changed()
-        switch await deps.backend.claim(task.id, actor: agent.agentName, project: project) {
+        let outcome = await deps.backend.claim(task.id, actor: agent.agentName, project: project)
+        // stop() (the menu, or Turn Off) or the closed-tab sweep may have retired the agent while
+        // the claim ran, releasing its lease. A claim that landed anyway is given back — Turn Off
+        // has already read the claims it returns, so this one would otherwise stay in progress
+        // under an agent nobody prompts — and nothing is typed or revived.
+        guard isLive(session) else {
+            if outcome == .claimed, await deps.backend.returnToOpen(task.id, project: project) {
+                log(.released, task: task.id, session: session, detail: "claimed after \(agent.agentName) left the swarm")
+            }
+            record.update(session) { $0.pendingClaim = nil }
+            return
+        }
+        switch outcome {
         case .claimed:
             record.update(session) { $0.pendingClaim = nil; $0.task = task.id }
             log(.claim, task: task.id, session: session, detail: agent.agentName)
@@ -383,28 +424,52 @@ final class SwarmController {
         let detail = await deps.backend.taskDetail(task.id, project: project)
             ?? TaskDetail(id: task.id, title: task.title, description: "", acceptance: "",
                           status: "in_progress", assignee: agent.agentName)
+        // The same race across the detail read: never type into a retired agent. stop() leaves
+        // it holding a claim it was never told about, so that claim goes back; a sweep has
+        // already given it back and cleared `task`, so there is nothing left to do then.
+        guard isLive(session) else {
+            if record.agent(session)?.task == task.id, record.agent(session)?.state == .done,
+               await deps.backend.returnToOpen(task.id, project: project) {
+                log(.released, task: task.id, session: session, detail: "claimed after \(agent.agentName) left the swarm")
+                record.update(session) { $0.task = nil }
+            }
+            return
+        }
         switch await deps.launcher.deliver(TaskPrompt.text(for: detail), to: session) {
         case .success:
+            record.spawnFailures[agent.config.rawValue] = nil
+            // A prompt typed into an agent stop() retired meanwhile has been sent; the agent
+            // keeps its claim (stop never returns claims) but stays retired.
+            guard isLive(session) else { return }
             record.update(session) { $0.state = .working; $0.stateSince = now() }
             log(.prompt, task: task.id, session: session)
         case .failure(let error):
-            await deliveryFailed(session, task: task.id, error: error)
+            await deliveryFailed(session, config: agent.config, task: task.id, error: error)
         }
     }
 
-    private func deliveryFailed(_ session: UUID, task: String, error: SpawnError) async {
+    private func deliveryFailed(_ session: UUID, config: ConfigKey, task: String, error: SpawnError) async {
         // Spec §10: the claim goes back to open and the agent is left alone (not killed), but a
         // tab that never showed a composer is never typed into again.
         _ = await deps.backend.returnToOpen(task, project: project)
         // stop() may have retired the agent while the deliver or this give-back awaited; a retired
         // agent keeps its done state and its marker (its lease is already released).
-        guard record.agent(session)?.state != .done else { return }
-        becomeIdle(session)
-        record.update(session) {
-            $0.excludedFromReuse = true
-            $0.marker = error == .composerTimeout ? "stuck at start" : "prompt failed"
-        }
+        guard isLive(session) else { return }
+        exclude(session, marker: error == .composerTimeout ? "stuck at start" : "prompt failed")
         log(error == .composerTimeout ? .stuck : .error, task: task, session: session, detail: Self.describe(error))
+        // A tab that never took its prompt is a failed launch (spec §10). Counted, so a config
+        // that is stuck every time pauses the swarm after three instead of opening a fresh tab
+        // per slot every two minutes forever.
+        noteSpawnFailure(config, error: error)
+    }
+
+    /// Idle and never reused again (spec §10). Such an agent never takes work, so its lease goes
+    /// back now rather than sitting held, uncounted against the cap, until the swarm stops;
+    /// `lease` is cleared so stop() does not release it a second time.
+    private func exclude(_ session: UUID, marker: String) {
+        if let lease = record.agent(session)?.lease { deps.allocator.release(lease.lease) }
+        becomeIdle(session)
+        record.update(session) { $0.excludedFromReuse = true; $0.marker = marker; $0.lease = nil }
     }
 
     private func noteSpawnFailure(_ key: ConfigKey, error: SpawnError) {
@@ -444,8 +509,13 @@ final class SwarmController {
         let settled = await giveBackHeldTasks(of: agent, detail: "claimed before a restart but never prompted") {
             $0.status == "in_progress" && $0.assignee == agent.agentName
         }
-        if settled { unreconciled.remove(agent.session); becomeIdle(agent.session) }
-        else { unreconciled.insert(agent.session) }
+        guard settled else { unreconciled.insert(agent.session); return }
+        unreconciled.remove(agent.session)
+        // Turn Off's stop() or a sweep may have retired the agent during the reads (its lease is
+        // released then): the claims it held are given back either way, but only a live agent
+        // becomes idle — becoming idle would revive a retired one with a released lease.
+        if isLive(agent.session) { becomeIdle(agent.session) }
+        else { record.update(agent.session) { $0.pendingClaim = nil; $0.task = nil } }
     }
 
     /// Returns every task the agent holds (`task`, `pendingClaim`) that `shouldReopen` accepts to

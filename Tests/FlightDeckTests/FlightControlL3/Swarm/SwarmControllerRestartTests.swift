@@ -136,4 +136,20 @@ final class SwarmControllerRestartTests: XCTestCase {
         XCTAssertNil(c.record.agent(a.session)?.task)
         XCTAssertEqual(c.record.agent(a.session)?.state, .done)
     }
+
+    /// Turn Off's stop() can retire a restored agent while its claim is read; the give-back must
+    /// not then set it idle again with a lease stop() already released.
+    func testStopDuringARestoredReconcileDoesNotReviveTheAgent() async {
+        let rig = SwarmRig()
+        let lease = SwarmFixtures.lease("codex-subs", "A")
+        var a = rig.agent("BlueLake", lease: lease, state: .starting)
+        a.pendingClaim = "fx-1"
+        rig.backend.statuses["fx-1"] = TaskStatusReading(status: "in_progress", assignee: "BlueLake")
+        let c = rig.controller(rig.record(state: .paused, agents: [a]))
+        rig.backend.onStatus = { _ in c.stop(reason: "Flight Control turned off") }
+        await c.reconcileAfterRestart()
+        XCTAssertEqual(c.record.agent(a.session)?.state, .done)
+        XCTAssertNil(c.record.agent(a.session)?.pendingClaim, "the claim was given back")
+        XCTAssertEqual(rig.allocator.released, [lease])
+    }
 }
