@@ -784,6 +784,26 @@ final class TerminalSmokeTests: XCTestCase {
     /// relaunch land on the state the first launch wrote.
     private static let isolatedStateDir = NSTemporaryDirectory() + "fd-smoke-state"
 
+    /// A launch environment whose session shells cannot find `claude` or `codex`.
+    ///
+    /// The seeded session types `claude --session-id …` into its shell the moment it exists. On
+    /// a machine where the user's shell profile puts a real `claude` on PATH — every machine
+    /// this suite runs on, including the dedicated UI-test Mac — that starts a live agent, which
+    /// swallows the test's typed `echo` as a prompt (and spends a real API turn on it), so the
+    /// marker never reaches the screen. The first run on the UI-test Mac failed exactly that way:
+    /// "marker never appeared in the terminal before the app was killed".
+    ///
+    /// `SHELL=/bin/sh` is the lever because `ShellResolver` takes the session shell from the
+    /// app's `$SHELL` when no Preferences override is set, and a non-login `sh` reads no profile,
+    /// so it keeps the PATH given here — launchd's own bare one, without `~/.local/bin` or
+    /// `/opt/homebrew/bin`. A PATH alone would not do: an interactive fish or zsh re-adds the
+    /// user's directories from their rc files. The claude and codex investigations need the
+    /// real agents and deliberately do not use this.
+    private static let agentlessShellEnvironment = [
+        "SHELL": "/bin/sh",
+        "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+    ]
+
     @discardableResult
     private func launchIsolated(_ extraArguments: [String] = []) -> XCUIApplication {
         let app = XCUIApplication()
@@ -809,13 +829,19 @@ final class TerminalSmokeTests: XCTestCase {
     ///
     /// Also used for that same test's FIRST launch, paired with `clearIsolatedStateDir()` —
     /// see that method's doc comment for why `launchIsolated(_:)` cannot be used there.
+    ///
+    /// `environment` is merged into the app's launch environment, for a test that has to pin
+    /// what its sessions' shells can find (see `agentlessShellEnvironment`).
     @discardableResult
-    private func launchPreservingState(_ extraArguments: [String] = []) -> XCUIApplication {
+    private func launchPreservingState(
+        _ extraArguments: [String] = [], environment: [String: String] = [:]
+    ) -> XCUIApplication {
         let app = XCUIApplication()
         app.launchArguments += [
             "-ApplePersistenceIgnoreState", "YES",
             "-FlightDeckStateDir", Self.isolatedStateDir,
         ] + extraArguments
+        app.launchEnvironment.merge(environment) { _, new in new }
         app.launch()
         app.activate()
         XCTAssertTrue(
@@ -1128,10 +1154,11 @@ final class TerminalSmokeTests: XCTestCase {
     ///
     /// **Why there is a wait before the first `echo`.** A freshly seeded session already has a
     /// resume/launch command (`claude ...`) queued into its shell the moment the surface is
-    /// created (`LaunchPlan.decide`'s cold path) — and no `claude` binary exists under test, so
-    /// it fails immediately with "command not found" and the shell falls back to its own prompt.
-    /// Typing this test's `echo` before that settles risks interleaving the two into one
-    /// corrupted line, so this waits for the shell to finish that round trip first.
+    /// created (`LaunchPlan.decide`'s cold path) — and `agentlessShellEnvironment` keeps
+    /// `claude` off this test's PATH, so it fails immediately with "command not found" and the
+    /// shell falls back to its own prompt. Typing this test's `echo` before that settles risks
+    /// interleaving the two into one corrupted line, so this waits for the shell to finish that
+    /// round trip first.
     func testSessionReattachesWithScrollbackAfterRelaunch() {
         let nonce = UUID().uuidString.prefix(8)
         let marker = "FD-REATTACH-\(nonce)"
@@ -1141,7 +1168,7 @@ final class TerminalSmokeTests: XCTestCase {
         // `SessionStore` persistence outright, which would leave `sessions.json` unwritten for
         // the capture just below to ever find.
         clearIsolatedStateDir()
-        var app = launchPreservingState()
+        var app = launchPreservingState(environment: Self.agentlessShellEnvironment)
 
         // Captured HERE, right after the seeded session is confirmed running, and BEFORE
         // anything below that could tear it down — deliberately NOT resolved from inside
@@ -1222,8 +1249,9 @@ final class TerminalSmokeTests: XCTestCase {
 
         // Same state directory, no `-FlightDeckResetState`: `SessionStore.restore()` reads the
         // session `sessions.json` recorded and, finding its daemon still live, attaches rather
-        // than starting a fresh shell.
-        app = launchPreservingState()
+        // than starting a fresh shell. The same environment as the first launch, so a reattach
+        // that wrongly cold-starts fails on the missing marker rather than spawning a real agent.
+        app = launchPreservingState(environment: Self.agentlessShellEnvironment)
 
         app.windows.firstMatch
             .coordinate(withNormalizedOffset: CGVector(dx: 0.7, dy: 0.5))
@@ -2054,20 +2082,31 @@ final class TerminalSmokeTests: XCTestCase {
                 "⌘⇧] did not advance the selection — the terminal probably swallowed the key"
             )
 
-            // Forward again from the last row: wraps to row 0.
+            // Forward again from the last row: wraps to the FIRST STOP, which is the project's
+            // own heading (cell 0), not "session 1". Project rows are cycle stops since
+            // 6be573f6 (a project is selectable, its per-project view); this group still
+            // expected cell 1 and failed on every run after that, reading as a swallowed key.
+            //
+            // Landing on the heading is observed as its project view opening with no session
+            // row selected, the same proof the heading-click group uses. The heading cell's own
+            // `isSelected` is not usable: it stays false while the heading is visibly selected.
             app.typeKey("]", modifierFlags: [.command, .shift])
             settle()
             XCTAssertTrue(
-                app.cells.element(boundBy: 1).isSelected,
-                "⌘⇧] did not wrap from the last session to the first"
+                app.descendants(matching: .any)["project-view"].waitForExistence(timeout: 5),
+                "⌘⇧] did not wrap from the last session to the first stop, the project heading"
+            )
+            XCTAssertFalse(
+                (1...3).contains { app.cells.element(boundBy: $0).isSelected },
+                "⌘⇧] from the last session left a session selected instead of the project heading"
             )
 
-            // Backward from the first row: wraps to the last, row 2.
+            // Backward from the heading: wraps to the last, row 2.
             app.typeKey("[", modifierFlags: [.command, .shift])
             settle()
             XCTAssertTrue(
                 app.cells.element(boundBy: 3).isSelected,
-                "⌘⇧[ did not wrap from the first session to the last"
+                "⌘⇧[ did not wrap from the project heading to the last session"
             )
 
             // The rows themselves must be untouched — a stray "[" or "]" reaching the pty
