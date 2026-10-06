@@ -25,7 +25,9 @@ final class SubagentWatcherTests: XCTestCase {
     private let finished = #"{"isSidechain":true,"type":"assistant","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"done"}]}}"#
 
     private func makeWatcher(_ seen: @escaping (SubagentTree) -> Void) -> SubagentWatcher {
-        let w = SubagentWatcher(directory: dir, clock: nil, startedAt: { nil },
+        // A known start well in the past: an unknown one reads nothing at all (see
+        // `testAnUnknownProcessStartReadsNoFilesAndPublishesNothing`).
+        let w = SubagentWatcher(directory: dir, clock: nil, startedAt: { .distantPast },
                                 keepDoneSince: { nil }, onChange: seen)
         w.now = { [unowned self] in self.clockNow }
         return w
@@ -80,6 +82,56 @@ final class SubagentWatcherTests: XCTestCase {
         w.rescan()
         // Creating a file changes the folder's own stamp, which `poll` compares every tick.
         try write("a0aaaaaa", records: [open])
+        w.poll()
+        XCTAssertEqual(w.tree.nodes.count, 1)
+    }
+
+    /// Before the first registry row pins the tab, and always after claude exits (a dead pid
+    /// has no start), the start is unknown. Read as "all history" that showed half-finished
+    /// agents from earlier runs as running and tail-read every file on the main actor.
+    func testAnUnknownProcessStartReadsNoFilesAndPublishesNothing() throws {
+        for i in 0..<5 { try write(String(format: "a%07x", i + 0x100), records: [open]) }
+        var seen: [SubagentTree] = []
+        let w = SubagentWatcher(directory: dir, clock: nil, startedAt: { nil },
+                                keepDoneSince: { nil }, onChange: { seen.append($0) })
+        w.now = { [unowned self] in self.clockNow }
+        w.rescan()
+        w.poll()
+        XCTAssertTrue(w.tree.nodes.isEmpty)
+        XCTAssertTrue(seen.isEmpty)
+        XCTAssertEqual(w.tailReadCount, 0)
+    }
+
+    func testATreeIsKeptWhenTheStartBecomesUnknown() throws {
+        try write("a0aaaaaa", records: [open])
+        var start: Date? = .distantPast
+        var seen: [SubagentTree] = []
+        let w = SubagentWatcher(directory: dir, clock: nil, startedAt: { start },
+                                keepDoneSince: { nil }, onChange: { seen.append($0) })
+        w.now = { [unowned self] in self.clockNow }
+        w.rescan()
+        XCTAssertEqual(w.tree.node("a0aaaaaa")?.state, .running)
+        let reads = w.tailReadCount
+        start = nil
+        let h = try FileHandle(forWritingTo: dir.appendingPathComponent("agent-a0aaaaaa.jsonl"))
+        try h.seekToEnd(); try h.write(contentsOf: Data((finished + "\n").utf8)); try h.close()
+        w.poll()
+        clockNow = clockNow.addingTimeInterval(SubagentWatcher.fullRescanInterval + 1)
+        w.poll()
+        XCTAssertEqual(w.tree.node("a0aaaaaa")?.state, .running, "the last tree, unchanged")
+        XCTAssertEqual(seen.count, 1)
+        XCTAssertEqual(w.tailReadCount, reads)
+    }
+
+    func testATreeIsBuiltOnTheFirstTickAfterTheStartIsKnown() throws {
+        try write("a0aaaaaa", records: [open])
+        var start: Date?
+        let w = SubagentWatcher(directory: dir, clock: nil, startedAt: { start },
+                                keepDoneSince: { nil }, onChange: { _ in })
+        w.now = { [unowned self] in self.clockNow }
+        w.poll()
+        XCTAssertTrue(w.tree.nodes.isEmpty)
+        start = .distantPast
         w.poll()
         XCTAssertEqual(w.tree.nodes.count, 1)
     }

@@ -136,7 +136,9 @@ final class ClaudeRuntimeTests: XCTestCase {
         try #"{"isSidechain":true,"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{}}]}}"#
             .write(to: sub.appendingPathComponent("agent-a0aaaaaa.jsonl"), atomically: true, encoding: .utf8)
 
-        let runtime = ClaudeRuntime()
+        // A known start: with none, the watcher reads nothing at all (see
+        // `testAnUnknownProcessStartReportsNoTree`).
+        let runtime = ClaudeRuntime(agentStartedAt: { _ in .distantPast })
         var seen: [AgentEvent] = []
         _ = runtime.attach(AgentBinding(conversationID: id, transcriptURL: url), for: UUID()) {
             seen.append($0)
@@ -148,5 +150,31 @@ final class ClaudeRuntimeTests: XCTestCase {
         XCTAssertEqual(tree.node("a0aaaaaa")?.type, "implementer")
         XCTAssertTrue(seen.contains(.subagentCount(1)),
                       "an agent launched before attach is counted — the fold alone reads 0")
+    }
+
+    /// Before the first registry row pins the tab, and after claude exits, the start is
+    /// unknown — and "unknown" is not "all history": every half-finished agent of an earlier
+    /// run would read as running.
+    func testAnUnknownProcessStartReportsNoTree() throws {
+        let id = UUID()
+        let url = dir.appendingPathComponent("\(id.uuidString.lowercased()).jsonl")
+        try "".write(to: url, atomically: true, encoding: .utf8)
+        let sub = url.deletingPathExtension().appendingPathComponent("subagents", isDirectory: true)
+        try FileManager.default.createDirectory(at: sub, withIntermediateDirectories: true)
+        try #"{"agentType":"implementer","description":"d","spawnDepth":1}"#
+            .write(to: sub.appendingPathComponent("agent-a0aaaaaa.meta.json"), atomically: true, encoding: .utf8)
+        try #"{"isSidechain":true,"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{}}]}}"#
+            .write(to: sub.appendingPathComponent("agent-a0aaaaaa.jsonl"), atomically: true, encoding: .utf8)
+
+        let runtime = ClaudeRuntime(agentStartedAt: { _ in nil })
+        var seen: [AgentEvent] = []
+        _ = runtime.attach(AgentBinding(conversationID: id, transcriptURL: url), for: UUID()) {
+            seen.append($0)
+        }
+        runtime.drainForTesting()
+        XCTAssertFalse(seen.contains {
+            if case .subagents(let tree) = $0 { return !tree.nodes.isEmpty } else { return false }
+        }, "\(seen)")
+        XCTAssertFalse(seen.contains(.subagentCount(1)))
     }
 }
