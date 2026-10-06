@@ -101,7 +101,18 @@ final class SessionStore: ObservableObject {
     /// as "nothing to report" rather than "always stuck". The closure itself returns nil only
     /// when installed but momentarily unable to answer (`PromptService` deallocated under a
     /// weak capture), read the same way.
+    ///
+    /// **Nil also means "not known yet"** since the probe stopped blocking the main actor: when
+    /// the first transcript window misses and a wider read is needed, that read runs off the
+    /// main actor, this returns nil for the tick, and `PromptService.onPolledSettled` calls
+    /// `recommitStatuses` when it lands. Read the same way as above — no dialog this tick.
     var openPromptProbe: ((UUID) -> Result<String, TimelineErrorCode>?)?
+
+    /// The same question asked by a tap rather than a tick, for `probeVerdict` — which gates a
+    /// blind Escape, so it must get a settled answer, never `openPromptProbe`'s "not known
+    /// yet". Answers inline (from the same stamp-keyed cache when the transcript is unchanged).
+    /// Nil falls back to `openPromptProbe`, which is what a test that installs only that gets.
+    var openPromptProbeInline: ((UUID) -> Result<String, TimelineErrorCode>?)?
 
     /// Session ids in most-recently-active order (index 0 == current selection).
     /// Consulted by `closeSession` so closing the active tab returns to the tab you
@@ -5221,6 +5232,14 @@ final class SessionStore: ObservableObject {
     /// is a stand-in for a registry tick, and a tick that skipped read-state, notifications
     /// and replication would make every test built on it exercise a path production never
     /// takes.
+    /// Re-runs the commit over the statuses this store already holds, for an input that moved
+    /// between registry ticks: `PromptService` landing an off-main widened read is the one
+    /// caller. Equivalent to a tick on which the registry itself changed nothing, so every
+    /// consequence still comes off the diff exactly as `commitStatuses` documents.
+    func recommitStatuses() {
+        commitStatuses(statuses, backgroundWork: backgroundWorkSessions)
+    }
+
     func applyRegistryForTesting(_ next: [UUID: SessionStatus]) {
         commitStatuses(next, backgroundWork: backgroundWorkSessions)
     }
@@ -6213,8 +6232,8 @@ final class SessionStore: ObservableObject {
     /// What this Mac's own dialog derivation says about `id` right now, in the shape the
     /// `.aborted` record carries. See `openPromptProbe` for why it can be absent entirely.
     private func probeVerdict(for id: UUID) -> PromptLifecycleRecord.AbortProbe {
-        guard let openPromptProbe else { return .unavailable }
-        guard let result = openPromptProbe(id) else { return .nameable }
+        guard let probe = openPromptProbeInline ?? openPromptProbe else { return .unavailable }
+        guard let result = probe(id) else { return .nameable }
         switch result {
         case .success: return .nameable
         case .failure(let code): return .unnameable(code: code.code)
@@ -6243,7 +6262,7 @@ final class SessionStore: ObservableObject {
     /// none of them is true — the tab exists, its agent is drivable, it is waiting, and its
     /// screen is readable.
     ///
-    /// **Costs codex nothing.** `openPromptProbe` runs `PromptService.pushedOpenPrompt`, which
+    /// **Costs codex nothing.** `openPromptProbeInline` runs `PromptService.pushedOpenPrompt`, which
     /// refuses a codex tab `unsupported_agent` before reading anything — a refusal, so
     /// `.unnameable`, so codex tabs stay abortable exactly as before. A store with no probe at
     /// all (`openPromptProbe` nil — every test with no fleet behind it) is `.unavailable` and
@@ -8314,22 +8333,20 @@ final class SessionStore: ObservableObject {
     /// same read, whether a tab that cannot be named has gone unnameable long enough to call
     /// `answerless`.
     ///
-    /// **Re-derived on every commit and never cached, exactly as `PromptService` re-derives on
-    /// every answer** — see that type for why a `served` table fails the case this whole
-    /// feature is about: claude answers one dialog and raises the next without the session
-    /// leaving `waiting`, and a cache still matches while a re-derivation does not.
+    /// **Asked on every commit, never cached by session.** `PromptService` keeps no `served`
+    /// table — see that type for why one fails the case this whole feature is about: claude
+    /// answers one dialog and raises the next without the session leaving `waiting`. What it
+    /// does cache is keyed on the transcript file's stamp, which that very append moves, so an
+    /// unchanged transcript costs one `stat` and a changed one is re-derived.
     ///
     /// Only `waiting` tabs are asked, so the cost is bounded to the state a human is being
-    /// waited on in: an idle or busy fleet reads nothing at all. The ordinary blocked tab costs
-    /// one `PromptService.tailRecords`-record read per poll — but `PromptService.openPrompt`'s
-    /// own widen-retry loop means a tab whose tail is crowded with non-conversational
-    /// bookkeeping can cost up to a handful of reads, widening toward
-    /// `PromptService.maxTailRecords`, before it gives up for this poll. That widening is rare
-    /// and bounded (see `PromptService.openPrompt`'s own doc comment for the cost this can
-    /// actually reach on a real transcript), but it is no longer a flat one-read-per-poll
-    /// promise for every blocked tab. `openPromptProbe` refuses a codex tab on the agent alone,
-    /// before any transcript is resolved, so an agent this build cannot read a dialog for is
-    /// free too.
+    /// waited on in: an idle or busy fleet reads nothing at all. A transcript that changed
+    /// since the last tick costs one `PromptService.tailRecords`-record read inline; if that
+    /// misses and the file holds more history, the widen toward `PromptService.maxTailRecords`
+    /// runs off the main actor, the probe answers nil ("not known yet") for this tick, and
+    /// `recommitStatuses` publishes the answer when it lands. `openPromptProbe` refuses a codex
+    /// tab on the agent alone, before any transcript is resolved, so an agent this build cannot
+    /// read a dialog for is free too.
     ///
     /// **One read per waiting tab, this tick — not two.** `checkStuckPrompts` used to run this
     /// same derivation a second time, over the same transcript, purely to learn the refusal
@@ -8377,8 +8394,9 @@ final class SessionStore: ObservableObject {
                     now.timeIntervalSince(episode.began) >= Self.stuckPromptReportLadder[0]
             case .failure, nil:
                 // A refusal this Mac cannot yet call "nothing to answer" (`"unsupported_agent"`,
-                // an agent this build cannot even ask) — or no probe installed at all. Either
-                // way, not the state `answerless` exists to report.
+                // an agent this build cannot even ask) — or no probe installed at all, or an
+                // answer still being widened off the main actor. In every case, not the state
+                // `answerless` exists to report.
                 stuckPromptEpisodes[id] = nil
                 next[id]?.answerless = false
             }

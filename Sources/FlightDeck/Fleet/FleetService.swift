@@ -173,15 +173,23 @@ final class FleetService: ObservableObject {
         // `openPromptProbe` for `checkStuckPrompts`'s refusal code) — see `openPromptProbe`'s
         // own doc on `SessionStore` for why splitting them cost every `waiting` tab a second
         // transcript-tail read a tick. `.map(\.callID)` is the only shaping this needs:
-        // `derivedOpenPromptCalls` reads the `Result` itself for the refusal code, over the
-        // exact same `PromptService.pushedOpenPrompt` call `pushedOpenPrompt`'s own doc
+        // `derivedOpenPromptCalls` reads the `Result` itself for the refusal code. Through
+        // `polledOpenPrompt`, which keeps the agent-first gate `pushedOpenPrompt`'s own doc
         // requires of a caller on a schedule — never `openPrompt`, which resolves and memoizes
         // the agent's adapter (a whole `CodexStack`, for codex) on every poll rather than once.
         //
         // `[weak prompts]` is required for the same reason `PlanGateService`'s closures above
         // capture `store` weakly: `FleetService` already holds `prompts` strongly, and a strong
         // capture here would be the second half of a cycle back through `store`.
+        //
+        // `polledOpenPrompt` rather than `pushedOpenPrompt`: a tick must never wait on a widened
+        // read, so a miss that needs one comes back nil ("not known yet") and the answer
+        // arrives through `onPolledSettled`, which recommits without waiting for a tick.
         store.openPromptProbe = { [weak prompts] id in
+            prompts?.polledOpenPrompt(inSession: id)?.map(\.callID)
+        }
+        prompts.onPolledSettled = { [weak store] in store?.recommitStatuses() }
+        store.openPromptProbeInline = { [weak prompts] id in
             prompts?.pushedOpenPrompt(inSession: id).map(\.callID)
         }
         wireHandlers()

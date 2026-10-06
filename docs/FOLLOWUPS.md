@@ -2432,3 +2432,23 @@ What is open, in the order it will bite:
 - The three MUST-FIX items are at the top of this section. Lesser: give a failed
   `systemctl enable --now` its own `die` message.
 
+
+## Open-prompt probe CPU (2026-10-05)
+
+A tab that claude reported as `waiting` ("permission prompt") had no open call in its transcript.
+The last conversational record was plain assistant text, followed by 112 bookkeeping lines, and
+the file was last written 53 minutes before the status flipped. Every registry tick widened the
+probe to the pager's scan ceiling: the whole 7.1 MB file, twice, every 500ms, on the main actor.
+Flight Deck sat at ~112% CPU (`sample`: 92% of main-thread samples under
+`PromptService.pushedOpenPrompt`). **Fixed:** the push-side probe caches on the transcript's
+`stat` (inode, size, mtime), so an unchanged file costs one `stat` a tick. A widen runs off the
+main actor and recommits through `SessionStore.recommitStatuses` when it lands. The answer path
+is still uncached.
+
+Still open:
+- **Why claude reports `waiting` with nothing in the transcript is unexplained.** It contradicts
+  "blocking tool_use is written at raise". Either the dialog is one claude does not log (an MCP or
+  plugin prompt?), or the session is wedged. It needs a live repro with the screen captured.
+- **The registry poll itself** (`SessionStatusWatcher.drain`, mtime-cached) and the rest of the
+  tick were ~4.5% of a core in the same sample. An FSEvents or `DISPATCH_SOURCE_TYPE_VNODE` watch
+  on the status directory could replace the 500ms rescan. Not done: it is a separate, smaller win.
