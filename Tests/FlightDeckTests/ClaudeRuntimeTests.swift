@@ -124,4 +124,29 @@ final class ClaudeRuntimeTests: XCTestCase {
         XCTAssertTrue(first.isEmpty, "a detached subscriber must receive nothing")
         XCTAssertEqual(second, [.title("after")], "the surviving subscriber must keep its watcher")
     }
+
+    func testAttachReportsTheSubagentTreeAndCountsAgentsStartedBeforeAttach() throws {
+        let id = UUID()
+        let url = dir.appendingPathComponent("\(id.uuidString.lowercased()).jsonl")
+        try "".write(to: url, atomically: true, encoding: .utf8)
+        let sub = url.deletingPathExtension().appendingPathComponent("subagents", isDirectory: true)
+        try FileManager.default.createDirectory(at: sub, withIntermediateDirectories: true)
+        try #"{"agentType":"implementer","description":"d","spawnDepth":1}"#
+            .write(to: sub.appendingPathComponent("agent-a0aaaaaa.meta.json"), atomically: true, encoding: .utf8)
+        try #"{"isSidechain":true,"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{}}]}}"#
+            .write(to: sub.appendingPathComponent("agent-a0aaaaaa.jsonl"), atomically: true, encoding: .utf8)
+
+        let runtime = ClaudeRuntime()
+        var seen: [AgentEvent] = []
+        _ = runtime.attach(AgentBinding(conversationID: id, transcriptURL: url), for: UUID()) {
+            seen.append($0)
+        }
+        runtime.drainForTesting()
+        guard case .subagents(let tree)? = seen.first(where: {
+            if case .subagents = $0 { return true } else { return false }
+        }) else { return XCTFail("no tree reported: \(seen)") }
+        XCTAssertEqual(tree.node("a0aaaaaa")?.type, "implementer")
+        XCTAssertTrue(seen.contains(.subagentCount(1)),
+                      "an agent launched before attach is counted — the fold alone reads 0")
+    }
 }
