@@ -179,6 +179,10 @@ public struct HandoffRequest: Equatable, Sendable {
     public var oldSession: SessionRef
     public var transcript: TranscriptPointer?
     public var reservedFiles: [String]
+    /// True when `reservedFiles` is empty because nobody could read the reservations, not
+    /// because the agent held none. Set by the driver; the prompt then says so instead of
+    /// claiming "held no file reservations". Not an init parameter, so the contract's init is unchanged.
+    public var reservationsUnknown = false
     public var fromAccount: AccountRef
     public init(task: TaskRef, block: ExecutionBlock, oldAgent: String, oldSession: SessionRef,
                 transcript: TranscriptPointer?, reservedFiles: [String], fromAccount: AccountRef) {

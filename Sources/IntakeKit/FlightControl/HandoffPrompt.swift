@@ -19,7 +19,9 @@ public enum HandoffPrompt {
             lines.append("Its transcript is not available. Lean on `git diff` and the task's notes in `br show \(r.task.id)` to understand what was done and decided.")
         }
         lines.append("Run `git status` and `git diff` before changing anything. The work may be half done.")
-        if r.reservedFiles.isEmpty {
+        if r.reservationsUnknown && r.reservedFiles.isEmpty {
+            lines.append("Its file reservations could not be read. Check Agent Mail for what it held and re-reserve those files before editing them.")
+        } else if r.reservedFiles.isEmpty {
             lines.append("It held no file reservations. Reserve the files you will edit with Agent Mail before you edit them.")
         } else {
             lines.append("Re-reserve these files before editing: \(r.reservedFiles.joined(separator: ", ")).")

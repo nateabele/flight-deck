@@ -172,7 +172,13 @@ final class HandoffDriver: HandoffDecisionSink {
         let (block, lease) = resolved
 
         var request = original
-        if let files = await host.reservedFiles(of: agent.agentName, project: request.task.project) { request.reservedFiles = files }
+        if let files = await host.reservedFiles(of: agent.agentName, project: request.task.project) {
+            request.reservedFiles = files
+        } else if request.reservedFiles.isEmpty {
+            // No reading and the planner had none: "held no file reservations" would be a claim
+            // nobody checked, and the new agent would skip re-reserving files it may still need.
+            request.reservationsUnknown = true
+        }
         let result = await spawner.spawn(task: request.task, block: block, lease: lease, firstPrompt: HandoffPrompt.render(request))
 
         switch result {
