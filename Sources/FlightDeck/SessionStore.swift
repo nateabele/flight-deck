@@ -1164,7 +1164,8 @@ final class SessionStore: ObservableObject {
 
     /// The agent and call behind the permission dialog a conversation is showing, by
     /// conversation id. Raised by the record-only `PermissionRequest` hook; Esc fires no hook,
-    /// so this can outlive a dismissed dialog until the next prompt or tool result.
+    /// so the hook log alone can leave it outliving a dismissed or approved dialog —
+    /// `commitStatuses` also retires it when the tab's wait ends (`retireEndedDialogs`).
     private(set) var pendingDialogs: [UUID: PendingDialog] = [:]
 
     func pendingDialog(forConversation id: UUID) -> PendingDialog? { pendingDialogs[id] }
@@ -5339,6 +5340,11 @@ final class SessionStore: ObservableObject {
         commitStatuses(next, backgroundWork: backgroundWorkSessions)
     }
 
+    /// The hook watcher's dialog feed, without a hook log on disk.
+    func ingestDialogChangesForTesting(_ changes: [DialogAttribution.Change]) {
+        ingestDialogChanges(changes)
+    }
+
     /// Test seams. Production drives both from `applyRegistry`; a test that only cares about
     /// the prompt queue should not have to fabricate registry rows.
     func flushPendingResumePromptsForTesting() { flushPendingPrompts() }
@@ -7652,6 +7658,32 @@ final class SessionStore: ObservableObject {
         recommitStatuses()
     }
 
+    /// Retires a tab's attributed dialog when the wait it was raised for has observably ended:
+    /// the tab went from `waiting` to anything else (or lost its status), or a tab still
+    /// waiting changed what it waits for.
+    ///
+    /// **Why the hook log alone is not enough.** It clears on PostToolUse, UserPromptSubmit
+    /// and SessionEnd. Approving a long-running subagent Bash in the terminal fires none of
+    /// those until the tool finishes, so the call stays unresolved and still named. If the
+    /// parent then waits on something that raises no PermissionRequest — an AskUserQuestion
+    /// (written only at resolve) or claude's own select list after Stop —
+    /// `PromptService.attributingSubagents` would offer the stale call, and an Allow tap would
+    /// pass every check and press Return on whatever list is on screen.
+    ///
+    /// **Why only on an observed edge, never on "not waiting now".** PermissionRequest fires
+    /// ~70ms BEFORE the registry flips the tab to `waiting`, and `ingestDialogChanges` then
+    /// recommits while the tab still reads `busy`. A rule of "clear while not waiting" would
+    /// erase every fresh attribution in that window, before the wait it belongs to began.
+    private func retireEndedDialogs(previous: [UUID: SessionStatus], next: [UUID: SessionStatus]) {
+        for (id, old) in previous where old.activity == .waiting {
+            let new = next[id]
+            let left = new?.activity != .waiting
+            let moved = !left && new?.waitingFor != old.waitingFor
+            guard left || moved, let at = locate(id) else { continue }
+            pendingDialogs[repos[at.repo].sessions[at.session].pinnedConversationID] = nil
+        }
+    }
+
     /// Fans one hook-log tick out to every live claude runtime. The log carries no account —
     /// only the conversation id each `ClaudeRuntime.sources` is keyed by — so unlike
     /// `applyRegistry`'s per-account merge, this hands the same report to every runtime and
@@ -8306,6 +8338,9 @@ final class SessionStore: ObservableObject {
             // `statuses` on every tick of an attributed prompt and publish twice per tick.
             next[id]?.blockedSubagentType = statuses[id]?.blockedSubagentType
         }
+        // Ahead of `derivedOpenPromptCalls`, so a dialog this tick retires is not offered by
+        // the very probe that runs against it below.
+        retireEndedDialogs(previous: previous, next: next)
         // Installed **above** the guard rather than below it, because the third axis is
         // derived FROM them: `openPromptProbe` asks this store what each tab is doing, and
         // asking it against the statuses this tick is replacing would report no dialog on
