@@ -184,8 +184,11 @@ of peer. The pairing frames are `@_spi(HostPairing)` because the Linux module ne
 the app must not.
 
 **Ports and Bonjour.** The host connection is **47410**. Pairing runs on its own listener, open
-only while a window is armed (2 minutes, 3 attempts): **47411** on Linux, an ephemeral port on a
-Mac (found through Bonjour). Types: `_fd-host._tcp` (a hostd, for the controller's `HostLink`) and
+only while a window is armed (2 minutes, 3 attempts): **47411** on both. A Mac hostd retries
+47411 for about a second (its own previous window's listener releases the port asynchronously),
+then falls back to an ephemeral port and reports it in the admin `armed` reply's optional
+`pairingPort`, so the Hosting tab can show it. A fixed port is what lets a controller pair by
+typed address where Bonjour cannot reach (a tailnet). Types: `_fd-host._tcp` (a hostd, for the controller's `HostLink`) and
 `_fd-host-pair._tcp` (a window is open, so its presence *is* the "pairable now" signal). Both are
 under the 15-character label limit. On Linux, avahi's `avahi-publish` is used if it is installed;
 without it nothing is advertised and the user types the address.

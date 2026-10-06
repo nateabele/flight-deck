@@ -471,7 +471,7 @@ final class HostLink {
 
     /// `host:port`, with an IPv6 literal optionally bracketed. The last colon splits, so an
     /// unbracketed IPv6 address still parses.
-    static func endpoint(from text: String) -> NWEndpoint? {
+    nonisolated static func endpoint(from text: String) -> NWEndpoint? {
         guard let colon = text.lastIndex(of: ":"),
               let port = NWEndpoint.Port(String(text[text.index(after: colon)...]))
         else { return nil }

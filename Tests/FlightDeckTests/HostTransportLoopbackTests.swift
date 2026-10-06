@@ -136,7 +136,7 @@ final class HostTransportLoopbackTests: XCTestCase {
     func testArmThenPairWithHostProfile() async throws {
         let server = DarwinHostServer(root: root, port: nil, hostName: { "loop" })
         _ = try await server.start(); defer { server.stop() }
-        guard case .armed(let codeText, _) = try AdminSocketClient.send(.arm, path: adminPath),
+        guard case .armed(let codeText, _, _) = try AdminSocketClient.send(.arm, path: adminPath),
               let code = PairingCode(normalizing: codeText) else { return XCTFail() }
         let initiator = PairingInitiator(profile: .host)
         let paired = expectation(description: "paired")
@@ -157,7 +157,7 @@ final class HostTransportLoopbackTests: XCTestCase {
     func testPairedKeyConnectsAndItsHelloNamesTheController() async throws {
         let server = DarwinHostServer(root: root, port: nil, hostName: { "loop" })
         let port = try await server.start(); defer { server.stop() }
-        guard case .armed(let codeText, _) = try AdminSocketClient.send(.arm, path: adminPath),
+        guard case .armed(let codeText, _, _) = try AdminSocketClient.send(.arm, path: adminPath),
               let code = PairingCode(normalizing: codeText) else { return XCTFail() }
         let initiator = PairingInitiator(profile: .host)
         let paired = expectation(description: "paired")
@@ -189,7 +189,7 @@ final class HostTransportLoopbackTests: XCTestCase {
     func testPairingThatOutlivesItsCodeIsNotStoredAndItsKeyIsRefused() async throws {
         let server = DarwinHostServer(root: root, port: nil, hostName: { "loop" })
         let port = try await server.start(); defer { server.stop() }
-        guard case .armed(let codeText, _) = try AdminSocketClient.send(.arm, path: adminPath),
+        guard case .armed(let codeText, _, _) = try AdminSocketClient.send(.arm, path: adminPath),
               let code = PairingCode(normalizing: codeText) else { return XCTFail() }
         server.window.cancel()
         let initiator = PairingInitiator(profile: .host)
@@ -219,6 +219,104 @@ final class HostTransportLoopbackTests: XCTestCase {
         XCTAssertNil(armedUntil)
         XCTAssertNotNil(listening)
         XCTAssertEqual(name, "loop")
+    }
+
+    // MARK: - The fixed pairing port
+
+    /// Skips, with the reason, when something else on this Mac holds 47411 — the developer's
+    /// own hostd does whenever its Hosting tab has a code up. Probed by binding it here and
+    /// waiting for the release to be confirmed, so the server under test is not racing this
+    /// probe's own socket for the port.
+    private func skipUnlessPairingPortFree() async throws {
+        let probe = try NWListener(using: .tcp, on: DarwinHostServer.pairingPort)
+        probe.newConnectionHandler = { $0.cancel() }
+        // `failed` is decided on `.failed`, and the answer given only on `.cancelled`, which
+        // follows both: that is the moment the port is really free again.
+        let free: Bool = await withCheckedContinuation { continuation in
+            nonisolated(unsafe) var failed = false
+            probe.stateUpdateHandler = {
+                switch $0 {
+                case .ready: probe.cancel()
+                case .failed: failed = true; probe.cancel()
+                case .cancelled: continuation.resume(returning: !failed)
+                default: break
+                }
+            }
+            probe.start(queue: DispatchQueue(label: "pairing-port-probe"))
+        }
+        guard free else {
+            throw XCTSkip("port \(DarwinHostServer.pairingPort) is held by another process "
+                          + "(`lsof -nP -iTCP:47411 -sTCP:LISTEN`; usually this Mac's own hostd with a code up)")
+        }
+    }
+
+    /// The point of the fixed port: a controller that types only the Mac's address dials
+    /// 47411 (`HostService.pairingEndpoint`), so that is where the window must be. Dialled at
+    /// the literal port, never `server.pairingPort`, which would pass on any port at all.
+    @MainActor  // `PairingInitiator` defaults to, and asserts, the main queue
+    func testArmBindsThePairingPortAndAnAddressOnlyControllerPairs() async throws {
+        try await skipUnlessPairingPortFree()
+        let server = DarwinHostServer(root: root, port: nil, hostName: { "loop" },
+                                      pairingPort: DarwinHostServer.pairingPort)
+        _ = try await server.start(); defer { server.stop() }
+        guard case .armed(let codeText, _, let reported) = try AdminSocketClient.send(.arm, path: adminPath),
+              let code = PairingCode(normalizing: codeText) else { return XCTFail() }
+        XCTAssertEqual(reported, 47411)
+        let initiator = PairingInitiator(profile: .host)
+        let paired = expectation(description: "paired")
+        initiator.onPaired = { _, name in XCTAssertEqual(name, "loop"); paired.fulfill() }
+        initiator.onFailure = { XCTFail("pairing over 127.0.0.1:47411 failed: \($0)") }
+        initiator.start(code: code, endpoint: .hostPort(host: "127.0.0.1", port: 47411))
+        await fulfillment(of: [paired], timeout: 15)
+        try await eventually { ControllerStore(root: self.root).all().count == 1 }
+    }
+
+    /// A fresh code replaces the armed one, and its listener must land on the same fixed port:
+    /// the old listener's release is asynchronous (Network.framework confirms it ~80 ms after
+    /// `cancel()`), and binding straight after it fails with EADDRINUSE — which, without a
+    /// retry, would quietly move every second code onto an ephemeral port.
+    func testRearmKeepsThePairingPort() async throws {
+        try await skipUnlessPairingPortFree()
+        let server = DarwinHostServer(root: root, port: nil, hostName: { "loop" },
+                                      pairingPort: DarwinHostServer.pairingPort)
+        _ = try await server.start(); defer { server.stop() }
+        for attempt in 1...3 {
+            guard case .armed(_, _, let reported) = try AdminSocketClient.send(.arm, path: adminPath) else {
+                return XCTFail("arm \(attempt) failed")
+            }
+            XCTAssertEqual(reported, 47411, "arm \(attempt)")
+            XCTAssertEqual(server.pairingPort?.rawValue, 47411, "arm \(attempt)")
+        }
+    }
+
+    /// A pairing port someone else holds must not cost the user the window: the listener falls
+    /// back to an ephemeral port and the `armed` reply says which, so the Hosting tab can show
+    /// it. Driven on a port this test holds itself, so it never depends on who has 47411.
+    @MainActor  // `PairingInitiator` defaults to, and asserts, the main queue
+    func testATakenPairingPortFallsBackAndReportsTheRealPort() async throws {
+        let squatter = try NWListener(using: .tcp)
+        squatter.newConnectionHandler = { $0.cancel() }
+        let ready = expectation(description: "squatter bound")
+        squatter.stateUpdateHandler = { if case .ready = $0 { ready.fulfill() } }
+        squatter.start(queue: .global())
+        defer { squatter.cancel() }
+        await fulfillment(of: [ready], timeout: 3)
+        let taken = try XCTUnwrap(squatter.port)
+
+        let server = DarwinHostServer(root: root, port: nil, hostName: { "loop" }, pairingPort: taken)
+        _ = try await server.start(); defer { server.stop() }
+        guard case .armed(let codeText, _, let reported) = try AdminSocketClient.send(.arm, path: adminPath),
+              let code = PairingCode(normalizing: codeText) else { return XCTFail("arm failed") }
+        let port = try XCTUnwrap(reported, "the armed reply must name the port it fell back to")
+        XCTAssertNotEqual(port, Int(taken.rawValue))
+        XCTAssertEqual(port, server.pairingPort.map { Int($0.rawValue) })
+
+        let initiator = PairingInitiator(profile: .host)
+        let paired = expectation(description: "paired")
+        initiator.onPaired = { _, _ in paired.fulfill() }
+        initiator.onFailure = { XCTFail("pairing on the reported port failed: \($0)") }
+        initiator.start(code: code, endpoint: .hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: UInt16(port))!))
+        await fulfillment(of: [paired], timeout: 15)
     }
 
     /// Sixteen TCP connects that never speak TLS fill the pending pool: the seventeenth is

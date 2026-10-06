@@ -187,7 +187,7 @@ func pair(root: URL) -> Never {
     guard case .status(let baseline, _, _, _) = adminRequest(.status, root: root) else {
         fail("unexpected status reply", code: 1)
     }
-    guard case .armed(let code, let expiresAt) = adminRequest(.arm, root: root) else {
+    guard case .armed(let code, let expiresAt, _) = adminRequest(.arm, root: root) else {
         fail("hostd did not arm a pairing window", code: 1)
     }
     // An abandoned `pair` must not leave its code live for the rest of the two minutes.
