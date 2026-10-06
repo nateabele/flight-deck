@@ -100,7 +100,7 @@ final class LaunchSheetModel: ObservableObject {
         directory = deps.pools
         let router = deps.makeRouter()
         let kinds = (try? deps.kinds.kinds(project: projectURL)) ?? []
-        let catalogs = await registry.catalogs(enabled: Set(registry.harnesses))
+        let catalogs = await (deps.catalogs ?? { await self.registry.catalogs(enabled: Set(self.registry.harnesses)) })()
         rows = tasks.filter { request.filter.admits($0.id) }
             .map { route($0, router: router, kinds: kinds, catalogs: catalogs) }
         // Spec §3: a local pool (every slot has no account) defaults to its own slot count.

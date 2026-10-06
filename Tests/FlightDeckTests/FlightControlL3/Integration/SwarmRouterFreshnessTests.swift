@@ -53,4 +53,30 @@ final class SwarmRouterFreshnessTests: XCTestCase {
         rig.preferences.globalRoutingRules = [lateRule]
         XCTAssertEqual(route().source.ruleId, "r-late", "the same dependency closure, asked again, sees the edit")
     }
+
+    // MARK: - Spill catalogs follow Settings
+
+    /// A task released onto the claude pool, which is full: the confirmed rule says codex, so a
+    /// spill lands there if codex is an enabled agent.
+    private func spillFromAFullClaudePool() async throws {
+        rig.setBlockPool(task: "fx-valid", pool: "claude-default", pinned: false)
+        rig.feed(account: "Rig Claude", utilization: 0.85)
+        try await rig.launch(cap: 1)
+        await rig.tick()
+    }
+
+    func testSpillTargetsCodexWhileItIsEnabled() async throws {
+        try await spillFromAFullClaudePool()
+        let spawn = try XCTUnwrap(rig.spawns.first, "\(String(describing: rig.waitingReason(task: "fx-valid")))")
+        XCTAssertEqual(spawn.block.harness, "codex", "control: with codex enabled the spill goes there")
+    }
+
+    /// Spill catalogs used to be `registry.catalogs(enabled: every harness)`, so an agent switched
+    /// off in Settings still received spilled work.
+    func testSpillNeverTargetsADisabledAgent() async throws {
+        rig.preferences.preferences.agents.removeAll { $0.id == .codex }
+        try await spillFromAFullClaudePool()
+        XCTAssertTrue(rig.spawns.isEmpty, "nothing may start on a disabled agent: \(rig.spawns.map(\.block.harness))")
+        XCTAssertNotNil(rig.waitingReason(task: "fx-valid"), "the task waits, with a reason")
+    }
 }
