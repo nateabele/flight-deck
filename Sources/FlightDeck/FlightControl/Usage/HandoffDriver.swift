@@ -15,6 +15,8 @@ final class HandoffDriver {
         case waitingForCapacity(String)
         case declined
         case failed
+        /// The new agent exists but the old one could not be told to exit. Terminal for this crossing.
+        case stopFailed
         case done(SessionRef)
     }
 
@@ -62,7 +64,7 @@ final class HandoffDriver {
             return
         }
         switch phases[id] {
-        case .done?, .declined?:
+        case .done?, .declined?, .stopFailed?:
             return
         case .failed?:
             // "Retried at the next boundary" (§7): the agent must work again and stop again, or a
@@ -147,7 +149,19 @@ final class HandoffDriver {
                 warnings.append("the new agent has no name yet, so the task's assignee was not changed")
             }
             if let w = await host.releaseReservations(of: agent.agentName, project: request.task.project) { warnings.append(w) }
-            await host.stopAgent(agent.session)
+            guard await host.stopAgent(agent.session) else {
+                // The new agent stays: it already holds the task (reassigned, reservations moved),
+                // and killing it would orphan the task. The old lease is kept because the old agent
+                // still runs on that account. A terminal phase, not `.failed`: `.failed` retries the
+                // whole hand-off and would spawn a second replacement.
+                phases[id] = .stopFailed
+                record(.stopFailed, agent, request, to: lease.account, fresh: fresh,
+                       detail: "exit command was not delivered to the old tab; \(agent.agentName) is still running")
+                host.notify(title: "Hand-off needs a manual stop",
+                            body: "\(fresh.agentName ?? "A new agent") took task \(request.task.id), but \(agent.agentName)'s tab is still running on \(request.fromAccount.label). Stop it by hand.",
+                            session: agent.session)
+                return
+            }
             host.markHandedOff(agent.session, to: fresh)
             if let old = agent.lease { allocator.release(old) }
             phases[id] = .done(fresh)

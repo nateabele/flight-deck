@@ -18,7 +18,8 @@ protocol HandoffHost: AnyObject {
     /// Each returns a warning, or nil when it worked.
     func reassign(task: TaskRef, to agentName: String) async -> String?
     func releaseReservations(of agent: String, project: URL) async -> String?
-    func stopAgent(_ session: SessionRef) async
+    /// True only when the exit command was accepted for delivery; false means the old agent is still running.
+    func stopAgent(_ session: SessionRef) async -> Bool
     func markHandedOff(_ old: SessionRef, to new: SessionRef)
     func record(_ entry: HandoffLogEntry)
     func notify(title: String, body: String, session: SessionRef)
@@ -27,7 +28,7 @@ protocol HandoffHost: AnyObject {
 /// One line of the hand-off log (L3-U §5.8): both tabs and both accounts, so "where did my
 /// agent go" has an answer after the fact.
 struct HandoffLogEntry: Codable, Equatable {
-    enum Outcome: String, Codable { case handedOff, spawnFailed, waitingForCapacity, declined, interrupted }
+    enum Outcome: String, Codable { case handedOff, spawnFailed, waitingForCapacity, declined, interrupted, stopFailed }
     var at: Date
     var outcome: Outcome
     var task: String
@@ -126,7 +127,15 @@ final class StoreHandoffHost: HandoffHost {
     func reservedFiles(of agent: String, project: URL) async -> [String]? { await reservationLookup(agent, project) }
     func reassign(task: TaskRef, to agentName: String) async -> String? { await commands.reassign(task: task, to: agentName) }
     func releaseReservations(of agent: String, project: URL) async -> String? { await commands.releaseReservations(of: agent, project: project) }
-    func stopAgent(_ session: SessionRef) async { store?.retireAgent(session.id) }
+    func stopAgent(_ session: SessionRef) async -> Bool {
+        // `.sent`/`.queued` are accepted; `.duplicate` means this exact command was already
+        // accepted. Every other case typed nothing, and reporting those as delivered would let the
+        // driver mark the hand-off done while the old agent keeps burning the over-limit account.
+        switch store?.retireAgent(session.id) {
+        case .sent?, .queued?, .duplicate?: return true
+        default: return false
+        }
+    }
     func markHandedOff(_ old: SessionRef, to new: SessionRef) { onHandedOff(old, new) }
 
     func record(_ entry: HandoffLogEntry) {

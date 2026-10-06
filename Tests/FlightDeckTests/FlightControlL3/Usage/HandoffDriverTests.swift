@@ -85,6 +85,24 @@ final class HandoffDriverTests: XCTestCase {
         XCTAssertEqual(host.events, ["spawn", "reassign", "release", "stop", "mark", "record:handedOff"])
     }
 
+    /// The old agent keeps running on the over-limit account if its exit command was refused, so
+    /// calling the hand-off done would leave two agents on one task.
+    func testUndeliveredExitDoesNotMarkHandedOff() async {
+        host.activities[oldID] = .idle
+        host.stopDelivered = false
+        let d = driver()
+        await d.evaluate([agent])
+        XCTAssertEqual(host.marked.count, 0)
+        XCTAssertEqual(host.log.map(\.outcome), [.stopFailed])
+        XCTAssertNotNil(host.log.first?.detail)
+        XCTAssertEqual(host.notices.count, 1)
+        XCTAssertEqual(allocator.released, [], "the old agent still holds its lease while it runs")
+        await d.evaluate([agent])
+        XCTAssertEqual(spawner.calls.count, 1, "the whole hand-off is not retried; the new agent already holds the task")
+        XCTAssertEqual(host.notices.count, 1)
+        XCTAssertEqual(host.log.count, 1)
+    }
+
     func testABusyAgentWaitsForItsTurnToEnd() async {
         host.activities[oldID] = .busy
         let d = driver()
