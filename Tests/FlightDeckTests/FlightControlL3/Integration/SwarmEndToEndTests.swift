@@ -233,4 +233,45 @@ final class SwarmEndToEndTests: XCTestCase {
         if let reopen, let claimBack { XCTAssertLessThan(reopen, claimBack) }
         XCTAssertFalse(rig.isHandedOff(first.session))
     }
+
+    // MARK: - Final review fix wave
+
+    /// The hand-off spawn's own claim landed, then its first prompt never did. The new tab must
+    /// not stay behind (each retry would leave one more agent nobody prompts), and the task must
+    /// go back to the old agent: the never-prompted agent's claim is returned to open first,
+    /// or claiming back for the old agent conflicts and the task stays with the orphan.
+    func testAFailedHandoffDeliveryLeavesNoTabAndClaimsTheTaskBack() async throws {
+        rig.feed(account: "Work", utilization: 0.30)
+        rig.feed(account: "Personal", utilization: 0.10)
+        try await rig.launch(cap: 1)
+        await rig.tick()
+        let first = try XCTUnwrap(rig.spawns.first)
+        let oldName = try XCTUnwrap(first.session.agentName)
+        rig.feed(account: "Work", utilization: 0.97)
+        rig.markIdle(first.session)
+        rig.launcher.onCreate = { [rig] ref in
+            rig?.launcher.deliverFailures[ref.id] = .composerTimeout
+            rig?.launcher.onCreate = nil
+        }
+        let before = rig.runner.argv.count
+        await rig.tick()
+        let fresh = try XCTUnwrap(rig.spawns.dropFirst().first?.session)
+        XCTAssertFalse(rig.store.sessionExists(fresh.id), "the never-prompted tab is closed")
+        let after = Array(rig.runner.argv.dropFirst(before))
+        let newClaim = after.firstIndex { $0.starts(with: ["br", "update", "fx-valid", "--claim", "--actor", fresh.agentName ?? "?"]) }
+        let reopenAfterNewClaim = newClaim.flatMap { c in
+            after.indices.first { $0 > c && after[$0].starts(with: ["br", "update", "fx-valid", "--status", "open"]) }
+        }
+        let claimBack = after.lastIndex { $0.starts(with: ["br", "update", "fx-valid", "--claim", "--actor", oldName]) }
+        XCTAssertNotNil(newClaim, "\(after)")
+        XCTAssertNotNil(reopenAfterNewClaim, "the orphan's claim goes back to open first: \(after)")
+        XCTAssertNotNil(claimBack, "\(after)")
+        if let reopenAfterNewClaim, let claimBack { XCTAssertLessThan(reopenAfterNewClaim, claimBack) }
+        XCTAssertFalse(rig.isHandedOff(first.session))
+        let old = rig.swarm.agentRecord(first.session.id)?.1
+        XCTAssertEqual(old?.state, .working, "the old agent is still recorded as working it")
+        XCTAssertEqual(old?.task, "fx-valid")
+        XCTAssertNil(rig.swarm.agentRecord(fresh.id), "the swarm never recorded the failed agent")
+    }
 }
+

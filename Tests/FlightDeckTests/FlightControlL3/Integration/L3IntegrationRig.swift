@@ -30,27 +30,28 @@ final class L3IntegrationRig {
         func report(_ error: AgentLaunchError) {}
     }
 
-    /// The contract's one-call spawn over the fake launcher, in `StoreSwarmSpawner.spawn`'s order
-    /// (create → claim → prompt), so a hand-off's first prompt is recorded like any other.
+    /// The contract's one-call spawn over the fake launcher, through production's own
+    /// `ContractSpawn` sequence (create → claim → prompt, closing the tab on a failure after it
+    /// exists), so a hand-off's first prompt is recorded like any other.
     final class RigSpawner: SwarmSpawner {
         let launcher: FakeSwarmAgentLauncher
         let backend: SwarmBackend
         /// Runs at the start of every hand-off spawn: the window between the old claim going
         /// back to open and the new one landing, where a test plays the Observe watcher.
         var onSpawn: (() async -> Void)?
+        /// What `StoreSwarmSpawner.live` does with a tab it cannot use: the rig closes the store tab.
+        var discard: (UUID) -> Void = { _ in }
         init(launcher: FakeSwarmAgentLauncher, backend: SwarmBackend) { self.launcher = launcher; self.backend = backend }
         func spawn(task: TaskRef, block: ExecutionBlock, lease: AccountLease?, firstPrompt: String) async -> Result<SessionRef, SpawnError> {
             await onSpawn?()
-            let created = await launcher.createAgent(task: task, block: block, lease: lease)
-            guard case .success(let ref) = created else { return created }
-            switch await backend.claim(task.id, actor: ref.agentName ?? "", project: task.project) {
-            case .claimed: break
-            case .conflict, .failed: return .failure(.claimConflict(task.id))
-            }
-            switch await launcher.deliver(firstPrompt, to: ref.id) {
-            case .success: return .success(ref)
-            case .failure(let error): return .failure(error)
-            }
+            return await ContractSpawn.run(
+                create: { [launcher] in
+                    let result = await launcher.createAgent(task: task, block: block, lease: lease)
+                    return (result, try? result.get().id)
+                },
+                claim: { [backend] in await backend.claim(task.id, actor: $0.agentName ?? "", project: task.project) },
+                deliver: { [launcher] in await launcher.deliver(firstPrompt, to: $0) },
+                discard: discard, task: task)
         }
     }
 
@@ -150,6 +151,7 @@ final class L3IntegrationRig {
                              backend: backend, launcher: launcher, spawner: spawner,
                              host: store, registry: RoutingCapabilityRegistry([]), clock: watch, now: { clock.now })
         launcher.onCreateAttempt = { [weak self] in self?.openTab() }
+        spawner.discard = { [weak store] in store?.closeSession($0, recordingHistory: false) }
     }
 
     static func make(accounts: [String], harness: HarnessID, rule: RoutingRule, readyTasks: [String]) throws -> L3IntegrationRig {
