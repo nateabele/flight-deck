@@ -232,6 +232,28 @@ final class HandoffDriverTests: XCTestCase {
         XCTAssertEqual(spawner.calls.first?.lease, codexLease)
     }
 
+    /// Integration ruling 5: the swarm records the new agent with the block and lease it was
+    /// actually spawned on — after a spill those are not the old agent's — and needs the task's
+    /// project to find the swarm. Before, the host was told only the two sessions.
+    func testMarkHandedOffCarriesTheSpawnedBlockLeaseAndTask() async throws {
+        allocator.leases["claude-default"] = []
+        let spilled = ExecutionBlock(kind: "tests", harness: "codex", model: "gpt-6-sol", pool: "codex-default",
+                                     source: AssignmentSource(by: .spill, reason: "claude-default exhausted", at: Date(timeIntervalSince1970: 0)))
+        host.kinds["tests"] = TaskKind(id: "tests", name: "Tests", description: "d", dimensions: ["test-authoring": 0.9],
+                                       origin: .seed, createdAt: Date(timeIntervalSince1970: 0))
+        router.spills["tests"] = Assignment(block: spilled)
+        let codexLease = AccountLease(pool: "codex-default", account: UsageRefs.codex)
+        allocator.leases["codex-default"] = [codexLease]
+        host.activities[oldID] = .idle
+        await driver().evaluate([agent])
+        let done = try XCTUnwrap(host.handoffs.first)
+        XCTAssertEqual(done.old.id, oldID)
+        XCTAssertEqual(done.new, SessionRef(id: newID, agentName: "GreenFox"))
+        XCTAssertEqual(done.block, spilled)
+        XCTAssertEqual(done.lease, codexLease)
+        XCTAssertEqual(done.task, TaskRef(id: "fd-3x9", project: project))
+    }
+
     /// An unroutable spill is the router's "nothing fits", not a block: leasing from its empty
     /// pool or spawning on its empty harness would launch nothing and strand the task.
     func testAnUnroutableSpillWaitsAndNeverLeasesOrSpawns() async {

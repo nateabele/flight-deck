@@ -41,6 +41,10 @@ final class SwarmService: ObservableObject {
     @Published private(set) var revision = 0
     var onChange: (() -> Void)?
     weak var handoffDecisions: HandoffDecisionSink?
+    /// L3-U's hand-off driver, run on this service's clock: called with the project key of every
+    /// swarm that has working agents, on each (throttled) tick — paused swarms included, because
+    /// pause stops new claims, not hand-offs. Set by `FlightControlComposition`.
+    var onTick: ((String) async -> Void)?
 
     /// Whether a session is contested right now: wired in `init` to `contest(for:)`; a test may
     /// override it.
@@ -185,6 +189,10 @@ final class SwarmService: ObservableObject {
         for controller in controllers.values where controller.record.state != .stopped {
             track { await controller.tick() }
         }
+        guard let onTick else { return }
+        for key in records.keys.sorted() where !agentSnapshots(project: key).isEmpty {
+            track { await onTick(key) }
+        }
     }
 
     /// Controllers are rebuilt from the records whenever the dependencies change — the records,
@@ -206,7 +214,7 @@ final class SwarmService: ObservableObject {
             record: record, store: store,
             deps: .init(backend: backend, launcher: launcher, host: WeakSwarmHost(host), makeRouter: deps.makeRouter, kinds: deps.kinds,
                         allocator: deps.allocator, capacity: deps.capacity,
-                        catalogs: { await registry.catalogs(enabled: Set(registry.harnesses)) }),
+                        catalogs: { await registry.catalogs(enabled: Set(registry.harnesses)) }, pools: deps.pools),
             now: now)
         // A rebuild orphans the old controller, which may still have launches in flight; only
         // the controller the service currently owns may write the record.

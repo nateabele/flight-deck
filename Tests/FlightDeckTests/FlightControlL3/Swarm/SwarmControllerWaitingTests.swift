@@ -96,4 +96,35 @@ final class SwarmControllerWaitingTests: XCTestCase {
         XCTAssertEqual(rig.launcher.created.count, 1)
         XCTAssertEqual(c.record.waiting, [WaitingTask(task: "fx-2", reason: "codex-subs is full and claude-subs is full too")])
     }
+
+    /// Integration ruling 8: a block naming a pool that Settings no longer has must say so. It
+    /// used to read as "full", which sends the user hunting for usage that is not the problem,
+    /// and an unpinned one spilled as if the pool were merely busy.
+    func testADeletedPoolWaitsWithItsOwnReasonAndNeverSpills() async {
+        for pinned in [true, false] {
+            let rig = SwarmRig()
+            rig.pools = DefaultPoolDirectory(harnesses: ["codex"])
+            rig.leases("claude-subs", 1)
+            rig.router.spills["tests"] = Assignment(block: spilled)
+            rig.backend.ready = [SwarmFixtures.task("fx-1", SwarmFixtures.block("gone", pinned: pinned))]
+            let c = rig.controller(rig.record(cap: 1))
+            await rig.run(c)
+            XCTAssertTrue(rig.launcher.created.isEmpty, "pinned: \(pinned)")
+            XCTAssertTrue(rig.router.spillCalls.isEmpty, "pinned: \(pinned)")
+            XCTAssertEqual(c.record.waiting, [WaitingTask(task: "fx-1", reason: "pool gone no longer exists")], "pinned: \(pinned)")
+        }
+    }
+
+    /// The deleted-pool check is about the directory, not the lease: a pool the allocator can
+    /// lease from still launches even when the directory does not list it (a fixture backend's
+    /// slots, say), and no directory at all keeps the old behavior.
+    func testAPoolThatLeasesIsNeverCalledDeleted() async {
+        let rig = SwarmRig()
+        rig.pools = DefaultPoolDirectory(harnesses: ["claude"])
+        rig.leases("codex-subs", 1)
+        rig.backend.ready = [SwarmFixtures.task("fx-1", SwarmFixtures.block())]
+        let c = rig.controller(rig.record(cap: 1))
+        await rig.run(c)
+        XCTAssertEqual(rig.launcher.created.count, 1)
+    }
 }

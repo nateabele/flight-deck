@@ -16,6 +16,9 @@ final class SwarmController {
         var allocator: any PoolAllocator
         var capacity: any CapacityReader
         var catalogs: () async -> AdapterCatalogs
+        /// The pools Settings defines. Only asked when a lease fails, to tell "full" from "gone";
+        /// nil skips the question (tests that predate it, and any caller with no directory).
+        var pools: (any PoolDirectory)? = nil
     }
 
     enum LaunchPlan: Equatable {
@@ -210,8 +213,11 @@ final class SwarmController {
         changed()
     }
 
-    /// L3-U's hand-off (spec §4): the old agent is marked handed off and its lease released (its
-    /// account is past hard), and the new agent carries the same task forward.
+    /// L3-U's hand-off (spec §4): the old agent is marked handed off and the new agent carries
+    /// the same task forward. The old lease is NOT released here: the hand-off driver owns it
+    /// (it releases only once the old agent's exit command went out, and keeps it when that
+    /// failed), and releasing here too freed it twice. A handed-off agent is skipped by `stop()`
+    /// and the closed-tab sweep, so nothing else releases it either.
     @discardableResult
     func recordHandoff(from old: UUID, to new: SessionRef, block: ExecutionBlock, lease: AccountLease?) -> Bool {
         guard let previous = record.agent(old), previous.state == .working || previous.state == .idle else { return false }
@@ -221,7 +227,6 @@ final class SwarmController {
         record.update(old) {
             $0.state = .handedOff; $0.handedOffTo = new.id; $0.lastTask = $0.task; $0.task = nil; $0.stateSince = now()
         }
-        if let held = previous.lease { deps.allocator.release(held.lease) }
         var next = SwarmAgentRecord(session: new.id, agentName: newName, block: block, lease: lease,
                                     task: previous.task, state: .working, stateSince: now())
         next.handedOffFrom = old
@@ -253,6 +258,13 @@ final class SwarmController {
             return .reuse(session: agent.session)
         }
         if let lease = leaseIfRoom(block.pool) { return .spawn(block: block, lease: lease) }
+        // A pool deleted in Settings is not "full": saying so sends the user looking at usage,
+        // and spilling would quietly route around a block that names a pool nobody has. The
+        // task waits until its block is re-routed or the pool comes back. Asked only after the
+        // lease failed, so a pool the allocator can still lease from is never called gone.
+        if let directory = deps.pools, !directory.pools().contains(where: { $0.id == block.pool }) {
+            return .waiting("pool \(block.pool) no longer exists")
+        }
         // A pinned block is a human's decision; L3-0 says it never spills.
         if block.pinned { return .waiting("pinned to \(block.pool), which has no account under its soft limit") }
         guard let kind = resolveKind(block.kind) else {

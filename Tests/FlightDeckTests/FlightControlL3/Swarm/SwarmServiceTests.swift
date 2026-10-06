@@ -114,7 +114,9 @@ final class SwarmServiceTests: XCTestCase {
         XCTAssertEqual(record.agent(a.session)?.handedOffTo, new.id)
         XCTAssertEqual(record.agent(new.id)?.task, "fx-1")
         XCTAssertEqual(record.agent(new.id)?.handedOffFrom, a.session)
-        XCTAssertEqual(rig.allocator.released, [lease])
+        // Integration ruling 6: the hand-off driver releases the old lease, and only once it
+        // knows the old agent was told to exit; releasing here too freed it twice.
+        XCTAssertEqual(rig.allocator.released, [], "the hand-off driver owns the old lease")
     }
 
     func testAgentSnapshotsListWorkingAgents() async {
@@ -231,5 +233,28 @@ final class SwarmServiceTests: XCTestCase {
                                        to: SessionRef(id: UUID(), agentName: nil), block: SwarmFixtures.block(), lease: nil))
         XCTAssertEqual(s.record(forProject: SwarmFixtures.project)?.agent(a.session)?.state, .working)
         XCTAssertEqual(s.record(forProject: SwarmFixtures.project)?.agents.count, 1)
+    }
+
+    /// Integration ruling 7: the hand-off driver runs on the swarm's clock, once per project
+    /// that has working agents — paused swarms included, because pause stops claims, not
+    /// hand-offs. A project with no working agent has nothing to hand off.
+    func testOnTickRunsPerProjectWithWorkingAgentsEvenWhilePaused() async {
+        let rig = SwarmRig()
+        let a = rig.agent("BlueLake", state: .working, task: "fx-1")
+        let other = "/tmp/swarm-project-idle"
+        var idle = rig.record(state: .running, agents: [rig.agent("GreenFox", state: .idle)])
+        idle = SwarmRecord(id: idle.id, project: other, cap: 1, poolCaps: [:], filter: .allReady, state: .running,
+                           agents: idle.agents, createdAt: idle.createdAt)
+        rig.store.save([rig.record(state: .paused, agents: [a]), idle])
+        let clock = WatchClock(appIsActive: { true })
+        let s = service(rig, clock: clock)
+        await s.settle()
+        var ticked: [String] = []
+        s.onTick = { ticked.append($0) }
+        rig.now += SwarmService.tickInterval
+        clock.fire(); await s.settle()
+        XCTAssertEqual(ticked, [SwarmService.key(SwarmFixtures.project)])
+        clock.fire(); await s.settle()
+        XCTAssertEqual(ticked.count, 1, "throttled with the swarm's own tick")
     }
 }
