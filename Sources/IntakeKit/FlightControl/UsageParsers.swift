@@ -128,9 +128,11 @@ public enum ClaudeRateLimitParser {
     }
 }
 
-/// The file Flight Deck's claude mod writes per tab: `<usage dir>/<id>.json`. `percentUsed` is
-/// 0–100 with one decimal (the mod API's `SessionRateLimit`), so it is divided here, once.
-public struct ModUsageFile: Equatable, Sendable {
+/// The file Flight Deck's claude status line writes per tab: `<usage dir>/<id>.json`. `percentUsed`
+/// is 0–100, as claude's `rate_limits.<window>.used_percentage`, so it is divided here, once.
+/// The shape is the one the retired usage mod wrote, kept so files on disk stay readable; the
+/// status line adds an `fp` key (its change detector) that this ignores.
+public struct ClaudeUsageFile: Equatable, Sendable {
     public struct Window: Equatable, Sendable {
         public var kind: String
         public var percentUsed: Double
@@ -158,9 +160,9 @@ public struct ModUsageFile: Equatable, Sendable {
         return f.date(from: text)
     }
 
-    /// Nil for a torn write (the mod's write and this read can interleave; the next scan
+    /// Nil for a torn write (the status line's write and this read can interleave; the next scan
     /// retries), a newer version, or a missing `readAt` — never a partial reading.
-    public static func decode(_ data: Data) -> ModUsageFile? {
+    public static func decode(_ data: Data) -> ClaudeUsageFile? {
         guard let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
               let v = (obj["v"] as? NSNumber)?.intValue, v <= currentVersion,
               let readAt = date(obj["readAt"]) else { return nil }
@@ -169,7 +171,7 @@ public struct ModUsageFile: Equatable, Sendable {
             guard let kind = w["kind"] as? String, let pct = (w["percentUsed"] as? NSNumber)?.doubleValue else { return nil }
             return Window(kind: kind, percentUsed: pct, resetsAt: date(w["resetsAt"]))
         }
-        return ModUsageFile(v: v, tab: obj["tab"] as? String, session: obj["session"] as? String, readAt: readAt, rateLimits: windows)
+        return ClaudeUsageFile(v: v, tab: obj["tab"] as? String, session: obj["session"] as? String, readAt: readAt, rateLimits: windows)
     }
 }
 

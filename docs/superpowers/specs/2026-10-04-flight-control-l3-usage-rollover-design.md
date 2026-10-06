@@ -42,13 +42,13 @@ account's **worst window** is the window with the highest utilization in its new
 | Adapter / mode | Source | Status |
 |---|---|---|
 | codex | the per-account app-server FD already runs: `account/rateLimits/read` at start and on demand, plus `account/rateLimits/updated` pushes. `RateLimitSnapshot.primary` / `.secondary` → `RateLimitWindow {usedPercent, windowDurationMins, resetsAt}`; `rateLimitsByLimitId` gives buckets | schema in `codex-app-server-v2.generated.json`; **first task probes it live** |
-| claude interactive | **a Flight Deck mod** in the bundled plugin (`Resources/ClaudePlugin`, already passed as `--plugin-dir`). It hooks `session.measure`, which fires "when a rate-limit window moves a whole point" and carries `rateLimits: [{kind, percentUsed, resetsAt}]`. On each event it writes the reading to `<FD runtime dir>/usage/<FD session id>.json`, and FD watches that directory | API confirmed in the 2.1.289 type definitions; **probe first** (§9) |
+| claude interactive | **Flight Deck's status line** (`Resources/ClaudePlugin/scripts/statusline.sh`, installed per tab with `--settings '{"statusLine":…}'`). Claude hands a status line command `rate_limits.{five_hour,seven_day}.{used_percentage,resets_at}` on stdin; no hook payload carries them. The script writes the reading to `<FD usage dir>/<FD session id>.json` and then runs the user's own status line on the same stdin. Until 2026-10-06 this was a Claude Code mod on `session.measure` (§12, "Status line replaces the mod") | live-probed on claude 2.1.292 (§12) |
 | claude headless (intake seats) | `rate_limit_event.rate_limit_info.unifiedWindows.{five_hour,seven_day}.utilization` | fixtures exist; FD reads only `status` today |
 | opencode hosted | no meter. An `APIError` with status 429 marks the account **over hard** until `retry-after`, or a 15-min backoff when there is none | from the OpenCode workstream |
 | opencode local | no meter. Capacity = the pool's concurrency cap minus FD's live sessions on that pool | load from outside FD (for example ledger-sync holding Ollama slots) cannot be seen. The pool popover says so |
 
 **FD maps a reading to an account** through the session that produced it (`Session.accountID`,
-resolved). The mod never sees account identity.
+resolved). The status line never sees account identity.
 
 **Freshness.** A reading older than 30 min is **unknown**. An account with no live session has
 no reading, so it is unknown. This is normal for idle accounts.
@@ -132,7 +132,7 @@ account it runs on.
 
 ## 7. Error handling
 
-- A meter source fails (the app-server is down, the mod is not loaded): the account becomes
+- A meter source fails (the app-server is down, the status line did not run): the account becomes
   unknown, and the popover shows the source error.
 - The hand-off spawn fails: the old agent is left running, the task stays assigned to it, and
   the failure is logged and notified. The hand-off is retried at the next boundary.
@@ -142,7 +142,7 @@ account it runs on.
 ## 8. Testing
 
 - **Meter parsing:** per adapter, against fixtures. This covers the codex snapshot with
-  primary/secondary windows and by-limit buckets, claude `unifiedWindows`, the mod's file
+  primary/secondary windows and by-limit buckets, claude `unifiedWindows`, the usage file
   format, and OpenCode `APIError` 429 with and without `retry-after`.
 - **State and lease logic:** a pure state machine, table-tested over the L3-0 usage timeline
   fixture. This covers order, unknown accounts, hard rejection overriding a meter, reset
@@ -150,11 +150,13 @@ account it runs on.
 - **The hand-off driver:** against fake sessions, a fake spawner and a fake br. It covers the
   idle boundary, the deadline interrupt, confirm on and off, decline, no account free → spill,
   pinned → wait, spawn failure, and a missing transcript pointer.
-- **The mod:** `claude plugin validate` and `claude plugin test` with a `*.test.ts` that feeds
-  `session.measure` events and checks the file written.
+- **The status line:** `ClaudeStatusLineTests` runs `scripts/statusline.sh` with a synthetic stdin
+  and a fake user command (the file written, the user's text passed through byte for byte, no
+  rewrite of an unchanged reading), and pins the `--settings` injection and merge.
 - **Live, skipped by default** (`USAGE_LIVE=1`):
   - the codex app-server rate-limit read for one real account;
-  - the claude mod in a real FD-spawned tab.
+  - the claude status line is not here: headless `claude -p` runs no status line, so it is
+    checked with a tmux probe of an interactive claude (§12).
 - **UI:** XCUITest for the pool popover, the row meter and the Capacity pane against fixture
   readings, with screenshots.
 
@@ -174,16 +176,17 @@ depends on it is written.
 
 ## 10. Provides at integration
 
-Real `CapacityReader`, `PoolAllocator` and `HandoffPlanner`, the meter sources, the mod, and the
+Real `CapacityReader`, `PoolAllocator` and `HandoffPlanner`, the meter sources, the status line, and the
 Capacity pane.
 
 ## 11. Files
 
 - `Sources/IntakeKit/FlightControl/PoolState.swift`, `LeasePolicy.swift`, `HandoffPrompt.swift`
 - `Sources/FlightDeck/FlightControl/Usage/UsageService.swift`, `CodexRateLimitSource.swift`,
-  `ClaudeModUsageSource.swift`, `HeadlessClaudeUsageSource.swift`, `OpenCodeErrorUsageSource.swift`,
+  `ClaudeUsageFileSource.swift`, `HeadlessClaudeUsageSource.swift`, `OpenCodeErrorUsageSource.swift`,
   `HandoffDriver.swift`
-- `Resources/ClaudePlugin/…`: the usage mod (`hooks/register.ts`, its test, `types/`)
+- `Resources/ClaudePlugin/scripts/statusline.sh` and `Sources/FlightDeck/Agents/ClaudeStatusLine.swift`:
+  the usage status line (the mod — `hooks/register.ts`, its test — was removed 2026-10-06)
 - `Sources/IntakeKit/SeatActivity.swift`: keep `unifiedWindows`, not just `status`
 - `Sources/FlightDeck/Preferences/UI/CapacityPane.swift`
 - `Tests/FlightDeckTests/FlightControlL3/Usage/…`, `UITests/FlightDeckUITests/CapacityUITests.swift`
@@ -267,8 +270,8 @@ Capacity pane.
 9. At the deadline, an agent in a dialog is handed off without Escape.
 10. After a spawn failure, the retry waits until the old agent works again and reaches a new
     boundary.
-11. "Mod not loaded" = an account's claude tab seen for 15 min with no usage file from any of
-    its tabs.
+11. "Status line silent" (was "mod not loaded") = an account's claude tab seen for 15 min with no
+    usage file from any of its tabs.
 12. The pool popover and row meter are UI-tested in a DEBUG Meter Gallery window; the pane in
     Settings. Script: `scripts/test-ui-capacity.sh`.
 13. OpenCode: `OpenCodeAPIErrorEvent` + `OpenCodeErrorUsageSource` ship, tested with fakes; wiring
@@ -277,15 +280,19 @@ Capacity pane.
 15. A local pool's usage is its unreleased leases (L3-S releases one when its session ends).
 16. A failing meter source shows its error at once but keeps a still-fresh reading until it goes
     stale.
-17. The claude mod (`Resources/ClaudePlugin`) is run from a byte-compared copy under
+17. The claude plugin (`Resources/ClaudePlugin`) is run from a byte-compared copy under
     `~/Library/Application Support/Flight Deck/claude-plugin-<debug|release>/`
     (`ClaudePluginLocation.materialize`), because claude writes `.claude-plugin/types/` into any
     module-carrying `--plugin-dir` at load (probe Outcome 3C) and the bundle is code-signed. The
+    module is gone, but the copy stays: the status line script runs from it too, and a later
+    module would bring the write back. The
     copy never takes the source's `.claude-plugin/types/` and never deletes the destination's.
 18. Claude gates hook modules behind a remote rollout switch: `claude plugin test` once refused
     with "hooks modules are turned off… rollout switch saved off" until an interactive claude
     refreshed it. A user whose switch is off gets no claude meter; the "mod is not loaded"
-    source error (deviation 11) is how that shows.
+    source error (deviation 11) is how that shows. **Resolved 2026-10-06:** the meter now comes
+    from the status line, which no rollout switch governs, so this hazard is gone (see "Status
+    line replaces the mod" below).
 19. A headless seat counts as refused while `SeatActivity.rateLimitedAt` is set (cleared by the
     next assistant event), not by its last `rate_limit_event` status, which stays "rejected"
     after recovery.
@@ -359,5 +366,59 @@ Capacity pane.
   is false: Settings greys the toggle out with a note, and `handoffSettings.confirm` reads false
   whatever is stored. §5's confirmation step (2) is therefore skipped in practice. The driver's
   confirmation machinery and its tests are kept for when a surface ships.
+
+### Status line replaces the mod (2026-10-06)
+
+The claude interactive meter moved from the `session.measure` mod to the status line. The mod
+could be switched off remotely (deviation 18), which blanks every claude meter at once; the status
+line has no such switch.
+
+- **Source.** Claude passes a status line command a JSON object on stdin with
+  `rate_limits.<window>.used_percentage` (0–100) and `resets_at` (epoch seconds), for
+  subscribers, after the first API response, while the window's reset is in the future. Ordinary
+  hook payloads (`Stop`, `PostToolUse`, …) do not carry them (checked on claude 2.1.292).
+- **Install.** `ClaudePluginLocation.applying` adds `--settings '{"statusLine":{"type":"command",
+  "command":"'<copy>/scripts/statusline.sh'","refreshInterval":30}}'`, beside `--plugin-dir`
+  and pointing at the same Application Support copy. The path is single-quoted inside the JSON
+  because it has a space (exit 127 otherwise, as for `record.sh`); the JSON is written without
+  `\/` escapes because fish reads a backslash inside single quotes. The user's `padding`,
+  `hideVimModeIndicator` and a shorter `refreshInterval` are carried over.
+- **The user's status line.** Claude takes one status line, so the wrapper runs the user's: it
+  pipes the same stdin to `$FLIGHT_DECK_USER_STATUSLINE` through `/bin/sh -c` and prints its
+  output unchanged; no user command prints nothing. `SessionStore.launchEnvironment` resolves
+  the variable per tab in claude's order: the user's own `--settings` flag, the project's
+  `.claude/settings.local.json`, its `.claude/settings.json`, then the account's `settings.json`
+  (`CLAUDE_CONFIG_DIR`, else `~/.claude`). A leading `~/` is expanded (quoted). Managed settings
+  outrank `--settings`; under one that sets a status line ours does not run, and the account
+  shows the silence error.
+- **An existing `--settings`** is merged into, not replaced: inline JSON is parsed, a path is read
+  (relative to the project) and folded in inline, since claude takes one `--settings`. A value
+  that does not read as a JSON object is left alone and gets no status line.
+- **File.** Same name rule and v1 shape as the mod's (`<tab or claude session id>.json`), so
+  `ClaudeUsageFileSource` (renamed from `ClaudeModUsageSource`; `ModUsageFile` is now
+  `ClaudeUsageFile`) reads it unchanged, plus an `fp` key. Temp file plus rename. The script
+  parses with `plutil` (no `jq`; not `python3`, which on a Mac without developer tools is an
+  install-dialog stub) and exits 0 on every path.
+- **No rewrite of an unchanged reading.** The status line re-runs on a timer and on UI events
+  and re-sends the last API call's numbers. A rewrite would stamp them with a new `readAt`, and
+  the ledger keeps the newest reading per account, so an idle tab would hide a busy tab's real
+  reading. The script fingerprints `rate_limits` plus `context_window.current_usage` (the last
+  API call's tokens) and writes only when that changes.
+- **Cost.** Measured on this Mac: a writing run is about 70 ms of `plutil` work, an unchanged run
+  about 30 ms, both in the background beside the user's command (Nate's own status line alone
+  takes about 160 ms), so the visible status line is not slowed. `refreshInterval: 30` adds one
+  such run per tab every 30 s. It does not freshen the meter (the numbers move only on API
+  calls); it is there so an idle tab's status line keeps time-based text current.
+- **Live probe (claude 2.1.292, 2026-10-06).** Interactive claude in tmux with the flags above, a
+  scratch `FLIGHT_DECK_USAGE_DIR` and the user's `~/.claude/statusline.sh`; one Haiku prompt. The
+  file appeared with five_hour 37 % (resets 21:00Z) and seven_day 38 % (resets Oct 8 21:00Z); the
+  user's status line rendered in the pane with the same figures ("5h 37% ↻36m", "wk 38% ↻2d0h").
+  40 s later the file's mtime had not moved (whether a timed refresh ran in that window was
+  not observed).
+- **Silence warning.** Kept, reworded: the status line may not have run (untrusted folder,
+  `disableAllHooks`, managed settings) or no tab has had a reply yet.
+- **Not covered.** Headless `claude -p` seats run no status line; they keep their
+  `rate_limit_event` source. A restored tab on a different account than the project's current one
+  takes its `padding` from the project's account (the command comes from its own account).
 
 **Integrated (2026-10-06):** integration branch `l3-integration`, code head 4db609f0 (not merged to master). The real graph is built in one place, `FlightControlComposition`; see `docs/FOLLOWUPS.md` for what is still open.

@@ -79,9 +79,9 @@ final class UsageMeterTap: UsageMeterSource, @unchecked Sendable {
 ///
 /// One per app (`shared`), attached once to the store and preferences from `AppDelegate`'s
 /// store-ready hops. It ticks every 30 s — usage windows move over hours, so a faster beat only
-/// spends the main actor — and each tick it scans the mod's files, folds headless seats, turns
+/// spends the main actor — and each tick it scans the status line's usage files, folds headless seats, turns
 /// rate-limit API errors into refusals, polls codex at most every 120 s per account with a live
-/// codex tab, flags a silent mod, and tells manual tabs once when their account crosses hard.
+/// codex tab, flags a silent status line, and tells manual tabs once when their account crosses hard.
 @MainActor
 final class UsageService: ObservableObject {
     static let shared = UsageService()
@@ -90,9 +90,13 @@ final class UsageService: ObservableObject {
     static let codexPollInterval: TimeInterval = 120
     /// A stuck app-server must not hold the tick: `CodexRPC.request` has no timeout of its own.
     static let defaultCodexReadTimeout: TimeInterval = 20
-    static let modSilenceGrace: TimeInterval = 15 * 60
+    static let statusLineSilenceGrace: TimeInterval = 15 * 60
     static let fileRetention: TimeInterval = 7 * 24 * 3600
-    static let modSilenceMessage = "No reading from Flight Deck's usage mod in this account's tabs for 15 minutes. Its Claude plugin may not be loaded."
+    /// The status line is the only claude meter for interactive tabs, and claude can skip it
+    /// without telling anyone: an untrusted folder, `disableAllHooks`, or managed settings that
+    /// set their own. A status line also runs only once claude has answered; a tab that never
+    /// sent a prompt has nothing to report, so this waits 15 minutes before it accuses anything.
+    static let statusLineSilenceMessage = "No usage reading from Claude's status line in this account's tabs for 15 minutes. Flight Deck's status line may not have run (untrusted folder, disableAllHooks, or managed settings), or no tab has had a reply yet."
 
     let ledger: CapacityLedger
     /// Bumped on every change and every tick: freshness and window resets move with the clock
@@ -107,7 +111,7 @@ final class UsageService: ObservableObject {
     private var swarmPredicate: (@MainActor (UUID) -> Bool)?
     private var codexReadsInFlight: Set<UUID> = []
 
-    private var modSource: ClaudeModUsageSource
+    private var usageFiles: ClaudeUsageFileSource
     private let headless = HeadlessClaudeUsageSource()
     private var codexSources: [UUID: CodexRateLimitSource] = [:]
     private var lastCodexPoll: [UUID: Date] = [:]
@@ -129,7 +133,7 @@ final class UsageService: ObservableObject {
         self.codexReadTimeout = codexReadTimeout
         self.ledger = ledger
         self.now = now
-        modSource = ClaudeModUsageSource(directory: environment.usageDirectory)
+        usageFiles = ClaudeUsageFileSource(directory: environment.usageDirectory)
         reconfigure()
     }
 
@@ -146,7 +150,7 @@ final class UsageService: ObservableObject {
         guard !isAttached else { return }
         isAttached = true
         replaceEnvironment(.live(store: store, preferences: preferences))
-        modSource.prune(olderThan: Self.fileRetention, now: now())
+        usageFiles.prune(olderThan: Self.fileRetention, now: now())
         store.onCodexNotification = { [weak self] account, method, params in
             self?.ingestCodexNotification(account: account, method: method, params: params)
         }
@@ -167,7 +171,7 @@ final class UsageService: ObservableObject {
     /// without a real store.
     func replaceEnvironment(_ new: UsageEnvironment) {
         environment = new
-        modSource = ClaudeModUsageSource(directory: new.usageDirectory)
+        usageFiles = ClaudeUsageFileSource(directory: new.usageDirectory)
     }
 
     /// "Is this tab a swarm agent?", answered from the swarm's records by
@@ -203,11 +207,11 @@ final class UsageService: ObservableObject {
         let t = now()
         let sessions = environment.sessions()
         for s in sessions where firstSeen[s.id] == nil { firstSeen[s.id] = t }
-        ingestModFiles(sessions)
+        ingestUsageFiles(sessions)
         ingestHeadlessSeats()
         ingestAPIErrors(sessions, at: t)
         await pollCodex(sessions, at: t)
-        flagSilentMod(sessions, at: t)
+        flagSilentStatusLine(sessions, at: t)
         noticeManualTabs(sessions)
         revision += 1
     }
@@ -271,12 +275,12 @@ final class UsageService: ObservableObject {
         return made
     }
 
-    private func ingestModFiles(_ sessions: [Session]) {
-        for (stem, file) in modSource.scan() {
+    private func ingestUsageFiles(_ sessions: [Session]) {
+        for (stem, file) in usageFiles.scan() {
             guard let tab = sessions.first(where: { $0.agent == .claude && ($0.id == stem || $0.pinnedConversationID == stem) }),
                   let ref = accountRef(for: tab) else { continue }
             reported.insert(tab.id)
-            ingest(UsageReading(account: ref, windows: file.windows, readAt: file.readAt, source: "claude mod", hardRejection: false))
+            ingest(UsageReading(account: ref, windows: file.windows, readAt: file.readAt, source: "claude status line", hardRejection: false))
         }
     }
 
@@ -358,14 +362,14 @@ final class UsageService: ObservableObject {
         }
     }
 
-    private func flagSilentMod(_ sessions: [Session], at t: Date) {
+    private func flagSilentStatusLine(_ sessions: [Session], at t: Date) {
         var tabsByAccount: [UUID: [Session]] = [:]
         for s in sessions where s.agent == .claude {
             if let id = environment.resolvedAccountID(.claude, s.accountID) { tabsByAccount[id, default: []].append(s) }
         }
         for (id, tabs) in tabsByAccount where ledger.latestReading(account: id) == nil && !tabs.contains(where: { reported.contains($0.id) }) {
             let oldest = tabs.compactMap { firstSeen[$0.id] }.min() ?? t
-            if t.timeIntervalSince(oldest) >= Self.modSilenceGrace { ledger.setSourceError(Self.modSilenceMessage, account: id) }
+            if t.timeIntervalSince(oldest) >= Self.statusLineSilenceGrace { ledger.setSourceError(Self.statusLineSilenceMessage, account: id) }
         }
     }
 
@@ -379,7 +383,7 @@ final class UsageService: ObservableObject {
             guard !isSwarm(s.id), environment.isLive(s.id) else { continue }
             manualByAccount[id, default: (ref, [])].tabs.append(s)
         }
-        // The first tick only records what is already over hard. The mod's files persist across a
+        // The first tick only records what is already over hard. The usage files persist across a
         // relaunch and the 7-day window can sit above 95 % for days, so a reading found at launch
         // is old news; only a crossing observed while running is announced.
         if !noticeSeeded {

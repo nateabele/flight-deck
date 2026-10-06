@@ -168,8 +168,8 @@ struct ClaudeAdapter: AgentAdapter {
     /// implementation there folds this into `environment(for:)`, so the Tools-menu path keeps
     /// receiving it too.
     ///
-    /// `FLIGHT_DECK_USAGE_DIR` is where the bundled usage mod writes each tab's rate limits;
-    /// without it the mod writes nothing.
+    /// `FLIGHT_DECK_USAGE_DIR` is where the bundled status line (`ClaudeStatusLine`) writes each
+    /// tab's rate limits; without it the status line writes nothing.
     ///
     /// Creating the directory here rather than at launch keeps the hook script's single
     /// append from ever hitting a missing directory — it has no `mkdir` of its own, by design:
@@ -177,7 +177,7 @@ struct ClaudeAdapter: AgentAdapter {
     var launchEnvironment: [String: String] {
         let events = ClaudePluginLocation.eventDirectory
         try? FileManager.default.createDirectory(at: events, withIntermediateDirectories: true)
-        // The usage mod's directory rides the same account-free path, for the same reason: a tab
+        // The usage directory rides the same account-free path, for the same reason: a tab
         // whose login was deleted still runs on *some* account and still has a meter.
         let usage = ClaudePluginLocation.usageDirectory
         try? FileManager.default.createDirectory(at: usage, withIntermediateDirectories: true)

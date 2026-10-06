@@ -1,16 +1,16 @@
 import Foundation
 import IntakeKit
 
-/// Reads the files the bundled usage mod writes, one per claude tab, into
-/// `ClaudePluginLocation.usageDirectory`.
+/// Reads the usage files the bundled status line writes, one per claude tab, into
+/// `ClaudePluginLocation.usageDirectory` (see `ClaudeStatusLine` and `scripts/statusline.sh`).
 ///
 /// Polled, not watched: `UsageService` already ticks every few seconds and a directory listing
 /// is cheap, while an FSEvents stream would be one more lifetime to manage for no gain. A file
 /// is decoded only when its modification date moved, and is recorded as seen only after it
-/// decoded — the mod's write and this read can interleave, and a torn read must be retried on
+/// decoded — the status line's write and this read can interleave, and a torn read must be retried on
 /// the next scan, not mistaken for "already handled".
 @MainActor
-final class ClaudeModUsageSource {
+final class ClaudeUsageFileSource {
     let directory: URL
     private var seen: [String: Date] = [:]
 
@@ -18,17 +18,17 @@ final class ClaudeModUsageSource {
 
     /// Files named `<uuid>.json` that changed since the last scan. The stem is the FD tab id or
     /// claude's own session id; `UsageService` decides which.
-    func scan() -> [(stem: UUID, file: ModUsageFile)] {
+    func scan() -> [(stem: UUID, file: ClaudeUsageFile)] {
         let fm = FileManager.default
         guard let names = try? fm.contentsOfDirectory(atPath: directory.path) else { return [] }
-        var out: [(stem: UUID, file: ModUsageFile)] = []
+        var out: [(stem: UUID, file: ClaudeUsageFile)] = []
         for name in names.sorted() where name.hasSuffix(".json") {
             guard let stem = UUID(uuidString: String(name.dropLast(5))) else { continue }
             let url = directory.appendingPathComponent(name)
             guard let mtime = (try? fm.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date,
                   seen[name] != mtime,
                   let data = try? Data(contentsOf: url),
-                  let file = ModUsageFile.decode(data) else { continue }
+                  let file = ClaudeUsageFile.decode(data) else { continue }
             seen[name] = mtime
             out.append((stem, file))
         }

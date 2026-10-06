@@ -24,9 +24,9 @@ final class UsageSourcesTests: XCTestCase {
 
     func testScanYieldsEachFileOncePerChange() throws {
         let tab = UUID(uuidString: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE")!
-        let fixture = try UsageFixtures.data("claude-mod-usage")
+        let fixture = try UsageFixtures.data("claude-usage-file")
         try write("\(tab.uuidString).json", fixture, mtime: Date(timeIntervalSince1970: 1_000))
-        let source = ClaudeModUsageSource(directory: dir)
+        let source = ClaudeUsageFileSource(directory: dir)
         let first = source.scan()
         XCTAssertEqual(first.map(\.stem), [tab])
         XCTAssertEqual(first.first?.file.windows.first?.name, "five_hour")
@@ -38,28 +38,28 @@ final class UsageSourcesTests: XCTestCase {
     func testATornWriteIsRetriedNotSkipped() throws {
         let tab = UUID()
         try write("\(tab.uuidString).json", Data(#"{"v":1,"readAt":"2026-10-04T19:00:00.000Z","rateLim"#.utf8), mtime: Date(timeIntervalSince1970: 1_000))
-        let source = ClaudeModUsageSource(directory: dir)
+        let source = ClaudeUsageFileSource(directory: dir)
         XCTAssertTrue(source.scan().isEmpty)
-        try write("\(tab.uuidString).json", try UsageFixtures.data("claude-mod-usage"), mtime: Date(timeIntervalSince1970: 1_000))
+        try write("\(tab.uuidString).json", try UsageFixtures.data("claude-usage-file"), mtime: Date(timeIntervalSince1970: 1_000))
         XCTAssertEqual(source.scan().count, 1, "same mtime, but the torn read was never recorded as seen")
     }
 
     func testAClaudeSessionIDNamedFileScansAndForeignNamesDoNot() throws {
-        try write("8552adc8-bbae-48c2-9b86-29a5becfa369.json", try UsageFixtures.data("claude-mod-usage"), mtime: Date())
+        try write("8552adc8-bbae-48c2-9b86-29a5becfa369.json", try UsageFixtures.data("claude-usage-file"), mtime: Date())
         try write("notes.json", Data("{}".utf8), mtime: Date())
         try write("\(UUID().uuidString).tmp", Data("{}".utf8), mtime: Date())
-        XCTAssertEqual(ClaudeModUsageSource(directory: dir).scan().map(\.stem), [UUID(uuidString: "8552ADC8-BBAE-48C2-9B86-29A5BECFA369")!])
+        XCTAssertEqual(ClaudeUsageFileSource(directory: dir).scan().map(\.stem), [UUID(uuidString: "8552ADC8-BBAE-48C2-9B86-29A5BECFA369")!])
     }
 
     func testAMissingDirectoryIsEmptyNotAnError() {
-        XCTAssertTrue(ClaudeModUsageSource(directory: dir.appendingPathComponent("nope")).scan().isEmpty)
+        XCTAssertTrue(ClaudeUsageFileSource(directory: dir.appendingPathComponent("nope")).scan().isEmpty)
     }
 
     func testPruneRemovesOnlyOldFiles() throws {
         let now = Date(timeIntervalSince1970: 10_000_000)
         try write("old.json", Data("{}".utf8), mtime: now.addingTimeInterval(-8 * 86_400))
         try write("new.json", Data("{}".utf8), mtime: now.addingTimeInterval(-60))
-        ClaudeModUsageSource(directory: dir).prune(olderThan: 7 * 86_400, now: now)
+        ClaudeUsageFileSource(directory: dir).prune(olderThan: 7 * 86_400, now: now)
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: dir.path), ["new.json"])
     }
 

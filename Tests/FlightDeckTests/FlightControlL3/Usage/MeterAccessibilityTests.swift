@@ -8,7 +8,7 @@ import XCTest
 /// proving nothing. The UI test is the authority on the live tree.)
 final class MeterAccessibilityTests: XCTestCase {
     private let model = AccountMeterModel(id: "a", label: "Work", fraction: 0.82, state: .overSoft, soft: 0.8, hard: 0.95,
-                                          resetText: "resets 11:00 PM", sourceText: "claude mod · 3 min ago", detail: nil)
+                                          resetText: "resets 11:00 PM", sourceText: "claude status line · 3 min ago", detail: nil)
 
     func testSpokenTextIsNameThenReading() {
         XCTAssertEqual(model.spokenText, "Work: \(model.accessibilityValue)")

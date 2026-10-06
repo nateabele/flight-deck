@@ -33,7 +33,7 @@ enum UsageFixture {
         usage.ingest(UsageReading(account: refs[0],
                                   windows: [UsageWindow(name: "five_hour", utilization: 0.82, resetsAt: now.addingTimeInterval(2 * 3600)),
                                             UsageWindow(name: "seven_day", utilization: 0.31, resetsAt: now.addingTimeInterval(3 * 86_400))],
-                                  readAt: now.addingTimeInterval(-180), source: "claude mod", hardRejection: false))
+                                  readAt: now.addingTimeInterval(-180), source: "claude status line", hardRejection: false))
         usage.ingest(UsageReading(account: refs[2],
                                   windows: [UsageWindow(name: "five_hour", utilization: 0.97, resetsAt: now.addingTimeInterval(3600)),
                                             UsageWindow(name: "seven_day", utilization: 0.40, resetsAt: now.addingTimeInterval(5 * 86_400))],

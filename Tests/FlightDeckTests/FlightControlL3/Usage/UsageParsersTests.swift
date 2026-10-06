@@ -91,7 +91,7 @@ final class UsageParsersTests: XCTestCase {
     }
 
     func testModFileDecodesWithAndWithoutFractionalSeconds() throws {
-        let file = try XCTUnwrap(ModUsageFile.decode(try UsageFixtures.data("claude-mod-usage")))
+        let file = try XCTUnwrap(ClaudeUsageFile.decode(try UsageFixtures.data("claude-usage-file")))
         XCTAssertEqual(file.tab, "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE")
         XCTAssertEqual(file.readAt, usageISO("2026-10-04T19:00:00.000Z"))
         XCTAssertEqual(file.windows.map(\.name), ["five_hour", "seven_day"])
@@ -100,9 +100,9 @@ final class UsageParsersTests: XCTestCase {
     }
 
     func testModFileRejectsATornWriteAndANewerVersion() {
-        XCTAssertNil(ModUsageFile.decode(Data(#"{"v":1,"tab":"x","readAt":"2026-10-04T19:00:00.000Z","rateLim"#.utf8)))
-        XCTAssertNil(ModUsageFile.decode(Data(#"{"v":2,"readAt":"2026-10-04T19:00:00.000Z","rateLimits":[]}"#.utf8)))
-        XCTAssertNil(ModUsageFile.decode(Data(#"{"v":1,"readAt":"yesterday","rateLimits":[]}"#.utf8)))
+        XCTAssertNil(ClaudeUsageFile.decode(Data(#"{"v":1,"tab":"x","readAt":"2026-10-04T19:00:00.000Z","rateLim"#.utf8)))
+        XCTAssertNil(ClaudeUsageFile.decode(Data(#"{"v":2,"readAt":"2026-10-04T19:00:00.000Z","rateLimits":[]}"#.utf8)))
+        XCTAssertNil(ClaudeUsageFile.decode(Data(#"{"v":1,"readAt":"yesterday","rateLimits":[]}"#.utf8)))
     }
 
     func testOpenCode429WithRetryAfterEndsThen() throws {
@@ -149,14 +149,14 @@ final class UsageParsersTests: XCTestCase {
     /// field, and a percentage that is not a whole number.
     func testModFileDecodesTheCapturedShape() throws {
         let json = #"{"v":1,"tab":"11111111-2222-3333-4444-555555555555","session":"70505722-0000-0000-0000-000000000000","readAt":"2026-10-05T06:32:21.357Z","changed":["context","cost"],"rateLimits":[{"kind":"five_hour","percentUsed":1,"resetsAt":"2026-10-05T11:30:00.000Z"},{"kind":"seven_day","percentUsed":58,"resetsAt":"2026-10-08T21:00:00.000Z"}]}"#
-        let file = try XCTUnwrap(ModUsageFile.decode(Data(json.utf8)))
+        let file = try XCTUnwrap(ClaudeUsageFile.decode(Data(json.utf8)))
         XCTAssertEqual(file.readAt.timeIntervalSince1970, usageISO("2026-10-05T06:32:21Z").timeIntervalSince1970 + 0.357, accuracy: 0.001)
         XCTAssertEqual(file.windows.map(\.utilization), [0.01, 0.58])
     }
 
     func testModFileKeepsAnExceededSpendLimitAboveOne() throws {
         let json = #"{"v":1,"readAt":"2026-10-05T06:32:21.357Z","rateLimits":[{"kind":"five_hour","percentUsed":104.5}]}"#
-        let file = try XCTUnwrap(ModUsageFile.decode(Data(json.utf8)))
+        let file = try XCTUnwrap(ClaudeUsageFile.decode(Data(json.utf8)))
         XCTAssertEqual(file.windows[0].utilization, 1.045, accuracy: 1e-9)
         XCTAssertNil(file.windows[0].resetsAt)
     }

@@ -40,4 +40,21 @@ final class ControlLaunchEnvironmentTests: XCTestCase {
         let env = store.launchEnvironment(for: session, adapter: ClaudeAdapter(), orphaned: false)
         XCTAssertNil(env["FLIGHT_DECK_CONTROL_SOCKET"])
     }
+
+    /// The status-line wrapper draws the user's own status line from this variable; without it
+    /// every claude tab's status line goes blank. A project's settings outrank the account's, so
+    /// this pins the variable without depending on the developer's own ~/.claude.
+    func testAClaudeTabCarriesTheUsersStatusLineCommand() throws {
+        let project = FileManager.default.temporaryDirectory.appendingPathComponent("fd-sl-\(UUID().uuidString)")
+        let settings = project.appendingPathComponent(".claude/settings.local.json")
+        try FileManager.default.createDirectory(at: settings.deletingLastPathComponent(), withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: project) }
+        try Data(#"{"statusLine":{"type":"command","command":"printf project-line"}}"#.utf8).write(to: settings)
+        let store = makeStore()
+        let session = store.newSession(in: project)
+        // A value typed into the Shell pane must not outlive the user's real settings.
+        store.preferences?.preferences.shell.environment[ClaudeStatusLine.userCommandVariable] = "stale"
+        let env = store.launchEnvironment(for: session, adapter: ClaudeAdapter(), orphaned: false)
+        XCTAssertEqual(env[ClaudeStatusLine.userCommandVariable], "printf project-line")
+    }
 }
