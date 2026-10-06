@@ -273,5 +273,58 @@ final class SwarmEndToEndTests: XCTestCase {
         XCTAssertEqual(old?.task, "fx-valid")
         XCTAssertNil(rig.swarm.agentRecord(fresh.id), "the swarm never recorded the failed agent")
     }
+
+    /// The old agent's exit command could not be typed. The new agent already holds the task, so
+    /// the swarm must own it: recorded (its lease released by the swarm like any agent's, and
+    /// handed off again if its own account crosses). The old lease stays held while the old tab
+    /// runs on that account, and is released once that tab is gone.
+    func testAStopFailedHandoffRecordsTheNewAgentAndReleasesTheOldLeaseWhenItsTabCloses() async throws {
+        rig.feed(account: "Work", utilization: 0.30)
+        rig.feed(account: "Personal", utilization: 0.10)
+        try await rig.launch(cap: 1)
+        await rig.tick()
+        let first = try XCTUnwrap(rig.spawns.first)
+        let oldLease = try XCTUnwrap(first.lease)
+        rig.feed(account: "Work", utilization: 0.97)
+        rig.clearStatus(first.session)
+        await rig.tick()
+        let fresh = try XCTUnwrap(rig.spawns.dropFirst().first)
+        let newLease = try XCTUnwrap(fresh.lease)
+        XCTAssertEqual(rig.handoffLog.map(\.outcome), [.stopFailed])
+        let recorded = rig.swarm.agentRecord(fresh.session.id)?.1
+        XCTAssertEqual(recorded?.state, .working, "the swarm owns the new agent")
+        XCTAssertEqual(recorded?.task, "fx-valid")
+        XCTAssertEqual(rig.allocator.releases(of: newLease), 0, "the new agent's lease is held by its record")
+        XCTAssertEqual(rig.allocator.releases(of: oldLease), 0, "the old tab still runs on that account")
+
+        rig.store.closeSession(first.session.id)
+        await rig.tick()
+        XCTAssertEqual(rig.allocator.releases(of: oldLease), 1)
+        await rig.tick()
+        XCTAssertEqual(rig.allocator.releases(of: oldLease), 1, "released once")
+    }
+
+    /// The swarm refuses to record the new agent (here: it has no name). Nothing would ever
+    /// release the lease it was spawned on, so the composition releases it, logs the hand-off
+    /// as unrecorded and tells the user. (Deferred from Task 5: this path had no test.)
+    func testARefusedRecordHandoffReleasesTheNewLeaseLogsAndNotifies() async throws {
+        rig.feed(account: "Work", utilization: 0.30)
+        rig.feed(account: "Personal", utilization: 0.10)
+        try await rig.launch(cap: 1)
+        await rig.tick()
+        let first = try XCTUnwrap(rig.spawns.first)
+        rig.feed(account: "Work", utilization: 0.97)
+        rig.markIdle(first.session)
+        rig.nextAgentName = ""
+        await rig.tick()
+        let fresh = try XCTUnwrap(rig.spawns.dropFirst().first)
+        let newLease = try XCTUnwrap(fresh.lease)
+        XCTAssertNil(rig.swarm.agentRecord(fresh.session.id), "refused: a nameless agent cannot be recorded")
+        XCTAssertEqual(rig.allocator.releases(of: newLease), 1)
+        XCTAssertTrue(rig.handoffLog.contains { $0.outcome == .unrecorded && $0.newSession == fresh.session.id },
+                      "\(rig.handoffLog.map(\.outcome))")
+        XCTAssertTrue(rig.notifier.notes.contains { $0.title == "Hand-off not recorded" && $0.session == fresh.session.id },
+                      "\(rig.notifier.notes.map(\.title))")
+    }
 }
 

@@ -31,6 +31,11 @@ final class HandoffDriver: HandoffDecisionSink {
     private var awaiting: [UUID: (agent: SwarmAgentSnapshot, request: HandoffRequest)] = [:]
     private var workedSinceFailure: Set<UUID> = []
     private var inFlight: Set<UUID> = []
+    /// Old agents whose exit command was refused (`.stopFailed`), with the lease they still run
+    /// on. The swarm records them handed off, so neither `stop()` nor the closed-tab sweep
+    /// releases that lease: the driver does, once the tab is gone. Kept apart from `phases`,
+    /// which forgets an agent the moment it leaves the snapshot — as a handed-off one does.
+    private var heldForRunningOld: [UUID: (session: SessionRef, lease: AccountLease)] = [:]
 
     /// Agents whose hand-off is waiting for a person. Read by `SwarmWire` for `handoffPending`.
     var pendingHandoffs: Set<UUID> { Set(awaiting.keys) }
@@ -50,6 +55,13 @@ final class HandoffDriver: HandoffDecisionSink {
     }
 
     func evaluate(_ agents: [SwarmAgentSnapshot]) async {
+        // A stop-failed old agent's account is free once its tab is gone (closed by hand, or it
+        // exited after all). Holding the lease forever would take a slot out of a local pool
+        // for the life of the app.
+        for (id, held) in heldForRunningOld where !host.sessionExists(held.session) {
+            heldForRunningOld[id] = nil
+            allocator.release(held.lease)
+        }
         // An agent that leaves the snapshot ends its crossing. Keeping its state would let it come
         // back on a NEW crossing with an old `since` (deadline already past, so a busy agent is
         // interrupted at once), an old decline (never asked again) or an old confirmation
@@ -198,12 +210,20 @@ final class HandoffDriver: HandoffDecisionSink {
                 warnings.append("the new agent has no name yet, so the task's assignee was not changed")
             }
             if let w = await host.releaseReservations(of: agent.agentName, project: request.task.project) { warnings.append(w) }
+            let completed = CompletedHandoff(old: agent.session, new: fresh, task: request.task, block: block, lease: lease,
+                                             fromAccount: request.fromAccount)
             guard await host.stopAgent(agent.session) else {
                 // The new agent stays: it already holds the task (reassigned, reservations moved),
-                // and killing it would orphan the task. The old lease is kept because the old agent
-                // still runs on that account. A terminal phase, not `.failed`: `.failed` retries the
-                // whole hand-off and would spawn a second replacement.
+                // and killing it would orphan the task. A terminal phase, not `.failed`: `.failed`
+                // retries the whole hand-off and would spawn a second replacement.
                 phases[id] = .stopFailed
+                // The swarm must own the new agent all the same. Unrecorded, its lease was never
+                // released (a lost slot in a local pool), it got the manual tab's over-limit
+                // notice, it was never handed off again and the phone never showed it.
+                host.markHandedOff(completed)
+                // The old lease is kept because the old agent still runs on that account; it is
+                // released once that tab is gone (top of `evaluate`).
+                if let old = agent.lease { heldForRunningOld[id] = (agent.session, old) }
                 record(.stopFailed, agent, request, to: lease.account, fresh: fresh,
                        detail: "exit command was refused (not running or not accepted); \(agent.agentName) is probably still running")
                 host.notify(title: "Hand-off needs a manual stop",
@@ -211,11 +231,10 @@ final class HandoffDriver: HandoffDecisionSink {
                             session: agent.session)
                 return
             }
-            host.markHandedOff(CompletedHandoff(old: agent.session, new: fresh, task: request.task, block: block, lease: lease,
-                                                fromAccount: request.fromAccount))
+            host.markHandedOff(completed)
             // The driver is the old lease's only owner in a hand-off: it alone knows the exit
-            // command went out (`.stopFailed` above keeps the lease, since the old agent still
-            // runs on it). The swarm's `recordHandoff` used to release it as well, which freed
+            // command went out (`.stopFailed` above keeps the lease until the old tab is gone,
+            // since the old agent still runs on it). The swarm's `recordHandoff` used to release it as well, which freed
             // the lease twice.
             if let old = agent.lease { allocator.release(old) }
             phases[id] = .done(fresh)

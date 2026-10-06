@@ -195,8 +195,9 @@ final class SwarmService: ObservableObject {
         handoffTasks[key]?.remove(task)
         if handoffTasks[key]?.isEmpty == true { handoffTasks[key] = nil }
     }
-    /// After a driver pass every hand-off it began has ended one way or another — including a
-    /// `.stopFailed`, which never reaches the success hook that ends its mark.
+    /// After a driver pass every hand-off it began has ended one way or another. A safety net:
+    /// the success and `.stopFailed` paths end their mark through `onHandedOff`, a failed spawn
+    /// ends its own, but a mark left by any path that returns early must not outlive the pass.
     func endAllHandoffs() { handoffTasks = [:] }
     func isHandingOff(project: String, task: String) -> Bool { handoffTasks[Self.key(project)]?.contains(task) ?? false }
 
