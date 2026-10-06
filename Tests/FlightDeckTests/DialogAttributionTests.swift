@@ -21,8 +21,19 @@ final class DialogAttributionTests: XCTestCase {
         var a = DialogAttribution()
         _ = a.apply(line("PreToolUse", agent: "a1111111", input: #"{"command":"ls"}"#, toolUseID: "toolu_OTHER"))
         _ = a.apply(line("PreToolUse", agent: "a28ad87b", toolUseID: "toolu_X"))
-        XCTAssertEqual(a.apply(line("PermissionRequest")),
+        // A real subagent PermissionRequest carries agent_id but no tool_use_id.
+        XCTAssertEqual(a.apply(line("PermissionRequest", agent: "a28ad87b")),
                        .raised(sid, PendingDialog(agentID: "a28ad87b", callID: "toolu_X")))
+    }
+
+    /// An id-less, agent-less request is the main agent's: a subagent's identical recent call
+    /// must not steal it.
+    func testAMainAgentRequestNeverMatchesASubagentsIdenticalCall() {
+        var a = DialogAttribution()
+        _ = a.apply(line("PreToolUse", toolUseID: "toolu_MAIN"))
+        _ = a.apply(line("PreToolUse", agent: "a28ad87b", toolUseID: "toolu_SUB"))
+        XCTAssertEqual(a.apply(line("PermissionRequest")),
+                       .raised(sid, PendingDialog(agentID: nil, callID: "toolu_MAIN")))
     }
 
     func testTheMainAgentsDialogHasNoAgentID() {
