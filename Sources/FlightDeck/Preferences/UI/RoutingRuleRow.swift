@@ -67,6 +67,7 @@ struct RoutingRuleRow: View {
         .onDeleteCommand { if isFocused { delete() } }
         .onMoveCommand { if isFocused { move($0) } }
         .contextMenu { menu }
+        .onAppear { if isEditing { draft = rule.sentence } }
         .onChange(of: editing) { _, now in
             if now == rule.id { draft = rule.sentence; focus.wrappedValue = .sentence(rule.id) }
         }
@@ -79,6 +80,10 @@ struct RoutingRuleRow: View {
         if isEditing {
             TextField("Rule", text: $draft)
                 .textFieldStyle(.roundedBorder)
+                // Same grouped-form trap as "New rule…": without these the label "Rule" shows and
+                // the field's text is pushed to the trailing edge.
+                .labelsHidden()
+                .multilineTextAlignment(.leading)
                 .focused(focus, equals: .sentence(rule.id))
                 .onSubmit(commitEdit)
                 .onExitCommand(perform: endEdit)
