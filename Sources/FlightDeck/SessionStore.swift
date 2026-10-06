@@ -8703,10 +8703,16 @@ final class SessionStore: ObservableObject {
     /// field, so without its own emission a connected phone would hold yesterday's tree until
     /// some unrelated tick happened to carry it. Skipped when there is no status yet, like
     /// `applySubagentCount`: the first `commitStatuses` emission carries the tree then.
+    ///
+    /// **Emitted only when the WIRE form moves.** `SubagentNode.modified` is part of tree
+    /// equality, so every append to a live agent's file is a "new" tree; emitting on that sent
+    /// a byte-identical `activityChanged` to every phone, and took a replay-ring slot, on each
+    /// write. The latest tree is still stored: the Mac's popover reads it directly.
     func applySubagents(_ id: UUID, _ tree: SubagentTree) {
         guard subagentTrees[id] != tree else { return }
+        let before = wireSubagents(of: id)
         subagentTrees[id] = tree
-        guard let status = statuses[id] else { return }
+        guard let status = statuses[id], wireSubagents(of: id) != before else { return }
         emit(.activityChanged(
             id: id, activity: status.activity.rawValue,
             waitingFor: status.waitingFor, subagentCount: status.subagentCount,
