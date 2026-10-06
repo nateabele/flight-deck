@@ -221,7 +221,7 @@ final class HandoffHostTests: XCTestCase {
         XCTAssertEqual(host.activity(of: ref), .idle)
     }
 
-    func testConfirmWithNoSurfaceDeclinesAndSaysSo() async throws {
+    func testRequestConfirmationNotifiesAndReturnsAtOnce() async throws {
         let (store, id, _) = try await storeWithTab(SessionStatus(activity: .idle))
         let notifier = UsageSpyNotifier()
         store.notifier = notifier
@@ -231,12 +231,8 @@ final class HandoffHostTests: XCTestCase {
                                                            source: AssignmentSource(by: .rule, reason: "r", at: Date())),
                                      oldAgent: "BlueLake", oldSession: SessionRef(id: id, agentName: "BlueLake"),
                                      transcript: nil, reservedFiles: [], fromAccount: UsageRefs.work)
-        let ok = await host.confirm(request)
-        XCTAssertFalse(ok, "the user asked to be asked; nothing may answer for them")
+        host.requestConfirmation(request)
         XCTAssertEqual(notifier.notes.map(\.title), ["Hand-off needs a confirmation"])
-        host.confirmer = { _ in true }
-        let accepted = await host.confirm(request)
-        XCTAssertTrue(accepted)
     }
 
     func testRecordAppendsOneJSONLinePerEntry() async throws {

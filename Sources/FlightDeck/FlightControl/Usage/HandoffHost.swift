@@ -10,7 +10,9 @@ protocol HandoffHost: AnyObject {
     /// True only when Escape was actually sent; the store refuses an idle composer or a dialog.
     @discardableResult
     func interrupt(_ session: SessionRef) -> Bool
-    func confirm(_ request: HandoffRequest) async -> Bool
+    /// Tells the user a hand-off is waiting on them. Must return at once: the answer comes back
+    /// through `HandoffDecisionSink`, never as a result here, so a slow human cannot stall the driver.
+    func requestConfirmation(_ request: HandoffRequest)
     func kind(for block: ExecutionBlock, project: URL) -> TaskKind?
     func catalogs() async -> AdapterCatalogs
     /// Nil keeps the planner's list.
@@ -72,7 +74,7 @@ struct BrAmHandoffCommands {
     }
 }
 
-/// The production host. The parts only the swarm knows — how to ask for confirmation, a task's
+/// The production host. The parts only the swarm knows — a task's
 /// kind for spill, the catalogs, an agent's reservations, marking the old tab "handed off →",
 /// where the swarm log lives — are hooks L3-S sets at integration; their defaults are the safe
 /// answer (no spill, keep the planner's list, a log file of its own).
@@ -82,7 +84,6 @@ final class StoreHandoffHost: HandoffHost {
     private let commands: BrAmHandoffCommands
     private let logURL: URL
 
-    var confirmer: ((HandoffRequest) async -> Bool)?
     var kindLookup: (ExecutionBlock, URL) -> TaskKind? = { _, _ in nil }
     var catalogProvider: () async -> AdapterCatalogs = { AdapterCatalogs([]) }
     var reservationLookup: (String, URL) async -> [String]? = { _, _ in nil }
@@ -110,16 +111,12 @@ final class StoreHandoffHost: HandoffHost {
 
     func interrupt(_ session: SessionRef) -> Bool { store?.interruptTurn(session.id) ?? false }
 
-    /// With "Confirm hand-offs" on and nothing installed to ask, the answer is no — never a
-    /// silent yes on the user's behalf — and the user is told why their agent stayed put.
-    func confirm(_ request: HandoffRequest) async -> Bool {
-        guard let confirmer else {
-            notify(title: "Hand-off needs a confirmation",
-                   body: "Confirm hand-offs is on, but there is nowhere to confirm yet. \(request.oldAgent) stays on its account.",
-                   session: request.oldSession)
-            return false
-        }
-        return await confirmer(request)
+    /// The notification is the whole job; the answer arrives through the driver's decision sink
+    /// (phone `handoff.confirm` / `handoff.decline`). Nothing here answers for the user.
+    func requestConfirmation(_ request: HandoffRequest) {
+        notify(title: "Hand-off needs a confirmation",
+               body: "\(request.oldAgent) is over its limit on \(request.fromAccount.label). Confirm or decline the hand-off of task \(request.task.id) from Flight Control on your phone; until then it stays on its account.",
+               session: request.oldSession)
     }
 
     func kind(for block: ExecutionBlock, project: URL) -> TaskKind? { kindLookup(block, project) }

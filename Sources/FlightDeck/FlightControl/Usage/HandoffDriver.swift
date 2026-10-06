@@ -9,10 +9,13 @@ import IntakeKit
 /// a spawn that fails leaves the old agent running, still assigned, on its account — the task is
 /// never orphaned between two agents.
 @MainActor
-final class HandoffDriver {
+final class HandoffDriver: HandoffDecisionSink {
     enum Phase: Equatable {
         case waitingForBoundary(since: Date)
         case waitingForCapacity(String)
+        /// Asked, nobody has answered. Holds NO task: `evaluate` moves on to the next agent, and the
+        /// answer arrives later through `HandoffDecisionSink` (the phone, or any future Mac surface).
+        case awaitingConfirmation
         case declined
         case failed
         /// The new agent exists but the old one could not be told to exit. Unlike every other phase it
@@ -24,8 +27,13 @@ final class HandoffDriver {
 
     private(set) var phases: [UUID: Phase] = [:]
     private var confirmed: Set<UUID> = []
+    /// What was asked for each pending agent, so a decline can log the same entry a refusal always did.
+    private var awaiting: [UUID: (agent: SwarmAgentSnapshot, request: HandoffRequest)] = [:]
     private var workedSinceFailure: Set<UUID> = []
     private var inFlight: Set<UUID> = []
+
+    /// Agents whose hand-off is waiting for a person. Read by `SwarmWire` for `handoffPending`.
+    var pendingHandoffs: Set<UUID> { Set(awaiting.keys) }
 
     private let planner: HandoffPlanner
     private let allocator: PoolAllocator
@@ -50,6 +58,8 @@ final class HandoffDriver {
         let present = Set(agents.map(\.session.id))
         for id in Array(phases.keys) where !present.contains(id) && !inFlight.contains(id) { phases[id] = nil }
         confirmed.formIntersection(present.union(inFlight))
+        // A pending agent that left is not answerable any more: its phase was pruned just above.
+        for id in Array(awaiting.keys) where !present.contains(id) { awaiting[id] = nil }
         workedSinceFailure.formIntersection(present.union(inFlight))
         for agent in agents { await evaluate(agent) }
     }
@@ -65,7 +75,7 @@ final class HandoffDriver {
             if phases[id] == .stopFailed { return }
             // Below hard again: this crossing is over. A decline, a failure or a wait from it must
             // not carry into the next one (§5.2: "does not ask again *for this crossing*").
-            phases[id] = nil; confirmed.remove(id); workedSinceFailure.remove(id)
+            phases[id] = nil; confirmed.remove(id); workedSinceFailure.remove(id); awaiting[id] = nil
             return
         }
         switch phases[id] {
@@ -85,6 +95,14 @@ final class HandoffDriver {
             // The agent keeps working where it is (§5.3); try again whenever it is between turns.
             guard isBoundary(activity, agent) else { return }
             await handOff(agent, request)
+        case .awaitingConfirmation?:
+            // Normally only an answer moves it (`confirmHandoff` / `declineHandoff`). Confirm turned
+            // OFF while it waited means nobody needs to be asked any more.
+            guard !settings().confirm else { return }
+            awaiting[id] = nil
+            let since = now()
+            phases[id] = .waitingForBoundary(since: since)
+            await waitOrGo(agent, request, activity: activity, since: since)
         case .waitingForBoundary(let since)?:
             await waitOrGo(agent, request, activity: activity, since: since)
         case nil:
@@ -92,6 +110,26 @@ final class HandoffDriver {
             phases[id] = .waitingForBoundary(since: since)
             await waitOrGo(agent, request, activity: activity, since: since)
         }
+    }
+
+    /// The person said yes. The next pass performs the hand-off (waiting for a turn boundary again,
+    /// since the agent may have started working while the question sat unanswered).
+    @discardableResult
+    func confirmHandoff(session: UUID) -> Bool {
+        guard awaiting[session] != nil else { return false }
+        awaiting[session] = nil
+        confirmed.insert(session)
+        phases[session] = .waitingForBoundary(since: now())
+        return true
+    }
+
+    @discardableResult
+    func declineHandoff(session: UUID) -> Bool {
+        guard let pending = awaiting[session] else { return false }
+        awaiting[session] = nil
+        phases[session] = .declined
+        record(.declined, pending.agent, pending.request, detail: nil)
+        return true
     }
 
     /// Idle, no agent at all, or refused by the API (it is stuck anyway, §5.1).
@@ -123,12 +161,12 @@ final class HandoffDriver {
         defer { inFlight.remove(id) }
 
         if settings().confirm && !confirmed.contains(id) {
-            guard await host.confirm(original) else {
-                phases[id] = .declined
-                record(.declined, agent, original, detail: nil)
-                return
-            }
-            confirmed.insert(id)
+            // Never wait for the answer here: one agent on an over-hard account would hold every
+            // other agent's hand-off (and every later pass) behind a person who may be away.
+            phases[id] = .awaitingConfirmation
+            awaiting[id] = (agent, original)
+            host.requestConfirmation(original)
+            return
         }
         guard let resolved = await capacity(for: agent, original) else { return }
         let (block, lease) = resolved
