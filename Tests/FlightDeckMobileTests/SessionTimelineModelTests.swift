@@ -27,7 +27,7 @@ private final class StubPager: TimelinePaging, PromptSending, PromptAnswering, P
     var isWaiting: Bool { !pending.isEmpty }
     var anchors: [TimelineAnchor] {
         requests.compactMap { request in
-            guard case .timeline(_, let anchor, _) = request else { return nil }
+            guard case .timeline(_, let anchor, _, _) = request else { return nil }
             return anchor
         }
     }

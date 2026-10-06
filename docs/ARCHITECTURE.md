@@ -184,8 +184,11 @@ of peer. The pairing frames are `@_spi(HostPairing)` because the Linux module ne
 the app must not.
 
 **Ports and Bonjour.** The host connection is **47410**. Pairing runs on its own listener, open
-only while a window is armed (2 minutes, 3 attempts): **47411** on Linux, an ephemeral port on a
-Mac (found through Bonjour). Types: `_fd-host._tcp` (a hostd, for the controller's `HostLink`) and
+only while a window is armed (2 minutes, 3 attempts): **47411** on both. A Mac hostd retries
+47411 for about a second (its own previous window's listener releases the port asynchronously),
+then falls back to an ephemeral port and reports it in the admin `armed` reply's optional
+`pairingPort`, so the Hosting tab can show it. A fixed port is what lets a controller pair by
+typed address where Bonjour cannot reach (a tailnet). Types: `_fd-host._tcp` (a hostd, for the controller's `HostLink`) and
 `_fd-host-pair._tcp` (a window is open, so its presence *is* the "pairable now" signal). Both are
 under the 15-character label limit. On Linux, avahi's `avahi-publish` is used if it is installed;
 without it nothing is advertised and the user types the address.
@@ -533,7 +536,51 @@ claude tab closes, so two logins' registries are never merged into one scan.
   by `<tool-use-id>` or by the launch's agent id as `<task-id>`. A `SendMessage` whose result
   carries `resumedAgentId` woke a stopped agent and counts it again, keyed by that call's id.
   Not cleared at turn end (the agents outlive it); only held ids are removed, so a notification
-  for an unseen launch is a no-op.
+  for an unseen launch is a no-op. This fold alone starts at end of file on attach, so it misses
+  agents launched before a Flight Deck relaunch; `subagentCount` is therefore
+  `max(fold, SubagentWatcher's live depth-1 count)`.
+- **`SubagentTree` and `SubagentWatcher`** — subagents are modelled children, not only a count.
+  Every claude subagent at any depth writes `subagents/agent-<id>.jsonl` and `.meta.json` in its
+  conversation's folder. `SubagentTree` (pure) builds nodes (`id`, `parentID`, `type`,
+  `description`, `running` / `blocked` / `done`) from the meta file and the tail of the jsonl.
+  A node is `done` when its last conversational record is assistant text with no `tool_use`.
+  `blocked` comes only from attribution, never from the file alone. `SubagentID.isValid`
+  (`^a[0-9a-f]{6,40}$`) guards any id joined onto a path. `SubagentWatcher` is one per
+  conversation, owned by `ClaudeRuntime`. A steady tick stats the folder and the non-done files
+  (`poll()`), and a full rescan runs when the folder's stamp changes or every 10s. Files older than the claude process start are ignored, and
+  done agents stay until the session's next `UserPromptSubmit`. While the process start is
+  unknown (before the first registry row pins the tab, and always after claude exits) the
+  watcher reads no files and publishes nothing, keeping its last tree: "unknown" is not "all
+  history", which would show an earlier run's half-finished agents as running. The store keeps a
+  tab's tree across a lost registry row (the tree's lifetime is the runtime attachment, cleared
+  at close, repin and retarget), because a blocked agent writes nothing and the watcher would
+  never republish it. `applySubagents` stores every new tree but emits `activityChanged` only
+  when the wire form changes; `modified` alone moves on every append to a live agent's file.
+  On the Mac, `displaySubagentTree(for:)` marks the attributed node `blocked` (the rule
+  `FleetProjection.wire` uses), and the count badge also shows while an agent is blocked.
+- **Dialog attribution** — the plugin registers a record-only `PermissionRequest` hook
+  (`Resources/ClaudePlugin/hooks/hooks.json`). It never decides anything and never changes
+  `ComposerReadiness`. `DialogAttribution` matches the event to the preceding `PreToolUse` with
+  the same `agent_id`, `tool_name` and canonical `tool_input`, because a subagent's
+  `PermissionRequest` carries no `tool_use_id`. The result is `SessionStore.pendingDialogs`,
+  cleared on `PostToolUse`, `UserPromptSubmit` and `SessionEnd`, and by `commitStatuses` on an
+  observed end of the wait: the tab going from `waiting` to anything else (or losing its
+  status), or a waiting tab's `waitingFor` changing. Never on "not waiting now":
+  `PermissionRequest` lands ~70ms before the registry flips the tab to `waiting`. Esc fires no hook, so
+  `PromptService` also requires the call to be unresolved in the owning file. An attributed
+  subagent call still unresolved in its own file is the open prompt (`openPromptAgent`). An
+  unattributed open subagent call still refuses `subagent_prompt`. `answer(session:agent:…)`
+  needs a valid id and a matching `pendingDialog`, else it refuses (`unknown_agent`,
+  `prompt_changed`).
+- **Subagents on the wire** — `WireSession.subagents` (`[]` for claude, `nil` for codex and older
+  Macs) and `openPromptAgent`, both carried by `activityChanged`. A claude tab with no status
+  projects `[]`, never its stored tree, since no event could have carried it; the tree goes out
+  with the `activityChanged` that brings the status back. `timeline.page` and
+  `prompt.answer` take an optional `agent`; `TimelineService` then pages
+  `subagents/agent-<id>.jsonl` with `sidechain: true`. All fields are optional, with no new event
+  tag. The prompt is still never sent: the phone derives the card from the blocked agent's own
+  `timeline.page(agent:)` with `OpenPrompt.find`, under "From <type> — <description>", and the
+  answer carries the agent. The Mac re-derives from the same file before typing.
 - **A session's activity is its tree's** — `SessionStatus.tree`: an agent reporting `idle` with a
   subagent still working shows `busy`, so the unread dot and "finished" notification wait for the
   last subagent. `waiting` is never lifted (it means the user must act). The agent's own report

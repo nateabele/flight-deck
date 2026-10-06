@@ -46,7 +46,7 @@ final class FleetFieldEmissionTests: XCTestCase {
         ])
         XCTAssertTrue(replicator.recorded.contains(.activityChanged(
             id: a.id, activity: "busy", waitingFor: nil, subagentCount: 3,
-            hasBackgroundWork: false, openPromptCall: .noPrompt
+            hasBackgroundWork: false, openPromptCall: .noPrompt, subagents: []
         )))
         // `.noPrompt` and never `.unreported`, even for the waiting tab: this store has no
         // fleet behind it, so `openPromptProbe` names nothing — and "I looked and found
@@ -54,7 +54,7 @@ final class FleetFieldEmissionTests: XCTestCase {
         // is blocked on a dialog this build cannot name reaches the wire exactly this way.
         XCTAssertTrue(replicator.recorded.contains(.activityChanged(
             id: b.id, activity: "waiting", waitingFor: "input needed", subagentCount: 0,
-            hasBackgroundWork: false, openPromptCall: .noPrompt
+            hasBackgroundWork: false, openPromptCall: .noPrompt, subagents: []
         )))
     }
 
@@ -68,7 +68,7 @@ final class FleetFieldEmissionTests: XCTestCase {
         store.applyRegistryForTesting([:])
         XCTAssertTrue(replicator.recorded.contains(.activityChanged(
             id: session.id, activity: nil, waitingFor: nil, subagentCount: 0,
-            hasBackgroundWork: false, openPromptCall: .noPrompt
+            hasBackgroundWork: false, openPromptCall: .noPrompt, subagents: []
         )))
     }
 
@@ -82,7 +82,7 @@ final class FleetFieldEmissionTests: XCTestCase {
         store.applySubagentCount(session.id, 4)
         XCTAssertTrue(replicator.recorded.contains(.activityChanged(
             id: session.id, activity: "busy", waitingFor: nil, subagentCount: 4,
-            hasBackgroundWork: false, openPromptCall: .noPrompt
+            hasBackgroundWork: false, openPromptCall: .noPrompt, subagents: []
         )))
     }
 
@@ -106,7 +106,7 @@ final class FleetFieldEmissionTests: XCTestCase {
 
         XCTAssertTrue(replicator.recorded.contains(.activityChanged(
             id: session.id, activity: "idle", waitingFor: nil, subagentCount: 0,
-            hasBackgroundWork: true, openPromptCall: .noPrompt
+            hasBackgroundWork: true, openPromptCall: .noPrompt, subagents: []
         )))
     }
 
@@ -194,7 +194,7 @@ final class FleetFieldEmissionTests: XCTestCase {
 
         XCTAssertTrue(replicator.recorded.contains(.activityChanged(
             id: session.id, activity: "waiting", waitingFor: nil, subagentCount: 0,
-            hasBackgroundWork: false, openPromptCall: .noPrompt, answerless: true
+            hasBackgroundWork: false, openPromptCall: .noPrompt, answerless: true, subagents: []
         )))
         XCTAssertEqual(
             FleetProjection.snapshot(of: store).projects.flatMap(\.sessions)
@@ -202,5 +202,76 @@ final class FleetFieldEmissionTests: XCTestCase {
             true,
             "the snapshot a reconnecting phone gets must assert the same fact the event did"
         )
+    }
+
+    // MARK: Subagents
+
+    private func tree() -> SubagentTree {
+        SubagentTree(nodes: [
+            SubagentNode(id: "a0aaaaaa", parentID: nil, type: "general-purpose",
+                         description: "Controller", state: .running, modified: Date()),
+            SubagentNode(id: "a28ad87b", parentID: "a0aaaaaa", type: "implementer",
+                         description: "Task 14", state: .running, modified: Date()),
+            SubagentNode(id: "a5555555", parentID: nil, type: "Explore",
+                         description: "Done one", state: .done, modified: Date()),
+        ])
+    }
+
+    private func wireSession(_ store: SessionStore, _ id: UUID) -> WireSession? {
+        FleetProjection.snapshot(of: store).projects.flatMap(\.sessions).first { $0.id == id }
+    }
+
+    func testASubagentTreeReachesTheWireAsAnEventAndInTheSnapshot() {
+        let store = store()
+        let session = store.newSession(in: URL(fileURLWithPath: "/w/alpha"))
+        store.applyRegistryForTesting([session.id: SessionStatus(activity: .busy, subagentCount: 2)])
+        let replicator = attachedReplicator(to: store)
+
+        store.applySubagents(session.id, tree())
+
+        let expected = [
+            WireSubagent(id: "a0aaaaaa", parent: nil, type: "general-purpose",
+                         description: "Controller", state: "running"),
+            WireSubagent(id: "a28ad87b", parent: "a0aaaaaa", type: "implementer",
+                         description: "Task 14", state: "running"),
+            WireSubagent(id: "a5555555", parent: nil, type: "Explore",
+                         description: "Done one", state: "done"),
+        ]
+        XCTAssertTrue(replicator.recorded.contains {
+            if case .activityChanged(session.id, _, _, _, _, _, _, let subs, _) = $0 {
+                return subs == expected
+            }
+            return false
+        }, "\(replicator.recorded)")
+        XCTAssertEqual(wireSession(store, session.id)?.subagents, expected)
+    }
+
+    func testABlockedSubagentIsMarkedAndNamedOnTheWire() {
+        let store = store()
+        let session = store.newSession(in: URL(fileURLWithPath: "/w/alpha"))
+        store.applySubagents(session.id, tree())
+        store.openPromptProbe = { _ in .success("toolu_SUB") }
+        store.openPromptAgentProbe = { _ in "a28ad87b" }
+        let replicator = attachedReplicator(to: store)
+        store.applyRegistryForTesting([session.id: SessionStatus(activity: .waiting)])
+
+        XCTAssertTrue(replicator.recorded.contains {
+            if case .activityChanged(session.id, _, _, _, _, .call("toolu_SUB"), _, let subs, "a28ad87b") = $0 {
+                return subs?.first { $0.id == "a28ad87b" }?.state == "blocked"
+            }
+            return false
+        }, "\(replicator.recorded)")
+        let wire = wireSession(store, session.id)
+        XCTAssertEqual(wire?.openPromptAgent, "a28ad87b")
+        XCTAssertEqual(wire?.blockedSubagent?.state, "blocked")
+        XCTAssertEqual(wire?.subagents?.first { $0.id == "a0aaaaaa" }?.state, "running")
+    }
+
+    /// `[]` is "modelled, none"; nil is "this Mac does not model them". A claude tab with no
+    /// agents must say the first, or a phone could not tell it from a codex tab.
+    func testAClaudeTabWithNoSubagentsIsEmptyNotNil() {
+        let store = store()
+        let session = store.newSession(in: URL(fileURLWithPath: "/w/alpha"))
+        XCTAssertEqual(wireSession(store, session.id)?.subagents, [])
     }
 }

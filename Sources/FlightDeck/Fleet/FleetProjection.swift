@@ -37,7 +37,9 @@ enum FleetProjection {
                 // The cache, never `IntakeService`: see `SessionStore.intakeSummaries` for why
                 // the oracle must read exactly what the store last recorded.
                 intakes: store.intakeSummaries[$0.id] ?? nil,
-                swarm: store.swarmSummaries[$0.id] ?? nil
+                swarm: store.swarmSummaries[$0.id] ?? nil,
+                subagentTrees: store.subagentTrees,
+                openPromptAgents: store.openPromptAgents
             )
         })
     }
@@ -49,7 +51,9 @@ enum FleetProjection {
         apiErrors: [UUID: SessionAPIError],
         planGates: PlanGateService? = nil, allowsBlockedAbort: Bool = false,
         intakes: [WireIntakeSummary]? = nil,
-        swarm: WireSwarm? = nil
+        swarm: WireSwarm? = nil,
+        subagentTrees: [UUID: SubagentTree] = [:],
+        openPromptAgents: [UUID: String] = [:]
     ) -> WireProject {
         WireProject(
             id: repo.id,
@@ -63,7 +67,9 @@ enum FleetProjection {
                     openPromptCall: openPromptCalls[$0.id],
                     apiError: apiErrors[$0.id],
                     planGates: planGates,
-                    allowsBlockedAbort: allowsBlockedAbort
+                    allowsBlockedAbort: allowsBlockedAbort,
+                    subagents: subagentModel(of: $0, trees: subagentTrees, status: statuses[$0.id]),
+                    openPromptAgent: openPromptAgents[$0.id]
                 )
             },
             intakes: intakes,
@@ -76,7 +82,8 @@ enum FleetProjection {
         _ session: Session, status: SessionStatus?, unread: Set<UUID>,
         hasBackgroundWork: Bool, openPromptCall: String?,
         apiError: SessionAPIError?,
-        planGates: PlanGateService? = nil, allowsBlockedAbort: Bool = false
+        planGates: PlanGateService? = nil, allowsBlockedAbort: Bool = false,
+        subagents: SubagentTree? = nil, openPromptAgent: String? = nil
     ) -> WireSession {
         WireSession(
             id: session.id,
@@ -106,7 +113,47 @@ enum FleetProjection {
             // A fact about this build: `SessionStore.answerPrompt` drives the row. It says
             // nothing about which agents raise questions — `OpenPrompt.find` decides that on
             // both ends, so a tab with no question card never reads it.
-            acceptsTypedAnswers: true
+            acceptsTypedAnswers: true,
+            subagents: subagents.map {
+                wire($0, blocked: openPromptAgent, call: openPromptCall)
+            },
+            openPromptAgent: openPromptAgent
         )
+    }
+
+    /// What a session's `subagents` field is built from. Claude gets a tree even when it is
+    /// empty — `[]` on the wire says "this Mac models subagents and there are none", which a
+    /// phone must be able to tell from a codex tab (nil: not modelled). Collapsing the two
+    /// would hide a non-zero `subagentCount` behind an empty list on every codex tab.
+    ///
+    /// **No status, no tree** — still `[]`, never the stored tree. `applySubagents` emits only
+    /// for a tab with a status (an event needs one to carry), and the tree now outlives a lost
+    /// registry row; projecting it anyway made the snapshot disagree with what was emitted
+    /// (`FleetReplicator`'s drift assertion) and showed a reconnecting phone a tree a
+    /// connected one never got. When the status appears, `emitActivity` carries the tree.
+    @MainActor
+    static func subagentModel(
+        of session: Session, trees: [UUID: SubagentTree], status: SessionStatus?
+    ) -> SubagentTree? {
+        guard session.agent == .claude else { return nil }
+        guard status != nil else { return .empty }
+        return trees[session.id] ?? .empty
+    }
+
+    /// The tree as the wire carries it, with the node that owns the open dialog marked
+    /// `blocked`. Marked here rather than stored that way because the tree is rebuilt from
+    /// files and knows nothing of the transcript call; `openPromptAgents` is what ties them.
+    static func wire(_ tree: SubagentTree, blocked agent: String?, call: String?) -> [WireSubagent] {
+        let marked = (agent != nil && call != nil) ? tree.marking(blocked: agent!, call: call!) : tree
+        return marked.nodes.map { node in
+            let state: String
+            switch node.state {
+            case .running: state = "running"
+            case .blocked: state = "blocked"
+            case .done: state = "done"
+            }
+            return WireSubagent(id: node.id, parent: node.parentID, type: node.type,
+                                description: node.description, state: state)
+        }
     }
 }

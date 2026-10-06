@@ -276,7 +276,7 @@ final class FleetListScreenTests: XCTestCase {
             if case .recentlyClosed = request {
                 return answerRecentlyClosed(cid, reply)
             }
-            guard case .timeline(let session, _, _) = request else { return }
+            guard case .timeline(let session, _, _, _) = request else { return }
             reply(.page(cid: cid, TimelinePage(
                 session: session, items: [], start: 0, end: 0, hasMore: false, reset: false
             )))

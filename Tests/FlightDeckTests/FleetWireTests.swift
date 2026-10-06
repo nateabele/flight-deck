@@ -119,6 +119,42 @@ final class FleetWireTests: XCTestCase {
         XCTAssertTrue(try roundTrip(session).answerless)
     }
 
+    func testWireSessionRoundTripsSubagentsAndTheirPromptAgent() throws {
+        let tree = [WireSubagent(id: "a0aaaaaa", parent: nil, type: "general-purpose",
+                                 description: "Controller", state: "running"),
+                    WireSubagent(id: "a28ad87b", parent: "a0aaaaaa", type: "implementer",
+                                 description: "Task 14", state: "blocked")]
+        let s = WireSession(id: UUID(), title: "t", agent: "claude", activity: "waiting",
+                            openPromptCall: .call("toolu_SUB"), subagents: tree,
+                            openPromptAgent: "a28ad87b")
+        let back = try roundTrip(s)
+        XCTAssertEqual(back.subagents, tree)
+        XCTAssertEqual(back.openPromptAgent, "a28ad87b")
+        XCTAssertEqual(back.blockedSubagent?.type, "implementer")
+    }
+
+    func testAnOlderMacsSessionHasNoSubagentModel() throws {
+        let json = Data(#"{"id":"\#(UUID().uuidString)","title":"t","agent":"claude","subagentCount":2,"isUnread":false}"#.utf8)
+        let s = try JSONDecoder().decode(WireSession.self, from: json)
+        XCTAssertNil(s.subagents)
+        XCTAssertNil(s.openPromptAgent)
+    }
+
+    func testActivityChangedCarriesSubagentsAndDecodesWithoutThem() throws {
+        let tree = [WireSubagent(id: "a28ad87b", parent: nil, type: "implementer",
+                                 description: "d", state: "blocked")]
+        let event = FleetEvent.activityChanged(
+            id: UUID(), activity: "waiting", waitingFor: "permission prompt", subagentCount: 1,
+            hasBackgroundWork: false, openPromptCall: .call("toolu_SUB"), answerless: false,
+            subagents: tree, openPromptAgent: "a28ad87b")
+        XCTAssertEqual(try roundTrip(event), event)
+        let old = Data(#"{"t":"session.activity","id":"\#(UUID().uuidString)","activity":"busy","subagentCount":0}"#.utf8)
+        guard case .activityChanged(_, _, _, _, _, let call, _, let subs, let agent) =
+                try JSONDecoder().decode(FleetEvent.self, from: old) else { return XCTFail() }
+        XCTAssertNil(subs); XCTAssertNil(agent)
+        XCTAssertEqual(call, .unreported, "an absent key is a peer that predates the field")
+    }
+
     func testActivityChangedRoundTripsBackgroundWork() throws {
         let event = FleetEvent.activityChanged(
             id: UUID(), activity: "idle", waitingFor: nil,
@@ -180,7 +216,7 @@ final class FleetWireTests: XCTestCase {
         let json = Data(#"""
         {"t":"session.activity","id":"\#(id)","activity":"waiting","subagentCount":0}
         """#.utf8)
-        guard case .activityChanged(_, _, _, _, _, let call, _) =
+        guard case .activityChanged(_, _, _, _, _, let call, _, _, _) =
             try JSONDecoder().decode(FleetEvent.self, from: json)
         else { return XCTFail("expected .activityChanged") }
         XCTAssertEqual(call, .unreported)
@@ -192,7 +228,7 @@ final class FleetWireTests: XCTestCase {
         {"t":"session.activity","id":"\(id.uuidString)","activity":"idle","subagentCount":0}
         """.utf8)
         let event = try JSONDecoder().decode(FleetEvent.self, from: json)
-        guard case .activityChanged(_, _, _, _, let hasBackgroundWork, _, _) = event else {
+        guard case .activityChanged(_, _, _, _, let hasBackgroundWork, _, _, _, _) = event else {
             return XCTFail("expected .activityChanged, got \(event)")
         }
         XCTAssertFalse(hasBackgroundWork)
@@ -207,7 +243,7 @@ final class FleetWireTests: XCTestCase {
         {"t":"session.activity","id":"\(id.uuidString)","activity":"waiting","subagentCount":0}
         """.utf8)
         let event = try JSONDecoder().decode(FleetEvent.self, from: json)
-        guard case .activityChanged(_, _, _, _, _, _, let answerless) = event else {
+        guard case .activityChanged(_, _, _, _, _, _, let answerless, _, _) = event else {
             return XCTFail("expected .activityChanged, got \(event)")
         }
         XCTAssertFalse(answerless)

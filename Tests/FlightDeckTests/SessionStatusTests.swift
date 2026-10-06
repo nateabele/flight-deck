@@ -74,6 +74,12 @@ final class SessionStatusTests: XCTestCase {
 
     /// The wording the whole feature exists for, verbatim — cross-checked against
     /// `SessionStatusGlyphTests`/`PromptCardTests` on the phone.
+    func testABlockedSubagentNamesItsTypeInTheWaitingTooltip() {
+        var s = SessionStatus(activity: .waiting, waitingFor: "permission prompt")
+        s.blockedSubagentType = "implementer"
+        XCTAssertEqual(s.tooltip, "Waiting for you — implementer: permission prompt")
+    }
+
     func testAnswerlessReplacesTheWaitingForYouWording() {
         XCTAssertEqual(
             SessionStatus(activity: .waiting, waitingFor: "input needed", answerless: true)

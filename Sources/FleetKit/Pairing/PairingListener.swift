@@ -180,12 +180,13 @@ public final class PairingListener: @unchecked Sendable {
         self.queue = queue
     }
 
-    /// Binds an OS-assigned port and advertises it on `profile.bonjourType`.
+    /// Binds `port` (nil: an OS-assigned one) and advertises it on `profile.bonjourType`.
     ///
     /// No `releaseListenerOnQueue` dance, unlike `FleetSocketServer.start`: that exists
     /// because key rotation rebinds the fleet listener on the *same* port on every arm, expiry
-    /// and revocation. This listener always takes a fresh port and is never rebound, so there
-    /// is no cancellation in flight for a bind to race.
+    /// and revocation. This listener is never rebound. The macOS hostd does ask for the fixed
+    /// 47411 on every window, so a new window can race the last one's release; it retries
+    /// that itself (`DarwinHostServer.bindPairing`) rather than this type waiting for it.
     @discardableResult
     public func start(
         code: PairingCode, key: FleetDeviceKey, macName: String,

@@ -52,13 +52,14 @@ final class TimelineService {
     /// with main-actor work — closing the tab — that happens while a page is in flight.
     ///
     /// `@Sendable` and free of `self`: what crosses into the detached task below is this
-    /// function value and five values, never the service or the store. Arguments in
-    /// `TimelineReader.page`'s own order — session, agent, url, anchor, limit — since a
+    /// function value and six values, never the service or the store. Arguments in
+    /// `TimelineReader.page`'s own order — session, agent, url, anchor, limit, sidechain — since a
     /// function type cannot carry its labels.
-    var reader: @Sendable (UUID, AgentID, URL, TimelineAnchor, Int)
-        -> Result<TimelinePage, TimelineReadFailure> = { session, agent, url, anchor, limit in
+    var reader: @Sendable (UUID, AgentID, URL, TimelineAnchor, Int, Bool)
+        -> Result<TimelinePage, TimelineReadFailure> = { session, agent, url, anchor, limit, sidechain in
             TimelineReader.page(
-                session: session, agent: agent, url: url, anchor: anchor, limit: limit
+                session: session, agent: agent, url: url, anchor: anchor, limit: limit,
+                sidechain: sidechain
             )
         }
 
@@ -79,10 +80,10 @@ final class TimelineService {
     /// handle, so two phones (or one phone scrolling while another screen refreshes) are in
     /// flight at once rather than queued behind each other's scan.
     func page(
-        session: UUID, anchor: TimelineAnchor, limit: Int
+        session: UUID, agent subagent: String?, anchor: TimelineAnchor, limit: Int
     ) async -> Result<TimelinePage, TimelineErrorCode> {
         let agent: AgentID
-        let url: URL
+        var url: URL
         switch store.timelineSource(of: session) {
         case .file(let resolvedAgent, let resolvedURL):
             agent = resolvedAgent
@@ -93,11 +94,22 @@ final class TimelineService {
             return .failure("unknown_session")
         }
 
+        // A subagent's feed is its own file. The id came off the wire, so it is validated
+        // before any path is built from it: "../../x" must never reach the file system.
+        if let subagent {
+            guard SubagentID.isValid(subagent),
+                  let dir = agent.openPromptReader?.subagentTranscripts(for: url)
+            else { return .failure("unknown_agent") }
+            url = dir.appendingPathComponent("agent-\(subagent).jsonl")
+        }
+        let sidechain = subagent != nil
+        let fileURL = url
+
         // Everything above is main-actor; everything inside is not. `Task.detached` rather
         // than `Task`, which would inherit this actor and read on the main thread after all.
         let reader = self.reader
         let read = await Task.detached(priority: .utility) {
-            reader(session, agent, url, anchor, limit)
+            reader(session, agent, fileURL, anchor, limit, sidechain)
         }.value
 
         switch read {

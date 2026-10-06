@@ -50,6 +50,9 @@ enum AgentEvent: Equatable, Sendable {
     case title(String)
     case activity(SessionActivity)
     case subagentCount(Int)
+    /// This conversation's background agents at every depth, rebuilt from `subagents/`. Claude
+    /// only; `.subagentCount` stays the number every other reader uses.
+    case subagents(SubagentTree)
     case turnEnded
     /// This tab's last turn died on an API error, or `nil` because a newer record cleared it.
     ///

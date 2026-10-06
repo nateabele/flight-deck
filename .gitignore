@@ -36,3 +36,5 @@ Resources/ClaudeUsagePlugin/.claude-plugin/types/
 scripts/.capacity-ui.log
 scripts/.capacity-ui.xcresult/
 scripts/.capacity-ui-shots/
+# Machine-specific settings (UI-test host, ssh key); template: scripts/local.env.example
+scripts/local.env

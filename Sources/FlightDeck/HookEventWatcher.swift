@@ -28,6 +28,8 @@ final class HookEventWatcher {
     private let url: URL
     private weak var clock: WatchClock?
     private let onChange: ([UUID: ComposerReadiness]) -> Void
+    private let onDialog: ([DialogAttribution.Change]) -> Void
+    private var attribution = DialogAttribution()
 
     private var offset: UInt64
     private var hasChosenStart: Bool
@@ -36,12 +38,14 @@ final class HookEventWatcher {
     init(
         directory: URL,
         clock: WatchClock?,
-        onChange: @escaping ([UUID: ComposerReadiness]) -> Void
+        onChange: @escaping ([UUID: ComposerReadiness]) -> Void,
+        onDialog: @escaping ([DialogAttribution.Change]) -> Void = { _ in }
     ) {
         let url = directory.appendingPathComponent("events.ndjson")
         self.url = url
         self.clock = clock
         self.onChange = onChange
+        self.onDialog = onDialog
 
         // The first look, taken now rather than deferred to the first drain() — see the
         // type doc comment. `hasChosenStart: false` is what makes TailReader treat any
@@ -105,14 +109,18 @@ final class HookEventWatcher {
         hasChosenStart = tail.hasChosenStart
 
         var changes: [UUID: ComposerReadiness] = [:]
+        var dialogChanges: [DialogAttribution.Change] = []
         for line in tail.lines {
             guard let record = HookEventRecord.decode(line) else { continue }
+            if let change = attribution.apply(record) { dialogChanges.append(change) }
             let current = readiness[record.sessionID] ?? .unknown
             let next = ComposerReadiness.applying(record.event, to: current)
             guard next != current else { continue }
             readiness[record.sessionID] = next
             changes[record.sessionID] = next
         }
+        // Before the readiness early return: a PermissionRequest never changes readiness.
+        if !dialogChanges.isEmpty { onDialog(dialogChanges) }
         guard !changes.isEmpty else { return }
         onChange(changes)
     }

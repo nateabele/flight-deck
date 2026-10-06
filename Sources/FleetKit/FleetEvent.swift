@@ -52,7 +52,9 @@ public enum FleetEvent: Equatable, Sendable {
     case activityChanged(id: UUID, activity: String?, waitingFor: String?,
                          subagentCount: Int, hasBackgroundWork: Bool,
                          openPromptCall: OpenPromptIdentity = .unreported,
-                         answerless: Bool = false)
+                         answerless: Bool = false,
+                         subagents: [WireSubagent]? = nil,
+                         openPromptAgent: String? = nil)
     case unreadChanged(id: UUID, isUnread: Bool)
 
     /// This session's last turn died on an API error, or a newer record cleared it.
@@ -104,7 +106,7 @@ extension FleetEvent {
         switch self {
         case .sessionAdded(let s, _, _): return s.id
         case .sessionRemoved(let id), .sessionMoved(let id, _, _),
-             .renamed(let id, _, _), .activityChanged(let id, _, _, _, _, _, _),
+             .renamed(let id, _, _), .activityChanged(let id, _, _, _, _, _, _, _, _),
              .unreadChanged(let id, _), .planGateChanged(let id, _),
              .promptExpired(let id, _), .promptTyped(let id, _), .apiErrorChanged(let id, _):
             return id

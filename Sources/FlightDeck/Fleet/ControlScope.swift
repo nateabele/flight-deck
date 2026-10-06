@@ -91,7 +91,7 @@ enum ControlScope {
             return id == me
         case .prompt(let id, _, _):
             return id == me
-        case .answerPrompt(let id, _, _, _):
+        case .answerPrompt(let id, _, _, _, _):
             return id == me
         case .annotatePlan(let id, _, _, _, _):
             return id == me

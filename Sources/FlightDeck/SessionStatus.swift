@@ -57,9 +57,17 @@ struct SessionStatus: Equatable {
     ///
     /// **"Nothing in the transcript tail" is not "nothing on screen".** A background subagent's
     /// permission dialog sets the parent `waiting` / `"permission prompt"` with the call in the
-    /// subagent's own transcript. That refuses `"subagent_prompt"` (see
-    /// `PromptService.attributingSubagents`), so it never sets this.
+    /// subagent's own transcript. When the `PermissionRequest` hook has attributed it, that call
+    /// IS the open prompt (`PromptService.openPromptAgent`). Only an UNATTRIBUTED open subagent
+    /// call (no hook, or no match) refuses `"subagent_prompt"` (see
+    /// `PromptService.attributingSubagents`). Neither sets this.
     var answerless: Bool
+    /// The type of the subagent whose dialog is the one this tab is waiting on, so the tooltip
+    /// can say "implementer" rather than only "permission prompt". Set by
+    /// `SessionStore.commitStatuses` for every waiting tab each tick (nil when the prompt is
+    /// not attributed to a subagent): it is part of the synthesized `Equatable`, so a field
+    /// set on some ticks and left stale on others would republish `statuses` at 2 Hz.
+    var blockedSubagentType: String? = nil
 
     init(
         activity: SessionActivity, waitingFor: String? = nil, subagentCount: Int = 0,
@@ -102,6 +110,11 @@ struct SessionStatus: Equatable {
             // nothing is open under is never worth the reason `claude` gave for it, because
             // that reason is precisely the string this field exists to stop repeating.
             guard !answerless else { return "Still working (no response needed)" }
+            // Byte-identical to the phone's `SessionStatusGlyph.baseLabel`, after the same
+            // `answerless` guard, so the two devices never name different blockers.
+            if let blockedSubagentType, let waitingFor, !waitingFor.isEmpty {
+                return "Waiting for you — \(blockedSubagentType): \(waitingFor)"
+            }
             guard let waitingFor, !waitingFor.isEmpty else { return "Waiting for you" }
             return "Waiting for you — \(waitingFor)"
         }
