@@ -103,6 +103,12 @@ final class TranscriptWatcher {
     /// two passes interleave over one `offset`.
     private func poll() {
         guard !isPolling else { return }
+        // One `stat` on the main actor instead of two tasks and an open off it, for the tick
+        // that finds nothing — nearly every tick, for nearly every tab. An empty scan changes
+        // nothing in `apply`, so skipping it is exact. See `TailReader.hasNothingNew`.
+        if TailReader.hasNothingNew(url: url, offset: offset, hasChosenStart: hasChosenStart) {
+            return
+        }
         isPolling = true
 
         let url = self.url

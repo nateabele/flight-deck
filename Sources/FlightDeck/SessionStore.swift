@@ -1423,6 +1423,9 @@ final class SessionStore: ObservableObject {
         // Read every tick, unlike the threshold above: flipping the Off switch in Preferences
         // must take effect immediately, not on the next launch.
         sleepEnabled: { [weak self] in self?.preferences?.idleSleepEnabled ?? true },
+        // The pidfile read and process-tree walk at most every 5s rather than every 500ms
+        // tick — see `SessionSleepController.evaluationInterval`.
+        evaluationInterval: 5,
         now: { Date() }
     )
 

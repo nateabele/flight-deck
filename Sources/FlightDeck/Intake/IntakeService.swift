@@ -189,6 +189,15 @@ final class IntakeService: ObservableObject {
     /// see `TapeOverlay`. Only `tapes` shows them: `latestTapes` stays the runner's word, since
     /// liveness, resumption and announcements are about what it has done, not what was asked.
     private var overlays: [UUID: [CommandEnvelope]] = [:]
+
+    /// `hasPendingCommands`'s memory, per intake. Dropped with the intake's other shaping
+    /// state in `pollTapes` when it stops shaping.
+    private var pendingCommandsMemo: [UUID: PendingCommandsMemo] = [:]
+    private struct PendingCommandsMemo {
+        let stamp: TranscriptStamp?
+        let acked: Int
+        let pending: Bool
+    }
     /// The newest read of each tape, heartbeat and all — what the runner-liveness checks use.
     /// Kept apart from `tapes` because a running tape's heartbeat changes every second, and
     /// republishing for that alone re-rendered every view observing this service each second
@@ -457,8 +466,23 @@ final class IntakeService: ObservableObject {
     }
 
     /// Commands queued after the last one the runner acked — work a runner still has to read.
+    ///
+    /// Memoized on `commands.jsonl`'s stat and the ack, because the answer is a function of
+    /// exactly those two and both callers ask on a schedule: the sidebar's attention count
+    /// several times per redraw, and `resumeIfStalled` every tick. Each used to re-read and
+    /// re-decode the whole file — ~2.6% of a core on the main thread (measured 2026-10-05).
+    /// `appendCommand` always grows the file, so a queued command always moves the stamp.
     private func hasPendingCommands(_ id: UUID, _ tape: Tape) -> Bool {
-        !tapeStore(id).commands(after: tape.ackedCommandSeq).isEmpty
+        let store = tapeStore(id)
+        let stamp = TranscriptStamp(of: store.commandsURL)
+        if let memo = pendingCommandsMemo[id], memo.stamp == stamp, memo.acked == tape.ackedCommandSeq {
+            return memo.pending
+        }
+        let pending = !store.commands(after: tape.ackedCommandSeq).isEmpty
+        pendingCommandsMemo[id] = PendingCommandsMemo(
+            stamp: stamp, acked: tape.ackedCommandSeq, pending: pending
+        )
+        return pending
     }
 
     /// The one split-flap memory for `id`'s screens — see `FlapPolicy` for why it can't live in
@@ -943,10 +967,11 @@ final class IntakeService: ObservableObject {
         let tracked = Set(latestTapes.keys).union(tapes.keys).union(tapeDates.keys).union(seatRounds.keys)
             .union(seatActivities.keys).union(runRecords.keys).union(seatResults.keys).union(convergence.keys)
             .union(convergenceKeys.keys).union(coverage.keys).union(halts.keys).union(editConflicts.keys).union(editRouters.keys).union(planFoldStores.keys)
-            .union(overlays.keys)
+            .union(overlays.keys).union(pendingCommandsMemo.keys)
         for gone in tracked.subtracting(shaping) {
             tapes[gone] = nil
             overlays[gone] = nil
+            pendingCommandsMemo[gone] = nil
             latestTapes[gone] = nil
             tapeDates[gone] = nil
             forgetSeats(gone)
