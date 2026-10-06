@@ -21,10 +21,11 @@ final class StoreSwarmSpawnerTests: XCTestCase {
 
     private func spawner(created: Result<UUID, AgentLaunchError>, exists: Bool = true, name: String? = "BlueLake",
                          calls: @escaping (Call) -> Void = { _ in },
-                         deliverSucceeds: Bool = true) -> StoreSwarmSpawner {
+                         deliverSucceeds: Bool = true,
+                         discarded: @escaping (UUID) -> Void = { _ in }) -> StoreSwarmSpawner {
         StoreSwarmSpawner(
             create: { agent, dir, account, overrides in calls(Call(agent: agent, dir: dir, account: account, overrides: overrides)); return created },
-            exists: { _ in exists },
+            exists: { _ in exists }, discard: discarded,
             identity: { id in name.map { FlywheelIdentity(agentName: $0, project: "/p") } },
             session: { id in Session(id: id, title: "t", workingDirectory: "/p") },
             registry: RoutingCapabilityRegistry([FakeRoutingCapabilities()]),
@@ -65,26 +66,55 @@ final class StoreSwarmSpawnerTests: XCTestCase {
     }
 
     func testContractSpawnClaimsBetweenCreateAndPrompt() async {
-        let s = spawner(created: .success(UUID()))
+        var discarded: [UUID] = []
+        let s = spawner(created: .success(UUID()), discarded: { discarded.append($0) })
         var order: [String] = []
         s.claim = { t, name in order.append("claim \(t.id) \(name)"); return .claimed }
         let r = await s.spawn(task: task, block: block(), lease: nil, firstPrompt: "go")
         XCTAssertEqual(r.map(\.agentName), .success("BlueLake"))
         XCTAssertEqual(order, ["claim fx-a BlueLake"])
+        XCTAssertEqual(discarded, [], "a spawn that worked keeps its tab")
     }
 
-    func testContractSpawnReportsAClaimConflict() async {
-        let s = spawner(created: .success(UUID()))
+    /// A failed hand-off spawn is retried at the next boundary; a tab left behind by each try
+    /// is an orphan agent nobody prompts, one more per retry. So a spawn that fails after its
+    /// tab exists closes that tab.
+    func testContractSpawnReportsAClaimConflictAndClosesTheTab() async {
+        let id = UUID(); var discarded: [UUID] = []
+        let s = spawner(created: .success(id), discarded: { discarded.append($0) })
         s.claim = { _, _ in .conflict }
         let r = await s.spawn(task: task, block: block(), lease: nil, firstPrompt: "go")
         XCTAssertEqual(r, .failure(.claimConflict("fx-a")))
+        XCTAssertEqual(discarded, [id])
     }
 
-    func testContractSpawnReportsAComposerTimeout() async {
-        let s = spawner(created: .success(UUID()), deliverSucceeds: false)
+    func testContractSpawnReportsAComposerTimeoutAndClosesTheTab() async {
+        let id = UUID(); var discarded: [UUID] = []
+        let s = spawner(created: .success(id), deliverSucceeds: false, discarded: { discarded.append($0) })
         s.claim = { _, _ in .claimed }
         let r = await s.spawn(task: task, block: block(), lease: nil, firstPrompt: "go")
         XCTAssertEqual(r, .failure(.composerTimeout))
+        XCTAssertEqual(discarded, [id])
+    }
+
+    /// The tab opened but booted no Agent Mail identity: still a tab the spawn opened and will
+    /// never prompt.
+    func testATabWithNoIdentityIsClosedBySpawn() async {
+        let id = UUID(); var discarded: [UUID] = []
+        let s = spawner(created: .success(id), name: nil, discarded: { discarded.append($0) })
+        s.claim = { _, _ in .claimed }
+        _ = await s.spawn(task: task, block: block(), lease: nil, firstPrompt: "go")
+        XCTAssertEqual(discarded, [id])
+    }
+
+    /// No tab was opened, so there is nothing to close (and closing an unknown id is not this
+    /// spawner's to guess at).
+    func testAFailedCreateClosesNothing() async {
+        var discarded: [UUID] = []
+        let s = spawner(created: .failure(.prepareFailed("boom")), discarded: { discarded.append($0) })
+        s.claim = { _, _ in .claimed }
+        _ = await s.spawn(task: task, block: block(), lease: nil, firstPrompt: "go")
+        XCTAssertEqual(discarded, [])
     }
 
     /// A hand-off spawn that never claims leaves the task open, and the swarm then claims it for
@@ -100,7 +130,7 @@ final class StoreSwarmSpawnerTests: XCTestCase {
     func testResetGoesThroughTheRegistry() async {
         let fake = FakeRoutingCapabilities(); fake.harness = "claude"
         let id = UUID()
-        let s = StoreSwarmSpawner(create: { _, _, _, _ in .success(id) }, exists: { _ in true },
+        let s = StoreSwarmSpawner(create: { _, _, _, _ in .success(id) }, exists: { _ in true }, discard: { _ in },
                                   identity: { _ in nil }, session: { Session(id: $0, title: "t", workingDirectory: "/p") },
                                   registry: RoutingCapabilityRegistry([fake]),
                                   delivery: PromptDelivery(submit: { _, _, _ in .sent }, pending: { _, _ in false },

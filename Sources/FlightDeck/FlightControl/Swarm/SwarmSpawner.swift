@@ -74,6 +74,7 @@ final class StoreSwarmSpawner: SwarmSpawner, SwarmAgentLauncher {
 
     private let create: Create
     private let exists: (UUID) -> Bool
+    private let discard: (UUID) -> Void
     private let identity: (UUID) -> FlywheelIdentity?
     /// Named apart from the `session` locals below, which would otherwise shadow it.
     private let lookupSession: (UUID) -> Session?
@@ -83,9 +84,10 @@ final class StoreSwarmSpawner: SwarmSpawner, SwarmAgentLauncher {
     /// Wired by `SessionStore.useSwarmService` to the service's backend. Nil makes `spawn` refuse.
     var claim: ((TaskRef, String) async -> ClaimOutcome)?
 
-    init(create: @escaping Create, exists: @escaping (UUID) -> Bool, identity: @escaping (UUID) -> FlywheelIdentity?,
+    init(create: @escaping Create, exists: @escaping (UUID) -> Bool, discard: @escaping (UUID) -> Void,
+         identity: @escaping (UUID) -> FlywheelIdentity?,
          session: @escaping (UUID) -> Session?, registry: RoutingCapabilityRegistry, delivery: PromptDelivery) {
-        self.create = create; self.exists = exists; self.identity = identity; self.lookupSession = session
+        self.create = create; self.exists = exists; self.discard = discard; self.identity = identity; self.lookupSession = session
         self.registry = registry; self.delivery = delivery
     }
 
@@ -97,6 +99,9 @@ final class StoreSwarmSpawner: SwarmSpawner, SwarmAgentLauncher {
                 return await store.createSession(agent: agent, in: dir, account: account, selecting: false, overrides: overrides)
             },
             exists: { [weak store] in store?.sessionExists($0) ?? false },
+            // A tab the hand-off spawn opened and then could not use. Not offered to ⌘⇧T: it
+            // never got a prompt, so there is nothing in it to reopen.
+            discard: { [weak store] in store?.closeSession($0, recordingHistory: false) },
             identity: { [weak store] id in store?.repos.flatMap(\.sessions).first { $0.id == id }?.flywheelIdentity },
             session: { [weak store] id in store?.repos.flatMap(\.sessions).first { $0.id == id } },
             registry: store.routingCapabilities,
@@ -110,19 +115,26 @@ final class StoreSwarmSpawner: SwarmSpawner, SwarmAgentLauncher {
     }
 
     func createAgent(task: TaskRef, block: ExecutionBlock, lease: AccountLease?) async -> Result<SessionRef, SpawnError> {
-        guard let agent = AgentID(rawValue: block.harness.rawValue) else { return .failure(.unsupportedHarness(block.harness)) }
+        await createReportingTab(task: task, block: block, lease: lease).result
+    }
+
+    /// `createAgent`, plus the tab it opened whether or not that tab is usable — the contract
+    /// spawn must close a tab it opened and cannot use (no Agent Mail identity).
+    private func createReportingTab(task: TaskRef, block: ExecutionBlock, lease: AccountLease?) async
+        -> (result: Result<SessionRef, SpawnError>, tab: UUID?) {
+        guard let agent = AgentID(rawValue: block.harness.rawValue) else { return (.failure(.unsupportedHarness(block.harness)), nil) }
         let overrides = LaunchOverrides(model: block.model, knobs: block.knobs)
         switch await create(agent, task.project.path, lease?.account.id, overrides) {
         case .failure(let error):
-            return .failure(.launchFailed(error.errorDescription ?? String(describing: error)))
+            return (.failure(.launchFailed(error.errorDescription ?? String(describing: error))), nil)
         case .success(let id):
             // `newSession` returns an unfiled draft when it refuses, and `createSession` passes
             // that draft's id back as a success; the tab has to actually exist.
-            guard exists(id) else { return .failure(.launchFailed("the tab was refused")) }
+            guard exists(id) else { return (.failure(.launchFailed("the tab was refused")), nil) }
             guard let name = identity(id)?.agentName else {
-                return .failure(.launchFailed("no Agent Mail identity — is Flight Control on for this project?"))
+                return (.failure(.launchFailed("no Agent Mail identity — is Flight Control on for this project?")), id)
             }
-            return .success(SessionRef(id: id, agentName: name))
+            return (.success(SessionRef(id: id, agentName: name)), id)
         }
     }
 
@@ -143,15 +155,44 @@ final class StoreSwarmSpawner: SwarmSpawner, SwarmAgentLauncher {
     /// task open after the hand-off returned it, and the swarm then claims it for a second agent.
     func spawn(task: TaskRef, block: ExecutionBlock, lease: AccountLease?, firstPrompt: String) async -> Result<SessionRef, SpawnError> {
         guard let claim else { return .failure(.launchFailed("no claim configured")) }
-        let created = await createAgent(task: task, block: block, lease: lease)
-        guard case .success(let ref) = created else { return created }
-        switch await claim(task, ref.agentName ?? "") {
-        case .claimed: break
-        case .conflict, .failed: return .failure(.claimConflict(task.id))
+        return await ContractSpawn.run(
+            create: { await self.createReportingTab(task: task, block: block, lease: lease) },
+            claim: { await claim(task, $0.agentName ?? "") },
+            deliver: { await self.deliver(firstPrompt, to: $0) },
+            discard: discard, task: task)
+    }
+}
+
+/// The contract spawn's sequence, shared by `StoreSwarmSpawner` and the integration rig so the
+/// rig runs production's failure handling, not a copy of it.
+///
+/// Create → claim → prompt, and any failure after the tab exists closes that tab. The hand-off
+/// driver retries a failed spawn at the next boundary; a tab left behind by each try is one
+/// more agent nobody prompts, holding nothing the swarm knows about. The claim such a spawn may
+/// have landed is NOT returned here: the caller (`HandoffClaimSpawner`) returns it to open
+/// before claiming the task back for the old agent.
+@MainActor
+enum ContractSpawn {
+    static func run(create: () async -> (result: Result<SessionRef, SpawnError>, tab: UUID?),
+                    claim: (SessionRef) async -> ClaimOutcome,
+                    deliver: (UUID) async -> Result<Void, SpawnError>,
+                    discard: (UUID) -> Void, task: TaskRef) async -> Result<SessionRef, SpawnError> {
+        let created = await create()
+        guard case .success(let ref) = created.result else {
+            if let tab = created.tab { discard(tab) }
+            return created.result
         }
-        switch await deliver(firstPrompt, to: ref.id) {
+        switch await claim(ref) {
+        case .claimed: break
+        case .conflict, .failed:
+            discard(ref.id)
+            return .failure(.claimConflict(task.id))
+        }
+        switch await deliver(ref.id) {
         case .success: return .success(ref)
-        case .failure(let error): return .failure(error)
+        case .failure(let error):
+            discard(ref.id)
+            return .failure(error)
         }
     }
 }

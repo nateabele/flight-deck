@@ -191,7 +191,8 @@ private struct FreshRouter: Router {
 /// open" (resetting the old agent, so the new one would be recorded with no task) nor claim it for
 /// another agent. The mark ends in `onHandedOff`, here on a failed spawn, or after the pass.
 ///
-/// If the spawn fails, the claim goes back to the agent the swarm records as holding the task:
+/// If the spawn fails (the spawner has closed any tab it opened), the claim is returned to open
+/// and then goes back to the agent the swarm records as holding the task:
 /// the driver's promise is that a failed spawn leaves the old agent running and still assigned.
 /// The holder comes from the swarm's record, not a br read, so an unreadable br cannot lose it.
 /// No holder means the swarm already let the task go (stopped or swept): nobody to give it to,
@@ -213,7 +214,14 @@ private final class HandoffClaimSpawner: SwarmSpawner {
         _ = await swarm.returnClaimToOpen(project: project, task: task.id)
         let result = await inner.spawn(task: task, block: block, lease: lease, firstPrompt: firstPrompt)
         if case .failure = result {
-            if let holder { _ = await swarm.backend.claim(task.id, actor: holder, project: task.project) }
+            if let holder {
+                // Back to open first: a spawn that failed after its own claim landed (the prompt
+                // never arrived) left the task claimed by the new agent, whose tab the spawner
+                // has closed. Claiming back over that claim conflicts, and the task stayed with
+                // an agent that no longer exists while the swarm still recorded the old one.
+                _ = await swarm.returnClaimToOpen(project: project, task: task.id)
+                _ = await swarm.backend.claim(task.id, actor: holder, project: task.project)
+            }
             swarm.endHandoff(project: project, task: task.id)
         }
         return result
