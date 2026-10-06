@@ -210,6 +210,11 @@ targets:
       # nothing, which would defeat its entire purpose.
       - path: Sources/FlightDeck/GhosttyDefaults.conf
         buildPhase: resources
+      # Same reason, for `GhosttyThemeTests`.
+      - path: Sources/FlightDeck/GhosttyThemeLight.conf
+        buildPhase: resources
+      - path: Sources/FlightDeck/GhosttyThemeDark.conf
+        buildPhase: resources
       # Same reason as GhosttyDefaults.conf above: `Bundle(for: Self.self)` under `xctest`
       # is this test bundle, not "Flight Deck.app", so ClaudePluginPayloadTests needs its
       # own copy of the folder reference rather than reaching the app target's.

@@ -68,6 +68,17 @@ Net: **~97% of `GhosttyEmbed/` is reused Ghostty code**; the Flight-Deck-authore
 
 - **Tick loop:** `libghostty` only advances when `ghostty_app_tick` is called. `GhosttyApp`'s `wakeup` callback does `DispatchQueue.main.async { tick() }` (thread-safe), and `TerminalPane` kicks an initial tick so the first frame renders.
 - **Retention:** one process-wide `GhosttyApp.shared`, held **weakly** by `SessionStore` (the store must not co-own a static that already owns itself for the life of the process). **This is the thing to change before multi-window/multi-session** — see the teardown-lifetime item in [FOLLOWUPS.md](FOLLOWUPS.md).
+- **Light/dark appearance:** the terminal follows the system appearance. `GhosttyApp` loads
+  `theme = light:…,dark:…` pointing at the bundled `GhosttyThemeLight.conf` /
+  `GhosttyThemeDark.conf` (the dark one is libghostty's own default palette, so dark mode is
+  unchanged). This loads after `GhosttyDefaults.conf` and before the user's Ghostty config, so
+  the user's own `theme`/`background`/`palette` still wins. The paths have to be absolute
+  because the bundle has no Ghostty resources directory, so the line is written to a throwaway
+  file at launch. KVO on `NSApp.effectiveAppearance` calls `ghostty_app_set_color_scheme`
+  (which seeds new surfaces) and `ghostty_surface_set_color_scheme` on every live surface
+  (each surface keeps its own state, so setting only the app's re-themes nothing already
+  open). libghostty answers each call with a soft `reload_config`, which `GhosttyApp.perform`
+  handles by re-handing over the existing config. Hard reloads are still unhandled.
 - **Shell launch:** the surface's PTY forks `ShellResolver.resolve()` in the session's `transcriptDirectory` — the same field the transcript watcher reads, not the project the row is filed under, so a restored `claude --resume` runs where its conversation actually lives (verified: `FlightDeck → /usr/bin/login → -/bin/zsh`). The two are equal until `claude` changes directory to somewhere the tab does not follow — a git worktree, a plain `cd`, or a resume into a conversation whose project is not open — since the transcript follows every reported cwd while the row is refiled only into an already-open project.
 - **Surface sizing:** `TerminalPane`'s container is a `TerminalHostView`, an `NSView` subclass
   that forwards frame changes to `Ghostty.SurfaceView.sizeDidChange(_:)` — the call that

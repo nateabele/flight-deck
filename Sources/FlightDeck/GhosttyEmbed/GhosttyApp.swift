@@ -42,6 +42,16 @@ final class GhosttyApp {
     /// The finalized libghostty configuration backing `app`.
     private var config: ghostty_config_t!
 
+    /// Every surface this app has handed out, so an appearance change can reach the live
+    /// ones. Weak: a surface's lifetime belongs to `SessionStore`, not to this registry.
+    private let surfaceViews = NSHashTable<Ghostty.SurfaceView>.weakObjects()
+
+    /// The scheme last pushed into libghostty, so a KVO burst that re-reports the same
+    /// appearance does not re-run a config reload on every surface.
+    private var appliedColorScheme: ghostty_color_scheme_e?
+
+    private var appearanceObservation: NSKeyValueObservation?
+
     /// One-time global libghostty initialization. libghostty requires
     /// `ghostty_init` exactly once per process before any other API call.
     private static let didInit: Bool = {
@@ -64,6 +74,7 @@ final class GhosttyApp {
         // Flight Deck's own defaults go in FIRST, so the user's config files below can still
         // override anything here. See GhosttyDefaults.conf for what and why.
         GhosttyApp.loadBundledDefaults(into: cfg)
+        GhosttyApp.loadBundledThemes(into: cfg)
         ghostty_config_load_default_files(cfg)
         ghostty_config_load_recursive_files(cfg)
         ghostty_config_finalize(cfg)
@@ -114,6 +125,14 @@ final class GhosttyApp {
         }
         self.app = app
         ghostty_app_set_focus(app, NSApp.isActive)
+
+        // Before any surface exists: a new surface takes the app's scheme as its starting
+        // state, and libghostty's default is light, so skipping this paints every terminal
+        // light on a dark Mac until the first appearance change.
+        applyColorScheme()
+        appearanceObservation = NSApp.observe(\.effectiveAppearance) { [weak self] _, _ in
+            DispatchQueue.main.async { self?.applyColorScheme() }
+        }
     }
 
     deinit {
@@ -129,7 +148,64 @@ final class GhosttyApp {
 
     /// Create a new terminal surface view bound to this app.
     func makeSurfaceView(baseConfig: Ghostty.SurfaceConfiguration? = nil) -> Ghostty.SurfaceView {
-        Ghostty.SurfaceView(app, baseConfig: baseConfig)
+        let view = Ghostty.SurfaceView(app, baseConfig: baseConfig)
+        surfaceViews.add(view)
+        return view
+    }
+
+    // MARK: - Appearance
+
+    /// The libghostty scheme for an AppKit appearance.
+    static func colorScheme(for appearance: NSAppearance) -> ghostty_color_scheme_e {
+        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            ? GHOSTTY_COLOR_SCHEME_DARK
+            : GHOSTTY_COLOR_SCHEME_LIGHT
+    }
+
+    /// Tells libghostty the app's current light/dark appearance, which selects the matching
+    /// half of the `theme` pair `loadBundledThemes` set.
+    ///
+    /// Both levels, as upstream's `AppDelegate` and `BaseTerminalController` do: the app's
+    /// scheme seeds surfaces created later, but each live surface keeps its own conditional
+    /// state and re-themes only when told directly. Setting just the app would leave every
+    /// open terminal on the old colours. Each call comes back through `perform` as a soft
+    /// `reload_config`, which is what actually re-applies the config.
+    ///
+    /// `NSApp.effectiveAppearance` rather than a view's: it follows System Settings, and a
+    /// surface parked off-window (a background tab, a slept session) still needs the change.
+    private func applyColorScheme() {
+        guard let app else { return }
+        let scheme = GhosttyApp.colorScheme(for: NSApp.effectiveAppearance)
+        guard scheme != appliedColorScheme else { return }
+        appliedColorScheme = scheme
+        ghostty_app_set_color_scheme(app, scheme)
+        for view in surfaceViews.allObjects {
+            if let surface = view.surface { ghostty_surface_set_color_scheme(surface, scheme) }
+        }
+    }
+
+    /// Answers libghostty's soft `reload_config`: re-hand it the config it already has, which
+    /// it re-resolves against the target's current light/dark state. Hard reloads (re-reading
+    /// the config files from disk) are not supported and stay unhandled.
+    private static func reloadConfig(
+        _ v: ghostty_action_reload_config_s,
+        target: ghostty_target_s,
+        app: ghostty_app_t?
+    ) -> Bool {
+        guard v.soft, let app, let userdata = ghostty_app_userdata(app) else { return false }
+        let owner = Unmanaged<GhosttyApp>.fromOpaque(userdata).takeUnretainedValue()
+        guard let config = owner.config else { return false }
+        switch target.tag {
+        case GHOSTTY_TARGET_APP:
+            ghostty_app_update_config(app, config)
+            return true
+        case GHOSTTY_TARGET_SURFACE:
+            guard let surface = target.target.surface else { return false }
+            ghostty_surface_update_config(surface, config)
+            return true
+        default:
+            return false
+        }
     }
 
     // MARK: - Runtime callbacks
@@ -149,6 +225,49 @@ final class GhosttyApp {
             return
         }
         url.path.withCString { ghostty_config_load_file(config, $0) }
+    }
+
+    /// Points `theme` at the bundled light/dark pair, so the terminal follows the system
+    /// appearance (see `applyColorScheme`). Loaded before the user's config files, so their
+    /// own `theme`, `background` or `palette` still wins.
+    ///
+    /// `theme` only resolves a bare name against a Ghostty resources directory, which the
+    /// bundle deliberately lacks (one would also switch on shell integration and terminfo), so
+    /// it needs absolute paths — and those are only known at runtime. With no string entry
+    /// point (see `loadBundledDefaults`), the line goes through a throwaway file. libghostty
+    /// keeps the parsed line, not the file, so deleting it straight after is safe; the theme
+    /// files themselves are re-read from the bundle on every switch.
+    private static func loadBundledThemes(into config: ghostty_config_t) {
+        guard let light = Bundle.main.url(forResource: "GhosttyThemeLight", withExtension: "conf"),
+              let dark = Bundle.main.url(forResource: "GhosttyThemeDark", withExtension: "conf")
+        else {
+            Ghostty.logger.warning("Ghostty theme files missing from bundle; terminal stays dark")
+            return
+        }
+        let file = FileManager.default.temporaryDirectory
+            .appendingPathComponent("flightdeck-ghostty-theme-\(UUID().uuidString).conf")
+        do {
+            try themeConfigLine(light: light.path, dark: dark.path)
+                .write(to: file, atomically: false, encoding: .utf8)
+        } catch {
+            Ghostty.logger.warning("could not write Ghostty theme config: \(error)")
+            return
+        }
+        defer { try? FileManager.default.removeItem(at: file) }
+        file.path.withCString { ghostty_config_load_file(config, $0) }
+    }
+
+    /// The `theme = light:…,dark:…` line for two absolute theme paths. Each path is quoted
+    /// because the pair syntax splits on `,` and `:`; libghostty decodes a quoted value as a
+    /// Zig string literal, hence escaping `\` and `"`.
+    static func themeConfigLine(light: String, dark: String) -> String {
+        func quoted(_ path: String) -> String {
+            let escaped = path
+                .replacingOccurrences(of: "\\", with: "\\\\")
+                .replacingOccurrences(of: "\"", with: "\\\"")
+            return "\"\(escaped)\""
+        }
+        return "theme = light:\(quoted(light)),dark:\(quoted(dark))\n"
     }
 
     /// Surfaces whatever diagnostics libghostty recorded while parsing the config.
@@ -209,6 +328,9 @@ final class GhosttyApp {
 
         case GHOSTTY_ACTION_OPEN_URL:
             return openURL(action.action.open_url)
+
+        case GHOSTTY_ACTION_RELOAD_CONFIG:
+            return reloadConfig(action.action.reload_config, target: target, app: app)
 
         case GHOSTTY_ACTION_MOUSE_OVER_LINK:
             let v = action.action.mouse_over_link
