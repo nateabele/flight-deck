@@ -521,6 +521,9 @@ page.
     paste your words (its row ticks with no Return), then press Submit and the review. Check
     that the keyboard does not hide the field. The suites cannot see the keyboard, so this
     check is manual.
+    **Then dismiss one.** Every question and permission card has an × in its top-right
+    corner. Tap it on a question: the terminal's dialog must close, as with Escape at the Mac,
+    and the card must leave. Tap it on a permission prompt: it must deny, exactly as Deny does.
 70. **Interfere while it drives.** Send a set, and while the Mac is walking the dialog, move
     the cursor in the terminal yourself. The drive must STOP — no further keys — rather than
     counting arrows from where you left it. Nothing is committed until the review is submitted,

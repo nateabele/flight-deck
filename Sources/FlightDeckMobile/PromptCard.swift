@@ -94,6 +94,20 @@ struct PromptCard: View {
         }
     }
 
+    /// Whether the corner × is offered: on every dialog, until an answer to it is in flight.
+    ///
+    /// **It is `PromptAnswer.deny` — one Escape, nothing read off the screen** — so unlike the
+    /// options it needs nothing this phone could have failed to parse, and a question this Mac
+    /// marked unanswerable can still be dismissed. On a permission dialog it is the Deny button
+    /// again; on a question it cancels the dialog, which claude records as the call rejected.
+    /// Hidden once anything is sent for this call, for `showsControls`' reason: a second answer
+    /// would race the first into the terminal.
+    static func showsDismiss(
+        for open: OpenPrompt, state: SessionTimelineModel.AnswerState
+    ) -> Bool {
+        state.call != open.callID
+    }
+
     /// Blocked replaces the bare "Waiting for you" only once the chase has actually given up
     /// (~18s), never on a single failed fetch — the ordinary race must keep looking like one.
     ///
@@ -337,6 +351,8 @@ struct PromptCard: View {
                 Text(Self.title(for: open, agent: agent))
                     .font(.callout.weight(.medium))
                     .fixedSize(horizontal: false, vertical: true)
+                    // Clear of the dismiss button in the corner.
+                    .padding(.trailing, 24)
                 if let subtitle = Self.subtitle(for: open) {
                     Text(subtitle)
                         .font(.footnote.monospaced())
@@ -355,6 +371,18 @@ struct PromptCard: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .overlay(alignment: .topTrailing) {
+                if Self.showsDismiss(for: open, state: state) {
+                    Button { model.answer(.deny, to: open.callID) } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.title3)
+                            .symbolRenderingMode(.hierarchical)
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Dismiss")
                 }
             }
             .modifier(CardChrome())

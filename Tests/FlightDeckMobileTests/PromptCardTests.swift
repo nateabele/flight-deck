@@ -50,6 +50,19 @@ final class PromptCardTests: XCTestCase {
         )
     }
 
+    /// **The corner × is Escape, so it needs nothing parsed** — offered on both shapes, and on
+    /// a question the Mac refused to drive, until an answer to THIS call is in flight.
+    func testDismissIsOfferedOnEveryDialogUntilAnAnswerIsSent() {
+        let refused = question(unanswerable: PromptQuestion.multiSelectReason)
+        for open in [question(), permission, refused] {
+            XCTAssertTrue(PromptCard.showsDismiss(for: open, state: .idle))
+            XCTAssertTrue(PromptCard.showsDismiss(for: open, state: .sent(call: "toolu_OTHER")),
+                          "a state from another dialog does not hide this one's ×")
+            XCTAssertFalse(PromptCard.showsDismiss(for: open, state: .sent(call: open.callID)))
+            XCTAssertFalse(PromptCard.showsDismiss(for: open, state: .failed(call: open.callID, "x")))
+        }
+    }
+
     // MARK: Typed answers
 
     /// A pasted newline is flattened rather than refused — in claude's field it would be
