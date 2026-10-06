@@ -18,7 +18,7 @@ protocol HandoffHost: AnyObject {
     /// Each returns a warning, or nil when it worked.
     func reassign(task: TaskRef, to agentName: String) async -> String?
     func releaseReservations(of agent: String, project: URL) async -> String?
-    /// True only when the exit command was accepted for delivery; false means the old agent is still running.
+    /// True only when the exit command was accepted for delivery (not proof the agent exited); false means it is still running.
     func stopAgent(_ session: SessionRef) async -> Bool
     func markHandedOff(_ old: SessionRef, to new: SessionRef)
     func record(_ entry: HandoffLogEntry)
@@ -128,8 +128,9 @@ final class StoreHandoffHost: HandoffHost {
     func reassign(task: TaskRef, to agentName: String) async -> String? { await commands.reassign(task: task, to: agentName) }
     func releaseReservations(of agent: String, project: URL) async -> String? { await commands.releaseReservations(of: agent, project: project) }
     func stopAgent(_ session: SessionRef) async -> Bool {
-        // `.sent`/`.queued` are accepted; `.duplicate` means this exact command was already
-        // accepted. Every other case typed nothing, and reporting those as delivered would let the
+        // `.sent`/`.queued` mean the command was ACCEPTED FOR DELIVERY (a queued one goes out when
+        // the composer returns), not that the agent has exited; `.duplicate` means this exact
+        // command was already accepted. Every other case typed nothing, and reporting those as delivered would let the
         // driver mark the hand-off done while the old agent keeps burning the over-limit account.
         switch store?.retireAgent(session.id) {
         case .sent?, .queued?, .duplicate?: return true

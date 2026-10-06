@@ -103,6 +103,23 @@ final class HandoffDriverTests: XCTestCase {
         XCTAssertEqual(host.log.count, 1)
     }
 
+    /// A dip below hard clears every other phase, but the first replacement already holds the task:
+    /// re-crossing while the old tab still lives must not spawn a second one.
+    func testStopFailedSurvivesADipBelowHard() async {
+        host.activities[oldID] = .idle
+        host.stopDelivered = false
+        let d = driver()
+        await d.evaluate([agent])
+        XCTAssertEqual(d.phases[oldID], .stopFailed)
+        planner.requests[oldID] = nil
+        await d.evaluate([agent])
+        planner.requests[oldID] = request
+        await d.evaluate([agent])
+        XCTAssertEqual(spawner.calls.count, 1)
+        XCTAssertEqual(host.notices.count, 1)
+        XCTAssertEqual(host.log.map(\.outcome), [.stopFailed])
+    }
+
     func testABusyAgentWaitsForItsTurnToEnd() async {
         host.activities[oldID] = .busy
         let d = driver()
