@@ -40,20 +40,14 @@ final class FlywheelReadCommandsTests: XCTestCase {
         XCTAssertNil(agents)
     }
 
-    /// `reservations`, `depEdges`, and `events` all decode shapes Task 1's probe could not
-    /// confirm at the row level (see docs/superpowers/notes/2026-09-24-observe-command-shapes.md),
-    /// so they ship as nil-stubs rather than guessed decoders — confirm that's what a caller
-    /// actually gets, independent of the runner's response.
-    func testUnconfirmedShapesDegradeToNilStub() async {
+    /// `events` is still unconfirmed at the row level (observe-command-shapes notes), so it stays
+    /// a nil-stub. `reservations` and `depEdges` are real since L3-S (ReservationsReadTests,
+    /// DepEdgesReadTests).
+    func testEventsStayANilStub() async {
         let fake = MultiRunner()
-        fake.responses["am reservations --project"] = (#"{"all_active":[]}"#, 0)
         fake.responses["am inbox-events --agent"] = (#"{"events":[],"next_cursor":0,"has_more":false}"#, 0)
         let rc = FlywheelReadCommands(runner: fake, amPath: "am", brPath: "br")
-        let reservations = await rc.reservations(project: "/tmp/p")
-        let depEdges = await rc.depEdges(project: "/tmp/p")
         let events = await rc.events(project: "/tmp/p", after: "0")
-        XCTAssertNil(reservations)
-        XCTAssertNil(depEdges)
         XCTAssertNil(events)
     }
 }

@@ -41,18 +41,24 @@ public struct GraphSnapshot: Codable, Equatable, Sendable {
         let components: [Component]
     }
 
+    /// `br graph --all --json`'s `[dependent, dependency]` pairs, on their own — Observe's
+    /// dependency lane needs the edges without the full bead list.
+    public static func decodeEdges(graph: Data) throws -> Set<DepEdge> {
+        let comps = try JSONDecoder().decode(GraphEnvelope.self, from: graph).components
+        return Set(comps.flatMap(\.edges).compactMap { pair -> DepEdge? in
+            pair.count == 2 ? DepEdge(dependent: pair[0], dependency: pair[1]) : nil
+        })
+    }
+
     /// `list` is `br list --all --json` (closed included); `graph` is `br graph --all --json`.
     public static func decode(list: Data, graph: Data) throws -> GraphSnapshot {
         let issues = try JSONDecoder().decode(ListEnvelope.self, from: list).issues
-        let comps = try JSONDecoder().decode(GraphEnvelope.self, from: graph).components
+        let edges = try decodeEdges(graph: graph)
         var beads: [String: BeadSnapshot] = [:]
         for i in issues {
             beads[i.id] = BeadSnapshot(id: i.id, title: i.title, status: i.status,
                                        assignee: i.assignee, updatedAt: i.updated_at, labels: i.labels ?? [])
         }
-        let edges = Set(comps.flatMap(\.edges).compactMap { pair -> DepEdge? in
-            pair.count == 2 ? DepEdge(dependent: pair[0], dependency: pair[1]) : nil
-        })
         return GraphSnapshot(beads: beads, edges: edges)
     }
 }

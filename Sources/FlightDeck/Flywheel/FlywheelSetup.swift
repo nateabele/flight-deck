@@ -106,7 +106,7 @@ struct FlywheelSetup {
     /// The fence `br agents --add` wraps its appended section in. `FlywheelProjectProbe` has
     /// no signal for it — that probe only reads git hooks and the two bootstrap markers — so
     /// `hasAgentsSection` checks directly rather than growing `FlywheelStatus` for one caller.
-    private static let agentsSectionMarker = "<!-- br-agent-instructions-v1 -->"
+    static let agentsSectionMarker = "<!-- br-agent-instructions-v1 -->"
 
     /// Whether `AGENTS.md` already carries `br agents --add`'s fenced section — see the gate
     /// on `initialize`'s `br agents --add` step for why this is checked on its own rather than
@@ -119,6 +119,13 @@ struct FlywheelSetup {
         let url = repo.appendingPathComponent("AGENTS.md")
         guard let contents = try? String(contentsOf: url, encoding: .utf8) else { return false }
         return contents.contains(agentsSectionMarker)
+    }
+
+    /// The beads-sync hook `enable` installs, and its path — public to removal (L3-S), which
+    /// deletes the file only when it still holds exactly this.
+    static let beadsSyncHookContents = "#!/bin/sh\nbr sync --flush-only\ngit add -A .beads\n"
+    static func beadsSyncHookPath(in repo: URL) -> URL {
+        repo.appendingPathComponent(".git/hooks/hooks.d/pre-commit").appendingPathComponent("60-beads-sync.sh")
     }
 
     /// `br init --prefix` wants a short identifier, not a path — mirrors `flywheel-new`'s own
@@ -138,11 +145,9 @@ struct FlywheelSetup {
     /// chain-runner (`#!/usr/bin/env python3 ... sys.exit(first_failure)`); appending shell
     /// to it is a `SyntaxError` that fails every commit. Never touch `pre-commit`.
     private func installBeadsSyncHook(repo: URL) throws {
-        let hooksDDir = repo.appendingPathComponent(".git/hooks/hooks.d/pre-commit")
-        try FileManager.default.createDirectory(at: hooksDDir, withIntermediateDirectories: true)
-
-        let scriptURL = hooksDDir.appendingPathComponent("60-beads-sync.sh")
-        let contents = "#!/bin/sh\nbr sync --flush-only\ngit add -A .beads\n"
+        let scriptURL = Self.beadsSyncHookPath(in: repo)
+        try FileManager.default.createDirectory(at: scriptURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let contents = Self.beadsSyncHookContents
         try contents.write(to: scriptURL, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
     }

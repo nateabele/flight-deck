@@ -30,10 +30,14 @@ public struct WireProject: Codable, Equatable, Sendable, Identifiable {
     /// Optional so a snapshot from a Mac that predates it decodes (synthesized `Codable`
     /// reads an `Optional` with `decodeIfPresent`).
     public var intakes: [WireIntakeSummary]?
+    /// This project's swarm (L3-S §8), or nil when it has none. Optional so a snapshot from a Mac
+    /// that predates it decodes.
+    public var swarm: WireSwarm?
 
     public init(
         id: UUID, name: String, path: String, isCollapsed: Bool = false,
-        sessions: [WireSession] = [], intakes: [WireIntakeSummary]? = nil
+        sessions: [WireSession] = [], intakes: [WireIntakeSummary]? = nil,
+        swarm: WireSwarm? = nil
     ) {
         self.id = id
         self.name = name
@@ -41,6 +45,7 @@ public struct WireProject: Codable, Equatable, Sendable, Identifiable {
         self.isCollapsed = isCollapsed
         self.sessions = sessions
         self.intakes = intakes
+        self.swarm = swarm
     }
 }
 

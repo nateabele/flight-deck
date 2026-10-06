@@ -150,6 +150,15 @@ struct FlightDeckApp: App {
         if Self.isResettingState, let fixture = Self.fixture {
             preferences.preferences.shell.shellOverride = fixture.shellURL.path
         }
+        #if DEBUG
+        // L3-S UI tests: Flight Control on for the fixture project, in the hermetic (nil
+        // persistence) preferences a reset run uses — so nothing reaches `preferences.v1`.
+        if Self.isResettingState, let backend = FlightControlFixtureBackend.fromDefaults() {
+            var settings = preferences.projectSettings(backend.projectPath)
+            settings.flywheelEnabled = true
+            preferences.setProjectSettings(backend.projectPath, settings)
+        }
+        #endif
         _preferences = StateObject(wrappedValue: preferences)
         // Eager like `preferences`, for the same reason: the Settings scene and the store need
         // the same instance. Building it spawns nothing.
@@ -323,6 +332,17 @@ struct FlightDeckApp: App {
         // hermetic, because `isResettingState` gave that store a nil persistence above.
         let fixture = resetState ? Self.fixture : nil
 
+        // Beside `intakes/`, honouring `-FlightDeckStateDir`; a reset run gets a scratch root.
+        let defaultSwarmsRoot: URL? = resetState ? nil : (Self.stateDirectory() ?? FileSessionPersistence.defaultDirectory())
+        #if DEBUG
+        let flightControlFixture = resetState ? FlightControlFixtureBackend.fromDefaults() : nil
+        let flywheelTools = flightControlFixture?.tools ?? .system
+        let swarmsRoot = flightControlFixture?.swarmsRoot ?? defaultSwarmsRoot
+        #else
+        let flywheelTools = FlywheelToolPaths.system
+        let swarmsRoot = defaultSwarmsRoot
+        #endif
+
         let store = SessionStore(
             ghostty: GhosttyApp.shared,
             resetState: resetState && fixture == nil,
@@ -351,7 +371,9 @@ struct FlightDeckApp: App {
             // triages into the real one's intakes.
             intakesRoot: (Self.stateDirectory() ?? FileSessionPersistence.defaultDirectory())
                 .appendingPathComponent("intakes", isDirectory: true),
-            delegationHooks: delegation
+            delegationHooks: delegation,
+            flywheelTools: flywheelTools,
+            swarmsRoot: swarmsRoot
         )
 
         // After `restore()` (inside the initializer above), which is what records the claude
@@ -382,6 +404,10 @@ struct FlightDeckApp: App {
         store.flywheelNotifier = flywheelNotifier
         // Intake release asks the store's routing for each created task's block (L3-R §4).
         store.flightControlRouting = routing
+
+        #if DEBUG
+        if let flightControlFixture { store.swarmDependencies = flightControlFixture.dependencies() }
+        #endif
 
         return store
     }

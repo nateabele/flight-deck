@@ -1,3 +1,4 @@
+import FleetKit
 import SwiftUI
 
 /// A test-only probe, reachable ONLY under a launch argument, that reproduces one question
@@ -16,6 +17,8 @@ import SwiftUI
 enum UITestHarness {
     /// The value passed as `-UITestHarness` for the link-in-NavigationLink probe.
     static let linkInNavLink = "linkInNavLink"
+    /// The swarm card with fixture data, for `SwarmCardUITests`.
+    static let swarmCard = "swarmCard"
 
     /// The harness the current launch asks for, if any. `UserDefaults` surfaces a
     /// `-Key Value` launch argument pair as a string default, which is how XCUITest hands
@@ -30,6 +33,8 @@ enum UITestHarness {
         switch name {
         case linkInNavLink:
             LinkInNavLinkHarness()
+        case swarmCard:
+            SwarmCardHarness()
         default:
             // An unknown harness name is a test bug, not a state to render silently.
             Text("Unknown UITestHarness: \(name)")
@@ -68,5 +73,20 @@ private struct LinkInNavLinkHarness: View {
                     .accessibilityIdentifier("probe-detail")
             }
         }
+    }
+}
+
+/// The swarm card with fixture data and a local pause state — no fleet, no Mac — so the UI test
+/// exercises the card's layout and its Pause/Resume swap in isolation.
+private struct SwarmCardHarness: View {
+    @State private var paused = false
+    private var swarm: WireSwarm {
+        WireSwarm(state: paused ? "paused" : "running", summary: paused ? "swarm paused · 2/3" : "swarm 2/3 · 1 waiting",
+                  banner: nil, agents: [],
+                  meters: [WireSwarmMeter(pool: "claude-subs", accountName: "Work", utilization: 0.62, state: "underSoft")],
+                  waiting: 1)
+    }
+    var body: some View {
+        List { SwarmCard(swarm: swarm, inFlight: false, onPause: { paused = true }, onResume: { paused = false }) }
     }
 }

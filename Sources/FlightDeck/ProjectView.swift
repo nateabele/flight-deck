@@ -179,6 +179,11 @@ struct ProjectView: View {
                     // must reset `IntakeDetailView`'s own `@State` (answer drafts, the chosen
                     // preset), which a same-identity re-render would otherwise carry over.
                     IntakeDetailView(service: intakeService, intake: intake, onOpenReview: { reviewIntakeID = id },
+                                     onRunTasks: { tasks in
+                                         store.requestSwarmLaunch(project: repo.url.standardizedFileURL.path,
+                                                                  filter: .intake(id: intake.id, tasks: tasks),
+                                                                  title: repo.displayName)
+                                     },
                                      showsInspector: inspectorBinding)
                         .id(intake.id)
                 } else {

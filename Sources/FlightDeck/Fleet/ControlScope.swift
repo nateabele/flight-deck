@@ -104,6 +104,9 @@ enum ControlScope {
         case .intakeTape, .intakeDefaultPlay, .intakeNote, .intakeRemoveNote:
             // An intake is a project's, not the asking session's: no session id names it.
             return false
+        case .swarmPause, .swarmResume, .handoffConfirm, .handoffDecline:
+            // A swarm and its hand-offs are a project's, not the asking session's.
+            return false
         case .newSession, .reopenClosed, .setProjectCollapsed:
             // Fleet-wide effects with no single session to scope to: opening or reopening a
             // tab, or collapsing a project's list, reach beyond whatever tab is asking.

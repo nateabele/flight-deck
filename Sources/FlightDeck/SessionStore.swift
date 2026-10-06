@@ -51,6 +51,12 @@ final class SessionStore: ObservableObject {
     /// is the whole point of the badge.
     @Published private(set) var apiErrors: [UUID: SessionAPIError] = [:]
 
+    /// When each tab last changed activity. Beside `statuses`, not inside `SessionStatus`: that
+    /// type is compared for equality in `commitStatuses`' change diff and across the suite, and a
+    /// timestamp in it would make every tick a change. Plain, not `@Published` — every write
+    /// coincides with a `statuses` change, which already republishes.
+    private var lastActiveAtByID: [UUID: Date] = [:]
+
     /// Which dialog each blocked tab is on, by the blocked call's `tool_use_id`. Absent for
     /// every tab this Mac cannot name a dialog for, which is nearly all of them.
     ///
@@ -364,6 +370,14 @@ final class SessionStore: ObservableObject {
     /// resolve `focusedObserveProjection()` against until the fleet reconnects anyway.
     @Published var observeDAGPresented = false
 
+    /// The launch sheet `RootView` presents. Set from the project header's "Run Ready Tasks…"
+    /// and a released intake's "Run Tasks…".
+    @Published var swarmLaunchRequest: SwarmLaunchRequest?
+
+    func requestSwarmLaunch(project: String, filter: SwarmFilter, title: String) {
+        swarmLaunchRequest = SwarmLaunchRequest(project: project, filter: filter, title: title)
+    }
+
     /// Weak: `GhosttyApp.shared` is a process-wide static that owns itself for the life of
     /// the process (see `GhosttyApp.shared`'s doc comment); the store must not co-own it.
     private weak var provider: SurfaceProvider?
@@ -510,6 +524,21 @@ final class SessionStore: ObservableObject {
         // is the `xctest` tool rather than the app — see `ClaudePluginLocationTests` for the
         // composition exercised against a bundle that does carry the plugin.
         return ClaudePluginLocation.applying(to: options, bundle: .main)
+    }
+
+    /// The options a tab launches with: the project's resolved preferences, with a swarm task's
+    /// overrides laid on top by the agent's own routing capability. Overrides the agent cannot
+    /// apply refuse the launch — a task routed to a model must never quietly run on another.
+    func launchOptions(for agent: AgentID, project: String, overrides: LaunchOverrides?) -> Result<AgentOptions, AgentLaunchError> {
+        let base = options(for: agent, project: project)
+        guard let overrides, overrides.model != nil || !overrides.knobs.isEmpty else { return .success(base) }
+        guard let capabilities = routingCapabilities.capabilities(for: agent.harnessID) else {
+            return .failure(.prepareFailed("\(agent.displayName) has no routing capabilities"))
+        }
+        switch capabilities.applying(overrides, to: base) {
+        case .supported(let applied): return .success(applied)
+        case .unsupported(let reason): return .failure(.prepareFailed(reason))
+        }
     }
 
     /// Codex's half of the two dictionaries above, held together rather than as four fields
@@ -1325,6 +1354,20 @@ final class SessionStore: ObservableObject {
         let service = FlywheelObserveService(reads: flywheelObserveReads, clock: clock)
         service.onProjectionsChanged = { [weak self] projections in
             self?.flywheelNotifier?.evaluate(projectsByKey: projections)
+            // Completion detection (spec §4): the swarm reads the same polls Observe does.
+            self?.swarmServiceStorage?.projectionsChanged(projections)
+        }
+        service.enrich = { [weak self] key, snapshot in
+            guard let self, let swarm = self.swarmServiceStorage else { return snapshot }
+            // A busy agent is active now, whatever its last transition said: a long turn makes
+            // no transitions, and must not read as stalled. `lastActiveAt` stands in for the
+            // events lane, which is still empty.
+            var activity: [String: Date] = [:]
+            for (session, name) in self.flywheelAgents(inProject: key) {
+                activity[name] = self.isAgentIdle(session) ? (self.lastActiveAt(for: session) ?? .distantPast) : self.now()
+            }
+            return ObserveEnrichment.enrich(snapshot, contests: swarm.contests(project: key), activity: activity,
+                                            blocked: swarm.declaredBlocked(project: key))
         }
         return service
     }()
@@ -1347,6 +1390,71 @@ final class SessionStore: ObservableObject {
     /// `FlightDeckApp.makeStore` right after this store is built; nil in every store a test builds
     /// directly, whose releases then write tasks with no execution block, as before Level 3.
     var flightControlRouting: RoutingService?
+
+    /// The `am`/`br` executables every flywheel command runs. `system` except under the Debug
+    /// fixture backend.
+    let flywheelTools: FlywheelToolPaths
+
+    /// Where `swarms.json` lives, as handed to `init` — nil for every store but the app's own,
+    /// for the reason `intakesRoot` gives: a test must never restore the developer's swarms.
+    private let swarmsRoot: URL?
+
+    lazy var resolvedSwarmsRoot: URL = swarmsRoot
+        ?? FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlightDeck-swarms-\(UUID().uuidString)", isDirectory: true)
+
+    private var swarmServiceStorage: SwarmService?
+    private var swarmChangeForward: AnyCancellable?
+
+    /// The routing/capacity conformers (L3-R/L3-U), set by the integration branch or the Debug
+    /// fixture backend. Forwarded to the service whenever it changes.
+    var swarmDependencies: SwarmDependencies? {
+        didSet { swarmServiceStorage?.dependencies = swarmDependencies }
+    }
+
+    /// Built on first use. Its changes are forwarded as this store's, because the sidebar and
+    /// header observe only the store.
+    var swarmService: SwarmService {
+        if let built = swarmServiceStorage { return built }
+        let spawner = StoreSwarmSpawner.live(store: self)
+        let service = SwarmService(
+            store: SwarmStore(root: resolvedSwarmsRoot),
+            backend: BrSwarmBackend(runner: SystemFlywheelProcessRunner(), brPath: flywheelTools.br, amPath: flywheelTools.am),
+            launcher: spawner, spawner: spawner, host: self, registry: routingCapabilities, clock: clock)
+        useSwarmService(service)
+        return service
+    }
+
+    var swarmServiceIfBuilt: SwarmService? { swarmServiceStorage }
+
+    /// Installs a service — the lazy builder, tests, and the Debug fixture backend. The one place
+    /// a service is wired to this store.
+    func useSwarmService(_ service: SwarmService) {
+        swarmServiceStorage = service
+        if service.dependencies == nil { service.dependencies = swarmDependencies }
+        service.reservationsLookup = { [weak self] key in
+            (self?.observeService.projection(forProject: key)?.reservations ?? []).map {
+                HeldReservation(pattern: $0.file, holder: $0.holder, since: $0.since == .distantPast ? nil : $0.since)
+            }
+        }
+        service.onChange = { [weak self] in self?.scheduleSwarmRefresh() }
+        // The hand-off spawn claims through the same backend the swarm does. Captured by value:
+        // the service owns the spawner, so capturing the service here would be a retain cycle.
+        if let spawner = service.spawner as? StoreSwarmSpawner, spawner.claim == nil {
+            let backend = service.backend
+            spawner.claim = { task, name in await backend.claim(task.id, actor: name, project: task.project) }
+        }
+        swarmChangeForward = service.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
+    }
+
+    /// A swarm on disk shows its "paused after restart" banner at launch, so the service is built
+    /// now when there is something to restore — and not otherwise, so a Mac that never ran a
+    /// swarm never builds one.
+    func restoreSwarmsIfPresent() {
+        if FileManager.default.fileExists(atPath: resolvedSwarmsRoot.appendingPathComponent("swarms.json").path) {
+            _ = swarmService
+        }
+    }
 
     /// Owns every project's intakes (triage, review, release). Lazy for the same reason as
     /// `observeService`, and one more: its init reads and writes its root, so a host that
@@ -1404,6 +1512,14 @@ final class SessionStore: ObservableObject {
     /// — see that factory's comment for why no second `Notifying` is constructed. `nil`
     /// until then, and nil forever in a `SessionStore` built directly by a test.
     var flywheelNotifier: FlywheelNotifier?
+
+    /// Every agent's Level 3 capabilities, keyed by harness. Lazily the standard set; settable so
+    /// a test can register a fake harness and the integration branch can swap in real conformers.
+    lazy var routingCapabilities: RoutingCapabilityRegistry = {
+        let registry = RoutingCapabilityRegistry.standard()
+        registry.attachCommandSink(self)
+        return registry
+    }()
 
     /// Guards the lazy notification-authorization request `startObserving(project:)`
     /// makes: the underlying `Notifying.requestAuthorization()` should fire once, the
@@ -1499,6 +1615,41 @@ final class SessionStore: ObservableObject {
     }
 
     private func emit(_ events: FleetEvent...) { emit(events) }
+
+    /// The swarm summaries last RECORDED on the fleet wire, per project — the `intakeSummaries`
+    /// rule: `FleetProjection` reads this cache, never the service, so a swarm change that reached
+    /// the projection without an event cannot exist.
+    private(set) var swarmSummaries: [Repo.ID: WireSwarm?] = [:]
+    private var swarmSummariesStarted = false
+    private var swarmRefreshScheduled = false
+
+    func refreshSwarmSummaries() {
+        var next: [Repo.ID: WireSwarm?] = [:]
+        for repo in repos {
+            next[repo.id] = swarmServiceStorage.flatMap { service in
+                service.record(forProject: repo.url.path).flatMap { SwarmWireProjection.wire($0, service: service) }
+            }
+        }
+        let events = SwarmWireProjection.changes(from: swarmSummaries, to: next)
+        swarmSummaries = next
+        emit(events)
+    }
+
+    /// Called by `FleetService` after it installs the replicator, beside `startIntakeSummaries`.
+    func startSwarmSummaries() {
+        swarmSummariesStarted = true
+        refreshSwarmSummaries()
+    }
+
+    /// Coalesces a burst of swarm changes into one refresh on the next main-queue turn.
+    private func scheduleSwarmRefresh() {
+        guard swarmSummariesStarted, !swarmRefreshScheduled else { return }
+        swarmRefreshScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            self?.swarmRefreshScheduled = false
+            self?.refreshSwarmSummaries()
+        }
+    }
 
     /// The Flight Control summaries last RECORDED on the fleet wire, per project — nil when
     /// Flight Control is off there, and an absent key means the same. `FleetProjection` reads
@@ -2056,9 +2207,13 @@ final class SessionStore: ObservableObject {
         flywheelCoordinator: FlywheelCoordinator = FlywheelCoordinator(),
         flywheelSetup: FlywheelSetup = FlywheelSetup(),
         flywheelObserveReads: FlywheelReadCommands = FlywheelReadCommands(),
-        intakesRoot: URL? = nil
+        intakesRoot: URL? = nil,
+        flywheelTools: FlywheelToolPaths = .system,
+        swarmsRoot: URL? = nil
     ) {
         self.intakesRoot = intakesRoot
+        self.flywheelTools = flywheelTools
+        self.swarmsRoot = swarmsRoot
         self.provider = provider
         self.persistence = persistence
         self.preferences = preferences
@@ -2143,14 +2298,21 @@ final class SessionStore: ObservableObject {
         statusIsAlive: ((pid_t) -> Bool)? = nil,
         daemon: SessionDaemon = SessionDaemon(),
         intakesRoot: URL? = nil,
-        delegationHooks: DelegationSessionHooks? = nil
+        delegationHooks: DelegationSessionHooks? = nil,
+        flywheelTools: FlywheelToolPaths = .system,
+        swarmsRoot: URL? = nil
     ) {
         self.init(
             provider: ghostty,
             persistence: persistence,
             preferences: preferences,
             daemon: daemon,
-            intakesRoot: intakesRoot
+            flywheelCoordinator: FlywheelCoordinator(amPath: flywheelTools.am),
+            flywheelSetup: FlywheelSetup(amPath: flywheelTools.am, brPath: flywheelTools.br),
+            flywheelObserveReads: FlywheelReadCommands(amPath: flywheelTools.am, brPath: flywheelTools.br),
+            intakesRoot: intakesRoot,
+            flywheelTools: flywheelTools,
+            swarmsRoot: swarmsRoot
         )
         // Load-bearing: `display` defaults to the always-permissive `AlwaysDrawableDisplay()`
         // so tests that construct a `SessionStore` don't have to stub it (see that type's doc
@@ -2227,6 +2389,7 @@ final class SessionStore: ObservableObject {
         // never a race — see `maintenanceTick`'s doc comment for why running twice is safe
         // anyway.
         clock.add(self) { [weak self] in self?.maintenanceTick() }
+        restoreSwarmsIfPresent()
         if let previousRun {
             Task { [weak self] in await self?.sweepOrphans(from: previousRun) }
         }
@@ -2295,7 +2458,7 @@ final class SessionStore: ObservableObject {
     func newSession(
         in url: URL, at index: Int? = nil, account explicit: UUID? = nil,
         waking: DisplayWakePolicy = .wakeIfNeeded, selecting: Bool = true,
-        flywheelIdentity: FlywheelIdentity? = nil
+        flywheelIdentity: FlywheelIdentity? = nil, overrides: LaunchOverrides? = nil
     ) -> Session {
         guard ensureTerminalCreatable(waking) else {
             launchFailureReporter.report(.terminalUnavailable(displayAsleep: true))
@@ -2321,7 +2484,11 @@ final class SessionStore: ObservableObject {
             flywheelIdentity: flywheelIdentity
         )
         let adapter = adapter(for: instance(for: session))
-        let options = options(for: session.agent, project: url.path)
+        // `createSession` has already refused an override this agent cannot apply, so a failure
+        // here is unreachable from it; the plain preferences are the right answer for any other
+        // caller that passed overrides directly.
+        let options = (try? launchOptions(for: session.agent, project: url.path, overrides: overrides).get())
+            ?? options(for: session.agent, project: url.path)
         return addSession(
             session,
             in: url,
@@ -2355,7 +2522,7 @@ final class SessionStore: ObservableObject {
     @discardableResult
     func createSession(
         agent: AgentID, in directory: String, at index: Int? = nil, account explicit: UUID? = nil,
-        selecting: Bool = true
+        selecting: Bool = true, overrides: LaunchOverrides? = nil
     ) async -> Result<UUID, AgentLaunchError> {
         // Before anything else, covering both branches below: the codex branch calls
         // `addSession` directly rather than routing through `newSession(in:)`, so it does not
@@ -2382,6 +2549,15 @@ final class SessionStore: ObservableObject {
             launchFailureReporter.report(error)
             return .failure(error)
         }
+        // Checked before anything is created on either branch, so an override the agent cannot
+        // apply refuses the tab rather than launching it on the project's defaults.
+        let launchOptions: AgentOptions
+        switch self.launchOptions(for: agent, project: directory, overrides: overrides) {
+        case .success(let resolved): launchOptions = resolved
+        case .failure(let error):
+            launchFailureReporter.report(error)
+            return .failure(error)
+        }
         // An agent that mints its own conversation id has nothing to negotiate, so it takes
         // the synchronous path and never touches anything this method builds below.
         //
@@ -2402,7 +2578,7 @@ final class SessionStore: ObservableObject {
             return .success(
                 newSession(
                     in: url, at: index, account: explicit, selecting: selecting,
-                    flywheelIdentity: identity
+                    flywheelIdentity: identity, overrides: overrides
                 ).id
             )
         }
@@ -2419,7 +2595,7 @@ final class SessionStore: ObservableObject {
             title: nextSessionTitle(), workingDirectory: directory, agent: agent,
             accountID: account?.id
         )
-        let options = options(for: agent, project: directory)
+        let options = launchOptions
         // Resolved once, from the draft, and used for every registry the creation touches:
         // the adapter it prepares against, the app-server it holds open, and the teardown it
         // defers all have to name the same account, or the creation guards a stack nobody is
@@ -2599,6 +2775,31 @@ final class SessionStore: ObservableObject {
         }
     }
 
+    /// Spec §9: drain and stop the project's swarm, give back its claims and every FD-booted
+    /// agent's reservations, stop watching, and clear the flag. The repo is not edited.
+    @discardableResult
+    func turnOffFlightControl(project path: String) async -> FlightControlOff.Report {
+        let backend: SwarmBackend = swarmServiceStorage?.backend
+            ?? BrSwarmBackend(runner: SystemFlywheelProcessRunner(), brPath: flywheelTools.br, amPath: flywheelTools.am)
+        let off = FlightControlOff(
+            swarm: swarmServiceStorage, backend: backend,
+            agents: { [weak self] in self?.flywheelAgents(inProject: $0) ?? [] },
+            stopObserving: { [weak self] in self?.observeService.disable(project: $0) },
+            setEnabled: { [weak self] project, enabled in
+                guard let self else { return }
+                var settings = self.preferences?.projectSettings(project) ?? ProjectSettings()
+                settings.flywheelEnabled = enabled ? true : nil
+                self.preferences?.setProjectSettings(project, settings)
+            })
+        return await off.run(project: path)
+    }
+
+    /// Spec §9 "Remove from repo…": undoes the guard, hook and AGENTS.md section; never `.beads`.
+    func removeFlightControl(from repo: URL) async -> [String] {
+        await FlightControlRepoRemoval(runner: SystemFlywheelProcessRunner(), amPath: flywheelTools.am,
+                                       brPath: flywheelTools.br).remove(repo: repo)
+    }
+
     /// The "Set Up Flight Control…" menu action's target — `enableFlywheel`'s sibling for a project
     /// the probe found neither `.beads/` nor `.agent-mail.yaml` in. Bootstraps those markers
     /// first (`FlywheelSetup.initialize`, which also runs `enable`'s own steps), then marks
@@ -2670,6 +2871,12 @@ final class SessionStore: ObservableObject {
         guard let identity = focusedFlywheelIdentity,
               let proj = observeService.projection(forProject: identity.project) else { return nil }
         return proj.agent(for: identity)
+    }
+
+    /// The drawer's Assignment lane for the focused tab, when it is a swarm agent.
+    func focusedSwarmAssignment() -> SwarmAssignmentDetail? {
+        guard let id = selectedSessionID else { return nil }
+        return swarmServiceIfBuilt?.assignment(for: id)
     }
 
     /// `DependencyDAGOverlay`'s mount point: the focused tab's whole-project projection
@@ -4354,6 +4561,7 @@ final class SessionStore: ObservableObject {
         acceptedPromptTokens.removeValue(forKey: id)
         answeredPromptTokens.removeValue(forKey: id)
         anchors.removeValue(forKey: id)
+        lastActiveAtByID[id] = nil
         // `applyReadState` no longer clears a mark when a session's status disappears — a
         // mark now outlives its process. But closing a tab removes its id from `repos`
         // entirely, so no future tick will ever see it again; leaving the mark in
@@ -5762,6 +5970,12 @@ final class SessionStore: ObservableObject {
     private var acceptedPromptTokens: [UUID: [UUID]] = [:]
     static let maxRememberedPromptTokens = 16
 
+    /// A capability's slash command (a context reset), typed through `submitPrompt`'s gate with a
+    /// fresh token — each reset is its own message, never a retry of the last one.
+    func submitCommand(_ text: String, to session: UUID) -> PromptDispatch {
+        submitPrompt(text, token: UUID(), to: session)
+    }
+
     /// A client asked for text to be typed into a live agent and submitted.
     ///
     /// **Only an agent with a text channel, and that question is asked of the agent rather
@@ -5833,6 +6047,20 @@ final class SessionStore: ObservableObject {
         // substituted `injectionSettle`, one turn later in production — so by the time this
         // line runs the entry is either gone or genuinely waiting.
         return promptQueue[id]?.contains { $0.token == token } == true ? .queued : .sent
+    }
+
+    /// Whether a prompt accepted as `.queued` is still waiting to be typed. The swarm's first
+    /// prompt waits on this rather than on an event, because "typed" is the queue letting go.
+    func isPromptQueued(_ token: UUID, for id: UUID) -> Bool {
+        promptQueue[id]?.contains { $0.token == token } == true
+    }
+
+    /// Takes back a queued prompt nobody should receive any more — a swarm agent that never
+    /// showed a composer has had its claim returned to open, and its task prompt must not be
+    /// typed into it minutes later.
+    func withdrawQueuedPrompt(_ token: UUID, from id: UUID) {
+        promptQueue[id]?.removeAll { $0.token == token }
+        if promptQueue[id]?.isEmpty == true { promptQueue[id] = nil }
     }
 
     /// Classifies what the tab's live surface reads as, for the typing-path instrumentation.
@@ -8229,6 +8457,8 @@ final class SessionStore: ObservableObject {
         emit(events)
     }
 
+    func lastActiveAt(for id: UUID) -> Date? { lastActiveAtByID[id] }
+
     /// The single writer of `statuses`, and the one place a status change turns into its
     /// consequences.
     ///
@@ -8242,6 +8472,12 @@ final class SessionStore: ObservableObject {
         let previous = statuses
         let previousBackgroundWork = backgroundWorkSessions
         let previousOpenPromptCalls = openPromptCalls
+        // Stamped before any early return below: an activity transition is news for the row's
+        // "active N min ago" even on a tick whose published fields end up equal.
+        let stamp = now()
+        for (id, status) in next where previous[id]?.activity != status.activity {
+            lastActiveAtByID[id] = stamp
+        }
         // Shadowed, mutable: `derivedOpenPromptCalls` fills in `answerless` on every `waiting`
         // entry below, ahead of every comparison this function makes — a tick where only that
         // field moves must be recognized as a change exactly like any other, not smuggled in
@@ -8899,6 +9135,13 @@ final class SessionStore: ObservableObject {
         case .subagentCount(let count): applySubagentCount(tabID, count)
         case .turnEnded: applyTurnEnded(to: tabID)
         case .turnAborted: applyTurnAborted(to: tabID)
+        case .outputSignals(let signals):
+            // Contested detection (L3-S §7). Only flywheel tabs count: building the service adds a
+            // permanent WatchClock subscriber, which a stray `BLOCKED:` line in an ordinary tab
+            // must never cause. A flywheel tab builds it, because the Observe enrichment reads
+            // signals for any agent in the project, swarm or not.
+            guard session(for: tabID)?.flywheelIdentity != nil else { break }
+            swarmService.recordSignals(signals, session: tabID)
         // Persisted only when it actually changed. The watcher already suppresses an unchanged
         // report (`TranscriptWatcher.lastAPIError`), so this guard is the second line: it also
         // covers a restore-seeded error re-reported identically by the first live scan, which
@@ -9223,3 +9466,5 @@ enum AnswerAbortLog {
 /// subscribers by object identity — registering the store itself would replace its other
 /// registration.
 final class IntakeRetentionTicker {}
+
+extension SessionStore: SessionCommandSink {}

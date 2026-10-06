@@ -149,8 +149,9 @@ public final class FleetSocketServer: @unchecked Sendable {
     public var onHello: ((_ client: FleetAttachment, _ lastSeq: Int) -> [ServerFrame])?
     /// Answers a command. Like `onRequest`, the answer comes back through `reply` rather than
     /// as a return value: most commands still answer synchronously, on the way out of this
-    /// closure, but `.newSession` on a sleeping display awaits the wake first, and a return
-    /// value cannot represent an answer that arrives after an `await`.
+    /// closure, but `.newSession` always answers only once its tab exists (awaiting the
+    /// creation, and on a sleeping display the wake first), and a return value cannot
+    /// represent an answer that arrives after an `await`.
     ///
     /// `reply` must be called on `queue`, and it asserts that. It answers at most once — a
     /// second call is dropped rather than trusted — and calling it after the connection has
@@ -172,8 +173,8 @@ public final class FleetSocketServer: @unchecked Sendable {
     /// Answers a request. Same reply-callback shape `onCommand` has, forced rather than
     /// stylistic in both directions: most commands are still dispatched on the way out of the
     /// frame handler, but a page is a file read that would otherwise block `queue` — which in
-    /// production is the main queue — and `.newSession` on a sleeping display is a command
-    /// that has grown the same problem.
+    /// production is the main queue — and `.newSession`, which always awaits its tab's
+    /// creation, is a command that has grown the same problem.
     ///
     /// `reply` must be called on `queue`, and it asserts that. It answers at most once —
     /// a second call is dropped rather than trusted, except after a frame whose

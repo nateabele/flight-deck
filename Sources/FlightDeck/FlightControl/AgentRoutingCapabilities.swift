@@ -81,11 +81,13 @@ final class RoutingCapabilityRegistry {
 }
 
 /// Catalog and knobs are real (L3-R, `RoutingCatalogs.swift`); the usage meter and transcript
-/// pointer are real (L3-U); reset and overrides stay stubs until L3-S fills them in.
+/// pointer are real (L3-U); reset and overrides are real (L3-S).
 @MainActor
 final class ClaudeRoutingCapabilities: AgentRoutingCapabilities {
     let harness: HarnessID = AgentID.claude.harnessID
     let accountModel: AccountModel = .login
+    /// Attached by `SessionStore` (`attachCommandSink`); weak because the store owns the registry.
+    weak var commands: SessionCommandSink?
     var knobSchema: [String: [String]] { ClaudeRoutingCatalog.knobSchema }
     func modelCatalog() async -> RoutingCapability<[ModelEntry]> { .supported(ClaudeRoutingCatalog.models) }
     func usageMeterSource(account: AgentAccount?) -> RoutingCapability<any UsageMeterSource> {
@@ -97,14 +99,22 @@ final class ClaudeRoutingCapabilities: AgentRoutingCapabilities {
         }
         return .supported(pointer)
     }
-    func resetContext(_ session: Session) async throws -> RoutingCapability<Void> { .unsupported(reason: "filled in by L3-S") }
-    func applying(_ overrides: LaunchOverrides, to options: AgentOptions) -> RoutingCapability<AgentOptions> { .unsupported(reason: "filled in by L3-S") }
+    func resetContext(_ session: Session) async throws -> RoutingCapability<Void> {
+        try ContextReset.typing(ContextReset.claudeCommand, into: session, via: commands)
+    }
+    func applying(_ overrides: LaunchOverrides, to options: AgentOptions) -> RoutingCapability<AgentOptions> {
+        ClaudeLaunchOverrides.apply(overrides, to: options)
+    }
 }
+
+extension ClaudeRoutingCapabilities: CommandSinkAttachable {}
 
 @MainActor
 final class CodexRoutingCapabilities: AgentRoutingCapabilities {
     let harness: HarnessID = AgentID.codex.harnessID
     let accountModel: AccountModel = .login
+    /// Attached by `SessionStore` (`attachCommandSink`); weak because the store owns the registry.
+    weak var commands: SessionCommandSink?
     var knobSchema: [String: [String]] { CodexRoutingCatalog.shared.knobSchema }
     func modelCatalog() async -> RoutingCapability<[ModelEntry]> { await CodexRoutingCatalog.shared.models() }
     func usageMeterSource(account: AgentAccount?) -> RoutingCapability<any UsageMeterSource> {
@@ -116,8 +126,12 @@ final class CodexRoutingCapabilities: AgentRoutingCapabilities {
         }
         return .supported(pointer)
     }
-    func resetContext(_ session: Session) async throws -> RoutingCapability<Void> { .unsupported(reason: "filled in by L3-S") }
-    func applying(_ overrides: LaunchOverrides, to options: AgentOptions) -> RoutingCapability<AgentOptions> { .unsupported(reason: "filled in by L3-S") }
+    func resetContext(_ session: Session) async throws -> RoutingCapability<Void> {
+        try ContextReset.typing(ContextReset.codexCommand, into: session, via: commands)
+    }
+    func applying(_ overrides: LaunchOverrides, to options: AgentOptions) -> RoutingCapability<AgentOptions> {
+        CodexLaunchOverrides.apply(overrides, to: options)
+    }
 }
 
 /// Owned by L3-S. Spawns (or the caller reuses) an agent for `task` and submits `firstPrompt`
@@ -126,3 +140,4 @@ final class CodexRoutingCapabilities: AgentRoutingCapabilities {
 protocol SwarmSpawner: AnyObject {
     func spawn(task: TaskRef, block: ExecutionBlock, lease: AccountLease?, firstPrompt: String) async -> Result<SessionRef, SpawnError>
 }
+extension CodexRoutingCapabilities: CommandSinkAttachable {}

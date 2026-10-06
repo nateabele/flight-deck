@@ -11,6 +11,9 @@ struct FlywheelSnapshot: Equatable, Sendable {
     var reservations: [FlywheelReadCommands.RawReservation]?
     var depEdges: [FlywheelReadCommands.RawDepEdge]?
     var events: [FlywheelReadCommands.RawEvent]?
+    /// Agents that declared `BLOCKED:` and have not resumed (L3-S). Not a br status — br's
+    /// in-progress list never says blocked — but what the block trigger needs.
+    var declaredBlocked: Set<String> = []
 }
 
 /// `.blocked` beats `.stalled` beats `.active` beats `.unknown` — see `project(_:...)`'s
@@ -87,8 +90,8 @@ struct FlywheelProjection: Equatable, Sendable {
         // `br dep`/`graph` edges pass through verbatim; a contended reservation (someone
         // waiting on the holder) additionally becomes a reservation edge from each waiter
         // to the holder, so the dependency view can show lock contention alongside real
-        // bead dependencies without a second lane. With `depEdges` still a Task 2 nil-stub,
-        // this is currently the only source of edges in practice.
+        // bead dependencies without a second lane. `depEdges` comes from `br graph` (L3-S) and
+        // names tasks (`from` is the dependent); reservation edges name agents.
         let dependencyEdges = (snapshot.depEdges ?? []).map { DepEdge(from: $0.from, to: $0.to, kind: .dependency) }
         let reservationEdges = reservations.flatMap { reservation -> [DepEdge] in
             guard !reservation.waiters.isEmpty else { return [] }
@@ -106,7 +109,7 @@ struct FlywheelProjection: Equatable, Sendable {
             let waitsOn = reservations.filter { $0.waiters.contains(raw.name) }
             let lastEventAt = events.filter { $0.agent == raw.name }.map(\.at).max()
 
-            let blocked = bead?.status == "blocked"
+            let blocked = bead?.status == "blocked" || snapshot.declaredBlocked.contains(raw.name)
             // Holds a file someone else is waiting on. The critical-path half of this
             // OR (from the spec) needs DependencyGraphLayout, which doesn't exist until
             // Task 4 — left out here rather than guessed; see task-3-brief.md ruling 1.

@@ -36,7 +36,8 @@ enum FleetProjection {
                 allowsBlockedAbort: allowsBlockedAbort,
                 // The cache, never `IntakeService`: see `SessionStore.intakeSummaries` for why
                 // the oracle must read exactly what the store last recorded.
-                intakes: store.intakeSummaries[$0.id] ?? nil
+                intakes: store.intakeSummaries[$0.id] ?? nil,
+                swarm: store.swarmSummaries[$0.id] ?? nil
             )
         })
     }
@@ -47,7 +48,8 @@ enum FleetProjection {
         backgroundWork: Set<UUID>, openPromptCalls: [UUID: String],
         apiErrors: [UUID: SessionAPIError],
         planGates: PlanGateService? = nil, allowsBlockedAbort: Bool = false,
-        intakes: [WireIntakeSummary]? = nil
+        intakes: [WireIntakeSummary]? = nil,
+        swarm: WireSwarm? = nil
     ) -> WireProject {
         WireProject(
             id: repo.id,
@@ -64,7 +66,8 @@ enum FleetProjection {
                     allowsBlockedAbort: allowsBlockedAbort
                 )
             },
-            intakes: intakes
+            intakes: intakes,
+            swarm: swarm
         )
     }
 

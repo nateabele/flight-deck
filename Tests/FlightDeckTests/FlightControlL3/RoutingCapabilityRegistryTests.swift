@@ -36,15 +36,6 @@ final class RoutingCapabilityRegistryTests: XCTestCase {
         XCTAssertEqual(cats.enabledModels, [], "an unsupported catalog must never pretend to have models")
     }
 
-    func testStubsSayUnsupportedRatherThanFake() {
-        for h in AgentID.allCases.map(\.harnessID) {
-            let caps = RoutingCapabilityRegistry.standard().capabilities(for: h)!
-            if case .supported = caps.applying(LaunchOverrides(model: "x", knobs: [:]), to: .codex(.init())) {
-                XCTFail("\(h) stub claimed launch overrides")
-            }
-        }
-    }
-
     func testFakeSpawnerRecordsAndReturnsScript() async {
         let spawner = FakeSwarmSpawner()
         let ref = SessionRef(id: UUID(), agentName: "BlueLake")

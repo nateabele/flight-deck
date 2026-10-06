@@ -57,7 +57,9 @@ struct RootView: View {
                                       collapsed: store.observeDrawerCollapsed,
                                       onToggleCollapse: { store.toggleObserveDrawer() },
                                       onJumpToRootCause: { store.jumpToObserveRootCause() },
-                                      onOpenDAG: { store.presentObserveDAG() })
+                                      onOpenDAG: { store.presentObserveDAG() },
+                                      assignment: store.focusedSwarmAssignment(),
+                                      onJumpToSession: { store.selectedSessionID = $0 })
                     }
                 }
             } else {
@@ -90,6 +92,12 @@ struct RootView: View {
                 )
                 .frame(minWidth: 640, minHeight: 440)
             }
+        }
+        .sheet(item: $store.swarmLaunchRequest) { request in
+            LaunchSheet(model: LaunchSheetModel(request: request, backend: store.swarmService.backend,
+                                                service: store.swarmService, registry: store.routingCapabilities),
+                        harnesses: store.routingCapabilities.harnesses,
+                        onClose: { store.swarmLaunchRequest = nil })
         }
         // Over the whole window, not the detail column: the scrim has to cover the sidebar too,
         // or a click there would change the selection behind an overlay the user is reading.

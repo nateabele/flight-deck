@@ -747,7 +747,9 @@ public final class FleetConnector: @unchecked Sendable {
             resolveSearch(cid, with: .success(hits))
             return
         case .session(let cid, let sessionID):
-            // Unsequenced, same reason.
+            // `session.new` now answers with the tab it made; a caller that filed it with
+            // `send(_:then:)` hears that as its ack. Unsequenced, like every reply here.
+            if resolveAck(cid, with: .success(())) { return }
             resolveSession(cid, with: .success(sessionID))
             return
         case .phoneRequest(let cid, let request):

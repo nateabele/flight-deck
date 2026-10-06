@@ -1,0 +1,52 @@
+{
+  "_meta": {
+    "command": "robot reservations",
+    "timestamp": "2026-10-05T17:31:29.444848+00:00",
+    "format": "json",
+    "version": "1.0",
+    "project": "users-me-fd-l3s-probe-am"
+  },
+  "_alerts": [
+    {
+      "severity": "warn",
+      "summary": "live server mailbox configuration unavailable: transport failure calling http://127.0.0.1:8765/mail/ws-state?limit=1: connection failed: Connection refused (os error 61); local reservation read cannot attest freshness",
+      "action": "use MCP file-reservation tools before relying on this CLI result"
+    }
+  ],
+  "all_active": [
+    {
+      "agent": "GreenFox",
+      "path": "Sources/*.swift",
+      "exclusive": true,
+      "remaining_seconds": 3594,
+      "remaining": "59m",
+      "granted_at": "5s ago"
+    }
+  ],
+  "forecast": {
+    "expiry_herds": [
+      {
+        "window": "15-60m",
+        "from_seconds": 900,
+        "until_seconds": 3600,
+        "count": 1,
+        "agents": [
+          "GreenFox"
+        ],
+        "paths": [
+          "Sources/*.swift"
+        ],
+        "safe_command": "am robot reservations --project users-me-fd-l3s-probe-am --expiring 60 --all",
+        "evidence": "robot://reservations/expiry-herd?project=users-me-fd-l3s-probe-am&window=15-60m&count=1"
+      }
+    ]
+  },
+  "reservation_read_attestation": {
+    "state": "unattested",
+    "source": "local_config_unattested",
+    "database_matches_server": null,
+    "storage_root_matches_server": null,
+    "detail": "live server mailbox configuration unavailable: transport failure calling http://127.0.0.1:8765/mail/ws-state?limit=1: connection failed: Connection refused (os error 61); local reservation read cannot attest freshness",
+    "action": "use MCP file-reservation tools before relying on this CLI result"
+  }
+}

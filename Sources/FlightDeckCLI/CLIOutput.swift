@@ -111,7 +111,7 @@ enum CLIOutput {
              .promptExpired(let id, _), .promptTyped(let id, _):
             return id
         case .projectAdded, .projectRemoved, .projectCollapsed, .projectsReordered,
-             .sessionsReordered, .projectIntakes:
+             .sessionsReordered, .projectIntakes, .projectSwarm:
             return nil
         }
     }

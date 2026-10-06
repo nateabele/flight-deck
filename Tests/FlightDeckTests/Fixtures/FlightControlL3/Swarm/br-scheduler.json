@@ -1,0 +1,6 @@
+{"schema":"br.scheduler.v1","generated_at":"2026-10-04T18:00:00Z",
+ "recommendations":[
+  {"rank":1,"issue":{"id":"fx-b","title":"Rewrite the scheduler"},"score":0.9},
+  {"rank":2,"issue":{"id":"fx-z","title":"Blocked elsewhere"},"score":0.8},
+  {"rank":3,"issue":{"id":"fx-a","title":"Add snapshot tests"},"score":0.7}
+ ]}

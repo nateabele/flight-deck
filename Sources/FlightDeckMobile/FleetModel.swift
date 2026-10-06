@@ -626,6 +626,53 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
         connector.send(command, then: completion)
     }
 
+    /// Projects with a pause/resume on the way, so the card cannot send a second one before the
+    /// Mac answers the first.
+    private(set) var swarmInFlight: Set<UUID> = []
+    /// Why the last pause/resume on a project failed, for the card to show; cleared by the next try.
+    private(set) var swarmMessages: [UUID: String] = [:]
+    /// Where swarm commands go; nil means `sendIntake`. A seam so tests can answer (or not) on demand.
+    @ObservationIgnored var swarmSender: ((FleetCommand, @escaping (Result<Void, FleetRequestError>) -> Void) -> Void)?
+    @ObservationIgnored var swarmTimeout: Duration = .seconds(10)
+    @ObservationIgnored private var swarmDeadlines: [UUID: Task<Void, Never>] = [:]
+    /// The send each project's in-flight mark belongs to. A late answer to a send that already
+    /// timed out must not clear, or write a message over, the send the user made after it.
+    @ObservationIgnored private var swarmSends: [UUID: UUID] = [:]
+
+    /// The Mac's ack clears the in-flight mark. A failure clears it with `CommandCopy`'s message,
+    /// and so does silence past `swarmTimeout`: without a deadline an ack that never comes would
+    /// leave the card disabled for good.
+    func setSwarmPaused(_ paused: Bool, project: UUID) {
+        guard !swarmInFlight.contains(project) else { return }
+        swarmInFlight.insert(project)
+        swarmMessages[project] = nil
+        let send = UUID()
+        swarmSends[project] = send
+        let finish: (String?) -> Void = { [weak self] message in
+            guard let self, self.swarmSends[project] == send else { return }
+            self.swarmSends[project] = nil
+            self.swarmDeadlines.removeValue(forKey: project)?.cancel()
+            self.swarmInFlight.remove(project)
+            self.swarmMessages[project] = message
+        }
+        swarmDeadlines[project] = Task { [weak self, timeout = swarmTimeout] in
+            try? await Task.sleep(for: timeout)
+            guard !Task.isCancelled, self != nil else { return }
+            finish(CommandCopy.message(for: nil))
+        }
+        let command: FleetCommand = paused ? .swarmPause(project: project) : .swarmResume(project: project)
+        (swarmSender ?? sendIntake)(command) { result in
+            switch result {
+            case .success: finish(nil)
+            case .failure(let error): finish(CommandCopy.message(for: error))
+            }
+        }
+    }
+
+    func decideHandoff(_ confirm: Bool, session: UUID) {
+        sendIntake(confirm ? .handoffConfirm(id: session) : .handoffDecline(id: session)) { _ in }
+    }
+
     /// Escape at a dialog nothing on this build can read — see `FleetCommand.abortPrompt`'s own
     /// comment for why it names a session rather than a call, and `PromptCard.showsBlocked` for
     /// when this is ever offered at all.

@@ -28,6 +28,10 @@ extension FleetSnapshot {
             guard let p = projects.firstIndex(where: { $0.id == id }) else { return }
             projects[p].intakes = intakes
 
+        case .projectSwarm(let id, let swarm):
+            guard let p = projects.firstIndex(where: { $0.id == id }) else { return }
+            projects[p].swarm = swarm
+
         case .sessionAdded(let session, let project, let at):
             guard let p = projects.firstIndex(where: { $0.id == project }) else { return }
             guard !projects[p].sessions.contains(where: { $0.id == session.id }) else { return }

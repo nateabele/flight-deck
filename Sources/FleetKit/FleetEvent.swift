@@ -25,6 +25,9 @@ public enum FleetEvent: Equatable, Sendable {
     /// turned off there). Sent only to peers that advertise `FleetCapability.flightControl`:
     /// an older phone's decoder throws on an unknown tag and would drop the socket.
     case projectIntakes(project: UUID, intakes: [WireIntakeSummary]?)
+    /// One project's swarm, replacing the previous one (nil: no swarm, or it stopped). Sent only
+    /// to peers that advertise `FleetCapability.swarm`, for the reason `projectIntakes` gives.
+    case projectSwarm(project: UUID, swarm: WireSwarm?)
 
     case sessionAdded(WireSession, project: UUID, at: Int)
     case sessionRemoved(id: UUID)
@@ -106,7 +109,7 @@ extension FleetEvent {
              .promptExpired(let id, _), .promptTyped(let id, _), .apiErrorChanged(let id, _):
             return id
         case .projectAdded, .projectRemoved, .projectCollapsed,
-             .projectsReordered, .sessionsReordered, .projectIntakes:
+             .projectsReordered, .sessionsReordered, .projectIntakes, .projectSwarm:
             return nil
         }
     }
@@ -116,7 +119,7 @@ extension FleetEvent {
         switch self {
         case .projectAdded(let p, _): return p.id
         case .projectRemoved(let id), .projectCollapsed(let id, _),
-             .sessionsReordered(let id, _), .projectIntakes(let id, _):
+             .sessionsReordered(let id, _), .projectIntakes(let id, _), .projectSwarm(let id, _):
             return id
         case .sessionAdded, .sessionRemoved, .sessionMoved, .projectsReordered,
              .renamed, .activityChanged, .unreadChanged, .planGateChanged, .promptExpired,

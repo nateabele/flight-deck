@@ -7,12 +7,17 @@ struct CodexThreadOptions: Codable, Equatable, Sendable {
     var sandbox: String?
     var approvalPolicy: String?
     var addDirs: [String]
+    /// A swarm task's `effort` knob (L3-S). Sent as codex's own `model_reasoning_effort` config
+    /// key, never a param of ours; nil sends nothing, so `config.toml` keeps deciding.
+    var reasoningEffort: String?
 
-    init(model: String? = nil, sandbox: String? = nil, approvalPolicy: String? = nil, addDirs: [String] = []) {
+    init(model: String? = nil, sandbox: String? = nil, approvalPolicy: String? = nil, addDirs: [String] = [],
+         reasoningEffort: String? = nil) {
         self.model = model
         self.sandbox = sandbox
         self.approvalPolicy = approvalPolicy
         self.addDirs = addDirs
+        self.reasoningEffort = reasoningEffort
     }
 
     /// Typed params, not a command line. Omitted keys mean "codex's own default" — sending
@@ -36,14 +41,17 @@ struct CodexThreadOptions: Codable, Equatable, Sendable {
         if let sandbox { params["sandbox"] = sandbox }
         if let approvalPolicy { params["approvalPolicy"] = approvalPolicy }
         if let historyMode { params["historyMode"] = historyMode }
+        var config: [String: Any] = [:]
         if !addDirs.isEmpty {
             params["addDirs"] = addDirs
             // `sandbox_workspace_write.writable_roots` is codex's own config key — see
             // `SandboxWorkspaceWrite` in the generated schema. Only sent when there is
             // something to say: an empty override is still an override, and would replace
             // whatever the user's `config.toml` set.
-            params["config"] = ["sandbox_workspace_write": ["writable_roots": addDirs]]
+            config["sandbox_workspace_write"] = ["writable_roots": addDirs]
         }
+        if let reasoningEffort { config["model_reasoning_effort"] = reasoningEffort }
+        if !config.isEmpty { params["config"] = config }
         return params
     }
 }
@@ -58,7 +66,8 @@ extension CodexThreadOptions {
             model: project.model ?? global.model,
             sandbox: project.sandbox ?? global.sandbox,
             approvalPolicy: project.approvalPolicy ?? global.approvalPolicy,
-            addDirs: project.addDirs.isEmpty ? global.addDirs : project.addDirs
+            addDirs: project.addDirs.isEmpty ? global.addDirs : project.addDirs,
+            reasoningEffort: project.reasoningEffort ?? global.reasoningEffort
         )
     }
 }
