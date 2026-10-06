@@ -8,6 +8,12 @@ settings:
   base:
     SWIFT_VERSION: "5.0"
     MACOSX_DEPLOYMENT_TARGET: "14.0"
+    # arm64 only. BoringSSL.xcframework (scripts/build-boringssl.sh) ships an arm64-only macOS
+    # slice, so an x86_64 slice of FleetKit cannot link (undefined _SPAKE2_*). Release builds
+    # were arm64-only by accident while xcodebuild synthesized the FlightDeck scheme; declaring
+    # that scheme explicitly (to switch off its code coverage) made Release build universal and
+    # fail. Pinning it here keeps the build what it always effectively was.
+    ARCHS[sdk=macosx*]: arm64
     # Where `import BoringSSLShim` resolves: the directory holding the module.modulemap that
     # names it (Sources/FleetKit/SPAKE2/module.modulemap). A path alone would only let clang
     # FIND the header — Swift cannot import a bare header, so the modulemap beside it is what
@@ -110,13 +116,16 @@ targets:
         codeSign: true
         copy:
           destination: executables
-      # `flightdeck-hostd` (target `HostDaemon`, below), beside `flightdeck` in Contents/MacOS,
-      # which is the path the LaunchAgent plist's `BundleProgram` names.
+      # The hostd's helper app (target `HostDaemon`, below) at `Contents/Library/LoginItems/
+      # Flight Deck Host.app`, which is the path the LaunchAgent plist's `BundleProgram` names.
+      # NOT beside `flightdeck` in Contents/MacOS: see the target's comment for why a bare
+      # executable there hijacks the app's own launch.
       - target: HostDaemon
         embed: true
         codeSign: true
         copy:
-          destination: executables
+          destination: wrapper
+          subpath: Contents/Library/LoginItems
       - package: HostKit
         product: HostKit
     # The Linux hostd installer's URL and digest. Only Release picks up the digest that
@@ -380,17 +389,26 @@ targets:
         CODE_SIGN_IDENTITY: Apple Development
 
   # The macOS hostd: serves this Mac to other Flight Decks, as a GUI-session LaunchAgent
-  # (`Sources/HostDaemon/dev.flightdeck.hostd.plist`). Embedded at `Contents/MacOS/
-  # flightdeck-hostd` by the `FlightDeck` target above.
+  # (`Sources/HostDaemon/dev.flightdeck.hostd.plist`). Embedded by the `FlightDeck` target
+  # above as `Contents/Library/LoginItems/Flight Deck Host.app`, executable `flightdeck-hostd`.
   #
-  # Named against the case-folding collisions recorded on `FlightDeckCLI` above, all three
+  # A helper APP with its own identifier, not a bare tool, because hostd runs an
+  # `NSApplication` (ScreenPanel's "don't touch" panel). A bundle-less executable inside
+  # `Flight Deck.app` checks in with LaunchServices as the enclosing bundle,
+  # `dev.flightdeck.FlightDeck`; from then on `open -a "Flight Deck"`, Finder and the Dock
+  # only activate hostd and the real app never starts. Seen live on a host Mac: launchservicesd
+  # logged `CHECKIN … dev.flightdeck.FlightDeck` for hostd's pid and runningboard gave hostd
+  # the frontmost assertion. `HostDaemonBundleLayoutTests` pins the layout in the built app.
+  #
+  # Named against the case-folding collisions recorded on `FlightDeckCLI` above, all four
   # knobs: the target is `HostDaemon` and the sources folder `Sources/HostDaemon`, neither of
-  # which folds onto anything; PRODUCT_NAME `flightdeck-hostd` folds onto neither
+  # which folds onto anything; PRODUCT_NAME `Flight Deck Host` (the bundle, in Products/Debug
+  # beside `Flight Deck.app`) and EXECUTABLE_NAME `flightdeck-hostd` fold onto neither
   # `flightdeck` nor `FlightDeck`; and PRODUCT_MODULE_NAME is pinned, because the default
-  # (`flightdeck_hostd`) would be a stray lowercase module beside `FlightDeck.swiftmodule` in
+  # (`Flight_Deck_Host`) would be a stray module beside `FlightDeck.swiftmodule` in
   # Products/Debug.
   HostDaemon:
-    type: tool
+    type: application
     platform: macOS
     sources:
       - path: Sources/HostDaemon
@@ -411,9 +429,25 @@ targets:
     settings:
       base:
         SWIFT_VERSION: "6.0"
-        PRODUCT_NAME: flightdeck-hostd
+        PRODUCT_NAME: Flight Deck Host
+        EXECUTABLE_NAME: flightdeck-hostd
         PRODUCT_MODULE_NAME: HostDaemon
-        LD_RUNPATH_SEARCH_PATHS: "@executable_path/../Frameworks"
+        PRODUCT_BUNDLE_IDENTIFIER: dev.flightdeck.hostd
+        GENERATE_INFOPLIST_FILE: "YES"
+        # Never a Dock icon or a menu bar, from the first instant: ScreenPanel's
+        # `.accessory` policy only applies once `main` reaches it.
+        INFOPLIST_KEY_LSUIElement: "YES"
+        INFOPLIST_KEY_CFBundleDisplayName: Flight Deck Host
+        # hostd listens and advertises `_fd-host._tcp` itself; as its own bundle it is its own
+        # subject for macOS 15+'s local-network gate, which never prompts without this.
+        INFOPLIST_KEY_NSLocalNetworkUsageDescription: Flight Deck Host uses the local network so your other Macs can run agents on this one.
+        # FleetKit.framework is not embedded here; it resolves to the enclosing app's
+        # Contents/Frameworks, FIVE levels up from Contents/Library/LoginItems/<helper>/
+        # Contents/MacOS (MacOS → Contents → <helper>.app → LoginItems → Library → Contents).
+        # Four levels lands in Contents/Library/Frameworks, which does not exist: dyld then
+        # refuses to start hostd (OS_REASON_DYLD), as it did on the first host Mac. Pinned by
+        # HostDaemonBundleLayoutTests.testEveryRpathLibraryOfTheHelperResolvesInsideTheApp.
+        LD_RUNPATH_SEARCH_PATHS: "@executable_path/../Frameworks @executable_path/../../../../../Frameworks"
         HEADER_SEARCH_PATHS: $(SRCROOT)/vendor/boringssl-artifacts/include
         DEVELOPMENT_TEAM: 2T9E3N27J8
         CODE_SIGN_STYLE: Automatic
@@ -612,3 +646,22 @@ schemes:
         FlightDeckMobileUITests: [test]
     test:
       targets: [FlightDeckMobileTests, FlightDeckMobileUITests]
+
+# FlightDeck is declared explicitly for the opposite reason: xcodebuild otherwise synthesizes an
+# implicit scheme for it, and that scheme GATHERS CODE COVERAGE, which compiles every target it
+# builds (FlightDeck, FleetKit, IntakeKit, flightdeck, hostd -- Release included) with
+# `-fprofile-instr-generate`. Each `flightdeck` run then dropped a `default.profraw` into the
+# caller's CWD (polluting their git repos) and hostd logged "LLVM Profile Error: Failed to write
+# file default.profraw: Read-only file system". Nothing in scripts/ reads coverage data.
+# scripts/check-no-coverage.sh guards this. The test targets are listed because the implicit
+# scheme carried them and test-unit.sh / smoke.sh depend on `-scheme FlightDeck` building and
+# running them.
+  FlightDeck:
+    build:
+      targets:
+        FlightDeck: all
+        FlightDeckTests: [test]
+        FlightDeckUITests: [test]
+    test:
+      gatherCoverageData: false
+      targets: [FlightDeckTests, FlightDeckUITests]
