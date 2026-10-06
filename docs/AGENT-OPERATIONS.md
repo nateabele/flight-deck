@@ -300,8 +300,57 @@ theirs elsewhere. Four consequences for anyone working here:
 
 ```bash
 ./scripts/test-unit.sh     # headless, fast, NOT throttled — your normal TDD loop
-./scripts/smoke.sh         # GUI UITest; ends with "SMOKE PASS"
+./scripts/smoke.sh         # GUI UITest, on the UI-test Mac; ends with "SMOKE PASS"
 ```
+
+### The UI suite runs on another Mac
+
+`smoke.sh` hands off to `scripts/smoke-remote.sh`, which runs the suite on the dedicated UI-test
+Mac (`FD_UITEST_HOST`, default `user@uitest-mac`), because an XCUITest run seizes the
+foreground for minutes and fires key events into whatever holds focus: on this Mac the user's
+typing landed in the test as phantom failures and the machine was unusable for the run. What
+it does, and the failure each step prevents:
+
+| Step | Why |
+|---|---|
+| ssh probe, 5 s timeout; on failure, `SMOKE FAIL` naming `FD_SMOKE_LOCAL=1` | Falling back to a local run would take over this screen without warning. |
+| `mkdir` lock at `~/flightdeck-uitests/.lock` on the UI-test Mac, waited on for up to 20 min; broken when older than 45 min | Every session on this Mac shares one UI-test Mac. Two runs at once rsync products over each other mid-run and fight over its one foreground. |
+| Throttle stamp `~/flightdeck-uitests/.last-run`, also on the remote | smoke.sh's one-run-per-120s cap (`FLIGHTDECK_TEST_THROTTLE`), shared by every caller instead of per-machine. |
+| `build-for-testing -only-testing:FlightDeckUITests` **here** | This Mac has the vendored artifacts and the signing team. |
+| rsync `DerivedData/Build/Products/` to `~/flightdeck-uitests/DerivedData/Build/Products/`, without `*.a`, `*.o`, `*.swiftmodule`, `include` | ~266 MB the first time, incremental after. The path must contain `/DerivedData/`: `assertFlightDeckIsFrontmost` tells the app under test from an installed Flight Deck by that string. |
+| Ship this Xcode's test frameworks as `Products/xctest26/` and rewrite the xctestrun (`scripts/patch-xctestrun.py`) | See below. |
+| `TEST_RUNNER_*` written into the xctestrun, prefix stripped | `xcodebuild` forwards them only from its own environment, and an ssh session has none of this shell's, so a hunt case would silently SKIP. |
+| Clears the same window-geometry keys smoke.sh clears, on the remote | Same reason as locally: a saved frame can park the window off the primary display. |
+| `xcodebuild test-without-building` there (~4 min); log and `.xcresult` copied back to `DerivedData/smoke-remote/`, the log also appended to `scripts/.smoke.log` | Same summary contract and exit status as smoke.sh. |
+| An EXIT trap reaps the run's leftovers, then releases the lock | A UI run leaves detached `fd-abduco` daemons in `/tmp/flight-deck-debug-<uid>` (four per run), some with a real `claude` inside. Agents get SIGTERM first, then daemons, as in §2. The release root `/tmp/flight-deck-<uid>` and the remote's hostd LaunchAgent belong to that Mac's own use and are never touched. |
+
+**The `xctest26` shim, and re-shipping it.** The UI-test Mac's Xcode (16.1 at the time of
+writing) is older than this one. The xctestrun this Mac writes resolves XCTest through
+`__SHAREDFRAMEWORKS__`/`__PLATFORMS__`, which the remote xcodebuild expands to ITS Xcode, so the
+runner — built against this Xcode's XCTest — loaded the old copy and died before any test ran
+(`Symbol not found …typeKey… in SharedFrameworks/XCTest.framework`). So this Xcode's
+`MacOSX.platform/Developer/Library/{Frameworks,PrivateFrameworks}/*.framework` and
+`usr/lib/*.dylib` (~36 MB) travel as `Products/xctest26/`, and the patch points
+`DYLD_FRAMEWORK_PATH`/`DYLD_LIBRARY_PATH` at them in place of the remote Xcode's paths (without
+`usr/lib` the error is `Library not loaded @rpath/lib_TestingInterop.dylib`). The Main Thread
+Checker insert is dropped for the same reason. The shim is stamped with this Xcode's build
+number and re-shipped automatically when it changes, so **upgrading Xcode on this Mac needs no
+manual step**; the first run after an upgrade just copies the 36 MB again. Upgrading the remote
+Xcode to match would make the shim unnecessary, but it stays harmless.
+
+**Environment differences on the UI-test Mac.** It has a real `claude` and `codex` on PATH and
+logged in, which the claude and codex investigations need. Its codex must be at least
+`CodexProcessTransport.minimumVersion` (0.142.4); an older one fails both codex tests with
+"creating a codex session added no row". `testSessionReattachesWithScrollbackAfterRelaunch`
+launches with `SHELL=/bin/sh` and launchd's bare PATH so its session cannot start a real claude
+(see `agentlessShellEnvironment`). It runs macOS 15, whose sidebar geometry and accessibility
+frames differ from macOS 26's, and a shorter screen: the failures that causes are listed, with
+their diagnosis, in FOLLOWUPS.md, "UI suite on the UI-test Mac". A red run there is not
+automatically your regression; compare against that list first.
+
+**Variables:** `FD_UITEST_HOST` (ssh destination), `FD_UITEST_SSH_KEY` (default
+`~/.ssh/id_rsa`), `FD_SMOKE_LOCAL=1` (the old local run — it takes over this screen, so only
+with the user's say-so).
 
 - `test-unit.sh` runs the app-hosted bundle in-process via `xcrun xctest` (symlinking the host
   dylib) because `xcodebuild test` would try to *launch* the app and dies with
@@ -321,10 +370,11 @@ theirs elsewhere. Four consequences for anyone working here:
   mutation result**, and read a zero as a broken filter rather than as a clean suite. Run it the
   way `test-unit.sh` does — the same `DYLD_FRAMEWORK_PATH` and the resolved `xcrun --find
   xctest` binary — or the bundle fails to load for an unrelated reason.
-- **Do not loop `smoke.sh`.** It seizes the foreground for ~70s and fires key events into
-  whatever holds focus, so the user's typing lands in the test and shows up as phantom
-  failures. `scripts/throttle.sh` caps it at one run per 120s
-  (`FLIGHTDECK_TEST_THROTTLE=0` for a deliberate one-off).
+- **Do not loop `smoke.sh`.** The UI-test Mac is one machine shared by every session, held
+  under a lock for the length of a run, and capped at one run per 120s
+  (`FLIGHTDECK_TEST_THROTTLE=0` for a deliberate one-off). With `FD_SMOKE_LOCAL=1` it seizes
+  THIS Mac's foreground instead and fires key events into whatever holds focus, so the user's
+  typing lands in the test as phantom failures; `scripts/throttle.sh` caps that path.
 - **To chase a flaky assertion, isolate it — do not re-run the suite.** `TerminalSmokeTests` is
   deliberately one test function of `runActivity` groups, so `-only-testing:` cannot target a
   single behaviour. Re-running the whole thing is also weak evidence: at a 20% failure rate,
@@ -336,8 +386,9 @@ theirs elsewhere. Four consequences for anyone working here:
   arbitrary shell environment into the UI-test runner process; it forwards only `TEST_RUNNER_*`,
   stripping the prefix. A bare `FOO=1` leaves the case **silently skipped**, which reads as a
   pass in the compact summary — check `scripts/.smoke.log` for `skipped` if a hunt reports
-  nothing.
-- The first UITest run needs a one-time TCC grant ("XCTest is trying to Enable UI Automation").
+  nothing. On the remote path `smoke-remote.sh` writes them into the shipped xctestrun.
+- The first UITest run on a machine needs a one-time TCC grant ("XCTest is trying to Enable UI
+  Automation"). The UI-test Mac already has it.
 - **Output discipline:** `smoke.sh` sends all `xcodebuild` output to `scripts/.smoke.log` and
   prints a compact summary, because dumping it floods an agent's context window. Keep it that
   way; read the log on failure.

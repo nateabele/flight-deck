@@ -25,8 +25,11 @@ Four things trip up every agent on this repo. The detail is in
 3. **Never `defaults delete dev.flightdeck.FlightDeck`.** Preferences live there. Sessions live
    in `~/Library/Application Support/Flight Deck/sessions.json`. Test isolation is the
    `-FlightDeckResetState YES` launch argument, not deletion.
-4. **Don't loop `./scripts/smoke.sh`.** It seizes the foreground for ~70s and captures the
-   user's keystrokes as phantom test failures. It's throttled to one run per 120s on purpose.
+4. **Don't loop `./scripts/smoke.sh`.** It runs on the dedicated UI-test Mac (`FD_UITEST_HOST`), not this one, so it no longer steals this Mac's screen; but that Mac is
+   one machine shared by every session, held under a lock for ~4 min a run and throttled to one
+   run per 120s. If it is unreachable the script fails and says so: it never falls back to this
+   Mac. `FD_SMOKE_LOCAL=1` runs it here, where it seizes the foreground for minutes and captures
+   the user's keystrokes as phantom test failures — only with the user's say-so.
    **To chase a flaky assertion, isolate it — never re-run the suite.** `UITests` is one giant
    test function of `runActivity` groups, so `-only-testing:` cannot target a behavior, and the
    statistics are against you: at a 20% failure rate, five clean whole-suite runs still pass by
@@ -48,10 +51,12 @@ or revert blind — check `git status` and leave changes that aren't yours alone
 ./scripts/build.sh              # xcodegen generate + xcodebuild → Debug "Flight Deck.app"
 ./scripts/test-unit.sh          # headless unit suite — your normal TDD loop
 ./scripts/test-adapters.sh      # re-derives the adapter capability matrix against live claude/codex, exits non-zero on drift; default tier `cheap` spends no tokens (see scripts/adapterprobe/README.md for `--tier full` — and its baseline note before assuming a red run is your bug)
-./scripts/smoke.sh              # GUI UITest, ends "SMOKE PASS" (see rule 4)
+./scripts/smoke.sh              # GUI UITest on the UI-test Mac, ends "SMOKE PASS" (see rule 4);
+                                # result bundle + log copied back to DerivedData/smoke-remote/
 
 # Flake hunting — loops one suspect sequence 20x in a single launch (rule 4).
-# The TEST_RUNNER_ prefix is mandatory; without it the case is silently SKIPPED.
+# The TEST_RUNNER_ prefix is mandatory; without it the case is silently SKIPPED. smoke-remote.sh
+# writes every TEST_RUNNER_* into the xctestrun it ships, since ssh carries no environment.
 TEST_RUNNER_FLIGHTDECK_FLAKE_HUNT=1 FLIGHTDECK_TEST_THROTTLE=0 ./scripts/smoke.sh
 
 # Hosts (remote machines) — need Docker. See docs/BUILD.md "The host scripts".
