@@ -39,7 +39,9 @@ final class FakeHandoffHost: HandoffHost {
         events.append("reassign"); reassigned.append((task.id, agentName)); return reassignWarning
     }
     func releaseReservations(of agent: String, project: URL) async -> String? { events.append("release"); released.append(agent); return nil }
-    func stopAgent(_ session: SessionRef) async { events.append("stop"); stopped.append(session.id) }
+    /// Whether the exit command "was delivered"; scripted false to model a tab that refused it.
+    var stopDelivered = true
+    func stopAgent(_ session: SessionRef) async -> Bool { events.append("stop"); stopped.append(session.id); return stopDelivered }
     func markHandedOff(_ old: SessionRef, to new: SessionRef) { events.append("mark"); marked.append((old.id, new.id)) }
     func record(_ entry: HandoffLogEntry) { events.append("record:\(entry.outcome.rawValue)"); log.append(entry) }
     func notify(title: String, body: String, session: SessionRef) { events.append("notify"); notices.append(title) }

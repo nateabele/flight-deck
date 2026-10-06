@@ -154,6 +154,21 @@ final class HandoffHostTests: XCTestCase {
         XCTAssertFalse(spy.events.contains(.escape))
     }
 
+    func testStopAgentReportsUndeliveredExit() async throws {
+        let (store, _, _) = try await storeWithTab(SessionStatus(activity: .idle))
+        let host = StoreHandoffHost(store: store, logURL: FileManager.default.temporaryDirectory.appendingPathComponent("unused.jsonl"))
+        let gone = await host.stopAgent(SessionRef(id: UUID(), agentName: nil))
+        XCTAssertFalse(gone, "no such tab: the exit command went nowhere")
+    }
+
+    func testStopAgentReportsDeliveredExit() async throws {
+        let (store, id, spy) = try await storeWithTab(SessionStatus(activity: .idle))
+        let host = StoreHandoffHost(store: store, logURL: FileManager.default.temporaryDirectory.appendingPathComponent("unused.jsonl"))
+        let ok = await host.stopAgent(SessionRef(id: id, agentName: nil))
+        XCTAssertTrue(ok)
+        XCTAssertEqual(spy.sent, ["/exit"])
+    }
+
     func testBrAndAmArgvAndWorkingDirectory() async {
         let runner = UsageRecordingRunner()
         let commands = BrAmHandoffCommands(runner: runner)
