@@ -2282,6 +2282,27 @@ flagged as most likely to differ from the tests. The maintainer's to run.
   launch, contested visibility, and the account strip (as pools and meters). They replace the
   fleet table with annotations on existing surfaces. Still deferred: the remaining tending
   actions, the Agent Mail inbox and the convergence gauge below. Original list, kept for history:
+  - **L3-S swarm built** (branch `l3-swarm`, 2f23691f plus docs commit). Integration must: set
+    `SessionStore.swarmDependencies` to L3-R's router factory and `KindRegistry` and L3-U's
+    `PoolAllocator`/`CapacityReader`. The router is a factory, `makeRouter: () -> any Router`: plug
+    in L3-R's `RoutingService.makeRouter()` and never cache a router. `SwarmDependencies.pools`
+    takes a `PoolDirectory`, and `DefaultPoolDirectory(harnesses: ["claude","codex"])` is a
+    stand-in until L3-R/L3-U's pool store is wired. Set `SwarmService.handoffDecisions` to L3-U's
+    driver and give that driver `SwarmService.spawner`, `agentSnapshots(project:)`,
+    `recordHandoff(project:from:to:block:lease:)` and `returnClaimToOpen(project:task:)`; replace
+    `MinimalMeter` with L3-U's meter view; merge the adjacent edits to
+    `ClaudeRoutingCapabilities`/`CodexRoutingCapabilities` (L3-R catalog, L3-U meter/transcript,
+    L3-S overrides/reset). Then run `scripts/test-ui-flight-control.sh` against the real stack and
+    the maintainer's [FLIGHT-CONTROL-L3-CHECKLIST.md](FLIGHT-CONTROL-L3-CHECKLIST.md).
+  - Open from L3-S: the Observe events lane is still a nil stub (activity stands in); the hook log's
+    failed-tool event for claude is unverified (transcript used instead); OpenCode feeds
+    `AgentOutputScan` once its adapter lands. The Observe Assignment lane is hidden when the tab has
+    no Observe (am) agent row (`lanes(for:)` returns []). claude/codex accept only the hard-coded
+    `effort` knob: an L3-R knobSchema knob other than effort is refused at launch. Phone: the
+    hand-off decision API (`decideHandoff`, `handoffPending`) has no UI caller yet (L3-U). Unverified
+    live: codex `effort` and `/new` (spec §15 items 15-16), and reservations time is parsed from a
+    relative `granted_at` (item 21). UI test: FLIGHT CONTROL UI PASS on run 6 against the stub
+    backend only (runs 1-5 failed for harness reasons, see spec §15).
   - **Launch a swarm from released tasks** — pick with `bv`, claim, spawn agents into the
     project's sessions.
   - **A fleet table** — agent × current task × state × last active × account, a row jumping to
