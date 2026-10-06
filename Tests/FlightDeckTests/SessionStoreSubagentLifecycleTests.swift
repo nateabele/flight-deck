@@ -142,4 +142,44 @@ final class SessionStoreSubagentLifecycleTests: XCTestCase {
         XCTAssertEqual(activityEvents(replicator, session.id).last, wireTree)
         XCTAssertEqual(wireSession(store, session.id)?.subagents, wireTree)
     }
+
+    // MARK: 4. The Mac shows the blocked agent
+
+    func testTheDisplayTreeMarksTheAttributedAgentBlocked() {
+        let (store, session) = make()
+        store.applySubagents(session.id, tree())
+        store.openPromptProbe = { _ in .success("toolu_SUB") }
+        store.openPromptAgentProbe = { _ in "a28ad87b" }
+        store.applyRegistryForTesting([
+            session.id: SessionStatus(activity: .waiting, waitingFor: "permission prompt")])
+        XCTAssertEqual(store.displaySubagentTree(for: session.id).node("a28ad87b")?.state,
+                       .blocked(callID: "toolu_SUB"))
+        XCTAssertEqual(store.displaySubagentTree(for: session.id).node("a0aaaaaa")?.state, .running)
+        XCTAssertEqual(store.subagentTree(for: session.id).node("a28ad87b")?.state, .running,
+                       "the stored tree stays as the files say")
+    }
+
+    func testTheBadgeShowsWhileBusyWithAgentsOrWhileAnAgentIsBlocked() {
+        let blocked = tree(childState: .blocked(callID: "toolu_SUB"))
+        XCTAssertEqual(SubagentCount.badge(
+            status: SessionStatus(activity: .busy, subagentCount: 2), tree: tree()), 2)
+        XCTAssertNil(SubagentCount.badge(status: SessionStatus(activity: .busy), tree: tree()))
+        XCTAssertNil(SubagentCount.badge(
+            status: SessionStatus(activity: .waiting, subagentCount: 2), tree: tree()),
+                     "a parent waiting on its own dialog is not about its agents")
+        XCTAssertEqual(SubagentCount.badge(
+            status: SessionStatus(activity: .waiting, subagentCount: 3), tree: blocked), 3)
+        XCTAssertEqual(SubagentCount.badge(
+            status: SessionStatus(activity: .waiting), tree: blocked), 1, "one minimum")
+        XCTAssertNil(SubagentCount.badge(status: nil, tree: tree()))
+    }
+
+    func testANewTreeIsPublishedToTheSidebar() {
+        let (store, session) = make()
+        var published = 0
+        let sink = store.objectWillChange.sink { published += 1 }
+        defer { sink.cancel() }
+        store.applySubagents(session.id, tree())
+        XCTAssertGreaterThan(published, 0)
+    }
 }
