@@ -306,7 +306,7 @@ theirs elsewhere. Four consequences for anyone working here:
 ### The UI suite runs on another Mac
 
 `smoke.sh` hands off to `scripts/smoke-remote.sh`, which runs the suite on the dedicated UI-test
-Mac (`FD_UITEST_HOST`, default `user@uitest-mac`), because an XCUITest run seizes the
+Mac (`FD_UITEST_HOST`, set in the git-ignored `scripts/local.env`), because an XCUITest run seizes the
 foreground for minutes and fires key events into whatever holds focus: on this Mac the user's
 typing landed in the test as phantom failures and the machine was unusable for the run. What
 it does, and the failure each step prevents:
@@ -348,8 +348,10 @@ frames differ from macOS 26's, and a shorter screen: the failures that causes ar
 their diagnosis, in FOLLOWUPS.md, "UI suite on the UI-test Mac". A red run there is not
 automatically your regression; compare against that list first.
 
-**Variables:** `FD_UITEST_HOST` (ssh destination), `FD_UITEST_SSH_KEY` (default
-`~/.ssh/id_rsa`), `FD_SMOKE_LOCAL=1` (the old local run — it takes over this screen, so only
+**Variables:** `FD_UITEST_HOST` (ssh destination, required), `FD_UITEST_SSH_KEY` (optional;
+ssh's defaults otherwise), both read from the environment or the git-ignored `scripts/local.env`
+(template: `scripts/local.env.example`; no host is committed, the repo is public),
+`FD_SMOKE_LOCAL=1` (the old local run — it takes over this screen, so only
 with the user's say-so).
 
 - `test-unit.sh` runs the app-hosted bundle in-process via `xcrun xctest` (symlinking the host

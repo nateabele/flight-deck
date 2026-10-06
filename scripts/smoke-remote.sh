@@ -12,8 +12,10 @@
 # test frameworks travel with the products (`xctest26/`) and scripts/patch-xctestrun.py points
 # the runner at them — see that script for the failure each change prevents.
 #
-#   FD_UITEST_HOST    ssh destination (default user@uitest-mac)
-#   FD_UITEST_SSH_KEY identity file (default ~/.ssh/id_rsa)
+#   FD_UITEST_HOST    ssh destination, required
+#   FD_UITEST_SSH_KEY identity file (default: ssh's own defaults and ~/.ssh/config)
+# Both are read from the environment or from scripts/local.env (git-ignored; copy
+# scripts/local.env.example). No default host is committed: this repo is public.
 #   TEST_RUNNER_*     forwarded into the runner, prefix stripped, as `xcodebuild test` does
 #   FLIGHTDECK_TEST_THROTTLE  minimum seconds between runs on the UI-test Mac (default 120)
 #   FD_UITEST_ONLY    space-separated -only-testing: identifiers (default FlightDeckUITests), so
@@ -25,15 +27,26 @@ set -euo pipefail
 export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 cd "$(dirname "$0")/.."
 
-HOST=${FD_UITEST_HOST:-user@uitest-mac}
-KEY=${FD_UITEST_SSH_KEY:-$HOME/.ssh/id_rsa}
+source scripts/lib-local-env.sh
+fd_load_local_env
+HOST=${FD_UITEST_HOST:-}
+KEY=${FD_UITEST_SSH_KEY:-}
+if [ -z "$HOST" ]; then
+  echo "SMOKE FAIL: no UI-test host configured."
+  echo "            cp scripts/local.env.example scripts/local.env and set FD_UITEST_HOST,"
+  echo "            or FD_SMOKE_LOCAL=1 to run on THIS Mac (it takes over the screen)."
+  exit 2
+fi
 THROTTLE=${FLIGHTDECK_TEST_THROTTLE:-120}
 # Relative to the remote home. The products path MUST contain `/DerivedData/`:
 # `assertFlightDeckIsFrontmost` tells the app under test from an installed Flight Deck by that
 # string in its bundle path, and fails every click-driven group without it.
 REMOTE_DIR=flightdeck-uitests
 REMOTE_PRODUCTS=$REMOTE_DIR/DerivedData/Build/Products
-SSH_OPTS=(-o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=5 -o ServerAliveInterval=30 -i "$KEY")
+SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=5 -o ServerAliveInterval=30)
+# IdentitiesOnly with an explicit key: an agent holding many keys otherwise exhausts the
+# server's auth attempts ("Too many authentication failures") before offering the right one.
+[ -n "$KEY" ] && SSH_OPTS+=(-o IdentitiesOnly=yes -i "$KEY")
 LOG="scripts/.smoke.log"
 read -r -a ONLY <<<"${FD_UITEST_ONLY:-FlightDeckUITests}"
 ONLY_ARGS=()

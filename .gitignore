@@ -24,3 +24,6 @@ scripts/adapterprobe/corpus/
 .superpowers/
 .claude/
 .aider*
+
+# Machine-specific settings (UI-test host, ssh key); template: scripts/local.env.example
+scripts/local.env
