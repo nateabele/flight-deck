@@ -165,3 +165,5 @@ A real `CapabilityIndex` conformer, the refresh scheduler, and the Settings pane
 - **Reset launches:** the service gets a runner that always throws, so "Refresh now" in a reset or UI-test launch fails fast and spends no tokens.
 - **UI test:** `CapabilityIndexUITests` skips unless `INDEX_UI=1` (as `TEST_RUNNER_INDEX_UI=1`), so `smoke.sh`, which runs the whole UI bundle, does not run it. Run it with `TEST_RUNNER_INDEX_UI=1 xcodebuild … test -only-testing:FlightDeckUITests/CapabilityIndexUITests`. Its reads use `value` for static text.
 - **Live probe, 2026-10-05:** claude 2.1.289 (Claude Code); aider-polyglot via WebFetch under `--restricted` — 69 rows accepted, all cited and figure-matched; 18,347 tokens; 66 s.
+
+**Integrated (2026-10-06):** integration branch `l3-integration`, code head 4db609f0 (not merged to master). The real graph is built in one place, `FlightControlComposition`; see `docs/FOLLOWUPS.md` for what is still open.

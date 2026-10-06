@@ -127,7 +127,7 @@ account it runs on.
   "no reading".
 - **Sidebar row:** a small meter when the row's account is past soft.
 - **Observe drawer, Assignment lane:** the account, its meter, and the hand-off history.
-- **Settings → Capacity:** pools, the order inside each pool, thresholds, the local caps,
+- **Settings → Flight Control → Capacity:** pools, the order inside each pool, thresholds, the local caps,
   "Confirm hand-offs", the hand-off deadline.
 
 ## 7. Error handling
@@ -252,8 +252,9 @@ Capacity pane.
    `UsageReading` with `hardRejection: true`; its worst window's `resetsAt` is when it ends.
 4. `CapacityLedger` (CapacityReader + PoolAllocator) and `LedgerHandoffPlanner` are IntakeKit
    classes, so their `Sendable` conformance is honest.
-5. Settings has a top-level Capacity tab (`PreferencesTab.capacity`), not Flight Control →
-   Capacity.
+5. Settings had a temporary top-level Capacity tab (`PreferencesTab.capacity`) so parallel
+   branches never edited the same tab file; integration folded it into Settings → Flight Control →
+   Capacity and deleted that tab.
 6. `StoreHandoffHost` does interrupt, retire (Escape for an open dialog, then `/exit` or
    `/quit`), `br update --assignee`, `am file_reservations release`, notify and a JSONL log;
    confirmation, kind lookup, catalogs, reservations, the "handed off →" marker and the swarm
@@ -342,7 +343,12 @@ Capacity pane.
 - `CapacityLedger` can conform to the contract's `PoolDirectory` (`allPools` → `PoolSummary`);
   L3-U does not. Default pool labels differ: L3-U says "Claude default", `DefaultPoolDirectory`
   says "claude — all accounts".
-- `StoreHandoffHost.stopAgent` ignores `retireAgent`'s `PromptDispatch`: if the exit command is
-  not delivered, nothing logs it and the old agent may stay alive after a "handed off" record.
-- `HandoffDriver.evaluate` awaits `host.confirm` inline, so one pending human confirmation stalls
-  every other agent's hand-off in that pass.
+- (Fixed in integration, task 9.) `StoreHandoffHost.stopAgent` ignored `retireAgent`'s `PromptDispatch`:
+  if the exit command is not delivered, nothing logged it and the old agent could stay alive after a
+  "handed off" record. A failed stop is now the terminal phase `.stopFailed`; the old lease is kept.
+- (Fixed in integration, task 10.) `HandoffDriver.evaluate` awaited `host.confirm` inline, so one
+  pending human confirmation stalled every other agent's hand-off in that pass. Confirmation is now
+  a non-blocking `requestConfirmation`; `HandoffDriver` is the `HandoffDecisionSink`; there is no
+  Mac confirm UI (phone only).
+
+**Integrated (2026-10-06):** integration branch `l3-integration`, code head 4db609f0 (not merged to master). The real graph is built in one place, `FlightControlComposition`; see `docs/FOLLOWUPS.md` for what is still open.

@@ -2272,128 +2272,102 @@ flagged as most likely to differ from the tests. The maintainer's to run.
   [FLIGHT-CONTROL-COVERAGE-HANDOFF.md](FLIGHT-CONTROL-COVERAGE-HANDOFF.md).
 - **Flight Control on the phone — BUILT (see "known gaps and limits" above).** Originally: Handoff:
   [FLIGHT-CONTROL-MOBILE-HANDOFF.md](FLIGHT-CONTROL-MOBILE-HANDOFF.md).
-- **Level 3 "Operate" — DESIGNED (2026-10-04); L3-0 contract MERGED (28e79fb, 2026-10-05), L3-R/I/U/S building in parallel worktrees.**
-  Five specs, built in parallel after
-  the contract lands: overview and contract
+- **Level 3 "Operate" — BUILT (2026-10-06), integrated on branch l3-integration (not merged), GUI-unverified.**
+  Five specs: overview and contract
   ([L3-0](superpowers/specs/2026-10-04-flight-control-l3-overview-contract-design.md)), routing
   ([L3-R](superpowers/specs/2026-10-04-flight-control-l3-routing-design.md)), capability index
   ([L3-I](superpowers/specs/2026-10-04-flight-control-l3-capability-index-design.md)), usage and
   rollover ([L3-U](superpowers/specs/2026-10-04-flight-control-l3-usage-rollover-design.md)) and
-  swarm ([L3-S](superpowers/specs/2026-10-04-flight-control-l3-swarm-design.md)). They cover
-  launch, contested visibility, and the account strip (as pools and meters). They replace the
-  fleet table with annotations on existing surfaces. Still deferred: the remaining tending
-  actions, the Agent Mail inbox and the convergence gauge below.
-  - **L3-I capability index — built** on its own branch (2026-10-04 plan
-    `superpowers/plans/2026-10-04-flight-control-l3-i-capability-index.md`), not merged.
-    Pure scoring/validation/storage in `Sources/IntakeKit/FlightControl/`, service and runner in
-    `Sources/FlightDeck/FlightControl/`, pane under Settings → Capability Index (temporary tab). Open for
-    integration: hand `capabilityIndexService.live` to L3-R's router and its `hints(for:…)` to
-    L3-R's rule list; move `CapabilityIndexPane` into L3-R's `FlightControlSettingsTab`; real catalogs
-    arrive with L3-R's `modelCatalog()`. The UI test is opt-in (`TEST_RUNNER_INDEX_UI=1`), not in
-    `smoke.sh`. The live probe is `INDEX_LIVE=1 FD_TEST_FILTER=IndexLiveProbeTests ./scripts/test-unit.sh`.
-    Known gaps (deferred):
-    - The validator trims spaces but not newlines (applied the same way in alias matching).
-    - The proposer proposes the bare model when a bracketed setting is not a known knob.
-    - The confidence denominator counts sources that returned no data.
-    - A model-supplied `retrievedAt` is kept as row provenance; the trusted time is `SourceResult.refreshedAt`.
-    - A refresh has no timeout or cancel, so a hung `claude` leaves Roll back disabled until relaunch.
-    - A refresh where every source failed still writes a snapshot, which can push real ones out of the 12 kept.
-    - The agent model field accepts an empty model and a token cap of 0, and saves on every keystroke.
-    - `knownCatalogs` is filled only by a refresh in the session; load it at service init on integration.
-    - A `prune()` failure after a good write is reported as a snapshot save failure.
-    - The manual-score discount field is not clamped to 0...1.
-    - `CapabilityIndexUITests` has not yet run live (the screen was locked).
-  L3-U (usage and rollover) built on branch `l3-usage` (5ee2091): pools, meters (codex app-server
-  read every 2 min, the bundled claude mod via `session.measure`, headless seats, the fleet's
-  rate-limit API errors), the capacity ledger, the hand-off driver and Settings → Capacity. Wired to
-  the swarm by `FlightControlComposition.install` (l3-integration), proven end to end only
-  against faked `br`/`am` and tabs (`SwarmEndToEndTests`). The maintainer's checks after integration: open Settings → Capacity
-  and confirm each account's bar matches `/usage` (claude) and codex's own status; run one
-  swarm agent on an account near its limit and watch it hand off; confirm a manual tab gets one
-  notification and stays put; run the real claude-tab meter (the mod in an FD-spawned
-  interactive tab) against `/usage`. Open L3-U items, each a bullet below.
-  - **L3-S swarm built** (branch `l3-swarm`, 2f23691f plus docs commit). The wiring below is
-    done in `FlightControlComposition` (the driver owns the old lease; a hand-off gives the old
-    claim back before the new agent claims; a block naming a deleted pool waits with "pool <id>
-    no longer exists"); the meter swap and the live UI-test run remain. Integration must: set
-    `SessionStore.swarmDependencies` to L3-R's router factory and `KindRegistry` and L3-U's
-    `PoolAllocator`/`CapacityReader`. The router is a factory, `makeRouter: () -> any Router`: plug
-    in L3-R's `RoutingService.makeRouter()` and never cache a router. `SwarmDependencies.pools`
-    takes a `PoolDirectory`, and `DefaultPoolDirectory(harnesses: ["claude","codex"])` is a
-    stand-in until L3-R/L3-U's pool store is wired. Set `SwarmService.handoffDecisions` to L3-U's
-    driver and give that driver `SwarmService.spawner`, `agentSnapshots(project:)`,
-    `recordHandoff(project:from:to:block:lease:)` and `returnClaimToOpen(project:task:)`; replace
-    `MinimalMeter` with L3-U's meter view; merge the adjacent edits to
-    `ClaudeRoutingCapabilities`/`CodexRoutingCapabilities` (L3-R catalog, L3-U meter/transcript,
-    L3-S overrides/reset). Then run `scripts/test-ui-flight-control.sh` against the real stack and
-    the maintainer's [FLIGHT-CONTROL-L3-CHECKLIST.md](FLIGHT-CONTROL-L3-CHECKLIST.md).
-  - Open from L3-S: the Observe events lane is still a nil stub (activity stands in); the hook log's
-    failed-tool event for claude is unverified (transcript used instead); OpenCode feeds
-    `AgentOutputScan` once its adapter lands. The Observe Assignment lane is hidden when the tab has
-    no Observe (am) agent row (`lanes(for:)` returns []). claude/codex accept only the hard-coded
-    `effort` knob: an L3-R knobSchema knob other than effort is refused at launch. Phone: the
-    hand-off decision API (`decideHandoff`, `handoffPending`) has no UI caller yet (L3-U). Unverified
-    live: codex `effort` and `/new` (spec §15 items 15-16), and reservations time is parsed from a
-    relative `granted_at` (item 21). UI test: FLIGHT CONTROL UI PASS on run 6 against the stub
-    backend only (runs 1-5 failed for harness reasons, see spec §15).
-  - Known L3-S follow-ups from the final review: an agent `stop()` retired gets no "done" marker
-    in `SwarmAnnotations`, and a stopped swarm's summary is not visible after it stops.
-    `SwarmService.applyProjections` awaits each project's `taskSetChanged` in turn, so one slow
-    `br show` delays completion detection for every other project.
-  Original list of the rest, kept for history:
-  - **Launch a swarm from released tasks** — pick with `bv`, claim, spawn agents into the
-    project's sessions.
-  - **A fleet table** — agent × current task × state × last active × account, a row jumping to
-    that session's terminal, built on `FleetService`/`FleetProjection`.
-  - **Reservation conflicts as a session state ("contested") and commit-guard visibility** — why
-    a commit was blocked. Required, not polish, in the shared-main default mode. Today the
-    `reservations` lane is a permanent nil-stub (see Observe Level 1 above), so this starts
-    with confirming `am`'s positive-path row shape.
-  - **Tending actions:** reclaim & respawn a stuck agent's in-progress task; "fresh eyes" (a
-    canned review prompt to a chosen agent); "reread AGENTS.md"; a quiet tend-cadence nudge
-    ("3 projects not tended in 14 min"); a `caam` account/rate-limit strip.
-  - **An Agent Mail inbox anchored to tasks**, unread threads reading like an unread session.
-  - **A task-graph convergence gauge** for the swarm (ready / in progress / blocked / done per
-    project), distinct from the planning rounds' convergence verdict.
-  - Unresolved: whether `AgentAdapter`/`AgentKind` should share `ntm`'s agent taxonomy, and
-    whether `ntm serve`'s event stream is worth a transport spike (its schema was never
-    inspected; [FLYWHEEL-SPIKE-FINDINGS.md](FLYWHEEL-SPIKE-FINDINGS.md) already ruled it out as
-    FD's own runner).
-  - **L3-R routing BUILT on branch `l3-routing` (3dc46df), not merged.** Rules →
-    compile → confirm in Settings → Flight Control → Routing; encode-time kinds and proposals; the
-    real `Router` and `KindRegistry`; Task kinds pane. Integration owes: L3-U's pool store
-    conforming to `PoolDirectory`, L3-I's hints to `RuleHintSource` and its index replacing
-    `NullCapabilityIndex`, and one Settings → Flight Control tab holding every branch's sections.
-    The maintainer's checklist: compile a real sentence with haiku from Settings; release a planned intake and
-    read one created task's `agent_context` with `br show`; merge a kind with an open task and see it
-    re-routed. Not done: claude full model ids (aliases only). Known gaps:
-    (a) RoutingUITests have not executed yet (screen locked during the build); run
-    `scripts/test-routing-ui.sh` once.
-    (b) The changed triage/change-set strict-mode schema (`taskKind`/`kindProposal`) was never
-    probed live against claude and codex; probe once per CLI before merging to master, since every
-    planning round shares that schema.
-    (c) `ProjectViewInspectorLiveTests` failed in this branch's full run and was not run on master
-    (believed pre-existing or machine-dependent, see FLIGHT-CONTROL-MOBILE-PHASE3-HANDOFF.md item
-    2); run it on master.
-    (d) Codex's effort knob schema is the union across models, so a rule can validate with an
-    effort one model rejects.
-  - **L3-U: local-pool capacity cannot see load from outside Flight Deck** (spec §3, by design).
-  - **L3-U: claude hook modules sit behind a remote rollout switch** (spec §12 deviation 18). A
-    user whose switch is off has no claude meter, only the "mod is not loaded" source error.
-  - **L3-U: codex usage-limit `codex_error_info` spellings are unverified.**
-    `RateLimitClassifier.kinds` was never checked against a real rollout, so the fleet API-error
-    path may never mark a codex account over hard; the 120 s read's `rateLimitReachedType` is
-    the authoritative codex signal.
-  - **L3-U: `spendControlReached` in codex's read is ignored**, so a spend-control stop is not a
-    hard rejection.
-  - **L3-U: the silent-mod check is suppressed by any other reading on the account** (headless
-    seat, API error), so a tab with an unloaded mod on a busy account is not flagged.
-  - **L3-U: a codex read that never returns stops that account's polling until restart**; its
-    source error stays visible (spec §12 deviation 20).
-  - **L3-U: the OpenCode transcript command interpolates its session id and server URL
-    unquoted.** Quote them when the OpenCode adapter lands.
-  - **L3-U: `/usage` shows a third window ("Current week (Fable)")** that `session.measure` does
-    not report, so the bar can omit a window the user sees.
+  swarm ([L3-S](superpowers/specs/2026-10-04-flight-control-l3-swarm-design.md)). The four
+  sub-branches (`l3-routing`, `l3-index`, `l3-usage`, `l3-swarm`) are merged into `l3-integration`,
+  and `FlightControlComposition` (installed in `FlightDeckApp.makeStore`) builds the one real
+  graph. The branch has NOT been merged to master and nothing has been swapped into /Applications.
+  The maintainer's checks are [FLIGHT-CONTROL-L3-CHECKLIST.md](FLIGHT-CONTROL-L3-CHECKLIST.md)
+  (eight tasks), run against a Release build.
+  - **UI runs (2026-10-06, `l3-integration` @ 4db609f0, under the global UI lock):**
+    `RoutingUITests` 4/4 PASS (the first execution on any branch); `CapabilityIndexUITests` PASS
+    (first execution, opt-in via `TEST_RUNNER_INDEX_UI=1`); `CapacityUITests` PASS;
+    `SwarmUITests` 2/2 PASS. Caveat: `SwarmUITests` runs under `-FlightControlFixtureBackend`,
+    which skips `FlightControlComposition`, so the UI suites do NOT exercise the real joined graph.
+    The joined graph is covered by `SwarmEndToEndTests` and the `FlightControlL3/Integration` unit
+    tests, against faked `br`/`am` and tabs. A real-stack GUI run is the maintainer's checklist.
+  - **What integration added beyond the merge** (each has a test; see the spec as-built sections):
+    - Retiring an agent honors the exit delivery: a failed exit is the terminal phase
+      `.stopFailed` (not `.failed`, which would spawn a second replacement); the old lease is kept.
+    - Hand-off confirmation does not block the pass. `HandoffDriver` is the
+      `HandoffDecisionSink`; confirmation is phone-only, there is no Mac confirm UI.
+    - Hand-off prompts list the old agent's file reservations. An unreadable lookup says so
+      instead of claiming "held no file reservations".
+    - A handed-off tab is marked finished and Flight Control stops driving it (no prompt, claim
+      or reuse). The user's keyboard is not blocked.
+    - A fresh router per launch and per spill, so a rule edited after launch applies.
+    - Spill and the launch sheet's catalogs follow Settings (a disabled agent is never a target).
+    - One hand-off pass per tick over all swarms; the task is held during a hand-off; the old
+      claim goes back to open before the new agent claims; the driver is the only owner of the
+      old lease.
+    - A block naming a deleted pool waits with "pool <id> no longer exists" and never spills.
+    - Real meters on swarm rows, observing `UsageService`.
+    - The materialized claude plugin copy is refreshed before `/reload-plugins`.
+    - Settings: one Flight Control tab with Routing, Capability index, Capacity and Task kinds
+      sections (Settings → Flight Control → Capacity); the temporary top-level tabs are gone.
+  - **OpenCode routing capabilities wait for the opencode-adapter merge; `RoutingCapabilityRegistry.standard()` will fail to compile until it states them, which is intended.**
+  - **Still open** (unresolved probe outcomes and deferred minors, carried from every branch):
+    - Probes never run live: the changed triage/change-set strict-mode schema
+      (`taskKind`/`kindProposal`) against claude and codex (probe once per CLI before merging,
+      since every planning round shares it); codex `effort` and `/new`; reservations time parsed
+      from a relative `granted_at`; codex usage-limit `codex_error_info` spellings
+      (`RateLimitClassifier.kinds`), so the fleet API-error path may never mark a codex account
+      over hard (the 120 s `rateLimitReachedType` read is the authoritative signal); the real
+      claude-tab meter (the mod in an FD-spawned tab) against `/usage`; the hook log's
+      failed-tool event for claude (transcript used instead).
+    - Capability index: the validator trims spaces but not newlines; the proposer proposes the
+      bare model for a non-knob bracketed setting; the confidence denominator counts sources that
+      returned no data; a model-supplied `retrievedAt` is kept as row provenance; a refresh has no
+      timeout or cancel (a hung `claude` leaves Roll back disabled until relaunch); an
+      all-sources-failed refresh still writes a snapshot, which can push real ones out of the 12
+      kept; the agent model field accepts an empty model and a token cap of 0 and saves on every
+      keystroke; `knownCatalogs` is filled only by a refresh in the session; a `prune()` failure
+      after a good write reads as a snapshot save failure; the manual-score discount is not
+      clamped to 0...1. The routing hint fallback is per-model, not per-dimension: a variant row
+      lacking the rule dimension suppresses the hint.
+    - Routing: claude full model ids (aliases only); codex's effort knob schema is the union
+      across models, so a rule can validate with an effort one model rejects.
+      `ProjectViewInspectorLiveTests` failed once in `l3-routing`'s full run (passes on master
+      and on the integration branch).
+    - Usage: local-pool capacity cannot see load from outside Flight Deck (by design); claude hook
+      modules sit behind a remote rollout switch (no meter when it is off); `spendControlReached`
+      is ignored; the silent-mod check is suppressed by any other reading on the account; a codex
+      read that never returns stops that account's polling until restart; the OpenCode transcript
+      command interpolates its session id and server URL unquoted (quote them when the adapter
+      lands); `/usage` shows a third window ("Current week (Fable)") that `session.measure` does
+      not report; `UsageService.revision` bumps on every tick, so swarm rows re-evaluate each tick.
+    - Swarm: the Observe events lane is a nil stub (activity stands in); the Assignment lane is
+      hidden when the tab has no Observe (am) agent row; claude/codex accept only the hard-coded
+      `effort` knob; an agent `stop()` retired gets no "done" marker and a stopped swarm's summary
+      is not visible; `SwarmService.applyProjections` awaits each project in turn, so one slow
+      `br show` delays completion detection everywhere; old phone builds get a `.session` reply to
+      `session.new`; the phone's hand-off decision API (`decideHandoff`, `handoffPending`) has no
+      UI caller yet, and there is no Mac confirm UI, so a user who turns "Confirm hand-offs" on
+      without the phone never gets hand-offs.
+    - Integration: a failed plugin refresh still arms the reload and records the fingerprint
+      (NSLog only); an absent Observe projection reads as no reservations (prompt says "held
+      none"); the debug fixture backend keeps all-harness catalogs (its router never spills);
+      `stop()` mid-hand-off can release the old lease twice (the ledger ignores the second);
+      a hung `onTick` stops all hand-offs; the hand-off claim conflict was inferred from a fixture,
+      not live `br`; the hand-off rig opens claude tabs for codex blocks; Settings'
+      `.id(project)` rebuilds Capacity drafts on a project change; `PreferencesOpener` cannot
+      select a Flight Control section; the awaiting agent is not re-Escaped if it resumes work
+      during a pending confirmation; no test for confirm-turned-off-while-pending; the swarm
+      drawer pixel test captures the first render without settling.
+    - Test flakes seen under load, each passing alone: `PlanEditorKeystrokeTests` frame budget
+      (16.1 to 16.7 ms), `PlanningRenderTests.testASeatBeatRedrawsTheLiveCardAlone`,
+      `DelegationLifecycleTests.testUnknownRunFromTheHostEndsTheRunAsDied`.
+  - **Still deferred (Level 3 follow-on, unchanged):** the remaining tending actions (reclaim and
+    respawn a stuck task, "fresh eyes", "reread AGENTS.md", a tend-cadence nudge), the Agent Mail
+    inbox anchored to tasks, and the task-graph convergence gauge. Unresolved: whether
+    `AgentAdapter`/`AgentKind` should share `ntm`'s agent taxonomy, and whether `ntm serve`'s
+    event stream is worth a transport spike ([FLYWHEEL-SPIKE-FINDINGS.md](FLYWHEEL-SPIKE-FINDINGS.md)
+    already ruled it out as FD's own runner).
 
 ## Plan comments from the phone (2026-09-30)
 
