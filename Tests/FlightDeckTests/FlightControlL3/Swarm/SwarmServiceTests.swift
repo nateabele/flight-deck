@@ -179,4 +179,57 @@ final class SwarmServiceTests: XCTestCase {
         XCTAssertNil(weakHost, "neither the service nor its controllers keep the host alive")
         s = nil
     }
+
+    // MARK: final review
+
+    /// A restored swarm is always paused, and the ruling retries an unreadable restored claim
+    /// "also while paused" — which only happens if the clock ticks paused swarms.
+    func testAPausedRestoredSwarmRetriesAnUnreadableClaimOnTheClock() async {
+        let rig = SwarmRig()
+        var a = rig.agent("BlueLake", state: .starting); a.pendingClaim = "fx-1"
+        rig.store.save([rig.record(state: .running, agents: [a])])   // restored as paused
+        let clock = WatchClock(appIsActive: { true })
+        let s = service(rig, clock: clock)
+        await s.settle()
+        XCTAssertTrue(rig.backend.returned.isEmpty, "unreadable at restore: left for a retry")
+        rig.backend.statuses["fx-1"] = TaskStatusReading(status: "in_progress", assignee: "BlueLake")
+        rig.now += SwarmService.tickInterval
+        clock.fire(); await s.settle()
+        XCTAssertEqual(rig.backend.returned, ["fx-1"])
+        XCTAssertEqual(s.record(forProject: SwarmFixtures.project)?.state, .paused, "ticking a paused swarm claims nothing")
+        XCTAssertTrue(rig.backend.claims.isEmpty)
+    }
+
+    /// Every throttled tick and projection change starts a task; only `settle()` (a test) used to
+    /// drop them, so a long-running app held one per tick forever.
+    func testFinishedWorkIsNotKept() async {
+        let rig = SwarmRig()
+        rig.backend.ready = [SwarmFixtures.task("fx-1", SwarmFixtures.block())]   // no lease: waits, keeps running
+        let clock = WatchClock(appIsActive: { true })
+        let s = service(rig, clock: clock)
+        _ = s.launch(project: SwarmFixtures.project, cap: 1, poolCaps: [:], filter: .allReady)
+        await s.settle()
+        for _ in 0..<50 {
+            rig.now += SwarmService.tickInterval
+            clock.fire()
+            for _ in 0..<5 { await Task.yield() }
+        }
+        XCTAssertLessThanOrEqual(s.pendingWorkCount, 1)
+        await s.settle()
+        XCTAssertEqual(s.pendingWorkCount, 0)
+    }
+
+    /// A hand-off to a session with no agent name would record an agent named "" that nothing
+    /// can claim as or message.
+    func testAHandoffToANamelessSessionIsRefused() async {
+        let rig = SwarmRig()
+        let a = rig.agent("BlueLake", state: .working, task: "fx-1")
+        rig.store.save([rig.record(state: .paused, agents: [a])])
+        let s = service(rig)
+        await s.settle()
+        XCTAssertFalse(s.recordHandoff(project: SwarmFixtures.project, from: a.session,
+                                       to: SessionRef(id: UUID(), agentName: nil), block: SwarmFixtures.block(), lease: nil))
+        XCTAssertEqual(s.record(forProject: SwarmFixtures.project)?.agent(a.session)?.state, .working)
+        XCTAssertEqual(s.record(forProject: SwarmFixtures.project)?.agents.count, 1)
+    }
 }

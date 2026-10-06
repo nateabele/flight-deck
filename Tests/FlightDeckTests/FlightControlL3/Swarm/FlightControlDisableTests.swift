@@ -113,4 +113,57 @@ final class FlightControlDisableTests: XCTestCase {
         _ = await removal.remove(repo: repo)
         XCTAssertTrue(FileManager.default.fileExists(atPath: hook.path))
     }
+
+    /// After a relaunch with no routing dependencies there is no controller, but the record still
+    /// names the claims; Turn Off must still give them back and end the swarm.
+    func testTurnOffWorksWithoutAController() async {
+        let rig = SwarmRig()
+        let a = rig.agent("BlueLake", state: .working, task: "fx-1")
+        rig.backend.statuses["fx-1"] = TaskStatusReading(status: "in_progress", assignee: "BlueLake")
+        rig.store.save([rig.record(state: .running, agents: [a])])
+        let service = SwarmService(store: rig.store, backend: rig.backend, launcher: rig.launcher, spawner: nil,
+                                   host: rig.host, registry: RoutingCapabilityRegistry([]), clock: nil, now: { rig.now })
+        XCTAssertNil(service.controller(forProject: SwarmFixtures.project))
+        let reopened = await service.turnOff(project: SwarmFixtures.project)
+        XCTAssertEqual(reopened, ["fx-1"])
+        XCTAssertEqual(service.record(forProject: SwarmFixtures.project)?.state, .stopped)
+        XCTAssertEqual(rig.store.load().first?.state, .stopped, "and a later relaunch does not bring it back")
+    }
+
+    /// Probed: `br agents --remove --force` backs AGENTS.md up to AGENTS.md.bak and leaves it in
+    /// the user's repo. A backup FD's own removal created is FD's to clean up.
+    func testBrAgentsRemovalLeavesNoBackupBehind() async throws {
+        try writeAgentsSection()
+        let removal = FlightControlRepoRemoval(runner: BrAgentsRemoveStub())
+        let done = await removal.remove(repo: repo)
+        XCTAssertTrue(done.contains("agents"))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: repo.appendingPathComponent("AGENTS.md.bak").path))
+    }
+
+    func testABackupThatWasAlreadyThereIsLeftAlone() async throws {
+        try writeAgentsSection()
+        try "mine".write(to: repo.appendingPathComponent("AGENTS.md.bak"), atomically: true, encoding: .utf8)
+        let done = await FlightControlRepoRemoval(runner: BrAgentsRemoveStub()).remove(repo: repo)
+        XCTAssertTrue(done.contains("agents"))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: repo.appendingPathComponent("AGENTS.md.bak").path))
+    }
+
+    private func writeAgentsSection() throws {
+        let section = FlightControlRepoRemoval.agentsSectionStart + "\nUse br.\n"
+            + (FlightControlRepoRemoval.agentsSectionEnd.map { $0 + "\n" } ?? "")
+        try ("# Mine\n\n" + section).write(to: repo.appendingPathComponent("AGENTS.md"), atomically: true, encoding: .utf8)
+    }
+}
+
+/// `br agents --remove --force` as probed: AGENTS.md is copied to AGENTS.md.bak, then the section
+/// is removed. Every other command is "not found".
+private final class BrAgentsRemoveStub: FlywheelProcessRunner, @unchecked Sendable {
+    func run(_ executable: String, _ args: [String], cwd: String?) async throws -> (stdout: String, exitCode: Int32) {
+        guard executable == "br", args == ["agents", "--remove", "--force"], let cwd else { return ("", 127) }
+        let agents = URL(fileURLWithPath: cwd).appendingPathComponent("AGENTS.md")
+        let text = try String(contentsOf: agents, encoding: .utf8)
+        try text.write(to: URL(fileURLWithPath: cwd).appendingPathComponent("AGENTS.md.bak"), atomically: true, encoding: .utf8)
+        try "# Mine\n".write(to: agents, atomically: true, encoding: .utf8)
+        return ("", 0)
+    }
 }
