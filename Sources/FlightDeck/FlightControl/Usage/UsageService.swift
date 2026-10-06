@@ -19,8 +19,9 @@ struct UsageEnvironment {
     var codexRead: @MainActor (UUID?) async throws -> [String: Any]?
     var seatActivities: @MainActor () -> [SeatActivity]
     var notifier: @MainActor () -> Notifying?
-    /// Swarm tabs are the hand-off driver's; only manual tabs get the one-time notice. L3-S
-    /// answers this at integration; until then every tab is manual.
+    /// Swarm tabs are the hand-off driver's; only manual tabs get the one-time notice. The real
+    /// answer is `setSwarmPredicate` (installed by `FlightControlComposition`), which wins over
+    /// this; without it every tab is manual.
     var isSwarmSession: @MainActor (UUID) -> Bool
     /// Whether the tab's agent is running (the store has a status for it). A tab whose agent has
     /// exited is still in the sidebar; telling the user about its account's limit is noise.
@@ -131,7 +132,7 @@ final class UsageService: ObservableObject {
         reconfigure()
     }
 
-    /// The real `HandoffPlanner`, for L3-S to give the `HandoffDriver` at integration. The
+    /// The real `HandoffPlanner`, which `FlightControlGraph` gives the `HandoffDriver`. The
     /// reservation list is the driver host's job (it asks Agent Mail just before the prompt),
     /// so the planner's is empty. The planner must be called on the main actor (the hand-off
     /// driver is `@MainActor`): its transcript closure asserts it with `assumeIsolated`.
@@ -168,8 +169,9 @@ final class UsageService: ObservableObject {
         modSource = ClaudeModUsageSource(directory: new.usageDirectory)
     }
 
-    /// L3-S answers "is this tab a swarm agent?" at integration. Until then every tab is
-    /// manual: it gets the one-time notice and is never handed off.
+    /// "Is this tab a swarm agent?", answered from the swarm's records by
+    /// `FlightControlComposition`. Without it every tab is manual: it gets the one-time notice
+    /// and is never handed off.
     func setSwarmPredicate(_ isSwarm: @escaping @MainActor (UUID) -> Bool) {
         swarmPredicate = isSwarm
     }
