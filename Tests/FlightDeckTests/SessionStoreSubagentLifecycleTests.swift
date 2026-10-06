@@ -9,9 +9,15 @@ import FleetKit
 @MainActor
 final class SessionStoreSubagentLifecycleTests: XCTestCase {
     private let dialog = PendingDialog(agentID: "a28ad87b", callID: "toolu_SUB")
+    private var clock = Date(timeIntervalSince1970: 5_000_000)
+
+    /// A dialog a human answers has been on screen for seconds, not milliseconds; the retire
+    /// rule's grace window (see `SessionStore.dialogRetireGrace`) depends on that difference.
+    private func advance(_ seconds: TimeInterval) { clock = clock.addingTimeInterval(seconds) }
 
     private func make() -> (SessionStore, Session) {
         let store = SessionStore(provider: nil, persistence: nil)
+        store.now = { [unowned self] in self.clock }
         let session = store.newSession(in: URL(fileURLWithPath: "/w/alpha"))
         return (store, session)
     }
@@ -67,6 +73,7 @@ final class SessionStoreSubagentLifecycleTests: XCTestCase {
         store.ingestDialogChangesForTesting([.raised(session.pinnedConversationID, dialog)])
         store.applyRegistryForTesting([
             session.id: SessionStatus(activity: .waiting, waitingFor: "permission prompt")])
+        advance(5)
         store.applyRegistryForTesting([session.id: SessionStatus(activity: .busy)])
         XCTAssertNil(store.pendingDialog(for: session.id))
     }
@@ -76,6 +83,7 @@ final class SessionStoreSubagentLifecycleTests: XCTestCase {
         store.applyRegistryForTesting([
             session.id: SessionStatus(activity: .waiting, waitingFor: "permission prompt")])
         store.ingestDialogChangesForTesting([.raised(session.pinnedConversationID, dialog)])
+        advance(5)
         store.applyRegistryForTesting([:])
         XCTAssertNil(store.pendingDialog(for: session.id))
     }
@@ -90,9 +98,48 @@ final class SessionStoreSubagentLifecycleTests: XCTestCase {
         store.applyRegistryForTesting([
             session.id: SessionStatus(activity: .waiting, waitingFor: "permission prompt")])
         XCTAssertEqual(store.pendingDialog(for: session.id), dialog, "an unchanged wait keeps it")
+        advance(5)
         store.applyRegistryForTesting([
             session.id: SessionStatus(activity: .waiting, waitingFor: "input needed")])
         XCTAssertNil(store.pendingDialog(for: session.id))
+    }
+
+    /// The registry may write `waiting` before it fills in why. A reason appearing where there
+    /// was none is the same wait, not a new one; counting it as a move retired the dialog on
+    /// its very first wait.
+    func testAWaitingForThatFillsInIsNotANewWait() {
+        let (store, session) = make()
+        store.applyRegistryForTesting([session.id: SessionStatus(activity: .busy)])
+        store.ingestDialogChangesForTesting([.raised(session.pinnedConversationID, dialog)])
+        store.applyRegistryForTesting([session.id: SessionStatus(activity: .waiting)])
+        advance(5)
+        store.applyRegistryForTesting([
+            session.id: SessionStatus(activity: .waiting, waitingFor: "permission prompt")])
+        XCTAssertEqual(store.pendingDialog(for: session.id), dialog)
+    }
+
+    /// Back-to-back dialogs: A is approved, B's PermissionRequest is ingested on the same tick as
+    /// a registry read that still says `busy` (the hook leads the registry by ~70ms). The edge
+    /// waiting → busy belongs to A; B was raised milliseconds ago and must survive it, then be
+    /// retired normally when its own wait ends.
+    func testABackToBackDialogRacingAStaleBusyReadSurvivesItsPredecessorsEdge() {
+        let (store, session) = make()
+        let conversation = session.pinnedConversationID
+        let next = PendingDialog(agentID: "a28ad87b", callID: "toolu_NEXT")
+        store.applyRegistryForTesting([session.id: SessionStatus(activity: .busy)])
+        store.ingestDialogChangesForTesting([.raised(conversation, dialog)])
+        store.applyRegistryForTesting([
+            session.id: SessionStatus(activity: .waiting, waitingFor: "permission prompt")])
+        advance(5)
+        store.ingestDialogChangesForTesting([.raised(conversation, next)])
+        advance(0.1)
+        store.applyRegistryForTesting([session.id: SessionStatus(activity: .busy)])
+        XCTAssertEqual(store.pendingDialog(for: session.id), next, "A's edge must not retire B")
+        store.applyRegistryForTesting([
+            session.id: SessionStatus(activity: .waiting, waitingFor: "permission prompt")])
+        advance(5)
+        store.applyRegistryForTesting([session.id: SessionStatus(activity: .busy)])
+        XCTAssertNil(store.pendingDialog(for: session.id), "B's own edge retires it")
     }
 
     func testAPromptSubmitRetiresThePendingDialogAndIsRemembered() {
