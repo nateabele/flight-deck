@@ -22,6 +22,11 @@ final class FakeSwarmBackend: SwarmBackend {
     var claimResults: [String: ClaimOutcome] = [:]
     /// Runs inside `releaseReservations`, so a test can act while a reuse is mid-flight.
     var onReleaseReservations: (() -> Void)?
+    /// Runs inside `claim`, before its outcome is returned, so a test can stop the swarm mid-claim.
+    var onClaim: ((String) -> Void)?
+    /// Runs inside `status`, before the reading is returned. Async so a test can run a whole
+    /// tick inside another path's await, which is how two controller paths interleave live.
+    var onStatus: ((String) async -> Void)?
     var statuses: [String: TaskStatusReading] = [:]
     /// Tasks whose `returnToOpen` fails (leaving the status untouched) until the test clears them.
     var returnToOpenFails: Set<String> = []
@@ -41,9 +46,13 @@ final class FakeSwarmBackend: SwarmBackend {
         return readyFails ? .failure(SwarmBackendError(message: "br ready failed")) : .success(ready)
     }
     func taskDetail(_ id: String, project: URL) async -> TaskDetail? { details[id] }
-    func status(_ id: String, project: URL) async -> TaskStatusReading? { statuses[id] }
+    func status(_ id: String, project: URL) async -> TaskStatusReading? {
+        await onStatus?(id)
+        return statuses[id]
+    }
     func claim(_ id: String, actor: String, project: URL) async -> ClaimOutcome {
         claims.append(ClaimCall(task: id, actor: actor)); log.add("claim \(id) \(actor)")
+        onClaim?(id)
         let outcome = claimResults[id] ?? .claimed
         if outcome == .claimed {
             statuses[id] = TaskStatusReading(status: "in_progress", assignee: actor)
