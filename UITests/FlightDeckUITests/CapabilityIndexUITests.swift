@@ -20,8 +20,12 @@ final class CapabilityIndexUITests: XCTestCase {
         return environment[name] ?? environment["TEST_RUNNER_\(name)"]
     }
 
+    /// `INDEX_UI_FIXTURE` wins: `#filePath` is the path on the Mac that COMPILED the bundle, and
+    /// when the suite runs on the UI-test Mac (smoke-remote.sh) that checkout does not exist there,
+    /// so the app would be handed a fixture folder that is not on disk.
     private var fixturePath: String {
-        URL(fileURLWithPath: #filePath)
+        if let override = environmentValue("INDEX_UI_FIXTURE"), !override.isEmpty { return override }
+        return URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()   // UITests/FlightDeckUITests
             .deletingLastPathComponent()   // UITests
             .deletingLastPathComponent()   // repo root
