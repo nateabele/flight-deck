@@ -30,6 +30,9 @@ struct RoundConfigEditor: View {
         // way to hide what the panel was opened to show.
         VStack(alignment: .leading, spacing: 14) {
             Text(Self.label(preset: preset, config: config)).font(.headline)
+            ForEach(Self.availabilityNotes(available), id: \.self) { note in
+                Text(note).font(.caption).foregroundStyle(.secondary)
+            }
             stackedSlots
             Divider()
             capsForm
@@ -57,8 +60,12 @@ struct RoundConfigEditor: View {
                         }
                         HStack(spacing: 8) {
                             harnessPicker(for: row.keyPath).fixedSize()
-                            modelField(for: row.keyPath)
-                            effortPicker(for: row.keyPath).fixedSize()
+                            modelField(for: row.keyPath, harness: choice.harness)
+                            // Hidden, not disabled, for a harness with no effort knob: a picker
+                            // whose value the CLI never receives would read as a setting.
+                            if !Self.effortChoices(for: choice.harness).isEmpty {
+                                effortPicker(for: row.keyPath, harness: choice.harness).fixedSize()
+                            }
                         }
                         if Self.supportsFallback(row.keyPath) {
                             HStack(spacing: 8) {
@@ -121,15 +128,29 @@ struct RoundConfigEditor: View {
         .pickerStyle(.menu)
     }
 
-    private func modelField(for keyPath: SlotKeyPath) -> some View {
-        TextField("Model", text: modelBinding(for: keyPath))
-            .textFieldStyle(.roundedBorder)
-            .frame(maxWidth: .infinity)
+    /// A picker when the harness's CLI listed its models at detection (grok), so a seat can
+    /// only name a model that account has; claude and codex keep the free text field, since
+    /// they take aliases no list command reports.
+    @ViewBuilder
+    private func modelField(for keyPath: SlotKeyPath, harness: Harness) -> some View {
+        let binding = modelBinding(for: keyPath)
+        if let models = Self.modelChoices(for: harness, current: binding.wrappedValue, available: available) {
+            Picker("Model", selection: binding) {
+                ForEach(models, id: \.self) { model in Text(model).tag(model) }
+            }
+            .labelsHidden()
+            .pickerStyle(.menu)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+            TextField("Model", text: binding)
+                .textFieldStyle(.roundedBorder)
+                .frame(maxWidth: .infinity)
+        }
     }
 
-    private func effortPicker(for keyPath: SlotKeyPath) -> some View {
+    private func effortPicker(for keyPath: SlotKeyPath, harness: Harness) -> some View {
         Picker("Effort", selection: effortBinding(for: keyPath)) {
-            ForEach(Self.effortChoices, id: \.self) { effort in
+            ForEach(Self.effortChoices(for: harness), id: \.self) { effort in
                 Text(effort).tag(effort)
             }
         }
@@ -327,6 +348,32 @@ struct RoundConfigEditor: View {
     /// bare `String` that would accept it.
     static let effortChoices = ["low", "medium", "high", "xhigh", "max"]
 
+    /// The effort values a seat on `harness` may pick: its profile's knob, or `effortChoices`
+    /// while that profile is still a stub with no catalog (claude/codex until Track P), so
+    /// their pickers don't change. Empty hides the picker.
+    static func effortChoices(for harness: Harness) -> [String] {
+        let catalog = AgentProfiles.profile(for: harness).modelCatalog
+        return catalog.isEmpty ? effortChoices : catalog.effortValues
+    }
+
+    /// The model picker's options, or nil for a free text field (no list was detected). A
+    /// persisted model the list no longer has stays selectable, first — dropping it would make
+    /// the picker show a blank selection and silently re-seat the slot on the next touch.
+    static func modelChoices(for harness: Harness, current: String, available: AvailableModels) -> [String]? {
+        guard let models = available.models[harness], !models.isEmpty else { return nil }
+        return models.contains(current) || current.isEmpty ? models : [current] + models
+    }
+
+    /// One line per harness this build can run but isn't offering — "Grok: run `grok login`"
+    /// — plus the data-use caution for any consumer-plan harness that IS offered (spec §3.9).
+    static func availabilityNotes(_ available: AvailableModels) -> [String] {
+        var notes = Harness.allCases.compactMap { available.unavailable[$0] }
+        if available.choice(for: .grok) != nil {
+            notes.append("Grok may use prompts to improve its models. Check xAI's data settings before using it on private repos.")
+        }
+        return notes
+    }
+
     /// One row per filled seat, in the fixed order the round actually runs: every drafter,
     /// then synthesizer, reviewer, crossReviewer, integrator, encoder, polisher. Skips
     /// synthesizer/reviewer/polisher when the preset has none, rather than emitting a row with
@@ -456,6 +503,8 @@ struct RoundConfigEditor: View {
     /// The fallback Picker's one non-"None" option: whichever available model ISN'T the
     /// seat's current choice. Nil on a single-harness machine, where there is no other model.
     static func otherModel(for choice: ModelChoice, available: AvailableModels) -> ModelChoice? {
-        choice.harness == .codex ? available.claude : available.codex
+        // The first other harness in `Harness.allCases` order: codex ↔ claude exactly as
+        // before, and a grok seat falls back to codex (else claude) — a different family.
+        available.harnesses.first { $0 != choice.harness }.flatMap(available.choice(for:))
     }
 }

@@ -24,14 +24,98 @@ struct TriageSettings: Equatable, Sendable {
     /// claude defaults for whichever is installed. Neither found falls back to claude alone,
     /// exactly as `detect` does — `PresetExpansion` needs at least one model, and a round that
     /// then fails to find `claude` says so in its own diagnosis rather than never starting.
-    static func available(path: String? = LoginShellPath.repairing()["PATH"]) -> AvailableModels {
+    ///
+    /// Every OTHER harness this build can run (`AgentProfiles.headlessReady`) is offered only
+    /// when its CLI is installed AND its profile's sign-in check passes — `probe` runs that
+    /// check's read-only command. One that fails is recorded in `unavailable` with the reason,
+    /// so the editor can say why it is missing; one that passes brings its listed models.
+    /// `probe` is injectable so a test never spawns the operator's real CLIs.
+    static func available(path: String? = LoginShellPath.repairing()["PATH"],
+                          probe: (_ executable: String, _ arguments: [String]) -> SignInCheckOutput? = runProbe)
+        -> AvailableModels {
         let codex = installed("codex", path: path), claude = installed("claude", path: path)
-        return AvailableModels(codex: codex ? AvailableModels.defaults.codex : nil,
-                               claude: claude || !codex ? AvailableModels.defaults.claude : nil)
+        var choices: [Harness: ModelChoice] = [:]
+        choices[.codex] = codex ? AvailableModels.defaults.codex : nil
+        choices[.claude] = claude || !codex ? AvailableModels.defaults.claude : nil
+        var models: [Harness: [String]] = [:], unavailable: [Harness: String] = [:]
+        for harness in Harness.allCases where harness != .codex && harness != .claude
+            && AgentProfiles.headlessReady.contains(harness) {
+            let profile = AgentProfiles.profile(for: harness)
+            guard let executable = executable(profile.binaryName, path: path) else {
+                unavailable[harness] = "\(profile.family.displayName): not installed"
+                continue
+            }
+            let check = profile.signInCheck
+            let output = check.arguments.isEmpty ? nil : probe(executable, check.arguments)
+            switch output.map(check.readiness) ?? .signedOut(hint: check.signedOutHint) {
+            case .ready:
+                let catalog = profile.modelCatalog
+                var listed: [String] = []
+                if let list = catalog.listArguments {
+                    // grok's list command IS its sign-in check — one spawn, not two.
+                    let listOutput = list == check.arguments ? output : probe(executable, list)
+                    listed = listOutput.map { profile.parseModelList($0.stdout) } ?? []
+                }
+                let offered = listed.isEmpty ? catalog.aliases : listed
+                // The profile's default unless this account doesn't list it — then the CLI's
+                // own first choice, so a seat is never seeded with a model it can't run.
+                let model = offered.isEmpty || offered.contains(catalog.defaultPlanningModel)
+                    ? catalog.defaultPlanningModel : offered[0]
+                choices[harness] = ModelChoice(harness: harness, model: model, effort: catalog.defaultPlanningEffort)
+                if !offered.isEmpty { models[harness] = offered }
+            case .signedOut(let hint):
+                unavailable[harness] = hint
+            case .notInstalled:
+                unavailable[harness] = "\(profile.family.displayName): not installed"
+            }
+        }
+        var available = AvailableModels(choices: choices)
+        available.models = models
+        available.unavailable = unavailable
+        return available
     }
 
-    private static func installed(_ tool: String, path: String?) -> Bool {
-        (path ?? "").split(separator: ":").contains { FileManager.default.isExecutableFile(atPath: "\($0)/\(tool)") }
+    private static func installed(_ tool: String, path: String?) -> Bool { executable(tool, path: path) != nil }
+
+    private static func executable(_ tool: String, path: String?) -> String? {
+        (path ?? "").split(separator: ":").lazy.map { "\($0)/\(tool)" }
+            .first { FileManager.default.isExecutableFile(atPath: $0) }
+    }
+
+    /// Runs a sign-in check's command for `available`. Output goes to temp FILES, not pipes: a
+    /// CLI that leaves a helper process holding its stdout (grok has a background "leader")
+    /// would block a pipe read forever, and this runs on every launch. Ten seconds is generous
+    /// for a command that reads a cached login (`grok models` takes ~0.25 s); past it the
+    /// harness reads as signed out rather than stalling detection.
+    static func runProbe(_ executable: String, _ arguments: [String]) -> SignInCheckOutput? {
+        let fm = FileManager.default
+        let dir = fm.temporaryDirectory.appendingPathComponent("fd-signin-\(UUID().uuidString)", isDirectory: true)
+        guard (try? fm.createDirectory(at: dir, withIntermediateDirectories: true)) != nil else { return nil }
+        defer { try? fm.removeItem(at: dir) }
+        let outURL = dir.appendingPathComponent("stdout"), errURL = dir.appendingPathComponent("stderr")
+        guard fm.createFile(atPath: outURL.path, contents: nil), fm.createFile(atPath: errURL.path, contents: nil),
+              let out = try? FileHandle(forWritingTo: outURL), let err = try? FileHandle(forWritingTo: errURL) else { return nil }
+        defer { try? out.close(); try? err.close() }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+        // The same environment a seat on this harness gets, so the check reads the same
+        // login a round would use.
+        process.environment = HarnessCommand.environment(
+            for: ((executable as NSString).lastPathComponent, arguments, []), base: LoginShellPath.repairing())
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = out
+        process.standardError = err
+        let exited = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in exited.signal() }
+        do { try process.run() } catch { return nil }
+        guard exited.wait(timeout: .now() + 10) == .success else {
+            process.terminate()
+            return nil
+        }
+        return SignInCheckOutput(stdout: (try? String(contentsOf: outURL, encoding: .utf8)) ?? "",
+                                 stderr: (try? String(contentsOf: errURL, encoding: .utf8)) ?? "",
+                                 exitCode: process.terminationStatus)
     }
 }
 
