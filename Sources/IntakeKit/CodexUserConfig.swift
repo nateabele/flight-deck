@@ -13,7 +13,14 @@ public enum CodexUserConfig {
     /// same key under a table is some other setting's. The identifier check is what makes it
     /// safe to splice into `-c service_tier="<value>"` — a quote or newline can't escape it.
     public static func serviceTier(home: URL = FileManager.default.homeDirectoryForCurrentUser) -> String? {
-        let file = home.appendingPathComponent(".codex", isDirectory: true).appendingPathComponent("config.toml")
+        serviceTier(configDirectory: home.appendingPathComponent(".codex", isDirectory: true))
+    }
+
+    /// The same read from a config directory directly — what `CODEX_HOME` names. A seat bound
+    /// to a non-default account carries THAT account's tier, since `--ignore-user-config`
+    /// dropped that account's file, not the built-in one (`CodexProfile.serviceTierArguments`).
+    public static func serviceTier(configDirectory: URL) -> String? {
+        let file = configDirectory.appendingPathComponent("config.toml")
         guard let text = try? String(contentsOf: file, encoding: .utf8) else { return nil }
         for raw in text.split(whereSeparator: \.isNewline) {
             let line = raw.trimmingCharacters(in: .whitespaces)
@@ -31,8 +38,8 @@ public enum CodexUserConfig {
         return nil
     }
 
-    /// `-c service_tier="<value>"` when the user's config sets one, else nothing.
-    static func arguments(home: URL) -> [String] {
-        serviceTier(home: home).map { ["-c", "service_tier=\"\($0)\""] } ?? []
+    /// `-c service_tier="<value>"` when the config in `configDirectory` sets one, else nothing.
+    static func arguments(configDirectory: URL) -> [String] {
+        serviceTier(configDirectory: configDirectory).map { ["-c", "service_tier=\"\($0)\""] } ?? []
     }
 }

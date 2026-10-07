@@ -60,7 +60,7 @@ public enum IndexExtraction {
             + HarnessCommand.claudeIsolation
         // Unset for the reason `HarnessCommand.build` gives: a claude spawned from inside Claude
         // Code otherwise skips saving its transcript, and the live probe runs from inside one.
-        return ("claude", args, ["CLAUDE_CODE_CHILD_SESSION", "CLAUDECODE"])
+        return ("claude", args, ClaudeProfile.childSessionVariables)
     }
 
     /// The stream's final `result.structured_output`, decoded. Throws on an error result, a

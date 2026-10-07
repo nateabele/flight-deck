@@ -1,24 +1,20 @@
 import Foundation
 import IntakeKit
 
-/// Claude's routable models: the aliases `ClaudeFlagCatalog` offers for `--model`, `opus` first
-/// because it is Flight Deck's default claude model everywhere else (`AvailableModels.defaults`).
+/// Claude's routable models: the claude profile's aliases — the same list Settings offers for
+/// `--model` and the Rounds editor suggests — with the profile's planning default (`opus`)
+/// first, because `RoutingCapabilityRegistry.catalogs` takes the first model as the default.
 ///
 /// Aliases only. Claude has no model-list command, and a hand-kept list of full ids goes stale
 /// silently — the failure a rule validated against it would then hide.
 enum ClaudeRoutingCatalog {
-    static var knobSchema: [String: [String]] { ["effort": choices("--effort")] }
+    static var knobSchema: [String: [String]] { ["effort": ClaudeProfile.catalog.effortValues] }
 
     static var models: [ModelEntry] {
-        let aliases = choices("--model")
-        let ordered = aliases.filter { $0 == "opus" } + aliases.filter { $0 != "opus" }
+        let catalog = ClaudeProfile.catalog
+        let first = catalog.defaultPlanningModel
+        let ordered = catalog.aliases.filter { $0 == first } + catalog.aliases.filter { $0 != first }
         return ordered.map { ModelEntry(id: $0, displayName: $0.capitalized, knobs: ["effort"]) }
-    }
-
-    private static func choices(_ flag: String) -> [String] {
-        guard let spec = ClaudeFlagCatalog.all.first(where: { $0.canonical == flag }),
-              case .choice(let values, _) = spec.kind else { return [] }
-        return values
     }
 }
 
@@ -55,6 +51,10 @@ final class CodexRoutingCatalog {
         }
     }
 
+    /// The ids of the last successful fetch, or none — a read that never fetches, for views
+    /// that may only show what is already known (the Rounds editor's model menu).
+    var cachedModelIDs: [String] { cached?.map(\.id) ?? [] }
+
     func invalidate() {
         cached = nil
         knobSchema = [:]
@@ -62,19 +62,14 @@ final class CodexRoutingCatalog {
 
     /// Hidden models are left out; the `isDefault` model goes first, because
     /// `RoutingCapabilityRegistry.catalogs` takes the first model as the adapter's default.
+    /// The listing itself is `CodexProfile.listedModels` — the one reader of `model/list`, so
+    /// routing and the profile's `parseModelList` can never disagree on which models exist.
     nonisolated static func parse(_ result: [String: Any]) -> ([ModelEntry], [String: [String]]) {
-        var models: [ModelEntry] = []
         var efforts: [String] = []
-        var defaultIndex: Int?
-        for m in result["data"] as? [[String: Any]] ?? [] where (m["hidden"] as? Bool) != true {
-            guard let id = m["id"] as? String, !id.isEmpty else { continue }
-            let supported = (m["supportedReasoningEfforts"] as? [[String: Any]] ?? []).compactMap { $0["reasoningEffort"] as? String }
-            for e in supported where !efforts.contains(e) { efforts.append(e) }
-            if m["isDefault"] as? Bool == true, defaultIndex == nil { defaultIndex = models.count }
-            models.append(ModelEntry(id: id, displayName: m["displayName"] as? String ?? id,
-                                     knobs: supported.isEmpty ? [] : ["effort"]))
+        let models = CodexProfile.listedModels(result).map { m -> ModelEntry in
+            for e in m.efforts where !efforts.contains(e) { efforts.append(e) }
+            return ModelEntry(id: m.id, displayName: m.displayName, knobs: m.efforts.isEmpty ? [] : ["effort"])
         }
-        if let i = defaultIndex, i > 0 { models.insert(models.remove(at: i), at: 0) }
         return (models, efforts.isEmpty ? [:] : ["effort": efforts])
     }
 

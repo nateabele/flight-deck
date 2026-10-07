@@ -1415,10 +1415,12 @@ backoff ladder, riding the existing `pendingPrompts` queue rather than a second 
   because it can afford a `TimelineView` scoped to a banner that is usually absent.
 
 - **`SessionAPIError.kind` is now matched against an allowlist for policy, while still being
-  rendered verbatim for display.** `CodexTurnRecovery.transientKinds` (`rate_limit_exceeded`,
+  rendered verbatim for display.** `AgentErrorVocabulary.kinds` (IntakeKit; since Track P it
+  merges what were `CodexTurnRecovery.transientKinds` — `rate_limit_exceeded`,
   `server_overloaded`, `internal_server_error`, `response_too_many_failed_attempts`,
   `response_stream_connection_failed`, `response_stream_disconnected`,
-  `http_connection_failed`) is the one place that vocabulary is judged; `kind` itself stays
+  `http_connection_failed` — with claude's `overloaded`/`server_error` and
+  `RateLimitClassifier`'s quota kinds) is the one place that vocabulary is judged; `kind` itself stays
   free text everywhere else, per the field's own "never matched against an enum" rule for
   *display*. The consequence: codex's error vocabulary is not ours and will grow, so a
   codex-cli upgrade can add a new transient kind the allowlist does not know about, and the
@@ -2335,7 +2337,7 @@ flagged as most likely to differ from the tests. The maintainer's to run.
       it and return `taskKind`; the app default `gpt-6-sol` was not tried.
     - Probes never run live: codex `effort` and `/new`; reservations time parsed
       from a relative `granted_at`; codex usage-limit `codex_error_info` spellings
-      (`RateLimitClassifier.kinds`), so the fleet API-error path may never mark a codex account
+      (`RateLimitClassifier.kinds`, now derived from `AgentErrorVocabulary`), so the fleet API-error path may never mark a codex account
       over hard (the 120 s `rateLimitReachedType` read is the authoritative signal); the real
       claude-tab meter (the status line in an FD-spawned tab) against `/usage`; the hook log's
       failed-tool event for claude (transcript used instead).

@@ -13,10 +13,26 @@ public struct ModelChoice: Codable, Equatable, Sendable {
     public var harness: Harness
     public var model: String
     public var effort: String
-    public init(harness: Harness, model: String, effort: String) {
+    /// The account this seat bills (grok/gemini spec §3.0), picked in the Rounds editor. nil is
+    /// the built-in account, which every config written before accounts reached planning
+    /// decodes to — the key is absent from those files, and stays absent when nil is encoded,
+    /// so an untouched config is byte-identical. Carries the home, not just the id: the runner
+    /// is a separate process with no preferences to resolve an id against.
+    public var account: AgentAccountRef?
+    public init(harness: Harness, model: String, effort: String, account: AgentAccountRef? = nil) {
         self.harness = harness
         self.model = model
         self.effort = effort
+        self.account = account
+    }
+}
+
+public extension AgentProfile {
+    /// The model and effort a fresh planning seat on this harness starts at — the profile's
+    /// catalog default, so triage, `AvailableModels.defaults` and the editor's harness switch
+    /// can never name different defaults.
+    var defaultPlanningChoice: ModelChoice {
+        ModelChoice(harness: id, model: modelCatalog.defaultPlanningModel, effort: modelCatalog.defaultPlanningEffort)
     }
 }
 
@@ -152,10 +168,11 @@ public struct AvailableModels: Sendable, Equatable {
         set { choices[.claude] = newValue }
     }
 
-    /// codex gpt-6-sol/high and claude opus/high when both are present.
+    /// Each profile's planning default — codex gpt-6-sol/high and claude opus/high — when
+    /// both are present.
     public static let defaults = AvailableModels(
-        codex: ModelChoice(harness: .codex, model: "gpt-6-sol", effort: "high"),
-        claude: ModelChoice(harness: .claude, model: "opus", effort: "high")
+        codex: CodexProfile().defaultPlanningChoice,
+        claude: ClaudeProfile().defaultPlanningChoice
     )
 }
 

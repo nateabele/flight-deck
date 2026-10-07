@@ -166,7 +166,8 @@ extension ShellToolLauncher {
     /// here, so an edit made in the pane after this launcher is built still applies to the next
     /// launch instead of being frozen at construction time.
     ///
-    /// Deliberately not `PreferencesStore.sessionEnvironment(inherited:)`: that also blanks
+    /// Deliberately not `PreferencesStore.sessionEnvironment(inherited:)`, and deliberately no
+    /// `ClaudeProfile.scrubbingChildSession` either: those blank or remove
     /// `CLAUDE_CODE_CHILD_SESSION`, which exists to keep a nested Claude session's transcript
     /// writing (and the sidebar's rename sync that depends on it) alive — a session-creation
     /// concern with nothing to say about launching an editor or a terminal. The pane's raw
