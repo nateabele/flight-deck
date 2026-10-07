@@ -1,0 +1,39 @@
+{
+  "SpotPriceHistory": [
+    {
+      "AvailabilityZone": "us-east-1d",
+      "InstanceType": "g6.xlarge",
+      "ProductDescription": "Linux/UNIX",
+      "SpotPrice": "0.626500",
+      "Timestamp": "2026-10-07T18:00:00+00:00"
+    },
+    {
+      "AvailabilityZone": "us-east-1c",
+      "InstanceType": "g6.xlarge",
+      "ProductDescription": "Linux/UNIX",
+      "SpotPrice": "0.538300",
+      "Timestamp": "2026-10-07T18:00:00+00:00"
+    },
+    {
+      "AvailabilityZone": "us-east-1b",
+      "InstanceType": "g6.xlarge",
+      "ProductDescription": "Linux/UNIX",
+      "SpotPrice": "0.544100",
+      "Timestamp": "2026-10-07T18:00:00+00:00"
+    },
+    {
+      "AvailabilityZone": "us-east-1f",
+      "InstanceType": "g6.xlarge",
+      "ProductDescription": "Linux/UNIX",
+      "SpotPrice": "0.689100",
+      "Timestamp": "2026-10-07T16:00:00+00:00"
+    },
+    {
+      "AvailabilityZone": "us-east-1a",
+      "InstanceType": "g6.xlarge",
+      "ProductDescription": "Linux/UNIX",
+      "SpotPrice": "0.571700",
+      "Timestamp": "2026-10-07T16:00:00+00:00"
+    }
+  ]
+}
