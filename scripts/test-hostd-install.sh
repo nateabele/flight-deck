@@ -44,6 +44,31 @@ docker run --rm --platform linux/arm64 -e SUMS="$SUMS" -v "$PWD/build/hostd-rele
     grep -q "Pairing code:" <<<"$out"
     test "$(stat -c %a ~/.local/share/flightdeck-hostd)" = 700
 
+    # 2b. A one-time enrollment file adds its controller to the running serve and is deleted;
+    #     the same payload again is refused, an expired one is refused and deleted, and with
+    #     no hostd behind the root it exits 2.
+    H=~/.local/bin/flightdeck-hostd
+    enroll_file() {  # $1 slot, $2 issuedAt, $3 path
+      printf "{\"version\":1,\"slot\":\"%s\",\"secretHex\":\"%s\",\"controllerName\":\"cloud-ctl\",\"idleSeconds\":900,\"issuedAt\":\"%s\"}" \
+        "$1" "$(printf "ab%.0s" $(seq 32))" "$2" > "$3"
+    }
+    slot=$(tr a-z A-Z < /proc/sys/kernel/random/uuid)
+    enroll_file "$slot" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" ~/enroll.json
+    cp ~/enroll.json ~/enroll-again.json
+    $H enroll --file ~/enroll.json | grep -q "enrolled cloud-ctl in slot $slot"
+    test ! -e ~/enroll.json
+    $H controllers | grep -q "^$slot	cloud-ctl	"
+    grep -q "\"idleSeconds\":900" ~/.local/share/flightdeck-hostd/idle.json
+    rc=0; out=$($H enroll --file ~/enroll-again.json 2>&1) || rc=$?
+    [ $rc = 1 ]; grep -q "already enrolled" <<<"$out"
+    test -e ~/enroll-again.json
+    enroll_file "$(cat /proc/sys/kernel/random/uuid)" 2020-01-01T00:00:00Z ~/stale.json
+    rc=0; out=$($H enroll --file ~/stale.json 2>&1) || rc=$?
+    [ $rc = 1 ]; grep -q "expired" <<<"$out"
+    test ! -e ~/stale.json
+    rc=0; $H enroll --file ~/enroll-again.json --root ~/nowhere 2>/dev/null || rc=$?
+    [ $rc = 2 ]
+
     # 3. The systemd path, against stubs (the container has no user manager): the unit, the
     #    linger note when loginctl refuses, and the pair it ends in. Run from a file so timeout
     #    signals the pair that the installer execs, not a pipeline shell that would orphan it.
@@ -65,6 +90,15 @@ docker run --rm --platform linux/arm64 -e SUMS="$SUMS" -v "$PWD/build/hostd-rele
     if grep -n FD_HOSTD_TEST $unit; then exit 1; fi
     grep -qx -- "--user daemon-reload" ~/systemctl.log
     grep -qx -- "--user enable --now flightdeck-hostd" ~/systemctl.log
+
+    # 3b. --no-pair: the same systemd path, ending once hostd answers instead of in `pair`.
+    #     The serve from step 2 stands in for the unit the stubbed systemctl never starts.
+    rc=0
+    PATH=~/stub:$PATH timeout 6 sh ~/install.sh --sha256 "$SUMS" --asset-base $B --no-pair >~/nopair.log 2>&1 || rc=$?
+    cat ~/nopair.log
+    [ $rc = 0 ]
+    if grep -n "Pairing code:" ~/nopair.log; then exit 1; fi
+    grep -q "not pairing (--no-pair)" ~/nopair.log
 DEV
 
   # 4. A wrong digest refuses before anything is installed, in a home with no prior install.

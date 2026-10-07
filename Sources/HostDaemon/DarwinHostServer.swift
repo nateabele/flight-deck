@@ -490,6 +490,9 @@ final class DarwinHostServer: @unchecked Sendable {
             return .ok
         case .arm:
             return arm()
+        case .enroll:
+            // Enrollment is how a cloud machine's user-data pairs it; a Mac host pairs by code.
+            return .failed("enrollment is only supported by the Linux hostd")
         }
     }
 
