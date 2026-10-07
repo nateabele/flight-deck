@@ -131,7 +131,10 @@ enum TailscaleCLI {
         return nil
     }
 
-    private static func run(_ path: String, _ arguments: [String], timeout: TimeInterval) -> Data? {
+    /// One bounded run of the CLI at `path`: its stdout on a zero exit, else nil. Internal so
+    /// `TailnetIntegration` drives `lock status` and `lock sign` through the same guard
+    /// against a wedged daemon.
+    static func run(_ path: String, _ arguments: [String], timeout: TimeInterval) -> Data? {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: path)
         process.arguments = arguments
