@@ -49,6 +49,27 @@ final class RoundConfigEditorRenderTests: XCTestCase {
             size: NSSize(width: 620, height: 560),
             to: URL(fileURLWithPath: dir).appendingPathComponent("rounds-editor-crosscheck-samefamily.png")
         )
+
+        // Four families, as the live four-way round seats them: claude + codex drafting, Grok
+        // reviewing, Gemini cross-checking. Gemini has no effort row of claude's five values and
+        // both newcomers' data-use notes show. Built from what the gate offers, so a harness not
+        // yet headless-ready simply renders absent rather than failing the render.
+        var four = AvailableModels(choices: [
+            .claude: AvailableModels.defaults.claude!, .codex: AvailableModels.defaults.codex!,
+            .grok: ModelChoice(harness: .grok, model: "grok-4.7", effort: "high"),
+            .gemini: ModelChoice(harness: .gemini, model: "gemini-3.1-pro-high", effort: "high"),
+        ])
+        four.models[.grok] = ["grok-4.7", "grok-4.6"]
+        four.models[.gemini] = ["gemini-3.1-pro-high", "gemini-3.1-pro-low"]
+        var fourFamily = crossCheck
+        fourFamily.drafters = [Slot(AvailableModels.defaults.claude!), Slot(AvailableModels.defaults.codex!)]
+        if let grok = four.choice(for: .grok) { fourFamily.reviewer = Slot(grok) }
+        if let gemini = four.choice(for: .gemini) { fourFamily.crossReviewer = Slot(gemini) }
+        try render(
+            RoundConfigEditor(preset: .featurePlan, config: .constant(fourFamily), available: four),
+            size: NSSize(width: 620, height: 720),
+            to: URL(fileURLWithPath: dir).appendingPathComponent("rounds-editor-four-family.png")
+        )
     }
 
     /// Parked offscreen `NSHostingView` + `layer.render(in:)` — screencapture is denied here,
