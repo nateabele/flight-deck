@@ -200,7 +200,8 @@ slot, name and pairing time; the slot is what `flightdeck-hostd revoke SLOT` tak
 pairs with no code: its user-data writes a one-time `EnrollmentPayload` file (the controller's slot,
 secret and idle threshold, valid 30 minutes) and `flightdeck-hostd enroll --file PATH` hands it to
 the running `serve` as the admin socket's `enroll` request, because `serve` reads
-`controllers.json` only at start; the file is deleted once enrolled or expired, a reused slot is
+`controllers.json` only at start; the file is deleted once enrolled or expired (one issued in "the
+future" means the VM clock is behind, and is re-checked for 2 minutes, then kept), a reused slot is
 refused, and the threshold is kept in `<state root>/idle.json` (the Mac hostd refuses `enroll`;
 `hostd-install.sh --no-pair` installs without arming a code for that path). The boundary is
 the filesystem: a `0600` unix socket in a directory the user owns and that is not group- or

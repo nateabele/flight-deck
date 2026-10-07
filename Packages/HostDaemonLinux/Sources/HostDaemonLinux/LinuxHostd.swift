@@ -284,6 +284,7 @@ final class LinuxHostd: @unchecked Sendable {
     static func describe(_ error: EnrollmentError) -> String {
         switch error {
         case .expired: "expired"
+        case .notYetValid: "is not valid yet (this machine's clock is behind)"
         case .malformed: "malformed"
         case .wrongVersion: "has an unsupported version"
         }

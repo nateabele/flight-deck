@@ -10,13 +10,24 @@ import HostKit
 /// refusal leaves it in place for someone to inspect. Expiry and format are checked here first
 /// so a dead file never reaches hostd; hostd checks again, because the admin socket is the
 /// boundary that matters.
+///
+/// A payload from "the future" means this machine's clock is behind the Mac's, usually a fresh
+/// VM before NTP has synced. That file is never deleted: `run` re-checks it every
+/// `clockRetry` for up to `clockWait`, and if the clock still has not caught up it exits 1 and
+/// keeps the file, so a later `enroll` can still redeem it.
 enum EnrollCommand {
     struct Outcome: Equatable {
         let exitCode: Int32
         let message: String
     }
 
-    static func run(file: URL, now: Date, send: (AdminRequest) -> AdminReply) -> Outcome {
+    static let clockWait: TimeInterval = 120
+    static let clockRetry: TimeInterval = 5
+
+    /// `now` and `sleep` are injected so the clock wait is testable without sleeping.
+    static func run(file: URL, now: () -> Date = Date.init,
+                    sleep: (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) },
+                    send: (AdminRequest) -> AdminReply) -> Outcome {
         let payload: EnrollmentPayload
         do {
             let decoder = JSONDecoder()
@@ -25,22 +36,41 @@ enum EnrollCommand {
         } catch {
             return Outcome(exitCode: 1, message: "cannot read enrollment file \(file.path): \(error)")
         }
-        do {
-            _ = try payload.validate(now: now)
-        } catch let error as EnrollmentError {
-            if error == .expired { try? FileManager.default.removeItem(at: file) }
-            return Outcome(exitCode: 1, message: "enrollment \(LinuxHostd.describe(error))")
-        } catch {
-            return Outcome(exitCode: 1, message: "enrollment refused: \(error)")
+        var waited: TimeInterval = 0
+        while true {
+            do {
+                _ = try payload.validate(now: now())
+                break
+            } catch EnrollmentError.notYetValid where waited < clockWait {
+                sleep(clockRetry)
+                waited += clockRetry
+            } catch EnrollmentError.notYetValid {
+                return Outcome(exitCode: 1, message: "enrollment is not valid yet: this machine's clock is behind "
+                    + "the controller's (issued \(payload.issuedAt), now \(now())); kept \(file.path) to retry")
+            } catch let error as EnrollmentError {
+                if error == .expired { remove(file) }
+                return Outcome(exitCode: 1, message: "enrollment \(LinuxHostd.describe(error))")
+            } catch {
+                return Outcome(exitCode: 1, message: "enrollment refused: \(error)")
+            }
         }
         switch send(.enroll(payload)) {
         case .ok:
-            try? FileManager.default.removeItem(at: file)
+            remove(file)
             return Outcome(exitCode: 0, message: "enrolled \(payload.controllerName) in slot \(payload.slot.uuidString)")
         case .failed(let message):
             return Outcome(exitCode: 1, message: message)
         case let other:
             return Outcome(exitCode: 1, message: "unexpected reply \(other)")
+        }
+    }
+
+    /// A spent file that survives still holds a controller's secret, so failing to delete it is
+    /// worth saying, though the enrollment itself stands.
+    private static func remove(_ file: URL) {
+        do { try FileManager.default.removeItem(at: file) } catch {
+            FileHandle.standardError.write(Data(
+                "flightdeck-hostd: warning: could not delete \(file.path): \(error)\n".utf8))
         }
     }
 }
