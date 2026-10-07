@@ -36,4 +36,15 @@ final class CostLedgerTests: XCTestCase {
         try l.open(name: "a", hourlyUSD: 3, at: d("2026-10-10T02:00:00Z"))
         XCTAssertEqual(l.spent(name: "a", now: d("2026-10-10T03:00:00Z")), 5, accuracy: 1e-9)
     }
+
+    func testCorruptLedgerIsMovedAsideAndLoadsEmpty() throws {
+        try Data("garbage".utf8).write(to: url)
+        let l = CostLedger(fileURL: url, calendar: cal)
+        XCTAssertEqual(l.monthToDate(now: d("2026-10-10T00:00:00Z")), 0)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
+        let dir = url.deletingLastPathComponent()
+        let aside = try FileManager.default.contentsOfDirectory(atPath: dir.path)
+            .filter { $0.hasPrefix(url.deletingPathExtension().lastPathComponent) && $0.contains("corrupt") }
+        XCTAssertEqual(aside.count, 1)
+    }
 }

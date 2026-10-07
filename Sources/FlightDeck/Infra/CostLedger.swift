@@ -1,5 +1,4 @@
 import Foundation
-import OSLog
 
 /// One stretch of a machine billing at one rate. A rate change is a new segment, never an
 /// edit, so hours already spent are not repriced.
@@ -15,34 +14,27 @@ struct CostSegment: Codable, Equatable, Sendable {
 @MainActor
 final class CostLedger {
     private var segments: [CostSegment]
-    private let fileURL: URL
+    private let file: VersionedJSONFile<CostSegment>
     private let calendar: Calendar
 
-    private static let logger = Logger(subsystem: "dev.flightdeck.FlightDeck", category: "infra")
-
-    private struct File: Codable {
-        var version = 1
-        var segments: [CostSegment]
-    }
-
     init(fileURL: URL, calendar: Calendar = .current) {
-        self.fileURL = fileURL
+        file = VersionedJSONFile(url: fileURL, key: "segments")
         self.calendar = calendar
-        segments = Self.load(fileURL)
+        segments = file.load()
     }
 
     /// Closes any segment still open for `name` at `at` first, so one machine never bills twice.
     func open(name: String, hourlyUSD: Double, at: Date) throws {
         var next = Self.closing(segments, name: name, at: at)
         next.append(CostSegment(name: name, start: at, end: nil, hourlyUSD: hourlyUSD))
-        try write(next)
+        try file.write(next)
         segments = next
     }
 
     func close(name: String, at: Date) throws {
         let next = Self.closing(segments, name: name, at: at)
         guard next != segments else { return }
-        try write(next)
+        try file.write(next)
         segments = next
     }
 
@@ -69,39 +61,5 @@ final class CostLedger {
             closed.end = max(at, s.start)
             return closed
         }
-    }
-
-    private func write(_ segments: [CostSegment]) throws {
-        try FileManager.default.createDirectory(
-            at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        encoder.dateEncodingStrategy = .iso8601
-        try encoder.encode(File(segments: segments)).write(to: fileURL, options: .atomic)
-    }
-
-    /// An unreadable ledger is moved aside, not zeroed: the next write would erase the spend history.
-    private static func load(_ url: URL) -> [CostSegment] {
-        let data: Data
-        do {
-            data = try Data(contentsOf: url)
-        } catch CocoaError.fileReadNoSuchFile {
-            return []
-        } catch {
-            moveAside(url, error)
-            return []
-        }
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        do { return try decoder.decode(File.self, from: data).segments } catch {
-            moveAside(url, error)
-            return []
-        }
-    }
-
-    private static func moveAside(_ url: URL, _ error: Error) {
-        let aside = url.deletingPathExtension().appendingPathExtension("corrupt-\(Int(Date().timeIntervalSince1970)).json")
-        try? FileManager.default.moveItem(at: url, to: aside)
-        logger.error("infra-ledger.json unreadable, moved aside: \(String(describing: error), privacy: .public)")
     }
 }
