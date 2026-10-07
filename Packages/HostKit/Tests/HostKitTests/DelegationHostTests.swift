@@ -466,7 +466,7 @@ extension DelegationHostTests {
         let runner: Runner
     }
 
-    private func parts() throws -> Parts {
+    private func parts(idle: IdleTracker? = nil, transferStall: TimeInterval = DelegationHost.transferStall) throws -> Parts {
         let root = try tempDir("fd-host")
         let workspace = Workspace(root: root)
         let screen = ScreenLease()
@@ -475,7 +475,8 @@ extension DelegationHostTests {
                             power: NoPowerAssertions(), console: UnsupportedConsoleSession(), screen: screen,
                             lifecycle: .workspace(workspace))
         let delegation = DelegationHost(runner: runner, workspace: workspace, screen: screen,
-                                        portCheck: PortCheck(run: { _, _ in nil }), screenSupported: false)
+                                        portCheck: PortCheck(run: { _, _ in nil }), screenSupported: false, idle: idle,
+                                        transferStall: transferStall)
         let core = HostServerCore(hostName: { "mini" }, probe: HostInfoProbe(stateRoot: root, hostdVersion: "t") { _, _ in nil },
                                   delegation: delegation)
         return Parts(core: core, delegation: delegation, runner: runner)
@@ -590,6 +591,138 @@ extension DelegationHostTests {
         let deadline = Date().addingTimeInterval(5)
         while !sawEOF.isSet && Date() < deadline { try await Task.sleep(nanoseconds: 20_000_000) }
         XCTAssertTrue(sawEOF.isSet, "the host finishes its side once it has the whole bundle")
+    }
+}
+
+// MARK: - Idle tracking
+
+extension DelegationHostTests {
+    private func eventually(_ what: String, within seconds: TimeInterval = 30,
+                            _ condition: () -> Bool) async throws {
+        let deadline = Date().addingTimeInterval(seconds)
+        while !condition() {
+            guard Date() < deadline else { return XCTFail("never: \(what)") }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+    }
+
+    /// A run belongs to the host, not to the connection that started it: a controller that
+    /// closes its lid mid-build must not make the box look idle (and get it stopped) while the
+    /// build is still going, and the run's end must still be heard with nobody attached.
+    func testARunKeepsTheHostBusyAfterItsControllerLeavesUntilItEnds() async throws {
+        let repo = try repo()
+        let idle = IdleTracker()
+        let p = try parts(idle: idle)
+        let c = Controller(core: p.core)
+        _ = try await c.hello()
+        let ref = try await sync(repo, over: c)
+        let run = try await start("echo ready; while :; do sleep 0.1; done", ref, over: c)
+        try await c.started(run)
+        c.closeConnection()
+        try await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertNil(idle.idleSince, "a live run with no controller attached is still activity")
+
+        p.runner.cancel(runID: run)
+        try await waitTerminal(p.runner, [run], within: 20)
+        try await eventually("idle after the run ended") { idle.idleSince != nil }
+    }
+
+    /// A run that never ran (its checkout failed) ends without an exit of its own; it must
+    /// still close its activity, or the host would never look idle again.
+    func testARunThatFailedBeforeRunningDoesNotKeepTheHostBusy() async throws {
+        let repo = try repo()
+        let idle = IdleTracker()
+        let p = try parts(idle: idle)
+        let c = Controller(core: p.core)
+        _ = try await c.hello()
+        let ref = try await sync(repo, over: c)
+        let wrong = SnapshotRef(repoRoot: ref.repoRoot, wtKey: ref.wtKey, worktreeName: ref.worktreeName,
+                                commit: ref.commit, tree: String(repeating: "f", count: 40))
+        let runID = try await start("echo must-not-run", wrong, over: c)
+        let events = try await c.events(runID)
+        XCTAssertEqual(events.last, .exited(.code(125)))
+        try await eventually("idle after the failed run") { idle.idleSince != nil }
+    }
+
+    /// A `sync.push` is activity while its bundle streams in, and ends as activity when its
+    /// connection drops mid-transfer: the aborted push must not leave the host busy forever.
+    func testAnAbortedSyncPushIsActivityUntilItFails() async throws {
+        let idle = IdleTracker()
+        let p = try parts(idle: idle)
+        let c = Controller(core: p.core)
+        _ = try await c.hello()
+        let channel = try await c.mux.open()
+        let ref = SnapshotRef(repoRoot: String(repeating: "a", count: 40), wtKey: "abcd", worktreeName: "w",
+                              commit: String(repeating: "b", count: 40), tree: String(repeating: "c", count: 40))
+        let id = c.post(.delegation(.syncPush(ref: ref, channel: channel.id)))
+        try await channel.write(Data("partial".utf8))
+        try await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertNil(idle.idleSince, "a push in flight is activity")
+
+        c.closeConnection()
+        let code = await remote { try await c.reply(to: id) }
+        XCTAssertNotNil(code)
+        try await eventually("idle after the aborted push") { idle.idleSince != nil }
+    }
+
+    /// A controller that went silent mid-push with its connection still up (a frozen peer, or
+    /// a sleeping laptop whose half-open TCP the host has not yet noticed) must not hold the
+    /// host busy forever: a transfer that makes no progress for the stall deadline fails.
+    func testASilentSyncPushFailsAfterTheStallDeadlineAndTheHostGoesIdle() async throws {
+        let idle = IdleTracker()
+        let p = try parts(idle: idle, transferStall: 0.3)
+        let c = Controller(core: p.core)
+        _ = try await c.hello()
+        let channel = try await c.mux.open()
+        let ref = SnapshotRef(repoRoot: String(repeating: "a", count: 40), wtKey: "abcd", worktreeName: "w",
+                              commit: String(repeating: "b", count: 40), tree: String(repeating: "c", count: 40))
+        let id = c.post(.delegation(.syncPush(ref: ref, channel: channel.id)))
+        try await channel.write(Data("partial".utf8))
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertNil(idle.idleSince, "a push in flight is activity")
+
+        let code = await remote { try await c.reply(to: id, timeout: 10) }
+        XCTAssertEqual(code, "transfer_stalled")
+        try await eventually("idle after the stalled push") { idle.idleSince != nil }
+    }
+
+    /// A transfer that keeps making progress is never cut, however long it takes in all.
+    func testASlowButSteadySyncPushIsNotCut() async throws {
+        let repo = try repo()
+        let p = try parts(transferStall: 0.5)
+        let c = Controller(core: p.core)
+        _ = try await c.hello()
+        let ref = try await Snapshotter().snapshot(worktree: repo.url, host: "mini", include: [])
+        let bundle = try Data(contentsOf: try await BundleMaker().bundle(worktree: repo.url, snapshot: ref, haves: []))
+        let channel = try await c.mux.open()
+        let id = c.post(.delegation(.syncPush(ref: ref, channel: channel.id)))
+        let pieces = stride(from: 0, to: bundle.count, by: max(1, bundle.count / 4)).map {
+            bundle.subdata(in: $0..<min($0 + max(1, bundle.count / 4), bundle.count))
+        }
+        for piece in pieces {
+            try await channel.write(piece)
+            try await Task.sleep(nanoseconds: 250_000_000)   // 1 s+ in all, past the 0.5 s deadline
+        }
+        await channel.finish()
+        let pushed = try await c.reply(to: id)
+        XCTAssertEqual(pushed, .delegation(.syncPush))
+    }
+
+    /// A service is activity from its start until it is downed, like a run.
+    func testAServiceKeepsTheHostBusyUntilItIsDowned() async throws {
+        let repo = try repo()
+        let idle = IdleTracker()
+        let p = try parts(idle: idle)
+        let c = Controller(core: p.core)
+        _ = try await c.hello()
+        let ref = try await sync(repo, over: c)
+        let svc = try await startService(service("echo up; while :; do sleep 0.1; done", down: "true"), ref, over: c)
+        try await c.started(svc)
+        XCTAssertNil(idle.idleSince, "a live service is activity")
+
+        let downed = try await c.request(.serviceDown(service: svc))
+        XCTAssertEqual(downed, .serviceDown)
+        try await eventually("idle after the service was downed") { idle.idleSince != nil }
     }
 }
 
