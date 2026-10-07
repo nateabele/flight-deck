@@ -1,6 +1,6 @@
 # Cloud infra hosts (sub-project E) — design
 
-Status: draft for review, 2026-10-07. Builds on
+Status: approved 2026-10-07. Builds on
 [2026-10-03-remote-hosts-delegation-design.md](2026-10-03-remote-hosts-delegation-design.md)
 (sub-projects A and C, shipped).
 
@@ -31,7 +31,7 @@ In scope:
 
 Out of scope (v1): Mac instances (AWS EC2 Mac's 24-hour dedicated-host minimum makes it a
 deliberate opt-in; possible later as a preset), Windows, Kubernetes, SkyPilot, Packer image
-baking, shared remote OpenTofu state. §12 outlines them.
+baking, shared remote OpenTofu state. §13 outlines them.
 
 Success criteria:
 1. From a clean Mac with only a cloud sign-in, `flightdeck infra up gpu` produces a host that
