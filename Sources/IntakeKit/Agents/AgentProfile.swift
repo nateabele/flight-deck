@@ -157,11 +157,16 @@ public protocol AgentProfile: Sendable {
     /// launch a Google sign-in in the human's browser. The executor runs the check first and
     /// pauses the round with `authExpired` rather than spawning the run.
     var headlessSignInPreflight: Bool { get }
+    /// Text a parse failure carries when the CLI ended the turn without any answer for a reason
+    /// a resume fixes (agy's auto-denied tool). `SchemaRepair` resumes such a run once even for
+    /// a native-schema harness. nil: the CLI has no such failure.
+    var answerlessTurnMarker: String? { get }
 }
 
 public extension AgentProfile {
     var unimplemented: String? { nil }
     var headlessSignInPreflight: Bool { false }
+    var answerlessTurnMarker: String? { nil }
 }
 
 /// The stub markers. Each names the track that replaces the stub. When no conformer returns

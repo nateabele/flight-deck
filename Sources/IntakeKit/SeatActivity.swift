@@ -216,6 +216,11 @@ public struct ActivityParser: Sendable {
             if let usage = result["usage"] as? [String: Any] { foldGeminiUsage(usage) }
             if let status = result["status"] as? String, status != "SUCCESS" {
                 activity.error = result["error"] as? String ?? status
+            } else if result["structured_output"] == nil,
+                      let denied = result["denied_actions"] as? [[String: Any]], !denied.isEmpty {
+                // SUCCESS with no answer: agy auto-denied a tool and ended the turn (probed
+                // 2026-10-07). The row says what was denied rather than looking finished-fine.
+                activity.error = "denied: " + denied.compactMap { $0["action"] as? String }.joined(separator: ", ")
             }
             activity.finished = true
         default: break

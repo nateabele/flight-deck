@@ -32,12 +32,14 @@ public struct GeminiProfile: AgentProfile {
         }
     }
 
-    /// Effort is `--effort low|medium|high` (agy 1.2.3 `--help`) — a real knob, so the editor
-    /// shows it with exactly these three values rather than claude's five.
+    /// No effort knob: every agy model id already names its effort (`gemini-3.1-pro-high`,
+    /// `-low`), and agy resolves `--model` and `--effort` as ONE selection (a bad model reports
+    /// `invalid model selection (--model "…" --effort "")`, probed 2026-10-07). A second knob
+    /// could only contradict the id, so the editor hides it and the model picks the effort.
     public var modelCatalog: ProfileModelCatalog {
         ProfileModelCatalog(aliases: [], listArguments: ["models"],
                             defaultPlanningModel: Self.defaultPlanningModel,
-                            defaultPlanningEffort: "high", effortValues: ["low", "medium", "high"])
+                            defaultPlanningEffort: "", effortValues: [])
     }
 
     /// The strongest Gemini `agy models` offered an AI Pro account on 2026-10-07 (the Pro line
@@ -62,8 +64,17 @@ public struct GeminiProfile: AgentProfile {
         }
     }
 
-    /// `agy --json-schema` constrains the final answer and returns it as `structured_output`.
+    /// `agy --json-schema` constrains the final answer and returns it as `structured_output`
+    /// (probed 2026-10-07 with the real triage and integrate schemas, after `GeminiSchema`).
     public var hasNativeSchema: Bool { true }
+
+    /// What `HarnessOutput.parse` reports when agy ended a turn WITHOUT an answer because it
+    /// auto-denied a tool (headless mode cannot ask). Probed 2026-10-07: a read-only seat that
+    /// tries to write or to run an unsandboxed command gets `status: SUCCESS`, an empty
+    /// response, no `structured_output`, and `denied_actions` — and a resume of that same
+    /// conversation then answers. So this one failure is repaired by a resume, schema or not.
+    public static let answerlessTurnMarker = "agy ended the turn without an answer"
+    public var answerlessTurnMarker: String? { Self.answerlessTurnMarker }
 
     public var headlessSignInPreflight: Bool { true }
 
@@ -109,5 +120,34 @@ public struct GeminiProfile: AgentProfile {
         env.removeValue(forKey: "CLAUDE_CODE_CHILD_SESSION")
         env.removeValue(forKey: "CLAUDECODE")
         return env
+    }
+}
+
+/// The intake's strict schemas, made acceptable to Gemini's API without changing which
+/// instances validate. Probed on agy 1.3.1, 2026-10-07: the triage schema's nullable enums
+/// (`{"type":["string","null"],"enum":["bead",…,null]}`) are refused with `400 INVALID_ARGUMENT
+/// … enum[4]: cannot be empty` — Gemini allows no `null` inside `enum`. Each such node becomes
+/// `{"anyOf":[{"type":"string","enum":["bead",…]},{"type":"null"}]}`, which accepts exactly the
+/// same values, and which agy accepted and enforced in the same probe. Nothing else changes.
+public enum GeminiSchema {
+    public static func compatible(_ schemaJSON: String) -> String {
+        guard let root = try? JSONSerialization.jsonObject(with: Data(schemaJSON.utf8)),
+              let data = try? JSONSerialization.data(withJSONObject: rewrite(root), options: [.sortedKeys]) else {
+            return schemaJSON
+        }
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    static func rewrite(_ node: Any) -> Any {
+        if let array = node as? [Any] { return array.map(rewrite) }
+        guard var object = node as? [String: Any] else { return node }
+        for (key, value) in object { object[key] = rewrite(value) }
+        guard let values = object["enum"] as? [Any], values.contains(where: { $0 is NSNull }),
+              let types = object["type"] as? [String], types.contains("null") else { return object }
+        var inner = object
+        let rest = types.filter { $0 != "null" }
+        inner["type"] = rest.count == 1 ? rest[0] as Any : rest as Any
+        inner["enum"] = values.filter { !($0 is NSNull) }
+        return ["anyOf": [inner, ["type": "null"]]]
     }
 }
