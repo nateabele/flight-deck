@@ -14,9 +14,10 @@ public struct HarnessRequest: Sendable {
     public var schemaFile: URL, schemaJSON: String, resumeSessionID: String?
     public var access: HarnessAccess
     /// The account this run bills (grok/gemini spec §3.0). nil is the built-in account — the
-    /// CLI's own default home — which is every caller today, so argv and environment are
-    /// unchanged. Binding a non-nil account is the profile's `environment(base:account:)` job,
-    /// wired in by Track P; until then this is carried, never read.
+    /// CLI's own default home — so argv and environment are exactly what they were before
+    /// accounts reached planning. A non-nil account is bound by the profile's
+    /// `environment(base:account:)` (via `HarnessCommand.environment`) and, for codex, picks
+    /// which `config.toml` `service_tier` is carried over from (`build`).
     public var account: AgentAccountRef?
     public init(harness: Harness, model: String, effort: String, cwd: URL, readableDirs: [URL],
                 prompt: String, schemaFile: URL, schemaJSON: String, resumeSessionID: String?,
@@ -142,8 +143,9 @@ public enum HarnessCommand {
         return nil
     }
 
-    /// `home` is where `CodexUserConfig` reads `service_tier` from — injectable so a test never
-    /// reads the operator's own config.
+    /// `home` is where `CodexUserConfig` reads the built-in account's `service_tier` from —
+    /// injectable so a test never reads the operator's own config. A bound `r.account` reads
+    /// its own home's instead (`CodexProfile.serviceTierArguments`).
     public static func build(_ r: HarnessRequest, home: URL = FileManager.default.homeDirectoryForCurrentUser)
         throws(HarnessCommandError) -> (executable: String, arguments: [String], unsetEnvironment: [String]) {
         if case .writeInWork = r.access {
@@ -152,7 +154,7 @@ public enum HarnessCommand {
         switch r.harness {
         case .codex:
             let effort = ["-m", r.model, "-c", "model_reasoning_effort=\(r.effort)"] + codexIsolation
-                + CodexUserConfig.arguments(home: home)
+                + CodexProfile(userHome: home).serviceTierArguments(account: r.account)
             let tail = ["--skip-git-repo-check", "--output-schema", r.schemaFile.path]
             if let s = r.resumeSessionID {
                 // `exec resume` has no -s flag, and IGNORES the session's recorded model unless
@@ -195,24 +197,31 @@ public enum HarnessCommand {
             if let s = r.resumeSessionID { args += ["--resume", s] }
             // Without these unset, a claude spawned from inside Claude Code silently skips
             // saving its transcript — and then `--resume` has nothing to resume.
-            return ("claude", args, ["CLAUDE_CODE_CHILD_SESSION", "CLAUDECODE"])
+            return ("claude", args, ClaudeProfile.childSessionVariables)
         case .grok, .gemini:
             throw .harnessNotImplemented(r.harness)
         }
     }
 
     /// The complete environment for a child `build` produced, from the caller's resolved
-    /// `base` (PATH already repaired). The ONE place both triage (`SystemHeadlessRunner`) and
-    /// every round (`RoundExecutor`) get it from, so the two can't drift: a claude child gets
-    /// the user settings' `env` back underneath `base` (see `ClaudeUserEnv` — `--restricted`
-    /// drops the file that carries it), then the unsets, so the settings file can never
-    /// re-introduce a variable `build` removed. `home` is injectable so a test never reads the
-    /// operator's own settings.
+    /// `base` (PATH already repaired). The ONE place triage (`SystemHeadlessRunner`), every
+    /// round (`RoundExecutor`) and the rule compiler get it from, so they can't drift. The
+    /// CLI's own profile builds it — for claude, the account's settings `env` back underneath
+    /// `base` (`--restricted` drops the file that carries it), the account's home bound, and the
+    /// child-session scrub — and then `build`'s unsets run, so nothing can re-introduce a
+    /// variable `build` removed. `account` nil is the built-in account. `home` is injectable so
+    /// a test never reads the operator's own settings.
     public static func environment(
         for command: (executable: String, arguments: [String], unsetEnvironment: [String]),
-        base: [String: String], home: URL = FileManager.default.homeDirectoryForCurrentUser
+        base: [String: String], home: URL = FileManager.default.homeDirectoryForCurrentUser,
+        account: AgentAccountRef? = nil
     ) -> [String: String] {
-        var environment = command.executable == "claude" ? ClaudeUserEnv.merged(into: base, home: home) : base
+        var environment: [String: String]
+        switch command.executable {
+        case ClaudeProfile().binaryName: environment = ClaudeProfile(userHome: home).environment(base: base, account: account)
+        case CodexProfile().binaryName: environment = CodexProfile(userHome: home).environment(base: base, account: account)
+        default: environment = base
+        }
         for key in command.unsetEnvironment { environment.removeValue(forKey: key) }
         return environment
     }

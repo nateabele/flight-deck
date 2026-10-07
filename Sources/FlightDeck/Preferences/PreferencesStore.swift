@@ -1,5 +1,6 @@
 import FleetKit
 import Foundation
+import IntakeKit
 import SwiftUI
 
 @MainActor
@@ -321,9 +322,13 @@ final class PreferencesStore: ObservableObject {
         inherited: [String: String] = ProcessInfo.processInfo.environment
     ) -> [String: String] {
         var environment = preferences.shell.environment
+        // Blanked rather than removed: this dictionary is an overlay on the shell's inherited
+        // environment, so absence would let the inherited marker through. Only the marker, not
+        // `ClaudeProfile.childSessionVariables` whole — the user's toggle has always named
+        // exactly this one variable.
         if preferences.shell.clearChildSessionMarker,
-           inherited["CLAUDE_CODE_CHILD_SESSION"] != nil {
-            environment["CLAUDE_CODE_CHILD_SESSION"] = ""
+           inherited[ClaudeProfile.childSessionMarker] != nil {
+            environment[ClaudeProfile.childSessionMarker] = ""
         }
         if let account {
             environment[account.agent.homeEnvironmentKey] = account.home.path
