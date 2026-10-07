@@ -52,23 +52,23 @@ final class HarnessTests: XCTestCase {
             XCTAssertEqual($0 as? HarnessOutput.ParseError, .noSession)
         }
     }
-    func testCodexFreshIsReadOnlyWithSchema() {
-        let c = HarnessCommand.build(req(.codex), home: Self.noHome)
+    func testCodexFreshIsReadOnlyWithSchema() throws {
+        let c = try HarnessCommand.build(req(.codex), home: Self.noHome)
         XCTAssertEqual(c.executable, "codex")
         XCTAssertEqual(c.arguments, ["exec", "--json", "-m", "m", "-c", "model_reasoning_effort=high",
                                      "--ignore-user-config", "--ignore-rules", "--disable", "hooks", "-c", "model_reasoning_summary=detailed",
                                      "-s", "read-only", "--skip-git-repo-check",
                                      "--output-schema", "/intake/schema.json", "P"])
     }
-    func testCodexResumePinsModelAndSandbox() {
-        let c = HarnessCommand.build(req(.codex, resume: "T1"), home: Self.noHome)
+    func testCodexResumePinsModelAndSandbox() throws {
+        let c = try HarnessCommand.build(req(.codex, resume: "T1"), home: Self.noHome)
         XCTAssertEqual(c.arguments, ["exec", "resume", "--json", "-m", "m", "-c", "model_reasoning_effort=high",
                                      "--ignore-user-config", "--ignore-rules", "--disable", "hooks", "-c", "model_reasoning_summary=detailed",
                                      "-c", "sandbox_mode=\"read-only\"", "--skip-git-repo-check",
                                      "--output-schema", "/intake/schema.json", "T1", "P"])
     }
-    func testClaudeIsReadOnlyAndUnsetsChildSessionEnv() {
-        let c = HarnessCommand.build(req(.claude, resume: "S1"), home: Self.noHome)
+    func testClaudeIsReadOnlyAndUnsetsChildSessionEnv() throws {
+        let c = try HarnessCommand.build(req(.claude, resume: "S1"), home: Self.noHome)
         XCTAssertEqual(c.executable, "claude")
         XCTAssertEqual(c.unsetEnvironment, ["CLAUDE_CODE_CHILD_SESSION", "CLAUDECODE"])
         XCTAssertEqual(c.arguments, ["-p", "P", "--model", "m", "--effort", "high", "--output-format", "stream-json",
@@ -84,12 +84,12 @@ final class HarnessTests: XCTestCase {
     /// `--restricted` ignores the user, project AND local settings files (where
     /// `--setting-sources local` still kept `settings.local.json`); every claude run, read-only
     /// and write, must carry it and `--strict-mcp-config`, and never the older flag.
-    func testEveryClaudeRunIsRestrictedAndDropsMCP() {
+    func testEveryClaudeRunIsRestrictedAndDropsMCP() throws {
         let write = HarnessRequest(harness: .claude, model: "m", effort: "high", cwd: URL(fileURLWithPath: "/work"),
                                    readableDirs: [], prompt: "P", schemaFile: URL(fileURLWithPath: "/s.json"),
                                    schemaJSON: "{}", resumeSessionID: nil, access: .writeInWork(URL(fileURLWithPath: "/work")))
         for r in [req(.claude), req(.claude, resume: "S1"), write] {
-            let a = HarnessCommand.build(r, home: Self.noHome).arguments
+            let a = try HarnessCommand.build(r, home: Self.noHome).arguments
             XCTAssertEqual(a.filter { $0 == "--restricted" }.count, 1, "\(a)")
             XCTAssertEqual(a.filter { $0 == "--strict-mcp-config" }.count, 1, "\(a)")
             XCTAssertFalse(a.contains("--setting-sources"), "\(a)")
@@ -99,12 +99,12 @@ final class HarnessTests: XCTestCase {
     }
     /// `~/.codex/config.toml` carries MCP servers (quillmap, with file mutators) and hooks that
     /// run OUTSIDE the `-s` sandbox. Every codex build — fresh, resume, write — must skip it.
-    func testEveryCodexRunIgnoresUserConfigRulesAndHooks() {
+    func testEveryCodexRunIgnoresUserConfigRulesAndHooks() throws {
         let write = HarnessRequest(harness: .codex, model: "m", effort: "high", cwd: URL(fileURLWithPath: "/work"),
                                    readableDirs: [], prompt: "P", schemaFile: URL(fileURLWithPath: "/s.json"),
                                    schemaJSON: "{}", resumeSessionID: nil, access: .writeInWork(URL(fileURLWithPath: "/work")))
         for r in [req(.codex), req(.codex, resume: "T1"), write] {
-            let a = HarnessCommand.build(r, home: Self.noHome).arguments
+            let a = try HarnessCommand.build(r, home: Self.noHome).arguments
             for flag in ["--ignore-user-config", "--ignore-rules"] {
                 XCTAssertEqual(a.filter { $0 == flag }.count, 1, "\(flag) in \(a)")
             }
@@ -136,9 +136,9 @@ final class HarnessTests: XCTestCase {
             .write(to: home.appendingPathComponent(".claude/settings.json"))
         let base = ["PATH": "/usr/bin", "HOME": "/Users/me", "CLAUDE_CODE_CHILD_SESSION": "1"]
 
-        let claude = HarnessCommand.environment(for: HarnessCommand.build(req(.claude), home: Self.noHome), base: base, home: home)
+        let claude = HarnessCommand.environment(for: try HarnessCommand.build(req(.claude), home: Self.noHome), base: base, home: home)
         XCTAssertEqual(claude, ["PATH": "/usr/bin", "HOME": "/Users/me", "ANTHROPIC_BASE_URL": "http://localhost:8787"])
-        let codex = HarnessCommand.environment(for: HarnessCommand.build(req(.codex), home: Self.noHome), base: base, home: home)
+        let codex = HarnessCommand.environment(for: try HarnessCommand.build(req(.codex), home: Self.noHome), base: base, home: home)
         XCTAssertEqual(codex, base)
     }
     /// `--ignore-user-config` drops the user's `service_tier`; it's read back (and only it) and
@@ -157,15 +157,15 @@ final class HarnessTests: XCTestCase {
         """.utf8).write(to: home.appendingPathComponent(".codex/config.toml"))
 
         XCTAssertEqual(CodexUserConfig.serviceTier(home: home), "fast")
-        let fresh = HarnessCommand.build(req(.codex), home: home).arguments
+        let fresh = try HarnessCommand.build(req(.codex), home: home).arguments
         XCTAssertEqual(Array(fresh.prefix(14)), ["exec", "--json", "-m", "m", "-c", "model_reasoning_effort=high",
                                                  "--ignore-user-config", "--ignore-rules", "--disable", "hooks", "-c", "model_reasoning_summary=detailed",
                                                  "-c", "service_tier=\"fast\""])
-        let resumed = HarnessCommand.build(req(.codex, resume: "T1"), home: home).arguments
+        let resumed = try HarnessCommand.build(req(.codex, resume: "T1"), home: home).arguments
         XCTAssertEqual(resumed.filter { $0.hasPrefix("service_tier") }, ["service_tier=\"fast\""])
         XCTAssertFalse(fresh.contains { $0.hasPrefix("model=") || $0.contains("approval_policy") || $0.contains("quillmap") },
                        "only service_tier is carried over")
-        XCTAssertFalse(HarnessCommand.build(req(.claude), home: home).arguments.contains { $0.contains("service_tier") })
+        XCTAssertFalse(try HarnessCommand.build(req(.claude), home: home).arguments.contains { $0.contains("service_tier") })
     }
 
     /// Only a top-level, plain-identifier value counts: a key under a table is some other
@@ -188,7 +188,7 @@ final class HarnessTests: XCTestCase {
             XCTAssertEqual(CodexUserConfig.serviceTier(home: home), expected, toml)
         }
         XCTAssertNil(CodexUserConfig.serviceTier(home: Self.noHome))
-        XCTAssertFalse(HarnessCommand.build(req(.codex), home: Self.noHome).arguments.contains { $0.contains("service_tier") })
+        XCTAssertFalse(try HarnessCommand.build(req(.codex), home: Self.noHome).arguments.contains { $0.contains("service_tier") })
     }
 
     /// No claude seat — polish rounds included — is ever granted `bv`: a `Bash` allow is a
@@ -198,12 +198,12 @@ final class HarnessTests: XCTestCase {
     /// agent the resulting files instead (`ShadowAnalytics` in RoundPrompts.swift). Checks
     /// `--tools` (the `--restricted` built-in allowlist) as well as `--allowedTools`, since
     /// `bv` needs to be absent from BOTH places a claude seat's tool access can now live.
-    func testNoClaudeArgvEverAllowsBv() {
+    func testNoClaudeArgvEverAllowsBv() throws {
         let write = HarnessRequest(harness: .claude, model: "m", effort: "high", cwd: URL(fileURLWithPath: "/work"),
                                    readableDirs: [], prompt: "P", schemaFile: URL(fileURLWithPath: "/s.json"),
                                    schemaJSON: "{}", resumeSessionID: nil, access: .writeInWork(URL(fileURLWithPath: "/work")))
         for r in [req(.claude), req(.claude, resume: "S1"), write] {
-            let a = HarnessCommand.build(r, home: Self.noHome).arguments
+            let a = try HarnessCommand.build(r, home: Self.noHome).arguments
             XCTAssertFalse(a.contains { $0.contains("bv") }, "\(a)")
         }
         XCTAssertFalse(HarnessCommand.claudeReadOnlyTools.contains("bv"))

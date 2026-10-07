@@ -14,6 +14,20 @@ public struct HarnessID: RawRepresentable, Codable, Hashable, Sendable, Expressi
     public var description: String { rawValue }
 }
 
+/// The L3 mapping for a planning harness (grok/gemini spec §3.1). Only claude and codex are
+/// agent harnesses — they have an `AgentID`, an adapter, a routing catalog. grok and gemini are
+/// planning-only: nil here means "not an agent harness", so no swarm task, capability index
+/// entry or routing rule can ever target them. Faking a catalog for them would let the router
+/// send a task to an agent Flight Deck cannot open a tab for.
+public extension Harness {
+    var agentHarnessID: HarnessID? {
+        switch self {
+        case .claude, .codex: HarnessID(rawValue)
+        case .grok, .gemini: nil
+        }
+    }
+}
+
 /// Names a capacity pool (L3-U). A block names a pool, never an account, so rollover never
 /// has to rewrite tasks.
 public struct PoolID: RawRepresentable, Codable, Hashable, Sendable, ExpressibleByStringLiteral, CustomStringConvertible {

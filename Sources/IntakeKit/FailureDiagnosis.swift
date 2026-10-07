@@ -33,6 +33,10 @@ public enum FailureDiagnosis {
                 switch harness {
                 case .codex: action = "Run `codex login` in a terminal"
                 case .claude, .none: action = "Run `claude /login` in a terminal"
+                // Generic until Tracks G/M probe each CLI's real sign-in flow: naming a command
+                // nobody verified would send the human to run something that doesn't exist.
+                case .grok?: action = "Sign in to `\(GrokProfile().binaryName)` in a terminal"
+                case .gemini?: action = "Sign in to `\(GeminiProfile().binaryName)` in a terminal"
                 }
             }
             return Diagnosis(category: .authExpired, detail: tail(stderr, errorText), action: action)
