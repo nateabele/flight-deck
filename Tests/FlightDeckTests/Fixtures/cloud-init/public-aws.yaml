@@ -4,6 +4,9 @@ users:
   - name: flightdeck
     shell: /bin/bash
     lock_passwd: true
+bootcmd:
+  - [ sh, -c, "iptables -A OUTPUT -d 169.254.169.254 -m owner ! --uid-owner 0 -j REJECT || true" ]
+  - [ sh, -c, "ip6tables -A OUTPUT -d fd00:ec2::254 -m owner ! --uid-owner 0 -j REJECT || true" ]
 write_files:
   - path: /etc/systemd/system/flightdeck-ttl.service
     owner: root:root
@@ -39,4 +42,3 @@ runcmd:
   - [ loginctl, enable-linger, flightdeck ]
   - [ su, "-", flightdeck, "-c", "curl -fsSL https://example.invalid/hostd/hostd-install.sh | sh -s -- --sha256 0000000000000000000000000000000000000000000000000000000000000000 --no-pair" ]
   - [ su, "-", flightdeck, "-c", "~/.local/bin/flightdeck-hostd enroll --file /run/flightdeck/enroll.json" ]
-  - [ iptables, -A, OUTPUT, -d, 169.254.169.254, -m, owner, "!", --uid-owner, "0", -j, REJECT ]
