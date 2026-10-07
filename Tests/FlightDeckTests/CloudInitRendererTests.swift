@@ -3,9 +3,10 @@ import XCTest
 @testable import FlightDeck
 
 /// The user-data a cloud machine boots with. The golden files are the reviewed contract; the
-/// other cases pin the properties a reviewer would otherwise have to re-derive from them: the
-/// TTL is armed before anything that can fail, the metadata endpoint is closed to workloads once
-/// the PSK in user-data is spent, and nothing user-controlled can break out of its quoting.
+/// other cases pin the properties a reviewer would otherwise have to re-derive from them: on AWS
+/// the TTL is armed before anything that can fail, the metadata endpoint (whose user-data holds
+/// the host's long-term PSK) is closed to workloads on every boot, the user manager is up before
+/// the installer needs it, and nothing user-controlled can break out of its quoting.
 final class CloudInitRendererTests: XCTestCase {
     private final class Token {}
 
@@ -68,23 +69,32 @@ final class CloudInitRendererTests: XCTestCase {
         XCTAssertEqual(try decoder.decode(EnrollmentPayload.self, from: Data(json.utf8)), payload)
     }
 
-    /// Ruling 1: a failed install must still die, and a reboot must not disarm it. A pending
+    /// Ruling 1, AWS: a failed install must still die, and a reboot must not disarm it. A pending
     /// `shutdown -h +N` dies with the reboot, so the TTL is an absolute, persistent systemd timer,
-    /// enabled before the install, and armed on GCP too as a backstop to `max_run_duration`.
-    func testTTLIsAPersistentTimerArmedBeforeTheInstall() throws {
-        for o in [base, tailnetGCP] {
-            let y = try CloudInitRenderer.render(payload, o)
-            XCTAssertTrue(y.contains("OnCalendar=2027-01-15 12:00:00 UTC"), o.cloud)
-            XCTAssertTrue(y.contains("Persistent=true"), o.cloud)
-            XCTAssertTrue(y.contains("ExecStart=/usr/bin/systemctl poweroff"), o.cloud)
-            XCTAssertTrue(y.contains("WantedBy=timers.target"), o.cloud)
-            XCTAssertFalse(y.contains("shutdown -h"), o.cloud)
-            XCTAssertFalse(y.contains("shutdown, -h"), o.cloud)
-            let runcmd = line(y, "runcmd:")
-            let arm = line(y, "[ systemctl, enable, --now, flightdeck-ttl.timer ]")
-            XCTAssertEqual(arm, runcmd + 1, "the TTL is the first runcmd step on \(o.cloud)")
-            XCTAssertLessThan(arm, line(y, "hostd-install.sh"), o.cloud)
-        }
+    /// enabled before the install; the preset turns the poweroff into a termination.
+    func testAWSTTLIsAPersistentTimerArmedBeforeTheInstall() throws {
+        let y = try CloudInitRenderer.render(payload, base)
+        XCTAssertTrue(y.contains("OnCalendar=2027-01-15 12:00:00 UTC"))
+        XCTAssertTrue(y.contains("Persistent=true"))
+        XCTAssertTrue(y.contains("ExecStart=/usr/bin/systemctl poweroff"))
+        XCTAssertTrue(y.contains("WantedBy=timers.target"))
+        XCTAssertFalse(y.contains("shutdown -h"))
+        XCTAssertFalse(y.contains("shutdown, -h"))
+        let runcmd = line(y, "runcmd:")
+        let arm = line(y, "[ systemctl, enable, --now, flightdeck-ttl.timer ]")
+        XCTAssertEqual(arm, runcmd + 1, "the TTL is the first runcmd step")
+        XCTAssertLessThan(arm, line(y, "hostd-install.sh"))
+    }
+
+    /// Ruling 1 revised, GCP: a guest poweroff only STOPS a GCE VM, which keeps billing its disk
+    /// and stops `max_run_duration` counting. The deadline falls before that expiry, so a timer
+    /// would fire first and turn the preset's guaranteed DELETE into a leak: GCP gets none.
+    func testGCPRendersNoTTLTimer() throws {
+        let y = try CloudInitRenderer.render(payload, tailnetGCP)
+        XCTAssertFalse(y.contains("flightdeck-ttl"))
+        XCTAssertFalse(y.contains("OnCalendar"))
+        XCTAssertFalse(y.contains("poweroff"))
+        XCTAssertFalse(y.contains("shutdown"))
     }
 
     func testDeadlineIsRenderedInUTCWholeSeconds() throws {
@@ -103,7 +113,8 @@ final class CloudInitRendererTests: XCTestCase {
     /// user-data stays readable from the metadata service for the machine's whole life, so only
     /// root may reach that endpoint, from the first boot and on every reboot. iptables state does
     /// not survive a reboot and runcmd runs once per instance, so the rules live in bootcmd,
-    /// which runs on every boot. Each tolerates its address family being absent.
+    /// which runs on every boot. Each tolerates its address family being absent. GCP needs only
+    /// the IPv4 rule: `metadata.google.internal` is the same address.
     func testMetadataEndpointIsClosedToNonRootOnEveryBoot() throws {
         func rule(_ tool: String, _ address: String) -> String {
             #"  - [ sh, -c, "\#(tool) -A OUTPUT -d \#(address) -m owner ! --uid-owner 0 -j REJECT || true" ]"#
@@ -112,7 +123,7 @@ final class CloudInitRendererTests: XCTestCase {
         let v6 = rule("ip6tables", "fd00:ec2::254")
         let gcpName = rule("iptables", "metadata.google.internal")
 
-        for (o, present, absent) in [(base, [v4, v6], [gcpName]), (tailnetGCP, [v4, gcpName], [v6])] {
+        for (o, present, absent) in [(base, [v4, v6], [gcpName]), (tailnetGCP, [v4], [v6, gcpName])] {
             let y = try CloudInitRenderer.render(payload, o)
             let lines = y.components(separatedBy: "\n")
             let bootcmd = line(y, "bootcmd:")
@@ -142,6 +153,55 @@ final class CloudInitRendererTests: XCTestCase {
         XCTAssertFalse(enroll.contains("&&"))
         XCTAssertFalse(enroll.contains("set -e"))
         XCTAssertGreaterThan(line(y, "tailscale, up"), line(y, "flightdeck-hostd enroll"))
+    }
+
+    /// `loginctl enable-linger` returns before `user@UID` is up, and `su -` from cloud-final may
+    /// carry no `XDG_RUNTIME_DIR`, so the installer's `systemctl --user` could find no manager.
+    /// The manager is started (and waited for) first, and both user steps name its runtime dir.
+    func testUserManagerIsUpBeforeTheInstallerNeedsIt() throws {
+        for o in [base, tailnetGCP] {
+            let y = try CloudInitRenderer.render(payload, o)
+            let linger = line(y, "[ loginctl, enable-linger, flightdeck ]")
+            let start = line(y, #"[ sh, -c, "systemctl start user@$(id -u flightdeck).service" ]"#)
+            let install = line(y, "hostd-install.sh")
+            let enroll = line(y, "flightdeck-hostd enroll")
+            XCTAssertLessThan(linger, start, o.cloud)
+            XCTAssertLessThan(start, install, o.cloud)
+            XCTAssertLessThan(install, enroll, o.cloud)
+            let lines = y.components(separatedBy: "\n")
+            for i in [install, enroll] where i >= 0 {
+                XCTAssertTrue(lines[i].contains(#""-c", "export XDG_RUNTIME_DIR=/run/user/$(id -u flightdeck); "#),
+                              "\(lines[i]) on \(o.cloud)")
+            }
+        }
+    }
+
+    /// `JSONEncoder` leaves U+0085 and U+2028/9 raw, and YAML reads them as line breaks: a
+    /// controller name could end the block scalar and inject keys into root's user-data. The
+    /// line is forced to pure ASCII, and still decodes to the same name.
+    func testControllerNameCannotLeaveTheEnrollLine() throws {
+        let name = "a\u{0085}b\u{2028}c\u{2029}d\u{1F600}"
+        let p = EnrollmentPayload(version: 1, slot: payload.slot, secretHex: payload.secretHex, controllerName: name,
+                                  idleSeconds: 1800, issuedAt: payload.issuedAt)
+        let y = try CloudInitRenderer.render(p, base)
+        XCTAssertTrue(y.unicodeScalars.allSatisfy(\.isASCII), "the whole render is ASCII")
+        let lines = y.components(separatedBy: "\n")
+        let path = line(y, "path: /run/flightdeck/enroll.json")
+        guard path >= 0, path + 4 < lines.count else { return }
+        XCTAssertEqual(lines[path + 5], "runcmd:", "the JSON stays one line inside its block")
+        let json = lines[path + 4].trimmingCharacters(in: .whitespaces)
+        XCTAssertTrue(json.contains(#"\ud83d\ude00"#), "astral scalars become a surrogate pair")
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        XCTAssertEqual(try decoder.decode(EnrollmentPayload.self, from: Data(json.utf8)).controllerName, name)
+    }
+
+    func testRejectsControlCharactersInControllerName() {
+        for name in ["a\nb", "a\rb", "a\u{0}b", "a\tb", "a\u{7F}b"] {
+            let p = EnrollmentPayload(version: 1, slot: payload.slot, secretHex: payload.secretHex, controllerName: name,
+                                      idleSeconds: 1800, issuedAt: payload.issuedAt)
+            XCTAssertThrowsError(try CloudInitRenderer.render(p, base), name.debugDescription)
+        }
     }
 
     /// `enroll` deletes the spent file, which needs write access to its directory, not just the
