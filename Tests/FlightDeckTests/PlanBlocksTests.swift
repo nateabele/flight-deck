@@ -108,6 +108,52 @@ final class PlanBlocksTests: XCTestCase {
         XCTAssertEqual(blocks.filter(\.isTarget).count, 2)
     }
 
+    /// **A 300 KB plan splits without freezing the phone.** The phone builds a review on the
+    /// tap, on the main thread, and a real plan of this size — 6,727 lines, 931 blocks — froze
+    /// it: each block's "occurs exactly once" check scanned the whole plan with
+    /// `String.range(of:)`, 3.9s optimised on an M-series Mac (0.16s after). This synthetic one
+    /// has 5,540 blocks and took 25s unoptimised before the fix, 0.8s after; the bound is loose
+    /// because this suite runs unoptimised on a machine that is often busy. Synthetic rather
+    /// than the plan that hit it, which belongs to another project.
+    func testAPlanOfThreeHundredKilobytesSplitsWithoutFreezing() {
+        var sections: [String] = []
+        var i = 0
+        while sections.joined(separator: "\n\n").utf8.count < 300_000 {
+            sections.append("""
+            ## Task \(i): wire the lane \(i) adapter
+
+            Step \(i) moves the encapsulation boundary for group \(i) and keeps its tests green.
+
+            - [ ] Write the failing test for lane \(i)
+            - [ ] Make it pass without touching lane \(i + 1)
+
+            ```swift
+            func lane\(i)() -> Int {
+                return \(i) * 2
+            }
+            ```
+            """)
+            i += 1
+        }
+        let plan = sections.joined(separator: "\n\n")
+        let started = Date()
+        let blocks = PlanBlocks.split(plan).blocks
+        let elapsed = Date().timeIntervalSince(started)
+        XCTAssertGreaterThan(blocks.count, 3_000)
+        XCTAssertLessThan(elapsed, 3.0, "split took \(elapsed)s")
+    }
+
+    /// The count the targets rest on: matches do not overlap, it stops at the limit, and a
+    /// non-ASCII needle is found where it is.
+    func testOccurrencesCountsNonOverlappingMatchesAndStopsAtTheLimit() {
+        XCTAssertEqual(PlanBlocks.occurrences(of: "aa", in: "aaa", stoppingAt: 2), 1)
+        XCTAssertEqual(PlanBlocks.occurrences(of: "aa", in: "aaaa", stoppingAt: 5), 2)
+        XCTAssertEqual(PlanBlocks.occurrences(of: "ab", in: "ab ab ab", stoppingAt: 2), 2)
+        XCTAssertEqual(PlanBlocks.occurrences(of: "", in: "abc", stoppingAt: 2), 0)
+        XCTAssertEqual(PlanBlocks.occurrences(of: "abcd", in: "abc", stoppingAt: 2), 0)
+        XCTAssertEqual(PlanBlocks.occurrences(of: "→ é 👩‍💻", in: "x → é 👩‍💻 y", stoppingAt: 2), 1)
+    }
+
     /// Index lookup is bounds-checked, because it is reached from a wire command.
     func testBlockAtIndexRefusesOutOfRange() {
         let split = PlanBlocks.split("Only one block.")
