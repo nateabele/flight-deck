@@ -68,6 +68,7 @@ TEST_RUNNER_FLIGHTDECK_FLAKE_HUNT=1 FLIGHTDECK_TEST_THROTTLE=0 ./scripts/smoke.s
 ./scripts/build-hostd-linux.sh       # release assets, BOTH arches, into build/hostd-release/ — before a Release build
 ./scripts/test-hostd-install.sh      # the pasted installer, end to end in ubuntu:24.04; ends INSTALL PASS
 # (scripts/hostd-install.sh is the installer itself, not a command you run.)
+./scripts/test-infra-presets.sh      # `tofu test` of the bundled cloud presets against mock providers (needs tofu, no Docker, no credentials); ends PRESETS PASS
 # Interop runs bind fixed ports 47410/47411 and share Packages/HostDaemonLinux/.build:
 # never run two at once, and never alongside test-hostd-linux.sh. serve and run publish 47410,
 # this Mac's own hostd port: turn Settings → Hosting off first.
