@@ -2281,7 +2281,7 @@ flagged as most likely to differ from the tests. The maintainer's to run.
   swarm ([L3-S](superpowers/specs/2026-10-04-flight-control-l3-swarm-design.md)). The four
   sub-branches (`l3-routing`, `l3-index`, `l3-usage`, `l3-swarm`) are merged into `l3-integration`,
   and `FlightControlComposition` (installed in `FlightDeckApp.makeStore`) builds the one real
-  graph. The branch has NOT been merged to master and nothing has been swapped into /Applications.
+  graph. Merged to master 2026-10-06 (fast-forward to 1a3e3d79); nothing has been swapped into /Applications.
   The maintainer's checks are [FLIGHT-CONTROL-L3-CHECKLIST.md](FLIGHT-CONTROL-L3-CHECKLIST.md)
   (eight tasks), run against a Release build.
   - **UI runs (2026-10-06, `l3-integration` @ 4db609f0):**
@@ -2330,9 +2330,10 @@ flagged as most likely to differ from the tests. The maintainer's to run.
       sections (Settings → Flight Control → Capacity); the temporary top-level tabs are gone.
   - **OpenCode routing capabilities wait for the opencode-adapter merge; `RoutingCapabilityRegistry.standard()` will fail to compile until it states them, which is intended.**
   - **Still open** (unresolved probe outcomes and deferred minors, carried from every branch):
-    - Probes never run live: the changed triage/change-set strict-mode schema
-      (`taskKind`/`kindProposal`) against claude and codex (probe once per CLI before merging,
-      since every planning round shares it); codex `effort` and `/new`; reservations time parsed
+    - The changed triage/change-set strict-mode schema (`taskKind`/`kindProposal`) WAS probed
+      live on 2026-10-05: claude 2.1.289 (haiku) and codex-cli 0.160.0 (gpt-5.6-terra) both accept
+      it and return `taskKind`; the app default `gpt-6-sol` was not tried.
+    - Probes never run live: codex `effort` and `/new`; reservations time parsed
       from a relative `granted_at`; codex usage-limit `codex_error_info` spellings
       (`RateLimitClassifier.kinds`), so the fleet API-error path may never mark a codex account
       over hard (the 120 s `rateLimitReachedType` read is the authoritative signal); the real
