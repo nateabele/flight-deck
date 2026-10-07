@@ -2913,3 +2913,54 @@ it still reports there, each diagnosed from the run's `.xcresult` screen recordi
   until grok gets one.
 - **Model ids drift.** The aliases (`grok-4.7`, …) are fallbacks only. Detection reads
   `grok models` at each launch.
+
+## Gemini as a planning harness (2026-10-07, Track M)
+
+- **Read-only depends on agy's own settings.** A Gemini seat is read-only because agy's default
+  permission mode, with `--sandbox`, auto-denies every write in a headless run. `--mode plan` is
+  NOT a boundary: in a probe it wrote files. If Nate ever adds a `write_file(...)` **allow** rule
+  to `~/.gemini/antigravity-cli/settings.json` or to a project under `~/.gemini/config/projects/`,
+  read-only seats could write there. Fix: an FD-owned deny rule. Flight Deck does not write to
+  agy's config today.
+- **Lost answers cost a resume.** agy ENDS a turn on any tool it auto-denies, with no answer.
+  The one schema-repair resume (`AgentProfile.answerlessTurnMarker`) recovers it. The first
+  four-family live round needed 1 such resume for its 1 Gemini seat. Expect about one per seat.
+  If the second turn also ends without an answer, the seat fails as `invalidOutput`.
+- **Rate-limit spellings are unverified.** `RESOURCE_EXHAUSTED`, quota, 429 and "too many
+  requests" come from Google's API docs. No live run has produced one. Capture the first real
+  one as a fixture.
+- **Data use.** Google's consumer plans may use prompts to improve its models. Check Google's data
+  settings before you use a Gemini agent on a private repo. The Rounds editor shows the same note
+  whenever Gemini is offered.
+
+## Four-family planning rounds (2026-10-07, branch `planning-4way`)
+
+- **The Grok reviewer is the slow seat.** In the first four-family live round it took 745 s at
+  medium effort. Its previous run at high took 763 s. The next-slowest seat was the claude
+  integrator at 406 s. Medium cut Grok's input tokens from 337k to 118k but barely changed the
+  time: the time is the model's reasoning. If rounds stay slow, the next levers are `low`
+  effort for the Grok reviewer, or `grok-4.7-build-fast`. Neither has been measured.
+- **Grok proposes many changes.** In that round Grok proposed 38 changes and Gemini proposed 4.
+  All 4 of Gemini's matched one of Grok's, so the coverage band read "saturated". That one round
+  is not enough to judge Grok's precision. The integrator then spent 406 s applying them.
+- **Gemini resume token counts look cumulative.** The resumed Gemini turn reported 162k in and
+  45k out for a one-sentence answer. agy's `usage` on a `--conversation` turn appears to cover
+  the whole conversation. Check before reading Gemini token counts as per turn.
+- **No XCUITest drives the Rounds editor.** It is covered by `RoundConfigEditorTests` and by the
+  offscreen renders in `RoundConfigEditorRenderTests` (`FD_ROUNDS_RENDER_DIR`), which include a
+  four-family case. A UI test needs an intake fixture and an availability seam (spec §5).
+- **Gemini accounts.** agy has no home variable, and its login is in the per-user keyring. A
+  Gemini seat always uses the built-in account, and the editor offers no Gemini accounts.
+- **The Flight Control UI tests fail on the UI-test Mac, on master too.** On 2026-10-07, after
+  `automationmodetool` was enabled there, the following ran with their gates set:
+  - `RoutingUITests` (`TEST_RUNNER_FLIGHTDECK_ROUTING_UI=1`);
+  - `CapacityUITests` (`TEST_RUNNER_FLIGHTDECK_CAPACITY_UI=1`).
+
+  All 6 routing tests failed with "the Flight Control tab did not open", both on this branch and
+  on master `2e922a11`. The capacity test also failed on both, at a different step each time:
+  - on this branch, "Settings did not open";
+  - on master, "no Capacity segment".
+
+  So this branch did not cause it. Diagnose it from the run's `.xcresult` recording. Without
+  their gates, all 10 cases SKIP and `smoke-remote.sh` prints SMOKE PASS, so a bare run proves
+  nothing.
