@@ -20,12 +20,24 @@ final class EnrollmentPayloadTests: XCTestCase {
         }
     }
 
-    /// A machine whose clock runs a little ahead of the Mac's still enrolls; one issued
-    /// further in the future than the skew allowance is refused like a stale one.
+    /// A machine whose clock runs a little behind the Mac's still enrolls; one further behind
+    /// than the skew allowance is "not yet valid", never "expired": a stale payload is spent for
+    /// good, but this one becomes valid as soon as NTP corrects the clock.
     func testClockSkewTolerance() throws {
         XCTAssertNoThrow(try payload().validate(now: t0.addingTimeInterval(-299)))
         XCTAssertThrowsError(try payload().validate(now: t0.addingTimeInterval(-301))) {
-            XCTAssertEqual($0 as? EnrollmentError, .expired)
+            XCTAssertEqual($0 as? EnrollmentError, .notYetValid)
+        }
+        XCTAssertThrowsError(try payload().validate(now: t0.addingTimeInterval(-600))) {
+            XCTAssertEqual($0 as? EnrollmentError, .notYetValid)
+        }
+    }
+
+    func testNonPositiveIdleSecondsIsMalformed() {
+        for idle in [0, -1] {
+            let p = EnrollmentPayload(version: 1, slot: UUID(), secretHex: String(repeating: "ab", count: 32),
+                                      controllerName: "ctl", idleSeconds: idle, issuedAt: t0)
+            XCTAssertThrowsError(try p.validate(now: t0)) { XCTAssertEqual($0 as? EnrollmentError, .malformed) }
         }
     }
 

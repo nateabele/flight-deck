@@ -20,7 +20,9 @@ import PairingCore
 //                            redeems a one-time enrollment file (EnrollmentPayload, ISO 8601
 //                            dates) written by a cloud machine's user-data: adds its controller
 //                            to the running hostd and deletes the file. Exit 0 enrolled, 1
-//                            refused (expired files are deleted too), 2 hostd not running.
+//                            refused (expired files are deleted too; a file from "the
+//                            future" is re-checked for up to 2 minutes while the clock syncs,
+//                            then kept), 2 hostd not running.
 //
 // And the §3.2 interop gates' servers:
 //   echo --port N --slot UUID --secret-hex HEX
@@ -120,7 +122,7 @@ case "revoke":
 case "enroll":
     guard let path = option("--file", in: args) else { usage() }
     let root = stateRoot(args)
-    let outcome = EnrollCommand.run(file: URL(fileURLWithPath: path), now: Date()) { adminRequest($0, root: root) }
+    let outcome = EnrollCommand.run(file: URL(fileURLWithPath: path)) { adminRequest($0, root: root) }
     if outcome.exitCode == 0 { say(outcome.message) } else { fail(outcome.message, code: outcome.exitCode) }
 case "echo":
     let gate = gateKey(args)

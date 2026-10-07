@@ -22,9 +22,9 @@ public struct EnrollmentPayload: Codable, Sendable, Equatable {
     /// payload is only honoured during the boot that it was written for: thirty minutes covers
     /// a slow image boot plus the hostd download, and anything older is a replay.
     public static let maxAge: TimeInterval = 1800
-    /// A cloud VM's clock can run ahead of the Mac's before NTP settles; without this slack a
+    /// A cloud VM's clock can run behind the Mac's before NTP settles; without this slack a
     /// payload issued "in the future" would be refused on a perfectly healthy boot.
-    static let clockSkew: TimeInterval = 300
+    public static let clockSkew: TimeInterval = 300
     static let currentVersion = 1
 
     public init(version: Int, slot: UUID, secretHex: String, controllerName: String, idleSeconds: Int,
@@ -42,7 +42,12 @@ public struct EnrollmentPayload: Codable, Sendable, Equatable {
     public func validate(now: Date) throws -> (slot: UUID, secret: Data) {
         guard version == Self.currentVersion else { throw EnrollmentError.wrongVersion }
         let age = now.timeIntervalSince(issuedAt)
-        guard age >= -Self.clockSkew, age <= Self.maxAge else { throw EnrollmentError.expired }
+        // Two refusals, not one: a stale payload is spent for good, but one from "the future"
+        // only means this clock is behind, and becomes valid once NTP corrects it.
+        guard age >= -Self.clockSkew else { throw EnrollmentError.notYetValid }
+        guard age <= Self.maxAge else { throw EnrollmentError.expired }
+        // A zero or negative threshold would report the machine idle the moment it booted.
+        guard idleSeconds > 0 else { throw EnrollmentError.malformed }
         guard let secret = Self.bytes(hex: secretHex), secret.count == 32 else { throw EnrollmentError.malformed }
         return (slot, secret)
     }
@@ -71,5 +76,9 @@ public struct EnrollmentPayload: Codable, Sendable, Equatable {
 }
 
 public enum EnrollmentError: Error, Equatable {
-    case expired, malformed, wrongVersion
+    /// Older than `maxAge`: never redeemable again.
+    case expired
+    /// Issued more than `clockSkew` after this machine's "now": its clock is behind.
+    case notYetValid
+    case malformed, wrongVersion
 }
