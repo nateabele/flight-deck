@@ -78,6 +78,8 @@ struct SessionTimelineScreen: View {
     /// reason the old `reviewingGate` gave: a live re-read would collapse the pushed screen out
     /// from under a reader still mid-review the instant the Mac's gate clears — which `resolve`
     /// itself causes a heartbeat after the reader's own tap.
+    /// Whether the prompt card's "Type something" field has the keyboard — see the inset.
+    @State private var promptTyping = false
     @State private var reviewModel: PlanReviewModel?
     /// The row a search jump landed on, briefly. Mirrors `model.scrollTarget` but fades on its
     /// own clock rather than being cleared by the model, so a reader who lingers keeps seeing
@@ -357,9 +359,16 @@ struct SessionTimelineScreen: View {
                     openPromptCall: session?.openPromptCall ?? .unreported,
                     answerless: session?.answerless ?? false,
                     onAbortBlocked: { await onAbortBlocked(model.sessionID) },
-                    fromSubagent: session?.blockedSubagent
+                    fromSubagent: session?.blockedSubagent,
+                    onTypingChange: { promptTyping = $0 }
                 )
-                PromptComposer(session: session, model: model)
+                // Out of the way while the card's own field is typed into: the inset lifts card
+                // and composer together, so the composer would sit between the card and the
+                // keyboard — measured at 122pt of it on the simulator. Gated on a card being
+                // up as well, so a card that leaves mid-typing cannot strand the composer gone.
+                if !(promptTyping && model.blockedPrompt != nil) {
+                    PromptComposer(session: session, model: model)
+                }
             }
         }
         // The other half of `KeyboardLiftedInset`'s hand-done lift, and neither works alone.
@@ -1186,7 +1195,9 @@ struct SessionTimelineScreen: View {
 /// O(conversation) work per frame, precisely what the timeline's `rebuild()` funnel exists to
 /// keep out of a render. Here, a report re-runs only this body; `content` was built by the
 /// screen and is not re-evaluated.
-private struct KeyboardLiftedInset<Content: View>: View {
+/// Internal rather than private so `UITestHarness.promptKeyboard` lifts its card with this very
+/// type rather than a copy of it.
+struct KeyboardLiftedInset<Content: View>: View {
     @ViewBuilder let content: Content
 
     @State private var settled: CGFloat = 0
