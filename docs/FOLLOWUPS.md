@@ -2892,3 +2892,17 @@ it still reports there, each diagnosed from the run's `.xcresult` screen recordi
 - **`testPermissionBypassConfirmationUnderChurn` (the flake hunt) on the UI-test Mac:** fails at once with
   "Unable to find hit point for ScrollView" at y≈2600: the Preferences command field is off the UI-test Mac's
   1125pt-tall screen. A screen-size environment failure, not the race it hunts.
+
+## Cloud infra hosts: account checks (2026-10-07)
+
+- **AWS quota ignores vCPUs already running.** `AWSAccount.quota` compares one machine's vCPUs
+  (`describe-instance-types`) with the family's whole Service Quotas value; it does not subtract
+  the region's running usage, so `ok` can say yes when the quota is already spent. Usage would
+  come from CloudWatch's `AWS/Usage` `ResourceCount` metric for the same quota. GCP does not have
+  this gap: `regions describe` carries usage, so its `have` is limit − usage.
+- **AWS quota covers only the standard, G/VT and P families.** `AWSAccount.quotaCode` maps
+  A/C/D/H/I/M/R/T/Z, G/VT and P (on-demand and spot); any other family (F, Inf, Trn, X, DL,
+  mac, u-…) throws `unsupportedInstanceType` rather than guess a quota code.
+- **The GCP quota link is not filtered to the metric.** The console's per-metric filter is an
+  undocumented `pageState` blob, so `increaseURL` opens the project's quotas page and the user
+  searches for the metric (`G2_CPUS`, `NVIDIA_L4_GPUS`…) themselves.
