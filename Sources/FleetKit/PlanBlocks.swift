@@ -74,12 +74,15 @@ public struct PlanBlocks: Equatable, Sendable {
         }
         flush()
 
+        // The plan's bytes once, not once per block: every block is searched for in all of
+        // it, so a per-call copy would multiply the work by the block count.
+        let haystack = Array(plan.utf8)
         let blocks = raw.enumerated().map { index, text in
             Block(
                 index: index,
                 text: text,
                 isTarget: !isThematicBreak(text)
-                    && occurrences(of: text, in: plan, stoppingAt: 2) == 1
+                    && occurrences(of: Array(text.utf8), in: haystack, stoppingAt: 2) == 1
             )
         }
         return PlanBlocks(blocks: blocks)
@@ -90,19 +93,37 @@ public struct PlanBlocks: Equatable, Sendable {
     /// The early stop is the point: every caller only asks "exactly one, or more than one?",
     /// and a full count over a 6 KB plan for each of 39 blocks would be work done to be
     /// thrown away.
+    ///
+    /// **Bytes and `memmem`, not `String.range(of:)`.** A unique block is the common case, and
+    /// proving it unique means scanning the whole plan — once per block. Foundation's
+    /// Unicode-aware search made that 3.9s for a 300 KB plan of 931 blocks (optimised, on an
+    /// M-series Mac), and the phone runs `split` on the main thread at the tap that opens a
+    /// review, so the app froze. Byte matching is also the closer reading of the rule:
+    /// Plannotator pins a comment by exact substring, not by canonical equivalence.
+    ///
+    /// Matches do not overlap — a match's bytes are skipped before the next search.
     static func occurrences(of needle: String, in haystack: String, stoppingAt limit: Int) -> Int {
-        guard !needle.isEmpty else { return 0 }
-        var count = 0
-        var searchStart = haystack.startIndex
-        while searchStart < haystack.endIndex,
-              let found = haystack.range(of: needle, range: searchStart..<haystack.endIndex) {
-            count += 1
-            if count >= limit { return count }
-            searchStart = found.lowerBound < found.upperBound
-                ? found.upperBound
-                : haystack.index(after: found.lowerBound)
+        occurrences(of: Array(needle.utf8), in: Array(haystack.utf8), stoppingAt: limit)
+    }
+
+    static func occurrences(of needle: [UInt8], in haystack: [UInt8], stoppingAt limit: Int) -> Int {
+        guard !needle.isEmpty, needle.count <= haystack.count else { return 0 }
+        return haystack.withUnsafeBytes { (hay: UnsafeRawBufferPointer) -> Int in
+            needle.withUnsafeBytes { (pin: UnsafeRawBufferPointer) -> Int in
+                guard let hayBase = hay.baseAddress, let pinBase = pin.baseAddress else { return 0 }
+                var count = 0
+                var offset = 0
+                while offset + pin.count <= hay.count {
+                    guard let found = memmem(hayBase + offset, hay.count - offset,
+                                             pinBase, pin.count)
+                    else { break }
+                    count += 1
+                    if count >= limit { break }
+                    offset = (UnsafeRawPointer(found) - hayBase) + pin.count
+                }
+                return count
+            }
         }
-        return count
     }
 
     /// `- `, `* `, `+ `, `1. `, `1) ` — the marker must be followed by a space, so `---` is a
