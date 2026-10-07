@@ -1582,6 +1582,9 @@ final class SessionStore: ObservableObject {
         // Resolved at each release, not captured now: this service is built lazily — often
         // before `FlightDeckApp` attaches routing — and must still see it.
         service.encodeRouting = { [weak self] in self?.flightControlRouting }
+        service.planningAccounts = { [weak self] in
+            PlanningAccountOption.options(from: self?.preferences?.preferences.accounts ?? [])
+        }
         intakeChangeForward = service.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
         // Straight to the summary refresh, never through `objectWillChange`: a seat settling
         // must not redraw every view of the store (see `SeatFeed`), only reach the phone.

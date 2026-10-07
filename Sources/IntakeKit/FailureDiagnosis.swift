@@ -14,22 +14,23 @@ public enum FailureDiagnosis {
     /// words as content; matching them sent the human off to log in again for a crash.
     public static func classify(exitCode: Int32, stdout: Data, stderr: String, parseError: Error?,
                                  harness: Harness? = nil) -> Diagnosis {
-        let errorText = errorEvents(in: stdout).joined(separator: "\n")
+        let events = errorEventJSON(in: stdout)
+        let errorText = events.compactMap(AgentErrorVocabulary.message(ofErrorEvent:)).joined(separator: "\n")
         let haystack = (stderr + "\n" + errorText).lowercased()
 
-        // The harness's own profile first, for the spellings only that CLI uses (agy's
-        // "Authentication required", Google's RESOURCE_EXHAUSTED). Gemini only for now: claude
-        // and codex keep exactly the rules below until Track P moves them onto their profiles.
-        let profileKind: AgentFailureKind? = harness == .gemini
-            ? GeminiProfile().classify(error: .stderr(stderr + "\n" + errorText)) : nil
+        // The CLI's profile classifies each piece of evidence (stderr, and every structured
+        // error event on its own). A profile that recognizes nothing — a grok stub until
+        // Track G — falls back to the shared vocabulary, which is what every harness was
+        // matched against before profiles existed.
+        let profile = AgentProfiles.profile(for: harness ?? .claude)
+        let signals = [AgentErrorSignal.stderr(stderr)] + events.map { .streamErrorEvent(json: $0) }
+        let kind = AgentFailureKind.strongest(signals.compactMap { profile.classify(error: $0) ?? AgentErrorVocabulary.classify($0) })
 
-        if profileKind == .rateLimited || haystack.contains("rate limit") || haystack.contains("429") || haystack.contains("usage limit") {
+        if kind == .rateLimited {
             return Diagnosis(category: .rateLimited, detail: tail(stderr, errorText),
                               action: "Wait for the limit to reset, or switch this slot to another model.")
         }
-        if profileKind == .authExpired || haystack.contains("not logged in") || haystack.contains("authentication") || haystack.contains("unauthorized")
-            || haystack.contains("401") || haystack.contains("/login") || haystack.contains("codex login")
-            || haystack.contains("invalid api key") {
+        if kind == .authExpired {
             let action: String
             if haystack.contains("codex login") {
                 action = "Run `codex login` in a terminal"
@@ -42,7 +43,8 @@ public enum FailureDiagnosis {
                 // Generic until Tracks G/M probe each CLI's real sign-in flow: naming a command
                 // nobody verified would send the human to run something that doesn't exist.
                 case .grok?: action = "Sign in to `\(GrokProfile().binaryName)` in a terminal"
-                // `agy` has no login subcommand: its interactive first run signs in.
+                // `agy` has no login subcommand: its interactive first run signs in, and an
+                // unverified account is verified from there too.
                 case .gemini?:
                     action = haystack.contains("not eligible")
                         ? "Run `agy` in a terminal and verify your Google account"
@@ -70,37 +72,22 @@ public enum FailureDiagnosis {
     /// the last line under stream-json. Everything else in stdout — agent messages, a
     /// successful result — is the model talking and is skipped.
     static func errorEvents(in stdout: Data) -> [String] {
+        errorEventJSON(in: stdout).compactMap(AgentErrorVocabulary.message(ofErrorEvent:))
+    }
+
+    /// The raw JSON text of each structured error event — what a profile classifies, as
+    /// `AgentErrorSignal.streamErrorEvent`. Its message is read by the one shared
+    /// `AgentErrorVocabulary.message(ofErrorEvent:)`.
+    static func errorEventJSON(in stdout: Data) -> [String] {
         // Keyed on `is_error` itself, not on "stdout is one JSON object": a codex run that
         // printed only its `turn.failed` line is one object too.
         if let obj = try? JSONSerialization.jsonObject(with: stdout) as? [String: Any], let isError = obj["is_error"] as? Bool {
-            guard isError else { return [] }
-            return [obj["result"] as? String ?? obj["subtype"] as? String ?? "is_error"]
-        }
-        if let obj = try? JSONSerialization.jsonObject(with: stdout) as? [String: Any], obj["event"] == nil,
-           obj["conversation_id"] != nil {
-            return agyError(obj).map { [$0] } ?? []
+            return isError ? [String(decoding: stdout, as: UTF8.self)] : []
         }
         return stdout.split(separator: UInt8(ascii: "\n")).compactMap { line -> String? in
-            guard let obj = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any] else { return nil }
-            switch obj["type"] as? String {
-            case "error": return obj["message"] as? String
-            case "turn.failed": return (obj["error"] as? [String: Any])?["message"] as? String
-            case "result" where obj["is_error"] as? Bool == true:
-                return obj["result"] as? String ?? obj["subtype"] as? String ?? "is_error"
-            default: break
-            }
-            return agyError(obj)
+            let json = String(decoding: line, as: UTF8.self)
+            return AgentErrorVocabulary.message(ofErrorEvent: json) == nil ? nil : json
         }
-    }
-
-    /// An `agy` result that did not succeed: `{"event":"result","result":{"status":"ERROR",
-    /// "error":"…"}}` under stream-json, or the bare result object under `--output-format json`.
-    /// Its `response` is never read — that is the model talking.
-    private static func agyError(_ obj: [String: Any]) -> String? {
-        let result = obj["event"] as? String == "result" ? obj["result"] as? [String: Any] : obj
-        guard let result, result["conversation_id"] != nil, let status = result["status"] as? String,
-              status != "SUCCESS" else { return nil }
-        return result["error"] as? String ?? status
     }
 
     /// A short excerpt for `detail` — stderr when there is any, otherwise the structured error,
