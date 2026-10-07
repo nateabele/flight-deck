@@ -21,6 +21,18 @@ Deck tab agents:
 That can come later. This spec touches IntakeKit's `Harness` and everything that switches on
 it.
 
+**And a shared agent profile (§3.0).** This spec first extracts a per-agent `AgentProfile` that
+both the tab side (`AgentAdapter`) and the headless side (`Harness`) read. Today four kinds of
+knowledge about each CLI are duplicated, and two have already drifted:
+- **Model catalog.** `ClaudeFlagCatalog` offers `fable`; planning and routing don't know it
+  exists.
+- **Error/rate-limit spellings.** These live in four separate lists.
+- **The `CLAUDE_CODE_CHILD_SESSION` scrub.** This is copied in three places.
+- **Account binding.** Planning seats always bill the built-in account.
+
+Grok and Gemini are then added as profile + harness. Adapters can follow later without
+duplicating anything.
+
 **Success criteria:**
 1. In the Rounds editor, any seat can be set to Grok or Gemini, with a model and an effort
    where the CLI supports one. Seats can be cross-family, e.g. drafters claude + grok, with a
@@ -58,6 +70,58 @@ Gemini harness drives:
   result in §10.
 
 ## 3. Design
+
+### 3.0 `AgentProfile` — one source of truth per CLI (IntakeKit, pure)
+
+A new `Sources/IntakeKit/Agents/AgentProfile.swift`.
+
+**The protocol.** One conformer per CLI: `ClaudeProfile`, `CodexProfile`, `GrokProfile` and
+`GeminiProfile`. Each answers the following, and holds the reasoning comments that today sit
+next to each copy:
+- `id: HarnessID` (the raw value: `claude`, `codex`, `grok`, `gemini`) and `family: ModelFamily`.
+- `binaryName` and `signInCheck`. The check is a cheap read-only command plus a predicate on its
+  output, so callers can tell "not installed" from "signed out" from "ready".
+- `modelCatalog`:
+  - the static aliases or the list command;
+  - the default planning model;
+  - the knob schema (effort values).
+- `classify(error:) -> AgentFailureKind?`. One classifier for `rateLimited`, `authExpired`,
+  `overloaded` and `other`, fed by stderr, stream error events, transcript API-error records or
+  app-server errors.
+- `environment(base:account:) -> [String: String]`:
+  - binds the account's home (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, Grok's and Gemini's
+    equivalents, found in Task 1);
+  - re-applies what an isolation flag drops (`ClaudeUserEnv`, `CodexUserConfig`'s
+    `service_tier`);
+  - performs the child-session scrub.
+
+**Who reads it.** Every duplicate becomes a call into the profile:
+- **Model lists and defaults:**
+  - `IntakeService`'s triage defaults;
+  - `AvailableModels`;
+  - `ClaudeFlagCatalog`'s `--model` choices. They stay a flag catalog, but their values come
+    from the profile;
+  - `RoutingCatalogs`.
+- **Error and rate-limit classification:**
+  - `FailureDiagnosis`;
+  - `RateLimitClassifier.kinds`;
+  - `CodexTurnRecovery`'s transient list;
+  - the fleet's `SessionAPIError` kind mapping. That one stays in FleetKit, but it is classified
+    through the profile on the Mac side before it reaches the wire.
+- **The child-session scrub:** `IntakeRunnerController`, `PreferencesStore` and `ToolLauncher`.
+- **Environment:** `ClaudeUserEnv` and `CodexUserConfig` fold into their profiles' `environment`.
+
+**Account binding for planning.** `HarnessRequest` gains `account: AgentAccountRef?`, a pure
+value (id + home URL), so a seat can run on a chosen account.
+- `nil` keeps today's behaviour, the built-in account.
+- The Rounds editor can pick an account per seat. The default is unchanged.
+- Hooking L3's pools and rollover into planning is a follow-up. This spec only makes it
+  possible.
+
+**Behaviour must not change** for claude or codex beyond the drift fixes. Each fix gets a test:
+- `fable` becomes known to planning and routing.
+- The classifier lists merge into one. Every previously recognized spelling still classifies
+  the same.
 
 ### 3.1 The harness and model family
 - Add `.grok` and `.gemini` to `Harness` (`Sources/IntakeKit/Intake.swift:24`). Raw values are
@@ -203,6 +267,24 @@ specific settings page; the URLs change.
   "beads".
 
 ## 4. Tasks (for the implementing session)
+
+**Execution shape (max parallelism):**
+- **Track 0 — contract** (lands first, small):
+  - the `AgentProfile` protocol and its value types;
+  - the `.grok`/`.gemini` cases on `Harness` and `ModelFamily`, plus every exhaustive switch arm.
+    New arms may `fatalError("track G/M")` only behind a test-visible stub;
+  - the schema-repair seam (`hasNativeSchema`);
+  - `HarnessRequest.account`.
+- **Then three parallel tracks, each in its own worktree:**
+  - **Track P:** claude and codex profiles, migrating every duplicate onto them (§3.0).
+  - **Track G:** Grok profile + harness.
+  - **Track M:** Gemini profile + harness.
+- **Integration:**
+  - merge P, then G, then M;
+  - the Rounds editor's account and harness pickers;
+  - the live round (§5).
+
+Tracks G and M do every non-auth step first. Their probes wait for Nate to sign in.
 
 **1. Probes. They come first and are recorded in §10 before any code depends on them.**
 - **Wait for sign-in.** Nate signs in to both CLIs first (`grok login`, then the `gemini`
