@@ -38,6 +38,12 @@ public final class DelegationHost: @unchecked Sendable {
     /// Told of every request and every run, service and transfer, for `host.info`'s
     /// `idleSince`. Public so a hostd hands the core the same tracker the router feeds.
     public let idle: IdleTracker?
+    /// How long a transfer channel (`sync.push`'s bundle in, `run.result`'s and
+    /// `run.artifacts`' out) may go without moving a byte before its request fails
+    /// `transfer_stalled`. Ten minutes: far past any link's hiccup, short enough that a frozen
+    /// controller cannot hold a billed cloud box "busy" until its TTL.
+    public static let transferStall: TimeInterval = 600
+    private let stall: TimeInterval
 
     private let lock = NSLock()
     private var connections: [ObjectIdentifier: Connection] = [:]
@@ -53,9 +59,11 @@ public final class DelegationHost: @unchecked Sendable {
     private var revokedSlots: Set<UUID> = []
 
     public init(runner: any RunControlling, workspace: any WorkspaceStore, screen: ScreenLease,
-                portCheck: any PortChecking, screenSupported: Bool, idle: IdleTracker? = nil) {
+                portCheck: any PortChecking, screenSupported: Bool, idle: IdleTracker? = nil,
+                transferStall: TimeInterval = DelegationHost.transferStall) {
         self.runner = runner
         self.idle = idle
+        stall = transferStall
         self.workspace = workspace
         self.screen = screen
         let live = LiveSlots()
@@ -189,7 +197,7 @@ public final class DelegationHost: @unchecked Sendable {
             return try await withChannel(channelID, on: connection) { channel in
                 let file = FileManager.default.temporaryDirectory.appendingPathComponent("fd-push-\(UUID().uuidString).bundle")
                 defer { try? FileManager.default.removeItem(at: file) }
-                try await Self.save(channel, to: file)
+                try await Self.save(channel, to: file, stall: stall)
                 try await workspace.receive(controller: slot, bundle: file, ref: ref)
                 return Routed(reply: .syncPush)
             }
@@ -250,7 +258,7 @@ public final class DelegationHost: @unchecked Sendable {
                     await channel.finish()
                     return Routed(reply: .runArtifacts(found: false))
                 }
-                try await Self.stream(tar, over: channel)
+                try await Self.stream(tar, over: channel, stall: stall)
                 return Routed(reply: .runArtifacts(found: true))
             }
 
@@ -331,7 +339,7 @@ public final class DelegationHost: @unchecked Sendable {
         }
         defer { try? FileManager.default.removeItem(at: bundle) }
         let commit = try await commit(of: bundle)
-        try await Self.stream(bundle, over: channel)
+        try await Self.stream(bundle, over: channel, stall: stall)
         return Routed(reply: .runResult(commit: commit))
     }
 
@@ -457,12 +465,15 @@ public final class DelegationHost: @unchecked Sendable {
         peer.send(text: text)
     }
 
-    /// Everything the controller writes on `channel` until its EOF, into `file`.
-    private static func save(_ channel: any ByteChannel, to file: URL) async throws {
+    /// Everything the controller writes on `channel` until its EOF, into `file`. Each read
+    /// must arrive within `stall` seconds (`progressing`).
+    private static func save(_ channel: any ByteChannel, to file: URL, stall: TimeInterval) async throws {
         FileManager.default.createFile(atPath: file.path, contents: nil)
         let handle = try FileHandle(forWritingTo: file)
         defer { try? handle.close() }
-        while let chunk = try await channel.read() { try handle.write(contentsOf: chunk) }
+        while let chunk = try await progressing(channel, within: stall, { try await channel.read() }) {
+            try handle.write(contentsOf: chunk)
+        }
         // Our side's EOF too: a channel retires only once both ends have finished, and without
         // it every push left an entry in both muxes for as long as the connection lived.
         await channel.finish()
@@ -470,13 +481,41 @@ public final class DelegationHost: @unchecked Sendable {
 
     /// `file` onto `channel`, then EOF. A write waits on the controller's credit, so a slow
     /// link backs up this transfer and nothing else on the connection.
-    private static func stream(_ file: URL, over channel: any ByteChannel) async throws {
+    private static func stream(_ file: URL, over channel: any ByteChannel, stall: TimeInterval) async throws {
         let handle = try FileHandle(forReadingFrom: file)
         defer { try? handle.close() }
         while let chunk = try handle.read(upToCount: ChannelFrame.maxPayload), !chunk.isEmpty {
-            try await channel.write(chunk)
+            try await progressing(channel, within: stall) { try await channel.write(chunk) }
         }
         await channel.finish()
+    }
+
+    /// One step of a transfer (a read, or a write waiting on the controller's credit), failed
+    /// `transfer_stalled` if it has not finished within `seconds`. A deadline per step, not per
+    /// transfer, so a big bundle over a slow link is never cut while bytes still move.
+    ///
+    /// The transport's TCP keepalive drops a peer whose machine is gone, but not one that is
+    /// alive and silent (a wedged controller, a channel it forgot): without this, that request
+    /// would hold the host busy, and a cloud box billing, until its TTL. On a stall the channel
+    /// is cancelled, which is also what frees the step's own pending read or write.
+    static func progressing<T: Sendable>(_ channel: any ByteChannel, within seconds: TimeInterval,
+                                         _ step: @escaping @Sendable () async throws -> T) async throws -> T {
+        try await withThrowingTaskGroup(of: StepOutcome<T>.self) { group in
+            group.addTask { .done(try await step()) }
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                return .stalled
+            }
+            defer { group.cancelAll() }
+            switch try await group.next() {
+            case .done(let value)?:
+                return value
+            case .stalled?, nil:
+                channel.cancel()
+                throw DelegationError(code: "transfer_stalled",
+                                      message: "the transfer made no progress for \(Int(seconds)) s; the controller stopped sending or reading")
+            }
+        }
     }
 
     /// An error as the `err` frame's code (the DelegationWire A5 table) and message (the
@@ -510,6 +549,12 @@ public final class DelegationHost: @unchecked Sendable {
             self.mux = mux
         }
     }
+}
+
+/// A transfer step's race against its stall deadline (`DelegationHost.progressing`).
+private enum StepOutcome<T: Sendable>: Sendable {
+    case done(T)
+    case stalled
 }
 
 /// Live connections per controller slot, shared with the services' `isConnected`, which must
