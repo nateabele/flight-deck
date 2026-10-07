@@ -29,8 +29,23 @@ public enum SchemaRepair {
         // mismatch is not something a "please fix your JSON" turn repairs — and claude/codex
         // rounds must behave exactly as before this seam existed.
         guard !profile.hasNativeSchema, !isRepair else { return nil }
-        // Track M: decide here (invalidOutput only, a session to resume, read-only access —
-        // write mode refuses a resume) and build the repair prompt from `failure.detail`.
-        return nil
+        // Only an answer that came back and failed to parse or validate is repairable. A rate
+        // limit, a sign-in or a crash is not fixed by asking again for JSON — retrying those
+        // would just spend the one retry on the same failure.
+        guard failure.category == .invalidOutput else { return nil }
+        // The repair resumes the failed run's OWN conversation; with no id there is nothing to
+        // resume, and a fresh run would not know what it was correcting.
+        guard let sessionID, !sessionID.isEmpty else { return nil }
+        // The integrator (write mode) always starts fresh — `HarnessCommand.validate` refuses a
+        // write-mode resume — so it is never repaired.
+        guard access == .readOnly else { return nil }
+        return Retry(resumeSessionID: sessionID, prompt: prompt(firstError: failure.detail))
+    }
+
+    /// The repair turn's whole prompt (spec §3.4 step 4). Only the first error: a list invites
+    /// the model to fix some and re-break others, and one is enough to say what went wrong.
+    public static func prompt(firstError: String) -> String {
+        let first = firstError.split(whereSeparator: \.isNewline).first.map(String.init) ?? firstError
+        return "Your reply did not validate: \(first). Reply again with only the corrected JSON."
     }
 }

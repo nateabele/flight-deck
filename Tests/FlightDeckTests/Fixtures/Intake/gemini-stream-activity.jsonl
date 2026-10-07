@@ -1,0 +1,8 @@
+{"event":"init","conversation_id":"6c1f4c0e-3a51-4b8e-9d0e-1f2a3b4c5d6e","init":{"cwd":"/proj","tools":["view_file","grep_search","list_dir"],"permission_mode":"request-review","model":"gemini-3.8-pro"}}
+{"event":"step_update","step_update":{"conversation_id":"6c1f4c0e-3a51-4b8e-9d0e-1f2a3b4c5d6e","step_index":0,"state":"DONE","step_type":"user_input"}}
+{"event":"step_update","step_update":{"conversation_id":"6c1f4c0e-3a51-4b8e-9d0e-1f2a3b4c5d6e","step_index":1,"state":"ACTIVE","step_type":"tool","tool_name":"view_file","tool_info":{"name":"view_file","parameters":{"AbsolutePath":"/proj/README.md"}}}}
+{"event":"step_update","step_update":{"conversation_id":"6c1f4c0e-3a51-4b8e-9d0e-1f2a3b4c5d6e","step_index":2,"state":"ACTIVE","step_type":"tool","tool_name":"grep_search","tool_info":{"name":"grep_search","parameters":{"Query":"func run","SearchPath":"/proj"}}}}
+{"event":"step_update","step_update":{"conversation_id":"6c1f4c0e-3a51-4b8e-9d0e-1f2a3b4c5d6e","step_index":3,"state":"ACTIVE","step_type":"agent_response","text_delta":"Reading the README first. Then"}}
+not json at all
+{"event":"mystery_event","payload":1}
+{"event":"result","result":{"conversation_id":"6c1f4c0e-3a51-4b8e-9d0e-1f2a3b4c5d6e","status":"SUCCESS","response":"{\"plan\":\"# Plan\"}","duration_seconds":6.0,"num_turns":3,"structured_output":{"plan":"# Plan"},"usage":{"input_tokens":1200,"output_tokens":50,"thinking_tokens":10,"cache_read_tokens":300,"total_tokens":1560}}}

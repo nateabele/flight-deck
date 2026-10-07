@@ -178,6 +178,8 @@ public enum HarnessCommand {
         /// never approximated: a guessed argv for a CLI nobody has probed could run a "read-only"
         /// seat with write tools, which is worse than a round that pauses saying why.
         case harnessNotImplemented(Harness)
+        /// The model is not one of this harness's own family (a Claude model on `agy`).
+        case modelOutsideFamily(harness: Harness, model: String)
     }
 
     public static func validate(_ r: HarnessRequest) -> HarnessCommandError? {
@@ -264,8 +266,43 @@ public enum HarnessCommand {
             if let s = r.resumeSessionID { args += ["--resume", s] } else { args += ["--session-id", mintGrokSessionID()] }
             return ("grok", args, [])
         case .gemini:
-            throw .harnessNotImplemented(r.harness)
+            // agy also serves Claude and GPT-OSS models; a "gemini" seat on one would be
+            // counted as the Gemini family by coverage and cross-check (see
+            // `GeminiProfile.isGeminiModel`), so it is refused, never run.
+            guard GeminiProfile.isGeminiModel(r.model) else { throw .modelOutsideFamily(harness: r.harness, model: r.model) }
+            return ("agy", geminiArguments(r), [])
         }
+    }
+
+    /// Every headless `agy` run. stream-json so the seat shows live activity (the final
+    /// `result` event carries the same object `--output-format json` prints alone);
+    /// `--json-schema` takes a file path or inline JSON, and the file keeps a large schema out
+    /// of argv. `--disable-slash-commands` stops a prompt line that happens to start with `/`
+    /// expanding into a skill or command — the seat's prompt is data, not a command.
+    static func geminiArguments(_ r: HarnessRequest) -> [String] {
+        var args = ["-p", r.prompt, "--output-format", "stream-json", "--json-schema", r.schemaFile.path,
+                    "--model", r.model]
+        if !r.effort.isEmpty { args += ["--effort", r.effort] }
+        // No `--print-timeout`: since agy 1.3.1 it defaults to 0, "wait until the turn
+        // completes" — the same uncapped wait claude and codex seats get. (1.2.3 defaulted to
+        // 5 minutes, shorter than a real drafter turn; agy self-updates past it.)
+        args += ["--disable-slash-commands"]
+        switch r.access {
+        case .readOnly:
+            // `--mode plan`: agy's read-only execution mode. Readable dirs join the workspace
+            // with `--add-dir`, the way claude seats get them.
+            args += ["--mode", "plan"]
+            for d in r.readableDirs { args += ["--add-dir", d.path] }
+        case .writeInWork:
+            // `accept-edits` lets file edits through without a prompt nobody could answer; the
+            // workspace is the cwd, which `validate` pins to the work dir. readableDirs are NOT
+            // added: `--add-dir` widens the workspace, i.e. where edits may land.
+            args += ["--mode", "accept-edits"]
+        }
+        // Resume by the id agy itself reported (`conversation_id`). Never `--continue`: it
+        // resumes the MOST RECENT conversation, which with parallel seats is another seat's.
+        if let s = r.resumeSessionID { args += ["--conversation", s] }
+        return args
     }
 
     /// The complete environment for a child `build` produced, from the caller's resolved
@@ -289,6 +326,7 @@ public enum HarnessCommand {
         // servers is environment, not argv (see `GrokProfile.isolationEnvironment`) — so every
         // grok child, triage and round alike, must come through here.
         case "grok": environment = GrokProfile().environment(base: base, account: account)
+        case GeminiProfile().binaryName: environment = GeminiProfile().environment(base: base, account: account)
         default: environment = base
         }
         for key in command.unsetEnvironment { environment.removeValue(forKey: key) }
@@ -344,7 +382,7 @@ public enum HarnessOutput {
         case .grok:
             return try grokParse(stdout)
         case .gemini:
-            throw ParseError.harnessNotImplemented(harness)
+            return try geminiParse(stdout)
         }
     }
 
@@ -376,6 +414,39 @@ public enum HarnessOutput {
         if result["result"] == nil, let text = result["text"] as? String { result["result"] = text }
         if result["structured_output"] == nil, let structured = result["structuredOutput"] { result["structured_output"] = structured }
         return (session, try claudeStructured(result))
+    }
+
+    /// `agy --output-format stream-json`: `{"event":"init","conversation_id":…}` first, then
+    /// `step_update`s, then `{"event":"result","result":{…}}` — the same object
+    /// `--output-format json` prints alone, which is accepted too. The session is the result's
+    /// `conversation_id` (or init's, when the result has none). A result whose `status` is not
+    /// `SUCCESS` holds an error, not an answer — and a signed-out run reports one with an EMPTY
+    /// conversation id, so the status is checked before the id.
+    private static func geminiParse(_ stdout: Data) throws -> (sessionID: String, structured: Data) {
+        var session: String?, result: [String: Any]?
+        if let obj = try? JSONSerialization.jsonObject(with: stdout) as? [String: Any], obj["event"] == nil {
+            result = obj
+        } else {
+            for line in stdout.split(separator: UInt8(ascii: "\n")) {
+                guard let obj = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any] else { continue }
+                if let s = obj["conversation_id"] as? String, !s.isEmpty { session = s }
+                if obj["event"] as? String == "result" { result = obj["result"] as? [String: Any] }
+            }
+        }
+        guard let result else { throw session == nil ? ParseError.noSession : ParseError.noResult }
+        let status = result["status"] as? String ?? ""
+        guard status == "SUCCESS" else {
+            throw ParseError.isError(result["error"] as? String ?? (status.isEmpty ? "no status" : status))
+        }
+        if let s = result["conversation_id"] as? String, !s.isEmpty { session = s }
+        guard let session else { throw ParseError.noSession }
+        if let structured = result["structured_output"], !(structured is NSNull) {
+            return (session, try JSONSerialization.data(withJSONObject: structured, options: .fragmentsAllowed))
+        }
+        guard let text = result["response"] as? String else { throw ParseError.noResult }
+        let data = Data(text.utf8)
+        guard (try? JSONSerialization.jsonObject(with: data)) != nil else { throw ParseError.notJSON(text) }
+        return (session, data)
     }
 
     /// The structured answer in a claude `result` object. `is_error` means `result` holds the

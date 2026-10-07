@@ -147,23 +147,22 @@ public protocol AgentProfile: Sendable {
     /// home (nil = the built-in account, i.e. `base` as is), re-applies whatever an isolation
     /// flag drops, and removes the child-session variables.
     func environment(base: [String: String], account: AgentAccountRef?) -> [String: String]
-    /// Non-nil while this conformer is still a Track 0 stub: one of `AgentProfileStub`'s
-    /// constants, naming the track that owns it. A track deletes its conformer's override when
-    /// the real profile lands; tests assert on this, never on behaviour, to tell stub from real.
+    /// Non-nil marks a conformer that is still a placeholder (Track 0 shipped all four as stubs,
+    /// each naming the track that would replace it). Every conformer is real now, so all return
+    /// nil; the requirement stays so a future CLI can land its profile before its harness, and
+    /// `AgentProfileContractTests` fails if any shipped profile is still a placeholder.
     var unimplemented: String? { get }
+    /// Whether a headless run must be preceded by `signInCheck`. True for a CLI whose headless
+    /// mode, when signed out, STARTS an interactive sign-in (opens a browser, waits for a
+    /// code) instead of failing fast — `agy -p` does, so a seat on a signed-out account would
+    /// launch a Google sign-in in the human's browser. The executor runs the check first and
+    /// pauses the round with `authExpired` rather than spawning the run.
+    var headlessSignInPreflight: Bool { get }
 }
 
 public extension AgentProfile {
     var unimplemented: String? { nil }
-}
-
-/// The stub markers. Each names the track that replaces the stub. When no conformer returns
-/// one any more, delete this enum — a reference to it left anywhere is then a compile error,
-/// which is the point.
-public enum AgentProfileStub {
-    public static let trackP = "unimplemented in track P"
-    public static let trackG = "unimplemented in track G"
-    public static let trackM = "unimplemented in track M"
+    var headlessSignInPreflight: Bool { false }
 }
 
 // MARK: - Registry
@@ -189,31 +188,7 @@ public enum AgentProfiles {
     public static let headlessReady: Set<Harness> = [.claude, .codex]
 }
 
-// MARK: - Stub conformers (Track 0)
+// MARK: - Conformers
 //
-// Each returns explicit "unimplemented" values that tests detect: an empty catalog, a classifier
-// that recognizes nothing, and `base` unchanged for the environment. No `fatalError` — a stub is
-// reachable from shipping code (`FailureDiagnosis` reads `binaryName`), so it must answer safely.
-// `id`, `family`, `binaryName` and `hasNativeSchema` are facts, not implementation, and are real.
-
-private func stubSignInCheck(_ marker: String) -> SignInCheck {
-    SignInCheck(arguments: [], signedOutHint: marker, isSignedIn: { _ in false })
-}
-
-// `GrokProfile` lives in GrokProfile.swift (Track G).
-
-public struct GeminiProfile: AgentProfile {
-    public init() {}
-    public var id: Harness { .gemini }
-    public var family: ModelFamily { .gemini }
-    /// May become `agy` if Track M's probe finds `gemini -p` refuses an AI Pro account (spec §2).
-    public var binaryName: String { "gemini" }
-    public var signInCheck: SignInCheck { stubSignInCheck(AgentProfileStub.trackM) }
-    public var modelCatalog: ProfileModelCatalog { .empty }
-    public func parseModelList(_ stdout: String) -> [String] { [] }
-    /// gemini 0.59.0 has no schema flag (spec §2), so its seats take the repair path.
-    public var hasNativeSchema: Bool { false }
-    public func classify(error: AgentErrorSignal) -> AgentFailureKind? { nil }
-    public func environment(base: [String: String], account: AgentAccountRef?) -> [String: String] { base }
-    public var unimplemented: String? { AgentProfileStub.trackM }
-}
+// Each lives in its own file: ClaudeProfile.swift, CodexProfile.swift (Track P),
+// GrokProfile.swift (Track G) and GeminiProfile.swift (Track M).

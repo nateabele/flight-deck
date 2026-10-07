@@ -601,6 +601,11 @@ public struct RoundExecutor: Sendable {
         // harness out of every config, so reaching this means a hand-edited or newer intake.
         let command: (executable: String, arguments: [String], unsetEnvironment: [String])
         do { command = try HarnessCommand.build(request, home: userHome) }
+        catch .modelOutsideFamily(let harness, let model) {
+            return .failed(Diagnosis(category: .harnessError,
+                                     detail: "\(model) is not a \(ModelFamily(harness).displayName) model",
+                                     action: "Pick a \(ModelFamily(harness).displayName) model for this slot."), sessionID: nil)
+        }
         catch {
             return .failed(Diagnosis(category: .harnessError, detail: "\(choice.harness.rawValue) cannot run in planning rounds yet: \(error)",
                                      action: "Switch this slot to another harness."), sessionID: nil)
@@ -608,6 +613,10 @@ public struct RoundExecutor: Sendable {
         // The seat's own account, when the Rounds editor bound one: nil is the built-in home.
         let environment = HarnessCommand.environment(for: command, base: inputs.environment, home: userHome,
                                                      account: request.account)
+        let profile = AgentProfiles.profile(for: choice.harness)
+        if profile.headlessSignInPreflight, let signedOut = await signedOutDiagnosis(profile, cwd: cwd, environment: environment) {
+            return .failed(signedOut, sessionID: nil)
+        }
 
         // stdout is appended live, chunk by chunk as the child writes it, so the stream on disk
         // is never more than a pipe read behind the child — the runner's reader thread is the
@@ -690,6 +699,21 @@ public struct RoundExecutor: Sendable {
     }
 
     private struct NonZeroExit: Error {}
+
+    /// The sign-in preflight (`AgentProfile.headlessSignInPreflight`): a CLI whose headless run
+    /// starts an interactive sign-in when signed out — `agy -p` opens a Google sign-in in the
+    /// human's browser — is checked with its read-only `signInCheck` first, and a signed-out
+    /// account pauses the seat as `authExpired` without the run ever being spawned. A check that
+    /// cannot even run falls through to the real run, whose own failure is then diagnosed.
+    private func signedOutDiagnosis(_ profile: any AgentProfile, cwd: URL, environment: [String: String]) async -> Diagnosis? {
+        let check = profile.signInCheck
+        guard let result = try? await runner.run(executable: profile.binaryName, arguments: check.arguments,
+                                                 cwd: cwd, environment: environment) else { return nil }
+        let output = SignInCheckOutput(stdout: String(decoding: result.stdout, as: UTF8.self), stderr: result.stderr,
+                                       exitCode: result.exitCode)
+        guard case .signedOut(let hint) = check.readiness(output) else { return nil }
+        return Diagnosis(category: .authExpired, detail: hint, action: hint)
+    }
 
     private static func write(_ run: RunRecord, to url: URL) throws {
         try IntakeJSON.encoder.encode(run).write(to: url, options: .atomic)

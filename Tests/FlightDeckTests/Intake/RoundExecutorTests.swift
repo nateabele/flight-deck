@@ -8,7 +8,7 @@ final class ScriptedHarnessRunner: CommandRunner, @unchecked Sendable {
     struct Call {
         var executable: String, arguments: [String], cwd: URL, environment: [String: String], processGroup: Bool
         var prompt: String {
-            if executable == "claude", let i = arguments.firstIndex(of: "-p") { return arguments[i + 1] }
+            if executable == "claude" || executable == "agy", let i = arguments.firstIndex(of: "-p") { return arguments[i + 1] }
             return arguments.last ?? ""
         }
         var model: String? {
@@ -30,7 +30,7 @@ final class ScriptedHarnessRunner: CommandRunner, @unchecked Sendable {
             guard let i = arguments.firstIndex(of: "--output-schema") else { return nil }
             return URL(fileURLWithPath: arguments[i + 1]).deletingLastPathComponent()
         }
-        var isResume: Bool { arguments.contains("resume") || arguments.contains("--resume") }
+        var isResume: Bool { arguments.contains("resume") || arguments.contains("--resume") || arguments.contains("--conversation") }
     }
 
     private let lock = NSLock()
@@ -50,6 +50,9 @@ final class ScriptedHarnessRunner: CommandRunner, @unchecked Sendable {
     var bvExitCode: Int32 = 0
     var bvStdout = #"{"ok":true}"#
     var nextPID: Int32 = 4000
+    /// What `agy models` (the gemini sign-in preflight) answers. Signed in by default, so a
+    /// gemini seat runs; a test sets the signed-out text to exercise the preflight.
+    var agyModels = CommandResult(stdout: Data("gemini-3.8-pro\n".utf8), stderr: "", exitCode: 0)
     let script: @Sendable (Call) -> CommandResult
     var onCall: (@Sendable (Call) -> Void)?
 
@@ -79,6 +82,7 @@ final class ScriptedHarnessRunner: CommandRunner, @unchecked Sendable {
             let out = arguments.first == "list" ? graphList : graphEdges
             return CommandResult(stdout: Data(out.utf8), stderr: "", exitCode: 0)
         }
+        if executable == "agy", arguments == ["models"] { return agyModels }
         if executable == "bv" {
             // `RoundExecutor.buildShadowAnalytics` — FD's own `bv --robot-insights/-plan/-priority`
             // runs against the shadow, never the agent's. Scripted the same way `br` is above:
@@ -112,9 +116,24 @@ func claudeOK(_ session: String, _ json: String) -> CommandResult {
                          stderr: "", exitCode: 0)
 }
 
+/// `agy --output-format stream-json`'s shape: init, then the final `result` with
+/// `structured_output`.
+func agyOK(_ session: String, _ json: String) -> CommandResult {
+    let structured = try! JSONSerialization.jsonObject(with: Data(json.utf8))
+    let initLine = try! JSONSerialization.data(withJSONObject: ["event": "init", "conversation_id": session])
+    let result = try! JSONSerialization.data(withJSONObject: ["event": "result", "result": [
+        "conversation_id": session, "status": "SUCCESS", "response": json, "structured_output": structured]])
+    return CommandResult(stdout: Data((String(decoding: initLine, as: UTF8.self) + "\n" + String(decoding: result, as: UTF8.self) + "\n").utf8),
+                         stderr: "", exitCode: 0)
+}
+
 /// Answers in whichever shape the call's harness speaks.
 func ok(_ call: ScriptedHarnessRunner.Call, _ session: String, _ json: String) -> CommandResult {
-    call.executable == "claude" ? claudeOK(session, json) : codexOK(session, json)
+    switch call.executable {
+    case "claude": claudeOK(session, json)
+    case "agy": agyOK(session, json)
+    default: codexOK(session, json)
+    }
 }
 
 func failed(_ stderr: String) -> CommandResult { CommandResult(stdout: Data(), stderr: stderr, exitCode: 1) }

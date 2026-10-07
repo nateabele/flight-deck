@@ -40,8 +40,7 @@ struct TriageSettings: Equatable, Sendable {
     /// so the editor can say why it is missing; one that passes brings its listed models.
     /// `probe` is injectable so a test never spawns the operator's real CLIs.
     static func available(path: String? = LoginShellPath.repairing()["PATH"],
-                          probe: (_ executable: String, _ arguments: [String]) -> SignInCheckOutput? = runProbe)
-        -> AvailableModels {
+                          probe: SignInProbe = .system) -> AvailableModels {
         let codex = installed("codex", path: path), claude = installed("claude", path: path)
         var choices: [Harness: ModelChoice] = [:]
         choices[.codex] = codex ? AvailableModels.defaults.codex : nil
@@ -55,14 +54,14 @@ struct TriageSettings: Equatable, Sendable {
                 continue
             }
             let check = profile.signInCheck
-            let output = check.arguments.isEmpty ? nil : probe(executable, check.arguments)
+            let output = check.arguments.isEmpty ? nil : probe.run(executable, check.arguments, path ?? "")
             switch output.map(check.readiness) ?? .signedOut(hint: check.signedOutHint) {
             case .ready:
                 let catalog = profile.modelCatalog
                 var listed: [String] = []
                 if let list = catalog.listArguments {
                     // grok's list command IS its sign-in check — one spawn, not two.
-                    let listOutput = list == check.arguments ? output : probe(executable, list)
+                    let listOutput = list == check.arguments ? output : probe.run(executable, list, path ?? "")
                     listed = listOutput.map { profile.parseModelList($0.stdout) } ?? []
                 }
                 let offered = listed.isEmpty ? catalog.aliases : listed
@@ -84,19 +83,32 @@ struct TriageSettings: Equatable, Sendable {
         return available
     }
 
+    /// The closure form of the probe seam, for tests that only need (executable, arguments).
+    static func available(path: String?, probe: @escaping (_ executable: String, _ arguments: [String]) -> SignInCheckOutput?)
+        -> AvailableModels {
+        available(path: path, probe: SignInProbe { executable, arguments, _ in probe(executable, arguments) })
+    }
+
     private static func installed(_ tool: String, path: String?) -> Bool { executable(tool, path: path) != nil }
 
     private static func executable(_ tool: String, path: String?) -> String? {
         (path ?? "").split(separator: ":").lazy.map { "\($0)/\(tool)" }
             .first { FileManager.default.isExecutableFile(atPath: $0) }
     }
+}
 
-    /// Runs a sign-in check's command for `available`. Output goes to temp FILES, not pipes: a
-    /// CLI that leaves a helper process holding its stdout (grok has a background "leader")
-    /// would block a pipe read forever, and this runs on every launch. Ten seconds is generous
-    /// for a command that reads a cached login (`grok models` takes ~0.25 s); past it the
-    /// harness reads as signed out rather than stalling detection.
-    static func runProbe(_ executable: String, _ arguments: [String]) -> SignInCheckOutput? {
+/// Runs a profile's read-only sign-in check for detection: the executable's full path, its
+/// arguments, and the PATH to run it under; nil when it could not run or did not finish in
+/// time. A seam so detection tests never spawn a real CLI.
+struct SignInProbe: Sendable {
+    var run: @Sendable (_ executable: String, _ arguments: [String], _ path: String) -> SignInCheckOutput?
+
+    /// Output goes to temp FILES, not pipes: a CLI that leaves a helper process holding its
+    /// stdout (grok has a background "leader") would block a pipe read forever, and this runs on
+    /// every launch. 20 s: `agy models` asks Google's servers for the list (`grok models` reads
+    /// a cached login in ~0.25 s) — long enough for a slow network, short enough that a hung
+    /// CLI cannot keep a harness "detecting" forever (it is reported signed out instead).
+    static let system = SignInProbe { executable, arguments, _ in
         let fm = FileManager.default
         let dir = fm.temporaryDirectory.appendingPathComponent("fd-signin-\(UUID().uuidString)", isDirectory: true)
         guard (try? fm.createDirectory(at: dir, withIntermediateDirectories: true)) != nil else { return nil }
@@ -118,7 +130,7 @@ struct TriageSettings: Equatable, Sendable {
         let exited = DispatchSemaphore(value: 0)
         process.terminationHandler = { _ in exited.signal() }
         do { try process.run() } catch { return nil }
-        guard exited.wait(timeout: .now() + 10) == .success else {
+        guard exited.wait(timeout: .now() + 20) == .success else {
             process.terminate()
             return nil
         }
