@@ -69,6 +69,17 @@ Gemini harness drives:
 - In that case, re-probe every Gemini row of the table above against `agy`, and record the
   result in §10.
 
+**Ruling (Track M, 2026-10-07): the Gemini harness drives `agy`, not `gemini`.** The Gemini
+column of the table above describes the `gemini` CLI, which the harness does NOT use. For `agy`
+(1.2.3, auto-updated to 1.3.1 the same day): headless is `agy -p <prompt>`; output is
+`--output-format text|json|stream-json`; the schema is native (`--json-schema <file|json>`, the
+answer in `structured_output`); the model is `--model <id>` with the effort part of the id
+(`gemini-3.1-pro-high`) and also an `--effort` flag; read-only is `--mode plan` (write mode
+`--mode accept-edits`); resume is `--conversation <id>` with the id agy reports
+(`conversation_id`), and there is no flag to pre-assign one; the sign-in check and model list
+are both `agy models`. A signed-out `agy -p` opens a Google sign-in in the browser instead of
+failing, so the harness runs `agy models` before every seat (`headlessSignInPreflight`).
+
 ## 3. Design
 
 ### 3.0 `AgentProfile` — one source of truth per CLI (IntakeKit, pure)
@@ -450,15 +461,15 @@ not need real accounts.
 
 | Probe | Grok | Gemini |
 |---|---|---|
-| Binary chosen | | |
-| Version / date | | |
-| Signed-in check command | | |
-| Model list command and output | | |
-| Strict `--json-schema` / schema appendix | | |
-| Session id source | | |
-| Resume by id | | |
-| Read-only enforcement verified | | |
-| Isolation flags | | |
-| Auth-failure text | | |
-| Bad-model text | | |
-| Rate-limit text | | |
+| Binary chosen | | `agy` (Antigravity CLI), `~/.local/bin/agy`. Not `gemini`: Google stopped serving AI Pro accounts from it on 2026-06-18. |
+| Version / date | | 1.2.3, then 1.3.1 (self-updated), 2026-10-07. 1.3.1 changed `--print-timeout`'s default from 5m to 0 (wait for the turn) and widened `--effort` to `low…max`. |
+| Signed-in check command | | `agy models`. Signed out: exit 1, stderr "Error: Please sign in to view available models. Launch the CLI without arguments to sign in." — and it does NOT start a sign-in. A signed-out `agy -p` DOES (opens the browser, waits 60 s for a code). `agy mcp list` / `agy plugin list` need no sign-in. |
+| Model list command and output | | `agy models`: `<id>\t<display name>` per line on stdout, "Fetching available models..." on stderr. Lists Gemini 3.8/3.7/3.6 Flash (high/medium/low), Gemini 3.1 Pro (high/low), Claude Opus/Sonnet 5.5, GPT-OSS 120B. The harness keeps only `gemini-*` ids; default `gemini-3.1-pro-high`. |
+| Strict `--json-schema` / schema appendix | | NOT YET PROBED — every run is refused (see Auth-failure text). |
+| Session id source | | Documented: `conversation_id` on `init` and on the `result`. Not yet probed. |
+| Resume by id | | `--conversation <id>`. Not yet probed. |
+| Read-only enforcement verified | | NOT YET PROBED. |
+| Isolation flags | | None exist. No MCP servers or plugins configured on this Mac (`agy mcp list`, `agy plugin list`). |
+| Auth-failure text | | Signed out: stderr "Authentication required. Please visit the URL to log in: …", result `{"status":"ERROR","error":"authentication failed or timed out","conversation_id":""}`, exit 1. Signed in but unverified: "Eligibility check failed: Your current account is not eligible for Antigravity. Verify your account to continue." (403 PERMISSION_DENIED), exit 1, no tokens. Both classify as `authExpired`. |
+| Bad-model text | | Documented `invalid model selection: … not recognized`; not yet probed. |
+| Rate-limit text | | Not observed. `RESOURCE_EXHAUSTED` / quota / 429 matched, UNVERIFIED. |
