@@ -85,7 +85,11 @@ public struct RuleCompiler: RuleCompiling {
         let request = HarnessRequest(harness: settings.harness, model: settings.model, effort: settings.effort,
                                      cwd: workDirectory, readableDirs: [], prompt: RuleCompilerPrompt.text(input),
                                      schemaFile: schemaFile, schemaJSON: RuleCompilerPrompt.schemaJSON, resumeSessionID: nil)
-        let command = HarnessCommand.build(request, home: home)
+        // A compiler set to a planning-only harness (grok/gemini, not an agent harness — spec
+        // §3.1) with no builder yet reads as unavailable, the same as a missing binary.
+        let command: (executable: String, arguments: [String], unsetEnvironment: [String])
+        do { command = try HarnessCommand.build(request, home: home) }
+        catch { return .unavailable("\(settings.harness.rawValue) cannot compile rules: \(error)") }
         let environment = HarnessCommand.environment(for: command, base: baseEnvironment(), home: home)
         let result: CommandResult
         do {

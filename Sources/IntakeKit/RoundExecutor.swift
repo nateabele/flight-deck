@@ -575,7 +575,8 @@ public struct RoundExecutor: Sendable {
     private func attempt<T: Decodable & Sendable>(_ type: T.Type, _ name: String, _ choice: ModelChoice, prompt: String,
                                                   schema: String, cwd: URL, readable: [URL],
                                                   access: HarnessAccess = .readOnly,
-                                                  resume: String? = nil, inputs: RoundInputs) async throws -> Attempt<T> {
+                                                  resume: String? = nil, isRepair: Bool = false,
+                                                  inputs: RoundInputs) async throws -> Attempt<T> {
         try Task.checkCancellation()
         let dir = inputs.store.runDirectory(name)
         let fm = FileManager.default
@@ -595,7 +596,15 @@ public struct RoundExecutor: Sendable {
             return .failed(Diagnosis(category: .harnessError, detail: "invalid harness request: \(invalid)",
                                      action: "This is a Flight Deck bug — report it."), sessionID: nil)
         }
-        let command = HarnessCommand.build(request, home: userHome)
+        // A harness with no builder yet (grok/gemini until Tracks G/M) pauses the round with the
+        // reason rather than crashing it or guessing an argv. `AvailableModels` keeps such a
+        // harness out of every config, so reaching this means a hand-edited or newer intake.
+        let command: (executable: String, arguments: [String], unsetEnvironment: [String])
+        do { command = try HarnessCommand.build(request, home: userHome) }
+        catch {
+            return .failed(Diagnosis(category: .harnessError, detail: "\(choice.harness.rawValue) cannot run in planning rounds yet: \(error)",
+                                     action: "Switch this slot to another harness."), sessionID: nil)
+        }
         let environment = HarnessCommand.environment(for: command, base: inputs.environment, home: userHome)
 
         // stdout is appended live, chunk by chunk as the child writes it, so the stream on disk
@@ -664,6 +673,17 @@ public struct RoundExecutor: Sendable {
         try Self.write(RunRecord(pid: pid.value, sessionID: session, started: started, finished: inputs.now(),
                                  exitCode: result.exitCode), to: runFile)
         try Data(result.stderr.utf8).write(to: dir.appendingPathComponent("stderr"), options: .atomic)
+        // The schema-repair hook (spec §3.4): a harness without a native schema flag gets ONE
+        // resumed retry of an answer that failed to validate. `SchemaRepair.retry` decides
+        // (Track M); it is nil for every native-schema harness, so claude/codex never get here.
+        // The repair runs in its own `-repair` run dir so the failed answer stays on disk.
+        if case .failed(let diagnosis, let failedSession) = outcome,
+           let repair = SchemaRepair.retry(profile: AgentProfiles.profile(for: choice.harness), failure: diagnosis,
+                                           sessionID: failedSession, access: access, isRepair: isRepair) {
+            return try await attempt(type, name + "-repair", choice, prompt: repair.prompt, schema: schema, cwd: cwd,
+                                     readable: readable, access: access, resume: repair.resumeSessionID,
+                                     isRepair: true, inputs: inputs)
+        }
         return outcome
     }
 

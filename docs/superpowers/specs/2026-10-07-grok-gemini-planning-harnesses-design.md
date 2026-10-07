@@ -275,6 +275,14 @@ specific settings page; the URLs change.
     New arms may `fatalError("track G/M")` only behind a test-visible stub;
   - the schema-repair seam (`hasNativeSchema`);
   - `HarnessRequest.account`.
+  - **As built (2026-10-07):** `Sources/IntakeKit/Agents/AgentProfile.swift` (protocol, value
+    types, `AgentProfiles`, stubs marked by `AgentProfileStub.trackP/G/M` via `unimplemented`);
+    `HarnessCommand.build` is `throws(HarnessCommandError)` and throws `.harnessNotImplemented`
+    for grok/gemini; `AvailableModels` is a `[Harness: ModelChoice]` map gated by
+    `AgentProfiles.headlessReady` (each track adds its harness there); the repair seam is
+    `SchemaRepair.retry` (`Sources/IntakeKit/SchemaRepair.swift`), already called from
+    `RoundExecutor.attempt`; the L3 mapping is `Harness.agentHarnessID` (nil for grok/gemini).
+    No new arm uses `fatalError`. Pinned by `AgentProfileContractTests`.
 - **Then three parallel tracks, each in its own worktree:**
   - **Track P:** claude and codex profiles, migrating every duplicate onto them (§3.0).
   - **Track G:** Grok profile + harness.

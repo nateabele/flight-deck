@@ -359,6 +359,8 @@ struct RoutingCompilerPopover: View {
         switch h {
         case .claude: next.model = "haiku"
         case .codex: next.model = models?.defaultModel ?? models?.models.first?.id ?? ""
+        // Not agent harnesses (spec §3.1): the popup above never offers them.
+        case .grok, .gemini: return
         }
         preferences.routingCompilerSettings = next
     }

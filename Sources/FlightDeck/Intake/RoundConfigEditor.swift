@@ -450,24 +450,12 @@ struct RoundConfigEditor: View {
     /// Harness Pickers only ever offer harnesses actually installed — an unavailable harness
     /// in the list would let the human pick a model no adapter can run.
     static func harnesses(in available: AvailableModels) -> [Harness] {
-        var result: [Harness] = []
-        if available.codex != nil { result.append(.codex) }
-        if available.claude != nil { result.append(.claude) }
-        return result
+        available.harnesses
     }
 
     /// The fallback Picker's one non-"None" option: whichever available model ISN'T the
     /// seat's current choice. Nil on a single-harness machine, where there is no other model.
     static func otherModel(for choice: ModelChoice, available: AvailableModels) -> ModelChoice? {
         choice.harness == .codex ? available.claude : available.codex
-    }
-}
-
-private extension AvailableModels {
-    func choice(for harness: Harness) -> ModelChoice? {
-        switch harness {
-        case .codex: codex
-        case .claude: claude
-        }
     }
 }

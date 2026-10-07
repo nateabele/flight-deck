@@ -45,19 +45,23 @@ public enum PlayMode: String, Codable, Sendable { case step, nextMajor, toReview
 public enum CrossCheckPolicy: String, Codable, Sendable, CaseIterable { case off, firstAndLast, every }
 
 /// A model's vendor lineage — what "cross-family" and coverage are counted over. Derived from the
-/// harness today; a later harness (Gemini, Grok, Qwen) adds a case here and nothing else changes.
+/// harness today; a later harness (Qwen, say) adds a case here and nothing else changes.
 public enum ModelFamily: String, Codable, Sendable {
-    case codex, claude
+    case codex, claude, grok, gemini
     public init(_ harness: Harness) {
         switch harness {
         case .codex: self = .codex
         case .claude: self = .claude
+        case .grok: self = .grok
+        case .gemini: self = .gemini
         }
     }
     public var displayName: String {
         switch self {
         case .codex: "Codex"
         case .claude: "Claude"
+        case .grok: "Grok"
+        case .gemini: "Gemini"
         }
     }
 }
@@ -111,15 +115,41 @@ public struct RoundConfig: Codable, Equatable, Sendable {
     }
 }
 
-/// Which harnesses are actually installed, and the model/effort each should run at. Either
-/// side can be nil — a machine with only one CLI installed still gets a usable, if
+/// Which harnesses are actually installed, and the model/effort each should run at. Any
+/// harness can be missing — a machine with only one CLI installed still gets a usable, if
 /// single-model, round.
+///
+/// A map rather than one field per harness (grok/gemini spec §3.2), so Tracks G and M each add
+/// a harness without touching the other's lines. GATED: `choices` never holds a harness outside
+/// `AgentProfiles.headlessReady`, whatever a caller passes in. Without that, a detected `grok`
+/// binary would be offered in the Rounds editor and then fail at round time, because its
+/// `HarnessCommand.build` arm only refuses until Track G lands.
 public struct AvailableModels: Sendable, Equatable {
-    public var codex: ModelChoice?
-    public var claude: ModelChoice?
+    public private(set) var choices: [Harness: ModelChoice]
+
+    public init(choices: [Harness: ModelChoice]) {
+        self.choices = choices.filter { AgentProfiles.headlessReady.contains($0.key) }
+    }
+
     public init(codex: ModelChoice?, claude: ModelChoice?) {
-        self.codex = codex
-        self.claude = claude
+        var choices: [Harness: ModelChoice] = [:]
+        choices[.codex] = codex
+        choices[.claude] = claude
+        self.init(choices: choices)
+    }
+
+    public func choice(for harness: Harness) -> ModelChoice? { choices[harness] }
+
+    /// Every available harness, in `Harness.allCases` order — the order pickers list them in.
+    public var harnesses: [Harness] { Harness.allCases.filter { choices[$0] != nil } }
+
+    public var codex: ModelChoice? {
+        get { choices[.codex] }
+        set { choices[.codex] = newValue }
+    }
+    public var claude: ModelChoice? {
+        get { choices[.claude] }
+        set { choices[.claude] = newValue }
     }
 
     /// codex gpt-6-sol/high and claude opus/high when both are present.

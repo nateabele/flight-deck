@@ -21,7 +21,13 @@ public enum IntakeState: String, Codable, Sendable {
     }
 }
 
-public enum Harness: String, Codable, Sendable { case codex, claude }
+/// A headless CLI that can run a planning seat. The raw values are persisted in intakes and tapes.
+/// `grok` and `gemini` (grok/gemini planning spec §3.1) are planning-only: they are NOT tab agents
+/// (`AgentID`) and NOT L3 swarm routing targets (see `agentHarnessID`). An older build cannot
+/// decode an intake that uses them — acceptable, since intakes are per-machine and the phone wire
+/// never carries `Harness`. Until Tracks G/M land, `AgentProfiles.headlessReady` keeps them out of
+/// every round (`AvailableModels`), and `HarnessCommand.build` refuses them.
+public enum Harness: String, Codable, Sendable, CaseIterable { case codex, claude, grok, gemini }
 
 public struct HarnessSession: Codable, Equatable, Sendable {
     public var harness: Harness

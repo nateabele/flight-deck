@@ -13,12 +13,18 @@ public struct HarnessRequest: Sendable {
     public var cwd: URL, readableDirs: [URL], prompt: String
     public var schemaFile: URL, schemaJSON: String, resumeSessionID: String?
     public var access: HarnessAccess
+    /// The account this run bills (grok/gemini spec §3.0). nil is the built-in account — the
+    /// CLI's own default home — which is every caller today, so argv and environment are
+    /// unchanged. Binding a non-nil account is the profile's `environment(base:account:)` job,
+    /// wired in by Track P; until then this is carried, never read.
+    public var account: AgentAccountRef?
     public init(harness: Harness, model: String, effort: String, cwd: URL, readableDirs: [URL],
                 prompt: String, schemaFile: URL, schemaJSON: String, resumeSessionID: String?,
-                access: HarnessAccess = .readOnly) {
+                access: HarnessAccess = .readOnly, account: AgentAccountRef? = nil) {
         self.harness = harness; self.model = model; self.effort = effort; self.cwd = cwd
         self.readableDirs = readableDirs; self.prompt = prompt; self.schemaFile = schemaFile
         self.schemaJSON = schemaJSON; self.resumeSessionID = resumeSessionID; self.access = access
+        self.account = account
     }
 }
 
@@ -123,6 +129,10 @@ public enum HarnessCommand {
     public enum HarnessCommandError: Error, Equatable, Sendable {
         case cwdNotWorkDir
         case resumeNotSupportedForWrite
+        /// `build` has no arm for this harness yet (grok/gemini until Tracks G/M land). Thrown,
+        /// never approximated: a guessed argv for a CLI nobody has probed could run a "read-only"
+        /// seat with write tools, which is worse than a round that pauses saying why.
+        case harnessNotImplemented(Harness)
     }
 
     public static func validate(_ r: HarnessRequest) -> HarnessCommandError? {
@@ -135,7 +145,7 @@ public enum HarnessCommand {
     /// `home` is where `CodexUserConfig` reads `service_tier` from — injectable so a test never
     /// reads the operator's own config.
     public static func build(_ r: HarnessRequest, home: URL = FileManager.default.homeDirectoryForCurrentUser)
-        -> (executable: String, arguments: [String], unsetEnvironment: [String]) {
+        throws(HarnessCommandError) -> (executable: String, arguments: [String], unsetEnvironment: [String]) {
         if case .writeInWork = r.access {
             precondition(validate(r) == nil, "HarnessCommand.build: invalid write-mode request: \(String(describing: validate(r)))")
         }
@@ -186,6 +196,8 @@ public enum HarnessCommand {
             // Without these unset, a claude spawned from inside Claude Code silently skips
             // saving its transcript — and then `--resume` has nothing to resume.
             return ("claude", args, ["CLAUDE_CODE_CHILD_SESSION", "CLAUDECODE"])
+        case .grok, .gemini:
+            throw .harnessNotImplemented(r.harness)
         }
     }
 
@@ -207,7 +219,13 @@ public enum HarnessCommand {
 }
 
 public enum HarnessOutput {
-    public enum ParseError: Error, Equatable { case noSession, noResult, notJSON(String), isError(String) }
+    public enum ParseError: Error, Equatable {
+        case noSession, noResult, notJSON(String), isError(String)
+        /// No parser for this harness yet (grok/gemini until Tracks G/M land). Unreachable in
+        /// practice — `build` refuses first — but a parse that guessed would hand an unvalidated
+        /// answer to the round.
+        case harnessNotImplemented(Harness)
+    }
 
     public static func parse(_ harness: Harness, stdout: Data) throws -> (sessionID: String, structured: Data) {
         switch harness {
@@ -245,6 +263,8 @@ public enum HarnessOutput {
             guard let session else { throw ParseError.noSession }
             guard let result else { throw ParseError.noResult }
             return (session, try claudeStructured(result))
+        case .grok, .gemini:
+            throw ParseError.harnessNotImplemented(harness)
         }
     }
 

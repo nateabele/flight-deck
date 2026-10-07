@@ -171,6 +171,9 @@ public struct ActivityParser: Sendable {
         switch activity.harness {
         case .codex: foldCodex(type, obj)
         case .claude: foldClaude(type, obj)
+        // Generic until Tracks G/M capture real streams: `lastEventAt` (set above) still shows
+        // the seat is alive; guessing at an unprobed event schema could only mislabel it.
+        case .grok, .gemini: break
         }
     }
 
