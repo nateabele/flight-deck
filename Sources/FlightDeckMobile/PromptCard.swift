@@ -69,6 +69,9 @@ struct PromptCard: View {
     /// The subagent this dialog belongs to, when it is not the conversation's own. Without it
     /// a reader allows a command believing the main agent asked for it.
     var fromSubagent: WireSubagent? = nil
+    /// Told when the "Type something" field gains or loses focus, so the screen can take the
+    /// composer out from between the card and the keyboard — see `onTypingChange`'s caller.
+    var onTypingChange: (Bool) -> Void = { _ in }
 
     static func origin(_ s: WireSubagent?) -> String? {
         s.map { "From \($0.type) — \($0.description)" }
@@ -331,9 +334,22 @@ struct PromptCard: View {
     /// Which question is on screen. Reset with the picks, for the same reason: a page left
     /// over from the last dialog would open this one part-way through.
     @State private var page = 0
+    /// The card's own height, so its scroll view is never taller than what it holds. `nil`
+    /// until first measured, which lets that one layout take whatever height it needs.
+    @State private var cardHeight: CGFloat?
+    /// The scroll target for the typed row and what follows it — see the card's scroll view.
+    static let typedRowID = "prompt-typed-row"
+    /// Whether the "Type something" field has the keyboard.
+    @FocusState private var typingFocused: Bool
 
     var body: some View {
         if let open {
+            // **A scroll view no taller than its content**, so a card that fits looks exactly as
+            // it did, and one that does not — a long question paged to with the keyboard up —
+            // scrolls inside the room it has instead of pushing its own top under the
+            // navigation bar, which is what it did on device.
+            ScrollViewReader { scroller in
+            ScrollView {
             VStack(alignment: .leading, spacing: 10) {
                 if let origin = Self.origin(fromSubagent) {
                     Text(origin)
@@ -373,6 +389,24 @@ struct PromptCard: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { cardHeight = $0 }
+            }
+            .scrollBounceBehavior(.basedOnSize)
+            .frame(maxHeight: cardHeight)
+            // A new question is a new decision: put the keyboard away, as the terminal does
+            // when its cursor leaves the row, so the next question is read whole first.
+            .onChange(of: page) { typingFocused = false }
+            // The field sits last in the card, so a card squeezed by the keyboard has it at the
+            // clipped edge — half a field to type into. Brought into view once the keyboard
+            // has settled, together with the row of buttons under it.
+            .onChange(of: typingFocused) { _, focused in
+                guard focused else { return }
+                Task { @MainActor in
+                    try? await Task.sleep(for: .milliseconds(350))
+                    withAnimation { scroller.scrollTo(Self.typedRowID, anchor: .bottom) }
+                }
+            }
+            }
             .overlay(alignment: .topTrailing) {
                 if Self.showsDismiss(for: open, state: state) {
                     Button { model.answer(.deny, to: open.callID) } label: {
@@ -385,6 +419,8 @@ struct PromptCard: View {
                     .accessibilityLabel("Dismiss")
                 }
             }
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("prompt-card")
             .modifier(CardChrome())
         } else if Self.showsBlocked(
             exhausted: blockedChaseExhausted, allowsAbort: allowsBlockedAbort,
@@ -542,15 +578,19 @@ struct PromptCard: View {
                 }
             }
 
-            if acceptsTypedAnswers {
-                typedRow(question: question, index: index, call: call,
-                         immediate: immediate, enabled: enabled)
+            // One unit, under one id, so scrolling to it shows the field AND the buttons that
+            // send what was typed — same 10pt spacing as the card's own stack.
+            VStack(alignment: .leading, spacing: 10) {
+                if acceptsTypedAnswers {
+                    typedRow(question: question, index: index, call: call,
+                             immediate: immediate, enabled: enabled)
+                }
+                if !immediate {
+                    navigation(call: call, questions: questions, index: index,
+                               isLast: isLast, enabled: enabled)
+                }
             }
-
-            if !immediate {
-                navigation(call: call, questions: questions, index: index,
-                           isLast: isLast, enabled: enabled)
-            }
+            .id(Self.typedRowID)
 
         case .permission(let call, _, _):
             HStack(spacing: 8) {
@@ -612,6 +652,12 @@ extension PromptCard {
                 }
             ))
             .font(.footnote)
+            .focused($typingFocused)
+            .onChange(of: typingFocused) { _, focused in onTypingChange(focused) }
+            // The card can leave with the field focused — answered, or dismissed from the Mac —
+            // and then no focus change would ever tell the screen to bring the composer back.
+            .onDisappear { onTypingChange(false) }
+            .accessibilityIdentifier("prompt-typed-field")
             .submitLabel(immediate ? .send : .done)
             .onSubmit { if immediate { send() } }
             if immediate {
