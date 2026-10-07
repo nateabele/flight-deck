@@ -392,6 +392,30 @@ grep `error:`.
 - One **real Refine round** with drafters claude + grok and a gemini reviewer, on a scratch
   intake. Record the round outcome, each seat's duration and tokens, and whether the cross-check
   coverage numbers make sense. This is the evidence for success criteria 2, 3 and 6.
+  - **As built (2026-10-07, branch `planning-4way`):** `Planning4WayLiveTests`, gated on
+    `FLIGHTDECK_PLANNING_4WAY_LIVE=1`. Its shape differs from the line above: claude + codex
+    draft, Grok reviews, Gemini cross-checks, claude integrates, so each family has a role and
+    the cross-check yields a Grok-vs-Gemini coverage reading. The executor runs reviewers fresh
+    each round on purpose, so criterion 3 is checked by one resumed turn per read-only seat:
+    the same session id must come back, and the seat must recall a project the prompt does not
+    name. Seat models come from detection. `FLIGHTDECK_PLANNING_4WAY_FAMILIES=3` drops Gemini.
+  - **Result, four families (one run):** passed in 1224 s for Draft + Refine.
+
+    | Seat | Model | Time | Tokens in / out |
+    |---|---|---|---|
+    | claude drafter | opus/high | 73 s | 35k / 7k |
+    | codex drafter | gpt-6-sol/high | 42 s | 70k / 3k |
+    | Grok reviewer | grok-4.7/medium | 745 s | 118k / 41k |
+    | Gemini cross-check | gemini-3.1-pro-high | 138 s | 111k / 44k |
+    | claude integrator | opus/high | 406 s | 105k / 48k |
+
+    - Gemini needed 1 answerless-turn resume. No other seat needed a repair.
+    - Coverage read Grok vs Gemini as two families: n1 38, n2 4, both 4, band saturated.
+    - All four resumes came back on their own session and recalled the project, in 3–8 s.
+  - **Grok effort.** In the three-family run the Grok reviewer at high took 763 s and 337k
+    input tokens. At medium it took 745 s and 118k. Medium cut tokens, not time, because the
+    time is grok's own reasoning: 52k of 56k output tokens were thinking at high. New Grok agents
+    now start at medium; any agent can still be set higher (the maintainer's ruling).
 
 **UI tests.** These run only on the UI-test Mac, never on this Mac:
 `FD_UITEST_ONLY="FlightDeckUITests/<RoundsEditor class>" ./scripts/smoke-remote.sh`. Neither CLI
@@ -474,3 +498,12 @@ not need real accounts.
 | Auth-failure text | Exit 1. stderr: `Error: Not signed in. To authenticate without a browser, run: grok login --device-code …`. The stream has an `is_error` result with that text in `errors[]` and `session_id:""` (signed out, and an empty `GROK_HOME`) | Signed out: stderr "Authentication required. Please visit the URL to log in: …", result `{"status":"ERROR","error":"authentication failed or timed out","conversation_id":""}`, exit 1. Signed in but unverified: "Eligibility check failed: Your current account is not eligible for Antigravity. Verify your account to continue." (403 PERMISSION_DENIED), exit 1, no tokens. Both classify as `authExpired`. |
 | Bad-model text | Exit 1. `Couldn't set model 'grok-bogus-9': Invalid params: "unknown model id". Run 'grok models' …` on stderr and in `errors[]`. No silent fallback | Exit 1. stderr and `result.error`: `invalid model selection (--model "x" --effort ""): model x is not recognized as a known model or custom model in settings`, then the available models. Classified `harnessError`. |
 | Rate-limit text | Not provoked. Matched from the 1.0.30 string table: "You hit your weekly limit.", "…rate limit for your plan", "…credit limit…", "out of credits", "Too Many Requests". UNVERIFIED | Not observed. `RESOURCE_EXHAUSTED` / quota / 429 matched, UNVERIFIED. |
+
+**Integration probes and fixes (2026-10-07, branch `planning-4way`):**
+- **Grok `Read(<glob>)` denies work.** On grok 1.0.30, `--deny 'Read(**/.git/**)'` made a read
+  of `.git/HEAD` return "Denied by permission policy: deny rule on read matching "**/.git/**"".
+  Every grok seat now denies `.git` and `.beads` reads. Before this, the first live reviewer
+  spent 8 of its 26 tool calls in that metadata.
+- **Gemini's default model.** agy marks no default and lists Flash first. Detection seeds a
+  seat with the first listed model, so `GeminiProfile.parseModelList` now puts
+  `gemini-3.1-pro-high` first whenever the account lists it.
