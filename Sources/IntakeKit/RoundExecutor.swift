@@ -601,6 +601,11 @@ public struct RoundExecutor: Sendable {
         // harness out of every config, so reaching this means a hand-edited or newer intake.
         let command: (executable: String, arguments: [String], unsetEnvironment: [String])
         do { command = try HarnessCommand.build(request, home: userHome) }
+        catch .modelOutsideFamily(let harness, let model) {
+            return .failed(Diagnosis(category: .harnessError,
+                                     detail: "\(model) is not a \(ModelFamily(harness).displayName) model",
+                                     action: "Pick a \(ModelFamily(harness).displayName) model for this slot."), sessionID: nil)
+        }
         catch {
             return .failed(Diagnosis(category: .harnessError, detail: "\(choice.harness.rawValue) cannot run in planning rounds yet: \(error)",
                                      action: "Switch this slot to another harness."), sessionID: nil)

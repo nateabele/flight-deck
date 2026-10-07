@@ -12,7 +12,7 @@ private func fixture(_ name: String, _ ext: String, _ test: AnyClass) throws -> 
 
 private func geminiRequest(resume: String? = nil, access: HarnessAccess = .readOnly, cwd: String = "/proj",
                            effort: String = "high") -> HarnessRequest {
-    HarnessRequest(harness: .gemini, model: "gemini-m", effort: effort, cwd: URL(fileURLWithPath: cwd),
+    HarnessRequest(harness: .gemini, model: "gemini-3.8-flash-low", effort: effort, cwd: URL(fileURLWithPath: cwd),
                    readableDirs: [URL(fileURLWithPath: "/intake"), URL(fileURLWithPath: "/shadow")], prompt: "P",
                    schemaFile: URL(fileURLWithPath: "/intake/runs/x/schema.json"), schemaJSON: "{}",
                    resumeSessionID: resume, access: access)
@@ -31,8 +31,8 @@ final class HarnessCommandGeminiTests: XCTestCase {
         let cmd = try HarnessCommand.build(geminiRequest(), home: noHome)
         XCTAssertEqual(cmd.executable, "agy")
         XCTAssertEqual(cmd.arguments, ["-p", "P", "--output-format", "stream-json",
-                                       "--json-schema", "/intake/runs/x/schema.json", "--model", "gemini-m",
-                                       "--effort", "high", "--disable-slash-commands", "--print-timeout", "2h",
+                                       "--json-schema", "/intake/runs/x/schema.json", "--model", "gemini-3.8-flash-low",
+                                       "--effort", "high", "--disable-slash-commands",
                                        "--mode", "plan", "--add-dir", "/intake", "--add-dir", "/shadow"])
         XCTAssertEqual(cmd.unsetEnvironment, [])
     }
@@ -76,6 +76,18 @@ final class HarnessCommandGeminiTests: XCTestCase {
         let work = URL(fileURLWithPath: "/intake/work")
         XCTAssertEqual(HarnessCommand.validate(geminiRequest(resume: "conv-7", access: .writeInWork(work), cwd: "/intake/work")),
                        .resumeNotSupportedForWrite)
+    }
+
+    /// agy serves Claude and GPT-OSS models too; a gemini seat on one would be miscounted as
+    /// the Gemini family, so build refuses it.
+    func testANonGeminiModelIsRefused() {
+        for model in ["claude-opus-5-5-high", "gpt-oss-120b-medium", "opus"] {
+            var r = geminiRequest()
+            r.model = model
+            XCTAssertThrowsError(try HarnessCommand.build(r, home: noHome)) {
+                XCTAssertEqual($0 as? HarnessCommand.HarnessCommandError, .modelOutsideFamily(harness: .gemini, model: model))
+            }
+        }
     }
 
     func testEmptyEffortIsOmitted() throws {
@@ -298,6 +310,16 @@ final class GeminiAvailabilityTests: XCTestCase {
         func append(_ c: (String, [String])) { lock.lock(); _calls.append(c); lock.unlock() }
     }
 
+    /// The captured `agy models` (agy 1.3.1): `<id>\t<name>` lines, Gemini and other vendors'
+    /// models mixed. Only Gemini ids are this harness's.
+    func testModelListKeepsOnlyGeminiIDs() throws {
+        let listed = GeminiProfile().parseModelList(String(decoding: try fixture("gemini-models", "txt", Self.self), as: UTF8.self))
+        XCTAssertEqual(listed.first, "gemini-3.8-flash-high")
+        XCTAssertTrue(listed.contains(GeminiProfile.defaultPlanningModel))
+        XCTAssertTrue(listed.allSatisfy { $0.hasPrefix("gemini-") && !$0.contains("\t") })
+        XCTAssertEqual(listed.count, 11)
+    }
+
     func testSignedInOffersGeminiWithItsListedModels() throws {
         try install(["claude", "agy"])
         let listed = String(decoding: try fixture("gemini-models", "txt", Self.self), as: UTF8.self)
@@ -305,7 +327,7 @@ final class GeminiAvailabilityTests: XCTestCase {
         let available = TriageSettings.available(path: bin.path, probe: probe(listed, exit: 0, calls: calls))
         XCTAssertEqual(available.harnesses, [.claude, .gemini])
         XCTAssertEqual(available.models[.gemini], GeminiProfile().parseModelList(listed))
-        XCTAssertEqual(available.choice(for: .gemini)?.effort, "high")
+        XCTAssertEqual(available.choice(for: .gemini)?.model, "gemini-3.1-pro-high")
         XCTAssertNil(available.unavailable[.gemini])
         // The ONLY agy command detection may run: `agy models`, which never starts a sign-in.
         XCTAssertEqual(calls.calls.map(\.0), ["agy"])
