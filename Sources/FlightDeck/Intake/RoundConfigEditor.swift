@@ -31,9 +31,35 @@ struct RoundConfigEditor: View {
         VStack(alignment: .leading, spacing: 14) {
             Text(Self.label(preset: preset, config: config)).font(.headline)
             stackedSlots
+            if !Self.unavailableNotes(available).isEmpty || available.harnesses.contains(.gemini) {
+                harnessNotes
+            }
             Divider()
             capsForm
         }
+    }
+
+    /// Why an installed-but-unusable harness is missing from the pickers (spec §3.2: never
+    /// silently dropped), and the data-use note for consumer-plan harnesses (spec §3.9).
+    private var harnessNotes: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            ForEach(Self.unavailableNotes(available), id: \.self) { note in
+                Text(note).font(.caption).foregroundStyle(.secondary)
+            }
+            if available.harnesses.contains(.gemini) {
+                Text(Self.dataUseNote).font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    /// Spec §3.9. No settings URL: those pages move.
+    static let dataUseNote = "Check Google's data settings before using Gemini agents on private repos."
+
+    /// One line per harness that is installed but not offered, in `Harness.allCases` order,
+    /// each the profile's own reason (e.g. "Gemini: run `agy` in a terminal to sign in").
+    /// "not installed" is left out: a CLI the human never installed is not news.
+    static func unavailableNotes(_ available: AvailableModels) -> [String] {
+        Harness.allCases.compactMap { available.unavailable[$0] }.filter { !$0.hasSuffix("not installed") }
     }
 
     /// One block per seat, its controls on two lines. A five-column grid needed ~530 pt, and an
@@ -57,8 +83,12 @@ struct RoundConfigEditor: View {
                         }
                         HStack(spacing: 8) {
                             harnessPicker(for: row.keyPath).fixedSize()
-                            modelField(for: row.keyPath)
-                            effortPicker(for: row.keyPath).fixedSize()
+                            modelField(for: row.keyPath, harness: choice.harness)
+                            // Hidden for a harness with no effort knob rather than offering a
+                            // control that changes nothing.
+                            if !Self.effortChoices(for: choice.harness).isEmpty {
+                                effortPicker(for: row.keyPath, harness: choice.harness).fixedSize()
+                            }
                         }
                         if Self.supportsFallback(row.keyPath) {
                             HStack(spacing: 8) {
@@ -121,15 +151,38 @@ struct RoundConfigEditor: View {
         .pickerStyle(.menu)
     }
 
-    private func modelField(for keyPath: SlotKeyPath) -> some View {
-        TextField("Model", text: modelBinding(for: keyPath))
-            .textFieldStyle(.roundedBorder)
-            .frame(maxWidth: .infinity)
+    /// A picker from the CLI's own model list where detection captured one (gemini's `agy
+    /// models`) — a typed name the account doesn't offer would only fail at round time — and a
+    /// free text field otherwise.
+    @ViewBuilder
+    private func modelField(for keyPath: SlotKeyPath, harness: Harness) -> some View {
+        let listed = Self.modelChoices(for: harness, current: Self.choice(for: keyPath, in: config)?.model ?? "",
+                                       available: available)
+        if listed.isEmpty {
+            TextField("Model", text: modelBinding(for: keyPath))
+                .textFieldStyle(.roundedBorder)
+                .frame(maxWidth: .infinity)
+        } else {
+            Picker("Model", selection: modelBinding(for: keyPath)) {
+                ForEach(listed, id: \.self) { Text($0).tag($0) }
+            }
+            .labelsHidden()
+            .pickerStyle(.menu)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
     }
 
-    private func effortPicker(for keyPath: SlotKeyPath) -> some View {
+    /// The listed models for `harness`, with `current` kept as an option even when the list no
+    /// longer has it (a saved config from before a model was retired) — a Picker whose selection
+    /// matches no tag shows blank and would silently re-pick on the next edit.
+    static func modelChoices(for harness: Harness, current: String, available: AvailableModels) -> [String] {
+        guard let listed = available.models[harness], !listed.isEmpty else { return [] }
+        return listed.contains(current) || current.isEmpty ? listed : [current] + listed
+    }
+
+    private func effortPicker(for keyPath: SlotKeyPath, harness: Harness) -> some View {
         Picker("Effort", selection: effortBinding(for: keyPath)) {
-            ForEach(Self.effortChoices, id: \.self) { effort in
+            ForEach(Self.effortChoices(for: harness), id: \.self) { effort in
                 Text(effort).tag(effort)
             }
         }
@@ -327,6 +380,13 @@ struct RoundConfigEditor: View {
     /// bare `String` that would accept it.
     static let effortChoices = ["low", "medium", "high", "xhigh", "max"]
 
+    /// The effort values a harness accepts: its profile's knob when the profile declares one
+    /// (agy takes only low/medium/high — `xhigh` would fail the run), else the list above.
+    static func effortChoices(for harness: Harness) -> [String] {
+        let values = AgentProfiles.profile(for: harness).modelCatalog.effortValues
+        return values.isEmpty ? effortChoices : values
+    }
+
     /// One row per filled seat, in the fixed order the round actually runs: every drafter,
     /// then synthesizer, reviewer, crossReviewer, integrator, encoder, polisher. Skips
     /// synthesizer/reviewer/polisher when the preset has none, rather than emitting a row with
@@ -453,9 +513,11 @@ struct RoundConfigEditor: View {
         available.harnesses
     }
 
-    /// The fallback Picker's one non-"None" option: whichever available model ISN'T the
-    /// seat's current choice. Nil on a single-harness machine, where there is no other model.
+    /// The fallback Picker's one non-"None" option: the first available model of ANOTHER family
+    /// than the seat's, in `Harness.allCases` order — so codex still falls back to claude and
+    /// claude to codex, and a gemini seat falls back to the first of those present. Nil on a
+    /// single-harness machine, where there is no other model.
     static func otherModel(for choice: ModelChoice, available: AvailableModels) -> ModelChoice? {
-        choice.harness == .codex ? available.claude : available.codex
+        available.harnesses.first { ModelFamily($0) != ModelFamily(choice.harness) }.flatMap(available.choice(for:))
     }
 }

@@ -17,11 +17,17 @@ public enum FailureDiagnosis {
         let errorText = errorEvents(in: stdout).joined(separator: "\n")
         let haystack = (stderr + "\n" + errorText).lowercased()
 
-        if haystack.contains("rate limit") || haystack.contains("429") || haystack.contains("usage limit") {
+        // The harness's own profile first, for the spellings only that CLI uses (agy's
+        // "Authentication required", Google's RESOURCE_EXHAUSTED). Gemini only for now: claude
+        // and codex keep exactly the rules below until Track P moves them onto their profiles.
+        let profileKind: AgentFailureKind? = harness == .gemini
+            ? GeminiProfile().classify(error: .stderr(stderr + "\n" + errorText)) : nil
+
+        if profileKind == .rateLimited || haystack.contains("rate limit") || haystack.contains("429") || haystack.contains("usage limit") {
             return Diagnosis(category: .rateLimited, detail: tail(stderr, errorText),
                               action: "Wait for the limit to reset, or switch this slot to another model.")
         }
-        if haystack.contains("not logged in") || haystack.contains("authentication") || haystack.contains("unauthorized")
+        if profileKind == .authExpired || haystack.contains("not logged in") || haystack.contains("authentication") || haystack.contains("unauthorized")
             || haystack.contains("401") || haystack.contains("/login") || haystack.contains("codex login")
             || haystack.contains("invalid api key") {
             let action: String
@@ -36,7 +42,8 @@ public enum FailureDiagnosis {
                 // Generic until Tracks G/M probe each CLI's real sign-in flow: naming a command
                 // nobody verified would send the human to run something that doesn't exist.
                 case .grok?: action = "Sign in to `\(GrokProfile().binaryName)` in a terminal"
-                case .gemini?: action = "Sign in to `\(GeminiProfile().binaryName)` in a terminal"
+                // `agy` has no login subcommand: its interactive first run signs in.
+                case .gemini?: action = "Run `agy` in a terminal to sign in"
                 }
             }
             return Diagnosis(category: .authExpired, detail: tail(stderr, errorText), action: action)
@@ -66,6 +73,10 @@ public enum FailureDiagnosis {
             guard isError else { return [] }
             return [obj["result"] as? String ?? obj["subtype"] as? String ?? "is_error"]
         }
+        if let obj = try? JSONSerialization.jsonObject(with: stdout) as? [String: Any], obj["event"] == nil,
+           obj["conversation_id"] != nil {
+            return agyError(obj).map { [$0] } ?? []
+        }
         return stdout.split(separator: UInt8(ascii: "\n")).compactMap { line -> String? in
             guard let obj = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any] else { return nil }
             switch obj["type"] as? String {
@@ -73,9 +84,20 @@ public enum FailureDiagnosis {
             case "turn.failed": return (obj["error"] as? [String: Any])?["message"] as? String
             case "result" where obj["is_error"] as? Bool == true:
                 return obj["result"] as? String ?? obj["subtype"] as? String ?? "is_error"
-            default: return nil
+            default: break
             }
+            return agyError(obj)
         }
+    }
+
+    /// An `agy` result that did not succeed: `{"event":"result","result":{"status":"ERROR",
+    /// "error":"…"}}` under stream-json, or the bare result object under `--output-format json`.
+    /// Its `response` is never read — that is the model talking.
+    private static func agyError(_ obj: [String: Any]) -> String? {
+        let result = obj["event"] as? String == "result" ? obj["result"] as? [String: Any] : obj
+        guard let result, result["conversation_id"] != nil, let status = result["status"] as? String,
+              status != "SUCCESS" else { return nil }
+        return result["error"] as? String ?? status
     }
 
     /// A short excerpt for `detail` — stderr when there is any, otherwise the structured error,
