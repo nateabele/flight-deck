@@ -76,7 +76,7 @@ public struct GeminiProfile: AgentProfile {
         let text: String
         switch error {
         case .stderr(let s): text = s
-        case .streamErrorEvent(let json): text = json
+        case .streamErrorEvent(let json): text = AgentErrorVocabulary.message(ofErrorEvent: json) ?? ""
         case .transcriptAPIError(let kind): text = kind
         case .appServerError(_, let message): text = message
         }

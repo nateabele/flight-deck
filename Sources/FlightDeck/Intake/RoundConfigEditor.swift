@@ -169,33 +169,19 @@ struct RoundConfigEditor: View {
         .pickerStyle(.menu)
     }
 
-    /// A picker when the harness's CLI listed its models at detection (grok, gemini), so a seat can
-    /// only name a model that account has. Otherwise free text, because every CLI also takes a
-    /// full model name — with the profile's known models one click away, so `fable` is offered
-    /// here as it is in Settings and routing.
-    @ViewBuilder
+    /// Free text, because every CLI also takes a full model name — with the profile's known
+    /// models one click away, so `fable` is offered here as it is in Settings and routing.
     private func modelField(for keyPath: SlotKeyPath, harness: Harness) -> some View {
-        let binding = modelBinding(for: keyPath)
-        if let models = Self.modelChoices(for: harness, current: binding.wrappedValue, available: available) {
-            Picker("Model", selection: binding) {
-                ForEach(models, id: \.self) { model in Text(model).tag(model) }
-            }
-            .labelsHidden()
-            .pickerStyle(.menu)
-            .frame(maxWidth: .infinity, alignment: .leading)
-        } else {
-            let suggestions = Self.modelSuggestions(for: harness, codexListed: codexListedModels)
-            HStack(spacing: 2) {
-                TextField("Model", text: binding)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(maxWidth: .infinity)
-                if !suggestions.isEmpty {
-                    Menu {
-                        ForEach(suggestions, id: \.self) { model in
-                            Button(model) { config = Self.updatingChoice(config, at: keyPath) { $0.model = model } }
-                        }
-                    } label: {
-                        Image(systemName: "chevron.down")
+        let suggestions = Self.modelSuggestions(for: harness, codexListed: codexListedModels,
+                                                detected: available.models[harness] ?? [])
+        return HStack(spacing: 2) {
+            TextField("Model", text: modelBinding(for: keyPath))
+                .textFieldStyle(.roundedBorder)
+                .frame(maxWidth: .infinity)
+            if !suggestions.isEmpty {
+                Menu {
+                    ForEach(suggestions, id: \.self) { model in
+                        Button(model) { config = Self.updatingChoice(config, at: keyPath) { $0.model = model } }
                     }
                     .menuStyle(.borderlessButton)
                     .menuIndicator(.hidden)
@@ -464,14 +450,6 @@ struct RoundConfigEditor: View {
         guard let id else { return updatingChoice(config, at: keyPath) { $0.account = nil } }
         guard let option = options.first(where: { $0.ref.id == id }) else { return config }
         return updatingChoice(config, at: keyPath) { $0.account = option.ref }
-    }
-
-    /// The model picker's options, or nil for a free text field (no list was detected). A
-    /// persisted model the list no longer has stays selectable, first — dropping it would make
-    /// the picker show a blank selection and silently re-seat the slot on the next touch.
-    static func modelChoices(for harness: Harness, current: String, available: AvailableModels) -> [String]? {
-        guard let models = available.models[harness], !models.isEmpty else { return nil }
-        return models.contains(current) || current.isEmpty ? models : [current] + models
     }
 
     /// The editor's one block of notes: why an installed-but-unusable harness is missing from
