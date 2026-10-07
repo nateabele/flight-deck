@@ -56,12 +56,17 @@ public struct GeminiProfile: AgentProfile {
 
     /// `agy models` prints `<id>\t<display name>` per line on stdout ("Fetching available
     /// models..." goes to stderr) — probed on agy 1.2.3/1.3.1, 2026-10-07. Only Gemini ids
-    /// are kept (see `isGeminiModel`).
+    /// are kept (see `isGeminiModel`). Detection seeds a new seat with the list's FIRST model
+    /// (the account's own default, for a CLI that marks one, as `grok models` does). agy marks
+    /// none and lists Flash first, so a seat would default to a Flash model; the planning
+    /// default leads instead whenever the account lists it.
     public func parseModelList(_ stdout: String) -> [String] {
-        stdout.split(whereSeparator: \.isNewline).compactMap { line in
+        var models = stdout.split(whereSeparator: \.isNewline).compactMap { line -> String? in
             let id = line.split(separator: "\t", maxSplits: 1).first.map { $0.trimmingCharacters(in: .whitespaces) } ?? ""
             return Self.isGeminiModel(id) && !id.contains(" ") ? id : nil
         }
+        if let i = models.firstIndex(of: Self.defaultPlanningModel) { models.insert(models.remove(at: i), at: 0) }
+        return models
     }
 
     /// `agy --json-schema` constrains the final answer and returns it as `structured_output`

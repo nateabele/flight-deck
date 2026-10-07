@@ -388,7 +388,9 @@ final class GeminiAvailabilityTests: XCTestCase {
     /// models mixed. Only Gemini ids are this harness's.
     func testModelListKeepsOnlyGeminiIDs() throws {
         let listed = GeminiProfile().parseModelList(String(decoding: try fixture("gemini-models", "txt", Self.self), as: UTF8.self))
-        XCTAssertEqual(listed.first, "gemini-3.8-flash-high")
+        // agy lists Flash first; the planning default leads, since detection seeds seats with `first`.
+        XCTAssertEqual(listed.first, GeminiProfile.defaultPlanningModel)
+        XCTAssertEqual(listed.dropFirst().first, "gemini-3.8-flash-high")
         XCTAssertTrue(listed.contains(GeminiProfile.defaultPlanningModel))
         XCTAssertTrue(listed.allSatisfy { $0.hasPrefix("gemini-") && !$0.contains("\t") })
         XCTAssertEqual(listed.count, 11)
