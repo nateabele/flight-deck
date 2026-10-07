@@ -16,6 +16,13 @@ import PairingCore
 //                            running. The SLOT is what `revoke` takes.
 //   revoke SLOT [--root DIR] unpairs SLOT and cuts its live connections. Exit 1 when SLOT is not
 //                            paired, 2 when hostd is not running.
+//   enroll --file PATH [--root DIR]
+//                            redeems a one-time enrollment file (EnrollmentPayload, ISO 8601
+//                            dates) written by a cloud machine's user-data: adds its controller
+//                            to the running hostd and deletes the file. Exit 0 enrolled, 1
+//                            refused (expired files are deleted too; a file from "the
+//                            future" is re-checked for up to 2 minutes while the clock syncs,
+//                            then kept), 2 hostd not running.
 //
 // And the §3.2 interop gates' servers:
 //   echo --port N --slot UUID --secret-hex HEX
@@ -34,6 +41,7 @@ func usage() -> Never {
                flightdeck-hostd status [--root DIR]
                flightdeck-hostd controllers [--json] [--root DIR]
                flightdeck-hostd revoke SLOT [--root DIR]
+               flightdeck-hostd enroll --file PATH [--root DIR]
                flightdeck-hostd echo --port N --slot UUID --secret-hex HEX
                flightdeck-hostd pair-test --port N --slot UUID --secret-hex HEX --code CODE
 
@@ -111,6 +119,11 @@ case "revoke":
     case .failed(let message): fail(message, code: 1)
     case let other: fail("unexpected reply \(other)", code: 1)
     }
+case "enroll":
+    guard let path = option("--file", in: args) else { usage() }
+    let root = stateRoot(args)
+    let outcome = EnrollCommand.run(file: URL(fileURLWithPath: path)) { adminRequest($0, root: root) }
+    if outcome.exitCode == 0 { say(outcome.message) } else { fail(outcome.message, code: outcome.exitCode) }
 case "echo":
     let gate = gateKey(args)
     try await echo(port: gate.port, slot: gate.slot, secret: gate.secret)
@@ -169,7 +182,7 @@ func seedTestController(_ spec: String, into store: ControllerStore) throws {
 }
 
 /// One admin round trip, exiting 2 when hostd is not running — the code `pair`, `status`,
-/// `controllers` and `revoke` share, so `hostd-install.sh` can tell "start it first" from every other failure.
+/// `controllers`, `revoke` and `enroll` share, so `hostd-install.sh` can tell "start it first" from every other failure.
 func adminRequest(_ request: AdminRequest, root: URL) -> AdminReply {
     let path = root.appendingPathComponent("admin.sock").path
     do {

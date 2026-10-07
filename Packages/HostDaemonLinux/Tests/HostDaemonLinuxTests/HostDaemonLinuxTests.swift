@@ -86,6 +86,150 @@ final class ControllersCommandTests: XCTestCase {
     }
 }
 
+/// `enroll`: a cloud machine's one-time file adds its controller to the *running* hostd, through
+/// the admin handler, because `serve` reads `controllers.json` once and would never see a key
+/// written beside it. A payload is good for one slot, once, and only while fresh.
+final class AdminEnrollTests: XCTestCase {
+    private func makeTestHostd() throws -> (LinuxHostd, URL) {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("fd-enroll-\(UUID().uuidString.prefix(8))")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        return (LinuxHostd(root: root, port: 47499, hostName: "linux-test"), root)
+    }
+
+    private func payload(issued: Date = Date(), idle: Int = 600) -> EnrollmentPayload {
+        EnrollmentPayload(version: 1, slot: UUID(), secretHex: String(repeating: "11", count: 32),
+                          controllerName: "ctl", idleSeconds: idle, issuedAt: issued)
+    }
+
+    func testAdminEnrollAddsControllerAndIsIdempotentlyRefusedOnReuse() throws {
+        let (hostd, _) = try makeTestHostd()
+        let p = payload()
+        XCTAssertEqual(hostd.handle(.enroll(p)), .ok)
+        XCTAssertEqual(hostd.store.all().map(\.slot), [p.slot])
+        XCTAssertEqual(hostd.store.all().first?.name, "ctl")
+        XCTAssertEqual(hostd.store.all().first?.secret, Data(repeating: 0x11, count: 32))
+        guard case .failed(let why) = hostd.handle(.enroll(p)) else { return XCTFail() }
+        XCTAssertTrue(why.contains("already"), why)
+        XCTAssertEqual(hostd.store.all().count, 1)
+    }
+
+    func testAdminEnrollRefusesExpired() throws {
+        let (hostd, _) = try makeTestHostd()
+        guard case .failed(let why) = hostd.handle(.enroll(payload(issued: Date(timeIntervalSinceNow: -3600)))) else {
+            return XCTFail()
+        }
+        XCTAssertTrue(why.contains("expired"), why)
+        XCTAssertTrue(hostd.store.all().isEmpty)
+    }
+
+    func testAdminEnrollRefusesANonPositiveIdleThreshold() throws {
+        let (hostd, _) = try makeTestHostd()
+        XCTAssertEqual(hostd.handle(.enroll(payload(idle: 0))), .failed("enrollment malformed"))
+        XCTAssertEqual(hostd.handle(.enroll(payload(idle: -5))), .failed("enrollment malformed"))
+        XCTAssertTrue(hostd.store.all().isEmpty)
+        XCTAssertNil(hostd.idleThreshold)
+    }
+
+    /// Task 5's idle reporting reads the threshold after a restart, when the enroll file is gone.
+    func testEnrolledIdleThresholdSurvivesARestart() throws {
+        let (hostd, root) = try makeTestHostd()
+        XCTAssertNil(hostd.idleThreshold)
+        XCTAssertEqual(hostd.handle(.enroll(payload(idle: 900))), .ok)
+        XCTAssertEqual(hostd.idleThreshold, 900)
+        XCTAssertEqual(LinuxHostd(root: root, port: 47499, hostName: "linux-test").idleThreshold, 900)
+    }
+}
+
+/// `flightdeck-hostd enroll --file`: which outcomes consume the one-time file. A redeemed or
+/// expired file is deleted (it can never enroll again, and it holds a secret); a refusal that a
+/// person might fix (a newer format, a hostd that answered oddly) leaves it for inspection.
+final class EnrollCommandTests: XCTestCase {
+    private func file(_ p: EnrollmentPayload) throws -> URL {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("enroll-\(UUID().uuidString.prefix(8)).json")
+        let enc = JSONEncoder(); enc.dateEncodingStrategy = .iso8601
+        try enc.encode(p).write(to: url)
+        addTeardownBlock { try? FileManager.default.removeItem(at: url) }
+        return url
+    }
+
+    /// Whole seconds by default: the file's ISO 8601 dates carry none, so a fractional `Date()`
+    /// would not compare equal to what `run` read back.
+    private func payload(issued: Date = Date(timeIntervalSince1970: Date().timeIntervalSince1970.rounded(.down)),
+                         version: Int = 1) -> EnrollmentPayload {
+        EnrollmentPayload(version: version, slot: UUID(), secretHex: String(repeating: "22", count: 32),
+                          controllerName: "ctl", idleSeconds: 60, issuedAt: issued)
+    }
+
+    func testEnrolledDeletesTheFile() throws {
+        let p = payload(), url = try file(p)
+        var sent: [AdminRequest] = []
+        let out = EnrollCommand.run(file: url) { sent.append($0); return .ok }
+        XCTAssertEqual(out.exitCode, 0)
+        XCTAssertEqual(sent, [.enroll(p)])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
+    }
+
+    func testExpiredIsDeletedWithoutAskingHostd() throws {
+        let url = try file(payload(issued: Date(timeIntervalSinceNow: -3600)))
+        let out = EnrollCommand.run(file: url) { _ in XCTFail("sent"); return .ok }
+        XCTAssertEqual(out.exitCode, 1)
+        XCTAssertTrue(out.message.contains("expired"), out.message)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
+    }
+
+    /// A VM that boots with its clock behind the Mac's must not burn its only enrollment file:
+    /// the payload is kept, and `run` waits up to `clockWait` for NTP before giving up.
+    func testFuturePayloadIsKeptWhenTheClockNeverCatchesUp() throws {
+        let t0 = Date(timeIntervalSince1970: 2_000_000_000)
+        let url = try file(payload(issued: t0.addingTimeInterval(600)))
+        var clock = t0, slept: TimeInterval = 0
+        let out = EnrollCommand.run(file: url, now: { clock }, sleep: { clock += $0; slept += $0 }) { _ in
+            XCTFail("sent"); return .ok
+        }
+        XCTAssertEqual(out.exitCode, 1)
+        XCTAssertTrue(out.message.contains("clock"), out.message)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: url.path))
+        XCTAssertGreaterThanOrEqual(slept, EnrollCommand.clockWait)
+        XCTAssertLessThan(slept, EnrollCommand.clockWait + 10)
+    }
+
+    func testFuturePayloadEnrollsOnceTheClockCatchesUp() throws {
+        let t0 = Date(timeIntervalSince1970: 2_000_000_000)
+        let p = payload(issued: t0.addingTimeInterval(330)), url = try file(p)
+        var clock = t0
+        var sent: [AdminRequest] = []
+        // NTP steps the clock forward on the second wait.
+        var waits = 0
+        let out = EnrollCommand.run(file: url, now: { clock }, sleep: { waits += 1; clock += waits == 2 ? 600 : $0 }) {
+            sent.append($0); return .ok
+        }
+        XCTAssertEqual(out.exitCode, 0, out.message)
+        XCTAssertEqual(sent, [.enroll(p)])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
+    }
+
+    func testRefusalKeepsTheFile() throws {
+        let url = try file(payload())
+        let out = EnrollCommand.run(file: url) { _ in .failed("slot already enrolled") }
+        XCTAssertEqual(out.exitCode, 1)
+        XCTAssertTrue(out.message.contains("already"), out.message)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: url.path))
+    }
+
+    func testWrongVersionKeepsTheFile() throws {
+        let url = try file(payload(version: 2))
+        let out = EnrollCommand.run(file: url) { _ in XCTFail("sent"); return .ok }
+        XCTAssertEqual(out.exitCode, 1)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: url.path))
+    }
+
+    func testUnreadableFileIsARefusal() {
+        let url = URL(fileURLWithPath: "/nonexistent/enroll.json")
+        XCTAssertEqual(EnrollCommand.run(file: url) { _ in .ok }.exitCode, 1)
+    }
+}
+
 final class WebSocketFragmentTests: XCTestCase {
     private final class Received: @unchecked Sendable {
         let lock = NSLock()
