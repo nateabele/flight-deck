@@ -45,6 +45,8 @@ import Foundation
 //   run_active              the request needs the run ended (a result, a re-sync of a busy slot)
 //   port_held               a forward's port is held on the host (§7 step 5)
 //   dial_failed             `port.open` could not connect to the remote port
+//   transfer_stalled        a transfer channel moved no bytes for the host's stall deadline
+//                           (10 min); the request failed and its channel was cancelled
 //   unsupported             an op or frame this host does not know (`HostServerCore`)
 //   not_implemented         an op this host knows of but does not serve yet
 //

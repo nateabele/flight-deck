@@ -96,6 +96,23 @@ final class HostWireTests: XCTestCase {
         XCTAssertTrue(try HostWire.encode(info).contains(#""docker":"27.0""#))
     }
 
+    /// `idleSince` came after the first hostds shipped: their `host.info` lacks it, and must
+    /// still decode (as "no idle report"), not fail the whole reply.
+    func testHostInfoFromAnOlderHostdHasNoIdleSince() throws {
+        let old = #"{"arch":"arm64","diskFreeBytes":1,"hostName":"h","hostdVersion":"0.1.0","osVersion":"x","platform":"Linux","xcode":[]}"#
+        XCTAssertNil(try JSONDecoder().decode(HostInfo.self, from: Data(old.utf8)).idleSince)
+    }
+
+    /// Present, it round-trips; absent (nil), it is omitted like `docker`, so the pinned shape
+    /// above is unchanged for a host that reports none.
+    func testHostInfoCarriesIdleSince() throws {
+        var info = HostInfo(hostName: "h", platform: "Linux", osVersion: "x", arch: "arm64",
+                            hostdVersion: "0.1.0", xcode: [], docker: nil, diskFreeBytes: 1)
+        XCTAssertFalse(try HostWire.encode(info).contains("idleSince"))
+        info.idleSince = Date(timeIntervalSince1970: 1_700_000_000)
+        XCTAssertEqual(try HostWire.decode(HostInfo.self, from: HostWire.encode(info)), info)
+    }
+
     /// Capabilities are the additive mechanism for minor-version skew: an unknown one must be
     /// dropped, not fail the whole handshake.
     func testUnknownCapabilityIsDropped() throws {

@@ -2,6 +2,7 @@ import Foundation
 import HostKit
 import NIOCore
 import NIOEmbedded
+import NIOPosix
 import NIOWebSocket
 @_spi(HostPairing) import PairingCore
 import XCTest
@@ -446,5 +447,88 @@ final class HandshakeGateTests: XCTestCase {
         let d = try connectRaw(port)
         defer { close(d) }
         XCTAssertFalse(closedByPeer(d, within: 0.3), "a freed slot was not reusable")
+    }
+}
+
+/// `host.info` from the real `serve` wiring carries `idleSince`, so a cloud box's controller
+/// can reap it once idle. A hostd built without the router's tracker reported none, which the
+/// controller must read as "never reap on idle": the box would run, and bill, until its TTL.
+final class IdleReportingTests: XCTestCase {
+    private final class Peer: HostPeer, @unchecked Sendable {
+        let slot = UUID()
+        private let lock = NSLock()
+        private var sent: [HostServerFrame] = []
+        func send(text: String) {
+            guard let frame = try? HostWire.decode(HostServerFrame.self, from: text) else { return }
+            lock.withLock { sent.append(frame) }
+        }
+        func close() {}
+
+        func info(_ id: Int) async throws -> HostInfo {
+            let deadline = Date().addingTimeInterval(60)
+            while Date() < deadline {
+                for frame in lock.withLock({ sent }) { if case .reply(id, .hostInfo(let info)) = frame { return info } }
+                try await Task.sleep(nanoseconds: 10_000_000)
+            }
+            throw CocoaError(.featureUnsupported)
+        }
+    }
+
+    func testServeReportsIdleSinceInHostInfo() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("fd-idle-\(UUID().uuidString.prefix(8))")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        let booted = Date()
+        let hostd = LinuxHostd(root: root, port: 47499, hostName: "linux-test")
+        let peer = Peer()
+        hostd.core.receive(text: try HostWire.encode(HostClientFrame.hello(
+            protocolVersion: .current, capabilities: [.hostInfo], controllerName: "laptop")), from: peer)
+        hostd.core.receive(text: try HostWire.encode(HostClientFrame.request(id: 1, .hostInfo)), from: peer)
+        let info = try await peer.info(1)
+        let idleSince = try XCTUnwrap(info.idleSince, "nothing is running, so the host is idle")
+        XCTAssertGreaterThanOrEqual(idleSince.timeIntervalSince(booted), -1, "idle since it booted, not since 1970")
+    }
+}
+
+/// Every accepted socket probes its peer: a controller whose laptop slept mid-transfer leaves
+/// a half-open TCP connection that only keepalive notices, and until it does, that request
+/// holds a cloud box "busy" and billing. Read back off a real accepted socket, because a
+/// bootstrap option NIO silently fails to apply would otherwise look fine in review.
+final class KeepaliveTests: XCTestCase {
+    private final class Seen: @unchecked Sendable {
+        let lock = NSLock()
+        var options: [String: SocketOptionValue] = [:]
+    }
+
+    func testAcceptedSocketsProbeADeadPeerWithinAboutTwoMinutes() throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { try? group.syncShutdownGracefully() }
+        let seen = Seen()
+        let accepted = group.next().makePromise(of: Void.self)
+        let server = try PSKWebSocketServer.keepingAlive(ServerBootstrap(group: group))
+            .childChannelInitializer { channel in
+                channel.eventLoop.makeCompletedFuture {
+                    let options = try XCTUnwrap(channel.syncOptions)
+                    for (name, option, _) in PSKWebSocketServer.keepaliveOptions {
+                        let value = try options.getOption(option)
+                        seen.lock.withLock { seen.options[name] = value }
+                    }
+                    let alive = try options.getOption(ChannelOptions.socketOption(.so_keepalive))
+                    seen.lock.withLock { seen.options["SO_KEEPALIVE"] = alive }
+                    accepted.succeed(())
+                }
+            }
+            .bind(host: "127.0.0.1", port: 0).wait()
+        defer { try? server.close().wait() }
+        let client = try ClientBootstrap(group: group).connect(to: try XCTUnwrap(server.localAddress)).wait()
+        defer { try? client.close().wait() }
+        try accepted.futureResult.wait()
+
+        let options = seen.lock.withLock { seen.options }
+        XCTAssertNotEqual(options["SO_KEEPALIVE"], 0)
+        XCTAssertEqual(options["TCP_KEEPIDLE"], 60)
+        XCTAssertEqual(options["TCP_KEEPINTVL"], 15)
+        // 60 s quiet, then 4 unanswered probes 15 s apart: a dead peer is dropped in 2 minutes.
+        XCTAssertEqual(options["TCP_KEEPCNT"], 4)
     }
 }
