@@ -450,15 +450,15 @@ not need real accounts.
 
 | Probe | Grok | Gemini |
 |---|---|---|
-| Binary chosen | | |
-| Version / date | | |
-| Signed-in check command | | |
-| Model list command and output | | |
-| Strict `--json-schema` / schema appendix | | |
-| Session id source | | |
-| Resume by id | | |
-| Read-only enforcement verified | | |
-| Isolation flags | | |
-| Auth-failure text | | |
-| Bad-model text | | |
-| Rate-limit text | | |
+| Binary chosen | `grok` (`~/.local/bin/grok`) | |
+| Version / date | grok 1.0.30 (04b7ffed98c6), 2026-10-07; models grok-4.7 (default), grok-4.7-build-fast, grok-4.6, grok-4.5 | |
+| Signed-in check command | `grok models`. It exits 0 in both states; signed out, its first line is "You are not authenticated.", signed in it is "You are logged in with grok.com." | |
+| Model list command and output | `grok models`: `Default model: <id>`, then `Available models:` with one model per line, `*` before the default (also suffixed `(default)`) and `-` before the others. The list is read at runtime; the default moved from 4.6 to 4.7 before the first probe | |
+| Strict `--json-schema` / schema appendix | Accepted unchanged: the real `triage-schema.json` and `RoundSchemas.review`, both strict. The answer is in `result.structured_output` (and as text in `result`). `--output-format streaming-messages-json` is honored alongside `--json-schema` | |
+| Session id source | Every line has `session_id`; it equals the minted `--session-id`. A failed start reports `""` | |
+| Resume by id | `--resume <uuid>` keeps the id and remembers (it answered "4817"). The resume needs the same `--cwd` and `GROK_HOME` | |
+| Read-only enforcement verified | Yes. Asked to create `pwned.txt` and to search `search_tool`/`use_tool` for a write tool, it found none and wrote no file. The init tools were `read_file, list_dir, grep, search_tool, use_tool` | |
+| Isolation flags | `GROK_*_{HOOKS,MCPS,RULES,SKILLS,AGENTS}_ENABLED=0` for CLAUDE, CURSOR and CODEX are NOT enough, because Claude Code plugins and their hooks still loaded. Setting **`HOME` = `GROK_HOME`** removes every plugin, MCP server and hook (`grok inspect --json`). Also `GROK_MEMORY=0`, `GROK_DISABLE_AUTOUPDATER=1` | |
+| Auth-failure text | Exit 1. stderr: `Error: Not signed in. To authenticate without a browser, run: grok login --device-code …`. The stream has an `is_error` result with that text in `errors[]` and `session_id:""` (signed out, and an empty `GROK_HOME`) | |
+| Bad-model text | Exit 1. `Couldn't set model 'grok-bogus-9': Invalid params: "unknown model id". Run 'grok models' …` on stderr and in `errors[]`. No silent fallback | |
+| Rate-limit text | Not provoked. Matched from the 1.0.30 string table: "You hit your weekly limit.", "…rate limit for your plan", "…credit limit…", "out of credits", "Too Many Requests". UNVERIFIED | |
