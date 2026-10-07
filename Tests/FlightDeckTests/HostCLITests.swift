@@ -98,6 +98,28 @@ final class HostCLITests: XCTestCase {
         XCTAssertEqual(frame.correlationID, 6)
     }
 
+    /// `idleSince` is additive: a reply from a Mac built before it decodes as "no report", and
+    /// one that carries it round-trips.
+    func testHostInfoIdleSinceIsOptionalOnTheWire() throws {
+        let old = #"{"name":"mini","hostName":"Mac-mini","platform":"macOS","osVersion":"26.1","arch":"arm64","hostdVersion":"1.0","xcode":[],"diskFreeBytes":1}"#
+        XCTAssertNil(try JSONDecoder().decode(WireHostInfo.self, from: Data(old.utf8)).idleSince)
+        let info = WireHostInfo(name: "box", hostName: "box", platform: "Linux", osVersion: "x", arch: "arm64",
+                                hostdVersion: "0.1.0", xcode: [], docker: nil, diskFreeBytes: 1,
+                                idleSince: Date(timeIntervalSince1970: 1_700_000_000))
+        XCTAssertEqual(try JSONDecoder().decode(WireHostInfo.self, from: JSONEncoder().encode(info)), info)
+    }
+
+    /// The projection relays the host's own `idleSince`; dropping it would make every box
+    /// look like one that reports none, and never be reaped on idle.
+    func testHostProjectionCopiesIdleSince() {
+        let record = HostRecord(slot: UUID(), name: "box", serviceName: "b", endpoints: [], platform: "Linux",
+                                pairedAt: Date())
+        let since = Date(timeIntervalSince1970: 1_700_000_000)
+        let info = HostInfo(hostName: "box", platform: "Linux", osVersion: "x", arch: "arm64", hostdVersion: "0.1.0",
+                            xcode: [], docker: nil, diskFreeBytes: 1, idleSince: since)
+        XCTAssertEqual(HostProjection.info(record, info).idleSince, since)
+    }
+
     func testHostRequestsRoundTripUnderTheirOps() throws {
         for (request, op) in [(FleetRequest.hostList, "host.list"), (.hostInfo(name: "mini"), "host.info")] {
             let data = try JSONEncoder().encode(ClientFrame.req(cid: 2, request))

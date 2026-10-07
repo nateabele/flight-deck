@@ -77,18 +77,20 @@ final class LinuxHostd: @unchecked Sendable {
     private var _idleThreshold: TimeInterval?
 
     /// `delegation` defaults to the real router under `root` (runs, checkouts; no screen on
-    /// Linux in v1); a test passes its own.
+    /// Linux in v1); a test passes its own. The core reports the router's own idle tracker,
+    /// so `host.info`'s `idleSince` counts exactly the runs, services and syncs it serves; on
+    /// Linux there is no console session to count besides.
     init(root: URL, port: Int, hostName: String, delegation: DelegationHost? = nil) {
         self.root = root
         self.port = port
         self.hostName = hostName
         store = ControllerStore(root: root)
-        let delegation = delegation ?? .standard(root: root, screenSupported: false)
+        let delegation = delegation ?? .standard(root: root, screenSupported: false, idle: IdleTracker())
         self.delegation = delegation
         core = HostServerCore(hostName: { hostName },
                               probe: HostInfoProbe(stateRoot: root, hostdVersion: hostdVersion),
                               endpoints: { Self.advertisedEndpoints(from: HostEndpoints.enumerate(), port: port) },
-                              delegation: delegation)
+                              delegation: delegation, idle: delegation.idle)
         knownSlots = Set(store.all().map(\.slot))
         _idleThreshold = IdleFile.load(root: root)
     }

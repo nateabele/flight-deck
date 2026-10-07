@@ -41,6 +41,8 @@ public final class HostServerCore: @unchecked Sendable {
     /// addresses change under it (a laptop host joining the tailnet), and a list read once at
     /// launch would keep advertising the network it booted on.
     private let endpoints: @Sendable () -> [String]
+    /// `host.info`'s `idleSince`. Nil (the macOS hostd, tests of the core alone) reports none.
+    private let idle: IdleTracker?
     private let lock = NSLock()
     private var peers: [ObjectIdentifier: (peer: HostPeer, helloed: Bool)] = [:]
     /// Slots revoked via `disconnect`. `peers` only knows peers that have said hello, so
@@ -58,11 +60,13 @@ public final class HostServerCore: @unchecked Sendable {
     /// `endpoints` defaults to none, which a controller reads as "nothing to learn"; both
     /// hostds pass their real interface list.
     public init(hostName: @escaping @Sendable () -> String, probe: HostInfoProbe,
-                endpoints: @escaping @Sendable () -> [String] = { [] }, delegation: DelegationHost? = nil) {
+                endpoints: @escaping @Sendable () -> [String] = { [] }, delegation: DelegationHost? = nil,
+                idle: IdleTracker? = nil) {
         self.hostName = hostName
         self.probe = probe
         self.endpoints = endpoints
         self.delegation = delegation
+        self.idle = idle
     }
 
     /// Replies are sent before this returns; see the type's threading contract.
@@ -194,9 +198,13 @@ public final class HostServerCore: @unchecked Sendable {
 
     /// The core's name wins over the probe's: the controller must see the same name in
     /// helloAck and host.info, or one host shows up under two names.
+    ///
+    /// `host.info` itself never touches the idle tracker: the controller's reaper polls it, and
+    /// a poll that counted as use would keep every box it watches from ever going idle.
     private func answerHostInfo(_ id: Int, to peer: HostPeer) {
         var info = probe.gather()
         info.hostName = hostName()
+        info.idleSince = idle?.idleSince
         send(.reply(id: id, .hostInfo(info)), to: peer)
     }
 

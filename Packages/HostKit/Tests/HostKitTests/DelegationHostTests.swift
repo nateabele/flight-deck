@@ -466,7 +466,7 @@ extension DelegationHostTests {
         let runner: Runner
     }
 
-    private func parts() throws -> Parts {
+    private func parts(idle: IdleTracker? = nil) throws -> Parts {
         let root = try tempDir("fd-host")
         let workspace = Workspace(root: root)
         let screen = ScreenLease()
@@ -475,7 +475,7 @@ extension DelegationHostTests {
                             power: NoPowerAssertions(), console: UnsupportedConsoleSession(), screen: screen,
                             lifecycle: .workspace(workspace))
         let delegation = DelegationHost(runner: runner, workspace: workspace, screen: screen,
-                                        portCheck: PortCheck(run: { _, _ in nil }), screenSupported: false)
+                                        portCheck: PortCheck(run: { _, _ in nil }), screenSupported: false, idle: idle)
         let core = HostServerCore(hostName: { "mini" }, probe: HostInfoProbe(stateRoot: root, hostdVersion: "t") { _, _ in nil },
                                   delegation: delegation)
         return Parts(core: core, delegation: delegation, runner: runner)
@@ -590,6 +590,78 @@ extension DelegationHostTests {
         let deadline = Date().addingTimeInterval(5)
         while !sawEOF.isSet && Date() < deadline { try await Task.sleep(nanoseconds: 20_000_000) }
         XCTAssertTrue(sawEOF.isSet, "the host finishes its side once it has the whole bundle")
+    }
+}
+
+// MARK: - Idle tracking
+
+extension DelegationHostTests {
+    private func eventually(_ what: String, within seconds: TimeInterval = 30,
+                            _ condition: () -> Bool) async throws {
+        let deadline = Date().addingTimeInterval(seconds)
+        while !condition() {
+            guard Date() < deadline else { return XCTFail("never: \(what)") }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+    }
+
+    /// A run belongs to the host, not to the connection that started it: a controller that
+    /// closes its lid mid-build must not make the box look idle (and get it stopped) while the
+    /// build is still going, and the run's end must still be heard with nobody attached.
+    func testARunKeepsTheHostBusyAfterItsControllerLeavesUntilItEnds() async throws {
+        let repo = try repo()
+        let idle = IdleTracker()
+        let p = try parts(idle: idle)
+        let c = Controller(core: p.core)
+        _ = try await c.hello()
+        let ref = try await sync(repo, over: c)
+        let run = try await start("echo ready; while :; do sleep 0.1; done", ref, over: c)
+        try await c.started(run)
+        c.closeConnection()
+        try await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertNil(idle.idleSince, "a live run with no controller attached is still activity")
+
+        p.runner.cancel(runID: run)
+        try await waitTerminal(p.runner, [run], within: 20)
+        try await eventually("idle after the run ended") { idle.idleSince != nil }
+    }
+
+    /// A run that never ran (its checkout failed) ends without an exit of its own; it must
+    /// still close its activity, or the host would never look idle again.
+    func testARunThatFailedBeforeRunningDoesNotKeepTheHostBusy() async throws {
+        let repo = try repo()
+        let idle = IdleTracker()
+        let p = try parts(idle: idle)
+        let c = Controller(core: p.core)
+        _ = try await c.hello()
+        let ref = try await sync(repo, over: c)
+        let wrong = SnapshotRef(repoRoot: ref.repoRoot, wtKey: ref.wtKey, worktreeName: ref.worktreeName,
+                                commit: ref.commit, tree: String(repeating: "f", count: 40))
+        let runID = try await start("echo must-not-run", wrong, over: c)
+        let events = try await c.events(runID)
+        XCTAssertEqual(events.last, .exited(.code(125)))
+        try await eventually("idle after the failed run") { idle.idleSince != nil }
+    }
+
+    /// A `sync.push` is activity while its bundle streams in, and ends as activity when its
+    /// connection drops mid-transfer: the aborted push must not leave the host busy forever.
+    func testAnAbortedSyncPushIsActivityUntilItFails() async throws {
+        let idle = IdleTracker()
+        let p = try parts(idle: idle)
+        let c = Controller(core: p.core)
+        _ = try await c.hello()
+        let channel = try await c.mux.open()
+        let ref = SnapshotRef(repoRoot: String(repeating: "a", count: 40), wtKey: "abcd", worktreeName: "w",
+                              commit: String(repeating: "b", count: 40), tree: String(repeating: "c", count: 40))
+        let id = c.post(.delegation(.syncPush(ref: ref, channel: channel.id)))
+        try await channel.write(Data("partial".utf8))
+        try await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertNil(idle.idleSince, "a push in flight is activity")
+
+        c.closeConnection()
+        let code = await remote { try await c.reply(to: id) }
+        XCTAssertNotNil(code)
+        try await eventually("idle after the aborted push") { idle.idleSince != nil }
     }
 }
 

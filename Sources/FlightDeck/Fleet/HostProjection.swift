@@ -29,7 +29,8 @@ enum HostProjection {
     static func info(_ record: HostRecord, _ info: HostInfo) -> WireHostInfo {
         WireHostInfo(name: record.name, hostName: info.hostName, platform: info.platform,
                      osVersion: info.osVersion, arch: info.arch, hostdVersion: info.hostdVersion,
-                     xcode: info.xcode, docker: info.docker, diskFreeBytes: info.diskFreeBytes)
+                     xcode: info.xcode, docker: info.docker, diskFreeBytes: info.diskFreeBytes,
+                     idleSince: info.idleSince)
     }
 
     /// The `err` a failed `host.info` answers with: a stable code for scripts, and a message
