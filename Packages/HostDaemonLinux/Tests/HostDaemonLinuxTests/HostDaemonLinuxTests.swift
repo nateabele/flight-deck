@@ -448,3 +448,43 @@ final class HandshakeGateTests: XCTestCase {
         XCTAssertFalse(closedByPeer(d, within: 0.3), "a freed slot was not reusable")
     }
 }
+
+/// `host.info` from the real `serve` wiring carries `idleSince`, so a cloud box's controller
+/// can reap it once idle. A hostd built without the router's tracker reported none, which the
+/// controller must read as "never reap on idle": the box would run, and bill, until its TTL.
+final class IdleReportingTests: XCTestCase {
+    private final class Peer: HostPeer, @unchecked Sendable {
+        let slot = UUID()
+        private let lock = NSLock()
+        private var sent: [HostServerFrame] = []
+        func send(text: String) {
+            guard let frame = try? HostWire.decode(HostServerFrame.self, from: text) else { return }
+            lock.withLock { sent.append(frame) }
+        }
+        func close() {}
+
+        func info(_ id: Int) async throws -> HostInfo {
+            let deadline = Date().addingTimeInterval(60)
+            while Date() < deadline {
+                for frame in lock.withLock({ sent }) { if case .reply(id, .hostInfo(let info)) = frame { return info } }
+                try await Task.sleep(nanoseconds: 10_000_000)
+            }
+            throw CocoaError(.featureUnsupported)
+        }
+    }
+
+    func testServeReportsIdleSinceInHostInfo() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("fd-idle-\(UUID().uuidString.prefix(8))")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        let booted = Date()
+        let hostd = LinuxHostd(root: root, port: 47499, hostName: "linux-test")
+        let peer = Peer()
+        hostd.core.receive(text: try HostWire.encode(HostClientFrame.hello(
+            protocolVersion: .current, capabilities: [.hostInfo], controllerName: "laptop")), from: peer)
+        hostd.core.receive(text: try HostWire.encode(HostClientFrame.request(id: 1, .hostInfo)), from: peer)
+        let info = try await peer.info(1)
+        let idleSince = try XCTUnwrap(info.idleSince, "nothing is running, so the host is idle")
+        XCTAssertGreaterThanOrEqual(idleSince.timeIntervalSince(booted), -1, "idle since it booted, not since 1970")
+    }
+}

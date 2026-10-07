@@ -385,9 +385,14 @@ public struct WireHostInfo: Codable, Equatable, Sendable {
     public let xcode: [String]
     public let docker: String?
     public let diskFreeBytes: Int64
+    /// When the host last had nothing running, serving or syncing; nil while busy, and from a
+    /// hostd or Mac too old to report it (an absent key decodes as nil). A bare `Date`, under
+    /// the same default-strategy caveat as `WireHost.lastSeenAt`.
+    public let idleSince: Date?
 
     public init(name: String, hostName: String, platform: String, osVersion: String, arch: String,
-                hostdVersion: String, xcode: [String], docker: String?, diskFreeBytes: Int64) {
+                hostdVersion: String, xcode: [String], docker: String?, diskFreeBytes: Int64,
+                idleSince: Date? = nil) {
         self.name = name
         self.hostName = hostName
         self.platform = platform
@@ -397,5 +402,6 @@ public struct WireHostInfo: Codable, Equatable, Sendable {
         self.xcode = xcode
         self.docker = docker
         self.diskFreeBytes = diskFreeBytes
+        self.idleSince = idleSince
     }
 }

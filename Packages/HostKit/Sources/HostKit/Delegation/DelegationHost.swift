@@ -35,6 +35,9 @@ public final class DelegationHost: @unchecked Sendable {
     private let services: DelegationHostServices
     private let live: LiveSlots
     private let git = GitRunner(isolated: true)
+    /// Told of every request and every run, service and transfer, for `host.info`'s
+    /// `idleSince`. Public so a hostd hands the core the same tracker the router feeds.
+    public let idle: IdleTracker?
 
     private let lock = NSLock()
     private var connections: [ObjectIdentifier: Connection] = [:]
@@ -50,8 +53,9 @@ public final class DelegationHost: @unchecked Sendable {
     private var revokedSlots: Set<UUID> = []
 
     public init(runner: any RunControlling, workspace: any WorkspaceStore, screen: ScreenLease,
-                portCheck: any PortChecking, screenSupported: Bool) {
+                portCheck: any PortChecking, screenSupported: Bool, idle: IdleTracker? = nil) {
         self.runner = runner
+        self.idle = idle
         self.workspace = workspace
         self.screen = screen
         let live = LiveSlots()
@@ -69,7 +73,7 @@ public final class DelegationHost: @unchecked Sendable {
     public static func standard(root: URL,
                                 power: any PowerAsserting = PowerAssertion.platformDefault,
                                 console: any ConsoleSessionProbing = ConsoleSession.platformDefault,
-                                screenSupported: Bool) -> DelegationHost {
+                                screenSupported: Bool, idle: IdleTracker? = nil) -> DelegationHost {
         let workspace = Workspace(root: root)
         let screen = ScreenLease()
         let runner = Runner(runsRoot: root.appendingPathComponent("runs"), power: power, console: console,
@@ -81,7 +85,7 @@ public final class DelegationHost: @unchecked Sendable {
             }
         }
         return DelegationHost(runner: runner, workspace: workspace, screen: screen, portCheck: PortCheck(),
-                              screenSupported: screenSupported)
+                              screenSupported: screenSupported, idle: idle)
     }
 
     /// hostd is stopping (its SIGTERM path): every service downed, `down` command and all,
@@ -142,13 +146,19 @@ public final class DelegationHost: @unchecked Sendable {
     }
 
     /// Answers request `id` whenever it is done, from a task of its own; returns at once.
+    ///
+    /// Every request is activity for the idle tracker from arrival until it is answered, not
+    /// just at arrival: a `sync.push` or `run.result` streaming a bundle over a slow link for
+    /// minutes is the host at work. Ended on every path out, a failed or aborted transfer too.
     public func handle(id: Int, _ request: DelegationRequest, from peer: any HostPeer) {
         guard let connection = lock.withLock({ connections[ObjectIdentifier(peer)] }) else {
             // The core registers the connection before it acks the hello, so this is a request
             // racing its own connection's close: nobody is left to read an answer.
             return
         }
+        let activity = idle?.begin()
         Task {
+            defer { if let activity { self.idle?.end(activity) } }
             do {
                 let routed = try await self.route(request, on: connection)
                 self.send(.reply(id: id, .delegation(routed.reply)), to: peer)
@@ -193,6 +203,9 @@ public final class DelegationHost: @unchecked Sendable {
             // services to down when its orphan timeout runs out, and the runner exposes neither.
             let runID = spec.service ? services.startService(spec, owner: owner, acquire: acquire)
                                      : runner.start(spec, owner: owner, acquire: acquire)
+            // Before this request's own activity ends, so the host never looks idle between
+            // the reply and the run's first event.
+            watchUntilEnded(runID)
             let revokedMeanwhile: Bool = lock.withLock {
                 // Pruned to the runs the runner still knows, so a hostd up for weeks does not
                 // keep a row per run it ever started.
@@ -354,6 +367,25 @@ public final class DelegationHost: @unchecked Sendable {
 
     private func owned(_ runID: String, by controller: UUID) throws {
         guard runner.owner(runID: runID)?.controller == controller else { throw RunnerError.unknownRun(runID) }
+    }
+
+    // MARK: - Idle
+
+    /// Holds the host busy until `runID` ends, however it ends: an exit, a service's death or
+    /// `down`, a cancel or revoke, or a failure before it ever ran (the stream throws). Watches
+    /// the runner, not a controller's subscription, because a run outlives the connection
+    /// that started it, and a box whose controller closed its lid mid-build must not be
+    /// reaped as idle while the build goes on.
+    private func watchUntilEnded(_ runID: String) {
+        guard let idle else { return }
+        let activity = idle.begin()
+        let runner = self.runner
+        Task {
+            defer { idle.end(activity) }
+            // From past any spool's end: only the run's end matters here, and replaying its
+            // output for nobody would read the whole spool once per run.
+            do { for try await _ in runner.events(runID: runID, from: .max) {} } catch {}
+        }
     }
 
     // MARK: - Events
