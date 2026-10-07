@@ -2951,16 +2951,28 @@ it still reports there, each diagnosed from the run's `.xcresult` screen recordi
   four-family case. A UI test needs an intake fixture and an availability seam (spec §5).
 - **Gemini accounts.** agy has no home variable, and its login is in the per-user keyring. A
   Gemini seat always uses the built-in account, and the editor offers no Gemini accounts.
-- **The Flight Control UI tests fail on the UI-test Mac, on master too.** On 2026-10-07, after
-  `automationmodetool` was enabled there, the following ran with their gates set:
-  - `RoutingUITests` (`TEST_RUNNER_FLIGHTDECK_ROUTING_UI=1`);
-  - `CapacityUITests` (`TEST_RUNNER_FLIGHTDECK_CAPACITY_UI=1`).
-
-  All 6 routing tests failed with "the Flight Control tab did not open", both on this branch and
-  on master `2e922a11`. The capacity test also failed on both, at a different step each time:
-  - on this branch, "Settings did not open";
-  - on master, "no Capacity segment".
-
-  So this branch did not cause it. Diagnose it from the run's `.xcresult` recording. Without
-  their gates, all 10 cases SKIP and `smoke-remote.sh` prints SMOKE PASS, so a bare run proves
-  nothing.
+- **The Flight Control UI tests fail on the UI-test Mac: diagnosed, not an app regression.**
+  On 2026-10-07 `RoutingUITests` (all 6) and `CapacityUITests` failed with their gates set, on
+  master `2e922a11` and on `planning-4way` alike, with "the Flight Control tab did not open".
+  - *Cause:* the run's recordings show a Little Snitch connection alert ("Flight Deck wants to
+    connect to api.anthropic.com", badged TERMINATED) over the Settings toolbar. The Flight
+    Control tab button sits under it, so every click hit the alert and Settings stayed on Agents
+    (the hierarchy dumps agree). Little Snitch's own log on the UI-test Mac puts the alert up at
+    18:11:10, two seconds after that day's first gated run started its runner, and it was still
+    up hours later. The routing-redesign pass (6/6, 2026-10-06 16:53) ran while no alert was up.
+    Which process inside the app made the connection is unconfirmed: Little Snitch's traffic
+    log needs root. The likeliest is the seed session's real `claude`.
+  - *Fixed in the tests:* the Flight Control classes open the tab through `openFlightControlTab`,
+    and click tabs and sections through `clickUnlessCovered`. That refuses to click under a
+    Little Snitch, system-alert or SecurityAgent window and fails naming it, with a full-screen
+    screenshot. A click on such an alert could answer it.
+  - *Fixed in `smoke-remote.sh`:* it prints the passed/failed/skipped counts. A named selection
+    whose every case skipped ends `SMOKE SKIPPED` (exit 5), not `SMOKE PASS`.
+  - *Still open, needs a person at the UI-test Mac:* dismiss the alert, and add a Little Snitch
+    rule so the Debug build's agents can reach api.anthropic.com without asking. Also keep the
+    screen unlocked during runs. The re-run after the fix (2026-10-07 18:37) found the display
+    asleep and failed all 6 at launch with "Failed to activate application … Running
+    Background", so `RoutingUITests`, `CapacityUITests`, `CapabilityIndexUITests` and
+    `SwarmUITests` have no green run on master yet. Run each once, with its script
+    (`test-routing-ui.sh`, `test-ui-capacity.sh`, `test-ui-capability-index.sh`,
+    `test-ui-flight-control.sh`), once the alert is gone.

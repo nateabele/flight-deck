@@ -36,8 +36,7 @@ final class RoutingUITests: XCTestCase {
         app.typeKey(",", modifierFlags: .command)
         let prefs = app.windows.containing(.button, identifier: "Agents").firstMatch
         XCTAssertTrue(prefs.waitForExistence(timeout: 10), "Settings never opened")
-        prefs.buttons["Flight Control"].click()
-        XCTAssertTrue(prefs.flightControlSectionPicker.waitForExistence(timeout: 5), "the Flight Control tab did not open")
+        prefs.openFlightControlTab()
         return prefs
     }
 

@@ -97,7 +97,7 @@ final class CapacityUITests: XCTestCase {
                 XCTFail("Settings did not open")
                 return
             }
-            prefs.buttons["Flight Control"].click()
+            prefs.openFlightControlTab()
             prefs.selectFlightControlSection("fc-section-capacity")
             XCTAssertTrue(prefs.descendants(matching: .any).matching(identifier: "capacity-pool-list").firstMatch.waitForExistence(timeout: 5))
             XCTAssertTrue(text("Claude default", in: prefs).exists)
