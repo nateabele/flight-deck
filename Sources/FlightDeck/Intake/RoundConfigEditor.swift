@@ -183,11 +183,13 @@ struct RoundConfigEditor: View {
                     ForEach(suggestions, id: \.self) { model in
                         Button(model) { config = Self.updatingChoice(config, at: keyPath) { $0.model = model } }
                     }
-                    .menuStyle(.borderlessButton)
-                    .menuIndicator(.hidden)
-                    .fixedSize()
-                    .help("Known models")
+                } label: {
+                    Image(systemName: "chevron.down")
                 }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("Known models")
             }
         }
     }
