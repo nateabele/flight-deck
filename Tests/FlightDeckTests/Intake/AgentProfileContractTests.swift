@@ -157,8 +157,11 @@ final class AgentProfileContractTests: XCTestCase {
         }
         // No `agy` here, so gemini is not offered either (the `gemini` CLI is not what the
         // harness drives); the probe must never run.
-        let available = TriageSettings.available(path: bin.path, probe: SignInProbe { _, _, _ in
-            XCTFail("no agy installed, so no sign-in probe"); return nil
+        // grok IS probed once its gate is open; a probe that can't answer reads as signed out,
+        // so it is not offered either way.
+        let available = TriageSettings.available(path: bin.path, probe: SignInProbe { executable, _, _ in
+            XCTAssertEqual((executable as NSString).lastPathComponent, "grok", "no agy installed, so no gemini probe")
+            return nil
         })
         XCTAssertEqual(available.harnesses, [.codex, .claude])
     }
