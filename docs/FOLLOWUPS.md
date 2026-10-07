@@ -2892,3 +2892,24 @@ it still reports there, each diagnosed from the run's `.xcresult` screen recordi
 - **`testPermissionBypassConfirmationUnderChurn` (the flake hunt) on the UI-test Mac:** fails at once with
   "Unable to find hit point for ScrollView" at y≈2600: the Preferences command field is off the UI-test Mac's
   1125pt-tall screen. A screen-size environment failure, not the race it hunts.
+
+## Grok as a planning harness (2026-10-07, Track G)
+
+- **Data use.** xAI's consumer plans may use prompts to train its models. Check xAI's data
+  settings before you use a Grok agent on a private repo. The Rounds editor shows the same note
+  whenever Grok is offered.
+- **Rate-limit spellings are unverified.** grok's usage-limit messages come from its 1.0.30
+  string table. No live run has produced one. The first real weekly-limit failure must be
+  captured as a fixture.
+- **Isolation is `HOME`, not flags.** grok finds Claude Code plugins under `~/.claude/plugins`,
+  and no compat switch covers that path. `GrokProfile.environment` sets `HOME` to the grok home.
+  If a grok update reads plugins from another path, a seat inherits hooks again. To check, read
+  `grok inspect --json` under the seat environment.
+- **Project hooks.** A project the operator has trusted in grok still runs its own
+  `.grok/config.toml` hooks and MCP servers. This is the same behaviour as when the operator
+  runs grok there.
+- **Accounts.** `GrokProfile.environment` binds `GROK_HOME` (and `HOME`) for an account.
+  `PlanningAccountOption` maps accounts by `AgentID`, so the editor offers no grok account
+  until grok gets one.
+- **Model ids drift.** The aliases (`grok-4.7`, …) are fallbacks only. Detection reads
+  `grok models` at each launch.

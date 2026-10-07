@@ -7,10 +7,30 @@ final class HarnessOutputGrokTests: XCTestCase {
         try Data(contentsOf: try XCTUnwrap(Bundle(for: Self.self).url(forResource: name, withExtension: ext, subdirectory: "Fixtures/Intake")))
     }
 
-    func testParsesStructuredOutputAndSession() throws {
-        let out = try HarnessOutput.parse(.grok, stdout: try load("grok-p-schema", "jsonl"))
-        XCTAssertEqual(out.sessionID, "0199c1a2-4b7e-7000-8000-00000000a001")
-        XCTAssertEqual(try JSONSerialization.jsonObject(with: out.structured) as? [String: String], ["answer": "PONG"])
+    /// Live captures (grok 1.0.30, grok-4.7, 2026-10-07, synthetic one-file project): a fresh
+    /// read-only run with the REAL strict triage schema, then `--resume <its id>` with the
+    /// strict review schema, asked for a number the first run was told. Both strict schemas
+    /// were accepted as-is — no transformation needed — and `structured_output` carries the
+    /// answer. The resume keeps the session id and remembers.
+    func testParsesTheLiveFreshAndResumedRuns() throws {
+        let fresh = try HarnessOutput.parse(.grok, stdout: try load("grok-p-schema", "jsonl"))
+        XCTAssertEqual(fresh.sessionID, "20c36533-a9a3-427b-81a2-51ed2484802d")
+        let triage = try XCTUnwrap(try JSONSerialization.jsonObject(with: fresh.structured) as? [String: Any])
+        XCTAssertEqual(triage["kind"] as? String, "questions")
+        XCTAssertEqual((triage["questions"] as? [String])?.count, 1)
+        XCTAssertTrue(triage["changeSet"] is NSNull)
+        let resumed = try HarnessOutput.parse(.grok, stdout: try load("grok-p-schema-resume", "jsonl"))
+        XCTAssertEqual(resumed.sessionID, fresh.sessionID)
+        let review = try XCTUnwrap(try JSONSerialization.jsonObject(with: resumed.structured) as? [String: Any])
+        XCTAssertEqual(review["summary"] as? String, "4817")
+    }
+
+    /// Live: an unknown `-m` fails loudly (exit 1) — no silent fallback to the default model.
+    func testBadModelIsAnError() throws {
+        XCTAssertThrowsError(try HarnessOutput.parse(.grok, stdout: try load("grok-bad-model", "jsonl"))) { error in
+            guard case .isError(let text) = error as? HarnessOutput.ParseError else { return XCTFail("\(error)") }
+            XCTAssertTrue(text.contains("unknown model id"), text)
+        }
     }
 
     /// The real signed-out run (grok 1.0.30): an `is_error` result whose reason is only in

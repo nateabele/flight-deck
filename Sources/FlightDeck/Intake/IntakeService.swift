@@ -65,10 +65,10 @@ struct TriageSettings: Equatable, Sendable {
                     listed = listOutput.map { profile.parseModelList($0.stdout) } ?? []
                 }
                 let offered = listed.isEmpty ? catalog.aliases : listed
-                // The profile's default unless this account doesn't list it — then the CLI's
-                // own first choice, so a seat is never seeded with a model it can't run.
-                let model = offered.isEmpty || offered.contains(catalog.defaultPlanningModel)
-                    ? catalog.defaultPlanningModel : offered[0]
+                // A listed model wins over the profile's hard-coded default: `parseModelList`
+                // puts the CLI's own default first, and the hard-coded one goes stale (grok's
+                // default moved from grok-4.6 to grok-4.7 on the day it was first probed).
+                let model = listed.first ?? catalog.defaultPlanningModel
                 choices[harness] = ModelChoice(harness: harness, model: model, effort: catalog.defaultPlanningEffort)
                 if !offered.isEmpty { models[harness] = offered }
             case .signedOut(let hint):

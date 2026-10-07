@@ -36,7 +36,7 @@ final class GrokPlanningLiveTests: XCTestCase {
     }
 
     private func run(_ prompt: String, resume: String? = nil) async throws -> (CommandResult, sessionID: String, plan: String) {
-        let request = HarnessRequest(harness: .grok, model: "grok-4.6", effort: "low", cwd: scratch, readableDirs: [],
+        let request = HarnessRequest(harness: .grok, model: GrokProfile().modelCatalog.defaultPlanningModel, effort: "low", cwd: scratch, readableDirs: [],
                                      prompt: prompt, schemaFile: scratch.appendingPathComponent("unused-schema.json"),
                                      schemaJSON: RoundSchemas.draft, resumeSessionID: resume)
         let command = try HarnessCommand.build(request)
