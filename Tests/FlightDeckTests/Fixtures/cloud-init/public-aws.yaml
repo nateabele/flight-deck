@@ -1,0 +1,45 @@
+#cloud-config
+users:
+  - default
+  - name: flightdeck
+    shell: /bin/bash
+    lock_passwd: true
+bootcmd:
+  - [ sh, -c, "iptables -A OUTPUT -d 169.254.169.254 -m owner ! --uid-owner 0 -j REJECT || true" ]
+  - [ sh, -c, "ip6tables -A OUTPUT -d fd00:ec2::254 -m owner ! --uid-owner 0 -j REJECT || true" ]
+write_files:
+  - path: /etc/systemd/system/flightdeck-ttl.service
+    owner: root:root
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=Power off at the Flight Deck TTL
+
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/bin/systemctl poweroff
+  - path: /etc/systemd/system/flightdeck-ttl.timer
+    owner: root:root
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=Flight Deck TTL deadline
+
+      [Timer]
+      OnCalendar=2027-01-15 12:00:00 UTC
+      Persistent=true
+
+      [Install]
+      WantedBy=timers.target
+  - path: /run/flightdeck/enroll.json
+    owner: root:root
+    permissions: '0600'
+    content: |
+      {"controllerName":"controller","idleSeconds":1800,"issuedAt":"2027-01-15T08:00:00Z","secretHex":"5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a","slot":"6F0B2C1E-8E37-4D7A-9D0A-3C5E2B1A9F00","version":1}
+runcmd:
+  - [ systemctl, enable, --now, flightdeck-ttl.timer ]
+  - [ chown, "flightdeck:flightdeck", /run/flightdeck, /run/flightdeck/enroll.json ]
+  - [ loginctl, enable-linger, flightdeck ]
+  - [ sh, -c, "systemctl start user@$(id -u flightdeck).service" ]
+  - [ su, "-", flightdeck, "-c", "export XDG_RUNTIME_DIR=/run/user/$(id -u flightdeck); curl -fsSL https://example.invalid/hostd/hostd-install.sh | sh -s -- --sha256 0000000000000000000000000000000000000000000000000000000000000000 --no-pair" ]
+  - [ su, "-", flightdeck, "-c", "export XDG_RUNTIME_DIR=/run/user/$(id -u flightdeck); ~/.local/bin/flightdeck-hostd enroll --file /run/flightdeck/enroll.json" ]

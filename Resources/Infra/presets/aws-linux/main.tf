@@ -97,8 +97,8 @@ resource "aws_instance" "this" {
     http_put_response_hop_limit = 1
   }
 
-  # The machine half of "nothing outlives its TTL" (spec §7.2): cloud-init's `shutdown -h`
-  # becomes a termination, so a lost Mac cannot leave a stopped instance and its disk billing.
+  # The machine half of "nothing outlives its TTL" (spec §7.2): cloud-init's TTL poweroff
+  # timer becomes a termination, so a lost Mac cannot leave a stopped instance and its disk billing.
   instance_initiated_shutdown_behavior = "terminate"
 
   root_block_device {
