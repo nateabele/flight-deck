@@ -19,6 +19,9 @@ enum UITestHarness {
     static let linkInNavLink = "linkInNavLink"
     /// The swarm card with fixture data, for `SwarmCardUITests`.
     static let swarmCard = "swarmCard"
+    /// A two-question prompt card above the composer, lifted by the keyboard exactly as the
+    /// conversation screen lifts them, for `PromptKeyboardUITests`.
+    static let promptKeyboard = "promptKeyboard"
 
     /// The harness the current launch asks for, if any. `UserDefaults` surfaces a
     /// `-Key Value` launch argument pair as a string default, which is how XCUITest hands
@@ -35,6 +38,8 @@ enum UITestHarness {
             LinkInNavLinkHarness()
         case swarmCard:
             SwarmCardHarness()
+        case promptKeyboard:
+            PromptKeyboardHarness()
         default:
             // An unknown harness name is a test bug, not a state to render silently.
             Text("Unknown UITestHarness: \(name)")
@@ -88,5 +93,69 @@ private struct SwarmCardHarness: View {
     }
     var body: some View {
         List { SwarmCard(swarm: swarm, inFlight: false, onPause: { paused = true }, onResume: { paused = false }) }
+    }
+}
+
+/// The bottom of `SessionTimelineScreen`, rebuilt around fixture data: a long `List`, and in its
+/// bottom inset the prompt card over the composer inside the same `KeyboardLiftedInset`, with
+/// the same keyboard modifiers. The prompt is a two-question set whose questions differ in
+/// height, because what this exists to show is the card against the keyboard as it pages.
+private struct PromptKeyboardHarness: View {
+    private final class NoFleet: TimelinePaging, PromptSending, PromptAnswering, PresenceReporting {
+        func viewing(_ session: UUID?) {}
+        func markRead(_ id: UUID) {}
+        func timelinePage(_ request: FleetRequest,
+                          then completion: @escaping (Result<TimelinePage, FleetRequestError>) -> Void) {}
+        func sendPrompt(_ command: FleetCommand,
+                        then completion: @escaping (Result<Void, FleetRequestError>) -> Void) {}
+        func answerPrompt(_ command: FleetCommand,
+                          then completion: @escaping (Result<Void, FleetRequestError>) -> Void) {}
+    }
+
+    @State private var model = SessionTimelineModel(sessionID: UUID(), fleet: NoFleet())
+    @State private var typing = false
+    private let session = WireSession(id: UUID(), title: "Harness", agent: "claude",
+                                      activity: "waiting", acceptsTypedAnswers: true)
+    private let open = OpenPrompt.question(callID: "toolu_HARNESS", [
+        PromptQuestion(header: "Color", question: "Which color do you like best?",
+                       options: [.init(label: "Red", detail: "Warm and bold"),
+                                 .init(label: "Blue", detail: "Cool and calm")]),
+        PromptQuestion(
+            header: "Approach",
+            question: "How should the group encapsulation land across the eight lanes?",
+            options: [
+                .init(label: "One lane at a time",
+                      detail: "Merge each lane behind its own flag so a regression names its lane, at the cost of a longer critical path."),
+                .init(label: "All lanes together",
+                      detail: "One integration branch, one review, one merge; fastest if nothing goes wrong, hardest to bisect if something does."),
+                .init(label: "Pairs of lanes",
+                      detail: "Four merges of two lanes each, a middle path that keeps bisection cheap without serialising everything."),
+                .init(label: "Spike first",
+                      detail: "A throwaway end-to-end spike through one lane before committing to an order for the rest."),
+            ]),
+    ])
+
+    var body: some View {
+        NavigationStack {
+            List(0..<40, id: \.self) { row in
+                Text("Conversation row \(row)")
+            }
+            .listStyle(.plain)
+            .scrollDismissesKeyboard(.interactively)
+            .safeAreaInset(edge: .bottom) {
+                KeyboardLiftedInset {
+                    PromptCard(open: open, agent: "claude", state: .idle, model: model,
+                               blockedChaseExhausted: false, allowsBlockedAbort: false,
+                               acceptsTypedAnswers: true, activity: "waiting",
+                               openPromptCall: .call("toolu_HARNESS"), answerless: false,
+                               onAbortBlocked: {}, fromSubagent: nil,
+                               onTypingChange: { typing = $0 })
+                    if !typing { PromptComposer(session: session, model: model) }
+                }
+            }
+            .ignoresSafeArea(.keyboard, edges: .bottom)
+            .navigationTitle("Harness")
+            .navigationBarTitleDisplayMode(.inline)
+        }
     }
 }
