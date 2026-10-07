@@ -10,14 +10,21 @@ public enum ClaudeUserEnv {
     /// `environment` with the settings `env` merged in underneath it: an explicit process
     /// variable wins on conflict, since the caller resolved it on purpose. A missing or
     /// malformed settings file (or a non-object `env`) contributes nothing — never a failed
-    /// run. Called only through `HarnessCommand.environment(for:base:home:)`, which applies
-    /// `build`'s `unsetEnvironment` AFTER this, so the settings file can never re-introduce
+    /// run. Called only through `ClaudeProfile.environment(base:account:)`, which scrubs the
+    /// child-session variables AFTER this, so the settings file can never re-introduce
     /// `CLAUDE_CODE_CHILD_SESSION`/`CLAUDECODE`.
     static let excluded: Set<String> = ["PATH", "HOME"]
 
     public static func merged(into environment: [String: String],
                               home: URL = FileManager.default.homeDirectoryForCurrentUser) -> [String: String] {
-        let file = home.appendingPathComponent(".claude", isDirectory: true).appendingPathComponent("settings.json")
+        merged(into: environment, configDirectory: home.appendingPathComponent(".claude", isDirectory: true))
+    }
+
+    /// The same merge from a config directory directly — what `CLAUDE_CONFIG_DIR` names. A seat
+    /// bound to a non-default account reads THAT account's `settings.json`, since that is the
+    /// file `--restricted` dropped for it (`ClaudeProfile.environment`).
+    public static func merged(into environment: [String: String], configDirectory: URL) -> [String: String] {
+        let file = configDirectory.appendingPathComponent("settings.json")
         guard let data = try? Data(contentsOf: file),
               let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let env = root["env"] as? [String: Any] else { return environment }

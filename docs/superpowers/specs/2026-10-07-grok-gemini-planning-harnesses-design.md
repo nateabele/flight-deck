@@ -285,6 +285,17 @@ specific settings page; the URLs change.
     No new arm uses `fatalError`. Pinned by `AgentProfileContractTests`.
 - **Then three parallel tracks, each in its own worktree:**
   - **Track P:** claude and codex profiles, migrating every duplicate onto them (§3.0).
+    - **As built (2026-10-07):** `ClaudeProfile.swift` and `CodexProfile.swift` beside
+      `AgentProfile.swift`; the merged error table is `AgentErrorVocabulary` (one kind table
+      with a failure kind AND a transient flag per spelling, plus the phrase rules
+      `FailureDiagnosis` used). Sign-in checks are `claude auth status` (JSON `loggedIn` + exit 0)
+      and `codex login status` (exit 0), probed on claude 2.1.293 and codex-cli 0.160.0; they
+      are filled in but not yet wired into detection, which stays PATH-only for claude/codex.
+      `ModelChoice.account: AgentAccountRef?` carries a seat's account (nil = built-in, absent
+      from the JSON); the Rounds editor shows an Account picker only for a harness with a
+      non-built-in account in preferences. `HarnessCommand.environment(for:base:home:account:)`
+      builds the child environment through the profile; a bound codex seat also takes its
+      `service_tier` from its own `config.toml`. Pinned by `AgentProfileMigrationTests`.
   - **Track G:** Grok profile + harness.
   - **Track M:** Gemini profile + harness.
 - **Integration:**

@@ -1,4 +1,5 @@
 import Foundation
+import IntakeKit
 
 extension AgentID {
     /// The config directory the agent uses when no environment variable names one. Spelled
@@ -14,11 +15,13 @@ extension AgentID {
     }
 
     /// The variable that binds a process to a home. Read by `AgentAdapter.environment(for:)`,
-    /// and nowhere else — callers name accounts, never variables.
+    /// and nowhere else — callers name accounts, never variables. Spelled by the CLI's profile,
+    /// which planning seats bind through too, so a tab and a seat on one account can never
+    /// name its home differently.
     var homeEnvironmentKey: String {
         switch self {
-        case .claude: return "CLAUDE_CONFIG_DIR"
-        case .codex:  return "CODEX_HOME"
+        case .claude: return ClaudeProfile.homeEnvironmentKey
+        case .codex:  return CodexProfile.homeEnvironmentKey
         }
     }
 }

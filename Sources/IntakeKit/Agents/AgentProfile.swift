@@ -186,7 +186,7 @@ public enum AgentProfiles {
     /// outside this set, so a round can never be configured to run a harness that would only
     /// fail at round time. Track G adds `.grok` and Track M adds `.gemini` when their builders
     /// land — and not before, which is what keeps master shippable meanwhile.
-    public static let headlessReady: Set<Harness> = [.claude, .codex]
+    public static let headlessReady: Set<Harness> = [.claude, .codex, .grok]
 }
 
 // MARK: - Stub conformers (Track 0)
@@ -198,34 +198,6 @@ public enum AgentProfiles {
 
 private func stubSignInCheck(_ marker: String) -> SignInCheck {
     SignInCheck(arguments: [], signedOutHint: marker, isSignedIn: { _ in false })
-}
-
-public struct ClaudeProfile: AgentProfile {
-    public init() {}
-    public var id: Harness { .claude }
-    public var family: ModelFamily { .claude }
-    public var binaryName: String { "claude" }
-    public var signInCheck: SignInCheck { stubSignInCheck(AgentProfileStub.trackP) }
-    public var modelCatalog: ProfileModelCatalog { .empty }
-    public func parseModelList(_ stdout: String) -> [String] { [] }
-    public var hasNativeSchema: Bool { true }
-    public func classify(error: AgentErrorSignal) -> AgentFailureKind? { nil }
-    public func environment(base: [String: String], account: AgentAccountRef?) -> [String: String] { base }
-    public var unimplemented: String? { AgentProfileStub.trackP }
-}
-
-public struct CodexProfile: AgentProfile {
-    public init() {}
-    public var id: Harness { .codex }
-    public var family: ModelFamily { .codex }
-    public var binaryName: String { "codex" }
-    public var signInCheck: SignInCheck { stubSignInCheck(AgentProfileStub.trackP) }
-    public var modelCatalog: ProfileModelCatalog { .empty }
-    public func parseModelList(_ stdout: String) -> [String] { [] }
-    public var hasNativeSchema: Bool { true }
-    public func classify(error: AgentErrorSignal) -> AgentFailureKind? { nil }
-    public func environment(base: [String: String], account: AgentAccountRef?) -> [String: String] { base }
-    public var unimplemented: String? { AgentProfileStub.trackP }
 }
 
 // `GrokProfile` lives in GrokProfile.swift (Track G).

@@ -1,4 +1,5 @@
 import Foundation
+import IntakeKit
 
 /// One `claude` option Flight Deck models with a control.
 struct FlagSpec: Equatable {
@@ -73,10 +74,12 @@ enum ClaudeFlagCatalog {
 
     static let all: [FlagSpec] = [
         // MARK: Model & Effort
-        .init("--model", kind: .choice(["fable", "opus", "sonnet", "haiku"], allowsCustom: true),
+        // Model aliases and effort values are the claude profile's, so Settings, routing and
+        // planning offer one list — Settings alone offering `fable` was the drift this ends.
+        .init("--model", kind: .choice(ClaudeProfile.catalog.aliases, allowsCustom: true),
               section: .modelEffort, label: "Model",
               help: "Alias for the latest model, or a full model name."),
-        .init("--effort", kind: .choice(["low", "medium", "high", "xhigh", "max"], allowsCustom: false),
+        .init("--effort", kind: .choice(ClaudeProfile.catalog.effortValues, allowsCustom: false),
               section: .modelEffort, label: "Effort",
               help: "Reasoning effort level for the session."),
         .init("--autocompact", kind: .choice(["auto"], allowsCustom: true),

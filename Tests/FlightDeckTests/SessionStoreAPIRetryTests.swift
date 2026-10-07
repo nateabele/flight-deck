@@ -287,10 +287,12 @@ final class SessionStoreAPIRetryTests: XCTestCase {
     /// Codex's own vocabulary for a capacity failure — the rollout's snake_case spelling,
     /// captured by the probe and matched by `CodexTurnRecovery`'s allowlist.
     ///
-    /// **Deliberately not `Self.transient`.** Claude's `"overloaded"` is not on codex's list,
-    /// and the first draft of the codex test below used the shared fixture and failed to arm —
-    /// which is the classifier being genuinely consulted per agent rather than the scheduler
-    /// deciding transience for itself. `isTransient` is set as `CodexEventMapper` would set
+    /// **Deliberately not `Self.transient`.** When this was written claude's `"overloaded"` was
+    /// not on codex's list, and the first draft of the codex test below used the shared fixture
+    /// and failed to arm — the classifier being genuinely consulted per agent rather than the
+    /// scheduler deciding transience for itself. The lists have since merged into
+    /// `AgentErrorVocabulary` (both spellings now retry for both agents), but codex's own
+    /// spelling is still the honest fixture for a codex tab. `isTransient` is set as `CodexEventMapper` would set
     /// it; `CodexTurnRecovery` ignores the flag and reads `kind`, so it is not a backdoor.
     private static let codexTransient = SessionAPIError(
         status: 429, kind: "response_too_many_failed_attempts", isTransient: true)

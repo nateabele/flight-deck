@@ -589,7 +589,7 @@ public struct RoundExecutor: Sendable {
 
         let request = HarnessRequest(harness: choice.harness, model: choice.model, effort: choice.effort, cwd: cwd,
                                      readableDirs: readable, prompt: prompt, schemaFile: schemaFile, schemaJSON: schema,
-                                     resumeSessionID: resume, access: access)
+                                     resumeSessionID: resume, access: access, account: choice.account)
         // `build` traps on an invalid write-mode request; checking first turns a wiring bug
         // into a paused round instead of a crashed runner.
         if let invalid = HarnessCommand.validate(request) {
@@ -605,7 +605,9 @@ public struct RoundExecutor: Sendable {
             return .failed(Diagnosis(category: .harnessError, detail: "\(choice.harness.rawValue) cannot run in planning rounds yet: \(error)",
                                      action: "Switch this slot to another harness."), sessionID: nil)
         }
-        let environment = HarnessCommand.environment(for: command, base: inputs.environment, home: userHome)
+        // The seat's own account, when the Rounds editor bound one: nil is the built-in home.
+        let environment = HarnessCommand.environment(for: command, base: inputs.environment, home: userHome,
+                                                     account: request.account)
 
         // stdout is appended live, chunk by chunk as the child writes it, so the stream on disk
         // is never more than a pipe read behind the child — the runner's reader thread is the
