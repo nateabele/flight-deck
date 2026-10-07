@@ -30,11 +30,35 @@ final class HarnessCommandGeminiTests: XCTestCase {
     func testFreshReadOnlySeat() throws {
         let cmd = try HarnessCommand.build(geminiRequest(), home: noHome)
         XCTAssertEqual(cmd.executable, "agy")
-        XCTAssertEqual(cmd.arguments, ["-p", "P", "--output-format", "stream-json",
-                                       "--json-schema", "/intake/runs/x/schema.json", "--model", "gemini-3.8-flash-low",
-                                       "--effort", "high", "--disable-slash-commands",
-                                       "--mode", "plan", "--add-dir", "/intake", "--add-dir", "/shadow"])
+        XCTAssertEqual(cmd.arguments, ["-p", "P" + HarnessCommand.geminiReadOnlyNote, "--output-format", "stream-json",
+                                       "--json-schema", "{}", "--model", "gemini-3.8-flash-low", "--disable-slash-commands",
+                                       "--sandbox", "--add-dir", "/intake", "--add-dir", "/shadow"])
         XCTAssertEqual(cmd.unsetEnvironment, [])
+    }
+
+    /// The model id carries the effort; a separate `--effort` could only contradict it.
+    func testNeverPassesEffort() throws {
+        XCTAssertFalse(try HarnessCommand.build(geminiRequest(effort: "high"), home: noHome).arguments.contains("--effort"))
+        XCTAssertEqual(GeminiProfile().modelCatalog.effortValues, [])
+        XCTAssertEqual(RoundConfigEditor.effortChoices(for: .gemini), [], "the editor hides the knob")
+    }
+
+    /// Gemini refuses `null` inside `enum` (probed: 400 on the triage schema). The rewrite to
+    /// `anyOf` must accept exactly the same values.
+    func testSchemaIsRewrittenWithoutNullEnums() throws {
+        let schema = #"{"type":"object","properties":{"preset":{"type":["string","null"],"enum":["a","b",null]},"n":{"type":["string","null"]}}}"#
+        let rewritten = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(GeminiSchema.compatible(schema).utf8)) as? [String: Any])
+        let preset = try XCTUnwrap((rewritten["properties"] as? [String: Any])?["preset"] as? [String: Any])
+        let anyOf = try XCTUnwrap(preset["anyOf"] as? [[String: Any]])
+        XCTAssertEqual(anyOf[0]["type"] as? String, "string")
+        XCTAssertEqual(anyOf[0]["enum"] as? [String], ["a", "b"])
+        XCTAssertEqual(anyOf[1] as? [String: String], ["type": "null"])
+        XCTAssertEqual((rewritten["properties"] as? [String: Any])?["n"] as? [String: [String]], ["type": ["string", "null"]],
+                       "a nullable without an enum is left alone")
+        // The real triage schema: no null survives in any enum.
+        let triage = try String(decoding: fixture("triage-schema", "json", Self.self), as: UTF8.self)
+        XCTAssertFalse(GeminiSchema.compatible(triage).contains(",null]"))
+        XCTAssertTrue(triage.contains(",null]"))
     }
 
     func testResumeUsesTheSeatsOwnConversationID() throws {
@@ -53,12 +77,14 @@ final class HarnessCommandGeminiTests: XCTestCase {
         }
     }
 
+    /// Read-only rests on agy's permission system: no mode that approves edits, never the
+    /// skip flag (probed: with it, plan mode wrote files), and the sandbox for commands.
     func testReadOnlyNeverGrantsEditsOrSkipsPermissions() throws {
         for resume in [nil, "conv-7"] {
             let args = try HarnessCommand.build(geminiRequest(resume: resume), home: noHome).arguments
-            XCTAssertEqual(geminiFlag("--mode", in: args), "plan")
-            XCTAssertFalse(args.contains("accept-edits"))
+            XCTAssertNil(geminiFlag("--mode", in: args))
             XCTAssertFalse(args.contains("--dangerously-skip-permissions"))
+            XCTAssertTrue(args.contains("--sandbox"))
         }
     }
 
@@ -66,6 +92,8 @@ final class HarnessCommandGeminiTests: XCTestCase {
         let work = URL(fileURLWithPath: "/intake/work")
         let cmd = try HarnessCommand.build(geminiRequest(access: .writeInWork(work), cwd: "/intake/work"), home: noHome)
         XCTAssertEqual(geminiFlag("--mode", in: cmd.arguments), "accept-edits")
+        XCTAssertTrue(cmd.arguments.contains("--sandbox"))
+        XCTAssertEqual(geminiFlag("-p", in: cmd.arguments), "P", "the read-only note is not the integrator's")
         // `--add-dir` widens where edits may land, so write mode adds none.
         XCTAssertFalse(cmd.arguments.contains("--add-dir"))
         XCTAssertFalse(cmd.arguments.contains("--dangerously-skip-permissions"))
@@ -90,11 +118,6 @@ final class HarnessCommandGeminiTests: XCTestCase {
         }
     }
 
-    func testEmptyEffortIsOmitted() throws {
-        let args = try HarnessCommand.build(geminiRequest(effort: ""), home: noHome).arguments
-        XCTAssertFalse(args.contains("--effort"))
-    }
-
     func testEnvironmentScrubsChildSessionAndKeepsTheBuiltInAccount() {
         let base = ["PATH": "/usr/bin", "HOME": "/Users/x", "CLAUDE_CODE_CHILD_SESSION": "1", "CLAUDECODE": "1"]
         let account = AgentAccountRef(id: "other", home: URL(fileURLWithPath: "/accounts/other"))
@@ -106,17 +129,30 @@ final class HarnessCommandGeminiTests: XCTestCase {
 // MARK: - Output
 
 final class HarnessOutputGeminiTests: XCTestCase {
+    /// A real `--output-format json` resume (agy 1.3.1): `structured_output` is the answer,
+    /// although `response` carries extra keys the schema forbids.
     func testParsesTheJSONResult() throws {
         let out = try HarnessOutput.parse(.gemini, stdout: try fixture("gemini-p-json", "json", Self.self))
-        XCTAssertEqual(out.sessionID, "6c1f4c0e-3a51-4b8e-9d0e-1f2a3b4c5d6e")
-        XCTAssertEqual(try JSONSerialization.jsonObject(with: out.structured) as? [String: String],
-                       ["plan": "# Plan\n\n## Scope\nOne\n"])
+        XCTAssertEqual(out.sessionID, "ff16f91d-63eb-4721-a707-784844faf067")
+        XCTAssertEqual(try JSONSerialization.jsonObject(with: out.structured) as? [String: String], ["plan": "417"])
     }
 
     func testParsesTheStreamsFinalResult() throws {
-        let out = try HarnessOutput.parse(.gemini, stdout: try fixture("gemini-stream-activity", "jsonl", Self.self))
-        XCTAssertEqual(out.sessionID, "6c1f4c0e-3a51-4b8e-9d0e-1f2a3b4c5d6e")
-        XCTAssertEqual(try JSONSerialization.jsonObject(with: out.structured) as? [String: String], ["plan": "# Plan"])
+        let out = try HarnessOutput.parse(.gemini, stdout: try fixture("gemini-stream-schema", "jsonl", Self.self))
+        XCTAssertEqual(out.sessionID, "f3a73f46-c54b-44b9-a89d-5eeaeba5dda8")
+        XCTAssertEqual(try JSONSerialization.jsonObject(with: out.structured) as? [String: String],
+                       ["plan": "All actions executed, verified, and documented in plan and walkthrough artifacts."])
+    }
+
+    /// A real read-only turn that tried to write: SUCCESS, no answer, `denied_actions`. That is
+    /// the answerless failure `SchemaRepair` resumes — and its conversation is still reported.
+    func testATurnEndedByADeniedToolIsAnswerless() throws {
+        let stdout = try fixture("gemini-denied-stream", "jsonl", Self.self)
+        XCTAssertThrowsError(try HarnessOutput.parse(.gemini, stdout: stdout)) {
+            XCTAssertEqual($0 as? HarnessOutput.ParseError, .isError(GeminiProfile.answerlessTurnMarker + " (denied: write_file)"))
+        }
+        XCTAssertEqual(HarnessOutput.reportedSession(.gemini, stdout: stdout), "ff16f91d-63eb-4721-a707-784844faf067")
+        XCTAssertNil(HarnessOutput.reportedSession(.claude, stdout: stdout))
     }
 
     /// A signed-out run reports an ERROR result with an EMPTY conversation id: the error must
@@ -137,14 +173,11 @@ final class HarnessOutputGeminiTests: XCTestCase {
         }
     }
 
-    /// Without `structured_output`, the response text must itself be JSON — prose is rejected.
-    func testFallsBackToTheResponseOnlyWhenItIsJSON() throws {
-        let ok = Data(#"{"conversation_id":"c1","status":"SUCCESS","response":"{\"a\":1}"}"#.utf8)
-        XCTAssertEqual(try JSONSerialization.jsonObject(with: try HarnessOutput.parse(.gemini, stdout: ok).structured) as? [String: Int],
-                       ["a": 1])
-        let prose = Data(#"{"conversation_id":"c1","status":"SUCCESS","response":"Here you go: {\"a\":1}"}"#.utf8)
-        XCTAssertThrowsError(try HarnessOutput.parse(.gemini, stdout: prose)) {
-            XCTAssertEqual($0 as? HarnessOutput.ParseError, .notJSON("Here you go: {\"a\":1}"))
+    /// The response text is never taken as the answer, even when it is JSON.
+    func testNeverTakesTheResponseTextAsTheAnswer() {
+        let json = Data(#"{"conversation_id":"c1","status":"SUCCESS","response":"{\"a\":1}"}"#.utf8)
+        XCTAssertThrowsError(try HarnessOutput.parse(.gemini, stdout: json)) {
+            XCTAssertEqual($0 as? HarnessOutput.ParseError, .isError(GeminiProfile.answerlessTurnMarker))
         }
     }
 }
@@ -168,9 +201,25 @@ final class GeminiFailureDiagnosisTests: XCTestCase {
 
     func testBadModelIsAHarnessError() throws {
         let d = FailureDiagnosis.classify(exitCode: 1, stdout: try fixture("gemini-bad-model-stdout", "jsonl", Self.self),
+                                          stderr: String(decoding: try fixture("gemini-bad-model-stderr", "txt", Self.self), as: UTF8.self),
+                                          parseError: nil, harness: .gemini)
+        XCTAssertEqual(d.category, .harnessError)
+    }
+
+    /// A schema Gemini's API refuses (probed with the un-rewritten triage schema) is the
+    /// harness's fault, not the account's.
+    func testRejectedSchemaIsAHarnessError() throws {
+        let d = FailureDiagnosis.classify(exitCode: 3, stdout: try fixture("gemini-schema-rejected", "jsonl", Self.self),
                                           stderr: "", parseError: nil, harness: .gemini)
         XCTAssertEqual(d.category, .harnessError)
-        XCTAssertTrue(d.detail.contains("invalid model selection"), d.detail)
+        XCTAssertTrue(d.detail.contains("INVALID_ARGUMENT"), d.detail)
+    }
+
+    func testUnverifiedAccountIsAuth() {
+        let stdout = Data(#"{"conversation_id":"","status":"ERROR","response":"","error":"Eligibility check failed: Your current account is not eligible for Antigravity. Verify your account to continue."}"#.utf8)
+        let d = FailureDiagnosis.classify(exitCode: 1, stdout: stdout, stderr: "", parseError: nil, harness: .gemini)
+        XCTAssertEqual(d.category, .authExpired)
+        XCTAssertEqual(d.action, "Run `agy` in a terminal and verify your Google account")
     }
 
     /// UNVERIFIED spelling: no real agy rate limit has been captured. Google's API reports
@@ -202,20 +251,29 @@ final class GeminiFailureDiagnosisTests: XCTestCase {
 // MARK: - Activity
 
 final class GeminiActivityParserTests: XCTestCase {
+    /// The real read-only triage stream (agy 1.3.1): it read README.md, then tried a shell
+    /// command the headless mode denied, which ended the turn without an answer.
     func testFoldsTheStream() throws {
         let tick = Date(timeIntervalSince1970: 9)
         var parser = ActivityParser(harness: .gemini, project: URL(fileURLWithPath: "/proj"), now: { tick })
         parser.feed(try fixture("gemini-stream-activity", "jsonl", Self.self))
         let a = parser.activity
         XCTAssertEqual(a.lastEventAt, tick)
-        XCTAssertEqual(a.headline, "Reading the README first.")
-        XCTAssertEqual(a.action, ActivityAction(verb: "Searching", object: "\"func run\""))
+        XCTAssertEqual(a.action, ActivityAction(verb: "Running", object: "git status"))
         XCTAssertEqual(a.footprint, [".": 1])
-        XCTAssertEqual(a.inputTokens, 1500)
-        XCTAssertEqual(a.outputTokens, 60)
+        XCTAssertEqual(a.inputTokens, 28387)
+        XCTAssertEqual(a.outputTokens, 136)
         XCTAssertTrue(a.finished)
-        XCTAssertNil(a.error)
+        XCTAssertEqual(a.error, "denied: command")
         XCTAssertNil(a.rateLimitWindows)
+    }
+
+    func testFoldsASuccessfulStream() throws {
+        var parser = ActivityParser(harness: .gemini, project: URL(fileURLWithPath: "/proj"), now: { Date() })
+        parser.feed(try fixture("gemini-stream-schema", "jsonl", Self.self))
+        XCTAssertTrue(parser.activity.finished)
+        XCTAssertNil(parser.activity.error)
+        XCTAssertEqual(parser.activity.footprint["."], 2, "README.md and NOTES.md")
     }
 
     func testAnErrorResultIsTheSeatsError() throws {
@@ -267,6 +325,21 @@ final class SchemaRepairRetryTests: XCTestCase {
         XCTAssertNil(SchemaRepair.retry(profile: SchemaLess(), failure: invalid, sessionID: nil, access: .readOnly, isRepair: false))
         XCTAssertNil(SchemaRepair.retry(profile: SchemaLess(), failure: invalid, sessionID: "S1",
                                         access: .writeInWork(URL(fileURLWithPath: "/w")), isRepair: false))
+    }
+
+    /// agy's answerless turn (a denied tool) is resumed once even though agy has a native
+    /// schema — and only that failure, only read-only, only once.
+    func testAnAnswerlessGeminiTurnIsResumedOnce() {
+        let answerless = Diagnosis(category: .invalidOutput,
+                                   detail: "isError(\"\(GeminiProfile.answerlessTurnMarker) (denied: write_file)\")", action: "")
+        XCTAssertEqual(SchemaRepair.retry(profile: GeminiProfile(), failure: answerless, sessionID: "C1", access: .readOnly, isRepair: false),
+                       SchemaRepair.Retry(resumeSessionID: "C1", prompt: SchemaRepair.answerlessPrompt))
+        XCTAssertNil(SchemaRepair.retry(profile: GeminiProfile(), failure: answerless, sessionID: "C1", access: .readOnly, isRepair: true))
+        XCTAssertNil(SchemaRepair.retry(profile: GeminiProfile(), failure: answerless, sessionID: nil, access: .readOnly, isRepair: false))
+        XCTAssertNil(SchemaRepair.retry(profile: GeminiProfile(), failure: answerless, sessionID: "C1",
+                                        access: .writeInWork(URL(fileURLWithPath: "/w")), isRepair: false))
+        XCTAssertNil(SchemaRepair.retry(profile: ClaudeProfile(), failure: answerless, sessionID: "C1", access: .readOnly, isRepair: false),
+                     "claude has no answerless failure")
     }
 
     func testNativeSchemaHarnessesNeverRetry() {
@@ -430,8 +503,28 @@ final class GeminiSeatTests: XCTestCase {
         for seat in seats {
             XCTAssertFalse(seat.isResume)
             XCTAssertFalse(seat.arguments.contains("--continue"))
-            XCTAssertEqual(geminiFlag("--mode", in: seat.arguments), "plan")
+            XCTAssertNil(geminiFlag("--mode", in: seat.arguments))
+            XCTAssertTrue(seat.arguments.contains("--sandbox"))
         }
+    }
+
+    /// A drafter whose turn agy ended on a denied tool is resumed ONCE, on its own conversation,
+    /// and the resumed answer stands.
+    func testAnAnswerlessDrafterIsResumedOnItsOwnConversation() async throws {
+        let denied = try fixture("gemini-denied-stream", "jsonl", Self.self)
+        let runner = ScriptedHarnessRunner { call in
+            call.isResume ? ok(call, "ff16f91d-63eb-4721-a707-784844faf067", json(DraftOutput(plan: "# recovered")))
+                          : CommandResult(stdout: denied, stderr: "", exitCode: 0)
+        }
+        let result = try await executor(runner).run(PlannedRound(stage: .draft, round: 0, major: true),
+                                                    inputs(drafters: [Slot(gemini)]))
+        guard case .checkpoint(let cp, let files) = result else { return XCTFail("expected a checkpoint, got \(result)") }
+        XCTAssertEqual(cp.record.slots.map(\.status), [.ok])
+        XCTAssertEqual(files["drafts/0.md"].map { String(decoding: $0, as: UTF8.self) }, "# recovered")
+        let runs = runner.calls.filter { $0.executable == "agy" && $0.arguments != ["models"] }
+        XCTAssertEqual(runs.count, 2)
+        XCTAssertEqual(geminiFlag("--conversation", in: runs[1].arguments), "ff16f91d-63eb-4721-a707-784844faf067")
+        XCTAssertTrue(runs[1].prompt.hasPrefix(SchemaRepair.answerlessPrompt))
     }
 
     /// The preflight: a signed-out agy pauses the seat as `authExpired` and the real run is

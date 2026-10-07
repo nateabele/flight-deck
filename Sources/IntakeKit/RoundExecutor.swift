@@ -674,9 +674,11 @@ public struct RoundExecutor: Sendable {
                                                             harness: choice.harness), sessionID: parsed.sessionID)
             }
         } catch {
+            // agy reports its conversation even on a turn that produced no answer, and that
+            // turn is resumable (`SchemaRepair`); every other harness still reports none here.
             outcome = .failed(FailureDiagnosis.classify(exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr,
                                                         parseError: error is NonZeroExit ? nil : error, harness: choice.harness),
-                              sessionID: nil)
+                              sessionID: error is NonZeroExit ? nil : HarnessOutput.reportedSession(choice.harness, stdout: result.stdout))
         }
         // The finished record goes down BEFORE stderr: a write that fails would otherwise
         // leave a pid with no `finished`, which a restart's reaper reads as a child still
