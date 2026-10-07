@@ -126,6 +126,9 @@ public struct ActivityParser: Sendable {
     /// per message id and summed — adding each event's would count a message several times.
     private var claudeUsage: [String: (input: Int, output: Int)] = [:]
     private var codexTurns: (input: Int, output: Int) = (0, 0)
+    /// agy streams its answer as `text_delta`s; the headline is the first sentence of the
+    /// response so far, so the deltas are joined before it is cut.
+    private var geminiResponse = ""
 
     /// `project` is what footprint and display paths are relative to; `cwd` (default: the
     /// project) is what a relative path in a shell command resolves against — the integrator
@@ -165,15 +168,102 @@ public struct ActivityParser: Sendable {
     // MARK: - Fold
 
     private mutating func fold(_ line: Data) {
-        guard let obj = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
-              let type = obj["type"] as? String else { return }
+        guard let obj = try? JSONSerialization.jsonObject(with: line) as? [String: Any] else { return }
+        // agy tags its events `event`, not `type` (agy 1.2.3 stream-json).
+        if activity.harness == .gemini {
+            guard let event = obj["event"] as? String ?? obj["type"] as? String else { return }
+            activity.lastEventAt = now()
+            foldGemini(event, obj)
+            return
+        }
+        guard let type = obj["type"] as? String else { return }
         activity.lastEventAt = now()
         switch activity.harness {
         case .codex: foldCodex(type, obj)
         case .claude: foldClaude(type, obj)
-        // Generic until Tracks G/M capture real streams: `lastEventAt` (set above) still shows
+        // Generic until Track G captures real streams: `lastEventAt` (set above) still shows
         // the seat is alive; guessing at an unprobed event schema could only mislabel it.
         case .grok, .gemini: break
+        }
+    }
+
+    /// `agy --output-format stream-json`: `init`, then one `step_update` per step state change
+    /// (`step_type` user_input / agent_response / tool / checkpoint), then `result`.
+    private mutating func foldGemini(_ event: String, _ obj: [String: Any]) {
+        switch event {
+        case "step_update":
+            guard let step = obj["step_update"] as? [String: Any] else { return }
+            if let usage = step["usage"] as? [String: Any] { foldGeminiUsage(usage) }
+            switch step["step_type"] as? String {
+            case "tool":
+                let info = step["tool_info"] as? [String: Any] ?? [:]
+                let name = step["tool_name"] as? String ?? info["name"] as? String ?? ""
+                foldGeminiTool(name, geminiParameters(info["parameters"]))
+            case "agent_response":
+                // The model's own words while it works: its first sentence is the headline,
+                // the nearest thing agy streams to claude's thinking or codex's reasoning.
+                // Not when that text is the structured answer itself: a headline reading
+                // `{"changeSet": …` says nothing.
+                if let text = step["text_delta"] as? String {
+                    geminiResponse += text
+                    let lead = geminiResponse.trimmingCharacters(in: .whitespacesAndNewlines).first
+                    if let lead, !"{[`".contains(lead) { setHeadline(geminiResponse) }
+                }
+            default: break
+            }
+        case "result":
+            let result = obj["result"] as? [String: Any] ?? [:]
+            if let usage = result["usage"] as? [String: Any] { foldGeminiUsage(usage) }
+            if let status = result["status"] as? String, status != "SUCCESS" {
+                activity.error = result["error"] as? String ?? status
+            }
+            activity.finished = true
+        default: break
+        }
+    }
+
+    private mutating func foldGeminiUsage(_ usage: [String: Any]) {
+        activity.inputTokens = int(usage["input_tokens"]) + int(usage["cache_read_tokens"])
+        activity.outputTokens = int(usage["output_tokens"]) + int(usage["thinking_tokens"])
+    }
+
+    /// `tool_info.parameters` arrives as an object, or as that object's JSON text.
+    private func geminiParameters(_ any: Any?) -> [String: Any] {
+        if let dict = any as? [String: Any] { return dict }
+        if let text = any as? String, let dict = try? JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any] {
+            return dict
+        }
+        return [:]
+    }
+
+    /// agy's tool names (the Antigravity agent's tool set). Unknown ones read "Using <name>".
+    private mutating func foldGeminiTool(_ name: String, _ input: [String: Any]) {
+        let path = ["AbsolutePath", "absolute_path", "file_path", "path", "TargetFile", "target_file", "DirectoryPath",
+                    "directory_path", "SearchPath", "search_path"].lazy.compactMap { input[$0] as? String }.first
+        switch name {
+        case "view_file", "read_file", "view_file_outline", "view_code_item":
+            if let path { touch(path) }
+            activity.action = ActivityAction(verb: "Reading", object: path.map(display))
+        case "write_to_file", "replace_file_content", "multi_replace_file_content", "write_file", "edit_file", "replace":
+            if let path { touch(path) }
+            activity.action = ActivityAction(verb: "Editing", object: path.map(display))
+        case "grep_search", "search_file_content", "codebase_search":
+            let query = ["Query", "query", "pattern"].lazy.compactMap { input[$0] as? String }.first
+            activity.action = ActivityAction(verb: "Searching", object: query.map(quoted))
+        case "list_dir", "find_by_name", "list_directory", "glob":
+            activity.action = ActivityAction(verb: "Listing", object: path.map(display))
+        case "run_command", "run_shell_command":
+            if let command = ["CommandLine", "command_line", "command"].lazy.compactMap({ input[$0] as? String }).first {
+                foldCommand(command, unwrapShell: false)
+            } else {
+                activity.action = ActivityAction(verb: "Running", object: nil)
+            }
+        case "search_web", "google_web_search":
+            activity.action = ActivityAction(verb: "Searching the web", object: input["query"] as? String)
+        case "read_url_content", "web_fetch":
+            activity.action = ActivityAction(verb: "Fetching", object: (input["Url"] ?? input["url"]) as? String)
+        default:
+            activity.action = ActivityAction(verb: "Using", object: name.isEmpty ? nil : name)
         }
     }
 

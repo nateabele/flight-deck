@@ -23,7 +23,9 @@ final class AgentProfileContractTests: XCTestCase {
             let profile = AgentProfiles.profile(for: harness)
             XCTAssertEqual(profile.id, harness)
             XCTAssertEqual(profile.family, ModelFamily(harness))
-            XCTAssertEqual(profile.binaryName, harness.rawValue)
+            // Gemini runs through Antigravity's `agy` (Track M): the gemini CLI no longer
+            // serves Google AI Pro accounts. Every other binary is its harness's raw value.
+            XCTAssertEqual(profile.binaryName, harness == .gemini ? "agy" : harness.rawValue)
         }
     }
 
@@ -53,7 +55,7 @@ final class AgentProfileContractTests: XCTestCase {
         XCTAssertTrue(AgentProfiles.profile(for: .claude).hasNativeSchema)
         XCTAssertTrue(AgentProfiles.profile(for: .codex).hasNativeSchema)
         XCTAssertTrue(AgentProfiles.profile(for: .grok).hasNativeSchema)
-        XCTAssertFalse(AgentProfiles.profile(for: .gemini).hasNativeSchema)
+        XCTAssertTrue(AgentProfiles.profile(for: .gemini).hasNativeSchema, "agy --json-schema")
     }
 
     /// The seam is wired but decides nothing yet; a native-schema harness must never retry,
@@ -112,7 +114,7 @@ final class AgentProfileContractTests: XCTestCase {
     // MARK: Refusal
 
     func testBuildRefusesGrokAndGemini() {
-        for harness in [Harness.grok, .gemini] {
+        for harness in [Harness.grok] {
             XCTAssertThrowsError(try HarnessCommand.build(req(harness), home: Self.noHome)) { error in
                 XCTAssertEqual(error as? HarnessCommand.HarnessCommandError, .harnessNotImplemented(harness))
             }
@@ -121,7 +123,7 @@ final class AgentProfileContractTests: XCTestCase {
 
     func testParseRefusesGrokAndGemini() {
         let stdout = Data(#"{"session_id":"S","structured_output":{}}"#.utf8)
-        for harness in [Harness.grok, .gemini] {
+        for harness in [Harness.grok] {
             XCTAssertThrowsError(try HarnessOutput.parse(harness, stdout: stdout)) { error in
                 XCTAssertEqual(error as? HarnessOutput.ParseError, .harnessNotImplemented(harness))
             }
@@ -142,9 +144,9 @@ final class AgentProfileContractTests: XCTestCase {
         XCTAssertEqual(auth.category, .authExpired)
         XCTAssertEqual(auth.action, "Sign in to `grok` in a terminal")
         let gemini = FailureDiagnosis.classify(exitCode: 1, stdout: Data(), stderr: "Unauthorized", parseError: nil, harness: .gemini)
-        XCTAssertEqual(gemini.action, "Sign in to `gemini` in a terminal")
+        XCTAssertEqual(gemini.action, "Run `agy` in a terminal to sign in")
 
-        var parser = ActivityParser(harness: .gemini, project: URL(fileURLWithPath: "/proj"), now: { Date(timeIntervalSince1970: 5) })
+        var parser = ActivityParser(harness: .grok, project: URL(fileURLWithPath: "/proj"), now: { Date(timeIntervalSince1970: 5) })
         parser.feed(Data(#"{"type":"anything","text":"hi"}"#.utf8 + [UInt8(ascii: "\n")]))
         XCTAssertEqual(parser.activity.lastEventAt, Date(timeIntervalSince1970: 5))
         XCTAssertNil(parser.activity.error)
@@ -157,10 +159,9 @@ final class AgentProfileContractTests: XCTestCase {
         let gemini = ModelChoice(harness: .gemini, model: "pro", effort: "")
         let claude = ModelChoice(harness: .claude, model: "opus", effort: "high")
         let available = AvailableModels(choices: [.grok: grok, .gemini: gemini, .claude: claude])
-        XCTAssertEqual(available.harnesses, [.claude])
+        XCTAssertEqual(available.harnesses, [.claude, .gemini])
         XCTAssertNil(available.choice(for: .grok))
-        XCTAssertNil(available.choice(for: .gemini))
-        XCTAssertEqual(RoundConfigEditor.harnesses(in: available), [.claude])
+        XCTAssertEqual(RoundConfigEditor.harnesses(in: available), [.claude, .gemini])
         XCTAssertEqual(RoundConfigEditor.harnesses(in: .defaults), [.codex, .claude])
     }
 
@@ -174,7 +175,11 @@ final class AgentProfileContractTests: XCTestCase {
             try Data("#!/bin/sh\n".utf8).write(to: file)
             try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: file.path)
         }
-        let available = TriageSettings.available(path: bin.path)
+        // No `agy` here, so gemini is not offered either (the `gemini` CLI is not what the
+        // harness drives); the probe must never run.
+        let available = TriageSettings.available(path: bin.path, probe: SignInProbe { _, _, _ in
+            XCTFail("no agy installed, so no sign-in probe"); return nil
+        })
         XCTAssertEqual(available.harnesses, [.codex, .claude])
     }
 }

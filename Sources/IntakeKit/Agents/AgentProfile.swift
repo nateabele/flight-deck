@@ -151,10 +151,17 @@ public protocol AgentProfile: Sendable {
     /// constants, naming the track that owns it. A track deletes its conformer's override when
     /// the real profile lands; tests assert on this, never on behaviour, to tell stub from real.
     var unimplemented: String? { get }
+    /// Whether a headless run must be preceded by `signInCheck`. True for a CLI whose headless
+    /// mode, when signed out, STARTS an interactive sign-in (opens a browser, waits for a
+    /// code) instead of failing fast — `agy -p` does, so a seat on a signed-out account would
+    /// launch a Google sign-in in the human's browser. The executor runs the check first and
+    /// pauses the round with `authExpired` rather than spawning the run.
+    var headlessSignInPreflight: Bool { get }
 }
 
 public extension AgentProfile {
     var unimplemented: String? { nil }
+    var headlessSignInPreflight: Bool { false }
 }
 
 /// The stub markers. Each names the track that replaces the stub. When no conformer returns
@@ -243,18 +250,4 @@ public struct GrokProfile: AgentProfile {
     public var unimplemented: String? { AgentProfileStub.trackG }
 }
 
-public struct GeminiProfile: AgentProfile {
-    public init() {}
-    public var id: Harness { .gemini }
-    public var family: ModelFamily { .gemini }
-    /// May become `agy` if Track M's probe finds `gemini -p` refuses an AI Pro account (spec §2).
-    public var binaryName: String { "gemini" }
-    public var signInCheck: SignInCheck { stubSignInCheck(AgentProfileStub.trackM) }
-    public var modelCatalog: ProfileModelCatalog { .empty }
-    public func parseModelList(_ stdout: String) -> [String] { [] }
-    /// gemini 0.59.0 has no schema flag (spec §2), so its seats take the repair path.
-    public var hasNativeSchema: Bool { false }
-    public func classify(error: AgentErrorSignal) -> AgentFailureKind? { nil }
-    public func environment(base: [String: String], account: AgentAccountRef?) -> [String: String] { base }
-    public var unimplemented: String? { AgentProfileStub.trackM }
-}
+// `GeminiProfile` lives in GeminiProfile.swift (Track M).

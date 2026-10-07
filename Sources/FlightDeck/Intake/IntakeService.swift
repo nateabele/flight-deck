@@ -24,15 +24,100 @@ struct TriageSettings: Equatable, Sendable {
     /// claude defaults for whichever is installed. Neither found falls back to claude alone,
     /// exactly as `detect` does — `PresetExpansion` needs at least one model, and a round that
     /// then fails to find `claude` says so in its own diagnosis rather than never starting.
-    static func available(path: String? = LoginShellPath.repairing()["PATH"]) -> AvailableModels {
+    ///
+    /// A harness with a sign-in check (gemini) is offered only when its binary is installed AND
+    /// the check says signed in; otherwise it lands in `unavailable` with the reason, so the
+    /// editor can say why it is missing. `probe` runs the check (injectable: tests never spawn).
+    static func available(path: String? = LoginShellPath.repairing()["PATH"],
+                          probe: SignInProbe = SignInProbe.system) -> AvailableModels {
         let codex = installed("codex", path: path), claude = installed("claude", path: path)
-        return AvailableModels(codex: codex ? AvailableModels.defaults.codex : nil,
-                               claude: claude || !codex ? AvailableModels.defaults.claude : nil)
+        var choices: [Harness: ModelChoice] = [:]
+        choices[.codex] = codex ? AvailableModels.defaults.codex : nil
+        choices[.claude] = claude || !codex ? AvailableModels.defaults.claude : nil
+        var models: [Harness: [String]] = [:], unavailable: [Harness: String] = [:]
+        let gemini = GeminiProfile()
+        switch readiness(gemini, path: path, probe: probe) {
+        case .ready(let listed):
+            models[.gemini] = listed
+            // The profile's default when the account offers it, else the first listed model —
+            // never a default the account would refuse at round time.
+            let model = listed.contains(GeminiProfile.defaultPlanningModel) ? GeminiProfile.defaultPlanningModel : listed[0]
+            choices[.gemini] = ModelChoice(harness: .gemini, model: model, effort: gemini.modelCatalog.defaultPlanningEffort)
+        case .notInstalled:
+            unavailable[.gemini] = "Gemini: not installed"
+        case .signedOut(let hint):
+            unavailable[.gemini] = hint
+        }
+        var available = AvailableModels(choices: choices)
+        available.models = models
+        available.unavailable = unavailable
+        return available
     }
 
-    private static func installed(_ tool: String, path: String?) -> Bool {
-        (path ?? "").split(separator: ":").contains { FileManager.default.isExecutableFile(atPath: "\($0)/\(tool)") }
+    private enum Detected { case notInstalled, signedOut(String), ready([String]) }
+
+    private static func readiness(_ profile: any AgentProfile, path: String?, probe: SignInProbe) -> Detected {
+        guard let executable = locate(profile.binaryName, path: path) else { return .notInstalled }
+        let check = profile.signInCheck
+        guard let output = probe.run(executable, check.arguments, path ?? "") else { return .signedOut(check.signedOutHint) }
+        switch check.readiness(output) {
+        case .ready:
+            let listed = profile.parseModelList(output.stdout)
+            return listed.isEmpty ? .signedOut(check.signedOutHint) : .ready(listed)
+        case .signedOut(let hint): return .signedOut(hint)
+        case .notInstalled: return .notInstalled
+        }
     }
+
+    private static func installed(_ tool: String, path: String?) -> Bool { locate(tool, path: path) != nil }
+
+    private static func locate(_ tool: String, path: String?) -> String? {
+        (path ?? "").split(separator: ":").map { "\($0)/\(tool)" }.first { FileManager.default.isExecutableFile(atPath: $0) }
+    }
+}
+
+/// Runs a profile's read-only sign-in check for detection: the executable's full path, its
+/// arguments, and the PATH to run it under; nil when it could not run or did not finish in
+/// time. A seam so detection tests never spawn a real CLI.
+struct SignInProbe: Sendable {
+    var run: @Sendable (_ executable: String, _ arguments: [String], _ path: String) -> SignInCheckOutput?
+
+    /// 20 s: `agy models` asks Google's servers for the list, and detection runs once per
+    /// launch off the main actor — long enough for a slow network, short enough that a hung
+    /// CLI cannot keep Gemini "detecting" forever (it is reported signed out instead).
+    static let system = SignInProbe { executable, arguments, path in
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+        var environment = ProcessInfo.processInfo.environment
+        environment["PATH"] = path
+        process.environment = environment
+        let out = Pipe(), err = Pipe()
+        process.standardOutput = out
+        process.standardError = err
+        process.standardInput = FileHandle.nullDevice
+        let done = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in done.signal() }
+        do { try process.run() } catch { return nil }
+        // Drain both pipes while it runs, so a long list can never fill a pipe and wedge it.
+        let stdout = LockedData(), stderr = LockedData()
+        let group = DispatchGroup()
+        for (pipe, sink) in [(out, stdout), (err, stderr)] {
+            group.enter()
+            DispatchQueue.global().async { sink.set(pipe.fileHandleForReading.readDataToEndOfFile()); group.leave() }
+        }
+        guard done.wait(timeout: .now() + 20) == .success else { process.terminate(); return nil }
+        group.wait()
+        return SignInCheckOutput(stdout: String(decoding: stdout.get(), as: UTF8.self),
+                                 stderr: String(decoding: stderr.get(), as: UTF8.self), exitCode: process.terminationStatus)
+    }
+}
+
+private final class LockedData: @unchecked Sendable {
+    private let lock = NSLock()
+    private var data = Data()
+    func set(_ d: Data) { lock.lock(); data = d; lock.unlock() }
+    func get() -> Data { lock.lock(); defer { lock.unlock() }; return data }
 }
 
 /// The part of `IntakeRunnerController` the service drives — a seam so the service's tests

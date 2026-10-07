@@ -1,0 +1,3 @@
+Fetching available models...
+gemini-3.8-pro
+gemini-3.8-flash
