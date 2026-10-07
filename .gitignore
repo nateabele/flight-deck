@@ -38,3 +38,6 @@ scripts/.capacity-ui.xcresult/
 scripts/.capacity-ui-shots/
 # Machine-specific settings (UI-test host, ssh key); template: scripts/local.env.example
 scripts/local.env
+# A `tofu init` run in place leaves provider binaries beside a preset; test-infra-presets.sh
+# works on copies under build/, so this only guards a hand-run init.
+Resources/Infra/**/.terraform/
