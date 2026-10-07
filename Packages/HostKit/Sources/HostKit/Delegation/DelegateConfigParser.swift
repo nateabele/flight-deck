@@ -105,6 +105,16 @@ public enum DelegateConfigParser {
                     }
                     config.recipes[name] = try recipe(table, name: name, warnings: &warnings)
                 }
+            case "infra":
+                guard case .table(let machines) = node else {
+                    throw DelegateConfigIssue(.error, line: node.line, "infra must be a table of [infra.<name>] tables")
+                }
+                for (name, machineNode) in machines.ordered {
+                    guard case .table(let table) = machineNode else {
+                        throw DelegateConfigIssue(.error, line: machineNode.line, "infra.\(name) must be an [infra.\(name)] table")
+                    }
+                    config.infra[name] = try infra(table, name: name)
+                }
             case "route":
                 guard case .tables(let tables) = node else {
                     throw DelegateConfigIssue(.error, line: node.line, "route must be written as [[route]] tables")
@@ -152,6 +162,61 @@ public enum DelegateConfigParser {
         return recipe
     }
 
+    /// Unlike a recipe, an unknown key here is an **error**: a misspelt `ttll` would otherwise
+    /// leave a billed machine with no lifetime, or a `max_hourly` typo with no price cap.
+    private static func infra(_ table: TOMLTable, name: String) throws -> InfraConfig {
+        let path = "infra.\(name)"
+        var preset: (String, Int)?, module: (String, Int)?
+        var region: String?, instanceType: String?, arch: String?, diskGB: Int?
+        var spot = false, autoUp = false, ttl: Duration?, idle = InfraConfig.defaultIdle
+        var vars: [String: String] = [:], maxHourly: Double?
+        for (key, node) in table.ordered {
+            let field = "\(path).\(key)"
+            switch key {
+            case "preset": preset = (try string(node, field), node.line)
+            case "module": module = (try string(node, field), node.line)
+            case "region": region = try string(node, field)
+            case "instance_type": instanceType = try string(node, field)
+            case "arch": arch = try string(node, field)
+            case "disk_gb": diskGB = try int(node, field)
+            case "spot": spot = try bool(node, field)
+            case "auto_up": autoUp = try bool(node, field)
+            case "vars": vars = try env(node, field)
+            case "max_hourly": maxHourly = try double(node, field)
+            case "ttl": ttl = try duration(node, field)
+            case "idle": idle = try duration(node, field)
+            default:
+                throw DelegateConfigIssue(.error, line: node.line, "unknown key \(field)")
+            }
+        }
+        let source: InfraConfig.Source
+        switch (preset, module) {
+        case (let p?, nil):
+            guard InfraConfig.knownPresets.contains(p.0) else {
+                throw DelegateConfigIssue(
+                    .error, line: p.1,
+                    "\(path).preset \"\(p.0)\" is not one of \(InfraConfig.knownPresets.joined(separator: ", "))")
+            }
+            guard region != nil, instanceType != nil else {
+                throw DelegateConfigIssue(.error, line: table.line, "\(path) uses a preset, so it needs region and instance_type")
+            }
+            source = .preset(p.0)
+        case (nil, let m?):
+            let parts = m.0.split(separator: "/", omittingEmptySubsequences: false)
+            guard !m.0.isEmpty, !m.0.hasPrefix("/"), !m.0.hasPrefix("~"), !parts.contains("..") else {
+                throw DelegateConfigIssue(.error, line: m.1, "\(path).module must be a path inside the repo, not \"\(m.0)\"")
+            }
+            source = .module(m.0)
+        default:
+            throw DelegateConfigIssue(.error, line: table.line, "\(path) needs exactly one of preset or module")
+        }
+        guard let ttl else {
+            throw DelegateConfigIssue(.error, line: table.line, "\(path).ttl is required, e.g. ttl = \"4h\"")
+        }
+        return InfraConfig(source: source, region: region, instanceType: instanceType, arch: arch, diskGB: diskGB,
+                           spot: spot, ttl: ttl, idle: idle, autoUp: autoUp, vars: vars, maxHourly: maxHourly)
+    }
+
     private static func route(_ table: TOMLTable, warnings: inout [DelegateConfigIssue]) throws -> Route {
         guard let match = table.entries["match"] else {
             throw DelegateConfigIssue(.error, line: table.line, "[[route]] has no match pattern")
@@ -184,6 +249,23 @@ public enum DelegateConfigParser {
             throw DelegateConfigIssue(.error, line: node.line, "\(field) must be an integer")
         }
         return value
+    }
+
+    /// Integers are accepted too: `max_hourly = 2` is a price, not a type error.
+    private static func double(_ node: TOMLNode, _ field: String) throws -> Double {
+        switch node {
+        case .value(.float(let value), _): return value
+        case .value(.int(let value), _): return Double(value)
+        default: throw DelegateConfigIssue(.error, line: node.line, "\(field) must be a number")
+        }
+    }
+
+    private static func duration(_ node: TOMLNode, _ field: String) throws -> Duration {
+        let text = try string(node, field)
+        guard let duration = Duration.parse(text) else {
+            throw DelegateConfigIssue(.error, line: node.line, "\(field) must be a duration like \"45m\", \"4h\" or \"1d\", not \"\(text)\"")
+        }
+        return duration
     }
 
     private static func strings(_ node: TOMLNode, _ field: String) throws -> [String] {
@@ -298,6 +380,10 @@ extension DelegateConfig {
                 issues.append(DelegateConfigIssue(
                     .error, "\(path) needs the screen, but \(host) is a Linux host; screen runs need a macOS host"))
             }
+        }
+        for name in infra.keys.sorted() where hosts?[name] != nil {
+            issues.append(DelegateConfigIssue(
+                .error, "infra.\(name) has the name of a paired host, so --on \(name) would be ambiguous"))
         }
         for route in routes {
             if recipes[route.recipe] == nil {

@@ -14,7 +14,11 @@ public struct Duration: Codable, Sendable, Equatable, Comparable {
         for ch in text {
             if ch.isASCII, ch.isNumber { digits.append(ch); continue }
             guard let unit = units.first(where: { $0.0 == ch }), let n = Int(digits), n > 0 else { return nil }
-            total += n * unit.1; digits = ""; sawUnit = true
+            // Overflow is a typo too (`9999999999999999d`), and must not trap the parser.
+            let (span, mulOverflow) = n.multipliedReportingOverflow(by: unit.1)
+            let (sum, addOverflow) = total.addingReportingOverflow(span)
+            if mulOverflow || addOverflow { return nil }
+            total = sum; digits = ""; sawUnit = true
         }
         guard sawUnit, digits.isEmpty, total > 0 else { return nil }
         return Duration(seconds: total)

@@ -320,4 +320,19 @@ final class DelegateConfigParserTests: XCTestCase {
         XCTAssertEqual(a, 1.25)
         XCTAssertEqual(b, -0.5)
     }
+
+    func testFloatValueReachesInfraMaxHourly() throws {
+        let config = try DelegateConfigParser.parse("""
+        [recipe.x]
+        run = "make"
+
+        [infra.g]
+        preset = "aws-linux"
+        region = "us-east-1"
+        instance_type = "g6.xlarge"
+        ttl = "1h"
+        max_hourly = 1.50
+        """).config
+        XCTAssertEqual(config.infra["g"]?.maxHourly, 1.5)
+    }
 }

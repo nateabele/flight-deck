@@ -16,6 +16,11 @@ final class DurationTests: XCTestCase {
         }
     }
 
+    func testOverflowIsNilNotATrap() {
+        XCTAssertNil(Duration.parse("9999999999999999d"))
+        XCTAssertNil(Duration.parse("9223372036854775807s9223372036854775807s"))
+    }
+
     func testFormatsLargestUnitsFirst() {
         XCTAssertEqual(Duration(seconds: 5400).formatted, "1h30m")
         XCTAssertEqual(Duration(seconds: 172_800).formatted, "2d")

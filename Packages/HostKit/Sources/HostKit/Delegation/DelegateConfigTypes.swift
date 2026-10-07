@@ -10,13 +10,16 @@ public struct DelegateConfig: Sendable, Equatable {
     public var recipes: [String: Recipe]
     /// In file order: the first match wins.
     public var routes: [Route]
+    /// `[infra.<name>]`: cloud machines this project can bring up.
+    public var infra: [String: InfraConfig]
 
     public init(defaultHost: String? = nil, include: [String] = [], recipes: [String: Recipe] = [:],
-                routes: [Route] = []) {
+                routes: [Route] = [], infra: [String: InfraConfig] = [:]) {
         self.defaultHost = defaultHost
         self.include = include
         self.recipes = recipes
         self.routes = routes
+        self.infra = infra
     }
 }
 
