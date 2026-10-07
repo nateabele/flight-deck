@@ -180,16 +180,20 @@ tailnet node if one remains, and closes the machine's cost segment.
 ### 5.2 cloud-init and enrollment
 
 User-data (rendered by `CloudInitRenderer`, a pure function with golden-file tests):
+0. Arm the on-machine TTL (§7.2) first, before anything that can fail, so a machine whose
+   install or enroll breaks still dies.
 1. Write `/run/flightdeck/enroll.json` (`EnrollmentPayload`: controller slot, secret, name,
    idle threshold), mode 0600.
 2. Run the release's `hostd-install.sh --sha256 <digest> --no-pair`, which installs hostd as a
    systemd user service with lingering on (the installer's existing path). `--no-pair` is new:
    the installer today ends by running `pair`, which would wait for a typed code.
 3. `flightdeck-hostd enroll --file /run/flightdeck/enroll.json` adds the controller to
-   `ControllerStore` and deletes the file.
-4. Tailnet mode: install Tailscale from its official repo, `tailscale up --auth-key=…
+   `ControllerStore` and deletes the file. A failed enroll does not stop the steps after it
+   (cloud-init's runcmd carries on); the TTL covers a machine that never enrolls.
+4. Block the cloud metadata endpoint (`169.254.169.254`, and on GCP `metadata.google.internal`)
+   for every user but root, so workloads cannot read the spent PSK back out of user-data.
+5. Tailnet mode: install Tailscale from its official repo, `tailscale up --auth-key=…
    --hostname=fd-<name> --advertise-tags=tag:flightdeck-cloud`.
-5. Arm the on-machine TTL (§7.2).
 
 Hardening: AWS presets require IMDSv2 with hop limit 1; GCP metadata requires its header by
 default. The enroll file lives on tmpfs and is deleted after use. `flightdeck-hostd enroll`
@@ -245,7 +249,10 @@ Enforced twice, so either side alone suffices:
 - **Controller**: the `Reaper` destroys at TTL (after a warning notification 10 minutes
   before; `flightdeck infra extend gpu 1h` moves it, within the caps of §8).
 - **Machine**: AWS presets set `instance_initiated_shutdown_behavior = "terminate"` and
-  cloud-init arms `shutdown -h +<ttl>`; GCP presets set `scheduling.max_run_duration` with
+  cloud-init enables a systemd timer, `OnCalendar=<UTC deadline>` with `Persistent=true`, that
+  runs `systemctl poweroff` (an absolute timer, because a reboot clears a pending
+  `shutdown -h +N`; `Persistent` fires it at boot if the deadline passed while stopped). The
+  same timer is armed on GCP as a backstop, where presets also set `scheduling.max_run_duration` with
   `instance_termination_action = "DELETE"`. A sleeping or lost Mac therefore cannot leave a
   machine running. `extend` pushes a new deadline to the machine over the host link.
 
