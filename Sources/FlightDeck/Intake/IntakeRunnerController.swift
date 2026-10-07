@@ -197,11 +197,11 @@ final class IntakeRunnerController {
                     Task.detached(priority: .utility) { _ = LoginShellPath.resolve() }
                     return nil
                 }
-                var env = LoginShellPath.repairing(ProcessInfo.processInfo.environment, path: path)
                 // The runner is not this tab's Claude session and must never be mistaken for
-                // a nested one — same hazard `AGENTS.md` warns every agent about.
-                env.removeValue(forKey: "CLAUDE_CODE_CHILD_SESSION")
-                env.removeValue(forKey: "CLAUDECODE")
+                // a nested one — same hazard `AGENTS.md` warns every agent about. The profile's
+                // scrub, so the variables removed here are the ones every claude child loses.
+                var env = ClaudeProfile.scrubbingChildSession(
+                    LoginShellPath.repairing(ProcessInfo.processInfo.environment, path: path))
                 env["FLIGHT_DECK_STATE_DIR"] = stateDir
                 return env
             }

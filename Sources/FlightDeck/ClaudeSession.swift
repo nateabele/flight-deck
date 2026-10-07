@@ -1,5 +1,6 @@
 import Foundation
 import FleetKit
+import IntakeKit
 
 /// Pure rules for locating and reading a Claude Code session transcript, and for
 /// building the launch command. No I/O and no state so every rule is unit-testable.
@@ -245,9 +246,10 @@ enum ClaudeSession {
                     kind: kind,
                     // The CLI's own predicate, evaluated here because this is the only place that
                     // still has the record. `apiErrorIsTransient` is set explicitly only for
-                    // capacity-shaped 429s; these two kinds are transient without carrying it.
+                    // capacity-shaped 429s; `overloaded` and `server_error` are transient without
+                    // carrying it — a rule the profile's shared vocabulary now holds.
                     isTransient: obj["apiErrorIsTransient"] as? Bool == true
-                        || kind == "overloaded" || kind == "server_error")))
+                        || ClaudeProfile().isTransient(apiErrorKind: kind))))
             } else {
                 events.append(.progressed)
             }

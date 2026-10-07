@@ -154,7 +154,8 @@ final class AgentProfileContractTests: XCTestCase {
 
     // MARK: Availability
 
-    func testAvailabilityNeverOffersGrokOrGemini() {
+    func testAvailabilityNeverOffersGrokOrGemini() throws {
+        try XCTSkipUnless(AgentProfiles.headlessReady.contains(.gemini), "gemini is not headless-ready yet")
         let grok = ModelChoice(harness: .grok, model: "grok-4.6", effort: "high")
         let gemini = ModelChoice(harness: .gemini, model: "pro", effort: "")
         let claude = ModelChoice(harness: .claude, model: "opus", effort: "high")

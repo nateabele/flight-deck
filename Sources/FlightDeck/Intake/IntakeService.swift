@@ -9,9 +9,18 @@ struct TriageSettings: Equatable, Sendable {
     var model: String
     var effort: String
 
-    // Detection-driven defaults: next plan (spec §6.2).
-    static let codexDefault = TriageSettings(harness: .codex, model: "gpt-6-sol", effort: "high")
-    static let claudeDefault = TriageSettings(harness: .claude, model: "opus", effort: "high")
+    // Detection-driven defaults: next plan (spec §6.2). Each profile's planning default, so
+    // triage and the Rounds editor's `AvailableModels.defaults` can never disagree.
+    static let codexDefault = TriageSettings(CodexProfile().defaultPlanningChoice)
+    static let claudeDefault = TriageSettings(ClaudeProfile().defaultPlanningChoice)
+
+    init(harness: Harness, model: String, effort: String) {
+        self.harness = harness; self.model = model; self.effort = effort
+    }
+
+    init(_ choice: ModelChoice) {
+        self.init(harness: choice.harness, model: choice.model, effort: choice.effort)
+    }
 
     /// codex when a `codex` is on the login shell's PATH (what `which codex` would say in the
     /// user's own terminal), claude otherwise. Resolves `LoginShellPath`, which spawns a login
@@ -981,6 +990,11 @@ final class IntakeService: ObservableObject {
     func availableModels() -> AvailableModels {
         availableModelsCache ?? .defaults
     }
+
+    /// Each harness's pickable planning accounts, from preferences — set by `SessionStore`,
+    /// which owns them, so this service never reads preferences itself. Read when the Rounds
+    /// editor draws, never captured, so an account added in Settings shows up next time.
+    var planningAccounts: () -> [Harness: [PlanningAccountOption]] = { [:] }
 
     func markEditNoteShown(_ id: UUID) { editNoteShown.insert(id) }
 
