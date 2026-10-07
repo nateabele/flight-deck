@@ -99,20 +99,35 @@ final class CloudInitRendererTests: XCTestCase {
         XCTAssertThrowsError(try CloudInitRenderer.render(payload, o))
     }
 
-    /// Ruling 2: user-data stays readable from the metadata service for the machine's life, so
-    /// once the PSK in it is spent, only root may reach that endpoint. On GCP the name is blocked
-    /// too, which is the same address.
-    func testMetadataEndpointIsClosedToNonRootAfterEnroll() throws {
-        let rule = #"[ iptables, -A, OUTPUT, -d, 169.254.169.254, -m, owner, "!", --uid-owner, "0", -j, REJECT ]"#
-        let gcpRule = #"[ iptables, -A, OUTPUT, -d, metadata.google.internal, -m, owner, "!", --uid-owner, "0", -j, REJECT ]"#
+    /// Ruling 2: the enrollment secret is the controller's long-term PSK for this host, and
+    /// user-data stays readable from the metadata service for the machine's whole life, so only
+    /// root may reach that endpoint, from the first boot and on every reboot. iptables state does
+    /// not survive a reboot and runcmd runs once per instance, so the rules live in bootcmd,
+    /// which runs on every boot. Each tolerates its address family being absent.
+    func testMetadataEndpointIsClosedToNonRootOnEveryBoot() throws {
+        func rule(_ tool: String, _ address: String) -> String {
+            #"  - [ sh, -c, "\#(tool) -A OUTPUT -d \#(address) -m owner ! --uid-owner 0 -j REJECT || true" ]"#
+        }
+        let v4 = rule("iptables", "169.254.169.254")
+        let v6 = rule("ip6tables", "fd00:ec2::254")
+        let gcpName = rule("iptables", "metadata.google.internal")
 
-        let aws = try CloudInitRenderer.render(payload, base)
-        XCTAssertGreaterThan(line(aws, rule), line(aws, "flightdeck-hostd enroll"))
-        XCTAssertFalse(aws.contains("metadata.google.internal"))
-
-        let gcp = try CloudInitRenderer.render(payload, tailnetGCP)
-        XCTAssertGreaterThan(line(gcp, rule), line(gcp, "flightdeck-hostd enroll"))
-        XCTAssertGreaterThan(line(gcp, gcpRule), line(gcp, "flightdeck-hostd enroll"))
+        for (o, present, absent) in [(base, [v4, v6], [gcpName]), (tailnetGCP, [v4, gcpName], [v6])] {
+            let y = try CloudInitRenderer.render(payload, o)
+            let lines = y.components(separatedBy: "\n")
+            let bootcmd = line(y, "bootcmd:")
+            let nextSection = line(y, "write_files:")
+            XCTAssertGreaterThanOrEqual(bootcmd, 0, o.cloud)
+            for r in present {
+                let at = lines.firstIndex(of: r) ?? -1
+                XCTAssertTrue(at > bootcmd && at < nextSection, "\(r) not under bootcmd on \(o.cloud)")
+                XCTAssertEqual(lines.filter { $0 == r }.count, 1, "\(r) rendered more than once on \(o.cloud)")
+            }
+            for r in absent { XCTAssertFalse(lines.contains(r), "\(r) on \(o.cloud)") }
+            // Not only in runcmd: no copy there at all.
+            let runcmd = line(y, "runcmd:")
+            XCTAssertFalse(lines[runcmd...].contains { $0.contains("tables") }, o.cloud)
+        }
     }
 
     /// Ruling 3: a failed enroll must not stop the steps after it. cloud-init's runcmd script

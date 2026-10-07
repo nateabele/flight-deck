@@ -1,9 +1,9 @@
 import Foundation
 import HostKit
 
-// The user-data a cloud machine boots with (spec §5.2): arm the TTL, install hostd, enroll it
-// with the controller's slot and secret, close the metadata endpoint to workloads, and in tailnet
-// mode join the tailnet.
+// The user-data a cloud machine boots with (spec §5.2): close the metadata endpoint to workloads
+// on every boot, arm the TTL, install hostd, enroll it with the controller's slot and secret, and
+// in tailnet mode join the tailnet.
 
 /// What `CloudInitRenderer` needs beyond the payload. `installerBaseURL` and `installerSHA256`
 /// are this build's `LinuxHostInstaller` values; `deadline` is the machine's absolute TTL.
@@ -61,8 +61,19 @@ enum CloudInitRenderer {
             "  - name: flightdeck",
             "    shell: /bin/bash",
             "    lock_passwd: true",
-            "write_files:",
+            // The enrollment secret is the controller's long-term PSK for this host, and user-data
+            // stays readable from the metadata service for the machine's whole life, so only root
+            // may reach that endpoint. bootcmd, not runcmd: firewall rules do not survive a reboot
+            // and runcmd runs once per instance, while bootcmd runs as root early on every boot.
+            // Nothing non-root needs the endpoint (cloud-init is root; enroll reads a file), so
+            // blocking before enroll costs nothing. `|| true` keeps a missing address family (no
+            // IPv6, or GCP's name not yet resolvable) from failing the module.
+            "bootcmd:",
         ]
+        lines += metadataAddresses(cloud: o.cloud).map { tool, address in
+            #"  - [ sh, -c, "\#(tool) -A OUTPUT -d \#(address) -m owner ! --uid-owner 0 -j REJECT || true" ]"#
+        }
+        lines.append("write_files:")
         // The TTL is a persistent systemd timer on an absolute UTC deadline: a reboot clears a
         // pending `shutdown -h +N`, but an enabled timer is re-armed at boot, and `Persistent`
         // fires it at once if the deadline passed while the machine was stopped. Armed on GCP
@@ -102,13 +113,6 @@ enum CloudInitRenderer {
             // already covers a machine that never enrolls.
             #"  - [ su, "-", flightdeck, "-c", "\#(hostd) enroll --file \#(enrollPath)" ]"#,
         ]
-        // User-data stays readable from the metadata service for the machine's whole life, and
-        // it holds the PSK: once that is spent, only root may reach the endpoint. GCP's name
-        // resolves to the same address; blocking it too costs a duplicate rule.
-        let metadataHosts = o.cloud == "gcp" ? ["169.254.169.254", "metadata.google.internal"] : ["169.254.169.254"]
-        lines += metadataHosts.map {
-            #"  - [ iptables, -A, OUTPUT, -d, \#($0), -m, owner, "!", --uid-owner, "0", -j, REJECT ]"#
-        }
         if let tailnet {
             lines += [
                 #"  - [ sh, -c, "curl -fsSL https://tailscale.com/install.sh | sh" ]"#,
@@ -116,6 +120,15 @@ enum CloudInitRenderer {
             ]
         }
         return lines.joined(separator: "\n") + "\n"
+    }
+
+    /// The metadata endpoint's addresses, with the tool that firewalls each. AWS also serves it
+    /// on IPv6 when the instance enables that; GCP's name resolves to the same IPv4 address, and
+    /// blocking it too costs a duplicate rule.
+    private static func metadataAddresses(cloud: String) -> [(tool: String, address: String)] {
+        cloud == "gcp"
+            ? [("iptables", "169.254.169.254"), ("iptables", "metadata.google.internal")]
+            : [("iptables", "169.254.169.254"), ("ip6tables", "fd00:ec2::254")]
     }
 
     /// One `write_files` entry. Contents are a YAML literal block, so each line is indented and
