@@ -27,6 +27,14 @@ struct TailscaleOAuthClient: Codable, Equatable, Sendable {
     let tailnet: String
 }
 
+/// Every way Swift prints a value — interpolation, `print`, `debugPrint`, `dump`, an array of
+/// them, an assertion message — goes through one of these, so the secret never reaches a log.
+extension TailscaleOAuthClient: CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
+    var description: String { "TailscaleOAuthClient(id: \(id), secret: <redacted>, tailnet: \(tailnet))" }
+    var debugDescription: String { description }
+    var customMirror: Mirror { Mirror(self, children: ["id": id, "secret": "<redacted>", "tailnet": tailnet]) }
+}
+
 enum TailnetMode: Equatable, Sendable {
     case available(TailscaleOAuthClient)
     case notRunning
@@ -40,6 +48,9 @@ enum TailnetMode: Equatable, Sendable {
 enum TailnetError: Error, Equatable {
     case unexpectedResponse(String)
     case lockSignFailed
+    /// The policy changed since it was read (a 412 on the `If-Match` write): re-fetch and
+    /// re-diff rather than overwrite someone else's edit.
+    case policyChanged
 }
 
 protocol TailnetSecretStoring: Sendable {
@@ -146,10 +157,16 @@ final class TailnetIntegration: @unchecked Sendable {
         return node?.addresses?.first { $0.contains(".") }
     }
 
-    /// Every node with this hostname, so a destroyed machine leaves nothing behind.
+    /// The tag every cloud machine joins with (spec §6.1).
+    static let cloudTag = "tag:flightdeck-cloud"
+
+    /// Every cloud node with this hostname, so a destroyed machine leaves nothing behind — and
+    /// only cloud nodes: one of the user's own devices that happens to share the hostname is
+    /// untagged (or tagged otherwise) and must never be removed from their tailnet.
     func deleteNode(client: TailscaleOAuthClient, hostname: String) async throws {
         let headers = try await authorization(client)
-        for node in try await devices(client, hostname: hostname, headers: headers) {
+        for node in try await devices(client, hostname: hostname, headers: headers)
+        where node.tags?.contains(Self.cloudTag) == true {
             try await http.delete(Self.api.appendingPathComponent("device/\(node.id)"), headers: headers)
         }
     }
@@ -159,18 +176,50 @@ final class TailnetIntegration: @unchecked Sendable {
         let hostname: String
         let addresses: [String]?
         let created: String?
+        let tags: [String]?
     }
 
     private func devices(_ client: TailscaleOAuthClient, hostname: String,
                          headers given: [String: String]? = nil) async throws -> [Device] {
         let headers: [String: String]
         if let given { headers = given } else { headers = try await authorization(client) }
-        let data = try await http.get(Self.api.appendingPathComponent("tailnet/-/devices"), headers: headers)
+        let data = try await http.get(Self.api.appendingPathComponent("tailnet/-/devices"), headers: headers).0
         struct Devices: Decodable { let devices: [Device] }
         guard let all = try? JSONDecoder().decode(Devices.self, from: data).devices else {
             throw TailnetError.unexpectedResponse("devices")
         }
         return all.filter { $0.hostname == hostname }
+    }
+
+    // MARK: Policy (setup only)
+
+    // The policy is read and written with the API access token the user pastes during setup
+    // (spec §9), never the OAuth client: that client is scoped to minting keys and managing
+    // devices, and a policy write needs a broader grant than it should ever hold.
+
+    /// The policy as HuJSON, comments and all, with the `ETag` `savePolicy` must quote.
+    func fetchPolicy(token: String) async throws -> (hujson: String, etag: String) {
+        let (data, headers) = try await http.get(Self.api.appendingPathComponent("tailnet/-/acl"),
+                                                 headers: ["Authorization": "Bearer \(token)", "Accept": "application/hujson"])
+        // Header names are case-insensitive, and `HTTPURLResponse` does not promise a spelling.
+        guard let etag = headers.first(where: { $0.key.caseInsensitiveCompare("ETag") == .orderedSame })?.value,
+              let hujson = String(data: data, encoding: .utf8) else {
+            throw TailnetError.unexpectedResponse("acl")
+        }
+        return (hujson, etag)
+    }
+
+    /// Writes the policy only if it is still the one `etag` names; otherwise `policyChanged`,
+    /// so setup re-fetches and shows a fresh diff instead of overwriting someone's edit.
+    func savePolicy(token: String, hujson: String, etag: String) async throws {
+        do {
+            _ = try await http.post(Self.api.appendingPathComponent("tailnet/-/acl"),
+                                    headers: ["Authorization": "Bearer \(token)", "Content-Type": "application/hujson",
+                                              "If-Match": etag],
+                                    body: Data(hujson.utf8))
+        } catch let error as HTTPStatusError where error.status == 412 {
+            throw TailnetError.policyChanged
+        }
     }
 
     /// A fresh OAuth access token per call: they live an hour and each operation here is a

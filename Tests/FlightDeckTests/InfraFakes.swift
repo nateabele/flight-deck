@@ -3,7 +3,8 @@ import Foundation
 
 /// Canned HTTP for the infra tests: answers by exact URL and records every request, so no test
 /// ever reaches a real cloud or Tailscale API. An unknown URL is a 404, which fails the test
-/// loudly instead of handing back an empty body that decodes as "nothing there".
+/// loudly instead of handing back an empty body that decodes as "nothing there"; `statuses`
+/// makes a URL fail with a chosen status instead.
 final class FakeHTTP: HTTPFetching, @unchecked Sendable {
     struct Request: Equatable {
         let method: String
@@ -15,11 +16,14 @@ final class FakeHTTP: HTTPFetching, @unchecked Sendable {
     private let lock = NSLock()
     private let responses: [String: String]
     private let responseHeaders: [String: [String: String]]
+    private let statuses: [String: Int]
     private var recorded: [Request] = []
 
-    init(responses: [String: String] = [:], responseHeaders: [String: [String: String]] = [:]) {
+    init(responses: [String: String] = [:], responseHeaders: [String: [String: String]] = [:],
+         statuses: [String: Int] = [:]) {
         self.responses = responses
         self.responseHeaders = responseHeaders
+        self.statuses = statuses
     }
 
     var requests: [Request] { lock.withLock { recorded } }
@@ -28,8 +32,8 @@ final class FakeHTTP: HTTPFetching, @unchecked Sendable {
         requests.last { $0.url == url }?.body
     }
 
-    func get(_ url: URL, headers: [String: String]) async throws -> Data {
-        try answer("GET", url, headers, nil).0
+    func get(_ url: URL, headers: [String: String]) async throws -> (Data, [String: String]) {
+        try answer("GET", url, headers, nil)
     }
 
     func post(_ url: URL, headers: [String: String], body: Data) async throws -> (Data, [String: String]) {
@@ -43,6 +47,7 @@ final class FakeHTTP: HTTPFetching, @unchecked Sendable {
     private func answer(_ method: String, _ url: URL, _ headers: [String: String], _ body: Data?) throws -> (Data, [String: String]) {
         let key = url.absoluteString
         lock.withLock { recorded.append(Request(method: method, url: key, headers: headers, body: body)) }
+        if let status = statuses[key] { throw HTTPStatusError(status: status) }
         guard let text = responses[key] else { throw HTTPStatusError(status: 404) }
         return (Data(text.utf8), responseHeaders[key] ?? [:])
     }

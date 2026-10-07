@@ -87,6 +87,26 @@ final class HuJSONPatcherTests: XCTestCase {
         XCTAssertTrue(changed.allSatisfy { $0.hasPrefix("+") }, p.diff)
     }
 
+    func testAGrantToTheTagOnOtherPortsDoesNotStandInForOurs() throws {
+        let ssh = "{\n  \"grants\": [\n    {\"src\": [\"autogroup:admin\"], \"dst\": [\"tag:flightdeck-cloud\"], \"ip\": [\"tcp:22\"]},\n  ],\n}\n"
+        let p = try XCTUnwrap(HuJSONPatcher.addFlightDeckRules(to: ssh, tag: "tag:flightdeck-cloud", ownerAutogroup: "autogroup:admin"))
+        let grants = try XCTUnwrap(try decode(p.patched)["grants"] as? [[String: [String]]])
+        XCTAssertEqual(grants.map { $0["ip"] ?? [] }, [["tcp:22"], ["tcp:47410-47411"]])
+        // A grant that already covers the ports (among others) does stand in for ours.
+        let wide = "{\"tagOwners\": {\"tag:flightdeck-cloud\": []}, \"grants\": [{\"src\": [\"*\"], \"dst\": [\"tag:flightdeck-cloud\"], \"ip\": [\"tcp:22\", \"tcp:47410-47411\"]}]}"
+        let same = try XCTUnwrap(HuJSONPatcher.addFlightDeckRules(to: wide, tag: "tag:flightdeck-cloud", ownerAutogroup: "autogroup:admin"))
+        XCTAssertEqual(same.patched, wide); XCTAssertTrue(same.diff.isEmpty)
+    }
+
+    func testNumbersFollowTheJSONGrammar() {
+        for bad in ["nan", "NaN", "inf", "Infinity", "-inf", "0x10", "01", "1.", ".5", "+1", "1e", "1e+", "-", "1_000"] {
+            XCTAssertNil(HuJSONPatcher.addFlightDeckRules(to: "{\"a\": \(bad)}", tag: "tag:x", ownerAutogroup: "autogroup:admin"), bad)
+        }
+        for good in ["0", "-0", "12", "-1.5", "1e3", "1E-3", "2.5e+10", "true", "false", "null"] {
+            XCTAssertNotNil(HuJSONPatcher.addFlightDeckRules(to: "{\"a\": \(good)}", tag: "tag:x", ownerAutogroup: "autogroup:admin"), good)
+        }
+    }
+
     /// HuJSON → JSON for the assertions. Deliberately not the patcher's own tokenizer, which
     /// would only check itself: a naive stripper of `//` comments and trailing commas, fed only
     /// policies whose strings hold neither.

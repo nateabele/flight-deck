@@ -25,10 +25,11 @@ protocol PriceSource: Sendable {
 
 /// The HTTP verbs the price lookup and the Tailscale API need. A protocol so tests hand back
 /// canned pages and never reach a real API.
+///
+/// Each verb that has a response hands back its headers too: the Tailscale policy endpoint
+/// answers a read with the `ETag` its next write must quote.
 protocol HTTPFetching: Sendable {
-    func get(_ url: URL, headers: [String: String]) async throws -> Data
-    /// The response headers come back because the Tailscale policy endpoint answers with the
-    /// `ETag` its next write must quote.
+    func get(_ url: URL, headers: [String: String]) async throws -> (Data, [String: String])
     func post(_ url: URL, headers: [String: String], body: Data) async throws -> (Data, [String: String])
     func delete(_ url: URL, headers: [String: String]) async throws
 }
@@ -38,8 +39,8 @@ struct HTTPStatusError: Error, Equatable {
 }
 
 struct URLSessionHTTPFetcher: HTTPFetching {
-    func get(_ url: URL, headers: [String: String]) async throws -> Data {
-        try await send(request(url, "GET", headers)).0
+    func get(_ url: URL, headers: [String: String]) async throws -> (Data, [String: String]) {
+        try await send(request(url, "GET", headers))
     }
 
     func post(_ url: URL, headers: [String: String], body: Data) async throws -> (Data, [String: String]) {
@@ -246,7 +247,7 @@ struct GCPPriceSource: PriceSource {
             components.queryItems = [URLQueryItem(name: "currencyCode", value: "USD"),
                                      URLQueryItem(name: "pageSize", value: "5000")]
                 + (pageToken.isEmpty ? [] : [URLQueryItem(name: "pageToken", value: pageToken)])
-            let page = try JSONDecoder().decode(SKUPage.self, from: try await http.get(components.url!, headers: headers))
+            let page = try JSONDecoder().decode(SKUPage.self, from: try await http.get(components.url!, headers: headers).0)
             skus += page.skus
             pageToken = page.nextPageToken ?? ""
         } while !pageToken.isEmpty
