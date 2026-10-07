@@ -40,6 +40,12 @@ public final class IdleTracker: @unchecked Sendable {
     }
 
     /// A request arrived: the host is in use even if the request starts nothing.
+    ///
+    /// Public but uncalled today, deliberately: `DelegationHost` holds each request open as a
+    /// `begin`/`end` activity from arrival to answer, which already counts it as use (and
+    /// covers long transfers that a single touch at arrival would not). Kept as part of the
+    /// tracker's contract for a hook with no duration to bracket, such as an interactive
+    /// session's keystroke on a hostd that grows one.
     public func touch() {
         let at = now()
         lock.withLock { last = at }

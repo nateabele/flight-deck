@@ -74,6 +74,7 @@ let package = Package(
                 "PairingCore",
                 .product(name: "HostKit", package: "HostKit"),
                 .product(name: "NIOEmbedded", package: "swift-nio"),
+                .product(name: "NIOPosix", package: "swift-nio"),
             ],
             swiftSettings: [.unsafeFlags(["-Xcc", "-I\(boringSSLInclude)"])]
         ),
