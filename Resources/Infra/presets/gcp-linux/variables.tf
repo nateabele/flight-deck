@@ -7,7 +7,7 @@ variable "fd_name" {
 }
 
 variable "fd_user_data" {
-  description = "cloud-init user-data rendered by Flight Deck (enrollment, hostd, TTL timer)."
+  description = "cloud-init user-data rendered by Flight Deck (enrollment, hostd; no TTL timer on GCP, max_run_duration is the TTL)."
   type        = string
   sensitive   = true
 }

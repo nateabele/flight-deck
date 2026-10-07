@@ -53,7 +53,7 @@ variable "spot" {
 }
 
 variable "ttl_seconds" {
-  description = "The machine's lifetime. AWS has no cloud-side TTL, so this preset only enforces the shutdown half: cloud-init (in fd_user_data) arms `shutdown -h`, and instance_initiated_shutdown_behavior turns that shutdown into termination."
+  description = "The machine's lifetime. AWS has no cloud-side TTL, so this preset only enforces the shutdown half: cloud-init (in fd_user_data) arms a poweroff timer at the deadline, and instance_initiated_shutdown_behavior turns that shutdown into termination."
   type        = number
 
   validation {
