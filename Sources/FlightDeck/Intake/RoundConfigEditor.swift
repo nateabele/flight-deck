@@ -65,6 +65,16 @@ struct RoundConfigEditor: View {
         }
     }
 
+    /// Spec §3.9. No settings URL: those pages move.
+    static let dataUseNote = "Check Google's data settings before using Gemini agents on private repos."
+
+    /// One line per harness that is installed but not offered, in `Harness.allCases` order,
+    /// each the profile's own reason (e.g. "Gemini: run `agy` in a terminal to sign in").
+    /// "not installed" is left out: a CLI the human never installed is not news.
+    static func unavailableNotes(_ available: AvailableModels) -> [String] {
+        Harness.allCases.compactMap { available.unavailable[$0] }.filter { !$0.hasSuffix("not installed") }
+    }
+
     /// One block per seat, its controls on two lines. A five-column grid needed ~530 pt, and an
     /// inspector column is narrower than that — the Model field collapsed to nothing and the
     /// Fallback picker ran off the panel's edge.
@@ -460,13 +470,16 @@ struct RoundConfigEditor: View {
         return models.contains(current) || current.isEmpty ? models : [current] + models
     }
 
-    /// One line per harness this build can run but isn't offering — "Grok: run `grok login`"
-    /// — plus the data-use caution for any consumer-plan harness that IS offered (spec §3.9).
+    /// The editor's one block of notes: why an installed-but-unusable harness is missing from
+    /// the pickers (spec §3.2: never silently dropped), then the data-use caution for each
+    /// consumer-plan harness that IS offered (spec §3.9). One list, so a harness never gets
+    /// its reason shown twice by two blocks.
     static func availabilityNotes(_ available: AvailableModels) -> [String] {
-        var notes = Harness.allCases.compactMap { available.unavailable[$0] }
+        var notes = unavailableNotes(available)
         if available.choice(for: .grok) != nil {
             notes.append("Grok may use prompts to improve its models. Check xAI's data settings before using it on private repos.")
         }
+        if available.choice(for: .gemini) != nil { notes.append(dataUseNote) }
         return notes
     }
 
@@ -597,11 +610,11 @@ struct RoundConfigEditor: View {
         available.harnesses
     }
 
-    /// The fallback Picker's one non-"None" option: whichever available model ISN'T the
-    /// seat's current choice. Nil on a single-harness machine, where there is no other model.
+    /// The fallback Picker's one non-"None" option: the first available model of ANOTHER family
+    /// than the seat's, in `Harness.allCases` order — so codex still falls back to claude and
+    /// claude to codex, and a gemini seat falls back to the first of those present. Nil on a
+    /// single-harness machine, where there is no other model.
     static func otherModel(for choice: ModelChoice, available: AvailableModels) -> ModelChoice? {
-        // The first other harness in `Harness.allCases` order: codex ↔ claude exactly as
-        // before, and a grok seat falls back to codex (else claude) — a different family.
-        available.harnesses.first { $0 != choice.harness }.flatMap(available.choice(for:))
+        available.harnesses.first { ModelFamily($0) != ModelFamily(choice.harness) }.flatMap(available.choice(for:))
     }
 }
