@@ -111,17 +111,18 @@ final class AgentProfileContractTests: XCTestCase {
 
     // MARK: Refusal
 
-    func testBuildRefusesGrokAndGemini() {
-        for harness in [Harness.grok, .gemini] {
+    /// grok's arm landed with Track G (`HarnessCommandGrokTests`); gemini's still refuses.
+    func testBuildRefusesGemini() {
+        for harness in [Harness.gemini] {
             XCTAssertThrowsError(try HarnessCommand.build(req(harness), home: Self.noHome)) { error in
                 XCTAssertEqual(error as? HarnessCommand.HarnessCommandError, .harnessNotImplemented(harness))
             }
         }
     }
 
-    func testParseRefusesGrokAndGemini() {
+    func testParseRefusesGemini() {
         let stdout = Data(#"{"session_id":"S","structured_output":{}}"#.utf8)
-        for harness in [Harness.grok, .gemini] {
+        for harness in [Harness.gemini] {
             XCTAssertThrowsError(try HarnessOutput.parse(harness, stdout: stdout)) { error in
                 XCTAssertEqual(error as? HarnessOutput.ParseError, .harnessNotImplemented(harness))
             }
@@ -140,7 +141,7 @@ final class AgentProfileContractTests: XCTestCase {
     func testGenericFallbacksForTheNewHarnesses() {
         let auth = FailureDiagnosis.classify(exitCode: 1, stdout: Data(), stderr: "Unauthorized", parseError: nil, harness: .grok)
         XCTAssertEqual(auth.category, .authExpired)
-        XCTAssertEqual(auth.action, "Sign in to `grok` in a terminal")
+        XCTAssertEqual(auth.action, "Run `grok login` in a terminal", "grok's sign-in command, probed by Track G")
         let gemini = FailureDiagnosis.classify(exitCode: 1, stdout: Data(), stderr: "Unauthorized", parseError: nil, harness: .gemini)
         XCTAssertEqual(gemini.action, "Sign in to `gemini` in a terminal")
 
@@ -152,20 +153,23 @@ final class AgentProfileContractTests: XCTestCase {
 
     // MARK: Availability
 
-    func testAvailabilityNeverOffersGrokOrGemini() {
+    /// grok is offered once Track G added it to `headlessReady`; gemini still never is.
+    func testAvailabilityNeverOffersGemini() {
         let grok = ModelChoice(harness: .grok, model: "grok-4.6", effort: "high")
         let gemini = ModelChoice(harness: .gemini, model: "pro", effort: "")
         let claude = ModelChoice(harness: .claude, model: "opus", effort: "high")
         let available = AvailableModels(choices: [.grok: grok, .gemini: gemini, .claude: claude])
-        XCTAssertEqual(available.harnesses, [.claude])
-        XCTAssertNil(available.choice(for: .grok))
+        XCTAssertEqual(available.harnesses, [.claude, .grok])
+        XCTAssertEqual(available.choice(for: .grok), grok)
         XCTAssertNil(available.choice(for: .gemini))
-        XCTAssertEqual(RoundConfigEditor.harnesses(in: available), [.claude])
+        XCTAssertEqual(RoundConfigEditor.harnesses(in: available), [.claude, .grok])
         XCTAssertEqual(RoundConfigEditor.harnesses(in: .defaults), [.codex, .claude])
     }
 
-    /// Detection with every CLI on PATH still offers only the two with builders.
-    func testDetectionWithGrokAndGeminiInstalledOffersNeither() throws {
+    /// Detection with every CLI on PATH offers neither newcomer when they can't prove a sign-in:
+    /// these stub scripts print nothing, so grok's check reads signed out, and gemini has no
+    /// builder at all.
+    func testDetectionWithStubGrokAndGeminiOffersNeither() throws {
         let bin = FileManager.default.temporaryDirectory.appendingPathComponent("fd-profile-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: bin) }

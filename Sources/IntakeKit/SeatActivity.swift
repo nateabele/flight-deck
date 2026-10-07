@@ -171,9 +171,89 @@ public struct ActivityParser: Sendable {
         switch activity.harness {
         case .codex: foldCodex(type, obj)
         case .claude: foldClaude(type, obj)
-        // Generic until Tracks G/M capture real streams: `lastEventAt` (set above) still shows
+        case .grok: foldGrok(type, obj)
+        // Generic until Track M captures real streams: `lastEventAt` (set above) still shows
         // the seat is alive; guessing at an unprobed event schema could only mislabel it.
-        case .grok, .gemini: break
+        case .gemini: break
+        }
+    }
+
+    /// grok `--output-format streaming-messages-json` is claude's stream shape (`assistant`
+    /// messages of `thinking`/`tool_use` blocks, a final `result`) with grok's own tool names.
+    /// It has no `rate_limit_event`, so a grok seat never reports usage windows.
+    private mutating func foldGrok(_ type: String, _ obj: [String: Any]) {
+        switch type {
+        case "assistant":
+            guard let message = obj["message"] as? [String: Any] else { return }
+            if let usage = message["usage"] as? [String: Any] {
+                // Keyed per message like claude's, so a message whose usage repeats on every
+                // block is counted once; a message with no id is its own entry.
+                let id = message["id"] as? String ?? "grok-\(claudeUsage.count)"
+                claudeUsage[id] = (claudeInput(usage), int(usage["output_tokens"]))
+                activity.inputTokens = claudeUsage.values.reduce(0) { $0 + $1.input }
+                activity.outputTokens = claudeUsage.values.reduce(0) { $0 + $1.output }
+            }
+            for block in message["content"] as? [[String: Any]] ?? [] {
+                switch block["type"] as? String {
+                case "thinking": setHeadline(block["thinking"] as? String)
+                case "tool_use": foldGrokTool(block["name"] as? String ?? "", block["input"] as? [String: Any] ?? [:])
+                default: break
+                }
+            }
+        case "result":
+            if let cost = obj["total_cost_usd"] as? Double { activity.costUSD = cost }
+            if let usage = obj["usage"] as? [String: Any] {
+                // grok zeroes every bucket when its usage ledger is incomplete — "unknown",
+                // not "nothing"; keep the per-message sums rather than overwrite them with 0.
+                let input = claudeInput(usage), output = int(usage["output_tokens"])
+                if input + output > 0 { activity.inputTokens = input; activity.outputTokens = output }
+            }
+            if obj["is_error"] as? Bool == true {
+                let errors = (obj["errors"] as? [Any] ?? []).compactMap { ($0 as? [String: Any])?["message"] as? String ?? $0 as? String }
+                activity.error = errors.first ?? obj["result"] as? String ?? obj["subtype"] as? String ?? "error"
+            }
+            activity.finished = true
+        case "error":
+            activity.error = obj["message"] as? String ?? "error"
+        default: break
+        }
+    }
+
+    /// grok's internal tool ids (`--tools` vocabulary). Its file tools name their path
+    /// `target_file`/`path` rather than claude's `file_path`, so every spelling is tried.
+    private mutating func foldGrokTool(_ name: String, _ input: [String: Any]) {
+        let path = ["target_file", "file_path", "path", "filePath", "file"].lazy.compactMap { input[$0] as? String }.first
+        switch name {
+        case "read_file":
+            if let path { touch(path) }
+            activity.action = ActivityAction(verb: "Reading", object: path.map(display))
+        case "search_replace", "write", "write_file", "edit_file", "apply_patch", "delete_file":
+            if let path { touch(path) }
+            activity.action = ActivityAction(verb: "Editing", object: path.map(display))
+        case "grep", "file_search":
+            let pattern = input["pattern"] as? String ?? input["query"] as? String
+            activity.action = ActivityAction(verb: "Searching", object: pattern.map(quoted))
+        case "list_dir", "glob":
+            let target = input["target_directory"] as? String ?? input["pattern"] as? String ?? path
+            activity.action = ActivityAction(verb: "Listing", object: target.map(display))
+        case "run_terminal_cmd":
+            if let command = input["command"] as? String { foldCommand(command, unwrapShell: false) }
+        case "web_search":
+            activity.action = ActivityAction(verb: "Searching the web", object: input["query"] as? String)
+        case "web_fetch":
+            activity.action = ActivityAction(verb: "Fetching", object: input["url"] as? String)
+        case "todo_write":
+            let todos = input["todos"] as? [[String: Any]] ?? []
+            let done = todos.filter { $0["status"] as? String == "completed" }.count
+            let active = todos.first { $0["status"] as? String == "in_progress" }
+                ?? todos.first { $0["status"] as? String != "completed" }
+            activity.steps = ActivitySteps(done: done, total: todos.count,
+                                           current: active.flatMap { $0["content"] as? String })
+        case "StructuredOutput":
+            // `--json-schema`'s answer tool, as with claude: the seat handing back its result.
+            break
+        default:
+            activity.action = ActivityAction(verb: "Using", object: name.isEmpty ? nil : name)
         }
     }
 

@@ -200,20 +200,7 @@ private func stubSignInCheck(_ marker: String) -> SignInCheck {
     SignInCheck(arguments: [], signedOutHint: marker, isSignedIn: { _ in false })
 }
 
-public struct GrokProfile: AgentProfile {
-    public init() {}
-    public var id: Harness { .grok }
-    public var family: ModelFamily { .grok }
-    public var binaryName: String { "grok" }
-    public var signInCheck: SignInCheck { stubSignInCheck(AgentProfileStub.trackG) }
-    public var modelCatalog: ProfileModelCatalog { .empty }
-    public func parseModelList(_ stdout: String) -> [String] { [] }
-    /// `grok --json-schema` (grok 1.0.30, spec §2). Strict-mode compatibility is Track G's probe.
-    public var hasNativeSchema: Bool { true }
-    public func classify(error: AgentErrorSignal) -> AgentFailureKind? { nil }
-    public func environment(base: [String: String], account: AgentAccountRef?) -> [String: String] { base }
-    public var unimplemented: String? { AgentProfileStub.trackG }
-}
+// `GrokProfile` lives in GrokProfile.swift (Track G).
 
 public struct GeminiProfile: AgentProfile {
     public init() {}
