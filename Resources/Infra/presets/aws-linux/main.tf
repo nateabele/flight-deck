@@ -124,4 +124,12 @@ resource "aws_instance" "this" {
 
   # volume_tags is deliberately unused: it conflicts with root_block_device.tags.
   tags = merge(var.fd_labels, { Name = "fd-${var.fd_name}" })
+
+  # Both are force-new (user_data through user_data_replace_on_change), and both drift on
+  # their own: Canonical publishes a new Noble AMI about weekly, and Flight Deck re-renders
+  # fd_user_data on every `up`. Without this, the spec §6.2 re-apply that only moves
+  # fd_allow_cidr would destroy and recreate a running machine. They matter at creation only.
+  lifecycle {
+    ignore_changes = [ami, user_data]
+  }
 }

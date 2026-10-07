@@ -90,3 +90,45 @@ run "spot" {
     error_message = "spot market options"
   }
 }
+
+# A running machine must survive a re-apply (spec §6.2 re-applies when this Mac's public IP
+# changes). Canonical publishes a new Noble AMI about weekly and Flight Deck re-renders
+# fd_user_data each `up`; `ami` is force-new and `user_data_replace_on_change` makes
+# user_data force-new too, so either drifting into the instance would replace it.
+#
+# The mocks make `apply` free and local, but a mock provider cannot see replacement: force-new
+# is the real provider's plan logic, not part of its schema, so the instance id survives
+# either way. What is asserted instead is that the triggers themselves never reach the
+# instance — the state still holds what it booted with.
+run "create" {
+  command = apply
+}
+
+run "reapply_keeps_the_machine" {
+  command = apply
+
+  variables {
+    fd_user_data  = "#cloud-config\n# re-rendered\n"
+    fd_allow_cidr = "198.51.100.8/32"
+  }
+
+  override_data {
+    target = data.aws_ami.ubuntu
+    values = {
+      id = "ami-0fedcba9876543210"
+    }
+  }
+
+  assert {
+    condition     = aws_instance.this.ami == "ami-0123456789abcdef0"
+    error_message = "a newer AMI must not reach (and so replace) the running instance"
+  }
+  assert {
+    condition     = aws_instance.this.user_data == "#cloud-config\n"
+    error_message = "re-rendered user-data must not reach (and so replace) the running instance"
+  }
+  assert {
+    condition     = aws_vpc_security_group_ingress_rule.hostd[0].cidr_ipv4 == "198.51.100.8/32"
+    error_message = "the re-apply must still move the firewall to the new /32"
+  }
+}

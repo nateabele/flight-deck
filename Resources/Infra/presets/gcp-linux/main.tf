@@ -6,12 +6,25 @@ locals {
   # API default, is refused by G2 and most current families).
   disk_type = can(regex("^(c4|c4a|c4d|n4|n4a|n4d|m4|x4|a4|a4x)-", var.instance_type)) ? "hyperdisk-balanced" : "pd-balanced"
 
+  # Firewall names, network tags and (per zone) instance names are project-global, so two
+  # controllers or repos that each name a host `gpu` would collide on "fd-gpu". The base name
+  # carries a short owner discriminator from fd_labels; both parts are sanitised to GCE's
+  # [a-z0-9-], and the base is capped at 49 so the longest suffix (-deny-ingress) stays
+  # within GCE's 63.
+  owner = trim(substr(replace(lower(lookup(var.fd_labels, "flightdeck-owner", "")), "/[^a-z0-9-]+/", "-"), 0, 12), "-")
+  host  = trim(replace(lower(var.fd_name), "/[^a-z0-9-]+/", "-"), "-")
+  base  = trim(substr(join("-", compact(["fd", local.owner, local.host])), 0, 49), "-")
+
   # The network tag both firewall rules target; GCE firewall rules cannot select by label.
-  tag = "fd-${var.fd_name}"
+  tag = local.base
+
+  # Firewalls cannot carry labels, so the orphan scan (spec §7.3) reads these from the
+  # description instead.
+  firewall_description = "flightdeck-owner=${lookup(var.fd_labels, "flightdeck-owner", "")} flightdeck-name=${var.fd_name}"
 }
 
 resource "google_compute_instance" "this" {
-  name         = "fd-${var.fd_name}"
+  name         = local.base
   machine_type = var.instance_type
   zone         = local.zone
   tags         = [local.tag]
@@ -61,13 +74,22 @@ resource "google_compute_instance" "this" {
   shielded_instance_config {
     enable_secure_boot = true
   }
+
+  # Both drift on their own: the image family moves to a newer image (and boot_disk's image is
+  # force-new), and Flight Deck re-renders fd_user_data on every `up`. Without this, the spec
+  # §6.2 re-apply that only moves fd_allow_cidr would replace a running machine, or rewrite
+  # its metadata under it. They matter at creation only.
+  lifecycle {
+    ignore_changes = [boot_disk[0].initialize_params[0].image, metadata["user-data"]]
+  }
 }
 
 # Public mode only: hostd's port, from this Mac's /32 only (spec §6.2).
 resource "google_compute_firewall" "hostd" {
   count = var.fd_allow_cidr == "" ? 0 : 1
 
-  name          = "fd-${var.fd_name}-hostd"
+  name          = "${local.base}-hostd"
+  description   = local.firewall_description
   network       = "default"
   direction     = "INGRESS"
   priority      = 1000
@@ -86,7 +108,8 @@ resource "google_compute_firewall" "hostd" {
 # tailnet mode ("nothing else inbound (no SSH)", spec §6.2). Replies to outbound traffic,
 # Tailscale's included, are unaffected: GCE firewalls are stateful.
 resource "google_compute_firewall" "deny_other_ingress" {
-  name          = "fd-${var.fd_name}-deny-ingress"
+  name          = "${local.base}-deny-ingress"
+  description   = local.firewall_description
   network       = "default"
   direction     = "INGRESS"
   priority      = 1001
