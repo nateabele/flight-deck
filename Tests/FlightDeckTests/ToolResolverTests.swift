@@ -22,9 +22,11 @@ final class ToolResolverTests: XCTestCase {
 
     struct NoDownload: ToolDownloading { func fetch(_ u: URL, progress: @escaping @Sendable (Double) -> Void) async throws -> URL { throw ToolError.downloadFailed(.tofu, "offline") } }
 
-    func resolver(_ downloader: ToolDownloading = NoDownload()) -> ToolResolver {
+    /// `environment` is pinned rather than inherited, so a `CLOUDSDK_PYTHON` in the shell that
+    /// launched the tests can never decide a gcloud case.
+    func resolver(_ downloader: ToolDownloading = NoDownload(), environment: [String: String] = ["PATH": "/usr/bin:/bin"]) -> ToolResolver {
         ToolResolver(searchPath: [dir.appendingPathComponent("bin")], managedRoot: dir.appendingPathComponent("managed"),
-                     runner: SystemCommandRunner(), downloader: downloader)
+                     runner: SystemCommandRunner(), downloader: downloader, environment: environment)
     }
 
     func testUsesCompatibleCopyOnPath() async throws {
@@ -52,6 +54,7 @@ final class ToolResolverTests: XCTestCase {
     func testAWSAndGcloudVersionShapes() async throws {
         try fake("aws", prints: "aws-cli/2.17.4 Python/3.11 Darwin/25 exe/arm64")
         try fake("gcloud", prints: "Google Cloud SDK 495.0.0\nbq 2.1.8")
+        try fake("python3", prints: "Python 3.11.9")
         let r = resolver()
         let aws = try await r.resolve(.aws, provision: false)
         let gc = try await r.resolve(.gcloud, provision: false)
@@ -161,6 +164,90 @@ final class ToolResolverTests: XCTestCase {
         let start = Date()
         do { _ = try await r.resolve(.tofu, provision: false); XCTFail() } catch ToolError.missing(.tofu, _) {}
         XCTAssertLessThan(Date().timeIntervalSince(start), 5)
+    }
+
+    // MARK: - gcloud's Python
+
+    /// The darwin tarball bundles no Python and macOS's own is 3.9, so gcloud is only usable
+    /// with a 3.10+ interpreter named to it through `CLOUDSDK_PYTHON`.
+    func testGcloudGetsAUsablePython() async throws {
+        try fake("gcloud", prints: "Google Cloud SDK 495.0.0")
+        try fake("python3", prints: "Python 3.9.6")
+        try fake("python3.12", prints: "Python 3.12.4")
+        let gc = try await resolver().resolve(.gcloud, provision: false)
+        XCTAssertEqual(gc.environment, ["CLOUDSDK_PYTHON": dir.appendingPathComponent("bin/python3.12").path])
+    }
+
+    func testOnlyAnOldPythonIsMissing() async throws {
+        try fake("gcloud", prints: "Google Cloud SDK 495.0.0")
+        try fake("python3", prints: "Python 3.9.6")
+        do { _ = try await resolver().resolve(.gcloud, provision: false); XCTFail() }
+        catch ToolError.missing(.gcloud, let why) { XCTAssertEqual(why, "gcloud needs Python 3.10+ (brew install python@3.12)") }
+    }
+
+    /// The user's own `CLOUDSDK_PYTHON` comes first, ahead of a newer one on the path.
+    func testCloudSDKPythonIsPreferred() async throws {
+        try fake("gcloud", prints: "Google Cloud SDK 495.0.0")
+        try fake("python3.13", prints: "Python 3.13.1")
+        try FileManager.default.createDirectory(at: dir.appendingPathComponent("py"), withIntermediateDirectories: true)
+        try fake("mypython", prints: "Python 3.10.14", in: "py")
+        let chosen = dir.appendingPathComponent("py/mypython").path
+        let gc = try await resolver(environment: ["PATH": "/usr/bin:/bin", "CLOUDSDK_PYTHON": chosen]).resolve(.gcloud, provision: false)
+        XCTAssertEqual(gc.environment["CLOUDSDK_PYTHON"], chosen)
+    }
+
+    /// gcloud's own version check runs with the Python it was given: a gcloud that only works
+    /// under `CLOUDSDK_PYTHON` must still resolve.
+    func testGcloudVersionCheckSeesThePython() async throws {
+        let url = dir.appendingPathComponent("bin/gcloud")
+        try "#!/bin/sh\n[ -n \"$CLOUDSDK_PYTHON\" ] || exit 1\necho 'Google Cloud SDK 495.0.0'\n".write(to: url, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
+        try fake("python3.12", prints: "Python 3.12.4")
+        let gc = try await resolver().resolve(.gcloud, provision: false)
+        XCTAssertEqual(gc.version.major, 495)
+    }
+
+    func testOtherToolsCarryNoEnvironment() async throws {
+        try fake("tofu", prints: "OpenTofu v1.8.3")
+        try fake("python3.12", prints: "Python 3.12.4")
+        let r = try await resolver().resolve(.tofu, provision: false)
+        XCTAssertEqual(r.environment, [:])
+    }
+
+    // MARK: - The aws pkg's space-free install dir
+
+    /// AWS's per-user pkg install refuses a directory with a space, and "Application Support"
+    /// has one: the managed aws lives under `~/Library/Caches/dev.flightdeck/tools` instead.
+    func testManagedAwsInstallPathHasNoSpaces() throws {
+        let r = ToolResolver(searchPath: [], managedRoot: dir.appendingPathComponent("Application Support/tools"),
+                             runner: SystemCommandRunner(), downloader: NoDownload())
+        let aws = try XCTUnwrap(r.managedBinary(for: .aws))
+        XCTAssertFalse(aws.path.contains(" "), aws.path)
+        XCTAssertTrue(aws.path.hasSuffix("/Library/Caches/dev.flightdeck/tools/aws/2.37.10/aws-cli/aws"), aws.path)
+        XCTAssertTrue(try XCTUnwrap(r.managedBinary(for: .tofu)).path.contains("Application Support/tools/tofu/"))
+    }
+
+    /// Defense in depth: a space-free root that has a space anyway is refused before the
+    /// installer ever runs, rather than handed to a pkg that fails half-way.
+    func testSpacedPkgRootNeverRunsTheInstaller() async throws {
+        final class Recording: CommandRunner, @unchecked Sendable {
+            var calls: [String] = []
+            func run(executable: String, arguments: [String], cwd: URL, environment: [String: String],
+                     processGroup: Bool, onSpawn: (@Sendable (Int32) -> Void)?) async throws -> CommandResult {
+                calls.append(executable); return CommandResult(stdout: Data(), stderr: "", exitCode: 1)
+            }
+        }
+        let pkg = dir.appendingPathComponent("fake.pkg"); try Data("pkg".utf8).write(to: pkg)
+        let pin = ToolPin(tool: .aws, minimum: SemVer(major: 2, minor: 15, patch: 0), belowMajor: 3, managedVersion: "2.37.10",
+                          assetURL: URL(string: "https://example.invalid/AWSCLIV2-2.37.10.pkg"), sha256: try ToolResolver.sha256(of: pkg),
+                          versionArgs: ["--version"], managedBinary: "aws-cli/aws", requiresSpaceFreePath: true)
+        let runner = Recording()
+        let r = ToolResolver(searchPath: [], managedRoot: dir.appendingPathComponent("managed"), runner: runner,
+                             downloader: CopyDownload(file: pkg), pins: [.aws: pin],
+                             spaceFreeRoot: dir.appendingPathComponent("has space"))
+        do { _ = try await r.resolve(.aws, provision: true); XCTFail() }
+        catch ToolError.downloadFailed(.aws, let why) { XCTAssertTrue(why.contains("space"), why) }
+        XCTAssertEqual(runner.calls, [])
     }
 
     func testTailscaleBareVersionShape() async throws {

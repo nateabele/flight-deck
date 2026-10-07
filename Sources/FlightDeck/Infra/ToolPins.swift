@@ -53,6 +53,10 @@ struct ToolPin: Sendable {
     let versionArgs: [String]
     /// The executable's path inside the unpacked version directory.
     var managedBinary: String? = nil
+    /// The managed copy must live on a path with no spaces — AWS's per-user pkg install refuses
+    /// one, and "Application Support" has one — so it goes under `ToolResolver`'s
+    /// `spaceFreeRoot` instead of `managedRoot`.
+    var requiresSpaceFreePath = false
 
     func accepts(_ version: SemVer) -> Bool {
         version >= minimum && belowMajor.map { version.major < $0 } ?? true
@@ -81,15 +85,16 @@ enum ToolPins {
             sha256: "e269244d1db1acca75d1ca813c8ddd9a419ff4f01ff3a37dff8dc0b825b3c58c",
             versionArgs: ["--version"], managedBinary: "tofu"),
         // The versioned pkg name (`AWSCLIV2-<ver>.pkg`); plain `AWSCLIV2.pkg` is always the latest.
-        // Installed per user with a `customLocation` choice, which lands it in `aws-cli/`.
+        // Installed per user with a `customLocation` choice, which lands it in `aws-cli/` and
+        // creates no symlinks: it is only ever run by the absolute path the resolver records.
         .aws: ToolPin(
             tool: .aws, minimum: SemVer(major: 2, minor: 15, patch: 0), belowMajor: 3,
             managedVersion: "2.37.10",
             assetURL: URL(string: "https://awscli.amazonaws.com/AWSCLIV2-2.37.10.pkg"),
             sha256: "6de7835fd806a86069509578b7e5a7135c803cf2e88349e7e10d6e681b89b9db",
-            versionArgs: ["--version"], managedBinary: "aws-cli/aws"),
-        // The darwin-arm tarball bundles no Python: the `gcloud` script needs a Python 3.10+ on
-        // PATH (or `CLOUDSDK_PYTHON`), which macOS's own 3.9 is not.
+            versionArgs: ["--version"], managedBinary: "aws-cli/aws", requiresSpaceFreePath: true),
+        // The darwin-arm tarball bundles no Python, and macOS's own 3.9 is too old: the resolver
+        // finds a 3.10+ one and hands it over as `CLOUDSDK_PYTHON` (`ResolvedTool.environment`).
         .gcloud: ToolPin(
             tool: .gcloud, minimum: SemVer(major: 480, minor: 0, patch: 0), belowMajor: nil,
             managedVersion: "588.0.0",
