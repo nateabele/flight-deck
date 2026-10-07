@@ -274,33 +274,47 @@ public enum HarnessCommand {
         }
     }
 
-    /// Every headless `agy` run. stream-json so the seat shows live activity (the final
-    /// `result` event carries the same object `--output-format json` prints alone);
-    /// `--json-schema` takes a file path or inline JSON, and the file keeps a large schema out
-    /// of argv. `--disable-slash-commands` stops a prompt line that happens to start with `/`
-    /// expanding into a skill or command — the seat's prompt is data, not a command.
+    /// Appended to every read-only agy seat's prompt. agy ends a headless turn with NO answer
+    /// the moment it auto-denies a tool (probed 2026-10-07), so a seat that "just checks" with a
+    /// write or an unsandboxed command loses its whole turn; saying so up front avoids most of
+    /// those, and `SchemaRepair` resumes the rest once.
+    public static let geminiReadOnlyNote = "\n\n(This run is read-only. Writing or editing files, or running commands "
+        + "that change anything, is denied and ends your turn without an answer. Read and search only.)"
+
+    /// Every headless `agy` run (probed on agy 1.3.1, 2026-10-07):
+    /// - stream-json so the seat shows live activity; the final `result` event carries the same
+    ///   object `--output-format json` prints alone.
+    /// - `--json-schema` gets the schema INLINE, rewritten by `GeminiSchema` — Gemini refuses a
+    ///   `null` inside `enum`, which every strict intake schema with a nullable enum has.
+    /// - No `--effort`: the model id carries it (see `GeminiProfile.modelCatalog`).
+    /// - No `--print-timeout`: since 1.3.1 it defaults to 0, "wait until the turn completes" —
+    ///   the uncapped wait claude and codex seats get (1.2.3 defaulted to 5 minutes).
+    /// - `--disable-slash-commands`: a prompt line that starts with `/` stays data.
     static func geminiArguments(_ r: HarnessRequest) -> [String] {
-        var args = ["-p", r.prompt, "--output-format", "stream-json", "--json-schema", r.schemaFile.path,
-                    "--model", r.model]
-        if !r.effort.isEmpty { args += ["--effort", r.effort] }
-        // No `--print-timeout`: since agy 1.3.1 it defaults to 0, "wait until the turn
-        // completes" — the same uncapped wait claude and codex seats get. (1.2.3 defaulted to
-        // 5 minutes, shorter than a real drafter turn; agy self-updates past it.)
-        args += ["--disable-slash-commands"]
+        var args = ["--output-format", "stream-json", "--json-schema", GeminiSchema.compatible(r.schemaJSON),
+                    "--model", r.model, "--disable-slash-commands"]
         switch r.access {
         case .readOnly:
-            // `--mode plan`: agy's read-only execution mode. Readable dirs join the workspace
-            // with `--add-dir`, the way claude seats get them.
-            args += ["--mode", "plan"]
+            // READ-ONLY IS THE PERMISSION SYSTEM, NOT `--mode plan`. Probed: `--mode plan` only
+            // changes the agent's workflow — with permissions skipped it wrote NOTES.md and
+            // edited README.md. In the default mode every write needs a permission headless
+            // mode cannot grant, so it is auto-denied (no file appeared). `--sandbox` lets
+            // read-only shell commands (`ls`, `rg`, `git log`) run without a permission and
+            // blocks their writes ("Operation not permitted"). Never
+            // `--dangerously-skip-permissions`: with it a sandbox-blocked `touch` was simply
+            // retried unsandboxed, and succeeded.
+            args = ["-p", r.prompt + geminiReadOnlyNote] + args + ["--sandbox"]
             for d in r.readableDirs { args += ["--add-dir", d.path] }
         case .writeInWork:
-            // `accept-edits` lets file edits through without a prompt nobody could answer; the
-            // workspace is the cwd, which `validate` pins to the work dir. readableDirs are NOT
+            // `accept-edits` approves edits inside the workspace — the cwd, which `validate`
+            // pins to the work dir — and still denies a write outside it (probed: an edit to
+            // work/plan.md landed, a write to ../OUTSIDE.md was denied). readableDirs are NOT
             // added: `--add-dir` widens the workspace, i.e. where edits may land.
-            args += ["--mode", "accept-edits"]
+            args = ["-p", r.prompt] + args + ["--mode", "accept-edits", "--sandbox"]
         }
-        // Resume by the id agy itself reported (`conversation_id`). Never `--continue`: it
-        // resumes the MOST RECENT conversation, which with parallel seats is another seat's.
+        // Resume by the id agy itself reported (`conversation_id`) — probed: the resumed turn
+        // keeps the id and remembers the earlier one. Never `--continue`: it resumes the MOST
+        // RECENT conversation, which with parallel seats is another seat's.
         if let s = r.resumeSessionID { args += ["--conversation", s] }
         return args
     }
@@ -418,35 +432,53 @@ public enum HarnessOutput {
 
     /// `agy --output-format stream-json`: `{"event":"init","conversation_id":…}` first, then
     /// `step_update`s, then `{"event":"result","result":{…}}` — the same object
-    /// `--output-format json` prints alone, which is accepted too. The session is the result's
-    /// `conversation_id` (or init's, when the result has none). A result whose `status` is not
-    /// `SUCCESS` holds an error, not an answer — and a signed-out run reports one with an EMPTY
-    /// conversation id, so the status is checked before the id.
+    /// `--output-format json` prints alone, which is accepted too. The answer is ONLY
+    /// `structured_output`: the `response` text can carry keys the schema forbids (probed:
+    /// `{"plan":"417","toolAction":…,"toolSummary":…}` beside a clean `structured_output`). A
+    /// result whose `status` is not `SUCCESS` holds an error, not an answer — and a signed-out
+    /// run reports one with an EMPTY conversation id, so the status is checked before the id.
     private static func geminiParse(_ stdout: Data) throws -> (sessionID: String, structured: Data) {
-        var session: String?, result: [String: Any]?
-        if let obj = try? JSONSerialization.jsonObject(with: stdout) as? [String: Any], obj["event"] == nil {
-            result = obj
-        } else {
-            for line in stdout.split(separator: UInt8(ascii: "\n")) {
-                guard let obj = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any] else { continue }
-                if let s = obj["conversation_id"] as? String, !s.isEmpty { session = s }
-                if obj["event"] as? String == "result" { result = obj["result"] as? [String: Any] }
-            }
+        guard let result = geminiResult(stdout) else {
+            throw geminiSession(stdout) == nil ? ParseError.noSession : ParseError.noResult
         }
-        guard let result else { throw session == nil ? ParseError.noSession : ParseError.noResult }
         let status = result["status"] as? String ?? ""
         guard status == "SUCCESS" else {
             throw ParseError.isError(result["error"] as? String ?? (status.isEmpty ? "no status" : status))
         }
-        if let s = result["conversation_id"] as? String, !s.isEmpty { session = s }
-        guard let session else { throw ParseError.noSession }
+        guard let session = geminiSession(stdout) else { throw ParseError.noSession }
         if let structured = result["structured_output"], !(structured is NSNull) {
             return (session, try JSONSerialization.data(withJSONObject: structured, options: .fragmentsAllowed))
         }
-        guard let text = result["response"] as? String else { throw ParseError.noResult }
-        let data = Data(text.utf8)
-        guard (try? JSONSerialization.jsonObject(with: data)) != nil else { throw ParseError.notJSON(text) }
-        return (session, data)
+        // SUCCESS with no answer: agy auto-denied a tool and stopped (`denied_actions`).
+        let denied = (result["denied_actions"] as? [[String: Any]] ?? []).compactMap { $0["action"] as? String }
+        throw ParseError.isError(GeminiProfile.answerlessTurnMarker
+            + (denied.isEmpty ? "" : " (denied: \(denied.joined(separator: ", ")))"))
+    }
+
+    private static func geminiResult(_ stdout: Data) -> [String: Any]? {
+        if let obj = try? JSONSerialization.jsonObject(with: stdout) as? [String: Any], obj["event"] == nil { return obj }
+        var result: [String: Any]?
+        for line in stdout.split(separator: UInt8(ascii: "\n")) {
+            guard let obj = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any] else { continue }
+            if obj["event"] as? String == "result" { result = obj["result"] as? [String: Any] }
+        }
+        return result
+    }
+
+    private static func geminiSession(_ stdout: Data) -> String? {
+        if let s = geminiResult(stdout)?["conversation_id"] as? String, !s.isEmpty { return s }
+        for line in stdout.split(separator: UInt8(ascii: "\n")) {
+            guard let obj = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any] else { continue }
+            if let s = obj["conversation_id"] as? String, !s.isEmpty { return s }
+        }
+        return nil
+    }
+
+    /// The session a run reported even when its output did not parse — so a failed run can
+    /// still be resumed (`SchemaRepair`). agy only: claude and codex runs keep reporting no
+    /// session on a parse failure, exactly as before.
+    public static func reportedSession(_ harness: Harness, stdout: Data) -> String? {
+        harness == .gemini ? geminiSession(stdout) : nil
     }
 
     /// The structured answer in a claude `result` object. `is_error` means `result` holds the

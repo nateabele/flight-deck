@@ -28,7 +28,14 @@ public enum SchemaRepair {
         // A native-schema harness never retries: its CLI already enforced the schema, so a
         // mismatch is not something a "please fix your JSON" turn repairs — and claude/codex
         // rounds must behave exactly as before this seam existed.
-        guard !profile.hasNativeSchema, !isRepair else { return nil }
+        guard !isRepair else { return nil }
+        // A turn the CLI ended with NO answer for a reason a resume fixes (agy auto-denying a
+        // tool) is repaired whatever the schema support: nothing was produced to validate.
+        if let marker = profile.answerlessTurnMarker, failure.detail.contains(marker) {
+            guard let sessionID, !sessionID.isEmpty, access == .readOnly else { return nil }
+            return Retry(resumeSessionID: sessionID, prompt: answerlessPrompt)
+        }
+        guard !profile.hasNativeSchema else { return nil }
         // Only an answer that came back and failed to parse or validate is repairable. A rate
         // limit, a sign-in or a crash is not fixed by asking again for JSON — retrying those
         // would just spend the one retry on the same failure.
@@ -41,6 +48,12 @@ public enum SchemaRepair {
         guard access == .readOnly else { return nil }
         return Retry(resumeSessionID: sessionID, prompt: prompt(firstError: failure.detail))
     }
+
+    /// The resume after a turn that ended without an answer: say why, and ask for the answer
+    /// without the tool use that was denied.
+    public static let answerlessPrompt = "Your last turn ended without an answer because a tool you tried was denied: "
+        + "this run is read-only, so writing files or running commands that change anything is not allowed. "
+        + "Without using any tool that writes or changes anything, reply now with the JSON answer."
 
     /// The repair turn's whole prompt (spec §3.4 step 4). Only the first error: a list invites
     /// the model to fix some and re-break others, and one is enough to say what went wrong.
