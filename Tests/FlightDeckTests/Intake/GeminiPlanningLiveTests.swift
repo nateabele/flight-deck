@@ -40,20 +40,31 @@ final class GeminiPlanningLiveTests: XCTestCase {
         if let scratch { try? FileManager.default.removeItem(at: scratch) }
     }
 
-    private func run(_ prompt: String, resume: String? = nil) async throws -> (sessionID: String, plan: String) {
+    /// One seat turn, with the executor's one repair: a turn agy ended on a denied tool is
+    /// resumed once on its own conversation (`SchemaRepair`), exactly as a round would.
+    private func run(_ prompt: String, resume: String? = nil, isRepair: Bool = false) async throws -> (sessionID: String, plan: String) {
         let schemaFile = scratch.appendingPathComponent("schema-\(UUID().uuidString).json")
         try Data(RoundSchemas.draft.utf8).write(to: schemaFile)
         defer { try? FileManager.default.removeItem(at: schemaFile) }
-        let request = HarnessRequest(harness: .gemini, model: model, effort: "low", cwd: scratch, readableDirs: [],
+        let request = HarnessRequest(harness: .gemini, model: model, effort: "", cwd: scratch, readableDirs: [],
                                      prompt: prompt, schemaFile: schemaFile, schemaJSON: RoundSchemas.draft,
                                      resumeSessionID: resume)
         let command = try HarnessCommand.build(request)
         let result = try await SystemCommandRunner().run(executable: command.executable, arguments: command.arguments,
                                                          cwd: scratch, environment: environment)
         XCTAssertEqual(result.exitCode, 0, result.stderr)
-        let parsed = try HarnessOutput.parse(.gemini, stdout: result.stdout)
-        let draft = try RoundPrompts.decode(DraftOutput.self, parsed.structured)
-        return (parsed.sessionID, draft.plan)
+        do {
+            let parsed = try HarnessOutput.parse(.gemini, stdout: result.stdout)
+            let draft = try RoundPrompts.decode(DraftOutput.self, parsed.structured)
+            return (parsed.sessionID, draft.plan)
+        } catch {
+            let diagnosis = FailureDiagnosis.classify(exitCode: 0, stdout: Data(), stderr: "", parseError: error, harness: .gemini)
+            guard let repair = SchemaRepair.retry(profile: GeminiProfile(), failure: diagnosis,
+                                                  sessionID: HarnessOutput.reportedSession(.gemini, stdout: result.stdout),
+                                                  access: .readOnly, isRepair: isRepair) else { throw error }
+            print("GeminiPlanningLiveTests: repairing an answerless turn: \(error)")
+            return try await run(repair.prompt, resume: repair.resumeSessionID, isRepair: true)
+        }
     }
 
     func testDraftThenResumeTheSameConversation() async throws {
@@ -65,8 +76,8 @@ final class GeminiPlanningLiveTests: XCTestCase {
         XCTAssertTrue(second.plan.contains("417"), second.plan)
     }
 
-    /// `--mode plan` must not let the seat write — `.md` included (the gemini CLI's own plan
-    /// mode allowed `*.md` writes in the workspace).
+    /// A read-only seat must not write — `.md` included (the gemini CLI's plan mode allowed
+    /// `*.md` writes, and agy's `--mode plan` wrote files once permissions were skipped).
     func testReadOnlySeatCannotWriteAMarkdownFile() async throws {
         _ = try? await run("Create a file named NOTES.md in the current directory containing the word hi. Then put done in plan.")
         let entries = try FileManager.default.contentsOfDirectory(atPath: scratch.path).filter { !$0.hasPrefix("schema-") }
