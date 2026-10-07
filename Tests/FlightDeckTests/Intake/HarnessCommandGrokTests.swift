@@ -30,7 +30,25 @@ final class HarnessCommandGrokTests: XCTestCase {
                                      "--disable-web-search", "--no-subagents", "--no-plan", "--disallowed-tools", "Agent",
                                      "--permission-mode", "dontAsk", "--tools", "read_file,grep,list_dir",
                                      "--deny", "Edit", "--deny", "Write", "--deny", "Bash", "--deny", "WebFetch",
-                                     "--deny", "WebSearch", "--deny", "MCPTool", "--session-id", minted])
+                                     "--deny", "WebSearch", "--deny", "MCPTool",
+                                     "--deny", "Read(**/.git/**)", "--deny", "Read(**/.beads/**)", "--session-id", minted])
+    }
+
+    /// No grok seat, read-only or integrator, may read `.git` or `.beads` metadata. The first
+    /// live three-family round's grok reviewer spent 8 of its 26 tool calls there (git config,
+    /// `info/exclude`, the beads DB metadata) — context every later turn re-sends, with nothing
+    /// in it a plan review can use. `Read(<glob>)` denies cover `read_file`, `grep` and
+    /// `list_dir` (probed on grok 1.0.30, 2026-10-07: "deny rule on read matching \"**/.git/**\"").
+    func testNoSeatReadsGitOrBeadsMetadata() throws {
+        let work = URL(fileURLWithPath: "/intake/work")
+        for access in [HarnessAccess.readOnly, .writeInWork(work)] {
+            let args = try HarnessCommand.build(req(access: access, cwd: access == .readOnly ? "/proj" : "/intake/work"),
+                                                home: Self.noHome).arguments
+            var denied: [String] = []
+            for (i, a) in args.enumerated() where a == "--deny" { denied.append(args[i + 1]) }
+            XCTAssertTrue(denied.contains("Read(**/.git/**)"), "\(access): \(denied)")
+            XCTAssertTrue(denied.contains("Read(**/.beads/**)"), "\(access): \(denied)")
+        }
     }
 
     /// Every fresh seat gets its OWN new UUID — two parallel seats on grok in the same project
@@ -69,7 +87,8 @@ final class HarnessCommandGrokTests: XCTestCase {
             XCTAssertEqual(Set(tools), ["read_file", "grep", "list_dir"])
             var denied: [String] = []
             for (i, a) in args.enumerated() where a == "--deny" { denied.append(args[i + 1]) }
-            XCTAssertEqual(Set(denied), ["Edit", "Write", "Bash", "WebFetch", "WebSearch", "MCPTool"])
+            XCTAssertEqual(Set(denied), ["Edit", "Write", "Bash", "WebFetch", "WebSearch", "MCPTool",
+                                         "Read(**/.git/**)", "Read(**/.beads/**)"])
             XCTAssertTrue(args.contains("--disable-web-search"))
             XCTAssertEqual(value(after: "--disallowed-tools", in: args), "Agent")
         }
@@ -95,7 +114,7 @@ final class HarnessCommandGrokTests: XCTestCase {
             if a == "--deny" { denied.append(args[i + 1]) }
         }
         XCTAssertEqual(allowed, ["Edit(/intake/work/**)"])
-        XCTAssertEqual(Set(denied), ["Bash", "WebFetch", "WebSearch", "MCPTool"])
+        XCTAssertEqual(Set(denied), ["Bash", "WebFetch", "WebSearch", "MCPTool", "Read(**/.git/**)", "Read(**/.beads/**)"])
         XCTAssertNotNil(value(after: "--session-id", in: args))
     }
 

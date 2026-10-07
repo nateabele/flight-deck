@@ -143,7 +143,15 @@ public enum HarnessCommand {
     /// names are grok's rule vocabulary (`Edit` and `Write` are one class, both named so a
     /// rename of either can't reopen it); `MCPTool` with no pattern matches every MCP tool,
     /// so an MCP server that slipped past the isolation environment still can't be called.
-    public static let grokDeniedRules = ["Edit", "Write", "Bash", "WebFetch", "WebSearch", "MCPTool"]
+    public static let grokDeniedRules = ["Edit", "Write", "Bash", "WebFetch", "WebSearch", "MCPTool"] + grokMetadataReadRules
+
+    /// Read denies for repository metadata, on every grok seat. The first live round's grok
+    /// reviewer spent 8 of its 26 tool calls reading `.git` (config, `info/exclude`) and the
+    /// beads DB's metadata — nothing a plan review can use, and context every later turn
+    /// re-sends. The graph reaches a seat as the file FD writes, never through `.beads`.
+    /// `Read(<glob>)` is grok's path rule; it covers `read_file`, `grep` and `list_dir` (probed
+    /// on grok 1.0.30, 2026-10-07: a read of `.git/HEAD` came back "Denied by permission policy").
+    public static let grokMetadataReadRules = ["Read(**/.git/**)", "Read(**/.beads/**)"]
 
     /// The flags every grok seat gets. `streaming-messages-json` is the Anthropic stream shape:
     /// tool use streams as it happens (the seat's live row), and the final `result` line carries
@@ -159,7 +167,7 @@ public enum HarnessCommand {
     /// Denied in write mode — `Edit`/`Write` are absent because the integrator needs them; they
     /// are instead allowed ONLY under its work dir (`Edit(<dir>/**)`), and `dontAsk` denies an
     /// edit anywhere else rather than asking.
-    public static let grokWriteDeniedRules = ["Bash", "WebFetch", "WebSearch", "MCPTool"]
+    public static let grokWriteDeniedRules = ["Bash", "WebFetch", "WebSearch", "MCPTool"] + grokMetadataReadRules
 
     /// A new conversation's id. grok's `--session-id` must be a valid UUID that names no
     /// existing session; minting it here (rather than letting grok pick one) means a seat's id
