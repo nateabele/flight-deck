@@ -24,6 +24,11 @@ import IntakeKit
 /// Never loop it; re-run only after a fix aimed at a specific failure. Set
 /// `FLIGHTDECK_PLANNING_4WAY_KEEP=<dir>` to keep the intake's checkpoints and `runs/`.
 ///
+/// `FLIGHTDECK_PLANNING_4WAY_FAMILIES=3` runs the same round WITHOUT the Gemini cross-check
+/// (claude + codex drafting, Grok reviewing, claude integrating). That proves validation,
+/// resume and Grok end to end while Gemini is unavailable, so only Gemini's part is left for
+/// the four-family run. It is a run-time override only; the default is all four.
+///
 /// The intake is synthetic (a temperature-conversion CLI that does not exist), in a scratch
 /// project under `$HOME` (never `/tmp`: `am` treats temp paths as ephemeral), removed on every
 /// path, pass or fail.
@@ -86,10 +91,11 @@ final class Planning4WayLiveTests: XCTestCase {
         let codex = try XCTUnwrap(available.choice(for: .codex), "codex not offered")
         let grok = try XCTUnwrap(available.choice(for: .grok),
                                  "grok not offered: \(available.unavailable[.grok] ?? "not in headlessReady")")
-        let gemini = try XCTUnwrap(available.choice(for: .gemini),
-                                   "gemini not offered: \(available.unavailable[.gemini] ?? "not in headlessReady")")
+        let withGemini = environment["FLIGHTDECK_PLANNING_4WAY_FAMILIES"] != "3"
+        let gemini = withGemini ? try XCTUnwrap(available.choice(for: .gemini),
+                                                "gemini not offered: \(available.unavailable[.gemini] ?? "not in headlessReady")") : nil
         print("planning-4way: seats claude \(claude.model)/\(claude.effort), codex \(codex.model)/\(codex.effort), "
-              + "grok \(grok.model)/\(grok.effort), gemini \(gemini.model)/\(gemini.effort)")
+              + "grok \(grok.model)/\(grok.effort), gemini \(gemini.map { "\($0.model)/\($0.effort)" } ?? "off")")
 
         var intake = Intake(projectPath: project.path,
                             intent: "Make tempconv safe for scripts: reject impossible temperatures and let callers choose the precision.")
@@ -97,8 +103,8 @@ final class Planning4WayLiveTests: XCTestCase {
         let config = RoundConfig(drafters: [Slot(claude), Slot(codex)], synthesizer: nil, reviewer: Slot(grok),
                                  integrator: claude, encoder: claude, polisher: nil, refinementCap: 1, polishCap: 0,
                                  freshEyesAndDedup: false, defaultPlay: .toReview, customized: true,
-                                 crossReviewer: Slot(gemini), crossCheck: .firstAndLast)
-        XCTAssertTrue(config.crossChecks, "Grok and Gemini must count as different families")
+                                 crossReviewer: gemini.map { Slot($0) }, crossCheck: withGemini ? .firstAndLast : .off)
+        if withGemini { XCTAssertTrue(config.crossChecks, "Grok and Gemini must count as different families") }
         intake.roundConfig = config
         try IntakeStore(root: intakes).save(intake)
         let store = TapeStore(intakeDirectory: IntakeStore(root: intakes).directory(for: intake.id))
@@ -116,7 +122,7 @@ final class Planning4WayLiveTests: XCTestCase {
         Self.printSlots(draftCP, store)
 
         // Refine 1, cross-checked: Grok and Gemini review the same plan at once, claude integrates.
-        let refine = try await executor.run(PlannedRound(stage: .refine, round: 1, major: false, crossCheck: true),
+        let refine = try await executor.run(PlannedRound(stage: .refine, round: 1, major: false, crossCheck: withGemini),
                                             RoundInputs(intake: intake, config: config, tape: tape, store: store,
                                                         project: project, environment: environment))
         let refineCP = try landed(refine, "refine", store, &tape)
@@ -126,8 +132,9 @@ final class Planning4WayLiveTests: XCTestCase {
         // Every seat ran on what it was given and came back as decoded, schema-valid output:
         // `.ok` is only recorded after `RoundPrompts.decode` accepted the answer.
         let slots = draftCP.record.slots + refineCP.record.slots
-        for (role, harness) in [("drafter", Harness.claude), ("drafter", .codex), ("reviewer", .grok),
-                                ("crossReviewer", .gemini), ("integrator", .claude)] {
+        var seated: [(String, Harness)] = [("drafter", .claude), ("drafter", .codex), ("reviewer", .grok), ("integrator", .claude)]
+        if withGemini { seated.append(("crossReviewer", .gemini)) }
+        for (role, harness) in seated {
             let slot = slots.first { $0.role == role && $0.requested.harness == harness }
             XCTAssertEqual(slot?.status, .ok, "\(role) \(harness): \(String(describing: slot?.diagnosis))")
             XCTAssertEqual(slot?.used.harness, harness, "\(role) \(harness) fell back")
@@ -138,7 +145,32 @@ final class Planning4WayLiveTests: XCTestCase {
 
         // Coverage: four families seated, and the cross-check reading is Grok vs Gemini.
         let families = Set(slots.filter { $0.status == .ok }.map { ModelFamily($0.used.harness) })
-        XCTAssertEqual(families, [.claude, .codex, .grok, .gemini])
+        XCTAssertEqual(families, withGemini ? [.claude, .codex, .grok, .gemini] : [.claude, .codex, .grok])
+        if withGemini { try assertCoverage(refineCP, store, tape) }
+
+        // Resume: each read-only seat's own session, once. The integrator is write mode, which
+        // never resumes (`resumeNotSupportedForWrite`).
+        var sessions: [Harness: String] = [:]
+        for (role, harness) in seated where role != "integrator" {
+            guard let slot = slots.first(where: { $0.role == role && $0.used.harness == harness }),
+                  let session = slot.sessionID else {
+                XCTFail("\(role) \(harness) recorded no session")
+                continue
+            }
+            sessions[harness] = session
+            let resumed = try await resume(slot.used, session: session)
+            print("planning-4way: resume \(harness.rawValue) \(resumed.seconds) s, tokens \(resumed.tokens), "
+                  + "same session \(resumed.sessionID == session), recall: \(resumed.recall.prefix(120))")
+            XCTAssertEqual(resumed.sessionID, session, "\(harness) resumed a different session")
+            XCTAssertTrue(resumed.recall.lowercased().contains("temperat"),
+                          "\(harness) resumed without its own context: \(resumed.recall)")
+        }
+        XCTAssertEqual(Set(sessions.values).count, sessions.count, "two seats shared a session: \(sessions)")
+    }
+
+    /// The cross-checked round's coverage: its record names Grok and Gemini, and the reading
+    /// counts them as two families.
+    private func assertCoverage(_ refineCP: Checkpoint, _ store: TapeStore, _ tape: Tape) throws {
         let crossRecord = try XCTUnwrap(try? IntakeJSON.decoder.decode(
             CrossCheckRecord.self,
             from: Data(contentsOf: store.checkpointDirectory(refineCP.id).appendingPathComponent(CrossCheckRecord.fileName))),
@@ -156,24 +188,6 @@ final class Planning4WayLiveTests: XCTestCase {
             XCTFail("no coverage reading from the cross-checked round")
         }
 
-        // Resume: each read-only seat's own session, once. The integrator is write mode, which
-        // never resumes (`resumeNotSupportedForWrite`).
-        var sessions: [Harness: String] = [:]
-        for (role, harness) in [("drafter", Harness.claude), ("drafter", .codex), ("reviewer", .grok), ("crossReviewer", .gemini)] {
-            guard let slot = slots.first(where: { $0.role == role && $0.used.harness == harness }),
-                  let session = slot.sessionID else {
-                XCTFail("\(role) \(harness) recorded no session")
-                continue
-            }
-            sessions[harness] = session
-            let resumed = try await resume(slot.used, session: session)
-            print("planning-4way: resume \(harness.rawValue) \(resumed.seconds) s, tokens \(resumed.tokens), "
-                  + "same session \(resumed.sessionID == session), recall: \(resumed.recall.prefix(120))")
-            XCTAssertEqual(resumed.sessionID, session, "\(harness) resumed a different session")
-            XCTAssertTrue(resumed.recall.lowercased().contains("temperat"),
-                          "\(harness) resumed without its own context: \(resumed.recall)")
-        }
-        XCTAssertEqual(Set(sessions.values).count, sessions.count, "two seats shared a session: \(sessions)")
     }
 
     // MARK: - Helpers
