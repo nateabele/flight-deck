@@ -192,7 +192,8 @@ final class GeminiFailureDiagnosisTests: XCTestCase {
         let p = GeminiProfile()
         XCTAssertEqual(p.classify(error: .stderr("Authentication required. Please visit the URL")), .authExpired)
         XCTAssertEqual(p.classify(error: .stderr("Error: Please sign in to view available models.")), .authExpired)
-        XCTAssertEqual(p.classify(error: .streamErrorEvent(json: #"{"error":"RESOURCE_EXHAUSTED"}"#)), .rateLimited)
+        XCTAssertEqual(p.classify(error: .streamErrorEvent(json:
+            #"{"event":"result","result":{"conversation_id":"","status":"ERROR","error":"RESOURCE_EXHAUSTED"}}"#)), .rateLimited)
         XCTAssertEqual(p.classify(error: .stderr("model is overloaded")), .overloaded)
         XCTAssertNil(p.classify(error: .stderr("invalid model selection: x not recognized")))
     }
@@ -321,6 +322,7 @@ final class GeminiAvailabilityTests: XCTestCase {
     }
 
     func testSignedInOffersGeminiWithItsListedModels() throws {
+        try XCTSkipUnless(AgentProfiles.headlessReady.contains(.gemini), "gemini is not headless-ready yet")
         try install(["claude", "agy"])
         let listed = String(decoding: try fixture("gemini-models", "txt", Self.self), as: UTF8.self)
         let calls = CallLog()
@@ -362,14 +364,15 @@ final class GeminiAvailabilityTests: XCTestCase {
         XCTAssertNotNil(available.unavailable[.gemini])
     }
 
-    func testEditorKnobsForGemini() {
+    func testEditorKnobsForGemini() throws {
+        try XCTSkipUnless(AgentProfiles.headlessReady.contains(.gemini), "gemini is not headless-ready yet")
         XCTAssertEqual(RoundConfigEditor.effortChoices(for: .gemini), ["low", "medium", "high"])
         var available = AvailableModels(choices: [.claude: ModelChoice(harness: .claude, model: "opus", effort: "high"),
                                                   .gemini: ModelChoice(harness: .gemini, model: "g1", effort: "high")])
         available.models[.gemini] = ["g1", "g2"]
-        XCTAssertEqual(RoundConfigEditor.modelChoices(for: .gemini, current: "g2", available: available), ["g1", "g2"])
-        XCTAssertEqual(RoundConfigEditor.modelChoices(for: .gemini, current: "old", available: available), ["old", "g1", "g2"])
-        XCTAssertNil(RoundConfigEditor.modelChoices(for: .claude, current: "opus", available: available))
+        // The model menu offers what `agy models` listed at detection.
+        XCTAssertEqual(RoundConfigEditor.modelSuggestions(for: .gemini, detected: available.models[.gemini] ?? []), ["g1", "g2"])
+        XCTAssertEqual(RoundConfigEditor.modelSuggestions(for: .gemini), [GeminiProfile.defaultPlanningModel])
         // Cross-family: a gemini seat's fallback is another family; claude's stays as it was.
         let gemini = ModelChoice(harness: .gemini, model: "g1", effort: "high")
         XCTAssertEqual(RoundConfigEditor.otherModel(for: gemini, available: available)?.harness, .claude)

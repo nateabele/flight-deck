@@ -15,7 +15,7 @@ public enum FailureDiagnosis {
     public static func classify(exitCode: Int32, stdout: Data, stderr: String, parseError: Error?,
                                  harness: Harness? = nil) -> Diagnosis {
         let events = errorEventJSON(in: stdout)
-        let errorText = events.compactMap(message(ofErrorEvent:)).joined(separator: "\n")
+        let errorText = events.compactMap(AgentErrorVocabulary.message(ofErrorEvent:)).joined(separator: "\n")
         let haystack = (stderr + "\n" + errorText).lowercased()
 
         // The CLI's profile classifies each piece of evidence (stderr, and every structured
@@ -70,7 +70,7 @@ public enum FailureDiagnosis {
     /// the last line under stream-json. Everything else in stdout — agent messages, a
     /// successful result — is the model talking and is skipped.
     static func errorEvents(in stdout: Data) -> [String] {
-        errorEventJSON(in: stdout).compactMap(message(ofErrorEvent:))
+        errorEventJSON(in: stdout).compactMap(AgentErrorVocabulary.message(ofErrorEvent:))
     }
 
     /// The raw JSON text of each structured error event — what a profile classifies, as
@@ -82,35 +82,10 @@ public enum FailureDiagnosis {
         if let obj = try? JSONSerialization.jsonObject(with: stdout) as? [String: Any], let isError = obj["is_error"] as? Bool {
             return isError ? [String(decoding: stdout, as: UTF8.self)] : []
         }
-        if let obj = try? JSONSerialization.jsonObject(with: stdout) as? [String: Any], obj["event"] == nil,
-           obj["conversation_id"] != nil {
-            return agyError(obj) == nil ? [] : [String(decoding: stdout, as: UTF8.self)]
-        }
         return stdout.split(separator: UInt8(ascii: "\n")).compactMap { line -> String? in
             let json = String(decoding: line, as: UTF8.self)
-            if AgentErrorVocabulary.message(ofErrorEvent: json) != nil { return json }
-            guard let obj = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any] else { return nil }
-            return agyError(obj) == nil ? nil : json
+            return AgentErrorVocabulary.message(ofErrorEvent: json) == nil ? nil : json
         }
-    }
-
-    /// One error event's message: the shared vocabulary's reader for claude/codex/grok shapes,
-    /// else agy's result object — which tags itself `event`, not `type`, so the shared reader
-    /// never sees it and an agy failure would otherwise diagnose with an empty detail.
-    static func message(ofErrorEvent json: String) -> String? {
-        if let message = AgentErrorVocabulary.message(ofErrorEvent: json) { return message }
-        guard let obj = try? JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any] else { return nil }
-        return agyError(obj)
-    }
-
-    /// An `agy` result that did not succeed: `{"event":"result","result":{"status":"ERROR",
-    /// "error":"…"}}` under stream-json, or the bare result object under `--output-format json`.
-    /// Its `response` is never read — that is the model talking.
-    private static func agyError(_ obj: [String: Any]) -> String? {
-        let result = obj["event"] as? String == "result" ? obj["result"] as? [String: Any] : obj
-        guard let result, result["conversation_id"] != nil, let status = result["status"] as? String,
-              status != "SUCCESS" else { return nil }
-        return result["error"] as? String ?? status
     }
 
     /// A short excerpt for `detail` — stderr when there is any, otherwise the structured error,

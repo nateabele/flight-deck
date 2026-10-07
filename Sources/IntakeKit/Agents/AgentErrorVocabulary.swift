@@ -100,6 +100,12 @@ public enum AgentErrorVocabulary {
     /// model talking.
     public static func message(ofErrorEvent json: String) -> String? {
         guard let obj = try? JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any] else { return nil }
+        if let agy = agyResult(obj) {
+            // agy (gemini): a result whose `status` is not SUCCESS holds an error, not an
+            // answer; its `response` is the model talking and is never read.
+            guard let status = agy["status"] as? String, status != "SUCCESS" else { return nil }
+            return agy["error"] as? String ?? status
+        }
         switch obj["type"] as? String {
         case "error": return obj["message"] as? String
         case "turn.failed": return (obj["error"] as? [String: Any])?["message"] as? String
@@ -114,6 +120,15 @@ public enum AgentErrorVocabulary {
             return obj["result"] as? String ?? (errors.isEmpty ? nil : errors.joined(separator: "\n"))
                 ?? obj["subtype"] as? String ?? "is_error"
         }
+    }
+
+    /// agy's result object: `{"event":"result","result":{…}}` under stream-json, or the bare
+    /// object `--output-format json` prints. Recognized by agy's own keys (`conversation_id` +
+    /// `status`), which no claude or codex event carries.
+    private static func agyResult(_ obj: [String: Any]) -> [String: Any]? {
+        let result = obj["event"] as? String == "result" ? obj["result"] as? [String: Any] : obj
+        guard let result, result["conversation_id"] != nil, result["status"] != nil else { return nil }
+        return result
     }
 
     /// The shared classifier claude's and codex's profiles both answer with.
