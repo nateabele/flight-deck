@@ -142,7 +142,7 @@ final class DelegateConfigParserTests: XCTestCase {
             ("[[route]]\nrecipe = \"a\"", 1, "match"),
             ("[[route]]\nmatch = \"a *\"", 1, "recipe"),
             ("run = \"\"\"multi\"\"\"", 1, "multi-line"),
-            ("pool = 1.5", 1, "value"),
+            ("pool = 1.5e3", 1, "value"),
             ("key = \"a\" trailing", 1, "end of line"),
             ("= \"a\"", 1, "key"),
             ("x = \"bad \\q escape\"", 1, "escape"),
@@ -309,5 +309,15 @@ final class DelegateConfigParserTests: XCTestCase {
         try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
         try Self.specExample.write(to: file, atomically: true, encoding: .utf8)
         XCTAssertEqual(try DelegateConfigParser.load(projectRoot: root)?.config.defaultHost, "mini")
+    }
+
+    func testFloatLexes() throws {
+        var reader = TOMLReader("a = 1.25\nb = -0.5\nc = 3\n")
+        let table = try reader.read().root
+        guard case .value(.float(let a), _) = table.entries["a"]!,
+              case .value(.float(let b), _) = table.entries["b"]!,
+              case .value(.int(3), _) = table.entries["c"]! else { return XCTFail("\(table.entries)") }
+        XCTAssertEqual(a, 1.25)
+        XCTAssertEqual(b, -0.5)
     }
 }
