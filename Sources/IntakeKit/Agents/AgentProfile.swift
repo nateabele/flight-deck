@@ -190,7 +190,7 @@ public enum AgentProfiles {
     /// outside this set, so a round can never be configured to run a harness that would only
     /// fail at round time. Track G adds `.grok` and Track M adds `.gemini` when their builders
     /// land — and not before, which is what keeps master shippable meanwhile.
-    public static let headlessReady: Set<Harness> = [.claude, .codex, .grok]
+    public static let headlessReady: Set<Harness> = [.claude, .codex, .grok, .gemini]
 }
 
 // MARK: - Conformers
