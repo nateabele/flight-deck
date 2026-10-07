@@ -17,6 +17,26 @@ public enum SlotKeyPath: Hashable {
     case polisher
 }
 
+/// One non-built-in account a planning agent can bill, as the Rounds editor offers it. Built from
+/// preferences by `options(from:)`; the built-in account is never listed, because nil already
+/// means it (`ModelChoice.account`).
+struct PlanningAccountOption: Equatable {
+    var ref: AgentAccountRef
+    var name: String
+
+    /// Each harness's live, non-built-in accounts, in preferences order. A removed account is
+    /// left out — it is not something to pick — and an agent with no harness (none today) too.
+    static func options(from accounts: [AgentAccount]) -> [Harness: [PlanningAccountOption]] {
+        var out: [Harness: [PlanningAccountOption]] = [:]
+        for account in accounts where !account.isRemoved && !account.isBuiltIn {
+            guard let harness = Harness(rawValue: account.agent.rawValue) else { continue }
+            out[harness, default: []].append(PlanningAccountOption(
+                ref: AgentAccountRef(id: account.id.uuidString, home: account.home), name: account.displayName))
+        }
+        return out
+    }
+}
+
 /// Lets the human tune a chosen preset's expanded `RoundConfig` before shaping starts. Its home
 /// is the detail pane's inspector (spec §9): the awaiting-choice body shows only `summary` and
 /// an Edit in Inspector button, since a five-column grid pushed the way forward off screen.
@@ -24,6 +44,12 @@ struct RoundConfigEditor: View {
     let preset: Preset
     @Binding var config: RoundConfig
     let available: AvailableModels
+    /// Each harness's pickable accounts (`PlanningAccountOption.options`). Empty hides every
+    /// account picker, which is the whole editor on a machine with only built-in logins.
+    var accounts: [Harness: [PlanningAccountOption]] = [:]
+    /// codex's own `model/list`, when routing has already fetched it this launch — never
+    /// fetched from here, since that spawns an app-server.
+    var codexListedModels: [String] = []
 
     var body: some View {
         // The whole inspector panel, under a plain title: a disclosure here would be a second
@@ -61,11 +87,16 @@ struct RoundConfigEditor: View {
                         HStack(spacing: 8) {
                             harnessPicker(for: row.keyPath).fixedSize()
                             modelField(for: row.keyPath, harness: choice.harness)
-                            // Hidden, not disabled, for a harness with no effort knob: a picker
-                            // whose value the CLI never receives would read as a setting.
                             if !Self.effortChoices(for: choice.harness).isEmpty {
                                 effortPicker(for: row.keyPath, harness: choice.harness).fixedSize()
                             }
+                        }
+                        if let options = accounts[choice.harness], !options.isEmpty {
+                            HStack(spacing: 8) {
+                                Text("Account").foregroundStyle(.secondary)
+                                accountPicker(for: row.keyPath, choice: choice, options: options).fixedSize()
+                            }
+                            .font(.callout)
                         }
                         if Self.supportsFallback(row.keyPath) {
                             HStack(spacing: 8) {
@@ -128,23 +159,28 @@ struct RoundConfigEditor: View {
         .pickerStyle(.menu)
     }
 
-    /// A picker when the harness's CLI listed its models at detection (grok), so a seat can
-    /// only name a model that account has; claude and codex keep the free text field, since
-    /// they take aliases no list command reports.
-    @ViewBuilder
+    /// Free text, because every CLI also takes a full model name — with the profile's known
+    /// models one click away, so `fable` is offered here as it is in Settings and routing.
     private func modelField(for keyPath: SlotKeyPath, harness: Harness) -> some View {
-        let binding = modelBinding(for: keyPath)
-        if let models = Self.modelChoices(for: harness, current: binding.wrappedValue, available: available) {
-            Picker("Model", selection: binding) {
-                ForEach(models, id: \.self) { model in Text(model).tag(model) }
-            }
-            .labelsHidden()
-            .pickerStyle(.menu)
-            .frame(maxWidth: .infinity, alignment: .leading)
-        } else {
-            TextField("Model", text: binding)
+        let suggestions = Self.modelSuggestions(for: harness, codexListed: codexListedModels,
+                                                detected: available.models[harness] ?? [])
+        return HStack(spacing: 2) {
+            TextField("Model", text: modelBinding(for: keyPath))
                 .textFieldStyle(.roundedBorder)
                 .frame(maxWidth: .infinity)
+            if !suggestions.isEmpty {
+                Menu {
+                    ForEach(suggestions, id: \.self) { model in
+                        Button(model) { config = Self.updatingChoice(config, at: keyPath) { $0.model = model } }
+                    }
+                } label: {
+                    Image(systemName: "chevron.down")
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("Known models")
+            }
         }
     }
 
@@ -152,6 +188,21 @@ struct RoundConfigEditor: View {
         Picker("Effort", selection: effortBinding(for: keyPath)) {
             ForEach(Self.effortChoices(for: harness), id: \.self) { effort in
                 Text(effort).tag(effort)
+            }
+        }
+        .labelsHidden()
+        .pickerStyle(.menu)
+    }
+
+    /// "Built-in account" or one of this harness's accounts from preferences. The selection is
+    /// the account's id rather than the ref, so a relocated home still shows as selected.
+    private func accountPicker(for keyPath: SlotKeyPath, choice: ModelChoice, options: [PlanningAccountOption]) -> some View {
+        Picker("Account", selection: Binding<String?>(
+            get: { Self.choice(for: keyPath, in: config)?.account?.id },
+            set: { id in config = Self.settingAccount(config, at: keyPath, to: id, options: options) }
+        )) {
+            ForEach(Self.accountChoices(for: choice, options: options), id: \.id) { entry in
+                Text(entry.label).tag(entry.id)
             }
         }
         .labelsHidden()
@@ -345,23 +396,52 @@ struct RoundConfigEditor: View {
     }
 
     /// `ultra` enables delegation and isn't Pro, so it's excluded even though `effort` is a
-    /// bare `String` that would accept it.
-    static let effortChoices = ["low", "medium", "high", "xhigh", "max"]
+    /// bare `String` that would accept it. Claude's profile's values; see `effortChoices(for:)`.
+    static let effortChoices = ClaudeProfile.catalog.effortValues
 
-    /// The effort values a seat on `harness` may pick: its profile's knob, or `effortChoices`
-    /// while that profile is still a stub with no catalog (claude/codex until Track P), so
-    /// their pickers don't change. Empty hides the picker.
+    /// The effort values `harness`'s profile accepts. Empty means the CLI has no effort knob,
+    /// and the row hides the picker rather than offer a setting that does nothing.
     static func effortChoices(for harness: Harness) -> [String] {
-        let catalog = AgentProfiles.profile(for: harness).modelCatalog
-        return catalog.isEmpty ? effortChoices : catalog.effortValues
+        AgentProfiles.profile(for: harness).modelCatalog.effortValues
     }
 
-    /// The model picker's options, or nil for a free text field (no list was detected). A
-    /// persisted model the list no longer has stays selectable, first — dropping it would make
-    /// the picker show a blank selection and silently re-seat the slot on the next touch.
-    static func modelChoices(for harness: Harness, current: String, available: AvailableModels) -> [String]? {
-        guard let models = available.models[harness], !models.isEmpty else { return nil }
-        return models.contains(current) || current.isEmpty ? models : [current] + models
+    /// The models the model field's menu offers for `harness`: its profile's static aliases,
+    /// then codex's runtime list when routing has one cached, else the profile's default —
+    /// never empty for a harness with a catalog, never a duplicate. `detected` is the list the
+    /// CLI itself printed at detection (`grok models`); when there is one it REPLACES the static
+    /// aliases, which are only a fallback and go stale as the vendor ships models (grok's moved
+    /// from 4.6 to 4.7 on the day it was first probed).
+    static func modelSuggestions(for harness: Harness, codexListed: [String] = [], detected: [String] = []) -> [String] {
+        let catalog = AgentProfiles.profile(for: harness).modelCatalog
+        var out: [String] = []
+        let known = detected.isEmpty ? catalog.aliases : detected
+        for model in known + (harness == .codex ? codexListed : []) where !out.contains(model) {
+            out.append(model)
+        }
+        if out.isEmpty, !catalog.defaultPlanningModel.isEmpty { out = [catalog.defaultPlanningModel] }
+        return out
+    }
+
+    /// The account picker's rows: the built-in account (id nil) first, then each option. A
+    /// seat still bound to an account that has since been removed keeps a row of its own, so
+    /// the picker never shows a selection it has no row for — and re-picking is a choice.
+    static func accountChoices(for choice: ModelChoice, options: [PlanningAccountOption]) -> [(id: String?, label: String)] {
+        var rows: [(id: String?, label: String)] = [(nil, "Built-in account")]
+        rows += options.map { ($0.ref.id, $0.name) }
+        if let bound = choice.account, !options.contains(where: { $0.ref.id == bound.id }) {
+            rows.append((bound.id, "Removed account"))
+        }
+        return rows
+    }
+
+    /// Binds the seat to the account with this id, from `options` — its CURRENT home, so a
+    /// re-pick after a relocate picks the new directory up. nil, or an id no longer offered
+    /// (the "Removed account" row), leaves the binding as nil and as-is respectively.
+    static func settingAccount(_ config: RoundConfig, at keyPath: SlotKeyPath, to id: String?,
+                               options: [PlanningAccountOption]) -> RoundConfig {
+        guard let id else { return updatingChoice(config, at: keyPath) { $0.account = nil } }
+        guard let option = options.first(where: { $0.ref.id == id }) else { return config }
+        return updatingChoice(config, at: keyPath) { $0.account = option.ref }
     }
 
     /// One line per harness this build can run but isn't offering — "Grok: run `grok login`"
@@ -488,7 +568,8 @@ struct RoundConfigEditor: View {
 
     /// Switching a seat's harness resets model AND effort to that harness's default from
     /// `available` — leaving the old model string in place would pair e.g. codex's harness
-    /// with a claude model name that codex has never heard of.
+    /// with a claude model name that codex has never heard of. The account resets to built-in
+    /// with them: a claude account's home means nothing to codex.
     static func switchingHarness(_ config: RoundConfig, at keyPath: SlotKeyPath, to harness: Harness, available: AvailableModels) -> RoundConfig {
         let replacement = available.choice(for: harness) ?? ModelChoice(harness: harness, model: "", effort: "high")
         return updatingChoice(config, at: keyPath) { $0 = replacement }

@@ -117,6 +117,6 @@ final class HarnessCommandGrokTests: XCTestCase {
         XCTAssertEqual(env["HTTPS_PROXY"], "http://proxy:1", "a proxy must survive isolation")
         XCTAssertEqual(env["PATH"], "/bin")
         XCTAssertNil(env["CLAUDE_CODE_CHILD_SESSION"])
-        XCTAssertNil(env["GROK_HOME"], "the built-in account keeps grok's own home")
+        XCTAssertNil(env["GROK_HOME"], "no HOME in base: nothing to bind")
     }
 }

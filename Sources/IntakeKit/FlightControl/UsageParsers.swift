@@ -5,13 +5,21 @@ import Foundation
 /// exhaustion would hand off every agent on every account at once, onto accounts that are just
 /// as overloaded. Kinds are each agent's own spelling — claude's transcript `error`, codex's
 /// rollout `codex_error_info` in snake_case (see `CodexTurnRecovery`).
+///
+/// The spellings are no longer kept here: every agent profile classifies them from the one
+/// shared `AgentErrorVocabulary`. Asked of EVERY profile because a reported error carries no
+/// harness here, and a profile that learns a spelling (grok's, gemini's) must reach the
+/// usage meters without anyone remembering to copy it into a fifth list.
 public enum RateLimitClassifier {
-    public static let kinds: Set<String> = ["rate_limit", "rate_limit_exceeded", "usage_limit_exceeded", "usage_limit_reached"]
+    /// Every kind any profile reads as a rate limit — derived, for callers that list them.
+    public static var kinds: Set<String> {
+        Set(AgentErrorVocabulary.kinds.keys.filter { isRateLimit(status: nil, kind: $0) })
+    }
 
     public static func isRateLimit(status: Int?, kind: String?) -> Bool {
         if status == 429 { return true }
         guard let kind else { return false }
-        return kinds.contains(kind)
+        return AgentProfiles.all.contains { $0.classify(error: .transcriptAPIError(kind: kind)) == .rateLimited }
     }
 }
 

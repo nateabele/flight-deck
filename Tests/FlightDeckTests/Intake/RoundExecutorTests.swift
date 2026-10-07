@@ -262,6 +262,30 @@ final class RoundExecutorTests: XCTestCase {
         XCTAssertNil(codex.environment["ANTHROPIC_BASE_URL"])
     }
 
+    /// A seat bound to an account (the Rounds editor's picker) runs in that account's home:
+    /// claude via `CLAUDE_CONFIG_DIR` and that home's own settings `env`, codex via `CODEX_HOME`.
+    /// An unbound seat in the same round still runs on the built-in account.
+    func testASeatBoundToAnAccountRunsInThatAccountsHome() async throws {
+        let workHome = root.appendingPathComponent("accounts/work")
+        try FileManager.default.createDirectory(at: workHome, withIntermediateDirectories: true)
+        try Data(#"{"env":{"ANTHROPIC_BASE_URL":"http://work"}}"#.utf8).write(to: workHome.appendingPathComponent("settings.json"))
+        let work = AgentAccountRef(id: "work", home: workHome)
+        var boundClaude = claudeB; boundClaude.account = work
+        var boundCodex = codexA; boundCodex.model = "C"; boundCodex.account = AgentAccountRef(id: "cx", home: workHome)
+        let runner = ScriptedHarnessRunner { call in ok(call, "s-\(call.model!)", json(DraftOutput(plan: "# P"))) }
+        let cfg = config(drafters: [Slot(boundClaude), Slot(boundCodex), Slot(codexA)])
+        _ = try checkpoint(try await executor(runner).run(PlannedRound(stage: .draft, round: 0, major: true), inputs(cfg)))
+        let drafters = runner.calls("drafter")
+        let claude = try XCTUnwrap(drafters.first { $0.executable == "claude" })
+        XCTAssertEqual(claude.environment["CLAUDE_CONFIG_DIR"], workHome.path)
+        XCTAssertEqual(claude.environment["ANTHROPIC_BASE_URL"], "http://work")
+        XCTAssertNil(claude.environment["CLAUDE_CODE_CHILD_SESSION"])
+        let codexBound = try XCTUnwrap(drafters.first { $0.model == "C" })
+        XCTAssertEqual(codexBound.environment["CODEX_HOME"], workHome.path)
+        let codexBuiltIn = try XCTUnwrap(drafters.first { $0.model == "A" })
+        XCTAssertNil(codexBuiltIn.environment["CODEX_HOME"], "an unbound seat stays on the built-in account")
+    }
+
     func testDrafterFallsBackOnce() async throws {
         let runner = ScriptedHarnessRunner { call in
             call.model == "A" ? failed("Error: 401 Unauthorized") : ok(call, "fb", json(DraftOutput(plan: "# Fallback")))
