@@ -42,9 +42,9 @@ public struct DelegateConfigParseResult: Sendable, Equatable {
 ///
 /// Foundation has no TOML reader, and this is not one either: it reads the subset §8 uses —
 /// top-level keys, `[recipe.<name>]` (and `[recipe.<name>.env]`), `[[route]]`, dotted and
-/// quoted keys, basic and literal strings, booleans, integers, arrays (which may span lines,
+/// quoted keys, basic and literal strings, booleans, integers, plain decimals (`1.50`), arrays (which may span lines,
 /// with comments and a trailing comma) and inline tables. Anything else — multi-line strings,
-/// floats, dates — is a parse error that names its line, never a silent misread.
+/// exponents, dates — is a parse error that names its line, never a silent misread.
 public enum DelegateConfigParser {
     /// Where the file lives, relative to the project root.
     public static let relativePath = ".flightdeck/delegate.toml"
@@ -318,6 +318,7 @@ extension DelegateConfig {
 enum TOMLValue: Equatable {
     case string(String)
     case int(Int)
+    case float(Double)
     case bool(Bool)
     case array([TOMLValue])
     case inlineTable([String: TOMLValue])
@@ -551,9 +552,14 @@ struct TOMLReader {
                digits.allSatisfy({ $0.isASCII && ($0.isNumber || $0 == "+" || $0 == "-") }) {
                 return .int(int)
             }
+            // Plain decimals only (`1.50`, `-0.5`): exponents, `inf`/`nan` and dates stay errors.
+            if digits.range(of: #"^-?[0-9]+\.[0-9]+$"#, options: .regularExpression) != nil,
+               let float = Double(digits) {
+                return .float(float)
+            }
             throw issue(token.isEmpty
                 ? "expected a value"
-                : "unsupported value \(token) (strings need quotes; floats and dates are not supported)")
+                : "unsupported value \(token) (strings need quotes; exponents and dates are not supported)")
         }
     }
 
