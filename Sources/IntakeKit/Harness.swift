@@ -122,6 +122,50 @@ public enum HarnessCommand {
                                            "-c", "sandbox_workspace_write.exclude_slash_tmp=true",
                                            "-c", "sandbox_workspace_write.writable_roots=[]"]
 
+    // MARK: grok (grok 1.0.30, 2026-10-07 — see GrokProfile for where each fact came from)
+
+    /// grok has no single read-only switch, and `--permission-mode plan` is "accepted for
+    /// compatibility" only — headless it enforces nothing. A read-only seat is therefore built
+    /// from four independent layers, any one of which would hold alone against the common case:
+    /// - `--tools` makes these the ONLY built-in tools that exist (no shell, no edit tool);
+    /// - `--deny` rules beat every allow from every source, including the operator's
+    ///   `~/.claude/settings.json` permissions, which grok also reads;
+    /// - `--permission-mode dontAsk` auto-denies anything not pre-approved instead of
+    ///   prompting nobody — and overrides a `bypassPermissions` default from those settings;
+    /// - `--disallowed-tools Agent` / `--no-subagents` stop a subagent being spawned with a
+    ///   tool set of its own.
+    /// These three tools are on grok's own "never prompts" read-only list, so `dontAsk` lets
+    /// them run without an allow rule.
+    public static let grokReadOnlyTools = "read_file,grep,list_dir"
+
+    /// Deny rules for every tool class that writes, executes or leaves the machine. Tool-class
+    /// names are grok's rule vocabulary (`Edit` and `Write` are one class, both named so a
+    /// rename of either can't reopen it); `MCPTool` with no pattern matches every MCP tool,
+    /// so an MCP server that slipped past the isolation environment still can't be called.
+    public static let grokDeniedRules = ["Edit", "Write", "Bash", "WebFetch", "WebSearch", "MCPTool"]
+
+    /// The flags every grok seat gets. `streaming-messages-json` is the Anthropic stream shape:
+    /// tool use streams as it happens (the seat's live row), and the final `result` line carries
+    /// the answer, `structured_output`, `session_id` and usage. `--no-plan` keeps the
+    /// interactive plan-mode tools (which write a plan file) out of a headless run.
+    public static let grokCommon = ["--output-format", "streaming-messages-json", "--disable-web-search",
+                                    "--no-subagents", "--no-plan", "--disallowed-tools", "Agent"]
+
+    /// The integrator's built-in tools: read, plus the two edit tools (`search_replace` edits,
+    /// `write` creates). Still no shell.
+    public static let grokWriteTools = "read_file,grep,list_dir,search_replace,write"
+
+    /// Denied in write mode — `Edit`/`Write` are absent because the integrator needs them; they
+    /// are instead allowed ONLY under its work dir (`Edit(<dir>/**)`), and `dontAsk` denies an
+    /// edit anywhere else rather than asking.
+    public static let grokWriteDeniedRules = ["Bash", "WebFetch", "WebSearch", "MCPTool"]
+
+    /// A new conversation's id. grok's `--session-id` must be a valid UUID that names no
+    /// existing session; minting it here (rather than letting grok pick one) means a seat's id
+    /// is known before the child even starts. The stream also reports it, and that reported id
+    /// is what `HarnessOutput.parse` returns — the minted one only ever goes TO grok.
+    static func mintGrokSessionID() -> String { UUID().uuidString.lowercased() }
+
     /// The pure check behind `build`'s write-mode `precondition` — a request that fails this
     /// would sandbox the integrator somewhere other than its own work dir, or let it resume
     /// (the integrator always starts fresh), so `build` must never construct argv for it.
@@ -196,7 +240,28 @@ public enum HarnessCommand {
             // Without these unset, a claude spawned from inside Claude Code silently skips
             // saving its transcript — and then `--resume` has nothing to resume.
             return ("claude", args, ["CLAUDE_CODE_CHILD_SESSION", "CLAUDECODE"])
-        case .grok, .gemini:
+        case .grok:
+            var args = ["-p", r.prompt, "--json-schema", r.schemaJSON, "-m", r.model]
+            // An empty effort means "the model's own default" — `--reasoning-effort ""` would be
+            // rejected as an unknown level, failing the seat over a knob nobody set.
+            if !r.effort.isEmpty { args += ["--reasoning-effort", r.effort] }
+            args += ["--cwd", r.cwd.path] + grokCommon + ["--permission-mode", "dontAsk"]
+            switch r.access {
+            case .readOnly:
+                // `readableDirs` needs no flag: `read_file`/`grep` are not path-confined in
+                // grok, so the intake dir is already readable. Narrowing reads with
+                // `Read(...)` rules would only add a way to lock the seat out of its inputs.
+                args += ["--tools", grokReadOnlyTools]
+                for rule in grokDeniedRules { args += ["--deny", rule] }
+            case .writeInWork(let dir):
+                args += ["--tools", grokWriteTools, "--allow", "Edit(\(dir.path)/**)"]
+                for rule in grokWriteDeniedRules { args += ["--deny", rule] }
+            }
+            // Never a title, never bare `--resume` (= the most recent session in this cwd, which
+            // with parallel seats is another seat's): always a UUID, which grok treats as an id.
+            if let s = r.resumeSessionID { args += ["--resume", s] } else { args += ["--session-id", mintGrokSessionID()] }
+            return ("grok", args, [])
+        case .gemini:
             throw .harnessNotImplemented(r.harness)
         }
     }
@@ -212,7 +277,15 @@ public enum HarnessCommand {
         for command: (executable: String, arguments: [String], unsetEnvironment: [String]),
         base: [String: String], home: URL = FileManager.default.homeDirectoryForCurrentUser
     ) -> [String: String] {
-        var environment = command.executable == "claude" ? ClaudeUserEnv.merged(into: base, home: home) : base
+        var environment: [String: String]
+        switch command.executable {
+        case "claude": environment = ClaudeUserEnv.merged(into: base, home: home)
+        // The isolation that keeps a grok seat off the operator's Claude/Cursor hooks and MCP
+        // servers is environment, not argv (see `GrokProfile.isolationEnvironment`) — so every
+        // grok child, triage and round alike, must come through here.
+        case "grok": environment = GrokProfile().environment(base: base, account: nil)
+        default: environment = base
+        }
         for key in command.unsetEnvironment { environment.removeValue(forKey: key) }
         return environment
     }
@@ -263,9 +336,41 @@ public enum HarnessOutput {
             guard let session else { throw ParseError.noSession }
             guard let result else { throw ParseError.noResult }
             return (session, try claudeStructured(result))
-        case .grok, .gemini:
+        case .grok:
+            return try grokParse(stdout)
+        case .gemini:
             throw ParseError.harnessNotImplemented(harness)
         }
+    }
+
+    /// grok `--output-format streaming-messages-json`: NDJSON whose every line carries
+    /// `session_id`, ending in one `result` line with the answer (`structured_output` under
+    /// `--json-schema`). Also accepts the single-object `--output-format json` shape
+    /// (`sessionId`, `text`), which `--json-schema` alone implies — so a run whose explicit
+    /// format grok ever stops honouring still parses instead of pausing the round.
+    private static func grokParse(_ stdout: Data) throws -> (sessionID: String, structured: Data) {
+        var session: String?, result: [String: Any]?
+        for line in stdout.split(separator: UInt8(ascii: "\n")) {
+            guard let obj = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any] else { continue }
+            // A run that failed before starting a session reports `"session_id":""` (probed:
+            // signed out, grok 1.0.30) — empty is "none", never an id to resume.
+            if let s = obj["session_id"] as? String ?? obj["sessionId"] as? String, !s.isEmpty { session = s }
+            if obj["type"] as? String == "result" || (obj["type"] == nil && obj["text"] != nil) { result = obj }
+        }
+        if var failed = result, failed["is_error"] as? Bool == true {
+            // Checked before the session: a failed run's error is the more useful report, and it
+            // may have no session at all. Its reason is in `errors[]` (strings, probed), with
+            // `result` absent — surface that rather than the bare subtype.
+            if failed["result"] == nil, let errors = failed["errors"] as? [Any], !errors.isEmpty {
+                failed["result"] = errors.map { ($0 as? [String: Any])?["message"] as? String ?? "\($0)" }.joined(separator: "; ")
+            }
+            throw ParseError.isError(failed["result"] as? String ?? failed["subtype"] as? String ?? "is_error")
+        }
+        guard let session else { throw ParseError.noSession }
+        guard var result else { throw ParseError.noResult }
+        if result["result"] == nil, let text = result["text"] as? String { result["result"] = text }
+        if result["structured_output"] == nil, let structured = result["structuredOutput"] { result["structured_output"] = structured }
+        return (session, try claudeStructured(result))
     }
 
     /// The structured answer in a claude `result` object. `is_error` means `result` holds the
