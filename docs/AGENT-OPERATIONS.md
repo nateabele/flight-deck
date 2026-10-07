@@ -349,6 +349,21 @@ frames differ from macOS 26's, and a shorter screen: the failures that causes ar
 their diagnosis, in FOLLOWUPS.md, "UI suite on the UI-test Mac". A red run there is not
 automatically your regression; compare against that list first.
 
+**The UI-test Mac is also somebody's desktop, and two of its states fail every click-driven
+case.** Read the run's recording (the `.mp4` attachments, `xcrun xcresulttool export
+attachments`) before you suspect the app:
+- *A floating alert from another app.* On 2026-10-07 a Little Snitch connection alert ("Flight
+  Deck wants to connect to api.anthropic.com", badged TERMINATED: its process had already
+  exited) sat over the Settings toolbar for hours. Every click on the Flight Control tab hit the
+  alert, so all six `RoutingUITests` and `CapacityUITests` failed with "the Flight Control tab
+  did not open", on every commit. The Flight Control classes now refuse to click a tab or
+  section that a Little Snitch, system-alert or SecurityAgent window covers, and fail naming
+  that window (`clickUnlessCovered`): a click that lands on such an alert can answer it. Only a
+  person at that Mac can dismiss it, or add the rule that stops it recurring.
+- *A locked screen or a sleeping display.* Every case fails at launch with "Failed to activate
+  application … (current state: Running Background)". `pmset -g log` on the UI-test Mac shows
+  "Display is turned off" at the time.
+
 **Variables:** `FD_UITEST_HOST` (ssh destination, required), `FD_UITEST_SSH_KEY` (optional;
 ssh's defaults otherwise), both read from the environment or the git-ignored `scripts/local.env`
 (template: `scripts/local.env.example`; no host is committed, the repo is public),
@@ -387,9 +402,11 @@ with the user's say-so).
   (1.2% luck) against ~23 min for the same power via the suite.
 - **Gate hunt cases on a `TEST_RUNNER_`-prefixed variable.** `xcodebuild` does not forward
   arbitrary shell environment into the UI-test runner process; it forwards only `TEST_RUNNER_*`,
-  stripping the prefix. A bare `FOO=1` leaves the case **silently skipped**, which reads as a
-  pass in the compact summary — check `scripts/.smoke.log` for `skipped` if a hunt reports
-  nothing. On the remote path `smoke-remote.sh` writes them into the shipped xctestrun.
+  stripping the prefix. A bare `FOO=1` leaves the case **silently skipped**. On the remote
+  path `smoke-remote.sh` writes them into the shipped xctestrun, prints the skipped count, and
+  ends `SMOKE SKIPPED` (exit 5), not `SMOKE PASS`, when `FD_UITEST_ONLY` names classes and
+  every selected case skipped. The local `FD_SMOKE_LOCAL=1` path has no such check: there,
+  grep `scripts/.smoke.log` for `skipped`.
 - The first UITest run on a machine needs a one-time TCC grant ("XCTest is trying to Enable UI
   Automation"). The UI-test Mac already has it.
 - **Output discipline:** `smoke.sh` sends all `xcodebuild` output to `scripts/.smoke.log` and
