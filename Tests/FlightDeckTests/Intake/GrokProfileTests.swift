@@ -31,7 +31,7 @@ final class GrokProfileTests: XCTestCase {
         XCTAssertNil(profile.unimplemented)
         XCTAssertFalse(profile.modelCatalog.isEmpty)
         XCTAssertEqual(profile.modelCatalog.defaultPlanningModel, "grok-4.7", "a fallback only; see testParsesTheModelList")
-        XCTAssertEqual(profile.modelCatalog.defaultPlanningEffort, "high")
+        XCTAssertEqual(profile.modelCatalog.defaultPlanningEffort, "medium", "see testGrokAgentsDefaultToMediumEffort")
         XCTAssertEqual(profile.modelCatalog.listArguments, ["models"])
         XCTAssertEqual(profile.signInCheck.arguments, ["models"])
         XCTAssertTrue(profile.hasNativeSchema)
@@ -171,7 +171,7 @@ final class GrokProfileTests: XCTestCase {
         }
         XCTAssertEqual(probed, [["models"]], "the list and the sign-in check are one spawn")
         XCTAssertEqual(available.harnesses, [.claude, .grok])
-        XCTAssertEqual(available.choice(for: .grok), ModelChoice(harness: .grok, model: "grok-4.6", effort: "high"))
+        XCTAssertEqual(available.choice(for: .grok), ModelChoice(harness: .grok, model: "grok-4.6", effort: "medium"))
         XCTAssertEqual(available.models[.grok], ["grok-4.6", "grok-4.5"])
         XCTAssertNil(available.unavailable[.grok])
         XCTAssertEqual(available.choice(for: .claude), AvailableModels.defaults.claude, "claude is unchanged")
@@ -229,6 +229,21 @@ final class GrokProfileTests: XCTestCase {
     func testEditorSuggestsTheDetectedModels() {
         XCTAssertEqual(RoundConfigEditor.modelSuggestions(for: .grok, detected: ["grok-5", "grok-4.7"]), ["grok-5", "grok-4.7"])
         XCTAssertEqual(RoundConfigEditor.modelSuggestions(for: .grok), GrokProfile().modelCatalog.aliases)
+    }
+
+    /// A new grok agent starts at medium effort, and the editor still lets each agent pick any
+    /// of grok's levels. At high, the first live round's grok reviewer took 763 s, 52k of its
+    /// 56k output tokens thinking — the slowest seat by five times, paid on every round. The
+    /// maintainer's ruling (2026-10-07): medium by default, high per agent when wanted.
+    func testGrokAgentsDefaultToMediumEffort() throws {
+        XCTAssertEqual(GrokProfile().defaultPlanningChoice.effort, "medium")
+        let dir = try bin(["grok"])
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let available = TriageSettings.available(path: dir.path) { _, _ in
+            SignInCheckOutput(stdout: Self.signedInModels, stderr: "", exitCode: 0)
+        }
+        XCTAssertEqual(available.choice(for: .grok)?.effort, "medium", "a detected grok seeds new agents at medium")
+        XCTAssertEqual(RoundConfigEditor.effortChoices(for: .grok), ["low", "medium", "high", "xhigh"], "still tunable per agent")
     }
 
     /// Switching a seat to grok seeds grok's own default; a grok seat's fallback is another family.

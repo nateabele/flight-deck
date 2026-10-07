@@ -32,9 +32,14 @@ public struct GrokProfile: AgentProfile {
     /// grok-4.7 since the spec was written — and are used only when the list can't be read. Effort levels are the TUI's `/effort` menu (`low`, `medium`, `high`,
     /// `xhigh`); the CLI also knows `none`/`minimal`/`max`, but "a model only accepts the levels
     /// its menu advertises", so offering them would let a seat pick one grok-4.6 rejects.
+    ///
+    /// The default effort is `medium`, not the `high` claude and codex start at: at high, the
+    /// first live round's grok reviewer took 763 s (52k of 56k output tokens spent thinking),
+    /// five times the next-slowest seat, and every round pays that. The maintainer's ruling of
+    /// 2026-10-07; any agent can still be set to `high` in the Rounds editor.
     public var modelCatalog: ProfileModelCatalog {
         ProfileModelCatalog(aliases: ["grok-4.7", "grok-4.7-build-fast", "grok-4.6"], listArguments: ["models"],
-                            defaultPlanningModel: "grok-4.7", defaultPlanningEffort: "high",
+                            defaultPlanningModel: "grok-4.7", defaultPlanningEffort: "medium",
                             effortValues: ["low", "medium", "high", "xhigh"])
     }
 
