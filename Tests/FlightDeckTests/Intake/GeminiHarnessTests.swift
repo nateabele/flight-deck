@@ -395,7 +395,6 @@ final class GeminiAvailabilityTests: XCTestCase {
     }
 
     func testSignedInOffersGeminiWithItsListedModels() throws {
-        try XCTSkipUnless(AgentProfiles.headlessReady.contains(.gemini), "gemini is not headless-ready yet")
         try install(["claude", "agy"])
         let listed = String(decoding: try fixture("gemini-models", "txt", Self.self), as: UTF8.self)
         let calls = CallLog()
@@ -438,8 +437,7 @@ final class GeminiAvailabilityTests: XCTestCase {
     }
 
     func testEditorKnobsForGemini() throws {
-        try XCTSkipUnless(AgentProfiles.headlessReady.contains(.gemini), "gemini is not headless-ready yet")
-        XCTAssertEqual(RoundConfigEditor.effortChoices(for: .gemini), ["low", "medium", "high"])
+        XCTAssertEqual(RoundConfigEditor.effortChoices(for: .gemini), [], "the model id carries the effort")
         var available = AvailableModels(choices: [.claude: ModelChoice(harness: .claude, model: "opus", effort: "high"),
                                                   .gemini: ModelChoice(harness: .gemini, model: "g1", effort: "high")])
         available.models[.gemini] = ["g1", "g2"]
