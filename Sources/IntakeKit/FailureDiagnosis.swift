@@ -43,7 +43,10 @@ public enum FailureDiagnosis {
                 // nobody verified would send the human to run something that doesn't exist.
                 case .grok?: action = "Sign in to `\(GrokProfile().binaryName)` in a terminal"
                 // `agy` has no login subcommand: its interactive first run signs in.
-                case .gemini?: action = "Run `agy` in a terminal to sign in"
+                case .gemini?:
+                    action = haystack.contains("not eligible")
+                        ? "Run `agy` in a terminal and verify your Google account"
+                        : "Run `agy` in a terminal to sign in"
                 }
             }
             return Diagnosis(category: .authExpired, detail: tail(stderr, errorText), action: action)

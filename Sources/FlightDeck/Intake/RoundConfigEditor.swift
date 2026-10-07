@@ -380,11 +380,13 @@ struct RoundConfigEditor: View {
     /// bare `String` that would accept it.
     static let effortChoices = ["low", "medium", "high", "xhigh", "max"]
 
-    /// The effort values a harness accepts: its profile's knob when the profile declares one
-    /// (agy takes only low/medium/high — `xhigh` would fail the run), else the list above.
+    /// The effort values a harness accepts, from its profile. Empty means the harness has no
+    /// effort knob and the editor hides the picker. A profile still marked unimplemented (a
+    /// Track 0 stub) keeps the list above, so claude/codex seats are unchanged until their
+    /// profiles land.
     static func effortChoices(for harness: Harness) -> [String] {
-        let values = AgentProfiles.profile(for: harness).modelCatalog.effortValues
-        return values.isEmpty ? effortChoices : values
+        let profile = AgentProfiles.profile(for: harness)
+        return profile.unimplemented == nil ? profile.modelCatalog.effortValues : effortChoices
     }
 
     /// One row per filled seat, in the fixed order the round actually runs: every drafter,

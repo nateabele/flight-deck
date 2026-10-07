@@ -40,18 +40,25 @@ public struct GeminiProfile: AgentProfile {
                             defaultPlanningEffort: "high", effortValues: ["low", "medium", "high"])
     }
 
-    /// PROVISIONAL until the signed-in probe reads `agy models`.
-    public static let defaultPlanningModel = "gemini-3.8-pro"
+    /// The strongest Gemini `agy models` offered an AI Pro account on 2026-10-07 (the Pro line
+    /// tops out at 3.1; 3.6–3.8 are Flash). The id carries its effort (`-high`).
+    public static let defaultPlanningModel = "gemini-3.1-pro-high"
 
-    /// One model id per line of `agy models`. Banner lines ("Fetching available models...")
-    /// and anything with spaces in it are not ids. PROVISIONAL format until the signed-in probe.
+    /// Only these ids belong to this harness. `agy` also serves Claude and GPT-OSS models
+    /// (probed 2026-10-07: `claude-opus-5-5-high`, `gpt-oss-120b-medium`), but the harness's
+    /// FAMILY is Gemini — coverage and cross-check count a seat by its harness — so a "gemini"
+    /// seat running a Claude model would make a claude+gemini pair look cross-family when it
+    /// is not. Restricting the catalog (rather than deriving the family from the model id)
+    /// keeps `ModelFamily(harness)` true everywhere it is already used.
+    public static func isGeminiModel(_ id: String) -> Bool { id.hasPrefix("gemini-") }
+
+    /// `agy models` prints `<id>\t<display name>` per line on stdout ("Fetching available
+    /// models..." goes to stderr) — probed on agy 1.2.3/1.3.1, 2026-10-07. Only Gemini ids
+    /// are kept (see `isGeminiModel`).
     public func parseModelList(_ stdout: String) -> [String] {
-        stdout.split(whereSeparator: \.isNewline).compactMap { raw in
-            var line = raw.trimmingCharacters(in: .whitespaces)
-            for bullet in ["- ", "* ", "• "] where line.hasPrefix(bullet) { line.removeFirst(bullet.count) }
-            line = line.trimmingCharacters(in: .whitespaces)
-            guard !line.isEmpty, !line.contains(" "), !line.hasSuffix(":"), !line.hasSuffix("...") else { return nil }
-            return line
+        stdout.split(whereSeparator: \.isNewline).compactMap { line in
+            let id = line.split(separator: "\t", maxSplits: 1).first.map { $0.trimmingCharacters(in: .whitespaces) } ?? ""
+            return Self.isGeminiModel(id) && !id.contains(" ") ? id : nil
         }
     }
 
@@ -77,8 +84,11 @@ public struct GeminiProfile: AgentProfile {
         if ["resource_exhausted", "rate limit", "quota", "429", "too many requests"].contains(where: t.contains) {
             return .rateLimited
         }
+        // "not eligible for Antigravity" (PERMISSION_DENIED 403, "Verify your account") is
+        // what a signed-in but unverified Google account gets on every run — probed
+        // 2026-10-07. It is the account, not the run, so it reads as auth.
         if ["authentication required", "authentication failed", "not logged in", "please sign in",
-            "unauthenticated", "401"].contains(where: t.contains) {
+            "unauthenticated", "401", "not eligible for antigravity", "verify your account"].contains(where: t.contains) {
             return .authExpired
         }
         if ["overloaded", "503", "\"unavailable\"", "status: unavailable"].contains(where: t.contains) {

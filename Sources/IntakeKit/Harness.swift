@@ -133,6 +133,8 @@ public enum HarnessCommand {
         /// never approximated: a guessed argv for a CLI nobody has probed could run a "read-only"
         /// seat with write tools, which is worse than a round that pauses saying why.
         case harnessNotImplemented(Harness)
+        /// The model is not one of this harness's own family (a Claude model on `agy`).
+        case modelOutsideFamily(harness: Harness, model: String)
     }
 
     public static func validate(_ r: HarnessRequest) -> HarnessCommandError? {
@@ -197,17 +199,15 @@ public enum HarnessCommand {
             // saving its transcript — and then `--resume` has nothing to resume.
             return ("claude", args, ["CLAUDE_CODE_CHILD_SESSION", "CLAUDECODE"])
         case .gemini:
+            // agy also serves Claude and GPT-OSS models; a "gemini" seat on one would be
+            // counted as the Gemini family by coverage and cross-check (see
+            // `GeminiProfile.isGeminiModel`), so it is refused, never run.
+            guard GeminiProfile.isGeminiModel(r.model) else { throw .modelOutsideFamily(harness: r.harness, model: r.model) }
             return ("agy", geminiArguments(r), [])
         case .grok:
             throw .harnessNotImplemented(r.harness)
         }
     }
-
-    /// `agy`'s own wait on a print-mode run defaults to 5 minutes (agy 1.2.3 `--help`), after
-    /// which it gives up on a seat that is still working — shorter than a real drafter or
-    /// integrator turn. Two hours is the same "never cut a seat short" the claude and codex
-    /// seats get by having no timeout at all, while still bounding a wedged child.
-    public static let geminiPrintTimeout = ["--print-timeout", "2h"]
 
     /// Every headless `agy` run. stream-json so the seat shows live activity (the final
     /// `result` event carries the same object `--output-format json` prints alone);
@@ -218,7 +218,10 @@ public enum HarnessCommand {
         var args = ["-p", r.prompt, "--output-format", "stream-json", "--json-schema", r.schemaFile.path,
                     "--model", r.model]
         if !r.effort.isEmpty { args += ["--effort", r.effort] }
-        args += ["--disable-slash-commands"] + geminiPrintTimeout
+        // No `--print-timeout`: since agy 1.3.1 it defaults to 0, "wait until the turn
+        // completes" — the same uncapped wait claude and codex seats get. (1.2.3 defaulted to
+        // 5 minutes, shorter than a real drafter turn; agy self-updates past it.)
+        args += ["--disable-slash-commands"]
         switch r.access {
         case .readOnly:
             // `--mode plan`: agy's read-only execution mode. Readable dirs join the workspace
