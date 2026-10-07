@@ -67,6 +67,15 @@ final class LinuxHostd: @unchecked Sendable {
     /// reports "expired" for a controller that has just paired.
     private let pairingLock = NSLock()
 
+    /// How long this box may sit idle before its controller may stop it, from the enrollment
+    /// that created it; nil for a host paired by code. Kept in `<root>/idle.json` because the
+    /// one-time enroll file is deleted, and idle reporting must survive a restart.
+    var idleThreshold: TimeInterval? {
+        lock.lock(); defer { lock.unlock() }
+        return _idleThreshold
+    }
+    private var _idleThreshold: TimeInterval?
+
     /// `delegation` defaults to the real router under `root` (runs, checkouts; no screen on
     /// Linux in v1); a test passes its own.
     init(root: URL, port: Int, hostName: String, delegation: DelegationHost? = nil) {
@@ -81,6 +90,7 @@ final class LinuxHostd: @unchecked Sendable {
                               endpoints: { Self.advertisedEndpoints(from: HostEndpoints.enumerate(), port: port) },
                               delegation: delegation)
         knownSlots = Set(store.all().map(\.slot))
+        _idleThreshold = IdleFile.load(root: root)
     }
 
     /// This box's `host:port` list for `helloAck`, from a `getifaddrs` walk: loopback and
@@ -240,6 +250,43 @@ final class LinuxHostd: @unchecked Sendable {
             return .ok
         case .arm:
             return arm()
+        case .enroll(let payload):
+            return enroll(payload)
+        }
+    }
+
+    /// Redeems a one-time enrollment file's payload. Under `pairingLock`, like a code pairing's
+    /// add, so two enrolls of one payload racing cannot both pass the "already" check.
+    private func enroll(_ payload: EnrollmentPayload) -> AdminReply {
+        let key: (slot: UUID, secret: Data)
+        do { key = try payload.validate(now: Date()) }
+        catch let error as EnrollmentError { return .failed("enrollment \(Self.describe(error))") }
+        catch { return .failed("enrollment refused: \(error)") }
+        pairingLock.lock(); defer { pairingLock.unlock() }
+        // A reused payload is refused rather than re-added: the store would list the slot twice.
+        guard !store.all().contains(where: { $0.slot == key.slot }) else { return .failed("slot already enrolled") }
+        do {
+            try store.add(PairedController(slot: key.slot, name: payload.controllerName, secret: key.secret,
+                                           pairedAt: Date()))
+        } catch {
+            return .failed("could not store the enrolled controller: \(error)")
+        }
+        let threshold = TimeInterval(payload.idleSeconds)
+        lock.lock(); _idleThreshold = threshold; lock.unlock()
+        do { try IdleFile.save(threshold, root: root) } catch {
+            // The controller is enrolled either way; only idle reporting after a restart is lost.
+            FileHandle.standardError.write(Data("could not record the idle threshold: \(error)\n".utf8))
+        }
+        FileHandle.standardError.write(Data("enrolled controller in slot \(key.slot)\n".utf8))
+        return .ok
+    }
+
+    static func describe(_ error: EnrollmentError) -> String {
+        switch error {
+        case .expired: "expired"
+        case .notYetValid: "is not valid yet (this machine's clock is behind)"
+        case .malformed: "malformed"
+        case .wrongVersion: "has an unsupported version"
         }
     }
 
@@ -302,5 +349,22 @@ final class LinuxHostd: @unchecked Sendable {
         } catch {
             FileHandle.standardError.write(Data("paired, but could not store the controller: \(error)\n".utf8))
         }
+    }
+}
+
+/// `<root>/idle.json`, `{"idleSeconds":N}`: the enrolled idle threshold. Missing or unreadable
+/// reads as nil (no threshold), which only means the host does not report itself idle.
+enum IdleFile {
+    private struct Body: Codable { let idleSeconds: Int }
+
+    static func load(root: URL) -> TimeInterval? {
+        guard let data = try? Data(contentsOf: root.appendingPathComponent("idle.json")),
+              let body = try? JSONDecoder().decode(Body.self, from: data) else { return nil }
+        return TimeInterval(body.idleSeconds)
+    }
+
+    static func save(_ threshold: TimeInterval, root: URL) throws {
+        try JSONEncoder().encode(Body(idleSeconds: Int(threshold)))
+            .write(to: root.appendingPathComponent("idle.json"), options: .atomic)
     }
 }

@@ -4,6 +4,7 @@ import Foundation
 //
 //   request  {"t":"status"} | {"t":"arm"} | {"t":"cancelArm"} | {"t":"ls"}
 //            {"t":"revoke","slot":uuid}
+//            {"t":"enroll","payload":EnrollmentPayload}
 //   reply    {"t":"status","paired":int,"armedUntil":date?,"listeningPort":int?,"hostName":string}
 //            {"t":"armed","code":string,"expiresAt":date,"pairingPort":int?}
 //            {"t":"controllers","controllers":[{"slot":uuid,"name":string,"pairedAt":date}]}
@@ -19,10 +20,14 @@ public enum AdminRequest: Codable, Sendable, Equatable {
     case cancelArm
     case listControllers
     case revoke(slot: UUID)
+    /// Adds the payload's controller to the running hostd's store. Through the admin socket,
+    /// not by writing `controllers.json`, because `serve` reads that file once at start and
+    /// would never see a key written behind its back.
+    case enroll(EnrollmentPayload)
 
-    enum CodingKeys: String, CodingKey { case t, slot }
+    enum CodingKeys: String, CodingKey { case t, slot, payload }
 
-    private enum Tag: String, Codable { case status, arm, cancelArm, ls, revoke }
+    private enum Tag: String, Codable { case status, arm, cancelArm, ls, revoke, enroll }
 
     public func encode(to encoder: any Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
@@ -34,6 +39,9 @@ public enum AdminRequest: Codable, Sendable, Equatable {
         case .revoke(let slot):
             try c.encode(Tag.revoke, forKey: .t)
             try c.encode(slot, forKey: .slot)
+        case .enroll(let payload):
+            try c.encode(Tag.enroll, forKey: .t)
+            try c.encode(payload, forKey: .payload)
         }
     }
 
@@ -45,6 +53,7 @@ public enum AdminRequest: Codable, Sendable, Equatable {
         case .cancelArm: self = .cancelArm
         case .ls: self = .listControllers
         case .revoke: self = .revoke(slot: try c.decode(UUID.self, forKey: .slot))
+        case .enroll: self = .enroll(try c.decode(EnrollmentPayload.self, forKey: .payload))
         }
     }
 }
