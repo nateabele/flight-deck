@@ -139,9 +139,15 @@ final class Planning4WayLiveTests: XCTestCase {
             XCTAssertEqual(slot?.status, .ok, "\(role) \(harness): \(String(describing: slot?.diagnosis))")
             XCTAssertEqual(slot?.used.harness, harness, "\(role) \(harness) fell back")
         }
-        // A schema repair would mean the native `--json-schema` path did not hold.
+        // A repair run (`<run>-repair`) is a resume of a turn that came back without a valid
+        // answer. Expected for gemini, at about one per seat: agy ENDS a turn on any tool it
+        // auto-denies, and the one resume recovers it (Track M's ruling 3). For every other
+        // harness one would mean the native `--json-schema` path did not hold.
         let repairs = Self.runDirectories(store).map(\.lastPathComponent).filter { $0.hasSuffix("-repair") }
-        XCTAssertEqual(repairs, [], "schema repairs ran")
+        print("planning-4way: repair resumes \(repairs.count): \(repairs)")
+        let geminiRuns = Set(slots.filter { $0.used.harness == .gemini }.map(\.role))
+        let unexpected = repairs.filter { run in !geminiRuns.contains { run.contains("-\($0)") } }
+        XCTAssertEqual(unexpected, [], "a native-schema seat needed a repair")
 
         // Coverage: four families seated, and the cross-check reading is Grok vs Gemini.
         let families = Set(slots.filter { $0.status == .ok }.map { ModelFamily($0.used.harness) })
