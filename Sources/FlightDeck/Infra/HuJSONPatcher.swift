@@ -29,7 +29,7 @@ enum HuJSONPatcher {
         if let grants, !grants.isArray { return nil }
 
         let ownerEntry = "\(quote(tag)): [\(quote(ownerAutogroup))]"
-        let grantEntry = "{\"src\": [\"autogroup:member\"], \"dst\": [\(quote(tag))], \"ip\": [\"tcp:47410-47411\"]}"
+        let grantEntry = "{\"src\": [\"autogroup:member\"], \"dst\": [\(quote(tag))], \"ip\": [\(quote(ports))]}"
         let editor = Editor(bytes: bytes)
         var edits: [Edit] = []
         var topLevel: [String] = []
@@ -50,12 +50,20 @@ enum HuJSONPatcher {
         return Patch(original: policy, patched: patched, diff: LineDiff.unified(policy, patched, context: 2))
     }
 
-    /// A grant whose `dst` already names the tag — the user's own wording of the rule counts.
+    /// The delegation ports, as the grant's `ip` names them.
+    private static let ports = "tcp:47410-47411"
+
+    /// A grant whose `dst` names the tag and whose `ip` names the delegation ports — the user's
+    /// own wording of the rule counts, but a grant to the tag on other ports (an SSH rule) does
+    /// not stand in for ours.
     private static func grantsTo(_ tag: String, _ node: Node) -> Bool {
-        guard case .object(let members, _) = node.kind,
-              let dst = members.first(where: { $0.key == "dst" })?.value,
-              case .array(let targets, _) = dst.kind else { return false }
-        return targets.contains { if case .string(tag) = $0.kind { return true } else { return false } }
+        guard case .object(let members, _) = node.kind else { return false }
+        func strings(_ key: String) -> [String] {
+            guard let value = members.first(where: { $0.key == key })?.value,
+                  case .array(let items, _) = value.kind else { return [] }
+            return items.compactMap { if case .string(let s) = $0.kind { return s } else { return nil } }
+        }
+        return strings("dst").contains(tag) && strings("ip").contains(ports)
     }
 
     private static func quote(_ s: String) -> String {
@@ -229,15 +237,38 @@ enum HuJSONPatcher {
             return unit
         }
 
+        /// `true`, `false`, `null`, or a number in JSON's own grammar —
+        /// `-? (0 | [1-9][0-9]*) (. [0-9]+)? ([eE] [+-]? [0-9]+)?`. Not `Double(_:)`, which
+        /// takes `nan`, `inf` and hex that Tailscale's parser rejects. Whatever follows is left
+        /// to the container, which refuses anything but a separator (`01`, `0x10`).
         private mutating func literal() throws -> Node {
             let start = i
-            while i < bytes.count, Self.literalBytes.contains(bytes[i]) { i += 1 }
-            let word = String(decoding: bytes[start..<i], as: UTF8.self)
-            guard ["true", "false", "null"].contains(word) || Double(word) != nil else { throw SyntaxError() }
+            for word in ["true", "false", "null"] where bytes[i...].starts(with: word.utf8) {
+                i += word.utf8.count
+                return Node(kind: .scalar, start: start, end: i)
+            }
+            _ = take("-")
+            if !take("0") { guard digits() else { throw SyntaxError() } }
+            if take(".") { guard digits() else { throw SyntaxError() } }
+            if take("e") || take("E") {
+                _ = take("+") || take("-")
+                guard digits() else { throw SyntaxError() }
+            }
             return Node(kind: .scalar, start: start, end: i)
         }
 
-        private static let literalBytes = Set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+-.".utf8)
+        private mutating func take(_ ascii: Unicode.Scalar) -> Bool {
+            guard i < bytes.count, bytes[i] == UInt8(ascii: ascii) else { return false }
+            i += 1
+            return true
+        }
+
+        /// One or more ASCII digits; false, consuming nothing, when there are none.
+        private mutating func digits() -> Bool {
+            let start = i
+            while i < bytes.count, (UInt8(ascii: "0")...UInt8(ascii: "9")).contains(bytes[i]) { i += 1 }
+            return i > start
+        }
 
         private mutating func skipTrivia() throws {
             while i < bytes.count {

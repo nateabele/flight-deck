@@ -137,9 +137,9 @@ final class PriceCatalogTests: XCTestCase {
         let seen = PriceTestBox<[(URL, [String: String])]>([])
         struct Paged: HTTPFetching {
             let seen: PriceTestBox<[(URL, [String: String])]>; let page1: Data; let page2: Data
-            func get(_ url: URL, headers: [String: String]) async throws -> Data {
+            func get(_ url: URL, headers: [String: String]) async throws -> (Data, [String: String]) {
                 seen.mutate { $0.append((url, headers)) }
-                return url.query?.contains("pageToken=p2") == true ? page2 : page1
+                return (url.query?.contains("pageToken=p2") == true ? page2 : page1, [:])
             }
             func post(_ url: URL, headers: [String: String], body: Data) async throws -> (Data, [String: String]) { throw HTTPStatusError(status: 405) }
             func delete(_ url: URL, headers: [String: String]) async throws { throw HTTPStatusError(status: 405) }
