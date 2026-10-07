@@ -2906,3 +2906,11 @@ it still reports there, each diagnosed from the run's `.xcresult` screen recordi
 - **The GCP quota link is not filtered to the metric.** The console's per-metric filter is an
   undocumented `pageState` blob, so `increaseURL` opens the project's quotas page and the user
   searches for the metric (`G2_CPUS`, `NVIDIA_L4_GPUS`…) themselves.
+
+## Cloud infra hosts: tailnet (2026-10-07)
+
+- **The tailnet IP comes from the Tailscale API, matched by hostname.** When several devices
+  share a hostname (a previous machine's node not yet gone), `nodeAddress` takes the newest by
+  `created`, and `deleteNode` deletes every one tagged `tag:flightdeck-cloud`. `nodeAddress`
+  does not filter by tag, so machine hostnames must be unique per machine and never collide
+  with one of the user's own devices.
