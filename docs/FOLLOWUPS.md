@@ -2906,3 +2906,15 @@ it still reports there, each diagnosed from the run's `.xcresult` screen recordi
 - **The GCP quota link is not filtered to the metric.** The console's per-metric filter is an
   undocumented `pageState` blob, so `increaseURL` opens the project's quotas page and the user
   searches for the metric (`G2_CPUS`, `NVIDIA_L4_GPUS`…) themselves.
+
+## Cloud infra hosts: tailnet (2026-10-07)
+
+- **The policy fetch and apply are not built.** Setup (spec §9) reads the policy with
+  `GET /api/v2/tailnet/-/acl` and writes it back with `If-Match: <ETag>`, but the ETag arrives
+  on the GET's response headers and `HTTPFetching.get` returns only the body. Whoever builds the
+  setup sheet's policy step needs a header-returning GET (or `get` widened to return headers like
+  `post` does); `HuJSONPatcher` already produces the text and the diff to show.
+- **The tailnet IP comes from the Tailscale API, matched by hostname.** When several devices
+  share a hostname (a previous machine's node not yet gone), `nodeAddress` takes the newest by
+  `created` and `deleteNode` deletes them all. Machine hostnames must therefore be unique per
+  machine, never reused across `up`s while an old node may linger.

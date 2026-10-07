@@ -23,9 +23,14 @@ protocol PriceSource: Sendable {
     func hourly(_ q: PriceQuery) async throws -> Double
 }
 
-/// The one HTTP verb the price lookup needs. A protocol so tests hand back canned pages.
+/// The HTTP verbs the price lookup and the Tailscale API need. A protocol so tests hand back
+/// canned pages and never reach a real API.
 protocol HTTPFetching: Sendable {
     func get(_ url: URL, headers: [String: String]) async throws -> Data
+    /// The response headers come back because the Tailscale policy endpoint answers with the
+    /// `ETag` its next write must quote.
+    func post(_ url: URL, headers: [String: String], body: Data) async throws -> (Data, [String: String])
+    func delete(_ url: URL, headers: [String: String]) async throws
 }
 
 struct HTTPStatusError: Error, Equatable {
@@ -34,15 +39,36 @@ struct HTTPStatusError: Error, Equatable {
 
 struct URLSessionHTTPFetcher: HTTPFetching {
     func get(_ url: URL, headers: [String: String]) async throws -> Data {
+        try await send(request(url, "GET", headers)).0
+    }
+
+    func post(_ url: URL, headers: [String: String], body: Data) async throws -> (Data, [String: String]) {
+        var request = request(url, "POST", headers)
+        request.httpBody = body
+        return try await send(request)
+    }
+
+    func delete(_ url: URL, headers: [String: String]) async throws {
+        _ = try await send(request(url, "DELETE", headers))
+    }
+
+    private func request(_ url: URL, _ method: String, _ headers: [String: String]) -> URLRequest {
         var request = URLRequest(url: url)
+        request.httpMethod = method
         headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
+        return request
+    }
+
+    private func send(_ request: URLRequest) async throws -> (Data, [String: String]) {
         let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse else { return (data, [:]) }
         // A 401/403 body is a JSON error document that would otherwise decode as an empty
         // price list and surface as "no SKU for this machine" instead of "sign in again".
-        if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
-            throw HTTPStatusError(status: http.statusCode)
+        guard (200..<300).contains(http.statusCode) else { throw HTTPStatusError(status: http.statusCode) }
+        let headers = http.allHeaderFields.reduce(into: [String: String]()) { out, field in
+            if let name = field.key as? String, let value = field.value as? String { out[name] = value }
         }
-        return data
+        return (data, headers)
     }
 }
 
