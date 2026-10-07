@@ -69,6 +69,17 @@ Gemini harness drives:
 - In that case, re-probe every Gemini row of the table above against `agy`, and record the
   result in §10.
 
+**Ruling (Track M, 2026-10-07): the Gemini harness drives `agy`, not `gemini`.** The Gemini
+column of the table above describes the `gemini` CLI, which the harness does NOT use. For `agy`
+(1.2.3, auto-updated to 1.3.1 the same day): headless is `agy -p <prompt>`; output is
+`--output-format text|json|stream-json`; the schema is native (`--json-schema <file|json>`, the
+answer in `structured_output`); the model is `--model <id>` with the effort part of the id
+(`gemini-3.1-pro-high`) and also an `--effort` flag; read-only is `--mode plan` (write mode
+`--mode accept-edits`); resume is `--conversation <id>` with the id agy reports
+(`conversation_id`), and there is no flag to pre-assign one; the sign-in check and model list
+are both `agy models`. A signed-out `agy -p` opens a Google sign-in in the browser instead of
+failing, so the harness runs `agy models` before every seat (`headlessSignInPreflight`).
+
 ## 3. Design
 
 ### 3.0 `AgentProfile` — one source of truth per CLI (IntakeKit, pure)
@@ -450,15 +461,15 @@ not need real accounts.
 
 | Probe | Grok | Gemini |
 |---|---|---|
-| Binary chosen | `grok` (`~/.local/bin/grok`) | |
-| Version / date | grok 1.0.30 (04b7ffed98c6), 2026-10-07; models grok-4.7 (default), grok-4.7-build-fast, grok-4.6, grok-4.5 | |
-| Signed-in check command | `grok models`. It exits 0 in both states; signed out, its first line is "You are not authenticated.", signed in it is "You are logged in with grok.com." | |
-| Model list command and output | `grok models`: `Default model: <id>`, then `Available models:` with one model per line, `*` before the default (also suffixed `(default)`) and `-` before the others. The list is read at runtime; the default moved from 4.6 to 4.7 before the first probe | |
-| Strict `--json-schema` / schema appendix | Accepted unchanged: the real `triage-schema.json` and `RoundSchemas.review`, both strict. The answer is in `result.structured_output` (and as text in `result`). `--output-format streaming-messages-json` is honored alongside `--json-schema` | |
-| Session id source | Every line has `session_id`; it equals the minted `--session-id`. A failed start reports `""` | |
-| Resume by id | `--resume <uuid>` keeps the id and remembers (it answered "4817"). The resume needs the same `--cwd` and `GROK_HOME` | |
-| Read-only enforcement verified | Yes. Asked to create `pwned.txt` and to search `search_tool`/`use_tool` for a write tool, it found none and wrote no file. The init tools were `read_file, list_dir, grep, search_tool, use_tool` | |
-| Isolation flags | `GROK_*_{HOOKS,MCPS,RULES,SKILLS,AGENTS}_ENABLED=0` for CLAUDE, CURSOR and CODEX are NOT enough, because Claude Code plugins and their hooks still loaded. Setting **`HOME` = `GROK_HOME`** removes every plugin, MCP server and hook (`grok inspect --json`). Also `GROK_MEMORY=0`, `GROK_DISABLE_AUTOUPDATER=1` | |
-| Auth-failure text | Exit 1. stderr: `Error: Not signed in. To authenticate without a browser, run: grok login --device-code …`. The stream has an `is_error` result with that text in `errors[]` and `session_id:""` (signed out, and an empty `GROK_HOME`) | |
-| Bad-model text | Exit 1. `Couldn't set model 'grok-bogus-9': Invalid params: "unknown model id". Run 'grok models' …` on stderr and in `errors[]`. No silent fallback | |
-| Rate-limit text | Not provoked. Matched from the 1.0.30 string table: "You hit your weekly limit.", "…rate limit for your plan", "…credit limit…", "out of credits", "Too Many Requests". UNVERIFIED | |
+| Binary chosen | `grok` (`~/.local/bin/grok`) | `agy` (Antigravity CLI), `~/.local/bin/agy`. Not `gemini`: Google stopped serving AI Pro accounts from it on 2026-06-18. |
+| Version / date | grok 1.0.30 (04b7ffed98c6), 2026-10-07; models grok-4.7 (default), grok-4.7-build-fast, grok-4.6, grok-4.5 | 1.2.3, then 1.3.1 (self-updated), 2026-10-07. 1.3.1 changed `--print-timeout`'s default from 5m to 0 (wait for the turn) and widened `--effort` to `low…max`. |
+| Signed-in check command | `grok models`. It exits 0 in both states; signed out, its first line is "You are not authenticated.", signed in it is "You are logged in with grok.com." | `agy models`. Signed out: exit 1, stderr "Error: Please sign in to view available models. Launch the CLI without arguments to sign in." — and it does NOT start a sign-in. A signed-out `agy -p` DOES (opens the browser, waits 60 s for a code). `agy mcp list` / `agy plugin list` need no sign-in. |
+| Model list command and output | `grok models`: `Default model: <id>`, then `Available models:` with one model per line, `*` before the default (also suffixed `(default)`) and `-` before the others. The list is read at runtime; the default moved from 4.6 to 4.7 before the first probe | `agy models`: `<id>\t<display name>` per line on stdout, "Fetching available models..." on stderr. Lists Gemini 3.8/3.7/3.6 Flash (high/medium/low), Gemini 3.1 Pro (high/low), Claude Opus/Sonnet 5.5, GPT-OSS 120B. The harness keeps only `gemini-*` ids; default `gemini-3.1-pro-high`. |
+| Strict `--json-schema` / schema appendix | Accepted unchanged: the real `triage-schema.json` and `RoundSchemas.review`, both strict. The answer is in `result.structured_output` (and as text in `result`). `--output-format streaming-messages-json` is honored alongside `--json-schema` | NOT YET PROBED — every run is refused (see Auth-failure text). |
+| Session id source | Every line has `session_id`; it equals the minted `--session-id`. A failed start reports `""` | Documented: `conversation_id` on `init` and on the `result`. Not yet probed. |
+| Resume by id | `--resume <uuid>` keeps the id and remembers (it answered "4817"). The resume needs the same `--cwd` and `GROK_HOME` | `--conversation <id>`. Not yet probed. |
+| Read-only enforcement verified | Yes. Asked to create `pwned.txt` and to search `search_tool`/`use_tool` for a write tool, it found none and wrote no file. The init tools were `read_file, list_dir, grep, search_tool, use_tool` | NOT YET PROBED. |
+| Isolation flags | `GROK_*_{HOOKS,MCPS,RULES,SKILLS,AGENTS}_ENABLED=0` for CLAUDE, CURSOR and CODEX are NOT enough, because Claude Code plugins and their hooks still loaded. Setting **`HOME` = `GROK_HOME`** removes every plugin, MCP server and hook (`grok inspect --json`). Also `GROK_MEMORY=0`, `GROK_DISABLE_AUTOUPDATER=1` | None exist. No MCP servers or plugins configured on this Mac (`agy mcp list`, `agy plugin list`). |
+| Auth-failure text | Exit 1. stderr: `Error: Not signed in. To authenticate without a browser, run: grok login --device-code …`. The stream has an `is_error` result with that text in `errors[]` and `session_id:""` (signed out, and an empty `GROK_HOME`) | Signed out: stderr "Authentication required. Please visit the URL to log in: …", result `{"status":"ERROR","error":"authentication failed or timed out","conversation_id":""}`, exit 1. Signed in but unverified: "Eligibility check failed: Your current account is not eligible for Antigravity. Verify your account to continue." (403 PERMISSION_DENIED), exit 1, no tokens. Both classify as `authExpired`. |
+| Bad-model text | Exit 1. `Couldn't set model 'grok-bogus-9': Invalid params: "unknown model id". Run 'grok models' …` on stderr and in `errors[]`. No silent fallback | Documented `invalid model selection: … not recognized`; not yet probed. |
+| Rate-limit text | Not provoked. Matched from the 1.0.30 string table: "You hit your weekly limit.", "…rate limit for your plan", "…credit limit…", "out of credits", "Too Many Requests". UNVERIFIED | Not observed. `RESOURCE_EXHAUSTED` / quota / 429 matched, UNVERIFIED. |
