@@ -56,6 +56,9 @@ struct RoundConfigEditor: View {
         // way to hide what the panel was opened to show.
         VStack(alignment: .leading, spacing: 14) {
             Text(Self.label(preset: preset, config: config)).font(.headline)
+            ForEach(Self.availabilityNotes(available), id: \.self) { note in
+                Text(note).font(.caption).foregroundStyle(.secondary)
+            }
             stackedSlots
             Divider()
             capsForm
@@ -156,26 +159,39 @@ struct RoundConfigEditor: View {
         .pickerStyle(.menu)
     }
 
-    /// Free text, because every CLI also takes a full model name — with the profile's known
-    /// models one click away, so `fable` is offered here as it is in Settings and routing.
+    /// A picker when the harness's CLI listed its models at detection (grok), so a seat can
+    /// only name a model that account has. Otherwise free text, because every CLI also takes a
+    /// full model name — with the profile's known models one click away, so `fable` is offered
+    /// here as it is in Settings and routing.
+    @ViewBuilder
     private func modelField(for keyPath: SlotKeyPath, harness: Harness) -> some View {
-        let suggestions = Self.modelSuggestions(for: harness, codexListed: codexListedModels)
-        return HStack(spacing: 2) {
-            TextField("Model", text: modelBinding(for: keyPath))
-                .textFieldStyle(.roundedBorder)
-                .frame(maxWidth: .infinity)
-            if !suggestions.isEmpty {
-                Menu {
-                    ForEach(suggestions, id: \.self) { model in
-                        Button(model) { config = Self.updatingChoice(config, at: keyPath) { $0.model = model } }
+        let binding = modelBinding(for: keyPath)
+        if let models = Self.modelChoices(for: harness, current: binding.wrappedValue, available: available) {
+            Picker("Model", selection: binding) {
+                ForEach(models, id: \.self) { model in Text(model).tag(model) }
+            }
+            .labelsHidden()
+            .pickerStyle(.menu)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+            let suggestions = Self.modelSuggestions(for: harness, codexListed: codexListedModels)
+            HStack(spacing: 2) {
+                TextField("Model", text: binding)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(maxWidth: .infinity)
+                if !suggestions.isEmpty {
+                    Menu {
+                        ForEach(suggestions, id: \.self) { model in
+                            Button(model) { config = Self.updatingChoice(config, at: keyPath) { $0.model = model } }
+                        }
+                    } label: {
+                        Image(systemName: "chevron.down")
                     }
-                } label: {
-                    Image(systemName: "chevron.down")
+                    .menuStyle(.borderlessButton)
+                    .menuIndicator(.hidden)
+                    .fixedSize()
+                    .help("Known models")
                 }
-                .menuStyle(.borderlessButton)
-                .menuIndicator(.hidden)
-                .fixedSize()
-                .help("Known models")
             }
         }
     }
@@ -436,6 +452,24 @@ struct RoundConfigEditor: View {
         return updatingChoice(config, at: keyPath) { $0.account = option.ref }
     }
 
+    /// The model picker's options, or nil for a free text field (no list was detected). A
+    /// persisted model the list no longer has stays selectable, first — dropping it would make
+    /// the picker show a blank selection and silently re-seat the slot on the next touch.
+    static func modelChoices(for harness: Harness, current: String, available: AvailableModels) -> [String]? {
+        guard let models = available.models[harness], !models.isEmpty else { return nil }
+        return models.contains(current) || current.isEmpty ? models : [current] + models
+    }
+
+    /// One line per harness this build can run but isn't offering — "Grok: run `grok login`"
+    /// — plus the data-use caution for any consumer-plan harness that IS offered (spec §3.9).
+    static func availabilityNotes(_ available: AvailableModels) -> [String] {
+        var notes = Harness.allCases.compactMap { available.unavailable[$0] }
+        if available.choice(for: .grok) != nil {
+            notes.append("Grok may use prompts to improve its models. Check xAI's data settings before using it on private repos.")
+        }
+        return notes
+    }
+
     /// One row per filled seat, in the fixed order the round actually runs: every drafter,
     /// then synthesizer, reviewer, crossReviewer, integrator, encoder, polisher. Skips
     /// synthesizer/reviewer/polisher when the preset has none, rather than emitting a row with
@@ -566,6 +600,8 @@ struct RoundConfigEditor: View {
     /// The fallback Picker's one non-"None" option: whichever available model ISN'T the
     /// seat's current choice. Nil on a single-harness machine, where there is no other model.
     static func otherModel(for choice: ModelChoice, available: AvailableModels) -> ModelChoice? {
-        choice.harness == .codex ? available.claude : available.codex
+        // The first other harness in `Harness.allCases` order: codex ↔ claude exactly as
+        // before, and a grok seat falls back to codex (else claude) — a different family.
+        available.harnesses.first { $0 != choice.harness }.flatMap(available.choice(for:))
     }
 }

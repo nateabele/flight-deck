@@ -27,6 +27,13 @@ public enum FailureDiagnosis {
         let kind = AgentFailureKind.strongest(signals.compactMap { profile.classify(error: $0) ?? AgentErrorVocabulary.classify($0) })
 
         if kind == .rateLimited {
+            // grok's own spellings ("You hit your weekly limit.") say neither "rate limit" nor
+            // "429"; GrokProfile.classify catches them above, and the action names Grok's pool so
+            // the human doesn't retry straight into a spent SuperGrok week.
+            if harness == .grok {
+                return Diagnosis(category: .rateLimited, detail: tail(stderr, errorText),
+                                 action: "Wait for Grok's usage limit to reset, or switch this slot to another model.")
+            }
             return Diagnosis(category: .rateLimited, detail: tail(stderr, errorText),
                               action: "Wait for the limit to reset, or switch this slot to another model.")
         }
@@ -40,9 +47,10 @@ public enum FailureDiagnosis {
                 switch harness {
                 case .codex: action = "Run `codex login` in a terminal"
                 case .claude, .none: action = "Run `claude /login` in a terminal"
-                // Generic until Tracks G/M probe each CLI's real sign-in flow: naming a command
+                // `grok login` is grok 1.0.30's sign-in command (`grok login --help`).
+                case .grok?: action = "Run `grok login` in a terminal"
+                // Generic until Track M probes gemini's real sign-in flow: naming a command
                 // nobody verified would send the human to run something that doesn't exist.
-                case .grok?: action = "Sign in to `\(GrokProfile().binaryName)` in a terminal"
                 case .gemini?: action = "Sign in to `\(GeminiProfile().binaryName)` in a terminal"
                 }
             }

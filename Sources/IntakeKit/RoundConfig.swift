@@ -154,6 +154,17 @@ public struct AvailableModels: Sendable, Equatable {
         self.init(choices: choices)
     }
 
+    /// Each harness's model ids, as its CLI listed them at detection (`grok models`), for the
+    /// editor's model picker. Absent for a harness with no list command (claude, codex), whose
+    /// model stays a free text field. Generic over `Harness` so Track M's gemini list lands here
+    /// too rather than in a field of its own.
+    public var models: [Harness: [String]] = [:]
+
+    /// Why a harness this build CAN run is not offered: its CLI is missing ("not installed") or
+    /// signed out (its profile's hint, e.g. "Grok: run `grok login`"). The editor shows these,
+    /// so a harness is never silently missing from a picker (spec §3.2).
+    public var unavailable: [Harness: String] = [:]
+
     public func choice(for harness: Harness) -> ModelChoice? { choices[harness] }
 
     /// Every available harness, in `Harness.allCases` order — the order pickers list them in.
