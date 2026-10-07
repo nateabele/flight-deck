@@ -91,6 +91,14 @@ targets:
       - path: Resources/RouteShim
         type: folder
         buildPhase: resources
+      # The bundled OpenTofu presets (`aws-linux`, `gcp-linux`) that `infra up` copies into a
+      # workdir (spec §5.1). A folder reference so each preset keeps its own directory — and
+      # its tests/ and .terraform.lock.hcl — at `Contents/Resources/Infra/presets/<name>/`.
+      # scripts/test-infra-presets.sh tests copies, never in place, because anything beside a
+      # preset (a stray `.terraform/` of provider binaries) would be bundled too.
+      - path: Resources/Infra
+        type: folder
+        buildPhase: resources
       # The hostd's LaunchAgent, where `SMAppService.agent(plistName:)` looks for it:
       # `Contents/Library/LaunchAgents`. Its `BundleProgram` names the embedded binary below.
       - path: Sources/HostDaemon/dev.flightdeck.hostd.plist
