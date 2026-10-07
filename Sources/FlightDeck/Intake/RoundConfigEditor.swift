@@ -169,7 +169,7 @@ struct RoundConfigEditor: View {
         .pickerStyle(.menu)
     }
 
-    /// A picker when the harness's CLI listed its models at detection (grok), so a seat can
+    /// A picker when the harness's CLI listed its models at detection (grok, gemini), so a seat can
     /// only name a model that account has. Otherwise free text, because every CLI also takes a
     /// full model name — with the profile's known models one click away, so `fable` is offered
     /// here as it is in Settings and routing.
@@ -429,11 +429,15 @@ struct RoundConfigEditor: View {
 
     /// The models the model field's menu offers for `harness`: its profile's static aliases,
     /// then codex's runtime list when routing has one cached, else the profile's default —
-    /// never empty for a harness with a catalog, never a duplicate.
-    static func modelSuggestions(for harness: Harness, codexListed: [String] = []) -> [String] {
+    /// never empty for a harness with a catalog, never a duplicate. `detected` is the list the
+    /// CLI itself printed at detection (`grok models`); when there is one it REPLACES the static
+    /// aliases, which are only a fallback and go stale as the vendor ships models (grok's moved
+    /// from 4.6 to 4.7 on the day it was first probed).
+    static func modelSuggestions(for harness: Harness, codexListed: [String] = [], detected: [String] = []) -> [String] {
         let catalog = AgentProfiles.profile(for: harness).modelCatalog
         var out: [String] = []
-        for model in catalog.aliases + (harness == .codex ? codexListed : []) where !out.contains(model) {
+        let known = detected.isEmpty ? catalog.aliases : detected
+        for model in known + (harness == .codex ? codexListed : []) where !out.contains(model) {
             out.append(model)
         }
         if out.isEmpty, !catalog.defaultPlanningModel.isEmpty { out = [catalog.defaultPlanningModel] }

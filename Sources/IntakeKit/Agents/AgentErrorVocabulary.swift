@@ -72,9 +72,20 @@ public enum AgentErrorVocabulary {
     /// Matched case-insensitively as substrings, rate limits before auth — the order
     /// `FailureDiagnosis` has always checked them in, so a "429 … unauthorized" stays a rate
     /// limit. Only ever applied to the CLI's own error channels, never to the model's prose.
-    static let rateLimitPhrases = ["rate limit", "429", "usage limit"]
+    ///
+    /// grok's spellings (grok 1.0.30's string table, Track G) are part of the union: its usage
+    /// limits ("You hit your weekly limit.", "…the credit limit for your plan") say neither
+    /// "rate limit" nor "429", so without them a spent SuperGrok pool read as a harness error
+    /// and the human retried straight into it. Its signed-out error ("Not signed in.") was
+    /// captured live; the limit spellings were never provoked. "403" is deliberately absent —
+    /// grok uses it for both credit exhaustion and permission errors.
+    static let rateLimitPhrases = ["rate limit", "429", "usage limit",
+                                   "weekly limit", "credit limit", "out of credits", "usage balance exhausted",
+                                   "spending limit", "too many requests", "payment required", "status 402"]
     static let authPhrases = ["not logged in", "authentication", "unauthorized", "401", "/login", "codex login",
-                              "invalid api key"]
+                              "invalid api key",
+                              "not authenticated", "not signed in", "session has expired", "credentials were rejected",
+                              "grok login"]
 
     public static func classify(text: String) -> AgentFailureKind? {
         let lower = text.lowercased()
@@ -96,7 +107,12 @@ public enum AgentErrorVocabulary {
             // Keyed on `is_error` itself rather than `type == "result"`: `--output-format json`
             // fixtures recorded before claude seats streamed are one bare result object.
             guard obj["is_error"] as? Bool == true else { return nil }
-            return obj["result"] as? String ?? obj["subtype"] as? String ?? "is_error"
+            // grok's failed `result` has no `result` text; its reason is in `errors[]` (strings,
+            // probed signed out on grok 1.0.30) — read before the bare `subtype`
+            // (`error_during_execution`), which says nothing a human can act on.
+            let errors = (obj["errors"] as? [Any] ?? []).compactMap { $0 as? String ?? ($0 as? [String: Any])?["message"] as? String }
+            return obj["result"] as? String ?? (errors.isEmpty ? nil : errors.joined(separator: "\n"))
+                ?? obj["subtype"] as? String ?? "is_error"
         }
     }
 

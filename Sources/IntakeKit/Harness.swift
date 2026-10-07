@@ -325,7 +325,7 @@ public enum HarnessCommand {
         // The isolation that keeps a grok seat off the operator's Claude/Cursor hooks and MCP
         // servers is environment, not argv (see `GrokProfile.isolationEnvironment`) — so every
         // grok child, triage and round alike, must come through here.
-        case "grok": environment = GrokProfile().environment(base: base, account: account)
+        case GrokProfile().binaryName: environment = GrokProfile().environment(base: base, account: account)
         case GeminiProfile().binaryName: environment = GeminiProfile().environment(base: base, account: account)
         default: environment = base
         }

@@ -27,13 +27,6 @@ public enum FailureDiagnosis {
         let kind = AgentFailureKind.strongest(signals.compactMap { profile.classify(error: $0) ?? AgentErrorVocabulary.classify($0) })
 
         if kind == .rateLimited {
-            // grok's own spellings ("You hit your weekly limit.") say neither "rate limit" nor
-            // "429"; GrokProfile.classify catches them above, and the action names Grok's pool so
-            // the human doesn't retry straight into a spent SuperGrok week.
-            if harness == .grok {
-                return Diagnosis(category: .rateLimited, detail: tail(stderr, errorText),
-                                 action: "Wait for Grok's usage limit to reset, or switch this slot to another model.")
-            }
             return Diagnosis(category: .rateLimited, detail: tail(stderr, errorText),
                               action: "Wait for the limit to reset, or switch this slot to another model.")
         }

@@ -26,14 +26,15 @@ public struct GrokProfile: AgentProfile {
         }
     }
 
-    /// `grok-4.6` is the CLI's own default and `grok-4.5` the only other model on a SuperGrok
-    /// account (`grok models`, 2026-10-07); they double as the picker's list when the runtime
-    /// list can't be read. Effort levels are the TUI's `/effort` menu (`low`, `medium`, `high`,
+    /// FALLBACKS ONLY, and they go stale: the model list and default are read from `grok models`
+    /// at detection (`parseModelList`, default first). These are what that printed for a
+    /// SuperGrok account on 2026-10-07 — where the default had already moved from grok-4.6 to
+    /// grok-4.7 since the spec was written — and are used only when the list can't be read. Effort levels are the TUI's `/effort` menu (`low`, `medium`, `high`,
     /// `xhigh`); the CLI also knows `none`/`minimal`/`max`, but "a model only accepts the levels
     /// its menu advertises", so offering them would let a seat pick one grok-4.6 rejects.
     public var modelCatalog: ProfileModelCatalog {
-        ProfileModelCatalog(aliases: ["grok-4.6", "grok-4.5"], listArguments: ["models"],
-                            defaultPlanningModel: "grok-4.6", defaultPlanningEffort: "high",
+        ProfileModelCatalog(aliases: ["grok-4.7", "grok-4.7-build-fast", "grok-4.6"], listArguments: ["models"],
+                            defaultPlanningModel: "grok-4.7", defaultPlanningEffort: "high",
                             effortValues: ["low", "medium", "high", "xhigh"])
     }
 
@@ -47,7 +48,9 @@ public struct GrokProfile: AgentProfile {
     ///       - grok-4.5
     ///
     /// Only bulleted lines AFTER "Available models:" count, so the "Default model:" line (and
-    /// any auth banner above it) never becomes a second entry.
+    /// any auth banner above it) never becomes a second entry. The `(default)` model is moved
+    /// FIRST: detection seeds a new seat with `first`, so the account's own default wins over
+    /// this profile's hard-coded one.
     public func parseModelList(_ stdout: String) -> [String] {
         var models: [String] = []
         var inList = false
@@ -58,7 +61,7 @@ public struct GrokProfile: AgentProfile {
             let rest = line.dropFirst().trimmingCharacters(in: .whitespaces)
             guard let id = rest.split(separator: " ").first.map(String.init), !id.isEmpty,
                   !models.contains(id) else { continue }
-            models.append(id)
+            if rest.hasSuffix("(default)") { models.insert(id, at: 0) } else { models.append(id) }
         }
         return models
     }
@@ -67,85 +70,50 @@ public struct GrokProfile: AgentProfile {
     /// a bounded retry that ends in `error_max_structured_output_retries`).
     public var hasNativeSchema: Bool { true }
 
-    /// grok's own error spellings, from its 1.0.30 string table. Usage limits come first: on a
-    /// SuperGrok plan they are the likely real failure (a weekly shared pool), and several of
-    /// them ("You hit your weekly limit.") say neither "rate" nor "429", so the generic
-    /// classifier would call them a harness error and send the human to retry into the same
-    /// wall. "403" is deliberately absent — grok uses it for both credit exhaustion and
-    /// permission errors, and guessing wrong either way sends the human to the wrong fix.
+    /// grok's error spellings live in the one shared table (`AgentErrorVocabulary`), with
+    /// claude's and codex's — a copy here would drift from it the way the old four lists did.
     public func classify(error: AgentErrorSignal) -> AgentFailureKind? {
-        let text: String
-        switch error {
-        case .stderr(let s): text = s
-        case .streamErrorEvent(let json): text = Self.errorText(ofEvent: json)
-        case .transcriptAPIError(let kind): text = kind
-        case .appServerError(let code, let message): text = (code.map { "status \($0) " } ?? "") + message
-        }
-        let t = text.lowercased()
-        if Self.rateLimitSpellings.contains(where: t.contains) { return .rateLimited }
-        if Self.authSpellings.contains(where: t.contains) { return .authExpired }
-        if Self.overloadSpellings.contains(where: t.contains) { return .overloaded }
-        return nil
+        AgentErrorVocabulary.classify(error)
     }
 
-    static let rateLimitSpellings = [
-        "rate limit", "weekly limit", "usage limit", "free usage limit", "credit limit", "out of credits",
-        "usage balance exhausted", "spending limit", "too many requests", "payment required",
-        "status 429", "status 402", "429",
-    ]
-    static let authSpellings = [
-        "not authenticated", "not signed in", "authentication required", "session has expired", "credentials were rejected",
-        "authentication could not be refreshed", "no oauth2 configuration", "grok login", "unauthorized", "401",
-    ]
-    static let overloadSpellings = [
-        "service unavailable", "overloaded", "bad gateway", "gateway timeout", "status 503", "status 502", "status 529",
-    ]
-
-    /// The human-readable part of one grok error event: `{"type":"error","message":…}`, or a
-    /// `result` flagged `is_error` (its `errors[]`, then `result`, then `subtype`). Falls back
-    /// to the raw text, so a shape nobody has seen yet is still matched rather than dropped.
-    static func errorText(ofEvent json: String) -> String {
-        guard let obj = try? JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any] else { return json }
-        var parts: [String] = []
-        if let message = obj["message"] as? String { parts.append(message) }
-        for e in obj["errors"] as? [Any] ?? [] {
-            if let s = e as? String { parts.append(s) }
-            else if let d = e as? [String: Any], let m = d["message"] as? String { parts.append(m) }
+    /// Variables that stop grok reading ANOTHER CLI's config: grok scans `~/.claude`,
+    /// `~/.cursor` and `~/.codex` (hooks, MCP servers, rules, skills, CLAUDE.md) by default
+    /// (`compat.*`). Defense in depth only — `environment` also moves `HOME`, which is what
+    /// actually holds (see there). `GROK_MEMORY=0` keeps cross-session memory from leaking one
+    /// seat's plan into another's prompt; the autoupdater is off so a seat never swaps its own
+    /// binary mid-round.
+    public static let isolationEnvironment: [String: String] = {
+        var env = ["GROK_MEMORY": "0", "GROK_DISABLE_AUTOUPDATER": "1"]
+        for vendor in ["CLAUDE", "CURSOR", "CODEX"] {
+            for surface in ["HOOKS", "MCPS", "RULES", "SKILLS", "AGENTS"] { env["GROK_\(vendor)_\(surface)_ENABLED"] = "0" }
         }
-        if let result = obj["result"] as? String { parts.append(result) }
-        if let subtype = obj["subtype"] as? String { parts.append(subtype) }
-        return parts.isEmpty ? json : parts.joined(separator: "\n")
-    }
+        return env
+    }()
 
-    /// Variables that stop grok reading ANOTHER CLI's config. grok scans `~/.claude` and
-    /// `~/.cursor` (hooks, MCP servers, rules, skills, CLAUDE.md) by default (`compat.claude.*`,
-    /// `compat.cursor.*`), and a fresh `GROK_HOME` does not stop it — so without these a
-    /// "read-only" planning seat would run the operator's Claude Code hooks (which execute
-    /// arbitrary commands and fail OPEN) and start their MCP servers, whose mutators write
-    /// anywhere. CLAUDE.md is dropped with them: the operator's global one is written to steer
-    /// their own sessions, not a planning seat; the project's AGENTS.md still loads.
-    /// `GROK_MEMORY=0` keeps cross-session memory from leaking one seat's plan into another's
-    /// prompt; the autoupdater is off so a seat never swaps its own binary mid-round.
-    public static let isolationEnvironment: [String: String] = [
-        "GROK_CLAUDE_HOOKS_ENABLED": "0", "GROK_CLAUDE_MCPS_ENABLED": "0", "GROK_CLAUDE_RULES_ENABLED": "0",
-        "GROK_CLAUDE_SKILLS_ENABLED": "0", "GROK_CLAUDE_AGENTS_ENABLED": "0",
-        "GROK_CURSOR_HOOKS_ENABLED": "0", "GROK_CURSOR_MCPS_ENABLED": "0", "GROK_CURSOR_RULES_ENABLED": "0",
-        "GROK_CURSOR_SKILLS_ENABLED": "0", "GROK_CURSOR_AGENTS_ENABLED": "0",
-        "GROK_MEMORY": "0", "GROK_DISABLE_AUTOUPDATER": "1",
-    ]
-
-    /// `GROK_HOME` relocates everything grok keeps — `auth.json` (the login, a plain file, not
-    /// the Keychain), config, sessions — so pointing it at an account's home is what bills that
-    /// account. nil leaves the operator's own `~/.grok`. Nothing is carried over from
-    /// `~/.grok/config.toml`: proxies reach grok through the environment (`HTTPS_PROXY` & co.,
-    /// which `base` already holds), and this machine's config sets no endpoint (2026-10-07).
-    /// The claude child-session variables are dropped like every profile drops them: they mean
-    /// nothing to grok, and must not reach anything grok spawns.
+    /// The child's environment. Two bindings, both to the grok home (`account.home`, else an
+    /// explicit `GROK_HOME` in `base`, else `$HOME/.grok`):
+    /// - `GROK_HOME` relocates everything grok keeps — `auth.json` (the login, a plain file,
+    ///   not the Keychain), config, sessions — so it is what bills an account;
+    /// - `HOME` points there too. Probed on grok 1.0.30, 2026-10-07: with the `compat.*`
+    ///   variables alone, `grok inspect` still listed the operator's Claude Code PLUGINS as
+    ///   enabled — superpowers, plannotator and codex — with their hooks, which grok discovers
+    ///   under `~/.claude/plugins` on a path no compat switch covers. Those hooks would inject
+    ///   superpowers' instructions into every seat and run codex's 900 s Stop review gate. With
+    ///   `HOME` moved to the grok home (which has no `.claude`, `.claude.json` or `.codex`),
+    ///   the same `inspect` listed no plugins, no MCP servers and no hooks, and `grok models`
+    ///   still read the login. grok's own built-in skills still load; they are prompts only.
+    /// Nothing is carried over from `~/.grok/config.toml`: proxies reach grok through the
+    /// environment (`HTTPS_PROXY` & co., already in `base`), and this machine's config sets no
+    /// endpoint (2026-10-07). The claude child-session variables are dropped like every
+    /// profile drops them, so nothing grok spawns inherits them.
     public func environment(base: [String: String], account: AgentAccountRef?) -> [String: String] {
-        var env = base
-        for key in ["CLAUDE_CODE_CHILD_SESSION", "CLAUDECODE"] { env.removeValue(forKey: key) }
+        var env = ClaudeProfile.scrubbingChildSession(base)
         env.merge(Self.isolationEnvironment) { _, isolation in isolation }
-        if let account { env["GROK_HOME"] = account.home.path }
+        let grokHome = account?.home.path ?? base["GROK_HOME"] ?? base["HOME"].map { ($0 as NSString).appendingPathComponent(".grok") }
+        if let grokHome {
+            env["GROK_HOME"] = grokHome
+            env["HOME"] = grokHome
+        }
         return env
     }
 }
