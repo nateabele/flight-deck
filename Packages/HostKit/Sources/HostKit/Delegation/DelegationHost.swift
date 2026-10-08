@@ -71,7 +71,7 @@ public final class DelegationHost: @unchecked Sendable {
         services = DelegationHostServices(context: DelegationHostContext(
             runner: runner, workspace: workspace, portCheck: portCheck, screen: screen,
             isConnected: { live.contains($0) }))
-        capabilities = [.run, .sync, .service] + (screenSupported ? [.screen] : [])
+        capabilities = [.run, .sync, .service, .submodules] + (screenSupported ? [.screen] : [])
     }
 
     /// hostd's wiring: the workspace store and the run spools under the state root, the

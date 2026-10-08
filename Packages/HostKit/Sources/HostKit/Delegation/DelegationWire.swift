@@ -35,7 +35,9 @@ import Foundation
 // its §5 line; a code not listed here is a bug on whichever side sent it.
 //   tree_mismatch           the checkout's tree is not the snapshot's after apply (§4.4)
 //   lfs_unsupported         the snapshot is of an LFS repo; out of v1
-//   submodules_unsupported  the snapshot's tree has a gitlink; out of v1
+//   submodule_fetch_failed  a submodule's pinned commit could not be fetched from its URL
+//                           (unreachable, refused, or the commit is not there); the message
+//                           names the submodule's path and the URL. Fails the run's checkout.
 //   screen_locked           `screen` asked of a host whose console session is locked
 //   no_console_user         `screen` asked of a host with nobody logged in at the console
 //   screen_unsupported      `screen` asked of a host that has none (Linux)
@@ -57,8 +59,18 @@ import Foundation
 //   port_bind_failed        a local listener failed for a reason other than the port being held
 //   preflight_failed        a check failed with an error that was not already a 125 line
 //   local_port_held         a requested local port is held, or still in TIME_WAIT (§7 step 4)
+//   submodule_dirty         a submodule has uncommitted or untracked changes (§4.2 step 4)
+//   submodule_unpushed      a submodule's commit is on no remote-tracking branch or tag
+//   submodule_no_url        a gitlink with no URL: a nested repo that is not a submodule
+//   submodules_unsupported  the snapshot has submodules and the host did not advertise
+//                           `submodules`: it would drop the pins (`SnapshotRef.unsupported`)
 // A host lacking a needed capability, or answering `port.check` for fewer ports than asked,
 // is reported as A5's `unsupported`; a held remote port is A5's `port_held`.
+//
+// `ref` (`SnapshotRef`) carries `submodules`, `[{path, commit, url}]`, only when the snapshot
+// has any: every gitlink, nested ones included, with the URL the controller resolved. It is
+// the one field added since 1.1 shipped, read leniently, and sent only to a host that
+// advertised the `submodules` capability; a host without it would decode and drop it.
 //
 // `run.start` with `apply: false` is `flightdeck exec`: run in the worktree's existing checkout
 // without applying `ref`, whose commit and tree are then the controller's view only and are

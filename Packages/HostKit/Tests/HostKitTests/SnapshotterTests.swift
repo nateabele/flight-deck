@@ -334,23 +334,7 @@ final class SnapshotterTests: XCTestCase {
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: decoy.path), [])
     }
 
-    /// Submodules are out of v1 (C0 amendment A1): the host has no store to resolve a gitlink
-    /// from, so the submodule's directory would arrive empty and the run would fail confusingly.
-    func testSubmoduleRefused() async throws {
-        let scratch = TempRepo.scratch()
-        let lib = try TempRepo(at: scratch.appendingPathComponent("lib"))
-        lib.write("lib.txt", "lib\n")
-        try lib.commitAll()
-        let app = try TempRepo(at: scratch.appendingPathComponent("app"))
-        app.write("main.txt", "main\n")
-        try app.git("submodule", "add", "-q", lib.url.path, "lib")
-        try app.commitAll()
-
-        let error = await thrown { try await Snapshotter().snapshot(worktree: app.url, host: "mini", include: []) }
-        XCTAssertEqual(error as? SyncError, .submodulesUnsupported)
-        XCTAssertEqual((error as? SyncError)?.code, "submodules_unsupported")
-        XCTAssertEqual(try app.git("for-each-ref", "refs/flightdeck/"), "", "a refused snapshot records nothing")
-    }
+    // Submodules: `SubmoduleSyncTests` (they used to be refused here, before §4.2 step 4).
 
     // MARK: - Transfer (§4.3)
 

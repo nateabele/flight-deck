@@ -87,11 +87,17 @@ public enum RunPhase: Sendable, Equatable {
 public struct RunLifecycle: Sendable {
     public var atExit: @Sendable (_ lease: CheckoutLease, _ runID: String, _ spec: RunSpec) async throws -> Void
     public var release: @Sendable (_ lease: CheckoutLease) async -> Void
+    /// Lines for the run's own output, asked after `atExit` and before `release`: what the
+    /// user must know about the result that the result itself cannot say (a submodule's
+    /// changes left on the host). Each is written as `flightdeck: <line>`.
+    public var notices: @Sendable (_ lease: CheckoutLease, _ runID: String, _ spec: RunSpec) async -> [String]
 
     public init(atExit: @escaping @Sendable (CheckoutLease, String, RunSpec) async throws -> Void,
-                release: @escaping @Sendable (CheckoutLease) async -> Void) {
+                release: @escaping @Sendable (CheckoutLease) async -> Void,
+                notices: @escaping @Sendable (CheckoutLease, String, RunSpec) async -> [String] = { _, _, _ in [] }) {
         self.atExit = atExit
         self.release = release
+        self.notices = notices
     }
 
     public static let none = RunLifecycle(atExit: { _, _, _ in }, release: { _ in })
@@ -107,6 +113,12 @@ public struct RunLifecycle: Sendable {
             }
         }, release: { lease in
             await store.release(lease)
+        }, notices: { lease, _, spec in
+            // A service's tree is the user's long-lived checkout, not one command's output.
+            guard !spec.service else { return [] }
+            return await store.submoduleChanges(lease: lease).map {
+                "warning: the run changed submodule \($0); changes inside submodules stay on the host and are not part of the result"
+            }
         })
     }
 }
@@ -398,16 +410,24 @@ public final class Runner: RunControlling, @unchecked Sendable {
 
     private func beginAcquire(_ run: Run) {
         acquireHook?(run.id)
+        // From here, not from spawn: preparing the checkout (a first sync's apply, a submodule
+        // fetch that takes minutes) is the run's work too, and a Mac that idle-slept through it
+        // would stall the run before it started. Released with the run's other assertions,
+        // however it ends (`terminate`).
+        let idle = power.hold(.idleSleep, reason: "Flight Deck run \(run.id)")
         // The task is stored in the same critical section that publishes `.queued(.slot)`, so a
         // cancel that sees the phase always finds the task to cancel. A run already ended or
         // cancelled (a cancel landing between a screen grant and here) is left alone:
         // publishing `.queued(.slot)` over its exit would resurrect it and take a slot for it.
         var abandoned = false
+        var attached = false
         update(run) {
             guard !$0.phase.isTerminal, !$0.cancelRequested else {
                 abandoned = !$0.phase.isTerminal
                 return
             }
+            $0.assertions.append(idle)
+            attached = true
             $0.phase = .queued(.slot)
             $0.acquireTask = Task { [weak self] in
                 let notice = Task { [weak self] in
@@ -433,6 +453,7 @@ public final class Runner: RunControlling, @unchecked Sendable {
                 }
             }
         }
+        if !attached { idle.release() }
         if abandoned { terminate(run, .exited(.signal(SIGINT))) }
     }
 
@@ -462,7 +483,6 @@ public final class Runner: RunControlling, @unchecked Sendable {
             fail(run, error)
             return
         }
-        let idle = power.hold(.idleSleep, reason: "Flight Deck run \(run.id)")
         let pump = OutputPump(fds: process.fds) { [weak self] stream, data in
             self?.appendOutput(run, stream, data)
         }
@@ -474,7 +494,6 @@ public final class Runner: RunControlling, @unchecked Sendable {
             $0.lease = lease
             $0.pgid = process.pid
             $0.cwd = cwd
-            $0.assertions.append(idle)
             $0.phase = .running
             cancelledWhileQueued = $0.cancelRequested
         }
@@ -516,6 +535,9 @@ public final class Runner: RunControlling, @unchecked Sendable {
                 } catch {
                     self.appendOutput(run, spec.pty ? .pty : .stderr,
                                       Data("flightdeck: collecting the run's results failed: \(error)\n".utf8))
+                }
+                for line in await self.lifecycle.notices(lease, run.id, spec) {
+                    self.appendOutput(run, spec.pty ? .pty : .stderr, Data("flightdeck: \(line)\n".utf8))
                 }
                 await self.lifecycle.release(lease)
             }

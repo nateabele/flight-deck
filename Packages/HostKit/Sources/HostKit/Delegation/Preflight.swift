@@ -241,6 +241,7 @@ public enum Preflight {
         case .sync: return "sync"
         case .service: return "services"
         case .screen: return "screen runs"
+        case .submodules: return "submodules"
         }
     }
 

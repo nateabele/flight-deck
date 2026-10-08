@@ -548,6 +548,22 @@ final class RunnerTests: XCTestCase {
         XCTAssertEqual(log.notes, ["atExit \(id) [\"build/*.xcresult\"]", "release"])
     }
 
+    /// A lifecycle's notices reach the run's own output, before its exit is reported: the
+    /// only place a user (or agent) watching the run will see that a submodule's changes were
+    /// left on the host.
+    func testLifecycleNoticesAreWrittenToTheRunsOutput() async throws {
+        let log = LeaseLog()
+        let r = Runner(runsRoot: try tempDir("runs"), shell: "/bin/sh", hostEnvironment: hostEnv,
+                       console: FixedConsole(state: consoleAvailable),
+                       lifecycle: RunLifecycle(atExit: { _, _, _ in log.note("atExit") },
+                                               release: { _ in log.note("release") },
+                                               notices: { _, _, _ in log.note("notices"); return ["warning: lib changed"] }))
+        let events = try await collect(r, start(r, spec("echo hi"), try checkout()))
+        XCTAssertTrue(output(events, .stderr).contains("flightdeck: warning: lib changed\n"), output(events))
+        XCTAssertEqual(log.notes, ["atExit", "notices", "release"])
+        XCTAssertEqual(exit(events), .code(0))
+    }
+
     func testOwnerIsExposedForControllerScoping() throws {
         let r = try runner()
         let lease = try checkout()
@@ -715,6 +731,40 @@ final class RunnerTests: XCTestCase {
         let r = try runner(power: power)
         let events = try await collect(r, start(r, spec("echo hi"), try checkout()))
         XCTAssertEqual(exit(events), .code(0))
+        XCTAssertEqual(power.everHeld, [.idleSleep])
+        XCTAssertEqual(power.held, [])
+    }
+
+    /// Preparing the checkout is part of the run: a first sync's apply, or a submodule fetch
+    /// that takes minutes, must not let the host sleep (or a cloud box look idle) before the
+    /// command even starts. Held once, from acquire to the end.
+    func testIdleSleepIsHeldWhileTheCheckoutIsPrepared() async throws {
+        let power = RecordingPower()
+        let r = try runner(power: power)
+        let lease = try checkout()
+        let ready = Done()
+        let id = r.start(spec("echo hi"), owner: LeaseHolderOwner(controller: controllerID, session: "A"), acquire: {
+            while !ready.isSet { try await Task.sleep(nanoseconds: 10_000_000) }
+            return lease
+        })
+        let deadline = Date().addingTimeInterval(10)
+        while r.phase(runID: id) != .queued(.slot) && Date() < deadline { try await Task.sleep(nanoseconds: 10_000_000) }
+        XCTAssertEqual(power.held, [.idleSleep], "held while the checkout is prepared")
+        ready.set()
+        let events = try await collect(r, id)
+        XCTAssertEqual(exit(events), .code(0))
+        XCTAssertEqual(power.everHeld, [.idleSleep], "one assertion for the whole run")
+        XCTAssertEqual(power.held, [])
+    }
+
+    /// A run whose checkout fails gives its assertion back.
+    func testIdleSleepIsReleasedWhenTheCheckoutFails() async throws {
+        let power = RecordingPower()
+        let r = try runner(power: power)
+        let id = r.start(spec("echo hi"), owner: LeaseHolderOwner(controller: controllerID, session: "A"),
+                         acquire: { throw SyncError.noCheckout })
+        _ = try? await collect(r, id)
+        XCTAssertEqual(r.phase(runID: id)?.isTerminal, true)
         XCTAssertEqual(power.everHeld, [.idleSleep])
         XCTAssertEqual(power.held, [])
     }

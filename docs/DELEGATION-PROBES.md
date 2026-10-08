@@ -158,7 +158,8 @@ login session.
 
 1. Make a minimal UI-test project on the host; the trivial `XCUIApplication().launch()` case
    is enough. A Flight Deck checkout (`-scheme FlightDeck -only-testing:UITests`) works for steps
-   2 and 4 but not step 3: delegation refuses repos with submodules (`submodules_unsupported`).
+   2 and 4; for step 3 the host must also reach its submodules' URLs (GitHub and
+   googlesource.com), which it fetches at checkout.
 2. **LaunchAgent half, emulated.** A throwaway agent in the hostd's place, which needs no pairing:
    - Write `~/Library/LaunchAgents/dev.flightdeck.p3.plist`. Set `ProgramArguments` =
      `/bin/zsh -lc "cd <proj> && xcodebuild test -scheme <S> -destination 'platform=macOS' -derivedDataPath /tmp/p3dd > /tmp/p3-agent.log 2>&1; echo EXIT $? >> /tmp/p3-agent.log"`.

@@ -68,6 +68,10 @@ public enum HostCapability: String, Codable, Sendable {
     case service = "service"
     /// `screen.status` and `RunSpec.screen` (1.1). A Linux host never advertises it.
     case screen = "screen"
+    /// `SnapshotRef.submodules`: the host brings each submodule to its pin after a checkout.
+    /// A host without it ignores the pins, so a controller never sends it a snapshot that has
+    /// any (`SnapshotRef.unsupported(on:capabilities:)`).
+    case submodules = "submodules"
 }
 
 extension KeyedDecodingContainer {
