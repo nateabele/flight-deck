@@ -326,7 +326,7 @@ public final class DelegationHost: @unchecked Sendable {
         guard let repoRoot = lock.withLock({ runRepos[runID] }) else { throw RunnerError.unknownRun(runID) }
         // Asked before the run ended there is no result yet, and `result_expired` would tell
         // the controller it was lost.
-        if let phase = (runner as? Runner)?.phase(runID: runID), !phase.isTerminal { throw SyncError.runActive }
+        if let phase = runner.phase(runID: runID), !phase.isTerminal { throw SyncError.runActive }
         let bundle: URL?
         do {
             bundle = try await workspace.resultBundle(controller: controller, repoRoot: repoRoot, runID: runID)

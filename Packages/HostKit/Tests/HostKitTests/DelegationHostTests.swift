@@ -111,7 +111,9 @@ final class DelegationHostTests: XCTestCase {
     }
 
     /// A core with the real router: a real `Runner` and `Workspace` under a temp state root.
-    private func host(probe: HostInfoProbe? = nil) throws -> HostServerCore {
+    /// `wrap` stands another `RunControlling` in front of the runner, as a hostd may.
+    private func host(probe: HostInfoProbe? = nil,
+                      wrap: (Runner) -> any RunControlling = { $0 }) throws -> HostServerCore {
         let root = try tempDir("fd-host")
         let workspace = Workspace(root: root)
         let screen = ScreenLease()
@@ -119,7 +121,7 @@ final class DelegationHostTests: XCTestCase {
                             hostEnvironment: ["PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": NSTemporaryDirectory()],
                             power: NoPowerAssertions(), console: UnsupportedConsoleSession(), screen: screen,
                             lifecycle: .workspace(workspace))
-        let delegation = DelegationHost(runner: runner, workspace: workspace, screen: screen,
+        let delegation = DelegationHost(runner: wrap(runner), workspace: workspace, screen: screen,
                                         portCheck: PortCheck(run: { _, _ in nil }), screenSupported: false)
         return HostServerCore(hostName: { "mini" },
                               probe: probe ?? HostInfoProbe(stateRoot: root, hostdVersion: "t") { _, _ in nil },
@@ -194,6 +196,25 @@ final class DelegationHostTests: XCTestCase {
     }
 
     // MARK: -
+
+    /// `run.result` asked while the run is still going has no result yet, and must say so
+    /// (`run_active`) rather than `result_expired`, which tells the controller the result is
+    /// lost. The router used to learn the phase by casting its runner to `Runner`, so any
+    /// other conformer (a wrapper, a fake) silently skipped the check.
+    func testResultOfARunStillGoingIsRunActiveWhateverTheRunner() async throws {
+        for (name, wrap) in [("Runner", { $0 } as (Runner) -> any RunControlling),
+                             ("a forwarding runner", { ForwardingRunner($0) as any RunControlling })] {
+            let c = Controller(core: try host(wrap: wrap))
+            _ = try await c.hello()
+            let ref = try await sync(try repo(), over: c)
+            let runID = try await start("sleep 30", ref, over: c)
+            try await c.started(runID)
+            let code = await remote { try await self.result(runID, over: c) }
+            XCTAssertEqual(code, "run_active", name)
+            _ = c.post(.delegation(.runCancel(runID: runID)))
+            _ = try await c.events(runID)
+        }
+    }
 
     func testHelloAdvertisesTheDelegationCapabilities() async throws {
         let c = Controller(core: try host())
@@ -735,4 +756,25 @@ private final class EOFFlag: @unchecked Sendable {
     private var raised = false
     func set() { lock.withLock { raised = true } }
     var isSet: Bool { lock.withLock { raised } }
+}
+
+/// Stands in front of a `Runner` and forwards every requirement, as a logging or metering layer
+/// in a hostd would. Only the protocol is visible to the router through it.
+private final class ForwardingRunner: RunControlling, @unchecked Sendable {
+    private let inner: Runner
+    init(_ inner: Runner) { self.inner = inner }
+    func start(_ spec: RunSpec, owner: LeaseHolderOwner,
+               acquire: @escaping @Sendable () async throws -> CheckoutLease) -> String {
+        inner.start(spec, owner: owner, acquire: acquire)
+    }
+    func events(runID: String, from offset: Int64) -> AsyncThrowingStream<RunEvent, Error> {
+        inner.events(runID: runID, from: offset)
+    }
+    func signal(runID: String, _ sig: Int32) throws { try inner.signal(runID: runID, sig) }
+    func cancel(runID: String) { inner.cancel(runID: runID) }
+    func down(runID: String) async throws { try await inner.down(runID: runID) }
+    func owner(runID: String) -> LeaseHolderOwner? { inner.owner(runID: runID) }
+    func liveRuns(controller: UUID) -> [String] { inner.liveRuns(controller: controller) }
+    func phase(runID: String) -> RunPhase? { inner.phase(runID: runID) }
+    func shutdown(grace: Double, deadline: Double) async { await inner.shutdown(grace: grace, deadline: deadline) }
 }

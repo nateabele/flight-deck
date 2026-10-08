@@ -201,6 +201,11 @@ public protocol RunControlling: Sendable {
     /// `controller`'s runs that are still queued or running, services included. Revoking a
     /// controller ends exactly these.
     func liveRuns(controller: UUID) -> [String]
+    /// Where `runID` is now, or nil for an unknown run. `run.result` asks it, to answer a run
+    /// still going `run_active` rather than `result_expired`. A requirement with no default:
+    /// the router once got it by casting to `Runner`, and every other conformer silently
+    /// skipped the check.
+    func phase(runID: String) -> RunPhase?
     /// hostd is stopping: every service is downed (`downCommand` included) and every other run
     /// ended, SIGTERM now and SIGKILL to any group still alive after `grace` seconds. Returns
     /// once every run has ended, or after `deadline` seconds, whichever is first; a run that
