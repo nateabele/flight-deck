@@ -1,0 +1,13 @@
+{
+  "https://auth.x.ai::00000000-aaaa-bbbb-cccc-000000000000": {
+    "key": "REDACTED",
+    "auth_mode": "oidc",
+    "user_id": "u-1",
+    "email": "pilot@example.com",
+    "first_name": "Test",
+    "last_name": "Pilot",
+    "principal_type": "User",
+    "refresh_token": "REDACTED",
+    "oidc_issuer": "https://auth.x.ai"
+  }
+}

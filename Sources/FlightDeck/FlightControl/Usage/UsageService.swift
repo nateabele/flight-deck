@@ -116,6 +116,7 @@ final class UsageService: ObservableObject {
     private let headless = HeadlessClaudeUsageSource()
     private var codexSources: [UUID: CodexRateLimitSource] = [:]
     private var lastCodexPoll: [UUID: Date] = [:]
+    private var lastGrokBilling: [UUID: Date] = [:]
     private struct WeakTap { weak var tap: UsageMeterTap? }
     private var taps: [WeakTap] = []
     private var firstSeen: [UUID: Date] = [:]
@@ -212,6 +213,7 @@ final class UsageService: ObservableObject {
         ingestHeadlessSeats()
         ingestAPIErrors(sessions, at: t)
         await pollCodex(sessions, at: t)
+        ingestGrokBilling(sessions)
         flagSilentStatusLine(sessions, at: t)
         noticeManualTabs(sessions)
         revision += 1
@@ -237,6 +239,12 @@ final class UsageService: ObservableObject {
         environment.resolvedAccountID(session.agent, session.accountID).flatMap(ref(forAccount:))
     }
 
+    /// The grok home a tab runs in: its account's, else the built-in `~/.grok`.
+    func grokHome(for session: Session) -> URL {
+        let id = environment.resolvedAccountID(.grok, session.accountID)
+        return environment.accounts().first { $0.id == id }?.home ?? AgentID.grok.builtInHome
+    }
+
     /// The account's `projects/` directory — the root claude writes this tab's transcript under.
     func claudeProjectsRoot(for session: Session) -> URL {
         let id = environment.resolvedAccountID(.claude, session.accountID)
@@ -251,6 +259,7 @@ final class UsageService: ObservableObject {
         switch session.agent {
         case .claude: return TranscriptPointers.claude(session: session, projectsRoot: claudeProjectsRoot(for: session))
         case .codex: return TranscriptPointers.codex(session: session)
+        case .grok: return TranscriptPointers.grok(session: session, home: grokHome(for: session))
         default: return nil
         }
     }
@@ -274,6 +283,25 @@ final class UsageService: ObservableObject {
         let made = CodexRateLimitSource()
         codexSources[id] = made
         return made
+    }
+
+    /// grok's weekly meter, from the billing line its own log carries (`GrokBillingSource`):
+    /// one read per account with a grok tab, ingested only when the line is newer than the last
+    /// one taken, so a quiet account is not re-stamped fresh every tick.
+    private func ingestGrokBilling(_ sessions: [Session]) {
+        let ids = Set(sessions.filter { $0.agent == .grok }.compactMap { environment.resolvedAccountID(.grok, $0.accountID) })
+        for id in ids {
+            guard let ref = ref(forAccount: id),
+                  let home = environment.accounts().first(where: { $0.id == id })?.home,
+                  let tail = GrokBillingSource.readTail(home: home),
+                  let found = GrokBillingSource.windows(inLogTail: tail)
+            else { continue }
+            let readAt = found.readAt ?? now()
+            guard lastGrokBilling[id] != readAt else { continue }
+            lastGrokBilling[id] = readAt
+            ingest(UsageReading(account: ref, windows: found.windows, readAt: readAt,
+                                source: "grok billing log", hardRejection: false))
+        }
     }
 
     private func ingestUsageFiles(_ sessions: [Session]) {

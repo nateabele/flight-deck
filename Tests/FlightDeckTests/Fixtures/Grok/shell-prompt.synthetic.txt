@@ -1,0 +1,5 @@
+Last login: Thu Oct  8 09:00:00 on ttys001
+~/proj ❯ ls
+a.txt  b.txt
+│ ❯ not a composer
+~/proj ❯ 

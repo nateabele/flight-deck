@@ -46,8 +46,8 @@ final class StoreSwarmSpawnerTests: XCTestCase {
     }
 
     func testUnknownHarnessIsUnsupported() async {
-        let r = await spawner(created: .success(UUID())).createAgent(task: task, block: block(.grok), lease: nil)
-        XCTAssertEqual(r, .failure(.unsupportedAgent(.grok)))
+        let r = await spawner(created: .success(UUID())).createAgent(task: task, block: block(.gemini), lease: nil)
+        XCTAssertEqual(r, .failure(.unsupportedAgent(.gemini)))
     }
 
     func testAnUnfiledTabIsALaunchFailure() async {

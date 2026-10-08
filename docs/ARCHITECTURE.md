@@ -692,8 +692,8 @@ only on the machine the work was done on.
 ## Agents
 
 `Sources/FlightDeck/Agents/` is the per-agent adapter protocol referenced from "Session
-status pipeline" above — `AgentAdapter`, implemented by `ClaudeAdapter`, `CodexAdapter`, and
-the stubs `GrokAdapter` and `GeminiAdapter`, dispatched through the `AgentID` switch rather
+status pipeline" above — `AgentAdapter`, implemented by `ClaudeAdapter`, `CodexAdapter`,
+`GrokAdapter` and the stub `GeminiAdapter`, dispatched through the `AgentID` switch rather
 than held as an existentially typed value. Each supplies its own runtime, dialog driver, turn
 recovery and timeline mapper.
 
@@ -704,9 +704,21 @@ storage format, and files keep the JSON key `harness` wherever they used it. Eac
 `static var profile` is the agent's headless facet — the same `AgentProfile` the runner gets
 from `AgentProfiles.profile(for:)`. `AgentID.tabReady` gates every surface that opens a tab
 (the agent list behind the New Session menus and ⌘N, a project's default-agent picker,
-`RoutingCapabilityRegistry.standard()`, `SwarmSpawner`); grok and gemini are planning-only
-until their adapters are real. The headless types are `HeadlessRequest`, `HeadlessCommand`,
+`RoutingCapabilityRegistry.standard()`, `SwarmSpawner`); gemini is planning-only until its
+adapter is real. The headless types are `HeadlessRequest`, `HeadlessCommand`,
 `HeadlessOutput`, `HeadlessSession` (`Sources/IntakeKit/Headless.swift`).
+
+**grok** (`Agents/Grok/`) runs `grok -s <tab id>` and resumes with `grok -r <id> || grok -s
+<id>`. Its session lives in `$GROK_HOME/sessions/<percent-encoded cwd>/<id>/`: the transcript
+is `updates.jsonl` (ACP `session/update` records, `GrokTimelineMapper`), status comes from
+`events.jsonl` plus the `active_sessions.json` process registry (`GrokRuntime`, folded by
+`GrokStatusFold`; no hook is installed), and the title from `summary.json`. Its composer is a
+rounded box with no placeholder; a draft is set aside with grok's own Ctrl+S stash
+(`GrokTextChannel`). Its cards are answered by the row's own key and never by Return
+(`GrokDialogDriver`, `AgentKeyedDialogDriver`), because the first card of a session focuses
+"always-approve"; deny and interrupt are Ctrl+C (`AgentAdapter.interruptKey`). Usage is the
+weekly figure from the billing line in `$GROK_HOME/logs/unified.jsonl` (`GrokBillingSource`).
+The evidence is `.superpowers/grok-tui-facts.md` (grok 1.0.30).
 
 **Accounts and pools are one list.** `AccountList` (`Agents/AccountList.swift`, stored as
 `Preferences.storedAccountList`) holds accounts and single-agent pools, one level deep, each

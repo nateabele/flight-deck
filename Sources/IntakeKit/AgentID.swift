@@ -47,8 +47,9 @@ public enum AgentID: String, Codable, CaseIterable, Sendable, CodingKeyRepresent
     /// place, so "can it run a tab" can never be answered two ways.
     public var tabReady: Bool {
         switch self {
-        case .claude, .codex: true
-        case .grok, .gemini: false
+        // grok: Track G's `GrokAdapter`, built from a live probe of grok 1.0.30's TUI.
+        case .claude, .codex, .grok: true
+        case .gemini: false
         }
     }
 

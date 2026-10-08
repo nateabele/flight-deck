@@ -336,6 +336,8 @@ final class CodexResumeTests: XCTestCase {
         func sendArrowDown() {}
         func sendArrowUp() {}
         func sendEscape() {}
+        func sendCharacterKey(_ character: Character) {}
+        func sendControlKey(_ letter: Character) {}
         func readViewport() -> String? { nil }
     }
 

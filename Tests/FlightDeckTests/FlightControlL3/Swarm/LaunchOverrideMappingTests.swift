@@ -54,7 +54,7 @@ final class LaunchOverrideMappingTests: XCTestCase {
     func testStandardRegistryNowSupportsOverridesForBothAgents() {
         let registry = RoutingCapabilityRegistry.standard()
         for id in AgentID.tabReadyCases {
-            let base: AgentOptions = id == .claude ? .claude(FlagSet()) : .codex(CodexThreadOptions())
+            let base = AgentOptions.empty(for: id)
             guard case .supported = registry.capabilities(for: id)!
                 .applying(LaunchOverrides(model: "m", knobs: [:]), to: base) else {
                 return XCTFail("\(id) should map a model override")
