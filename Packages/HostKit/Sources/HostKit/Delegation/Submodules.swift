@@ -203,6 +203,30 @@ enum SubmoduleURL {
     /// URL in a `.gitmodules` it synced came from whoever wrote that repository.
     static let allowedProtocols = "file:git:http:https:ssh"
 
+    /// An http transfer that moves under 1000 bytes/s for 60 s is abandoned. Without it a
+    /// hung server held the fetch, the cache lock and the run's slot for `longTimeout` (an
+    /// hour), past the controller's own wait for the run to start.
+    static let fetchConfig = ["-c", "http.lowSpeedLimit=1000", "-c", "http.lowSpeedTime=60"]
+
+    /// The environment of every submodule fetch: the allowed transports, and ssh that never
+    /// prompts (hostd has no terminal; a passphrase or host-key question would wait forever),
+    /// gives up on a connect after 15 s and on a silent server after 45 s (3 keepalives).
+    static func fetchEnvironment(allowFile: Bool) -> [String: String] {
+        ["GIT_ALLOW_PROTOCOL": allowFile ? allowedProtocols : remoteProtocols,
+         "GIT_SSH_COMMAND": "ssh -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=15"]
+    }
+
+    static let remoteProtocols = "git:http:https:ssh"
+
+    /// Whether a failed one-commit fetch was the server refusing that request (it will not
+    /// hand out an unadvertised object, or cannot do shallow), the only failure a full fetch
+    /// can get past. A connection or auth failure would fail the full fetch the same way,
+    /// after waiting as long again.
+    static func refusedOneCommit(_ stderr: String) -> Bool {
+        let text = stderr.lowercased()
+        return ["unadvertised object", "not our ref", "does not support shallow"].contains { text.contains($0) }
+    }
+
     static func refusal(_ url: String) -> String? {
         if url.isEmpty || url.hasPrefix("-") || url.contains("\n") || url.contains("\0") {
             return "refused: not a repository URL"
@@ -292,27 +316,46 @@ extension Workspace {
         }
         func present() -> Bool { (try? git.run(["cat-file", "-e", "\(commit)^{commit}"], in: cache)) != nil }
         if !present() {
-            // BatchMode: hostd has no terminal, and an ssh that waits for a passphrase or a
-            // host-key answer would hold the run's slot until git's timeout.
-            let env = ["GIT_ALLOW_PROTOCOL": SubmoduleURL.allowedProtocols, "GIT_SSH_COMMAND": "ssh -o BatchMode=yes"]
-            _ = try? git.run(["fetch", "-q", "--no-tags", "--no-write-fetch-head", "--depth=1", url, commit],
-                             in: cache, env: env, timeout: GitRunner.longTimeout)
-            if !present() {
-                let shallow = (try? git.text(["rev-parse", "--is-shallow-repository"], in: cache)) == "true"
+            Self.clearStaleLocks(in: cache)
+            let env = SubmoduleURL.fetchEnvironment(allowFile: true)
+            /// false: the server refused exactly this request (asked only when `refusable`).
+            func fetch(_ args: [String], refusable: Bool) throws -> Bool {
                 do {
-                    try git.run(["fetch", "-q", "--no-write-fetch-head"] + (shallow ? ["--unshallow"] : []) +
-                                [url, "+refs/heads/*:refs/fd/remote/heads/*", "+refs/tags/*:refs/fd/remote/tags/*"],
+                    try git.run(SubmoduleURL.fetchConfig + ["fetch", "-q", "--no-write-fetch-head"] + args,
                                 in: cache, env: env, timeout: GitRunner.longTimeout)
+                    return true
                 } catch GitError.failed(_, _, let stderr) {
+                    if refusable && SubmoduleURL.refusedOneCommit(stderr) { return false }
                     let detail = stderr.split(separator: "\n").last.map(String.init) ?? "git fetch failed"
                     throw SyncError.submodule(path: path, problem: .fetchFailed(url: url, detail: detail))
                 } catch GitError.timedOut(_, let seconds) {
                     throw SyncError.submodule(path: path, problem: .fetchFailed(url: url, detail: "timed out after \(Int(seconds))s"))
                 }
+            }
+            // The one commit. Only the server refusing exactly that earns the full fetch; any
+            // other failure (unreachable, auth) is final, rather than paid for twice.
+            _ = try fetch(["--no-tags", "--depth=1", url, commit], refusable: true)
+            if !present() {
+                let shallow = (try? git.text(["rev-parse", "--is-shallow-repository"], in: cache)) == "true"
+                _ = try fetch((shallow ? ["--unshallow"] : []) +
+                              [url, "+refs/heads/*:refs/fd/remote/heads/*", "+refs/tags/*:refs/fd/remote/tags/*"],
+                              refusable: false)
                 guard present() else { throw SyncError.submodule(path: path, problem: .missingCommit(url: url, commit: commit)) }
             }
         }
         try git.run(["update-ref", "refs/fd/pins/\(commit)", commit], in: cache)
+    }
+
+    /// The lock files a killed fetch leaves in a cache (`shallow.lock`, a ref's `.lock`), each
+    /// of which would fail every later fetch into it. Only called under the cache's lock, and
+    /// one hostd owns the state root, so any lock found here is stale.
+    static func clearStaleLocks(in cache: URL) {
+        let fm = FileManager.default
+        for name in ["shallow.lock", "packed-refs.lock", "config.lock", "HEAD.lock"] {
+            try? fm.removeItem(at: cache.appendingPathComponent(name))
+        }
+        guard let walker = fm.enumerator(at: cache.appendingPathComponent("refs"), includingPropertiesForKeys: nil) else { return }
+        for case let file as URL in walker where file.pathExtension == "lock" { try? fm.removeItem(at: file) }
     }
 
     /// `sub` as a worktree of `cache` at `commit`. One already there is moved in place

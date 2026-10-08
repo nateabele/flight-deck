@@ -212,6 +212,7 @@ public struct GitRunner: Sendable {
     public func run(_ args: [String], in dir: URL? = nil, env extra: [String: String] = [:],
                     input: Data? = nil, accept: Set<Int32> = [0], timeout: TimeInterval? = nil) throws -> Output {
         guard let executable else { throw GitError.notFound }
+        if GitCancellation.current?.isCancelled == true { throw CancellationError() }
         try Self.requireSupported(executable, environment: environment)
         return try execute(executable, args, in: dir, env: environment.merging(extra) { $1 }, input: input,
                            accept: accept, timeout: timeout ?? self.timeout)
@@ -232,6 +233,9 @@ public struct GitRunner: Sendable {
         let exited = DispatchSemaphore(value: 0)
         p.terminationHandler = { _ in exited.signal() }
         try p.run()
+        let cancel = GitCancellation.current
+        if let cancel, !cancel.started(p.processIdentifier) { GitCancellation.kill(p.processIdentifier) }
+        defer { cancel?.ended(p.processIdentifier) }
 
         // Both pipes drain on their own threads: a git that fills stderr while we block on
         // stdout (or the reverse) would otherwise deadlock until the timeout. Each reader closes
@@ -268,6 +272,7 @@ public struct GitRunner: Sendable {
         let (stdout, stderr) = box.lock.withLock { (box.out, box.err) }
         let status = p.terminationReason == .exit ? p.terminationStatus : 128 + p.terminationStatus
         let result = Output(status: status, stdout: stdout, stderr: String(decoding: stderr, as: UTF8.self))
+        if cancel?.isCancelled == true, !accept.contains(status) { throw CancellationError() }
         guard accept.contains(status) else {
             throw GitError.failed(args: args, status: status, stderr: result.stderr)
         }
@@ -360,9 +365,24 @@ public struct GitRunner: Sendable {
     /// API is async (C0 amendment A1) because git can take minutes; running it inline would pin
     /// a cooperative-pool thread, and a handful of concurrent syncs would starve every other
     /// task in the process, including the transport that is feeding them bytes.
+    ///
+    /// Cancelling the calling task kills the git `work` is running (its whole process group,
+    /// so a `git fetch`'s ssh or remote helper goes too), and every later git call in `work`
+    /// throws `CancellationError`. Before, a cancel waited for git: a run cancelled while its
+    /// checkout fetched a submodule from a hung remote held its slot until git's timeout.
     static func offload<T: Sendable>(_ work: @escaping @Sendable () throws -> T) async throws -> T {
-        try await withCheckedThrowingContinuation { cont in
-            DispatchQueue.global().async { cont.resume(with: Result { try work() }) }
+        let cancel = GitCancellation()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { cont in
+                DispatchQueue.global().async {
+                    let previous = GitCancellation.current
+                    GitCancellation.current = cancel
+                    defer { GitCancellation.current = previous }
+                    cont.resume(with: Result { try work() })
+                }
+            }
+        } onCancel: {
+            cancel.cancel()
         }
     }
 
@@ -370,6 +390,53 @@ public struct GitRunner: Sendable {
         let lock = NSLock()
         var out = Data()
         var err = Data()
+    }
+}
+
+/// The cancel `GitRunner.offload` hands the git calls of one blocking body, through a
+/// thread-local: the body runs synchronously on one dispatch thread, and threading a token
+/// through every git call in Workspace and Submodules would touch them all for one concern.
+final class GitCancellation: @unchecked Sendable {
+    private let lock = NSLock()
+    private var cancelled = false
+    private var running: Set<pid_t> = []
+
+    var isCancelled: Bool { lock.withLock { cancelled } }
+
+    func cancel() {
+        let pids: Set<pid_t> = lock.withLock {
+            cancelled = true
+            return running
+        }
+        pids.forEach(Self.kill)
+    }
+
+    /// Records a git just started; false when the body was already cancelled (kill it).
+    func started(_ pid: pid_t) -> Bool {
+        lock.withLock {
+            guard !cancelled else { return false }
+            running.insert(pid)
+            return true
+        }
+    }
+
+    func ended(_ pid: pid_t) { _ = lock.withLock { running.remove(pid) } }
+
+    /// SIGKILL to git's process group (Foundation starts each child as a group leader) and to
+    /// git itself. Not TERM: a child inherits the blocked-signal mask of the thread that
+    /// spawned it, and a hostd thread may block TERM (measured: a `Process` child under XCTest
+    /// on Linux has it blocked), so a TERM could go unseen. What a killed fetch leaves behind
+    /// (lock files) is cleared by the next fetch into the same cache.
+    static func kill(_ pid: pid_t) {
+        _ = Foundation.kill(-pid, SIGKILL)
+        _ = Foundation.kill(pid, SIGKILL)
+    }
+
+    private static let key = "dev.flightdeck.git-cancellation"
+
+    static var current: GitCancellation? {
+        get { Thread.current.threadDictionary[key] as? GitCancellation }
+        set { Thread.current.threadDictionary[key] = newValue }
     }
 }
 
