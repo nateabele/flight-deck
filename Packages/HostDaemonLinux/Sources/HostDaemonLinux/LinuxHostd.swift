@@ -50,6 +50,8 @@ final class LinuxHostd: @unchecked Sendable {
     let port: Int
     let hostName: String
     let store: ControllerStore
+    /// Enrollment slots already redeemed, so a revoke cannot reopen one (`enroll`).
+    private let spent: SpentEnrollments
     let core: HostServerCore
     /// Kept beside the core, which holds it privately, for the SIGTERM path's `shutdown`.
     private let delegation: DelegationHost
@@ -85,6 +87,7 @@ final class LinuxHostd: @unchecked Sendable {
         self.port = port
         self.hostName = hostName
         store = ControllerStore(root: root)
+        spent = SpentEnrollments(root: root)
         let delegation = delegation ?? .standard(root: root, screenSupported: false, idle: IdleTracker())
         self.delegation = delegation
         core = HostServerCore(hostName: { hostName },
@@ -258,19 +261,37 @@ final class LinuxHostd: @unchecked Sendable {
     }
 
     /// Redeems a one-time enrollment file's payload. Under `pairingLock`, like a code pairing's
-    /// add, so two enrolls of one payload racing cannot both pass the "already" check.
+    /// add, so two enrolls of one payload racing cannot both pass the "already" checks.
     private func enroll(_ payload: EnrollmentPayload) -> AdminReply {
+        let now = Date()
         let key: (slot: UUID, secret: Data)
-        do { key = try payload.validate(now: Date()) }
+        do { key = try payload.validate(now: now) }
         catch let error as EnrollmentError { return .failed("enrollment \(Self.describe(error))") }
         catch { return .failed("enrollment refused: \(error)") }
         pairingLock.lock(); defer { pairingLock.unlock() }
         // A reused payload is refused rather than re-added: the store would list the slot twice.
         guard !store.all().contains(where: { $0.slot == key.slot }) else { return .failed("slot already enrolled") }
+        // The store check alone stops a reuse only until the slot is revoked: the payload stays
+        // valid for `maxAge` and readable from the metadata service, so a revoked controller's
+        // key could be enrolled straight back. The spent list survives the revoke and a restart.
+        do {
+            guard try spent.spend(slot: key.slot, issuedAt: payload.issuedAt, now: now) else {
+                return .failed("enrollment already used: slot \(key.slot) was redeemed before, and a revoked "
+                    + "controller cannot re-enroll from the same payload")
+            }
+        } catch SpentEnrollments.Failure.unreadable(let path) {
+            return .failed("enrollment refused: cannot read \(path), so cannot tell whether this payload was "
+                + "already used; move it aside to accept enrollments again")
+        } catch {
+            return .failed("could not record the enrollment as used: \(error)")
+        }
         do {
             try store.add(PairedController(slot: key.slot, name: payload.controllerName, secret: key.secret,
                                            pairedAt: Date()))
         } catch {
+            // Released again, so a disk error does not burn the machine's only enrollment file:
+            // `enroll` keeps the file on a refusal, and a retry must be able to redeem it.
+            try? spent.forget(key.slot)
             return .failed("could not store the enrolled controller: \(error)")
         }
         let threshold = TimeInterval(payload.idleSeconds)

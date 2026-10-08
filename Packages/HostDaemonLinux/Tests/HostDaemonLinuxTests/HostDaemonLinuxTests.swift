@@ -115,6 +115,39 @@ final class AdminEnrollTests: XCTestCase {
         XCTAssertEqual(hostd.store.all().count, 1)
     }
 
+    /// The replay this guards: user-data stays readable from the metadata service, so after a
+    /// revoke anyone on the box could re-enroll the revoked controller's key from it until the
+    /// payload aged out, because "already in the store" was the only reuse check.
+    func testARevokedEnrollmentCannotBeReplayed() throws {
+        let (hostd, _) = try makeTestHostd()
+        let p = payload()
+        XCTAssertEqual(hostd.handle(.enroll(p)), .ok)
+        XCTAssertEqual(hostd.handle(.revoke(slot: p.slot)), .ok)
+        guard case .failed(let why) = hostd.handle(.enroll(p)) else { return XCTFail("replayed after revoke") }
+        XCTAssertTrue(why.contains("already used"), why)
+        XCTAssertTrue(hostd.store.all().isEmpty)
+    }
+
+    func testARevokedEnrollmentCannotBeReplayedAfterARestart() throws {
+        let (hostd, root) = try makeTestHostd()
+        let p = payload()
+        XCTAssertEqual(hostd.handle(.enroll(p)), .ok)
+        XCTAssertEqual(hostd.handle(.revoke(slot: p.slot)), .ok)
+        let restarted = LinuxHostd(root: root, port: 47499, hostName: "linux-test")
+        guard case .failed(let why) = restarted.handle(.enroll(p)) else { return XCTFail("replayed after restart") }
+        XCTAssertTrue(why.contains("already used"), why)
+        XCTAssertTrue(restarted.store.all().isEmpty)
+    }
+
+    /// Fail closed: an unreadable spent list cannot prove the slot unspent.
+    func testAnUnreadableSpentListRefusesEnrollment() throws {
+        let (hostd, root) = try makeTestHostd()
+        try Data("{not json".utf8).write(to: root.appendingPathComponent("enrollments-spent.json"))
+        guard case .failed(let why) = hostd.handle(.enroll(payload())) else { return XCTFail("enrolled") }
+        XCTAssertTrue(why.contains("enrollments-spent.json"), why)
+        XCTAssertTrue(hostd.store.all().isEmpty)
+    }
+
     func testAdminEnrollRefusesExpired() throws {
         let (hostd, _) = try makeTestHostd()
         guard case .failed(let why) = hostd.handle(.enroll(payload(issued: Date(timeIntervalSinceNow: -3600)))) else {

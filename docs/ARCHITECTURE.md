@@ -202,7 +202,9 @@ secret and idle threshold, valid 30 minutes) and `flightdeck-hostd enroll --file
 the running `serve` as the admin socket's `enroll` request, because `serve` reads
 `controllers.json` only at start; the file is deleted once enrolled or expired (one issued in "the
 future" means the VM clock is behind, and is re-checked for 2 minutes, then kept), a reused slot is
-refused, and the threshold is kept in `<state root>/idle.json` (the Mac hostd refuses `enroll`;
+refused even after its controller is revoked (redeemed slots are recorded in
+`<state root>/enrollments-spent.json`, `0600`, pruned once their payload is past 30 minutes; an
+unreadable list refuses every enrollment rather than guess), and the threshold is kept in `<state root>/idle.json` (the Mac hostd refuses `enroll`;
 `hostd-install.sh --no-pair` installs without arming a code for that path). The boundary is
 the filesystem: a `0600` unix socket in a directory the user owns and that is not group- or
 other-writable, checked before bind. It is not authenticated beyond that, so anything running as the
