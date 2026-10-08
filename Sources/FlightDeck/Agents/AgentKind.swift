@@ -77,6 +77,12 @@ enum AgentEvent: Equatable, Sendable {
     /// detection). Carried as an event so claude's transcript tail and codex's rollout tail reach
     /// the store through the one channel every agent report already takes.
     case outputSignals([AgentOutputSignal])
+    /// The tab's agent is running a different conversation than the one the tab is pinned to,
+    /// and this is it. For an agent that cannot be told an id up front — agy mints its own on
+    /// the first submit and on `/clear`, and silently mints a new one for a resume of an id it
+    /// does not know — so identity is learned after launch rather than negotiated before it.
+    /// The store re-pins the tab and re-attaches its runtime to the new binding.
+    case rebound(AgentBinding)
 }
 
 /// Per-agent settings payload.
@@ -91,7 +97,7 @@ enum AgentOptions: Equatable, Sendable {
     /// start, rather than a bare case, so adding grok's options later is a new optional field
     /// on `GrokOptions` and not a change to how a stored `AgentOptions` is spelled.
     case grok(GrokOptions)
-    /// Empty until Track M; see `.grok`.
+    /// agy's launch options (`GeminiOptions`): the model slug.
     case gemini(GeminiOptions)
 
     var agent: AgentID {
@@ -119,6 +125,14 @@ enum AgentOptions: Equatable, Sendable {
 /// Every field added here must be optional, so a row stored before it existed still decodes.
 struct GrokOptions: Codable, Equatable, Sendable {}
 
-/// Gemini's (`agy`'s) per-agent launch options. None yet; see `GrokOptions`.
-struct GeminiOptions: Codable, Equatable, Sendable {}
+/// Gemini's (`agy`'s) per-agent launch options. Every field is optional, so a row stored before
+/// it existed still decodes.
+struct GeminiOptions: Codable, Equatable, Sendable {
+    /// The `agy --model` slug. nil launches `GeminiAdapter.defaultModel`. Only `gemini-*` slugs
+    /// are honoured (`GeminiAdapter.model(for:)`): agy also serves Claude and GPT-OSS models,
+    /// and a gemini tab running one of those would be a gemini tab in name only.
+    var model: String?
+
+    init(model: String? = nil) { self.model = model }
+}
 

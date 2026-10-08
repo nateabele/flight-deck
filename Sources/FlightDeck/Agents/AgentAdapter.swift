@@ -321,6 +321,12 @@ protocol AgentAdapter {
 protocol AgentOpenPromptReader: Sendable {
     func openPrompt(inTranscriptTail lines: [SourceLine], activity: SessionActivity?) -> OpenPrompt?
 
+    /// The same derivation, told which transcript the lines came from. What `PromptService`
+    /// calls. The default ignores the path and is `openPrompt(inTranscriptTail:activity:)`;
+    /// gemini overrides it because agy never writes a WAITING step to its transcript, so the
+    /// open call has to be read from the conversation's step store, which only the path names.
+    func openPrompt(inTranscriptAt url: URL, tail lines: [SourceLine], activity: SessionActivity?) -> OpenPrompt?
+
     /// Where this agent writes its background subagents' transcripts for the conversation in
     /// `transcript`, or nil if it has none.
     ///
@@ -335,6 +341,12 @@ protocol AgentOpenPromptReader: Sendable {
     /// Separate from `openPrompt(inTranscriptTail:activity:)` because claude marks every
     /// record in a subagent's file as a sidechain, which the main-transcript reading skips.
     func openPrompt(inSubagentTail lines: [SourceLine]) -> OpenPrompt?
+}
+
+extension AgentOpenPromptReader {
+    func openPrompt(inTranscriptAt url: URL, tail lines: [SourceLine], activity: SessionActivity?) -> OpenPrompt? {
+        openPrompt(inTranscriptTail: lines, activity: activity)
+    }
 }
 
 /// **Typing a message into a live agent and submitting it.**
