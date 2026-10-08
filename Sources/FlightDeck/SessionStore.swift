@@ -1627,11 +1627,15 @@ final class SessionStore: ObservableObject {
     /// test's control is the one the runner is probed through too.
     private(set) lazy var intakeService: IntakeService = {
         let root = resolvedIntakesRoot
+        // One resolver for the runner's starts and triage's turns, leasing from the ledger every
+        // Level 3 lease uses (unify brief R9). No preferences (a bare test store): no resolver,
+        // and planning runs on built-in homes.
+        let accounts: AccountResolving? = preferences.map { LedgerAccountResolver(preferences: $0, ledger: UsageService.shared.ledger) }
         let service = IntakeService(
             store: IntakeStore(root: root),
             clock: clock,
             runner: IntakeRunnerController(daemon: daemon, control: daemonControl,
-                                           spawner: FdAbducoRunnerSpawner(), intakesRoot: root),
+                                           spawner: FdAbducoRunnerSpawner(), intakesRoot: root, accounts: accounts),
             inject: { [weak self] project, agent, text, token in
                 guard let self, let session = self.session(project: project, agentName: agent) else { return false }
                 return self.submitPrompt(text, token: token, to: session.id).errorCode == nil
@@ -1642,9 +1646,7 @@ final class SessionStore: ObservableObject {
         // Resolved at each release, not captured now: this service is built lazily — often
         // before `FlightDeckApp` attaches routing — and must still see it.
         service.encodeRouting = { [weak self] in self?.flightControlRouting }
-        service.planningAccounts = { [weak self] in
-            PlanningAccountOption.options(from: self?.preferences?.preferences.accounts ?? [])
-        }
+        service.accountResolver = accounts
         intakeChangeForward = service.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
         // Straight to the summary refresh, never through `objectWillChange`: a seat settling
         // must not redraw every view of the store (see `SeatFeed`), only reach the phone.

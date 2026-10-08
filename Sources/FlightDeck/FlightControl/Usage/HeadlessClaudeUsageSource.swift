@@ -12,8 +12,15 @@ final class HeadlessClaudeUsageSource {
     private var seen: Set<String> = []
 
     func readings(from activities: [SeatActivity], account: AccountRef) -> [UsageReading] {
+        readings(from: activities) { _ in account }
+    }
+
+    /// Each seat credited to the account `account` names for it — the one it billed
+    /// (`SeatActivity.accountID`, unify brief R9). A seat it answers nil for is skipped.
+    func readings(from activities: [SeatActivity], account: (SeatActivity) -> AccountRef?) -> [UsageReading] {
         var out: [UsageReading] = []
         for a in activities where a.agent == .claude && (a.rateLimitWindows != nil || a.rateLimitedAt != nil) {
+            guard let account = account(a) else { continue }
             let at = a.lastEventAt ?? a.startedAt
             let key = "\(a.startedAt.timeIntervalSince1970)|\(at.timeIntervalSince1970)"
             guard seen.insert(key).inserted else { continue }

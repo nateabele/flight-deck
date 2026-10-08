@@ -83,6 +83,10 @@ enum RunnerStartError: Error, Equatable {
     /// still in flight off the main actor), so nothing was spawned. The caller's next tick
     /// retries — computing it here instead would block the main actor on a login shell.
     case notReady
+    /// The project's account (or pool) for an agent the round config uses could not be
+    /// resolved (`AccountResolutionError.message`): nothing was spawned, rather than a runner
+    /// that bills some other login.
+    case accountUnavailable(String)
 }
 
 /// Adopts, spawns and reaps the one detached runner process an intake's round engine needs —
@@ -155,6 +159,17 @@ final class IntakeRunnerController {
     /// not every call after that. See `orphanGrace`'s doc comment.
     private var firstSeenOrphaned: [UUID: Date] = [:]
 
+    /// Resolves each runner's accounts at its start (unify brief R9). nil — a test host, or a
+    /// store with no preferences — spawns with no `accounts.json`, so every seat runs on its
+    /// built-in home.
+    private let accounts: AccountResolving?
+
+    /// The accounts each runner this launch spawned or adopted bills, with their pool leases —
+    /// released the moment the runner is seen gone (`reap`, `syncAccountLeases`), whichever way
+    /// it went: finished, stopped, crashed or killed. Lives only in memory, like the ledger
+    /// holding the leases; a relaunch rebuilds it from each live runner's `accounts.json`.
+    private var heldAccounts: [UUID: RunnerAccounts] = [:]
+
     init(
         daemon: SessionDaemon,
         control: DaemonControlling,
@@ -173,8 +188,10 @@ final class IntakeRunnerController {
         spawnGrace: TimeInterval = 15,
         staleGrace: TimeInterval = 2 * heartbeatFreshness,
         orphanGrace: TimeInterval = 30,
+        accounts: AccountResolving? = nil,
         now: @escaping () -> Date = Date.init
     ) {
+        self.accounts = accounts
         self.daemon = daemon
         self.control = control
         self.spawner = spawner
@@ -293,7 +310,12 @@ final class IntakeRunnerController {
     /// respawning it, and clears a finished one's leftover daemon first so the fresh spawn can
     /// bind the same socket path.
     func ensureRunning(_ id: UUID) -> Result<Void, RunnerStartError> {
-        if isRunning(id) { return .success(()) }
+        if isRunning(id) {
+            adoptAccounts(id)
+            return .success(())
+        }
+        // Releases the previous runner's leases, so the resolve below is the rollover point:
+        // a pool may now lease a different account than the last runner billed.
         reap(id)
 
         guard let flightdeckPath = flightdeckPath() else { return .failure(.noBundledCLI) }
@@ -306,6 +328,9 @@ final class IntakeRunnerController {
         }
 
         guard let environment = environment() else { return .failure(.notReady) }
+        // Resolved last, after every check that can refuse or defer: a `.notReady` retried each
+        // tick must not lease (and churn) a pool account per tick.
+        if case .failure(let refusal) = resolveAccounts(id) { return .failure(refusal) }
 
         let arguments = [
             "-n", socketPath(for: id), flightdeckPath, "intake", "run", id.uuidString.lowercased(),
@@ -326,13 +351,74 @@ final class IntakeRunnerController {
             try spawner.spawn(executable: fdAbducoPath, arguments: arguments, environment: environment)
             return .success(())
         } catch let error as FdAbducoRunnerSpawner.SpawnError {
+            // `.timedOut` keeps its leases with its grace: that launcher may yet bring a
+            // runner up, and `syncAccountLeases` releases them if it never does.
             if case .launcherFailed = error {
                 spawnedAt.removeValue(forKey: id)
+                releaseAccounts(id)
             }
             return .failure(.spawnFailed(String(describing: error)))
         } catch {
             spawnedAt.removeValue(forKey: id)
+            releaseAccounts(id)
             return .failure(.spawnFailed(String(describing: error)))
+        }
+    }
+
+    // MARK: - Accounts (unify brief R9)
+
+    /// Resolves every agent the intake's round config can run — fallbacks included — in its
+    /// project, leasing from pools, and writes `accounts.json` for the runner about to start.
+    /// With no resolver the file is removed instead: a stale one would bill a previous run's
+    /// accounts.
+    private func resolveAccounts(_ id: UUID) -> Result<Void, RunnerStartError> {
+        let intakes = IntakeStore(root: intakesRoot)
+        let directory = intakes.directory(for: id)
+        guard let accounts else {
+            try? FileManager.default.removeItem(at: RunnerAccounts.url(in: directory))
+            return .success(())
+        }
+        // An intake that will not load has no agents to resolve; the runner fails it with its
+        // own diagnosis.
+        let intake = try? intakes.load(id: id)
+        switch accounts.acquire(intake?.roundConfig?.agents ?? [], project: intake?.projectPath ?? "") {
+        case .failure(let error):
+            return .failure(.accountUnavailable(error.message))
+        case .success(let resolved):
+            do {
+                try resolved.write(to: directory)
+            } catch {
+                accounts.release(resolved)
+                return .failure(.spawnFailed("could not record the planning accounts: \(error)"))
+            }
+            heldAccounts[id] = resolved
+            return .success(())
+        }
+    }
+
+    private func releaseAccounts(_ id: UUID) {
+        guard let held = heldAccounts.removeValue(forKey: id) else { return }
+        accounts?.release(held)
+    }
+
+    /// A runner this launch did not spawn — it outlived an app quit or crash under fd-abduco —
+    /// still bills what its `accounts.json` says; its leases go back into the ledger so a pool
+    /// does not hand the same slot out twice, and so they are released when it exits.
+    private func adoptAccounts(_ id: UUID) {
+        guard heldAccounts[id] == nil, let accounts,
+              let file = RunnerAccounts.load(from: IntakeStore(root: intakesRoot).directory(for: id)) else { return }
+        accounts.adopt(file)
+        heldAccounts[id] = file
+    }
+
+    /// Called every tick with the intakes that are shaping: adopts a live runner's leases (the
+    /// first tick after a relaunch) and releases a gone runner's — the exit path no other call
+    /// sees, since a runner that crashes or finishes is never told to anyone until something
+    /// next asks. Ids already holding leases are checked whatever their state, so an intake
+    /// that left shaping (discarded, finished) still gives its leases back.
+    func syncAccountLeases(_ shaping: [UUID]) {
+        for id in Set(shaping).union(heldAccounts.keys) {
+            if isRunning(id) { adoptAccounts(id) } else { releaseAccounts(id) }
         }
     }
 
@@ -364,9 +450,13 @@ final class IntakeRunnerController {
         let socket = socketPath(for: id)
         guard control.isLive(socketPath: socket) else {
             firstSeenOrphaned.removeValue(forKey: id)
+            releaseAccounts(id)
             return
         }
         guard !isRunning(id) else { return }
+        // Not running, whatever is left of its daemon: its leases go back now, not once the
+        // socket is finally gone — an orphan can take `orphanGrace` to clear.
+        releaseAccounts(id)
 
         if control.daemonPID(socketPath: socket) != nil {
             firstSeenOrphaned.removeValue(forKey: id)

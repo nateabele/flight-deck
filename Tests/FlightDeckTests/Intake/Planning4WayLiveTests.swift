@@ -222,13 +222,12 @@ final class Planning4WayLiveTests: XCTestCase {
         let request = HeadlessRequest(agent: choice.agent, model: choice.model, effort: choice.effort, cwd: project,
                                      readableDirs: [], prompt: "In one sentence, what does the tool in the project you "
                                         + "just worked on do? Put that sentence in `plan`.",
-                                     schemaFile: schemaFile, schemaJSON: RoundSchemas.draft, resumeSessionID: session,
-                                     account: choice.account)
+                                     schemaFile: schemaFile, schemaJSON: RoundSchemas.draft, resumeSessionID: session)
         let command = try HeadlessCommand.build(request)
         let started = Date()
         let result = try await SystemCommandRunner().run(
             executable: command.executable, arguments: command.arguments, cwd: project,
-            environment: HeadlessCommand.environment(for: command, base: environment, account: choice.account))
+            environment: HeadlessCommand.environment(for: command, base: environment))
         try result.stdout.write(to: dir.appendingPathComponent("stdout"))
         XCTAssertEqual(result.exitCode, 0, "\(choice.agent) resume stderr: \(result.stderr.suffix(400))")
         let parsed = try HeadlessOutput.parse(choice.agent, stdout: result.stdout)

@@ -168,6 +168,23 @@ final class UsageServiceTests: XCTestCase {
         XCTAssertEqual(svc.ledger.latestReading(account: UsageRefs.workID)?.source, "claude headless")
     }
 
+    /// Unify brief R9: a seat that billed the project's account (`accountID`) meters THAT
+    /// account, not the built-in one (`Work` here); one whose account is gone credits nobody.
+    func testHeadlessSeatsMeterTheAccountTheyBilled() async {
+        var billed = SeatActivity(agent: .claude, startedAt: Date(timeIntervalSince1970: 0), accountID: UsageRefs.spareID)
+        billed.rateLimitWindows = [UsageWindow(name: "five_hour", utilization: 0.6, resetsAt: nil)]
+        billed.rateLimitStatus = "allowed"
+        billed.lastEventAt = clock.now
+        var orphan = SeatActivity(agent: .claude, startedAt: Date(timeIntervalSince1970: 1), accountID: UUID())
+        orphan.rateLimitWindows = [UsageWindow(name: "five_hour", utilization: 0.9, resetsAt: nil)]
+        orphan.lastEventAt = clock.now
+        seats = [billed, orphan]
+        let svc = service()
+        await svc.tick()
+        XCTAssertEqual(svc.ledger.latestReading(account: UsageRefs.spareID)?.windows.first?.utilization, 0.6)
+        XCTAssertNil(svc.ledger.latestReading(account: UsageRefs.workID), "the built-in account billed nothing")
+    }
+
     // Behavior changed on purpose (final review): the notice is per ACCOUNT per crossing, and a
     // reading already over hard on the first tick is stale news (mod files outlive a relaunch),
     // so the crossing must be observed while running.
