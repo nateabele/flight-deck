@@ -388,6 +388,43 @@ extension InfraServiceTests {
         let failed = try XCTUnwrap(events.firstIndex { if case .failed = $0 { return true }; return false })
         XCTAssertLessThan(failedProgress, failed)
     }
+
+    // MARK: - Orphans (spec §7.3)
+
+    func testOrphansAreOwnedResourcesNoMachineAccountsFor() async throws {
+        try h.registry.upsert(.fixture(name: "gpu"))                         // instance i-1
+        try h.registry.upsert(.fixture(name: "web"))
+        h.account.owned = [
+            OwnedResource(cloud: "aws", kind: .instance, id: "i-1", region: "us-east-1", name: nil),          // by ID
+            OwnedResource(cloud: "aws", kind: .securityGroup, id: "sg-1", region: "us-east-1", name: "web"),  // by name
+            OwnedResource(cloud: "aws", kind: .instance, id: "i-9", region: "eu-west-1", name: "lost"),
+            OwnedResource(cloud: "aws", kind: .securityGroup, id: "sg-9", region: "eu-west-1", name: nil),
+        ]
+        let orphans = await h.service.orphans()
+        XCTAssertEqual(orphans.map(\.id), ["i-9", "sg-9"])
+        XCTAssertEqual(h.account.owners, [h.service.ownerLabel], "asked for this controller's resources only")
+    }
+
+    /// A GCP machine records `projects/<p>/zones/<z>/instances/<name>`; the scan lists the bare name.
+    func testGCPInstanceIsAccountedForByItsResourceName() async throws {
+        var m = InfraMachine.fixture(name: "gpu", cloud: "gcp")
+        m.instanceID = "projects/example-project/zones/us-central1-a/instances/fd-0a1b-gpu"
+        try h.registry.upsert(m)
+        let gcp = h.gcpAccount
+        gcp.owned = [OwnedResource(cloud: "gcp", kind: .instance, id: "fd-0a1b-gpu", region: "us-central1-a", name: nil)]
+        let orphans = await h.service.orphans()
+        XCTAssertEqual(orphans, [])
+    }
+
+    func testDownOrphanDeletesOnlyAnOrphan() async throws {
+        try h.registry.upsert(.fixture(name: "gpu"))
+        let lost = OwnedResource(cloud: "aws", kind: .instance, id: "i-9", region: "eu-west-1", name: "lost")
+        h.account.owned = [OwnedResource(cloud: "aws", kind: .instance, id: "i-1", region: "us-east-1", name: "gpu"), lost]
+        do { try await h.service.downOrphan(id: "i-1"); XCTFail("a known machine is never an orphan") }
+        catch InfraError.notFound(let id) { XCTAssertEqual(id, "i-1") }
+        try await h.service.downOrphan(id: "i-9")
+        XCTAssertEqual(h.account.deleted, [lost])
+    }
 }
 
 @MainActor

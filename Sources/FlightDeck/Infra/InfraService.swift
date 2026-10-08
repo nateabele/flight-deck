@@ -486,12 +486,84 @@ final class InfraService {
         }
     }
 
-    private func refreshShowsGone(_ m: InfraMachine) async -> Bool {
+    /// True when `tofu plan -refresh-only` finds the instance gone (its own timer fired). False
+    /// when it is there, when nothing was ever applied, and when the refresh itself fails: a
+    /// machine is only ever forgotten on a definite answer.
+    func refreshShowsGone(_ m: InfraMachine) async -> Bool {
         let workdir = registry.workdir(for: m.name)
         guard FileManager.default.fileExists(atPath: workdir.appendingPathComponent("module").path) else { return false }
         do { return try await tofu(cloud: m.cloud).refreshShowsGone(workdir: workdir) } catch {
             Self.logger.error("\(m.name, privacy: .public): refresh failed: \(String(describing: error), privacy: .public)")
             return false
+        }
+    }
+
+    /// `ready ⇄ idle` (spec §7.1), for the UI. Any other state is left alone: the Reaper read
+    /// the machine before it suspended, and an `up` or `down` may have moved it since.
+    func setIdle(_ name: String, _ idle: Bool) {
+        guard var m = registry.machine(named: name), m.state == .ready || m.state == .idle else { return }
+        let state: InfraState = idle ? .idle : .ready
+        guard m.state != state else { return }
+        m.state = state
+        do { try registry.upsert(m) } catch {
+            Self.logger.error("\(name, privacy: .public): could not record \(state.rawValue, privacy: .public): \(String(describing: error), privacy: .public)")
+        }
+    }
+
+    // MARK: - Public mode follows the Mac (spec §6.2, Review Focus 5)
+
+    /// Re-points a public-mode machine's one inbound rule at this Mac's current public IP: the
+    /// vars file's `fd_allow_cidr`, an `apply`, then the record. Returns the new `/32`, or nil
+    /// when nothing changed (tailnet mode, not running, or the address is the same).
+    func followPublicIP(name: String) async throws -> String? {
+        guard let m = registry.machine(named: name), m.network == .public, m.state == .ready || m.state == .idle else { return nil }
+        let cidr = "\(try await env.publicIP())/32"
+        guard cidr != m.allowCIDR else { return nil }
+        try claim(name)
+        defer { release(name) }
+        let workdir = registry.workdir(for: name)
+        try InfraWorkdir.setVar(workdir: workdir, "fd_allow_cidr", cidr)
+        try await tofu(cloud: m.cloud).apply(workdir: workdir) { _ in }
+        // Re-read: only the address is this call's to change.
+        guard var current = registry.machine(named: name) else { return cidr }
+        current.allowCIDR = cidr
+        try registry.upsert(current)
+        return cidr
+    }
+
+    // MARK: - Orphans (spec §7.3)
+
+    /// Every resource carrying this controller's owner label that no machine in `infra.json`
+    /// accounts for, by instance ID or by `flightdeck-name`. An account that cannot be read is
+    /// logged and skipped, so this is what could be seen, not proof there is nothing else.
+    func orphans() async -> [OwnedResource] {
+        let owner = ownerLabel
+        var found: [OwnedResource] = []
+        for (cloud, account) in env.accounts.sorted(by: { $0.key < $1.key }) {
+            do { found += try await account.listOwned(owner: owner) } catch {
+                Self.logger.error("orphan scan of \(cloud, privacy: .public) failed: \(String(describing: error), privacy: .public)")
+            }
+        }
+        return found.filter { !accountsFor($0) }
+    }
+
+    /// Deletes one orphan by its cloud ID. Looked up in a fresh scan, so only something that is
+    /// an orphan right now can be deleted: never a resource a machine in the registry owns.
+    func downOrphan(id: String) async throws {
+        guard let orphan = await orphans().first(where: { $0.id == id }), let account = env.accounts[orphan.cloud] else {
+            throw InfraError.notFound(id)
+        }
+        try await account.deleteOwned(orphan)
+    }
+
+    /// A GCE machine records its instance as `projects/<p>/zones/<z>/instances/<name>`, which
+    /// the scan lists by `<name>`; an EC2 machine records the bare ID both ways.
+    private func accountsFor(_ r: OwnedResource) -> Bool {
+        registry.machines.contains { m in
+            guard m.cloud == r.cloud else { return false }
+            if let name = r.name, name.caseInsensitiveCompare(m.name) == .orderedSame { return true }
+            guard let id = m.instanceID else { return false }
+            return id == r.id || id.split(separator: "/").last.map(String.init) == r.id
         }
     }
 

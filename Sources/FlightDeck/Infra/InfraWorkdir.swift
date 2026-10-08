@@ -48,10 +48,28 @@ enum InfraWorkdir {
 
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
-        // Owner-only from the first byte: the vars hold the enrollment PSK (inside the user-data)
-        // and any Tailscale auth key. Written to a 0600 temp file and renamed over the old one,
-        // so neither a reader nor a crash ever sees it world-readable or half-written.
-        let data = try encoder.encode(vars)
+        try writeVars(try encoder.encode(vars), module: module)
+        return workdir
+    }
+
+    /// Replaces one variable in an existing machine's vars file, leaving every other one as
+    /// `prepare` wrote it: public mode's `fd_allow_cidr` when this Mac's address moves, where
+    /// re-rendering everything would mint a new enrollment key the machine never heard of.
+    static func setVar(workdir: URL, _ key: String, _ value: String) throws {
+        let module = workdir.appendingPathComponent("module", isDirectory: true)
+        let data = try Data(contentsOf: module.appendingPathComponent(varsFile))
+        guard var vars = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw CocoaError(.fileReadCorruptFile, userInfo: [NSFilePathErrorKey: module.appendingPathComponent(varsFile).path])
+        }
+        vars[key] = value
+        try writeVars(try JSONSerialization.data(withJSONObject: vars, options: [.sortedKeys, .prettyPrinted]), module: module)
+    }
+
+    /// Owner-only from the first byte: the vars hold the enrollment PSK (inside the user-data)
+    /// and any Tailscale auth key. Written to a 0600 temp file and renamed over the old one,
+    /// so neither a reader nor a crash ever sees it world-readable or half-written.
+    private static func writeVars(_ data: Data, module: URL) throws {
+        let fm = FileManager.default
         let temp = module.appendingPathComponent(".\(varsFile).\(UUID().uuidString)")
         guard fm.createFile(atPath: temp.path, contents: data, attributes: [.posixPermissions: 0o600]) else {
             throw CocoaError(.fileWriteUnknown, userInfo: [NSFilePathErrorKey: temp.path])
@@ -61,7 +79,6 @@ enum InfraWorkdir {
             try? fm.removeItem(at: temp)
             throw error
         }
-        return workdir
     }
 
     /// A source module checked out from a working tree can carry its own state and provider
