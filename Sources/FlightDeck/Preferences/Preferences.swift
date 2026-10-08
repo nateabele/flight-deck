@@ -166,6 +166,11 @@ struct Preferences: Codable, Equatable {
     /// default pools and hand-off settings.
     var capacity: CapacityPreferences?
 
+    /// Settings → Cloud: accounts, regions and the cloud budget. Optional for exactly the reason
+    /// `confirmations` is — see that property's comment. `nil` means "never configured": the
+    /// spec's default budget and each CLI's own default account.
+    var cloud: CloudPreferences?
+
     init(
         globalFlags: FlagSet = FlagSet(),
         projectFlags: [String: FlagSet] = [:],
@@ -181,7 +186,8 @@ struct Preferences: Codable, Equatable {
         fleetPort: UInt16? = nil,
         terminalFontSize: Float? = nil,
         flightControlRouting: RoutingPreferences? = nil,
-        capacity: CapacityPreferences? = nil
+        capacity: CapacityPreferences? = nil,
+        cloud: CloudPreferences? = nil
     ) {
         self.globalFlags = globalFlags
         self.projectFlags = projectFlags
@@ -198,6 +204,7 @@ struct Preferences: Codable, Equatable {
         self.terminalFontSize = terminalFontSize
         self.flightControlRouting = flightControlRouting
         self.capacity = capacity
+        self.cloud = cloud
     }
 
     /// Falls back to claude-then-codex so a `Preferences` that has never been migrated
