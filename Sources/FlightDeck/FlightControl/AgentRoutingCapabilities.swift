@@ -138,20 +138,38 @@ final class CodexRoutingCapabilities: AgentRoutingCapabilities {
     }
 }
 
-/// **STUB (unify brief P0).** grok's routing answers: every capability unsupported, with the
-/// reason. Unregistered while `AgentID.grok.tabReady` is false (`RoutingCapabilityRegistry
-/// .standard`); Track G fills each in where its probe shows grok can (unify brief R10).
+/// grok's routing answers (unify brief R10). Catalog and knobs come from `GrokProfile`, the one
+/// place grok's models and effort levels are stated; the meter is the billing line grok logs
+/// (`GrokBillingSource`); overrides become `GrokOptions`.
 @MainActor
 final class GrokRoutingCapabilities: AgentRoutingCapabilities {
     let agent: AgentID = .grok
     let accountModel: AccountModel = .login
-    var knobSchema: [String: [String]] { [:] }
-    private static let stub = "the grok adapter is a stub"
-    func modelCatalog() async -> RoutingCapability<[ModelEntry]> { .unsupported(reason: Self.stub) }
-    func usageMeterSource(account: AgentAccount?) -> RoutingCapability<any UsageMeterSource> { .unsupported(reason: Self.stub) }
-    func transcriptPointer(for session: Session) -> RoutingCapability<TranscriptPointer> { .unsupported(reason: Self.stub) }
-    func resetContext(_ session: Session) async throws -> RoutingCapability<Void> { .unsupported(reason: Self.stub) }
-    func applying(_ overrides: LaunchOverrides, to options: AgentOptions) -> RoutingCapability<AgentOptions> { .unsupported(reason: Self.stub) }
+    private var catalog: ProfileModelCatalog { GrokProfile().modelCatalog }
+    var knobSchema: [String: [String]] { ["effort": catalog.effortValues] }
+    func modelCatalog() async -> RoutingCapability<[ModelEntry]> {
+        .supported(catalog.aliases.map { ModelEntry(id: $0, displayName: $0, knobs: ["effort"]) })
+    }
+    func usageMeterSource(account: AgentAccount?) -> RoutingCapability<any UsageMeterSource> {
+        .supported(UsageService.shared.tap(agent: .grok, account: account))
+    }
+    func transcriptPointer(for session: Session) -> RoutingCapability<TranscriptPointer> {
+        guard let pointer = TranscriptPointers.grok(session: session, home: UsageService.shared.grokHome(for: session)) else {
+            return .unsupported(reason: "no grok session file on disk for this conversation")
+        }
+        return .supported(pointer)
+    }
+    /// **Unsupported, and it is Flight Deck that cannot, not grok.** grok's reset is `/new`
+    /// (alias `/clear`), which starts a NEW session with a new id inside the same process.
+    /// Nothing re-pins a grok tab to a session it did not mint — codex has
+    /// `CodexPinReconciler` for exactly this; grok has no equivalent yet — so after a reset the
+    /// tab would watch a session nobody writes and report its status forever stale.
+    func resetContext(_ session: Session) async throws -> RoutingCapability<Void> {
+        .unsupported(reason: "grok's /new starts a new session id that Flight Deck cannot follow yet")
+    }
+    func applying(_ overrides: LaunchOverrides, to options: AgentOptions) -> RoutingCapability<AgentOptions> {
+        GrokLaunchOverrides.apply(overrides, to: options)
+    }
 }
 
 /// **STUB (unify brief P0).** Gemini's routing answers; see `GrokRoutingCapabilities`. Its

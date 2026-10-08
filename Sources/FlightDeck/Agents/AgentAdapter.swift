@@ -298,6 +298,17 @@ protocol AgentAdapter {
     /// members with a genuine majority answer (`rebind`, `environment`); this has none, and a
     /// silent default is how a third agent would ship looking searchable and finding nothing.
     static var searchCorpus: AgentSearchCorpus? { get }
+
+    /// **The key that stops this agent's running turn** — or cancels the dialog it is blocked on.
+    /// Escape for claude and codex; grok ignores Escape for both and takes Ctrl+C.
+    static var interruptKey: AgentInterruptKey { get }
+}
+
+/// How `SessionStore.interruptTurn` stops a turn. A stated key rather than a method so the store
+/// keeps the one injector call site.
+enum AgentInterruptKey: Equatable, Sendable {
+    case escape
+    case controlC
 }
 
 /// Deriving what an agent is blocked on from a window of its transcript.
@@ -572,6 +583,10 @@ extension AgentAdapter {
         return environment
     }
 
+    /// Escape: what claude and codex both take, verified against each (`interruptTurn`'s own
+    /// comment). An agent that does not — grok — states its own.
+    static var interruptKey: AgentInterruptKey { .escape }
+
     /// Nothing beyond the account binding, for an agent that reports no lifecycle of its own.
     /// Codex takes this default: its readiness comes from rollout evidence on disk, which
     /// needs no variable in the child's environment.
@@ -686,6 +701,16 @@ extension AgentID {
         case .codex: CodexAdapter.needsRuntimeStart
         case .grok: GrokAdapter.needsRuntimeStart
         case .gemini: GeminiAdapter.needsRuntimeStart
+        }
+    }
+
+    /// See `AgentAdapter.interruptKey`. Consulted by `SessionStore.interruptTurn`.
+    var interruptKey: AgentInterruptKey {
+        switch self {
+        case .claude: ClaudeAdapter.interruptKey
+        case .codex: CodexAdapter.interruptKey
+        case .grok: GrokAdapter.interruptKey
+        case .gemini: GeminiAdapter.interruptKey
         }
     }
 

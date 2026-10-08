@@ -48,6 +48,24 @@ protocol TextInjecting: AnyObject {
     /// not on a row. See `PromptAnswer.deny`.
     func sendEscape()
 
+    /// One printable key — a digit or a lowercase letter — as a real key event, never a paste.
+    ///
+    /// **Exists for grok, whose dialogs are answered by a key and must never be answered by
+    /// Return.** A grok permission card opens with "don't ask again for anything" focused
+    /// (`GrokDialogDriver`), so Return on an unmoved cursor grants always-approve; its own
+    /// digit (`3` for a plain "Yes") picks and submits in one press. `sendText("3")` cannot do
+    /// that job: it is a bracketed paste, and a TUI reads a paste as text for whatever field
+    /// has focus, not as the keypress that selects a row. A character with no key of its own
+    /// sends nothing.
+    func sendCharacterKey(_ character: Character)
+
+    /// Ctrl plus one letter, as a real key event — the same route `sendKillLine` takes.
+    ///
+    /// For grok again: Ctrl+C is how it cancels a turn or a pending request (Escape only
+    /// parks focus in its scrollback), and Ctrl+S stashes and restores its composer draft,
+    /// which is its answer to the kill ring claude's `sendKillLine`/`sendYank` pair relies on.
+    func sendControlKey(_ letter: Character)
+
     /// The terminal's visible screen, or nil when it cannot be read. Plain text only —
     /// libghostty exposes no cell attributes, which is why `InputBar` cannot tell a
     /// placeholder hint from a real draft.
@@ -90,6 +108,29 @@ extension Ghostty.SurfaceView: TextInjecting {
     func sendArrowDown() { sendBareKey(.arrowDown) }
     func sendArrowUp() { sendBareKey(.arrowUp) }
     func sendEscape() { sendBareKey(.escape) }
+
+    /// `text:` IS stated here, unlike `sendBareKey`: a digit has a textual form, and under the
+    /// legacy encoding that text is what the program receives. Ghostty names a digit key
+    /// `digitN` and a letter key by the letter, which is the whole mapping.
+    func sendCharacterKey(_ character: Character) {
+        guard let surfaceModel, let key = Self.key(for: character) else { return }
+        surfaceModel.sendKeyEvent(.init(key: key, action: .press, text: String(character)))
+        surfaceModel.sendKeyEvent(.init(key: key, action: .release))
+        screenChanged()
+    }
+
+    func sendControlKey(_ letter: Character) {
+        guard let key = Self.key(for: letter), letter.isLetter, let ascii = letter.asciiValue else { return }
+        // Ctrl+<letter> is the letter's code with the top three bits cleared: `s` → 0x13.
+        sendControl(key, byte: String(UnicodeScalar(ascii & 0x1F)))
+    }
+
+    private static func key(for character: Character) -> Ghostty.Input.Key? {
+        guard character.isASCII else { return nil }
+        if character.isNumber { return Ghostty.Input.Key(rawValue: "digit\(character)") }
+        guard character.isLetter, character.isLowercase else { return nil }
+        return Ghostty.Input.Key(rawValue: String(character))
+    }
 
     /// No `text:`, deliberately: none of these has a textual form, and ghostty's own key
     /// encoder is what turns the keycode into whatever the running program expects — which

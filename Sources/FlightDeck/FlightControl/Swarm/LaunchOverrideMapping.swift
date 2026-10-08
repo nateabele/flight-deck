@@ -34,6 +34,21 @@ enum CodexLaunchOverrides {
     }
 }
 
+/// grok's half: `-m` and `--effort` on its command line, carried as `GrokOptions`.
+enum GrokLaunchOverrides {
+    static func apply(_ overrides: LaunchOverrides, to options: AgentOptions) -> RoutingCapability<AgentOptions> {
+        guard case .grok(var grok) = options else { return .unsupported(reason: "grok was handed another agent's options") }
+        if let model = overrides.model { grok.model = model }
+        for (knob, value) in overrides.knobs.sorted(by: { $0.key < $1.key }) {
+            switch knob {
+            case "effort": grok.effort = value
+            default: return .unsupported(reason: "grok has no knob \(knob)")
+            }
+        }
+        return .supported(.grok(grok))
+    }
+}
+
 /// The one way a routing capability may type into a tab: the store's own prompt gate, which
 /// waits for a real composer and queues behind a running turn.
 @MainActor

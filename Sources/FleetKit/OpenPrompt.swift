@@ -197,6 +197,9 @@ public enum OpenPrompt: Equatable, Sendable {
     ///   heard of degrades to "renders without one" rather than taking the screen down, and
     ///   inventing a dialog for it would be the same mistake as inventing a count. **Add an
     ///   agent to this list when — and only when — something can actually answer for it.**
+    ///   grok joined when its Mac gained a keyed dialog driver (`GrokDialogDriver`): its
+    ///   transcript pairs `tool_call`/`tool_call_update` the way claude's pairs
+    ///   `tool_use`/`tool_result`, so the same rule reads it.
     ///
     ///   This is presentation only. The refusal that protects a terminal is
     ///   `SessionStore.answerPrompt`'s, over on the Mac, and it is not weakened by anything
@@ -218,7 +221,7 @@ public enum OpenPrompt: Equatable, Sendable {
     public static func find(
         in items: [TimelineItem], agent: String?, activity: String?
     ) -> OpenPrompt? {
-        guard agent == "claude" else { return nil }
+        guard agent == "claude" || agent == "grok" else { return nil }
         guard activity == "waiting" else { return nil }
 
         // Built from the WHOLE feed first. A merged feed can hold a result above its own call

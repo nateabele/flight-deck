@@ -3,8 +3,8 @@ import IntakeKit
 @testable import FlightDeck
 
 /// Unify brief R3/R4 and the P0 stubs: `AgentAdapter` is the one per-agent type and carries the
-/// headless profile; grok and gemini exist with stub adapters but stay off every surface that
-/// opens a tab until their tracks flip `tabReady`.
+/// headless profile; gemini exists with a stub adapter and stays off every surface that opens a
+/// tab until its track flips `tabReady`. grok's track has (its own tests are `Grok*Tests`).
 @MainActor
 final class AgentUnificationTests: XCTestCase {
     // MARK: R3 — the headless facet
@@ -26,8 +26,8 @@ final class AgentUnificationTests: XCTestCase {
 
     // MARK: R4 — tab readiness
 
-    func testOnlyClaudeAndCodexAreTabReady() {
-        XCTAssertEqual(AgentID.tabReadyCases, [.claude, .codex])
+    func testClaudeCodexAndGrokAreTabReady() {
+        XCTAssertEqual(AgentID.tabReadyCases, [.claude, .codex, .grok])
     }
 
     /// The agent list is the new-tab surface (menus, ⌘N): a stored list naming a stub agent must
@@ -37,8 +37,8 @@ final class AgentUnificationTests: XCTestCase {
         prefs.storedAgents = [AgentSettings(id: .grok, options: .grok(GrokOptions())),
                               AgentSettings(id: .claude, options: .claude(FlagSet())),
                               AgentSettings(id: .gemini, options: .gemini(GeminiOptions()))]
-        XCTAssertEqual(prefs.agents.map(\.id), [.claude])
-        XCTAssertEqual(NewSessionAffordance.slots(for: prefs.agents).count, 1)
+        XCTAssertEqual(prefs.agents.map(\.id), [.grok, .claude])
+        XCTAssertEqual(NewSessionAffordance.slots(for: prefs.agents).count, 2)
     }
 
     /// The migration appends any tab-ready agent a stored list lacks — how grok appears the
@@ -46,14 +46,13 @@ final class AgentUnificationTests: XCTestCase {
     func testMigrationAddsMissingTabReadyAgentsOnly() {
         var prefs = Preferences(storedAgents: [AgentSettings(id: .codex, options: .codex(CodexThreadOptions()))])
         prefs.migrateAgentsIfNeeded()
-        XCTAssertEqual(prefs.storedAgents?.map(\.id), [.codex, .claude], "appended, so no shortcut moves")
+        XCTAssertEqual(prefs.storedAgents?.map(\.id), [.codex, .claude, .grok], "appended, so no shortcut moves")
     }
 
     /// Routing sends a task to an agent by opening a tab on it.
     func testRoutingTargetsAreTabReadyAgentsOnly() {
         let registry = RoutingCapabilityRegistry.standard()
-        XCTAssertEqual(registry.agents, [.claude, .codex])
-        XCTAssertNil(registry.capabilities(for: .grok))
+        XCTAssertEqual(registry.agents, [.claude, .codex, .grok])
         XCTAssertNil(registry.capabilities(for: .gemini))
     }
 
@@ -61,7 +60,7 @@ final class AgentUnificationTests: XCTestCase {
 
     /// Every optional capability is the stated refusal, not a claude-shaped default.
     func testStubAdaptersRefuseEveryOptionalCapability() {
-        for agent in [AgentID.grok, .gemini] {
+        for agent in [AgentID.gemini] {
             XCTAssertNil(agent.textChannel, "\(agent)")
             XCTAssertNil(agent.renameTyping, "\(agent)")
             XCTAssertNil(agent.dialogDriver, "\(agent)")
@@ -75,7 +74,7 @@ final class AgentUnificationTests: XCTestCase {
     }
 
     func testStubRoutingCapabilitiesAreUnsupported() async {
-        for caps in [GrokRoutingCapabilities() as any AgentRoutingCapabilities, GeminiRoutingCapabilities()] {
+        for caps in [GeminiRoutingCapabilities() as any AgentRoutingCapabilities] {
             let catalog = await caps.modelCatalog()
             XCTAssertNil(catalog.value, "\(caps.agent)")
         }
@@ -88,9 +87,8 @@ final class AgentUnificationTests: XCTestCase {
         let store = SessionStore(provider: nil, persistence: nil)
         XCTAssertTrue(store.adapter(for: .grok, account: nil) is GrokAdapter)
         XCTAssertTrue(store.adapter(for: .gemini, account: nil) is GeminiAdapter)
-        let session = Session(title: "g", workingDirectory: "/tmp", agent: .grok)
-        let adapter = store.adapter(for: .grok, account: nil)
-        XCTAssertEqual(adapter.launchCommand(adapter.binding(for: session), session, .grok(GrokOptions())), "grok")
+        let session = Session(title: "g", workingDirectory: "/tmp", agent: .gemini)
+        let adapter = store.adapter(for: .gemini, account: nil)
         XCTAssertNil(adapter.binding(for: session).transcriptURL)
     }
 

@@ -1050,11 +1050,15 @@ final class SessionStore: ObservableObject {
             return makeCodexStackIfNeeded(account: instance.account).adapter
         case .claude:
             adapter = makeClaudeAdapter(account: instance.account)
-        // Stubs (unify brief P0): `tabReady` keeps both off every surface that opens a tab, so
-        // these arms answer only a hand-edited `sessions.json` — with the agent's own stub
-        // rather than claude's adapter, which would launch `claude` in a tab labelled grok.
         case .grok:
-            adapter = GrokAdapter()
+            // The home is resolved per derivation, like claude's projects root, so a fixture
+            // root or a relocated account is picked up rather than frozen here.
+            adapter = GrokAdapter(home: { [weak self] in
+                self?.home(ofAccount: instance.account, agent: .grok) ?? AgentID.grok.builtInHome
+            })
+        // A stub (unify brief P0): `tabReady` keeps gemini off every surface that opens a tab,
+        // so this arm answers only a hand-edited `sessions.json` — with its own stub rather
+        // than claude's adapter, which would launch `claude` in a tab labelled gemini.
         case .gemini:
             adapter = GeminiAdapter()
         }
@@ -1084,8 +1088,13 @@ final class SessionStore: ObservableObject {
         switch instance.agent {
         case .codex:
             return makeCodexStackIfNeeded(account: instance.account).runtime
-        case .grok, .gemini:
-            // Nothing to observe until Tracks G/M build a runtime; see `UnobservedAgentRuntime`.
+        case .grok:
+            // grok's per-session files, tailed on the shared clock; see `GrokRuntime`.
+            let runtime = GrokRuntime(clock: clock)
+            runtimes[instance] = runtime
+            return runtime
+        case .gemini:
+            // Nothing to observe until Track M builds a runtime; see `UnobservedAgentRuntime`.
             let runtime = UnobservedAgentRuntime()
             runtimes[instance] = runtime
             return runtime
@@ -2591,7 +2600,8 @@ final class SessionStore: ObservableObject {
     func newSession(
         in url: URL, at index: Int? = nil, account explicit: UUID? = nil,
         waking: DisplayWakePolicy = .wakeIfNeeded, selecting: Bool = true,
-        flywheelIdentity: FlywheelIdentity? = nil, overrides: LaunchOverrides? = nil
+        flywheelIdentity: FlywheelIdentity? = nil, overrides: LaunchOverrides? = nil,
+        agent: AgentID = .claude
     ) -> Session {
         guard ensureTerminalCreatable(waking) else {
             launchFailureReporter.report(.terminalUnavailable(displayAsleep: true))
@@ -2602,7 +2612,10 @@ final class SessionStore: ObservableObject {
         }
         // Resolved before the title is minted, so a refusal does not burn a session number.
         let account: AgentAccount?
-        switch launchAccount(for: .claude, project: url.path, choosing: explicit) {
+        // `agent`, not `.claude`: every agent that mints its own conversation id lands here
+        // from `createSession` (grok, besides claude), and a tab stamped claude would launch
+        // `claude` under the other agent's name.
+        switch launchAccount(for: agent, project: url.path, choosing: explicit) {
         case .success(let resolved): account = resolved
         case .failure(let error):
             launchFailureReporter.report(error)
@@ -2613,7 +2626,7 @@ final class SessionStore: ObservableObject {
         // second login or reassigns this project's default, which would silently move every
         // existing tab's conversation to a home it was never written in.
         let session = Session(
-            title: nextSessionTitle(), workingDirectory: url.path, accountID: account?.id,
+            title: nextSessionTitle(), workingDirectory: url.path, agent: agent, accountID: account?.id,
             flywheelIdentity: flywheelIdentity
         )
         let adapter = adapter(for: instance(for: session))
@@ -2711,7 +2724,7 @@ final class SessionStore: ObservableObject {
             return .success(
                 newSession(
                     in: url, at: index, account: explicit, selecting: selecting,
-                    flywheelIdentity: identity, overrides: overrides
+                    flywheelIdentity: identity, overrides: overrides, agent: agent
                 ).id
             )
         }
@@ -2855,9 +2868,9 @@ final class SessionStore: ObservableObject {
             if case .value(let value)? = flags.values["--model"] { model = value } else { model = "claude" }
         case .codex(let codexOptions):
             model = codexOptions.model ?? "codex"
-        // No model option yet on either (`GrokOptions`/`GeminiOptions` are empty), so the
-        // agent's name is the placeholder, as for the other two.
-        case .grok: model = "grok"
+        case .grok(let grokOptions): model = grokOptions.model ?? "grok"
+        // No model option yet (`GeminiOptions` is empty), so the agent's name is the
+        // placeholder, as for the other agents.
         case .gemini: model = "gemini"
         }
         let coordinator = flywheelCoordinator
@@ -5989,10 +6002,13 @@ final class SessionStore: ObservableObject {
             // that guard, or is a genuine external rename — and neither outcome can queue a
             // second injection.
             injectPendingRename(id, name)
-        case .grok, .gemini:
-            // Stubs: no rename channel to either agent yet (unify brief P0; Tracks G/M probe
-            // one). The local title above is the whole rename, which is what a tab with no
-            // channel can honestly offer.
+        case .grok:
+            // claude's shape: `/rename <name>` is one submission into grok's composer, and it
+            // is the whole of grok's rename — it writes the session's `summary.json` itself.
+            injectPendingRename(id, name)
+        case .gemini:
+            // A stub: no rename channel yet (unify brief P0; Track M probes one). The local
+            // title above is the whole rename, which is what a tab with no channel can offer.
             break
         }
         // True means the name was ACCEPTED and the local title changed — not that the agent
@@ -6466,6 +6482,12 @@ final class SessionStore: ObservableObject {
         guard !injecting.contains(id) else {
             recordEarlyAbort(.tabBusy, injector: injector)
             return .unreadableScreen
+        }
+
+        // An agent whose list must never see a Return answers by key instead (grok — see
+        // `AgentKeyedDialogDriver`). Deny stays on the shared path below: one key, nothing read.
+        if let keyed = driver as? AgentKeyedDialogDriver, answer != .deny {
+            return answerByKey(open, with: answer, keyed: keyed, injector: injector, id: id, token: token)
         }
 
         switch answer {
@@ -6989,6 +7011,76 @@ final class SessionStore: ObservableObject {
             }
             injector.sendReturn()
         }
+        return .dispatched
+    }
+
+    /// **One keypress that names the row, read off the screen — the whole drive for a keyed
+    /// agent.** Every check runs before the key: the open prompt's own shape, the client's label
+    /// against this Mac's transcript copy, and the screen's row for that label. The key then
+    /// picks AND submits, so there is no cursor to move, no landing to confirm and no Return
+    /// that could commit a focused durable grant (grok's first card focuses always-approve).
+    ///
+    /// Narrower than the arrow drive on purpose: one single-select question, or a permission's
+    /// plain "Yes". A set of questions, a checkbox question or a typed answer is `.unanswerable`
+    /// here — grok's multi-question card walks with ←/→ and its free-text row submits on Return,
+    /// neither of which was probed, so neither is pressed.
+    private func answerByKey(
+        _ open: OpenPrompt, with answer: PromptAnswer, keyed: AgentKeyedDialogDriver,
+        injector: TextInjecting, id: UUID, token: UUID
+    ) -> AnswerDispatch {
+        guard let viewport = injector.readViewport() else {
+            recordEarlyAbort(.unreadableBeforePress)
+            return .unreadableScreen
+        }
+        let key: Character
+        switch answer {
+        case .deny:
+            remember(answered: token, for: id)
+            keyed.deny(injector)
+            return .dispatched
+        case .allow:
+            guard case .permission = open else {
+                recordEarlyAbort(.allowNotPermission, injector: injector)
+                return .unreadableScreen
+            }
+            guard let found = keyed.allowKey(inViewport: viewport) else {
+                recordEarlyAbort(.optionRowMismatch, expected: "Yes", injector: injector)
+                return .unreadableScreen
+            }
+            key = found
+        case .option, .answers:
+            let pick: (index: Int, label: String)
+            switch answer {
+            case .option(let index, let label): pick = (index, label)
+            case .answers(let selections):
+                guard selections.count == 1, selections[0].count == 1, selections[0][0].text == nil
+                else { return .unanswerable }
+                pick = (selections[0][0].index, selections[0][0].label)
+            default: return .unanswerable
+            }
+            guard case .question(_, let questions) = open else {
+                recordEarlyAbort(.optionNotQuestion, injector: injector)
+                return .unreadableScreen
+            }
+            guard questions.count == 1, let question = questions.first,
+                  question.isAnswerable, !question.multiSelect
+            else { return .unanswerable }
+            guard question.options.indices.contains(pick.index),
+                  question.options[pick.index].label == pick.label
+            else {
+                let expected = question.options.indices.contains(pick.index)
+                    ? question.options[pick.index].label : nil
+                recordEarlyAbort(.optionLabelMismatch, expected: expected, injector: injector)
+                return .unreadableScreen
+            }
+            guard let found = keyed.optionKey(pick.index, label: pick.label, inViewport: viewport) else {
+                recordEarlyAbort(.optionRowMismatch, expected: pick.label, injector: injector)
+                return .unreadableScreen
+            }
+            key = found
+        }
+        remember(answered: token, for: id)
+        injector.sendCharacterKey(key)
         return .dispatched
     }
 
@@ -9181,7 +9273,12 @@ final class SessionStore: ObservableObject {
         guard let status = statuses[id],
               status.agentActivity == .busy || (includingDialog && status.activity == .waiting),
               let injector = injector(for: id) else { return false }
-        injector.sendEscape()
+        // The agent's own stop key: Escape for claude and codex, Ctrl+C for grok, whose Escape
+        // neither cancels a turn nor answers a card (`GrokAdapter.interruptKey`).
+        switch session(for: id)?.agent.interruptKey ?? .escape {
+        case .escape: injector.sendEscape()
+        case .controlC: injector.sendControlKey("c")
+        }
         return true
     }
 

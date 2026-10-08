@@ -4,7 +4,7 @@ import IntakeKit
 
 /// "An agent is routable once its adapter registers" is only true if nothing between a block
 /// and a spawn knows the adapter list. These tests register a fake conformer for an agent the
-/// standard registry leaves out (grok, not tab-ready) and route it end to end through the
+/// standard registry need not carry (grok here, registered by hand) and route it end to end through the
 /// registry — the same path claude and codex take.
 @MainActor
 final class RoutingCapabilityRegistryTests: XCTestCase {
@@ -14,7 +14,8 @@ final class RoutingCapabilityRegistryTests: XCTestCase {
         let reg = RoutingCapabilityRegistry.standard()
         XCTAssertEqual(Set(reg.agents), Set(AgentID.tabReadyCases))
         XCTAssertEqual(reg.capabilities(for: .claude)?.accountModel, .login)
-        XCTAssertNil(reg.capabilities(for: .grok))
+        XCTAssertNotNil(reg.capabilities(for: .grok), "Track G made grok tab-ready")
+        XCTAssertNil(reg.capabilities(for: .gemini))
     }
 
     func testAFakeHarnessIsRoutableThroughTheRegistry() async {

@@ -115,9 +115,13 @@ enum AgentOptions: Equatable, Sendable {
     }
 }
 
-/// grok's per-agent launch options. None yet: the stub `GrokAdapter` launches plain `grok`.
-/// Every field added here must be optional, so a row stored before it existed still decodes.
-struct GrokOptions: Codable, Equatable, Sendable {}
+/// grok's per-agent launch options: the TUI's `-m <model>` and `--effort <level>` (probed on
+/// grok 1.0.30; see `GrokAdapter.launchCommand`). Every field is optional, so a row stored
+/// before it existed — the empty payload of the P0 stub — still decodes.
+struct GrokOptions: Codable, Equatable, Sendable {
+    var model: String?
+    var effort: String?
+}
 
 /// Gemini's (`agy`'s) per-agent launch options. None yet; see `GrokOptions`.
 struct GeminiOptions: Codable, Equatable, Sendable {}

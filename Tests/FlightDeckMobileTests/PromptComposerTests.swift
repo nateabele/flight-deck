@@ -27,6 +27,12 @@ final class PromptComposerTests: XCTestCase {
         XCTAssertNil(PromptComposer.unavailable(for: session(agent: "codex")))
     }
 
+    /// grok's Mac side types into its composer box (`GrokTextChannel`), so the phone offers
+    /// the field too.
+    func testAGrokTabIsOfferedAField() {
+        XCTAssertNil(PromptComposer.unavailable(for: session(agent: "grok")))
+    }
+
     /// An agent this build has never heard of is refused too. `WireSession.agent` is a
     /// `String` precisely so a new agent does not take the snapshot down — and an unknown
     /// agent has no known input box either.
