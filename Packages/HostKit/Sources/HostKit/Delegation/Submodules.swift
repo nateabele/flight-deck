@@ -326,12 +326,19 @@ extension Workspace {
         let pins = Dictionary(ref.submodules.map { ($0.path, $0) }, uniquingKeysWith: { first, _ in first })
         var placed: [String] = []
         try place(in: top, prefix: "", parentURL: nil, pins: pins, caches: submoduleCaches(controller: controller),
-                  placed: &placed)
+                  ignoring: Self.controllerIgnores(top), placed: &placed)
         try sweepStaleSubmodules(in: top, keeping: placed)
     }
 
+    /// `ignoring` config for the controller's excludes, as `finish` wrote them into the slot's
+    /// admin dir: what the controller ignores, it ignores inside its submodules too, so their
+    /// build output survives `clean` and is not reported as a change.
+    static func controllerIgnores(_ slot: URL) -> [String] {
+        adminDir(slot).map { ignoring($0.appendingPathComponent("flightdeck-excludes")) } ?? []
+    }
+
     private func place(in dir: URL, prefix: String, parentURL: String?, pins: [String: SubmodulePin], caches: URL,
-                       placed: inout [String]) throws {
+                       ignoring: [String], placed: inout [String]) throws {
         let links = try SubmoduleScan.declaredGitlinks(of: "HEAD", in: dir, git: git)
         guard !links.isEmpty else { return }
         let declared = Gitmodules(git: git, rev: "HEAD", in: dir)
@@ -360,10 +367,11 @@ extension Workspace {
             try withStore(cache) {
                 submoduleFetchHook?(full)
                 try fetchIfMissing(link.commit, from: url, into: cache, path: full, allowFile: pinned)
-                try placeWorktree(link.commit, at: sub, from: cache)
+                try placeWorktree(link.commit, at: sub, from: cache, ignoring: ignoring)
             }
             placed.append(full)
-            try place(in: sub, prefix: full + "/", parentURL: url, pins: pins, caches: caches, placed: &placed)
+            try place(in: sub, prefix: full + "/", parentURL: url, pins: pins, caches: caches, ignoring: ignoring,
+                      placed: &placed)
         }
     }
 
@@ -423,14 +431,14 @@ extension Workspace {
     /// `sub` as a worktree of `cache` at `commit`. One already there is moved in place
     /// (`checkout --force`, then `clean -fd`, never `-x`, so the submodule's ignored build
     /// output survives as the superproject's does); anything else there is replaced.
-    private func placeWorktree(_ commit: String, at sub: URL, from cache: URL) throws {
+    private func placeWorktree(_ commit: String, at sub: URL, from cache: URL, ignoring: [String]) throws {
         let fm = FileManager.default
         if let admin = Self.adminDir(sub), admin.standardizedFileURL.path.hasPrefix(cache.standardizedFileURL.path + "/worktrees/"),
            fm.fileExists(atPath: admin.path) {
             // Both locks are held (the slot's and the cache's): a leftover index.lock is stale.
             try? fm.removeItem(at: admin.appendingPathComponent("index.lock"))
             if (try? git.run(["checkout", "-q", "--force", "--detach", commit], in: sub, timeout: GitRunner.longTimeout)) != nil,
-               (try? git.run(["clean", "-fdq"], in: sub, timeout: GitRunner.longTimeout)) != nil,
+               (try? git.run(ignoring + ["clean", "-fdq"], in: sub, timeout: GitRunner.longTimeout)) != nil,
                (try? git.text(["rev-parse", "HEAD"], in: sub)) == commit {
                 return
             }
@@ -478,11 +486,12 @@ extension Workspace {
     public func submoduleChanges(lease: CheckoutLease) async -> [String] {
         (try? await GitRunner.offload { [git] () -> [String] in
             let fm = FileManager.default
+            let ignoring = Self.controllerIgnores(lease.path)
             return try SubmoduleScan.declaredGitlinks(of: lease.ref.commit, in: lease.path, git: git).compactMap { link in
                 let sub = lease.path.appendingPathComponent(link.path)
                 guard fm.fileExists(atPath: sub.appendingPathComponent(".git").path) else { return nil }
                 let head = try? git.text(["rev-parse", "HEAD"], in: sub)
-                let status = (try? git.fields(["status", "--porcelain=v1", "-z", "--untracked-files=normal"], in: sub)) ?? []
+                let status = (try? git.fields(ignoring + ["status", "--porcelain=v1", "-z", "--untracked-files=normal"], in: sub)) ?? []
                 return head != link.commit || !status.isEmpty ? link.path : nil
             }
         }) ?? []
