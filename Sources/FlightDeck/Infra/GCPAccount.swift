@@ -105,7 +105,52 @@ struct GCPAccount: CloudAccount {
         return text.isEmpty ? nil : text
     }
 
+    // MARK: - Orphan scan (spec §7.3)
+
+    /// The presets create one instance and two firewall rules per machine. Instances carry the
+    /// owner as a label and are listed across every zone; firewall rules cannot carry labels,
+    /// so the preset writes `flightdeck-owner=<owner> flightdeck-name=<name>` into their
+    /// description instead. The filter's regex is a substring match, so the description is
+    /// checked again here word for word: owner `abc` must not claim owner `abcd`'s rules.
+    func listOwned(owner: String) async throws -> [OwnedResource] {
+        let instances = try await cli.checked(["compute", "instances", "list", "--filter", "labels.flightdeck-owner=\(owner)",
+                                               "--format", "json"] + projectArgs)
+        let rules = try await cli.checked(["compute", "firewall-rules", "list", "--filter", "description~flightdeck-owner=\(owner)",
+                                           "--format", "json"] + projectArgs)
+        return Self.owned(instances: instances.stdout, firewalls: rules.stdout, owner: owner)
+    }
+
+    func deleteOwned(_ resource: OwnedResource) async throws {
+        switch resource.kind {
+        case .instance:
+            _ = try await cli.checked(["compute", "instances", "delete", resource.id, "--zone", resource.region, "--quiet"] + projectArgs)
+        case .firewall:
+            _ = try await cli.checked(["compute", "firewall-rules", "delete", resource.id, "--quiet"] + projectArgs)
+        case .securityGroup:
+            throw CloudAccountError.failed("GCP has no security groups; \(resource.id) is not a GCP resource")
+        }
+    }
+
     // MARK: - pure
+
+    /// `instances list` and `firewall-rules list` JSON as `OwnedResource`s. An instance's
+    /// region is its zone, the last part of its `zone` URL, which is what deleting it needs.
+    static func owned(instances: Data, firewalls: Data, owner: String) -> [OwnedResource] {
+        func array(_ data: Data) -> [[String: Any]] { (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] ?? [] }
+        let found = array(instances).compactMap { i -> OwnedResource? in
+            guard let name = i["name"] as? String, let zone = (i["zone"] as? String)?.split(separator: "/").last else { return nil }
+            return OwnedResource(cloud: "gcp", kind: .instance, id: name, region: String(zone),
+                                 name: (i["labels"] as? [String: String])?["flightdeck-name"])
+        }
+        let rules = array(firewalls).compactMap { f -> OwnedResource? in
+            guard let name = f["name"] as? String else { return nil }
+            let words = ((f["description"] as? String) ?? "").split(separator: " ").map(String.init)
+            guard words.contains("flightdeck-owner=\(owner)") else { return nil }
+            let host = words.first { $0.hasPrefix("flightdeck-name=") }.map { String($0.dropFirst("flightdeck-name=".count)) }
+            return OwnedResource(cloud: "gcp", kind: .firewall, id: name, region: "global", name: host)
+        }
+        return found + rules
+    }
 
     /// The regional vCPU metric for a machine type's family: E2, N1 and the shared-core
     /// f1/g1 count against plain `CPUS`; every other family has its own (`N2_CPUS`, `G2_CPUS`…).

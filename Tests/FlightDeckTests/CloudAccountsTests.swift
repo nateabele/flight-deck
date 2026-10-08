@@ -208,6 +208,92 @@ final class CloudAccountsTests: XCTestCase {
                        ["compute instances get-serial-port-output fd-gpu-0a1b --zone us-central1-b --project example-project"])
     }
 
+    // MARK: - Orphan scan (spec §7.3)
+
+    /// Every enabled region is asked, because an orphan's region is exactly what nobody
+    /// recorded; terminated instances are filtered out by the CLI, not reported as orphans.
+    func testAWSListOwnedAsksEveryRegionForInstancesAndSecurityGroups() async throws {
+        let aws = try FakeExecutable.make("aws", script: FakeExecutable.record(to: log) + "\n" + #"""
+        case "$*" in
+          *describe-regions*) echo '["us-east-1","eu-west-1"]' ;;
+          *describe-instances*us-east-1*) echo '{"Reservations":[{"Instances":[{"InstanceId":"i-0abc","Tags":[{"Key":"flightdeck-owner","Value":"0a1b2c3d4e5f"},{"Key":"flightdeck-name","Value":"gpu"}]}]}]}' ;;
+          *describe-instances*) echo '{"Reservations":[]}' ;;
+          *describe-security-groups*eu-west-1*) echo '{"SecurityGroups":[{"GroupId":"sg-0def","GroupName":"fd-old","Tags":[{"Key":"flightdeck-name","Value":"old"}]}]}' ;;
+          *describe-security-groups*) echo '{"SecurityGroups":[]}' ;;
+        esac
+        """#)
+        let found = try await AWSAccount(aws: aws, profile: "dev", runner: SystemCommandRunner()).listOwned(owner: "0a1b2c3d4e5f")
+        XCTAssertEqual(Set(found), [
+            OwnedResource(cloud: "aws", kind: .instance, id: "i-0abc", region: "us-east-1", name: "gpu"),
+            OwnedResource(cloud: "aws", kind: .securityGroup, id: "sg-0def", region: "eu-west-1", name: "old"),
+        ])
+        let calls = FakeExecutable.calls(log)
+        XCTAssertTrue(calls.contains { $0.hasPrefix("ec2 describe-regions") && $0.contains("--profile dev") }, "\(calls)")
+        for region in ["us-east-1", "eu-west-1"] {
+            XCTAssertTrue(calls.contains {
+                $0.hasPrefix("ec2 describe-instances") && $0.contains("Name=tag:flightdeck-owner,Values=0a1b2c3d4e5f")
+                    && $0.contains("Name=instance-state-name,Values=pending,running,stopping,stopped")
+                    && $0.contains("--region \(region)")
+            }, "\(calls)")
+            XCTAssertTrue(calls.contains {
+                $0.hasPrefix("ec2 describe-security-groups") && $0.contains("Name=tag:flightdeck-owner,Values=0a1b2c3d4e5f")
+                    && $0.contains("--region \(region)")
+            }, "\(calls)")
+        }
+    }
+
+    /// A region that cannot be read fails the scan: "no orphans" must never mean "did not look".
+    func testAWSListOwnedFailsWhenARegionFails() async throws {
+        let aws = try FakeExecutable.make("aws", script: #"""
+        case "$*" in
+          *describe-regions*) echo '["us-east-1"]' ;;
+          *) echo 'UnauthorizedOperation' >&2; exit 254 ;;
+        esac
+        """#)
+        do { _ = try await AWSAccount(aws: aws, profile: nil, runner: SystemCommandRunner()).listOwned(owner: "0a1b2c3d4e5f"); XCTFail() }
+        catch CloudAccountError.failed(let why) { XCTAssertTrue(why.contains("UnauthorizedOperation"), why) }
+    }
+
+    func testAWSDeleteOwned() async throws {
+        let aws = try FakeExecutable.make("aws", script: FakeExecutable.record(to: log))
+        let account = AWSAccount(aws: aws, profile: "dev", runner: SystemCommandRunner())
+        try await account.deleteOwned(OwnedResource(cloud: "aws", kind: .instance, id: "i-0abc", region: "us-east-1", name: "gpu"))
+        try await account.deleteOwned(OwnedResource(cloud: "aws", kind: .securityGroup, id: "sg-0def", region: "eu-west-1", name: nil))
+        XCTAssertEqual(FakeExecutable.calls(log), [
+            "ec2 terminate-instances --instance-ids i-0abc --region us-east-1 --output json --profile dev",
+            "ec2 delete-security-group --group-id sg-0def --region eu-west-1 --profile dev",
+        ])
+    }
+
+    /// Firewalls carry no labels, so the owner is read from the description the preset writes.
+    func testGCPListOwnedFindsInstancesByLabelAndFirewallsByDescription() async throws {
+        let gc = try FakeExecutable.make("gcloud", script: FakeExecutable.record(to: log) + "\n" + #"""
+        case "$2" in
+          instances) echo '[{"id":"123","name":"fd-0a1b2c3d4e5f-gpu","zone":"https://www.googleapis.com/compute/v1/projects/example-project/zones/us-central1-a","labels":{"flightdeck-owner":"0a1b2c3d4e5f","flightdeck-name":"gpu"}}]' ;;
+          firewall-rules) echo '[{"name":"fd-0a1b2c3d4e5f-gpu","description":"flightdeck-owner=0a1b2c3d4e5f flightdeck-name=gpu"},{"name":"someone-else","description":"flightdeck-owner=0a1b2c3d4e5f0 flightdeck-name=x"}]' ;;
+        esac
+        """#)
+        let found = try await GCPAccount(gcloud: gc, project: "example-project", runner: SystemCommandRunner()).listOwned(owner: "0a1b2c3d4e5f")
+        XCTAssertEqual(found, [
+            OwnedResource(cloud: "gcp", kind: .instance, id: "fd-0a1b2c3d4e5f-gpu", region: "us-central1-a", name: "gpu"),
+            OwnedResource(cloud: "gcp", kind: .firewall, id: "fd-0a1b2c3d4e5f-gpu", region: "global", name: "gpu"),
+        ])
+        let calls = FakeExecutable.calls(log)
+        XCTAssertTrue(calls.contains { $0.hasPrefix("compute instances list --filter labels.flightdeck-owner=0a1b2c3d4e5f") && $0.contains("--project example-project") }, "\(calls)")
+        XCTAssertTrue(calls.contains { $0.hasPrefix("compute firewall-rules list --filter description~flightdeck-owner=0a1b2c3d4e5f") }, "\(calls)")
+    }
+
+    func testGCPDeleteOwned() async throws {
+        let gc = try FakeExecutable.make("gcloud", script: FakeExecutable.record(to: log))
+        let account = GCPAccount(gcloud: gc, project: "example-project", runner: SystemCommandRunner())
+        try await account.deleteOwned(OwnedResource(cloud: "gcp", kind: .instance, id: "fd-x-gpu", region: "us-central1-a", name: "gpu"))
+        try await account.deleteOwned(OwnedResource(cloud: "gcp", kind: .firewall, id: "fd-x-gpu", region: "global", name: "gpu"))
+        XCTAssertEqual(FakeExecutable.calls(log), [
+            "compute instances delete fd-x-gpu --zone us-central1-a --quiet --project example-project",
+            "compute firewall-rules delete fd-x-gpu --quiet --project example-project",
+        ])
+    }
+
     func testConsoleOutputIsNilWhenTheCLIFails() async throws {
         let aws = try FakeExecutable.make("aws", script: "echo denied >&2; exit 255")
         let out = await AWSAccount(aws: aws, profile: nil, runner: SystemCommandRunner()).consoleOutput(instanceID: "i-1", region: "us-east-1")

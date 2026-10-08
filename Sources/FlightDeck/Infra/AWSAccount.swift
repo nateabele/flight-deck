@@ -58,6 +58,51 @@ struct AWSAccount: CloudAccount {
 
     func moduleVars() -> [String: String] { [:] }
 
+    // MARK: - Orphan scan (spec §7.3)
+
+    /// The presets create one instance and one security group per machine (the security group
+    /// rules are its children), so those two are what is asked for, in every region the account
+    /// has enabled: an orphan is by definition one whose region nobody recorded. The region
+    /// list itself is asked of us-east-1, which every commercial account can reach whether or
+    /// not the profile names a region. A terminated instance is not an orphan, and one shutting
+    /// down is already on its way out; the CLI filters both.
+    func listOwned(owner: String) async throws -> [OwnedResource] {
+        let listed = try await cli.checked(["ec2", "describe-regions", "--query", "Regions[].RegionName",
+                                            "--output", "json", "--region", "us-east-1"] + profileArgs)
+        let regions = (try? JSONSerialization.jsonObject(with: listed.stdout)) as? [String] ?? []
+        let ownerFilter = "Name=tag:flightdeck-owner,Values=\(owner)"
+        return try await withThrowingTaskGroup(of: [OwnedResource].self) { group in
+            for region in regions {
+                group.addTask {
+                    let instances = try await cli.checked(["ec2", "describe-instances", "--filters", ownerFilter,
+                                                           "Name=instance-state-name,Values=pending,running,stopping,stopped",
+                                                           "--region", region, "--output", "json"] + profileArgs)
+                    let groups = try await cli.checked(["ec2", "describe-security-groups", "--filters", ownerFilter,
+                                                        "--region", region, "--output", "json"] + profileArgs)
+                    return Self.owned(instances: instances.stdout, securityGroups: groups.stdout, region: region)
+                }
+            }
+            var found: [OwnedResource] = []
+            for try await part in group { found += part }
+            return found.sorted { ($0.region, $0.kind.rawValue, $0.id) < ($1.region, $1.kind.rawValue, $1.id) }
+        }
+    }
+
+    /// A security group still referenced by a running instance cannot be deleted; that is the
+    /// CLI's error to report, and terminating the instance first is the fix.
+    func deleteOwned(_ resource: OwnedResource) async throws {
+        switch resource.kind {
+        case .instance:
+            _ = try await cli.checked(["ec2", "terminate-instances", "--instance-ids", resource.id,
+                                       "--region", resource.region, "--output", "json"] + profileArgs)
+        case .securityGroup:
+            _ = try await cli.checked(["ec2", "delete-security-group", "--group-id", resource.id,
+                                       "--region", resource.region] + profileArgs)
+        case .firewall:
+            throw CloudAccountError.failed("AWS has no firewall resources; \(resource.id) is not an AWS resource")
+        }
+    }
+
     /// v1 compares this machine's vCPUs with the family's whole quota; vCPUs already running
     /// in the region are not subtracted (docs/FOLLOWUPS.md), so `ok` can be optimistic.
     func quota(region: String, instanceType: String) async throws -> QuotaCheck {
@@ -86,6 +131,23 @@ struct AWSAccount: CloudAccount {
     }
 
     // MARK: - pure
+
+    /// `describe-instances` and `describe-security-groups` JSON as `OwnedResource`s, named by
+    /// their `flightdeck-name` tag.
+    static func owned(instances: Data, securityGroups: Data, region: String) -> [OwnedResource] {
+        func object(_ data: Data) -> [String: Any] { (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:] }
+        func name(_ item: [String: Any]) -> String? {
+            (item["Tags"] as? [[String: Any]])?.first { $0["Key"] as? String == "flightdeck-name" }?["Value"] as? String
+        }
+        let reservations = object(instances)["Reservations"] as? [[String: Any]] ?? []
+        let found = reservations.flatMap { $0["Instances"] as? [[String: Any]] ?? [] }.compactMap { i in
+            (i["InstanceId"] as? String).map { OwnedResource(cloud: "aws", kind: .instance, id: $0, region: region, name: name(i)) }
+        }
+        let groups = (object(securityGroups)["SecurityGroups"] as? [[String: Any]] ?? []).compactMap { g in
+            (g["GroupId"] as? String).map { OwnedResource(cloud: "aws", kind: .securityGroup, id: $0, region: region, name: name(g)) }
+        }
+        return found + groups
+    }
 
     /// The EC2 vCPU quota covering `instanceType`'s family, keyed by the family's leading
     /// letters (`g6.xlarge` → `g`, `vt1.3xlarge` → `vt`, `im4gn.large` → `im`). Nil for a

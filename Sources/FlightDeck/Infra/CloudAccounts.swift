@@ -28,6 +28,19 @@ enum CloudAccountError: Error, Equatable {
     case unsupportedInstanceType(String)
 }
 
+/// One cloud resource carrying this controller's `flightdeck-owner` label (spec §7.3), as the
+/// orphan scan finds it. `id` is what the cloud deletes it by: an EC2 instance or security
+/// group ID, a GCE instance or firewall name. `region` is where to ask: the AWS region, the
+/// GCE instance's zone, or `global` for a GCE firewall. `name` is its `flightdeck-name`.
+struct OwnedResource: Codable, Hashable, Sendable {
+    enum Kind: String, Codable, Sendable { case instance, securityGroup = "security-group", firewall }
+    let cloud: String
+    let kind: Kind
+    let id: String
+    let region: String
+    let name: String?
+}
+
 /// One cloud account, driven entirely through that cloud's own CLI: its sign-in flow, its
 /// credential chain and its quota API. Nothing here holds a credential itself.
 protocol CloudAccount: Sendable {
@@ -44,6 +57,12 @@ protocol CloudAccount: Sendable {
     /// are there. Nil when the CLI fails or the cloud has nothing yet; this only ever adds
     /// detail to a failure already being reported.
     func consoleOutput(instanceID: String, region: String) async -> String?
+    /// Every live resource labelled `flightdeck-owner=<owner>` the account can see, in every
+    /// place the presets create them. Throws when any part could not be read: an empty answer
+    /// must only ever mean there is nothing there.
+    func listOwned(owner: String) async throws -> [OwnedResource]
+    /// Deletes one resource `listOwned` returned.
+    func deleteOwned(_ resource: OwnedResource) async throws
 }
 
 /// The environment every cloud tool runs with: the app's own, its PATH repaired from the login

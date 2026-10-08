@@ -83,6 +83,7 @@ final class FakeTofu: TofuRunning, @unchecked Sendable {
     private var _failApply: TofuError?
     private var _failDestroy: TofuError?
     private var _gone = false
+    private var _goneOnRefresh: Set<String> = []
     private var _afterApply: (@Sendable (URL) async -> Void)?
 
     var calls: [String] { lock.withLock { _calls } }
@@ -92,6 +93,9 @@ final class FakeTofu: TofuRunning, @unchecked Sendable {
     var failApply: TofuError? { get { lock.withLock { _failApply } } set { lock.withLock { _failApply = newValue } } }
     var failDestroy: TofuError? { get { lock.withLock { _failDestroy } } set { lock.withLock { _failDestroy = newValue } } }
     var refreshGone: Bool { get { lock.withLock { _gone } } set { lock.withLock { _gone = newValue } } }
+    /// Machines (by work directory name) whose refresh finds the instance gone, when
+    /// `refreshGone` would say so for every one.
+    var goneOnRefresh: Set<String> { get { lock.withLock { _goneOnRefresh } } set { lock.withLock { _goneOnRefresh = newValue } } }
     var afterApply: (@Sendable (URL) async -> Void)? {
         get { lock.withLock { _afterApply } } set { lock.withLock { _afterApply = newValue } }
     }
@@ -137,7 +141,7 @@ final class FakeTofu: TofuRunning, @unchecked Sendable {
 
     func refreshShowsGone(workdir: URL) async throws -> Bool {
         record("refresh")
-        return refreshGone
+        return refreshGone || goneOnRefresh.contains(workdir.lastPathComponent)
     }
 }
 
@@ -162,8 +166,16 @@ final class FakeAccount: CloudAccount, @unchecked Sendable {
     private let lock = NSLock()
     private var _status: AccountStatus = .ready(identity: "123456789012")
     private var _console: String?
+    private var _owned: [OwnedResource] = []
+    private var _deleted: [OwnedResource] = []
+    private var _owners: [String] = []
 
     init(cloud: String = "aws") { self.cloud = cloud }
+
+    /// What `listOwned` finds, whatever owner it is asked for; `owners` records what it was asked.
+    var owned: [OwnedResource] { get { lock.withLock { _owned } } set { lock.withLock { _owned = newValue } } }
+    var deleted: [OwnedResource] { lock.withLock { _deleted } }
+    var owners: [String] { lock.withLock { _owners } }
 
     var accountStatus: AccountStatus { get { lock.withLock { _status } } set { lock.withLock { _status = newValue } } }
     var console: String? { get { lock.withLock { _console } } set { lock.withLock { _console = newValue } } }
@@ -176,6 +188,24 @@ final class FakeAccount: CloudAccount, @unchecked Sendable {
     func providerEnvironment() -> [String: String] { ["AWS_PROFILE": "example"] }
     func moduleVars() -> [String: String] { cloud == "gcp" ? ["project": "example-project"] : [:] }
     func consoleOutput(instanceID: String, region: String) async -> String? { console }
+    func listOwned(owner: String) async throws -> [OwnedResource] {
+        lock.withLock { _owners.append(owner); return _owned }
+    }
+    func deleteOwned(_ resource: OwnedResource) async throws {
+        lock.withLock { _deleted.append(resource); _owned.removeAll { $0 == resource } }
+    }
+}
+
+/// Every notification the Reaper sends, in order. `UNUserNotificationCenter.current()` traps in
+/// the test bundle, so nothing a test reaches may use the real one.
+final class SpyInfraNotifier: InfraNotifying, @unchecked Sendable {
+    struct Sent: Equatable { let id: String; let title: String; let body: String }
+    private let lock = NSLock()
+    private var _sent: [Sent] = []
+    var sent: [Sent] { lock.withLock { _sent } }
+    func notify(id: String, title: String, body: String) {
+        lock.withLock { _sent.append(Sent(id: id, title: title, body: body)) }
+    }
 }
 
 struct ConstantPrice: PriceSource {
@@ -184,7 +214,8 @@ struct ConstantPrice: PriceSource {
 }
 
 /// A host connection that completes the hello handshake the moment it starts, if its host is
-/// "up"; otherwise it waits until the test brings the host up.
+/// "up"; otherwise it waits until the test brings the host up. Answers `host.info` with what
+/// `info` returns, so a test chooses the host's `idleSince`.
 final class InfraHostConnection: HostLinkConnection {
     var onReady: (() -> Void)?
     var onText: ((String) -> Void)?
@@ -192,14 +223,26 @@ final class InfraHostConnection: HostLinkConnection {
     var remoteAddress: String?
     let slot: UUID
     let isUp: () -> Bool
+    let info: () -> HostInfo
     private(set) var acked = false
 
-    init(slot: UUID, isUp: @escaping () -> Bool) { self.slot = slot; self.isUp = isUp }
+    init(slot: UUID, isUp: @escaping () -> Bool, info: @escaping () -> HostInfo = { InfraHostDialer.defaultInfo }) {
+        self.slot = slot; self.isUp = isUp; self.info = info
+    }
 
     func start() { if isUp() { ack() } }
-    func send(_ text: String) {}
+    func send(_ text: String) {
+        guard acked, case .request(let id, .hostInfo)? = try? HostWire.decode(HostClientFrame.self, from: text) else { return }
+        onText?(try! HostWire.encode(HostServerFrame.reply(id: id, .hostInfo(info()))))
+    }
     func ping(onPong: @escaping () -> Void) { onPong() }
     func cancel() { onReady = nil; onText = nil; onClosed = nil }
+
+    /// The host goes away: the link sees its connection close.
+    func drop() {
+        acked = false
+        onClosed?()
+    }
 
     func ack() {
         guard !acked, let onReady else { return }
@@ -215,6 +258,11 @@ final class InfraHostConnection: HostLinkConnection {
 final class InfraHostDialer: HostLinkDialing {
     private(set) var connections: [InfraHostConnection] = []
     private var up: Set<UUID> = []
+    /// What each host answers `host.info` with; `defaultInfo` (busy) when unset.
+    var infos: [UUID: HostInfo] = [:]
+
+    nonisolated static let defaultInfo = HostInfo(hostName: "cloud", platform: "Linux", osVersion: "Ubuntu 24.04", arch: "x86_64",
+                                                  hostdVersion: "1.0", xcode: [], docker: nil, diskFreeBytes: 1 << 30)
 
     final class Handle: HostLinkCancellable { func cancel() {} }
 
@@ -223,11 +271,18 @@ final class InfraHostDialer: HostLinkDialing {
         for c in connections where c.slot == slot { c.ack() }
     }
 
+    func takeDown(_ slot: UUID) {
+        up.remove(slot)
+        for c in connections where c.slot == slot { c.drop() }
+    }
+
     func connection(to endpoint: NWEndpoint, key: FleetDeviceKey) -> HostLinkConnection {
         let slot = key.slot
-        let c = InfraHostConnection(slot: slot) { [weak self] in
+        let c = InfraHostConnection(slot: slot, isUp: { [weak self] in
             MainActor.assumeIsolated { self?.up.contains(slot) ?? false }
-        }
+        }, info: { [weak self] in
+            MainActor.assumeIsolated { self?.infos[slot] ?? InfraHostDialer.defaultInfo }
+        })
         connections.append(c)
         return c
     }
@@ -266,10 +321,13 @@ final class InfraHarness {
     let registry: InfraRegistry
     let ledger: CostLedger
     let dialer = InfraHostDialer()
+    /// The one clock for everything: the hosts' links, the Reaper, and the service's `now`.
+    let clock = ManualHostLinkClock(now: InfraMachine.fixtureNow)
     let hosts: HostService
     let tofu = FakeTofu()
     let account = FakeAccount()
-    let now = InfraMachine.fixtureNow
+    let gcpAccount = FakeAccount(cloud: "gcp")
+    var now: Date { clock.now }
     var budget = BudgetSettings.default
     var events: [InfraEvent] = []
     var enrollTimeout: TimeInterval = 600
@@ -277,6 +335,8 @@ final class InfraHarness {
     var tailnet: TailnetIntegration
     var resolver: ToolResolver
     var publicIPCalls = 0
+    /// What `env.publicIP` answers: this Mac's public address as the cloud sees it.
+    var publicIP = "203.0.113.9"
     var controllerID = "00000000-0000-4000-8000-000000000001"
 
     lazy var service: InfraService = InfraService(registry: registry, ledger: ledger, hosts: hosts, env: environment())
@@ -294,7 +354,7 @@ final class InfraHarness {
         registry = InfraRegistry(fileURL: root.appendingPathComponent("infra.json"), workRoot: root.appendingPathComponent("infra"))
         ledger = CostLedger(fileURL: root.appendingPathComponent("infra-ledger.json"))
         hosts = HostService(registry: HostRegistry(fileURL: root.appendingPathComponent("hosts.json"), secrets: InMemoryHostSecretStore()),
-                            controllerName: "test-mac", dial: dialer, clock: ManualHostLinkClock())
+                            controllerName: "test-mac", dial: dialer, clock: clock)
         tailnet = TailnetIntegration(cli: nil, http: FakeHTTP(), secrets: MemoryTailnetSecrets())
         let tofuBinary = try FakeExecutable.make("tofu", script: "echo 'OpenTofu v1.8.11'")
         resolver = ToolResolver(searchPath: [tofuBinary.deletingLastPathComponent()], managedRoot: root.appendingPathComponent("tools"),
@@ -309,19 +369,21 @@ final class InfraHarness {
         return InfraEnvironment(
             tofu: { _, environment in tofu.built(environment: environment) },
             resolver: resolver,
-            accounts: ["aws": account, "gcp": FakeAccount(cloud: "gcp")],
+            accounts: ["aws": account, "gcp": gcpAccount],
             prices: PriceCatalog(sources: ["aws": ConstantPrice(hourly: 0.5), "gcp": ConstantPrice(hourly: 0.5)],
                                  cacheURL: root.appendingPathComponent("prices.json")),
             tailnet: tailnet,
             publicIP: { [weak self] in
-                await MainActor.run { self?.publicIPCalls += 1 }
-                return "203.0.113.9"
+                await MainActor.run {
+                    self?.publicIPCalls += 1
+                    return self?.publicIP ?? "203.0.113.9"
+                }
             },
             presetsRoot: root.appendingPathComponent("presets"),
             installer: (base: "https://example.com/hostd", sha256: String(repeating: "a", count: 64)),
             controllerName: "test-mac",
             controllerID: controllerID,
-            now: { [now] in now },
+            now: { [clock] in clock.now },
             budget: { [unowned self] in self.budget },
             baseEnvironment: { ["PATH": "/usr/bin:/bin:/login/shell/bin"] },
             enrollTimeout: enrollTimeout,
@@ -361,6 +423,37 @@ final class InfraHarness {
     func tfvars(_ name: String) throws -> [String: Any] {
         let url = registry.workdir(for: name).appendingPathComponent("module").appendingPathComponent(InfraWorkdir.varsFile)
         return try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any] ?? [:]
+    }
+
+    /// A machine as `up` leaves one: enrolled as a host that is online, its work directory and
+    /// `fd.auto.tfvars.json` in place, and its cost segment open since `createdAt`.
+    @discardableResult
+    func readyMachine(_ name: String, deadline: Date? = nil, idle: HostKit.Duration = .init(seconds: 1800),
+                      hourlyUSD: Double? = 0.5, createdAt: Date? = nil, network: NetworkMode = .public,
+                      allowCIDR: String? = "203.0.113.9/32") throws -> InfraMachine {
+        let createdAt = createdAt ?? now
+        let slot = try hosts.enroll(key: .mint(), name: name, endpoints: ["198.51.100.7:47410"]).slot
+        dialer.bringUp(slot)
+        var m = InfraMachine.fixture(name: name, slot: slot, network: network, hourlyUSD: hourlyUSD, createdAt: createdAt,
+                                     deadline: deadline ?? now.addingTimeInterval(4 * 3600))
+        m.idle = idle
+        m.allowCIDR = network == .public ? allowCIDR : nil
+        m.address = "198.51.100.7"
+        try registry.upsert(m)
+        try prepareWorkdir(name)
+        let vars: [String: Any] = ["fd_name": name, "fd_allow_cidr": m.allowCIDR ?? ""]
+        try JSONSerialization.data(withJSONObject: vars).write(
+            to: registry.workdir(for: name).appendingPathComponent("module").appendingPathComponent(InfraWorkdir.varsFile))
+        if let hourlyUSD { try ledger.open(name: name, hourlyUSD: hourlyUSD, at: createdAt) }
+        return m
+    }
+
+    /// What `name`'s host answers `host.info` with from now on.
+    func hostInfo(_ name: String, idleSince: Date?) {
+        guard case .success(let record) = hosts.registry.resolve(name: name) else { return }
+        var info = InfraHostDialer.defaultInfo
+        info.idleSince = idleSince
+        dialer.infos[record.slot] = info
     }
 
     /// A work directory as `up` leaves one once OpenTofu has state, so `down` has something to destroy.
