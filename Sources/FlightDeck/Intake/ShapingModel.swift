@@ -395,7 +395,7 @@ struct ShapingModel {
         case .rateLimited: "rate limited"
         case .authExpired: "auth expired"
         case .timeout: "timed out"
-        case .harnessError: "harness error"
+        case .harnessError: "agent error"
         case .invalidOutput: "invalid output"
         }
     }
