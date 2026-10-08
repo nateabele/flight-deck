@@ -197,4 +197,22 @@ final class TailnetIntegrationTests: XCTestCase {
             XCTAssertTrue(text.contains("k-EXAMPLE"), text)
         }
     }
+
+    /// Only a cloud-tagged node is ever the machine: one of the user's own devices that happens
+    /// to share the hostname (and is newer) must never become a host's address.
+    func testNodeAddressIgnoresUntaggedNodesWithTheSameHostname() async throws {
+        let http = FakeHTTP(responses: [
+            "https://api.tailscale.com/api/v2/oauth/token": #"{"access_token":"tok"}"#,
+            "https://api.tailscale.com/api/v2/tailnet/-/devices": #"""
+            {"devices":[
+              {"id":"1","hostname":"fd-gpu","addresses":["100.64.0.5"],"created":"2026-10-07T10:00:00Z","nodeKey":"nodekey:cloud","tags":["tag:flightdeck-cloud"]},
+              {"id":"2","hostname":"fd-gpu","addresses":["100.64.0.6"],"created":"2026-10-07T11:00:00Z","nodeKey":"nodekey:mine"}]}
+            """#])
+        let t = TailnetIntegration(cli: nil, http: http, secrets: MemoryTailnetSecrets())
+        let client = TailscaleOAuthClient(id: "k", secret: "s", tailnet: "example-tailnet.ts.net")
+        let address = try await t.nodeAddress(client: client, hostname: "fd-gpu")
+        XCTAssertEqual(address, "100.64.0.5")
+        let node = try await t.cloudNode(client: client, hostname: "fd-gpu")
+        XCTAssertEqual(node, TailnetNode(address: "100.64.0.5", nodeKey: "nodekey:cloud"))
+    }
 }

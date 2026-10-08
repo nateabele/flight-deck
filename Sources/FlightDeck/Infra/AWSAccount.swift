@@ -8,10 +8,14 @@ struct AWSAccount: CloudAccount {
     let profile: String?
     private let cli: CloudCLI
 
-    init(aws: URL, profile: String?, runner: CommandRunner) {
+    /// `environment` is the resolved tool's own (`ResolvedTool.environment`); `base` replaces
+    /// the login-shell-repaired app environment only in tests.
+    init(aws: URL, profile: String?, runner: CommandRunner, environment: [String: String] = [:],
+         base: [String: String]? = nil) {
         self.profile = profile
         // An empty pager: CLI v2 pipes long output through `less` when it thinks it can.
-        self.cli = CloudCLI(executable: aws, runner: runner, extra: ["AWS_PAGER": ""])
+        self.cli = CloudCLI(executable: aws, runner: runner,
+                            extra: environment.merging(["AWS_PAGER": ""]) { _, new in new }, base: base)
     }
 
     private var profileArgs: [String] { profile.map { ["--profile", $0] } ?? [] }
@@ -36,9 +40,23 @@ struct AWSAccount: CloudAccount {
         return .ready(identity: account)
     }
 
+    /// `aws sso login` needs a profile that names an SSO session; with none there is nothing it
+    /// could log into, so the user is pointed at creating one rather than shown its error.
     func signIn() async throws {
+        guard profile != nil else {
+            throw CloudAccountError.failed("No AWS profile is chosen. Run `aws configure sso` to create one, then pick it in Settings → Cloud.")
+        }
         _ = try await cli.checked(["sso", "login"] + profileArgs)
     }
+
+    func consoleOutput(instanceID: String, region: String) async -> String? {
+        guard let result = try? await cli.checked(["ec2", "get-console-output", "--instance-id", instanceID, "--latest",
+                                                    "--output", "text", "--region", region] + profileArgs) else { return nil }
+        let text = String(decoding: result.stdout, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.isEmpty || text == "None" ? nil : text
+    }
+
+    func moduleVars() -> [String: String] { [:] }
 
     /// v1 compares this machine's vCPUs with the family's whole quota; vCPUs already running
     /// in the region are not subtracted (docs/FOLLOWUPS.md), so `ok` can be optimistic.
