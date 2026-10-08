@@ -132,3 +132,41 @@ run "reapply_keeps_the_machine" {
     error_message = "the re-apply must still move the firewall to the new /32"
   }
 }
+
+# The arch picks the AMI, and an amd64 image on an arm64 type (or the reverse) is refused by
+# RunInstances. The AMI name filter is the one observable place the derived arch lands.
+run "gpu_family_is_x86" {
+  command = plan
+
+  assert {
+    condition     = anytrue([for f in data.aws_ami.ubuntu.filter : anytrue([for v in f.values : strcontains(v, "-amd64-")])])
+    error_message = "g6 is an x86 GPU family, not Graviton"
+  }
+}
+
+run "graviton_is_arm" {
+  command = plan
+
+  variables {
+    instance_type = "m7g.large"
+  }
+
+  assert {
+    condition     = anytrue([for f in data.aws_ami.ubuntu.filter : anytrue([for v in f.values : strcontains(v, "-arm64-")])])
+    error_message = "m7g is Graviton"
+  }
+}
+
+# a1 is the first Graviton generation and the one family without the `g` suffix.
+run "a1_is_arm" {
+  command = plan
+
+  variables {
+    instance_type = "a1.large"
+  }
+
+  assert {
+    condition     = anytrue([for f in data.aws_ami.ubuntu.filter : anytrue([for v in f.values : strcontains(v, "-arm64-")])])
+    error_message = "a1 is Graviton (arm64)"
+  }
+}

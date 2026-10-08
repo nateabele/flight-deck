@@ -32,7 +32,7 @@ variable "instance_type" {
 }
 
 variable "arch" {
-  description = "\"x86_64\" or \"arm64\". Null derives it from the instance type (Graviton families carry a `g` after the generation, e.g. m7g, c7gn, t4g)."
+  description = "\"x86_64\" or \"arm64\". Null derives it from the instance type (Graviton families carry a `g` after the generation, e.g. m7g, c7gn, t4g, plus a1)."
   type        = string
   default     = null
 

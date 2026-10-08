@@ -1,7 +1,9 @@
 locals {
   # Graviton families put a `g` after the generation digit (t4g, m7g, m7gd, c7gn, x2gd, g5g);
-  # GPU families like g6 or p5 start with their letter and so do not match.
-  arch = coalesce(var.arch, can(regex("^[a-z]+[0-9]+[a-z]*g[a-z]*\\.", var.instance_type)) ? "arm64" : "x86_64")
+  # GPU families like g6 or p5 start with their letter and so do not match. a1, the first
+  # Graviton, predates the suffix and is named outright, or it would get an amd64 AMI that
+  # RunInstances refuses.
+  arch = coalesce(var.arch, can(regex("^(a1|[a-z]+[0-9]+[a-z]*g[a-z]*)\\.", var.instance_type)) ? "arm64" : "x86_64")
 }
 
 # Canonical's Ubuntu 24.04 — the distro hostd-install.sh is tested against
