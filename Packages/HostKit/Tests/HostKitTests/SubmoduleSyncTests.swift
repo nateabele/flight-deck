@@ -623,6 +623,30 @@ final class SubmoduleSyncTests: XCTestCase {
         XCTAssertEqual(try TempRepo.git(["rev-parse", "\(result):lib"], in: storeGit), pin)
     }
 
+    /// The controller's own ignore rules (its `info/exclude` and global excludes, which the
+    /// snapshot carries) cover a submodule's files on the host as they cover the
+    /// superproject's: build output there is neither "a change the run made" nor wiped by the
+    /// next apply's `clean`, which would force a full rebuild of the submodule every run.
+    func testControllersExcludesCoverSubmodules() async throws {
+        let scratch = TempRepo.scratch()
+        let (app, _, _) = try makeApp(in: scratch)
+        app.write(".git/info/exclude", "scratch/\n")
+        let store = Workspace(root: scratch.appendingPathComponent("host"), poolSize: 1)
+        let first = try await store.checkout(controller: controller, ref: try await push(app, to: store), pin: false)
+        let output = first.path.appendingPathComponent("lib/scratch/out.o")
+        try FileManager.default.createDirectory(at: output.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("obj".utf8).write(to: output)
+        let changes = await store.submoduleChanges(lease: first)
+        XCTAssertEqual(changes, [], "ignored build output is not a change")
+        await store.release(first)
+
+        app.write("main.txt", "second\n")
+        try app.commitAll()
+        let second = try await store.checkout(controller: controller, ref: try await push(app, to: store), pin: false)
+        XCTAssertEqual(second.slot, first.slot)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: output.path), "the next apply's clean kept it")
+    }
+
     /// A clean run reports nothing.
     func testUntouchedSubmoduleReportsNothing() async throws {
         let scratch = TempRepo.scratch()

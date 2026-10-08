@@ -347,7 +347,7 @@ public final class Workspace: WorkspaceStore, @unchecked Sendable {
 
     /// Config for the commands that decide what is ignored (`clean`, the result's `add`): the
     /// controller's excludes, and no host-wide attributes file.
-    private static func ignoring(_ excludes: URL) -> [String] {
+    static func ignoring(_ excludes: URL) -> [String] {
         ["-c", "core.excludesFile=\(excludes.path)", "-c", "core.attributesFile=/dev/null"]
     }
 
