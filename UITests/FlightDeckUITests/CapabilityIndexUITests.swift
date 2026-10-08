@@ -48,6 +48,14 @@ final class CapabilityIndexUITests: XCTestCase {
             throw XCTSkip("INDEX_UI unset; run with TEST_RUNNER_INDEX_UI=1 -only-testing:FlightDeckUITests/CapabilityIndexUITests")
         }
         continueAfterFailure = false
+        // Fail here, by name, rather than three steps later as "No snapshot yet": the app treats a
+        // missing fixture folder as an empty index, so a run that was not given INDEX_UI_FIXTURE
+        // (smoke-remote.sh straight, not scripts/test-ui-capability-index.sh) looks like a UI bug.
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: fixturePath, isDirectory: &isDirectory), isDirectory.boolValue else {
+            XCTFail("capability index fixture folder does not exist at \(fixturePath); on the UI-test Mac run scripts/test-ui-capability-index.sh, which rsyncs it and sets TEST_RUNNER_INDEX_UI_FIXTURE")
+            return
+        }
         let app = XCUIApplication()
         app.launchArguments += ["-ApplePersistenceIgnoreState", "YES", "-FlightDeckResetState", "YES",
                                 "-FlightDeckCapabilityIndexFixture", fixturePath]
