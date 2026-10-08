@@ -67,7 +67,10 @@ struct FlagRow: View {
                 Text("Off").tag("off")
             }
             .labelsHidden()
-            .frame(width: 120)
+            // Trailing, not the default center: a menu picker does not stretch to its frame,
+            // so a centered "Default" floated ~34 pt in from the edge every other input in the
+            // pane (the Projects account pickers, the text fields) ends on — a ragged column.
+            .frame(width: 120, alignment: .trailing)
             .accessibilityIdentifier(spec.label)
 
         case .choice(let options, let allowsCustom):
@@ -97,7 +100,8 @@ struct FlagRow: View {
                     }
                 }
                 .labelsHidden()
-                .frame(width: 160)
+                // Trailing for the same reason as `.negatable` above: one input column.
+                .frame(width: 160, alignment: .trailing)
                 .accessibilityIdentifier(spec.label)
 
                 if allowsCustom, isCustomValue(options) {
