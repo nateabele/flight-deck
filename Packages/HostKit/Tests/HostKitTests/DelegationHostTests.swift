@@ -427,6 +427,41 @@ final class DelegationHostTests: XCTestCase {
         XCTAssertNil(commit, "nothing ran, so nothing changed")
     }
 
+    /// The reason line of a run that never ran is synthesized, not stored in the spool, so it
+    /// used to be re-sent at whatever offset a re-attach asked from: a controller that already
+    /// had it, re-attaching from just past it, got it again at the new offset and printed it
+    /// twice. The line keeps the offset it was first sent at.
+    func testAReattachDoesNotRepeatTheNeverRanReason() async throws {
+        let repo = try repo()
+        let c = Controller(core: try host())
+        _ = try await c.hello()
+        let ref = try await sync(repo, over: c)
+        let wrong = SnapshotRef(repoRoot: ref.repoRoot, wtKey: ref.wtKey, worktreeName: ref.worktreeName,
+                                commit: ref.commit, tree: String(repeating: "f", count: 40))
+        let runID = try await start("echo must-not-run", wrong, over: c)
+        let first = try await c.events(runID)
+        let lines = first.compactMap { event -> (Int64, Data)? in
+            if case .output(_, let at, let data) = event { return (at, data) }; return nil
+        }
+        XCTAssertEqual(lines.count, 1)
+        let (at, line) = try XCTUnwrap(lines.first)
+        let past = at + Int64(line.count)
+
+        c.forgetFrames()
+        _ = c.post(.delegation(.runAttach(runID: runID, offset: past)))
+        let again = try await c.events(runID)
+        XCTAssertEqual(again.last, .exited(.code(125)))
+        XCTAssertEqual(output(again), "", "re-attached past the reason, so nothing to print")
+
+        c.forgetFrames()
+        _ = c.post(.delegation(.runAttach(runID: runID, offset: 0)))
+        let replay = try await c.events(runID)
+        let replayed = replay.compactMap { event -> Int64? in
+            if case .output(_, let at, _) = event { return at }; return nil
+        }
+        XCTAssertEqual(replayed, [at], "a replay from the start gets the line at its own offset")
+    }
+
     /// A service starts through the services (so they hold its slot and can sync and down
     /// it), and the service ops reach them through the router.
     func testServiceStartsThroughTheServicesAndTheirOpsAreRouted() async throws {
