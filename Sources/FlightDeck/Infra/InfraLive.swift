@@ -66,23 +66,34 @@ enum InfraLive {
         { host, command, cwd in
             guard let delegation = delegation() else { throw InfraLiveError.noDelegation }
             try await Task.detached { try scratchRepository(cwd) }.value
-            return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<String, Error>) in
-                var output = Data(), settled = false
-                func settle(_ result: Result<String, Error>) {
-                    guard !settled else { return }
-                    settled = true
-                    continuation.resume(with: result)
-                }
-                delegation.handle(.run(WireDelegateRun(cwd: cwd.path, host: host, command: command)), caller: .human, cid: 0) { frame in
-                    switch frame {
-                    case .delegateOutput(_, _, _, let data): output.append(data)
-                    case .delegateExit(_, let status):
-                        let text = String(decoding: output, as: UTF8.self)
-                        settle(status == 0 ? .success(text) : .failure(InfraLiveError.runFailed(status, text)))
-                    case .err(_, let code, let message): settle(.failure(InfraLiveError.refused(message ?? code)))
-                    default: break
+            // Cancelling (the setup sheet's timeout) settles at once and stops the reply
+            // stream; the machine itself is destroyed by the caller either way.
+            let cancellation = ReplyCancellation()
+            let box = SettleBox()
+            return try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<String, Error>) in
+                    var output = Data(), settled = false
+                    box.settle = { result in
+                        guard !settled else { return }
+                        settled = true
+                        cancellation.cancel()
+                        continuation.resume(with: result)
                     }
+                    delegation.handle(.run(WireDelegateRun(cwd: cwd.path, host: host, command: command)), caller: .human,
+                                      cid: 0, cancellation: cancellation) { frame in
+                        switch frame {
+                        case .delegateOutput(_, _, _, let data): output.append(data)
+                        case .delegateExit(_, let status):
+                            let text = String(decoding: output, as: UTF8.self)
+                            box.settle?(status == 0 ? .success(text) : .failure(InfraLiveError.runFailed(status, text)))
+                        case .err(_, let code, let message): box.settle?(.failure(InfraLiveError.refused(message ?? code)))
+                        default: break
+                        }
+                    }
+                    if Task.isCancelled { box.settle?(.failure(CancellationError())) }
                 }
+            } onCancel: {
+                Task { @MainActor in box.settle?(.failure(CancellationError())) }
             }
         }
     }
@@ -102,6 +113,12 @@ enum InfraLive {
             guard p.terminationStatus == 0 else { throw InfraLiveError.refused("git \(args.first!) failed in \(dir.path)") }
         }
     }
+}
+
+/// The one way a delegated run's continuation is resumed, shared with its cancellation
+/// handler. Only ever read and written on the main actor.
+private final class SettleBox: @unchecked Sendable {
+    var settle: ((Result<String, Error>) -> Void)?
 }
 
 enum InfraLiveError: Error, CustomStringConvertible {
@@ -135,7 +152,7 @@ final class CloudChoices: @unchecked Sendable {
 /// CLI resolved on first use — never at launch, where resolving waits on a login shell. A
 /// missing CLI reads as `unavailable` with the resolver's own words; the setup sheet's Tools
 /// step is what downloads one.
-final class LiveCloudAccount: CloudAccount, @unchecked Sendable {
+final class LiveCloudAccount: CloudAccount, ComputeAPIEnabling, @unchecked Sendable {
     let cloud: String
     private let resolver: ToolResolver
     private let runner: CommandRunner
@@ -182,6 +199,17 @@ final class LiveCloudAccount: CloudAccount, @unchecked Sendable {
     }
     func listOwned(owner: String) async throws -> [OwnedResource] { try await live().listOwned(owner: owner) }
     func deleteOwned(_ resource: OwnedResource) async throws { try await live().deleteOwned(resource) }
+
+    /// GCP's projects for Settings → Cloud's picker; AWS has none to list.
+    func projects() async throws -> [String] {
+        guard let gcp = try await live() as? GCPAccount else { return [] }
+        return try await gcp.projects()
+    }
+
+    func enableComputeAPI() async throws -> ComputeAPIResult {
+        guard let gcp = try await live() as? GCPAccount else { return .enabled }
+        return try await gcp.enableComputeAPI()
+    }
 
     /// This cloud's price list over the same CLI and choice (spec §8.1).
     var prices: PriceSource { LivePriceSource(account: self, runner: runner, choices: choices) }
@@ -252,7 +280,10 @@ extension InfraLive {
         let resolver = ToolResolver(
             searchPathProvider: searchPath(reset: reset),
             managedRoot: root.appendingPathComponent("tools", isDirectory: true), runner: runner,
-            downloader: URLSessionToolDownloader())
+            downloader: URLSessionToolDownloader(),
+            // A reset run must not share the real cache directory the managed AWS CLI lives in.
+            spaceFreeRoot: reset ? root.appendingPathComponent("tools-nospace", isDirectory: true)
+                                 : ToolResolver.defaultSpaceFreeRoot())
         let aws = LiveCloudAccount(cloud: "aws", resolver: resolver, runner: runner, choices: choices)
         let gcp = LiveCloudAccount(cloud: "gcp", resolver: resolver, runner: runner, choices: choices)
         let accounts: [String: CloudAccount] = ["aws": aws, "gcp": gcp]
@@ -301,7 +332,7 @@ extension InfraLive {
 
         let run = Self.delegatedRun { [weak fleet] in fleet?.fleet?.delegation }
         let workRoot = root.appendingPathComponent("infra-setup-test", isDirectory: true)
-        let context = CloudSettingsContext(service: service, tailnet: tailnet, makeSetup: {
+        let context = CloudSettingsContext(service: service, tailnet: tailnet, listGCPProjects: { try await gcp.projects() }, makeSetup: {
             CloudSetupModel(
                 service: service, tailnet: tailnet, accounts: accounts,
                 open: { NSWorkspace.shared.open($0) },
@@ -309,6 +340,13 @@ extension InfraLive {
                 copy: { text in
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(text, forType: .string)
+                },
+                clearClipboard: { secret in
+                    // Only a clipboard that still holds the secret: the user may have copied
+                    // something else since, and that is theirs.
+                    if NSPasteboard.general.string(forType: .string)?.contains(secret) == true {
+                        NSPasteboard.general.clearContents()
+                    }
                 },
                 resolver: resolver, budget: { choices.current.budget }, regions: { choices.current.regions },
                 run: run, workRoot: workRoot)

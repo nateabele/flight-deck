@@ -4,7 +4,7 @@ import IntakeKit
 /// A GCP project reached through `gcloud` and Application Default Credentials — the credentials
 /// OpenTofu's google provider reads, which are separate from `gcloud auth login`'s. `project ==
 /// nil` means gcloud's configured default project.
-struct GCPAccount: CloudAccount {
+struct GCPAccount: CloudAccount, ComputeAPIEnabling {
     let cloud = "gcp"
     let project: String?
     private let cli: CloudCLI
@@ -82,6 +82,22 @@ struct GCPAccount: CloudAccount {
         var parts = URLComponents(string: "https://console.cloud.google.com/iam-admin/quotas")
         if let project { parts?.queryItems = [URLQueryItem(name: "project", value: project)] }
         return parts?.url
+    }
+
+    /// Every project these credentials can see, for Settings → Cloud's picker.
+    func projects() async throws -> [String] {
+        let result = try await cli.checked(["projects", "list", "--format=json"])
+        guard let list = (try? JSONSerialization.jsonObject(with: result.stdout)) as? [[String: Any]] else {
+            throw CloudAccountError.failed("gcloud projects list did not return a list")
+        }
+        return list.compactMap { $0["projectId"] as? String }
+    }
+
+    /// The Compute Engine API's console page for this project.
+    var computeAPIPage: URL {
+        var c = URLComponents(string: "https://console.cloud.google.com/apis/library/compute.googleapis.com")!
+        if let project { c.queryItems = [URLQueryItem(name: "project", value: project)] }
+        return c.url!
     }
 
     func providerEnvironment() -> [String: String] {
@@ -171,5 +187,18 @@ struct GCPAccount: CloudAccount {
         if acceleratorType == "nvidia-h100-80gb" { return "NVIDIA_H100_GPUS" }
         let model = acceleratorType.replacingOccurrences(of: "nvidia-tesla-", with: "nvidia-")
         return model.uppercased().replacingOccurrences(of: "-", with: "_") + "_GPUS"
+    }
+
+    /// `services enable` is a no-op when the API is already on, so this is safe to repeat. A
+    /// refusal for permissions is not an error to show but a page to open: someone with the
+    /// right role enables it there.
+    func enableComputeAPI() async throws -> ComputeAPIResult {
+        let result = try await cli.run(["services", "enable", "compute.googleapis.com"] + projectArgs)
+        guard result.exitCode != 0 else { return .enabled }
+        let stderr = result.stderr.lowercased()
+        if ["permission_denied", "permission denied", "does not have permission", "403"].contains(where: stderr.contains) {
+            return .needsConsole(computeAPIPage)
+        }
+        throw CloudAccountError.failed(CloudCLI.message(result))
     }
 }

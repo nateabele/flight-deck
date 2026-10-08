@@ -48,7 +48,11 @@ final class CloudSetupModel: ObservableObject {
 
     static let testPitch = "Creates the cheapest machine for at most 15 minutes, runs uname -a on it, destroys it, and shows the time and cost (about a cent)."
 
+    static let enableComputeAction = "Enable Compute Engine API"
+
     @Published private(set) var steps: [Step]
+    /// The Tools step's download, 0...1, while one runs; nil otherwise.
+    @Published private(set) var toolProgress: Double?
     /// The policy change `applyPolicy` found, waiting for the user to read it and Apply.
     @Published private(set) var pendingPatch: HuJSONPatcher.Patch?
 
@@ -58,11 +62,13 @@ final class CloudSetupModel: ObservableObject {
     private let open: (URL) -> Void
     private let clipboard: () -> String?
     private let copy: (String) -> Void
+    private let clearClipboard: (String) -> Void
     private let resolver: ToolResolver?
     private let budget: () -> BudgetSettings
     private let regions: () -> [String: String]
     private let run: HostRun
     private let workRoot: URL
+    private let testRunTimeout: TimeInterval
 
     private var userSkipped: Set<StepID> = []
     private var autoSkipped: Set<StepID> = []
@@ -72,22 +78,26 @@ final class CloudSetupModel: ObservableObject {
 
     init(service: InfraService, tailnet: TailnetIntegration, accounts: [String: CloudAccount],
          open: @escaping (URL) -> Void, clipboard: @escaping () -> String?,
-         copy: @escaping (String) -> Void = { _ in }, resolver: ToolResolver? = nil,
+         copy: @escaping (String) -> Void = { _ in }, clearClipboard: @escaping (String) -> Void = { _ in },
+         resolver: ToolResolver? = nil,
          budget: @escaping () -> BudgetSettings = { .default },
          regions: @escaping () -> [String: String] = { CloudPreferences().regions },
          run: @escaping HostRun = { _, _, _ in throw InfraLiveError.noDelegation },
-         workRoot: URL = FileManager.default.temporaryDirectory.appendingPathComponent("flightdeck-setup-test")) {
+         workRoot: URL = FileManager.default.temporaryDirectory.appendingPathComponent("flightdeck-setup-test"),
+         testRunTimeout: TimeInterval = 180) {
         self.service = service
         self.tailnet = tailnet
         self.accounts = accounts
         self.open = open
         self.clipboard = clipboard
         self.copy = copy
+        self.clearClipboard = clearClipboard
         self.resolver = resolver
         self.budget = budget
         self.regions = regions
         self.run = run
         self.workRoot = workRoot
+        self.testRunTimeout = testRunTimeout
         steps = StepID.allCases.map { Step(id: $0, state: .pending, detail: "", action: nil, skipped: false) }
         // The one step no check fills in: it runs only when asked, because it costs money.
         set(.test, .pending, Self.testPitch, action: "Run Test")
@@ -146,7 +156,11 @@ final class CloudSetupModel: ObservableObject {
         guard !isSkipped(id) else { return apply() }
         guard let account = accounts[cloud] else { return set(id, .failed, "No \(cloud) account is configured.") }
         switch await account.status() {
-        case .ready(let identity): set(id, .ok, "Signed in: \(identity)")
+        case .ready(let identity):
+            // GCP creates nothing until the Compute Engine API is on; enabling is idempotent,
+            // so the action is offered rather than checked (a check is a second slow call).
+            set(id, .ok, "Signed in: \(identity)",
+                action: account is ComputeAPIEnabling ? Self.enableComputeAction : nil)
         case .signedOut(let fix): set(id, .failed, "Signed out. `\(fix)` signs in.", action: "Sign in")
         case .unavailable(let why): set(id, .failed, why)
         }
@@ -231,14 +245,14 @@ final class CloudSetupModel: ObservableObject {
     func perform(_ id: StepID) async {
         switch id {
         case .tools:
-            set(.tools, .running, "Downloading…")
             for tool in [InfraTool.tofu, .aws, .gcloud] {
                 if tool == .aws && isSkipped(.aws) || tool == .gcloud && isSkipped(.gcp) { continue }
-                do { _ = try await service.tool(tool) } catch {
-                    // Reported by the check below, in the resolver's own words.
-                }
+                set(.tools, .running, "Getting \(tool.rawValue)…")
+                await provision(tool)
             }
             await refreshTools()
+        case .gcp where step(.gcp).state == .ok:
+            await enableCompute()
         case .aws, .gcp:
             let cloud = id == .aws ? "aws" : "gcp"
             guard let account = accounts[cloud] else { return await refreshAccount(cloud) }
@@ -262,6 +276,39 @@ final class CloudSetupModel: ObservableObject {
             refreshBudget()
         case .test:
             await runTest()
+        }
+    }
+
+    /// One tool through `InfraService` (one download per tool, however many ask), its progress
+    /// published as it arrives. Every value is delivered before this returns, so a late one
+    /// can never re-show a bar for a step that has finished.
+    private func provision(_ tool: InfraTool) async {
+        let (stream, continuation) = AsyncStream.makeStream(of: Double.self)
+        let forward = Task { @MainActor in
+            for await p in stream { self.toolProgress = p }
+        }
+        // A failure is reported by the check that follows, in the resolver's own words.
+        _ = try? await service.tool(tool) { continuation.yield($0) }
+        continuation.finish()
+        await forward.value
+        toolProgress = nil
+    }
+
+    private func enableCompute() async {
+        guard let account = accounts["gcp"] as? ComputeAPIEnabling else { return }
+        let signedIn = step(.gcp).detail
+        set(.gcp, .running, "Enabling the Compute Engine API…")
+        do {
+            switch try await account.enableComputeAPI() {
+            case .enabled:
+                set(.gcp, .ok, "\(signedIn)\nThe Compute Engine API is enabled.")
+            case .needsConsole(let page):
+                open(page)
+                set(.gcp, .failed, "\(signedIn)\nThis account can't enable the Compute Engine API: enable it on the page that opened, or ask a project owner.",
+                    action: Self.enableComputeAction)
+            }
+        } catch {
+            set(.gcp, .failed, "\(signedIn)\n\(Self.describe(error))", action: Self.enableComputeAction)
         }
     }
 
@@ -331,17 +378,19 @@ final class CloudSetupModel: ObservableObject {
 
     // MARK: - OAuth client
 
-    /// Reads an OAuth client's ID and secret off the clipboard into the Keychain. False when
-    /// the clipboard does not hold both; throws when there is no tailnet to record it for.
-    func captureOAuthClientFromClipboard() throws -> Bool {
+    /// Reads an OAuth client's ID and secret off the clipboard into the Keychain, then asks
+    /// for the secret to be cleared off the clipboard. False when the clipboard does not hold
+    /// both; throws when there is no tailnet to record it for. The tailnet is read with
+    /// `local()`, which runs off the main actor (its CLI call can take seconds).
+    func captureOAuthClientFromClipboard() async throws -> Bool {
         guard let text = clipboard(), let parsed = Self.parseOAuthClient(text) else {
-            set(.oauth, .failed, "The clipboard doesn't hold both a client ID (k…) and a secret (tskey-client-…). "
+            set(.oauth, .failed, "The clipboard doesn't hold both a client ID (k…) and its secret (tskey-client-k…). "
                 + Self.oauthChecklist, action: "Open OAuth Clients")
             return false
         }
         let name: String
         if let localTailnet { name = localTailnet } else {
-            let local = tailnet.localNow()
+            let local = await tailnet.local()
             guard local.running, let current = local.tailnet else {
                 set(.oauth, .failed, CloudSetupError.tailscaleNotRunning.description)
                 throw CloudSetupError.tailscaleNotRunning
@@ -349,24 +398,27 @@ final class CloudSetupModel: ObservableObject {
             name = current
         }
         try tailnet.saveClient(TailscaleOAuthClient(id: parsed.id, secret: parsed.secret, tailnet: name))
+        clearClipboard(parsed.secret)
         set(.oauth, .ok, "OAuth client \(parsed.id) is in the Keychain.")
         return true
     }
 
-    /// The client ID (`k…`) and secret (`tskey-client-…`) anywhere in `text`. Tailscale's
-    /// secret carries the ID inside it, so a standalone token equal to that one is preferred
-    /// over any other word that happens to start with `k`.
+    /// The client ID (`k…`) and secret (`tskey-client-<id>-…`) in `text`. Tailscale's secret
+    /// carries its client's ID, so the ID is that one, and only when it also appears on its
+    /// own: never some other `k…` word ("key:", another client's ID).
     static func parseOAuthClient(_ text: String) -> (id: String, secret: String)? {
-        guard let secretRange = text.range(of: #"tskey-client-[A-Za-z0-9-]+"#, options: .regularExpression) else { return nil }
+        guard let secretRange = text.range(of: #"tskey-client-k[A-Za-z0-9]+-[A-Za-z0-9-]+"#, options: .regularExpression)
+        else { return nil }
         let secret = String(text[secretRange])
-        let embedded = secret.dropFirst("tskey-client-".count).split(separator: "-").first.map(String.init)
+        guard let embedded = secret.dropFirst("tskey-client-".count).split(separator: "-").first.map(String.init)
+        else { return nil }
         var rest = text
         rest.removeSubrange(secretRange)
         let pattern = try! NSRegularExpression(pattern: #"(?<![A-Za-z0-9-])k[A-Za-z0-9]+(?![A-Za-z0-9-])"#)
-        let ids = pattern.matches(in: rest, range: NSRange(rest.startIndex..., in: rest))
+        let standalone = pattern.matches(in: rest, range: NSRange(rest.startIndex..., in: rest))
             .compactMap { Range($0.range, in: rest).map { String(rest[$0]) } }
-        guard let id = ids.first(where: { $0 == embedded }) ?? ids.first else { return nil }
-        return (id, secret)
+        guard standalone.contains(embedded) else { return nil }
+        return (embedded, secret)
     }
 
     // MARK: - Test machine
@@ -393,7 +445,7 @@ final class CloudSetupModel: ObservableObject {
                 if case .progress(let line) = event { self?.set(.test, .running, line) }
             }
             set(.test, .running, "Running uname -a on \(name)…")
-            output = try await run(name, ["uname", "-a"], workRoot)
+            output = try await runWithTimeout(name)
         } catch {
             failure = Self.describe(error)
         }
@@ -412,6 +464,28 @@ final class CloudSetupModel: ObservableObject {
         } else {
             let first = output?.split(separator: "\n").first.map(String.init) ?? ""
             set(.test, .ok, "\(first)\n\(cloud) \(type) · \(took) · ~\(cost) est.", action: "Run Test")
+        }
+    }
+
+    struct TestRunTimedOut: Error {}
+
+    /// The delegated `uname -a`, abandoned after `testRunTimeout`: a run that never ends must
+    /// not hold the test machine (and its bill) for the rest of its TTL. The run is cancelled,
+    /// so the delegated run's own cancellation stops it.
+    private func runWithTimeout(_ name: String) async throws -> String {
+        let run = run, workRoot = workRoot, timeout = testRunTimeout
+        do {
+            return try await withThrowingTaskGroup(of: String.self) { group in
+                group.addTask { @MainActor in try await run(name, ["uname", "-a"], workRoot) }
+                group.addTask {
+                    try await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+                    throw TestRunTimedOut()
+                }
+                defer { group.cancelAll() }
+                return try await group.next()!
+            }
+        } catch is TestRunTimedOut {
+            throw InfraError.refused("uname -a on \(name) did not finish within \(Int(timeout.rounded(.up))) s")
         }
     }
 

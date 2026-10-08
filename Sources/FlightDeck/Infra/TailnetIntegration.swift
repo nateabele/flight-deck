@@ -84,12 +84,7 @@ final class TailnetIntegration: @unchecked Sendable {
 
     // MARK: Local CLI
 
-    func local() async -> LocalTailnet { localNow() }
-
-    /// `local()` without the suspension, for the setup sheet's clipboard capture, which must
-    /// record the client against this Mac's tailnet from a button press. Blocks for at most
-    /// the CLI's own timeouts.
-    func localNow() -> LocalTailnet {
+    func local() async -> LocalTailnet {
         guard let cli, let data = TailscaleCLI.run(cli.path, ["status", "--json"], timeout: 2) else { return .absent }
         struct Status: Decodable {
             struct Tailnet: Decodable { let Name: String? }

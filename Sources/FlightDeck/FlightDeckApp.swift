@@ -228,6 +228,9 @@ struct FlightDeckApp: App {
         return DelegationBootstrap(stateDirectory: stateDirectory() ?? FileSessionPersistence.defaultDirectory())
     }
 
+    /// What hosts and cloud machines know this Mac as.
+    private static var controllerName: String { Host.current().localizedName ?? "Mac" }
+
     /// Builds the host service beside `FleetService` and starts its links. Cannot hold up
     /// launch: `hosts.json` is a few hundred bytes, `start()` returns at once and reads the
     /// Keychain off the main thread, and with no paired hosts it does nothing.
@@ -236,9 +239,6 @@ struct FlightDeckApp: App {
     /// never started, for the reason the fleet listener is not: a reset run must neither read
     /// the developer's paired hosts nor dial them.
     @MainActor
-    /// What hosts and cloud machines know this Mac as.
-    private static var controllerName: String { Host.current().localizedName ?? "Mac" }
-
     private static func makeHostService() -> HostService {
         let controllerName = Self.controllerName
         guard !isResettingState else {
