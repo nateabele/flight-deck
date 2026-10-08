@@ -170,6 +170,12 @@ final class IntakeRunnerController {
     /// holding the leases; a relaunch rebuilds it from each live runner's `accounts.json`.
     private var heldAccounts: [UUID: RunnerAccounts] = [:]
 
+    /// Told when a runner starts on a pool whose every member is over its hard limit (intake
+    /// id, project path, the notice). The run still starts — inside the pool, on the member with
+    /// the most headroom — so without this the user would learn of it only from a round that
+    /// stalls on a rate limit. `SessionStore` posts it as a user notification, as tabs do.
+    var onAccountNotice: ((UUID, String, AccountNotice) -> Void)?
+
     init(
         daemon: SessionDaemon,
         control: DaemonControlling,
@@ -381,7 +387,9 @@ final class IntakeRunnerController {
         // An intake that will not load has no agents to resolve; the runner fails it with its
         // own diagnosis.
         let intake = try? intakes.load(id: id)
-        switch accounts.acquire(intake?.roundConfig?.agents ?? [], project: intake?.projectPath ?? "") {
+        let project = intake?.projectPath ?? ""
+        var notices: [AccountNotice] = []
+        switch accounts.acquire(intake?.roundConfig?.agents ?? [], project: project, notice: { notices.append($0) }) {
         case .failure(let error):
             return .failure(.accountUnavailable(error.message))
         case .success(let resolved):
@@ -392,6 +400,8 @@ final class IntakeRunnerController {
                 return .failure(.spawnFailed("could not record the planning accounts: \(error)"))
             }
             heldAccounts[id] = resolved
+            // After the write succeeded, so a start that then failed never also says it started.
+            for notice in notices { onAccountNotice?(id, project, notice) }
             return .success(())
         }
     }

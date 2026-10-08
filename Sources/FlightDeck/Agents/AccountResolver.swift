@@ -95,7 +95,9 @@ enum AccountResolutionError: Error, Equatable, Sendable {
 /// Main-actor because its inputs (`PreferencesStore`) are; the ledger itself is lock-guarded.
 @MainActor
 final class AccountResolver {
-    private let preferences: PreferencesStore
+    /// Internal, not private: planning's `AccountResolving` conformance (PlanningAccounts.swift)
+    /// reads a pool's label from it for the Rounds editor's billing line.
+    let preferences: PreferencesStore
     let ledger: CapacityLedger
     private var holds: [UUID: [AccountLease]] = [:]
 
