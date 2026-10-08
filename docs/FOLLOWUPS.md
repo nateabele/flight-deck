@@ -2679,7 +2679,8 @@ container; **nothing has run against a real second machine.**
 **Config and routing shims**
 - The shim's probe watchdog (`sleep 2`) can linger up to 2 s after the probe returns; `exec sleep`
   would end it with the probe.
-- The inline-table deep-key test asserts only that it throws.
+- The inline-table deep-key test asserts only that it throws. **FIXED (2026-10-08):** it now
+  asserts the exact refusal (`delegate.toml:1: error: expected = after the key`).
 - A CLI found on `PATH` (not this build's) costs one extra process start per routed command for the
   `route-exec` probe.
 - `recipe add` drops comments inside the recipe's own table when it replaces it, and cannot replace a

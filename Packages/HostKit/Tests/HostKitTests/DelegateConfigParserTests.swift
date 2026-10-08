@@ -185,9 +185,14 @@ final class DelegateConfigParserTests: XCTestCase {
                 XCTAssertEqual((error as? DelegateConfigIssue)?.message, "keys nested too deeply")
             }
         }
-        // An inline table takes a single key, so a dotted one is refused before any table is
-        // built; the point is that it is an error and not a crash.
-        XCTAssertThrowsError(try DelegateConfigParser.parse("x = { \(path) = 1 }"))
+        // An inline table takes a single key, so a dotted one is refused at its first `.`,
+        // before any of the path is walked. Pinned to that refusal, not just "it threw": a
+        // parser that walked the dotted path first (to build it, or to bound it) would still
+        // throw, and only the exact message says it stopped at the first component.
+        XCTAssertThrowsError(try DelegateConfigParser.parse("x = { \(path) = 1 }")) { error in
+            XCTAssertEqual(error as? DelegateConfigIssue,
+                           DelegateConfigIssue(.error, line: 1, "expected = after the key"))
+        }
         let ok = Array(repeating: "a", count: 32).joined(separator: ".")
         XCTAssertNoThrow(try DelegateConfigParser.parse("[\(ok)]\n\(ok) = 1"))
     }
