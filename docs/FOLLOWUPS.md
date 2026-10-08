@@ -2612,7 +2612,9 @@ container; **nothing has run against a real second machine.**
 **Host router and wire**
 - **No failure event.** A run that never ran is a synthesized `flightdeck: <reason>` line plus
   `exited(125)`. The line sits at the spool's end without being stored in it, so a re-attach from
-  past it sends it again at the new offset (a cosmetic duplicate).
+  past it sends it again at the new offset (a cosmetic duplicate). **Duplicate FIXED (2026-10-08):** the router
+  keeps the offset the line was first sent at, re-sends it only there, and not at all to a
+  re-attach from past it. There is still no failure event.
 - **No event-send backpressure on the host.** `HostPeer.send(text:)` is fire-and-forget and
   `Runner.events` buffers without limit: replaying a full 64 MiB spool to a slow link holds about
   85 MiB in hostd.

@@ -51,9 +51,12 @@ public final class DelegationHost: @unchecked Sendable {
     /// keys results by repo. In memory, because a run does not outlive hostd (`shutdown`, and
     /// `Runner`'s startup kill of groups a crashed hostd left).
     private var runRepos: [String: String] = [:]
-    /// Runs that ended without ever running (a failed checkout, a locked screen). Their
-    /// `run.result` is "nothing changed", not `result_expired`: there never was a result.
-    private var failedRuns: Set<String> = []
+    /// Runs that ended without ever running (a failed checkout, a locked screen), with the
+    /// offset their synthesized reason line was first sent at. Their `run.result` is "nothing
+    /// changed", not `result_expired`: there never was a result. The offset is kept because
+    /// the line is not in the spool: re-sent at whatever offset a re-attach asked from, a
+    /// controller that already had it printed it twice.
+    private var failedRuns: [String: Int64] = [:]
     /// Slots whose pairing was revoked. A `run.start` from one that was already being routed
     /// when the revoke landed must not start anything afterwards.
     private var revokedSlots: Set<UUID> = []
@@ -218,7 +221,7 @@ public final class DelegationHost: @unchecked Sendable {
                 // Pruned to the runs the runner still knows, so a hostd up for weeks does not
                 // keep a row per run it ever started.
                 runRepos = runRepos.filter { runner.owner(runID: $0.key) != nil }
-                failedRuns = failedRuns.filter { runner.owner(runID: $0) != nil }
+                failedRuns = failedRuns.filter { runner.owner(runID: $0.key) != nil }
                 runRepos[runID] = ref.repoRoot
                 return revokedSlots.contains(slot)
             }
@@ -330,7 +333,7 @@ public final class DelegationHost: @unchecked Sendable {
         let bundle: URL?
         do {
             bundle = try await workspace.resultBundle(controller: controller, repoRoot: repoRoot, runID: runID)
-        } catch SyncError.resultExpired where lock.withLock({ failedRuns.contains(runID) }) {
+        } catch SyncError.resultExpired where lock.withLock({ failedRuns[runID] != nil }) {
             bundle = nil
         }
         guard let bundle else {
@@ -440,9 +443,16 @@ public final class DelegationHost: @unchecked Sendable {
             // stream just throws, and the wire has no event for that. Without this the
             // controller would wait on a run that is already over. It gets the reason as the
             // usual `flightdeck:` line and the 125 every delegation failure exits with (§5).
-            lock.withLock { _ = failedRuns.insert(runID) }
+            // At the offset it was first sent at, and not at all to a re-attach from past it.
             let line = Data("flightdeck: \(Self.describe(error).message)\n".utf8)
-            send(.event(runID: runID, .output(stream: .stderr, offset: end, data: line)), to: peer)
+            let at = lock.withLock { () -> Int64 in
+                if let first = failedRuns[runID] { return first }
+                failedRuns[runID] = end
+                return end
+            }
+            if offset < at + Int64(line.count) {
+                send(.event(runID: runID, .output(stream: .stderr, offset: at, data: line)), to: peer)
+            }
             send(.event(runID: runID, .exited(.code(DelegationError.exitStatus))), to: peer)
         }
     }
