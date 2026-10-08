@@ -49,10 +49,10 @@ public final class ChannelMux: ChannelOpening, ChannelAccepting, @unchecked Send
         case host
     }
 
-    /// Peer channels the host holds before anyone claims them. Each is bounded by the
-    /// window, so this bounds the pre-accept bytes too (32 x 256 KiB = 8 MiB): without it an
-    /// authenticated but broken peer could open ids without end and make us hold a window
-    /// for each.
+    /// Peer channels held before anyone claims them: unclaimed in the mux, or waiting in the
+    /// `accept()` stream for its consumer. Each is bounded by the window, so this bounds the
+    /// pre-accept bytes too (32 x 256 KiB = 8 MiB): without it an authenticated but broken
+    /// peer could open ids without end and make us hold a window for each.
     public static let maxUnclaimed = 32
 
     private let role: Role
@@ -110,10 +110,16 @@ public final class ChannelMux: ChannelOpening, ChannelAccepting, @unchecked Send
     /// Peer-opened channels nobody has claimed by id, each yielded once, at its first frame.
     /// Created on first call, so a side that only ever claims by id (the host's router) never
     /// accumulates channels in a stream nobody drains. The same stream on every call.
+    ///
+    /// The stream holds at most `maxUnclaimed` channels its consumer has not taken yet; a
+    /// channel that arrives past that is closed at both ends, as past the cap without a stream.
+    /// An unbounded buffer let a consumer that stopped draining hold a window per channel
+    /// for as many channels as the peer cared to open.
     public func accept() -> AsyncStream<any ByteChannel> {
         lock.lock(); defer { lock.unlock() }
         if let incoming { return incoming }
-        let (stream, continuation) = AsyncStream<any ByteChannel>.makeStream()
+        let (stream, continuation) = AsyncStream<any ByteChannel>.makeStream(
+            bufferingPolicy: .bufferingOldest(Self.maxUnclaimed))
         if isShutdown { continuation.finish() }
         incoming = stream
         incomingContinuation = continuation
@@ -173,7 +179,9 @@ public final class ChannelMux: ChannelOpening, ChannelAccepting, @unchecked Send
             channels[id] = channel
             if let incomingContinuation {
                 channel.claimed = true
-                effects.yields.append { incomingContinuation.yield(channel) }
+                effects.yields.append {
+                    if case .dropped = incomingContinuation.yield(channel) { channel.cancel() }
+                }
             }
         } else {
             // Our parity, but never opened: dropped (contract A6). Answering with a close
