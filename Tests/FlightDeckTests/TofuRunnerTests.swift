@@ -93,4 +93,21 @@ final class TofuRunnerTests: XCTestCase {
         let gone = try await runner(tofu).refreshShowsGone(workdir: dir)
         XCTAssertFalse(gone)
     }
+
+    /// Only the compute resource's own type counts: `aws_instance_profile` merely contains
+    /// "instance", and its deletion is not a gone machine.
+    func testRefreshAnchorsOnTheInstanceResourceType() async throws {
+        let profile = try fakeTofu("""
+        echo '{"type":"resource_drift","change":{"resource":{"addr":"aws_instance_profile.this"},"action":"delete"}}'
+        exit 2
+        """)
+        let profileGone = try await runner(profile).refreshShowsGone(workdir: dir)
+        XCTAssertFalse(profileGone)
+        let gce = try fakeTofu("""
+        echo '{"type":"resource_drift","change":{"resource":{"addr":"module.box.google_compute_instance.this[0]"},"action":"delete"}}'
+        exit 2
+        """)
+        let gceGone = try await runner(gce).refreshShowsGone(workdir: dir)
+        XCTAssertTrue(gceGone)
+    }
 }
