@@ -1,5 +1,22 @@
+# `<region>-a` is not a zone everywhere (us-east1 has b, c and d), so a guessed default fails
+# at create time in those regions. With no zone given, take the first UP zone by name: sorted,
+# because the API's order is not a contract and a reordering must not move the machine.
+data "google_compute_zones" "up" {
+  count = var.zone == null ? 1 : 0
+
+  region = var.region
+  status = "UP"
+
+  lifecycle {
+    postcondition {
+      condition     = length(self.names) > 0
+      error_message = "${var.region} has no zone that is UP; set zone in [infra.<name>] vars, or pick another region."
+    }
+  }
+}
+
 locals {
-  zone = coalesce(var.zone, "${var.region}-a")
+  zone = var.zone != null ? var.zone : sort(data.google_compute_zones.up[0].names)[0]
   arch = coalesce(var.arch, can(regex("^(t2a|c4a|n4a|a4x)-", var.instance_type)) ? "arm64" : "x86_64")
 
   # The newest families boot only from Hyperdisk; the rest take pd-balanced (pd-standard, the
@@ -75,12 +92,13 @@ resource "google_compute_instance" "this" {
     enable_secure_boot = true
   }
 
-  # Both drift on their own: the image family moves to a newer image (and boot_disk's image is
-  # force-new), and Flight Deck re-renders fd_user_data on every `up`. Without this, the spec
-  # §6.2 re-apply that only moves fd_allow_cidr would replace a running machine, or rewrite
-  # its metadata under it. They matter at creation only.
+  # All three drift on their own: the image family moves to a newer image (and boot_disk's
+  # image is force-new), Flight Deck re-renders fd_user_data on every `up`, and the first UP
+  # zone moves when a zone goes down (zone is force-new). Without this, the spec §6.2 re-apply
+  # that only moves fd_allow_cidr would replace a running machine, or rewrite its metadata
+  # under it. They matter at creation only.
   lifecycle {
-    ignore_changes = [boot_disk[0].initialize_params[0].image, metadata["user-data"]]
+    ignore_changes = [boot_disk[0].initialize_params[0].image, metadata["user-data"], zone]
   }
 }
 
