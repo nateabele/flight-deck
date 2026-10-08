@@ -84,6 +84,26 @@ final class PromptKeyboardUITests: XCTestCase {
         XCTAssertFalse(composer.exists, "expanded again, the message box goes again")
     }
 
+    /// A lone question shows its heading once, at the card's left edge, and the minimize
+    /// button beside the title line below it rather than beside the heading.
+    func testALoneQuestionShowsItsHeadingOnceWithTheButtonOnTheTitleLine() {
+        let app = XCUIApplication()
+        app.launchArguments += ["-UITestHarness", "promptKeyboard", "-UITestSingle", "YES"]
+        app.launch()
+        let card = app.otherElements["prompt-card"]
+        XCTAssertTrue(card.waitForExistence(timeout: 20))
+        attach(app, "7-single")
+        XCTAssertEqual(app.staticTexts.matching(identifier: "COLOR").count, 1, "heading shown once")
+        XCTAssertEqual(app.staticTexts.matching(identifier: "Which color do you like best?").count, 1,
+                       "title shown once")
+        let heading = app.staticTexts["COLOR"]
+        let title = app.staticTexts["Which color do you like best?"]
+        let toggle = app.buttons["prompt-minimize"]
+        XCTAssertLessThan(heading.frame.minX, toggle.frame.minX, "the heading keeps the left edge")
+        XCTAssertGreaterThan(toggle.frame.minY, heading.frame.maxY - 2, "the button is below the heading")
+        XCTAssertGreaterThan(title.frame.minX, toggle.frame.maxX, "the title sits after the button")
+    }
+
     /// The keyboard's drawn top edge, suggestion bar included — see the first measurement.
     private func keyboardTop(_ keyboard: XCUIElement) -> CGFloat { keyboard.frame.minY - 44 }
 
