@@ -1,5 +1,6 @@
 import FleetKit
 import Foundation
+import IntakeKit
 
 /// One entry from codex's `thread/list` — trimmed to exactly what `threads(inDirectory:)`'s
 /// caller (`CodexPinReconciler`) needs to tell whether a tab is still driving the thread its
@@ -24,6 +25,9 @@ private let codexThreadListLimit = 10
 @MainActor
 struct CodexAdapter: AgentAdapter {
     static let id: AgentID = .codex
+
+    /// The headless facet (unify brief R3): the profile planning runs this agent through.
+    nonisolated static var profile: any AgentProfile { AgentProfiles.profile(for: id) }
 
     /// **Typed at the pty, never through the app-server — and the distinction is permanent.**
     ///

@@ -82,7 +82,7 @@ final class BrSwarmBackendTests: XCTestCase {
     func testWriteBlockMergesIntoExistingContext() async throws {
         let fake = MultiRunner()
         fake.responses["br update fx-c"] = ("{}", 0)
-        let block = ExecutionBlock(kind: "tests", harness: "claude", model: "opus", pool: "claude-subs",
+        let block = ExecutionBlock(kind: "tests", agent: .claude, model: "opus", pool: "claude-subs",
                                    source: AssignmentSource(by: .manual, reason: "override", at: Date(timeIntervalSince1970: 1_790_000_000)),
                                    pinned: true)
         let ok = await BrSwarmBackend(runner: fake).writeBlock(block, task: "fx-c",

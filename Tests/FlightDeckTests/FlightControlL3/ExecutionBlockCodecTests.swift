@@ -9,7 +9,7 @@ final class ExecutionBlockCodecTests: XCTestCase {
     private let at = Date(timeIntervalSince1970: 1_790_000_000)
 
     private func block(pinned: Bool = false) -> ExecutionBlock {
-        ExecutionBlock(kind: "snapshot-tests", harness: "codex", model: "gpt-6-sol",
+        ExecutionBlock(kind: "snapshot-tests", agent: .codex, model: "gpt-6-sol",
                        knobs: ["effort": "high"], pool: "codex-subs",
                        source: AssignmentSource(by: .rule, ruleId: "r3",
                                                 reason: "test-authoring 0.8 → codex", at: at),
@@ -60,7 +60,7 @@ final class ExecutionBlockCodecTests: XCTestCase {
     }
 
     func testDecodeRejectsNewerVersion() {
-        let ctx = #"{"flight_deck":{"execution":{"v":2,"kind":"k","harness":"h","model":"m","pool":"p","source":{"by":"rule","reason":"r","at":"2026-10-04T18:00:00Z"}}}}"#
+        let ctx = #"{"flight_deck":{"execution":{"v":2,"kind":"k","harness":"claude","model":"m","pool":"p","source":{"by":"rule","reason":"r","at":"2026-10-04T18:00:00Z"}}}}"#
         XCTAssertEqual(ExecutionBlockCodec.decode(agentContext: ctx), .failure(.unsupportedVersion(2)))
     }
 
@@ -68,23 +68,23 @@ final class ExecutionBlockCodecTests: XCTestCase {
         func ctx(_ exec: String) -> String { #"{"flight_deck":{"execution":"# + exec + "}}" }
         let src = #""source":{"by":"rule","reason":"r","at":"2026-10-04T18:00:00Z"}"#
         XCTAssertEqual(ExecutionBlockCodec.decode(agentContext: ctx(#"{"kind":"k"}"#)), .failure(.missingField("v")))
-        XCTAssertEqual(ExecutionBlockCodec.decode(agentContext: ctx(#"{"v":1,"harness":"h","model":"m","pool":"p","# + src + "}")),
+        XCTAssertEqual(ExecutionBlockCodec.decode(agentContext: ctx(#"{"v":1,"harness":"claude","model":"m","pool":"p","# + src + "}")),
                        .failure(.missingField("kind")))
-        XCTAssertEqual(ExecutionBlockCodec.decode(agentContext: ctx(#"{"v":1,"kind":"","harness":"h","model":"m","pool":"p","# + src + "}")),
+        XCTAssertEqual(ExecutionBlockCodec.decode(agentContext: ctx(#"{"v":1,"kind":"","harness":"claude","model":"m","pool":"p","# + src + "}")),
                        .failure(.invalidField("kind", "empty")))
-        XCTAssertEqual(ExecutionBlockCodec.decode(agentContext: ctx(#"{"v":1,"kind":"k","harness":"h","model":"m","pool":"p","knobs":{"effort":3},"# + src + "}")),
+        XCTAssertEqual(ExecutionBlockCodec.decode(agentContext: ctx(#"{"v":1,"kind":"k","harness":"claude","model":"m","pool":"p","knobs":{"effort":3},"# + src + "}")),
                        .failure(.invalidField("knobs", "values must be strings")))
-        XCTAssertEqual(ExecutionBlockCodec.decode(agentContext: ctx(#"{"v":1,"kind":"k","harness":"h","model":"m","pool":"p","source":{"by":"vibes","reason":"r","at":"2026-10-04T18:00:00Z"}}"#)),
+        XCTAssertEqual(ExecutionBlockCodec.decode(agentContext: ctx(#"{"v":1,"kind":"k","harness":"claude","model":"m","pool":"p","source":{"by":"vibes","reason":"r","at":"2026-10-04T18:00:00Z"}}"#)),
                        .failure(.invalidField("source.by", "unknown value vibes")))
         XCTAssertEqual(ExecutionBlockCodec.decode(agentContext: ctx(#""oops""#)),
                        .failure(.invalidField("execution", "not an object")))
     }
 
     func testPinnedAndHostDefault() throws {
-        let ctx = #"{"flight_deck":{"execution":{"v":1,"kind":"k","harness":"h","model":"m","pool":"p","source":{"by":"manual","reason":"r","at":"2026-10-04T18:00:00Z"}}}}"#
+        let ctx = #"{"flight_deck":{"execution":{"v":1,"kind":"k","harness":"claude","model":"m","pool":"p","source":{"by":"manual","reason":"r","at":"2026-10-04T18:00:00Z"}}}}"#
         let b = try XCTUnwrap(ExecutionBlockCodec.decode(agentContext: ctx).get())
         XCTAssertFalse(b.pinned); XCTAssertNil(b.host); XCTAssertEqual(b.knobs, [:])
-        XCTAssertEqual(b.modelRef, ModelRef(harness: "h", model: "m", knobs: [:]))
+        XCTAssertEqual(b.modelRef, ModelRef(agent: .claude, model: "m", knobs: [:]))
     }
 
     // Fix 1: flight_deck validation
@@ -96,7 +96,7 @@ final class ExecutionBlockCodecTests: XCTestCase {
     }
 
     func testDecodeRefusesNonObjectFlightDeck() {
-        let ctx = #"{"flight_deck":"not an object","execution":{"v":1,"kind":"k","harness":"h","model":"m","pool":"p","source":{"by":"rule","reason":"r","at":"2026-10-04T18:00:00Z"}}}"#
+        let ctx = #"{"flight_deck":"not an object","execution":{"v":1,"kind":"k","harness":"claude","model":"m","pool":"p","source":{"by":"rule","reason":"r","at":"2026-10-04T18:00:00Z"}}}"#
         XCTAssertEqual(ExecutionBlockCodec.decode(agentContext: ctx), .failure(.invalidField("flight_deck", "not an object")))
     }
 
@@ -109,14 +109,14 @@ final class ExecutionBlockCodecTests: XCTestCase {
     func testDecodeRejectsNonStringRuleId() {
         func ctx(_ exec: String) -> String { #"{"flight_deck":{"execution":"# + exec + "}}" }
         let src = #""source":{"by":"rule","reason":"r","at":"2026-10-04T18:00:00Z","ruleId":123}"#
-        XCTAssertEqual(ExecutionBlockCodec.decode(agentContext: ctx(#"{"v":1,"kind":"k","harness":"h","model":"m","pool":"p","# + src + "}")),
+        XCTAssertEqual(ExecutionBlockCodec.decode(agentContext: ctx(#"{"v":1,"kind":"k","harness":"claude","model":"m","pool":"p","# + src + "}")),
                        .failure(.invalidField("source.ruleId", "not a string")))
     }
 
     func testDecodeRejectsNonStringHost() {
         func ctx(_ exec: String) -> String { #"{"flight_deck":{"execution":"# + exec + "}}" }
         let src = #""source":{"by":"rule","reason":"r","at":"2026-10-04T18:00:00Z"}"#
-        XCTAssertEqual(ExecutionBlockCodec.decode(agentContext: ctx(#"{"v":1,"kind":"k","harness":"h","model":"m","pool":"p","# + src + #","host":123}"#)),
+        XCTAssertEqual(ExecutionBlockCodec.decode(agentContext: ctx(#"{"v":1,"kind":"k","harness":"claude","model":"m","pool":"p","# + src + #","host":123}"#)),
                        .failure(.invalidField("host", "not a string")))
     }
 
@@ -124,16 +124,16 @@ final class ExecutionBlockCodecTests: XCTestCase {
     func testDecodeRejectsNonIntegerV() {
         func ctx(_ exec: String) -> String { #"{"flight_deck":{"execution":"# + exec + "}}" }
         let src = #""source":{"by":"rule","reason":"r","at":"2026-10-04T18:00:00Z"}"#
-        XCTAssertEqual(ExecutionBlockCodec.decode(agentContext: ctx(#"{"v":"1","kind":"k","harness":"h","model":"m","pool":"p","# + src + "}")),
+        XCTAssertEqual(ExecutionBlockCodec.decode(agentContext: ctx(#"{"v":"1","kind":"k","harness":"claude","model":"m","pool":"p","# + src + "}")),
                        .failure(.invalidField("v", "not an integer")))
-        XCTAssertEqual(ExecutionBlockCodec.decode(agentContext: ctx(#"{"v":1.5,"kind":"k","harness":"h","model":"m","pool":"p","# + src + "}")),
+        XCTAssertEqual(ExecutionBlockCodec.decode(agentContext: ctx(#"{"v":1.5,"kind":"k","harness":"claude","model":"m","pool":"p","# + src + "}")),
                        .failure(.invalidField("v", "not an integer")))
     }
 
     func testDecodeRejectsVLessThanOne() {
         func ctx(_ exec: String) -> String { #"{"flight_deck":{"execution":"# + exec + "}}" }
         let src = #""source":{"by":"rule","reason":"r","at":"2026-10-04T18:00:00Z"}"#
-        XCTAssertEqual(ExecutionBlockCodec.decode(agentContext: ctx(#"{"v":0,"kind":"k","harness":"h","model":"m","pool":"p","# + src + "}")),
+        XCTAssertEqual(ExecutionBlockCodec.decode(agentContext: ctx(#"{"v":0,"kind":"k","harness":"claude","model":"m","pool":"p","# + src + "}")),
                        .failure(.invalidField("v", "must be at least 1")))
     }
 
@@ -141,26 +141,26 @@ final class ExecutionBlockCodecTests: XCTestCase {
         func ctx(_ exec: String) -> String { #"{"flight_deck":{"execution":"# + exec + "}}" }
         let src = #""source":{"by":"rule","reason":"r","at":"2026-10-04T18:00:00Z"}"#
         // 1 and 0 should be rejected
-        XCTAssertEqual(ExecutionBlockCodec.decode(agentContext: ctx(#"{"v":1,"kind":"k","harness":"h","model":"m","pool":"p","pinned":1,"# + src + "}")),
+        XCTAssertEqual(ExecutionBlockCodec.decode(agentContext: ctx(#"{"v":1,"kind":"k","harness":"claude","model":"m","pool":"p","pinned":1,"# + src + "}")),
                        .failure(.invalidField("pinned", "not a boolean")))
-        XCTAssertEqual(ExecutionBlockCodec.decode(agentContext: ctx(#"{"v":1,"kind":"k","harness":"h","model":"m","pool":"p","pinned":0,"# + src + "}")),
+        XCTAssertEqual(ExecutionBlockCodec.decode(agentContext: ctx(#"{"v":1,"kind":"k","harness":"claude","model":"m","pool":"p","pinned":0,"# + src + "}")),
                        .failure(.invalidField("pinned", "not a boolean")))
         // true from JSON should decode fine
-        let ctxWithTrue = ctx(#"{"v":1,"kind":"k","harness":"h","model":"m","pool":"p","pinned":true,"# + src + "}")
+        let ctxWithTrue = ctx(#"{"v":1,"kind":"k","harness":"claude","model":"m","pool":"p","pinned":true,"# + src + "}")
         XCTAssertNotNil(try ExecutionBlockCodec.decode(agentContext: ctxWithTrue).get())
     }
 
     func testDecodeVMissing() {
         func ctx(_ exec: String) -> String { #"{"flight_deck":{"execution":"# + exec + "}}" }
         let src = #""source":{"by":"rule","reason":"r","at":"2026-10-04T18:00:00Z"}"#
-        XCTAssertEqual(ExecutionBlockCodec.decode(agentContext: ctx(#"{"kind":"k","harness":"h","model":"m","pool":"p","# + src + "}")),
+        XCTAssertEqual(ExecutionBlockCodec.decode(agentContext: ctx(#"{"kind":"k","harness":"claude","model":"m","pool":"p","# + src + "}")),
                        .failure(.missingField("v")))
     }
 
     func testDecodeVBoolean() {
         func ctx(_ exec: String) -> String { #"{"flight_deck":{"execution":"# + exec + "}}" }
         let src = #""source":{"by":"rule","reason":"r","at":"2026-10-04T18:00:00Z"}"#
-        XCTAssertEqual(ExecutionBlockCodec.decode(agentContext: ctx(#"{"v":true,"kind":"k","harness":"h","model":"m","pool":"p","# + src + "}")),
+        XCTAssertEqual(ExecutionBlockCodec.decode(agentContext: ctx(#"{"v":true,"kind":"k","harness":"claude","model":"m","pool":"p","# + src + "}")),
                        .failure(.invalidField("v", "not an integer")))
     }
 
@@ -179,7 +179,7 @@ final class ExecutionBlockCodecTests: XCTestCase {
 
     func testDecodeRejectsNonStringSourceFields() {
         func ctx(_ src: String) -> String {
-            #"{"flight_deck":{"execution":{"v":1,"kind":"k","harness":"h","model":"m","pool":"p","source":"# + src + "}}}"
+            #"{"flight_deck":{"execution":{"v":1,"kind":"k","harness":"claude","model":"m","pool":"p","source":"# + src + "}}}"
         }
         XCTAssertEqual(ExecutionBlockCodec.decode(agentContext: ctx(#"{"by":5,"reason":"r","at":"2026-10-04T18:00:00Z"}"#)),
                        .failure(.invalidField("source.by", "not a string")))

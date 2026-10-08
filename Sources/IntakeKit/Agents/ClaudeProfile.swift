@@ -3,7 +3,7 @@ import Foundation
 /// Everything Flight Deck knows about the `claude` CLI that is not specific to tabs or to
 /// headless planning (grok/gemini planning spec §3.0). The tab side (`ClaudeFlagCatalog`,
 /// `ClaudeRoutingCatalog`, `AgentID.homeEnvironmentKey`, `PreferencesStore`'s marker blanking)
-/// and the headless side (`HarnessCommand`, `RoundExecutor`, triage defaults) all read these
+/// and the headless side (`HeadlessCommand`, `RoundExecutor`, triage defaults) all read these
 /// answers from here, so a new model alias or a renamed variable is one edit, not five that
 /// drift — the drift that left `fable` offered in Settings and unknown to planning.
 public struct ClaudeProfile: AgentProfile {
@@ -48,8 +48,7 @@ public struct ClaudeProfile: AgentProfile {
         self.userHome = userHome
     }
 
-    public var id: Harness { .claude }
-    public var family: ModelFamily { .claude }
+    public var id: AgentID { .claude }
     public var binaryName: String { "claude" }
 
     /// `claude auth status`: local, read-only, spends no tokens. Probed 2026-10-07 on claude

@@ -252,8 +252,8 @@ struct LiveCard: View {
     /// the harness actually streaming, since `make` reads a harness mismatch as a fallback and
     /// triage has none.
     private func triageSlot(activity: SeatActivity?) -> Slot? {
-        guard let session = intake.triage, activity == nil || activity?.harness == session.harness else { return nil }
-        return Slot(ModelChoice(harness: session.harness, model: session.model, effort: session.effort))
+        guard let session = intake.triage, activity == nil || activity?.agent == session.agent else { return nil }
+        return Slot(ModelChoice(agent: session.agent, model: session.model, effort: session.effort))
     }
 
     // MARK: - Banners

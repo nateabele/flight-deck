@@ -1,5 +1,6 @@
 // Tests/FlightDeckTests/OpenConversationTests.swift
 import XCTest
+import IntakeKit
 import FleetKit
 @testable import FlightDeck
 
@@ -263,9 +264,9 @@ final class OpenConversationTests: XCTestCase {
     func testResumingStampsTheProjectsResolvedAccount() {
         let chosen = account("chosen")
         let preferences = PreferencesStore(persistence: nil)
-        preferences.preferences.storedAccounts = [chosen]
+        preferences.preferences.accounts = [chosen]
         preferences.preferences.storedProjectSettings = [
-            projectA.path: ProjectSettings(accounts: [.claude: chosen.id])
+            projectA.path: ProjectSettings(accounts: [.claude: .account(chosen.id)])
         ]
         let store = makeStore(preferences: preferences)
         let conversation = UUID()
@@ -285,9 +286,9 @@ final class OpenConversationTests: XCTestCase {
     /// must not launch as the built-in home instead. No tab may be filed either.
     func testAResumeUnderADanglingAccountAssignmentIsRefusedRatherThanSubstituted() {
         let preferences = PreferencesStore(persistence: nil)
-        preferences.preferences.storedAccounts = []
+        preferences.preferences.accounts = []
         preferences.preferences.storedProjectSettings = [
-            projectA.path: ProjectSettings(accounts: [.claude: UUID()])
+            projectA.path: ProjectSettings(accounts: [.claude: .account(UUID())])
         ]
         let store = makeStore(preferences: preferences)
         let reporter = SpyReporter()
@@ -315,9 +316,9 @@ final class OpenConversationTests: XCTestCase {
     /// read `selectedSessionID` back, since that property still names `unrelated.id` on this path.
     func testARefusedLaunchNeverReportsAPreviouslySelectedTabAsTheResult() {
         let preferences = PreferencesStore(persistence: nil)
-        preferences.preferences.storedAccounts = []
+        preferences.preferences.accounts = []
         preferences.preferences.storedProjectSettings = [
-            projectA.path: ProjectSettings(accounts: [.claude: UUID()])
+            projectA.path: ProjectSettings(accounts: [.claude: .account(UUID())])
         ]
         let store = makeStore(preferences: preferences)
         store.launchFailureReporter = SpyReporter()
@@ -413,6 +414,7 @@ final class OpenConversationTests: XCTestCase {
     /// every store test file here, so no test file depends on another's fixtures.
     private struct StubCodexAdapter: AgentAdapter {
         static let id: AgentID = .codex
+        nonisolated static var profile: any AgentProfile { AgentProfiles.profile(for: .codex) }
         static let textChannel: AgentTextChannel? = nil
         static let renameTyping: AgentRenameTyping? = nil
         static let dialogDriver: AgentDialogDriver? = nil
@@ -492,9 +494,9 @@ final class OpenConversationTests: XCTestCase {
     func testOpenConversationResolvesTheCodexAccountNotTheClaudeOne() {
         let chosen = AgentAccount(agent: .codex, displayName: "codex-work", home: AgentID.codex.builtInHome)
         let preferences = PreferencesStore(persistence: nil)
-        preferences.preferences.storedAccounts = [chosen]
+        preferences.preferences.accounts = [chosen]
         preferences.preferences.storedProjectSettings = [
-            projectA.path: ProjectSettings(accounts: [.codex: chosen.id])
+            projectA.path: ProjectSettings(accounts: [.codex: .account(chosen.id)])
         ]
         let store = makeStore(preferences: preferences)
         store.overrideAdapter(StubCodexAdapter(thread: UUID()), for: .codex, account: chosen.id)

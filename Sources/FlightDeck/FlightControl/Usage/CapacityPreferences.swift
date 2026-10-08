@@ -12,14 +12,32 @@ struct HandoffSettings: Equatable {
 /// `Preferences` is: a stored blob from before this existed must decode, and nil reads as the
 /// default.
 struct CapacityPreferences: Codable, Equatable {
-    /// Only pools the user created or edited. The default pools are derived, so a user who never
-    /// opens Settings has nothing stored and still gets one pool per agent that tracks the
-    /// account list.
+    /// The pre-list pool store, now only the downgrade MIRROR of the Accounts list's claude and
+    /// codex pools (`AccountList.legacyPools`, written by `Preferences.accountList`). This build
+    /// reads it once, to migrate a blob from before the list; the pools in force are
+    /// `AccountList.effectivePools()`.
     var pools: [CapacityPool]?
     var confirmHandoffs: Bool?
     var handoffDeadlineSeconds: Int?
 
     static let defaultDeadlineSeconds = 600
+
+    private enum CodingKeys: String, CodingKey { case pools, confirmHandoffs, handoffDeadlineSeconds }
+
+    /// `pools` element by element: a pool naming an agent this build has no `AgentID` case for
+    /// (`HarnessID` was a free string, and local pools named adapters like "opencode") costs that
+    /// pool — not the whole `capacity` record and, through it, every preference.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        pools = try c.decodeIfPresent([LossyPool].self, forKey: .pools).map { $0.compactMap(\.value) }
+        confirmHandoffs = try c.decodeIfPresent(Bool.self, forKey: .confirmHandoffs)
+        handoffDeadlineSeconds = try c.decodeIfPresent(Int.self, forKey: .handoffDeadlineSeconds)
+    }
+
+    private struct LossyPool: Decodable {
+        let value: CapacityPool?
+        init(from decoder: Decoder) throws { value = try? CapacityPool(from: decoder) }
+    }
 
     init(pools: [CapacityPool]? = nil, confirmHandoffs: Bool? = nil, handoffDeadlineSeconds: Int? = nil) {
         self.pools = pools
@@ -45,41 +63,6 @@ struct CapacityPreferences: Codable, Equatable {
     }
 
     static func accountRef(_ account: AgentAccount) -> AccountRef {
-        AccountRef(harness: account.agent.harnessID, id: account.id, label: account.displayName)
-    }
-
-    /// The pools in force: one `<agent>-default` per agent with a live account, then the user's
-    /// own pools in stored order.
-    ///
-    /// A stored default keeps the order the user gave it, but an account added since joins at
-    /// the end — otherwise a new login would be invisible to Flight Control until someone
-    /// remembered to edit a pool. Every hosted pool drops ids that are not live accounts: a
-    /// tombstoned account's running tab still reports (see `CapacityLedger.configure`), but it
-    /// must never be leased again.
-    func effectivePools(accounts: [AgentAccount]) -> [CapacityPool] {
-        let stored = pools ?? []
-        let live = accounts.filter { !$0.isRemoved }
-        let liveIDs = Set(live.map(\.id))
-        var out: [CapacityPool] = []
-        for agent in AgentID.allCases {
-            let mine = live.filter { $0.agent == agent }.map(\.id)
-            let id = CapacityPool.defaultID(for: agent.harnessID)
-            if var pool = stored.first(where: { $0.id == id }) {
-                pool.accounts = pool.accounts.filter { mine.contains($0) } + mine.filter { !pool.accounts.contains($0) }
-                out.append(pool)
-            } else if !mine.isEmpty {
-                out.append(.hosted(id: id, label: "\(agent.displayName) default", harness: agent.harnessID, accounts: mine))
-            }
-        }
-        for var pool in stored where !out.contains(where: { $0.id == pool.id }) {
-            // A member of another agent's harness is dropped too: leasing a codex account for a
-            // claude spawn would launch it under the wrong login.
-            if pool.kind == .hosted {
-                let sameHarness = Set(live.filter { $0.agent.harnessID == pool.harness }.map(\.id))
-                pool.accounts = pool.accounts.filter { liveIDs.contains($0) && sameHarness.contains($0) }
-            }
-            out.append(pool)
-        }
-        return out
+        AccountRef(agent: account.agent, id: account.id, label: account.displayName)
     }
 }

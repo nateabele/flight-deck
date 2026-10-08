@@ -1,4 +1,5 @@
 import XCTest
+import IntakeKit
 @testable import FlightDeck
 
 /// That the adapter, runtime and codex-stack registries are keyed by an agent *as an account*
@@ -72,7 +73,7 @@ final class AgentInstanceTests: XCTestCase {
                 .appendingPathComponent("other-codex", isDirectory: true)
         )
         let preferences = PreferencesStore(persistence: nil)
-        preferences.preferences.storedAccounts = [builtIn, other]
+        preferences.preferences.accounts = [builtIn, other]
 
         // Restored rather than created: `createSession` cannot yet be pointed at a
         // non-default account — that is a later task — but a snapshot already carries

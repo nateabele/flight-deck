@@ -106,7 +106,7 @@ final class IntakeServiceTests: XCTestCase {
                              hasSession: @escaping (String, String) -> Bool = { _, _ in false },
                              inject: @escaping (String, String, String, UUID) -> Bool = { _, _, _, _ in true }) -> IntakeService {
         IntakeService(store: IntakeStore(root: root), headless: headless, processRunner: br,
-                      triageSettings: TriageSettings(harness: .codex, model: "m1", effort: "high"),
+                      triageSettings: TriageSettings(agent: .codex, model: "m1", effort: "high"),
                       inject: inject, hasSession: hasSession)
     }
 
@@ -141,7 +141,7 @@ final class IntakeServiceTests: XCTestCase {
         let i = intake(svc, id)
         XCTAssertEqual(i.state, .needsAnswers)
         XCTAssertEqual(i.exchanges, [TriageExchange(questions: ["Which README?"])])
-        XCTAssertEqual(i.triage, HarnessSession(harness: .codex, sessionID: "S1", model: "m1", effort: "high"))
+        XCTAssertEqual(i.triage, HeadlessSession(agent: .codex, sessionID: "S1", model: "m1", effort: "high"))
         XCTAssertEqual(svc.attentionCount(forProject: "/p"), 1)
         // Inputs the agent was pointed at exist beside intake.json.
         let dir = IntakeStore(root: root).directory(for: id).appendingPathComponent("triage")
@@ -160,7 +160,7 @@ final class IntakeServiceTests: XCTestCase {
         let headless = StreamingHeadlessRunner(first: command, output: Self.codex(Self.questions))
         let svc = IntakeService(store: IntakeStore(root: root), headless: headless,
                                 processRunner: MutableRunner(Self.brReplies(Self.openGraph)),
-                                triageSettings: TriageSettings(harness: .codex, model: "m1", effort: "high"),
+                                triageSettings: TriageSettings(agent: .codex, model: "m1", effort: "high"),
                                 inject: { _, _, _, _ in true }, hasSession: { _, _ in false })
         svc.capture(intent: "Add a note", project: "/p")
         let id = svc.intakes[0].id
@@ -174,7 +174,7 @@ final class IntakeServiceTests: XCTestCase {
 
         svc.pollTapes()
         let started = try XCTUnwrap(svc.triageActivity(id))
-        XCTAssertEqual(started.harness, .codex)
+        XCTAssertEqual(started.agent, .codex)
         XCTAssertFalse(started.finished)
 
         // Same mtime, new bytes: the tick must not re-read.

@@ -36,7 +36,7 @@ final class IndexTokenMeter: @unchecked Sendable {
     private var onOver: (() -> Void)?
 
     init(cwd: URL, budget: Int) {
-        parser = ActivityParser(harness: .claude, project: cwd, now: { Date() })
+        parser = ActivityParser(agent: .claude, project: cwd, now: { Date() })
         self.budget = budget
     }
 
@@ -164,7 +164,7 @@ struct IndexRefreshRunner: Sendable {
             case .overCap(let used): return "token cap reached after \(used) tokens"
             }
         }
-        if let e = error as? HarnessOutput.ParseError { return "unreadable answer: \(e)" }
+        if let e = error as? HeadlessOutput.ParseError { return "unreadable answer: \(e)" }
         if error is DecodingError { return "the answer did not match the row format" }
         return String(describing: error)
     }

@@ -1,23 +1,25 @@
 import Foundation
 import IntakeKit
 
-/// Routing's view of the pools Settings → Flight Control → Capacity defines: one
-/// `<agent>-default` per agent with a live account, then the user's own pools
-/// (`CapacityPreferences.effectivePools`). Read through a closure on every call, so a pool added
-/// in Settings is routable without rebuilding the router.
+/// Routing's view of the pools the Accounts list defines (`AccountList.effectivePools`): one
+/// `<agent>-default` per agent with an unpooled live account, then the user's own pools. Read
+/// through a closure on every call, so a pool added in Settings is routable without rebuilding
+/// the router.
 struct CapacityPoolDirectory: PoolDirectory {
     let source: @Sendable () -> [CapacityPool]
     init(pools: @escaping @Sendable () -> [CapacityPool]) { source = pools }
 
     func pools() -> [PoolSummary] {
-        source().map { PoolSummary(id: $0.id, harness: $0.harness, label: $0.label) }
+        source().map { PoolSummary(id: $0.id, agent: $0.agent, label: $0.label) }
     }
 
-    /// `<harness>-default` when it exists — the pools in force hold one per agent that has a
-    /// live account — else nil, so the validator says "no pool for claude" instead of
-    /// inventing one.
-    func defaultPool(for harness: HarnessID) -> PoolID? {
-        let wanted = CapacityPool.defaultID(for: harness)
-        return source().first { $0.id == wanted }?.id
+    /// `<agent>-default` when it exists; else the agent's first pool in list order — an agent
+    /// whose every account sits in pools has no default, and a rule that names no pool must
+    /// still land in one of that agent's; else nil, so the validator says "no pool for claude"
+    /// instead of inventing one.
+    func defaultPool(for agent: AgentID) -> PoolID? {
+        let pools = source()
+        let wanted = CapacityPool.defaultID(for: agent)
+        return pools.first { $0.id == wanted }?.id ?? pools.first { $0.agent == agent }?.id
     }
 }

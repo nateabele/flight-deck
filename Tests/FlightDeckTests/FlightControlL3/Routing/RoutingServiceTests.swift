@@ -32,7 +32,7 @@ final class RoutingServiceTests: XCTestCase {
         let compiled = try XCTUnwrap(svc.rules(.global).first)
         XCTAssertEqual(compiled.state, .compiled)
         XCTAssertEqual(compiled.compiled?.assign.pool, "codex-default")
-        XCTAssertEqual(compiled.compiler, CompilerRef(harness: "claude", model: "haiku"))
+        XCTAssertEqual(compiled.compiler, CompilerRef(agent: .claude, model: "haiku"))
         XCTAssertEqual(compiled.compiledAt, D.at)
         svc.confirm(id, in: .global)
         XCTAssertEqual(prefs.globalRoutingRules.first?.state, .confirmed)
@@ -107,7 +107,7 @@ final class RoutingServiceTests: XCTestCase {
         await svc.compile(p, in: .project(path))
         XCTAssertFalse(compiler.inputs[0].kinds.contains { $0.id == "snapshot-tests" })
         XCTAssertTrue(compiler.inputs[1].kinds.contains { $0.id == "snapshot-tests" })
-        XCTAssertEqual(compiler.inputs[0].defaultPools["codex"], "codex-default")
+        XCTAssertEqual(compiler.inputs[0].defaultPools[.codex], "codex-default")
     }
 
     func testAnEditDuringACompileWins() async throws {
@@ -140,7 +140,7 @@ final class RoutingServiceTests: XCTestCase {
                        .default, "compiled is not confirmed")
         svc.confirm(id, in: .global)
         let a = svc.makeRouter().assign(kind: D.snapshot, project: project, catalogs: D.catalogs, now: D.at)
-        XCTAssertEqual(a.block.harness, "codex")
+        XCTAssertEqual(a.block.agent, .codex)
         XCTAssertEqual(a.block.source.ruleId, id)
     }
 
@@ -148,10 +148,10 @@ final class RoutingServiceTests: XCTestCase {
         let prefs = PreferencesStore(persistence: nil)
         prefs.setProjectSettings(path, ProjectSettings(defaultAgent: .codex))
         let svc = make(prefs: prefs)
-        XCTAssertEqual(svc.makeRouter().assign(kind: D.docs, project: project, catalogs: D.catalogs, now: D.at).block.harness, "codex")
+        XCTAssertEqual(svc.makeRouter().assign(kind: D.docs, project: project, catalogs: D.catalogs, now: D.at).block.agent, .codex)
         let elsewhere = URL(fileURLWithPath: "/elsewhere", isDirectory: true)
-        XCTAssertEqual(svc.makeRouter().assign(kind: D.docs, project: elsewhere, catalogs: D.catalogs, now: D.at).block.harness,
-                       "claude", "a project with no choice gets the first global agent")
+        XCTAssertEqual(svc.makeRouter().assign(kind: D.docs, project: elsewhere, catalogs: D.catalogs, now: D.at).block.agent,
+                       .claude, "a project with no choice gets the first global agent")
     }
 
     func testHintsShowOnConfirmedRulesAndStayDismissedUntilTheSnapshotChanges() async throws {

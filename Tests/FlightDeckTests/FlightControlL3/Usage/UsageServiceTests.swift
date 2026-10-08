@@ -22,7 +22,8 @@ final class UsageServiceTests: XCTestCase {
     private var swarm: Set<UUID> = []
     /// Sessions the store has a status for. nil means every tab is live.
     private var live: Set<UUID>?
-    private var capacity = CapacityPreferences()
+    /// The Accounts list the pools come from; nil means one entry per account, unpooled.
+    private var accountList: AccountList?
     private let notifier = UsageSpyNotifier()
     private let accounts = [
         AgentAccount(id: UsageRefs.workID, agent: .claude, displayName: "Work", home: URL(fileURLWithPath: "/tmp/fd-usage/w", isDirectory: true)),
@@ -44,7 +45,7 @@ final class UsageServiceTests: XCTestCase {
             apiErrors: { [unowned self] in self.apiErrors },
             accounts: { [unowned self] in self.accounts },
             resolvedAccountID: { agent, stored in stored ?? (agent == .claude ? UsageRefs.workID : UsageRefs.codexID) },
-            capacity: { [unowned self] in self.capacity },
+            pools: { [unowned self] in (self.accountList ?? AccountList(entries: self.accounts.map(AccountEntry.account))).effectivePools() },
             usageDirectory: dir,
             codexRead: { [unowned self] _ in
                 self.codexReads += 1
@@ -157,7 +158,7 @@ final class UsageServiceTests: XCTestCase {
     }
 
     func testHeadlessSeatsMeterTheBuiltInClaudeAccount() async {
-        var a = SeatActivity(harness: .claude, startedAt: Date(timeIntervalSince1970: 0))
+        var a = SeatActivity(agent: .claude, startedAt: Date(timeIntervalSince1970: 0))
         a.rateLimitWindows = [UsageWindow(name: "five_hour", utilization: 0.3, resetsAt: nil)]
         a.rateLimitStatus = "allowed"
         a.lastEventAt = clock.now
@@ -257,10 +258,12 @@ final class UsageServiceTests: XCTestCase {
         XCTAssertEqual(svc.ledger.latestReading(account: UsageRefs.spareID)?.worstWindow?.utilization, 0.25)
     }
 
-    func testReconfigurePicksUpStoredPools() {
+    func testReconfigurePicksUpStoredPools() throws {
         let svc = service()
         XCTAssertNil(svc.ledger.pool("pool-night001"))
-        capacity = CapacityPreferences(pools: [.hosted(id: "pool-night001", label: "Night", harness: "claude", accounts: [UsageRefs.spareID])])
+        var list = AccountList(entries: accounts.map(AccountEntry.account))
+        try list.addPool(AccountPool(id: "pool-night001", label: "Night", agent: .claude, members: [accounts[1]]))
+        accountList = list
         svc.reconfigure()
         XCTAssertEqual(svc.ledger.pool("pool-night001")?.accounts, [UsageRefs.spareID])
     }

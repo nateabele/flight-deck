@@ -1,12 +1,17 @@
 import Foundation
+import IntakeKit
 
 extension AgentID {
     /// The slash command that ends this agent's TUI and returns its tab to the shell (verified
     /// against each TUI; see the L3-U plan Task 14 Step 1).
-    var exitCommand: String {
+    ///
+    /// nil for an agent whose TUI nobody has verified yet (grok and gemini, stubs until Tracks
+    /// G/M): a guessed command typed into the wrong TUI is a prompt, not an exit.
+    var exitCommand: String? {
         switch self {
         case .claude: return "/exit"
         case .codex: return "/quit"
+        case .grok, .gemini: return nil
         }
     }
 }
@@ -24,6 +29,7 @@ extension SessionStore {
     func retireAgent(_ id: UUID) -> PromptDispatch {
         if statuses[id]?.activity == .waiting { interruptTurn(id, includingDialog: true) }
         let agent = repos.flatMap(\.sessions).first { $0.id == id }?.agent ?? .claude
-        return submitPrompt(agent.exitCommand, token: UUID(), to: id)
+        guard let command = agent.exitCommand else { return .unsupportedAgent }
+        return submitPrompt(command, token: UUID(), to: id)
     }
 }

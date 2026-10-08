@@ -26,11 +26,11 @@ struct PlanningAccountOption: Equatable {
 
     /// Each harness's live, non-built-in accounts, in preferences order. A removed account is
     /// left out — it is not something to pick — and an agent with no harness (none today) too.
-    static func options(from accounts: [AgentAccount]) -> [Harness: [PlanningAccountOption]] {
-        var out: [Harness: [PlanningAccountOption]] = [:]
+    static func options(from accounts: [AgentAccount]) -> [AgentID: [PlanningAccountOption]] {
+        var out: [AgentID: [PlanningAccountOption]] = [:]
         for account in accounts where !account.isRemoved && !account.isBuiltIn {
-            guard let harness = Harness(rawValue: account.agent.rawValue) else { continue }
-            out[harness, default: []].append(PlanningAccountOption(
+            guard let agent = AgentID(rawValue: account.agent.rawValue) else { continue }
+            out[agent, default: []].append(PlanningAccountOption(
                 ref: AgentAccountRef(id: account.id.uuidString, home: account.home), name: account.displayName))
         }
         return out
@@ -46,7 +46,7 @@ struct RoundConfigEditor: View {
     let available: AvailableModels
     /// Each harness's pickable accounts (`PlanningAccountOption.options`). Empty hides every
     /// account picker, which is the whole editor on a machine with only built-in logins.
-    var accounts: [Harness: [PlanningAccountOption]] = [:]
+    var accounts: [AgentID: [PlanningAccountOption]] = [:]
     /// codex's own `model/list`, when routing has already fetched it this launch — never
     /// fetched from here, since that spawns an app-server.
     var codexListedModels: [String] = []
@@ -78,11 +78,11 @@ struct RoundConfigEditor: View {
     /// Spec §3.9. No settings URL: those pages move.
     static let dataUseNote = "Check Google's data settings before using Gemini agents on private repos."
 
-    /// One line per harness that is installed but not offered, in `Harness.allCases` order,
+    /// One line per harness that is installed but not offered, in `AgentID.planningOrder` order,
     /// each the profile's own reason (e.g. "Gemini: run `agy` in a terminal to sign in").
     /// "not installed" is left out: a CLI the human never installed is not news.
     static func unavailableNotes(_ available: AvailableModels) -> [String] {
-        Harness.allCases.compactMap { available.unavailable[$0] }.filter { !$0.hasSuffix("not installed") }
+        AgentID.planningOrder.compactMap { available.unavailable[$0] }.filter { !$0.hasSuffix("not installed") }
     }
 
     /// One block per seat, its controls on two lines. A five-column grid needed ~530 pt, and an
@@ -110,12 +110,12 @@ struct RoundConfigEditor: View {
                         }
                         HStack(spacing: 8) {
                             harnessPicker(for: row.keyPath).fixedSize()
-                            modelField(for: row.keyPath, harness: choice.harness)
-                            if !Self.effortChoices(for: choice.harness).isEmpty {
-                                effortPicker(for: row.keyPath, harness: choice.harness).fixedSize()
+                            modelField(for: row.keyPath, agent: choice.agent)
+                            if !Self.effortChoices(for: choice.agent).isEmpty {
+                                effortPicker(for: row.keyPath, agent: choice.agent).fixedSize()
                             }
                         }
-                        if let options = accounts[choice.harness], !options.isEmpty {
+                        if let options = accounts[choice.agent], !options.isEmpty {
                             HStack(spacing: 8) {
                                 Text("Account").foregroundStyle(.secondary)
                                 accountPicker(for: row.keyPath, choice: choice, options: options).fixedSize()
@@ -176,9 +176,9 @@ struct RoundConfigEditor: View {
     }
 
     private func harnessPicker(for keyPath: SlotKeyPath) -> some View {
-        Picker("Harness", selection: harnessBinding(for: keyPath)) {
-            ForEach(Self.harnesses(in: available), id: \.self) { harness in
-                Text(harness.rawValue).tag(harness)
+        Picker("AgentID", selection: harnessBinding(for: keyPath)) {
+            ForEach(Self.agents(in: available), id: \.self) { agent in
+                Text(agent.rawValue).tag(agent)
             }
         }
         .labelsHidden()
@@ -187,9 +187,9 @@ struct RoundConfigEditor: View {
 
     /// Free text, because every CLI also takes a full model name — with the profile's known
     /// models one click away, so `fable` is offered here as it is in Settings and routing.
-    private func modelField(for keyPath: SlotKeyPath, harness: Harness) -> some View {
-        let suggestions = Self.modelSuggestions(for: harness, codexListed: codexListedModels,
-                                                detected: available.models[harness] ?? [])
+    private func modelField(for keyPath: SlotKeyPath, agent: AgentID) -> some View {
+        let suggestions = Self.modelSuggestions(for: agent, codexListed: codexListedModels,
+                                                detected: available.models[agent] ?? [])
         return HStack(spacing: 2) {
             TextField("Model", text: modelBinding(for: keyPath))
                 .textFieldStyle(.roundedBorder)
@@ -210,9 +210,9 @@ struct RoundConfigEditor: View {
         }
     }
 
-    private func effortPicker(for keyPath: SlotKeyPath, harness: Harness) -> some View {
+    private func effortPicker(for keyPath: SlotKeyPath, agent: AgentID) -> some View {
         Picker("Effort", selection: effortBinding(for: keyPath)) {
-            ForEach(Self.effortChoices(for: harness), id: \.self) { effort in
+            ForEach(Self.effortChoices(for: agent), id: \.self) { effort in
                 Text(effort).tag(effort)
             }
         }
@@ -244,7 +244,7 @@ struct RoundConfigEditor: View {
         return Picker("Fallback", selection: fallbackBinding(for: keyPath, other: other)) {
             Text("none").tag(false)
             if let other {
-                Text("\(other.harness.rawValue) \(other.model)").tag(true)
+                Text("\(other.agent.rawValue) \(other.model)").tag(true)
             }
         }
         .labelsHidden()
@@ -291,10 +291,10 @@ struct RoundConfigEditor: View {
 
     // MARK: - Bindings (route every edit through `setting`, which flags `customized`)
 
-    private func harnessBinding(for keyPath: SlotKeyPath) -> Binding<Harness> {
+    private func harnessBinding(for keyPath: SlotKeyPath) -> Binding<AgentID> {
         Binding(
-            get: { Self.choice(for: keyPath, in: config)?.harness ?? .codex },
-            set: { config = Self.switchingHarness(config, at: keyPath, to: $0, available: available) }
+            get: { Self.choice(for: keyPath, in: config)?.agent ?? .codex },
+            set: { config = Self.switchingAgent(config, at: keyPath, to: $0, available: available) }
         )
     }
 
@@ -408,7 +408,7 @@ struct RoundConfigEditor: View {
     /// row explains why a live policy still won't cross-check anything.
     static func crossCheckSameFamily(_ config: RoundConfig) -> Bool {
         guard let reviewer = config.reviewer, let crossReviewer = config.crossReviewer else { return false }
-        return ModelFamily(reviewer.choice.harness) == ModelFamily(crossReviewer.choice.harness)
+        return reviewer.choice.agent == crossReviewer.choice.agent
     }
 
     /// The caption under the Cross-check picker when the policy is on but no cross-check agent
@@ -440,8 +440,8 @@ struct RoundConfigEditor: View {
 
     /// The effort values `harness`'s profile accepts. Empty means the CLI has no effort knob,
     /// and the row hides the picker rather than offer a setting that does nothing.
-    static func effortChoices(for harness: Harness) -> [String] {
-        AgentProfiles.profile(for: harness).modelCatalog.effortValues
+    static func effortChoices(for agent: AgentID) -> [String] {
+        AgentProfiles.profile(for: agent).modelCatalog.effortValues
     }
 
     /// The models the model field's menu offers for `harness`: its profile's static aliases,
@@ -450,11 +450,11 @@ struct RoundConfigEditor: View {
     /// CLI itself printed at detection (`grok models`); when there is one it REPLACES the static
     /// aliases, which are only a fallback and go stale as the vendor ships models (grok's moved
     /// from 4.6 to 4.7 on the day it was first probed).
-    static func modelSuggestions(for harness: Harness, codexListed: [String] = [], detected: [String] = []) -> [String] {
-        let catalog = AgentProfiles.profile(for: harness).modelCatalog
+    static func modelSuggestions(for agent: AgentID, codexListed: [String] = [], detected: [String] = []) -> [String] {
+        let catalog = AgentProfiles.profile(for: agent).modelCatalog
         var out: [String] = []
         let known = detected.isEmpty ? catalog.aliases : detected
-        for model in known + (harness == .codex ? codexListed : []) where !out.contains(model) {
+        for model in known + (agent == .codex ? codexListed : []) where !out.contains(model) {
             out.append(model)
         }
         if out.isEmpty, !catalog.defaultPlanningModel.isEmpty { out = [catalog.defaultPlanningModel] }
@@ -612,22 +612,22 @@ struct RoundConfigEditor: View {
     /// `available` — leaving the old model string in place would pair e.g. codex's harness
     /// with a claude model name that codex has never heard of. The account resets to built-in
     /// with them: a claude account's home means nothing to codex.
-    static func switchingHarness(_ config: RoundConfig, at keyPath: SlotKeyPath, to harness: Harness, available: AvailableModels) -> RoundConfig {
-        let replacement = available.choice(for: harness) ?? ModelChoice(harness: harness, model: "", effort: "high")
+    static func switchingAgent(_ config: RoundConfig, at keyPath: SlotKeyPath, to agent: AgentID, available: AvailableModels) -> RoundConfig {
+        let replacement = available.choice(for: agent) ?? ModelChoice(agent: agent, model: "", effort: "high")
         return updatingChoice(config, at: keyPath) { $0 = replacement }
     }
 
-    /// Harness Pickers only ever offer harnesses actually installed — an unavailable harness
+    /// AgentID Pickers only ever offer harnesses actually installed — an unavailable harness
     /// in the list would let the human pick a model no adapter can run.
-    static func harnesses(in available: AvailableModels) -> [Harness] {
-        available.harnesses
+    static func agents(in available: AvailableModels) -> [AgentID] {
+        available.agents
     }
 
     /// The fallback Picker's one non-"None" option: the first available model of ANOTHER family
-    /// than the seat's, in `Harness.allCases` order — so codex still falls back to claude and
+    /// than the seat's, in `AgentID.planningOrder` order — so codex still falls back to claude and
     /// claude to codex, and a gemini seat falls back to the first of those present. Nil on a
     /// single-harness machine, where there is no other model.
     static func otherModel(for choice: ModelChoice, available: AvailableModels) -> ModelChoice? {
-        available.harnesses.first { ModelFamily($0) != ModelFamily(choice.harness) }.flatMap(available.choice(for:))
+        available.agents.first { $0 != choice.agent }.flatMap(available.choice(for:))
     }
 }

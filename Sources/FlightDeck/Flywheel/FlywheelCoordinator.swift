@@ -1,4 +1,5 @@
 import Foundation
+import IntakeKit
 
 /// Errors `FlywheelCoordinator.boot` can throw.
 enum FlywheelError: Error, LocalizedError {
@@ -47,6 +48,11 @@ enum FlywheelProgram {
         switch agent {
         case .claude: "claude-code"
         case .codex: "codex-cli"
+        // Unverified spellings: Agent-Mail's `--program` is free text, and no grok or gemini
+        // agent has been spawned into a Flight Control swarm yet (neither is `tabReady`). The
+        // binary name is the least surprising label until Tracks G/M check what `am` shows.
+        case .grok: "grok"
+        case .gemini: "agy"
         }
     }
 }

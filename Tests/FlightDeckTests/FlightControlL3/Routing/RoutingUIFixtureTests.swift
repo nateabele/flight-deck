@@ -42,7 +42,7 @@ final class RoutingUIFixtureTests: XCTestCase {
         let svc = RoutingUIFixture.service(preferences: PreferencesStore(persistence: nil), root: root)
         let project = try XCTUnwrap(svc.fixtureProjects?.first)
         let rule = try XCTUnwrap(svc.rules(.project(project)).first)
-        XCTAssertEqual(svc.hint(for: rule, scope: .project(project))?.suggested, ModelRef(harness: "codex", model: "gpt-6-luna"))
+        XCTAssertEqual(svc.hint(for: rule, scope: .project(project))?.suggested, ModelRef(agent: .codex, model: "gpt-6-luna"))
         let id = try XCTUnwrap(svc.submitNewRule("Anything UI-heavy uses Sonnet", to: .global))
         await svc.waitForCompile(id)
         XCTAssertEqual(svc.rules(.global).first?.failure,

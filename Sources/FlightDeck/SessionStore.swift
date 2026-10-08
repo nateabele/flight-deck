@@ -522,10 +522,7 @@ final class SessionStore: ObservableObject {
     /// default.
     private func options(for agent: AgentID, project: String) -> AgentOptions {
         let options: AgentOptions
-        switch agent {
-        case .claude: options = preferences?.resolvedOptions(for: agent, project: project) ?? .claude(FlagSet())
-        case .codex:  options = preferences?.resolvedOptions(for: agent, project: project) ?? .codex(CodexThreadOptions())
-        }
+        options = preferences?.resolvedOptions(for: agent, project: project) ?? AgentOptions.empty(for: agent)
         // The bundled plugin rides in as an ordinary `--plugin-dir` entry so it serialises,
         // quotes and round-trips exactly like a user's own. Done here rather than in
         // `ClaudeAdapter` so `launchCommand`/`resumeCommand` stay byte-identical
@@ -560,7 +557,7 @@ final class SessionStore: ObservableObject {
     func launchOptions(for agent: AgentID, project: String, overrides: LaunchOverrides?) -> Result<AgentOptions, AgentLaunchError> {
         let base = options(for: agent, project: project)
         guard let overrides, overrides.model != nil || !overrides.knobs.isEmpty else { return .success(base) }
-        guard let capabilities = routingCapabilities.capabilities(for: agent.harnessID) else {
+        guard let capabilities = routingCapabilities.capabilities(for: agent) else {
             return .failure(.prepareFailed("\(agent.displayName) has no routing capabilities"))
         }
         switch capabilities.applying(overrides, to: base) {
@@ -990,9 +987,20 @@ final class SessionStore: ObservableObject {
             // assignment have to agree about a tombstone, and the answer that is safe is
             // `.accountMissing`. (`markAccountRemoved` clears these assignments, so this is
             // defence in depth, matching `account(for:project:)`'s own comment.)
-            if let assigned = preferences.projectSettings(project).accounts[agent],
-               preferences.account(id: assigned)?.isRemoved ?? true {
-                return .failure(.accountMissing(agent.displayName))
+            switch preferences.projectSettings(project).accounts[agent] {
+            case .account(let assigned)?:
+                if preferences.account(id: assigned)?.isRemoved ?? true {
+                    return .failure(.accountMissing(agent.displayName))
+                }
+            case .pool?:
+                // A pool assignment that resolves to no live account (the pool is gone, or every
+                // member was removed) is missing for the same reason: launching in the built-in
+                // home instead would bill a login the project was never assigned.
+                if preferences.account(for: agent, project: project) == nil {
+                    return .failure(.accountMissing(agent.displayName))
+                }
+            case nil:
+                break
             }
             account = preferences.account(for: agent, project: project)
         }
@@ -1036,10 +1044,20 @@ final class SessionStore: ObservableObject {
     /// and whatever a caller injected.
     func adapter(for instance: AgentInstance) -> any AgentAdapter {
         if let existing = adapters[instance] { return existing }
-        if instance.agent == .codex {
+        let adapter: any AgentAdapter
+        switch instance.agent {
+        case .codex:
             return makeCodexStackIfNeeded(account: instance.account).adapter
+        case .claude:
+            adapter = makeClaudeAdapter(account: instance.account)
+        // Stubs (unify brief P0): `tabReady` keeps both off every surface that opens a tab, so
+        // these arms answer only a hand-edited `sessions.json` — with the agent's own stub
+        // rather than claude's adapter, which would launch `claude` in a tab labelled grok.
+        case .grok:
+            adapter = GrokAdapter()
+        case .gemini:
+            adapter = GeminiAdapter()
         }
-        let adapter = makeClaudeAdapter(account: instance.account)
         adapters[instance] = adapter
         return adapter
     }
@@ -1063,8 +1081,16 @@ final class SessionStore: ObservableObject {
     /// app-server does send would reach nobody.
     func runtime(for instance: AgentInstance) -> any AgentRuntime {
         if let existing = runtimes[instance] { return existing }
-        if instance.agent == .codex {
+        switch instance.agent {
+        case .codex:
             return makeCodexStackIfNeeded(account: instance.account).runtime
+        case .grok, .gemini:
+            // Nothing to observe until Tracks G/M build a runtime; see `UnobservedAgentRuntime`.
+            let runtime = UnobservedAgentRuntime()
+            runtimes[instance] = runtime
+            return runtime
+        case .claude:
+            break
         }
         // `searchIndex`, `projectPath` and `workingDirectory` are closures, re-read on every
         // message batch rather than resolved once here — see `ClaudeRuntime.init` — so a
@@ -2829,6 +2855,10 @@ final class SessionStore: ObservableObject {
             if case .value(let value)? = flags.values["--model"] { model = value } else { model = "claude" }
         case .codex(let codexOptions):
             model = codexOptions.model ?? "codex"
+        // No model option yet on either (`GrokOptions`/`GeminiOptions` are empty), so the
+        // agent's name is the placeholder, as for the other two.
+        case .grok: model = "grok"
+        case .gemini: model = "gemini"
         }
         let coordinator = flywheelCoordinator
         let program = FlywheelProgram.rawValue(for: agent)
@@ -5959,6 +5989,11 @@ final class SessionStore: ObservableObject {
             // that guard, or is a genuine external rename — and neither outcome can queue a
             // second injection.
             injectPendingRename(id, name)
+        case .grok, .gemini:
+            // Stubs: no rename channel to either agent yet (unify brief P0; Tracks G/M probe
+            // one). The local title above is the whole rename, which is what a tab with no
+            // channel can honestly offer.
+            break
         }
         // True means the name was ACCEPTED and the local title changed — not that the agent
         // has been told. The codex arm above is deliberately fire-and-forget and the claude

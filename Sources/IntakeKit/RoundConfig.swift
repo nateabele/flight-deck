@@ -7,10 +7,13 @@ public enum DrafterPersona: String, Codable, Sendable, CaseIterable {
     case general, arbiter, realist, coverage, stressTest
 }
 
-/// One harness/model/effort triple. Distinct from `HarnessSession` (which also carries a
+/// One agent/model/effort triple. Distinct from `HeadlessSession` (which also carries a
 /// live `sessionID`) — a `RoundConfig` describes what to run, before any session exists.
+///
+/// The agent is stored under the JSON key `harness`, its name before the agent identities were
+/// unified (unify brief R1): every `intake.json` and tape on disk spells it that way.
 public struct ModelChoice: Codable, Equatable, Sendable {
-    public var harness: Harness
+    public var agent: AgentID
     public var model: String
     public var effort: String
     /// The account this seat bills (grok/gemini spec §3.0), picked in the Rounds editor. nil is
@@ -19,11 +22,16 @@ public struct ModelChoice: Codable, Equatable, Sendable {
     /// so an untouched config is byte-identical. Carries the home, not just the id: the runner
     /// is a separate process with no preferences to resolve an id against.
     public var account: AgentAccountRef?
-    public init(harness: Harness, model: String, effort: String, account: AgentAccountRef? = nil) {
-        self.harness = harness
+    public init(agent: AgentID, model: String, effort: String, account: AgentAccountRef? = nil) {
+        self.agent = agent
         self.model = model
         self.effort = effort
         self.account = account
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case agent = "harness"
+        case model, effort, account
     }
 }
 
@@ -32,7 +40,7 @@ public extension AgentProfile {
     /// catalog default, so triage, `AvailableModels.defaults` and the editor's harness switch
     /// can never name different defaults.
     var defaultPlanningChoice: ModelChoice {
-        ModelChoice(harness: id, model: modelCatalog.defaultPlanningModel, effort: modelCatalog.defaultPlanningEffort)
+        ModelChoice(agent: id, model: modelCatalog.defaultPlanningModel, effort: modelCatalog.defaultPlanningEffort)
     }
 }
 
@@ -60,28 +68,6 @@ public enum PlayMode: String, Codable, Sendable { case step, nextMajor, toReview
 /// proposals are not a review sample.
 public enum CrossCheckPolicy: String, Codable, Sendable, CaseIterable { case off, firstAndLast, every }
 
-/// A model's vendor lineage — what "cross-family" and coverage are counted over. Derived from the
-/// harness today; a later harness (Qwen, say) adds a case here and nothing else changes.
-public enum ModelFamily: String, Codable, Sendable {
-    case codex, claude, grok, gemini
-    public init(_ harness: Harness) {
-        switch harness {
-        case .codex: self = .codex
-        case .claude: self = .claude
-        case .grok: self = .grok
-        case .gemini: self = .gemini
-        }
-    }
-    public var displayName: String {
-        switch self {
-        case .codex: "Codex"
-        case .claude: "Claude"
-        case .grok: "Grok"
-        case .gemini: "Gemini"
-        }
-    }
-}
-
 /// The fully expanded shape of a shaping round: every seat, every cap, and the play mode a
 /// "Continue" click uses by default. `PresetExpansion` builds the initial one from a
 /// `Preset`; the config editor (Task 13) lets the human edit it in place, at which point
@@ -108,7 +94,7 @@ public struct RoundConfig: Codable, Equatable, Sendable {
     /// Whether any round can cross-check: a policy, both reviewers, and two different families.
     public var crossChecks: Bool {
         guard let policy = crossCheck, policy != .off, let reviewer, let crossReviewer else { return false }
-        return ModelFamily(reviewer.choice.harness) != ModelFamily(crossReviewer.choice.harness)
+        return reviewer.choice.agent != crossReviewer.choice.agent
     }
 
     public init(drafters: [Slot], synthesizer: Slot?, reviewer: Slot?, integrator: ModelChoice,
@@ -139,16 +125,16 @@ public struct RoundConfig: Codable, Equatable, Sendable {
 /// a harness without touching the other's lines. GATED: `choices` never holds a harness outside
 /// `AgentProfiles.headlessReady`, whatever a caller passes in. Without that, a detected `grok`
 /// binary would be offered in the Rounds editor and then fail at round time, because its
-/// `HarnessCommand.build` arm only refuses until Track G lands.
+/// `HeadlessCommand.build` arm only refuses until Track G lands.
 public struct AvailableModels: Sendable, Equatable {
-    public private(set) var choices: [Harness: ModelChoice]
+    public private(set) var choices: [AgentID: ModelChoice]
 
-    public init(choices: [Harness: ModelChoice]) {
+    public init(choices: [AgentID: ModelChoice]) {
         self.choices = choices.filter { AgentProfiles.headlessReady.contains($0.key) }
     }
 
     public init(codex: ModelChoice?, claude: ModelChoice?) {
-        var choices: [Harness: ModelChoice] = [:]
+        var choices: [AgentID: ModelChoice] = [:]
         choices[.codex] = codex
         choices[.claude] = claude
         self.init(choices: choices)
@@ -156,19 +142,19 @@ public struct AvailableModels: Sendable, Equatable {
 
     /// Each harness's model ids, as its CLI listed them at detection (`grok models`), for the
     /// editor's model picker. Absent for a harness with no list command (claude, codex), whose
-    /// model stays a free text field. Generic over `Harness` so Track M's gemini list lands here
+    /// model stays a free text field. Generic over `AgentID` so Track M's gemini list lands here
     /// too rather than in a field of its own.
-    public var models: [Harness: [String]] = [:]
+    public var models: [AgentID: [String]] = [:]
 
     /// Why a harness this build CAN run is not offered: its CLI is missing ("not installed") or
     /// signed out (its profile's hint, e.g. "Grok: run `grok login`"). The editor shows these,
     /// so a harness is never silently missing from a picker (spec §3.2).
-    public var unavailable: [Harness: String] = [:]
+    public var unavailable: [AgentID: String] = [:]
 
-    public func choice(for harness: Harness) -> ModelChoice? { choices[harness] }
+    public func choice(for agent: AgentID) -> ModelChoice? { choices[agent] }
 
-    /// Every available harness, in `Harness.allCases` order — the order pickers list them in.
-    public var harnesses: [Harness] { Harness.allCases.filter { choices[$0] != nil } }
+    /// Every available agent, in `AgentID.planningOrder` order — the order pickers list them in.
+    public var agents: [AgentID] { AgentID.planningOrder.filter { choices[$0] != nil } }
 
     public var codex: ModelChoice? {
         get { choices[.codex] }

@@ -5,7 +5,7 @@ import OSLog
 
 /// Which harness, model and effort run triage.
 struct TriageSettings: Equatable, Sendable {
-    var harness: Harness
+    var agent: AgentID
     var model: String
     var effort: String
 
@@ -14,12 +14,12 @@ struct TriageSettings: Equatable, Sendable {
     static let codexDefault = TriageSettings(CodexProfile().defaultPlanningChoice)
     static let claudeDefault = TriageSettings(ClaudeProfile().defaultPlanningChoice)
 
-    init(harness: Harness, model: String, effort: String) {
-        self.harness = harness; self.model = model; self.effort = effort
+    init(agent: AgentID, model: String, effort: String) {
+        self.agent = agent; self.model = model; self.effort = effort
     }
 
     init(_ choice: ModelChoice) {
-        self.init(harness: choice.harness, model: choice.model, effort: choice.effort)
+        self.init(agent: choice.agent, model: choice.model, effort: choice.effort)
     }
 
     /// codex when a `codex` is on the login shell's PATH (what `which codex` would say in the
@@ -42,15 +42,15 @@ struct TriageSettings: Equatable, Sendable {
     static func available(path: String? = LoginShellPath.repairing()["PATH"],
                           probe: SignInProbe = .system) -> AvailableModels {
         let codex = installed("codex", path: path), claude = installed("claude", path: path)
-        var choices: [Harness: ModelChoice] = [:]
+        var choices: [AgentID: ModelChoice] = [:]
         choices[.codex] = codex ? AvailableModels.defaults.codex : nil
         choices[.claude] = claude || !codex ? AvailableModels.defaults.claude : nil
-        var models: [Harness: [String]] = [:], unavailable: [Harness: String] = [:]
-        for harness in Harness.allCases where harness != .codex && harness != .claude
-            && AgentProfiles.headlessReady.contains(harness) {
-            let profile = AgentProfiles.profile(for: harness)
+        var models: [AgentID: [String]] = [:], unavailable: [AgentID: String] = [:]
+        for agent in AgentID.planningOrder where agent != .codex && agent != .claude
+            && AgentProfiles.headlessReady.contains(agent) {
+            let profile = AgentProfiles.profile(for: agent)
             guard let executable = executable(profile.binaryName, path: path) else {
-                unavailable[harness] = "\(profile.family.displayName): not installed"
+                unavailable[agent] = "\(profile.id.displayName): not installed"
                 continue
             }
             let check = profile.signInCheck
@@ -69,12 +69,12 @@ struct TriageSettings: Equatable, Sendable {
                 // puts the CLI's own default first, and the hard-coded one goes stale (grok's
                 // default moved from grok-4.6 to grok-4.7 on the day it was first probed).
                 let model = listed.first ?? catalog.defaultPlanningModel
-                choices[harness] = ModelChoice(harness: harness, model: model, effort: catalog.defaultPlanningEffort)
-                if !offered.isEmpty { models[harness] = offered }
+                choices[agent] = ModelChoice(agent: agent, model: model, effort: catalog.defaultPlanningEffort)
+                if !offered.isEmpty { models[agent] = offered }
             case .signedOut(let hint):
-                unavailable[harness] = hint
+                unavailable[agent] = hint
             case .notInstalled:
-                unavailable[harness] = "\(profile.family.displayName): not installed"
+                unavailable[agent] = "\(profile.id.displayName): not installed"
             }
         }
         var available = AvailableModels(choices: choices)
@@ -122,7 +122,7 @@ struct SignInProbe: Sendable {
         process.arguments = arguments
         // The same environment a seat on this harness gets, so the check reads the same
         // login a round would use.
-        process.environment = HarnessCommand.environment(
+        process.environment = HeadlessCommand.environment(
             for: ((executable as NSString).lastPathComponent, arguments, []), base: LoginShellPath.repairing())
         process.standardInput = FileHandle.nullDevice
         process.standardOutput = out
@@ -1087,7 +1087,7 @@ final class IntakeService: ObservableObject {
     /// Each harness's pickable planning accounts, from preferences — set by `SessionStore`,
     /// which owns them, so this service never reads preferences itself. Read when the Rounds
     /// editor draws, never captured, so an account added in Settings shows up next time.
-    var planningAccounts: () -> [Harness: [PlanningAccountOption]] = { [:] }
+    var planningAccounts: () -> [AgentID: [PlanningAccountOption]] = { [:] }
 
     func markEditNoteShown(_ id: UUID) { editNoteShown.insert(id) }
 
@@ -1833,7 +1833,7 @@ final class IntakeService: ObservableObject {
         }
         // A resume is pinned to the session's recorded harness/model/effort, never to the
         // current defaults — a turn must not silently switch models mid-conversation.
-        let session = i.triage.map { TriageSettings(harness: $0.harness, model: $0.model, effort: $0.effort) } ?? settings
+        let session = i.triage.map { TriageSettings(agent: $0.agent, model: $0.model, effort: $0.effort) } ?? settings
 
         var reply = await turnResult(id, prompt: prompt, resume: resume, settings: session, files: files, project: project)
         guard !Task.isCancelled else { return }
@@ -1842,7 +1842,7 @@ final class IntakeService: ObservableObject {
             return
         }
         i = intake(id) ?? i
-        i.triage = HarnessSession(harness: session.harness, sessionID: result.sessionID, model: session.model, effort: session.effort)
+        i.triage = HeadlessSession(agent: session.agent, sessionID: result.sessionID, model: session.model, effort: session.effort)
 
         if case .recommendation(let preset, let reason, var cs?) = result.triage {
             cs.graphObservedAt = observedAt  // FD owns this timestamp — see `Triage.initialPrompt`.
@@ -1906,25 +1906,25 @@ final class IntakeService: ObservableObject {
     /// message plus the raw output, which is what `.failed` shows (spec §11).
     private func turnResult(_ id: UUID, prompt: String, resume: String?, settings: TriageSettings,
                             files: TriageFiles, project: URL) async -> Result<TurnReply, TurnFailure> {
-        let request = HarnessRequest(
-            harness: settings.harness, model: settings.model, effort: settings.effort, cwd: project,
+        let request = HeadlessRequest(
+            agent: settings.agent, model: settings.model, effort: settings.effort, cwd: project,
             readableDirs: [files.directory], prompt: prompt, schemaFile: files.schema,
             schemaJSON: Triage.schemaJSON, resumeSessionID: resume)
         // The same fold and cadence as a round's seats (`RoundExecutor.attempt`), written beside
         // triage's other files; the clock tick reads it back (`pollTriageActivity`), and the
         // finished fold is published directly below so the last state never waits on a tick.
-        let activity = ActivityPublisher(harness: settings.harness, project: project,
+        let activity = ActivityPublisher(agent: settings.agent, project: project,
                                          destination: files.directory.appendingPathComponent("activity.json"),
                                          now: { Date() })
         activity.start()
         let out: (stdout: Data, stderr: String, exitCode: Int32)
         do {
-            out = try await headless.run(HarnessCommand.build(request), cwd: project,
+            out = try await headless.run(HeadlessCommand.build(request), cwd: project,
                                          onStdout: { activity.feed($0) })
         } catch {
-            activity.finish(exitCode: nil, error: Task.isCancelled ? nil : "Could not run \(settings.harness.rawValue)")
+            activity.finish(exitCode: nil, error: Task.isCancelled ? nil : "Could not run \(settings.agent.rawValue)")
             triageActivities[id] = activity.activity
-            return .failure(TurnFailure(message: "Could not run \(settings.harness.rawValue): \(error)", raw: nil))
+            return .failure(TurnFailure(message: "Could not run \(settings.agent.rawValue): \(error)", raw: nil))
         }
         activity.finish(exitCode: out.exitCode)
         triageActivities[id] = activity.activity
@@ -1932,10 +1932,10 @@ final class IntakeService: ObservableObject {
         let raw = stdout.isEmpty ? out.stderr : stdout
         guard out.exitCode == 0 else {
             let why = out.stderr.firstLine.isEmpty ? stdout.firstLine : out.stderr.firstLine
-            return .failure(TurnFailure(message: "\(settings.harness.rawValue) exited \(out.exitCode): \(why)", raw: raw))
+            return .failure(TurnFailure(message: "\(settings.agent.rawValue) exited \(out.exitCode): \(why)", raw: raw))
         }
         do {
-            let (session, structured) = try HarnessOutput.parse(settings.harness, stdout: out.stdout)
+            let (session, structured) = try HeadlessOutput.parse(settings.agent, stdout: out.stdout)
             return .success(TurnReply(sessionID: session, triage: try Triage.decode(structured), raw: raw))
         } catch {
             return .failure(TurnFailure(message: "Triage did not return the expected JSON: \(error)", raw: raw))

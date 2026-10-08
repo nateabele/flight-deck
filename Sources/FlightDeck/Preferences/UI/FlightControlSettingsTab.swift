@@ -88,7 +88,7 @@ struct FlightControlSettingsTab: View {
                     }
                 case .capacity:
                     CapacityPane(preferences: preferences, usage: UsageService.shared,
-                                 localHarnesses: CapacityPane.defaultLocalHarnesses())
+                                 localAgents: CapacityPane.defaultLocalAgents())
                 }
             }
             .id(project)

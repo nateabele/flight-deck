@@ -1,4 +1,5 @@
 import XCTest
+import IntakeKit
 @testable import FlightDeck
 
 /// The capability is reached through `AgentID`, never off an adapter instance — the backfill

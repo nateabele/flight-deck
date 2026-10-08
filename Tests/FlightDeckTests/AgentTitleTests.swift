@@ -1,4 +1,5 @@
 import XCTest
+import IntakeKit
 @testable import FlightDeck
 
 /// **A legal conversation name is a property of the channel the name travels down —**

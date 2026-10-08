@@ -13,7 +13,7 @@ final class HeadlessClaudeUsageSource {
 
     func readings(from activities: [SeatActivity], account: AccountRef) -> [UsageReading] {
         var out: [UsageReading] = []
-        for a in activities where a.harness == .claude && (a.rateLimitWindows != nil || a.rateLimitedAt != nil) {
+        for a in activities where a.agent == .claude && (a.rateLimitWindows != nil || a.rateLimitedAt != nil) {
             let at = a.lastEventAt ?? a.startedAt
             let key = "\(a.startedAt.timeIntervalSince1970)|\(at.timeIntervalSince1970)"
             guard seen.insert(key).inserted else { continue }

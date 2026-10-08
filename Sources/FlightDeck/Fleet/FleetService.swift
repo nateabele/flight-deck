@@ -1,6 +1,7 @@
 import Combine
 import FleetKit
 import Foundation
+import IntakeKit
 import Network
 import OSLog
 

@@ -67,12 +67,12 @@ final class TriageTests: XCTestCase {
         try Data(contentsOf: try XCTUnwrap(Bundle(for: Self.self).url(forResource: name, withExtension: ext, subdirectory: "Fixtures/Intake")))
     }
     func testDecodesLiveCodexOutput() throws {
-        let out = try HarnessOutput.parse(.codex, stdout: try load("triage-codex-live", "jsonl"))
+        let out = try HeadlessOutput.parse(.codex, stdout: try load("triage-codex-live", "jsonl"))
         guard case .questions(let qs) = try Triage.decode(out.structured) else { return XCTFail() }
         XCTAssertEqual(qs.count, 1)
     }
     func testDecodesLiveClaudeOutput() throws {
-        let out = try HarnessOutput.parse(.claude, stdout: try load("triage-claude-live", "json"))
+        let out = try HeadlessOutput.parse(.claude, stdout: try load("triage-claude-live", "json"))
         guard case .questions(let qs) = try Triage.decode(out.structured) else { return XCTFail() }
         XCTAssertEqual(qs.count, 1)
     }

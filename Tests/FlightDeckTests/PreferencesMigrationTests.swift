@@ -1,4 +1,5 @@
 import XCTest
+import IntakeKit
 @testable import FlightDeck
 
 final class PreferencesMigrationTests: XCTestCase {
@@ -33,7 +34,7 @@ final class PreferencesMigrationTests: XCTestCase {
     func testMigrationDoesNotRescanOnceAccountsExist() {
         var prefs = Preferences()
         prefs.migrateAccountsIfNeeded(homeRoot: root)
-        prefs.storedAccounts?.removeAll { $0.home.lastPathComponent.contains("-") }
+        prefs.accounts.removeAll { $0.home.lastPathComponent.contains("-") }
         prefs.migrateAccountsIfNeeded(homeRoot: root)
         XCTAssertEqual(prefs.accounts(for: .claude).count, 1)
     }

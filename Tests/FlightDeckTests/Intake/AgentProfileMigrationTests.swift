@@ -25,8 +25,8 @@ final class AgentProfileMigrationTests: XCTestCase {
         try Data(text.utf8).write(to: url)
     }
 
-    private func req(_ h: Harness, account: AgentAccountRef? = nil) -> HarnessRequest {
-        HarnessRequest(harness: h, model: "m", effort: "high", cwd: URL(fileURLWithPath: "/proj"), readableDirs: [],
+    private func req(_ h: AgentID, account: AgentAccountRef? = nil) -> HeadlessRequest {
+        HeadlessRequest(agent: h, model: "m", effort: "high", cwd: URL(fileURLWithPath: "/proj"), readableDirs: [],
                        prompt: "P", schemaFile: URL(fileURLWithPath: "/s.json"), schemaJSON: "{}",
                        resumeSessionID: nil, account: account)
     }
@@ -34,11 +34,11 @@ final class AgentProfileMigrationTests: XCTestCase {
     // MARK: - The profiles are real
 
     func testClaudeAndCodexAreNoLongerStubs() {
-        for harness in [Harness.claude, .codex] {
-            let profile = AgentProfiles.profile(for: harness)
-            XCTAssertNil(profile.unimplemented, "\(harness)")
-            XCTAssertFalse(profile.modelCatalog.isEmpty, "\(harness)")
-            XCTAssertFalse(profile.signInCheck.arguments.isEmpty, "\(harness)")
+        for agent in [AgentID.claude, .codex] {
+            let profile = AgentProfiles.profile(for: agent)
+            XCTAssertNil(profile.unimplemented, "\(agent)")
+            XCTAssertFalse(profile.modelCatalog.isEmpty, "\(agent)")
+            XCTAssertFalse(profile.signInCheck.arguments.isEmpty, "\(agent)")
         }
     }
 
@@ -66,10 +66,10 @@ final class AgentProfileMigrationTests: XCTestCase {
     // MARK: - Models and defaults (regression)
 
     func testPlanningAndTriageDefaultsAreUnchanged() {
-        XCTAssertEqual(AvailableModels.defaults.codex, ModelChoice(harness: .codex, model: "gpt-6-sol", effort: "high"))
-        XCTAssertEqual(AvailableModels.defaults.claude, ModelChoice(harness: .claude, model: "opus", effort: "high"))
-        XCTAssertEqual(TriageSettings.codexDefault, TriageSettings(harness: .codex, model: "gpt-6-sol", effort: "high"))
-        XCTAssertEqual(TriageSettings.claudeDefault, TriageSettings(harness: .claude, model: "opus", effort: "high"))
+        XCTAssertEqual(AvailableModels.defaults.codex, ModelChoice(agent: .codex, model: "gpt-6-sol", effort: "high"))
+        XCTAssertEqual(AvailableModels.defaults.claude, ModelChoice(agent: .claude, model: "opus", effort: "high"))
+        XCTAssertEqual(TriageSettings.codexDefault, TriageSettings(agent: .codex, model: "gpt-6-sol", effort: "high"))
+        XCTAssertEqual(TriageSettings.claudeDefault, TriageSettings(agent: .claude, model: "opus", effort: "high"))
     }
 
     func testSettingsFlagCatalogOffersTheSameModelsAndEfforts() {
@@ -167,7 +167,7 @@ final class AgentProfileMigrationTests: XCTestCase {
     }
 
     /// `FailureDiagnosis.classify`'s rate-limit/auth decision before profiles, verbatim.
-    private static func legacyDiagnosis(_ stderr: String, harness: Harness?) -> (DiagnosisCategory, String)? {
+    private static func legacyDiagnosis(_ stderr: String, agent: AgentID?) -> (DiagnosisCategory, String)? {
         let haystack = stderr.lowercased()
         if haystack.contains("rate limit") || haystack.contains("429") || haystack.contains("usage limit") {
             return (.rateLimited, "Wait for the limit to reset, or switch this slot to another model.")
@@ -177,7 +177,7 @@ final class AgentProfileMigrationTests: XCTestCase {
             || haystack.contains("invalid api key") {
             if haystack.contains("codex login") { return (.authExpired, "Run `codex login` in a terminal") }
             if haystack.contains("claude /login") { return (.authExpired, "Run `claude /login` in a terminal") }
-            return (.authExpired, harness == .codex ? "Run `codex login` in a terminal" : "Run `claude /login` in a terminal")
+            return (.authExpired, agent == .codex ? "Run `codex login` in a terminal" : "Run `claude /login` in a terminal")
         }
         return nil
     }
@@ -187,14 +187,14 @@ final class AgentProfileMigrationTests: XCTestCase {
                       "Authentication failed", "401 Unauthorized", "Please run /login", "run `codex login` first",
                       "Invalid API key", "Please run claude /login", "429 and also unauthorized", "segfault",
                       "the server is overloaded", ""]
-        for harness in [Harness?.none, .claude, .codex] {
+        for agent in [AgentID?.none, .claude, .codex] {
             for stderr in corpus {
-                let d = FailureDiagnosis.classify(exitCode: 1, stdout: Data(), stderr: stderr, parseError: nil, harness: harness)
-                if let (category, action) = Self.legacyDiagnosis(stderr, harness: harness) {
-                    XCTAssertEqual(d.category, category, "\(stderr) / \(String(describing: harness))")
-                    XCTAssertEqual(d.action, action, "\(stderr) / \(String(describing: harness))")
+                let d = FailureDiagnosis.classify(exitCode: 1, stdout: Data(), stderr: stderr, parseError: nil, agent: agent)
+                if let (category, action) = Self.legacyDiagnosis(stderr, agent: agent) {
+                    XCTAssertEqual(d.category, category, "\(stderr) / \(String(describing: agent))")
+                    XCTAssertEqual(d.action, action, "\(stderr) / \(String(describing: agent))")
                 } else {
-                    XCTAssertEqual(d.category, .harnessError, "\(stderr) / \(String(describing: harness))")
+                    XCTAssertEqual(d.category, .harnessError, "\(stderr) / \(String(describing: agent))")
                 }
             }
         }
@@ -203,13 +203,13 @@ final class AgentProfileMigrationTests: XCTestCase {
     /// Structured error events still count, and the model's own prose still does not.
     func testDiagnosisStillReadsOnlyStructuredErrorEvents() {
         let failed = Data(#"{"type":"turn.failed","error":{"message":"429 Too Many Requests"}}"#.utf8)
-        XCTAssertEqual(FailureDiagnosis.classify(exitCode: 1, stdout: failed, stderr: "", parseError: nil, harness: .codex).category,
+        XCTAssertEqual(FailureDiagnosis.classify(exitCode: 1, stdout: failed, stderr: "", parseError: nil, agent: .codex).category,
                        .rateLimited)
         let claude = Data(#"{"type":"result","is_error":true,"result":"Not logged in · Please run /login"}"#.utf8)
-        XCTAssertEqual(FailureDiagnosis.classify(exitCode: 1, stdout: claude, stderr: "", parseError: nil, harness: .claude).category,
+        XCTAssertEqual(FailureDiagnosis.classify(exitCode: 1, stdout: claude, stderr: "", parseError: nil, agent: .claude).category,
                        .authExpired)
         let prose = Data(#"{"type":"item.completed","item":{"type":"agent_message","text":"handle the 401 authentication case"}}"#.utf8)
-        XCTAssertEqual(FailureDiagnosis.classify(exitCode: 1, stdout: prose, stderr: "", parseError: nil, harness: .codex).category,
+        XCTAssertEqual(FailureDiagnosis.classify(exitCode: 1, stdout: prose, stderr: "", parseError: nil, agent: .codex).category,
                        .harnessError)
     }
 
@@ -237,23 +237,23 @@ final class AgentProfileMigrationTests: XCTestCase {
 
     func testChildSessionScrubIsOneList() {
         XCTAssertEqual(ClaudeProfile.childSessionVariables, ["CLAUDE_CODE_CHILD_SESSION", "CLAUDECODE"])
-        XCTAssertEqual(try HarnessCommand.build(req(.claude), home: root).unsetEnvironment, ClaudeProfile.childSessionVariables)
+        XCTAssertEqual(try HeadlessCommand.build(req(.claude), home: root).unsetEnvironment, ClaudeProfile.childSessionVariables)
         XCTAssertEqual(IndexExtraction.command(prompt: "p", settings: .standard).unsetEnvironment, ClaudeProfile.childSessionVariables)
         XCTAssertEqual(ClaudeProfile.scrubbingChildSession(["A": "1", "CLAUDECODE": "1", "CLAUDE_CODE_CHILD_SESSION": "1"]), ["A": "1"])
     }
 
-    /// The built-in account (nil) builds exactly what `HarnessCommand.environment` built before.
+    /// The built-in account (nil) builds exactly what `HeadlessCommand.environment` built before.
     func testBuiltInAccountEnvironmentIsUnchanged() throws {
         try write(#"{"env":{"ANTHROPIC_BASE_URL":"http://localhost:8787","PATH":"/settings","CLAUDECODE":"1"}}"#,
                   to: ".claude/settings.json")
         let base = ["PATH": "/usr/bin", "CLAUDE_CODE_CHILD_SESSION": "1", "CLAUDECODE": "1", "KEEP": "k"]
         var legacyClaude = ClaudeUserEnv.merged(into: base, home: root)
         for key in ["CLAUDE_CODE_CHILD_SESSION", "CLAUDECODE"] { legacyClaude.removeValue(forKey: key) }
-        let claude = try HarnessCommand.build(req(.claude), home: root)
-        XCTAssertEqual(HarnessCommand.environment(for: claude, base: base, home: root), legacyClaude)
+        let claude = try HeadlessCommand.build(req(.claude), home: root)
+        XCTAssertEqual(HeadlessCommand.environment(for: claude, base: base, home: root), legacyClaude)
         XCTAssertEqual(ClaudeProfile(userHome: root).environment(base: base, account: nil), legacyClaude)
-        let codex = try HarnessCommand.build(req(.codex), home: root)
-        XCTAssertEqual(HarnessCommand.environment(for: codex, base: base, home: root), base)
+        let codex = try HeadlessCommand.build(req(.codex), home: root)
+        XCTAssertEqual(HeadlessCommand.environment(for: codex, base: base, home: root), base)
         XCTAssertEqual(CodexProfile(userHome: root).environment(base: base, account: nil), base)
     }
 
@@ -264,20 +264,20 @@ final class AgentProfileMigrationTests: XCTestCase {
         let personal = AgentAccountRef(id: "personal", home: root.appendingPathComponent("accounts/personal"))
         let base = ["PATH": "/usr/bin", "CLAUDE_CODE_CHILD_SESSION": "1", "CLAUDE_CONFIG_DIR": "/elsewhere"]
 
-        let claude = try HarnessCommand.build(req(.claude, account: work), home: root)
-        let workEnv = HarnessCommand.environment(for: claude, base: base, home: root, account: work)
+        let claude = try HeadlessCommand.build(req(.claude, account: work), home: root)
+        let workEnv = HeadlessCommand.environment(for: claude, base: base, home: root, account: work)
         XCTAssertEqual(workEnv["CLAUDE_CONFIG_DIR"], work.home.path, "the account beats an inherited home")
         XCTAssertEqual(workEnv["ANTHROPIC_BASE_URL"], "http://work", "the account's own settings, not the built-in's")
         XCTAssertNil(workEnv["CLAUDE_CODE_CHILD_SESSION"])
-        let personalEnv = HarnessCommand.environment(for: claude, base: base, home: root, account: personal)
+        let personalEnv = HeadlessCommand.environment(for: claude, base: base, home: root, account: personal)
         XCTAssertEqual(personalEnv["CLAUDE_CONFIG_DIR"], personal.home.path)
         XCTAssertNil(personalEnv["ANTHROPIC_BASE_URL"], "an account with no settings file carries none")
-        let builtIn = HarnessCommand.environment(for: claude, base: base, home: root)
+        let builtIn = HeadlessCommand.environment(for: claude, base: base, home: root)
         XCTAssertEqual(builtIn["CLAUDE_CONFIG_DIR"], "/elsewhere", "nil leaves the caller's environment alone")
         XCTAssertEqual(builtIn["ANTHROPIC_BASE_URL"], "http://built-in")
 
-        let codex = try HarnessCommand.build(req(.codex, account: work), home: root)
-        XCTAssertEqual(HarnessCommand.environment(for: codex, base: ["PATH": "/usr/bin"], home: root, account: work),
+        let codex = try HeadlessCommand.build(req(.codex, account: work), home: root)
+        XCTAssertEqual(HeadlessCommand.environment(for: codex, base: ["PATH": "/usr/bin"], home: root, account: work),
                        ["PATH": "/usr/bin", "CODEX_HOME": work.home.path])
     }
 
@@ -285,9 +285,9 @@ final class AgentProfileMigrationTests: XCTestCase {
         try write("service_tier = \"fast\"\n", to: ".codex/config.toml")
         try write("service_tier = \"flex\"\n", to: "accounts/work/config.toml")
         let work = AgentAccountRef(id: "work", home: root.appendingPathComponent("accounts/work"))
-        let builtIn = try HarnessCommand.build(req(.codex), home: root).arguments
+        let builtIn = try HeadlessCommand.build(req(.codex), home: root).arguments
         XCTAssertTrue(builtIn.contains("service_tier=\"fast\""), "\(builtIn)")
-        let bound = try HarnessCommand.build(req(.codex, account: work), home: root).arguments
+        let bound = try HeadlessCommand.build(req(.codex, account: work), home: root).arguments
         XCTAssertTrue(bound.contains("service_tier=\"flex\""), "\(bound)")
         XCTAssertFalse(bound.contains("service_tier=\"fast\""))
     }
@@ -326,7 +326,7 @@ final class AgentProfileMigrationTests: XCTestCase {
         XCTAssertEqual(RoundConfigEditor.accountChoices(for: bound.drafters[0].choice, options: []).map(\.label),
                        ["Built-in account", "Removed account"])
         // Switching harness drops the account: a claude home means nothing to codex.
-        let switched = RoundConfigEditor.switchingHarness(bound, at: .drafter(0), to: .claude, available: .defaults)
+        let switched = RoundConfigEditor.switchingAgent(bound, at: .drafter(0), to: .claude, available: .defaults)
         XCTAssertNil(switched.drafters[0].choice.account)
     }
 
@@ -335,9 +335,9 @@ final class AgentProfileMigrationTests: XCTestCase {
     func testAModelChoiceWithNoAccountCodesAsBefore() throws {
         let old = Data(#"{"harness":"claude","model":"opus","effort":"high"}"#.utf8)
         let decoded = try IntakeJSON.decoder.decode(ModelChoice.self, from: old)
-        XCTAssertEqual(decoded, ModelChoice(harness: .claude, model: "opus", effort: "high"))
+        XCTAssertEqual(decoded, ModelChoice(agent: .claude, model: "opus", effort: "high"))
         XCTAssertFalse(String(decoding: try IntakeJSON.encoder.encode(decoded), as: UTF8.self).contains("account"))
-        let bound = ModelChoice(harness: .codex, model: "m", effort: "high",
+        let bound = ModelChoice(agent: .codex, model: "m", effort: "high",
                                 account: AgentAccountRef(id: "w", home: URL(fileURLWithPath: "/accounts/w")))
         XCTAssertEqual(try IntakeJSON.decoder.decode(ModelChoice.self, from: IntakeJSON.encoder.encode(bound)), bound)
     }

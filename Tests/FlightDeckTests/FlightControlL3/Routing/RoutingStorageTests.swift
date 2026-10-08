@@ -71,7 +71,7 @@ final class RoutingStorageTests: XCTestCase {
         let persistence = MemoryPersistence()
         let store = PreferencesStore(persistence: persistence)
         store.globalRoutingRules = [rule]
-        store.routingCompilerSettings = RuleCompilerSettings(harness: .codex, model: "gpt-6-luna", effort: "low")
+        store.routingCompilerSettings = RuleCompilerSettings(agent: .codex, model: "gpt-6-luna", effort: "low")
         let reopened = PreferencesStore(persistence: persistence)
         XCTAssertEqual(reopened.globalRoutingRules, [rule])
         XCTAssertEqual(reopened.routingCompilerSettings.model, "gpt-6-luna")

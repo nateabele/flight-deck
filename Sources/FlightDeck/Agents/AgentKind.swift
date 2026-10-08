@@ -2,19 +2,9 @@ import FleetKit
 import Foundation
 import IntakeKit
 
-/// Which coding agent a tab runs. The raw value is a storage format — it is written into
-/// `sessions.json` — so it is spelled explicitly rather than derived from the case name.
-enum AgentID: String, Codable, CaseIterable, Sendable {
-    case claude
-    case codex
-
-    var displayName: String {
-        switch self {
-        case .claude: "Claude"
-        case .codex: "Codex"
-        }
-    }
-}
+// `AgentID` itself lives in IntakeKit (unify brief R1): the planning runner links IntakeKit
+// alone and must name the same agents a tab does. The app-side answers about an agent — its
+// adapter's capabilities, its built-in home, its routing — are extensions in this module.
 
 /// What a prepared session is bound to: the agent's own conversation identity, and where
 /// its transcript lives when the agent reports one.
@@ -97,17 +87,38 @@ enum AgentEvent: Equatable, Sendable {
 enum AgentOptions: Equatable, Sendable {
     case claude(FlagSet)
     case codex(CodexThreadOptions)
+    /// Empty until Track G gives grok a launch surface (unify brief R10). A payload from the
+    /// start, rather than a bare case, so adding grok's options later is a new optional field
+    /// on `GrokOptions` and not a change to how a stored `AgentOptions` is spelled.
+    case grok(GrokOptions)
+    /// Empty until Track M; see `.grok`.
+    case gemini(GeminiOptions)
 
     var agent: AgentID {
         switch self {
         case .claude: .claude
         case .codex: .codex
+        case .grok: .grok
+        case .gemini: .gemini
+        }
+    }
+
+    /// The payload that overrides nothing, per agent — what a project or agent row with no
+    /// options of its own carries.
+    static func empty(for agent: AgentID) -> AgentOptions {
+        switch agent {
+        case .claude: .claude(FlagSet())
+        case .codex: .codex(CodexThreadOptions())
+        case .grok: .grok(GrokOptions())
+        case .gemini: .gemini(GeminiOptions())
         }
     }
 }
 
-/// So `[AgentID: T]` encodes as a JSON object keyed `"claude"` / `"codex"` rather than Swift's
-/// default alternating-array form. The stdlib supplies the whole implementation for a
-/// `String`-backed `RawRepresentable` (SE-0320), which is why the body is empty — and the raw
-/// values are already documented above as a storage format, so this keeps that promise legible.
-extension AgentID: CodingKeyRepresentable {}
+/// grok's per-agent launch options. None yet: the stub `GrokAdapter` launches plain `grok`.
+/// Every field added here must be optional, so a row stored before it existed still decodes.
+struct GrokOptions: Codable, Equatable, Sendable {}
+
+/// Gemini's (`agy`'s) per-agent launch options. None yet; see `GrokOptions`.
+struct GeminiOptions: Codable, Equatable, Sendable {}
+

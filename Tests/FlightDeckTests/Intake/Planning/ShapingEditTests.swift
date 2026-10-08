@@ -6,8 +6,8 @@ import XCTest
 /// agents already ran, how a cap edit folds into the tape's extend/trim counter, and the
 /// refusals the service applies to a config that changes what already ran.
 final class ShapingEditTests: XCTestCase {
-    private let codex = ModelChoice(harness: .codex, model: "gpt-6-sol", effort: "high")
-    private let grok = ModelChoice(harness: .grok, model: "grok-4.7", effort: "high")
+    private let codex = ModelChoice(agent: .codex, model: "gpt-6-sol", effort: "high")
+    private let grok = ModelChoice(agent: .grok, model: "grok-4.7", effort: "high")
 
     private var config: RoundConfig { PresetExpansion.config(for: .featurePlan, available: .defaults)! }
 

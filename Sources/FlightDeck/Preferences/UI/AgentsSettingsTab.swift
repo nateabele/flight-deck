@@ -1,4 +1,5 @@
 import SwiftUI
+import IntakeKit
 
 /// Replaces the old single-agent Claude tab. The list on the left is both the agent
 /// registry and the shortcut binding — row 1 is ⌘N, row 2 ⌘⇧N, row 3 ⌘⇧⌥N — so the shortcut

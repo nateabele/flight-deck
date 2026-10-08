@@ -24,7 +24,7 @@ public struct ActivitySteps: Codable, Equatable, Sendable {
 /// really emit: neither harness reports a percentage or an ETA, so there are none here, and
 /// `costUSD` exists only because claude's final `result` states one (codex never does).
 public struct SeatActivity: Codable, Equatable, Sendable {
-    public var harness: Harness
+    public var agent: AgentID
     /// The latest reasoning (codex) or thinking (claude) summary: its first sentence, markdown
     /// bold stripped, at most `ActivityParser.headlineLimit` characters.
     public var headline: String?
@@ -54,7 +54,18 @@ public struct SeatActivity: Codable, Equatable, Sendable {
     public var costUSD: Double?
     public var finished = false
     public var error: String?
-    public init(harness: Harness, startedAt: Date) { self.harness = harness; self.startedAt = startedAt }
+    public init(agent: AgentID, startedAt: Date) { self.agent = agent; self.startedAt = startedAt }
+
+    /// `agent` keeps the JSON key `harness` (unify brief R1): a runner from an older build may
+    /// still be writing `activity.json` for a round this build is drawing. Every other property
+    /// keeps its own name — listed in full because a stored property left out of `CodingKeys`
+    /// silently stops being encoded.
+    private enum CodingKeys: String, CodingKey {
+        case agent = "harness"
+        case headline, action, footprint, steps, inputTokens, outputTokens, rateLimitedAt
+        case rateLimitWindows, rateLimitStatus, rateLimitResetsAt, startedAt, lastEventAt, costUSD
+        case finished, error
+    }
 }
 
 /// What one seat produced, written to `runs/<run>/result.json` the moment that seat's own
@@ -133,11 +144,11 @@ public struct ActivityParser: Sendable {
     /// `project` is what footprint and display paths are relative to; `cwd` (default: the
     /// project) is what a relative path in a shell command resolves against — the integrator
     /// runs in the intake's work dir, not the project.
-    public init(harness: Harness, project: URL, cwd: URL? = nil, now: @escaping @Sendable () -> Date) {
+    public init(agent: AgentID, project: URL, cwd: URL? = nil, now: @escaping @Sendable () -> Date) {
         self.project = project.standardizedFileURL
         self.cwd = (cwd ?? project).standardizedFileURL
         self.now = now
-        activity = SeatActivity(harness: harness, startedAt: now())
+        activity = SeatActivity(agent: agent, startedAt: now())
     }
 
     public mutating func feed(_ data: Data) {
@@ -170,7 +181,7 @@ public struct ActivityParser: Sendable {
     private mutating func fold(_ line: Data) {
         guard let obj = try? JSONSerialization.jsonObject(with: line) as? [String: Any] else { return }
         // agy tags its events `event`, not `type` (agy 1.2.3 stream-json).
-        if activity.harness == .gemini {
+        if activity.agent == .gemini {
             guard let event = obj["event"] as? String ?? obj["type"] as? String else { return }
             activity.lastEventAt = now()
             foldGemini(event, obj)
@@ -178,7 +189,7 @@ public struct ActivityParser: Sendable {
         }
         guard let type = obj["type"] as? String else { return }
         activity.lastEventAt = now()
-        switch activity.harness {
+        switch activity.agent {
         case .codex: foldCodex(type, obj)
         case .claude: foldClaude(type, obj)
         case .grok: foldGrok(type, obj)

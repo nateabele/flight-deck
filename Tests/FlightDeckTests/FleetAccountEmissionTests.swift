@@ -1,4 +1,5 @@
 import XCTest
+import IntakeKit
 import FleetKit
 @testable import FlightDeck
 
@@ -49,9 +50,9 @@ final class FleetAccountEmissionTests: XCTestCase {
     /// removed, because no `sessionRemoved` will ever name it.
     func testARefusedClaudeLaunchEmitsNothing() {
         let preferences = PreferencesStore(persistence: nil)
-        preferences.preferences.storedAccounts = []
+        preferences.preferences.accounts = []
         preferences.preferences.storedProjectSettings =
-            ["/p": ProjectSettings(accounts: [.claude: UUID()])]
+            ["/p": ProjectSettings(accounts: [.claude: .account(UUID())])]
         let store = makeStore(preferences)
         let replicator = attachedReplicator(to: store)
 
@@ -65,9 +66,9 @@ final class FleetAccountEmissionTests: XCTestCase {
     /// is touched, so there is nothing to describe on the wire either.
     func testARefusedCodexLaunchEmitsNothing() async {
         let preferences = PreferencesStore(persistence: nil)
-        preferences.preferences.storedAccounts = []
+        preferences.preferences.accounts = []
         preferences.preferences.storedProjectSettings =
-            ["/p": ProjectSettings(accounts: [.codex: UUID()])]
+            ["/p": ProjectSettings(accounts: [.codex: .account(UUID())])]
         let store = makeStore(preferences)
         let replicator = attachedReplicator(to: store)
 
@@ -144,7 +145,7 @@ final class FleetAccountEmissionTests: XCTestCase {
     func testATickOnOneAccountDoesNotAnnounceTheOthersTabAsGone() {
         let (preferences, work) = configured(.claude)
         let other = AgentAccount(agent: .claude, displayName: "Other", home: home("other"))
-        preferences.preferences.storedAccounts = [work, other]
+        preferences.preferences.accounts = [work, other]
         let store = makeStore(preferences)
         let first = store.newSession(in: projectURL)
         let second = store.openSignInSession(
@@ -216,7 +217,7 @@ final class FleetAccountEmissionTests: XCTestCase {
         let account = AgentAccount(agent: .claude, displayName: "Work", home: home("work"))
         let other = AgentAccount(agent: .claude, displayName: "Personal", home: home("personal"))
         let preferences = PreferencesStore(persistence: nil)
-        preferences.preferences.storedAccounts = [account, other]
+        preferences.preferences.accounts = [account, other]
 
         let agents = preferences.agentOrder(forProject: projectURL.path)
         let entries = NewSessionAffordance.menu(
@@ -342,7 +343,7 @@ final class FleetAccountEmissionTests: XCTestCase {
     private func configured(_ agent: AgentID) -> (PreferencesStore, AgentAccount) {
         let account = AgentAccount(agent: agent, displayName: "Work", home: home("work"))
         let preferences = PreferencesStore(persistence: nil)
-        preferences.preferences.storedAccounts = [account]
+        preferences.preferences.accounts = [account]
         return (preferences, account)
     }
 

@@ -108,7 +108,7 @@ public final class CapacityLedger: CapacityReader, PoolAllocator, @unchecked Sen
     }
 
     private func activeCount(_ pool: PoolID) -> Int { active.values.filter { $0.pool == pool }.count }
-    private func slot(_ pool: CapacityPool) -> AccountRef { AccountRef(harness: pool.harness, id: nil, label: pool.label) }
+    private func slot(_ pool: CapacityPool) -> AccountRef { AccountRef(agent: pool.agent, id: nil, label: pool.label) }
 
     private func strictestHard(for account: UUID) -> Double {
         pools.filter { $0.kind == .hosted && $0.accounts.contains(account) }.map(\.hardThreshold).min()

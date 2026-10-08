@@ -4,7 +4,7 @@ import IntakeKit
 /// grok as a planning seat against the REAL CLI and account (grok/gemini spec §5): one fresh
 /// read-only drafter run with the real round schema, one resume that must remember what the
 /// first run was told, and one run that is asked to write a file and must not be able to.
-/// Every other grok test runs on fixtures; only this proves the argv `HarnessCommand.build`
+/// Every other grok test runs on fixtures; only this proves the argv `HeadlessCommand.build`
 /// produces is one grok accepts, signed in, with strict schemas.
 ///
 /// Costs real tokens, so it is skipped unless `FLIGHTDECK_GROK_LIVE=1` — run it by hand, once,
@@ -36,15 +36,15 @@ final class GrokPlanningLiveTests: XCTestCase {
     }
 
     private func run(_ prompt: String, resume: String? = nil) async throws -> (CommandResult, sessionID: String, plan: String) {
-        let request = HarnessRequest(harness: .grok, model: GrokProfile().modelCatalog.defaultPlanningModel, effort: "low", cwd: scratch, readableDirs: [],
+        let request = HeadlessRequest(agent: .grok, model: GrokProfile().modelCatalog.defaultPlanningModel, effort: "low", cwd: scratch, readableDirs: [],
                                      prompt: prompt, schemaFile: scratch.appendingPathComponent("unused-schema.json"),
                                      schemaJSON: RoundSchemas.draft, resumeSessionID: resume)
-        let command = try HarnessCommand.build(request)
+        let command = try HeadlessCommand.build(request)
         let result = try await SystemCommandRunner().run(
             executable: command.executable, arguments: command.arguments, cwd: scratch,
-            environment: HarnessCommand.environment(for: command, base: environment))
+            environment: HeadlessCommand.environment(for: command, base: environment))
         XCTAssertEqual(result.exitCode, 0, "stderr: \(result.stderr)")
-        let parsed = try HarnessOutput.parse(.grok, stdout: result.stdout)
+        let parsed = try HeadlessOutput.parse(.grok, stdout: result.stdout)
         let object = try XCTUnwrap(try JSONSerialization.jsonObject(with: parsed.structured) as? [String: Any])
         return (result, parsed.sessionID, try XCTUnwrap(object["plan"] as? String))
     }

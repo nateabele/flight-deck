@@ -1,4 +1,5 @@
 import XCTest
+import IntakeKit
 @testable import FlightDeck
 
 /// That a tab actually *runs* as its account, and that a tab whose account is gone does not
@@ -46,8 +47,8 @@ final class AccountLaunchTests: XCTestCase {
 
     func testAMissingAccountIsReportedRatherThanSubstituted() async {
         let preferences = PreferencesStore(persistence: nil)
-        preferences.preferences.storedAccounts = []
-        preferences.preferences.storedProjectSettings = ["/p": ProjectSettings(accounts: [.claude: UUID()])]
+        preferences.preferences.accounts = []
+        preferences.preferences.storedProjectSettings = ["/p": ProjectSettings(accounts: [.claude: .account(UUID())])]
         let store = makeStore(preferences)
 
         let result = await store.createSession(agent: .claude, in: "/p")
@@ -68,9 +69,9 @@ final class AccountLaunchTests: XCTestCase {
     func testAnAssignmentNamingARemovedAccountIsReportedRatherThanSubstituted() async {
         let (preferences, work) = configured(.claude)
         let spare = AgentAccount(agent: .claude, displayName: "Spare", home: home("spare"))
-        preferences.preferences.storedAccounts = [work, spare]
+        preferences.preferences.accounts = [work, spare]
         preferences.preferences.storedProjectSettings = [
-            projectURL.path: ProjectSettings(accounts: [.claude: work.id])
+            projectURL.path: ProjectSettings(accounts: [.claude: .account(work.id)])
         ]
         // Directly, not through `markAccountRemoved`: that clears the assignment as it goes,
         // and the assignment is the thing under test. Both states are reachable — a snapshot
@@ -90,8 +91,8 @@ final class AccountLaunchTests: XCTestCase {
     /// app-server to prepare against.
     func testABrokenAccountIsRefusedBeforeCodexIsTouched() async {
         let preferences = PreferencesStore(persistence: nil)
-        preferences.preferences.storedAccounts = []
-        preferences.preferences.storedProjectSettings = ["/p": ProjectSettings(accounts: [.codex: UUID()])]
+        preferences.preferences.accounts = []
+        preferences.preferences.storedProjectSettings = ["/p": ProjectSettings(accounts: [.codex: .account(UUID())])]
         let store = makeStore(preferences)
 
         let result = await store.createSession(agent: .codex, in: "/p")
@@ -110,7 +111,7 @@ final class AccountLaunchTests: XCTestCase {
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         let work = AgentAccount(agent: .claude, displayName: "Work", home: missing)
         let preferences = PreferencesStore(persistence: nil)
-        preferences.preferences.storedAccounts = [work]
+        preferences.preferences.accounts = [work]
         let store = makeStore(preferences)
 
         let result = await store.createSession(agent: .claude, in: "/p")
@@ -126,8 +127,8 @@ final class AccountLaunchTests: XCTestCase {
     /// appears.
     func testTheSynchronousPathRefusesABrokenAccountThroughTheReporter() {
         let preferences = PreferencesStore(persistence: nil)
-        preferences.preferences.storedAccounts = []
-        preferences.preferences.storedProjectSettings = ["/p": ProjectSettings(accounts: [.claude: UUID()])]
+        preferences.preferences.accounts = []
+        preferences.preferences.storedProjectSettings = ["/p": ProjectSettings(accounts: [.claude: .account(UUID())])]
         let store = makeStore(preferences)
 
         store.newSession(in: URL(fileURLWithPath: "/p", isDirectory: true))
@@ -160,9 +161,9 @@ final class AccountLaunchTests: XCTestCase {
     func testTheStampFollowsTheProjectsChoiceRatherThanTheDefault() {
         let (preferences, top) = configured(.claude)
         let chosen = AgentAccount(agent: .claude, displayName: "Chosen", home: home("chosen"))
-        preferences.preferences.storedAccounts = [top, chosen]
+        preferences.preferences.accounts = [top, chosen]
         preferences.preferences.storedProjectSettings = [
-            projectURL.path: ProjectSettings(accounts: [.claude: chosen.id])
+            projectURL.path: ProjectSettings(accounts: [.claude: .account(chosen.id)])
         ]
         let store = makeStore(preferences)
 
@@ -196,7 +197,7 @@ final class AccountLaunchTests: XCTestCase {
     func testAnExplicitlyChosenAccountReachesTheStamp() async throws {
         let (preferences, top) = configured(.claude)
         let chosen = AgentAccount(agent: .claude, displayName: "Chosen", home: home("chosen"))
-        preferences.preferences.storedAccounts = [top, chosen]
+        preferences.preferences.accounts = [top, chosen]
         let store = makeStore(preferences)
         store.newSession(in: projectURL)   // an active project to add the chosen tab beside
 
@@ -235,7 +236,7 @@ final class AccountLaunchTests: XCTestCase {
     func testASessionOnADifferentAccountThanItsProjectIsMismatched() {
         let (preferences, top) = configured(.claude)
         let other = AgentAccount(agent: .claude, displayName: "Other", home: home("other"))
-        preferences.preferences.storedAccounts = [top, other]
+        preferences.preferences.accounts = [top, other]
         let store = makeStore(preferences)
 
         let session = store.newSession(in: projectURL, account: other.id)
@@ -283,7 +284,7 @@ final class AccountLaunchTests: XCTestCase {
             agent: .claude, displayName: "Default", home: AgentID.claude.builtInHome
         )
         let preferences = PreferencesStore(persistence: nil)
-        preferences.preferences.storedAccounts = [builtIn]
+        preferences.preferences.accounts = [builtIn]
         let provider = RecordingProvider()
         retained.append(provider)
         let store = makeStore(preferences, provider: provider)
@@ -330,7 +331,7 @@ final class AccountLaunchTests: XCTestCase {
     func testARestoredTabIsRelaunchedUnderTheAccountItWasCreatedWith() {
         let (preferences, work) = configured(.claude)
         let other = AgentAccount(agent: .claude, displayName: "Other", home: home("other"))
-        preferences.preferences.storedAccounts = [other, work]   // `other` is now the default
+        preferences.preferences.accounts = [other, work]   // `other` is now the default
         let provider = RecordingProvider()
         retained.append(provider)
         let persistence = StubPersistence()
@@ -454,7 +455,7 @@ final class AccountLaunchTests: XCTestCase {
     func testRemovingAnAccountUnderALiveTabLeavesItsWatcherWhereItIs() throws {
         let (preferences, work) = configured(.claude)
         let spare = AgentAccount(agent: .claude, displayName: "Spare", home: home("spare"))
-        preferences.preferences.storedAccounts = [work, spare]
+        preferences.preferences.accounts = [work, spare]
         let tab = UUID()
         let persistence = StubPersistence()
         persistence.stored = SessionSnapshot(
@@ -496,7 +497,7 @@ final class AccountLaunchTests: XCTestCase {
         )
         let other = AgentAccount(agent: .claude, displayName: "Other", home: home("other"))
         let preferences = PreferencesStore(persistence: nil)
-        preferences.preferences.storedAccounts = [builtIn, other]
+        preferences.preferences.accounts = [builtIn, other]
         let tab = UUID()
         let persistence = StubPersistence()
         persistence.stored = SessionSnapshot(
@@ -532,7 +533,7 @@ final class AccountLaunchTests: XCTestCase {
         )
         let other = AgentAccount(agent: .codex, displayName: "Other", home: home("other-codex"))
         let preferences = PreferencesStore(persistence: nil)
-        preferences.preferences.storedAccounts = [builtIn, other]
+        preferences.preferences.accounts = [builtIn, other]
         let tab = UUID()
         let persistence = StubPersistence()
         persistence.stored = SessionSnapshot(
@@ -654,7 +655,7 @@ final class AccountLaunchTests: XCTestCase {
     private func configured(_ agent: AgentID) -> (PreferencesStore, AgentAccount) {
         let account = AgentAccount(agent: agent, displayName: "Work", home: home("work"))
         let preferences = PreferencesStore(persistence: nil)
-        preferences.preferences.storedAccounts = [account]
+        preferences.preferences.accounts = [account]
         return (preferences, account)
     }
 

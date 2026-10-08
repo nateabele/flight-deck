@@ -29,7 +29,7 @@ enum RoutingUIFixture {
         return RoutingService(preferences: preferences, kindStore: KindRegistryStore(),
                               makeCompiler: { FixtureRuleCompiler() },
                               loadCatalogs: { catalogs },
-                              pools: DefaultPoolDirectory(harnesses: ["claude", "codex"]),
+                              pools: DefaultPoolDirectory(agents: [.claude, .codex]),
                               hints: FixtureHints(), tasks: FixtureOpenTasks(), writer: FixtureBlockWriter(),
                               fixtureProjects: [project.path],
                               makeRuleID: { next += 1; return "r\(next)" })
@@ -37,9 +37,9 @@ enum RoutingUIFixture {
 
     static var catalogs: AdapterCatalogs {
         AdapterCatalogs([
-            AdapterCatalog(harness: "claude", models: ClaudeRoutingCatalog.models, knobSchema: ClaudeRoutingCatalog.knobSchema,
+            AdapterCatalog(agent: .claude, models: ClaudeRoutingCatalog.models, knobSchema: ClaudeRoutingCatalog.knobSchema,
                            defaultModel: "opus", enabled: true),
-            AdapterCatalog(harness: "codex",
+            AdapterCatalog(agent: .codex,
                            models: [ModelEntry(id: "gpt-6.1-sol", displayName: "GPT-6.1-Sol", knobs: ["effort"]),
                                     ModelEntry(id: "gpt-6-sol", displayName: "GPT-6-Sol", knobs: ["effort"]),
                                     ModelEntry(id: "gpt-6-luna", displayName: "GPT-6-Luna", knobs: ["effort"])],
@@ -66,7 +66,7 @@ enum RoutingUIFixture {
 /// Answers the way a compiler would; the real validator then decides. "teleport" names a
 /// dimension that does not exist, which is how the UI test sees a failed rule.
 struct FixtureRuleCompiler: RuleCompiling {
-    var ref: CompilerRef { CompilerRef(harness: "claude", model: "haiku") }
+    var ref: CompilerRef { CompilerRef(agent: .claude, model: "haiku") }
 
     func propose(_ input: RuleCompilerInput) async -> RuleProposal {
         func term(_ d: String, _ t: Double) -> RuleCompilerWire.Term { .init(dimension: d, atLeast: t, kind: nil) }
@@ -99,20 +99,20 @@ struct FixtureHints: RuleHintSource {
         // Gone once the rule routes to the suggestion, as the real index's hint would be.
         guard rule.id == "p1", rule.compiled?.assign.model != "gpt-6-luna" else { return nil }
         return RuleHint(ruleID: "p1", text: "gpt-6-luna scores 0.14 higher on docs-prose (confidence 0.8)",
-                        snapshotDate: Self.snapshot, suggested: ModelRef(harness: "codex", model: "gpt-6-luna"))
+                        snapshotDate: Self.snapshot, suggested: ModelRef(agent: .codex, model: "gpt-6-luna"))
     }
 }
 
 struct FixtureOpenTasks: OpenTaskReading {
     func openTasks(project: String) async -> Result<[TaskContextRow], OpenTaskReadError> {
         let at = Date(timeIntervalSince1970: 1_790_000_000)
-        func row(_ id: String, _ kind: KindID, _ harness: HarnessID, _ model: String, _ pool: PoolID) -> TaskContextRow {
-            let block = ExecutionBlock(kind: kind, harness: harness, model: model, pool: pool,
+        func row(_ id: String, _ kind: KindID, _ agent: AgentID, _ model: String, _ pool: PoolID) -> TaskContextRow {
+            let block = ExecutionBlock(kind: kind, agent: agent, model: model, pool: pool,
                                        source: AssignmentSource(by: .default, reason: "fixture", at: at))
             return TaskContextRow(id: id, agentContext: try? ExecutionBlockCodec.encode(block, into: nil))
         }
-        return .success([row("fx-1", "snapshot-tests", "claude", "opus", "claude-default"),
-                         row("fx-2", "tests", "codex", "gpt-6-sol", "codex-default")])
+        return .success([row("fx-1", "snapshot-tests", .claude, "opus", "claude-default"),
+                         row("fx-2", "tests", .codex, "gpt-6-sol", "codex-default")])
     }
 }
 

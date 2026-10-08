@@ -13,8 +13,8 @@ import XCTest
 final class PlanReadableRenderTests: XCTestCase {
     private var root: URL!
     private let now = Date()
-    private let codex = ModelChoice(harness: .codex, model: "gpt-6-sol", effort: "high")
-    private let claude = ModelChoice(harness: .claude, model: "opus", effort: "high")
+    private let codex = ModelChoice(agent: .codex, model: "gpt-6-sol", effort: "high")
+    private let claude = ModelChoice(agent: .claude, model: "opus", effort: "high")
 
     override func setUp() {
         super.setUp()
@@ -120,7 +120,7 @@ final class PlanReadableRenderTests: XCTestCase {
             files: ["plan.md": Data(Self.plan.utf8)], into: &tape)
         tape.status = .paused
         try tapes.saveTape(tape)
-        let service = IntakeService(store: store, triageSettings: TriageSettings(harness: .codex, model: "gpt-6-sol", effort: "high"),
+        let service = IntakeService(store: store, triageSettings: TriageSettings(agent: .codex, model: "gpt-6-sol", effort: "high"),
                                     availableModels: .defaults, inject: { _, _, _, _ in true }, hasSession: { _, _ in false })
         service.pollTapes()
         return (service, intake)

@@ -1,4 +1,5 @@
 import AppKit
+import IntakeKit
 import SwiftUI
 
 /// File-menu items for session creation and renaming. All stay enabled in every state: a

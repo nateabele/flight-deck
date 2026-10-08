@@ -1,4 +1,5 @@
 import OSLog
+import IntakeKit
 import SwiftUI
 
 @main
@@ -457,7 +458,7 @@ struct FlightDeckApp: App {
             // Routing, spills and the launch sheet use `RoutingService.catalogs()`, which honors
             // Settings. Until L3-R fills `modelCatalog()` these are the L3-0
             // stubs' empty catalogs, so a refresh proposes no aliases before integration.
-            catalogs: { await RoutingCapabilityRegistry.standard().catalogs(enabled: Set(AgentID.allCases.map(\.harnessID))) })
+            catalogs: { await RoutingCapabilityRegistry.standard().catalogs(enabled: Set(AgentID.allCases)) })
         service.startScheduling(clock: store.watchClock)
         return service
     }

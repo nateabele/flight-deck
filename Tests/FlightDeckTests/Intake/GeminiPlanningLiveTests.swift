@@ -4,7 +4,7 @@ import IntakeKit
 /// The Gemini harness against a real `agy`: one read-only drafter run with the real draft
 /// schema, one resume of THAT conversation that must remember what the first turn was told,
 /// and a read-only check that a seat asked to write a `.md` file leaves no file behind. Every
-/// other Gemini test runs on captured fixtures; only this proves the argv `HarnessCommand`
+/// other Gemini test runs on captured fixtures; only this proves the argv `HeadlessCommand`
 /// builds still drives the installed `agy`.
 ///
 /// Spends real (minimal) tokens, so it is skipped unless `FLIGHTDECK_GEMINI_LIVE=1` — run it
@@ -16,7 +16,7 @@ import IntakeKit
 final class GeminiPlanningLiveTests: XCTestCase {
     private var scratch: URL!
     private var environment: [String: String] = [:]
-    private let model = "gemini-3.8-flash-low"   // cheap: this probes the harness, not plan quality
+    private let model = "gemini-3.8-flash-low"   // cheap: this probes the agent, not plan quality
 
     override func setUp() async throws {
         let env = ProcessInfo.processInfo.environment
@@ -46,21 +46,21 @@ final class GeminiPlanningLiveTests: XCTestCase {
         let schemaFile = scratch.appendingPathComponent("schema-\(UUID().uuidString).json")
         try Data(RoundSchemas.draft.utf8).write(to: schemaFile)
         defer { try? FileManager.default.removeItem(at: schemaFile) }
-        let request = HarnessRequest(harness: .gemini, model: model, effort: "", cwd: scratch, readableDirs: [],
+        let request = HeadlessRequest(agent: .gemini, model: model, effort: "", cwd: scratch, readableDirs: [],
                                      prompt: prompt, schemaFile: schemaFile, schemaJSON: RoundSchemas.draft,
                                      resumeSessionID: resume)
-        let command = try HarnessCommand.build(request)
+        let command = try HeadlessCommand.build(request)
         let result = try await SystemCommandRunner().run(executable: command.executable, arguments: command.arguments,
                                                          cwd: scratch, environment: environment)
         XCTAssertEqual(result.exitCode, 0, result.stderr)
         do {
-            let parsed = try HarnessOutput.parse(.gemini, stdout: result.stdout)
+            let parsed = try HeadlessOutput.parse(.gemini, stdout: result.stdout)
             let draft = try RoundPrompts.decode(DraftOutput.self, parsed.structured)
             return (parsed.sessionID, draft.plan)
         } catch {
-            let diagnosis = FailureDiagnosis.classify(exitCode: 0, stdout: Data(), stderr: "", parseError: error, harness: .gemini)
+            let diagnosis = FailureDiagnosis.classify(exitCode: 0, stdout: Data(), stderr: "", parseError: error, agent: .gemini)
             guard let repair = SchemaRepair.retry(profile: GeminiProfile(), failure: diagnosis,
-                                                  sessionID: HarnessOutput.reportedSession(.gemini, stdout: result.stdout),
+                                                  sessionID: HeadlessOutput.reportedSession(.gemini, stdout: result.stdout),
                                                   access: .readOnly, isRepair: isRepair) else { throw error }
             print("GeminiPlanningLiveTests: repairing an answerless turn: \(error)")
             return try await run(repair.prompt, resume: repair.resumeSessionID, isRepair: true)

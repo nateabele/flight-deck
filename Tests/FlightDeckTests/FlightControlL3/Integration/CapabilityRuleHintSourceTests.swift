@@ -10,11 +10,11 @@ final class CapabilityRuleHintSourceTests: XCTestCase {
     private let snap1 = Date(timeIntervalSince1970: 1_790_000_000)
     private let snap2 = Date(timeIntervalSince1970: 1_790_600_000)
     /// Scored with the rule's knobs: L3-I matches a knobbed assignment to that exact variant only.
-    private let sol = ModelRef(harness: "codex", model: "gpt-6-sol", knobs: ["effort": "high"])
-    private let opus = ModelRef(harness: "claude", model: "opus")
+    private let sol = ModelRef(agent: .codex, model: "gpt-6-sol", knobs: ["effort": "high"])
+    private let opus = ModelRef(agent: .claude, model: "opus")
 
     private func rule() -> RoutingRule {
-        RoutingTestData.rule("r3", .any([.dimension("test-authoring", atLeast: 0.5)]), "codex", "gpt-6-sol",
+        RoutingTestData.rule("r3", .any([.dimension("test-authoring", atLeast: 0.5)]), .codex, "gpt-6-sol",
                              knobs: ["effort": "high"], pool: "codex-default")
     }
 
@@ -33,7 +33,7 @@ final class CapabilityRuleHintSourceTests: XCTestCase {
         XCTAssertTrue(hint.text.hasPrefix("opus scores 0.18 higher on test-authoring"), hint.text)
         // Bare: "Switch to opus" re-targets the rule's model, and the rule's own effort is
         // re-validated against it rather than inheriting whatever variant the index scored.
-        XCTAssertEqual(hint.suggested, ModelRef(harness: "claude", model: "opus"))
+        XCTAssertEqual(hint.suggested, ModelRef(agent: .claude, model: "opus"))
     }
 
     func testNoHintWithoutIndexOrBelowMargin() {
@@ -45,7 +45,7 @@ final class CapabilityRuleHintSourceTests: XCTestCase {
 
     /// The index usually scores a model bare; a rule that pins effort=high must still get a hint.
     func testKnobbedRuleGetsHintFromBareScores() throws {
-        let bare = ModelRef(harness: "codex", model: "gpt-6-sol")
+        let bare = ModelRef(agent: .codex, model: "gpt-6-sol")
         let scores = IndexTestScores.make([(bare, "test-authoring", 0.60, 0.9), (opus, "test-authoring", 0.78, 0.8)])
         let snap = snap1
         let src = CapabilityRuleHintSource { (scores, snap) }
@@ -55,7 +55,7 @@ final class CapabilityRuleHintSourceTests: XCTestCase {
 
     /// A rule with only kind terms has no dimension to compare: no hint, not a crash.
     func testKindOnlyRuleGetsNoHint() {
-        let r = RoutingTestData.rule("k", .any([.kind("tests")]), "codex", "gpt-6-sol", pool: "codex-default")
+        let r = RoutingTestData.rule("k", .any([.kind("tests")]), .codex, "gpt-6-sol", pool: "codex-default")
         let scores = better(), snap = snap1
         XCTAssertNil(CapabilityRuleHintSource { (scores, snap) }.hint(for: r, kinds: [], catalogs: catalogs()))
     }

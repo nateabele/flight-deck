@@ -195,7 +195,7 @@ final class RoutingService: ObservableObject {
         return loaded
     }
 
-    func defaultPools(_ catalogs: AdapterCatalogs) -> [HarnessID: PoolID] {
+    func defaultPools(_ catalogs: AdapterCatalogs) -> [AgentID: PoolID] {
         pools.defaultPools(for: catalogs.order)
     }
 
@@ -225,15 +225,15 @@ final class RoutingService: ObservableObject {
     /// re-route and (at integration) the swarm's launch and spill call. Project rules are read
     /// from the repo file at routing time; the global list and default agents are copied here.
     func makeRouter() -> RuleRouter {
-        let fallback = preferences.preferences.agents.first?.id.harnessID
-        var byProject: [String: HarnessID] = [:]
+        let fallback = preferences.preferences.agents.first?.id
+        var byProject: [String: AgentID] = [:]
         for (path, settings) in preferences.preferences.projectSettings {
-            if let agent = settings.defaultAgent { byProject[path] = agent.harnessID }
+            if let agent = settings.defaultAgent { byProject[path] = agent }
         }
         let defaults = byProject
         return RuleRouter(rules: ProjectFileRuleSource(global: preferences.globalRoutingRules, store: projectStore),
                           kinds: kindStore, index: index, pools: pools,
-                          defaultHarness: { project in defaults[project.standardizedFileURL.path] ?? fallback })
+                          defaultAgent: { project in defaults[project.standardizedFileURL.path] ?? fallback })
     }
 
     // MARK: - Hints (spec §7)

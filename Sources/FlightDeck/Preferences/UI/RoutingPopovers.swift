@@ -208,8 +208,8 @@ struct RoutingTargetEditor: View {
         let options = routing.targetOptions(for: assign)
         RoutingPopoverForm(error: error) {
             RoutingPopoverRow("Agent") {
-                FillingPopUp(selection: Binding(get: { assign.harness }, set: { apply(.setHarness($0)) }),
-                             items: options.harnesses.map { ($0, RuleRowPresentation.agentName($0)) },
+                FillingPopUp(selection: Binding(get: { assign.agent }, set: { apply(.setAgent($0)) }),
+                             items: options.agents.map { ($0, RuleRowPresentation.agentName($0)) },
                              identifier: "routing-target-agent")
             }
             RoutingPopoverRow("Model") {
@@ -316,11 +316,11 @@ struct RoutingCompilerPopover: View {
     private var settings: RuleCompilerSettings { preferences.routingCompilerSettings }
 
     var body: some View {
-        let models = routing.lastCatalogs.byHarness[HarnessID(settings.harness.rawValue)]?.models ?? []
+        let models = routing.lastCatalogs.byAgent[settings.agent]?.models ?? []
         RoutingPopoverForm {
             RoutingPopoverRow("Agent") {
-                FillingPopUp(selection: Binding(get: { settings.harness }, set: { setHarness($0) }),
-                             items: [(Harness.claude, "Claude"), (Harness.codex, "Codex")], identifier: "routing-compiler-agent")
+                FillingPopUp(selection: Binding(get: { settings.agent }, set: { setAgent($0) }),
+                             items: [(AgentID.claude, "Claude"), (AgentID.codex, "Codex")], identifier: "routing-compiler-agent")
             }
             RoutingPopoverRow("Model") {
                 // Free text only while the catalog is unknown (before the pane's first load, or
@@ -351,15 +351,15 @@ struct RoutingCompilerPopover: View {
 
     /// Switching agent picks that agent's cheapest sensible compiler, not its flagship: the
     /// compile is a tiny, schema-checked answer.
-    private func setHarness(_ h: Harness) {
-        guard h != settings.harness else { return }
+    private func setAgent(_ h: AgentID) {
+        guard h != settings.agent else { return }
         var next = settings
-        next.harness = h
-        let models = routing.lastCatalogs.byHarness[HarnessID(h.rawValue)]
+        next.agent = h
+        let models = routing.lastCatalogs.byAgent[h]
         switch h {
         case .claude: next.model = "haiku"
         case .codex: next.model = models?.defaultModel ?? models?.models.first?.id ?? ""
-        // Not agent harnesses (spec §3.1): the popup above never offers them.
+        // Not agent agents (spec §3.1): the popup above never offers them.
         case .grok, .gemini: return
         }
         preferences.routingCompilerSettings = next

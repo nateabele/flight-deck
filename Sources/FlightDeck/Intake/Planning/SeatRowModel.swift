@@ -79,13 +79,13 @@ struct SeatRowModel: Equatable, Identifiable {
     ///     just the process's pid/exit code). See the task report for this deviation.
     static func make(run: String, slot: SlotOutcome?, requested: Slot?, activity: SeatActivity?, record: RunRecord?,
                       roundRecord: RoundRecord?, seatResult: SeatResult? = nil, now: Date, thresholds: SeatThresholds = .default) -> SeatRowModel {
-        let activityHarness = activity?.harness
+        let activityAgent = activity?.agent
         // A slot with a checkpoint is settled regardless of what its own stream/process say —
         // `slot != nil` means a `RoundRecord` already landed for it.
         let processFinished = activity?.finished == true || record?.exitCode != nil || record?.finished != nil
             || slot != nil
         let failure = failureReason(activity: activity, slot: slot, record: record)
-        let fallback = isFallback(slot: slot, requested: requested, activityHarness: activityHarness)
+        let fallback = isFallback(slot: slot, requested: requested, activityAgent: activityAgent)
 
         let glyph: Glyph
         if activity == nil {
@@ -111,19 +111,19 @@ struct SeatRowModel: Equatable, Identifiable {
             exception = .failed(failure)
         } else if !processFinished, let activity {
             exception = runningException(activity: activity, now: now, thresholds: thresholds,
-                                          fallback: fallback, requested: requested, activityHarness: activityHarness,
+                                          fallback: fallback, requested: requested, activityAgent: activityAgent,
                                           currentAction: action)
         } else {
             exception = nil
         }
 
         let allDirs = footprintAll(activity?.footprint ?? [:])
-        let model = currentChoice(slot: slot, requested: requested, activityHarness: activityHarness)?.model
+        let model = currentChoice(slot: slot, requested: requested, activityAgent: activityAgent)?.model
         return SeatRowModel(
             id: run,
             glyph: glyph,
             role: role,
-            identity: identity(slot: slot, requested: requested, activityHarness: activityHarness),
+            identity: identity(slot: slot, requested: requested, activityAgent: activityAgent),
             headline: headline,
             action: action,
             footprint: footprintChips(allDirs),
@@ -169,36 +169,36 @@ struct SeatRowModel: Equatable, Identifiable {
     /// what was requested (the fallback fired), else the requested choice itself. There is no
     /// live signal that names the model mid-run other than the config — `SeatActivity` carries a
     /// harness, never a model — so this is the best a still-running seat can say.
-    private static func currentChoice(slot: SlotOutcome?, requested: Slot?, activityHarness: Harness?) -> ModelChoice? {
+    private static func currentChoice(slot: SlotOutcome?, requested: Slot?, activityAgent: AgentID?) -> ModelChoice? {
         if let slot { return slot.used }
         guard let requested else { return nil }
-        if let activityHarness, activityHarness != requested.choice.harness, let fallback = requested.fallback {
+        if let activityAgent, activityAgent != requested.choice.agent, let fallback = requested.fallback {
             return fallback
         }
         return requested.choice
     }
 
-    private static func isFallback(slot: SlotOutcome?, requested: Slot?, activityHarness: Harness?) -> Bool {
+    private static func isFallback(slot: SlotOutcome?, requested: Slot?, activityAgent: AgentID?) -> Bool {
         // `used != requested` covers BOTH outcomes of a fallback attempt: `.substituted` (the
         // fallback succeeded) and `.failed` with `used` already the fallback choice (the
         // fallback attempt failed too) — status alone would miss the second one.
-        if let slot { return slot.used.harness != slot.requested.harness }
-        guard let requested, let activityHarness else { return false }
-        return activityHarness != requested.choice.harness
+        if let slot { return slot.used.agent != slot.requested.agent }
+        guard let requested, let activityAgent else { return false }
+        return activityAgent != requested.choice.agent
     }
 
     /// "codex · gpt-6-sol · high", or after a fallback "claude → codex · gpt-6-sol" (spec §6) —
     /// the model, not the effort, on the far side of the arrow: the fallback line is about which
     /// harness took over, and the effort the harness that failed asked for says nothing about it.
-    private static func identity(slot: SlotOutcome?, requested: Slot?, activityHarness: Harness?) -> String {
-        guard let choice = currentChoice(slot: slot, requested: requested, activityHarness: activityHarness) else {
-            return activityHarness?.rawValue ?? "…"
+    private static func identity(slot: SlotOutcome?, requested: Slot?, activityAgent: AgentID?) -> String {
+        guard let choice = currentChoice(slot: slot, requested: requested, activityAgent: activityAgent) else {
+            return activityAgent?.rawValue ?? "…"
         }
-        guard isFallback(slot: slot, requested: requested, activityHarness: activityHarness),
-              let from = slot?.requested.harness ?? requested?.choice.harness else {
-            return "\(choice.harness.rawValue) · \(choice.model) · \(choice.effort)"
+        guard isFallback(slot: slot, requested: requested, activityAgent: activityAgent),
+              let from = slot?.requested.agent ?? requested?.choice.agent else {
+            return "\(choice.agent.rawValue) · \(choice.model) · \(choice.effort)"
         }
-        return "\(from.rawValue) → \(choice.harness.rawValue) · \(choice.model)"
+        return "\(from.rawValue) → \(choice.agent.rawValue) · \(choice.model)"
     }
 
     /// "fell back to codex" — and, only when the engine actually recorded why (today that's
@@ -206,10 +206,10 @@ struct SeatRowModel: Equatable, Identifiable {
     /// carries no diagnosis), "fell back to codex · <detail>". Never invents a reason the data
     /// doesn't have (spec §2 "honest data only") — the brief's illustrative "claude 401" assumes
     /// a reason the current engine doesn't record for a live or successful fallback.
-    private static func fallbackReason(slot: SlotOutcome?, requested: Slot?, activityHarness: Harness?) -> String? {
-        guard isFallback(slot: slot, requested: requested, activityHarness: activityHarness) else { return nil }
-        let to = currentChoice(slot: slot, requested: requested, activityHarness: activityHarness)?.harness.rawValue
-            ?? activityHarness?.rawValue ?? "the fallback model"
+    private static func fallbackReason(slot: SlotOutcome?, requested: Slot?, activityAgent: AgentID?) -> String? {
+        guard isFallback(slot: slot, requested: requested, activityAgent: activityAgent) else { return nil }
+        let to = currentChoice(slot: slot, requested: requested, activityAgent: activityAgent)?.agent.rawValue
+            ?? activityAgent?.rawValue ?? "the fallback model"
         var text = "fell back to \(to)"
         if let detail = slot?.diagnosis?.detail, !detail.isEmpty { text += " · \(detail)" }
         return text
@@ -259,14 +259,14 @@ struct SeatRowModel: Equatable, Identifiable {
     /// guess; a stall (needs a decision — spec's "Stop seat") beats mere quiet; a fallback that
     /// isn't also stalled still gets its line, since it's the reason the identity has an arrow.
     private static func runningException(activity: SeatActivity, now: Date, thresholds: SeatThresholds,
-                                          fallback: Bool, requested: Slot?, activityHarness: Harness?,
+                                          fallback: Bool, requested: Slot?, activityAgent: AgentID?,
                                           currentAction: String?) -> Exception? {
         if let rateLimitedAt = activity.rateLimitedAt {
             return .rateLimited(max(0, now.timeIntervalSince(rateLimitedAt)))
         }
         let idle = max(0, now.timeIntervalSince(activity.lastEventAt ?? activity.startedAt))
         if idle >= thresholds.stalled { return .stalled(idle, last: currentAction) }
-        if fallback, let reason = fallbackReason(slot: nil, requested: requested, activityHarness: activityHarness) {
+        if fallback, let reason = fallbackReason(slot: nil, requested: requested, activityAgent: activityAgent) {
             return .fallback(reason)
         }
         if idle >= thresholds.quiet { return .quiet(idle) }

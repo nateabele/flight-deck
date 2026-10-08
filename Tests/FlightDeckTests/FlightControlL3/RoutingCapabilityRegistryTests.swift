@@ -2,16 +2,19 @@ import XCTest
 import IntakeKit
 @testable import FlightDeck
 
-/// "Harness is any registered adapter" is only true if nothing between a block and a spawn
-/// knows the adapter list. These tests register a third, fake harness and route it end to end
-/// through the registry — the same path claude and codex take.
+/// "An agent is routable once its adapter registers" is only true if nothing between a block
+/// and a spawn knows the adapter list. These tests register a fake conformer for an agent the
+/// standard registry leaves out (grok, not tab-ready) and route it end to end through the
+/// registry — the same path claude and codex take.
 @MainActor
 final class RoutingCapabilityRegistryTests: XCTestCase {
-    func testStandardRegistryHasEveryAgentID() {
+    /// Every TAB-READY agent (unify brief R4): routing opens a tab on its target, so a stub
+    /// agent is not one.
+    func testStandardRegistryHasEveryTabReadyAgent() {
         let reg = RoutingCapabilityRegistry.standard()
-        XCTAssertEqual(Set(reg.harnesses), Set(AgentID.allCases.map(\.harnessID)))
-        XCTAssertEqual(reg.capabilities(for: "claude")?.accountModel, .login)
-        XCTAssertNil(reg.capabilities(for: "nope"))
+        XCTAssertEqual(Set(reg.agents), Set(AgentID.tabReadyCases))
+        XCTAssertEqual(reg.capabilities(for: .claude)?.accountModel, .login)
+        XCTAssertNil(reg.capabilities(for: .grok))
     }
 
     func testAFakeHarnessIsRoutableThroughTheRegistry() async {
@@ -19,10 +22,10 @@ final class RoutingCapabilityRegistryTests: XCTestCase {
         fake.catalog = .supported([ModelEntry(id: "fake-1", displayName: "Fake One", knobs: ["mode"])])
         fake.knobSchema = ["mode": ["fast", "slow"]]
         let reg = RoutingCapabilityRegistry([fake])
-        let cats = await reg.catalogs(enabled: ["fake"])
-        XCTAssertTrue(cats.contains(ModelRef(harness: "fake", model: "fake-1")))
-        XCTAssertTrue(cats.knobsValid(ModelRef(harness: "fake", model: "fake-1", knobs: ["mode": "fast"])))
-        XCTAssertEqual(cats.enabledModels, [ModelRef(harness: "fake", model: "fake-1")])
+        let cats = await reg.catalogs(enabled: [.grok])
+        XCTAssertTrue(cats.contains(ModelRef(agent: .grok, model: "fake-1")))
+        XCTAssertTrue(cats.knobsValid(ModelRef(agent: .grok, model: "fake-1", knobs: ["mode": "fast"])))
+        XCTAssertEqual(cats.enabledModels, [ModelRef(agent: .grok, model: "fake-1")])
     }
 
     /// Rewritten by L3-R: claude's and codex's catalogs are real now, and asking the standard
@@ -31,8 +34,8 @@ final class RoutingCapabilityRegistryTests: XCTestCase {
     func testUnsupportedCatalogYieldsAnEmptyDisabledCatalog() async {
         let stub = FakeRoutingCapabilities()
         stub.catalog = .unsupported(reason: "not yet")
-        let cats = await RoutingCapabilityRegistry([stub]).catalogs(enabled: ["fake"])
-        XCTAssertEqual(cats.byHarness["fake"]?.models, [])
+        let cats = await RoutingCapabilityRegistry([stub]).catalogs(enabled: [.grok])
+        XCTAssertEqual(cats.byAgent[.grok]?.models, [])
         XCTAssertEqual(cats.enabledModels, [], "an unsupported catalog must never pretend to have models")
     }
 
@@ -40,7 +43,7 @@ final class RoutingCapabilityRegistryTests: XCTestCase {
         let spawner = FakeSwarmSpawner()
         let ref = SessionRef(id: UUID(), agentName: "BlueLake")
         spawner.results = [.success(ref)]
-        let block = ExecutionBlock(kind: "tests", harness: "fake", model: "fake-1", pool: "p",
+        let block = ExecutionBlock(kind: "tests", agent: .grok, model: "fake-1", pool: "p",
                                    source: AssignmentSource(by: .rule, reason: "r", at: Date()))
         let r = await spawner.spawn(task: TaskRef(id: "t1", project: URL(fileURLWithPath: "/p")), block: block,
                                     lease: nil, firstPrompt: "Your task is t1")

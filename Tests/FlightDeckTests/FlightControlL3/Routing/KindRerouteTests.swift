@@ -7,16 +7,16 @@ final class KindRerouteTests: XCTestCase {
     private typealias D = RoutingTestData
     private let project = URL(fileURLWithPath: "/w/project", isDirectory: true)
 
-    private func row(_ id: String, kind: KindID, harness: HarnessID = "claude", model: String = "opus",
+    private func row(_ id: String, kind: KindID, agent: AgentID = .claude, model: String = "opus",
                      knobs: [String: String] = [:], pool: PoolID = "claude-default", pinned: Bool = false) throws -> TaskContextRow {
-        let b = ExecutionBlock(kind: kind, harness: harness, model: model, knobs: knobs, pool: pool,
+        let b = ExecutionBlock(kind: kind, agent: agent, model: model, knobs: knobs, pool: pool,
                                source: AssignmentSource(by: .default, reason: "r", at: D.at), pinned: pinned)
         return TaskContextRow(id: id, agentContext: try ExecutionBlockCodec.encode(b, into: #"{"instructions":"keep"}"#))
     }
 
     private func codexAssignment() -> Assignment {
         Assignment(block: ExecutionBlock(
-            kind: "x", harness: "codex", model: "gpt-6-sol", knobs: ["effort": "high"], pool: "codex-default",
+            kind: "x", agent: .codex, model: "gpt-6-sol", knobs: ["effort": "high"], pool: "codex-default",
             source: AssignmentSource(by: .rule, ruleId: "r3", reason: "test-authoring 0.8 → codex", at: D.at)))
     }
 
@@ -37,7 +37,7 @@ final class KindRerouteTests: XCTestCase {
                       try row("t3", kind: "algorithm")], affected: "snapshot-tests", router: r)
         XCTAssertEqual(p.changes.map(\.id), ["t1"])
         XCTAssertEqual(p.changes.first?.block.kind, "snapshot-tests", "the task keeps its own kind")
-        XCTAssertEqual(p.changes.first?.block.harness, "codex")
+        XCTAssertEqual(p.changes.first?.block.agent, .codex)
         XCTAssertEqual(p.skippedPinned, ["t2"])
         XCTAssertEqual(r.assignCalls, ["snapshot-tests"], "a pinned task is never even routed")
     }
@@ -49,7 +49,7 @@ final class KindRerouteTests: XCTestCase {
     }
 
     func testAnUnchangedAssignmentIsNotRewritten() throws {
-        let same = try row("t1", kind: "snapshot-tests", harness: "codex", model: "gpt-6-sol", knobs: ["effort": "high"], pool: "codex-default")
+        let same = try row("t1", kind: "snapshot-tests", agent: .codex, model: "gpt-6-sol", knobs: ["effort": "high"], pool: "codex-default")
         XCTAssertEqual(plan([same], affected: "snapshot-tests", router: codexRouter()).changes, [])
     }
 

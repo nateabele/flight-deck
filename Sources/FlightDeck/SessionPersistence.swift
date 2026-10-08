@@ -1,6 +1,7 @@
 // Sources/FlightDeck/SessionPersistence.swift
 import FleetKit
 import Foundation
+import IntakeKit
 import OSLog
 
 /// What survives a relaunch. Sessions carry their own `workingDirectory`, so a project's

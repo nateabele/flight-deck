@@ -25,7 +25,7 @@ struct LaunchOverrides: Equatable, Sendable {
 /// these answers are per agent; session-specific calls take the `Session`.
 @MainActor
 protocol AgentRoutingCapabilities: AnyObject {
-    var harness: HarnessID { get }
+    var agent: AgentID { get }
     func modelCatalog() async -> RoutingCapability<[ModelEntry]>
     var knobSchema: [String: [String]] { get }
     var accountModel: AccountModel { get }
@@ -35,46 +35,50 @@ protocol AgentRoutingCapabilities: AnyObject {
     func applying(_ overrides: LaunchOverrides, to options: AgentOptions) -> RoutingCapability<AgentOptions>
 }
 
-extension AgentID {
-    var harnessID: HarnessID { HarnessID(rawValue) }
-}
-
 @MainActor
 final class RoutingCapabilityRegistry {
-    private var entries: [HarnessID: any AgentRoutingCapabilities] = [:]
-    private(set) var harnesses: [HarnessID] = []
+    private var entries: [AgentID: any AgentRoutingCapabilities] = [:]
+    private(set) var agents: [AgentID] = []
 
     init(_ list: [any AgentRoutingCapabilities]) {
-        for e in list where entries[e.harness] == nil {
-            entries[e.harness] = e
-            harnesses.append(e.harness)
+        for e in list where entries[e.agent] == nil {
+            entries[e.agent] = e
+            agents.append(e.agent)
         }
     }
 
-    func capabilities(for harness: HarnessID) -> (any AgentRoutingCapabilities)? { entries[harness] }
+    func capabilities(for agent: AgentID) -> (any AgentRoutingCapabilities)? { entries[agent] }
 
     /// Every registered harness's catalog. A harness outside `enabled`, or one whose catalog is
     /// unsupported, contributes a disabled, empty catalog — present, so validation can say
     /// "codex is disabled" instead of "codex does not exist".
-    func catalogs(enabled: Set<HarnessID>) async -> AdapterCatalogs {
+    func catalogs(enabled: Set<AgentID>) async -> AdapterCatalogs {
         var out: [AdapterCatalog] = []
-        for h in harnesses {
+        for h in agents {
             guard let caps = entries[h] else { continue }
             let models = await caps.modelCatalog().value
-            out.append(AdapterCatalog(harness: h, models: models ?? [], knobSchema: caps.knobSchema,
+            out.append(AdapterCatalog(agent: h, models: models ?? [], knobSchema: caps.knobSchema,
                                       defaultModel: models?.first?.id,
                                       enabled: enabled.contains(h) && models != nil))
         }
         return AdapterCatalogs(out)
     }
 
-    /// One conformer per `AgentID`. The `switch` is exhaustive on purpose: a new `AgentID` case
-    /// (the OpenCode branch adds `.opencode`) fails to compile here until it states its answers.
+    /// One conformer per tab-ready `AgentID`. The `switch` is exhaustive on purpose: a new
+    /// `AgentID` case fails to compile here until it states its answers.
+    ///
+    /// Filtered by `tabReady` (unify brief R4): routing sends a task to an agent by opening a
+    /// TAB on it, so an agent that cannot run a tab must not be a routing target — the router
+    /// would otherwise pick grok for a task and the spawn would type a stub command into a
+    /// shell. Its stub conformer still exists, so flipping `tabReady` is the whole change that
+    /// makes it routable once Track G or M fills the conformer in.
     static func standard() -> RoutingCapabilityRegistry {
-        RoutingCapabilityRegistry(AgentID.allCases.map { id -> any AgentRoutingCapabilities in
+        RoutingCapabilityRegistry(AgentID.tabReadyCases.map { id -> any AgentRoutingCapabilities in
             switch id {
             case .claude: ClaudeRoutingCapabilities()
             case .codex: CodexRoutingCapabilities()
+            case .grok: GrokRoutingCapabilities()
+            case .gemini: GeminiRoutingCapabilities()
             }
         })
     }
@@ -84,7 +88,7 @@ final class RoutingCapabilityRegistry {
 /// pointer are real (L3-U); reset and overrides are real (L3-S).
 @MainActor
 final class ClaudeRoutingCapabilities: AgentRoutingCapabilities {
-    let harness: HarnessID = AgentID.claude.harnessID
+    let agent: AgentID = .claude
     let accountModel: AccountModel = .login
     /// Attached by `SessionStore` (`attachCommandSink`); weak because the store owns the registry.
     weak var commands: SessionCommandSink?
@@ -111,7 +115,7 @@ extension ClaudeRoutingCapabilities: CommandSinkAttachable {}
 
 @MainActor
 final class CodexRoutingCapabilities: AgentRoutingCapabilities {
-    let harness: HarnessID = AgentID.codex.harnessID
+    let agent: AgentID = .codex
     let accountModel: AccountModel = .login
     /// Attached by `SessionStore` (`attachCommandSink`); weak because the store owns the registry.
     weak var commands: SessionCommandSink?
@@ -132,6 +136,37 @@ final class CodexRoutingCapabilities: AgentRoutingCapabilities {
     func applying(_ overrides: LaunchOverrides, to options: AgentOptions) -> RoutingCapability<AgentOptions> {
         CodexLaunchOverrides.apply(overrides, to: options)
     }
+}
+
+/// **STUB (unify brief P0).** grok's routing answers: every capability unsupported, with the
+/// reason. Unregistered while `AgentID.grok.tabReady` is false (`RoutingCapabilityRegistry
+/// .standard`); Track G fills each in where its probe shows grok can (unify brief R10).
+@MainActor
+final class GrokRoutingCapabilities: AgentRoutingCapabilities {
+    let agent: AgentID = .grok
+    let accountModel: AccountModel = .login
+    var knobSchema: [String: [String]] { [:] }
+    private static let stub = "the grok adapter is a stub"
+    func modelCatalog() async -> RoutingCapability<[ModelEntry]> { .unsupported(reason: Self.stub) }
+    func usageMeterSource(account: AgentAccount?) -> RoutingCapability<any UsageMeterSource> { .unsupported(reason: Self.stub) }
+    func transcriptPointer(for session: Session) -> RoutingCapability<TranscriptPointer> { .unsupported(reason: Self.stub) }
+    func resetContext(_ session: Session) async throws -> RoutingCapability<Void> { .unsupported(reason: Self.stub) }
+    func applying(_ overrides: LaunchOverrides, to options: AgentOptions) -> RoutingCapability<AgentOptions> { .unsupported(reason: Self.stub) }
+}
+
+/// **STUB (unify brief P0).** Gemini's routing answers; see `GrokRoutingCapabilities`. Its
+/// account model is `.login` with exactly one login (the keyring's), per unify brief R5.
+@MainActor
+final class GeminiRoutingCapabilities: AgentRoutingCapabilities {
+    let agent: AgentID = .gemini
+    let accountModel: AccountModel = .login
+    var knobSchema: [String: [String]] { [:] }
+    private static let stub = "the gemini adapter is a stub"
+    func modelCatalog() async -> RoutingCapability<[ModelEntry]> { .unsupported(reason: Self.stub) }
+    func usageMeterSource(account: AgentAccount?) -> RoutingCapability<any UsageMeterSource> { .unsupported(reason: Self.stub) }
+    func transcriptPointer(for session: Session) -> RoutingCapability<TranscriptPointer> { .unsupported(reason: Self.stub) }
+    func resetContext(_ session: Session) async throws -> RoutingCapability<Void> { .unsupported(reason: Self.stub) }
+    func applying(_ overrides: LaunchOverrides, to options: AgentOptions) -> RoutingCapability<AgentOptions> { .unsupported(reason: Self.stub) }
 }
 
 /// Owned by L3-S. Spawns (or the caller reuses) an agent for `task` and submits `firstPrompt`

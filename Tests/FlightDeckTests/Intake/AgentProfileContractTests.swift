@@ -9,8 +9,8 @@ import IntakeKit
 final class AgentProfileContractTests: XCTestCase {
     private static let noHome = URL(fileURLWithPath: "/nonexistent-fd-home")
 
-    private func req(_ h: Harness) -> HarnessRequest {
-        HarnessRequest(harness: h, model: "m", effort: "high", cwd: URL(fileURLWithPath: "/proj"),
+    private func req(_ h: AgentID) -> HeadlessRequest {
+        HeadlessRequest(agent: h, model: "m", effort: "high", cwd: URL(fileURLWithPath: "/proj"),
                        readableDirs: [], prompt: "P", schemaFile: URL(fileURLWithPath: "/s.json"),
                        schemaJSON: "{}", resumeSessionID: nil)
     }
@@ -18,14 +18,13 @@ final class AgentProfileContractTests: XCTestCase {
     // MARK: Registry
 
     func testEveryHarnessHasExactlyItsOwnProfile() {
-        XCTAssertEqual(AgentProfiles.all.map(\.id), Harness.allCases)
-        for harness in Harness.allCases {
-            let profile = AgentProfiles.profile(for: harness)
-            XCTAssertEqual(profile.id, harness)
-            XCTAssertEqual(profile.family, ModelFamily(harness))
+        XCTAssertEqual(AgentProfiles.all.map(\.id), AgentID.planningOrder)
+        for agent in AgentID.planningOrder {
+            let profile = AgentProfiles.profile(for: agent)
+            XCTAssertEqual(profile.id, agent)
             // Gemini runs through Antigravity's `agy` (Track M): the gemini CLI no longer
             // serves Google AI Pro accounts. Every other binary is its harness's raw value.
-            XCTAssertEqual(profile.binaryName, harness == .gemini ? "agy" : harness.rawValue)
+            XCTAssertEqual(profile.binaryName, agent == .gemini ? "agy" : agent.rawValue)
         }
     }
 
@@ -50,8 +49,8 @@ final class AgentProfileContractTests: XCTestCase {
     /// whatever Track M later does for the others.
     func testSchemaRepairNeverRetriesANativeSchemaHarness() {
         let invalid = Diagnosis(category: .invalidOutput, detail: "notJSON", action: "")
-        for harness in Harness.allCases where AgentProfiles.profile(for: harness).hasNativeSchema {
-            XCTAssertNil(SchemaRepair.retry(profile: AgentProfiles.profile(for: harness), failure: invalid,
+        for agent in AgentID.planningOrder where AgentProfiles.profile(for: agent).hasNativeSchema {
+            XCTAssertNil(SchemaRepair.retry(profile: AgentProfiles.profile(for: agent), failure: invalid,
                                             sessionID: "S1", access: .readOnly, isRepair: false))
         }
         XCTAssertNil(SchemaRepair.retry(profile: GeminiProfile(), failure: invalid, sessionID: "S1",
@@ -66,20 +65,18 @@ final class AgentProfileContractTests: XCTestCase {
                        .signedOut(hint: "Grok: run `grok login`"))
     }
 
-    // MARK: Harness and ModelFamily
+    // MARK: AgentID
 
     func testNewRawValuesRoundTrip() throws {
-        XCTAssertEqual(Harness(rawValue: "grok"), .grok)
-        XCTAssertEqual(Harness(rawValue: "gemini"), .gemini)
-        XCTAssertEqual(ModelFamily(.grok), .grok)
-        XCTAssertEqual(ModelFamily(.gemini), .gemini)
-        XCTAssertEqual(ModelFamily.grok.displayName, "Grok")
-        XCTAssertEqual(ModelFamily.gemini.displayName, "Gemini")
-        for harness in Harness.allCases {
-            let session = HarnessSession(harness: harness, sessionID: "s", model: "m", effort: "")
+        XCTAssertEqual(AgentID(rawValue: "grok"), .grok)
+        XCTAssertEqual(AgentID(rawValue: "gemini"), .gemini)
+        XCTAssertEqual(AgentID.grok.displayName, "Grok")
+        XCTAssertEqual(AgentID.gemini.displayName, "Gemini")
+        for agent in AgentID.planningOrder {
+            let session = HeadlessSession(agent: agent, sessionID: "s", model: "m", effort: "")
             let data = try IntakeJSON.encoder.encode(session)
-            XCTAssertTrue(String(decoding: data, as: UTF8.self).contains("\"\(harness.rawValue)\""))
-            XCTAssertEqual(try IntakeJSON.decoder.decode(HarnessSession.self, from: data), session)
+            XCTAssertTrue(String(decoding: data, as: UTF8.self).contains("\"\(agent.rawValue)\""))
+            XCTAssertEqual(try IntakeJSON.decoder.decode(HeadlessSession.self, from: data), session)
         }
     }
 
@@ -88,15 +85,18 @@ final class AgentProfileContractTests: XCTestCase {
         let url = try XCTUnwrap(Bundle(for: Self.self).url(
             forResource: "intake-pre-rounds", withExtension: "json", subdirectory: "Fixtures/Intake"))
         let decoded = try IntakeJSON.decoder.decode(Intake.self, from: Data(contentsOf: url))
-        XCTAssertEqual(decoded.triage?.harness, .claude)
+        XCTAssertEqual(decoded.triage?.agent, .claude)
         XCTAssertEqual(decoded.triage?.model, "opus")
     }
 
-    func testGrokAndGeminiAreNotAgentHarnesses() {
-        XCTAssertEqual(Harness.claude.agentHarnessID, "claude")
-        XCTAssertEqual(Harness.codex.agentHarnessID, "codex")
-        XCTAssertNil(Harness.grok.agentHarnessID)
-        XCTAssertNil(Harness.gemini.agentHarnessID)
+    /// What `agentHarnessID == nil` used to say — "grok and gemini are not tab or routing
+    /// agents" — is `tabReady` now that there is one agent identity (unify brief R4).
+    func testGrokAndGeminiAreNotTabReadyYet() {
+        XCTAssertTrue(AgentID.claude.tabReady)
+        XCTAssertTrue(AgentID.codex.tabReady)
+        XCTAssertFalse(AgentID.grok.tabReady)
+        XCTAssertFalse(AgentID.gemini.tabReady)
+        XCTAssertEqual(AgentID.tabReadyCases, [.claude, .codex])
     }
 
     // MARK: Refusal
@@ -109,18 +109,18 @@ final class AgentProfileContractTests: XCTestCase {
         XCTAssertNil(req(.claude).account)
         var bound = req(.claude)
         bound.account = AgentAccountRef(id: "a", home: URL(fileURLWithPath: "/accounts/a"))
-        XCTAssertEqual(try HarnessCommand.build(bound, home: Self.noHome).arguments,
-                       try HarnessCommand.build(req(.claude), home: Self.noHome).arguments)
+        XCTAssertEqual(try HeadlessCommand.build(bound, home: Self.noHome).arguments,
+                       try HeadlessCommand.build(req(.claude), home: Self.noHome).arguments)
     }
 
     func testGenericFallbacksForTheNewHarnesses() {
-        let auth = FailureDiagnosis.classify(exitCode: 1, stdout: Data(), stderr: "Unauthorized", parseError: nil, harness: .grok)
+        let auth = FailureDiagnosis.classify(exitCode: 1, stdout: Data(), stderr: "Unauthorized", parseError: nil, agent: .grok)
         XCTAssertEqual(auth.category, .authExpired)
         XCTAssertEqual(auth.action, "Run `grok login` in a terminal", "grok's sign-in command, probed by Track G")
-        let gemini = FailureDiagnosis.classify(exitCode: 1, stdout: Data(), stderr: "Unauthorized", parseError: nil, harness: .gemini)
+        let gemini = FailureDiagnosis.classify(exitCode: 1, stdout: Data(), stderr: "Unauthorized", parseError: nil, agent: .gemini)
         XCTAssertEqual(gemini.action, "Run `agy` in a terminal to sign in")
 
-        var parser = ActivityParser(harness: .grok, project: URL(fileURLWithPath: "/proj"), now: { Date(timeIntervalSince1970: 5) })
+        var parser = ActivityParser(agent: .grok, project: URL(fileURLWithPath: "/proj"), now: { Date(timeIntervalSince1970: 5) })
         parser.feed(Data(#"{"type":"anything","text":"hi"}"#.utf8 + [UInt8(ascii: "\n")]))
         XCTAssertEqual(parser.activity.lastEventAt, Date(timeIntervalSince1970: 5))
         XCTAssertNil(parser.activity.error)
@@ -130,17 +130,17 @@ final class AgentProfileContractTests: XCTestCase {
 
     /// grok and gemini are offered only once their track adds them to `headlessReady`.
     func testAvailabilityFollowsTheGate() {
-        let grok = ModelChoice(harness: .grok, model: "grok-4.6", effort: "high")
-        let gemini = ModelChoice(harness: .gemini, model: "pro", effort: "")
-        let claude = ModelChoice(harness: .claude, model: "opus", effort: "high")
+        let grok = ModelChoice(agent: .grok, model: "grok-4.6", effort: "high")
+        let gemini = ModelChoice(agent: .gemini, model: "pro", effort: "")
+        let claude = ModelChoice(agent: .claude, model: "opus", effort: "high")
         let available = AvailableModels(choices: [.grok: grok, .gemini: gemini, .claude: claude])
         // Each new harness is offered exactly when its track has opened the gate for it.
-        let expected = Harness.allCases.filter { $0 != .codex && AgentProfiles.headlessReady.contains($0) }
-        XCTAssertEqual(available.harnesses, expected)
+        let expected = AgentID.planningOrder.filter { $0 != .codex && AgentProfiles.headlessReady.contains($0) }
+        XCTAssertEqual(available.agents, expected)
         XCTAssertEqual(available.choice(for: .grok), AgentProfiles.headlessReady.contains(.grok) ? grok : nil)
         XCTAssertEqual(available.choice(for: .gemini), AgentProfiles.headlessReady.contains(.gemini) ? gemini : nil)
-        XCTAssertEqual(RoundConfigEditor.harnesses(in: available), expected)
-        XCTAssertEqual(RoundConfigEditor.harnesses(in: .defaults), [.codex, .claude])
+        XCTAssertEqual(RoundConfigEditor.agents(in: available), expected)
+        XCTAssertEqual(RoundConfigEditor.agents(in: .defaults), [.codex, .claude])
     }
 
     /// Detection with every CLI on PATH offers neither newcomer when they can't prove a sign-in:
@@ -163,6 +163,6 @@ final class AgentProfileContractTests: XCTestCase {
             XCTAssertEqual((executable as NSString).lastPathComponent, "grok", "no agy installed, so no gemini probe")
             return nil
         })
-        XCTAssertEqual(available.harnesses, [.codex, .claude])
+        XCTAssertEqual(available.agents, [.codex, .claude])
     }
 }

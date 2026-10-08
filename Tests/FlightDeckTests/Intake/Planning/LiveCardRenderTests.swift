@@ -11,8 +11,8 @@ import XCTest
 /// placeholders — they are separate views the card only positions.
 @MainActor
 final class LiveCardRenderTests: XCTestCase {
-    private let codex = ModelChoice(harness: .codex, model: "gpt-6-sol", effort: "high")
-    private let claude = ModelChoice(harness: .claude, model: "opus", effort: "high")
+    private let codex = ModelChoice(agent: .codex, model: "gpt-6-sol", effort: "high")
+    private let claude = ModelChoice(agent: .claude, model: "opus", effort: "high")
     private let now = Date()
 
     private func dir() throws -> URL {
@@ -22,10 +22,10 @@ final class LiveCardRenderTests: XCTestCase {
         return URL(fileURLWithPath: dir)
     }
 
-    private func activity(_ harness: Harness, ago: TimeInterval, headline: String? = nil, verb: String? = nil,
+    private func activity(_ agent: AgentID, ago: TimeInterval, headline: String? = nil, verb: String? = nil,
                           object: String? = nil, footprint: [String: Int] = [:], steps: ActivitySteps? = nil,
                           tokens: Int? = nil, quietFor: TimeInterval = 2) -> SeatActivity {
-        var a = SeatActivity(harness: harness, startedAt: now.addingTimeInterval(-ago))
+        var a = SeatActivity(agent: agent, startedAt: now.addingTimeInterval(-ago))
         a.headline = headline
         a.action = verb.map { ActivityAction(verb: $0, object: object) }
         a.footprint = footprint
@@ -38,7 +38,7 @@ final class LiveCardRenderTests: XCTestCase {
     func testRenderTriage() throws {
         let out = try dir()
         var intake = Intake(projectPath: "/tmp/project", intent: "Scheduling platform for field technicians")
-        intake.triage = HarnessSession(harness: .codex, sessionID: "s", model: "gpt-6-sol", effort: "high")
+        intake.triage = HeadlessSession(agent: .codex, sessionID: "s", model: "gpt-6-sol", effort: "high")
         let running = activity(.codex, ago: 134, headline: "Checking whether dispatch already has a notion of skills",
                                verb: "Reading", object: "Sources/Dispatch/Assigner.swift",
                                footprint: ["Sources": 14, "Tests": 6, "docs": 3, ".": 2, "scripts": 1, "work": 4],
@@ -65,7 +65,7 @@ final class LiveCardRenderTests: XCTestCase {
         let intake = try shapingIntake()
         let tape = Tape(target: .nextMajor, status: .running, roundInProgress: PlannedRound(stage: .draft, round: 0, major: true),
                         roundStartedAt: now.addingTimeInterval(-252))
-        var failed = SeatActivity(harness: .claude, startedAt: now.addingTimeInterval(-252))
+        var failed = SeatActivity(agent: .claude, startedAt: now.addingTimeInterval(-252))
         failed.finished = true; failed.error = "exited 1"
         var done = activity(.claude, ago: 250, footprint: ["Sources": 9, "docs": 2, "Tests": 3])
         done.finished = true; done.costUSD = 0.61

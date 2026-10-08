@@ -41,9 +41,9 @@ enum UsageRefs {
     static let workID = UUID(uuidString: "11111111-1111-1111-1111-111111111111")!
     static let spareID = UUID(uuidString: "22222222-2222-2222-2222-222222222222")!
     static let codexID = UUID(uuidString: "33333333-3333-3333-3333-333333333333")!
-    static let work = AccountRef(harness: "claude", id: workID, label: "Work")
-    static let spare = AccountRef(harness: "claude", id: spareID, label: "Spare")
-    static let codex = AccountRef(harness: "codex", id: codexID, label: "Codex")
+    static let work = AccountRef(agent: .claude, id: workID, label: "Work")
+    static let spare = AccountRef(agent: .claude, id: spareID, label: "Spare")
+    static let codex = AccountRef(agent: .codex, id: codexID, label: "Codex")
 
     static func reading(_ account: AccountRef, _ worst: Double, at: Date, resetsAt: Date? = nil,
                         rejection: Bool = false) -> UsageReading {

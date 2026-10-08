@@ -8,27 +8,27 @@ struct CapacityPane: View {
     @ObservedObject var usage: UsageService
     /// Adapters with no accounts (`AccountModel.none`) can have local pools. None on master;
     /// the OpenCode adapter brings the first.
-    let localHarnesses: [HarnessID]
+    let localAgents: [AgentID]
     @State private var selection: PoolID?
 
-    init(preferences: PreferencesStore, usage: UsageService, localHarnesses: [HarnessID]) {
-        self.preferences = preferences; self.usage = usage; self.localHarnesses = localHarnesses
+    init(preferences: PreferencesStore, usage: UsageService, localAgents: [AgentID]) {
+        self.preferences = preferences; self.usage = usage; self.localAgents = localAgents
     }
 
     /// `AccountModel.none` spelled out: `.none` here would compare against `Optional.none`.
     @MainActor
-    static func defaultLocalHarnesses() -> [HarnessID] {
+    static func defaultLocalAgents() -> [AgentID] {
         let registry = RoutingCapabilityRegistry.standard()
-        return registry.harnesses.filter { registry.capabilities(for: $0)?.accountModel == AccountModel.none }
+        return registry.agents.filter { registry.capabilities(for: $0)?.accountModel == AccountModel.none }
     }
 
     private var accounts: [AgentAccount] { preferences.preferences.accounts }
-    private var pools: [CapacityPool] { preferences.capacity.effectivePools(accounts: accounts) }
+    private var pools: [CapacityPool] { preferences.effectivePools }
     private var selected: CapacityPool? { pools.first { $0.id == (selection ?? pools.first?.id) } }
 
-    private func edit(_ change: (inout CapacityPreferences, [AgentAccount]) -> Void) {
-        let snapshot = accounts
-        preferences.updateCapacity { change(&$0, snapshot) }
+    /// Pool edits go to the Accounts list, which is where pools live now (unify brief R6).
+    private func edit(_ change: (inout AccountList) -> Void) {
+        try? preferences.updateAccountList { change(&$0) }
     }
 
     var body: some View {
@@ -45,7 +45,7 @@ struct CapacityPane: View {
                 ForEach(pools) { pool in
                     VStack(alignment: .leading, spacing: 2) {
                         Text(pool.label)
-                        Text(pool.kind == .local ? "Local · \(pool.harness.rawValue)" : "\(pool.accounts.count) accounts · \(pool.harness.rawValue)")
+                        Text(pool.kind == .local ? "Local · \(pool.agent.rawValue)" : "\(pool.accounts.count) accounts · \(pool.agent.rawValue)")
                             .font(.caption).foregroundStyle(.secondary)
                     }
                     .tag(pool.id)
@@ -57,12 +57,12 @@ struct CapacityPane: View {
                 Menu {
                     ForEach(AgentID.allCases, id: \.self) { agent in
                         Button("\(agent.displayName) pool") {
-                            edit { prefs, accts in selection = CapacityEditing.addHostedPool(&prefs, agent: agent, accounts: accts) }
+                            edit { selection = CapacityEditing.addHostedPool(&$0, agent: agent) }
                         }
                     }
-                    ForEach(localHarnesses, id: \.self) { harness in
-                        Button("Local \(harness.rawValue) pool") {
-                            edit { prefs, accts in selection = CapacityEditing.addLocalPool(&prefs, harness: harness, accounts: accts) }
+                    ForEach(localAgents, id: \.self) { agent in
+                        Button("Local \(agent.rawValue) pool") {
+                            edit { selection = CapacityEditing.addLocalPool(&$0, agent: agent) }
                         }
                     }
                 } label: { Image(systemName: "plus") }
@@ -70,7 +70,7 @@ struct CapacityPane: View {
                     .accessibilityIdentifier("capacity-add-pool")
                 Button {
                     guard let id = selected?.id else { return }
-                    edit { prefs, accts in _ = CapacityEditing.removePool(id, &prefs, accounts: accts) }
+                    edit { _ = CapacityEditing.removePool(id, &$0) }
                     selection = nil
                 } label: { Image(systemName: "minus") }
                     .buttonStyle(.borderless)
@@ -88,7 +88,7 @@ struct CapacityPane: View {
         VStack(alignment: .leading, spacing: 16) {
             if let pool = selected {
                 TextField("Name", text: Binding(get: { pool.label },
-                                                set: { v in edit { CapacityEditing.rename(pool.id, to: v, &$0, accounts: $1) } }))
+                                                set: { v in edit { CapacityEditing.rename(pool.id, to: v, &$0) } }))
                     .textFieldStyle(.roundedBorder)
                     .accessibilityIdentifier("capacity-pool-name")
                 if pool.kind == .hosted { hostedEditor(pool) } else { localEditor(pool) }
@@ -112,11 +112,11 @@ struct CapacityPane: View {
                     Text(accounts.first { $0.id == id }?.displayName ?? "Removed account")
                     Spacer()
                     if !pool.isDefault {
-                        Button("Remove") { edit { CapacityEditing.toggle(id, in: pool.id, &$0, accounts: $1) } }.buttonStyle(.borderless)
+                        Button("Remove") { edit { CapacityEditing.toggle(id, in: pool.id, &$0) } }.buttonStyle(.borderless)
                     }
                 }
             }
-            .onMove { from, to in edit { CapacityEditing.move(in: pool.id, from: from, to: to, &$0, accounts: $1) } }
+            .onMove { from, to in edit { CapacityEditing.move(in: pool.id, from: from, to: to, &$0) } }
         }
         .frame(minHeight: 90, maxHeight: 160)
         .accessibilityElement(children: .contain)
@@ -125,21 +125,21 @@ struct CapacityPane: View {
             Text("A default pool holds every \(accountNoun(pool)) account. Make a new pool to choose accounts.")
                 .font(.caption).foregroundStyle(.secondary)
         }
-        let others = accounts.filter { $0.agent.harnessID == pool.harness && !$0.isRemoved && !pool.accounts.contains($0.id) }
+        let others = accounts.filter { $0.agent == pool.agent && !$0.isRemoved && !pool.accounts.contains($0.id) }
         if !others.isEmpty {
             Menu("Add account") {
-                ForEach(others) { a in Button(a.displayName) { edit { CapacityEditing.toggle(a.id, in: pool.id, &$0, accounts: $1) } } }
+                ForEach(others) { a in Button(a.displayName) { edit { CapacityEditing.toggle(a.id, in: pool.id, &$0) } } }
             }
             .fixedSize()
         }
         Stepper(value: Binding(get: { Int((pool.softThreshold * 100).rounded()) },
-                               set: { v in edit { CapacityEditing.setThresholds(pool.id, soft: Double(v) / 100, hard: pool.hardThreshold, &$0, accounts: $1) } }),
+                               set: { v in edit { CapacityEditing.setThresholds(pool.id, soft: Double(v) / 100, hard: pool.hardThreshold, &$0) } }),
                 in: 5...99) {
             Text("New work stops at \(Int((pool.softThreshold * 100).rounded()))% (soft)")
         }
         .accessibilityIdentifier("capacity-soft")
         Stepper(value: Binding(get: { Int((pool.hardThreshold * 100).rounded()) },
-                               set: { v in edit { CapacityEditing.setThresholds(pool.id, soft: pool.softThreshold, hard: Double(v) / 100, &$0, accounts: $1) } }),
+                               set: { v in edit { CapacityEditing.setThresholds(pool.id, soft: pool.softThreshold, hard: Double(v) / 100, &$0) } }),
                 in: 10...100) {
             Text("Agents hand off at \(Int((pool.hardThreshold * 100).rounded()))% (hard)")
         }
@@ -147,17 +147,17 @@ struct CapacityPane: View {
     }
 
     private func accountNoun(_ pool: CapacityPool) -> String {
-        AgentID.allCases.first { $0.harnessID == pool.harness }?.displayName ?? "agent"
+        pool.agent.displayName
     }
 
     @ViewBuilder
     private func localEditor(_ pool: CapacityPool) -> some View {
         TextField("Endpoint", text: Binding(get: { pool.endpoint ?? "" },
-                                            set: { v in edit { CapacityEditing.setEndpoint(pool.id, v, &$0, accounts: $1) } }))
+                                            set: { v in edit { CapacityEditing.setEndpoint(pool.id, v, &$0) } }))
             .textFieldStyle(.roundedBorder)
             .accessibilityIdentifier("capacity-endpoint")
         Stepper(value: Binding(get: { pool.concurrencyCap },
-                               set: { v in edit { CapacityEditing.setCap(pool.id, v, &$0, accounts: $1) } }),
+                               set: { v in edit { CapacityEditing.setCap(pool.id, v, &$0) } }),
                 in: 1...64) {
             Text("Up to \(pool.concurrencyCap) agents at once")
         }

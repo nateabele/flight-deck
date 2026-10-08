@@ -1,4 +1,5 @@
 import XCTest
+import IntakeKit
 import FleetKit
 
 final class FleetWireTests: XCTestCase {

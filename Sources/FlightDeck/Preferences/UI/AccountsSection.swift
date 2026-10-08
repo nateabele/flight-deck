@@ -1,4 +1,5 @@
 import AppKit
+import IntakeKit
 import SwiftUI
 
 /// The Accounts listbox under an agent's options pane (spec §8.1): every login this agent has,

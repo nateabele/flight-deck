@@ -1,4 +1,5 @@
 import XCTest
+import IntakeKit
 @testable import FlightDeck
 
 /// The Accounts pane's Sign In path. Everything here is store-level: what gets typed at the

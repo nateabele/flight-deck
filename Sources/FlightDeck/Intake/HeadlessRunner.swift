@@ -2,13 +2,13 @@ import Foundation
 import IntakeKit
 
 /// Runs one headless agent turn (`codex exec` / `claude -p`) as built by
-/// `HarnessCommand.build`. A protocol so `IntakeService`'s tests can hand back canned harness
+/// `HeadlessCommand.build`. A protocol so `IntakeService`'s tests can hand back canned harness
 /// output without spawning a model.
 ///
 /// Separate from `FlywheelProcessRunner` because a harness turn needs three things that
 /// runner deliberately doesn't do: stdout as raw `Data` (codex's JSONL is parsed byte-wise),
 /// stderr kept rather than discarded (a harness that dies before its first JSON line says why
-/// only there), and environment variables removed (see `HarnessCommand.build`'s claude arm).
+/// only there), and environment variables removed (see `HeadlessCommand.build`'s claude arm).
 protocol HeadlessRunner: Sendable {
     func run(
         _ command: (executable: String, arguments: [String], unsetEnvironment: [String]),
@@ -56,7 +56,7 @@ struct SystemHeadlessRunner: HeadlessRunner {
         // The login shell's PATH, appended: a Finder-launched app has launchd's bare PATH,
         // which contains neither `~/.local/bin` (codex, claude) nor `/opt/homebrew/bin` — see
         // `LoginShellPath`. `/usr/bin/env` alone would report "no such file" for both.
-        let environment = HarnessCommand.environment(for: command, base: LoginShellPath.repairing(ProcessInfo.processInfo.environment))
+        let environment = HeadlessCommand.environment(for: command, base: LoginShellPath.repairing(ProcessInfo.processInfo.environment))
         let result = try await runner.run(executable: command.executable, arguments: command.arguments,
                                           cwd: cwd, environment: environment, processGroup: false,
                                           onSpawn: nil, onStdout: onStdout)

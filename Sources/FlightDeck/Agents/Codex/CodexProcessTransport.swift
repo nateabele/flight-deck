@@ -1,4 +1,5 @@
 import Foundation
+import IntakeKit
 
 /// Why a launch failed to produce a usable tab. Named causes rather than one generic string
 /// wherever the fix differs — "install/upgrade codex" reads differently from "codex refused
@@ -324,7 +325,7 @@ final class CodexProcessTransport: CodexTransport {
     var spawnEnvironment: [String: String]? {
         let base = LoginShellPath.repairing()
         guard let home else { return base }
-        return base.merging([AgentID.codex.homeEnvironmentKey: home.path]) { _, override in override }
+        return base.merging([CodexProfile.homeEnvironmentKey: home.path]) { _, override in override }
     }
 
     /// Spawns the process. `/usr/bin/env` resolves `executable` against `$PATH`, same as

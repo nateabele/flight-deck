@@ -23,7 +23,7 @@ final class UsageLiveTests: XCTestCase {
         let result = try await rpc.request("account/rateLimits/read", [:])
         let buckets = CodexRateLimitParser.readResponse(result)
         XCTAssertFalse(buckets.isEmpty, "a ChatGPT login reports at least one bucket; got \(result)")
-        let reading = try XCTUnwrap(CodexRateLimitParser.reading(buckets, account: AccountRef(harness: "codex", id: UUID(), label: "live"), readAt: Date()))
+        let reading = try XCTUnwrap(CodexRateLimitParser.reading(buckets, account: AccountRef(agent: .codex, id: UUID(), label: "live"), readAt: Date()))
         XCTAssertFalse(reading.windows.isEmpty)
         for w in reading.windows { XCTAssertTrue((0...1.5).contains(w.utilization), "\(w.name) = \(w.utilization)") }
     }

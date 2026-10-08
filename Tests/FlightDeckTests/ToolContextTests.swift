@@ -1,5 +1,6 @@
 import FleetKit
 import XCTest
+import IntakeKit
 @testable import FlightDeck
 
 /// That a tool's view of a session is assembled from the ADAPTER, not from `Session` fields.
@@ -70,7 +71,7 @@ final class ToolContextTests: XCTestCase {
         try? FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
         let account = AgentAccount(agent: .claude, displayName: "Work", home: home)
         let preferences = PreferencesStore(persistence: nil)
-        preferences.preferences.storedAccounts = [account]
+        preferences.preferences.accounts = [account]
 
         let store = makeStore(preferences: preferences)
         store.newSession(in: URL(fileURLWithPath: "/tmp/repo", isDirectory: true))
@@ -126,6 +127,7 @@ final class ToolContextTests: XCTestCase {
     /// mean the store asked the adapter.
     private struct RelocatingAdapter: AgentAdapter {
         static let id: AgentID = .claude
+        nonisolated static var profile: any AgentProfile { AgentProfiles.profile(for: .claude) }
         /// Claude's answers, because this stands in for claude — the store reads both
         /// capabilities off `AgentID`, so a stub that disagreed would describe an agent that
         /// does not exist.

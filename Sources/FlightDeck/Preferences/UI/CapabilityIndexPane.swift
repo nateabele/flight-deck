@@ -248,7 +248,7 @@ struct CapabilityIndexPane: View {
                 Text("Hand-entered scores").font(.headline)
                 Spacer()
                 Button("Add…") {
-                    editing = ManualDraft(entry: ManualModelScores(model: ModelRef(harness: "opencode", model: ""), dimensions: [:]),
+                    editing = ManualDraft(entry: ManualModelScores(model: ModelRef(agent: .claude, model: ""), dimensions: [:]),
                                           original: nil)
                 }
                 .accessibilityIdentifier("index-manual-add")
@@ -412,7 +412,7 @@ struct ManualScoresEditor: View {
     let save: (ManualModelScores) -> Void
     private let knobs: [String: String]
     @Environment(\.dismiss) private var dismiss
-    @State private var harness: String
+    @State private var agent: AgentID
     @State private var model: String
     @State private var texts: [String: String]
     @State private var inherit: ModelRef?
@@ -422,7 +422,7 @@ struct ManualScoresEditor: View {
         self.knownModels = knownModels
         self.save = save
         self.knobs = entry.model.knobs
-        _harness = State(initialValue: entry.model.harness.rawValue)
+        _agent = State(initialValue: entry.model.agent)
         _model = State(initialValue: entry.model.model)
         _texts = State(initialValue: entry.dimensions.mapValues { String(format: "%.2f", $0) })
         _inherit = State(initialValue: entry.inheritFrom)
@@ -431,7 +431,11 @@ struct ManualScoresEditor: View {
 
     var body: some View {
         Form {
-            TextField("Harness", text: $harness)
+            // A picker, not the free-text field this was while agents were strings: a hand
+            // score for an agent Flight Deck has no case for could never be routed to.
+            Picker("Agent", selection: $agent) {
+                ForEach(AgentID.allCases, id: \.self) { Text($0.displayName).tag($0) }
+            }
             TextField("Model", text: $model)
             Picker("Inherit from", selection: $inherit) {
                 Text("Nothing").tag(ModelRef?.none)
@@ -447,12 +451,12 @@ struct ManualScoresEditor: View {
                 Spacer()
                 Button("Cancel") { dismiss() }
                 Button("Save") {
-                    save(ManualModelScores(model: ModelRef(harness: HarnessID(trimmed(harness)), model: trimmed(model), knobs: knobs),
+                    save(ManualModelScores(model: ModelRef(agent: agent, model: trimmed(model), knobs: knobs),
                                            dimensions: Self.parse(texts), inheritFrom: inherit, discount: discount))
                     dismiss()
                 }
                 .keyboardShortcut(.defaultAction)
-                .disabled(trimmed(harness).isEmpty || trimmed(model).isEmpty)
+                .disabled(trimmed(model).isEmpty)
             }
         }
         .padding(20)
