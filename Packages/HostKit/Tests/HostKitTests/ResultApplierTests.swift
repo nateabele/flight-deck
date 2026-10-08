@@ -121,6 +121,13 @@ final class ResultApplierTests: XCTestCase {
         let hooks = try repo.git("mktree", input: "040000 tree \(try subtree(repo, "pre-commit", "#!/bin/sh\nevil\n"))\thooks\n")
         let cases: [(String, [(mode: String, type: String, sha: String, name: String)])] = [
             ("dotgit", [("040000", "tree", hooks, ".GIT")]),
+            // HFS+ ignores these code points when it compares names, so each is `.git` on a
+            // Mac volume; git's own is_hfs_dotgit drops the same set.
+            ("dotgit-zwnj", [("040000", "tree", hooks, ".g\u{200C}it")]),
+            ("dotgit-bom", [("040000", "tree", hooks, "\u{FEFF}.GIT")]),
+            ("dotgit-lrm", [("040000", "tree", hooks, ".git\u{200E}")]),
+            ("dotgit-bidi", [("040000", "tree", hooks, ".Gi\u{202A}t")]),
+            ("dotgit-iss", [("040000", "tree", hooks, ".\u{206F}git")]),
             ("dotdot", [("040000", "tree", try subtree(repo, "evil", "x"), "..")]),
             ("dot", [("040000", "tree", try subtree(repo, "evil", "x"), ".")]),
         ]
