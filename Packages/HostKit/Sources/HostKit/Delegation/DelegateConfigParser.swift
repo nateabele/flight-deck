@@ -42,9 +42,10 @@ public struct DelegateConfigParseResult: Sendable, Equatable {
 ///
 /// Foundation has no TOML reader, and this is not one either: it reads the subset §8 uses —
 /// top-level keys, `[recipe.<name>]` (and `[recipe.<name>.env]`), `[[route]]`, dotted and
-/// quoted keys, basic and literal strings, booleans, integers, plain decimals (`1.50`), arrays (which may span lines,
-/// with comments and a trailing comma) and inline tables. Anything else — multi-line strings,
-/// exponents, dates — is a parse error that names its line, never a silent misread.
+/// quoted keys, basic and literal strings, booleans, integers, plain decimals (`1.50`), arrays
+/// (which may span lines, with comments and a trailing comma) and inline tables. Anything else —
+/// multi-line strings, exponents, dates — is a parse error that names its line, never a silent
+/// misread.
 public enum DelegateConfigParser {
     /// Where the file lives, relative to the project root.
     public static let relativePath = ".flightdeck/delegate.toml"
