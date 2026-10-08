@@ -81,8 +81,14 @@ extension InfraService {
     }
 
     /// The `err` a failure is answered with: each `InfraError` keeps its own code, so the CLI
-    /// can tell "fix this setting" from "it broke".
+    /// can tell "fix this setting" from "it broke". Redacted last, whatever the case: a boot
+    /// console can echo the auth key and enrollment secret cloud-init was handed.
     static func refusal(for error: Error, recorded: String?) -> (code: String, message: String) {
+        let (code, message) = unredactedRefusal(for: error, recorded: recorded)
+        return (code, SecretRedaction.redact(message))
+    }
+
+    private static func unredactedRefusal(for error: Error, recorded: String?) -> (code: String, message: String) {
         switch error {
         case let refusal as Refusal:
             return (refusal.code, refusal.message)
@@ -114,5 +120,31 @@ extension InfraService {
     /// whole boot log on one control-socket line.
     private static func tail(_ console: String) -> String {
         console.split(separator: "\n", omittingEmptySubsequences: false).suffix(40).joined(separator: "\n")
+    }
+}
+
+/// `run --on` a cloud machine (`DelegationService`): the same `up` `infra up` runs, its errors
+/// worded and coded as `infra.up`'s are, so the CLI prints the same lines either way.
+extension InfraService: InfraUpProviding {
+    func ensureUp(name: String, config: InfraConfig, repoRoot: URL, notice: @escaping (String) -> Void) async throws {
+        var recorded: String?
+        do {
+            _ = try await up(name: name, config: config, repoRoot: repoRoot) { event in
+                switch event {
+                case .progress(let line): notice(line)
+                case .failed(let message): recorded = message
+                // The run sends the cost line itself, once the machine is its host.
+                case .cost, .ready: break
+                }
+            }
+        } catch {
+            let refusal = Self.refusal(for: error, recorded: recorded)
+            throw DelegationError(code: refusal.code, message: refusal.message)
+        }
+    }
+
+    func costLine(host: String) -> String? {
+        guard let machine = registry.machine(named: host), machine.state == .ready || machine.state == .idle else { return nil }
+        return costLine(for: machine, now: now)
     }
 }

@@ -897,6 +897,94 @@ final class DelegationServiceTests: XCTestCase {
         XCTAssertEqual(resumed.all.count, 1, "\(resumed.all)")
     }
 
+    // MARK: Cloud hosts (infra)
+
+    /// What `run --on` asks of the cloud machines: `ensureUp` stands one up (and pairs it, as
+    /// `InfraService.up` does) by adding its link to the directory.
+    @MainActor
+    final class FakeInfraUp: InfraUpProviding {
+        let hosts: FakeHosts
+        var ensured: [String] = []
+        var costLines: [String: String] = [:]
+        var failure: Error?
+        init(hosts: FakeHosts) { self.hosts = hosts }
+        func ensureUp(name: String, config: InfraConfig, repoRoot: URL, notice: @escaping (String) -> Void) async throws {
+            ensured.append(name)
+            notice("tofu init")
+            if let failure { throw failure }
+            hosts.links[name] = FakeHostLink(name: name)
+        }
+        func costLine(host: String) -> String? { costLines[host] }
+    }
+
+    private let gpuRecipe = InfraConfig(source: .preset("aws-linux"), region: "us-east-1", instanceType: "t3.small",
+                                        ttl: .init(seconds: 3600))
+
+    private func withInfra(autoUp: Bool) -> FakeInfraUp {
+        var recipe = gpuRecipe
+        recipe.autoUp = autoUp
+        config.config = DelegateConfig(infra: ["gpu": recipe])
+        let infra = FakeInfraUp(hosts: hosts)
+        var deps = dependencies()
+        deps.infra = infra
+        service = DelegationService(registry: RunRegistry(file: nil), dependencies: deps)
+        return infra
+    }
+
+    private func notices(_ frames: Frames) -> [String] {
+        frames.all.compactMap { if case .delegateNotice(_, let message) = $0 { return message }; return nil }
+    }
+
+    func testRunOnAutoUpInfraCreatesItFirst() async throws {
+        let infra = withInfra(autoUp: true)
+        let frames = send(.run(WireDelegateRun(cwd: "/w/proj", host: "gpu", command: ["make"])))
+        _ = try await started(frames)
+        XCTAssertEqual(infra.ensured, ["gpu"])
+        XCTAssertEqual(Array(notices(frames).prefix(2)), ["creating gpu (aws-linux, t3.small)…", "tofu init"])
+        let gpu = try XCTUnwrap(hosts.links["gpu"])
+        XCTAssertEqual(gpu.requests.map(Self.op).prefix(3), ["sync.tips", "sync.push", "run.start"],
+                       "the run went to the machine it just created")
+        XCTAssertTrue(mini.requests.isEmpty)
+        // Notices come before the stream starts, so a detached run's CLI still prints them.
+        let firstStart = try XCTUnwrap(frames.all.firstIndex { if case .delegateStarted = $0 { return true }; return false })
+        XCTAssertTrue(frames.all[..<firstStart].allSatisfy { if case .delegateNotice = $0 { return true }; return false })
+    }
+
+    func testAnAutoUpThatFailsEndsTheRunWithItsReason() async throws {
+        let infra = withInfra(autoUp: true)
+        infra.failure = DelegationError(code: "infra_preflight", message: "budget: over the monthly cap — Settings → Cloud → Budget")
+        let frames = send(.run(WireDelegateRun(cwd: "/w/proj", host: "gpu", command: ["make"])))
+        try await until { frames.all.contains(where: terminal) }
+        XCTAssertEqual(frames.all.last, .err(cid: 1, code: "infra_preflight",
+                                             message: "budget: over the monthly cap — Settings → Cloud → Budget"))
+        XCTAssertEqual(sync.snapshots, 0)
+    }
+
+    func testRunOnInfraWithoutAutoUpSaysHowToCreateIt() async throws {
+        let infra = withInfra(autoUp: false)
+        let frames = send(.run(WireDelegateRun(cwd: "/w/proj", host: "gpu", command: ["make"])))
+        try await until { frames.all.contains(where: terminal) }
+        guard case .err(1, _, let message?) = frames.all.last else { return XCTFail("\(frames.all)") }
+        XCTAssertTrue(message.contains("flightdeck infra up gpu"), message)
+        XCTAssertEqual(infra.ensured, [], "nothing is created without auto_up")
+        XCTAssertEqual(sync.snapshots, 0)
+    }
+
+    func testRunOnCloudHostSendsCostNotice() async throws {
+        let infra = withInfra(autoUp: false)
+        hosts.links["gpu"] = FakeHostLink(name: "gpu")
+        infra.costLines["gpu"] = "gpu · t3.small · $0.02/h est. · up 5m · ~$0.00 · TTL 55m · month ~$1.00 of $50"
+        let frames = send(.run(WireDelegateRun(cwd: "/w/proj", host: "gpu", command: ["make"])))
+        _ = try await started(frames)
+        XCTAssertEqual(infra.ensured, [], "already up: nothing to create")
+        XCTAssertEqual(frames.all.first, .delegateNotice(cid: 1, message: infra.costLines["gpu"]!))
+
+        // A paired host that is no cloud machine gets no cost line.
+        let plain = send(.run(WireDelegateRun(cwd: "/w/proj", host: "mini", command: ["make"])))
+        _ = try await started(plain)
+        XCTAssertEqual(notices(plain), [])
+    }
+
     // MARK: Helpers
 
     private static func op(_ request: DelegationRequest) -> String {

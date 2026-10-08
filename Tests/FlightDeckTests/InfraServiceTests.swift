@@ -406,6 +406,88 @@ extension InfraServiceTests {
         XCTAssertEqual(h.account.owners, [h.service.ownerLabel], "asked for this controller's resources only")
     }
 
+    /// Spec §7.3: doctor runs the orphan scan too, listing each orphan with how to delete it,
+    /// and each account it could not read — never a passing "orphans" check when one was.
+    func testDoctorListsOrphansAndUnreadableAccounts() async throws {
+        h.account.owned = [OwnedResource(cloud: "aws", kind: .instance, id: "i-9", region: "eu-west-1", name: "lost")]
+        h.gcpAccount.listError = CloudAccountError.failed("gcloud: not signed in")
+        let checks = await h.service.doctor()
+        let orphan = try XCTUnwrap(checks.first { $0.name == "orphan instance:i-9" }, "\(checks.map(\.name))")
+        XCTAssertFalse(orphan.ok)
+        XCTAssertEqual(orphan.fix, "flightdeck infra down --orphan instance:i-9")
+        let unreadable = try XCTUnwrap(checks.first { $0.name == "orphan scan gcp" }, "\(checks.map(\.name))")
+        XCTAssertFalse(unreadable.ok)
+        XCTAssertTrue(unreadable.detail.contains("not signed in"), unreadable.detail)
+        XCTAssertFalse(checks.contains { $0.name == "orphans" }, "no all-clear while gcp was unreadable")
+
+        h.account.owned = []
+        h.gcpAccount.listError = nil
+        let clean = await h.service.doctor()
+        let none = try XCTUnwrap(clean.first { $0.name == "orphans" })
+        XCTAssertTrue(none.ok)
+    }
+
+    // MARK: - Secret redaction (ruling 3)
+
+    func testRedactionHidesTailscaleKeysAndLongHex() {
+        let hex = String(repeating: "a1", count: 32)
+        XCTAssertEqual(SecretRedaction.redact("auth tskey-auth-kAbC123-XYZ789 then \(hex)."),
+                       "auth [redacted] then [redacted].")
+        let short = String(repeating: "f", count: 63)
+        XCTAssertEqual(SecretRedaction.redact("sha \(short)"), "sha \(short)", "under 64 hex characters is kept")
+        XCTAssertEqual(SecretRedaction.redact("i-0123abcd"), "i-0123abcd")
+    }
+
+    /// The enroll-timeout console tail is cloud-init's own output, which can echo the
+    /// enrollment secret and the auth key it was handed.
+    func testEnrollTimeoutConsoleIsRedacted() {
+        let secret = String(repeating: "0f", count: 32)
+        let refusal = InfraService.refusal(
+            for: InfraError.enrollTimeout(console: "tailscale up --auth-key=tskey-auth-k1-ABC\nenroll \(secret)"), recorded: nil)
+        XCTAssertEqual(refusal.code, "infra_enroll_timeout")
+        XCTAssertFalse(refusal.message.contains("tskey-"), refusal.message)
+        XCTAssertFalse(refusal.message.contains(secret), refusal.message)
+        XCTAssertTrue(refusal.message.contains("--auth-key=[redacted]"), refusal.message)
+    }
+
+    /// OpenTofu's diagnostics reach the record, the `failed` event and the CLI redacted.
+    func testFailedApplyTextIsRedactedEverywhere() async throws {
+        let secret = String(repeating: "9c", count: 40)
+        h.tofu.failApply = TofuError.failed(step: "apply", message: "user_data = \"enroll \(secret) tskey-auth-k2-QQ\"")
+        do { _ = try await h.service.up(name: "gpu", config: gpu, repoRoot: h.repo) { self.h.events.append($0) }; XCTFail() }
+        catch {
+            let refusal = InfraService.refusal(for: error, recorded: nil)
+            XCTAssertFalse(refusal.message.contains(secret), refusal.message)
+        }
+        let failure = try XCTUnwrap(h.registry.machine(named: "gpu")?.failure)
+        XCTAssertFalse(failure.contains(secret) || failure.contains("tskey-"), failure)
+        for case .failed(let message) in h.events {
+            XCTAssertFalse(message.contains(secret) || message.contains("tskey-"), message)
+        }
+    }
+
+    // MARK: - run --on (InfraUpProviding)
+
+    func testEnsureUpCreatesAndForwardsProgressAndCostLineNamesOnlyCloudHosts() async throws {
+        h.tofu.outputs = TofuOutputs(address: "198.51.100.7", instanceID: "i-1", hourlyUSD: nil)
+        h.hostComesOnline(after: .applied)
+        var notices: [String] = []
+        try await h.service.ensureUp(name: "gpu", config: gpu, repoRoot: h.repo) { notices.append($0) }
+        XCTAssertEqual(h.registry.machine(named: "gpu")?.state, .ready)
+        XCTAssertTrue(notices.contains("tofu init"), "\(notices)")
+        XCTAssertTrue(h.service.costLine(host: "gpu")?.hasPrefix("gpu · t3.small") == true)
+        XCTAssertNil(h.service.costLine(host: "mini"))
+    }
+
+    func testEnsureUpFailureCarriesTheInfraCode() async throws {
+        h.budget.allowedTypes["aws"] = []
+        do { try await h.service.ensureUp(name: "gpu", config: gpu, repoRoot: h.repo) { _ in }; XCTFail() }
+        catch let error as DelegationError {
+            XCTAssertEqual(error.code, "infra_preflight")
+            XCTAssertTrue(error.message.contains("budget: "), error.message)
+        }
+    }
+
     /// "No orphans" must never mean "could not look".
     func testAnAccountThatCannotBeReadIsReportedNotEmpty() async throws {
         h.account.listError = CloudAccountError.failed("UnauthorizedOperation")

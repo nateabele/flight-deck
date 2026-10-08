@@ -153,4 +153,37 @@ final class CLIArgumentsTests: XCTestCase {
         }
         XCTAssertNotNil(usageMessage("search", "--limit", "--", "5"), "a flag's value never comes from past --")
     }
+
+    // MARK: infra
+
+    func testInfraVerbs() throws {
+        XCTAssertEqual(try parse("infra", "up", "gpu").command, .infra(.up(name: "gpu")))
+        XCTAssertEqual(try parse("infra", "down", "gpu").command, .infra(.down(name: "gpu", orphan: nil)))
+        XCTAssertEqual(try parse("infra", "down", "--orphan", "instance:i-0dead").command,
+                       .infra(.down(name: nil, orphan: "instance:i-0dead")))
+        XCTAssertEqual(try parse("infra", "ls").command, .infra(.ls(orphans: false)))
+        XCTAssertEqual(try parse("infra", "ls", "--orphans").command, .infra(.ls(orphans: true)))
+        XCTAssertEqual(try parse("infra", "doctor").command, .infra(.doctor))
+        XCTAssertEqual(try parse("infra", "extend", "gpu", "1h").command, .infra(.extend(name: "gpu", by: "1h")))
+        XCTAssertTrue(try parse("infra", "ls", "--json").json)
+    }
+
+    func testInfraRefusals() {
+        XCTAssertEqual(usageMessage("infra", "extend", "gpu", "forever"),
+                       #"infra extend: duration must be like 30m, 1h or 1h30m, got "forever""#)
+        XCTAssertEqual(usageMessage("infra", "up"), "infra up: missing machine name")
+        XCTAssertNotNil(usageMessage("infra"))
+        XCTAssertNotNil(usageMessage("infra", "nuke", "gpu"))
+        XCTAssertNotNil(usageMessage("infra", "down"), "a name or an orphan")
+        XCTAssertNotNil(usageMessage("infra", "down", "gpu", "--orphan", "instance:i-1"), "not both")
+        XCTAssertNotNil(usageMessage("infra", "ls", "--bogus"))
+    }
+
+    /// The CLI parses the duration; the wire carries seconds, and `down --orphan` an empty name.
+    func testInfraRequests() {
+        XCTAssertEqual(InfraCommand.extend(name: "gpu", by: "1h30m").request(cwd: "/r"), .extend(name: "gpu", seconds: 5400))
+        XCTAssertEqual(InfraCommand.down(name: nil, orphan: "firewall:fd-gpu").request(cwd: "/r"),
+                       .down(name: "", orphanID: "firewall:fd-gpu"))
+        XCTAssertEqual(InfraCommand.up(name: "gpu").request(cwd: "/r"), .up(name: "gpu", cwd: "/r"))
+    }
 }

@@ -386,6 +386,10 @@ targets:
       # Frameworks`, and `LD_RUNPATH_SEARCH_PATHS` below already points this binary there.
       - target: IntakeKit
         embed: false
+      # `infra extend 1h` parses its duration with HostKit's `Duration`, the grammar `ttl` is
+      # written in, so the CLI and delegate.toml can never disagree on what `1h30m` means.
+      - package: HostKit
+        product: HostKit
     settings:
       base:
         PRODUCT_NAME: flightdeck
