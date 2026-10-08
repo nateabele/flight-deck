@@ -34,7 +34,7 @@ struct SubmoduleScan {
                   let raw = local[name] ?? declared.urls[name], !raw.isEmpty else {
                 throw SyncError.submodule(path: full, problem: .noURL)
             }
-            let url = expand(SubmoduleURL.resolve(raw, against: base), in: dir)
+            let url = SubmoduleURL.withoutCredentials(expand(SubmoduleURL.resolve(raw, against: base), in: dir))
             pins.append(SubmodulePin(path: full, commit: link.commit, url: url))
 
             let sub = dir.appendingPathComponent(link.path)
@@ -225,6 +225,42 @@ enum SubmoduleURL {
     static func refusedOneCommit(_ stderr: String) -> Bool {
         let text = stderr.lowercased()
         return ["unadvertised object", "not our ref", "does not support shallow"].contains { text.contains($0) }
+    }
+
+    /// `url` without the credentials it may carry. A token in a local `submodule.*.url`, or
+    /// one an `insteadOf` rule adds, would otherwise travel in the pin: over the wire, into the
+    /// host's cache name and state, and into every message that quotes the URL. The host
+    /// fetches with its own credentials. An http(s) URL loses its whole userinfo (it is only
+    /// ever credentials there); any other scheme keeps its user, which names the account (the
+    /// `git` of `ssh://git@host/…`), and loses only a `:password`. An scp-style `user@host:path`
+    /// cannot hold a password and is left alone.
+    static func withoutCredentials(_ url: String) -> String {
+        guard let scheme = url.range(of: "://") else { return url }
+        let authorityStart = scheme.upperBound
+        let authorityEnd = url[authorityStart...].firstIndex(of: "/") ?? url.endIndex
+        guard let at = url[authorityStart..<authorityEnd].lastIndex(of: "@") else { return url }
+        let userinfo = url[authorityStart..<at]
+        let isHTTP = ["http", "https"].contains(url[..<scheme.lowerBound].lowercased())
+        let kept = isHTTP ? "" : (userinfo.split(separator: ":", maxSplits: 1).first.map { "\($0)@" } ?? "")
+        return String(url[..<authorityStart]) + kept + String(url[url.index(after: at)...])
+    }
+
+    /// `text` with the userinfo of every URL in it replaced by `***`, for messages: a host
+    /// that predates `withoutCredentials` may still hold a URL with a token, and git quotes the
+    /// URL it was given in its own errors.
+    static func redacted(_ text: String) -> String {
+        var out = ""
+        var rest = Substring(text)
+        while let scheme = rest.range(of: "://") {
+            out += rest[..<scheme.upperBound]
+            rest = rest[scheme.upperBound...]
+            let authorityEnd = rest.firstIndex { $0 == "/" || $0 == " " || $0 == "'" || $0 == "\"" || $0 == "\n" } ?? rest.endIndex
+            if let at = rest[..<authorityEnd].lastIndex(of: "@") {
+                out += "***"
+                rest = rest[at...]
+            }
+        }
+        return out + rest
     }
 
     static func refusal(_ url: String) -> String? {
