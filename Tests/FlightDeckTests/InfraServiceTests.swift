@@ -400,9 +400,42 @@ extension InfraServiceTests {
             OwnedResource(cloud: "aws", kind: .instance, id: "i-9", region: "eu-west-1", name: "lost"),
             OwnedResource(cloud: "aws", kind: .securityGroup, id: "sg-9", region: "eu-west-1", name: nil),
         ]
-        let orphans = await h.service.orphans()
-        XCTAssertEqual(orphans.map(\.id), ["i-9", "sg-9"])
+        let scan = await h.service.orphans()
+        XCTAssertEqual(scan.found.map(\.id), ["i-9", "sg-9"])
+        XCTAssertEqual(scan.unreadable, [:])
         XCTAssertEqual(h.account.owners, [h.service.ownerLabel], "asked for this controller's resources only")
+    }
+
+    /// "No orphans" must never mean "could not look".
+    func testAnAccountThatCannotBeReadIsReportedNotEmpty() async throws {
+        h.account.listError = CloudAccountError.failed("UnauthorizedOperation")
+        let scan = await h.service.orphans()
+        XCTAssertEqual(scan.found, [])
+        XCTAssertEqual(Array(scan.unreadable.keys), ["aws"])
+        XCTAssertTrue(scan.unreadable["aws"]?.contains("UnauthorizedOperation") == true, "\(scan.unreadable)")
+    }
+
+    /// An instance is its machine's only by the recorded ID: an older "gpu" that leaked is
+    /// still an orphan while a new "gpu" runs. Its security group can only go by name.
+    func testALeakedInstanceIsReportedBesideANewMachineOfTheSameName() async throws {
+        try h.registry.upsert(.fixture(name: "gpu"))                         // instance i-1
+        h.account.owned = [
+            OwnedResource(cloud: "aws", kind: .instance, id: "i-1", region: "us-east-1", name: "gpu"),
+            OwnedResource(cloud: "aws", kind: .instance, id: "i-7", region: "us-east-1", name: "gpu"),
+            OwnedResource(cloud: "aws", kind: .securityGroup, id: "sg-1", region: "us-east-1", name: "gpu"),
+        ]
+        let scan = await h.service.orphans()
+        XCTAssertEqual(scan.found.map(\.id), ["i-7"])
+    }
+
+    /// Before `up` recorded an instance ID, the name is all there is to go by.
+    func testAMachineWithoutAnInstanceIDAccountsForItsInstanceByName() async throws {
+        var m = InfraMachine.fixture(name: "gpu", state: .provisioning)
+        m.instanceID = nil
+        try h.registry.upsert(m)
+        h.account.owned = [OwnedResource(cloud: "aws", kind: .instance, id: "i-7", region: "us-east-1", name: "gpu")]
+        let scan = await h.service.orphans()
+        XCTAssertEqual(scan.found, [])
     }
 
     /// A GCP machine records `projects/<p>/zones/<z>/instances/<name>`; the scan lists the bare name.
@@ -412,18 +445,30 @@ extension InfraServiceTests {
         try h.registry.upsert(m)
         let gcp = h.gcpAccount
         gcp.owned = [OwnedResource(cloud: "gcp", kind: .instance, id: "fd-0a1b-gpu", region: "us-central1-a", name: nil)]
-        let orphans = await h.service.orphans()
-        XCTAssertEqual(orphans, [])
+        let scan = await h.service.orphans()
+        XCTAssertEqual(scan.found, [])
     }
 
     func testDownOrphanDeletesOnlyAnOrphan() async throws {
         try h.registry.upsert(.fixture(name: "gpu"))
         let lost = OwnedResource(cloud: "aws", kind: .instance, id: "i-9", region: "eu-west-1", name: "lost")
         h.account.owned = [OwnedResource(cloud: "aws", kind: .instance, id: "i-1", region: "us-east-1", name: "gpu"), lost]
-        do { try await h.service.downOrphan(id: "i-1"); XCTFail("a known machine is never an orphan") }
-        catch InfraError.notFound(let id) { XCTAssertEqual(id, "i-1") }
-        try await h.service.downOrphan(id: "i-9")
+        do { try await h.service.downOrphan(id: "instance:i-1"); XCTFail("a known machine is never an orphan") }
+        catch InfraError.notFound(let id) { XCTAssertEqual(id, "instance:i-1") }
+        try await h.service.downOrphan(id: "instance:i-9")
         XCTAssertEqual(h.account.deleted, [lost])
+    }
+
+    /// GCE names an instance and its firewall rule alike; the kind says which one goes.
+    func testDownOrphanTakesAKindQualifiedID() async throws {
+        let instance = OwnedResource(cloud: "gcp", kind: .instance, id: "fd-x-gpu", region: "us-central1-a", name: "lost")
+        let firewall = OwnedResource(cloud: "gcp", kind: .firewall, id: "fd-x-gpu", region: "global", name: "lost")
+        h.gcpAccount.owned = [instance, firewall]
+        XCTAssertEqual(instance.ref, "instance:fd-x-gpu")
+        do { try await h.service.downOrphan(id: "fd-x-gpu"); XCTFail("an unqualified id is ambiguous") }
+        catch InfraError.notFound {}
+        try await h.service.downOrphan(id: "firewall:fd-x-gpu")
+        XCTAssertEqual(h.gcpAccount.deleted, [firewall])
     }
 }
 

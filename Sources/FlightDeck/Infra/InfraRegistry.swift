@@ -30,6 +30,11 @@ struct InfraMachine: Codable, Equatable, Identifiable, Sendable {
     /// When the machine reached `enrolling`: its enroll window runs from here, so a relaunch
     /// gives a slow apply's machine the whole window rather than what creation time leaves.
     var enrollingSince: Date? = nil
+    /// How many times a `down` of this machine has failed, and when the last one did. Set
+    /// only by `down`, so a machine that failed during `up` (never destroyed by anyone) has
+    /// none, and the Reaper retries only the ones a destroy left behind.
+    var destroyAttempts: Int? = nil
+    var lastDestroyAt: Date? = nil
     var id: String { name }
 }
 

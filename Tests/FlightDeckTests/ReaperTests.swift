@@ -9,16 +9,23 @@ final class ReaperTests: XCTestCase {
     var h: InfraHarness!
     var spy: SpyInfraNotifier!
     var reaper: Reaper!
+    var path: ManualPathTrigger!
 
     override func setUp() async throws {
         h = try InfraHarness()
         spy = SpyInfraNotifier()
-        reaper = Reaper(service: h.service, hosts: h.hosts, clock: h.clock, notifier: spy, budget: { self.h.budget })
+        path = ManualPathTrigger()
+        reaper = makeReaper()
+    }
+
+    private func makeReaper(interval: TimeInterval = 60) -> Reaper {
+        Reaper(service: h.service, hosts: h.hosts, clock: h.clock, notifier: spy, budget: { self.h.budget },
+               interval: interval, pathChanges: { [path] in path!.watch($0) })
     }
 
     override func tearDown() async throws {
         reaper.stop()
-        reaper = nil; spy = nil; h = nil
+        reaper = nil; spy = nil; path = nil; h = nil
     }
 
     func testWarnsTenMinutesBeforeTTLThenDestroys() async throws {
@@ -38,11 +45,39 @@ final class ReaperTests: XCTestCase {
         XCTAssertEqual(spy.sent.filter { $0.body.contains("minutes") }.count, 1, "\(spy.sent)")
     }
 
+    /// Idle is timed on this Mac's clock, from when the Reaper first saw the host's `idleSince`,
+    /// never by comparing the host's clock with ours.
     func testIdleDestroys() async throws {
         try h.readyMachine("gpu", idle: .init(seconds: 1800))
         h.hostInfo("gpu", idleSince: h.now.addingTimeInterval(-1801))
         await reaper.tick()
+        XCTAssertFalse(h.tofu.destroyed.contains("gpu"), "first seen idle just now")
+        h.clock.advance(by: 1800); await reaper.tick()
         XCTAssertTrue(h.tofu.destroyed.contains("gpu"))
+    }
+
+    /// The host's clock runs 10 minutes behind: its 25 minutes idle read as 35 on ours.
+    func testHostClockSkewNeverReapsEarly() async throws {
+        try h.readyMachine("gpu", idle: .init(seconds: 1800))
+        h.hostInfo("gpu", idleSince: h.now.addingTimeInterval(-(1500 + 600)))
+        await reaper.tick()
+        XCTAssertFalse(h.tofu.destroyed.contains("gpu"))
+        h.clock.advance(by: 1700); await reaper.tick()
+        XCTAssertFalse(h.tofu.destroyed.contains("gpu"), "seen idle 1700 s of 1800")
+        h.clock.advance(by: 101); await reaper.tick()
+        XCTAssertTrue(h.tofu.destroyed.contains("gpu"))
+    }
+
+    /// A new `idleSince` (the host did something, then went idle again) restarts the count.
+    func testANewIdleSinceRestartsTheCount() async throws {
+        try h.readyMachine("gpu", idle: .init(seconds: 1800))
+        h.hostInfo("gpu", idleSince: h.now)
+        await reaper.tick()
+        h.clock.advance(by: 1000)
+        h.hostInfo("gpu", idleSince: h.now)
+        await reaper.tick()
+        h.clock.advance(by: 1000); await reaper.tick()
+        XCTAssertFalse(h.tofu.destroyed.contains("gpu"))
     }
 
     func testBusyMachineIsNotIdle() async throws {
@@ -103,6 +138,19 @@ final class ReaperTests: XCTestCase {
         XCTAssertFalse(h.tofu.destroyed.contains("gpu"))
     }
 
+    /// The monthly threshold is its own warning, even after the machine's own was sent.
+    func testMonthlyWarningIsIndependentOfThePerMachineOne() async throws {
+        h.budget.perMachineCapUSD = 10; h.budget.monthlyCapUSD = 100
+        try h.readyMachine("gpu", hourlyUSD: 8.5, createdAt: h.now.addingTimeInterval(-3600))
+        await reaper.tick()
+        h.budget.monthlyCapUSD = 10
+        h.clock.advance(by: 60); await reaper.tick()
+        let warnings = spy.sent.filter { $0.title.contains("budget") }
+        XCTAssertEqual(warnings.count, 2, "\(spy.sent)")
+        XCTAssertTrue(warnings.contains { $0.body.contains("monthly") }, "\(warnings)")
+        XCTAssertFalse(h.tofu.destroyed.contains("gpu"))
+    }
+
     func testDriftMarksGone() async throws {
         try h.readyMachine("gpu"); h.tofu.goneOnRefresh.insert("gpu")
         await reaper.tick()
@@ -116,6 +164,72 @@ final class ReaperTests: XCTestCase {
         XCTAssertEqual(h.tofu.calls.filter { $0 == "refresh" }.count, 1)
         h.clock.advance(by: 301); await reaper.tick()
         XCTAssertEqual(h.tofu.calls.filter { $0 == "refresh" }.count, 2)
+    }
+
+    /// The refresh holds the name, so a `down` arriving meanwhile is refused cleanly instead of
+    /// racing it for OpenTofu's state.
+    func testRefreshInFlightHoldsTheName() async throws {
+        try h.readyMachine("gpu")
+        h.tofu.holdRefresh = true
+        let pass = Task { await reaper.tick() }
+        try await waitUntil { self.h.tofu.calls.contains("refresh") }
+        do { try await h.service.down(name: "gpu") { _ in }; XCTFail("down raced the refresh") }
+        catch InfraError.refused {}
+        XCTAssertEqual(h.registry.machine(named: "gpu")?.state, .ready)
+        await h.tofu.refreshGate.open(); await pass.value
+        try await h.service.down(name: "gpu") { _ in }
+        XCTAssertTrue(h.tofu.destroyed.contains("gpu"))
+    }
+
+    /// Claimed before anything is asked: a busy machine never costs a public-IP lookup.
+    func testFollowPublicIPClaimsBeforeLookingUp() async throws {
+        try h.readyMachine("gpu", network: .public, allowCIDR: "203.0.113.9/32")
+        h.publicIP = "203.0.113.77"
+        h.tofu.holdRefresh = true
+        let pass = Task { await reaper.tick() }
+        try await waitUntil { self.h.tofu.calls.contains("refresh") }
+        do { _ = try await h.service.followPublicIP(name: "gpu"); XCTFail("ran while the name was held") }
+        catch InfraError.refused {}
+        XCTAssertEqual(h.publicIPCalls, 0)
+        await h.tofu.refreshGate.open(); await pass.value
+    }
+
+    func testFailedDestroyIsRetriedLater() async throws {
+        try h.readyMachine("gpu", deadline: h.now.addingTimeInterval(-1))
+        h.tofu.failDestroy = TofuError.failed(step: "destroy", message: "RequestLimitExceeded")
+        await reaper.tick()
+        XCTAssertEqual(h.registry.machine(named: "gpu")?.state, .failed)
+        XCTAssertEqual(h.registry.machine(named: "gpu")?.destroyAttempts, 1)
+        h.tofu.failDestroy = nil
+        h.clock.advance(by: 30); await reaper.tick()
+        XCTAssertNotNil(h.registry.machine(named: "gpu"), "not before a minute")
+        h.clock.advance(by: 31); await reaper.tick()
+        XCTAssertNil(h.registry.machine(named: "gpu"))
+        XCTAssertTrue(h.tofu.destroyed.contains("gpu"))
+    }
+
+    /// 1, 5, 15, then every 30 minutes.
+    func testDestroyRetriesBackOff() async throws {
+        try h.readyMachine("gpu", deadline: h.now.addingTimeInterval(-1))
+        h.tofu.failDestroy = TofuError.failed(step: "destroy", message: "RequestLimitExceeded")
+        func attempts() -> Int { h.tofu.calls.filter { $0 == "destroy" }.count }
+        await reaper.tick()
+        XCTAssertEqual(attempts(), 1)
+        for (wait, expected) in [(61.0, 2), (240, 2), (61, 3), (840, 3), (61, 4), (1740, 4), (61, 5), (1740, 5), (61, 6)] {
+            h.clock.advance(by: wait); await reaper.tick()
+            XCTAssertEqual(attempts(), expected, "after +\(wait)")
+        }
+    }
+
+    /// A machine that failed during `up` was never destroyed by anyone: it is the user's to
+    /// `down`, not the Reaper's to retry.
+    func testMachineThatFailedDuringUpIsLeftAlone() async throws {
+        try h.registry.upsert(.fixture(name: "x", state: .failed))
+        try h.prepareWorkdir("x")
+        await reaper.tick()
+        h.clock.advance(by: 3600); await reaper.tick()
+        XCTAssertEqual(h.tofu.calls.filter { $0 == "destroy" }, [])
+        XCTAssertEqual(h.registry.machine(named: "x")?.state, .failed)
     }
 
     /// Review Focus 5.
@@ -157,6 +271,35 @@ final class ReaperTests: XCTestCase {
         XCTAssertEqual(h.tofu.calls.last, "apply")
     }
 
+    /// The first look fails (the new network is not up yet); the link is still down three
+    /// minutes later, so it looks again.
+    func testLinkLostIsRetriedWhileTheLinkStaysDown() async throws {
+        let m = try h.readyMachine("gpu", network: .public, allowCIDR: "203.0.113.9/32")
+        h.publicIP = "203.0.113.77"; h.publicIPFailures = 1
+        // No periodic pass in the way: its drift refresh holds the name, which defers a check
+        // landing in the same instant to the next retry (by design, but not this test's subject).
+        reaper = makeReaper(interval: 3600)
+        reaper.start()
+        h.dialer.takeDown(m.slot!)
+        h.clock.advance(by: 31)
+        try await waitUntil { self.h.publicIPCalls == 1 }
+        XCTAssertEqual(h.registry.machine(named: "gpu")?.allowCIDR, "203.0.113.9/32")
+        h.clock.advance(by: 180)
+        try await waitUntil { self.h.registry.machine(named: "gpu")?.allowCIDR == "203.0.113.77/32" }
+    }
+
+    func testPathChangeRerunsLinkLost() async throws {
+        let m = try h.readyMachine("gpu", network: .public, allowCIDR: "203.0.113.9/32")
+        reaper = makeReaper(interval: 3600)
+        reaper.start()
+        h.dialer.takeDown(m.slot!)
+        h.clock.advance(by: 31)
+        try await waitUntil { self.h.publicIPCalls == 1 }    // same address: nothing to do
+        h.publicIP = "203.0.113.77"
+        path.fire()
+        try await waitUntil { self.h.registry.machine(named: "gpu")?.allowCIDR == "203.0.113.77/32" }
+    }
+
     func testLinkBackWithinTheDebounceDoesNothing() async throws {
         let m = try h.readyMachine("gpu", network: .public, allowCIDR: "203.0.113.9/32")
         h.publicIP = "203.0.113.77"
@@ -172,7 +315,7 @@ final class ReaperTests: XCTestCase {
     }
 
     func testStartTicksOnTheInterval() async throws {
-        reaper = Reaper(service: h.service, hosts: h.hosts, clock: h.clock, notifier: spy, budget: { self.h.budget }, interval: 60)
+        reaper = makeReaper(interval: 60)
         try h.readyMachine("gpu", deadline: h.now.addingTimeInterval(90))
         reaper.start()
         h.clock.advance(by: 61)

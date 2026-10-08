@@ -39,6 +39,17 @@ struct OwnedResource: Codable, Hashable, Sendable {
     let id: String
     let region: String
     let name: String?
+
+    /// `kind:id`, what `infra down --orphan` takes: GCE names an instance and its firewall
+    /// rule alike, so the bare id is ambiguous.
+    var ref: String { "\(kind.rawValue):\(id)" }
+}
+
+/// What an orphan scan found, and each cloud it could not read (cloud → why), so an empty
+/// `found` is only "none" when `unreadable` is empty too.
+struct OrphanScan: Equatable, Sendable {
+    var found: [OwnedResource]
+    var unreadable: [String: String]
 }
 
 /// One cloud account, driven entirely through that cloud's own CLI: its sign-in flow, its

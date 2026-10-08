@@ -69,7 +69,9 @@ struct AWSAccount: CloudAccount {
     func listOwned(owner: String) async throws -> [OwnedResource] {
         let listed = try await cli.checked(["ec2", "describe-regions", "--query", "Regions[].RegionName",
                                             "--output", "json", "--region", "us-east-1"] + profileArgs)
-        let regions = (try? JSONSerialization.jsonObject(with: listed.stdout)) as? [String] ?? []
+        guard let regions = (try? JSONSerialization.jsonObject(with: listed.stdout)) as? [String] else {
+            throw CloudAccountError.failed("aws ec2 describe-regions did not return a list of regions")
+        }
         let ownerFilter = "Name=tag:flightdeck-owner,Values=\(owner)"
         return try await withThrowingTaskGroup(of: [OwnedResource].self) { group in
             for region in regions {
@@ -79,7 +81,7 @@ struct AWSAccount: CloudAccount {
                                                            "--region", region, "--output", "json"] + profileArgs)
                     let groups = try await cli.checked(["ec2", "describe-security-groups", "--filters", ownerFilter,
                                                         "--region", region, "--output", "json"] + profileArgs)
-                    return Self.owned(instances: instances.stdout, securityGroups: groups.stdout, region: region)
+                    return try Self.owned(instances: instances.stdout, securityGroups: groups.stdout, region: region)
                 }
             }
             var found: [OwnedResource] = []
@@ -133,17 +135,24 @@ struct AWSAccount: CloudAccount {
     // MARK: - pure
 
     /// `describe-instances` and `describe-security-groups` JSON as `OwnedResource`s, named by
-    /// their `flightdeck-name` tag.
-    static func owned(instances: Data, securityGroups: Data, region: String) -> [OwnedResource] {
-        func object(_ data: Data) -> [String: Any] { (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:] }
+    /// their `flightdeck-name` tag. Output without the expected top-level list throws: an
+    /// error page or a changed format must never read as "nothing there".
+    static func owned(instances: Data, securityGroups: Data, region: String) throws -> [OwnedResource] {
+        func list(_ data: Data, _ key: String) throws -> [[String: Any]] {
+            guard let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                  let items = object[key] as? [[String: Any]] else {
+                throw CloudAccountError.failed("aws returned no \(key) list for \(region)")
+            }
+            return items
+        }
         func name(_ item: [String: Any]) -> String? {
             (item["Tags"] as? [[String: Any]])?.first { $0["Key"] as? String == "flightdeck-name" }?["Value"] as? String
         }
-        let reservations = object(instances)["Reservations"] as? [[String: Any]] ?? []
+        let reservations = try list(instances, "Reservations")
         let found = reservations.flatMap { $0["Instances"] as? [[String: Any]] ?? [] }.compactMap { i in
             (i["InstanceId"] as? String).map { OwnedResource(cloud: "aws", kind: .instance, id: $0, region: region, name: name(i)) }
         }
-        let groups = (object(securityGroups)["SecurityGroups"] as? [[String: Any]] ?? []).compactMap { g in
+        let groups = try list(securityGroups, "SecurityGroups").compactMap { g in
             (g["GroupId"] as? String).map { OwnedResource(cloud: "aws", kind: .securityGroup, id: $0, region: region, name: name(g)) }
         }
         return found + groups

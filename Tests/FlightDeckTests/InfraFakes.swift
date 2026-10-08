@@ -139,8 +139,14 @@ final class FakeTofu: TofuRunning, @unchecked Sendable {
         return outputs
     }
 
+    /// When set, every refresh suspends here until the test opens `refreshGate`.
+    let refreshGate = ApplyGate()
+    private var _holdRefresh = false
+    var holdRefresh: Bool { get { lock.withLock { _holdRefresh } } set { lock.withLock { _holdRefresh = newValue } } }
+
     func refreshShowsGone(workdir: URL) async throws -> Bool {
         record("refresh")
+        if holdRefresh { await refreshGate.wait() }
         return refreshGone || goneOnRefresh.contains(workdir.lastPathComponent)
     }
 }
@@ -169,6 +175,7 @@ final class FakeAccount: CloudAccount, @unchecked Sendable {
     private var _owned: [OwnedResource] = []
     private var _deleted: [OwnedResource] = []
     private var _owners: [String] = []
+    private var _listError: Error?
 
     init(cloud: String = "aws") { self.cloud = cloud }
 
@@ -176,6 +183,8 @@ final class FakeAccount: CloudAccount, @unchecked Sendable {
     var owned: [OwnedResource] { get { lock.withLock { _owned } } set { lock.withLock { _owned = newValue } } }
     var deleted: [OwnedResource] { lock.withLock { _deleted } }
     var owners: [String] { lock.withLock { _owners } }
+    /// When set, `listOwned` throws it: an account the scan cannot read.
+    var listError: Error? { get { lock.withLock { _listError } } set { lock.withLock { _listError = newValue } } }
 
     var accountStatus: AccountStatus { get { lock.withLock { _status } } set { lock.withLock { _status = newValue } } }
     var console: String? { get { lock.withLock { _console } } set { lock.withLock { _console = newValue } } }
@@ -189,11 +198,27 @@ final class FakeAccount: CloudAccount, @unchecked Sendable {
     func moduleVars() -> [String: String] { cloud == "gcp" ? ["project": "example-project"] : [:] }
     func consoleOutput(instanceID: String, region: String) async -> String? { console }
     func listOwned(owner: String) async throws -> [OwnedResource] {
-        lock.withLock { _owners.append(owner); return _owned }
+        try lock.withLock {
+            _owners.append(owner)
+            if let _listError { throw _listError }
+            return _owned
+        }
     }
     func deleteOwned(_ resource: OwnedResource) async throws {
         lock.withLock { _deleted.append(resource); _owned.removeAll { $0 == resource } }
     }
+}
+
+/// A path monitor the test fires by hand.
+@MainActor
+final class ManualPathTrigger {
+    private var handlers: [() -> Void] = []
+    final class Handle: HostLinkCancellable { func cancel() {} }
+    func watch(_ onChange: @escaping () -> Void) -> HostLinkCancellable {
+        handlers.append(onChange)
+        return Handle()
+    }
+    func fire() { handlers.forEach { $0() } }
 }
 
 /// Every notification the Reaper sends, in order. `UNUserNotificationCenter.current()` traps in
@@ -337,6 +362,8 @@ final class InfraHarness {
     var publicIPCalls = 0
     /// What `env.publicIP` answers: this Mac's public address as the cloud sees it.
     var publicIP = "203.0.113.9"
+    /// How many of the next `env.publicIP` calls fail, as a lookup on a network that is not up yet.
+    var publicIPFailures = 0
     var controllerID = "00000000-0000-4000-8000-000000000001"
 
     lazy var service: InfraService = InfraService(registry: registry, ledger: ledger, hosts: hosts, env: environment())
@@ -374,9 +401,14 @@ final class InfraHarness {
                                  cacheURL: root.appendingPathComponent("prices.json")),
             tailnet: tailnet,
             publicIP: { [weak self] in
-                await MainActor.run {
-                    self?.publicIPCalls += 1
-                    return self?.publicIP ?? "203.0.113.9"
+                try await MainActor.run {
+                    guard let self else { return "203.0.113.9" }
+                    self.publicIPCalls += 1
+                    if self.publicIPFailures > 0 {
+                        self.publicIPFailures -= 1
+                        throw URLError(.notConnectedToInternet)
+                    }
+                    return self.publicIP
                 }
             },
             presetsRoot: root.appendingPathComponent("presets"),
