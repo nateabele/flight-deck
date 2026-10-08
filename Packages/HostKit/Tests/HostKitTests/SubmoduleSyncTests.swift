@@ -151,6 +151,47 @@ final class SubmoduleSyncTests: XCTestCase {
         XCTAssertEqual(ref.submodules.map(\.url), [lib.bare.path])
     }
 
+    /// A URL with credentials in it (a token in a local `submodule.*.url`, or one an
+    /// `insteadOf` rule adds) must not travel: the pin goes over the wire, is stored on the
+    /// host and is quoted in error messages. The host fetches with its own credentials.
+    func testCredentialsInASubmoduleURLNeverLeaveTheController() async throws {
+        let (app, _, _) = try makeApp(in: TempRepo.scratch())
+        try app.git("config", "submodule.lib.url", "https://user:tskey-auth-EXAMPLE@example.com/lib.git")
+        var ref = try await Snapshotter().snapshot(worktree: app.url, host: "mini", include: [])
+        XCTAssertEqual(ref.submodules.map(\.url), ["https://example.com/lib.git"])
+
+        try app.git("config", "url.https://oauth2:tskey-auth-EXAMPLE@example.com/.insteadOf", "https://mirror.example.com/")
+        try app.git("config", "submodule.lib.url", "https://mirror.example.com/lib.git")
+        ref = try await Snapshotter().snapshot(worktree: app.url, host: "mini", include: [])
+        XCTAssertEqual(ref.submodules.map(\.url), ["https://example.com/lib.git"], "the rewrite applies, its token does not")
+    }
+
+    func testCredentialsAreStrippedButSSHUsersKept() {
+        XCTAssertEqual(SubmoduleURL.withoutCredentials("https://user:tskey-auth-EXAMPLE@example.com/lib.git"),
+                       "https://example.com/lib.git")
+        XCTAssertEqual(SubmoduleURL.withoutCredentials("HTTP://tskey-auth-EXAMPLE@example.com:8443/lib.git"),
+                       "HTTP://example.com:8443/lib.git")
+        XCTAssertEqual(SubmoduleURL.withoutCredentials("ssh://git:secret-EXAMPLE@example.com/lib.git"),
+                       "ssh://git@example.com/lib.git", "the ssh user names the account; only the password goes")
+        XCTAssertEqual(SubmoduleURL.withoutCredentials("ssh://git@example.com/lib.git"), "ssh://git@example.com/lib.git")
+        XCTAssertEqual(SubmoduleURL.withoutCredentials("git@example.com:org/lib.git"), "git@example.com:org/lib.git")
+        XCTAssertEqual(SubmoduleURL.withoutCredentials("https://example.com/a@b/lib.git"), "https://example.com/a@b/lib.git",
+                       "an @ in the path is not userinfo")
+        XCTAssertEqual(SubmoduleURL.withoutCredentials("/srv/git/lib.git"), "/srv/git/lib.git")
+    }
+
+    /// A host's fetch error quotes the URL it was given and whatever git printed; neither may
+    /// carry a token into the run's output, the CLI's line, or a log.
+    func testFetchErrorsRedactCredentials() {
+        let url = "https://user:tskey-auth-EXAMPLE@example.com/lib.git"
+        for problem: SubmoduleProblem in [.fetchFailed(url: url, detail: "fatal: unable to access '\(url)/': 403"),
+                                          .missingCommit(url: url, commit: String(repeating: "a", count: 40))] {
+            let message = "\(SyncError.submodule(path: "lib", problem: problem))"
+            XCTAssertFalse(message.contains("tskey-auth-EXAMPLE"), message)
+            XCTAssertTrue(message.contains("example.com/lib.git"), message)
+        }
+    }
+
     func testRelativeURLResolution() {
         XCTAssertEqual(SubmoduleURL.resolve("../lib.git", against: "https://example.com/org/app.git"),
                        "https://example.com/org/lib.git")

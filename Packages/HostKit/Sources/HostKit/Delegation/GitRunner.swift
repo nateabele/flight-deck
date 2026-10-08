@@ -124,10 +124,13 @@ public enum SubmoduleProblem: Equatable, Sendable {
             return "submodule \(path) is at \(commit.prefix(12)), which no branch or tag of its remote contains; push it (git -C \(path) push), or fetch if it is already pushed, then rerun"
         case .noURL:
             return "\(path) is a nested git repository with no URL in .gitmodules; add it with git submodule add <url> \(path), or ignore it, then rerun"
+        // Redacted: these quote a URL from the wire and git's own words about it, and either
+        // may carry a token (`SubmoduleURL.redacted`).
         case .fetchFailed(let url, let detail):
-            return "couldn't fetch submodule \(path) from \(url): \(detail.trimmingCharacters(in: .whitespacesAndNewlines)); make that URL reachable from the host, then rerun"
+            let detail = SubmoduleURL.redacted(detail.trimmingCharacters(in: .whitespacesAndNewlines))
+            return "couldn't fetch submodule \(path) from \(SubmoduleURL.redacted(url)): \(detail); make that URL reachable from the host, then rerun"
         case .missingCommit(let url, let commit):
-            return "submodule \(path)'s commit \(commit.prefix(12)) is not on \(url); push it, then rerun"
+            return "submodule \(path)'s commit \(commit.prefix(12)) is not on \(SubmoduleURL.redacted(url)); push it, then rerun"
         }
     }
 }
