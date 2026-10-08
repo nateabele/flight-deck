@@ -153,6 +153,14 @@ final class CloudSetupModelTests: XCTestCase {
         XCTAssertEqual(h.opened, [page])
     }
 
+    /// The Compute Engine action is GCP's alone: on AWS it would start a sign-in instead.
+    func testSignedInAWSOffersNoComputeEngineAction() async throws {
+        let h = try CloudSetupHarness()
+        await h.model.refresh()
+        XCTAssertEqual(h.model.step(.aws).state, .ok)
+        XCTAssertNil(h.model.step(.aws).action)
+    }
+
     func testEnablingComputeThatWorksOpensNothing() async throws {
         let h = try CloudSetupHarness()
         await h.model.refresh()
