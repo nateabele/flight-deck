@@ -28,8 +28,8 @@ enum HuJSONPatcher {
         if let owners, !owners.isObject { return nil }
         if let grants, !grants.isArray { return nil }
 
-        let ownerEntry = "\(quote(tag)): [\(quote(ownerAutogroup))]"
-        let grantEntry = "{\"src\": [\"autogroup:member\"], \"dst\": [\(quote(tag))], \"ip\": [\(quote(ports))]}"
+        let ownerEntry = ownerEntry(tag: tag, ownerAutogroup: ownerAutogroup)
+        let grantEntry = grantEntry(tag: tag)
         let editor = Editor(bytes: bytes)
         var edits: [Edit] = []
         var topLevel: [String] = []
@@ -48,6 +48,23 @@ enum HuJSONPatcher {
 
         let patched = edits.isEmpty ? policy : apply(edits, to: bytes)
         return Patch(original: policy, patched: patched, diff: LineDiff.unified(policy, patched, context: 2))
+    }
+
+    /// The two rules as text to paste into the policy editor by hand, for when
+    /// `addFlightDeckRules` cannot place them safely: the same entries it would insert.
+    static func snippet(tag: String, ownerAutogroup: String) -> String {
+        """
+        "tagOwners": {\(ownerEntry(tag: tag, ownerAutogroup: ownerAutogroup))},
+        "grants": [\(grantEntry(tag: tag))],
+        """
+    }
+
+    private static func ownerEntry(tag: String, ownerAutogroup: String) -> String {
+        "\(quote(tag)): [\(quote(ownerAutogroup))]"
+    }
+
+    private static func grantEntry(tag: String) -> String {
+        "{\"src\": [\"autogroup:member\"], \"dst\": [\(quote(tag))], \"ip\": [\(quote(ports))]}"
     }
 
     /// The delegation ports, as the grant's `ip` names them.

@@ -84,7 +84,12 @@ final class TailnetIntegration: @unchecked Sendable {
 
     // MARK: Local CLI
 
-    func local() async -> LocalTailnet {
+    func local() async -> LocalTailnet { localNow() }
+
+    /// `local()` without the suspension, for the setup sheet's clipboard capture, which must
+    /// record the client against this Mac's tailnet from a button press. Blocks for at most
+    /// the CLI's own timeouts.
+    func localNow() -> LocalTailnet {
         guard let cli, let data = TailscaleCLI.run(cli.path, ["status", "--json"], timeout: 2) else { return .absent }
         struct Status: Decodable {
             struct Tailnet: Decodable { let Name: String? }
@@ -115,6 +120,9 @@ final class TailnetIntegration: @unchecked Sendable {
         let signer = lock.PublicKey.map { key in lock.TrustedKeys?.contains { $0.Key == key } ?? false } ?? false
         return (lock.Enabled ?? false, signer)
     }
+
+    /// Stores the OAuth client the user created during setup (spec §9), in the Keychain only.
+    func saveClient(_ client: TailscaleOAuthClient) throws { try secrets.save(client) }
 
     func mode() async -> TailnetMode {
         let local = await local()

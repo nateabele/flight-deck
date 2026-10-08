@@ -10,6 +10,10 @@ struct FlightDeckApp: App {
     @StateObject private var hosts: HostService
     @StateObject private var hosting: HostingController
     @StateObject private var routing: RoutingService
+    /// Cloud machines: the service, the Reaper keeping their TTLs and the Cloud tab's context.
+    /// Held here, not in a `@StateObject`, because nothing in it is observable and the Reaper
+    /// must start at launch, not whenever SwiftUI first evaluates a thunk.
+    private let infra: InfraWiring
 
     private static let logger = Logger(subsystem: "dev.flightdeck.FlightDeck", category: "fleet")
 
@@ -202,8 +206,16 @@ struct FlightDeckApp: App {
         let hosts = Self.makeHostService()
         _hosts = StateObject(wrappedValue: hosts)
         _hosting = StateObject(wrappedValue: Self.makeHostingController())
+        // Eager like `hosts`, which it enrolls cloud machines into: the Reaper must keep TTLs
+        // from launch, and a relaunch must pick up machines a quit left mid-flight.
+        let fleetRef = FleetRef()
+        let infra = InfraLive.wire(
+            directory: Self.stateDirectory() ?? FileSessionPersistence.defaultDirectory(), reset: Self.isResettingState,
+            hosts: hosts, controllerName: Self.controllerName, preferences: preferences, fleet: fleetRef)
+        self.infra = infra
         _fleet = StateObject(wrappedValue: Self.makeFleetService(
-            store: deferredStore(), preferences: preferences, hosts: hosts, delegation: delegation
+            store: deferredStore(), preferences: preferences, hosts: hosts, delegation: delegation,
+            infra: infra.service, fleetRef: fleetRef
         ))
     }
 
@@ -224,8 +236,11 @@ struct FlightDeckApp: App {
     /// never started, for the reason the fleet listener is not: a reset run must neither read
     /// the developer's paired hosts nor dial them.
     @MainActor
+    /// What hosts and cloud machines know this Mac as.
+    private static var controllerName: String { Host.current().localizedName ?? "Mac" }
+
     private static func makeHostService() -> HostService {
-        let controllerName = Host.current().localizedName ?? "Mac"
+        let controllerName = Self.controllerName
         guard !isResettingState else {
             let scratch = FileManager.default.temporaryDirectory
                 .appendingPathComponent("flightdeck-hosts-\(UUID().uuidString).json")
@@ -264,15 +279,21 @@ struct FlightDeckApp: App {
     /// `Task` it starts are.
     @MainActor
     private static func makeFleetService(store: SessionStore, preferences: PreferencesStore,
-                                         hosts: HostService, delegation: DelegationBootstrap?) -> FleetService {
+                                         hosts: HostService, delegation: DelegationBootstrap?,
+                                         infra: InfraService, fleetRef: FleetRef) -> FleetService {
         let service = FleetService(store: store, preferences: preferences, armer: PairingArmer(),
                                    hosts: hosts)
+        // Before either socket starts, like delegation below, so no `infra.*` request is ever
+        // answered `infra_unavailable` by a fleet that had not been handed its service yet.
+        service.infra = infra
+        fleetRef.fleet = service
         // The UITest gate is hermetic: a listener advertising this Mac on the real LAN
         // during a GUI test would be a live service, not a test fixture.
         guard !isResettingState else { return service }
         // Before either socket starts, so no `delegate.*` request is ever answered
         // `not_implemented` by a fleet that simply had not been handed its service yet.
         delegation?.connect(fleet: service, hosts: hosts) { [weak store] in store?.title(of: $0) }
+        // TODO(T17 merge): service.delegation?.infra = infra  // InfraUpProviding, for auto-up
         Task {
             do {
                 try await service.start()
@@ -488,7 +509,7 @@ struct FlightDeckApp: App {
         // A `Settings` scene gives ⌘, and the standard Preferences window for free.
         Settings {
             PreferencesView(preferences: preferences, sessions: store, fleet: fleet,
-                            hosts: hosts, hosting: hosting, routing: routing)
+                            hosts: hosts, hosting: hosting, routing: routing, cloud: infra.context)
         }
     }
 }

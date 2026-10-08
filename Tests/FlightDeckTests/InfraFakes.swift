@@ -191,9 +191,10 @@ final class FakeAccount: CloudAccount, @unchecked Sendable {
 
     func status() async -> AccountStatus { accountStatus }
     func signIn() async throws {}
-    func quota(region: String, instanceType: String) async throws -> QuotaCheck {
-        QuotaCheck(ok: true, have: 64, need: 2, increaseURL: nil)
-    }
+    private var _quota = QuotaCheck(ok: true, have: 64, need: 2, increaseURL: nil)
+    /// What `quota` answers, for every region and type.
+    var quotaResult: QuotaCheck { get { lock.withLock { _quota } } set { lock.withLock { _quota = newValue } } }
+    func quota(region: String, instanceType: String) async throws -> QuotaCheck { quotaResult }
     func providerEnvironment() -> [String: String] { ["AWS_PROFILE": "example"] }
     func moduleVars() -> [String: String] { cloud == "gcp" ? ["project": "example-project"] : [:] }
     func consoleOutput(instanceID: String, region: String) async -> String? { console }
@@ -492,5 +493,84 @@ final class InfraHarness {
     func prepareWorkdir(_ name: String) throws {
         try FileManager.default.createDirectory(at: registry.workdir(for: name).appendingPathComponent("module"),
                                                 withIntermediateDirectories: true)
+    }
+}
+
+// MARK: - The setup sheet's seams (Task 18)
+
+/// A `CloudSetupModel` over an `InfraHarness`: fake AWS and GCP accounts, a tailnet in the
+/// chosen mode (a fake `tailscale` CLI for a running one), the policy endpoint answering
+/// `policy` with an `ETag`, and spies for every URL opened, every string copied, the
+/// clipboard read and each command run on a host. Nothing reaches a real API.
+@MainActor
+final class CloudSetupHarness {
+    let infra: InfraHarness
+    let http: FakeHTTP
+    let secrets: MemoryTailnetSecrets
+    let tailnet: TailnetIntegration
+    /// What the model's closures record into, held by them strongly: a test may keep only
+    /// `harness.model`, and the harness itself is then gone.
+    @MainActor final class Spies {
+        var opened: [URL] = []
+        var copied: String?
+        var ran: [(host: String, command: [String])] = []
+        var runOutput = "Linux example 6.8.0 x86_64 GNU/Linux\n"
+        var runError: Error?
+    }
+    let spies = Spies()
+    var opened: [URL] { spies.opened }
+    var copied: String? { spies.copied }
+    var ran: [(host: String, command: [String])] { spies.ran }
+    var runOutput: String { get { spies.runOutput } set { spies.runOutput = newValue } }
+    var runError: Error? { get { spies.runError } set { spies.runError = newValue } }
+    var savedOAuth: TailscaleOAuthClient? { secrets.load() }
+
+    lazy var model = CloudSetupModel(
+        service: infra.service, tailnet: tailnet, accounts: ["aws": infra.account, "gcp": infra.gcpAccount],
+        open: { [spies] in spies.opened.append($0) }, clipboard: { [clipboard] in clipboard },
+        copy: { [spies] in spies.copied = $0 }, resolver: infra.resolver,
+        budget: { [infra] in infra.budget },
+        run: { [spies] host, command, _ in
+            spies.ran.append((host, command))
+            if let runError = spies.runError { throw runError }
+            return spies.runOutput
+        },
+        workRoot: infra.repo)
+
+    private let clipboard: String?
+
+    static let policyURL = "https://api.tailscale.com/api/v2/tailnet/-/acl"
+
+    init(tailnet mode: TailnetMode = .notConfigured(tailnet: "example-tailnet.ts.net"),
+         aws: AccountStatus = .ready(identity: "123456789012"), quota: QuotaCheck? = nil,
+         policy: String = "{\n  \"acls\": []\n}\n", clipboard: String? = nil) throws {
+        infra = try InfraHarness()
+        infra.account.accountStatus = aws
+        if let quota { infra.account.quotaResult = quota }
+        self.clipboard = clipboard
+        http = FakeHTTP(responses: [Self.policyURL: policy], responseHeaders: [Self.policyURL: ["ETag": "\"e1\""]])
+        let client: TailscaleOAuthClient?
+        let cli: URL?
+        switch mode {
+        case .notRunning:
+            client = nil; cli = nil
+        case .notConfigured(let name):
+            client = nil; cli = try Self.runningCLI(name)
+        case .available(let c):
+            client = c; cli = try Self.runningCLI(c.tailnet)
+        case .mismatch(let local, let other):
+            client = TailscaleOAuthClient(id: "kOther", secret: "tskey-client-kOther-SECRET", tailnet: other)
+            cli = try Self.runningCLI(local)
+        }
+        secrets = MemoryTailnetSecrets(client)
+        tailnet = TailnetIntegration(cli: cli, http: http, secrets: secrets)
+        infra.tailnet = tailnet
+    }
+
+    /// A `tailscale` that reports itself running on `tailnet` for every subcommand; its `lock
+    /// status` decodes as lock off.
+    static func runningCLI(_ tailnet: String) throws -> URL {
+        let status = #"{"BackendState":"Running","CurrentTailnet":{"Name":"\#(tailnet)"},"Self":{"TailscaleIPs":["100.64.0.2"]}}"#
+        return try FakeExecutable.make("tailscale", script: "echo '\(status)'")
     }
 }
