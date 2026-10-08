@@ -547,10 +547,10 @@ struct PromptCard: View {
                             Text(detail)
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
-                                // A real description runs to a line and a half and is the only
-                                // thing saying what the option MEANS. Clamped so four options
-                                // still fit above the keyboard.
-                                .lineLimit(3)
+                                // Never clamped: a description is the only thing saying what the
+                                // option MEANS, and an ellipsis hides exactly the clause that
+                                // decides between two options. The card scrolls when the options
+                                // outgrow the room above the keyboard, so height is not a reason.
                                 .fixedSize(horizontal: false, vertical: true)
                         }
                     }
