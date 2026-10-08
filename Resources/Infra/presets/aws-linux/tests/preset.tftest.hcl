@@ -16,6 +16,12 @@ mock_provider "aws" {
       locations = ["us-east-1a"]
     }
   }
+  # Likewise no VPCs, which the module refuses as "no default VPC".
+  mock_data "aws_vpcs" {
+    defaults = {
+      ids = ["vpc-0123456789abcdef0"]
+    }
+  }
 }
 
 variables {
@@ -198,4 +204,22 @@ run "spot_request_carries_the_labels" {
     condition     = { for k, t in aws_ec2_tag.spot_request : k => t.value } == var.fd_labels
     error_message = "every fd_label on the spot request"
   }
+}
+
+# An account or region with no default VPC (deleted by hand, or an account that predates them)
+# must fail at plan, naming the fix. Before the precondition the singular lookup failed inside
+# AWS's own read with "no matching EC2 VPC found", which says nothing about what to do. The
+# plural lookup returns an empty list instead of failing, which is what the mock models here:
+# a mocked singular `aws_vpc` always "finds" one, so it could never show the gap.
+run "no_default_vpc_fails_at_plan" {
+  command = plan
+
+  override_data {
+    target = data.aws_vpcs.default
+    values = {
+      ids = []
+    }
+  }
+
+  expect_failures = [data.aws_vpc.default]
 }

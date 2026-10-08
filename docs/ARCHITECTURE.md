@@ -512,7 +512,10 @@ which YAML reads as line breaks). In order:
 OAuth client for that same tailnet is in the Keychain: each `up` mints a single-use, preauthorized,
 ephemeral key tagged `tag:flightdeck-cloud` (15-minute expiry), and `fd_address` is the node's
 tailnet IP from the Tailscale API. Tailnet machines still get a public IP, used for egress only:
-the default VPC/network has no NAT, and cloud-init must download hostd. Inbound stays closed (the
+the default VPC/network has no NAT, and cloud-init must download hostd. `aws-linux` needs the
+region's default VPC and refuses at plan time without one, naming `aws ec2 create-default-vpc`
+(a precondition on the lookup; AWS's own read failed later with "no matching EC2 VPC found").
+Inbound stays closed (the
 AWS security group has no ingress rule; GCP gets a deny-all-ingress rule). Public mode admits TCP
 47410 from this Mac's `/32` only — no SSH in either mode — and the delegation link is TLS-PSK with
 the enrolled key, so the open port answers no one else. The OAuth client itself is a manual
