@@ -254,6 +254,33 @@ final class CloudAccountsTests: XCTestCase {
         catch CloudAccountError.failed(let why) { XCTAssertTrue(why.contains("UnauthorizedOperation"), why) }
     }
 
+    /// Output that is not the JSON asked for is a failure, never an empty list.
+    func testAWSListOwnedRejectsBadJSON() async throws {
+        let badRegions = try FakeExecutable.make("aws", script: "echo 'not json'")
+        do { _ = try await AWSAccount(aws: badRegions, profile: nil, runner: SystemCommandRunner()).listOwned(owner: "0a1b2c3d4e5f"); XCTFail() }
+        catch CloudAccountError.failed {}
+        let badInstances = try FakeExecutable.make("aws", script: #"""
+        case "$*" in
+          *describe-regions*) echo '["us-east-1"]' ;;
+          *describe-instances*) echo '<html>proxy error</html>' ;;
+          *) echo '{"SecurityGroups":[]}' ;;
+        esac
+        """#)
+        do { _ = try await AWSAccount(aws: badInstances, profile: nil, runner: SystemCommandRunner()).listOwned(owner: "0a1b2c3d4e5f"); XCTFail() }
+        catch CloudAccountError.failed {}
+    }
+
+    func testGCPListOwnedRejectsBadJSON() async throws {
+        let gc = try FakeExecutable.make("gcloud", script: #"""
+        case "$2" in
+          instances) echo '[]' ;;
+          firewall-rules) echo '{"error":"unexpected"}' ;;
+        esac
+        """#)
+        do { _ = try await GCPAccount(gcloud: gc, project: "example-project", runner: SystemCommandRunner()).listOwned(owner: "0a1b2c3d4e5f"); XCTFail() }
+        catch CloudAccountError.failed {}
+    }
+
     func testAWSDeleteOwned() async throws {
         let aws = try FakeExecutable.make("aws", script: FakeExecutable.record(to: log))
         let account = AWSAccount(aws: aws, profile: "dev", runner: SystemCommandRunner())

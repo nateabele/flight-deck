@@ -80,6 +80,16 @@ final class TofuRunnerTests: XCTestCase {
         XCTAssertTrue(gone)
     }
 
+    /// A read-only refresh never takes the state lock, so it can never block a `down` or `apply`.
+    func testRefreshTakesNoStateLock() async throws {
+        let log = dir.appendingPathComponent("args")
+        let tofu = try fakeTofu("echo \"$*\" >> '\(log.path)'; exit 0")
+        _ = try await runner(tofu).refreshShowsGone(workdir: dir)
+        let args = try String(contentsOf: log, encoding: .utf8)
+        XCTAssertTrue(args.contains("plan -refresh-only"), args)
+        XCTAssertTrue(args.contains("-lock=false"), args)
+    }
+
     func testRefreshCleanIsNotGone() async throws {
         let gone = try await runner(try fakeTofu("exit 0")).refreshShowsGone(workdir: dir)
         XCTAssertFalse(gone)

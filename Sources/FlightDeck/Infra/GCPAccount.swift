@@ -117,7 +117,7 @@ struct GCPAccount: CloudAccount {
                                                "--format", "json"] + projectArgs)
         let rules = try await cli.checked(["compute", "firewall-rules", "list", "--filter", "description~flightdeck-owner=\(owner)",
                                            "--format", "json"] + projectArgs)
-        return Self.owned(instances: instances.stdout, firewalls: rules.stdout, owner: owner)
+        return try Self.owned(instances: instances.stdout, firewalls: rules.stdout, owner: owner)
     }
 
     func deleteOwned(_ resource: OwnedResource) async throws {
@@ -135,14 +135,20 @@ struct GCPAccount: CloudAccount {
 
     /// `instances list` and `firewall-rules list` JSON as `OwnedResource`s. An instance's
     /// region is its zone, the last part of its `zone` URL, which is what deleting it needs.
-    static func owned(instances: Data, firewalls: Data, owner: String) -> [OwnedResource] {
-        func array(_ data: Data) -> [[String: Any]] { (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] ?? [] }
-        let found = array(instances).compactMap { i -> OwnedResource? in
+    /// Output that is not a JSON list throws: it must never read as "nothing there".
+    static func owned(instances: Data, firewalls: Data, owner: String) throws -> [OwnedResource] {
+        func array(_ data: Data, _ what: String) throws -> [[String: Any]] {
+            guard let items = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] else {
+                throw CloudAccountError.failed("gcloud did not return a list of \(what)")
+            }
+            return items
+        }
+        let found = try array(instances, "instances").compactMap { i -> OwnedResource? in
             guard let name = i["name"] as? String, let zone = (i["zone"] as? String)?.split(separator: "/").last else { return nil }
             return OwnedResource(cloud: "gcp", kind: .instance, id: name, region: String(zone),
                                  name: (i["labels"] as? [String: String])?["flightdeck-name"])
         }
-        let rules = array(firewalls).compactMap { f -> OwnedResource? in
+        let rules = try array(firewalls, "firewall rules").compactMap { f -> OwnedResource? in
             guard let name = f["name"] as? String else { return nil }
             let words = ((f["description"] as? String) ?? "").split(separator: " ").map(String.init)
             guard words.contains("flightdeck-owner=\(owner)") else { return nil }

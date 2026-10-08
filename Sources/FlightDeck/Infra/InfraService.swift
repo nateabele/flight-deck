@@ -324,9 +324,7 @@ final class InfraService {
             } catch {
                 // Never removed while resources may still exist: the record is how anyone finds them.
                 let message = "destroy: " + Self.failureText(error)
-                machine.state = .failed
-                machine.failure = message
-                try? registry.upsert(machine)
+                recordDestroyFailure(&machine, message)
                 events(.failed(message))
                 throw error
             }
@@ -341,14 +339,22 @@ final class InfraService {
             // Kept, never forgotten: a record removed with its segment still open would bill
             // this machine into every month-to-date from now on, with nothing left to close it.
             let message = "destroyed, but the cost ledger could not be written (\(error.localizedDescription)); run `flightdeck infra down \(name)` again"
-            machine.state = .failed
-            machine.failure = message
-            try? registry.upsert(machine)
+            recordDestroyFailure(&machine, message)
             events(.failed(message))
             throw error
         }
         try discard(machine)
         events(.progress("\(name) destroyed"))
+    }
+
+    /// A failed `down` is counted and timed, so the Reaper can retry it with backoff; a machine
+    /// that failed during `up` has no count and is left for the user.
+    private func recordDestroyFailure(_ machine: inout InfraMachine, _ message: String) {
+        machine.state = .failed
+        machine.failure = message
+        machine.destroyAttempts = (machine.destroyAttempts ?? 0) + 1
+        machine.lastDestroyAt = env.now()
+        try? registry.upsert(machine)
     }
 
     /// Forgets a machine whose resources are destroyed and whose cost segment is closed: its
@@ -486,6 +492,14 @@ final class InfraService {
         }
     }
 
+    /// `refreshShowsGone` holding the name, so no `up`, `down` or address change runs against
+    /// the same state meanwhile. Nil when the name is already held: skip, and look next time.
+    func refreshClaimed(_ name: String) async -> Bool? {
+        guard let m = registry.machine(named: name), (try? claim(name)) != nil else { return nil }
+        defer { release(name) }
+        return await refreshShowsGone(m)
+    }
+
     /// True when `tofu plan -refresh-only` finds the instance gone (its own timer fired). False
     /// when it is there, when nothing was ever applied, and when the refresh itself fails: a
     /// machine is only ever forgotten on a definite answer.
@@ -515,12 +529,14 @@ final class InfraService {
     /// Re-points a public-mode machine's one inbound rule at this Mac's current public IP: the
     /// vars file's `fd_allow_cidr`, an `apply`, then the record. Returns the new `/32`, or nil
     /// when nothing changed (tailnet mode, not running, or the address is the same).
+    /// Claimed first and the record read under the claim, so a busy machine costs no lookup and
+    /// the state checked is the state acted on.
     func followPublicIP(name: String) async throws -> String? {
+        try claim(name)
+        defer { release(name) }
         guard let m = registry.machine(named: name), m.network == .public, m.state == .ready || m.state == .idle else { return nil }
         let cidr = "\(try await env.publicIP())/32"
         guard cidr != m.allowCIDR else { return nil }
-        try claim(name)
-        defer { release(name) }
         let workdir = registry.workdir(for: name)
         try InfraWorkdir.setVar(workdir: workdir, "fd_allow_cidr", cidr)
         try await tofu(cloud: m.cloud).apply(workdir: workdir) { _ in }
@@ -534,35 +550,42 @@ final class InfraService {
     // MARK: - Orphans (spec §7.3)
 
     /// Every resource carrying this controller's owner label that no machine in `infra.json`
-    /// accounts for, by instance ID or by `flightdeck-name`. An account that cannot be read is
-    /// logged and skipped, so this is what could be seen, not proof there is nothing else.
-    func orphans() async -> [OwnedResource] {
+    /// accounts for, and every account that could not be read, with why: "none found" is only
+    /// "none" when nothing was unreadable.
+    func orphans() async -> OrphanScan {
         let owner = ownerLabel
-        var found: [OwnedResource] = []
+        var scan = OrphanScan(found: [], unreadable: [:])
         for (cloud, account) in env.accounts.sorted(by: { $0.key < $1.key }) {
-            do { found += try await account.listOwned(owner: owner) } catch {
+            do { scan.found += try await account.listOwned(owner: owner) } catch {
                 Self.logger.error("orphan scan of \(cloud, privacy: .public) failed: \(String(describing: error), privacy: .public)")
+                scan.unreadable[cloud] = Self.failureText(error)
             }
         }
-        return found.filter { !accountsFor($0) }
+        scan.found = scan.found.filter { !accountsFor($0) }
+        return scan
     }
 
-    /// Deletes one orphan by its cloud ID. Looked up in a fresh scan, so only something that is
-    /// an orphan right now can be deleted: never a resource a machine in the registry owns.
-    func downOrphan(id: String) async throws {
-        guard let orphan = await orphans().first(where: { $0.id == id }), let account = env.accounts[orphan.cloud] else {
-            throw InfraError.notFound(id)
+    /// Deletes one orphan by its `kind:id` (`OwnedResource.ref`). Looked up in a fresh scan, so
+    /// only something that is an orphan right now can be deleted: never a resource a machine in
+    /// the registry owns.
+    func downOrphan(id ref: String) async throws {
+        guard let orphan = await orphans().found.first(where: { $0.ref == ref }), let account = env.accounts[orphan.cloud] else {
+            throw InfraError.notFound(ref)
         }
         try await account.deleteOwned(orphan)
     }
 
-    /// A GCE machine records its instance as `projects/<p>/zones/<z>/instances/<name>`, which
-    /// the scan lists by `<name>`; an EC2 machine records the bare ID both ways.
+    /// An instance is a machine's only by the ID it recorded: an older instance of the same
+    /// name that leaked must still show up. A GCE machine records `projects/<p>/zones/<z>/
+    /// instances/<name>`, which the scan lists by `<name>`. Only a machine with no ID yet (`up`
+    /// interrupted before the apply's outputs) claims its instance by name. Security groups
+    /// and firewall rules have no ID on the record, so they go by `flightdeck-name`.
     private func accountsFor(_ r: OwnedResource) -> Bool {
         registry.machines.contains { m in
             guard m.cloud == r.cloud else { return false }
-            if let name = r.name, name.caseInsensitiveCompare(m.name) == .orderedSame { return true }
-            guard let id = m.instanceID else { return false }
+            let sameName = r.name.map { $0.caseInsensitiveCompare(m.name) == .orderedSame } ?? false
+            guard r.kind == .instance else { return sameName }
+            guard let id = m.instanceID else { return sameName }
             return id == r.id || id.split(separator: "/").last.map(String.init) == r.id
         }
     }

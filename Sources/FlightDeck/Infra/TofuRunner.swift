@@ -56,8 +56,10 @@ struct LiveTofuRunner: TofuRunning {
     }
 
     func refreshShowsGone(workdir: URL) async throws -> Bool {
-        // -detailed-exitcode: 0 no drift, 2 drift, anything else a real failure.
-        let result = try await run("plan", ["plan", "-refresh-only", "-detailed-exitcode", "-input=false", "-json"],
+        // -detailed-exitcode: 0 no drift, 2 drift, anything else a real failure. -lock=false: a
+        // refresh-only plan writes nothing, so it must never hold the state lock a user's
+        // `down` or `apply` needs (the Reaper runs one every 10 minutes per machine).
+        let result = try await run("plan", ["plan", "-refresh-only", "-detailed-exitcode", "-input=false", "-lock=false", "-json"],
                                    workdir: workdir, okCodes: [0, 2])
         guard result.exitCode == 2 else { return false }
         return Self.lines(result.stdout).contains { line in
