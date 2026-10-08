@@ -87,11 +87,17 @@ public enum RunPhase: Sendable, Equatable {
 public struct RunLifecycle: Sendable {
     public var atExit: @Sendable (_ lease: CheckoutLease, _ runID: String, _ spec: RunSpec) async throws -> Void
     public var release: @Sendable (_ lease: CheckoutLease) async -> Void
+    /// Lines for the run's own output, asked after `atExit` and before `release`: what the
+    /// user must know about the result that the result itself cannot say (a submodule's
+    /// changes left on the host). Each is written as `flightdeck: <line>`.
+    public var notices: @Sendable (_ lease: CheckoutLease, _ runID: String, _ spec: RunSpec) async -> [String]
 
     public init(atExit: @escaping @Sendable (CheckoutLease, String, RunSpec) async throws -> Void,
-                release: @escaping @Sendable (CheckoutLease) async -> Void) {
+                release: @escaping @Sendable (CheckoutLease) async -> Void,
+                notices: @escaping @Sendable (CheckoutLease, String, RunSpec) async -> [String] = { _, _, _ in [] }) {
         self.atExit = atExit
         self.release = release
+        self.notices = notices
     }
 
     public static let none = RunLifecycle(atExit: { _, _, _ in }, release: { _ in })
@@ -107,6 +113,12 @@ public struct RunLifecycle: Sendable {
             }
         }, release: { lease in
             await store.release(lease)
+        }, notices: { lease, _, spec in
+            // A service's tree is the user's long-lived checkout, not one command's output.
+            guard !spec.service else { return [] }
+            return await store.submoduleChanges(lease: lease).map {
+                "warning: the run changed submodule \($0); changes inside submodules stay on the host and are not part of the result"
+            }
         })
     }
 }
@@ -516,6 +528,9 @@ public final class Runner: RunControlling, @unchecked Sendable {
                 } catch {
                     self.appendOutput(run, spec.pty ? .pty : .stderr,
                                       Data("flightdeck: collecting the run's results failed: \(error)\n".utf8))
+                }
+                for line in await self.lifecycle.notices(lease, run.id, spec) {
+                    self.appendOutput(run, spec.pty ? .pty : .stderr, Data("flightdeck: \(line)\n".utf8))
                 }
                 await self.lifecycle.release(lease)
             }

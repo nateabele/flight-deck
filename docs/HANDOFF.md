@@ -193,9 +193,10 @@ intercepted by per-tab shims on `PATH`. Claude and codex tabs learn all of it fr
   UI-test run there (the "don't touch" panel, a second screen run queueing), a Linux pairing plus a
   `flightdeck run`, and `command -v <routed command>` in a real tab to see the shim is first on
   `PATH` (FOLLOWUPS lists all of it).
-- **Not from this repo.** Flight Deck's own repo has submodules (`vendor/ghostty`,
-  `vendor/boringssl`), and v1 refuses any repo with submodules (`submodules_unsupported`, exit 125).
-  Try it from a project without them.
+- **Submodules are synced, untried on this repo.** Flight Deck's own submodules
+  (`vendor/ghostty`, `vendor/boringssl`) are fetched by the host from their URLs (GitHub and
+  googlesource.com), so the host must reach both. A submodule with uncommitted changes, or at a
+  commit its remote lacks, is refused (exit 125, naming the path); FOLLOWUPS lists the rest.
 - **Debug builds:** shims go under `Flight Deck (Debug)/route-shims/`; a UITest reset builds no
   delegation at all; a Debug codex start does not install the skill into the real `~/.codex`.
 
@@ -205,7 +206,8 @@ The laptop is the *controller*, the other Mac (here, `mini`) the *host*. Both ne
 later at `/usr/bin/git`**: the hostd is started by launchd with launchd's `PATH`, so it runs
 `/usr/bin/git` (the Xcode or Command Line Tools git, whichever `xcode-select -p` names) and never a
 Homebrew one. `/usr/bin/git --version` on each machine; anything older refuses every run with
-`git_too_old`. The repo you run from must have no submodules and no LFS.
+`git_too_old`. The repo you run from must have no LFS, and its submodules (if any) must be clean
+and pushed, at URLs the host can reach.
 
 1. **Install the same build on the mini.** Copy the laptop's `/Applications/Flight Deck.app` there
    (a different major version is refused with "Update Flight Deck on <name>"). Someone must stay

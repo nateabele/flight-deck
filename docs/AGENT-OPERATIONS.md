@@ -264,8 +264,9 @@ theirs elsewhere. Four consequences for anyone working here:
   startup snippet puts it back in front after the user's own profile has run. In a project whose
   `.flightdeck/delegate.toml` has `[[route]]` rules, a matching command typed by an agent (say
   `xcodebuild test …`) runs on a host, not here. `FLIGHTDECK_NO_ROUTE=1` (any non-empty value other
-  than `0`) bypasses routing for that command. This repo has no `delegate.toml`, and could not
-  delegate anyway: it has submodules, which v1 refuses (`submodules_unsupported`).
+  than `0`) bypasses routing for that command. This repo has no `delegate.toml`. Its submodules
+  delegate if they are clean and pushed and the host can reach their URLs (ARCHITECTURE.md,
+  "Submodules").
 - **Debug builds do not write `~/.codex`.** A Debug codex start skips installing the `delegate`
   skill into the real `~/.codex/skills/` (it logs once); only a Release build installs or
   refreshes it. A Debug build that predates this fix did write it, and the next Release start

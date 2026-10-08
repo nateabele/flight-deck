@@ -12,6 +12,9 @@ import Foundation
 /// `HEAD`. The same `HEAD` with the same files gives the same commit, so a re-run of unchanged
 /// code shares the host's checkout slot instead of taking another one (§4.6).
 ///
+/// Each gitlink is pinned with its URL (`SubmoduleScan`); a submodule with uncommitted work, or
+/// at a commit no remote ref contains, is refused before anything is recorded.
+///
 /// The commit message carries the controller's effective excludes (`info/exclude` and the
 /// resolved `core.excludesFile`), which `.gitignore` does not: see `SnapshotMessage`.
 public struct Snapshotter: SnapshotMaking {
@@ -54,11 +57,15 @@ public struct Snapshotter: SnapshotMaking {
         for batch in includes.chunked(GitRunner.argumentBatch) {
             try git.run(["add", "-f", "--"] + batch, in: top, env: index.env)
         }
-        // After `add`: a nested repository only becomes a gitlink by being added.
+        // After `add`: a nested repository only becomes a gitlink by being added, and `add`
+        // records a populated submodule at whatever its HEAD is now, which is what the user
+        // is looking at. Pinned before `commit-tree` and `record`, so a submodule refused
+        // here leaves nothing behind.
         let staged = try git.fields(["ls-files", "-s", "-z"], in: top, env: index.env)
-        if staged.contains(where: { $0.hasPrefix("160000 ") }) { throw SyncError.submodulesUnsupported }
-
         let tree = try git.text(["write-tree"], in: top, env: index.env)
+        let gitlinks = SubmoduleScan.gitlinks(staged: staged)
+        let scan = SubmoduleScan(git: git)
+        let submodules = gitlinks.isEmpty ? [] : try scan.pins(in: top, rev: tree, gitlinks: gitlinks, base: scan.base(of: top))
         let date = try git.text(["show", "-s", "--format=%ct", head], in: top)
         let message = SnapshotMessage.compose(excludes: try effectiveExcludes(top: top))
         let commit = try git.text(["commit-tree", tree, "-p", head, "-m", message], in: top,
@@ -66,7 +73,7 @@ public struct Snapshotter: SnapshotMaking {
         try record(commit, host: host, in: top)
 
         return SnapshotRef(repoRoot: try rootCommit(top: top), wtKey: Self.wtKey(forPath: top.path),
-                           worktreeName: top.lastPathComponent, commit: commit, tree: tree)
+                           worktreeName: top.lastPathComponent, commit: commit, tree: tree, submodules: submodules)
     }
 
     /// Refuses an LFS repo (§4.2.5): the host would check out pointer files and run against
