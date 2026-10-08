@@ -135,3 +135,24 @@ resource "aws_instance" "this" {
     ignore_changes = [ami, user_data]
   }
 }
+
+# RunInstances also creates the primary network interface and, for spot, a spot request, and
+# aws_instance tags neither: provider v5 sends tag specifications for the instance and its
+# volumes only, and its default_tags go no further. Untagged, they would be the one footprint
+# of this machine that the orphan scan and cost allocation (spec §5.3) cannot attribute. Tags
+# are added just after launch, one aws_ec2_tag per label.
+resource "aws_ec2_tag" "eni" {
+  for_each = var.fd_labels
+
+  resource_id = aws_instance.this.primary_network_interface_id
+  key         = each.key
+  value       = each.value
+}
+
+resource "aws_ec2_tag" "spot_request" {
+  for_each = var.spot ? var.fd_labels : {}
+
+  resource_id = aws_instance.this.spot_instance_request_id
+  key         = each.key
+  value       = each.value
+}
