@@ -39,12 +39,12 @@ final class SubmoduleSyncTests: XCTestCase {
     /// `app` with one submodule `lib` from its own bare remote, committed at lib's first commit.
     /// The remote then moves past that commit, so a host that fetched "the tip" instead of the
     /// pin would check out the wrong code and every test below would see it.
-    func makeApp(in scratch: URL) throws -> (app: TempRepo, lib: Remote, pin: String) {
+    func makeApp(in scratch: URL, url: ((Remote) -> String)? = nil) throws -> (app: TempRepo, lib: Remote, pin: String) {
         let lib = try makeRemote("lib", in: scratch, ["lib.txt": "v1\n"])
         let pin = try lib.work.git("rev-parse", "HEAD")
         let app = try TempRepo(at: scratch.appendingPathComponent("app"))
         app.write("main.txt", "main\n")
-        try app.git("submodule", "add", "-q", lib.bare.path, "lib")
+        try app.git("submodule", "add", "-q", url?(lib) ?? lib.bare.path, "lib")
         try app.commitAll()
         try lib.advance(["lib.txt": "v2\n"])
         return (app, lib, pin)
@@ -361,6 +361,136 @@ final class SubmoduleSyncTests: XCTestCase {
         try await sync.value
         let lease = try await slow.value
         XCTAssertEqual(text(lease, "lib/lib.txt"), "v1\n")
+    }
+
+    /// `ref` with every pin's URL replaced: what a controller would send for a remote that
+    /// has since gone away, hung, or never existed.
+    func repointed(_ ref: SnapshotRef, to url: String) -> SnapshotRef {
+        SnapshotRef(repoRoot: ref.repoRoot, wtKey: ref.wtKey, worktreeName: ref.worktreeName, commit: ref.commit,
+                    tree: ref.tree, submodules: ref.submodules.map { SubmodulePin(path: $0.path, commit: $0.commit, url: url) })
+    }
+
+    // MARK: - Fetch bounds
+
+    /// A server that will not hand out one unadvertised commit (protocol v0 without
+    /// `allowReachableSHA1InWant`, as many older servers run) still works: the host falls back
+    /// to fetching everything it advertises. The cache is set to v0 here, which makes the
+    /// daemon refuse the shallow request as such a server does.
+    func testFallsBackToAFullFetchWhenTheServerRefusesOneCommit() async throws {
+        let scratch = TempRepo.scratch()
+        let daemon = try GitDaemon(base: scratch)
+        defer { daemon.stop() }
+        let (app, _, pin) = try makeApp(in: scratch, url: { _ in daemon.url("lib.git") })
+        let root = scratch.appendingPathComponent("host")
+        let store = Workspace(root: root)
+        let ref = try await push(app, to: store)
+        XCTAssertEqual(ref.submodules.first?.url, daemon.url("lib.git"))
+        let cache = store.submoduleCaches(controller: controller).appendingPathComponent(SubmoduleURL.cacheName(daemon.url("lib.git")))
+        try FileManager.default.createDirectory(at: cache, withIntermediateDirectories: true)
+        try TempRepo.git(["init", "-q", "--bare", cache.path], in: scratch)
+        try TempRepo.git(["config", "protocol.version", "0"], in: cache)
+
+        let lease = try await store.checkout(controller: controller, ref: ref, pin: false)
+        XCTAssertEqual(try head(lease, "lib"), pin)
+        XCTAssertFalse(try TempRepo.git(["for-each-ref", "refs/fd/remote/heads/"], in: cache).isEmpty,
+                       "the full fetch ran: the shallow one was refused")
+    }
+
+    /// A pinned commit the remote no longer has (history rewritten after the snapshot) is
+    /// named as such, after the full fetch found it missing, not as a bare fetch error.
+    func testCommitMissingFromTheRemoteIsReported() async throws {
+        let scratch = TempRepo.scratch()
+        let daemon = try GitDaemon(base: scratch)
+        defer { daemon.stop() }
+        let (app, lib, _) = try makeApp(in: scratch, url: { _ in daemon.url("lib.git") })
+        let sub = app.url.appendingPathComponent("lib")
+        try TempRepo.git(["fetch", "-q", "origin"], in: sub)
+        let doomed = try lib.work.git("rev-parse", "HEAD")
+        try TempRepo.git(["checkout", "-q", doomed], in: sub)
+        try app.commitAll()
+        let store = Workspace(root: scratch.appendingPathComponent("host"))
+        let ref = try await push(app, to: store)
+        // The remote drops the pinned commit for good.
+        try TempRepo.git(["update-ref", "refs/heads/main", "\(doomed)^"], in: lib.bare)
+        try TempRepo.git(["reflog", "expire", "--all", "--expire=now"], in: lib.bare)
+        try TempRepo.git(["gc", "-q", "--prune=now"], in: lib.bare)
+
+        let error = await thrown { try await store.checkout(controller: controller, ref: ref, pin: false) }
+        XCTAssertEqual(error as? SyncError,
+                       .submodule(path: "lib", problem: .missingCommit(url: daemon.url("lib.git"), commit: doomed)))
+        XCTAssertEqual((error as? SyncError)?.code, "submodule_fetch_failed")
+    }
+
+    /// A server that is down (or refuses us) fails once. Retrying it as a full fetch only
+    /// doubled the wait, and a hung one doubled a wait measured in hours.
+    func testConnectionFailureIsNotRetriedAsAFullFetch() async throws {
+        let scratch = TempRepo.scratch()
+        let (app, _, _) = try makeApp(in: scratch)
+        let store = Workspace(root: scratch.appendingPathComponent("host"))
+        let pushed = try await push(app, to: store)
+        let stub = try TCPStub(.close)
+        defer { stub.stop() }
+        let ref = repointed(pushed, to: "git://127.0.0.1:\(stub.port)/lib.git")
+
+        let error = await thrown { try await store.checkout(controller: controller, ref: ref, pin: false) }
+        guard case .submodule(path: "lib", problem: .fetchFailed)? = error as? SyncError else {
+            return XCTFail("\(String(describing: error))")
+        }
+        XCTAssertEqual(stub.connections, 1, "one attempt, not a shallow one and then a full one")
+    }
+
+    /// Cancelling the run (`flightdeck cancel`, a controller that hung up) while its checkout
+    /// waits on a hung remote ends it now, and the git doing the fetch dies with it rather than
+    /// holding the cache lock until its timeout.
+    func testCancellingACheckoutKillsTheFetch() async throws {
+        let scratch = TempRepo.scratch()
+        let (app, _, _) = try makeApp(in: scratch)
+        let store = Workspace(root: scratch.appendingPathComponent("host"))
+        let pushed = try await push(app, to: store)
+        let stub = try TCPStub(.hang)
+        defer { stub.stop() }
+        let ref = repointed(pushed, to: "git://127.0.0.1:\(stub.port)/lib.git")
+        let controller = self.controller
+
+        let ended = Done()
+        let checkout = Task {
+            defer { ended.set() }
+            _ = try await store.checkout(controller: controller, ref: ref, pin: false)
+        }
+        let deadline = Date().addingTimeInterval(20)
+        while stub.connections == 0 && Date() < deadline { try await Task.sleep(nanoseconds: 20_000_000) }
+        XCTAssertEqual(stub.connections, 1)
+        checkout.cancel()
+        let stopped = await ended.wait(seconds: 10)
+        let died = stub.disconnected == 1
+        stub.stop()   // frees a git that was not killed, so a failure here does not hang
+        XCTAssertTrue(stopped, "the checkout outlived its cancel")
+        XCTAssertTrue(died, "the fetching git outlived its cancel")
+        let error = await thrown { try await checkout.value }
+        XCTAssertTrue(error is CancellationError, "\(String(describing: error))")
+    }
+
+    func testFetchesAreBoundedAndNeverPrompt() {
+        XCTAssertEqual(SubmoduleURL.fetchConfig, ["-c", "http.lowSpeedLimit=1000", "-c", "http.lowSpeedTime=60"])
+        let ssh = SubmoduleURL.fetchEnvironment(allowFile: true)["GIT_SSH_COMMAND"] ?? ""
+        for option in ["BatchMode=yes", "ConnectTimeout=15", "ServerAliveInterval=15"] {
+            XCTAssertTrue(ssh.contains("-o \(option)"), ssh)
+        }
+    }
+
+    /// Only a server's refusal of the one commit earns the full fetch.
+    func testOnlyARefusedCommitFallsBack() {
+        for refused in ["error: Server does not allow request for unadvertised object 0123",
+                        "fatal: remote error: upload-pack: not our ref 0123",
+                        "fatal: dumb http transport does not support shallow capabilities"] {
+            XCTAssertTrue(SubmoduleURL.refusedOneCommit(refused), refused)
+        }
+        for failed in ["fatal: unable to connect to 192.0.2.1:\nConnection refused",
+                       "git@example.com: Permission denied (publickey).\nfatal: Could not read from remote repository.",
+                       "fatal: Authentication failed for 'https://example.com/lib.git/'",
+                       "fatal: the remote end hung up unexpectedly"] {
+            XCTAssertFalse(SubmoduleURL.refusedOneCommit(failed), failed)
+        }
     }
 
     // MARK: - Results (§4.5)
