@@ -1150,10 +1150,15 @@ final class DelegationService {
 
     private func push(_ snapshot: SnapshotRef, from worktree: URL, to link: any HostLinking) async throws {
         // A host that predates submodule support would drop the pins and run against empty
-        // submodule directories; refused here, before anything is sent. A link that is not
-        // a `LiveHostLink` has no helloAck to read, and the host decides (as in preflight).
-        if let refusal = snapshot.unsupported(on: link.name, capabilities: (link as? LiveHostLink)?.capabilities) {
-            throw refusal
+        // submodule directories; refused here, before anything is sent. A live link whose
+        // helloAck has not arrived yet (mid-reconnect) has no capabilities to check, and
+        // sending then would be that same gamble, so it is refused as a retry. A link that is
+        // not a `LiveHostLink` (a test fake) has no helloAck at all, and the host decides.
+        if let live = link as? LiveHostLink {
+            if !snapshot.submodules.isEmpty, live.capabilities == nil {
+                throw DelegationError(code: "host_unavailable", message: "reconnecting to \(link.name) — try again")
+            }
+            if let refusal = snapshot.unsupported(on: link.name, capabilities: live.capabilities) { throw refusal }
         }
         guard case .syncTips(let tips) = try await hostRequest(.syncTips(repoRoot: snapshot.repoRoot, wtKey: snapshot.wtKey), on: link)
         else { throw Self.unexpected(link.name, "sync.tips") }
