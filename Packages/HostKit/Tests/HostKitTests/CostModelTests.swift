@@ -68,4 +68,48 @@ final class CostModelTests: XCTestCase {
         XCTAssertFalse(CostModel.globMatches("m6i.*large", "m6i.metal"))
         XCTAssertFalse(CostModel.globMatches("t3.*", "t3a.micro"))
     }
+
+    func testGlobMidPatternStars() {
+        XCTAssertTrue(CostModel.globMatches("a*b*c", "axxbyyc"))
+        // Every `*` may match nothing.
+        XCTAssertTrue(CostModel.globMatches("a*b*c", "abc"))
+        XCTAssertTrue(CostModel.globMatches("t3.*", "t3."))
+        // Order matters, and the literals may not overlap: `abc` holds no separate `bc` then `c`.
+        XCTAssertFalse(CostModel.globMatches("a*b*c", "acb"))
+        XCTAssertFalse(CostModel.globMatches("a*bc*c", "abc"))
+        XCTAssertFalse(CostModel.globMatches("a*a", "a"))
+    }
+
+    func testMonthlyCapAloneWarns() {
+        var monthlyOnly = s; monthlyOnly.perMachineCapUSD = nil
+        guard case .warn(let why) = CostModel.checkRunning(spent: 1, monthToDate: 41, settings: monthlyOnly)
+        else { return XCTFail() }
+        XCTAssertTrue(why.contains("monthly"), why)
+        XCTAssertEqual(CostModel.checkRunning(spent: 1, monthToDate: 39, settings: monthlyOnly), .ok)
+    }
+
+    /// Either cap alone is a dollar cap an unpriced machine could blow through unseen.
+    func testUnpricedRefusedWithEitherCapAlone() {
+        var monthlyOnly = s; monthlyOnly.perMachineCapUSD = nil
+        var perMachineOnly = s; perMachineOnly.monthlyCapUSD = nil
+        for settings in [monthlyOnly, perMachineOnly] {
+            guard case .refused(let why) = CostModel.checkLaunch(hourly: nil, ttl: .init(seconds: 3600), idle: .init(seconds: 60),
+                instanceType: "t3.small", cloud: "aws", running: 0, monthToDate: 0, settings: settings)
+            else { return XCTFail("\(settings)") }
+            XCTAssertTrue(why.contains("max_hourly"), why)
+        }
+    }
+
+    /// A negative rate makes the worst case negative, which passes every cap and would even
+    /// shrink the month-to-date sum; a broken price lookup must not read as "free".
+    func testNegativeHourlyIsRefused() {
+        for hourly in [-0.5, -.ulpOfOne, Double.nan] {
+            guard case .refused(let why) = CostModel.checkLaunch(hourly: hourly, ttl: .init(seconds: 3600), idle: .init(seconds: 60),
+                instanceType: "t3.small", cloud: "aws", running: 0, monthToDate: 0, settings: s)
+            else { return XCTFail("\(hourly)") }
+            XCTAssertTrue(why.contains("hourly price"), why)
+        }
+        XCTAssertEqual(CostModel.checkLaunch(hourly: 0, ttl: .init(seconds: 3600), idle: .init(seconds: 60),
+            instanceType: "t3.small", cloud: "aws", running: 0, monthToDate: 0, settings: s), .allowed)
+    }
 }
