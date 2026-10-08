@@ -21,6 +21,13 @@ protocol HeadlessRunner: Sendable {
         _ command: (executable: String, arguments: [String], unsetEnvironment: [String]),
         cwd: URL, onStdout: (@Sendable (Data) -> Void)?
     ) async throws -> (stdout: Data, stderr: String, exitCode: Int32)
+
+    /// The same, bound to `account`'s home (nil: the built-in home) — triage bills the
+    /// project's account like every round seat (unify brief R9).
+    func run(
+        _ command: (executable: String, arguments: [String], unsetEnvironment: [String]),
+        cwd: URL, account: AgentAccountRef?, onStdout: (@Sendable (Data) -> Void)?
+    ) async throws -> (stdout: Data, stderr: String, exitCode: Int32)
 }
 
 extension HeadlessRunner {
@@ -32,6 +39,14 @@ extension HeadlessRunner {
         let result = try await run(command, cwd: cwd)
         if let onStdout, !result.stdout.isEmpty { onStdout(result.stdout) }
         return result
+    }
+
+    /// A runner with no environment of its own (every test fake) has no home to bind.
+    func run(
+        _ command: (executable: String, arguments: [String], unsetEnvironment: [String]),
+        cwd: URL, account: AgentAccountRef?, onStdout: (@Sendable (Data) -> Void)?
+    ) async throws -> (stdout: Data, stderr: String, exitCode: Int32) {
+        try await run(command, cwd: cwd, onStdout: onStdout)
     }
 }
 
@@ -53,10 +68,18 @@ struct SystemHeadlessRunner: HeadlessRunner {
         _ command: (executable: String, arguments: [String], unsetEnvironment: [String]),
         cwd: URL, onStdout: (@Sendable (Data) -> Void)?
     ) async throws -> (stdout: Data, stderr: String, exitCode: Int32) {
+        try await run(command, cwd: cwd, account: nil, onStdout: onStdout)
+    }
+
+    func run(
+        _ command: (executable: String, arguments: [String], unsetEnvironment: [String]),
+        cwd: URL, account: AgentAccountRef?, onStdout: (@Sendable (Data) -> Void)?
+    ) async throws -> (stdout: Data, stderr: String, exitCode: Int32) {
         // The login shell's PATH, appended: a Finder-launched app has launchd's bare PATH,
         // which contains neither `~/.local/bin` (codex, claude) nor `/opt/homebrew/bin` — see
         // `LoginShellPath`. `/usr/bin/env` alone would report "no such file" for both.
-        let environment = HeadlessCommand.environment(for: command, base: LoginShellPath.repairing(ProcessInfo.processInfo.environment))
+        let environment = HeadlessCommand.environment(for: command, base: LoginShellPath.repairing(ProcessInfo.processInfo.environment),
+                                                     account: account)
         let result = try await runner.run(executable: command.executable, arguments: command.arguments,
                                           cwd: cwd, environment: environment, processGroup: false,
                                           onSpawn: nil, onStdout: onStdout)

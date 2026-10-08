@@ -1463,6 +1463,26 @@ a stage still running lengthens it and moves its major checkpoint to the new las
 last round of each stage is a **major** checkpoint (⏭'s stop). Release is never a tape target:
 the tape stops at release review and the existing release flow takes over unchanged.
 
+*Which accounts planning bills (unify brief R9).* Every planning seat bills the project's
+assignment for its agent (Settings → Projects) — an account, or a pool leased through the
+`CapacityLedger` (first under soft) — and with no assignment the agent's first live account, as
+a new tab would; an agent with no account record runs in its CLI's built-in home. There is no
+per-seat account: `ModelChoice` no longer carries one (an old `account` key decodes and is
+dropped on save), and the Rounds editor shows each seat's "Bills: …" line read-only. The runner
+has no preferences, so the APP resolves: at every runner start `IntakeRunnerController` resolves
+each agent the round config can run (fallbacks included) through `AccountResolving`
+(`Intake/PlanningAccounts.swift`) and writes `<intake>/accounts.json` (`RunnerAccounts`) before
+spawning; `RoundExecutor` binds each seat to its agent's entry and records the account id on the
+seat's `activity.json`, which is what `UsageService` credits. A broken assignment (a removed
+account, a pool that is gone or has no live member) refuses the start
+(`RunnerStartError.accountUnavailable`); a pool with nothing leasable runs on its least-used member
+unleased, never on a login outside the pool.
+Pool leases are released when the runner is seen gone — `reap`, or the per-tick
+`syncAccountLeases` for an exit nobody reported (finish, crash, kill) — and a relaunched app
+re-adopts a live runner's leases from its `accounts.json` (`CapacityLedger.adopt`). Each start
+re-leases, which is the rollover point. Triage resolves the same way per turn and releases its
+lease when the turn ends. Index refresh is not project-scoped and stays on the built-in home.
+
 *The runner.* `flightdeck intake run <id> --root <intakesRoot>` (the bundled CLI, which links
 `IntakeKit`) is spawned by `IntakeRunnerController` inside its own fd-abduco daemon (`-n`,
 socket `<daemon dir>/intake-<uuid lowercased>.sock` — a name `SessionDaemon.liveSessionIDs()`

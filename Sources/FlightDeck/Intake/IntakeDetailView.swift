@@ -844,7 +844,7 @@ struct IntakeDetailView: View {
     private var roundsEditor: some View {
         if let config = editedConfig {
             RoundConfigEditor(preset: selectedPreset, config: Binding(get: { config }, set: { editedConfig = $0 }),
-                              available: service.availableModels(), accounts: service.planningAccounts(),
+                              available: service.availableModels(), billing: service.planningBilling(project: intake.projectPath),
                               codexListedModels: CodexRoutingCatalog.shared.cachedModelIDs)
         }
     }
