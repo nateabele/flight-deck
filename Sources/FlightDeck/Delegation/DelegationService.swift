@@ -225,6 +225,11 @@ final class DelegationService {
 
     let registry: RunRegistry
     private let deps: Dependencies
+    /// The cloud machines, set after `init` because `InfraService` is built beside the app, not
+    /// by the delegation factory; without it `run --on <infra host>` would never auto-up or
+    /// show its cost line. Wins over `Dependencies.infra`, which tests inject.
+    var infraProvider: (any InfraUpProviding)?
+    private var infra: (any InfraUpProviding)? { infraProvider ?? deps.infra }
     /// Runs this app instance is watching, by local id.
     private var live: [String: LiveRun] = [:]
     /// Replay tasks (`logs`, `wait {from}`) still running: each ends with its run, its reader
@@ -469,7 +474,7 @@ final class DelegationService {
         let link = try deps.hosts.link(named: host)
         // Before anything streams, so a detached run (whose stream ends on `delegateStarted`)
         // still shows what the machine it lands on is costing.
-        if let cost = deps.infra?.costLine(host: host) { reply(.delegateNotice(cid: cid, message: cost)) }
+        if let cost = infra?.costLine(host: host) { reply(.delegateNotice(cid: cid, message: cost)) }
 
         // §7 steps 2–7. A preflight failure's message is already the finished §5 line, host
         // and next step included: passed through as is.
@@ -538,9 +543,13 @@ final class DelegationService {
                                  reply: @escaping (ServerFrame) -> Void) async throws {
         guard let recipe = config.infra[host],
               !deps.hosts.hostNames.contains(where: { $0.caseInsensitiveCompare(host) == .orderedSame }) else { return }
-        guard recipe.autoUp, let infra = deps.infra else {
+        guard recipe.autoUp else {
             throw DelegationError(code: "unknown_host",
                                   message: "\(host) is a cloud machine that is not up — run `flightdeck infra up \(host)` first, or set auto_up = true in [infra.\(host)]")
+        }
+        guard let infra else {
+            throw DelegationError(code: "unknown_host",
+                                  message: "\(host) is a cloud machine that is not up, and cloud machines are not available in this app — bring it up with `flightdeck infra up \(host)` from a build that has them")
         }
         let what: String
         switch recipe.source {
