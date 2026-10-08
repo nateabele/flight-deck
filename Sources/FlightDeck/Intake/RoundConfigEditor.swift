@@ -17,26 +17,6 @@ public enum SlotKeyPath: Hashable {
     case polisher
 }
 
-/// One non-built-in account a planning agent can bill, as the Rounds editor offers it. Built from
-/// preferences by `options(from:)`; the built-in account is never listed, because nil already
-/// means it (`ModelChoice.account`).
-struct PlanningAccountOption: Equatable {
-    var ref: AgentAccountRef
-    var name: String
-
-    /// Each harness's live, non-built-in accounts, in preferences order. A removed account is
-    /// left out — it is not something to pick — and an agent with no harness (none today) too.
-    static func options(from accounts: [AgentAccount]) -> [AgentID: [PlanningAccountOption]] {
-        var out: [AgentID: [PlanningAccountOption]] = [:]
-        for account in accounts where !account.isRemoved && !account.isBuiltIn {
-            guard let agent = AgentID(rawValue: account.agent.rawValue) else { continue }
-            out[agent, default: []].append(PlanningAccountOption(
-                ref: AgentAccountRef(id: account.id.uuidString, home: account.home), name: account.displayName))
-        }
-        return out
-    }
-}
-
 /// Lets the human tune a chosen preset's expanded `RoundConfig` before shaping starts. Its home
 /// is the detail pane's inspector (spec §9): the awaiting-choice body shows only `summary` and
 /// an Edit in Inspector button, since a five-column grid pushed the way forward off screen.
@@ -44,9 +24,10 @@ struct RoundConfigEditor: View {
     let preset: Preset
     @Binding var config: RoundConfig
     let available: AvailableModels
-    /// Each harness's pickable accounts (`PlanningAccountOption.options`). Empty hides every
-    /// account picker, which is the whole editor on a machine with only built-in logins.
-    var accounts: [AgentID: [PlanningAccountOption]] = [:]
+    /// What each agent bills for this intake's project (`IntakeService.planningBilling`) — shown,
+    /// never picked: a seat bills the project's assignment for its agent (unify brief R9), set in
+    /// Settings → Projects. Empty (no resolver) hides the line.
+    var billing: [AgentID: AccountBilling] = [:]
     /// codex's own `model/list`, when routing has already fetched it this launch — never
     /// fetched from here, since that spawns an app-server.
     var codexListedModels: [String] = []
@@ -115,12 +96,8 @@ struct RoundConfigEditor: View {
                                 effortPicker(for: row.keyPath, agent: choice.agent).fixedSize()
                             }
                         }
-                        if let options = accounts[choice.agent], !options.isEmpty {
-                            HStack(spacing: 8) {
-                                Text("Account").foregroundStyle(.secondary)
-                                accountPicker(for: row.keyPath, choice: choice, options: options).fixedSize()
-                            }
-                            .font(.callout)
+                        if let line = Self.billingLine(billing[choice.agent]) {
+                            billingLabel(line, problem: billing[choice.agent]?.problem == true)
                         }
                         if Self.supportsFallback(row.keyPath) {
                             HStack(spacing: 8) {
@@ -220,19 +197,17 @@ struct RoundConfigEditor: View {
         .pickerStyle(.menu)
     }
 
-    /// "Built-in account" or one of this harness's accounts from preferences. The selection is
-    /// the account's id rather than the ref, so a relocated home still shows as selected.
-    private func accountPicker(for keyPath: SlotKeyPath, choice: ModelChoice, options: [PlanningAccountOption]) -> some View {
-        Picker("Account", selection: Binding<String?>(
-            get: { Self.choice(for: keyPath, in: config)?.account?.id },
-            set: { id in config = Self.settingAccount(config, at: keyPath, to: id, options: options) }
-        )) {
-            ForEach(Self.accountChoices(for: choice, options: options), id: \.id) { entry in
-                Text(entry.label).tag(entry.id)
-            }
+    /// The read-only "Bills: Work pool" line under a seat. A broken assignment reads in orange
+    /// with a warning glyph — planning will refuse to start on it — rather than as a login.
+    private func billingLabel(_ line: String, problem: Bool) -> some View {
+        HStack(spacing: 4) {
+            if problem { Image(systemName: "exclamationmark.triangle.fill").imageScale(.small) }
+            Text(line).lineLimit(1).truncationMode(.middle)
         }
-        .labelsHidden()
-        .pickerStyle(.menu)
+        .font(.caption)
+        .foregroundStyle(problem ? AnyShapeStyle(Color.orange) : AnyShapeStyle(.secondary))
+        .help(problem ? "Choose another in Settings → Projects." : "Set per project in Settings → Projects.")
+        .accessibilityIdentifier("rounds-billing")
     }
 
     /// "none" or the other available model. `ModelChoice` isn't `Hashable` (its `.effort` is a
@@ -461,26 +436,9 @@ struct RoundConfigEditor: View {
         return out
     }
 
-    /// The account picker's rows: the built-in account (id nil) first, then each option. A
-    /// seat still bound to an account that has since been removed keeps a row of its own, so
-    /// the picker never shows a selection it has no row for — and re-picking is a choice.
-    static func accountChoices(for choice: ModelChoice, options: [PlanningAccountOption]) -> [(id: String?, label: String)] {
-        var rows: [(id: String?, label: String)] = [(nil, "Built-in account")]
-        rows += options.map { ($0.ref.id, $0.name) }
-        if let bound = choice.account, !options.contains(where: { $0.ref.id == bound.id }) {
-            rows.append((bound.id, "Removed account"))
-        }
-        return rows
-    }
-
-    /// Binds the seat to the account with this id, from `options` — its CURRENT home, so a
-    /// re-pick after a relocate picks the new directory up. nil, or an id no longer offered
-    /// (the "Removed account" row), leaves the binding as nil and as-is respectively.
-    static func settingAccount(_ config: RoundConfig, at keyPath: SlotKeyPath, to id: String?,
-                               options: [PlanningAccountOption]) -> RoundConfig {
-        guard let id else { return updatingChoice(config, at: keyPath) { $0.account = nil } }
-        guard let option = options.first(where: { $0.ref.id == id }) else { return config }
-        return updatingChoice(config, at: keyPath) { $0.account = option.ref }
+    /// "Bills: Work pool", or nil when there is nothing to show.
+    static func billingLine(_ billing: AccountBilling?) -> String? {
+        billing.map { "Bills: \($0.text)" }
     }
 
     /// The editor's one block of notes: why an installed-but-unusable harness is missing from
@@ -610,8 +568,8 @@ struct RoundConfigEditor: View {
 
     /// Switching a seat's harness resets model AND effort to that harness's default from
     /// `available` — leaving the old model string in place would pair e.g. codex's harness
-    /// with a claude model name that codex has never heard of. The account resets to built-in
-    /// with them: a claude account's home means nothing to codex.
+    /// with a claude model name that codex has never heard of. The account is not the seat's to
+    /// carry: it follows the new agent's project assignment (unify brief R9).
     static func switchingAgent(_ config: RoundConfig, at keyPath: SlotKeyPath, to agent: AgentID, available: AvailableModels) -> RoundConfig {
         let replacement = available.choice(for: agent) ?? ModelChoice(agent: agent, model: "", effort: "high")
         return updatingChoice(config, at: keyPath) { $0 = replacement }

@@ -24,12 +24,13 @@ public final class ActivityPublisher: @unchecked Sendable {
     private var finished = false
 
     /// `schedule` runs the trailing flush after a delay — injectable so a test fires it by hand.
-    public init(agent: AgentID, project: URL, cwd: URL? = nil, destination: URL,
+    /// `accountID` is the account the seat bills (`SeatActivity.accountID`).
+    public init(agent: AgentID, project: URL, cwd: URL? = nil, accountID: UUID? = nil, destination: URL,
                 now: @escaping @Sendable () -> Date,
                 schedule: @escaping @Sendable (TimeInterval, @escaping @Sendable () -> Void) -> Void = { delay, work in
                     DispatchQueue.global().asyncAfter(deadline: .now() + delay, execute: work)
                 }) {
-        parser = ActivityParser(agent: agent, project: project, cwd: cwd, now: now)
+        parser = ActivityParser(agent: agent, project: project, cwd: cwd, accountID: accountID, now: now)
         self.destination = destination
         self.now = now
         self.schedule = schedule

@@ -152,6 +152,14 @@ protocol IntakeRunnerControlling: AnyObject {
     /// Where the runner's `fd-abduco` socket lives, so launch can find a daemon left behind
     /// by an intake that has since stopped shaping.
     func socketPath(for id: UUID) -> String
+    /// Each tick, with the shaping intakes: hand back the pool leases of runners that are gone
+    /// and re-register those of live runners a previous launch spawned (unify brief R9).
+    func syncAccountLeases(_ shaping: [UUID])
+}
+
+extension IntakeRunnerControlling {
+    /// A controller that resolves no accounts holds no leases.
+    func syncAccountLeases(_ shaping: [UUID]) {}
 }
 
 extension IntakeRunnerController: IntakeRunnerControlling {}
@@ -1084,10 +1092,17 @@ final class IntakeService: ObservableObject {
         availableModelsCache ?? .defaults
     }
 
-    /// Each harness's pickable planning accounts, from preferences — set by `SessionStore`,
-    /// which owns them, so this service never reads preferences itself. Read when the Rounds
-    /// editor draws, never captured, so an account added in Settings shows up next time.
-    var planningAccounts: () -> [AgentID: [PlanningAccountOption]] = { [:] }
+    /// Resolves which account each planning agent bills for a project (unify brief R9) — set by
+    /// `SessionStore`, which owns preferences, so this service never reads them itself. nil (a
+    /// test host) runs triage on the built-in home and shows no billing line.
+    var accountResolver: AccountResolving?
+
+    /// What each agent bills for `project`, for the Rounds editor's read-only "Bills:" line.
+    /// Read when the editor draws, never captured, so a reassignment in Settings shows next time.
+    func planningBilling(project: String) -> [AgentID: AccountBilling] {
+        guard let accountResolver else { return [:] }
+        return Dictionary(uniqueKeysWithValues: AgentID.allCases.map { ($0, accountResolver.billing($0, project: project)) })
+    }
 
     func markEditNoteShown(_ id: UUID) { editNoteShown.insert(id) }
 
@@ -1206,6 +1221,8 @@ final class IntakeService: ObservableObject {
                 runner.reap(id)
                 pendingReaps.remove(id)
             }
+            // After this tick's respawns, so a runner just started is seen inside its grace.
+            runner.syncAccountLeases(Array(shaping))
         }
     }
 
@@ -1460,6 +1477,7 @@ final class IntakeService: ObservableObject {
         if case .noBundledCLI = error { return "this build has no bundled flightdeck CLI" }
         if case .noFdAbduco = error { return "this build has no usable fd-abduco" }
         if case .spawnFailed(let why) = error { return why }
+        if case .accountUnavailable(let why) = error { return why }
         return String(describing: error)
     }
 
@@ -1906,20 +1924,30 @@ final class IntakeService: ObservableObject {
     /// message plus the raw output, which is what `.failed` shows (spec §11).
     private func turnResult(_ id: UUID, prompt: String, resume: String?, settings: TriageSettings,
                             files: TriageFiles, project: URL) async -> Result<TurnReply, TurnFailure> {
+        // Triage bills the project's account for its agent, as every round seat does (unify
+        // brief R9) — resolved per turn, and a pool's lease held only while the turn runs.
+        var billing: RunnerAccounts.Entry?
+        if let accountResolver {
+            switch accountResolver.acquire(settings.agent, project: project.path) {
+            case .failure(let error): return .failure(TurnFailure(message: "Could not run triage: \(error.message)", raw: nil))
+            case .success(let resolved): billing = resolved.entry
+            }
+        }
+        defer { if let lease = billing?.lease { accountResolver?.release(lease.lease) } }
         let request = HeadlessRequest(
             agent: settings.agent, model: settings.model, effort: settings.effort, cwd: project,
             readableDirs: [files.directory], prompt: prompt, schemaFile: files.schema,
-            schemaJSON: Triage.schemaJSON, resumeSessionID: resume)
+            schemaJSON: Triage.schemaJSON, resumeSessionID: resume, account: billing?.ref)
         // The same fold and cadence as a round's seats (`RoundExecutor.attempt`), written beside
         // triage's other files; the clock tick reads it back (`pollTriageActivity`), and the
         // finished fold is published directly below so the last state never waits on a tick.
-        let activity = ActivityPublisher(agent: settings.agent, project: project,
+        let activity = ActivityPublisher(agent: settings.agent, project: project, accountID: billing?.accountID,
                                          destination: files.directory.appendingPathComponent("activity.json"),
                                          now: { Date() })
         activity.start()
         let out: (stdout: Data, stderr: String, exitCode: Int32)
         do {
-            out = try await headless.run(HeadlessCommand.build(request), cwd: project,
+            out = try await headless.run(HeadlessCommand.build(request), cwd: project, account: request.account,
                                          onStdout: { activity.feed($0) })
         } catch {
             activity.finish(exitCode: nil, error: Task.isCancelled ? nil : "Could not run \(settings.agent.rawValue)")

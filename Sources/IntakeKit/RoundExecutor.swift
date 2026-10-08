@@ -12,10 +12,15 @@ public struct RoundInputs: Sendable {
     public var project: URL
     public var environment: [String: String]
     public var now: @Sendable () -> Date
+    /// The accounts the app resolved for this runner (`<intake>/accounts.json`). nil — no file,
+    /// from a runner a build before R9 spawned — runs every seat on its built-in home, as such
+    /// a runner always did.
+    public var accounts: RunnerAccounts?
     public init(intake: Intake, config: RoundConfig, tape: Tape, store: TapeStore, project: URL,
-                environment: [String: String], now: @escaping @Sendable () -> Date = { Date() }) {
+                environment: [String: String], accounts: RunnerAccounts? = nil,
+                now: @escaping @Sendable () -> Date = { Date() }) {
         self.intake = intake; self.config = config; self.tape = tape; self.store = store
-        self.project = project; self.environment = environment; self.now = now
+        self.project = project; self.environment = environment; self.accounts = accounts; self.now = now
     }
 }
 
@@ -587,9 +592,25 @@ public struct RoundExecutor: Sendable {
         let schemaFile = dir.appendingPathComponent("schema.json")
         try Data(schema.utf8).write(to: schemaFile, options: .atomic)
 
+        // The project's account for this agent, as the app resolved it at this runner's start.
+        // An agent the file leaves out was added to the config after the runner started (only
+        // a hand edit can do that): running it on the built-in home would bill an account the
+        // project never chose, so the seat pauses and the next ▶ re-resolves.
+        let billing: RunnerAccounts.Entry?
+        if let accounts = inputs.accounts {
+            guard let entry = accounts.agents[choice.agent] else {
+                return .failed(Diagnosis(category: .harnessError,
+                                         detail: "No account was resolved for \(choice.agent.displayName) when planning started",
+                                         action: "Press play again so Flight Deck picks this project's \(choice.agent.displayName) account."),
+                               sessionID: nil)
+            }
+            billing = entry
+        } else {
+            billing = nil
+        }
         let request = HeadlessRequest(agent: choice.agent, model: choice.model, effort: choice.effort, cwd: cwd,
                                      readableDirs: readable, prompt: prompt, schemaFile: schemaFile, schemaJSON: schema,
-                                     resumeSessionID: resume, access: access, account: choice.account)
+                                     resumeSessionID: resume, access: access, account: billing?.ref)
         // `build` traps on an invalid write-mode request; checking first turns a wiring bug
         // into a paused round instead of a crashed runner.
         if let invalid = HeadlessCommand.validate(request) {
@@ -610,7 +631,7 @@ public struct RoundExecutor: Sendable {
             return .failed(Diagnosis(category: .harnessError, detail: "\(choice.agent.rawValue) cannot run in planning rounds yet: \(error)",
                                      action: "Switch this slot to another agent."), sessionID: nil)
         }
-        // The seat's own account, when the Rounds editor bound one: nil is the built-in home.
+        // The project's account for the seat's agent (`billing`): nil is the built-in home.
         let environment = HeadlessCommand.environment(for: command, base: inputs.environment, home: userHome,
                                                      account: request.account)
         let profile = AgentProfiles.profile(for: choice.agent)
@@ -629,7 +650,7 @@ public struct RoundExecutor: Sendable {
         let stream = try FileHandle(forWritingTo: stdoutFile)
         defer { try? stream.close() }
         let activity = ActivityPublisher(agent: choice.agent, project: inputs.project, cwd: cwd,
-                                         destination: dir.appendingPathComponent("activity.json"), now: inputs.now)
+                                         accountID: billing?.accountID, destination: dir.appendingPathComponent("activity.json"), now: inputs.now)
         activity.start()
 
         let runFile = dir.appendingPathComponent("run.json")

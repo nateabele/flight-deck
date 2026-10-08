@@ -2908,9 +2908,9 @@ it still reports there, each diagnosed from the run's `.xcresult` screen recordi
 - **Project hooks.** A project the operator has trusted in grok still runs its own
   `.grok/config.toml` hooks and MCP servers. This is the same behaviour as when the operator
   runs grok there.
-- **Accounts.** `GrokProfile.environment` binds `GROK_HOME` (and `HOME`) for an account.
-  `PlanningAccountOption` maps accounts by `AgentID`, so the editor offers no grok account
-  until grok gets one.
+- **Accounts.** `GrokProfile.environment` binds `GROK_HOME` (and `HOME`) for an account. A grok
+  seat bills the project's grok assignment like every seat (unify brief R9); with no grok account
+  record it runs in the built-in home.
 - **Model ids drift.** The aliases (`grok-4.7`, …) are fallbacks only. Detection reads
   `grok models` at each launch.
 
@@ -2980,3 +2980,17 @@ it still reports there, each diagnosed from the run's `.xcresult` screen recordi
     `SwarmUITests` have no green run on master yet. Run each once, with its script
     (`test-routing-ui.sh`, `test-ui-capacity.sh`, `test-ui-capability-index.sh`,
     `test-ui-flight-control.sh`), once the alert is gone.
+
+## Planning bills the project's accounts (2026-10-08, unify Track P)
+
+- **A pool with nothing leasable runs unleased.** When every member is past soft, planning runs
+  on the pool's least-used member with no lease and no notice (Track A shows a notice for tabs
+  when every member is over hard; planning shows none until integration adopts that resolver).
+- **Fallback seats are not shown billing.** The Rounds editor's "Bills:" line names the seat's
+  primary agent only; a fallback to another agent bills that agent's assignment, unshown.
+- **The ledger re-adopts leases only on the first tick after relaunch.** Between launch and that
+  tick, a local pool could hand a live runner's slot to someone else. No live user of local pools
+  in planning today.
+- **Only claude seats meter usage.** `ingestHeadlessSeats` credits claude `rate_limit_event`s;
+  codex/grok/gemini seats carry `accountID` but report no readings.
+

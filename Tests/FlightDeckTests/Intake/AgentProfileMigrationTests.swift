@@ -299,46 +299,31 @@ final class AgentProfileMigrationTests: XCTestCase {
         XCTAssertEqual(CodexProfile.homeEnvironmentKey, "CODEX_HOME")
     }
 
-    // MARK: - Account-bound planning seats
+    // MARK: - Planning seats bill the project, not the seat (unify brief R9)
 
-    func testAccountOptionsListOnlyLiveNonBuiltInAccountsPerHarness() {
-        let work = AgentAccount(agent: .claude, displayName: "Work", home: root.appendingPathComponent("w"))
-        let gone = AgentAccount(agent: .claude, displayName: "Gone", home: root.appendingPathComponent("g"), removedAt: Date())
-        let builtIn = AgentAccount(agent: .claude, displayName: "Default", home: AgentID.claude.builtInHome)
-        let cx = AgentAccount(agent: .codex, displayName: "CX", home: root.appendingPathComponent("c"))
-        let options = PlanningAccountOption.options(from: [builtIn, work, gone, cx])
-        XCTAssertEqual(options[.claude], [PlanningAccountOption(ref: AgentAccountRef(id: work.id.uuidString, home: work.home), name: "Work")])
-        XCTAssertEqual(options[.codex]?.map(\.name), ["CX"])
-        XCTAssertNil(options[.grok])
-    }
-
-    func testTheAccountPickerDefaultsToBuiltInAndBindsTheChosenAccount() {
-        let work = PlanningAccountOption(ref: AgentAccountRef(id: "w", home: root.appendingPathComponent("w")), name: "Work")
-        let config = PresetExpansion.config(for: .sketch, available: .defaults)!
-        XCTAssertNil(config.drafters[0].choice.account, "a fresh config bills the built-in account")
-        XCTAssertEqual(RoundConfigEditor.accountChoices(for: config.drafters[0].choice, options: [work]).map(\.label),
-                       ["Built-in account", "Work"])
-        let bound = RoundConfigEditor.settingAccount(config, at: .drafter(0), to: "w", options: [work])
-        XCTAssertEqual(bound.drafters[0].choice.account, work.ref)
-        XCTAssertTrue(bound.customized)
-        XCTAssertNil(RoundConfigEditor.settingAccount(bound, at: .drafter(0), to: nil, options: [work]).drafters[0].choice.account)
-        // A removed account keeps a row, so the picker never shows a selection it has no row for.
-        XCTAssertEqual(RoundConfigEditor.accountChoices(for: bound.drafters[0].choice, options: []).map(\.label),
-                       ["Built-in account", "Removed account"])
-        // Switching harness drops the account: a claude home means nothing to codex.
-        let switched = RoundConfigEditor.switchingAgent(bound, at: .drafter(0), to: .claude, available: .defaults)
-        XCTAssertNil(switched.drafters[0].choice.account)
-    }
-
-    /// A config written before accounts reached planning decodes, and an unbound choice encodes
-    /// with no `account` key at all — byte-identical files for everyone who never picks one.
+    /// A config written before accounts reached planning decodes, and encodes with no `account`
+    /// key at all — byte-identical files for everyone who never picked one.
     func testAModelChoiceWithNoAccountCodesAsBefore() throws {
         let old = Data(#"{"harness":"claude","model":"opus","effort":"high"}"#.utf8)
         let decoded = try IntakeJSON.decoder.decode(ModelChoice.self, from: old)
         XCTAssertEqual(decoded, ModelChoice(agent: .claude, model: "opus", effort: "high"))
         XCTAssertFalse(String(decoding: try IntakeJSON.encoder.encode(decoded), as: UTF8.self).contains("account"))
-        let bound = ModelChoice(agent: .codex, model: "m", effort: "high",
-                                account: AgentAccountRef(id: "w", home: URL(fileURLWithPath: "/accounts/w")))
-        XCTAssertEqual(try IntakeJSON.decoder.decode(ModelChoice.self, from: IntakeJSON.encoder.encode(bound)), bound)
+    }
+
+    /// A config saved while the Rounds editor had a per-seat account picker still decodes; the
+    /// account it named is ignored (the project decides now) and the next save drops it.
+    func testAPerSeatAccountFromAnOldConfigDecodesAndIsDroppedOnSave() throws {
+        let old = Data(#"{"harness":"codex","model":"m","effort":"high","account":{"id":"w","home":"file:///accounts/w"}}"#.utf8)
+        let decoded = try IntakeJSON.decoder.decode(ModelChoice.self, from: old)
+        XCTAssertEqual(decoded, ModelChoice(agent: .codex, model: "m", effort: "high"))
+        XCTAssertFalse(String(decoding: try IntakeJSON.encoder.encode(decoded), as: UTF8.self).contains("account"))
+        // Inside a whole config too, the shape `intake.json` actually stores.
+        let config = PresetExpansion.config(for: .sketch, available: .defaults)!
+        var json = String(decoding: try IntakeJSON.encoder.encode(config), as: UTF8.self)
+        json = json.replacingOccurrences(of: #""harness":"codex""#, with: #""account":{"id":"w","home":"file:///accounts/w"},"harness":"codex""#)
+        XCTAssertTrue(json.contains(#""account""#), "the fixture carries the old key")
+        let reread = try IntakeJSON.decoder.decode(RoundConfig.self, from: Data(json.utf8))
+        XCTAssertEqual(reread, config)
+        XCTAssertFalse(String(decoding: try IntakeJSON.encoder.encode(reread), as: UTF8.self).contains("account"))
     }
 }

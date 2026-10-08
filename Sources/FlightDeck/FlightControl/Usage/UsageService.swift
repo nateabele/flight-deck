@@ -285,11 +285,19 @@ final class UsageService: ObservableObject {
         }
     }
 
-    /// Headless seats run with Flight Deck's own environment, so they bill the built-in claude
-    /// account (see `IntakeRunnerController`'s environment recipe).
+    /// A headless seat bills the account the app resolved for its project when its runner (or
+    /// triage turn) started, recorded on the seat as `accountID` (unify brief R9) — a Work-pool
+    /// seat's rate-limit windows are Work's, and crediting them to the built-in login would let
+    /// the pool keep leasing an account that is in fact exhausted. A seat with no id (an agent
+    /// with no account record, or a runner from before R9) ran in the built-in home, so it is
+    /// credited there, as every seat once was.
     private func ingestHeadlessSeats() {
-        guard let id = environment.resolvedAccountID(.claude, nil), let ref = ref(forAccount: id) else { return }
-        for reading in headless.readings(from: environment.seatActivities(), account: ref) { ingest(reading) }
+        let builtIn = environment.resolvedAccountID(.claude, nil).flatMap(ref(forAccount:))
+        for reading in headless.readings(from: environment.seatActivities(), account: { [self] seat in
+            // An id that no longer names an account (purged since) credits nobody: its numbers
+            // are not the built-in login's either.
+            seat.accountID.map { ref(forAccount: $0) } ?? builtIn
+        }) { ingest(reading) }
     }
 
     private func ingestAPIErrors(_ sessions: [Session], at t: Date) {

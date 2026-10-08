@@ -42,7 +42,7 @@ struct ShapingRoundsPanel: View {
                 RoundConfigEditor(preset: intake.chosenPreset ?? .featurePlan,
                                   config: Binding(get: { draft ?? saved },
                                                   set: { [service, id = intake.id] in service.setRoundConfigDraft(id, $0) }),
-                                  available: service.availableModels(), accounts: service.planningAccounts(),
+                                  available: service.availableModels(), billing: service.planningBilling(project: intake.projectPath),
                                   codexListedModels: CodexRoutingCatalog.shared.cachedModelIDs,
                                   shaping: service.shapingEdit(intake.id), readOnly: editing == .readOnly)
             }
