@@ -524,6 +524,9 @@ page.
     **Then dismiss one.** Every question and permission card has an × in its top-right
     corner. Tap it on a question: the terminal's dialog must close, as with Escape at the Mac,
     and the card must leave. Tap it on a permission prompt: it must deny, exactly as Deny does.
+    **Then minimize one.** A question card hides the message box while it is expanded. Tap the
+    chevron in its top-left corner: the card shrinks to its title line, the × stays at the right,
+    and the message box comes back. Tap it again: the question returns and the box goes.
 70. **Interfere while it drives.** Send a set, and while the Mac is walking the dialog, move
     the cursor in the terminal yourself. The drive must STOP — no further keys — rather than
     counting arrows from where you left it. Nothing is committed until the review is submitted,

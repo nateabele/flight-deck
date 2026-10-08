@@ -55,6 +55,35 @@ final class PromptKeyboardUITests: XCTestCase {
         XCTAssertGreaterThanOrEqual(field.frame.minY, navBottom, "the field is under the navigation bar")
     }
 
+    /// The message box is gone while the question is expanded, back when the card is
+    /// minimized — which shrinks the card to its title — and gone again on expand.
+    func testMinimizingAQuestionGivesTheMessageBoxBack() {
+        let app = XCUIApplication()
+        app.launchArguments += ["-UITestHarness", "promptKeyboard"]
+        app.launch()
+        let card = app.otherElements["prompt-card"]
+        let composer = app.descendants(matching: .any)["composer-field"]
+        let toggle = app.buttons["prompt-minimize"]
+        XCTAssertTrue(card.waitForExistence(timeout: 20))
+        XCTAssertFalse(composer.exists, "an expanded question hides the message box")
+        let expandedHeight = card.frame.height
+        attach(app, "5-expanded")
+
+        toggle.tap()
+        XCTAssertTrue(composer.waitForExistence(timeout: 5), "minimized, the message box is back")
+        sleep(1)
+        XCTAssertGreaterThan(app.buttons["Dismiss"].frame.minX, card.frame.maxX - 60,
+                             "minimized, the × stays in the card's corner")
+        XCTAssertFalse(app.buttons["Next"].exists, "minimized, the options and buttons are gone")
+        XCTAssertLessThan(card.frame.height, expandedHeight / 2)
+        XCTAssertEqual(toggle.label, "Expand")
+        attach(app, "6-minimized")
+
+        toggle.tap()
+        XCTAssertTrue(app.buttons["Next"].waitForExistence(timeout: 5))
+        XCTAssertFalse(composer.exists, "expanded again, the message box goes again")
+    }
+
     /// The keyboard's drawn top edge, suggestion bar included — see the first measurement.
     private func keyboardTop(_ keyboard: XCUIElement) -> CGFloat { keyboard.frame.minY - 44 }
 

@@ -69,9 +69,9 @@ struct PromptCard: View {
     /// The subagent this dialog belongs to, when it is not the conversation's own. Without it
     /// a reader allows a command believing the main agent asked for it.
     var fromSubagent: WireSubagent? = nil
-    /// Told when the "Type something" field gains or loses focus, so the screen can take the
-    /// composer out from between the card and the keyboard — see `onTypingChange`'s caller.
-    var onTypingChange: (Bool) -> Void = { _ in }
+    /// Told whether the screen should hide its composer — `hidesComposer(for:minimized:)` —
+    /// whenever that changes, and `false` when the card leaves.
+    var onHidesComposerChange: (Bool) -> Void = { _ in }
 
     static func origin(_ s: WireSubagent?) -> String? {
         s.map { "From \($0.type) — \($0.description)" }
@@ -95,6 +95,23 @@ struct PromptCard: View {
         // about.
         case .permission: return true
         }
+    }
+
+    static func isQuestion(_ open: OpenPrompt) -> Bool {
+        if case .question = open { return true }
+        return false
+    }
+
+    /// Whether the message box should be out of the way: while a question is up and expanded.
+    ///
+    /// **A question's own inputs replace it.** The card and the composer ride the keyboard as
+    /// one inset, so with both showing the composer sat between the card and the keyboard (122pt
+    /// of it, measured on the simulator), and two text fields on one screen asked which one this
+    /// was. A minimized card gives the composer back — that is what minimizing is for — and a
+    /// permission card never takes it, having no inputs of its own.
+    static func hidesComposer(for open: OpenPrompt?, minimized: Bool) -> Bool {
+        guard case .question = open else { return false }
+        return !minimized
     }
 
     /// Whether the corner × is offered: on every dialog, until an answer to it is in flight.
@@ -341,6 +358,9 @@ struct PromptCard: View {
     static let typedRowID = "prompt-typed-row"
     /// Whether the "Type something" field has the keyboard.
     @FocusState private var typingFocused: Bool
+    /// The call whose card the reader minimized. Keyed on the call, like `picks`, so the next
+    /// dialog opens expanded rather than inheriting a collapse made for a different question.
+    @State private var minimizedFor: String?
 
     var body: some View {
         if let open {
@@ -351,24 +371,33 @@ struct PromptCard: View {
             ScrollViewReader { scroller in
             ScrollView {
             VStack(alignment: .leading, spacing: 10) {
-                if let origin = Self.origin(fromSubagent) {
+                // Clear of the minimize button in the opposite corner, on a question.
+                let leading: CGFloat = Self.isQuestion(open) ? 28 : 0
+                let minimized = minimizedFor == open.callID
+                if let origin = Self.origin(fromSubagent), !minimized {
                     Text(origin)
                         .font(.caption2.weight(.semibold))
                         .foregroundStyle(.orange)
+                        .padding(.leading, leading)
                 }
                 // Only a single question's header sits up here; in a set each question draws
                 // its own beside its options, where it says which question it belongs to.
                 if case .question(_, let questions) = open, questions.count == 1,
-                   let header = questions[0].header, !header.isEmpty {
+                   let header = questions[0].header, !header.isEmpty, !minimized {
                     Text(header.uppercased())
                         .font(.caption2.weight(.semibold))
                         .foregroundStyle(.orange)
+                        .padding(.leading, leading)
                 }
                 Text(Self.title(for: open, agent: agent))
                     .font(.callout.weight(.medium))
+                    // Minimized, the card is one line — enough to say what is waiting.
+                    .lineLimit(minimized ? 1 : nil)
                     .fixedSize(horizontal: false, vertical: true)
                     // Clear of the dismiss button in the corner.
                     .padding(.trailing, 24)
+                    .padding(.leading, leading)
+                if !minimized {
                 if let subtitle = Self.subtitle(for: open) {
                     Text(subtitle)
                         .font(.footnote.monospaced())
@@ -388,7 +417,11 @@ struct PromptCard: View {
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+                }
             }
+            // Full width whatever it holds: minimized to its title, the stack is only as wide
+            // as those words, and the × in its corner would follow them in from the edge.
+            .frame(maxWidth: .infinity, alignment: .leading)
             .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { cardHeight = $0 }
             }
             .scrollBounceBehavior(.basedOnSize)
@@ -407,6 +440,29 @@ struct PromptCard: View {
                 }
             }
             }
+            .overlay(alignment: .topLeading) {
+                if Self.isQuestion(open) {
+                    let minimized = minimizedFor == open.callID
+                    Button {
+                        if !minimized { typingFocused = false }
+                        withAnimation(.snappy) { minimizedFor = minimized ? nil : open.callID }
+                    } label: {
+                        Image(systemName: minimized ? "chevron.up.circle.fill"
+                                                    : "chevron.down.circle.fill")
+                            .font(.title3)
+                            .symbolRenderingMode(.hierarchical)
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(minimized ? "Expand" : "Minimize")
+                    .accessibilityIdentifier("prompt-minimize")
+                }
+            }
+            .onChange(of: Self.hidesComposer(for: open, minimized: minimizedFor == open.callID),
+                      initial: true) { _, hides in onHidesComposerChange(hides) }
+            // The card can leave while it is hiding the composer — answered, or dismissed from
+            // the Mac — and no other change would ever tell the screen to bring it back.
+            .onDisappear { onHidesComposerChange(false) }
             .overlay(alignment: .topTrailing) {
                 if Self.showsDismiss(for: open, state: state) {
                     Button { model.answer(.deny, to: open.callID) } label: {
@@ -653,10 +709,6 @@ extension PromptCard {
             ))
             .font(.footnote)
             .focused($typingFocused)
-            .onChange(of: typingFocused) { _, focused in onTypingChange(focused) }
-            // The card can leave with the field focused — answered, or dismissed from the Mac —
-            // and then no focus change would ever tell the screen to bring the composer back.
-            .onDisappear { onTypingChange(false) }
             .accessibilityIdentifier("prompt-typed-field")
             .submitLabel(immediate ? .send : .done)
             .onSubmit { if immediate { send() } }
