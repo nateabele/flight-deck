@@ -218,7 +218,7 @@ struct PoolMeterList: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             if pools.isEmpty {
-                Text("No pools yet. Add an account in Settings → Agents.").font(.callout).foregroundStyle(.secondary)
+                Text("No pools yet. Add an account in Settings → Accounts.").font(.callout).foregroundStyle(.secondary)
             }
             ForEach(pools) { pool in
                 VStack(alignment: .leading, spacing: 8) {

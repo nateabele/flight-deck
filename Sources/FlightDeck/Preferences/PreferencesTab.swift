@@ -11,6 +11,8 @@ import Foundation
 /// reopen Settings days later on whatever pane was last touched.
 enum PreferencesTab: Hashable, CaseIterable {
     case agents
+    /// Every login and pool (unify brief R7) — formerly a section under each agent.
+    case accounts
     case projects
     case shell
     case tools
