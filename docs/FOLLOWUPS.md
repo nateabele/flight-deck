@@ -2983,9 +2983,11 @@ it still reports there, each diagnosed from the run's `.xcresult` screen recordi
 
 ## Planning bills the project's accounts (2026-10-08, unify Track P)
 
-- **A pool with nothing leasable runs unleased.** When every member is past soft, planning runs
-  on the pool's least-used member with no lease and no notice (Track A shows a notice for tabs
-  when every member is over hard; planning shows none until integration adopts that resolver).
+- **A pool with nothing leasable runs unleased.** RESOLVED at integration (2026-10-08):
+  planning now resolves through the tabs' `AccountResolver`, so it follows the tab rules (every
+  member over soft → the first over-soft member, no notice; every member over hard → the one with
+  the most headroom, and the runner start or triage turn posts the same "Every account in … is
+  over its limit" banner a tab posts).
 - **Fallback seats are not shown billing.** The Rounds editor's "Bills:" line names the seat's
   primary agent only; a fallback to another agent bills that agent's assignment, unshown.
 - **The ledger re-adopts leases only on the first tick after relaunch.** Between launch and that
@@ -2994,3 +2996,43 @@ it still reports there, each diagnosed from the run's `.xcresult` screen recordi
 - **Only claude seats meter usage.** `ingestHeadlessSeats` credits claude `rate_limit_event`s;
   codex/grok/gemini seats carry `accountID` but report no readings.
 
+## Unify agents, grok/gemini tabs, account pools (2026-10-08, integration)
+
+Merged from `unify-grok`, `unify-gemini`, `unify-accounts` and `unify-planning`. The unit suite
+and the phone unit bundle are green; everything below is what no automated run has seen.
+
+- **No UI test ran.** The UI-test Mac's screen was locked (`CGSSessionScreenIsLocked`), and
+  `CapacityUITests` failed at launch with "Failed to activate application … Running
+  Background" before any of its steps. `CapacityUITests` was changed by this work (add-pool now
+  goes Capacity → "Edit Pools in Accounts…" → Accounts → "Add Pool…") and has never passed in
+  that shape. Unlock the UI-test Mac, then run each once: `test-ui-capacity.sh`,
+  `test-routing-ui.sh`, `test-ui-capability-index.sh`, `test-ui-flight-control.sh`. The Little
+  Snitch alert in the entry above may still be up.
+- **GUI checks for a person (none can run here):**
+  - *grok tab:* the composer gate; the Ctrl+S stash round trip around a phone prompt; digit
+    answers and Ctrl+C under Ghostty's kitty keyboard mode; the phone permission and question
+    cards; the status glyphs (from `events.jsonl` + `active_sessions.json`); `/rename`.
+  - *gemini (`agy`) tab:* launch, the `.rebound` re-pin after the first submit, the status
+    glyphs, a phone answer, Ctrl-U/Ctrl-Y under kitty keyboard mode, and a narrow terminal.
+    Whether `agy --conversation=<id>` holds its presence lock before the next submit is
+    unverified, so a resumed gemini tab may read not-live until then.
+  - *Accounts tab:* drag and drop (reorder, into and out of a pool, the cross-agent refusal) and
+    the pool popover's anchor. The row model is unit-tested; the gestures are not.
+  - *Projects and Agents panes:* `FlagRow`'s pickers are now trailing-aligned (one input column
+    with the account pickers). Rendered for Projects only; glance at Settings → Agents too.
+  - *Planning on a spent pool:* the banner is a user notification keyed by the intake id;
+    clicking it activates the app and selects nothing.
+- **The phone shows no gemini permission card.** The open prompt is derived on the Mac only
+  (agy's JSONL never holds the waiting call); the phone's own `OpenPrompt.find` cannot see it.
+  Needs a wire change that sends the Mac's derivation.
+- **grok has no hook, so no turn recovery and no hard rejection.** Rate-limit and final-failure
+  signals reach grok only through a `StopFailure` hook in the user's `$GROK_HOME/hooks/`, which
+  Flight Deck does not install. Claude Code plugin hooks still load inside grok tabs, because the
+  tab's shell keeps the real `HOME`.
+- **No model picker for grok or gemini tabs.** `GrokOptions` (model, effort) and
+  `GeminiOptions.model` exist and routing overrides set them; gemini tabs default to
+  `gemini-3.1-pro-high`.
+- **`FlywheelProgram` names are guesses.** `grok` and `agy` as Agent-Mail `--program` values are
+  unverified; no grok or gemini agent has joined a live swarm.
+- **Every agent is tab-ready.** The R4 gate stays (`AgentID.tabReady`) for the next agent; its
+  tests use the task-local seam `AgentID.$tabReadyOverride` to stand one agent in as not ready.

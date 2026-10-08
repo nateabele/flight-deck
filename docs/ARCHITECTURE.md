@@ -742,7 +742,10 @@ or — every member over hard — the one with the most headroom plus a notice t
 `SessionStore.launchAccount`, hold the lease under the tab id once filed (`fileLease`, which posts
 the notice), and release it in `closeSession`; every creation path that fails after the lease gives
 it back. A tab whose agent exits keeps its lease: the shell stays bound to the leased home. Restored
-tabs do not re-lease. Planning runs use the same resolver with the run id as holder.
+tabs do not re-lease. Planning runs use the same resolver through its `AccountResolving`
+conformance (`Intake/PlanningAccounts.swift`), but keep their own lease book (the runner
+controller's `heldAccounts` plus `accounts.json`, which survives a relaunch) rather than
+`hold(for:)`, so one lease is never in two books.
 
 **Adapter capabilities are optional statics, `nil` is the refusal.** `textChannel` (how a
 message is typed into the agent's live terminal), `dialogDriver` (how a select-list dialog
@@ -1510,13 +1513,16 @@ a new tab would; an agent with no account record runs in its CLI's built-in home
 per-seat account: `ModelChoice` no longer carries one (an old `account` key decodes and is
 dropped on save), and the Rounds editor shows each seat's "Bills: …" line read-only. The runner
 has no preferences, so the APP resolves: at every runner start `IntakeRunnerController` resolves
-each agent the round config can run (fallbacks included) through `AccountResolving`
-(`Intake/PlanningAccounts.swift`) and writes `<intake>/accounts.json` (`RunnerAccounts`) before
+each agent the round config can run (fallbacks included) through `AccountResolving` — the tabs'
+own `AccountResolver` — and writes `<intake>/accounts.json` (`RunnerAccounts`) before
 spawning; `RoundExecutor` binds each seat to its agent's entry and records the account id on the
 seat's `activity.json`, which is what `UsageService` credits. A broken assignment (a removed
 account, a pool that is gone or has no live member) refuses the start
-(`RunnerStartError.accountUnavailable`); a pool with nothing leasable runs on its least-used member
-unleased, never on a login outside the pool.
+(`RunnerStartError.accountUnavailable`); a pool with nothing leasable runs on a member unleased by
+the tab rules (first over-soft member; every member over hard → most headroom), never on a login
+outside the pool. In the all-over-hard case the runner start (`IntakeRunnerController
+.onAccountNotice`) and a triage turn (`IntakeService.onAccountNotice`) post the same banner a tab
+does, and only after the start succeeded.
 Pool leases are released when the runner is seen gone — `reap`, or the per-tick
 `syncAccountLeases` for an exit nobody reported (finish, crash, kill) — and a relaunched app
 re-adopts a live runner's leases from its `accounts.json` (`CapacityLedger.adopt`). Each start
