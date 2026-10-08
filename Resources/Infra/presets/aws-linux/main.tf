@@ -18,8 +18,28 @@ data "aws_ami" "ubuntu" {
   }
 }
 
+# The plural lookup first, because it returns an empty list where the singular one fails: with
+# no default VPC (deleted by hand, or an account older than default VPCs) `aws_vpc` with
+# `default = true` errors inside AWS's own read, "no matching EC2 VPC found", before any
+# condition could explain it. The precondition below turns that into a plan-time error that
+# names the fix, and runs before the read, so the null `id` never reaches AWS.
+data "aws_vpcs" "default" {
+  filter {
+    name   = "is-default"
+    values = ["true"]
+  }
+}
+
 data "aws_vpc" "default" {
+  id      = one(data.aws_vpcs.default.ids)
   default = true
+
+  lifecycle {
+    precondition {
+      condition     = length(data.aws_vpcs.default.ids) > 0
+      error_message = "this AWS region has no default VPC; create one (aws ec2 create-default-vpc) or use your own module"
+    }
+  }
 }
 
 # Not every type is offered in every zone (GPU families especially), and an unpinned launch
