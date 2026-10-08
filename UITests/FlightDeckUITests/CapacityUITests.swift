@@ -87,7 +87,7 @@ final class CapacityUITests: XCTestCase {
             shoot(gallery, "row-meter")
         }
 
-        XCTContext.runActivity(named: "Settings → Capacity lists the default pools and takes edits") { _ in
+        XCTContext.runActivity(named: "Settings → Capacity meters the default pools; pools are added in Accounts") { _ in
             app.typeKey(",", modifierFlags: .command)
             // No identifier on the tab itself (a container identifier would shadow its children),
             // so find the window by the "Agents" tab button, as the smoke tests do for "Agents".
@@ -99,7 +99,7 @@ final class CapacityUITests: XCTestCase {
             }
             prefs.openFlightControlTab()
             prefs.selectFlightControlSection("fc-section-capacity")
-            XCTAssertTrue(prefs.descendants(matching: .any).matching(identifier: "capacity-pool-list").firstMatch.waitForExistence(timeout: 5))
+            XCTAssertTrue(prefs.descendants(matching: .any).matching(identifier: "capacity-pool-meters").firstMatch.waitForExistence(timeout: 5))
             XCTAssertTrue(text("Claude default", in: prefs).exists)
             XCTAssertTrue(text("Codex default", in: prefs).exists)
             if !bar("Work", in: prefs).waitForExistence(timeout: 5) { attachTree(prefs, "settings-tree") }
@@ -113,10 +113,17 @@ final class CapacityUITests: XCTestCase {
             XCTAssertFalse(confirm.isEnabled, "Confirm hand-offs cannot be turned on yet")
             XCTAssertTrue(prefs.descendants(matching: .any).matching(identifier: "capacity-confirm-unavailable").firstMatch.exists)
 
-            prefs.descendants(matching: .any).matching(identifier: "capacity-add-pool").firstMatch.click()
-            app.menuItems["Claude pool"].click()
+            // Pool editing moved to Settings → Accounts (unify brief R7); Capacity points there.
+            prefs.descendants(matching: .any).matching(identifier: "capacity-open-accounts").firstMatch.click()
+            let add = prefs.descendants(matching: .any).matching(identifier: "accounts-add").firstMatch
+            XCTAssertTrue(add.waitForExistence(timeout: 5), "the button switches to the Accounts tab")
+            add.click()
+            app.menuItems["Add Pool…"].click()
+            let create = app.descendants(matching: .any).matching(identifier: "pool-add-confirm").firstMatch
+            XCTAssertTrue(create.waitForExistence(timeout: 5))
+            create.click()
             XCTAssertTrue(text("New Claude pool", in: prefs).waitForExistence(timeout: 5))
-            shoot(prefs, "capacity-pane-edited")
+            shoot(prefs, "accounts-pool-added")
         }
     }
 }
