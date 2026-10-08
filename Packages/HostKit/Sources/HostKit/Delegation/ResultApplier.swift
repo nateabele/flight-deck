@@ -332,14 +332,14 @@ public struct ResultApplier: Sendable {
     }
 
     /// Refuses a host-supplied path that could write outside the worktree or into git's own
-    /// files: absolute, a `.`/`..`/`.git` component (any case: macOS's file system folds it),
+    /// files: absolute, a `.`/`..`/`.git` component (any case and any HFS+ spelling, `isDotGit`),
     /// or an existing parent that is a symlink (checked with `lstat`, component by component),
     /// which would carry the write wherever it points. A newline is refused too: the batched
     /// git calls take paths one per line.
     static func checkSafe(_ path: String, under top: URL) throws {
         let parts = path.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
         guard !path.hasPrefix("/"), !path.contains("\n"),
-              !parts.contains(where: { $0.isEmpty || $0 == "." || $0 == ".." || $0.lowercased() == ".git" })
+              !parts.contains(where: { $0.isEmpty || $0 == "." || $0 == ".." || isDotGit($0) })
         else { throw SyncError.unsafePath(path) }
         var dir = top
         let fm = FileManager.default
@@ -349,6 +349,23 @@ public struct ResultApplier: Sendable {
             if type == .typeSymbolicLink { throw SyncError.unsafePath(path) }
         }
     }
+
+    /// Whether a path component names `.git` on a case-insensitive file system that ignores
+    /// HFS+'s ignorable code points, as git's own `is_hfs_dotgit` decides it. HFS+ drops these
+    /// when it compares names, so `.g\u{200C}it` *is* `.git` on such a volume, and a plain
+    /// case fold let a result write `.g\u{200C}it/hooks/pre-commit` (a hook on the user's next
+    /// commit). `index-pack --strict` refuses such trees at `fetch`, but `apply` must not
+    /// depend on how its result arrived.
+    static func isDotGit(_ component: String) -> Bool {
+        let kept = component.unicodeScalars.filter { !hfsIgnorable.contains($0.value) }
+        return String(String.UnicodeScalarView(kept)).lowercased() == ".git"
+    }
+
+    /// git's list (utf8.c, `next_hfs_char`): zero-width joiners, directional marks and
+    /// embeddings, the deprecated format characters, and the byte-order mark.
+    private static let hfsIgnorable: Set<UInt32> = Set(
+        Array(0x200C...0x200F) + Array(0x202A...0x202E) + Array(0x206A...0x206F) + [0xFEFF]
+    )
 
 }
 

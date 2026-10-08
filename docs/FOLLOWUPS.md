@@ -2658,7 +2658,9 @@ container; **nothing has run against a real second machine.**
 
 **Sync and results**
 - `ResultApplier`'s `.git` check is case-insensitive but does not cover HFS-ignorable Unicode
-  variants; git's own `verify_path` does, at checkout.
+  variants; git's own `verify_path` does, at checkout. **FIXED (2026-10-08):** `checkSafe` drops
+  the code points git's `is_hfs_dotgit` ignores (U+200C–200F, U+202A–202E, U+206A–206F, U+FEFF)
+  before the case fold, so `.g\u{200C}it/hooks/…` is refused like `.GIT/hooks/…`.
 - A symlink planted *during* an apply makes it throw `unsafe_path` after earlier paths were written,
   and a time-of-check gap remains between the parent walk and the rename (Foundation has no portable
   `openat`/`O_NOFOLLOW` write).
