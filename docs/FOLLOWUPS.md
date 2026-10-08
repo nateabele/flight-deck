@@ -2631,7 +2631,8 @@ container; **nothing has run against a real second machine.**
 - `run.ack` is best effort: an ack lost with its connection leaves the result on the host until its
   24 h expiry, which costs disk, not data.
 - `run.result` tells a run still going (`run_active`) by `(runner as? Runner)?.phase`:
-  `RunControlling` has no phase query.
+  `RunControlling` has no phase query. **FIXED (2026-10-08):** `phase(runID:)` is a `RunControlling`
+  requirement, with no default, and the router asks the protocol.
 - `port.open` checks the run's owner, not that it is a service still running; a finished run's port
   simply gets `dial_failed`.
 
