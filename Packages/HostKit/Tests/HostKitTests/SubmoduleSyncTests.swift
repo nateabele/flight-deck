@@ -312,27 +312,63 @@ final class SubmoduleSyncTests: XCTestCase {
         XCTAssertEqual(try head(lease, "mid/inner"), innerPin)
     }
 
-    /// A nested gitlink with no pin (a controller that could not read it) is found in the
-    /// parent submodule's own `.gitmodules` on the host, instead of being left empty.
-    func testNestedSubmoduleWithoutAPinUsesItsGitmodules() async throws {
-        let scratch = TempRepo.scratch()
+    /// `mid` with a nested `inner`, whose URL in mid's `.gitmodules` is `innerURL(inner)`, and
+    /// `app` with `mid` (not recursively initialized). Returns the pushed ref with only mid's
+    /// pin: a nested gitlink the controller sent no pin for.
+    func nestedWithoutPin(in scratch: URL, store: Workspace, innerURL: (Remote) -> String) async throws -> SnapshotRef {
         let inner = try makeRemote("inner", in: scratch, ["inner.txt": "inner\n"])
         let mid = try makeRemote("mid", in: scratch, ["mid.txt": "mid\n"])
-        try mid.work.git("submodule", "add", "-q", inner.bare.path, "inner")
+        try mid.work.git("submodule", "add", "-q", innerURL(inner), "inner")
         try mid.advance([:])
         let app = try TempRepo(at: scratch.appendingPathComponent("app"))
         app.write("main.txt", "main\n")
         try app.git("submodule", "add", "-q", mid.bare.path, "mid")   // not --recursive
         try app.commitAll()
-
-        let store = Workspace(root: scratch.appendingPathComponent("host"))
         let pushed = try await push(app, to: store)
         XCTAssertEqual(pushed.submodules.map(\.path), ["mid", "mid/inner"],
                        "an uninitialized nested submodule is still pinned, from mid's committed .gitmodules")
-        let ref = SnapshotRef(repoRoot: pushed.repoRoot, wtKey: pushed.wtKey, worktreeName: pushed.worktreeName,
-                              commit: pushed.commit, tree: pushed.tree, submodules: Array(pushed.submodules.prefix(1)))
+        return SnapshotRef(repoRoot: pushed.repoRoot, wtKey: pushed.wtKey, worktreeName: pushed.worktreeName,
+                           commit: pushed.commit, tree: pushed.tree, submodules: Array(pushed.submodules.prefix(1)))
+    }
+
+    /// A nested gitlink with no pin (a controller that could not read it) is found in the
+    /// parent submodule's own `.gitmodules` on the host, instead of being left empty.
+    func testNestedSubmoduleWithoutAPinUsesItsGitmodules() async throws {
+        let scratch = TempRepo.scratch()
+        let daemon = try GitDaemon(base: scratch)
+        defer { daemon.stop() }
+        let store = Workspace(root: scratch.appendingPathComponent("host"))
+        let ref = try await nestedWithoutPin(in: scratch, store: store) { _ in daemon.url("inner.git") }
         let lease = try await store.checkout(controller: controller, ref: ref, pin: false)
         XCTAssertEqual(text(lease, "mid/inner/inner.txt"), "inner\n")
+    }
+
+    /// That fallback reads a `.gitmodules` from a fetched repository, written by whoever wrote
+    /// it, not by the controller. A local path there would have the host read its own disk
+    /// (another controller's cache, a repository the host user can read) into a checkout the
+    /// controller gets back. Only a pin the controller sent may use the file transport.
+    func testNestedLocalPathFromAGitmodulesIsRefused() async throws {
+        let scratch = TempRepo.scratch()
+        let store = Workspace(root: scratch.appendingPathComponent("host"))
+        let ref = try await nestedWithoutPin(in: scratch, store: store) { $0.bare.path }
+        let error = await thrown { try await store.checkout(controller: controller, ref: ref, pin: false) }
+        guard case .submodule(path: "mid/inner", problem: .fetchFailed(_, let detail))? = error as? SyncError else {
+            return XCTFail("\(String(describing: error))")
+        }
+        XCTAssertTrue(detail.contains("local"), detail)
+    }
+
+    /// The same refusal holds in git itself (`GIT_ALLOW_PROTOCOL`), not only in the URL check
+    /// in front of it: a path or `file://` URL fetched without `allowFile` fails.
+    func testFileTransportIsRefusedByGitWithoutAllowFile() throws {
+        let scratch = TempRepo.scratch()
+        let (_, lib, pin) = try makeApp(in: scratch)
+        let store = Workspace(root: scratch.appendingPathComponent("host"))
+        let cache = scratch.appendingPathComponent("cache.git")
+        for url in [lib.bare.path, "file://\(lib.bare.path)"] {
+            XCTAssertThrowsError(try store.fetchIfMissing(pin, from: url, into: cache, path: "lib", allowFile: false), url)
+        }
+        XCTAssertNoThrow(try store.fetchIfMissing(pin, from: lib.bare.path, into: cache, path: "lib", allowFile: true))
     }
 
     /// A URL the host cannot reach fails the checkout naming the submodule and the URL, not

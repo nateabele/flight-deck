@@ -196,11 +196,22 @@ enum SubmoduleURL {
         return base
     }
 
+    /// Whether git would fetch `url` with its file transport: a `file://` URL, or a path (no
+    /// scheme, and no colon before the first slash, which would make it scp-style `host:path`).
+    static func isLocal(_ url: String) -> Bool {
+        if url.lowercased().hasPrefix("file:") { return true }
+        if url.contains("://") { return false }
+        guard let colon = url.firstIndex(of: ":") else { return true }
+        return url[..<colon].contains("/")
+    }
+
     /// What the host lets a fetch use. Every URL here came over the wire, so it is refused
     /// rather than handed to git when it could be read as an option (`--upload-pack=…`) and
     /// the transport is restricted to the ordinary protocols (no `ext::`, which runs a
     /// command, or `fd::`): a paired controller can already run commands on the host, but a
-    /// URL in a `.gitmodules` it synced came from whoever wrote that repository.
+    /// URL in a `.gitmodules` it synced came from whoever wrote that repository. `file` is
+    /// allowed only for the controller's own pins (`fetchEnvironment(allowFile:)`): a nested
+    /// `.gitmodules` read on the host gets `remoteProtocols`.
     static let allowedProtocols = "file:git:http:https:ssh"
 
     /// An http transfer that moves under 1000 bytes/s for 60 s is abandoned. Without it a
@@ -327,6 +338,7 @@ extension Workspace {
         for link in links {
             let full = prefix + link.path
             let url: String
+            let pinned = pins[full] != nil
             if let pin = pins[full] {
                 url = pin.url
             } else if let raw = declared.url(forPath: link.path),
@@ -336,7 +348,8 @@ extension Workspace {
             } else {
                 throw SyncError.submodule(path: full, problem: .noURL)
             }
-            if let why = SubmoduleURL.refusal(url) {
+            if let why = SubmoduleURL.refusal(url) ?? (pinned || !SubmoduleURL.isLocal(url) ? nil
+                    : "refused: a local path from a nested .gitmodules; only the controller's own pins may name one") {
                 throw SyncError.submodule(path: full, problem: .fetchFailed(url: url, detail: why))
             }
             try ResultApplier.checkSafe(link.path, under: dir)
@@ -346,7 +359,7 @@ extension Workspace {
             // race on its `worktrees/` and on the fetch's lock files.
             try withStore(cache) {
                 submoduleFetchHook?(full)
-                try fetchIfMissing(link.commit, from: url, into: cache, path: full)
+                try fetchIfMissing(link.commit, from: url, into: cache, path: full, allowFile: pinned)
                 try placeWorktree(link.commit, at: sub, from: cache)
             }
             placed.append(full)
@@ -358,7 +371,7 @@ extension Workspace {
     /// one commit first (most servers allow it, and a big submodule's full history can be
     /// gigabytes), then everything the remote advertises for a server that refuses. The commit
     /// is then kept under `refs/fd/pins/`, so `gc` cannot drop what a slot has checked out.
-    private func fetchIfMissing(_ commit: String, from url: String, into cache: URL, path: String) throws {
+    func fetchIfMissing(_ commit: String, from url: String, into cache: URL, path: String, allowFile: Bool) throws {
         let fm = FileManager.default
         if !fm.fileExists(atPath: cache.path) {
             try fm.createDirectory(at: cache, withIntermediateDirectories: true)
@@ -367,7 +380,7 @@ extension Workspace {
         func present() -> Bool { (try? git.run(["cat-file", "-e", "\(commit)^{commit}"], in: cache)) != nil }
         if !present() {
             Self.clearStaleLocks(in: cache)
-            let env = SubmoduleURL.fetchEnvironment(allowFile: true)
+            let env = SubmoduleURL.fetchEnvironment(allowFile: allowFile)
             /// false: the server refused exactly this request (asked only when `refusable`).
             func fetch(_ args: [String], refusable: Bool) throws -> Bool {
                 do {
