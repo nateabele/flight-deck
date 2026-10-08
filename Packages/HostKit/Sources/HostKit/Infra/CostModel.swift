@@ -23,6 +23,33 @@ public struct BudgetSettings: Codable, Sendable, Equatable {
         ])
 
     public var hasDollarCap: Bool { monthlyCapUSD != nil || perMachineCapUSD != nil }
+
+    public init(monthlyCapUSD: Double?, perMachineCapUSD: Double?, warnFraction: Double, maxConcurrent: Int,
+                maxTTL: Duration, maxIdle: Duration, allowedTypes: [String: [String]]) {
+        self.monthlyCapUSD = monthlyCapUSD
+        self.perMachineCapUSD = perMachineCapUSD
+        self.warnFraction = warnFraction
+        self.maxConcurrent = maxConcurrent
+        self.maxTTL = maxTTL
+        self.maxIdle = maxIdle
+        self.allowedTypes = allowedTypes
+    }
+
+    /// Every field may be missing — a budget saved before it existed — and only that field
+    /// takes its default: the synthesized decoder would throw, and the caller's fallback would
+    /// reset the whole budget, silently raising a cap the user had lowered. An absent cap stays
+    /// absent, because that is how a cleared cap is saved.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let d = Self.default
+        self.init(monthlyCapUSD: try c.decodeIfPresent(Double.self, forKey: .monthlyCapUSD),
+                  perMachineCapUSD: try c.decodeIfPresent(Double.self, forKey: .perMachineCapUSD),
+                  warnFraction: try c.decodeIfPresent(Double.self, forKey: .warnFraction) ?? d.warnFraction,
+                  maxConcurrent: try c.decodeIfPresent(Int.self, forKey: .maxConcurrent) ?? d.maxConcurrent,
+                  maxTTL: try c.decodeIfPresent(Duration.self, forKey: .maxTTL) ?? d.maxTTL,
+                  maxIdle: try c.decodeIfPresent(Duration.self, forKey: .maxIdle) ?? d.maxIdle,
+                  allowedTypes: try c.decodeIfPresent([String: [String]].self, forKey: .allowedTypes) ?? d.allowedTypes)
+    }
 }
 
 public enum BudgetVerdict: Equatable, Sendable {

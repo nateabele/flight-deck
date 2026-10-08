@@ -5,6 +5,9 @@ import SwiftUI
 /// rows and empty state, a `+` under it and a caption beneath.
 struct HostsSettingsTab: View {
     @ObservedObject var hostService: HostService
+    /// The cloud machines, so a host Flight Deck provisioned shows its badge, rate and spend
+    /// (spec §8.4). Nil where there is none, as in the renders of a plain host list.
+    var infra: InfraService? = nil
 
     @State private var addingHost = false
     @State private var pendingForget: HostRecord?
@@ -26,7 +29,8 @@ struct HostsSettingsTab: View {
                                 .accessibilityIdentifier("hosts-empty")
                         } else {
                             ForEach(hosts) { host in
-                                HostRow(record: host, status: hostService.statuses[host.slot])
+                                HostRow(record: host, status: hostService.statuses[host.slot],
+                                        cloudCost: cloudCost(for: host))
                                     .contextMenu {
                                         Button("Forget “\(host.name)”…") { pendingForget = host }
                                     }
@@ -83,11 +87,27 @@ struct HostsSettingsTab: View {
     }
 }
 
+extension HostsSettingsTab {
+    /// `$0.80/h est. · ~$0.96` for a host that is an infra machine, read afresh each time the
+    /// row's timeline ticks; nil for any other host.
+    func cloudCost(for host: HostRecord) -> (() -> String)? {
+        guard let infra, infra.registry.machines.contains(where: { $0.slot == host.slot }) else { return nil }
+        return { [weak infra] in
+            guard let infra, let m = infra.registry.machines.first(where: { $0.slot == host.slot }) else { return "" }
+            let usd = InfraPreflight.usd
+            guard let rate = m.hourlyUSD else { return "price unknown" }
+            return "\(usd(rate))/h est. · ~\(usd(infra.ledger.spent(name: m.name, now: infra.now)))"
+        }
+    }
+}
+
 /// One host: a status dot, its name and platform, and what the link last said.
 struct HostRow: View {
     let record: HostRecord
     /// nil before `HostService.start()` has listed the host, which reads as offline.
     let status: HostLinkState?
+    /// Set for a cloud machine: its rate and spend so far, which change while it runs.
+    var cloudCost: (() -> String)? = nil
 
     var body: some View {
         HStack(spacing: 8) {
@@ -102,6 +122,18 @@ struct HostRow: View {
                 Text(platform)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+            }
+
+            if let cloudCost {
+                Label("Cloud", systemImage: "cloud")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("host-cloud-badge-\(record.slot.uuidString)")
+                TimelineView(.periodic(from: .now, by: 30)) { _ in
+                    Text(cloudCost())
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
             }
 
             Spacer()

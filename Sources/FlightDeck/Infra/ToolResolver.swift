@@ -35,7 +35,10 @@ enum ToolError: Error, Equatable {
 /// Holds no mutable state, hence `@unchecked Sendable` only for the `CommandRunner` and
 /// downloader existentials it stores.
 final class ToolResolver: @unchecked Sendable {
-    private let searchPath: [URL]
+    /// Asked on every resolve, off the main actor: the app's real search path waits on a login
+    /// shell the first time (`defaultSearchPath`), which must never happen at launch on main.
+    private let searchPathProvider: @Sendable () -> [URL]
+    private var searchPath: [URL] { searchPathProvider() }
     private let managedRoot: URL
     private let runner: CommandRunner
     private let downloader: ToolDownloading
@@ -50,11 +53,19 @@ final class ToolResolver: @unchecked Sendable {
     /// `managedRoot`.
     private let spaceFreeRoot: URL
 
-    init(searchPath: [URL], managedRoot: URL, runner: CommandRunner, downloader: ToolDownloading,
-         pins: [InfraTool: ToolPin] = ToolPins.all, versionTimeout: TimeInterval = 5,
+    convenience init(searchPath: [URL], managedRoot: URL, runner: CommandRunner, downloader: ToolDownloading,
+                     pins: [InfraTool: ToolPin] = ToolPins.all, versionTimeout: TimeInterval = 5,
+                     environment: [String: String] = ProcessInfo.processInfo.environment,
+                     spaceFreeRoot: URL = ToolResolver.defaultSpaceFreeRoot()) {
+        self.init(searchPathProvider: { searchPath }, managedRoot: managedRoot, runner: runner, downloader: downloader,
+                  pins: pins, versionTimeout: versionTimeout, environment: environment, spaceFreeRoot: spaceFreeRoot)
+    }
+
+    init(searchPathProvider: @escaping @Sendable () -> [URL], managedRoot: URL, runner: CommandRunner,
+         downloader: ToolDownloading, pins: [InfraTool: ToolPin] = ToolPins.all, versionTimeout: TimeInterval = 5,
          environment: [String: String] = ProcessInfo.processInfo.environment,
          spaceFreeRoot: URL = ToolResolver.defaultSpaceFreeRoot()) {
-        self.searchPath = searchPath
+        self.searchPathProvider = searchPathProvider
         self.managedRoot = managedRoot
         self.runner = runner
         self.downloader = downloader

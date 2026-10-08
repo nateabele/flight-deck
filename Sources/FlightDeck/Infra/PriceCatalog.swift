@@ -39,6 +39,9 @@ struct HTTPStatusError: Error, Equatable {
 }
 
 struct URLSessionHTTPFetcher: HTTPFetching {
+    /// Seconds a request may wait for data; nil is `URLRequest`'s own 60.
+    var timeout: TimeInterval?
+
     func get(_ url: URL, headers: [String: String]) async throws -> (Data, [String: String]) {
         try await send(request(url, "GET", headers))
     }
@@ -56,6 +59,7 @@ struct URLSessionHTTPFetcher: HTTPFetching {
     private func request(_ url: URL, _ method: String, _ headers: [String: String]) -> URLRequest {
         var request = URLRequest(url: url)
         request.httpMethod = method
+        if let timeout { request.timeoutInterval = timeout }
         headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
         return request
     }

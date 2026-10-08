@@ -7,6 +7,7 @@ struct PreferencesView: View {
     @ObservedObject var hosts: HostService
     @ObservedObject var hosting: HostingController
     @ObservedObject var routing: RoutingService
+    let cloud: CloudSettingsContext
 
     var body: some View {
         // Bound rather than unbound, and every pane tagged: without a selection binding there
@@ -38,7 +39,7 @@ struct PreferencesView: View {
                 .accessibilityIdentifier("prefs-devices")
                 .tag(PreferencesTab.devices)
 
-            HostsSettingsTab(hostService: hosts)
+            HostsSettingsTab(hostService: hosts, infra: cloud.service)
                 .tabItem { Label("Hosts", systemImage: "desktopcomputer.and.arrow.down") }
                 .accessibilityIdentifier("prefs-hosts")
                 .tag(PreferencesTab.hosts)
@@ -47,6 +48,13 @@ struct PreferencesView: View {
                 .tabItem { Label("Hosting", systemImage: "server.rack") }
                 .accessibilityIdentifier("prefs-hosting")
                 .tag(PreferencesTab.hosting)
+
+            CloudSettingsTab(preferences: preferences, context: cloud)
+                // On the tab's label, not the pane: on a container SwiftUI/macOS stamps the
+                // identifier over every descendant, hiding each `cloud-*` one (as Flight Control's
+                // comment below records).
+                .tabItem { Label("Cloud", systemImage: "cloud").accessibilityIdentifier("prefs-cloud") }
+                .tag(PreferencesTab.cloud)
 
             FlightControlSettingsTab(preferences: preferences, sessions: sessions, routing: routing)
                 .tabItem { Label("Flight Control", systemImage: "airplane") }

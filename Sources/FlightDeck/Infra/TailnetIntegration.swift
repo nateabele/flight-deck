@@ -116,6 +116,9 @@ final class TailnetIntegration: @unchecked Sendable {
         return (lock.Enabled ?? false, signer)
     }
 
+    /// Stores the OAuth client the user created during setup (spec §9), in the Keychain only.
+    func saveClient(_ client: TailscaleOAuthClient) throws { try secrets.save(client) }
+
     func mode() async -> TailnetMode {
         let local = await local()
         guard local.running, let tailnet = local.tailnet else { return .notRunning }
