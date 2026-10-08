@@ -54,6 +54,20 @@ case "$MODE" in
         GATE=(testDelegatedRunAgainstLinuxHostd) ;;
   *)    echo "unknown mode $MODE" >&2; exit 64 ;;
 esac
+# Refuse up front when a port this mode publishes is already taken. serve and run publish
+# 47410, which this Mac's own hostd holds while Settings → Hosting is on; without this check
+# `docker run` failed with "failed to bind host port … address already in use", exit 125, and
+# left a Created container behind (the cleanup trap is armed only after it). A connect, not
+# lsof: bash's /dev/tcp is on every Mac and Linux box, lsof is not on every Linux image.
+port_in_use() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
+for p in "$PORT" ${PUBLISH[@]+"${PUBLISH[@]}"}; do
+  case "$p" in -p) continue ;; *:*:*) p=${p#*:}; p=${p%%:*} ;; esac
+  if port_in_use "$p"; then
+    echo "127.0.0.1:$p is already in use, and $MODE mode publishes it." >&2
+    [ "$p" = 47410 ] && echo "This Mac's own hostd listens there: turn Settings → Hosting off first." >&2
+    exit 2
+  fi
+done
 # Mounted at its own resolved path as well as through /src: in a worktree
 # vendor/boringssl-artifacts is a symlink to the main checkout's (AGENTS.md), which dangles
 # inside the container unless its target exists there too, and the linker then reports a
