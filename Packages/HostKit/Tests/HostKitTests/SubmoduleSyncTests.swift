@@ -52,6 +52,11 @@ final class SubmoduleSyncTests: XCTestCase {
 
     @discardableResult
     func push(_ repo: TempRepo, to store: Workspace) async throws -> SnapshotRef {
+        try await Self.push(repo, to: store, controller: controller)
+    }
+
+    @discardableResult
+    static func push(_ repo: TempRepo, to store: Workspace, controller: UUID) async throws -> SnapshotRef {
         let ref = try await Snapshotter().snapshot(worktree: repo.url, host: "mini", include: [])
         let tips = try await store.tips(controller: controller, repoRoot: ref.repoRoot, wtKey: ref.wtKey)
         let bundle = try await BundleMaker().bundle(worktree: repo.url, snapshot: ref, haves: tips)
@@ -325,6 +330,37 @@ final class SubmoduleSyncTests: XCTestCase {
             }
         }
         XCTAssertFalse(FileManager.default.fileExists(atPath: "/tmp/fd-pwned"))
+    }
+
+    /// A slow submodule fetch (a big repository, a slow remote) must not hold the repo's store:
+    /// that lock serializes every sync, apply, gc and prune of the repo, so holding it for the
+    /// fetch would stall every other agent syncing the same repo until the fetch finished.
+    func testSlowSubmoduleFetchDoesNotBlockTheStore() async throws {
+        let scratch = TempRepo.scratch()
+        let (app, _, _) = try makeApp(in: scratch)
+        let store = Workspace(root: scratch.appendingPathComponent("host"), poolSize: 2)
+        let ref = try await push(app, to: store)
+        let gate = Gate()
+        store.submoduleFetchHook = { _ in gate.hold() }
+        defer { gate.open() }
+        let controller = self.controller
+        let slow = Task { try await store.checkout(controller: controller, ref: ref, pin: false) }
+        try await gate.waitUntilHeld()
+
+        app.write("main.txt", "second\n")
+        try app.commitAll()
+        let finished = Done()
+        let sync = Task {
+            _ = try await SubmoduleSyncTests.push(app, to: store, controller: controller)
+            try await store.gc()
+            finished.set()
+        }
+        let done = await finished.wait(seconds: 20)
+        gate.open()
+        XCTAssertTrue(done, "a sync and a gc of the same repo waited on another slot's submodule fetch")
+        try await sync.value
+        let lease = try await slow.value
+        XCTAssertEqual(text(lease, "lib/lib.txt"), "v1\n")
     }
 
     // MARK: - Results (§4.5)

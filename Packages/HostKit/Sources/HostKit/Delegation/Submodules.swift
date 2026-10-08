@@ -271,6 +271,7 @@ extension Workspace {
             // Per cache, like the store: two slots placing the same submodule at once would
             // race on its `worktrees/` and on the fetch's lock files.
             try withStore(cache) {
+                submoduleFetchHook?(full)
                 try fetchIfMissing(link.commit, from: url, into: cache, path: full)
                 try placeWorktree(link.commit, at: sub, from: cache)
             }
