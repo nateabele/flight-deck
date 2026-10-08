@@ -72,17 +72,41 @@ final class RoundConfigEditorRenderTests: XCTestCase {
         )
     }
 
+    /// Unify brief R9: each seat's read-only "Bills:" line where the per-seat account picker was —
+    /// codex on the project's pool, claude on its account, and a broken grok assignment warned.
+    /// Light and dark.
+    @MainActor
+    func testRenderBillingLines() throws {
+        guard let dir = ProcessInfo.processInfo.environment["FD_ROUNDS_RENDER_DIR"] else {
+            throw XCTSkip("set FD_ROUNDS_RENDER_DIR to render the round-config-editor PNGs")
+        }
+        var config = try XCTUnwrap(PresetExpansion.config(for: .featurePlan, available: .defaults))
+        let grok = ModelChoice(agent: .grok, model: "grok-4.7", effort: "high")
+        config.crossReviewer = Slot(grok)
+        let available = AvailableModels(choices: [.claude: AvailableModels.defaults.claude!, .codex: AvailableModels.defaults.codex!, .grok: grok])
+        let billing: [AgentID: AccountBilling] = [
+            .codex: AccountBilling(text: "Work pool"), .claude: AccountBilling(text: "Personal"),
+            .grok: AccountBilling(text: "a removed account", problem: true),
+        ]
+        for (name, appearance) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
+            try render(RoundConfigEditor(preset: .featurePlan, config: .constant(config), available: available, billing: billing),
+                       size: NSSize(width: 420, height: 700),
+                       to: URL(fileURLWithPath: dir).appendingPathComponent("rounds-editor-billing-\(name).png"),
+                       appearance: appearance)
+        }
+    }
+
     /// Parked offscreen `NSHostingView` + `layer.render(in:)` — screencapture is denied here,
     /// and `cacheDisplay` drops layer-backed SwiftUI content.
     @MainActor
-    private func render(_ view: some View, size: NSSize, to url: URL) throws {
+    private func render(_ view: some View, size: NSSize, to url: URL, appearance: NSAppearance.Name = .darkAqua) throws {
         let root = view.padding(16).frame(width: size.width, height: size.height, alignment: .topLeading)
             .background(Color(nsColor: .windowBackgroundColor))
         let host = NSHostingView(rootView: root)
         host.frame = NSRect(origin: .zero, size: size)
         let window = NSWindow(contentRect: NSRect(x: -10_000, y: -10_000, width: size.width, height: size.height),
                               styleMask: [.borderless], backing: .buffered, defer: false)
-        window.appearance = NSAppearance(named: .darkAqua)
+        window.appearance = NSAppearance(named: appearance)
         window.contentView = host
         window.orderFrontRegardless()
         host.layoutSubtreeIfNeeded()

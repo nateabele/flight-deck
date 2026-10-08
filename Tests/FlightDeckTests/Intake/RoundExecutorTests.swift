@@ -281,28 +281,77 @@ final class RoundExecutorTests: XCTestCase {
         XCTAssertNil(codex.environment["ANTHROPIC_BASE_URL"])
     }
 
-    /// A seat bound to an account (the Rounds editor's picker) runs in that account's home:
-    /// claude via `CLAUDE_CONFIG_DIR` and that home's own settings `env`, codex via `CODEX_HOME`.
-    /// An unbound seat in the same round still runs on the built-in account.
-    func testASeatBoundToAnAccountRunsInThatAccountsHome() async throws {
+    /// Every seat runs as the account the app resolved for its AGENT when the runner started
+    /// (`RunnerAccounts`, unify brief R9): claude via `CLAUDE_CONFIG_DIR` and that home's own
+    /// settings `env`, codex via `CODEX_HOME`. Both seats of one agent bill the same account, and
+    /// each seat's activity records the account id usage attribution credits.
+    func testEverySeatRunsAsItsAgentsResolvedAccount() async throws {
         let workHome = root.appendingPathComponent("accounts/work")
         try FileManager.default.createDirectory(at: workHome, withIntermediateDirectories: true)
         try Data(#"{"env":{"ANTHROPIC_BASE_URL":"http://work"}}"#.utf8).write(to: workHome.appendingPathComponent("settings.json"))
-        let work = AgentAccountRef(id: "work", home: workHome)
-        var boundClaude = claudeB; boundClaude.account = work
-        var boundCodex = codexA; boundCodex.model = "C"; boundCodex.account = AgentAccountRef(id: "cx", home: workHome)
+        let codexHome = root.appendingPathComponent("accounts/cx")
+        let claudeID = UUID(), codexID = UUID()
+        let accounts = RunnerAccounts(agents: [
+            .claude: RunnerAccounts.Entry(accountID: claudeID, home: workHome, label: "Work pool · Work"),
+            .codex: RunnerAccounts.Entry(accountID: codexID, home: codexHome, label: "CX"),
+        ])
+        var codexC = codexA; codexC.model = "C"
         let runner = ScriptedHarnessRunner { call in ok(call, "s-\(call.model!)", json(DraftOutput(plan: "# P"))) }
-        let cfg = config(drafters: [Slot(boundClaude), Slot(boundCodex), Slot(codexA)])
-        _ = try checkpoint(try await executor(runner).run(PlannedRound(stage: .draft, round: 0, major: true), inputs(cfg)))
+        let cfg = config(drafters: [Slot(claudeB), Slot(codexC), Slot(codexA)])
+        var inputs = inputs(cfg)
+        inputs.accounts = accounts
+        _ = try checkpoint(try await executor(runner).run(PlannedRound(stage: .draft, round: 0, major: true), inputs))
         let drafters = runner.calls("drafter")
         let claude = try XCTUnwrap(drafters.first { $0.executable == "claude" })
         XCTAssertEqual(claude.environment["CLAUDE_CONFIG_DIR"], workHome.path)
         XCTAssertEqual(claude.environment["ANTHROPIC_BASE_URL"], "http://work")
         XCTAssertNil(claude.environment["CLAUDE_CODE_CHILD_SESSION"])
-        let codexBound = try XCTUnwrap(drafters.first { $0.model == "C" })
-        XCTAssertEqual(codexBound.environment["CODEX_HOME"], workHome.path)
-        let codexBuiltIn = try XCTUnwrap(drafters.first { $0.model == "A" })
-        XCTAssertNil(codexBuiltIn.environment["CODEX_HOME"], "an unbound seat stays on the built-in account")
+        for model in ["A", "C"] {
+            let codex = try XCTUnwrap(drafters.first { $0.model == model })
+            XCTAssertEqual(codex.environment["CODEX_HOME"], codexHome.path, "every codex seat bills the project's codex account")
+        }
+        let activities = store.runNames(forRound: PlannedRound(stage: .draft, round: 0, major: true)).compactMap { name -> SeatActivity? in
+            let file = store.runDirectory(name).appendingPathComponent("activity.json")
+            return try? IntakeJSON.decoder.decode(SeatActivity.self, from: Data(contentsOf: file))
+        }
+        XCTAssertEqual(Set(activities.filter { $0.agent == .claude }.map(\.accountID)), [claudeID])
+        XCTAssertEqual(Set(activities.filter { $0.agent == .codex }.map(\.accountID)), [codexID])
+    }
+
+    /// A built-in account is credited by id but its CLI keeps its own default home: no home
+    /// variable is set, exactly as before planning billed projects.
+    func testABuiltInAccountSetsNoHomeVariable() async throws {
+        let builtIn = UUID()
+        let runner = ScriptedHarnessRunner { call in ok(call, "s", json(DraftOutput(plan: "# P"))) }
+        var inputs = inputs(config(drafters: [Slot(claudeB)]))
+        inputs.accounts = RunnerAccounts(agents: [.claude: RunnerAccounts.Entry(accountID: builtIn, home: nil, label: "Default"),
+                                                  .codex: RunnerAccounts.Entry(accountID: nil, home: nil, label: "Codex built-in")])
+        _ = try checkpoint(try await executor(runner).run(PlannedRound(stage: .draft, round: 0, major: true), inputs))
+        let claude = try XCTUnwrap(runner.calls("drafter").first)
+        XCTAssertNil(claude.environment["CLAUDE_CONFIG_DIR"])
+    }
+
+    /// No `accounts.json` (a runner a pre-R9 build spawned): every seat on its built-in home.
+    func testNoResolvedAccountsRunsEverySeatOnItsBuiltInHome() async throws {
+        let runner = ScriptedHarnessRunner { call in ok(call, "s-\(call.model!)", json(DraftOutput(plan: "# P"))) }
+        _ = try checkpoint(try await executor(runner).run(PlannedRound(stage: .draft, round: 0, major: true),
+                                                          inputs(config(drafters: [Slot(claudeB), Slot(codexA)]))))
+        for call in runner.calls("drafter") {
+            XCTAssertNil(call.environment["CLAUDE_CONFIG_DIR"])
+            XCTAssertNil(call.environment["CODEX_HOME"])
+        }
+    }
+
+    /// An agent the runner's accounts leave out pauses its seat rather than billing a login the
+    /// project never chose.
+    func testAnAgentWithNoResolvedAccountPausesRatherThanRunOnTheBuiltInHome() async throws {
+        let runner = ScriptedHarnessRunner { call in ok(call, "s", json(DraftOutput(plan: "# P"))) }
+        var inputs = inputs(config(drafters: [Slot(claudeB)]))
+        inputs.accounts = RunnerAccounts(agents: [.codex: RunnerAccounts.Entry(accountID: nil, home: nil, label: "Codex built-in")])
+        let result = try await executor(runner).run(PlannedRound(stage: .draft, round: 0, major: true), inputs)
+        guard case .paused(let diagnosis, _) = result else { return XCTFail("expected a pause, got \(result)") }
+        XCTAssertTrue(diagnosis.detail.contains("No account was resolved for Claude"), diagnosis.detail)
+        XCTAssertTrue(runner.calls("drafter").isEmpty, "nothing ran")
     }
 
     func testDrafterFallsBackOnce() async throws {

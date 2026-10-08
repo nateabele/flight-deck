@@ -54,7 +54,15 @@ public struct SeatActivity: Codable, Equatable, Sendable {
     public var costUSD: Double?
     public var finished = false
     public var error: String?
-    public init(agent: AgentID, startedAt: Date) { self.agent = agent; self.startedAt = startedAt }
+    /// The Accounts-list id of the account this seat billed (unify brief R9), as the app
+    /// resolved it for the project when the runner started. nil is the agent's built-in home
+    /// with no account record, or a runner from a build before planning billed projects —
+    /// `UsageService` credits the built-in account for either, as it always did. Without it a
+    /// claude seat's `rate_limit_event`s on a pooled Work login would meter the built-in one.
+    public var accountID: UUID?
+    public init(agent: AgentID, startedAt: Date, accountID: UUID? = nil) {
+        self.agent = agent; self.startedAt = startedAt; self.accountID = accountID
+    }
 
     /// `agent` keeps the JSON key `harness` (unify brief R1): a runner from an older build may
     /// still be writing `activity.json` for a round this build is drawing. Every other property
@@ -65,6 +73,7 @@ public struct SeatActivity: Codable, Equatable, Sendable {
         case headline, action, footprint, steps, inputTokens, outputTokens, rateLimitedAt
         case rateLimitWindows, rateLimitStatus, rateLimitResetsAt, startedAt, lastEventAt, costUSD
         case finished, error
+        case accountID = "account"
     }
 }
 
@@ -144,11 +153,12 @@ public struct ActivityParser: Sendable {
     /// `project` is what footprint and display paths are relative to; `cwd` (default: the
     /// project) is what a relative path in a shell command resolves against — the integrator
     /// runs in the intake's work dir, not the project.
-    public init(agent: AgentID, project: URL, cwd: URL? = nil, now: @escaping @Sendable () -> Date) {
+    public init(agent: AgentID, project: URL, cwd: URL? = nil, accountID: UUID? = nil,
+                now: @escaping @Sendable () -> Date) {
         self.project = project.standardizedFileURL
         self.cwd = (cwd ?? project).standardizedFileURL
         self.now = now
-        activity = SeatActivity(agent: agent, startedAt: now())
+        activity = SeatActivity(agent: agent, startedAt: now(), accountID: accountID)
     }
 
     public mutating func feed(_ data: Data) {

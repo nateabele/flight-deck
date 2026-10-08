@@ -16,22 +16,20 @@ public struct ModelChoice: Codable, Equatable, Sendable {
     public var agent: AgentID
     public var model: String
     public var effort: String
-    /// The account this seat bills (grok/gemini spec §3.0), picked in the Rounds editor. nil is
-    /// the built-in account, which every config written before accounts reached planning
-    /// decodes to — the key is absent from those files, and stays absent when nil is encoded,
-    /// so an untouched config is byte-identical. Carries the home, not just the id: the runner
-    /// is a separate process with no preferences to resolve an id against.
-    public var account: AgentAccountRef?
-    public init(agent: AgentID, model: String, effort: String, account: AgentAccountRef? = nil) {
+    public init(agent: AgentID, model: String, effort: String) {
         self.agent = agent
         self.model = model
         self.effort = effort
-        self.account = account
     }
 
     private enum CodingKeys: String, CodingKey {
         case agent = "harness"
-        case model, effort, account
+        // No `account`: a seat no longer picks its own account — every seat bills the project's
+        // assignment for its agent, resolved by the app at each runner start (unify brief R9,
+        // `RunnerAccounts`). Configs written while the Rounds editor had a per-seat picker still
+        // carry the key; a keyed decoder skips a key it is not asked for, so they decode, and
+        // the next save drops it.
+        case model, effort
     }
 }
 
