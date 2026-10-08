@@ -548,6 +548,22 @@ final class RunnerTests: XCTestCase {
         XCTAssertEqual(log.notes, ["atExit \(id) [\"build/*.xcresult\"]", "release"])
     }
 
+    /// A lifecycle's notices reach the run's own output, before its exit is reported: the
+    /// only place a user (or agent) watching the run will see that a submodule's changes were
+    /// left on the host.
+    func testLifecycleNoticesAreWrittenToTheRunsOutput() async throws {
+        let log = LeaseLog()
+        let r = Runner(runsRoot: try tempDir("runs"), shell: "/bin/sh", hostEnvironment: hostEnv,
+                       console: FixedConsole(state: consoleAvailable),
+                       lifecycle: RunLifecycle(atExit: { _, _, _ in log.note("atExit") },
+                                               release: { _ in log.note("release") },
+                                               notices: { _, _, _ in log.note("notices"); return ["warning: lib changed"] }))
+        let events = try await collect(r, start(r, spec("echo hi"), try checkout()))
+        XCTAssertTrue(output(events, .stderr).contains("flightdeck: warning: lib changed\n"), output(events))
+        XCTAssertEqual(log.notes, ["atExit", "notices", "release"])
+        XCTAssertEqual(exit(events), .code(0))
+    }
+
     func testOwnerIsExposedForControllerScoping() throws {
         let r = try runner()
         let lease = try checkout()

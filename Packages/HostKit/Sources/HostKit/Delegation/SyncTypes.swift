@@ -18,13 +18,22 @@ public struct SnapshotRef: Codable, Sendable, Equatable {
     public let commit: String
     /// `commit^{tree}`, verified on the host after checkout and before anything runs (§4.4).
     public let tree: String
+    /// Every gitlink in the snapshot, nested ones included, each parent before its children
+    /// (§4.2 step 4).
+    /// The tree already names each pinned commit; what only the controller knows is where to
+    /// fetch it from (its `.git/config`, a relative URL's base, its `insteadOf` rules), so the
+    /// URL travels here. Empty for a repo without submodules, and then left off the wire, so
+    /// such a snapshot is byte-identical to what a host that predates the field expects.
+    public let submodules: [SubmodulePin]
 
-    public init(repoRoot: String, wtKey: String, worktreeName: String, commit: String, tree: String) {
+    public init(repoRoot: String, wtKey: String, worktreeName: String, commit: String, tree: String,
+                submodules: [SubmodulePin] = []) {
         self.repoRoot = repoRoot
         self.wtKey = wtKey
         self.worktreeName = worktreeName
         self.commit = commit
         self.tree = tree
+        self.submodules = submodules
     }
 
     // Explicit raw values: a Swift rename must not change the wire.
@@ -34,6 +43,7 @@ public struct SnapshotRef: Codable, Sendable, Equatable {
         case worktreeName = "worktreeName"
         case commit = "commit"
         case tree = "tree"
+        case submodules = "submodules"
     }
 
     /// Hand-written so the leniency rule has a place to live: every field here is the first
@@ -46,7 +56,55 @@ public struct SnapshotRef: Codable, Sendable, Equatable {
                   wtKey: try c.decode(String.self, forKey: .wtKey),
                   worktreeName: try c.decode(String.self, forKey: .worktreeName),
                   commit: try c.decode(String.self, forKey: .commit),
-                  tree: try c.decode(String.self, forKey: .tree))
+                  tree: try c.decode(String.self, forKey: .tree),
+                  submodules: try c.decodeIfPresent([SubmodulePin].self, forKey: .submodules) ?? [])
+    }
+
+    /// Hand-written so an empty `submodules` is omitted rather than sent as `[]`: the wire's
+    /// rule (optionals omitted, never null), and it keeps a submodule-free snapshot's bytes
+    /// exactly what every earlier build sent and pinned in its tests.
+    public func encode(to encoder: any Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(repoRoot, forKey: .repoRoot)
+        try c.encode(wtKey, forKey: .wtKey)
+        try c.encode(worktreeName, forKey: .worktreeName)
+        try c.encode(commit, forKey: .commit)
+        try c.encode(tree, forKey: .tree)
+        if !submodules.isEmpty { try c.encode(submodules, forKey: .submodules) }
+    }
+
+    /// The refusal for sending this snapshot to a host that advertised `capabilities`, or nil
+    /// when it may go. A host without `submodules` decodes the pins as an unknown key and
+    /// drops them: its checkout passes the tree check (the gitlinks are in the tree) and the
+    /// run starts against empty submodule directories, failing somewhere far from the cause.
+    /// nil capabilities (no helloAck to read) leaves the call to the host.
+    public func unsupported(on host: String, capabilities: Set<HostCapability>?) -> DelegationError? {
+        guard !submodules.isEmpty, let capabilities, !capabilities.contains(.submodules) else { return nil }
+        return DelegationError(code: "submodules_unsupported",
+                               message: "\(host)'s Flight Deck predates submodule support, and this repo has submodules — update Flight Deck on \(host), or run it locally")
+    }
+}
+
+/// One submodule as the snapshot pins it.
+public struct SubmodulePin: Codable, Sendable, Equatable {
+    /// Relative to the superproject's root, `/`-separated; a nested one's includes its parents.
+    public let path: String
+    /// The gitlink's commit: what the host checks out, and what the tree check covers.
+    public let commit: String
+    /// Where the host fetches it from, already resolved: a relative URL made absolute against
+    /// the superproject's remote, and the controller's `insteadOf` rules applied.
+    public let url: String
+
+    public init(path: String, commit: String, url: String) {
+        self.path = path
+        self.commit = commit
+        self.url = url
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case path = "path"
+        case commit = "commit"
+        case url = "url"
     }
 }
 
@@ -54,9 +112,11 @@ public struct SnapshotRef: Codable, Sendable, Equatable {
 /// `include` path) through a temporary `GIT_INDEX_FILE`, never touching the user's index,
 /// stash, reflog or branches (§4.2). The commit is kept under
 /// `refs/flightdeck/snapshots/<host>/<n>` so `gc` cannot prune it before the host has it. Throws
-/// `lfs_unsupported` for an LFS repo and `submodules_unsupported` for a tree with a gitlink:
-/// both are out of v1. Async because it shells out to git, which can take seconds on a big
-/// tree, and must not hold a cooperative thread while it does.
+/// `lfs_unsupported` for an LFS repo (out of v1). Each gitlink becomes a `SubmodulePin`; a
+/// submodule the host could not reproduce (uncommitted work in it, a commit its remote lacks,
+/// no URL) throws `SyncError.submodule` before anything is recorded. Async because it shells
+/// out to git, which can take seconds on a big tree, and must not hold a cooperative thread
+/// while it does.
 public protocol SnapshotMaking: Sendable {
     func snapshot(worktree: URL, host: String, include: [String]) async throws -> SnapshotRef
 }
@@ -98,6 +158,9 @@ public protocol WorkspaceStore: Sendable {
     /// only then `release`. Once the slot is released the next run's apply cleans it, and
     /// whatever the finished run changed is gone.
     func resultCommit(lease: CheckoutLease, runID: String) async throws -> String?
+    /// The submodules (by path) whose contents the run changed. Those changes are never in
+    /// the result (§4.5); the run's output says so instead. Same ordering as `resultCommit`.
+    func submoduleChanges(lease: CheckoutLease) async -> [String]
     /// A bundle of that one result commit, for the controller to fetch. nil when the run
     /// changed nothing; throws `result_expired` when the result is unknown, already acked, or
     /// past its 24h TTL. Making a bundle changes nothing, so a dropped transfer can ask again.
@@ -116,6 +179,11 @@ public protocol WorkspaceStore: Sendable {
     /// Deletes this controller's checkouts and object stores, or one repo's when `repoRoot`
     /// is given (`host prune`, §4.7).
     func prune(controller: UUID, repoRoot: String?) async throws
+}
+
+extension WorkspaceStore {
+    /// A store that places no submodules has none to report.
+    public func submoduleChanges(lease: CheckoutLease) async -> [String] { [] }
 }
 
 /// A locked checkout slot. Not `Codable`: it names a host-local path and never crosses the wire.

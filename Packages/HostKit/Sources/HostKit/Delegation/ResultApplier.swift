@@ -80,7 +80,10 @@ public struct ResultApplier: Sendable {
         let runID = try SyncName.validate(runID)
         return try await GitRunner.offload { [git] () -> String? in
             guard let result = try? git.text(["rev-parse", "-q", "--verify", Self.ref(runID)], in: worktree) else { return nil }
-            let out = try git.run(["diff", "--binary", "--no-color", "--no-ext-diff", "\(result)^", result], in: worktree)
+            // Without submodules, as `apply` is: a "Subproject commit" hunk would show a change
+            // that applying never makes.
+            let out = try git.run(["diff", "--binary", "--no-color", "--no-ext-diff", "--ignore-submodules=all",
+                                   "\(result)^", result], in: worktree)
             return String(decoding: out.stdout, as: UTF8.self)
         }
     }
@@ -126,7 +129,15 @@ public struct ResultApplier: Sendable {
         let mergedTree = fields[0]
         var conflicts = Set(merged.status == 1 ? Array(fields.dropFirst().prefix { !$0.isEmpty }) : [])
 
-        let changes = Self.changes(try git.run(["diff-tree", "-r", "-z", "--no-renames", "--raw", oursTree, mergedTree], in: top).stdout)
+        let all = Self.changes(try git.run(["diff-tree", "-r", "-z", "--no-renames", "--raw", oursTree, mergedTree], in: top).stdout)
+        // Submodules are never part of a result (§4.5): a current host leaves them out, and a
+        // gitlink change from any other is dropped here with everything beneath it. Applied, a
+        // deleted gitlink would delete the user's submodule checkout, and one replaced by a
+        // directory would scatter another repository's files into this one.
+        let gitlinks = Set(all.filter { $0.oldMode == Self.gitlink || $0.newMode == Self.gitlink }.map(\.path))
+        func inSubmodule(_ path: String) -> Bool { gitlinks.contains { path == $0 || path.hasPrefix($0 + "/") } }
+        let changes = all.filter { !inSubmodule($0.path) }
+        conflicts = conflicts.filter { !inSubmodule($0) }
         let realTop = top.resolvingSymlinksInPath()
 
         // Every check runs before the first write, so a refusal never leaves a partial apply.
@@ -187,10 +198,10 @@ public struct ResultApplier: Sendable {
             }
             let staged = staging.appendingPathComponent(change.path)
             guard (try? fm.attributesOfItem(atPath: staged.path)) != nil else {
-                // Only a gitlink legitimately stages nothing. Anything else missing lost a
-                // collision in staging (on APFS, `Notes/bar` and `notes` from a case-sensitive
-                // host are one entry): report it and keep the result, never drop it silently.
-                if change.newMode != "160000" { skip.insert(change.path) }
+                // Gitlinks were filtered out above, so anything missing lost a collision in
+                // staging (on APFS, `Notes/bar` and `notes` from a case-sensitive host are one
+                // entry): report it and keep the result, never drop it silently.
+                skip.insert(change.path)
                 continue
             }
             try fm.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -208,6 +219,7 @@ public struct ResultApplier: Sendable {
     }
 
     private static let absent = "000000"
+    private static let gitlink = "160000"
 
     /// One changed path, both sides, from `diff-tree --raw -z`.
     struct Change {

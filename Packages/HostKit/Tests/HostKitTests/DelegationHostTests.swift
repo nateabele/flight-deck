@@ -198,7 +198,7 @@ final class DelegationHostTests: XCTestCase {
     func testHelloAdvertisesTheDelegationCapabilities() async throws {
         let c = Controller(core: try host())
         let caps = try await c.hello()
-        XCTAssertEqual(Set(caps), [.hostInfo, .run, .sync, .service], "no screen on a host that has none")
+        XCTAssertEqual(Set(caps), [.hostInfo, .run, .sync, .service, .submodules], "no screen on a host that has none")
     }
 
     func testSyncThenRunStreamsOutputAndExitCode() async throws {

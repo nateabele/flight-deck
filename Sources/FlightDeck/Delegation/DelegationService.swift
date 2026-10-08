@@ -1149,6 +1149,12 @@ final class DelegationService {
     // MARK: Transfer
 
     private func push(_ snapshot: SnapshotRef, from worktree: URL, to link: any HostLinking) async throws {
+        // A host that predates submodule support would drop the pins and run against empty
+        // submodule directories; refused here, before anything is sent. A link that is not
+        // a `LiveHostLink` has no helloAck to read, and the host decides (as in preflight).
+        if let refusal = snapshot.unsupported(on: link.name, capabilities: (link as? LiveHostLink)?.capabilities) {
+            throw refusal
+        }
         guard case .syncTips(let tips) = try await hostRequest(.syncTips(repoRoot: snapshot.repoRoot, wtKey: snapshot.wtKey), on: link)
         else { throw Self.unexpected(link.name, "sync.tips") }
         let bundle = try await deps.bundles.bundle(worktree: worktree, snapshot: snapshot, haves: tips)
@@ -1247,7 +1253,7 @@ final class DelegationService {
         switch code {
         case "tree_mismatch": return "\(host): sync rejected: tree hash mismatch — rerun; if it repeats, flightdeck host prune \(host)"
         case "lfs_unsupported": return "\(host): LFS repos are not supported for delegation yet — run it locally"
-        case "submodules_unsupported": return "\(host): submodules are not supported for delegation yet — run it locally"
+        case "submodules_unsupported": return "\(host)'s Flight Deck predates submodule support — update Flight Deck on \(host), or run it locally"
         case "screen_locked": return "\(host)'s screen is locked — unlock it, then rerun"
         case "no_console_user": return "nobody is logged in at \(host)'s console — log in there, then rerun"
         case "screen_unsupported": return "\(host) has no screen for --screen runs — use a macOS host"

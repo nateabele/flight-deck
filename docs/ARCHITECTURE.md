@@ -299,9 +299,27 @@ host says which tips it holds; the controller sends a bundle of only what is mis
 checkouts (two per worktree by default), each a `git worktree` named after the local worktree so
 `docker compose` project names match. An apply is `checkout --force --detach` then `clean -fd`
 (never `-x`), so ignored build output survives and builds stay incremental; the tree hash is checked
-before anything runs. Refused up front: LFS repos (`lfs_unsupported`), repos with submodules
-(`submodules_unsupported`: v1 refuses them, like LFS, instead of the spec's recursive handling, to
-keep sync bounded), and git older than 2.40 (`git_too_old`).
+before anything runs. Refused up front: LFS repos (`lfs_unsupported`) and git older than 2.40
+(`git_too_old`).
+
+**Submodules** (`Submodules.swift`, spec §4.2 step 4). The snapshot's tree already pins each
+submodule (a gitlink is a commit id, covered by the tree check); what it lacks is where to fetch
+it, and only the controller knows that (its `.git/config`, the superproject's remote for a
+relative URL, its `insteadOf` rules). So the snapshot carries `SnapshotRef.submodules`, one
+`{path, commit, url}` per gitlink, nested ones included, with the URL already resolved. Before
+anything is recorded or sent, a populated submodule with uncommitted or untracked changes is
+refused (`submodule_dirty`), as is one at a commit no remote-tracking branch or tag of it contains
+(`submodule_unpushed`, a local-refs check: no network on every run), and a nested repository that
+has no URL (`submodule_no_url`). On the host, after the superproject's tree is verified, each
+gitlink is fetched into a per-URL bare cache, `<state root>/submodules/<controller slot>/`, kept
+across runs (a shallow fetch of the one commit, falling back to a full fetch for a server that
+refuses it; only `file`, `git`, `http`, `https` and `ssh` URLs, ssh in batch mode), and placed as a
+`git worktree` of that cache at its path, recursing into nested submodules. A nested gitlink with
+no pin falls back to its parent's committed `.gitmodules`. A URL the host cannot reach fails the
+checkout as `submodule_fetch_failed`, naming the path and the URL. A host advertises the
+`submodules` capability; the controller refuses to sync a snapshot with submodules to one that
+does not (`submodules_unsupported`), because it would drop the pins and run against empty
+directories. A submodule-free snapshot is byte-identical on the wire to what earlier builds sent.
 
 **Results come back two ways.** Tracked changes are committed on the host as a child of the
 snapshot (`refs/fd/results/<run>`) and fetched as a one-commit bundle. The host keeps it until the
@@ -311,7 +329,11 @@ connection died before the Mac's copy landed, so the controller's ack is what re
 worktree, so edits made during the run conflict instead of being overwritten. `apply = "auto"`
 applies on completion and falls back to review on a conflict. `ResultApplier` trusts nothing the
 host sends: a path into `.git`, through a symlink, or colliding with another after case and NFC
-folding is refused as `unsafe_path` with nothing written. Artifacts (`--fetch`, recipe `fetch`)
+folding is refused as `unsafe_path` with nothing written. Nothing inside a submodule comes back:
+the host's result commit leaves every gitlink at its pin (its `add -A` excludes them), the run's
+output ends with a `flightdeck: warning:` line naming each submodule the run changed, and
+`ResultApplier` drops any gitlink change (and anything beneath one) a result carries, so a host
+that predates this cannot delete or scatter a submodule either. Artifacts (`--fetch`, recipe `fetch`)
 are tarred on the host at exit and unpacked over local files only where those are ignored.
 
 **Execution** (`Runner`, `OutputSpool`). A run is `$SHELL -lc '<cmd>'` in its own process group,

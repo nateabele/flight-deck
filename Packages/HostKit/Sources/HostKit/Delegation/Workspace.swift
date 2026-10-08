@@ -11,6 +11,10 @@ import Foundation
 ///     fd-results/<run-id>                       "this run changed nothing", same lifetime
 ///     worktrees/<n>/flightdeck-excludes         the controller's excludes, per slot
 ///   checkouts/<wt-key>-<slot>/<worktree-name>/  one `git worktree` per pool slot
+///     <submodule path>/                         a `git worktree` of that submodule's cache
+/// <root>/submodules/<controller>/<name>-<hash>.git   one bare cache per submodule URL
+///     refs/fd/pins/<commit>                     every commit a slot has had checked out
+///     worktrees/<n>/                            one per slot and path it is placed at
 /// <root>/runs/<run-id>/artifacts.tar            captured artifacts
 /// ```
 ///
@@ -28,7 +32,7 @@ public final class Workspace: WorkspaceStore, @unchecked Sendable {
     public let poolSize: Int
     public let keep: Int
     public let resultTTL: TimeInterval
-    private let git: GitRunner
+    let git: GitRunner
 
     private let lock = NSLock()
     private var pools: [PoolKey: [Int: Slot]] = [:]
@@ -161,7 +165,8 @@ public final class Workspace: WorkspaceStore, @unchecked Sendable {
                     try await GitRunner.offload { [self] in
                         applyHook?()
                         return try withStore(storeURL(controller: controller, repoRoot: ref.repoRoot)) {
-                            try apply(ref, at: path, store: storeURL(controller: controller, repoRoot: ref.repoRoot), exclusive: true)
+                            try apply(ref, at: path, store: storeURL(controller: controller, repoRoot: ref.repoRoot),
+                                      controller: controller, exclusive: true)
                         }
                     }
                 } catch {
@@ -271,7 +276,16 @@ public final class Workspace: WorkspaceStore, @unchecked Sendable {
     /// rebuilt from scratch and the whole apply runs once more, rather than left wedged. A real
     /// tree mismatch fails again after the rebuild and is reported as such. With a sharer (an
     /// `exec` beside a service) its git may be live, so nothing is touched.
-    private func apply(_ ref: SnapshotRef, at path: URL, store: URL, exclusive: Bool) throws {
+    ///
+    /// Submodules are placed after the superproject's tree is verified, and outside its
+    /// rebuild-and-retry: a submodule that cannot be fetched (a URL the host cannot reach) would
+    /// fail the same way after a rebuild, having paid for the fetch attempt twice.
+    private func apply(_ ref: SnapshotRef, at path: URL, store: URL, controller: UUID, exclusive: Bool) throws {
+        try applyTree(ref, at: path, store: store, exclusive: exclusive)
+        try placeSubmodules(ref, in: path, controller: controller)
+    }
+
+    private func applyTree(_ ref: SnapshotRef, at path: URL, store: URL, exclusive: Bool) throws {
         let fm = FileManager.default
         if let admin = Self.adminDir(path), fm.fileExists(atPath: admin.path) {
             if exclusive {
@@ -314,7 +328,7 @@ public final class Workspace: WorkspaceStore, @unchecked Sendable {
 
     /// A worktree's admin dir, from its `.git` file (`gitdir: …`), read without git so that it
     /// still works on a slot whose git state is broken.
-    private static func adminDir(_ path: URL) -> URL? {
+    static func adminDir(_ path: URL) -> URL? {
         guard let text = try? String(contentsOf: path.appendingPathComponent(".git"), encoding: .utf8),
               text.hasPrefix("gitdir: ") else { return nil }
         let dir = text.dropFirst("gitdir: ".count).trimmingCharacters(in: .whitespacesAndNewlines)
@@ -386,7 +400,9 @@ public final class Workspace: WorkspaceStore, @unchecked Sendable {
             return (key, index, pools[key]?[index]?.holders == [lease.id])
         }) else { throw SyncError.noCheckout }
         let store = storeURL(controller: key.controller, repoRoot: key.repoRoot)
-        try await GitRunner.offload { [self] in try withStore(store) { try apply(ref, at: lease.path, store: store, exclusive: alone) } }
+        try await GitRunner.offload { [self] in
+            try withStore(store) { try apply(ref, at: lease.path, store: store, controller: key.controller, exclusive: alone) }
+        }
         lock.withLock {
             pools[key]?[index]?.ref = ref
             pools[key]?[index]?.lastApplied = Date()
@@ -414,12 +430,13 @@ public final class Workspace: WorkspaceStore, @unchecked Sendable {
     /// that changed nothing records that too, so `resultBundle` can tell it from a lost result.
     public func resultCommit(lease: CheckoutLease, runID: String) async throws -> String? {
         let runID = try SyncName.validate(runID)
-        return try await GitRunner.offload { [git] () -> String? in
+        return try await GitRunner.offload { [self, git] () -> String? in
             let store = URL(fileURLWithPath: try git.text(["rev-parse", "--path-format=absolute", "--git-common-dir"], in: lease.path))
             let index = try TempIndex(git: git, top: lease.path, dir: FileManager.default.temporaryDirectory, seed: lease.ref.commit)
             defer { index.remove() }
             let ignoring = Self.adminDir(lease.path).map { Self.ignoring($0.appendingPathComponent("flightdeck-excludes")) } ?? []
-            try git.run(ignoring + ["add", "-A"], in: lease.path, env: index.env)
+            let pathspecs = try resultPathspecs(snapshot: lease.ref.commit, in: lease.path)
+            try git.run(ignoring + ["add", "-A"] + pathspecs, in: lease.path, env: index.env)
             let tree = try git.text(["write-tree"], in: lease.path, env: index.env)
             guard tree != lease.ref.tree else {
                 let marks = store.appendingPathComponent("fd-results")
@@ -621,7 +638,7 @@ public final class Workspace: WorkspaceStore, @unchecked Sendable {
     /// Serializes git work per store: `worktree add`, `fetch` and ref transactions on one bare
     /// repo would otherwise race on its lock files and fail one of two concurrent syncs.
     /// Blocks a dispatch thread, never the cooperative pool (every caller is inside `offload`).
-    private func withStore<T>(_ store: URL, _ body: () throws -> T) throws -> T {
+    func withStore<T>(_ store: URL, _ body: () throws -> T) throws -> T {
         let storeLock = lock.withLock { () -> NSLock in
             if let l = storeLocks[store.path] { return l }
             let l = NSLock()
