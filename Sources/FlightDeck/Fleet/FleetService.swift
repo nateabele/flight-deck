@@ -74,6 +74,9 @@ final class FleetService: ObservableObject {
     /// wired (task C8); nil answers `not_implemented`, which is what every fleet test without
     /// one and any build that predates the wiring wants.
     var delegation: DelegationService?
+    /// Answers `infra.*` (cloud infra hosts). Set by the app once it builds the service
+    /// (Task 18); nil answers `infra_unavailable`, for `delegation`'s reason.
+    var infra: InfraService?
     private(set) var boundPort: NWEndpoint.Port?
     /// The window's own listener, and the port it is on. Both are `nil` whenever no window is
     /// open, which is invariant 2 stated as a field rather than as a comment.
@@ -725,6 +728,17 @@ final class FleetService: ObservableObject {
             delegation.handle(delegate, caller: ControlScope.caller(token: client.caller, secret: controlSecret),
                               cid: cid, cancellation: localServer.replyCancellation(for: client, cid: cid),
                               reply: reply)
+        case .infra(let request):
+            // Local callers only, like `delegate`: creating or destroying a cloud machine
+            // spends this Mac's money, and the phone has no screen that asks for it.
+            guard client.isLocal else { return reply(.err(cid: cid, code: "out_of_scope")) }
+            guard let infra else {
+                return reply(.err(cid: cid, code: "infra_unavailable",
+                                  message: "cloud machines are not available in this Flight Deck"))
+            }
+            // No cancellation: a CLI that goes away mid-`up` must not abandon a machine that
+            // is half created. The app finishes it, and `infra down` cancels it.
+            infra.handle(request, cid: cid, reply: reply)
         }
     }
 

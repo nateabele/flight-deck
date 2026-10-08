@@ -116,8 +116,9 @@ enum ControlScope {
 
     /// Exhaustive with no `default`, same reasoning as the command overload. `.openConversation`
     /// is a request that writes — it opens a tab — so it follows the fleet-wide command rule
-    /// (`.full` or `.human` only). The delegation requests that write follow the own-session
-    /// rule instead (see their arm). Every other request only reads and is always allowed.
+    /// (`.full` or `.human` only), as do the infra requests that write. The delegation requests
+    /// that write follow the own-session rule instead (see their arm). Every other request only
+    /// reads and is always allowed.
     static func permits(_ request: FleetRequest, level: ControlScopeLevel, caller: ControlCaller) -> Bool {
         switch request {
         case .timeline, .newSessionOptions, .recentlyClosed, .macEndpoints, .conversations, .search,
@@ -149,6 +150,11 @@ enum ControlScope {
             if case .hostPrune = delegate { return false }
             guard case .session = caller else { return false }
             return level == .ownSession
+        case .infra(let infra):
+            // `infra ls` and `doctor` only read. `up`, `down` and `extend` create, destroy or
+            // spend money on a machine that belongs to the Mac, not to the tab that asked (any
+            // tab's runs may land on it), so they follow the fleet-wide rule, like `host prune`.
+            return infra.isReadOnly || level == .full || caller == .human
         }
     }
 }
