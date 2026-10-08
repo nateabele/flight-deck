@@ -970,6 +970,30 @@ final class DelegationServiceTests: XCTestCase {
         XCTAssertEqual(sync.snapshots, 0)
     }
 
+    func testAnInfraProviderSetAfterInitAutoUpsTheHost() async throws {
+        var recipe = gpuRecipe
+        recipe.autoUp = true
+        config.config = DelegateConfig(infra: ["gpu": recipe])
+        service = DelegationService(registry: RunRegistry(file: nil), dependencies: dependencies())
+        let infra = FakeInfraUp(hosts: hosts)
+        service.infraProvider = infra
+        let frames = send(.run(WireDelegateRun(cwd: "/w/proj", host: "gpu", command: ["make"])))
+        _ = try await started(frames)
+        XCTAssertEqual(infra.ensured, ["gpu"])
+    }
+
+    func testAutoUpWithNoInfraInThisAppSaysSoRatherThanToSetAutoUp() async throws {
+        var recipe = gpuRecipe
+        recipe.autoUp = true
+        config.config = DelegateConfig(infra: ["gpu": recipe])
+        service = DelegationService(registry: RunRegistry(file: nil), dependencies: dependencies())
+        let frames = send(.run(WireDelegateRun(cwd: "/w/proj", host: "gpu", command: ["make"])))
+        try await until { frames.all.contains(where: terminal) }
+        guard case .err(1, "unknown_host", let message?) = frames.all.last else { return XCTFail("\(frames.all)") }
+        XCTAssertTrue(message.contains("not available in this app"), message)
+        XCTAssertFalse(message.contains("set auto_up"), message)
+    }
+
     func testRunOnCloudHostSendsCostNotice() async throws {
         let infra = withInfra(autoUp: false)
         hosts.links["gpu"] = FakeHostLink(name: "gpu")

@@ -293,7 +293,7 @@ struct FlightDeckApp: App {
         // Before either socket starts, so no `delegate.*` request is ever answered
         // `not_implemented` by a fleet that simply had not been handed its service yet.
         delegation?.connect(fleet: service, hosts: hosts) { [weak store] in store?.title(of: $0) }
-        // TODO(T17 merge): service.delegation?.infra = infra  // InfraUpProviding, for auto-up
+        service.delegation?.infraProvider = infra  // for `run --on` auto-up and its cost line
         Task {
             do {
                 try await service.start()
