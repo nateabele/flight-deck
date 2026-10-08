@@ -3,8 +3,8 @@ import IntakeKit
 @testable import FlightDeck
 
 final class ShapingModelTests: XCTestCase {
-    private let codex = ModelChoice(harness: .codex, model: "gpt-6-sol", effort: "high")
-    private let claude = ModelChoice(harness: .claude, model: "opus", effort: "high")
+    private let codex = ModelChoice(agent: .codex, model: "gpt-6-sol", effort: "high")
+    private let claude = ModelChoice(agent: .claude, model: "opus", effort: "high")
 
     /// Feature plan: drafts, synthesis, R1–R3 (R3 major), encode, P1–P2 (P2 major).
     private func featureIntake() throws -> Intake {

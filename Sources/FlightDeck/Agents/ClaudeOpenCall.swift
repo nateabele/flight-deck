@@ -1,5 +1,6 @@
 import FleetKit
 import Foundation
+import IntakeKit
 
 /// What a claude session is blocked on, derived on the Mac from a window of its transcript.
 ///

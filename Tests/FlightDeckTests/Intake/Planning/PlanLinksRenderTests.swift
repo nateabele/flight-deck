@@ -13,8 +13,8 @@ import XCTest
 final class PlanLinksRenderTests: XCTestCase {
     private var root: URL!
     private let now = Date()
-    private let codex = ModelChoice(harness: .codex, model: "gpt-6-sol", effort: "high")
-    private let claude = ModelChoice(harness: .claude, model: "opus", effort: "high")
+    private let codex = ModelChoice(agent: .codex, model: "gpt-6-sol", effort: "high")
+    private let claude = ModelChoice(agent: .claude, model: "opus", effort: "high")
 
     override func setUp() {
         super.setUp()
@@ -76,7 +76,7 @@ final class PlanLinksRenderTests: XCTestCase {
             refinementCap: 3, polishCap: 2, freshEyesAndDedup: true, defaultPlay: .nextMajor, customized: false)
         try store.save(intake)
         try ConvergenceFixture.writeTape(scenario, for: intake.id, store: store, now: now, codex: codex, claude: claude)
-        let service = IntakeService(store: store, triageSettings: TriageSettings(harness: .codex, model: "gpt-6-sol", effort: "high"),
+        let service = IntakeService(store: store, triageSettings: TriageSettings(agent: .codex, model: "gpt-6-sol", effort: "high"),
                                     availableModels: .defaults, inject: { _, _, _, _ in true }, hasSession: { _, _ in false })
         await service.launchRecovery?.value
         service.pollTapes()
@@ -142,7 +142,7 @@ final class PlanLinksRenderTests: XCTestCase {
             files: ["plan.md": Data(plan.utf8)], into: &tape)
         tape.status = .paused
         try tapes.saveTape(tape)
-        let service = IntakeService(store: store, triageSettings: TriageSettings(harness: .codex, model: "gpt-6-sol", effort: "high"),
+        let service = IntakeService(store: store, triageSettings: TriageSettings(agent: .codex, model: "gpt-6-sol", effort: "high"),
                                     availableModels: .defaults, inject: { _, _, _, _ in true }, hasSession: { _, _ in false })
         service.pollTapes()
         return (service, intake)

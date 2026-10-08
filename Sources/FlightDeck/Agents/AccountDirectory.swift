@@ -1,4 +1,5 @@
 import Foundation
+import IntakeKit
 
 /// Reads what a config directory says about itself, and finds directories that look like one.
 ///

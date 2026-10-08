@@ -1,4 +1,5 @@
 import XCTest
+import IntakeKit
 import FleetKit
 import SQLite3
 @testable import FlightDeck

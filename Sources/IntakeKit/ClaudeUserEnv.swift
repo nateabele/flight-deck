@@ -1,7 +1,7 @@
 import Foundation
 
 /// The `env` block of the operator's `~/.claude/settings.json`, re-applied by hand to every
-/// headless claude child. `HarnessCommand.claudeIsolation`'s `--restricted` drops the user
+/// headless claude child. `HeadlessCommand.claudeIsolation`'s `--restricted` drops the user
 /// settings file wholesale — its permission allows, which is the point, but also its
 /// `env`, which on this machine carries `ANTHROPIC_BASE_URL` (a local proxy). A shell that
 /// already exports it hides the loss; the app's launchd environment doesn't, so without this

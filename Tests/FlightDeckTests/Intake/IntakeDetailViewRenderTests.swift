@@ -56,7 +56,7 @@ final class IntakeDetailViewRenderTests: XCTestCase {
 
         let store = IntakeStore(root: root)
         for i in [asking, choosing, failed] { try store.save(i) }
-        let service = IntakeService(store: store, triageSettings: TriageSettings(harness: .codex, model: "m1", effort: "high"),
+        let service = IntakeService(store: store, triageSettings: TriageSettings(agent: .codex, model: "m1", effort: "high"),
                                     availableModels: .defaults, inject: { _, _, _, _ in true }, hasSession: { _, _ in false })
         // Partially typed drafts go through the same file a relaunch reads them back from.
         service.saveAnswerDrafts(asking.id, questions: open, answers: ["One short paragraph.", "Link to it", ""])

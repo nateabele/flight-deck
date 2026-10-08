@@ -176,8 +176,8 @@ struct FlightControlRoutingPane: View {
 
     private var compilerTitle: String {
         let s = preferences.routingCompilerSettings
-        let h = HarnessID(s.harness.rawValue)
-        let model = routing.lastCatalogs.byHarness[h]?.models.first { $0.id == s.model }?.displayName ?? s.model
+        let h = s.agent
+        let model = routing.lastCatalogs.byAgent[h]?.models.first { $0.id == s.model }?.displayName ?? s.model
         return "Compiled by \(RuleRowPresentation.agentName(h)) \(model)"
     }
 

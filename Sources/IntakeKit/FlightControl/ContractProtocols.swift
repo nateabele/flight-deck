@@ -22,19 +22,19 @@ public protocol Router: Sendable {
 /// Owned by L3-U (its pool store conforms; `DefaultPoolDirectory` stands in until then).
 public protocol PoolDirectory: Sendable {
     func pools() -> [PoolSummary]
-    func defaultPool(for harness: HarnessID) -> PoolID?
+    func defaultPool(for agent: AgentID) -> PoolID?
 }
 
-/// One `<harness>-default` pool per agent — L3-U §2's default pools, which exist before anyone
+/// One `<agent>-default` pool per agent — L3-U §2's default pools, which exist before anyone
 /// configures capacity. Enough for routing to run end to end before L3-U's pool store conforms.
 public struct DefaultPoolDirectory: PoolDirectory {
-    public let harnesses: [HarnessID]
-    public init(harnesses: [HarnessID]) { self.harnesses = harnesses }
+    public let agents: [AgentID]
+    public init(agents: [AgentID]) { self.agents = agents }
     public func pools() -> [PoolSummary] {
-        harnesses.map { PoolSummary(id: PoolID("\($0.rawValue)-default"), harness: $0, label: "\($0.rawValue) — all accounts") }
+        agents.map { PoolSummary(id: PoolID("\($0.rawValue)-default"), agent: $0, label: "\($0.rawValue) — all accounts") }
     }
-    public func defaultPool(for harness: HarnessID) -> PoolID? {
-        harnesses.contains(harness) ? PoolID("\(harness.rawValue)-default") : nil
+    public func defaultPool(for agent: AgentID) -> PoolID? {
+        agents.contains(agent) ? PoolID("\(agent.rawValue)-default") : nil
     }
 }
 

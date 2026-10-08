@@ -563,7 +563,7 @@ final class SwarmController {
         switch error {
         case .launchFailed(let why): why
         case .composerTimeout: "no composer within two minutes"
-        case .unsupportedHarness(let harness): "no adapter named \(harness)"
+        case .unsupportedAgent(let agent): "no adapter named \(agent)"
         case .claimConflict(let task): "\(task) was claimed elsewhere"
         }
     }

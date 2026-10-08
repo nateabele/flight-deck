@@ -24,10 +24,10 @@ final class RoutingRuleTests: XCTestCase {
                         match: .any([.dimension("test-authoring", atLeast: 0.5),
                                      .dimension("algorithmic-reasoning", atLeast: 0.6),
                                      .kind("tests")]),
-                        assign: RuleAssign(harness: "codex", model: "gpt-6-sol", knobs: ["effort": "high"],
+                        assign: RuleAssign(agent: .codex, model: "gpt-6-sol", knobs: ["effort": "high"],
                                            pool: "codex-subs")),
                     state: .confirmed, compiledAt: Date(timeIntervalSince1970: 1_790_964_000),
-                    compiler: CompilerRef(harness: "claude", model: "haiku"))
+                    compiler: CompilerRef(agent: .claude, model: "haiku"))
     }
 
     private func decoder() -> JSONDecoder { let d = JSONDecoder(); d.dateDecodingStrategy = .iso8601; return d }
@@ -37,7 +37,7 @@ final class RoutingRuleTests: XCTestCase {
         let rule = try decoder().decode(RoutingRule.self, from: Data(specJSON.utf8))
         XCTAssertEqual(rule.compiled, specRule.compiled)
         XCTAssertEqual(rule.state, .confirmed)
-        XCTAssertEqual(rule.compiler, CompilerRef(harness: "claude", model: "haiku"))
+        XCTAssertEqual(rule.compiler, CompilerRef(agent: .claude, model: "haiku"))
         XCTAssertFalse(rule.compiled?.assign.modelDefaulted ?? true)
     }
 
@@ -60,7 +60,7 @@ final class RoutingRuleTests: XCTestCase {
 
     func testCompiledTextForAllWithADefaultedModelAndFallback() {
         let c = CompiledRule(match: .all([.dimension("debugging", atLeast: 0.7), .kind("investigate")]),
-                             assign: RuleAssign(harness: "claude", model: "opus", pool: "claude-default",
+                             assign: RuleAssign(agent: .claude, model: "opus", pool: "claude-default",
                                                 fallbackPool: "codex-default", modelDefaulted: true))
         XCTAssertEqual(RuleText.compiled(c),
                        "matches debugging ≥ 0.7 and kind *investigate* → claude · opus (default model) · pool claude-default · else pool codex-default")
@@ -128,12 +128,12 @@ final class RoutingRuleTests: XCTestCase {
         XCTAssertFalse(rule.adjusted, "the pills are gone with the old compiled form")
         var recompiled = specRule
         recompiled.adjusted = true
-        recompiled.record(.compiled(specRule.compiled!), by: CompilerRef(harness: "claude", model: "haiku"), at: Date())
+        recompiled.record(.compiled(specRule.compiled!), by: CompilerRef(agent: .claude, model: "haiku"), at: Date())
         XCTAssertFalse(recompiled.adjusted, "a fresh compile matches the sentence again")
     }
 
     func testCompilerDefaultsToHeadlessHaiku() {
-        XCTAssertEqual(RuleCompilerSettings.default, RuleCompilerSettings(harness: .claude, model: "haiku", effort: "low"))
-        XCTAssertEqual(RuleCompilerSettings.default.ref, CompilerRef(harness: "claude", model: "haiku"))
+        XCTAssertEqual(RuleCompilerSettings.default, RuleCompilerSettings(agent: .claude, model: "haiku", effort: "low"))
+        XCTAssertEqual(RuleCompilerSettings.default.ref, CompilerRef(agent: .claude, model: "haiku"))
     }
 }

@@ -24,18 +24,18 @@ public struct RoutingContext: Sendable {
     public var kinds: [TaskKind]
     public var catalogs: AdapterCatalogs
     public var pools: [PoolSummary]
-    public var defaultPools: [HarnessID: PoolID]
+    public var defaultPools: [AgentID: PoolID]
     /// The project's default agent (its Projects-pane agent, else the first global agent).
-    public var defaultHarness: HarnessID?
+    public var defaultAgent: AgentID?
     public var index: any CapabilityIndex
     public var confidenceFloor: Double
     public var now: Date
 
     public init(projectRules: [RoutingRule], globalRules: [RoutingRule], kinds: [TaskKind], catalogs: AdapterCatalogs,
-                pools: [PoolSummary], defaultPools: [HarnessID: PoolID], defaultHarness: HarnessID?,
+                pools: [PoolSummary], defaultPools: [AgentID: PoolID], defaultAgent: AgentID?,
                 index: any CapabilityIndex, confidenceFloor: Double = RouterCore.defaultConfidenceFloor, now: Date) {
         self.projectRules = projectRules; self.globalRules = globalRules; self.kinds = kinds; self.catalogs = catalogs
-        self.pools = pools; self.defaultPools = defaultPools; self.defaultHarness = defaultHarness
+        self.pools = pools; self.defaultPools = defaultPools; self.defaultAgent = defaultAgent
         self.index = index; self.confidenceFloor = confidenceFloor; self.now = now
     }
 }
@@ -63,29 +63,29 @@ public enum RouterCore {
             guard let compiled = rule.compiled,
                   compiled.match.holds(weights: live.dimensions, chain: chain),
                   let a = usable(compiled.assign, ctx) else { continue }
-            let reason = ruleReason(compiled.match, live: live, chain: chain, harness: a.harness)
+            let reason = ruleReason(compiled.match, live: live, chain: chain, agent: a.agent)
             return .routed(Assignment(block: ExecutionBlock(
-                kind: kind.id, harness: a.harness, model: a.model, knobs: a.knobs, pool: a.pool,
+                kind: kind.id, agent: a.agent, model: a.model, knobs: a.knobs, pool: a.pool,
                 source: AssignmentSource(by: .rule, ruleId: rule.id, reason: reason, at: ctx.now))))
         }
 
-        let candidates = ctx.catalogs.enabledModels.filter { ctx.defaultPools[$0.harness] != nil }
+        let candidates = ctx.catalogs.enabledModels.filter { ctx.defaultPools[$0.agent] != nil }
         if !candidates.isEmpty,
            let best = ctx.index.rank(kind: live, candidates: candidates).first(where: { $0.confidence >= ctx.confidenceFloor }),
-           candidates.contains(where: { $0.harness == best.model.harness && $0.model == best.model.model }),
-           let pool = ctx.defaultPools[best.model.harness] {
-            let reason = "index: \(best.model.harness.rawValue)/\(best.model.model) scores \(RuleText.number(best.score))"
+           candidates.contains(where: { $0.agent == best.model.agent && $0.model == best.model.model }),
+           let pool = ctx.defaultPools[best.model.agent] {
+            let reason = "index: \(best.model.agent.rawValue)/\(best.model.model) scores \(RuleText.number(best.score))"
                 + " for \(live.id.rawValue) (confidence \(RuleText.number(best.confidence)))"
             return .routed(Assignment(block: ExecutionBlock(
-                kind: kind.id, harness: best.model.harness, model: best.model.model, pool: pool,
+                kind: kind.id, agent: best.model.agent, model: best.model.model, pool: pool,
                 source: AssignmentSource(by: .index, reason: reason, at: ctx.now))))
         }
 
         guard let choice = defaultChoice(ctx) else { return .unroutable("no enabled agent has a model and a pool") }
         return .routed(Assignment(block: ExecutionBlock(
-            kind: kind.id, harness: choice.harness, model: choice.model, pool: choice.pool,
+            kind: kind.id, agent: choice.agent, model: choice.model, pool: choice.pool,
             source: AssignmentSource(by: .default,
-                                     reason: "default agent \(choice.harness.rawValue): no rule matched and the index had no confident answer",
+                                     reason: "default agent \(choice.agent.rawValue): no rule matched and the index had no confident answer",
                                      at: ctx.now))))
     }
 
@@ -114,12 +114,12 @@ public enum RouterCore {
            let rule = (ctx.projectRules + ctx.globalRules).first(where: { $0.id == ruleId }),
            let compiled = rule.compiled, let fallback = compiled.assign.fallbackPool,
            let pool = open.pools.first(where: { $0.id == fallback }),
-           let cat = open.catalogs.byHarness[pool.harness], cat.enabled {
-            let sameAgent = pool.harness == compiled.assign.harness
+           let cat = open.catalogs.byAgent[pool.agent], cat.enabled {
+            let sameAgent = pool.agent == compiled.assign.agent
             let model = sameAgent ? compiled.assign.model : (cat.defaultModel ?? cat.models.first?.id)
             let knobs = sameAgent ? compiled.assign.knobs : [:]
-            if let model, open.catalogs.contains(ModelRef(harness: pool.harness, model: model)) {
-                let b = ExecutionBlock(kind: block.kind, harness: pool.harness, model: model, knobs: knobs,
+            if let model, open.catalogs.contains(ModelRef(agent: pool.agent, model: model)) {
+                let b = ExecutionBlock(kind: block.kind, agent: pool.agent, model: model, knobs: knobs,
                                        pool: pool.id, source: block.source)
                 return spilled(b, ruleId: ruleId)
             }
@@ -133,18 +133,18 @@ public enum RouterCore {
     /// pool present and the agent's. A rule written for a model that has since left the catalog
     /// is skipped — routing to it would hand the swarm a block nothing can launch.
     static func usable(_ a: RuleAssign, _ ctx: RoutingContext) -> RuleAssign? {
-        guard ctx.catalogs.byHarness[a.harness]?.enabled == true else { return nil }
-        let ref = ModelRef(harness: a.harness, model: a.model, knobs: a.knobs)
+        guard ctx.catalogs.byAgent[a.agent]?.enabled == true else { return nil }
+        let ref = ModelRef(agent: a.agent, model: a.model, knobs: a.knobs)
         guard ctx.catalogs.contains(ref), ctx.catalogs.knobsValid(ref) else { return nil }
-        guard ctx.pools.contains(where: { $0.id == a.pool && $0.harness == a.harness }) else { return nil }
+        guard ctx.pools.contains(where: { $0.id == a.pool && $0.agent == a.agent }) else { return nil }
         return a
     }
 
-    static func defaultChoice(_ ctx: RoutingContext) -> (harness: HarnessID, model: String, pool: PoolID)? {
+    static func defaultChoice(_ ctx: RoutingContext) -> (agent: AgentID, model: String, pool: PoolID)? {
         var order = ctx.catalogs.order
-        if let preferred = ctx.defaultHarness { order.insert(preferred, at: 0) }
+        if let preferred = ctx.defaultAgent { order.insert(preferred, at: 0) }
         for h in order {
-            guard let cat = ctx.catalogs.byHarness[h], cat.enabled, let pool = ctx.defaultPools[h],
+            guard let cat = ctx.catalogs.byAgent[h], cat.enabled, let pool = ctx.defaultPools[h],
                   let model = cat.defaultModel ?? cat.models.first?.id,
                   cat.models.contains(where: { $0.id == model }) else { continue }
             return (h, model, pool)
@@ -153,7 +153,7 @@ public enum RouterCore {
     }
 
     /// The terms that held, with the kind's actual weight — "test-authoring 0.8 → codex".
-    static func ruleReason(_ match: RuleMatch, live: TaskKind, chain: [KindID], harness: HarnessID) -> String {
+    static func ruleReason(_ match: RuleMatch, live: TaskKind, chain: [KindID], agent: AgentID) -> String {
         let held = match.terms.compactMap { term -> String? in
             switch term {
             case .dimension(let d, let atLeast):
@@ -163,7 +163,7 @@ public enum RouterCore {
                 return chain.contains(k) ? "kind \(k.rawValue)" : nil
             }
         }
-        return held.joined(separator: " + ") + " → \(harness.rawValue)"
+        return held.joined(separator: " + ") + " → \(agent.rawValue)"
     }
 }
 
@@ -174,14 +174,14 @@ public struct RuleRouter: Router {
     public let kinds: any KindRegistry
     public let index: any CapabilityIndex
     public let pools: any PoolDirectory
-    public let defaultHarness: @Sendable (URL) -> HarnessID?
+    public let defaultAgent: @Sendable (URL) -> AgentID?
     public let confidenceFloor: Double
 
     public init(rules: any RoutingRuleSource, kinds: any KindRegistry, index: any CapabilityIndex,
-                pools: any PoolDirectory, defaultHarness: @escaping @Sendable (URL) -> HarnessID?,
+                pools: any PoolDirectory, defaultAgent: @escaping @Sendable (URL) -> AgentID?,
                 confidenceFloor: Double = RouterCore.defaultConfidenceFloor) {
         self.rules = rules; self.kinds = kinds; self.index = index; self.pools = pools
-        self.defaultHarness = defaultHarness; self.confidenceFloor = confidenceFloor
+        self.defaultAgent = defaultAgent; self.confidenceFloor = confidenceFloor
     }
 
     /// An unreadable registry routes with no kinds: the task's own weights still decide, and
@@ -191,7 +191,7 @@ public struct RuleRouter: Router {
         return RoutingContext(projectRules: lists.project, globalRules: lists.global,
                               kinds: (try? kinds.kinds(project: project)) ?? [],
                               catalogs: catalogs, pools: pools.pools(), defaultPools: pools.defaultPools(for: catalogs.order),
-                              defaultHarness: defaultHarness(project), index: index,
+                              defaultAgent: defaultAgent(project), index: index,
                               confidenceFloor: confidenceFloor, now: now)
     }
 

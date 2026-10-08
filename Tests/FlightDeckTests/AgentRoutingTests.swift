@@ -1,5 +1,6 @@
 import FleetKit
 import XCTest
+import IntakeKit
 @testable import FlightDeck
 
 /// The seam itself: that the store picks an agent's adapter and runtime by the *session's*
@@ -347,6 +348,7 @@ final class AgentRoutingTests: XCTestCase {
     /// which of the two the store asked for.
     private struct StubAdapter: AgentAdapter {
         static let id: AgentID = .claude
+        nonisolated static var profile: any AgentProfile { AgentProfiles.profile(for: .claude) }
         /// Claude's answers, because this stands in for claude — the store reads both
         /// capabilities off `AgentID`, so a stub that disagreed would describe an agent that
         /// does not exist.
@@ -406,6 +408,7 @@ final class AgentRoutingTests: XCTestCase {
     /// whether one arrived.
     private struct RecordingRenameAdapter: AgentAdapter {
         static let id: AgentID = .claude
+        nonisolated static var profile: any AgentProfile { AgentProfiles.profile(for: .claude) }
         let recorder: RenameCallRecorder
 
         // Every static requirement delegates to the adapter this stands in for. It exists to

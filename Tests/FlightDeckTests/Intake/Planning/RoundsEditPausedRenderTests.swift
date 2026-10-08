@@ -43,12 +43,12 @@ final class RoundsEditPausedRenderTests: XCTestCase {
 
         // Four families offered, as on a machine with every CLI signed in; a harness the gate
         // does not offer yet simply renders absent.
-        let codex = ModelChoice(harness: .codex, model: "gpt-6-sol", effort: "high")
-        let claude = ModelChoice(harness: .claude, model: "opus", effort: "high")
+        let codex = ModelChoice(agent: .codex, model: "gpt-6-sol", effort: "high")
+        let claude = ModelChoice(agent: .claude, model: "opus", effort: "high")
         var available = AvailableModels(choices: [
             .claude: claude, .codex: codex,
-            .grok: ModelChoice(harness: .grok, model: "grok-4.7", effort: "high"),
-            .gemini: ModelChoice(harness: .gemini, model: "gemini-3.1-pro-high", effort: "high"),
+            .grok: ModelChoice(agent: .grok, model: "grok-4.7", effort: "high"),
+            .gemini: ModelChoice(agent: .gemini, model: "gemini-3.1-pro-high", effort: "high"),
         ])
         available.models[.grok] = ["grok-4.7", "grok-4.6"]
         let config = RoundConfig(
@@ -81,7 +81,7 @@ final class RoundsEditPausedRenderTests: XCTestCase {
 
         let runner = StubRunner()
         runner.running = [running.id]
-        let service = IntakeService(store: store, triageSettings: TriageSettings(harness: .codex, model: "gpt-6-sol", effort: "high"),
+        let service = IntakeService(store: store, triageSettings: TriageSettings(agent: .codex, model: "gpt-6-sol", effort: "high"),
                                     availableModels: available, runner: runner,
                                     inject: { _, _, _, _ in true }, hasSession: { _, _ in false })
         // An unsaved change of reviewer to Grok, as the panel shows it before Save.

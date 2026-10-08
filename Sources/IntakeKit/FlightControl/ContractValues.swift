@@ -9,36 +9,42 @@ public struct ModelEntry: Codable, Hashable, Sendable {
 }
 
 public struct AdapterCatalog: Codable, Equatable, Sendable {
-    public var harness: HarnessID
+    public var agent: AgentID
     public var models: [ModelEntry]
     /// Knob name → allowed values, as the adapter declares them.
     public var knobSchema: [String: [String]]
     public var defaultModel: String?
     public var enabled: Bool
-    public init(harness: HarnessID, models: [ModelEntry], knobSchema: [String: [String]], defaultModel: String?, enabled: Bool) {
-        self.harness = harness; self.models = models; self.knobSchema = knobSchema
+    public init(agent: AgentID, models: [ModelEntry], knobSchema: [String: [String]], defaultModel: String?, enabled: Bool) {
+        self.agent = agent; self.models = models; self.knobSchema = knobSchema
         self.defaultModel = defaultModel; self.enabled = enabled
+    }
+
+    /// `agent` keeps its pre-unification JSON key, `harness` (unify brief R1).
+    private enum CodingKeys: String, CodingKey {
+        case agent = "harness"
+        case models, knobSchema, defaultModel, enabled
     }
 }
 
 public struct AdapterCatalogs: Equatable, Sendable {
-    public var byHarness: [HarnessID: AdapterCatalog]
+    public var byAgent: [AgentID: AdapterCatalog]
     /// Insertion order, so "ties go to catalog order" (L3-I §6) is stable.
-    public var order: [HarnessID]
+    public var order: [AgentID]
 
     public init(_ catalogs: [AdapterCatalog]) {
-        byHarness = Dictionary(catalogs.map { ($0.harness, $0) }, uniquingKeysWith: { a, _ in a })
-        // First occurrence wins, matching `byHarness`; a repeat would list its models twice.
-        var seen = Set<HarnessID>()
-        order = catalogs.map(\.harness).filter { seen.insert($0).inserted }
+        byAgent = Dictionary(catalogs.map { ($0.agent, $0) }, uniquingKeysWith: { a, _ in a })
+        // First occurrence wins, matching `byAgent`; a repeat would list its models twice.
+        var seen = Set<AgentID>()
+        order = catalogs.map(\.agent).filter { seen.insert($0).inserted }
     }
 
     public func contains(_ ref: ModelRef) -> Bool {
-        byHarness[ref.harness]?.models.contains { $0.id == ref.model } ?? false
+        byAgent[ref.agent]?.models.contains { $0.id == ref.model } ?? false
     }
 
     public func knobsValid(_ ref: ModelRef) -> Bool {
-        guard let cat = byHarness[ref.harness], let entry = cat.models.first(where: { $0.id == ref.model }) else { return false }
+        guard let cat = byAgent[ref.agent], let entry = cat.models.first(where: { $0.id == ref.model }) else { return false }
         for (k, v) in ref.knobs {
             guard entry.knobs.contains(k), cat.knobSchema[k]?.contains(v) == true else { return false }
         }
@@ -46,8 +52,8 @@ public struct AdapterCatalogs: Equatable, Sendable {
     }
 
     public var enabledModels: [ModelRef] {
-        order.compactMap { byHarness[$0] }.filter(\.enabled)
-            .flatMap { cat in cat.models.map { ModelRef(harness: cat.harness, model: $0.id) } }
+        order.compactMap { byAgent[$0] }.filter(\.enabled)
+            .flatMap { cat in cat.models.map { ModelRef(agent: cat.agent, model: $0.id) } }
     }
 }
 
@@ -57,13 +63,17 @@ public struct Assignment: Equatable, Sendable {
 
     /// `Router.assign` cannot fail, so this is the shared way for every branch to say "no route".
     /// A writer never stores an unroutable block (the codec refuses empty fields anyway).
+    ///
+    /// The agent is a placeholder: `AgentID` has no empty value (`HarnessID("")` used to be the
+    /// marker), so "no route" is carried by the empty model and pool alone — which is all
+    /// `isUnroutable` reads. Never read `block.agent` of an unroutable assignment.
     public static func unroutable(kind: KindID, reason: String, at: Date) -> Assignment {
-        Assignment(block: ExecutionBlock(kind: kind, harness: "", model: "", knobs: [:], pool: "",
+        Assignment(block: ExecutionBlock(kind: kind, agent: .claude, model: "", knobs: [:], pool: "",
                                          source: AssignmentSource(by: .default, ruleId: nil, reason: "unroutable: \(reason)", at: at),
                                          pinned: false))
     }
 
-    public var isUnroutable: Bool { block.harness.rawValue.isEmpty || block.model.isEmpty || block.pool.rawValue.isEmpty }
+    public var isUnroutable: Bool { block.model.isEmpty || block.pool.rawValue.isEmpty }
 
     public var unroutableReason: String? {
         guard isUnroutable else { return nil }
@@ -87,18 +97,24 @@ public enum HeadroomState: String, Codable, Sendable { case underSoft, overSoft,
 /// Identity is harness + id. A rename changes `label`, and a renamed account must still match its
 /// leases and readings. A slot with no id has nothing else to go on, so it compares by label.
 public struct AccountRef: Codable, Hashable, Sendable {
-    public var harness: HarnessID
+    public var agent: AgentID
     public var id: UUID?
     public var label: String
-    public init(harness: HarnessID, id: UUID?, label: String) { self.harness = harness; self.id = id; self.label = label }
+    public init(agent: AgentID, id: UUID?, label: String) { self.agent = agent; self.id = id; self.label = label }
 
     public static func == (a: AccountRef, b: AccountRef) -> Bool {
-        guard a.harness == b.harness, a.id == b.id else { return false }
+        guard a.agent == b.agent, a.id == b.id else { return false }
         return a.id != nil || a.label == b.label
     }
     public func hash(into hasher: inout Hasher) {
-        hasher.combine(harness)
+        hasher.combine(agent)
         if let id { hasher.combine(id) } else { hasher.combine(label) }
+    }
+
+    /// `agent` keeps its pre-unification JSON key, `harness` (unify brief R1).
+    private enum CodingKeys: String, CodingKey {
+        case agent = "harness"
+        case id, label
     }
 }
 
@@ -192,12 +208,18 @@ public struct HandoffRequest: Equatable, Sendable {
 }
 
 public enum SpawnError: Error, Equatable, Sendable {
-    case launchFailed(String), composerTimeout, unsupportedHarness(HarnessID), claimConflict(String)
+    case launchFailed(String), composerTimeout, unsupportedAgent(AgentID), claimConflict(String)
 }
 
 public struct PoolSummary: Codable, Hashable, Sendable {
     public var id: PoolID
-    public var harness: HarnessID
+    public var agent: AgentID
     public var label: String
-    public init(id: PoolID, harness: HarnessID, label: String) { self.id = id; self.harness = harness; self.label = label }
+    public init(id: PoolID, agent: AgentID, label: String) { self.id = id; self.agent = agent; self.label = label }
+
+    /// `agent` keeps its pre-unification JSON key, `harness` (unify brief R1).
+    private enum CodingKeys: String, CodingKey {
+        case agent = "harness"
+        case id, label
+    }
 }

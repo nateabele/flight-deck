@@ -1,5 +1,6 @@
 import FleetKit
 import Foundation
+import IntakeKit
 
 /// What the index knows about a conversation: its newest name, and which project it
 /// belongs to. Defined here rather than beside its consumer so the protocol, the SQLite

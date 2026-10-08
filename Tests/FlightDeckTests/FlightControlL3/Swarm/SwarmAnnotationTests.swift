@@ -36,7 +36,7 @@ final class SwarmAnnotationTests: XCTestCase {
     }
 
     func testTheMeterShowsOnlyPastSoft() {
-        let account = AccountRef(harness: "codex", id: UUID(), label: "Work")
+        let account = AccountRef(agent: .codex, id: UUID(), label: "Work")
         func meter(_ state: HeadroomState, _ u: Double?) -> Double? {
             SwarmAnnotations.session(agent(.working, task: "t"),
                                      headroom: AccountHeadroom(account: account, worstUtilization: u, state: state, resetsAt: nil),

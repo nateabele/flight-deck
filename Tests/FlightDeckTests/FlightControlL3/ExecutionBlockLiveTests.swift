@@ -26,7 +26,7 @@ final class ExecutionBlockLiveTests: XCTestCase {
         }
         _ = try run(["/usr/bin/git", "init", "-q"])
         _ = try run([br, "init"])
-        let block = ExecutionBlock(kind: "tests", harness: "codex", model: "gpt-6-sol", knobs: ["effort": "high"],
+        let block = ExecutionBlock(kind: "tests", agent: .codex, model: "gpt-6-sol", knobs: ["effort": "high"],
                                    pool: "codex-subs", source: AssignmentSource(by: .rule, ruleId: "r1", reason: "live",
                                    at: Date(timeIntervalSince1970: 1_790_000_000)))
         let ctx = try ExecutionBlockCodec.encode(block, into: #"{"instructions":"keep"}"#)

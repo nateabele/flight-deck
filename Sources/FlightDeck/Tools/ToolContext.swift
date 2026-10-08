@@ -1,4 +1,5 @@
 import Foundation
+import IntakeKit
 
 /// The values a tool's command template can interpolate, for one selected session.
 ///

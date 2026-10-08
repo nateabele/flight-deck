@@ -7,9 +7,9 @@ import IntakeKit
 final class HarnessCommandGrokTests: XCTestCase {
     private static let noHome = URL(fileURLWithPath: "/nonexistent-fd-home")
 
-    private func req(resume: String? = nil, effort: String = "high", access: HarnessAccess = .readOnly,
-                     cwd: String = "/proj") -> HarnessRequest {
-        HarnessRequest(harness: .grok, model: "grok-4.6", effort: effort, cwd: URL(fileURLWithPath: cwd),
+    private func req(resume: String? = nil, effort: String = "high", access: HeadlessAccess = .readOnly,
+                     cwd: String = "/proj") -> HeadlessRequest {
+        HeadlessRequest(agent: .grok, model: "grok-4.6", effort: effort, cwd: URL(fileURLWithPath: cwd),
                        readableDirs: [URL(fileURLWithPath: "/intake")], prompt: "P",
                        schemaFile: URL(fileURLWithPath: "/intake/schema.json"), schemaJSON: "{}",
                        resumeSessionID: resume, access: access)
@@ -21,7 +21,7 @@ final class HarnessCommandGrokTests: XCTestCase {
     }
 
     func testFreshReadOnlyArgv() throws {
-        let c = try HarnessCommand.build(req(), home: Self.noHome)
+        let c = try HeadlessCommand.build(req(), home: Self.noHome)
         XCTAssertEqual(c.executable, "grok")
         XCTAssertEqual(c.unsetEnvironment, [])
         let minted = try XCTUnwrap(value(after: "--session-id", in: c.arguments))
@@ -41,8 +41,8 @@ final class HarnessCommandGrokTests: XCTestCase {
     /// `list_dir` (probed on grok 1.0.30, 2026-10-07: "deny rule on read matching \"**/.git/**\"").
     func testNoSeatReadsGitOrBeadsMetadata() throws {
         let work = URL(fileURLWithPath: "/intake/work")
-        for access in [HarnessAccess.readOnly, .writeInWork(work)] {
-            let args = try HarnessCommand.build(req(access: access, cwd: access == .readOnly ? "/proj" : "/intake/work"),
+        for access in [HeadlessAccess.readOnly, .writeInWork(work)] {
+            let args = try HeadlessCommand.build(req(access: access, cwd: access == .readOnly ? "/proj" : "/intake/work"),
                                                 home: Self.noHome).arguments
             var denied: [String] = []
             for (i, a) in args.enumerated() where a == "--deny" { denied.append(args[i + 1]) }
@@ -54,8 +54,8 @@ final class HarnessCommandGrokTests: XCTestCase {
     /// Every fresh seat gets its OWN new UUID — two parallel seats on grok in the same project
     /// must never share a conversation, and grok refuses a `--session-id` that already exists.
     func testEachFreshSeatMintsItsOwnUUID() throws {
-        let a = try XCTUnwrap(value(after: "--session-id", in: try HarnessCommand.build(req(), home: Self.noHome).arguments))
-        let b = try XCTUnwrap(value(after: "--session-id", in: try HarnessCommand.build(req(), home: Self.noHome).arguments))
+        let a = try XCTUnwrap(value(after: "--session-id", in: try HeadlessCommand.build(req(), home: Self.noHome).arguments))
+        let b = try XCTUnwrap(value(after: "--session-id", in: try HeadlessCommand.build(req(), home: Self.noHome).arguments))
         XCTAssertNotNil(UUID(uuidString: a))
         XCTAssertNotNil(UUID(uuidString: b))
         XCTAssertNotEqual(a, b)
@@ -66,7 +66,7 @@ final class HarnessCommandGrokTests: XCTestCase {
     /// `--session-id` with `--resume` alongside `--fork-session`). Bare `--resume`/`--continue`
     /// would pick the most recent session in the cwd — with parallel seats, another seat's.
     func testResumeUsesTheSeatsOwnIDOnly() throws {
-        let args = try HarnessCommand.build(req(resume: "0199c1a2-4b7e-7000-8000-00000000a001"), home: Self.noHome).arguments
+        let args = try HeadlessCommand.build(req(resume: "0199c1a2-4b7e-7000-8000-00000000a001"), home: Self.noHome).arguments
         XCTAssertEqual(value(after: "--resume", in: args), "0199c1a2-4b7e-7000-8000-00000000a001")
         XCTAssertFalse(args.contains("--session-id"))
         XCTAssertFalse(args.contains("--continue"))
@@ -78,7 +78,7 @@ final class HarnessCommandGrokTests: XCTestCase {
     /// No read-only argv ever allows an edit or exec tool, or grants a write-capable built-in.
     func testReadOnlyNeverAllowsAWriteOrExecTool() throws {
         for resume in [nil, "S1"] as [String?] {
-            let args = try HarnessCommand.build(req(resume: resume), home: Self.noHome).arguments
+            let args = try HeadlessCommand.build(req(resume: resume), home: Self.noHome).arguments
             XCTAssertFalse(args.contains("--allow"), "\(args)")
             XCTAssertFalse(args.contains("--always-approve"))
             XCTAssertFalse(args.contains("--yolo"))
@@ -96,7 +96,7 @@ final class HarnessCommandGrokTests: XCTestCase {
 
     /// An empty effort is "the model's default": the flag is left off rather than sent empty.
     func testEmptyEffortOmitsTheFlag() throws {
-        let args = try HarnessCommand.build(req(effort: ""), home: Self.noHome).arguments
+        let args = try HeadlessCommand.build(req(effort: ""), home: Self.noHome).arguments
         XCTAssertFalse(args.contains("--reasoning-effort"))
     }
 
@@ -104,7 +104,7 @@ final class HarnessCommandGrokTests: XCTestCase {
     /// `dontAsk`, still no shell and no network.
     func testIntegratorWritesOnlyInItsWorkDir() throws {
         let work = URL(fileURLWithPath: "/intake/work")
-        let args = try HarnessCommand.build(req(access: .writeInWork(work), cwd: "/intake/work"), home: Self.noHome).arguments
+        let args = try HeadlessCommand.build(req(access: .writeInWork(work), cwd: "/intake/work"), home: Self.noHome).arguments
         XCTAssertEqual(value(after: "--cwd", in: args), "/intake/work")
         XCTAssertEqual(value(after: "--permission-mode", in: args), "dontAsk")
         XCTAssertEqual(value(after: "--tools", in: args), "read_file,grep,list_dir,search_replace,write")
@@ -120,15 +120,15 @@ final class HarnessCommandGrokTests: XCTestCase {
 
     func testIntegratorWithAResumeIsRefused() {
         let work = URL(fileURLWithPath: "/intake/work")
-        XCTAssertEqual(HarnessCommand.validate(req(resume: "S1", access: .writeInWork(work), cwd: "/intake/work")),
+        XCTAssertEqual(HeadlessCommand.validate(req(resume: "S1", access: .writeInWork(work), cwd: "/intake/work")),
                        .resumeNotSupportedForWrite)
     }
 
     /// The isolation is environment, not argv: every grok child gets the variables that stop it
     /// reading the operator's Claude/Cursor hooks and MCP servers, whatever `base` held.
     func testEveryGrokChildGetsTheIsolationEnvironment() throws {
-        let c = try HarnessCommand.build(req(), home: Self.noHome)
-        let env = HarnessCommand.environment(for: c, base: ["PATH": "/bin", "GROK_CLAUDE_HOOKS_ENABLED": "1",
+        let c = try HeadlessCommand.build(req(), home: Self.noHome)
+        let env = HeadlessCommand.environment(for: c, base: ["PATH": "/bin", "GROK_CLAUDE_HOOKS_ENABLED": "1",
                                                            "CLAUDE_CODE_CHILD_SESSION": "1", "HTTPS_PROXY": "http://proxy:1"],
                                              home: Self.noHome)
         for (key, value) in GrokProfile.isolationEnvironment { XCTAssertEqual(env[key], value, key) }

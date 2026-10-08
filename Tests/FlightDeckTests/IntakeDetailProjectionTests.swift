@@ -55,7 +55,7 @@ final class IntakeDetailProjectionTests: XCTestCase {
     private func makeService() async -> IntakeService {
         let svc = IntakeService(store: IntakeStore(root: root), headless: InertHeadlessRunner(),
                                 processRunner: SilentProcessRunner(),
-                                triageSettings: TriageSettings(harness: .codex, model: "m1", effort: "high"),
+                                triageSettings: TriageSettings(agent: .codex, model: "m1", effort: "high"),
                                 availableModels: .defaults, runner: runner,
                                 inject: { _, _, _, _ in true }, hasSession: { _, _ in false },
                                 now: { [unowned self] in self.clockNow },
@@ -126,7 +126,7 @@ final class IntakeDetailProjectionTests: XCTestCase {
             tape.roundInProgress = PlannedRound(stage: .draft, round: 0, major: true)
             tape.roundStartedAt = Date(timeIntervalSinceReferenceDate: 5_000)
         }
-        var activity = SeatActivity(harness: .claude, startedAt: Date(timeIntervalSinceReferenceDate: 5_001))
+        var activity = SeatActivity(agent: .claude, startedAt: Date(timeIntervalSinceReferenceDate: 5_001))
         activity.headline = "Reading the repo"
         activity.lastEventAt = Date(timeIntervalSinceReferenceDate: 5_010)
         try writeSeat(i.id, run: "draft-0-drafter-0", activity: activity, record: nil,

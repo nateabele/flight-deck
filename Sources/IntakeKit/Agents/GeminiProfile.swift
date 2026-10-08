@@ -10,8 +10,7 @@ import Foundation
 /// in which case it was exercised live on that date (see spec §10, Gemini column).
 public struct GeminiProfile: AgentProfile {
     public init() {}
-    public var id: Harness { .gemini }
-    public var family: ModelFamily { .gemini }
+    public var id: AgentID { .gemini }
     public var binaryName: String { "agy" }
 
     /// The one-line fix the editor shows next to a signed-out Gemini. `agy` signs in from its
@@ -51,7 +50,7 @@ public struct GeminiProfile: AgentProfile {
     /// FAMILY is Gemini — coverage and cross-check count a seat by its harness — so a "gemini"
     /// seat running a Claude model would make a claude+gemini pair look cross-family when it
     /// is not. Restricting the catalog (rather than deriving the family from the model id)
-    /// keeps `ModelFamily(harness)` true everywhere it is already used.
+    /// keeps `harness` true everywhere it is already used.
     public static func isGeminiModel(_ id: String) -> Bool { id.hasPrefix("gemini-") }
 
     /// `agy models` prints `<id>\t<display name>` per line on stdout ("Fetching available
@@ -73,7 +72,7 @@ public struct GeminiProfile: AgentProfile {
     /// (probed 2026-10-07 with the real triage and integrate schemas, after `GeminiSchema`).
     public var hasNativeSchema: Bool { true }
 
-    /// What `HarnessOutput.parse` reports when agy ended a turn WITHOUT an answer because it
+    /// What `HeadlessOutput.parse` reports when agy ended a turn WITHOUT an answer because it
     /// auto-denied a tool (headless mode cannot ask). Probed 2026-10-07: a read-only seat that
     /// tries to write or to run an unsandboxed command gets `status: SUCCESS`, an empty
     /// response, no `structured_output`, and `denied_actions` — and a resume of that same

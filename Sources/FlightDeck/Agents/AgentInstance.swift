@@ -1,4 +1,5 @@
 import Foundation
+import IntakeKit
 
 /// One agent running as one account. The key for every registry that used to be keyed by
 /// `AgentID` alone: the adapter, the runtime, and codex's app-server stack.

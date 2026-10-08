@@ -30,8 +30,8 @@ public struct CoverageThresholds: Equatable, Sendable {
 public struct CoverageReading: Equatable, Sendable {
     public var checkpoint: Int
     public var round: Int
-    public var familyA: ModelFamily
-    public var familyB: ModelFamily
+    public var familyA: AgentID
+    public var familyB: AgentID
     public var matcher: CoverageMatcher
     /// Accepted issues (a cluster with any agree/somewhat member) raised by A, by B, by both.
     public var n1: Int
@@ -49,7 +49,7 @@ public struct CoverageReading: Equatable, Sendable {
     public var textSimilarityBoth: Int?
     public var matchersDisagree: Bool
 
-    public init(checkpoint: Int, round: Int, familyA: ModelFamily, familyB: ModelFamily, matcher: CoverageMatcher,
+    public init(checkpoint: Int, round: Int, familyA: AgentID, familyB: AgentID, matcher: CoverageMatcher,
                 n1: Int, n2: Int, both: Int, rejectedA: Int, rejectedB: Int, found: Int, unfound: Int?,
                 band: CoverageBand, correlated: Bool, textSimilarityBoth: Int?, matchersDisagree: Bool) {
         self.checkpoint = checkpoint

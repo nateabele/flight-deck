@@ -37,7 +37,7 @@ final class SwarmWireEmissionTests: XCTestCase {
     func testTheAccountNameTravelsButNeverItsID() async throws {
         let rig = SwarmRig()
         let accountID = UUID()
-        let lease = AccountLease(pool: "codex-subs", account: AccountRef(harness: "codex", id: accountID, label: "Work Account"))
+        let lease = AccountLease(pool: "codex-subs", account: AccountRef(agent: .codex, id: accountID, label: "Work Account"))
         let agent = rig.agent("BlueLake", lease: lease, state: .working, task: "fx-1")
         rig.store.save([rig.record(state: .paused, agents: [agent])])
         let (store, _, _) = setUp(rig)

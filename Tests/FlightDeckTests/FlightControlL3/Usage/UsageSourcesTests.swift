@@ -63,8 +63,8 @@ final class UsageSourcesTests: XCTestCase {
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: dir.path), ["new.json"])
     }
 
-    private func seat(windows: [UsageWindow]?, status: String?, resets: Date? = nil, last: Date, harness: Harness = .claude) -> SeatActivity {
-        var a = SeatActivity(harness: harness, startedAt: Date(timeIntervalSince1970: 0))
+    private func seat(windows: [UsageWindow]?, status: String?, resets: Date? = nil, last: Date, agent: AgentID = .claude) -> SeatActivity {
+        var a = SeatActivity(agent: agent, startedAt: Date(timeIntervalSince1970: 0))
         a.rateLimitWindows = windows; a.rateLimitStatus = status; a.rateLimitResetsAt = resets; a.lastEventAt = last
         // A rejecting event sets rateLimitedAt in the real fold; the next assistant event clears it.
         if let status, !status.hasPrefix("allowed") { a.rateLimitedAt = last }
@@ -112,7 +112,7 @@ final class UsageSourcesTests: XCTestCase {
     func testCodexSeatsAndSeatsWithoutRateLimitsAreSkipped() {
         let source = HeadlessClaudeUsageSource()
         XCTAssertEqual(source.readings(from: [seat(windows: [UsageWindow(name: "x", utilization: 0.1, resetsAt: nil)], status: "allowed",
-                                                   last: Date(), harness: .codex)], account: UsageRefs.work), [])
+                                                   last: Date(), agent: .codex)], account: UsageRefs.work), [])
         XCTAssertEqual(source.readings(from: [seat(windows: nil, status: nil, last: Date())], account: UsageRefs.work), [])
     }
 

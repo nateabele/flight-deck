@@ -43,7 +43,7 @@ struct RuleRowPresentation: Equatable {
     var canAdjust: Bool
 
     init(rule: RoutingRule, compiling: Bool, note: String?, catalogs: AdapterCatalogs,
-         defaultPools: [HarnessID: PoolID]) {
+         defaultPools: [AgentID: PoolID]) {
         if compiling {
             status = .compiling
         } else {
@@ -93,19 +93,19 @@ struct RuleRowPresentation: Equatable {
 
     /// "Codex · GPT-6-Sol · high". The pool is named only when it is not the agent's default,
     /// the same way a default goes unsaid anywhere else in Settings.
-    static func targetText(_ a: RuleAssign, catalogs: AdapterCatalogs, defaultPools: [HarnessID: PoolID]) -> String {
-        var parts = [agentName(a.harness)]
-        parts.append(catalogs.byHarness[a.harness]?.models.first { $0.id == a.model }?.displayName ?? a.model)
+    static func targetText(_ a: RuleAssign, catalogs: AdapterCatalogs, defaultPools: [AgentID: PoolID]) -> String {
+        var parts = [agentName(a.agent)]
+        parts.append(catalogs.byAgent[a.agent]?.models.first { $0.id == a.model }?.displayName ?? a.model)
         parts += a.knobs.sorted { $0.key < $1.key }.map(\.value)
         var text = parts.joined(separator: " · ")
-        let poolIsDefault = defaultPools[a.harness] == a.pool
+        let poolIsDefault = defaultPools[a.agent] == a.pool
         if !poolIsDefault { text += " · \(a.pool.rawValue)" }
         if let fallback = a.fallbackPool { text += poolIsDefault ? " · else \(fallback.rawValue)" : ", else \(fallback.rawValue)" }
         return text
     }
 
-    static func agentName(_ h: HarnessID) -> String {
-        AgentID.allCases.first { $0.harnessID == h }?.displayName ?? h.rawValue.prefix(1).uppercased() + h.rawValue.dropFirst()
+    static func agentName(_ h: AgentID) -> String {
+        AgentID.allCases.first { $0 == h }?.displayName ?? h.rawValue.prefix(1).uppercased() + h.rawValue.dropFirst()
     }
 }
 

@@ -1,5 +1,6 @@
 import FleetKit
 import XCTest
+import IntakeKit
 @testable import FlightDeck
 
 /// Creating a codex tab, and refusing to create one that could never launch.
@@ -75,6 +76,7 @@ final class CodexLaunchFailureTests: XCTestCase {
     /// genuinely mid-negotiation.
     private final class GatedAdapter: AgentAdapter {
         static let id: AgentID = .codex
+        nonisolated static var profile: any AgentProfile { AgentProfiles.profile(for: .codex) }
         /// Codex's answers, because this stands in for codex — the store reads both
         /// capabilities off `AgentID`, so a stub that disagreed would describe an agent that
         /// does not exist.

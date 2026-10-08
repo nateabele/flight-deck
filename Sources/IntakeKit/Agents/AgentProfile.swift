@@ -3,7 +3,7 @@ import Foundation
 // The shared per-CLI agent profile (grok/gemini planning spec §3.0). Today four kinds of
 // knowledge about each CLI — its model catalog, its error spellings, the child-session scrub
 // and its account binding — are copied between the tab side (`AgentAdapter`) and the headless
-// side (`Harness`), and two copies have already drifted. A profile is the one place each of
+// side (`AgentID`), and two copies have already drifted. A profile is the one place each of
 // those answers lives, so a new CLI (grok, gemini) is a profile plus a harness, not a fifth copy.
 //
 // This file is the CONTRACT that three parallel tracks build against: P (claude + codex),
@@ -113,7 +113,7 @@ public struct ProfileModelCatalog: Sendable, Equatable {
 
 /// Which account a run bills: an opaque id plus the CLI's config home for that account (the
 /// directory a profile binds via `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, or grok's/gemini's
-/// equivalent). Pure — no Keychain, no file reads — so it rides on `HarnessRequest`.
+/// equivalent). Pure — no Keychain, no file reads — so it rides on `HeadlessRequest`.
 public struct AgentAccountRef: Codable, Hashable, Sendable {
     public var id: String
     public var home: URL
@@ -126,10 +126,11 @@ public struct AgentAccountRef: Codable, Hashable, Sendable {
 /// planning. Pure and Sendable: no process spawning, no file reads — a caller runs the commands
 /// it describes and hands the output back in.
 public protocol AgentProfile: Sendable {
-    /// The headless harness this profile describes. Its raw value (`claude`, `codex`, `grok`,
-    /// `gemini`) is the CLI's id everywhere — including L3's `HarnessID`.
-    var id: Harness { get }
-    var family: ModelFamily { get }
+    /// The agent this profile describes — the one identity tabs, planning, routing and pools all
+    /// share (unify brief R1). It is also the model family coverage and cross-check count over:
+    /// `ModelFamily` was a copy of this enum and is gone, so a family's display name is
+    /// `id.displayName`.
+    var id: AgentID { get }
     /// The executable looked up on the login shell's PATH.
     var binaryName: String { get }
     var signInCheck: SignInCheck { get }
@@ -173,11 +174,11 @@ public extension AgentProfile {
 // MARK: - Registry
 
 public enum AgentProfiles {
-    /// One profile per `Harness` case, in `Harness.allCases` order.
-    public static let all: [any AgentProfile] = Harness.allCases.map { AgentProfiles.profile(for: $0) }
+    /// One profile per `AgentID` case, in `AgentID.planningOrder` order.
+    public static let all: [any AgentProfile] = AgentID.planningOrder.map { AgentProfiles.profile(for: $0) }
 
-    public static func profile(for harness: Harness) -> any AgentProfile {
-        switch harness {
+    public static func profile(for agent: AgentID) -> any AgentProfile {
+        switch agent {
         case .claude: ClaudeProfile()
         case .codex: CodexProfile()
         case .grok: GrokProfile()
@@ -185,12 +186,12 @@ public enum AgentProfiles {
         }
     }
 
-    /// The harnesses whose headless command and output parser exist (`HarnessCommand.build`,
-    /// `HarnessOutput.parse`). The availability gate: `AvailableModels` never holds a harness
+    /// The harnesses whose headless command and output parser exist (`HeadlessCommand.build`,
+    /// `HeadlessOutput.parse`). The availability gate: `AvailableModels` never holds a harness
     /// outside this set, so a round can never be configured to run a harness that would only
     /// fail at round time. Track G adds `.grok` and Track M adds `.gemini` when their builders
     /// land — and not before, which is what keeps master shippable meanwhile.
-    public static let headlessReady: Set<Harness> = [.claude, .codex, .grok, .gemini]
+    public static let headlessReady: Set<AgentID> = [.claude, .codex, .grok, .gemini]
 }
 
 // MARK: - Conformers

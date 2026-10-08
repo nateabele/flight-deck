@@ -6,7 +6,7 @@ import IntakeKit
 /// never spills, and a spill is for one spawn — the stored block is never rewritten.
 @MainActor
 final class SwarmControllerWaitingTests: XCTestCase {
-    private let spilled = SwarmFixtures.block("claude-subs", model: "opus", harness: "claude")
+    private let spilled = SwarmFixtures.block("claude-subs", model: "opus", agent: .claude)
 
     func testAFullPoolSpillsThroughTheRouterForOneSpawn() async {
         let rig = SwarmRig()
@@ -103,7 +103,7 @@ final class SwarmControllerWaitingTests: XCTestCase {
     func testADeletedPoolWaitsWithItsOwnReasonAndNeverSpills() async {
         for pinned in [true, false] {
             let rig = SwarmRig()
-            rig.pools = DefaultPoolDirectory(harnesses: ["codex"])
+            rig.pools = DefaultPoolDirectory(agents: [.codex])
             rig.leases("claude-subs", 1)
             rig.router.spills["tests"] = Assignment(block: spilled)
             rig.backend.ready = [SwarmFixtures.task("fx-1", SwarmFixtures.block("gone", pinned: pinned))]
@@ -120,7 +120,7 @@ final class SwarmControllerWaitingTests: XCTestCase {
     /// slots, say), and no directory at all keeps the old behavior.
     func testAPoolThatLeasesIsNeverCalledDeleted() async {
         let rig = SwarmRig()
-        rig.pools = DefaultPoolDirectory(harnesses: ["claude"])
+        rig.pools = DefaultPoolDirectory(agents: [.claude])
         rig.leases("codex-subs", 1)
         rig.backend.ready = [SwarmFixtures.task("fx-1", SwarmFixtures.block())]
         let c = rig.controller(rig.record(cap: 1))

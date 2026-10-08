@@ -121,11 +121,11 @@ final class CapabilityIndexServiceTests: XCTestCase {
     func testManualScoresReachTheLiveIndex() throws {
         try seedConfig()
         let service = make(ScriptedIndexHeadless())
-        let local = ModelRef(harness: "opencode", model: "ollama/qwen")
+        let local = ModelRef(agent: .gemini, model: "ollama/qwen")
         service.setManual(ManualModelScores(model: local, dimensions: ["agentic-coding": 0.9]))
         XCTAssertEqual(service.live.rank(kind: kind, candidates: [local]).first?.score, 0.9)
         XCTAssertEqual(service.scores.first { $0.model == local }?.dimensions["agentic-coding"]?.origin, .manual)
-        let renamed = ModelRef(harness: "opencode", model: "ollama/qwen3")
+        let renamed = ModelRef(agent: .gemini, model: "ollama/qwen3")
         service.setManual(ManualModelScores(model: renamed, dimensions: ["agentic-coding": 0.8]), replacing: local)
         XCTAssertEqual(service.config.manual.map(\.model), [renamed])
         XCTAssertEqual(IndexConfig.load(from: dir.appendingPathComponent("config.json")).config.manual.map(\.model), [renamed], "hand scores persist")

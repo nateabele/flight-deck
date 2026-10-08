@@ -1,5 +1,6 @@
 import FleetKit
 import XCTest
+import IntakeKit
 @testable import FlightDeck
 
 /// Tab id → agent + transcript → page, and the three answers that are not a page.
@@ -28,6 +29,7 @@ final class TimelineServiceTests: XCTestCase {
     /// business writing there.
     private struct FixedTranscriptAdapter: AgentAdapter {
         static let id: AgentID = .claude
+        nonisolated static var profile: any AgentProfile { AgentProfiles.profile(for: .claude) }
         /// Claude's answers, because this stands in for claude — the store reads both
         /// capabilities off `AgentID`, so a stub that disagreed would describe an agent that
         /// does not exist.

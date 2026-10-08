@@ -1,5 +1,6 @@
 import Network
 import XCTest
+import IntakeKit
 @testable import FleetKit
 @testable import FlightDeck
 
@@ -44,6 +45,7 @@ final class TimelineLoopbackTests: XCTestCase {
     /// a transcript path under `~/.claude/projects`, and a test has no business writing there.
     private struct FixedTranscriptAdapter: AgentAdapter {
         static let id: AgentID = .claude
+        nonisolated static var profile: any AgentProfile { AgentProfiles.profile(for: .claude) }
         /// Claude's answers, because this stands in for claude — the store reads both
         /// capabilities off `AgentID`, so a stub that disagreed would describe an agent that
         /// does not exist.

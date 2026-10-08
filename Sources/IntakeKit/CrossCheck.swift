@@ -10,11 +10,11 @@ public struct CrossCheckRecord: Codable, Equatable, Sendable {
     public var proposers: [Int]
     /// The family of proposer 0 and of proposer 1. Equal when the primary fell back to the
     /// cross-reviewer's family, which the fold reports as not independent.
-    public var families: [ModelFamily]
+    public var families: [AgentID]
     /// Cleaned (`IssueClusters.clean`); nil when the integrator gave none usable.
     public var clusters: [[Int]]?
     public var blindOrderSeed: Int
-    public init(proposers: [Int], families: [ModelFamily], clusters: [[Int]]?, blindOrderSeed: Int) {
+    public init(proposers: [Int], families: [AgentID], clusters: [[Int]]?, blindOrderSeed: Int) {
         self.proposers = proposers; self.families = families; self.clusters = clusters
         self.blindOrderSeed = blindOrderSeed
     }

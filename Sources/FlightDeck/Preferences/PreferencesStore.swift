@@ -139,17 +139,54 @@ final class PreferencesStore: ObservableObject {
         preferences.capacity = next
     }
 
+    /// The pools Flight Control leases from, derived from the Accounts list (unify brief R6):
+    /// `CapacityLedger`, `CapacityPoolDirectory` and `UsageService` all read this, so a pool
+    /// edited in Settings → Accounts is the pool every lease sees.
+    var effectivePools: [CapacityPool] { preferences.accountList.effectivePools() }
+
+    /// One edit to the Accounts list, one write. Throws the model's refusal (and writes nothing)
+    /// when an edit breaks a rule of the list — a pool of another agent's account, an unknown id.
+    func updateAccountList(_ edit: (inout AccountList) throws(AccountListError) -> Void) throws(AccountListError) {
+        var next = preferences.accountList
+        try edit(&next)
+        preferences.accountList = next
+    }
+
+    /// Removes a pool — its accounts return to top level — and every project assignment that
+    /// named it, for the reason `markAccountRemoved` clears account assignments: nothing may be
+    /// left pointing at a pool the user removed, or that project's tabs would launch BROKEN.
+    func removePool(_ id: PoolID) throws(AccountListError) {
+        try updateAccountList { list throws(AccountListError) in try list.removePool(id) }
+        for (path, var settings) in preferences.projectSettings {
+            let before = settings.accounts
+            settings.accounts = settings.accounts.filter { $0.value != .pool(id) }
+            guard settings.accounts != before else { continue }
+            preferences.projectSettings[path] = settings.isEmpty ? nil : settings
+        }
+    }
+
     /// The account a new session for `agent` in `project` launches under. nil is BROKEN — an
     /// explicit assignment that no longer resolves must never silently become another login.
+    ///
+    /// A POOL assignment (unify brief R8) resolves to the pool's first live account in lease
+    /// order. That is a placeholder for real leasing — Track A makes a tab launch on a pool
+    /// lease through `CapacityLedger` (first under soft, `LeasePolicy`) and release when the tab
+    /// ends; until then a pool behaves like "its top account". A pool with no live account, or
+    /// one that no longer exists, is BROKEN (nil) for the same reason a missing account is.
     func account(for agent: AgentID, project: String) -> AgentAccount? {
-        if let assigned = preferences.projectSettings[Self.key(project)]?.accounts[agent] {
+        switch preferences.projectSettings[Self.key(project)]?.accounts[agent] {
+        case .account(let assigned)?:
             // A tombstone here is answered as nil — i.e. BROKEN — rather than by silently
             // falling through to the topmost account, which is the wrong-login bug this
             // method's nil exists to prevent. `markAccountRemoved` clears these assignments,
             // so this is defence in depth rather than a reachable state.
             return account(id: assigned).flatMap { $0.isRemoved ? nil : $0 }
+        case .pool(let pool)?:
+            guard let first = effectivePools.first(where: { $0.id == pool && $0.agent == agent })?.accounts.first else { return nil }
+            return account(id: first)
+        case nil:
+            return preferences.accounts.first { $0.agent == agent && !$0.isRemoved }
         }
-        return preferences.accounts.first { $0.agent == agent && !$0.isRemoved }
     }
 
     /// Normalises a stored `Session.accountID`. nil means the agent's built-in home — not "the
@@ -185,17 +222,14 @@ final class PreferencesStore: ObservableObject {
     func resolvedOptions(for agent: AgentID, project: String) -> AgentOptions {
         let global = preferences.agents.first { $0.id == agent }?.options
         let override = preferences.projectSettings[Self.key(project)]?.options[agent]
-        switch (global ?? Self.emptyOptions(for: agent), override) {
+        switch (global ?? AgentOptions.empty(for: agent), override) {
         case (.claude(let g), .claude(let p)?): return .claude(FlagSetMerge.merge(global: g, project: p))
         case (.codex(let g), .codex(let p)?):   return .codex(CodexThreadOptions.merge(global: g, project: p))
+        // grok and gemini have no option fields yet, so there is nothing to merge: the project's
+        // payload (if any) is the global one. Tracks G/M add a merge here with their fields.
+        case (.grok, .grok(let p)?):            return .grok(p)
+        case (.gemini, .gemini(let p)?):        return .gemini(p)
         case (let g, _):                        return g
-        }
-    }
-
-    private static func emptyOptions(for agent: AgentID) -> AgentOptions {
-        switch agent {
-        case .claude: return .claude(FlagSet())
-        case .codex:  return .codex(CodexThreadOptions())
         }
     }
 
@@ -235,7 +269,18 @@ final class PreferencesStore: ObservableObject {
         }
     }
 
-    func addAccount(_ account: AgentAccount) { preferences.accounts.append(account) }
+    /// Adds an account at the top level of the Accounts list, or returns why it cannot be added
+    /// (gemini has only its built-in account — `AccountList.addRefusal(for:)`) and adds nothing.
+    @discardableResult
+    func addAccount(_ account: AgentAccount) -> String? {
+        do throws(AccountListError) {
+            try updateAccountList { list throws(AccountListError) in try list.add(account) }
+            return nil
+        } catch {
+            if case .addRefused(let reason) = error { return reason }
+            return "\(error)"
+        }
+    }
 
     func renameAccount(id: UUID, to name: String) {
         guard let index = preferences.accounts.firstIndex(where: { $0.id == id }) else { return }
@@ -260,7 +305,7 @@ final class PreferencesStore: ObservableObject {
         preferences.accounts[index].removedAt = Date()
         for (path, var settings) in preferences.projectSettings {
             let before = settings.accounts
-            settings.accounts = settings.accounts.filter { $0.value != id }
+            settings.accounts = settings.accounts.filter { $0.value != .account(id) }
             guard settings.accounts != before else { continue }
             preferences.projectSettings[path] = settings.isEmpty ? nil : settings
         }
@@ -330,8 +375,8 @@ final class PreferencesStore: ObservableObject {
            inherited[ClaudeProfile.childSessionMarker] != nil {
             environment[ClaudeProfile.childSessionMarker] = ""
         }
-        if let account {
-            environment[account.agent.homeEnvironmentKey] = account.home.path
+        if let account, let key = account.agent.homeEnvironmentKey {
+            environment[key] = account.home.path
         }
         environment["FD_OUTLOG_BUDGET"] = String(scrollbackBudgetBytes)
         if let flywheel {

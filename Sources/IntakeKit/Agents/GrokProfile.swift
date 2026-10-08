@@ -8,8 +8,7 @@ import Foundation
 /// here is pinned to that version, never to "grok".
 public struct GrokProfile: AgentProfile {
     public init() {}
-    public var id: Harness { .grok }
-    public var family: ModelFamily { .grok }
+    public var id: AgentID { .grok }
     public var binaryName: String { "grok" }
 
     /// `grok models` reads the cached login and never calls a model, so it costs no tokens.
@@ -87,6 +86,10 @@ public struct GrokProfile: AgentProfile {
     /// actually holds (see there). `GROK_MEMORY=0` keeps cross-session memory from leaking one
     /// seat's plan into another's prompt; the autoupdater is off so a seat never swaps its own
     /// binary mid-round.
+    /// The variable that relocates everything grok keeps — its login (`auth.json`), config and
+    /// sessions — so it is what binds an account. `environment` also moves `HOME` there; see why.
+    public static let homeEnvironmentKey = "GROK_HOME"
+
     public static let isolationEnvironment: [String: String] = {
         var env = ["GROK_MEMORY": "0", "GROK_DISABLE_AUTOUPDATER": "1"]
         for vendor in ["CLAUDE", "CURSOR", "CODEX"] {

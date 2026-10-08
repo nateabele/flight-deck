@@ -1,5 +1,6 @@
 import FleetKit
 import XCTest
+import IntakeKit
 @testable import FlightDeck
 
 /// The desktop menu, described for a phone and read back when one is tapped.
@@ -16,7 +17,7 @@ final class NewSessionOptionsProjectionTests: XCTestCase {
 
     private func preferences(_ accounts: [AgentAccount]) -> PreferencesStore {
         let store = PreferencesStore(persistence: nil)
-        store.preferences.storedAccounts = accounts
+        store.preferences.accounts = accounts
         return store
     }
 

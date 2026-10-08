@@ -16,25 +16,25 @@ struct CapabilityRuleHintSource: RuleHintSource {
         let dims = compiled.match.dimensionThresholds
         // A kind-only rule names no dimension, so there is nothing to compare models on.
         guard !dims.isEmpty else { return nil }
-        let assigned = ModelRef(harness: compiled.assign.harness, model: compiled.assign.model,
+        let assigned = ModelRef(agent: compiled.assign.agent, model: compiled.assign.model,
                                 knobs: compiled.assign.knobs)
         // The exclusion keeps the knobbed ref's identity: only the assigned model is dropped.
         // Other knob variants of it are never suggested, since "same model, other effort" is
         // not a better model.
-        let candidates = catalogs.enabledModels.filter { $0.harness != assigned.harness || $0.model != assigned.model }
+        let candidates = catalogs.enabledModels.filter { $0.agent != assigned.agent || $0.model != assigned.model }
         // L3-I matches a knobbed ref to that exact scored variant only, and the index usually
         // scores a model bare or at another effort. Without a fallback a rule pinning
         // effort=high would never get a hint. When no row matches the exact variant, compare
         // from the bare model, which resolves to its best variant. That can overstate the
         // assigned score and so suppress some hints, the safer direction for a hint.
         let exact = current.scores.contains { CapabilityScoring.matches(candidate: assigned, scored: $0.model) }
-        let compareFrom = exact ? assigned : ModelRef(harness: assigned.harness, model: assigned.model)
+        let compareFrom = exact ? assigned : ModelRef(agent: assigned.agent, model: assigned.model)
         guard let best = CapabilityHints.hints(for: dims, assigned: compareFrom, candidates: candidates,
                                                scores: current.scores).first else { return nil }
         // Bare: the index may have scored a knobbed variant, and "Switch to" re-validates the
         // rule's own effort against the new model rather than adopting the scored one.
         return RuleHint(ruleID: rule.id, text: best.message, snapshotDate: current.snapshotDate,
-                        suggested: ModelRef(harness: best.better.harness, model: best.better.model))
+                        suggested: ModelRef(agent: best.better.agent, model: best.better.model))
     }
 }
 

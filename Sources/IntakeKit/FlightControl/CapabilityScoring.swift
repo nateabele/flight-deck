@@ -141,7 +141,7 @@ extension CapabilityScoring {
     /// A catalog candidate has no knobs and stands for every scored knob variant of its model; a
     /// candidate that names knobs (a rule's assignment) matches only that exact variant.
     public static func matches(candidate: ModelRef, scored: ModelRef) -> Bool {
-        candidate.harness == scored.harness && candidate.model == scored.model
+        candidate.agent == scored.agent && candidate.model == scored.model
             && (candidate.knobs.isEmpty || candidate.knobs == scored.knobs)
     }
 

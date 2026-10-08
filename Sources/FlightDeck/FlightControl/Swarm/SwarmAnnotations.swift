@@ -245,7 +245,7 @@ extension SwarmAnnotations {
         let block = agent.block.block
         var lines = ["\(agent.task.map { "task \($0)" } ?? "no task") · kind \(block.kind.rawValue)"]
         let knobs = ConfigKey.knobsText(block.knobs)
-        lines.append([block.harness.rawValue, block.model, knobs.isEmpty ? nil : knobs, "pool \(block.pool.rawValue)"]
+        lines.append([block.agent.rawValue, block.model, knobs.isEmpty ? nil : knobs, "pool \(block.pool.rawValue)"]
             .compactMap { $0 }.joined(separator: " · "))
         if block.pinned {
             lines.append("pinned by hand — \(block.source.reason)")

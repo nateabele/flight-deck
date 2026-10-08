@@ -1,4 +1,5 @@
 import AppKit
+import IntakeKit
 import Combine
 import FleetKit
 import OSLog

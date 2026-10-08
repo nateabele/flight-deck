@@ -1,5 +1,6 @@
 import FleetKit
 import Foundation
+import IntakeKit
 
 /// Where a tab's conversation is read from.
 enum TimelineSource: Equatable {

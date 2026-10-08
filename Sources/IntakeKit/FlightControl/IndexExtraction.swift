@@ -2,7 +2,7 @@ import Foundation
 
 /// One source's refresh as a headless claude run.
 ///
-/// The isolation reuses `HarnessCommand`'s, for the reasons documented there: `--restricted`
+/// The isolation reuses `HeadlessCommand`'s, for the reasons documented there: `--restricted`
 /// ignores the user's settings files (a standing `Bash(git add *)` allow would otherwise
 /// apply), `--strict-mcp-config` loads no MCP server, `dontAsk` denies anything not
 /// pre-approved because nobody can answer a prompt under `-p`. On top of that, `--tools` makes
@@ -23,8 +23,8 @@ public enum IndexExtraction {
     /// the benchmark's own names — mapping them is the alias table's job, and an agent asked to
     /// map would guess.
     public static func prompt(source: IndexSource, catalogs: AdapterCatalogs) -> String {
-        let models = catalogs.order.compactMap { catalogs.byHarness[$0] }.flatMap { cat in
-            cat.models.map { "- \(cat.harness.rawValue)/\($0.id) (\($0.displayName))" }
+        let models = catalogs.order.compactMap { catalogs.byAgent[$0] }.flatMap { cat in
+            cat.models.map { "- \(cat.agent.rawValue)/\($0.id) (\($0.displayName))" }
         }
         let list = models.isEmpty ? "- (none listed yet)" : models.joined(separator: "\n")
         return """
@@ -54,11 +54,11 @@ public enum IndexExtraction {
     public static func command(prompt: String, settings: IndexAgentSettings)
         -> (executable: String, arguments: [String], unsetEnvironment: [String]) {
         let args = ["-p", prompt, "--model", settings.model, "--effort", settings.effort]
-            + HarnessCommand.claudeStreaming
+            + HeadlessCommand.claudeStreaming
             + ["--json-schema", schemaJSON, "--permission-mode", "dontAsk",
                "--tools", webTools, "--allowedTools", webTools, "--disallowedTools", deniedTools]
-            + HarnessCommand.claudeIsolation
-        // Unset for the reason `HarnessCommand.build` gives: a claude spawned from inside Claude
+            + HeadlessCommand.claudeIsolation
+        // Unset for the reason `HeadlessCommand.build` gives: a claude spawned from inside Claude
         // Code otherwise skips saving its transcript, and the live probe runs from inside one.
         return ("claude", args, ClaudeProfile.childSessionVariables)
     }
@@ -66,7 +66,7 @@ public enum IndexExtraction {
     /// The stream's final `result.structured_output`, decoded. Throws on an error result, a
     /// stream that never finished, or an answer that is not the row format.
     public static func parse(stdout: Data) throws -> ExtractionPayload {
-        let parsed = try HarnessOutput.parse(.claude, stdout: stdout)
+        let parsed = try HeadlessOutput.parse(.claude, stdout: stdout)
         return try JSONDecoder().decode(ExtractionPayload.self, from: parsed.structured)
     }
 }

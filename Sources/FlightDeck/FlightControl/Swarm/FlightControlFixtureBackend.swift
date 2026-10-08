@@ -22,6 +22,7 @@ struct FlightControlFixtureBackend {
     var swarmsRoot: URL { root.appendingPathComponent("state", isDirectory: true) }
 
     private struct Table: Decodable {
+        // `harness` is the key `scripts/make-flight-control-fixture.py` writes.
         struct Routing: Decodable { let harness: String; let model: String; let pool: String }
         let pools: [String: Int]
         let routing: Routing
@@ -29,22 +30,23 @@ struct FlightControlFixtureBackend {
 
     func dependencies() -> SwarmDependencies? {
         guard let data = try? Data(contentsOf: root.appendingPathComponent("swarm-deps.json")),
-              let table = try? JSONDecoder().decode(Table.self, from: data) else { return nil }
+              let table = try? JSONDecoder().decode(Table.self, from: data),
+              let agent = AgentID(rawValue: table.routing.harness) else { return nil }
         let slots = FixtureSlots(pools: table.pools)
-        let router = FixtureRouter(harness: HarnessID(table.routing.harness), model: table.routing.model,
+        let router = FixtureRouter(agent: agent, model: table.routing.model,
                                    pool: PoolID(table.routing.pool))
         return SwarmDependencies(
             makeRouter: { router }, kinds: FixtureKinds(), allocator: slots, capacity: slots,
-            pools: FixturePools(harness: router.harness, ids: table.pools.keys.sorted().map { PoolID($0) }))
+            pools: FixturePools(agent: router.agent, ids: table.pools.keys.sorted().map { PoolID($0) }))
     }
 }
 
 /// Routes every kind to one model and never spills — the UI test asserts on routing it can predict.
 final class FixtureRouter: Router, @unchecked Sendable {
-    let harness: HarnessID, model: String, pool: PoolID
-    init(harness: HarnessID, model: String, pool: PoolID) { self.harness = harness; self.model = model; self.pool = pool }
+    let agent: AgentID, model: String, pool: PoolID
+    init(agent: AgentID, model: String, pool: PoolID) { self.agent = agent; self.model = model; self.pool = pool }
     func assign(kind: TaskKind, project: URL, catalogs: AdapterCatalogs, now: Date) -> Assignment {
-        Assignment(block: ExecutionBlock(kind: kind.id, harness: harness, model: model, pool: pool,
+        Assignment(block: ExecutionBlock(kind: kind.id, agent: agent, model: model, pool: pool,
                                          source: AssignmentSource(by: .rule, ruleId: "fixture", reason: "fixture routing", at: now)))
     }
     func spill(_ block: ExecutionBlock, kind: TaskKind, project: URL, exhausted: Set<PoolID>,
@@ -53,10 +55,10 @@ final class FixtureRouter: Router, @unchecked Sendable {
 
 /// The launch sheet's Override picker offers the fixture's own pools, not `claude-default`.
 struct FixturePools: PoolDirectory {
-    let harness: HarnessID
+    let agent: AgentID
     let ids: [PoolID]
-    func pools() -> [PoolSummary] { ids.map { PoolSummary(id: $0, harness: harness, label: $0.rawValue) } }
-    func defaultPool(for harness: HarnessID) -> PoolID? { harness == self.harness ? ids.first : nil }
+    func pools() -> [PoolSummary] { ids.map { PoolSummary(id: $0, agent: agent, label: $0.rawValue) } }
+    func defaultPool(for agent: AgentID) -> PoolID? { agent == self.agent ? ids.first : nil }
 }
 
 final class FixtureKinds: KindRegistry, @unchecked Sendable {
@@ -71,7 +73,7 @@ final class FixtureSlots: PoolAllocator, CapacityReader, @unchecked Sendable {
     private var taken: [PoolID: Set<Int>] = [:]
     init(pools: [String: Int]) { self.pools = pools }
 
-    private func account(_ index: Int) -> AccountRef { AccountRef(harness: "claude", id: nil, label: "local \(index)") }
+    private func account(_ index: Int) -> AccountRef { AccountRef(agent: .claude, id: nil, label: "local \(index)") }
 
     func lease(pool: PoolID) -> AccountLease? {
         lock.withLock {

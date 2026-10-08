@@ -21,24 +21,26 @@ public enum IntakeState: String, Codable, Sendable {
     }
 }
 
-/// A headless CLI that can run a planning seat. The raw values are persisted in intakes and tapes.
-/// `grok` and `gemini` (grok/gemini planning spec §3.1) are planning-only: they are NOT tab agents
-/// (`AgentID`) and NOT L3 swarm routing targets (see `agentHarnessID`). An older build cannot
-/// decode an intake that uses them — acceptable, since intakes are per-machine and the phone wire
-/// never carries `Harness`. Until Tracks G/M land, `AgentProfiles.headlessReady` keeps them out of
-/// every round (`AvailableModels`), and `HarnessCommand.build` refuses them.
-public enum Harness: String, Codable, Sendable, CaseIterable { case codex, claude, grok, gemini }
-
-public struct HarnessSession: Codable, Equatable, Sendable {
-    public var harness: Harness
+/// One live headless conversation: which agent, its own session id, and the model/effort it ran
+/// at. Persisted in `intake.json` (the triage session) under the key `harness` — the name the
+/// agent field had when this type was `HarnessSession` — so the key stays while the Swift name
+/// moved to `agent` (unify brief R1). Renaming the key would make every saved intake fail to
+/// decode.
+public struct HeadlessSession: Codable, Equatable, Sendable {
+    public var agent: AgentID
     public var sessionID: String
     public var model: String
     public var effort: String
-    public init(harness: Harness, sessionID: String, model: String, effort: String) {
-        self.harness = harness
+    public init(agent: AgentID, sessionID: String, model: String, effort: String) {
+        self.agent = agent
         self.sessionID = sessionID
         self.model = model
         self.effort = effort
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case agent = "harness"
+        case sessionID, model, effort
     }
 }
 
@@ -97,7 +99,7 @@ public struct Intake: Codable, Identifiable, Equatable, Sendable {
     /// The expanded, possibly human-edited round shape for `chosenPreset`. Nil until shaping
     /// starts, and nil forever for a Bead-fidelity intake, which has no shaping stage at all.
     public var roundConfig: RoundConfig?
-    public var triage: HarnessSession?
+    public var triage: HeadlessSession?
     public var exchanges: [TriageExchange]
     public var changeSet: ChangeSet?
     public var failure: String?
@@ -164,7 +166,7 @@ public struct Intake: Codable, Identifiable, Equatable, Sendable {
         // fixture loading unchanged.
         chosenPreset = try container.decodeIfPresent(Preset.self, forKey: .chosenPreset)
         roundConfig = try container.decodeIfPresent(RoundConfig.self, forKey: .roundConfig)
-        triage = try container.decodeIfPresent(HarnessSession.self, forKey: .triage)
+        triage = try container.decodeIfPresent(HeadlessSession.self, forKey: .triage)
         exchanges = try container.decodeIfPresent([TriageExchange].self, forKey: .exchanges) ?? []
         changeSet = try container.decodeIfPresent(ChangeSet.self, forKey: .changeSet)
         failure = try container.decodeIfPresent(String.self, forKey: .failure)

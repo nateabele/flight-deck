@@ -22,6 +22,9 @@ public struct RuleCompilerWire: Codable, Equatable, Sendable {
     public var reason: String?
     public var mode: String
     public var terms: [Term]
+    /// The agent's raw name as the compiler wrote it. Kept as the schema's own field name
+    /// (`harness`) rather than renamed with the rest of the agent identity: it is what the
+    /// compiler prompt asks for and what recorded compiler outputs contain.
     public var harness: String?
     public var model: String?
     public var modelDefaulted: Bool
@@ -43,9 +46,9 @@ public struct RuleCompilerInput: Equatable, Sendable {
     public var kinds: [TaskKind]
     public var catalogs: AdapterCatalogs
     public var pools: [PoolSummary]
-    public var defaultPools: [HarnessID: PoolID]
+    public var defaultPools: [AgentID: PoolID]
     public init(sentence: String, kinds: [TaskKind], catalogs: AdapterCatalogs, pools: [PoolSummary],
-                defaultPools: [HarnessID: PoolID]) {
+                defaultPools: [AgentID: PoolID]) {
         self.sentence = sentence; self.kinds = kinds; self.catalogs = catalogs; self.pools = pools
         self.defaultPools = defaultPools
     }
@@ -59,9 +62,9 @@ public enum RuleValidationError: Error, Equatable, Sendable {
     case unknownKind(String)
     case emptyMatch
     case unknownMode(String)
-    case missingHarness
-    case unknownHarness(String)
-    case harnessDisabled(String)
+    case missingAgent
+    case unknownAgent(String)
+    case agentDisabled(String)
     case noDefaultModel(String)
     /// `suggestion` is a catalog id that differs only in case — the usual way a model is
     /// misnamed ("Sonnet" for `sonnet`) — so the failure can name the fix.
@@ -69,7 +72,7 @@ public enum RuleValidationError: Error, Equatable, Sendable {
     case knobRejected(String, String, String, String)
     case noPool(String)
     case unknownPool(String)
-    case poolBelongsElsewhere(String, owner: String, harness: String)
+    case poolBelongsElsewhere(String, owner: String, agent: String)
     case fallbackIsPrimary(String)
 
     /// Shown inline under a failed rule (spec §2: "failed (shown inline with the reason)").
@@ -84,9 +87,9 @@ public enum RuleValidationError: Error, Equatable, Sendable {
         case .unknownKind(let k): return "there is no task kind “\(k)” — reword the rule, or add the kind under Task Kinds"
         case .emptyMatch: return "the rule has no conditions"
         case .unknownMode(let m): return "unknown match mode \(m)"
-        case .missingHarness: return "the rule names no agent"
-        case .unknownHarness(let h): return "\(h) is not a registered agent"
-        case .harnessDisabled(let h): return "\(Self.agent(h)) is turned off — enable it under Agents, or name another agent"
+        case .missingAgent: return "the rule names no agent"
+        case .unknownAgent(let h): return "\(h) is not a registered agent"
+        case .agentDisabled(let h): return "\(Self.agent(h)) is turned off — enable it under Agents, or name another agent"
         case .noDefaultModel(let h): return "\(h) has no default model to fall back to"
         case .unknownModel(let h, let m, let suggestion?):
             return "“\(m)” matched no model in \(Self.agent(h))'s catalog — try “\(suggestion)”, or reword the rule"
@@ -134,10 +137,14 @@ public enum RuleValidator {
         default: return .failure(.unknownMode(w.mode))
         }
 
-        guard let harnessName = w.harness, !harnessName.isEmpty else { return .failure(.missingHarness) }
-        let harness = HarnessID(harnessName)
-        guard let catalog = input.catalogs.byHarness[harness] else { return .failure(.unknownHarness(harnessName)) }
-        guard catalog.enabled else { return .failure(.harnessDisabled(harnessName)) }
+        // `w.agent` is the compiler's own output field (`RuleCompilerPrompt`'s schema keeps the
+        // key), so it stays a string until here: a name with no `AgentID` case is reported as
+        // "not a registered agent", the same as one with no catalog.
+        guard let harnessName = w.harness, !harnessName.isEmpty else { return .failure(.missingAgent) }
+        guard let agent = AgentID(rawValue: harnessName), let catalog = input.catalogs.byAgent[agent] else {
+            return .failure(.unknownAgent(harnessName))
+        }
+        guard catalog.enabled else { return .failure(.agentDisabled(harnessName)) }
 
         var defaulted = w.modelDefaulted
         var modelName = w.model
@@ -154,19 +161,19 @@ public enum RuleValidator {
         var knobs: [String: String] = [:]
         for k in w.knobs { knobs[k.name] = k.value }
         for (k, v) in knobs.sorted(by: { $0.key < $1.key })
-        where !input.catalogs.knobsValid(ModelRef(harness: harness, model: model, knobs: [k: v])) {
+        where !input.catalogs.knobsValid(ModelRef(agent: agent, model: model, knobs: [k: v])) {
             return .failure(.knobRejected(harnessName, model, k, v))
         }
 
         let pool: PoolID
         if let p = w.pool, !p.isEmpty {
             guard let summary = input.pools.first(where: { $0.id.rawValue == p }) else { return .failure(.unknownPool(p)) }
-            guard summary.harness == harness else {
-                return .failure(.poolBelongsElsewhere(p, owner: summary.harness.rawValue, harness: harnessName))
+            guard summary.agent == agent else {
+                return .failure(.poolBelongsElsewhere(p, owner: summary.agent.rawValue, agent: harnessName))
             }
             pool = summary.id
         } else {
-            guard let d = input.defaultPools[harness] else { return .failure(.noPool(harnessName)) }
+            guard let d = input.defaultPools[agent] else { return .failure(.noPool(harnessName)) }
             pool = d
         }
 
@@ -177,7 +184,7 @@ public enum RuleValidator {
             fallback = PoolID(f)
         }
 
-        return .success(CompiledRule(match: match, assign: RuleAssign(harness: harness, model: model, knobs: knobs, pool: pool,
+        return .success(CompiledRule(match: match, assign: RuleAssign(agent: agent, model: model, knobs: knobs, pool: pool,
                                                                       fallbackPool: fallback, modelDefaulted: defaulted)))
     }
 }

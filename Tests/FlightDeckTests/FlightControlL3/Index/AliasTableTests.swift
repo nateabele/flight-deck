@@ -21,7 +21,7 @@ final class AliasTableTests: XCTestCase {
         let p = AliasProposer.propose([UnmappedName(source: "terminal-bench", benchmarkModel: "Opus 5 (high)"),
                                        UnmappedName(source: "terminal-bench", benchmarkModel: "GPT-6 Sol (low)")],
                                       table: AliasTable(), catalogs: IndexFixtures.catalogs())
-        XCTAssertEqual(p.map(\.model), [ModelRef(harness: "codex", model: "gpt-6-sol", knobs: ["effort": "low"]), opus])
+        XCTAssertEqual(p.map(\.model), [ModelRef(agent: .codex, model: "gpt-6-sol", knobs: ["effort": "low"]), opus])
         XCTAssertEqual(Set(p.map(\.status)), [.pending])
     }
 
@@ -45,7 +45,7 @@ final class AliasTableTests: XCTestCase {
         var t = AliasTable()
         t.set(source: "s", benchmarkModel: "GPT-6 Sol (high)", model: sol, status: .confirmed)
         t.set(source: "s", benchmarkModel: "GPT-6 Sol (low)",
-              model: ModelRef(harness: "codex", model: "gpt-6-sol", knobs: ["effort": "low"]), status: .confirmed)
+              model: ModelRef(agent: .codex, model: "gpt-6-sol", knobs: ["effort": "low"]), status: .confirmed)
         XCTAssertEqual(t.model(source: "s", benchmarkModel: "GPT-6 Sol (low)")?.knobs, ["effort": "low"])
         XCTAssertEqual(t.model(source: "s", benchmarkModel: "GPT-6 Sol (high)")?.knobs, ["effort": "high"])
     }
@@ -61,7 +61,7 @@ final class AliasTableTests: XCTestCase {
     }
 
     func testKeyIsStableAcrossKnobOrder() {
-        XCTAssertEqual(IndexKeys.key(ModelRef(harness: "codex", model: "m", knobs: ["b": "2", "a": "1"])), "codex/m[a=1,b=2]")
+        XCTAssertEqual(IndexKeys.key(ModelRef(agent: .codex, model: "m", knobs: ["b": "2", "a": "1"])), "codex/m[a=1,b=2]")
         XCTAssertEqual(IndexKeys.key(IndexFixtures.sonnet), "claude/sonnet")
         XCTAssertEqual(IndexKeys.label(sol), "codex · gpt-6-sol (effort high)")
         XCTAssertEqual(AliasProposer.split("GPT-6 Sol (High)").base, "gpt-6-sol")

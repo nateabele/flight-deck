@@ -61,8 +61,8 @@ final class RoundsLiveProbeTests: XCTestCase {
     func testSketchReachesReviewWithAValidChangeSet() async throws {
         // Cheap models: this probes prompt/schema fit, not plan quality.
         let seat = Self.onPath("codex", environment) != nil
-            ? ModelChoice(harness: .codex, model: "gpt-5.6-luna", effort: "low")
-            : ModelChoice(harness: .claude, model: "haiku", effort: "low")
+            ? ModelChoice(agent: .codex, model: "gpt-5.6-luna", effort: "low")
+            : ModelChoice(agent: .claude, model: "haiku", effort: "low")
         var intake = Intake(projectPath: project.path,
                             intent: "Add a `--json` flag to every tallyho command so scripts can read its output.")
         intake.chosenPreset = .sketch
@@ -83,7 +83,7 @@ final class RoundsLiveProbeTests: XCTestCase {
         let started = Date()
         let status = await runner.run()
         let tape = store.loadTape()
-        print("rounds-live: \(seat.harness.rawValue) \(seat.model)/\(seat.effort) → \(status) in "
+        print("rounds-live: \(seat.agent.rawValue) \(seat.model)/\(seat.effort) → \(status) in "
               + String(format: "%.0f s", Date().timeIntervalSince(started)))
         Self.printRuns(store)
 
@@ -122,7 +122,7 @@ final class RoundsLiveProbeTests: XCTestCase {
         var config = try XCTUnwrap(intake.roundConfig)
         // No fallback, as the coverage spec requires: a cross-reviewer that fell back would be
         // the primary's family, and the round would measure nothing.
-        config.crossReviewer = Slot(ModelChoice(harness: .claude, model: "opus", effort: "high"))
+        config.crossReviewer = Slot(ModelChoice(agent: .claude, model: "opus", effort: "high"))
         config.crossCheck = .firstAndLast
         XCTAssertTrue(config.crossChecks, "reviewer and cross-reviewer must be different families")
         let store = TapeStore(intakeDirectory: dir)
@@ -145,7 +145,7 @@ final class RoundsLiveProbeTests: XCTestCase {
         }
         try store.writeCheckpoint(cp, files: files, into: &tape)
         print("xcheck-live: checkpoint \(cp.id) files \(files.keys.sorted()), slots "
-              + cp.record.slots.map { "\($0.role)=\($0.used.harness.rawValue)/\($0.used.model):\($0.status)" }.joined(separator: " "))
+              + cp.record.slots.map { "\($0.role)=\($0.used.agent.rawValue)/\($0.used.model):\($0.status)" }.joined(separator: " "))
 
         let readings = CoverageSeries.readings(tape.checkpoints) { id, name in
             try? Data(contentsOf: store.checkpointDirectory(id).appendingPathComponent(name))

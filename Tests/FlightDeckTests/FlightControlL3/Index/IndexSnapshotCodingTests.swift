@@ -50,7 +50,7 @@ final class IndexSnapshotCodingTests: XCTestCase {
         let dir = IndexFixtures.scratch()
         addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
         var c = IndexConfig.initial()
-        c.manual = [ManualModelScores(model: ModelRef(harness: "opencode", model: "ollama/qwen"), dimensions: ["debugging": 0.7],
+        c.manual = [ManualModelScores(model: ModelRef(agent: .gemini, model: "ollama/qwen"), dimensions: ["debugging": 0.7],
                                       inheritFrom: IndexFixtures.sol)]
         c.lastRefreshAttemptAt = at
         let url = dir.appendingPathComponent("config.json")

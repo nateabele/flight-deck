@@ -1,5 +1,6 @@
 import FleetKit
 import XCTest
+import IntakeKit
 @testable import FlightDeck
 
 /// That what the Codex pane in Preferences writes is what `thread/start` is handed.
@@ -26,6 +27,7 @@ final class CodexOptionsRoutingTests: XCTestCase {
     /// spawns and no thread is created.
     private final class RecordingCodexAdapter: AgentAdapter {
         static let id: AgentID = .codex
+        nonisolated static var profile: any AgentProfile { AgentProfiles.profile(for: .codex) }
         /// Codex's answers, because this stands in for codex — the store reads both
         /// capabilities off `AgentID`, so a stub that disagreed would describe an agent that
         /// does not exist.

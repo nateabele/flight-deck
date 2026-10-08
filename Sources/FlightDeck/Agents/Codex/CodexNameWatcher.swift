@@ -1,4 +1,5 @@
 import Foundation
+import IntakeKit
 
 /// Tails codex's `session_index.jsonl` and reports thread renames.
 ///

@@ -30,7 +30,7 @@ final class RoutingPresentationTests: XCTestCase {
     }
 
     func testAnAllRuleJoinsWithAnd() {
-        let rule = D.rule("r1", .all([.dimension("debugging", atLeast: 0.7), .kind("docs")]), "claude", "opus", pool: "claude-default")
+        let rule = D.rule("r1", .all([.dimension("debugging", atLeast: 0.7), .kind("docs")]), .claude, "opus", pool: "claude-default")
         XCTAssertEqual(row(rule).joiner, "and")
         XCTAssertEqual(row(rule).target, "Claude · Opus")
     }

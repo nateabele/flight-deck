@@ -410,5 +410,5 @@ struct ShapingModel {
         }
     }
 
-    private static func modelName(_ m: ModelChoice) -> String { "\(m.harness.rawValue) \(m.model)" }
+    private static func modelName(_ m: ModelChoice) -> String { "\(m.agent.rawValue) \(m.model)" }
 }

@@ -92,7 +92,7 @@ final class IntakeServiceLiveTests: XCTestCase {
                              countRecovery: Bool = false, awaitRecovery: Bool = true) async -> IntakeService {
         let reads = self.reads!
         let svc = IntakeService(store: IntakeStore(root: root), headless: headless, processRunner: processRunner,
-                                triageSettings: TriageSettings(harness: .codex, model: "m1", effort: "high"),
+                                triageSettings: TriageSettings(agent: .codex, model: "m1", effort: "high"),
                                 availableModels: .defaults, runner: runner,
                                 inject: { _, _, _, _ in true }, hasSession: { _, _ in false },
                                 now: { [unowned self] in self.clockNow },
@@ -205,7 +205,7 @@ final class IntakeServiceLiveTests: XCTestCase {
         }
         svc.pollTapes()
         XCTAssertNotNil(svc.pending[a.id], "a round in progress with no seat yet is still pending")
-        try writeSeat(a.id, run: "draft-0-drafter-1", activity: SeatActivity(harness: .codex, startedAt: clockNow), record: nil)
+        try writeSeat(a.id, run: "draft-0-drafter-1", activity: SeatActivity(agent: .codex, startedAt: clockNow), record: nil)
         svc.pollTapes()
         XCTAssertNil(svc.pending[a.id])
 
@@ -441,7 +441,7 @@ final class IntakeServiceLiveTests: XCTestCase {
         let asking = try seed(.needsAnswers)
         let file = IntakeStore(root: root).directory(for: asking.id).appendingPathComponent("triage/activity.json")
         try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
-        var old = SeatActivity(harness: .codex, startedAt: clockNow.addingTimeInterval(-600))
+        var old = SeatActivity(agent: .codex, startedAt: clockNow.addingTimeInterval(-600))
         old.finished = true
         try IntakeJSON.encoder.encode(old).write(to: file)
 
@@ -488,11 +488,11 @@ final class IntakeServiceLiveTests: XCTestCase {
         let i = try seed(.shaping)
         try updateTape(i.id) { $0.status = .paused }
         let started = clockNow
-        try writeSeat(i.id, run: "draft-0-drafter-1", activity: SeatActivity(harness: .codex, startedAt: started),
+        try writeSeat(i.id, run: "draft-0-drafter-1", activity: SeatActivity(agent: .codex, startedAt: started),
                       record: RunRecord(pid: 1, started: started, finished: started, exitCode: 0))
-        try writeSeat(i.id, run: "refine-1-reviewer", activity: SeatActivity(harness: .claude, startedAt: started),
+        try writeSeat(i.id, run: "refine-1-reviewer", activity: SeatActivity(agent: .claude, startedAt: started),
                       record: RunRecord(pid: 2, started: started))
-        try writeSeat(i.id, run: "refine-10-reviewer", activity: SeatActivity(harness: .codex, startedAt: started), record: nil)
+        try writeSeat(i.id, run: "refine-10-reviewer", activity: SeatActivity(agent: .codex, startedAt: started), record: nil)
         let svc = await makeService()
 
         svc.pollTapes()
@@ -503,7 +503,7 @@ final class IntakeServiceLiveTests: XCTestCase {
         try updateTape(i.id) { $0.status = .running; $0.roundInProgress = Self.refine1 }
         svc.pollTapes()
         XCTAssertEqual(svc.seatActivities[i.id]?.keys.sorted(), ["refine-1-reviewer"])
-        XCTAssertEqual(svc.seatActivities[i.id]?["refine-1-reviewer"]?.harness, .claude)
+        XCTAssertEqual(svc.seatActivities[i.id]?["refine-1-reviewer"]?.agent, .claude)
         XCTAssertEqual(svc.runRecords[i.id], ["refine-1-reviewer": RunRecord(pid: 2, started: started)])
         XCTAssertEqual(reads.count(containing: "/runs/draft-0-"), 0)
         XCTAssertEqual(reads.count(containing: "/runs/refine-10-"), 0)
@@ -521,7 +521,7 @@ final class IntakeServiceLiveTests: XCTestCase {
     func testActivityReloadIsMtimeGated() async throws {
         let i = try seed(.shaping)
         try updateTape(i.id) { $0.status = .running; $0.roundInProgress = Self.refine1 }
-        try writeSeat(i.id, run: "refine-1-reviewer", activity: SeatActivity(harness: .codex, startedAt: clockNow),
+        try writeSeat(i.id, run: "refine-1-reviewer", activity: SeatActivity(agent: .codex, startedAt: clockNow),
                       record: RunRecord(started: clockNow))
         let dir = tapeStore(i.id).runDirectory("refine-1-reviewer")
         let activity = dir.appendingPathComponent("activity.json"), record = dir.appendingPathComponent("run.json")
@@ -535,7 +535,7 @@ final class IntakeServiceLiveTests: XCTestCase {
         XCTAssertEqual(reads.count("activity.json"), 1, "an unchanged mtime costs a stat, not a read")
         XCTAssertEqual(reads.count("run.json"), 1)
 
-        var moved = SeatActivity(harness: .codex, startedAt: clockNow)
+        var moved = SeatActivity(agent: .codex, startedAt: clockNow)
         moved.headline = "Reading the board"
         try IntakeJSON.encoder.encode(moved).write(to: activity)
         try setMTime(activity, 1_790_000_001)
@@ -557,7 +557,7 @@ final class IntakeServiceLiveTests: XCTestCase {
         let other = try seed(.shaping)
         for id in [i.id, other.id] {
             try updateTape(id) { $0.status = .running; $0.roundInProgress = Self.refine1 }
-            try writeSeat(id, run: "refine-1-reviewer", activity: SeatActivity(harness: .codex, startedAt: clockNow),
+            try writeSeat(id, run: "refine-1-reviewer", activity: SeatActivity(agent: .codex, startedAt: clockNow),
                           record: RunRecord(started: clockNow))
             try setMTime(tapeStore(id).runDirectory("refine-1-reviewer").appendingPathComponent("activity.json"), 1_790_000_000)
         }
@@ -569,7 +569,7 @@ final class IntakeServiceLiveTests: XCTestCase {
         let c = svc.seats.channel(other.id).objectWillChange.sink { otherPublishes += 1 }
         defer { a.cancel(); b.cancel(); c.cancel() }
 
-        var moved = SeatActivity(harness: .codex, startedAt: clockNow)
+        var moved = SeatActivity(agent: .codex, startedAt: clockNow)
         moved.headline = "Reading the board"
         try IntakeJSON.encoder.encode(moved).write(to: activity)
         try setMTime(activity, 1_790_000_001)
@@ -589,11 +589,11 @@ final class IntakeServiceLiveTests: XCTestCase {
         try updateTape(i.id) {
             $0.status = .running; $0.roundInProgress = Self.refine1; $0.roundStartedAt = attempt
         }
-        try writeSeat(i.id, run: "refine-1-reviewer", activity: SeatActivity(harness: .codex, startedAt: attempt - 120),
+        try writeSeat(i.id, run: "refine-1-reviewer", activity: SeatActivity(agent: .codex, startedAt: attempt - 120),
                       record: RunRecord(pid: 1, started: attempt - 120, finished: attempt - 60, exitCode: 1))
-        try writeSeat(i.id, run: "refine-1-reviewer-fallback", activity: SeatActivity(harness: .claude, startedAt: attempt + 2),
+        try writeSeat(i.id, run: "refine-1-reviewer-fallback", activity: SeatActivity(agent: .claude, startedAt: attempt + 2),
                       record: RunRecord(pid: 2, started: attempt + 2))
-        try writeSeat(i.id, run: "refine-1-integrator", activity: SeatActivity(harness: .codex, startedAt: attempt - 0.5),
+        try writeSeat(i.id, run: "refine-1-integrator", activity: SeatActivity(agent: .codex, startedAt: attempt - 0.5),
                       record: nil)
         let svc = await makeService()
         XCTAssertEqual(svc.seatActivities[i.id]?.keys.sorted(), ["refine-1-integrator", "refine-1-reviewer-fallback"])
@@ -613,7 +613,7 @@ final class IntakeServiceLiveTests: XCTestCase {
     func testSeatResultLoadsOnItsOwnMtime() async throws {
         let i = try seed(.shaping)
         try updateTape(i.id) { $0.status = .running; $0.roundInProgress = Self.refine1 }
-        try writeSeat(i.id, run: "refine-1-reviewer", activity: SeatActivity(harness: .codex, startedAt: clockNow),
+        try writeSeat(i.id, run: "refine-1-reviewer", activity: SeatActivity(agent: .codex, startedAt: clockNow),
                       record: RunRecord(started: clockNow))
         let svc = await makeService()
         svc.pollTapes()

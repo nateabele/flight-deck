@@ -2,97 +2,116 @@ import XCTest
 import IntakeKit
 @testable import FlightDeck
 
-/// Every Settings edit is a pure function over `CapacityPreferences`, so the pane is a thin
-/// binding and these pin the rules: default pools cannot be deleted, ids are minted once and
-/// never reused for a different pool, thresholds can never cross, and the first edit of a
-/// default pool stores it without losing what it held.
+/// Every pool edit is a pure function over the Accounts list (unify brief R6), so the pane is a
+/// thin binding and these pin the rules: synthesized default pools cannot be deleted, ids are
+/// minted once and never reused for a different pool, thresholds can never cross, editing a
+/// default stores its settings without nesting anyone's accounts, and a pool holds one agent's
+/// accounts, each in at most one pool.
 @MainActor
 final class CapacityEditingTests: XCTestCase {
     private let accounts = [
         AgentAccount(id: UsageRefs.workID, agent: .claude, displayName: "Work", home: URL(fileURLWithPath: "/tmp/fd-edit/w")),
         AgentAccount(id: UsageRefs.spareID, agent: .claude, displayName: "Spare", home: URL(fileURLWithPath: "/tmp/fd-edit/s")),
     ]
+    private var list: AccountList { AccountList(entries: accounts.map(AccountEntry.account)) }
     private func fixedUUIDs(_ texts: [String]) -> () -> UUID {
         var queue = texts.map { UUID(uuidString: $0)! }
         return { queue.removeFirst() }
     }
+    private func effective(_ list: AccountList, _ id: PoolID) -> CapacityPool? { list.effectivePools().first { $0.id == id } }
 
     func testNewIDsArePrefixedHexAndSkipTakenOnes() {
         let next = fixedUUIDs(["ABCDEF12-0000-0000-0000-000000000000", "12345678-0000-0000-0000-000000000000"])
         XCTAssertEqual(CapacityEditing.newPoolID(existing: ["pool-abcdef12"], random: next), "pool-12345678")
     }
 
-    func testAddingAHostedPoolStoresTheDefaultsToo() {
-        var prefs = CapacityPreferences()
-        let id = CapacityEditing.addHostedPool(&prefs, agent: .claude, accounts: accounts,
-                                               random: fixedUUIDs(["ABCDEF12-0000-0000-0000-000000000000"]))
+    func testAddingAHostedPoolLeavesTheDefaultSynthesized() {
+        var list = list
+        let id = CapacityEditing.addHostedPool(&list, agent: .claude, random: fixedUUIDs(["ABCDEF12-0000-0000-0000-000000000000"]))
         XCTAssertEqual(id, "pool-abcdef12")
-        XCTAssertEqual(prefs.pools?.map(\.id), ["claude-default", "pool-abcdef12"])
-        XCTAssertEqual(prefs.pools?.last?.label, "New Claude pool")
-        XCTAssertEqual(prefs.pools?.last?.accounts, [])
-        XCTAssertEqual(prefs.pools?.first?.accounts, [UsageRefs.workID, UsageRefs.spareID])
+        XCTAssertEqual(list.pools.map(\.id), ["pool-abcdef12"], "the default is derived, never stored by an unrelated edit")
+        XCTAssertEqual(list.pool(id)?.label, "New Claude pool")
+        XCTAssertEqual(list.pool(id)?.members, [])
+        XCTAssertEqual(list.effectivePools().map(\.id), ["claude-default", "pool-abcdef12"])
+        XCTAssertEqual(effective(list, "claude-default")?.accounts, [UsageRefs.workID, UsageRefs.spareID])
     }
 
     func testAddingALocalPoolUsesTheDefaultCap() {
-        var prefs = CapacityPreferences()
-        let id = CapacityEditing.addLocalPool(&prefs, harness: "opencode", accounts: accounts,
-                                              random: fixedUUIDs(["0000AAAA-0000-0000-0000-000000000000"]))
-        let pool = prefs.pools?.first { $0.id == id }
+        var list = list
+        let id = CapacityEditing.addLocalPool(&list, agent: .gemini, random: fixedUUIDs(["0000AAAA-0000-0000-0000-000000000000"]))
+        let pool = list.pool(id)
         XCTAssertEqual(pool?.kind, .local); XCTAssertEqual(pool?.concurrencyCap, 2); XCTAssertEqual(pool?.endpoint, "http://localhost:11434")
     }
 
-    func testDefaultPoolsCannotBeRemovedUserPoolsCan() {
-        var prefs = CapacityPreferences()
-        let id = CapacityEditing.addHostedPool(&prefs, agent: .claude, accounts: accounts)
-        XCTAssertFalse(CapacityEditing.removePool("claude-default", &prefs, accounts: accounts))
-        XCTAssertTrue(CapacityEditing.removePool(id, &prefs, accounts: accounts))
-        XCTAssertEqual(prefs.pools?.map(\.id), ["claude-default"])
+    func testSynthesizedDefaultPoolsCannotBeRemovedUserPoolsCan() {
+        var list = list
+        let id = CapacityEditing.addHostedPool(&list, agent: .claude)
+        XCTAssertFalse(CapacityEditing.removePool("claude-default", &list))
+        XCTAssertTrue(CapacityEditing.removePool(id, &list))
+        XCTAssertEqual(list.effectivePools().map(\.id), ["claude-default"])
     }
 
-    func testRenameTrimsAndIgnoresEmpty() {
-        var prefs = CapacityPreferences()
-        CapacityEditing.rename("claude-default", to: "  Day shift ", &prefs, accounts: accounts)
-        XCTAssertEqual(prefs.pools?.first?.label, "Day shift")
-        XCTAssertEqual(prefs.pools?.first?.id, "claude-default", "renaming never changes the id blocks store")
-        CapacityEditing.rename("claude-default", to: "   ", &prefs, accounts: accounts)
-        XCTAssertEqual(prefs.pools?.first?.label, "Day shift")
+    /// Editing a default stores its settings as a memberless entry: the accounts stay at top
+    /// level and still fill it.
+    func testRenamingADefaultStoresItWithoutNestingAccounts() {
+        var list = list
+        CapacityEditing.rename("claude-default", to: "  Day shift ", &list)
+        XCTAssertEqual(effective(list, "claude-default")?.label, "Day shift")
+        XCTAssertEqual(list.pool("claude-default")?.members, [])
+        XCTAssertEqual(effective(list, "claude-default")?.accounts, [UsageRefs.workID, UsageRefs.spareID])
+        XCTAssertEqual(list.entries.first?.id, .account(UsageRefs.workID))
+        CapacityEditing.rename("claude-default", to: "   ", &list)
+        XCTAssertEqual(effective(list, "claude-default")?.label, "Day shift")
     }
 
     func testThresholdsNeverCross() {
-        var prefs = CapacityPreferences()
-        CapacityEditing.setThresholds("claude-default", soft: 0.97, hard: 0.95, &prefs, accounts: accounts)
-        let p = prefs.pools?.first
+        var list = list
+        CapacityEditing.setThresholds("claude-default", soft: 0.97, hard: 0.95, &list)
+        let p = effective(list, "claude-default")
         XCTAssertEqual(p?.hardThreshold ?? 0, 0.95, accuracy: 1e-9)
         XCTAssertEqual(p?.softThreshold ?? 0, 0.90, accuracy: 1e-9)
         XCTAssertNoThrow(try p?.validate())
-        CapacityEditing.setThresholds("claude-default", soft: 0.0, hard: 2.0, &prefs, accounts: accounts)
-        XCTAssertEqual(prefs.pools?.first?.softThreshold ?? 0, 0.05, accuracy: 1e-9)
-        XCTAssertEqual(prefs.pools?.first?.hardThreshold ?? 0, 1.0, accuracy: 1e-9)
+        CapacityEditing.setThresholds("claude-default", soft: 0.0, hard: 2.0, &list)
+        XCTAssertEqual(effective(list, "claude-default")?.softThreshold ?? 0, 0.05, accuracy: 1e-9)
+        XCTAssertEqual(effective(list, "claude-default")?.hardThreshold ?? 0, 1.0, accuracy: 1e-9)
     }
 
     func testToggleAndMoveAccounts() {
-        var prefs = CapacityPreferences()
-        let id = CapacityEditing.addHostedPool(&prefs, agent: .claude, accounts: accounts)
-        CapacityEditing.toggle(UsageRefs.workID, in: id, &prefs, accounts: accounts)
-        CapacityEditing.toggle(UsageRefs.spareID, in: id, &prefs, accounts: accounts)
-        XCTAssertEqual(prefs.pools?.last?.accounts, [UsageRefs.workID, UsageRefs.spareID])
-        CapacityEditing.move(in: id, from: IndexSet(integer: 1), to: 0, &prefs, accounts: accounts)
-        XCTAssertEqual(prefs.pools?.last?.accounts, [UsageRefs.spareID, UsageRefs.workID])
-        CapacityEditing.toggle(UsageRefs.spareID, in: id, &prefs, accounts: accounts)
-        XCTAssertEqual(prefs.pools?.last?.accounts, [UsageRefs.workID])
+        var list = list
+        let id = CapacityEditing.addHostedPool(&list, agent: .claude)
+        CapacityEditing.toggle(UsageRefs.workID, in: id, &list)
+        CapacityEditing.toggle(UsageRefs.spareID, in: id, &list)
+        XCTAssertEqual(effective(list, id)?.accounts, [UsageRefs.workID, UsageRefs.spareID])
+        XCTAssertNil(effective(list, "claude-default"), "every claude account is pooled now, so there is no default")
+        CapacityEditing.move(in: id, from: IndexSet(integer: 1), to: 0, &list)
+        XCTAssertEqual(effective(list, id)?.accounts, [UsageRefs.spareID, UsageRefs.workID])
+        CapacityEditing.toggle(UsageRefs.spareID, in: id, &list)
+        XCTAssertEqual(effective(list, id)?.accounts, [UsageRefs.workID])
+        XCTAssertEqual(effective(list, "claude-default")?.accounts, [UsageRefs.spareID], "back at top level, back in the default")
+    }
+
+    /// An account is in at most one pool: putting it in a second takes it out of the first.
+    func testTogglingIntoASecondPoolMovesTheAccount() {
+        var list = list
+        let a = CapacityEditing.addHostedPool(&list, agent: .claude)
+        let b = CapacityEditing.addHostedPool(&list, agent: .claude)
+        CapacityEditing.toggle(UsageRefs.workID, in: a, &list)
+        CapacityEditing.toggle(UsageRefs.workID, in: b, &list)
+        XCTAssertEqual(effective(list, a)?.accounts, [])
+        XCTAssertEqual(effective(list, b)?.accounts, [UsageRefs.workID])
     }
 
     func testCapAndEndpointClamp() {
-        var prefs = CapacityPreferences()
-        let id = CapacityEditing.addLocalPool(&prefs, harness: "opencode", accounts: accounts)
-        CapacityEditing.setCap(id, 0, &prefs, accounts: accounts)
-        XCTAssertEqual(prefs.pools?.last?.concurrencyCap, 1)
-        CapacityEditing.setEndpoint(id, " http://box:11434 ", &prefs, accounts: accounts)
-        XCTAssertEqual(prefs.pools?.last?.endpoint, "http://box:11434")
+        var list = list
+        let id = CapacityEditing.addLocalPool(&list, agent: .gemini)
+        CapacityEditing.setCap(id, 0, &list)
+        XCTAssertEqual(list.pool(id)?.concurrencyCap, 1)
+        CapacityEditing.setEndpoint(id, " http://box:11434 ", &list)
+        XCTAssertEqual(list.pool(id)?.endpoint, "http://box:11434")
     }
 
-    func testNoLocalHarnessIsRegisteredOnMaster() {
-        XCTAssertEqual(CapacityPane.defaultLocalHarnesses(), [], "claude and codex are both .login; OpenCode adds the first local one")
+    func testNoLocalAgentIsRegisteredOnMaster() {
+        XCTAssertEqual(CapacityPane.defaultLocalAgents(), [], "claude and codex are both .login; a local provider adds the first")
     }
 
     func testTheFixtureSeedsThreeAccountsAndTwoReadings() {
@@ -108,22 +127,22 @@ final class CapacityEditingTests: XCTestCase {
 
     func testAnotherAgentsAccountCannotJoinAPool() {
         let codex = AgentAccount(id: UsageRefs.codexID, agent: .codex, displayName: "Codex", home: URL(fileURLWithPath: "/tmp/fd-edit/c"))
-        let all = accounts + [codex]
-        var prefs = CapacityPreferences()
-        let id = CapacityEditing.addHostedPool(&prefs, agent: .claude, accounts: all)
-        CapacityEditing.toggle(UsageRefs.codexID, in: id, &prefs, accounts: all)
-        XCTAssertEqual(prefs.pools?.last?.accounts, [], "a codex account in a claude pool would be leased for a claude spawn")
-        CapacityEditing.toggle(UUID(), in: id, &prefs, accounts: all)
-        XCTAssertEqual(prefs.pools?.last?.accounts, [], "an unknown account cannot join either")
+        var list = AccountList(entries: (accounts + [codex]).map(AccountEntry.account))
+        let id = CapacityEditing.addHostedPool(&list, agent: .claude)
+        CapacityEditing.toggle(UsageRefs.codexID, in: id, &list)
+        XCTAssertEqual(list.pool(id)?.members, [], "a codex account in a claude pool would be leased for a claude spawn")
+        CapacityEditing.toggle(UUID(), in: id, &list)
+        XCTAssertEqual(list.pool(id)?.members, [], "an unknown account cannot join either")
     }
 
-    /// A default pool is every live account; Remove used to just reorder it while looking like
-    /// an exclusion.
+    /// A default pool is every unpooled account of its agent; Remove used to just reorder it while
+    /// looking like an exclusion.
     func testTogglingAMemberOfADefaultPoolLeavesTheEffectivePoolUnchanged() {
-        var prefs = CapacityPreferences()
-        let before = prefs.effectivePools(accounts: accounts).first { $0.id == "claude-default" }?.accounts
-        CapacityEditing.toggle(UsageRefs.workID, in: "claude-default", &prefs, accounts: accounts)
-        let after = prefs.effectivePools(accounts: accounts).first { $0.id == "claude-default" }?.accounts
+        var list = list
+        CapacityEditing.rename("claude-default", to: "Stored default", &list)
+        let before = effective(list, "claude-default")?.accounts
+        CapacityEditing.toggle(UsageRefs.workID, in: "claude-default", &list)
+        let after = effective(list, "claude-default")?.accounts
         XCTAssertEqual(after, before)
         XCTAssertEqual(after, [UsageRefs.workID, UsageRefs.spareID])
     }

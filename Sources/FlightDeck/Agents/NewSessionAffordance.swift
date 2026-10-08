@@ -1,4 +1,5 @@
 import AppKit
+import IntakeKit
 import SwiftUI
 
 /// Maps the ordered agent list onto New Session shortcuts, labels and glyphs.

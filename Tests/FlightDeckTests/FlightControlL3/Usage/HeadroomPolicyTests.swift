@@ -98,11 +98,11 @@ final class HeadroomPolicyTests: XCTestCase {
     }
 
     func testPoolConstructorsAndDefaults() throws {
-        let p = CapacityPool.hosted(id: CapacityPool.defaultID(for: "claude"), label: "Claude default", harness: "claude", accounts: [UsageRefs.workID])
+        let p = CapacityPool.hosted(id: CapacityPool.defaultID(for: .claude), label: "Claude default", agent: .claude, accounts: [UsageRefs.workID])
         XCTAssertEqual(p.id, "claude-default")
         XCTAssertTrue(p.isDefault)
         XCTAssertEqual(p.softThreshold, 0.80); XCTAssertEqual(p.hardThreshold, 0.95)
-        let l = CapacityPool.local(id: "pool-local1", label: "Ollama", harness: "opencode", endpoint: "http://localhost:11434")
+        let l = CapacityPool.local(id: "pool-local1", label: "Ollama", agent: .gemini, endpoint: "http://localhost:11434")
         XCTAssertEqual(l.concurrencyCap, 2); XCTAssertEqual(l.kind, .local); XCTAssertFalse(l.isDefault)
         XCTAssertNoThrow(try p.validate()); XCTAssertNoThrow(try l.validate())
         let data = try JSONEncoder().encode([p, l])
@@ -110,12 +110,12 @@ final class HeadroomPolicyTests: XCTestCase {
     }
 
     func testValidateNamesTheBadField() {
-        var p = CapacityPool.hosted(id: "pool-a", label: "A", harness: "claude", accounts: [])
+        var p = CapacityPool.hosted(id: "pool-a", label: "A", agent: .claude, accounts: [])
         p.softThreshold = 0.96
         XCTAssertThrowsError(try p.validate()) { XCTAssertEqual($0 as? PoolValidationError, .thresholdsOutOfOrder(soft: 0.96, hard: 0.95)) }
         p.softThreshold = 0.8; p.hardThreshold = 1.2
         XCTAssertThrowsError(try p.validate()) { XCTAssertEqual($0 as? PoolValidationError, .thresholdOutOfRange(1.2)) }
-        var l = CapacityPool.local(id: "pool-b", label: "B", harness: "opencode", endpoint: "x")
+        var l = CapacityPool.local(id: "pool-b", label: "B", agent: .gemini, endpoint: "x")
         l.concurrencyCap = 0
         XCTAssertThrowsError(try l.validate()) { XCTAssertEqual($0 as? PoolValidationError, .capBelowOne(0)) }
         l.concurrencyCap = 1; l.label = " "

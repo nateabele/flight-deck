@@ -1,4 +1,5 @@
 import SwiftUI
+import IntakeKit
 
 /// What the "+" sheet is filling in: a name and the home it will create. `homePath` starts as
 /// `defaultHome(for:name:)`'s derivation and is user-editable via the sheet's "Choose…" escape

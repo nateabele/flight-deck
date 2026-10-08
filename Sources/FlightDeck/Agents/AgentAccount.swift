@@ -11,17 +11,33 @@ extension AgentID {
         switch self {
         case .claude: return home.appendingPathComponent(".claude", isDirectory: true)
         case .codex:  return home.appendingPathComponent(".codex", isDirectory: true)
+        // grok keeps its login, config and sessions under `$GROK_HOME`, default `~/.grok`
+        // (`GrokProfile.environment`).
+        case .grok:   return home.appendingPathComponent(".grok", isDirectory: true)
+        // agy's own files live under `~/.gemini/antigravity-cli`, but `~/.gemini` is the
+        // directory a migration seeds from (it must be a direct child of `$HOME`, see
+        // `Preferences.migrateAccountsIfNeeded`). Its login is in the keyring, not here — which
+        // is why gemini has exactly one account (unify brief R5).
+        case .gemini: return home.appendingPathComponent(".gemini", isDirectory: true)
         }
     }
 
-    /// The variable that binds a process to a home. Read by `AgentAdapter.environment(for:)`,
-    /// and nowhere else — callers name accounts, never variables. Spelled by the CLI's profile,
-    /// which planning seats bind through too, so a tab and a seat on one account can never
-    /// name its home differently.
-    var homeEnvironmentKey: String {
+    /// The variable that binds a process to a home, or nil for an agent that has none. Read by
+    /// `AgentAdapter.environment(for:)` and `PreferencesStore.sessionEnvironment`, and nowhere
+    /// else — callers name accounts, never variables. Spelled by the CLI's profile, which
+    /// planning seats bind through too, so a tab and a seat on one account can never name its
+    /// home differently.
+    ///
+    /// nil is gemini's honest answer: `agy` has no home-relocation variable and signs in through
+    /// the OS keyring (`GeminiProfile.environment`), so there is nothing to bind and only its
+    /// built-in account exists. Optional rather than a made-up name, which would be set on every
+    /// gemini launch and bind nothing.
+    var homeEnvironmentKey: String? {
         switch self {
         case .claude: return ClaudeProfile.homeEnvironmentKey
         case .codex:  return CodexProfile.homeEnvironmentKey
+        case .grok:   return GrokProfile.homeEnvironmentKey
+        case .gemini: return nil
         }
     }
 }

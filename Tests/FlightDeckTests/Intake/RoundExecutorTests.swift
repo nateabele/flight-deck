@@ -95,7 +95,7 @@ final class ScriptedHarnessRunner: CommandRunner, @unchecked Sendable {
     }
 }
 
-// MARK: - Harness-shaped outputs
+// MARK: - AgentID-shaped outputs
 
 func codexOK(_ session: String, _ json: String) -> CommandResult {
     let started = #"{"type":"thread.started","thread_id":"\#(session)"}"#
@@ -141,8 +141,8 @@ func failed(_ stderr: String) -> CommandResult { CommandResult(stdout: Data(), s
 func json<T: Encodable>(_ value: T) -> String { String(decoding: try! IntakeJSON.encoder.encode(value), as: UTF8.self) }
 
 final class RoundExecutorTests: XCTestCase {
-    let codexA = ModelChoice(harness: .codex, model: "A", effort: "high")
-    let claudeB = ModelChoice(harness: .claude, model: "B", effort: "medium")
+    let codexA = ModelChoice(agent: .codex, model: "A", effort: "high")
+    let claudeB = ModelChoice(agent: .claude, model: "B", effort: "medium")
     let now = Date(timeIntervalSince1970: 1_790_000_000)
     var root: URL!
 

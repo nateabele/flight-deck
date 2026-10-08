@@ -105,7 +105,7 @@ final class CoverageRenderTests: XCTestCase {
     }
 
     /// A reading folded from proposals and verdicts, as `CoverageCellModelTests` builds them.
-    private func reading(n1: Int, n2: Int, both: Int, round: Int, families: [ModelFamily] = [.codex, .claude],
+    private func reading(n1: Int, n2: Int, both: Int, round: Int, families: [AgentID] = [.codex, .claude],
                          rejected: (Int, Int) = (0, 0)) -> CoverageReading {
         var proposers: [Int] = [], changes: [ProposedChange] = [], vs: [ChangeVerdict] = [], clusters: [[Int]] = []
         func add(_ p: Int, _ t: String, _ v: Verdict = .agree) -> Int {

@@ -31,7 +31,7 @@ final class RoundConfigEditorRenderTests: XCTestCase {
             to: URL(fileURLWithPath: dir).appendingPathComponent("rounds-editor-sketch.png")
         )
 
-        // Cross-check on (Feature plan's default with both harnesses present): the Cross-check
+        // Cross-check on (Feature plan's default with both agents present): the Cross-check
         // picker plus the second reviewer's row sit right under Reviewer.
         let crossCheck = try XCTUnwrap(PresetExpansion.config(for: .featurePlan, available: .defaults))
         try render(
@@ -56,8 +56,8 @@ final class RoundConfigEditorRenderTests: XCTestCase {
         // yet headless-ready simply renders absent rather than failing the render.
         var four = AvailableModels(choices: [
             .claude: AvailableModels.defaults.claude!, .codex: AvailableModels.defaults.codex!,
-            .grok: ModelChoice(harness: .grok, model: "grok-4.7", effort: "high"),
-            .gemini: ModelChoice(harness: .gemini, model: "gemini-3.1-pro-high", effort: "high"),
+            .grok: ModelChoice(agent: .grok, model: "grok-4.7", effort: "high"),
+            .gemini: ModelChoice(agent: .gemini, model: "gemini-3.1-pro-high", effort: "high"),
         ])
         four.models[.grok] = ["grok-4.7", "grok-4.6"]
         four.models[.gemini] = ["gemini-3.1-pro-high", "gemini-3.1-pro-low"]

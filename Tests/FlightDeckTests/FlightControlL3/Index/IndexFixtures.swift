@@ -37,20 +37,20 @@ enum IndexFixtures {
 
     static func catalogs() -> AdapterCatalogs {
         AdapterCatalogs([
-            AdapterCatalog(harness: "codex", models: [ModelEntry(id: "gpt-6-sol", displayName: "GPT-6 Sol", knobs: ["effort"])],
+            AdapterCatalog(agent: .codex, models: [ModelEntry(id: "gpt-6-sol", displayName: "GPT-6 Sol", knobs: ["effort"])],
                            knobSchema: ["effort": ["low", "medium", "high"]], defaultModel: "gpt-6-sol", enabled: true),
-            AdapterCatalog(harness: "claude", models: [ModelEntry(id: "opus", displayName: "Opus 5", knobs: ["effort"]),
+            AdapterCatalog(agent: .claude, models: [ModelEntry(id: "opus", displayName: "Opus 5", knobs: ["effort"]),
                                                        ModelEntry(id: "sonnet", displayName: "Sonnet 5", knobs: ["effort"])],
                            knobSchema: ["effort": ["low", "medium", "high"]], defaultModel: "opus", enabled: true),
         ])
     }
 
-    static let sol = ModelRef(harness: "codex", model: "gpt-6-sol", knobs: ["effort": "high"])
-    static let opus = ModelRef(harness: "claude", model: "opus", knobs: ["effort": "high"])
-    static let sonnet = ModelRef(harness: "claude", model: "sonnet")
+    static let sol = ModelRef(agent: .codex, model: "gpt-6-sol", knobs: ["effort": "high"])
+    static let opus = ModelRef(agent: .claude, model: "opus", knobs: ["effort": "high"])
+    static let sonnet = ModelRef(agent: .claude, model: "sonnet")
 
     /// The catalog's view of a model: no knobs.
-    static func bare(_ ref: ModelRef) -> ModelRef { ModelRef(harness: ref.harness, model: ref.model) }
+    static func bare(_ ref: ModelRef) -> ModelRef { ModelRef(agent: ref.agent, model: ref.model) }
 
     static func source(_ id: String, _ dims: [String: Double] = ["agentic-coding": 1], unit: IndexUnit = .percent,
                        enabled: Bool = true) -> IndexSource {

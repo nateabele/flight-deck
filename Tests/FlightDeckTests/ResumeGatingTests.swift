@@ -1,4 +1,5 @@
 import XCTest
+import IntakeKit
 @testable import FlightDeck
 
 /// Task 6: when a session's daemon is already live at restore, the agent never stopped — so

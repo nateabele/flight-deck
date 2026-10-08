@@ -77,8 +77,8 @@ private final class PIDCell: @unchecked Sendable {
 }
 
 final class IntakeRunnerTests: XCTestCase {
-    let codexA = ModelChoice(harness: .codex, model: "A", effort: "high")
-    let claudeB = ModelChoice(harness: .claude, model: "B", effort: "medium")
+    let codexA = ModelChoice(agent: .codex, model: "A", effort: "high")
+    let claudeB = ModelChoice(agent: .claude, model: "B", effort: "medium")
     static let draftPlan = "# Plan\n\n## Scope\nOne\n"
     var root: URL!
     var intake: Intake!

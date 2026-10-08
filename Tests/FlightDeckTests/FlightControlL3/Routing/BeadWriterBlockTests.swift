@@ -12,7 +12,7 @@ final class BeadWriterBlockTests: XCTestCase {
 
     private func block(model: String = "gpt-6-sol", reason: String = "test-authoring 0.8 → codex",
                        pinned: Bool = false) -> ExecutionBlock {
-        ExecutionBlock(kind: "snapshot-tests", harness: "codex", model: model, knobs: ["effort": "high"], pool: "codex-default",
+        ExecutionBlock(kind: "snapshot-tests", agent: .codex, model: model, knobs: ["effort": "high"], pool: "codex-default",
                        source: AssignmentSource(by: .rule, ruleId: "r3", reason: reason, at: D.at), pinned: pinned)
     }
 
@@ -109,8 +109,8 @@ final class BeadWriterBlockTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: dir) }
         let steps = try RoutingFixtures.encodeSteps()
         let router = RuleRouter(rules: StaticRuleSource(global: [D.r3(pool: "codex-default")]), kinds: KindRegistryStore(),
-                                index: NullCapabilityIndex(), pools: DefaultPoolDirectory(harnesses: ["codex", "claude"]),
-                                defaultHarness: { _ in "claude" })
+                                index: NullCapabilityIndex(), pools: DefaultPoolDirectory(agents: [.codex, .claude]),
+                                defaultAgent: { _ in .claude })
         let routed = EncodeRouting.route(steps, project: dir, registry: KindRegistryStore(), router: router, catalogs: D.catalogs, now: D.at)
         let r = RecordingRunner(replies: ["br create": (#"{"id":"b9"}"#, 0), "br dep": ("", 0), "br sync": ("", 0)])
         let out = await BeadWriter(runner: r, brPath: "br", actor: "a").apply(steps, project: dir.path, agentContexts: routed.contexts)
@@ -121,7 +121,7 @@ final class BeadWriterBlockTests: XCTestCase {
         let renderer = try XCTUnwrap(creates.first { $0.contains("Snapshot tests for the renderer") })
         let written = try XCTUnwrap(ExecutionBlockCodec.decode(agentContext: argument("--agent-context", in: renderer)).get())
         XCTAssertEqual(written.kind, "snapshot-tests")
-        XCTAssertEqual(written.harness, "codex")
+        XCTAssertEqual(written.agent, .codex)
         XCTAssertTrue(FileManager.default.fileExists(atPath: KindRegistryStore.fileURL(project: dir).path),
                       "the proposal reached the project's kinds.json")
     }

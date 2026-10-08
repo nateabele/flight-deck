@@ -87,13 +87,13 @@ public struct AliasTable: Codable, Equatable, Sendable {
 public enum IndexKeys {
     public static func key(_ ref: ModelRef) -> String {
         let knobs = ref.knobs.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: ",")
-        let base = "\(ref.harness.rawValue)/\(ref.model)"
+        let base = "\(ref.agent.rawValue)/\(ref.model)"
         return knobs.isEmpty ? base : "\(base)[\(knobs)]"
     }
 
     public static func label(_ ref: ModelRef) -> String {
         let knobs = ref.knobs.sorted { $0.key < $1.key }.map { "\($0.key) \($0.value)" }.joined(separator: ", ")
-        let base = "\(ref.harness.rawValue) · \(ref.model)"
+        let base = "\(ref.agent.rawValue) · \(ref.model)"
         return knobs.isEmpty ? base : "\(base) (\(knobs))"
     }
 }
@@ -129,14 +129,14 @@ public enum AliasProposer {
         let (base, setting) = split(name)
         guard !base.isEmpty else { return nil }
         for harness in catalogs.order {
-            guard let cat = catalogs.byHarness[harness] else { continue }
+            guard let cat = catalogs.byAgent[harness] else { continue }
             for entry in cat.models where KindID.normalized(entry.id).rawValue == base
                 || KindID.normalized(entry.displayName).rawValue == base {
                 var knobs: [String: String] = [:]
                 if let setting, let knob = entry.knobs.sorted().first(where: { cat.knobSchema[$0]?.contains(setting) == true }) {
                     knobs[knob] = setting
                 }
-                return ModelRef(harness: harness, model: entry.id, knobs: knobs)
+                return ModelRef(agent: harness, model: entry.id, knobs: knobs)
             }
         }
         return nil

@@ -6,8 +6,8 @@ import XCTest
 /// (spec §8). Each fixture is a cycle assessed by the engine from hand-made points, so the
 /// words here are the engine's verdict read through the UI's models — never a second opinion.
 final class ConvergenceCellModelTests: XCTestCase {
-    private let codex = ModelChoice(harness: .codex, model: "gpt-6-sol", effort: "high")
-    private let claude = ModelChoice(harness: .claude, model: "opus", effort: "high")
+    private let codex = ModelChoice(agent: .codex, model: "gpt-6-sol", effort: "high")
+    private let claude = ModelChoice(agent: .claude, model: "opus", effort: "high")
 
     private func point(_ round: Int, _ changes: Int, agree: Double? = nil, churn: [String: Int] = [:],
                        model: ModelChoice? = nil, checkpoint: Int? = nil) -> ConvergencePoint {

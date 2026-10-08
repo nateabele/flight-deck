@@ -50,7 +50,7 @@ protocol CommandSinkAttachable: AnyObject {
 
 extension RoutingCapabilityRegistry {
     func attachCommandSink(_ sink: SessionCommandSink) {
-        for harness in harnesses { (capabilities(for: harness) as? CommandSinkAttachable)?.commands = sink }
+        for agent in agents { (capabilities(for: agent) as? CommandSinkAttachable)?.commands = sink }
     }
 }
 

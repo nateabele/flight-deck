@@ -1,11 +1,13 @@
 import SwiftUI
 import IntakeKit
 
-/// The Capacity pane's edits as pure functions, so the pane is a thin binding and the rules are
-/// testable: default pools cannot be removed, ids are minted once, thresholds never cross.
+/// The Capacity pane's pool edits as pure functions over the Accounts list (unify brief R6), so
+/// the pane is a thin binding and the rules are testable: synthesized default pools cannot be
+/// removed, ids are minted once, thresholds never cross, a pool holds one agent's accounts and
+/// an account is in at most one pool.
 ///
-/// Every edit first materializes the pools in force: the default pools are derived until the
-/// user touches one, and the first touch must store them whole rather than store an empty list.
+/// Track A moves pool editing into Settings → Accounts; these stay the model-level edits it
+/// builds on.
 enum CapacityEditing {
     static func newPoolID(existing: [PoolID], random: () -> UUID = UUID.init) -> PoolID {
         while true {
@@ -14,84 +16,86 @@ enum CapacityEditing {
         }
     }
 
-    static func materialize(_ prefs: inout CapacityPreferences, accounts: [AgentAccount]) {
-        prefs.pools = prefs.effectivePools(accounts: accounts)
+    /// Every id in use, synthesized defaults included, so a minted id never shadows one.
+    private static func ids(_ list: AccountList) -> [PoolID] {
+        list.effectivePools().map(\.id) + list.pools.map(\.id)
     }
 
-    private static func edit(_ id: PoolID, _ prefs: inout CapacityPreferences, accounts: [AgentAccount],
-                             _ change: (inout CapacityPool) -> Void) {
-        materialize(&prefs, accounts: accounts)
-        guard let i = prefs.pools?.firstIndex(where: { $0.id == id }) else { return }
-        change(&prefs.pools![i])
+    /// The entry behind `id`, materializing a synthesized default as a MEMBERLESS entry first:
+    /// it then carries the edited settings while `effectivePools` keeps filling it with the
+    /// agent's unpooled accounts, so editing a default never nests anyone's accounts.
+    private static func edit(_ id: PoolID, _ list: inout AccountList, _ change: (inout AccountPool) -> Void) {
+        if list.pool(id) == nil, let synthesized = list.effectivePools().first(where: { $0.id == id && $0.isDefault }) {
+            try? list.addPool(AccountPool(synthesized, members: []))
+        }
+        try? list.updatePool(id, change)
     }
 
     @discardableResult
-    static func addHostedPool(_ prefs: inout CapacityPreferences, agent: AgentID, accounts: [AgentAccount],
-                              random: () -> UUID = UUID.init) -> PoolID {
-        materialize(&prefs, accounts: accounts)
-        let id = newPoolID(existing: prefs.pools?.map(\.id) ?? [], random: random)
-        prefs.pools?.append(.hosted(id: id, label: "New \(agent.displayName) pool", harness: agent.harnessID, accounts: []))
+    static func addHostedPool(_ list: inout AccountList, agent: AgentID, random: () -> UUID = UUID.init) -> PoolID {
+        let id = newPoolID(existing: ids(list), random: random)
+        try? list.addPool(AccountPool(id: id, label: "New \(agent.displayName) pool", agent: agent))
         return id
     }
 
     @discardableResult
-    static func addLocalPool(_ prefs: inout CapacityPreferences, harness: HarnessID, accounts: [AgentAccount],
-                             random: () -> UUID = UUID.init) -> PoolID {
-        materialize(&prefs, accounts: accounts)
-        let id = newPoolID(existing: prefs.pools?.map(\.id) ?? [], random: random)
-        prefs.pools?.append(.local(id: id, label: "New local pool", harness: harness, endpoint: "http://localhost:11434"))
+    static func addLocalPool(_ list: inout AccountList, agent: AgentID, random: () -> UUID = UUID.init) -> PoolID {
+        let id = newPoolID(existing: ids(list), random: random)
+        try? list.addPool(AccountPool(id: id, label: "New local pool", agent: agent, kind: .local,
+                                      endpoint: "http://localhost:11434"))
         return id
     }
 
-    /// A default pool is every account's home; removing it would leave an agent's tasks with no
-    /// pool to name.
+    /// A synthesized default pool is every unpooled account's home; there is no entry to remove.
+    /// A stored default entry (edited settings) can be removed — the default then reverts to its
+    /// synthesized settings. Removing a pool returns its accounts to top level.
     @discardableResult
-    static func removePool(_ id: PoolID, _ prefs: inout CapacityPreferences, accounts: [AgentAccount]) -> Bool {
-        materialize(&prefs, accounts: accounts)
-        guard let i = prefs.pools?.firstIndex(where: { $0.id == id }), prefs.pools?[i].isDefault == false else { return false }
-        prefs.pools?.remove(at: i)
-        return true
+    static func removePool(_ id: PoolID, _ list: inout AccountList) -> Bool {
+        guard list.pool(id) != nil else { return false }
+        return (try? list.removePool(id)) != nil
     }
 
-    static func rename(_ id: PoolID, to label: String, _ prefs: inout CapacityPreferences, accounts: [AgentAccount]) {
+    static func rename(_ id: PoolID, to label: String, _ list: inout AccountList) {
         let trimmed = label.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        edit(id, &prefs, accounts: accounts) { $0.label = trimmed }
+        edit(id, &list) { $0.label = trimmed }
     }
 
     /// Hard in 0.10…1.0; soft in 0.05…hard−0.05. Clamped rather than refused, so a stepper can
     /// never leave the pool in a state `CapacityPool.validate` rejects.
-    static func setThresholds(_ id: PoolID, soft: Double, hard: Double, _ prefs: inout CapacityPreferences, accounts: [AgentAccount]) {
+    static func setThresholds(_ id: PoolID, soft: Double, hard: Double, _ list: inout AccountList) {
         let h = min(max(hard, 0.10), 1.0)
         let s = min(max(soft, 0.05), h - 0.05)
-        edit(id, &prefs, accounts: accounts) { $0.hardThreshold = h; $0.softThreshold = s }
+        edit(id, &list) { $0.hardThreshold = h; $0.softThreshold = s }
     }
 
-    static func toggle(_ account: UUID, in id: PoolID, _ prefs: inout CapacityPreferences, accounts: [AgentAccount]) {
-        // A default pool is every live account of its agent, by definition (`effectivePools`
-        // re-appends any the stored list lacks). Removing one used to just shove it to the end of
-        // the list while the user believed it was excluded, so a default pool refuses both
-        // directions; adding is moot, every live account is already in it.
-        // Otherwise removing a member is allowed; adding one only if it is a live account of the
-        // pool's own harness, so a codex login can never be leased for a claude spawn.
-        let eligible = accounts.contains { $0.id == account && !$0.isRemoved }
-        edit(id, &prefs, accounts: accounts) { pool in
-            if pool.isDefault { return }
-            if let i = pool.accounts.firstIndex(of: account) { pool.accounts.remove(at: i); return }
-            guard eligible, accounts.first(where: { $0.id == account })?.agent.harnessID == pool.harness else { return }
-            pool.accounts.append(account)
+    /// Takes `account` out of pool `id` (back to top level), or puts it in — moving it out of any
+    /// other pool, since an account is in at most one. A default pool refuses both directions: it
+    /// is every unpooled account of its agent by definition, so "removing" one would only move it
+    /// to the end while the user believed it excluded. Adding is refused for a removed account or
+    /// another agent's, so a codex login can never be leased for a claude spawn.
+    static func toggle(_ account: UUID, in id: PoolID, _ list: inout AccountList) {
+        guard let pool = list.pool(id), !pool.isDefault else { return }
+        if pool.members.contains(where: { $0.id == account }) {
+            try? list.move(account: account, toPool: nil)
+            return
         }
+        guard let record = list.accounts.first(where: { $0.id == account }), !record.isRemoved else { return }
+        try? list.move(account: account, toPool: id)
     }
 
-    static func move(in id: PoolID, from: IndexSet, to: Int, _ prefs: inout CapacityPreferences, accounts: [AgentAccount]) {
-        edit(id, &prefs, accounts: accounts) { $0.accounts.move(fromOffsets: from, toOffset: to) }
+    /// Reorders a pool's lease order. A default pool's order is the Accounts list's own order
+    /// for that agent (its members are the unpooled accounts), so it is reordered there instead.
+    static func move(in id: PoolID, from: IndexSet, to: Int, _ list: inout AccountList) {
+        guard let pool = list.pool(id), !pool.isDefault else { return }
+        try? list.updatePool(id) { $0.members.move(fromOffsets: from, toOffset: to) }
     }
 
-    static func setCap(_ id: PoolID, _ cap: Int, _ prefs: inout CapacityPreferences, accounts: [AgentAccount]) {
-        edit(id, &prefs, accounts: accounts) { $0.concurrencyCap = min(max(cap, 1), 64) }
+    static func setCap(_ id: PoolID, _ cap: Int, _ list: inout AccountList) {
+        edit(id, &list) { $0.concurrencyCap = min(max(cap, 1), 64) }
     }
 
-    static func setEndpoint(_ id: PoolID, _ endpoint: String, _ prefs: inout CapacityPreferences, accounts: [AgentAccount]) {
-        edit(id, &prefs, accounts: accounts) { $0.endpoint = endpoint.trimmingCharacters(in: .whitespacesAndNewlines) }
+    static func setEndpoint(_ id: PoolID, _ endpoint: String, _ list: inout AccountList) {
+        edit(id, &list) { $0.endpoint = endpoint.trimmingCharacters(in: .whitespacesAndNewlines) }
     }
 }

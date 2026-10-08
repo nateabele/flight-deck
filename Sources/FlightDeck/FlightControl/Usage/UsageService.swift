@@ -13,7 +13,8 @@ struct UsageEnvironment {
     /// its readings must land under its own id.
     var accounts: @MainActor () -> [AgentAccount]
     var resolvedAccountID: @MainActor (AgentID, UUID?) -> UUID?
-    var capacity: @MainActor () -> CapacityPreferences
+    /// The pools in force — the Accounts list's (`PreferencesStore.effectivePools`).
+    var pools: @MainActor () -> [CapacityPool]
     var usageDirectory: URL
     /// The account's codex `account/rateLimits/read`, or nil when no app-server runs for it.
     var codexRead: @MainActor (UUID?) async throws -> [String: Any]?
@@ -29,7 +30,7 @@ struct UsageEnvironment {
 
     static var empty: UsageEnvironment {
         UsageEnvironment(sessions: { [] }, apiErrors: { [:] }, accounts: { [] },
-                         resolvedAccountID: { _, stored in stored }, capacity: { CapacityPreferences() },
+                         resolvedAccountID: { _, stored in stored }, pools: { [] },
                          usageDirectory: ClaudePluginLocation.usageDirectory, codexRead: { _ in nil },
                          seatActivities: { [] }, notifier: { nil }, isSwarmSession: { _ in false })
     }
@@ -43,7 +44,7 @@ struct UsageEnvironment {
             resolvedAccountID: { [weak preferences] agent, stored in
                 preferences?.resolvedAccountID(for: agent, in: stored) ?? stored
             },
-            capacity: { [weak preferences] in preferences?.capacity ?? CapacityPreferences() },
+            pools: { [weak preferences] in preferences?.effectivePools ?? [] },
             usageDirectory: ClaudePluginLocation.usageDirectory,
             codexRead: { [weak store] account in try await store?.codexRateLimitsRead(account: account) },
             // `intakeService` is lazy, but reading it here is safe: `collapsedStatus` already
@@ -183,7 +184,7 @@ final class UsageService: ObservableObject {
 
     func reconfigure() {
         let accounts = environment.accounts()
-        ledger.configure(pools: environment.capacity().effectivePools(accounts: accounts),
+        ledger.configure(pools: environment.pools(),
                          accounts: accounts.map(CapacityPreferences.accountRef))
         revision += 1
     }

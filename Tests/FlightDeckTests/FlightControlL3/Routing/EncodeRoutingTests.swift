@@ -28,7 +28,7 @@ final class EncodeRoutingTests: XCTestCase {
 
     private func router(_ global: [RoutingRule] = [RoutingTestData.r3(pool: "codex-default")]) -> RuleRouter {
         RuleRouter(rules: StaticRuleSource(global: global), kinds: registry, index: NullCapabilityIndex(),
-                   pools: DefaultPoolDirectory(harnesses: ["codex", "claude"]), defaultHarness: { _ in "claude" })
+                   pools: DefaultPoolDirectory(agents: [.codex, .claude]), defaultAgent: { _ in .claude })
     }
 
     private func route(_ steps: [ApplyStep], catalogs: AdapterCatalogs = RoutingTestData.catalogs) -> EncodeRouting.Outcome {
@@ -48,14 +48,14 @@ final class EncodeRoutingTests: XCTestCase {
         XCTAssertEqual(out.proposed, ["snapshot-tests"])
 
         let n1 = try XCTUnwrap(ExecutionBlockCodec.decode(agentContext: out.contexts["n1"]).get())
-        XCTAssertEqual(n1.kind, "tests"); XCTAssertEqual(n1.harness, "codex"); XCTAssertEqual(n1.source.ruleId, "r3")
+        XCTAssertEqual(n1.kind, "tests"); XCTAssertEqual(n1.agent, .codex); XCTAssertEqual(n1.source.ruleId, "r3")
 
         let n2 = try XCTUnwrap(ExecutionBlockCodec.decode(agentContext: out.contexts["n2"]).get())
         XCTAssertEqual(n2.kind, "snapshot-tests"); XCTAssertEqual(n2.model, "gpt-6-sol")
         XCTAssertEqual(n2.knobs, ["effort": "high"], "the proposal routes by the same rule, no recompile")
 
         let n3 = try XCTUnwrap(ExecutionBlockCodec.decode(agentContext: out.contexts["n3"]).get())
-        XCTAssertEqual(n3.kind, "implement-simple"); XCTAssertEqual(n3.harness, "claude"); XCTAssertEqual(n3.source.by, .default)
+        XCTAssertEqual(n3.kind, "implement-simple"); XCTAssertEqual(n3.agent, .claude); XCTAssertEqual(n3.source.by, .default)
         XCTAssertTrue(n3.source.reason.hasPrefix("no kind from planning; "), n3.source.reason)
 
         XCTAssertEqual(Set(out.contexts.keys), ["n1", "n2", "n3"])
@@ -108,7 +108,7 @@ final class EncodeRoutingTests: XCTestCase {
 
     func testAnUnroutableTaskGetsNoContext() {
         let out = route(create(NewBead(tempId: "n1", title: "T", description: "d", taskKind: "tests")),
-                        catalogs: D.catalogsDisabling(["codex", "claude"]))
+                        catalogs: D.catalogsDisabling([.codex, .claude]))
         XCTAssertEqual(out.contexts, [:])
         XCTAssertEqual(out.blocks, [:])
         XCTAssertTrue(out.unroutable["n1"]?.hasPrefix("unroutable: ") == true)

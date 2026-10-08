@@ -24,7 +24,7 @@ public enum SchemaRepair {
     /// `sessionID` is the failed run's session (nil when none was parsed); `isRepair` is true
     /// when that run was itself the repair.
     public static func retry(profile: any AgentProfile, failure: Diagnosis, sessionID: String?,
-                             access: HarnessAccess, isRepair: Bool) -> Retry? {
+                             access: HeadlessAccess, isRepair: Bool) -> Retry? {
         // A native-schema harness never retries: its CLI already enforced the schema, so a
         // mismatch is not something a "please fix your JSON" turn repairs — and claude/codex
         // rounds must behave exactly as before this seam existed.
@@ -43,7 +43,7 @@ public enum SchemaRepair {
         // The repair resumes the failed run's OWN conversation; with no id there is nothing to
         // resume, and a fresh run would not know what it was correcting.
         guard let sessionID, !sessionID.isEmpty else { return nil }
-        // The integrator (write mode) always starts fresh — `HarnessCommand.validate` refuses a
+        // The integrator (write mode) always starts fresh — `HeadlessCommand.validate` refuses a
         // write-mode resume — so it is never repaired.
         guard access == .readOnly else { return nil }
         return Retry(resumeSessionID: sessionID, prompt: prompt(firstError: failure.detail))

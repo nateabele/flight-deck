@@ -98,7 +98,7 @@ final class GrokProfileTests: XCTestCase {
     /// that is auth, and the action names grok's real sign-in command.
     func testSignedOutRunDiagnosesAsAuth() throws {
         let d = FailureDiagnosis.classify(exitCode: 1, stdout: try fixture("grok-auth-error", "jsonl"),
-                                          stderr: try text("grok-auth-error-stderr", "txt"), parseError: nil, harness: .grok)
+                                          stderr: try text("grok-auth-error-stderr", "txt"), parseError: nil, agent: .grok)
         XCTAssertEqual(d.category, .authExpired)
         XCTAssertEqual(d.action, "Run `grok login` in a terminal")
     }
@@ -107,7 +107,7 @@ final class GrokProfileTests: XCTestCase {
     /// (UNVERIFIED spelling: from the string table, never provoked).
     func testWeeklyLimitIsRateLimited() {
         let stream = #"{"type":"result","subtype":"error_during_execution","is_error":true,"errors":["You hit your weekly limit."],"session_id":""}"# + "\n"
-        let d = FailureDiagnosis.classify(exitCode: 1, stdout: Data(stream.utf8), stderr: "", parseError: nil, harness: .grok)
+        let d = FailureDiagnosis.classify(exitCode: 1, stdout: Data(stream.utf8), stderr: "", parseError: nil, agent: .grok)
         XCTAssertEqual(d.category, .rateLimited)
         XCTAssertTrue(d.detail.contains("weekly limit"), "the reason from errors[], not the bare subtype: \(d.detail)")
     }
@@ -115,7 +115,7 @@ final class GrokProfileTests: XCTestCase {
     /// A model's own prose mentioning limits is content, not a failure signal.
     func testAgentTextNeverClassifies() {
         let stream = #"{"type":"assistant","message":{"content":[{"type":"text","text":"You hit your weekly limit."}]},"session_id":"S"}"# + "\n"
-        let d = FailureDiagnosis.classify(exitCode: 1, stdout: Data(stream.utf8), stderr: "boom", parseError: nil, harness: .grok)
+        let d = FailureDiagnosis.classify(exitCode: 1, stdout: Data(stream.utf8), stderr: "boom", parseError: nil, agent: .grok)
         XCTAssertEqual(d.category, .harnessError)
     }
 
@@ -124,7 +124,7 @@ final class GrokProfileTests: XCTestCase {
     /// The live fresh run (grok-4.7, 2026-10-07): a `read_file` with `target_file`, then a
     /// `thinking` block, then the result with usage and cost.
     func testActivityFoldsTheStream() throws {
-        var parser = ActivityParser(harness: .grok, project: URL(fileURLWithPath: "/scratch/proj"),
+        var parser = ActivityParser(agent: .grok, project: URL(fileURLWithPath: "/scratch/proj"),
                                     now: { Date(timeIntervalSince1970: 7) })
         parser.feed(try fixture("grok-stream-activity", "jsonl"))
         let a = parser.activity
@@ -141,7 +141,7 @@ final class GrokProfileTests: XCTestCase {
     }
 
     func testActivityReportsTheSignedOutError() throws {
-        var parser = ActivityParser(harness: .grok, project: URL(fileURLWithPath: "/p"), now: { Date() })
+        var parser = ActivityParser(agent: .grok, project: URL(fileURLWithPath: "/p"), now: { Date() })
         parser.feed(try fixture("grok-auth-error", "jsonl"))
         parser.finish(exitCode: 1)
         XCTAssertTrue(parser.activity.error?.hasPrefix("Not signed in.") == true, parser.activity.error ?? "nil")
@@ -170,8 +170,8 @@ final class GrokProfileTests: XCTestCase {
             return SignInCheckOutput(stdout: Self.signedInModels, stderr: "", exitCode: 0)
         }
         XCTAssertEqual(probed, [["models"]], "the list and the sign-in check are one spawn")
-        XCTAssertEqual(available.harnesses, [.claude, .grok])
-        XCTAssertEqual(available.choice(for: .grok), ModelChoice(harness: .grok, model: "grok-4.6", effort: "medium"))
+        XCTAssertEqual(available.agents, [.claude, .grok])
+        XCTAssertEqual(available.choice(for: .grok), ModelChoice(agent: .grok, model: "grok-4.6", effort: "medium"))
         XCTAssertEqual(available.models[.grok], ["grok-4.6", "grok-4.5"])
         XCTAssertNil(available.unavailable[.grok])
         XCTAssertEqual(available.choice(for: .claude), AvailableModels.defaults.claude, "claude is unchanged")
@@ -182,7 +182,7 @@ final class GrokProfileTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: dir) }
         let signedOut = try text("grok-models-signed-out", "txt")
         let available = TriageSettings.available(path: dir.path) { _, _ in SignInCheckOutput(stdout: signedOut, stderr: "", exitCode: 0) }
-        XCTAssertEqual(available.harnesses, [.codex])
+        XCTAssertEqual(available.agents, [.codex])
         XCTAssertEqual(available.unavailable[.grok], "Grok: run `grok login`")
         XCTAssertEqual(RoundConfigEditor.availabilityNotes(available), ["Grok: run `grok login`"])
     }
@@ -191,7 +191,7 @@ final class GrokProfileTests: XCTestCase {
         let dir = try bin(["codex"])
         defer { try? FileManager.default.removeItem(at: dir) }
         let available = TriageSettings.available(path: dir.path) { _, _ in XCTFail("nothing to probe"); return nil }
-        XCTAssertEqual(available.harnesses, [.codex])
+        XCTAssertEqual(available.agents, [.codex])
         XCTAssertEqual(available.unavailable[.grok], "Grok: not installed")
     }
 
@@ -217,9 +217,9 @@ final class GrokProfileTests: XCTestCase {
 
     func testEditorOffersGrokWithItsModelsAndEffort() {
         var available = AvailableModels(choices: [.claude: AvailableModels.defaults.claude!,
-                                                  .grok: ModelChoice(harness: .grok, model: "grok-4.6", effort: "high")])
+                                                  .grok: ModelChoice(agent: .grok, model: "grok-4.6", effort: "high")])
         available.models[.grok] = ["grok-4.6", "grok-4.5"]
-        XCTAssertEqual(RoundConfigEditor.harnesses(in: available), [.claude, .grok])
+        XCTAssertEqual(RoundConfigEditor.agents(in: available), [.claude, .grok])
         XCTAssertEqual(RoundConfigEditor.modelSuggestions(for: .grok, detected: available.models[.grok] ?? []), ["grok-4.6", "grok-4.5"])
         XCTAssertEqual(RoundConfigEditor.effortChoices(for: .grok), ["low", "medium", "high", "xhigh"])
         XCTAssertTrue(RoundConfigEditor.availabilityNotes(available).contains { $0.contains("xAI") }, "the data-use note")
@@ -248,7 +248,7 @@ final class GrokProfileTests: XCTestCase {
 
     /// Switching a seat to grok seeds grok's own default; a grok seat's fallback is another family.
     func testSwitchingToGrokAndItsFallback() throws {
-        let grok = ModelChoice(harness: .grok, model: "grok-4.6", effort: "high")
+        let grok = ModelChoice(agent: .grok, model: "grok-4.6", effort: "high")
         let available = AvailableModels(choices: [.codex: AvailableModels.defaults.codex!, .claude: AvailableModels.defaults.claude!, .grok: grok])
         XCTAssertEqual(RoundConfigEditor.otherModel(for: grok, available: available), AvailableModels.defaults.codex)
         XCTAssertEqual(RoundConfigEditor.otherModel(for: AvailableModels.defaults.codex!, available: available), AvailableModels.defaults.claude)
@@ -257,18 +257,17 @@ final class GrokProfileTests: XCTestCase {
         let config = RoundConfig(drafters: [Slot(codex)], synthesizer: nil, reviewer: Slot(codex), integrator: codex,
                                  encoder: codex, polisher: nil, refinementCap: 1, polishCap: 0, freshEyesAndDedup: false,
                                  defaultPlay: .toReview, customized: false)
-        let switched = RoundConfigEditor.switchingHarness(config, at: .reviewer, to: .grok, available: available)
+        let switched = RoundConfigEditor.switchingAgent(config, at: .reviewer, to: .grok, available: available)
         XCTAssertEqual(switched.reviewer?.choice, grok)
     }
 
     /// A claude+grok pair is cross-family (coverage counts Grok as its own family).
     func testGrokIsItsOwnFamily() {
-        let grok = ModelChoice(harness: .grok, model: "grok-4.6", effort: "high")
+        let grok = ModelChoice(agent: .grok, model: "grok-4.6", effort: "high")
         let claude = AvailableModels.defaults.claude!
         let config = RoundConfig(drafters: [Slot(claude)], synthesizer: nil, reviewer: Slot(claude), integrator: claude,
                                  encoder: claude, polisher: nil, refinementCap: 1, polishCap: 0, freshEyesAndDedup: false,
                                  defaultPlay: .toReview, customized: true, crossReviewer: Slot(grok), crossCheck: .every)
         XCTAssertTrue(config.crossChecks)
-        XCTAssertNotEqual(ModelFamily(.grok), ModelFamily(.claude))
     }
 }

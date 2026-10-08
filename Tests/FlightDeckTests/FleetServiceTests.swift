@@ -1,6 +1,7 @@
 import Combine
 import Network
 import XCTest
+import IntakeKit
 import FleetKit
 @testable import FlightDeck
 
@@ -46,7 +47,7 @@ final class FleetServiceTests: XCTestCase {
         let harness = FleetTestHarness()
         self.harness = harness
         self.service = harness.service
-        harness.preferences.preferences.storedAccounts = [
+        harness.preferences.preferences.accounts = [
             AgentAccount(agent: .claude, displayName: "Work",
                          home: URL(fileURLWithPath: "/w/home-work"))
         ]
@@ -448,7 +449,7 @@ final class FleetServiceTests: XCTestCase {
     func testAnOpenConversationRequestWhoseLaunchFailsIsRefusedNotConfusedWithAPreviouslySelectedTab() async throws {
         let preferences = PreferencesStore(persistence: nil)
         preferences.preferences.storedProjectSettings = [
-            "/w/alpha": ProjectSettings(accounts: [.claude: UUID()])
+            "/w/alpha": ProjectSettings(accounts: [.claude: .account(UUID())])
         ]
         let store = SessionStore(provider: nil, persistence: nil, preferences: preferences)
         let key = FleetDeviceKey.mint()
@@ -1089,6 +1090,7 @@ private enum StubSearchIndexError: Error { case boom }
 /// file already makes for `StubSearchIndex`.
 private struct StubCodexAdapter: AgentAdapter {
     static let id: AgentID = .codex
+    nonisolated static var profile: any AgentProfile { AgentProfiles.profile(for: .codex) }
     static let textChannel: AgentTextChannel? = nil
     static let renameTyping: AgentRenameTyping? = nil
     static let dialogDriver: AgentDialogDriver? = nil

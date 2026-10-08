@@ -26,7 +26,7 @@ final class RuleCompilerTests: XCTestCase {
     override func tearDown() { try? FileManager.default.removeItem(at: work); super.tearDown() }
 
     private func compiler(_ runner: CannedRunner, settings: RuleCompilerSettings = .default) -> RuleCompiler {
-        // `home: work` so `HarnessCommand` never reads the operator's own codex/claude settings.
+        // `home: work` so `HeadlessCommand` never reads the operator's own codex/claude settings.
         RuleCompiler(runner: runner, settings: settings, workDirectory: work, home: work,
                      baseEnvironment: { ["PATH": "/usr/bin", "CLAUDECODE": "1"] })
     }
@@ -43,7 +43,7 @@ final class RuleCompilerTests: XCTestCase {
     }
 
     private func recordedWire() throws -> RuleCompilerWire {
-        let parsed = try HarnessOutput.parse(.claude, stdout: RoutingFixtures.data("compiler-valid.claude.jsonl"))
+        let parsed = try HeadlessOutput.parse(.claude, stdout: RoutingFixtures.data("compiler-valid.claude.jsonl"))
         return try JSONDecoder().decode(RuleCompilerWire.self, from: parsed.structured)
     }
 
@@ -76,7 +76,7 @@ final class RuleCompilerTests: XCTestCase {
         let msg = try JSONSerialization.data(withJSONObject: ["type": "item.completed", "item": ["type": "agent_message", "text": text]])
         let stdout = Data((#"{"type":"thread.started","thread_id":"T1"}"# + "\n" + String(decoding: msg, as: UTF8.self) + "\n").utf8)
         let runner = ok(stdout)
-        let result = await outcome(runner, settings: RuleCompilerSettings(harness: .codex, model: "gpt-6-luna", effort: "low"))
+        let result = await outcome(runner, settings: RuleCompilerSettings(agent: .codex, model: "gpt-6-luna", effort: "low"))
         XCTAssertEqual(result, .compiled(D.r3().compiled!))
         XCTAssertEqual(runner.calls.first?.executable, "codex")
         XCTAssertTrue(runner.calls.first?.arguments.contains("--output-schema") == true)
@@ -87,12 +87,12 @@ final class RuleCompilerTests: XCTestCase {
         let cases: [(String, (inout RuleCompilerWire) -> Void, RuleValidationError)] = [
             ("dimension", { $0.terms[0].dimension = "teleportation" }, .unknownDimension("teleportation")),
             ("kind", { $0.terms[2].kind = "astrology" }, .unknownKind("astrology")),
-            ("agent", { $0.harness = "gemini" }, .unknownHarness("gemini")),
+            ("agent", { $0.harness = "gemini" }, .unknownAgent("gemini")),
             ("model", { $0.model = "gpt-9" }, .unknownModel("codex", "gpt-9", suggestion: nil)),
             ("model case", { $0.model = "GPT-6-SOL" }, .unknownModel("codex", "GPT-6-SOL", suggestion: "gpt-6-sol")),
             ("knob", { $0.knobs = [.init(name: "effort", value: "max")] }, .knobRejected("codex", "gpt-6-sol", "effort", "max")),
             ("pool", { $0.pool = "nowhere" }, .unknownPool("nowhere")),
-            ("pool owner", { $0.pool = "claude-subs" }, .poolBelongsElsewhere("claude-subs", owner: "claude", harness: "codex")),
+            ("pool owner", { $0.pool = "claude-subs" }, .poolBelongsElsewhere("claude-subs", owner: "claude", agent: "codex")),
             ("declined", { $0.ok = false; $0.reason = "that is not a routing rule" }, .declined("that is not a routing rule")),
         ]
         for (name, change, expected) in cases {
@@ -125,7 +125,7 @@ final class RuleCompilerTests: XCTestCase {
     }
 
     func testRecordingMovesTheRuleThroughItsStates() {
-        let ref = CompilerRef(harness: "claude", model: "haiku")
+        let ref = CompilerRef(agent: .claude, model: "haiku")
         var rule = RoutingRule(id: "r1", sentence: D.specSentence)
         rule.record(.unavailable("offline"), by: ref, at: D.at)
         XCTAssertEqual(rule.state, .draft); XCTAssertNil(rule.compiledAt)

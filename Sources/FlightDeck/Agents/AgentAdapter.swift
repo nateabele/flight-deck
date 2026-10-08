@@ -1,5 +1,6 @@
 import FleetKit
 import Foundation
+import IntakeKit
 
 /// Everything `SessionStore` needs from an agent, and nothing about how that agent works.
 ///
@@ -10,6 +11,18 @@ import Foundation
 @MainActor
 protocol AgentAdapter {
     static var id: AgentID { get }
+
+    /// **This agent's headless facet** (unify brief R3): the IntakeKit `AgentProfile` — model
+    /// catalog, error vocabulary, child environment, sign-in check and headless command — that
+    /// planning runs it through. `AgentAdapter` is the one per-agent type; the profile is the
+    /// part of it the planning runner can see, because the runner is a separate process that
+    /// links IntakeKit and has no adapters.
+    ///
+    /// Every conformer answers `AgentProfiles.profile(for: id)`, the registry the runner uses,
+    /// so a tab and a planning run on one agent reach the same answers by construction — no
+    /// behaviour lives in two places. `nonisolated` because a profile is `Sendable` and pure,
+    /// and its readers (detection, the rule compiler) are not on the main actor.
+    nonisolated static var profile: any AgentProfile { get }
 
     /// Establishes conversation identity BEFORE anything is typed into a terminal.
     ///
@@ -555,7 +568,7 @@ extension AgentAdapter {
     /// nothing else may repoint (see `PreferencesStore.sessionEnvironment`).
     func environment(for account: AgentAccount) -> [String: String] {
         var environment = launchEnvironment
-        environment[account.agent.homeEnvironmentKey] = account.home.path
+        if let key = account.agent.homeEnvironmentKey { environment[key] = account.home.path }
         return environment
     }
 
@@ -589,6 +602,8 @@ extension AgentID {
         switch self {
         case .claude: ClaudeAdapter.textChannel
         case .codex: CodexAdapter.textChannel
+        case .grok: GrokAdapter.textChannel
+        case .gemini: GeminiAdapter.textChannel
         }
     }
 
@@ -599,6 +614,8 @@ extension AgentID {
         switch self {
         case .claude: ClaudeAdapter.renameTyping
         case .codex: CodexAdapter.renameTyping
+        case .grok: GrokAdapter.renameTyping
+        case .gemini: GeminiAdapter.renameTyping
         }
     }
 
@@ -609,6 +626,8 @@ extension AgentID {
         switch self {
         case .claude: ClaudeAdapter.dialogDriver
         case .codex: CodexAdapter.dialogDriver
+        case .grok: GrokAdapter.dialogDriver
+        case .gemini: GeminiAdapter.dialogDriver
         }
     }
 
@@ -618,6 +637,8 @@ extension AgentID {
         switch self {
         case .claude: ClaudeAdapter.turnRecovery
         case .codex: CodexAdapter.turnRecovery
+        case .grok: GrokAdapter.turnRecovery
+        case .gemini: GeminiAdapter.turnRecovery
         }
     }
 
@@ -627,6 +648,8 @@ extension AgentID {
         switch self {
         case .claude: ClaudeAdapter.openPromptReader
         case .codex: CodexAdapter.openPromptReader
+        case .grok: GrokAdapter.openPromptReader
+        case .gemini: GeminiAdapter.openPromptReader
         }
     }
 
@@ -640,6 +663,8 @@ extension AgentID {
         switch self {
         case .claude: ClaudeAdapter.searchCorpus
         case .codex: CodexAdapter.searchCorpus
+        case .grok: GrokAdapter.searchCorpus
+        case .gemini: GeminiAdapter.searchCorpus
         }
     }
 
@@ -649,6 +674,8 @@ extension AgentID {
         switch self {
         case .claude: ClaudeAdapter.negotiatesIdentity
         case .codex: CodexAdapter.negotiatesIdentity
+        case .grok: GrokAdapter.negotiatesIdentity
+        case .gemini: GeminiAdapter.negotiatesIdentity
         }
     }
 
@@ -657,6 +684,8 @@ extension AgentID {
         switch self {
         case .claude: ClaudeAdapter.needsRuntimeStart
         case .codex: CodexAdapter.needsRuntimeStart
+        case .grok: GrokAdapter.needsRuntimeStart
+        case .gemini: GeminiAdapter.needsRuntimeStart
         }
     }
 
@@ -666,6 +695,8 @@ extension AgentID {
         switch self {
         case .claude: ClaudeAdapter.hasStatusRegistry
         case .codex: CodexAdapter.hasStatusRegistry
+        case .grok: GrokAdapter.hasStatusRegistry
+        case .gemini: GeminiAdapter.hasStatusRegistry
         }
     }
 }
@@ -675,12 +706,25 @@ extension AgentID {
 /// answers preference migration before a store exists. Same construction table, same reason
 /// — the answers live on the adapters so a third agent states its own.
 extension AgentID {
+    /// See `AgentAdapter.profile`. The app's way to an agent's headless facet; the planning
+    /// runner, which has no adapters, asks `AgentProfiles.profile(for:)` — the same object.
+    var profile: any AgentProfile {
+        switch self {
+        case .claude: ClaudeAdapter.profile
+        case .codex: CodexAdapter.profile
+        case .grok: GrokAdapter.profile
+        case .gemini: GeminiAdapter.profile
+        }
+    }
+
     /// See `AgentAdapter.sanitizedTitle`. Consulted by `SessionStore.rename`,
     /// `injectPendingRename` and `applyExternalTitle`.
     func sanitizedTitle(_ raw: String) -> String? {
         switch self {
         case .claude: ClaudeAdapter.sanitizedTitle(raw)
         case .codex: CodexAdapter.sanitizedTitle(raw)
+        case .grok: GrokAdapter.sanitizedTitle(raw)
+        case .gemini: GeminiAdapter.sanitizedTitle(raw)
         }
     }
 
@@ -690,6 +734,8 @@ extension AgentID {
         switch self {
         case .claude: ClaudeAdapter.title(fromTranscriptAt: url)
         case .codex: CodexAdapter.title(fromTranscriptAt: url)
+        case .grok: GrokAdapter.title(fromTranscriptAt: url)
+        case .gemini: GeminiAdapter.title(fromTranscriptAt: url)
         }
     }
 
@@ -702,6 +748,8 @@ extension AgentID {
         switch self {
         case .claude: ClaudeTimelineMapper.items(inLine: line, at: offset, sidechain: sidechain)
         case .codex: CodexAdapter.timelineItems(inLine: line, at: offset)
+        case .grok: GrokAdapter.timelineItems(inLine: line, at: offset)
+        case .gemini: GeminiAdapter.timelineItems(inLine: line, at: offset)
         }
     }
 
@@ -710,6 +758,8 @@ extension AgentID {
         switch self {
         case .claude: ClaudeAdapter.homeMarkerFile
         case .codex: CodexAdapter.homeMarkerFile
+        case .grok: GrokAdapter.homeMarkerFile
+        case .gemini: GeminiAdapter.homeMarkerFile
         }
     }
 
@@ -717,6 +767,8 @@ extension AgentID {
         switch self {
         case .claude: ClaudeAdapter.identity(fromHomeData: data)
         case .codex: CodexAdapter.identity(fromHomeData: data)
+        case .grok: GrokAdapter.identity(fromHomeData: data)
+        case .gemini: GeminiAdapter.identity(fromHomeData: data)
         }
     }
 

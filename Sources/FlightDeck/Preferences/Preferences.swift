@@ -1,4 +1,5 @@
 import Foundation
+import IntakeKit
 
 /// The shell and environment new sessions are spawned into.
 struct ShellPreferences: Codable, Equatable {
@@ -118,12 +119,16 @@ struct Preferences: Codable, Equatable {
     /// An *empty* array is a different thing entirely: it means the user deleted every tool,
     /// and it must stay empty.
     var storedTools: [ToolDefinition]?
-    /// Ordered. Relative order *within one agent's* entries is that agent's default ordering:
-    /// the topmost is what a project with no explicit choice resolves to.
-    ///
-    /// Optional in storage for the same reason `storedAgents` is — see that property. `nil`
-    /// means "never migrated", which `migrateAccountsIfNeeded` fills in.
+    /// The pre-list account store, now a MIRROR of `storedAccountList` (its claude and codex
+    /// accounts, flat) written for an older Flight Deck build — see `AccountList.legacyAccounts`.
+    /// Read only when `storedAccountList` is nil, i.e. to migrate a blob from before the list.
+    /// Never write it directly: write `accounts` or `accountList`.
     var storedAccounts: [AgentAccount]?
+    /// Settings → Accounts (unify brief R6): every account and pool, in order. The source of
+    /// truth for accounts AND for pools; `accounts` and `PreferencesStore.effectivePools` read
+    /// it. Optional for the reason `confirmations` is; nil means "never migrated", which
+    /// `migrateAccountsIfNeeded` fills in from `storedAccounts` and `capacity.pools`.
+    var storedAccountList: AccountList?
     /// Keyed by standardized project path, replacing `projectFlags`. Optional for the same
     /// reason; `migrateProjectSettingsIfNeeded` folds the old field in.
     var storedProjectSettings: [String: ProjectSettings]?
@@ -175,6 +180,7 @@ struct Preferences: Codable, Equatable {
         storedAgents: [AgentSettings]? = nil,
         storedTools: [ToolDefinition]? = nil,
         storedAccounts: [AgentAccount]? = nil,
+        storedAccountList: AccountList? = nil,
         storedProjectSettings: [String: ProjectSettings]? = nil,
         pairedDevices: [PairedDevice]? = nil,
         installID: UUID? = nil,
@@ -191,6 +197,7 @@ struct Preferences: Codable, Equatable {
         self.storedAgents = storedAgents
         self.storedTools = storedTools
         self.storedAccounts = storedAccounts
+        self.storedAccountList = storedAccountList
         self.storedProjectSettings = storedProjectSettings
         self.pairedDevices = pairedDevices
         self.installID = installID
@@ -202,8 +209,12 @@ struct Preferences: Codable, Equatable {
 
     /// Falls back to claude-then-codex so a `Preferences` that has never been migrated
     /// behaves exactly as it always has, with claude on ⌘N.
+    ///
+    /// Tab-ready agents only (unify brief R4). This list IS the new-tab surface — the New
+    /// Session menus, ⌘N's binding and the project agent order all read it — so an agent that
+    /// cannot run a tab yet (grok, gemini) must never appear in it, whatever a stored list says.
     var agents: [AgentSettings] {
-        get { storedAgents ?? Self.defaultAgents }
+        get { (storedAgents ?? Self.defaultAgents).filter { $0.id.tabReady } }
         set { storedAgents = newValue }
     }
 
@@ -214,12 +225,20 @@ struct Preferences: Codable, Equatable {
 
     /// Folds today's single-agent settings (`globalFlags`) into the list. Idempotent — safe
     /// to call on every load — so it never overwrites a list the user has already reordered.
+    ///
+    /// Also appends any tab-ready agent the stored list lacks, at the end so no existing
+    /// shortcut moves. That is how an agent becomes reachable the launch after its track flips
+    /// `AgentID.tabReady`: without it, a list stored before grok existed would never offer it.
     mutating func migrateAgentsIfNeeded() {
-        guard storedAgents == nil else { return }
-        storedAgents = [
-            AgentSettings(id: .claude, options: .claude(globalFlags)),
-            AgentSettings(id: .codex, options: .codex(CodexThreadOptions())),
-        ]
+        if storedAgents == nil {
+            storedAgents = [
+                AgentSettings(id: .claude, options: .claude(globalFlags)),
+                AgentSettings(id: .codex, options: .codex(CodexThreadOptions())),
+            ]
+        }
+        for agent in AgentID.tabReadyCases where !(storedAgents ?? []).contains(where: { $0.id == agent }) {
+            storedAgents?.append(AgentSettings(id: agent, options: .empty(for: agent)))
+        }
     }
 
     /// Reorders the agent list, which rebinds the New Session shortcuts
@@ -271,9 +290,33 @@ struct Preferences: Codable, Equatable {
         storedTools = Self.defaultTools(terminalCommand: terminalCommand)
     }
 
+    /// Every account, flat, in list order — tombstones included. A view over `accountList`;
+    /// writing it reconciles the list (see `AccountList.accounts`), so every caller that edited
+    /// the old flat array keeps working and keeps each account in its pool.
     var accounts: [AgentAccount] {
-        get { storedAccounts ?? [] }
-        set { storedAccounts = newValue }
+        get { accountList.accounts }
+        set { accountList.accounts = newValue }
+    }
+
+    /// The Accounts list, migrated on the fly from the pre-list fields when it was never stored.
+    ///
+    /// Every write also refreshes the legacy mirror (`storedAccounts`, `capacity.pools`): an
+    /// older build installed over this one (several sessions on this machine build and swap
+    /// their own) then still finds the same account ids and pools instead of re-seeding new ids
+    /// that orphan every tab and project assignment. The mirror never feeds back — this build
+    /// reads it only while `storedAccountList` is nil.
+    var accountList: AccountList {
+        get { storedAccountList ?? .migrating(accounts: storedAccounts ?? [], pools: capacity?.pools ?? []) }
+        set {
+            storedAccountList = newValue
+            storedAccounts = newValue.legacyAccounts
+            let legacyPools = newValue.legacyPools
+            if capacity != nil || !legacyPools.isEmpty {
+                var next = capacity ?? CapacityPreferences()
+                next.pools = legacyPools.isEmpty ? nil : legacyPools
+                capacity = next
+            }
+        }
     }
 
     /// One agent's LIVE accounts. Tombstones are filtered here rather than at each caller
@@ -293,19 +336,19 @@ struct Preferences: Codable, Equatable {
     /// chain: tombstones exist only to keep a *running* tab's identity stable, and at launch
     /// there are none left to protect. Nothing else prunes them — one mechanism, not two.
     ///
-    /// Cannot resurrect what the user removed: this never sets `storedAccounts` back to nil,
+    /// Cannot resurrect what the user removed: this never sets `storedAccountList` back to nil,
     /// so `migrateAccountsIfNeeded` never reseeds on a later launch. That is deliberate for an
     /// account the user removed, but it is not scoped per agent — if this purge empties one
     /// agent's accounts entirely, that agent stays empty; nothing here (or afterward) restores it.
     mutating func purgeRemovedAccounts() {
-        // `accounts` is a computed view over `storedAccounts` whose setter writes back, so on
-        // preferences that have never been migrated this get-modify-set would turn a nil
-        // `storedAccounts` into `[]` — permanently defeating `migrateAccountsIfNeeded`'s
-        // seed-once `guard storedAccounts == nil` and leaving the user with no accounts at
+        // `accounts` is a computed view over `storedAccountList` whose setter writes back, so
+        // on preferences that have never been migrated this get-modify-set would store an empty
+        // list — permanently defeating `migrateAccountsIfNeeded`'s seed-once
+        // `guard storedAccountList == nil` and leaving the user with no accounts at
         // all, forever. Today's call site runs after that migration so it cannot happen; this
         // guard means it still cannot if the order ever changes, and it is honest besides:
         // there is nothing to purge.
-        guard storedAccounts != nil else { return }
+        guard storedAccountList != nil || storedAccounts != nil else { return }
         accounts.removeAll { $0.isRemoved }
     }
 
@@ -334,6 +377,11 @@ struct Preferences: Codable, Equatable {
 
     /// Seeds the built-in account per agent, then discovers siblings ONCE.
     ///
+    /// Every `AgentID` is seeded on a fresh install, grok and gemini included: planning bills an
+    /// agent's first account (unify brief R9), and a built-in account is what that resolves to.
+    /// An install that migrated before grok and gemini existed is not re-seeded — that would
+    /// also resurrect a claude or codex login the user removed.
+    ///
     /// Deliberately not a re-scan on later launches: a re-scan resurrects accounts the user
     /// removed. The Accounts pane offers "Scan for Accounts…" for additions made afterwards.
     mutating func migrateAccountsIfNeeded(
@@ -342,7 +390,13 @@ struct Preferences: Codable, Equatable {
         // developer's actual `~/.claude` / `~/.codex`.
         homeRoot: URL = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
     ) {
-        guard storedAccounts == nil else { return }
+        guard storedAccountList == nil else { return }
+        // A blob from before the list already has its accounts (and maybe pools): those are
+        // folded in as they are, never re-seeded.
+        if storedAccounts != nil {
+            accountList = .migrating(accounts: storedAccounts ?? [], pools: capacity?.pools ?? [])
+            return
+        }
         var seeded: [AgentAccount] = []
         for agent in AgentID.allCases {
             let builtIn = homeRoot.appendingPathComponent(agent.builtInHome.lastPathComponent, isDirectory: true)
@@ -352,7 +406,9 @@ struct Preferences: Codable, Equatable {
                 home: builtIn,
                 cachedIdentity: AccountDirectory.identity(atHome: builtIn, agent: agent)
             ))
-            for home in AccountDirectory.discover(in: homeRoot, agent: agent) {
+            // Gemini has its built-in account only (unify brief R5): a `~/.gemini-work` would
+            // be a directory agy never reads, since its login is in the keychain.
+            for home in AccountDirectory.discover(in: homeRoot, agent: agent) where agent.homeEnvironmentKey != nil {
                 let identity = AccountDirectory.identity(atHome: home, agent: agent)
                 seeded.append(AgentAccount(
                     agent: agent,
@@ -362,7 +418,7 @@ struct Preferences: Codable, Equatable {
                 ))
             }
         }
-        storedAccounts = seeded
+        accountList = AccountList(entries: seeded.map(AccountEntry.account))
     }
 
     /// Folds today's per-project claude flags into the per-agent record. Every existing project

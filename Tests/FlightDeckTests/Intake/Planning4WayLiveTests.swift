@@ -132,12 +132,12 @@ final class Planning4WayLiveTests: XCTestCase {
         // Every seat ran on what it was given and came back as decoded, schema-valid output:
         // `.ok` is only recorded after `RoundPrompts.decode` accepted the answer.
         let slots = draftCP.record.slots + refineCP.record.slots
-        var seated: [(String, Harness)] = [("drafter", .claude), ("drafter", .codex), ("reviewer", .grok), ("integrator", .claude)]
+        var seated: [(String, AgentID)] = [("drafter", .claude), ("drafter", .codex), ("reviewer", .grok), ("integrator", .claude)]
         if withGemini { seated.append(("crossReviewer", .gemini)) }
-        for (role, harness) in seated {
-            let slot = slots.first { $0.role == role && $0.requested.harness == harness }
-            XCTAssertEqual(slot?.status, .ok, "\(role) \(harness): \(String(describing: slot?.diagnosis))")
-            XCTAssertEqual(slot?.used.harness, harness, "\(role) \(harness) fell back")
+        for (role, agent) in seated {
+            let slot = slots.first { $0.role == role && $0.requested.agent == agent }
+            XCTAssertEqual(slot?.status, .ok, "\(role) \(agent): \(String(describing: slot?.diagnosis))")
+            XCTAssertEqual(slot?.used.agent, agent, "\(role) \(agent) fell back")
         }
         // A repair run (`<run>-repair`) is a resume of a turn that came back without a valid
         // answer. Expected for gemini, at about one per seat: agy ENDS a turn on any tool it
@@ -145,31 +145,31 @@ final class Planning4WayLiveTests: XCTestCase {
         // harness one would mean the native `--json-schema` path did not hold.
         let repairs = Self.runDirectories(store).map(\.lastPathComponent).filter { $0.hasSuffix("-repair") }
         print("planning-4way: repair resumes \(repairs.count): \(repairs)")
-        let geminiRuns = Set(slots.filter { $0.used.harness == .gemini }.map(\.role))
+        let geminiRuns = Set(slots.filter { $0.used.agent == .gemini }.map(\.role))
         let unexpected = repairs.filter { run in !geminiRuns.contains { run.contains("-\($0)") } }
         XCTAssertEqual(unexpected, [], "a native-schema seat needed a repair")
 
         // Coverage: four families seated, and the cross-check reading is Grok vs Gemini.
-        let families = Set(slots.filter { $0.status == .ok }.map { ModelFamily($0.used.harness) })
+        let families = Set(slots.filter { $0.status == .ok }.map { $0.used.agent })
         XCTAssertEqual(families, withGemini ? [.claude, .codex, .grok, .gemini] : [.claude, .codex, .grok])
         if withGemini { try assertCoverage(refineCP, store, tape) }
 
         // Resume: each read-only seat's own session, once. The integrator is write mode, which
         // never resumes (`resumeNotSupportedForWrite`).
-        var sessions: [Harness: String] = [:]
-        for (role, harness) in seated where role != "integrator" {
-            guard let slot = slots.first(where: { $0.role == role && $0.used.harness == harness }),
+        var sessions: [AgentID: String] = [:]
+        for (role, agent) in seated where role != "integrator" {
+            guard let slot = slots.first(where: { $0.role == role && $0.used.agent == agent }),
                   let session = slot.sessionID else {
-                XCTFail("\(role) \(harness) recorded no session")
+                XCTFail("\(role) \(agent) recorded no session")
                 continue
             }
-            sessions[harness] = session
+            sessions[agent] = session
             let resumed = try await resume(slot.used, session: session)
-            print("planning-4way: resume \(harness.rawValue) \(resumed.seconds) s, tokens \(resumed.tokens), "
+            print("planning-4way: resume \(agent.rawValue) \(resumed.seconds) s, tokens \(resumed.tokens), "
                   + "same session \(resumed.sessionID == session), recall: \(resumed.recall.prefix(120))")
-            XCTAssertEqual(resumed.sessionID, session, "\(harness) resumed a different session")
+            XCTAssertEqual(resumed.sessionID, session, "\(agent) resumed a different session")
             XCTAssertTrue(resumed.recall.lowercased().contains("temperat"),
-                          "\(harness) resumed without its own context: \(resumed.recall)")
+                          "\(agent) resumed without its own context: \(resumed.recall)")
         }
         XCTAssertEqual(Set(sessions.values).count, sessions.count, "two seats shared a session: \(sessions)")
     }
@@ -205,7 +205,7 @@ final class Planning4WayLiveTests: XCTestCase {
             return cp
         case .paused(let diagnosis, let partial):
             Self.printRuns(store)
-            let slots = partial.slots.map { "\($0.role)=\($0.used.harness.rawValue):\($0.status) \($0.diagnosis.map { "\($0)" } ?? "")" }
+            let slots = partial.slots.map { "\($0.role)=\($0.used.agent.rawValue):\($0.status) \($0.diagnosis.map { "\($0)" } ?? "")" }
             XCTFail("\(stage) round paused: \(diagnosis) — \(slots)")
             throw XCTSkip("stopping after the paused \(stage) round")
         }
@@ -215,26 +215,26 @@ final class Planning4WayLiveTests: XCTestCase {
     /// the prompt never names the project, so recalling it proves the conversation carried over.
     private func resume(_ choice: ModelChoice, session: String) async throws
         -> (sessionID: String, recall: String, seconds: Int, tokens: String) {
-        let dir = scratch.appendingPathComponent("resume-\(choice.harness.rawValue)", isDirectory: true)
+        let dir = scratch.appendingPathComponent("resume-\(choice.agent.rawValue)", isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let schemaFile = dir.appendingPathComponent("schema.json")
         try Data(RoundSchemas.draft.utf8).write(to: schemaFile)
-        let request = HarnessRequest(harness: choice.harness, model: choice.model, effort: choice.effort, cwd: project,
+        let request = HeadlessRequest(agent: choice.agent, model: choice.model, effort: choice.effort, cwd: project,
                                      readableDirs: [], prompt: "In one sentence, what does the tool in the project you "
                                         + "just worked on do? Put that sentence in `plan`.",
                                      schemaFile: schemaFile, schemaJSON: RoundSchemas.draft, resumeSessionID: session,
                                      account: choice.account)
-        let command = try HarnessCommand.build(request)
+        let command = try HeadlessCommand.build(request)
         let started = Date()
         let result = try await SystemCommandRunner().run(
             executable: command.executable, arguments: command.arguments, cwd: project,
-            environment: HarnessCommand.environment(for: command, base: environment, account: choice.account))
+            environment: HeadlessCommand.environment(for: command, base: environment, account: choice.account))
         try result.stdout.write(to: dir.appendingPathComponent("stdout"))
-        XCTAssertEqual(result.exitCode, 0, "\(choice.harness) resume stderr: \(result.stderr.suffix(400))")
-        let parsed = try HarnessOutput.parse(choice.harness, stdout: result.stdout)
+        XCTAssertEqual(result.exitCode, 0, "\(choice.agent) resume stderr: \(result.stderr.suffix(400))")
+        let parsed = try HeadlessOutput.parse(choice.agent, stdout: result.stdout)
         let object = try JSONSerialization.jsonObject(with: parsed.structured) as? [String: Any]
         return (parsed.sessionID, object?["plan"] as? String ?? "",
-                Int(Date().timeIntervalSince(started)), Self.tokens(choice.harness, result.stdout))
+                Int(Date().timeIntervalSince(started)), Self.tokens(choice.agent, result.stdout))
     }
 
     private func sh(_ executable: String, _ arguments: [String]) async throws {
@@ -260,8 +260,8 @@ final class Planning4WayLiveTests: XCTestCase {
 
     /// Input/output tokens (and cost when the CLI states one), folded from the seat's own
     /// stream by the same parser the planning UI uses.
-    private static func tokens(_ harness: Harness, _ stdout: Data) -> String {
-        var parser = ActivityParser(harness: harness, project: URL(fileURLWithPath: "/"), now: { Date() })
+    private static func tokens(_ agent: AgentID, _ stdout: Data) -> String {
+        var parser = ActivityParser(agent: agent, project: URL(fileURLWithPath: "/"), now: { Date() })
         parser.feed(stdout + Data("\n".utf8))
         let a = parser.activity
         let cost = a.costUSD.map { String(format: " $%.3f", $0) } ?? ""
@@ -287,10 +287,10 @@ final class Planning4WayLiveTests: XCTestCase {
                     seconds = String(format: "%.0f s", finished.timeIntervalSince(record.started))
                 }
                 if let stdout = try? Data(contentsOf: run.appendingPathComponent("stdout")) {
-                    tokens = Self.tokens(slot.used.harness, stdout)
+                    tokens = Self.tokens(slot.used.agent, stdout)
                 }
             }
-            print("planning-4way: \(cp.stage.rawValue) \(slot.role) \(slot.used.harness.rawValue) "
+            print("planning-4way: \(cp.stage.rawValue) \(slot.role) \(slot.used.agent.rawValue) "
                   + "\(slot.used.model)/\(slot.used.effort) \(slot.status) \(seconds) \(tokens) "
                   + "run \(run?.lastPathComponent ?? "-") \(slot.diagnosis.map { "— \($0.category): \($0.detail)" } ?? "")")
         }

@@ -691,10 +691,31 @@ authority**, because the ledger those notes cite
 only on the machine the work was done on.
 ## Agents
 
-`Sources/FlightDeck/Agents/` is the per-harness adapter protocol referenced from "Session
-status pipeline" above — `AgentAdapter`, with two implementations today, `ClaudeAdapter` and
-`CodexAdapter`, dispatched through the `AgentID` switch rather than held as an existentially
-typed value. Each supplies its own runtime, dialog driver, turn recovery and timeline mapper.
+`Sources/FlightDeck/Agents/` is the per-agent adapter protocol referenced from "Session
+status pipeline" above — `AgentAdapter`, implemented by `ClaudeAdapter`, `CodexAdapter`, and
+the stubs `GrokAdapter` and `GeminiAdapter`, dispatched through the `AgentID` switch rather
+than held as an existentially typed value. Each supplies its own runtime, dialog driver, turn
+recovery and timeline mapper.
+
+**One agent identity.** `AgentID` (`claude`, `codex`, `grok`, `gemini`) lives in IntakeKit,
+because the planning runner links IntakeKit alone; it replaced the app's old `AgentID`,
+IntakeKit's `Harness`/`ModelFamily` and Level 3's string `HarnessID`. Raw values are the
+storage format, and files keep the JSON key `harness` wherever they used it. Each adapter's
+`static var profile` is the agent's headless facet — the same `AgentProfile` the runner gets
+from `AgentProfiles.profile(for:)`. `AgentID.tabReady` gates every surface that opens a tab
+(the agent list behind the New Session menus and ⌘N, a project's default-agent picker,
+`RoutingCapabilityRegistry.standard()`, `SwarmSpawner`); grok and gemini are planning-only
+until their adapters are real. The headless types are `HeadlessRequest`, `HeadlessCommand`,
+`HeadlessOutput`, `HeadlessSession` (`Sources/IntakeKit/Headless.swift`).
+
+**Accounts and pools are one list.** `AccountList` (`Agents/AccountList.swift`, stored as
+`Preferences.storedAccountList`) holds accounts and single-agent pools, one level deep, each
+account at most once. `PreferencesStore.effectivePools` derives Level 3's pools from it: a
+synthesized `<agent>-default` of the agent's unpooled live accounts, then each pool entry.
+`storedAccounts` and `capacity.pools` are written as a mirror (claude and codex only) so an
+older build installed over this one keeps the same account ids. A project assigns each agent
+an `AccountAssignment` — `.account(UUID)` or `.pool(PoolID)` — stored under `accounts` and
+`accountPools` respectively, so the old key keeps its old shape.
 
 **Adapter capabilities are optional statics, `nil` is the refusal.** `textChannel` (how a
 message is typed into the agent's live terminal), `dialogDriver` (how a select-list dialog
@@ -1558,7 +1579,7 @@ diagnosis). Drafters run in parallel; synthesis and refine have a seat propose `
 and the **integrator** apply them to `work/plan.md`; encode, polish, fresh-eyes and dedup each
 return a whole change set in the triage schema. Each seat is one headless `codex exec --json` /
 `claude -p` turn with an explicit model and effort (resumes included), a JSON schema, and its
-own `runs/` directory. Isolation, on every seat, fresh and resumed (`HarnessCommand`): claude
+own `runs/` directory. Isolation, on every seat, fresh and resumed (`HeadlessCommand`): claude
 runs with `--restricted --strict-mcp-config` (no user/project/local settings files, so no
 standing Bash allows, and no MCP servers) and `--tools` naming the only built-ins that exist;
 because `--restricted` also drops the settings file's `env` block (this machine's

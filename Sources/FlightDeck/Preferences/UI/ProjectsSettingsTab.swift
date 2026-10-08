@@ -1,4 +1,5 @@
 import SwiftUI
+import IntakeKit
 
 /// Per-project overrides. The project list is the union of currently-open projects and
 /// projects with a saved override — an override outlives the project it belongs to, since
@@ -130,7 +131,10 @@ struct ProjectsSettingsTab: View {
                         Section("Agent") {
                             Picker("Agent", selection: agentBinding(for: path)) {
                                 Text("<Use global settings>").tag(AgentID?.none)
-                                ForEach(AgentID.allCases, id: \.self) { agent in
+                                // Tab-ready agents only (unify brief R4): this choice is what ⌘N
+                                // opens here, and grok/gemini cannot run a tab until their
+                                // adapters are real.
+                                ForEach(AgentID.tabReadyCases, id: \.self) { agent in
                                     Text(agent.displayName).tag(AgentID?.some(agent))
                                 }
                             }
@@ -218,12 +222,18 @@ struct ProjectsSettingsTab: View {
         )
     }
 
+    /// Accounts only, for now: Track A adds pools to this picker (unify brief R8). A project
+    /// assigned a pool shows "Default" here; picking an account or Default replaces the pool.
     private func accountBinding(for path: String, agent: AgentID) -> Binding<UUID?> {
         Binding(
-            get: { preferences.projectSettings(path).accounts[agent] },
+            get: { preferences.projectSettings(path).accounts[agent]?.accountID },
             set: { newValue in
                 var settings = preferences.projectSettings(path)
-                settings.accounts[agent] = newValue
+                if let newValue {
+                    settings.accounts[agent] = .account(newValue)
+                } else {
+                    settings.accounts[agent] = nil
+                }
                 preferences.setProjectSettings(path, settings)
             }
         )

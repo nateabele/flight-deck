@@ -1,4 +1,5 @@
 import XCTest
+import IntakeKit
 @testable import FlightDeck
 
 /// Removal is a soft delete. The rules split cleanly in two and this suite pins both halves:
@@ -24,7 +25,7 @@ final class AccountTombstoneTests: XCTestCase {
             agent: .claude, displayName: "Default", home: AgentID.claude.builtInHome
         )
         let work = AgentAccount(agent: .claude, displayName: "Work", home: home("work"))
-        store.preferences.storedAccounts = [builtIn, work]
+        store.preferences.accounts = [builtIn, work]
         return (store, builtIn, work)
     }
 
@@ -95,7 +96,7 @@ final class AccountTombstoneTests: XCTestCase {
     /// Unchanged from hard delete: nothing may be left pointing at an account the user removed.
     func testRemovalStillClearsProjectAssignments() {
         let (store, _, work) = makeStore()
-        store.setProjectSettings(root.path, ProjectSettings(accounts: [.claude: work.id]))
+        store.setProjectSettings(root.path, ProjectSettings(accounts: [.claude: .account(work.id)]))
         store.markAccountRemoved(id: work.id)
         XCTAssertNil(store.projectSettings(root.path).accounts[.claude])
     }
@@ -108,7 +109,7 @@ final class AccountTombstoneTests: XCTestCase {
         let a = AgentAccount(agent: .claude, displayName: "A", home: home("a"))
         let dead = AgentAccount(agent: .claude, displayName: "Dead", home: home("dead"))
         let b = AgentAccount(agent: .claude, displayName: "B", home: home("b"))
-        store.preferences.storedAccounts = [a, dead, b]
+        store.preferences.accounts = [a, dead, b]
         store.markAccountRemoved(id: dead.id)
         store.preferences.moveAccounts(forAgent: .claude, fromOffsets: IndexSet(integer: 1), toOffset: 0)
         XCTAssertEqual(store.preferences.accounts(for: .claude).map(\.displayName), ["B", "A"])
@@ -181,7 +182,7 @@ final class AccountTombstoneTests: XCTestCase {
         let store = PreferencesStore(persistence: nil)
         let work = AgentAccount(agent: .claude, displayName: "Work", home: home("work"))
         let personal = AgentAccount(agent: .claude, displayName: "Personal", home: home("personal"))
-        store.preferences.storedAccounts = [work, personal]
+        store.preferences.accounts = [work, personal]
         let agents = [AgentSettings(id: .claude, options: .claude(FlagSet()))]
 
         let before = NewSessionAffordance.menu(

@@ -2,61 +2,15 @@ import XCTest
 import IntakeKit
 @testable import FlightDeck
 
-/// Pools are the user's words for capacity, stored in preferences; the default pools are what
-/// every user has without touching Settings. These pin that the defaults track the account list
-/// the user already curates, that an edited pool keeps its order while new accounts still join,
-/// that a removed account never reappears in a pool, and that an old preferences blob decodes.
+/// The hand-off settings stored beside the pools' legacy mirror, and that a removed account is
+/// metered but never leased. The pools themselves are the Accounts list's (unify brief R6):
+/// their derivation is pinned by `AccountListTests`.
 @MainActor
 final class CapacityPreferencesTests: XCTestCase {
     private let home = URL(fileURLWithPath: "/tmp/fd-capacity-prefs", isDirectory: true)
     private lazy var work = AgentAccount(id: UsageRefs.workID, agent: .claude, displayName: "Work", home: home.appendingPathComponent("w"))
     private lazy var spare = AgentAccount(id: UsageRefs.spareID, agent: .claude, displayName: "Spare", home: home.appendingPathComponent("s"))
     private lazy var codex = AgentAccount(id: UsageRefs.codexID, agent: .codex, displayName: "Codex", home: home.appendingPathComponent("c"))
-
-    func testDefaultPoolsHoldEachAgentsLiveAccountsInOrder() {
-        let pools = CapacityPreferences().effectivePools(accounts: [work, codex, spare])
-        XCTAssertEqual(pools.map(\.id), ["claude-default", "codex-default"])
-        XCTAssertEqual(pools[0].accounts, [UsageRefs.workID, UsageRefs.spareID])
-        XCTAssertEqual(pools[0].label, "Claude default")
-        XCTAssertEqual(pools[0].harness, "claude")
-        XCTAssertEqual(pools[0].softThreshold, 0.80)
-        XCTAssertEqual(pools[0].hardThreshold, 0.95)
-        XCTAssertEqual(pools[1].accounts, [UsageRefs.codexID])
-    }
-
-    func testAnAgentWithNoAccountsHasNoDefaultPool() {
-        XCTAssertEqual(CapacityPreferences().effectivePools(accounts: [codex]).map(\.id), ["codex-default"])
-    }
-
-    func testAStoredDefaultPoolKeepsItsOrderAndGainsNewAccounts() {
-        var stored = CapacityPool.hosted(id: "claude-default", label: "Claude default", harness: "claude", accounts: [UsageRefs.spareID, UsageRefs.workID])
-        stored.softThreshold = 0.7
-        let newcomer = AgentAccount(agent: .claude, displayName: "New", home: home.appendingPathComponent("n"))
-        let pools = CapacityPreferences(pools: [stored]).effectivePools(accounts: [work, spare, newcomer])
-        XCTAssertEqual(pools.first?.accounts, [UsageRefs.spareID, UsageRefs.workID, newcomer.id])
-        XCTAssertEqual(pools.first?.softThreshold, 0.7)
-    }
-
-    func testUserPoolsFollowTheDefaultsAndDropDeletedAccounts() {
-        let gone = UUID()
-        let mine = CapacityPool.hosted(id: "pool-abc12345", label: "Night shift", harness: "claude", accounts: [gone, UsageRefs.spareID])
-        let pools = CapacityPreferences(pools: [mine]).effectivePools(accounts: [work, spare])
-        XCTAssertEqual(pools.map(\.id), ["claude-default", "pool-abc12345"])
-        XCTAssertEqual(pools[1].accounts, [UsageRefs.spareID])
-    }
-
-    func testAUserPoolDropsAnotherAgentsAccount() {
-        let mine = CapacityPool.hosted(id: "pool-abc12345", label: "Mixed", harness: "claude",
-                                       accounts: [UsageRefs.codexID, UsageRefs.spareID])
-        let pools = CapacityPreferences(pools: [mine]).effectivePools(accounts: [work, spare, codex])
-        XCTAssertEqual(pools.first { $0.id == "pool-abc12345" }?.accounts, [UsageRefs.spareID],
-                       "a stored blob may hold a cross-harness member; it must never be leased")
-    }
-
-    func testALocalPoolPassesThroughUntouched() {
-        let local = CapacityPool.local(id: "pool-local001", label: "Ollama", harness: "opencode", endpoint: "http://localhost:11434")
-        XCTAssertEqual(CapacityPreferences(pools: [local]).effectivePools(accounts: [work]).last, local)
-    }
 
     func testHandoffSettingsDefaults() {
         XCTAssertEqual(CapacityPreferences().handoffSettings, HandoffSettings(confirm: false, deadline: 600))
@@ -96,7 +50,7 @@ final class CapacityPreferencesTests: XCTestCase {
         removed.removedAt = Date()
         let accounts = [removed, spare]
         let ledger = CapacityLedger()
-        ledger.configure(pools: CapacityPreferences().effectivePools(accounts: accounts),
+        ledger.configure(pools: AccountList(entries: accounts.map(AccountEntry.account)).effectivePools(),
                          accounts: accounts.map(CapacityPreferences.accountRef))
         ledger.ingest(UsageRefs.reading(UsageRefs.work, 0.05, at: Date()))
         XCTAssertEqual(ledger.latestReading(account: UsageRefs.workID)?.worstWindow?.utilization, 0.05)

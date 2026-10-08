@@ -8,7 +8,7 @@ import IntakeKit
 /// pool or a renamed account — produces a request.
 final class HandoffPromptTests: XCTestCase {
     private let task = TaskRef(id: "fd-3x9", project: URL(fileURLWithPath: "/p/proj"))
-    private let block = ExecutionBlock(kind: "tests", harness: "claude", model: "opus", pool: "claude-default",
+    private let block = ExecutionBlock(kind: "tests", agent: .claude, model: "opus", pool: "claude-default",
                                        source: AssignmentSource(by: .rule, reason: "r", at: Date(timeIntervalSince1970: 0)))
 
     private func request(transcript: TranscriptPointer?, files: [String]) -> HandoffRequest {
@@ -87,7 +87,7 @@ final class HandoffPromptTests: XCTestCase {
 
     func testNoRequestWithoutALeaseATaskOrForALocalSlot() {
         let reader = FakeCapacityReader()
-        let slot = AccountRef(harness: "opencode", id: nil, label: "Ollama")
+        let slot = AccountRef(agent: .gemini, id: nil, label: "Ollama")
         reader.byPool["ollama"] = [AccountHeadroom(account: slot, worstUtilization: 1, state: .overHard, resetsAt: nil)]
         XCTAssertNil(planner(reader).request(for: snapshot(lease: AccountLease(pool: "ollama", account: slot))),
                      "a full local pool is concurrency, not quota: nothing to hand off")

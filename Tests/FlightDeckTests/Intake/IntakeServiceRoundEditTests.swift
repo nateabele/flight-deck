@@ -30,7 +30,7 @@ private final class FakeRunnerController: IntakeRunnerControlling {
 final class IntakeServiceRoundEditTests: XCTestCase {
     private var root: URL!
     private var runner: FakeRunnerController!
-    private let grok = ModelChoice(harness: .grok, model: "grok-4.7", effort: "high")
+    private let grok = ModelChoice(agent: .grok, model: "grok-4.7", effort: "high")
 
     override func setUp() {
         super.setUp()
@@ -46,7 +46,7 @@ final class IntakeServiceRoundEditTests: XCTestCase {
 
     private func makeService() -> IntakeService {
         IntakeService(store: IntakeStore(root: root),
-                      triageSettings: TriageSettings(harness: .codex, model: "m1", effort: "high"),
+                      triageSettings: TriageSettings(agent: .codex, model: "m1", effort: "high"),
                       availableModels: .defaults, runner: runner,
                       inject: { _, _, _, _ in true }, hasSession: { _, _ in false })
     }
@@ -239,12 +239,12 @@ final class IntakeServiceRoundEditTests: XCTestCase {
     func testAConfigSavedWhileStoppedIsTheOneTheNextRunnerRuns() async throws {
         let project = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
-        let a = ModelChoice(harness: .codex, model: "A", effort: "high")
+        let a = ModelChoice(agent: .codex, model: "A", effort: "high")
         var i = Intake(projectPath: project.path, intent: "Add dark mode")
         i.state = .shaping
         i.chosenPreset = .sketch
         i.roundConfig = RoundConfig(drafters: [Slot(a)], synthesizer: nil, reviewer: Slot(a),
-                                    integrator: ModelChoice(harness: .claude, model: "B", effort: "medium"), encoder: a,
+                                    integrator: ModelChoice(agent: .claude, model: "B", effort: "medium"), encoder: a,
                                     polisher: nil, refinementCap: 2, polishCap: 0, freshEyesAndDedup: false,
                                     defaultPlay: .step, customized: false)
         try IntakeStore(root: root).save(i)
@@ -266,7 +266,7 @@ final class IntakeServiceRoundEditTests: XCTestCase {
         let svc = makeService()
         XCTAssertEqual(svc.roundConfigEditing(i.id), .editable)
         var edited = try XCTUnwrap(try onDisk(i.id).roundConfig)
-        edited.reviewer = Slot(ModelChoice(harness: .codex, model: "Z", effort: "high"))
+        edited.reviewer = Slot(ModelChoice(agent: .codex, model: "Z", effort: "high"))
         edited.customized = true
         XCTAssertNil(svc.saveRoundConfig(i.id, edited))
 

@@ -20,7 +20,7 @@ final class RoutingServiceKindsTests: XCTestCase {
     override func tearDown() { try? FileManager.default.removeItem(at: project); super.tearDown() }
 
     private func row(_ id: String, kind: KindID, pinned: Bool = false) throws -> TaskContextRow {
-        let b = ExecutionBlock(kind: kind, harness: "claude", model: "opus", pool: "claude-default",
+        let b = ExecutionBlock(kind: kind, agent: .claude, model: "opus", pool: "claude-default",
                                source: AssignmentSource(by: .default, reason: "r", at: D.at), pinned: pinned)
         return TaskContextRow(id: id, agentContext: try ExecutionBlockCodec.encode(b, into: nil))
     }
@@ -50,7 +50,7 @@ final class RoutingServiceKindsTests: XCTestCase {
 
     func testMergeReRoutesUnpinnedOpenTasksOfThatKind() async throws {
         let prefs = PreferencesStore(persistence: nil)
-        prefs.globalRoutingRules = [D.rule("g1", .any([.kind("tests")]), "codex", "gpt-6-sol", knobs: ["effort": "high"], pool: "codex-default")]
+        prefs.globalRoutingRules = [D.rule("g1", .any([.kind("tests")]), .codex, "gpt-6-sol", knobs: ["effort": "high"], pool: "codex-default")]
         let tasks = FakeOpenTasks()
         tasks.result = .success([try row("t1", kind: "snapshot-tests"), try row("t2", kind: "snapshot-tests", pinned: true),
                                  try row("t3", kind: "algorithm")])
@@ -60,7 +60,7 @@ final class RoutingServiceKindsTests: XCTestCase {
         XCTAssertNil(error)
         XCTAssertEqual(loaded(svc).first { $0.id == "snapshot-tests" }?.status, .merged(into: "tests"))
         XCTAssertEqual(writer.writes.map(\.id), ["t1"])
-        XCTAssertEqual(writer.writes.first?.block.harness, "codex")
+        XCTAssertEqual(writer.writes.first?.block.agent, .codex)
         XCTAssertEqual(writer.writes.first?.block.kind, "snapshot-tests")
         XCTAssertEqual(writer.writes.first?.project, path)
         XCTAssertEqual(svc.kindNote, "Re-routed 1 open task; 1 pinned left alone")
@@ -68,7 +68,7 @@ final class RoutingServiceKindsTests: XCTestCase {
 
     func testReweightReRoutesTheKindAndKindsMergedIntoIt() async throws {
         let prefs = PreferencesStore(persistence: nil)
-        prefs.globalRoutingRules = [D.rule("g3", .any([.dimension("docs-prose", atLeast: 0.5)]), "codex", "gpt-6-sol", pool: "codex-default")]
+        prefs.globalRoutingRules = [D.rule("g3", .any([.dimension("docs-prose", atLeast: 0.5)]), .codex, "gpt-6-sol", pool: "codex-default")]
         let tasks = FakeOpenTasks()
         tasks.result = .success([try row("t1", kind: "golden-tests"), try row("t3", kind: "algorithm")])
         let writer = RecordingBlockWriter()
@@ -80,7 +80,7 @@ final class RoutingServiceKindsTests: XCTestCase {
 
     func testWriterSideSkipsAndFailuresAreAccountedAndDoNotAbortTheRest() async throws {
         let prefs = PreferencesStore(persistence: nil)
-        prefs.globalRoutingRules = [D.rule("g1", .any([.kind("tests")]), "codex", "gpt-6-sol", knobs: ["effort": "high"], pool: "codex-default")]
+        prefs.globalRoutingRules = [D.rule("g1", .any([.kind("tests")]), .codex, "gpt-6-sol", knobs: ["effort": "high"], pool: "codex-default")]
         let tasks = FakeOpenTasks()
         tasks.result = .success([try row("t1", kind: "snapshot-tests"), try row("t2", kind: "snapshot-tests"),
                                  try row("t3", kind: "snapshot-tests")])
@@ -128,7 +128,7 @@ final class RoutingServiceKindsTests: XCTestCase {
         XCTAssertEqual(Set(contexts.keys), ["n1", "n2", "n3"])
         let n2 = try XCTUnwrap(ExecutionBlockCodec.decode(agentContext: contexts["n2"]).get())
         XCTAssertEqual(n2.kind, "snapshot-tests")
-        XCTAssertEqual(n2.harness, "codex")
+        XCTAssertEqual(n2.agent, .codex)
     }
 
     func testAnEditOnlyReleaseNeverLoadsCatalogs() async {
@@ -145,7 +145,7 @@ final class RoutingServiceKindsTests: XCTestCase {
     func testKindForABlockResolvesThroughTheProjectRegistry() throws {
         let svc = RoutingServiceSupport.make()
         func block(_ kind: KindID) -> ExecutionBlock {
-            ExecutionBlock(kind: kind, harness: "claude", model: "opus", pool: "claude-default",
+            ExecutionBlock(kind: kind, agent: .claude, model: "opus", pool: "claude-default",
                            source: AssignmentSource(by: .default, reason: "r", at: D.at))
         }
         XCTAssertEqual(svc.kind(for: block("tests"), project: project)?.id, "tests")

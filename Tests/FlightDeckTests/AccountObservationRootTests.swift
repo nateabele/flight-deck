@@ -1,4 +1,5 @@
 import XCTest
+import IntakeKit
 @testable import FlightDeck
 
 /// That every root the app *observes* is derived from the account a tab runs as, rather than
@@ -25,7 +26,7 @@ final class AccountObservationRootTests: XCTestCase {
         // construction, so every test here builds the store around its preferences.
         let preferences = PreferencesStore(persistence: nil)
         let work = AgentAccount(agent: .claude, displayName: "Work", home: URL(fileURLWithPath: "/tmp/claude-work"))
-        preferences.preferences.storedAccounts = [work]
+        preferences.preferences.accounts = [work]
         let store = SessionStore(provider: nil, persistence: nil, preferences: preferences)
 
         let session = Session(title: "s", workingDirectory: "/p", accountID: work.id)
@@ -70,7 +71,7 @@ final class AccountObservationRootTests: XCTestCase {
         let preferences = PreferencesStore(persistence: nil)
         let a = AgentAccount(agent: .codex, displayName: "A", home: URL(fileURLWithPath: "/tmp/codex-a"))
         let b = AgentAccount(agent: .codex, displayName: "B", home: URL(fileURLWithPath: "/tmp/codex-b"))
-        preferences.preferences.storedAccounts = [a, b]
+        preferences.preferences.accounts = [a, b]
         let store = SessionStore(provider: nil, persistence: nil, preferences: preferences)
 
         XCTAssertEqual(
@@ -209,7 +210,7 @@ final class AccountObservationRootTests: XCTestCase {
                 .appendingPathComponent("other-claude", isDirectory: true)
         )
         let preferences = PreferencesStore(persistence: nil)
-        preferences.preferences.storedAccounts = [builtIn, other]
+        preferences.preferences.accounts = [builtIn, other]
         return (preferences, builtIn, other)
     }
 }

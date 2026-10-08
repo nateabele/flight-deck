@@ -1,4 +1,5 @@
 import XCTest
+import IntakeKit
 @testable import FlightDeck
 
 /// `AppDelegate.startSearch`'s deferred backfill task is not unit-testable directly — it
@@ -53,6 +54,7 @@ final class SearchBackfillWiringTests: XCTestCase {
             switch agent {
             case .claude: StubCorpus(refs: [claudeRef])
             case .codex: StubCorpus(refs: [codexRef])
+            case .grok, .gemini: nil
             }
         }
 
@@ -68,6 +70,7 @@ final class SearchBackfillWiringTests: XCTestCase {
             switch agent {
             case .claude: StubCorpus(refs: [older])
             case .codex: StubCorpus(refs: [newer])
+            case .grok, .gemini: nil
             }
         }
 
@@ -82,6 +85,7 @@ final class SearchBackfillWiringTests: XCTestCase {
             switch agent {
             case .claude: nil
             case .codex: StubCorpus(refs: [codexRef])
+            case .grok, .gemini: nil
             }
         }
 

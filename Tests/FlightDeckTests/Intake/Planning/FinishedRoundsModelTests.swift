@@ -5,8 +5,8 @@ import IntakeKit
 /// The finished-rounds strip's pure parts: every card says the same things in the same places,
 /// whatever kind of round it is; the detail panel's open card, caret and height.
 final class FinishedRoundsModelTests: XCTestCase {
-    private let codex = ModelChoice(harness: .codex, model: "gpt-6-sol", effort: "high")
-    private let claude = ModelChoice(harness: .claude, model: "opus", effort: "high")
+    private let codex = ModelChoice(agent: .codex, model: "gpt-6-sol", effort: "high")
+    private let claude = ModelChoice(agent: .claude, model: "opus", effort: "high")
     private let t0 = Date(timeIntervalSince1970: 1_790_000_000)
 
     private func slot(_ role: String, _ status: SlotStatus) -> SlotOutcome {

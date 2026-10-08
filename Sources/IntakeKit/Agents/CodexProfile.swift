@@ -53,8 +53,7 @@ public struct CodexProfile: AgentProfile {
         self.userHome = userHome
     }
 
-    public var id: Harness { .codex }
-    public var family: ModelFamily { .codex }
+    public var id: AgentID { .codex }
     public var binaryName: String { "codex" }
 
     /// `codex login status`: local, read-only, spends no tokens. Probed 2026-10-07 on

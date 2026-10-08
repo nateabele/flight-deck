@@ -1,35 +1,35 @@
 import Foundation
 
-/// Whether a harness runs read-only (triage, review, drafting — every seat but the integrator)
-/// or may write inside its own work dir. Defaults to `.readOnly` on `HarnessRequest` so every
+/// Whether a headless run is read-only (triage, review, drafting — every seat but the integrator)
+/// or may write inside its own work dir. Defaults to `.readOnly` on `HeadlessRequest` so every
 /// existing caller keeps producing byte-identical argv.
-public enum HarnessAccess: Sendable, Equatable {
+public enum HeadlessAccess: Sendable, Equatable {
     case readOnly
     case writeInWork(URL)
 }
 
-public struct HarnessRequest: Sendable {
-    public var harness: Harness, model: String, effort: String
+public struct HeadlessRequest: Sendable {
+    public var agent: AgentID, model: String, effort: String
     public var cwd: URL, readableDirs: [URL], prompt: String
     public var schemaFile: URL, schemaJSON: String, resumeSessionID: String?
-    public var access: HarnessAccess
+    public var access: HeadlessAccess
     /// The account this run bills (grok/gemini spec §3.0). nil is the built-in account — the
     /// CLI's own default home — so argv and environment are exactly what they were before
     /// accounts reached planning. A non-nil account is bound by the profile's
-    /// `environment(base:account:)` (via `HarnessCommand.environment`) and, for codex, picks
+    /// `environment(base:account:)` (via `HeadlessCommand.environment`) and, for codex, picks
     /// which `config.toml` `service_tier` is carried over from (`build`).
     public var account: AgentAccountRef?
-    public init(harness: Harness, model: String, effort: String, cwd: URL, readableDirs: [URL],
+    public init(agent: AgentID, model: String, effort: String, cwd: URL, readableDirs: [URL],
                 prompt: String, schemaFile: URL, schemaJSON: String, resumeSessionID: String?,
-                access: HarnessAccess = .readOnly, account: AgentAccountRef? = nil) {
-        self.harness = harness; self.model = model; self.effort = effort; self.cwd = cwd
+                access: HeadlessAccess = .readOnly, account: AgentAccountRef? = nil) {
+        self.agent = agent; self.model = model; self.effort = effort; self.cwd = cwd
         self.readableDirs = readableDirs; self.prompt = prompt; self.schemaFile = schemaFile
         self.schemaJSON = schemaJSON; self.resumeSessionID = resumeSessionID; self.access = access
         self.account = account
     }
 }
 
-public enum HarnessCommand {
+public enum HeadlessCommand {
     /// Read-only tool set for triage under `claude -p`: file reading plus `br` READ verbs. FD is
     /// the only `br` writer (spec §5) — no `br create/update/dep` here. `bv` is deliberately
     /// NOT on this list, for any claude seat: even `Bash(bv --db <path> *)`, scoped to one
@@ -90,7 +90,7 @@ public enum HarnessCommand {
     /// stream-json without `--verbose`. Probed live on claude 2.1.283, 2026-09-27, with
     /// `--json-schema` and the isolation flags above, fresh and `--resume`: the stream ends in
     /// the same `result` object `json` printed alone, `structured_output` included (see
-    /// `HarnessOutput.parse`).
+    /// `HeadlessOutput.parse`).
     public static let claudeStreaming = ["--output-format", "stream-json", "--verbose"]
 
     /// Prepended to EVERY codex run, fresh, resumed and write alike. `-s` only sandboxes the
@@ -172,25 +172,25 @@ public enum HarnessCommand {
     /// A new conversation's id. grok's `--session-id` must be a valid UUID that names no
     /// existing session; minting it here (rather than letting grok pick one) means a seat's id
     /// is known before the child even starts. The stream also reports it, and that reported id
-    /// is what `HarnessOutput.parse` returns — the minted one only ever goes TO grok.
+    /// is what `HeadlessOutput.parse` returns — the minted one only ever goes TO grok.
     static func mintGrokSessionID() -> String { UUID().uuidString.lowercased() }
 
     /// The pure check behind `build`'s write-mode `precondition` — a request that fails this
     /// would sandbox the integrator somewhere other than its own work dir, or let it resume
     /// (the integrator always starts fresh), so `build` must never construct argv for it.
     /// Exposed separately so tests can exercise the failure without tripping the trap.
-    public enum HarnessCommandError: Error, Equatable, Sendable {
+    public enum HeadlessCommandError: Error, Equatable, Sendable {
         case cwdNotWorkDir
         case resumeNotSupportedForWrite
-        /// `build` has no arm for this harness yet (grok/gemini until Tracks G/M land). Thrown,
+        /// `build` has no arm for this agent yet (grok/gemini until Tracks G/M land). Thrown,
         /// never approximated: a guessed argv for a CLI nobody has probed could run a "read-only"
         /// seat with write tools, which is worse than a round that pauses saying why.
-        case harnessNotImplemented(Harness)
-        /// The model is not one of this harness's own family (a Claude model on `agy`).
-        case modelOutsideFamily(harness: Harness, model: String)
+        case agentNotImplemented(AgentID)
+        /// The model is not one of this agent's own models (a Claude model on `agy`).
+        case modelOutsideFamily(agent: AgentID, model: String)
     }
 
-    public static func validate(_ r: HarnessRequest) -> HarnessCommandError? {
+    public static func validate(_ r: HeadlessRequest) -> HeadlessCommandError? {
         guard case .writeInWork(let dir) = r.access else { return nil }
         if r.cwd != dir { return .cwdNotWorkDir }
         if r.resumeSessionID != nil { return .resumeNotSupportedForWrite }
@@ -200,12 +200,12 @@ public enum HarnessCommand {
     /// `home` is where `CodexUserConfig` reads the built-in account's `service_tier` from —
     /// injectable so a test never reads the operator's own config. A bound `r.account` reads
     /// its own home's instead (`CodexProfile.serviceTierArguments`).
-    public static func build(_ r: HarnessRequest, home: URL = FileManager.default.homeDirectoryForCurrentUser)
-        throws(HarnessCommandError) -> (executable: String, arguments: [String], unsetEnvironment: [String]) {
+    public static func build(_ r: HeadlessRequest, home: URL = FileManager.default.homeDirectoryForCurrentUser)
+        throws(HeadlessCommandError) -> (executable: String, arguments: [String], unsetEnvironment: [String]) {
         if case .writeInWork = r.access {
-            precondition(validate(r) == nil, "HarnessCommand.build: invalid write-mode request: \(String(describing: validate(r)))")
+            precondition(validate(r) == nil, "HeadlessCommand.build: invalid write-mode request: \(String(describing: validate(r)))")
         }
-        switch r.harness {
+        switch r.agent {
         case .codex:
             let effort = ["-m", r.model, "-c", "model_reasoning_effort=\(r.effort)"] + codexIsolation
                 + CodexProfile(userHome: home).serviceTierArguments(account: r.account)
@@ -277,7 +277,7 @@ public enum HarnessCommand {
             // agy also serves Claude and GPT-OSS models; a "gemini" seat on one would be
             // counted as the Gemini family by coverage and cross-check (see
             // `GeminiProfile.isGeminiModel`), so it is refused, never run.
-            guard GeminiProfile.isGeminiModel(r.model) else { throw .modelOutsideFamily(harness: r.harness, model: r.model) }
+            guard GeminiProfile.isGeminiModel(r.model) else { throw .modelOutsideFamily(agent: r.agent, model: r.model) }
             return ("agy", geminiArguments(r), [])
         }
     }
@@ -298,7 +298,7 @@ public enum HarnessCommand {
     /// - No `--print-timeout`: since 1.3.1 it defaults to 0, "wait until the turn completes" —
     ///   the uncapped wait claude and codex seats get (1.2.3 defaulted to 5 minutes).
     /// - `--disable-slash-commands`: a prompt line that starts with `/` stays data.
-    static func geminiArguments(_ r: HarnessRequest) -> [String] {
+    static func geminiArguments(_ r: HeadlessRequest) -> [String] {
         var args = ["--output-format", "stream-json", "--json-schema", GeminiSchema.compatible(r.schemaJSON),
                     "--model", r.model, "--disable-slash-commands"]
         switch r.access {
@@ -356,17 +356,17 @@ public enum HarnessCommand {
     }
 }
 
-public enum HarnessOutput {
+public enum HeadlessOutput {
     public enum ParseError: Error, Equatable {
         case noSession, noResult, notJSON(String), isError(String)
-        /// No parser for this harness yet (grok/gemini until Tracks G/M land). Unreachable in
+        /// No parser for this agent yet (grok/gemini until Tracks G/M land). Unreachable in
         /// practice — `build` refuses first — but a parse that guessed would hand an unvalidated
         /// answer to the round.
-        case harnessNotImplemented(Harness)
+        case agentNotImplemented(AgentID)
     }
 
-    public static func parse(_ harness: Harness, stdout: Data) throws -> (sessionID: String, structured: Data) {
-        switch harness {
+    public static func parse(_ agent: AgentID, stdout: Data) throws -> (sessionID: String, structured: Data) {
+        switch agent {
         case .codex:
             var session: String?, text: String?
             for line in stdout.split(separator: UInt8(ascii: "\n")) {
@@ -485,8 +485,8 @@ public enum HarnessOutput {
     /// The session a run reported even when its output did not parse — so a failed run can
     /// still be resumed (`SchemaRepair`). agy only: claude and codex runs keep reporting no
     /// session on a parse failure, exactly as before.
-    public static func reportedSession(_ harness: Harness, stdout: Data) -> String? {
-        harness == .gemini ? geminiSession(stdout) : nil
+    public static func reportedSession(_ agent: AgentID, stdout: Data) -> String? {
+        agent == .gemini ? geminiSession(stdout) : nil
     }
 
     /// The structured answer in a claude `result` object. `is_error` means `result` holds the

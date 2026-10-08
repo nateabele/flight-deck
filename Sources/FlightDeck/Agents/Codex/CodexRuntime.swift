@@ -1,4 +1,5 @@
 import Foundation
+import IntakeKit
 
 /// Codex's observation half: everything is read from the files codex writes.
 ///

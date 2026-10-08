@@ -9,7 +9,7 @@ final class SwarmRecordTests: XCTestCase {
 
     private func block(model: String = "gpt-6-sol", knobs: [String: String] = ["effort": "high"],
                        pool: PoolID = "codex-subs") -> ExecutionBlock {
-        ExecutionBlock(kind: "tests", harness: "codex", model: model, knobs: knobs, pool: pool,
+        ExecutionBlock(kind: "tests", agent: .codex, model: model, knobs: knobs, pool: pool,
                        source: AssignmentSource(by: .rule, ruleId: "r1", reason: "r", at: at))
     }
 
@@ -56,7 +56,7 @@ final class SwarmRecordTests: XCTestCase {
 
     func testRecordRoundTripsWithBlockAndLease() throws {
         let lease = AccountLease(id: UUID(), pool: "codex-subs",
-                                 account: AccountRef(harness: "codex", id: UUID(), label: "Work"))
+                                 account: AccountRef(agent: .codex, id: UUID(), label: "Work"))
         let agent = SwarmAgentRecord(session: UUID(), agentName: "BlueLake", block: block(),
                                      lease: lease, task: "fx-a", state: .working, stateSince: at)
         let record = SwarmRecord(id: UUID(), project: "/p", cap: 3, poolCaps: ["codex-subs": 2],

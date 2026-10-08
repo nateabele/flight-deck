@@ -1,4 +1,5 @@
 import XCTest
+import IntakeKit
 @testable import FlightDeck
 
 /// Bringing a codex tab back across a relaunch: settling its thread before anything is typed

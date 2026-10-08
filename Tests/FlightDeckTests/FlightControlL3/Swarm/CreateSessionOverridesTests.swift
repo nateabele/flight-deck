@@ -51,7 +51,7 @@ final class CreateSessionOverridesTests: XCTestCase {
 
     func testLaunchOptionsAppliesThroughTheRegistry() throws {
         let (store, _) = makeStore()
-        let fake = FakeRoutingCapabilities(); fake.harness = "claude"
+        let fake = FakeRoutingCapabilities(); fake.agent = .claude
         fake.overridesResult = .unsupported(reason: "nope")
         store.routingCapabilities = RoutingCapabilityRegistry([fake])
         guard case .failure(.prepareFailed("nope")) = store.launchOptions(
