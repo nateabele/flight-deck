@@ -407,3 +407,68 @@ runs the same checks with no recipe and lists every result.
   the ETag guard, and falls back to copy-and-open rather than rewriting the file.
 - **Managed tool downloads depend on upstream release URLs.** Pinned checksums make a moved
   or altered asset fail loudly; the user can always put a compatible copy on `PATH`.
+
+## 15. As built (2026-10-08)
+
+Built on branch `infra-hosts` per [the plan](../plans/2026-10-07-cloud-infra-hosts.md). The
+as-built structure is [ARCHITECTURE.md, "Cloud infra hosts"](../../ARCHITECTURE.md#cloud-infra-hosts-sub-project-e);
+open items are in [FOLLOWUPS.md](../../FOLLOWUPS.md#cloud-infra-hosts-as-built-2026-10-08). Where
+the code differs from the sections above, the code is right and this list says why:
+
+1. **Unknown keys in `[infra.<name>]` are errors**, not warnings (§3.1 said "as for recipes",
+   which warn). An infra typo spends money — `ttl` misspelt is a machine with the wrong deadline —
+   so the strict reading won.
+2. **The TOML reader gained floats** (`max_hourly = 1.50`); it rejected them before.
+3. **HostKit has its own `Duration`** (`30m`, `4h`, `1d`, `1h30m`). It shadows `Swift.Duration`
+   in every file importing HostKit, so the clash sites write `Swift.Duration` explicitly.
+4. **Enrollment goes through the running hostd's admin socket** (`AdminRequest.enroll`), not a
+   write to `controllers.json` (§5.2 step 5): `ControllerStore` is read once at start, so a
+   second process's write would be ignored until a restart. A payload whose `issuedAt` is ahead
+   of the machine's clock (a fresh VM before NTP) is `notYetValid` and is retried every 5 s for
+   120 s, then left in place, never deleted — deleting it would strand a machine a minute's
+   patience would have enrolled. Spent and expired files are deleted.
+5. **`auto_up` hooks into `DelegationService.start`** (the app resolves `--on`), not the CLI.
+6. **`infra extend` cannot go past the TTL set at creation.** The machine's own guarantee (AWS's
+   timer, GCP's `max_run_duration`) is fixed when it boots, and success criterion 3 rests on it;
+   moving only the controller's deadline would make `extend` a promise the machine breaks.
+7. **Tailnet-mode machines keep a public IP, for egress only** (§6.1 implied none). The default
+   VPC/network has no NAT, and cloud-init must download hostd and Tailscale. Inbound stays closed:
+   no ingress rule on AWS; a per-machine deny-all-ingress rule on GCP that outranks the default
+   network's open `default-allow-ssh`. Public mode admits only the Mac's `/32` on 47410.
+8. **The on-machine TTL is AWS-only.** A persistent systemd timer at an absolute UTC deadline,
+   armed first in cloud-init, with `instance_initiated_shutdown_behavior = "terminate"`. GCP has
+   no on-machine timer — a guest poweroff only stops a GCE VM, which keeps billing its disk and
+   halts `max_run_duration` — so `max_run_duration` with `DELETE` is the guarantee there (§7.2
+   already records this).
+9. **The metadata endpoint is blocked for non-root from `bootcmd` on every boot** (IPv4, plus
+   AWS's IPv6 `fd00:ec2::254`), because the enrollment secret is the controller's long-lived PSK
+   and user-data stays readable for the machine's life (§5.2 step 1 records this).
+10. **A re-apply never replaces a running machine.** Both presets `ignore_changes` the image and
+    the user-data, both force-new and both drifting on their own; otherwise §6.2's re-apply that
+    only moves `fd_allow_cidr` would recreate the machine. **GCP names carry a 12-hex owner
+    prefix** (`fd-<owner>-<name>`), because firewall and instance names are project-global and
+    two controllers' `gpu` would collide; **GCP firewall descriptions carry the labels**, because
+    firewalls take none and the orphan scan must still find them.
+11. **Managed tool pins**: tofu 1.8.11; aws 2.37.10, installed under
+    `~/Library/Caches/dev.flightdeck/tools/aws` rather than Application Support because the pkg
+    refuses a path with a space; gcloud 588, which needs Python 3.10+ handed over as
+    `CLOUDSDK_PYTHON`. Each is verified against a pinned SHA-256 before unpacking.
+12. **Idle is timed on the Mac's clock.** hostd reports `idleSince`; the Reaper destroys only
+    after watching the *same* `idleSince` for the whole idle period, so a host clock running
+    behind can never reap early. hostd gained TCP keepalive and a 10-minute per-chunk transfer
+    stall deadline (`transfer_stalled`), so a vanished peer cannot hold a host busy — and billing
+    — until its TTL.
+13. **The Reaper** claims a name before acting (it never races a user's `down`), runs drift with
+    `-lock=false`, retries failed destroys with backoff (1, 5, 15, then every 30 minutes),
+    re-checks the public IP every 3 minutes while a public-mode link is down and on network path
+    changes, and warns separately for the per-machine and monthly caps.
+14. **The orphan scan** returns kind-qualified ids (`instance:`, `security-group:`, `firewall:`;
+    `infra down --orphan KIND:ID`) and an `unreadable` map, so it never says "none" when it
+    could not look. `infra doctor` includes it.
+15. **Secrets are redacted** — `tskey-…` and runs of 64+ hex — from OpenTofu and console text
+    before it becomes an event, error or notification.
+16. **The Tailscale OAuth client is a manual checklist plus a clipboard paste** (§9): probe P1
+    found no API that creates one.
+17. **`controllerID` is a UUID per state directory** (`infra-controller.json`), and only a
+    12-hex hash of it is ever a label, so a Debug build and the Release app never scan, reap or
+    orphan each other's machines.

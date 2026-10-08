@@ -253,6 +253,33 @@ Homebrew one. `/usr/bin/git --version` on each machine; anything older refuses e
 Stopping Hosting on the mini (or an update that restarts its hostd) stops its delegated runs and
 services cleanly; see [AGENT-OPERATIONS.md](AGENT-OPERATIONS.md), "Delegated runs".
 
+## Cloud infra hosts (sub-project E)
+
+**State:** built on branch `infra-hosts` (Tasks 0–19 of the plan); **never run against a real
+cloud.** `flightdeck infra up <name>` creates a machine in the user's own AWS or GCP account
+with OpenTofu from a repo's `[infra.<name>]` table in `.flightdeck/delegate.toml`, the machine
+enrolls itself as an ordinary paired host, and every delegation verb works on it; `infra down`
+destroys it. `run --on <name>` creates an `auto_up` machine on demand. Every command aimed at a
+cloud host prints a cost line on stderr (`gpu · g6.xlarge · $0.80/h est. · … · month ~$14.20 of
+$50`). A machine dies at its TTL even if the Mac is asleep or gone (an on-machine timer on AWS,
+`max_run_duration` on GCP), and the Reaper also destroys it when idle or over budget.
+
+- Design: [the cloud-infra spec](superpowers/specs/2026-10-07-cloud-infra-hosts-design.md), and its
+  §15 "As built" for where the code departs from it.
+- Plan: [the cloud-infra plan](superpowers/plans/2026-10-07-cloud-infra-hosts.md).
+- As built: [ARCHITECTURE.md, "Cloud infra hosts"](ARCHITECTURE.md#cloud-infra-hosts-sub-project-e);
+  tests in [BUILD.md](BUILD.md); hazards (never run the live test unasked, finding and destroying
+  orphans) in [AGENT-OPERATIONS.md §3](AGENT-OPERATIONS.md#cloud-machines-sub-project-e); open
+  items in [FOLLOWUPS.md](FOLLOWUPS.md#cloud-infra-hosts-as-built-2026-10-08).
+- **The maintainer's before relying on it:** Settings → Cloud → Set up… (sign-ins, Tailscale,
+  budget, Test), then `FD_INFRA_LIVE=1 ./scripts/test-infra-live.sh aws` and `gcp`, then the
+  plan's four manual checks. Until then, unit suites with fakes, `tofu test` on mock providers
+  and the Linux container are all it has seen.
+- **Where it looks:** `flightdeck infra ls` (add `--orphans` to scan the accounts for anything
+  labelled as this controller's that no workdir knows), `flightdeck infra doctor` (`tofu`, each cloud
+  account's sign-in, the network mode, every `failed` machine and the orphan scan, each with its
+  fix; quota and price are checked per machine, by `up`'s preflight).
+
 ## Releasing the Linux host (`flightdeck-hostd`)
 
 Settings → Hosts → Add Host → Linux shows one command, `curl -fsSL <base>/hostd-install.sh | sh

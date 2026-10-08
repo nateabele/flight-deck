@@ -90,6 +90,21 @@ script: they need a real second Mac and are the maintainer's, written up as proc
 (`Application Support/Flight Deck (Debug)/route-shims/`), and a UITest reset writes none. To run a
 routed command locally in a tab, set `FLIGHTDECK_NO_ROUTE=1`.
 
+### Cloud infra hosts (sub-project E)
+
+No build step either: HostKit's `Infra/` builds with everything else, the presets are a folder
+reference (`Resources/Infra`) copied into the bundle as they are, and `tofu`, `aws` and `gcloud`
+are found or fetched at run time, never at build time. **No test below touches a cloud** except
+the last, which is opt-in and the user's to run.
+
+| Script / mode | Does | Notes |
+|---|---|---|
+| `scripts/test-hostkit.sh` | Also runs `DurationTests`, `InfraConfigTests` (and the parser's float and `[infra.*]` cases in `DelegateConfigParserTests`), `CostModelTests`, `EnrollmentPayloadTests`, `IdleTrackerTests`, `AdminWireTests`, on macOS and Linux | |
+| `scripts/test-hostd-linux.sh` | Also runs hostd's `enroll` (`HostDaemonLinuxTests`): the admin op, reuse and expiry refusals, the behind-clock retry that keeps the file | |
+| `FD_TEST_FILTER=… ./scripts/test-unit.sh` | The app's infra classes: `InfraServiceTests`, `ReaperTests`, `InfraRegistryTests`, `CostLedgerTests`, `InfraWorkdirTests`, `TofuRunnerTests`, `ToolResolverTests`, `CloudInitRendererTests` (golden files in `Fixtures/cloud-init/`), `CloudAccountsTests`, `PriceCatalogTests` (fixtures and their provenance in `Fixtures/prices/`), `TailnetIntegrationTests`, `HuJSONPatcherTests`, `InfraControlWireTests`, `InfraCommandsTests` | Every seam is faked through `InfraEnvironment` (`InfraFakes.swift`), and `ToolResolverTests` runs fake tool scripts on a fake `PATH`, so nothing is downloaded and nothing is created. Exits 0 on failure: `rg -n "error:\|failed \("` the output. |
+| `scripts/test-infra-presets.sh` | See "The host scripts" above | Needs `tofu`; no credentials. |
+| `FD_INFRA_LIVE=1 ./scripts/test-infra-live.sh aws\|gcp` | The spec's success criteria against the **real** account: in a throwaway repo, `run --on` an `auto_up` machine (t4g.nano / e2-micro, `ttl = "15m"`), `uname -a`, `host ls`, `infra down`, then `infra ls --orphans --json` must show no orphans **and** no unreadable account; ends `INFRA LIVE PASS` | **Costs money and creates real resources.** Refuses (exit 2) without `FD_INFRA_LIVE=1`. Drives the *installed* app's `flightdeck` (or `FLIGHTDECK=`) from a Flight Deck tab with Settings → Cloud set up; its exit trap runs `infra down` whatever happened. Never in any suite; never run by an agent unasked (AGENT-OPERATIONS.md §3). Has not run yet. |
+
 ## Running tests
 
 **Unit tests** (fast, no special permission):

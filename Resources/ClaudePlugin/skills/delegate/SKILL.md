@@ -49,6 +49,16 @@ A recipe marked `long`, or `--detach`, prints a run id and returns at once. Then
 - `flightdeck sync <service>` pushes your current tree into the running service's checkout.
 - Services stop when this tab closes.
 
+## Cloud machines
+
+A host can also be a machine Flight Deck creates in the user's own AWS or GCP account, from an `[infra.<name>]` table in `.flightdeck/delegate.toml`. It costs real money by the hour.
+
+- Every command aimed at a cloud host prints a cost line on stderr, like `<name> · <type> · $0.80/h est. · up 1h12m · ~$0.96 · TTL 2h48m · month ~$14.20 of $50`. Tell the user what it says before running long or repeated work there.
+- `flightdeck infra ls` lists the cloud machines with their state, rate, spend and time left. `flightdeck infra doctor` checks the tools and accounts.
+- A table with `auto_up = true` is created by the first `flightdeck run --on <name>`, which then waits for it (minutes). Without `auto_up`, the run is refused until someone runs `flightdeck infra up <name>`.
+- Never run `flightdeck infra up`, `infra down` or `infra extend` unless the user asked: they create, destroy or keep paying for a machine. A refusal from the budget or a guardrail names the setting to change; it is the user's to change, never yours.
+- A machine is destroyed by itself at its `ttl`, and after `idle` with nothing running, so a long gap between runs can mean the next one creates it again.
+
 ## Exit codes
 
 - **125 with a stderr line starting `flightdeck:`** means delegation itself failed. Do exactly what that line says (another `--port`, `--include <path>`, wait for the host to come online); do not retry blindly. A failure in the checks before syncing changed nothing on either machine. A 125 without that line is the remote command's own exit code.
