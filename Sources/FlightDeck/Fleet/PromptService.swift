@@ -555,7 +555,7 @@ final class PromptService {
         while true {
             let (lines, hasMore) = tail(read.url, step.limit)
             performed += 1
-            if let open = read.reader.openPrompt(inTranscriptTail: lines, activity: read.activity) {
+            if let open = read.reader.openPrompt(inTranscriptAt: read.url, tail: lines, activity: read.activity) {
                 return .settled(.success(open))
             }
             guard hasMore, step.limit < maxTailRecords, lines.count > step.previousCount

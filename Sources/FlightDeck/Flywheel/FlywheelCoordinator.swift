@@ -49,8 +49,8 @@ enum FlywheelProgram {
         case .claude: "claude-code"
         case .codex: "codex-cli"
         // Unverified spellings: Agent-Mail's `--program` is free text, and no grok or gemini
-        // agent has been spawned into a Flight Control swarm yet (neither is `tabReady`). The
-        // binary name is the least surprising label until Tracks G/M check what `am` shows.
+        // agent has been spawned into a real Flight Control swarm yet. The binary name is the
+        // least surprising label until a live swarm shows what `am` displays.
         case .grok: "grok"
         case .gemini: "agy"
         }

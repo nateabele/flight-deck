@@ -1056,11 +1056,8 @@ final class SessionStore: ObservableObject {
             adapter = GrokAdapter(home: { [weak self] in
                 self?.home(ofAccount: instance.account, agent: .grok) ?? AgentID.grok.builtInHome
             })
-        // A stub (unify brief P0): `tabReady` keeps gemini off every surface that opens a tab,
-        // so this arm answers only a hand-edited `sessions.json` — with its own stub rather
-        // than claude's adapter, which would launch `claude` in a tab labelled gemini.
         case .gemini:
-            adapter = GeminiAdapter()
+            adapter = GeminiAdapter(paths: geminiPaths)
         }
         adapters[instance] = adapter
         return adapter
@@ -1094,8 +1091,14 @@ final class SessionStore: ObservableObject {
             runtimes[instance] = runtime
             return runtime
         case .gemini:
-            // Nothing to observe until Track M builds a runtime; see `UnobservedAgentRuntime`.
-            let runtime = UnobservedAgentRuntime()
+            // agy's identity, liveness and status are read off its own files, scoped to the
+            // processes THIS tab owns: its fd-abduco daemon (a detached session is not a
+            // descendant of its surface) and its surface's shell. See `GeminiRuntime`.
+            let runtime = GeminiRuntime(clock: clock, paths: geminiPaths, roots: { [weak self] tab in
+                guard let self else { return [] }
+                return [self.daemonControl.daemonPID(tab), self.processRegistry.process(for: tab)?.identity.pid]
+                    .compactMap { $0 }
+            })
             runtimes[instance] = runtime
             return runtime
         case .claude:
@@ -1179,6 +1182,10 @@ final class SessionStore: ObservableObject {
     var transcriptsRootOverride: URL?
     var statusRootOverride: URL?
     var codexIndexURLOverride: URL?
+    /// agy's root (`~/.gemini/antigravity-cli`), the same kind of seam: a fixture run points it
+    /// at a temporary directory so no gemini tab ever reads or resumes against the real one.
+    /// Read when a gemini adapter or runtime is first built, so set it before any gemini tab.
+    var geminiPaths: GeminiPaths = .default
     /// The hook-event log's directory, the same override shape as the three above but for a
     /// root that is not per-account: `HookEventWatcher` tails one file for the whole app, so
     /// there is one override rather than one keyed by account. Nil means the real
@@ -2612,9 +2619,9 @@ final class SessionStore: ObservableObject {
         }
         // Resolved before the title is minted, so a refusal does not burn a session number.
         let account: AgentAccount?
-        // `agent`, not `.claude`: every agent that mints its own conversation id lands here
-        // from `createSession` (grok, besides claude), and a tab stamped claude would launch
-        // `claude` under the other agent's name.
+        // `agent`, not `.claude`: every agent that mints or learns its own conversation id
+        // (`negotiatesIdentity == false` — grok and gemini) lands here from `createSession`, and a
+        // hard-coded claude here opened a CLAUDE tab under the other agent's name.
         switch launchAccount(for: agent, project: url.path, choosing: explicit) {
         case .success(let resolved): account = resolved
         case .failure(let error):
@@ -2869,9 +2876,7 @@ final class SessionStore: ObservableObject {
         case .codex(let codexOptions):
             model = codexOptions.model ?? "codex"
         case .grok(let grokOptions): model = grokOptions.model ?? "grok"
-        // No model option yet (`GeminiOptions` is empty), so the agent's name is the
-        // placeholder, as for the other agents.
-        case .gemini: model = "gemini"
+        case .gemini(let geminiOptions): model = GeminiAdapter.model(for: geminiOptions)
         }
         let coordinator = flywheelCoordinator
         let program = FlywheelProgram.rawValue(for: agent)
@@ -6007,9 +6012,10 @@ final class SessionStore: ObservableObject {
             // is the whole of grok's rename — it writes the session's `summary.json` itself.
             injectPendingRename(id, name)
         case .gemini:
-            // A stub: no rename channel yet (unify brief P0; Track M probes one). The local
-            // title above is the whole rename, which is what a tab with no channel can offer.
-            break
+            // agy's `/rename <name>` is one submission with an inline argument (probed: it
+            // answers `Conversation renamed to: <name>` and rewrites `annotations/<id>.pbtxt`),
+            // so it takes claude's queued composer route; `GeminiAdapter.renameTyping` is nil.
+            injectPendingRename(id, name)
         }
         // True means the name was ACCEPTED and the local title changed — not that the agent
         // has been told. The codex arm above is deliberately fire-and-forget and the claude
@@ -9574,7 +9580,24 @@ final class SessionStore: ObservableObject {
         // `sessions.json`.
         case .lifecycle(let readiness):
             composerReadinessByTab[tabID] = readiness
+        case .rebound(let binding):
+            repinRebound(tabID, to: binding)
         }
+    }
+
+    /// The tab's agent named its conversation after launch (`AgentEvent.rebound`). Pins the tab
+    /// to it, keeps the transcript path the agent reported, and re-attaches the runtime, whose
+    /// attachment names the conversation the tab has just left. `repinCodex`'s shape without
+    /// codex's ever-pinned bookkeeping, which only codex's pin reconciler reads.
+    private func repinRebound(_ tabID: UUID, to binding: AgentBinding) {
+        guard let at = locate(tabID),
+              repos[at.repo].sessions[at.session].pinnedConversationID != binding.conversationID
+        else { return }
+        repos[at.repo].sessions[at.session].pinnedConversationID = binding.conversationID
+        repos[at.repo].sessions[at.session].transcriptPath = binding.transcriptURL?.path
+        stopWatching(tabID)
+        startWatching(tabID: tabID)
+        persist()
     }
 
     /// An agent reported what it is doing.

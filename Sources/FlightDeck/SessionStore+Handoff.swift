@@ -5,13 +5,16 @@ extension AgentID {
     /// The slash command that ends this agent's TUI and returns its tab to the shell (verified
     /// against each TUI; see the L3-U plan Task 14 Step 1).
     ///
-    /// nil for an agent whose TUI nobody has verified yet (gemini, a stub until Track M): a
-    /// guessed command typed into the wrong TUI is a prompt, not an exit. grok's `/quit` was
+    /// nil for an agent whose TUI has no verified exit command (gemini: agy leaves on Ctrl-C
+    /// pressed twice, a key sequence): a guessed command typed into the wrong TUI is a prompt,
+    /// not an exit. grok's `/quit` was
     /// verified live (grok 1.0.30): the TUI exits cleanly and the shell prompt returns.
     var exitCommand: String? {
         switch self {
         case .claude: return "/exit"
         case .codex, .grok: return "/quit"
+        // agy has no exit slash command anyone has verified — it leaves on Ctrl-C pressed twice,
+        // which is a key sequence, not a message `submitPrompt` can type.
         case .gemini: return nil
         }
     }

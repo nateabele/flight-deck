@@ -27,6 +27,9 @@ struct UsageEnvironment {
     /// Whether the tab's agent is running (the store has a status for it). A tab whose agent has
     /// exited is still in the sidebar; telling the user about its account's limit is noise.
     var isLive: @MainActor (UUID) -> Bool = { _ in true }
+    /// agy's `/usage` answer as raw JSON, or nil (`GeminiUsageSource.read`). Run off the main
+    /// actor by the caller; defaulted to nothing so a test environment never spawns agy.
+    var geminiUsage: @Sendable () async -> Data? = { nil }
 
     static var empty: UsageEnvironment {
         UsageEnvironment(sessions: { [] }, apiErrors: { [:] }, accounts: { [] },
@@ -55,7 +58,12 @@ struct UsageEnvironment {
             },
             notifier: { [weak store] in store?.notifier },
             isSwarmSession: { _ in false },
-            isLive: { [weak store] in store?.statuses[$0] != nil })
+            isLive: { [weak store] in store?.statuses[$0] != nil },
+            geminiUsage: {
+                await Task.detached(priority: .utility) {
+                    GeminiUsageSource.read(path: LoginShellPath.repairing()["PATH"])
+                }.value
+            })
     }
 }
 
@@ -117,6 +125,8 @@ final class UsageService: ObservableObject {
     private var codexSources: [UUID: CodexRateLimitSource] = [:]
     private var lastCodexPoll: [UUID: Date] = [:]
     private var lastGrokBilling: [UUID: Date] = [:]
+    private var lastGeminiPoll: Date?
+    private var geminiReadInFlight = false
     private struct WeakTap { weak var tap: UsageMeterTap? }
     private var taps: [WeakTap] = []
     private var firstSeen: [UUID: Date] = [:]
@@ -214,6 +224,7 @@ final class UsageService: ObservableObject {
         ingestAPIErrors(sessions, at: t)
         await pollCodex(sessions, at: t)
         ingestGrokBilling(sessions)
+        await pollGemini(sessions, at: t)
         flagSilentStatusLine(sessions, at: t)
         noticeManualTabs(sessions)
         revision += 1
@@ -260,6 +271,7 @@ final class UsageService: ObservableObject {
         case .claude: return TranscriptPointers.claude(session: session, projectsRoot: claudeProjectsRoot(for: session))
         case .codex: return TranscriptPointers.codex(session: session)
         case .grok: return TranscriptPointers.grok(session: session, home: grokHome(for: session))
+        case .gemini: return TranscriptPointers.gemini(session: session)
         default: return nil
         }
     }
@@ -355,6 +367,23 @@ final class UsageService: ObservableObject {
                 ledger.setSourceError("Codex app-server did not answer within \(Int(codexReadTimeout)) s", account: id)
             }
         }
+    }
+
+    /// agy's quota for the one gemini account (unify brief R5), at most every
+    /// `GeminiUsageSource.pollInterval`, and only while a gemini tab exists: each read spawns agy
+    /// twice. No reading is not an error worth flagging — agy may simply be signed out, and
+    /// `GeminiUsageSource.read` refuses to run `/usage` then rather than open a browser.
+    private func pollGemini(_ sessions: [Session], at t: Date) async {
+        guard let tab = sessions.first(where: { $0.agent == .gemini }), !geminiReadInFlight,
+              lastGeminiPoll.map({ t.timeIntervalSince($0) >= GeminiUsageSource.pollInterval }) ?? true,
+              let ref = accountRef(for: tab)
+        else { return }
+        lastGeminiPoll = t
+        geminiReadInFlight = true
+        let data = await environment.geminiUsage()
+        geminiReadInFlight = false
+        guard let data, let windows = GeminiUsageSource.windows(fromUsageJSON: data), !windows.isEmpty else { return }
+        ingest(UsageReading(account: ref, windows: windows, readAt: t, source: "agy /usage", hardRejection: false))
     }
 
     private enum CodexReadOutcome { case result([String: Any]?), failed(Error), timedOut }

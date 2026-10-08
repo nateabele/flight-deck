@@ -69,9 +69,9 @@ final class RoutingCapabilityRegistry {
     ///
     /// Filtered by `tabReady` (unify brief R4): routing sends a task to an agent by opening a
     /// TAB on it, so an agent that cannot run a tab must not be a routing target — the router
-    /// would otherwise pick grok for a task and the spawn would type a stub command into a
-    /// shell. Its stub conformer still exists, so flipping `tabReady` is the whole change that
-    /// makes it routable once Track G or M fills the conformer in.
+    /// would otherwise pick it for a task and the spawn would type a placeholder command into
+    /// a shell. Every agent is tab-ready today; the filter is what keeps the next agent off
+    /// routing until its adapter can run a tab.
     static func standard() -> RoutingCapabilityRegistry {
         RoutingCapabilityRegistry(AgentID.tabReadyCases.map { id -> any AgentRoutingCapabilities in
             switch id {
@@ -172,20 +172,67 @@ final class GrokRoutingCapabilities: AgentRoutingCapabilities {
     }
 }
 
-/// **STUB (unify brief P0).** Gemini's routing answers; see `GrokRoutingCapabilities`. Its
-/// account model is `.login` with exactly one login (the keyring's), per unify brief R5.
+/// Gemini's (agy's) routing answers. Its account model is `.login` with exactly one login (the
+/// keyring's), per unify brief R5.
 @MainActor
 final class GeminiRoutingCapabilities: AgentRoutingCapabilities {
     let agent: AgentID = .gemini
     let accountModel: AccountModel = .login
+    /// Attached by `SessionStore` (`attachCommandSink`); weak because the store owns the registry.
+    weak var commands: SessionCommandSink?
+    /// No knobs: every agy model id already names its effort (`gemini-3.1-pro-high`), and agy
+    /// resolves `--model` and `--effort` as one selection (`GeminiProfile.modelCatalog`).
     var knobSchema: [String: [String]] { [:] }
-    private static let stub = "the gemini adapter is a stub"
-    func modelCatalog() async -> RoutingCapability<[ModelEntry]> { .unsupported(reason: Self.stub) }
-    func usageMeterSource(account: AgentAccount?) -> RoutingCapability<any UsageMeterSource> { .unsupported(reason: Self.stub) }
-    func transcriptPointer(for session: Session) -> RoutingCapability<TranscriptPointer> { .unsupported(reason: Self.stub) }
-    func resetContext(_ session: Session) async throws -> RoutingCapability<Void> { .unsupported(reason: Self.stub) }
-    func applying(_ overrides: LaunchOverrides, to options: AgentOptions) -> RoutingCapability<AgentOptions> { .unsupported(reason: Self.stub) }
+
+    /// The account's own list, from `agy models` (read-only, no tokens; also the sign-in check),
+    /// Gemini ids only. Listed once per run: the catalog changes with agy releases, not turns.
+    /// Unsupported, with the reason, when agy is missing or signed out.
+    private var listed: [ModelEntry]?
+    var list: @Sendable () async -> [String]? = {
+        await Task.detached(priority: .utility) { () -> [String]? in
+            let path = LoginShellPath.repairing()["PATH"]
+            guard let executable = (path ?? "").split(separator: ":").lazy.map({ "\($0)/agy" })
+                .first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else { return nil }
+            let profile = GeminiProfile()
+            guard let output = SignInProbe.system.run(executable, profile.signInCheck.arguments, path ?? ""),
+                  profile.signInCheck.readiness(output) == .ready else { return nil }
+            return profile.parseModelList(output.stdout)
+        }.value
+    }
+
+    func modelCatalog() async -> RoutingCapability<[ModelEntry]> {
+        if let listed { return .supported(listed) }
+        guard let ids = await list(), !ids.isEmpty else {
+            return .unsupported(reason: "agy is not installed or not signed in (`agy models` listed nothing)")
+        }
+        let entries = ids.map { ModelEntry(id: $0, displayName: $0, knobs: []) }
+        listed = entries
+        return .supported(entries)
+    }
+
+    func usageMeterSource(account: AgentAccount?) -> RoutingCapability<any UsageMeterSource> {
+        .supported(UsageService.shared.tap(agent: .gemini, account: account))
+    }
+
+    func transcriptPointer(for session: Session) -> RoutingCapability<TranscriptPointer> {
+        guard let pointer = TranscriptPointers.gemini(session: session) else {
+            return .unsupported(reason: "agy has not written a transcript for this conversation yet")
+        }
+        return .supported(pointer)
+    }
+
+    /// `/clear` starts a new agy conversation in the same process (probed 2026-10-08: a new
+    /// presence lock and step store at once); `GeminiRuntime` re-pins the tab to it.
+    func resetContext(_ session: Session) async throws -> RoutingCapability<Void> {
+        try ContextReset.typing(ContextReset.geminiCommand, into: session, via: commands)
+    }
+
+    func applying(_ overrides: LaunchOverrides, to options: AgentOptions) -> RoutingCapability<AgentOptions> {
+        GeminiLaunchOverrides.apply(overrides, to: options)
+    }
 }
+
+extension GeminiRoutingCapabilities: CommandSinkAttachable {}
 
 /// Owned by L3-S. Spawns (or the caller reuses) an agent for `task` and submits `firstPrompt`
 /// once its composer is ready. L3-U's hand-off calls it with the hand-off prompt.

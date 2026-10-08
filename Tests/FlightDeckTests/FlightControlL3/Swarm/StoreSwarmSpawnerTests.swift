@@ -45,8 +45,12 @@ final class StoreSwarmSpawnerTests: XCTestCase {
                                    overrides: LaunchOverrides(model: "opus", knobs: ["effort": "high"]))])
     }
 
-    func testUnknownHarnessIsUnsupported() async {
-        let r = await spawner(created: .success(UUID())).createAgent(task: task, block: block(.gemini), lease: nil)
+    /// A block naming an agent that cannot run a tab is refused before anything opens. Every
+    /// agent can today, so the test seam stands gemini in for one that cannot.
+    func testAnAgentThatIsNotTabReadyIsUnsupported() async {
+        let r = await AgentID.$tabReadyOverride.withValue([.claude, .codex, .grok]) {
+            await spawner(created: .success(UUID())).createAgent(task: task, block: block(.gemini), lease: nil)
+        }
         XCTAssertEqual(r, .failure(.unsupportedAgent(.gemini)))
     }
 
