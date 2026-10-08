@@ -16,4 +16,12 @@ terraform {
 
 provider "aws" {
   region = var.region
+
+  # Belt and braces for "every resource carries fd_labels" (spec §5.3): anything taggable this
+  # module creates gets them even where a resource forgets to say so. The resource-level tags
+  # stay, because they are what the tests can see (a mock provider never computes tags_all),
+  # and default_tags does not reach the ENI or spot request (see aws_ec2_tag in main.tf).
+  default_tags {
+    tags = var.fd_labels
+  }
 }

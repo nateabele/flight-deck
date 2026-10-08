@@ -42,9 +42,10 @@ public struct DelegateConfigParseResult: Sendable, Equatable {
 ///
 /// Foundation has no TOML reader, and this is not one either: it reads the subset §8 uses —
 /// top-level keys, `[recipe.<name>]` (and `[recipe.<name>.env]`), `[[route]]`, dotted and
-/// quoted keys, basic and literal strings, booleans, integers, plain decimals (`1.50`), arrays (which may span lines,
-/// with comments and a trailing comma) and inline tables. Anything else — multi-line strings,
-/// exponents, dates — is a parse error that names its line, never a silent misread.
+/// quoted keys, basic and literal strings, booleans, integers, plain decimals (`1.50`), arrays
+/// (which may span lines, with comments and a trailing comma) and inline tables. Anything else —
+/// multi-line strings, exponents, dates — is a parse error that names its line, never a silent
+/// misread.
 public enum DelegateConfigParser {
     /// Where the file lives, relative to the project root.
     public static let relativePath = ".flightdeck/delegate.toml"
@@ -178,11 +179,13 @@ public enum DelegateConfigParser {
             case "region": region = try string(node, field)
             case "instance_type": instanceType = try string(node, field)
             case "arch": arch = try string(node, field)
-            case "disk_gb": diskGB = try int(node, field)
+            // Zero or less is never a request: a 0 GB disk fails deep inside OpenTofu, far from
+            // this line, and a price cap of 0 refuses every launch without saying why.
+            case "disk_gb": diskGB = try positive(try int(node, field), node, field)
             case "spot": spot = try bool(node, field)
             case "auto_up": autoUp = try bool(node, field)
             case "vars": vars = try env(node, field)
-            case "max_hourly": maxHourly = try double(node, field)
+            case "max_hourly": maxHourly = try positive(try double(node, field), node, field)
             case "ttl": ttl = try duration(node, field)
             case "idle": idle = try duration(node, field)
             default:
@@ -197,8 +200,11 @@ public enum DelegateConfigParser {
                     .error, line: p.1,
                     "\(path).preset \"\(p.0)\" is not one of \(InfraConfig.knownPresets.joined(separator: ", "))")
             }
-            guard region != nil, instanceType != nil else {
-                throw DelegateConfigIssue(.error, line: table.line, "\(path) uses a preset, so it needs region and instance_type")
+            // Name only what is missing: a message listing both sends someone who set one of
+            // them hunting for a typo in a line that is fine.
+            let missing = [("region", region), ("instance_type", instanceType)].filter { $0.1 == nil }.map { "\(path).\($0.0)" }
+            guard missing.isEmpty else {
+                throw DelegateConfigIssue(.error, line: table.line, "\(path) uses a preset, so it needs \(missing.joined(separator: " and "))")
             }
             source = .preset(p.0)
         case (nil, let m?):
@@ -258,6 +264,13 @@ public enum DelegateConfigParser {
         case .value(.int(let value), _): return Double(value)
         default: throw DelegateConfigIssue(.error, line: node.line, "\(field) must be a number")
         }
+    }
+
+    private static func positive<N: Numeric & Comparable>(_ value: N, _ node: TOMLNode, _ field: String) throws -> N {
+        guard value > 0 else {
+            throw DelegateConfigIssue(.error, line: node.line, "\(field) must be greater than zero")
+        }
+        return value
     }
 
     private static func duration(_ node: TOMLNode, _ field: String) throws -> Duration {

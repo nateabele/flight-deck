@@ -88,6 +88,11 @@ public enum CostModel {
                 ? .refused("Can't price this machine, so a dollar cap can't be enforced; set max_hourly or clear the caps in Settings → Cloud → Budget.")
                 : .allowed
         }
+        // A negative rate makes the worst case negative, which slips under every cap; NaN fails
+        // every comparison and slips under them too. Either is a broken price, not a free machine.
+        guard hourly >= 0 else {
+            return .refused("The hourly price \(hourly.isNaN ? "is not a number" : "of " + usd(hourly) + " is negative"), so the caps can't be enforced; check max_hourly or the module's fd_hourly_usd output.")
+        }
         let worst = worstCase(hourly: hourly, ttl: ttl)
         if let cap = settings.perMachineCapUSD, worst > cap + 1e-9 {
             return .refused("Worst case \(usd(worst)) (\(usd(hourly))/h for \(ttl.formatted)) is over the \(usd(cap)) per-machine cap; shorten the TTL or raise Per-machine cap in Settings → Cloud → Budget.")

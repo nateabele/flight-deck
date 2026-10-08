@@ -2,7 +2,15 @@
 # the Google provider entirely, so these plans need no credentials and make no cloud call —
 # every assertion is about what the module WOULD ask GCP for.
 
-mock_provider "google" {}
+mock_provider "google" {
+  # The module picks the first UP zone when none is given; the mock's default is no zones.
+  # Unsorted on purpose, and without `-a`: us-east1 really has no us-east1-a.
+  mock_data "google_compute_zones" {
+    defaults = {
+      names = ["us-central1-c", "us-central1-b", "us-central1-f"]
+    }
+  }
+}
 
 variables {
   fd_name      = "gpu"
@@ -127,6 +135,49 @@ run "long_names_still_fit" {
   }
 }
 
+# `<region>-a` is not a zone everywhere (us-east1 has b, c and d), so with no zone given the
+# module asks GCP for the region's UP zones and takes the first by name.
+run "zone_defaults_to_an_up_zone" {
+  command = plan
+
+  variables {
+    region = "us-east1"
+  }
+
+  override_data {
+    target = data.google_compute_zones.up
+    values = {
+      names = ["us-east1-d", "us-east1-b", "us-east1-c"]
+    }
+  }
+
+  assert {
+    condition     = google_compute_instance.this.zone == "us-east1-b"
+    error_message = "the first UP zone by name, not a guessed us-east1-a"
+  }
+  assert {
+    condition     = data.google_compute_zones.up[0].region == "us-east1" && data.google_compute_zones.up[0].status == "UP"
+    error_message = "only UP zones of the machine's region"
+  }
+}
+
+run "zone_override_wins" {
+  command = plan
+
+  variables {
+    zone = "us-central1-f"
+  }
+
+  assert {
+    condition     = google_compute_instance.this.zone == "us-central1-f"
+    error_message = "var.zone is used as given"
+  }
+  assert {
+    condition     = length(data.google_compute_zones.up) == 0
+    error_message = "no zone lookup (and no compute.zones.list call) when the zone is given"
+  }
+}
+
 # A running machine must survive a re-apply (spec §6.2 re-applies when this Mac's public IP
 # changes): a newer image in the family (boot_disk image is force-new) and re-rendered
 # user-data must neither replace nor alter it. Switching arch is the test's stand-in for "the
@@ -159,5 +210,23 @@ run "reapply_keeps_the_machine" {
   assert {
     condition     = google_compute_firewall.hostd[0].source_ranges == toset(["198.51.100.8/32"])
     error_message = "the re-apply must still move the firewall to the new /32"
+  }
+}
+
+# A zone that goes DOWN after launch moves the first UP zone, and zone is force-new: the
+# spec §6.2 re-apply must not chase it and replace the machine `create` made above.
+run "reapply_keeps_the_zone" {
+  command = apply
+
+  override_data {
+    target = data.google_compute_zones.up
+    values = {
+      names = ["us-central1-f"]
+    }
+  }
+
+  assert {
+    condition     = google_compute_instance.this.zone == "us-central1-b"
+    error_message = "a moved zone list must not reach (and so replace) the running instance"
   }
 }

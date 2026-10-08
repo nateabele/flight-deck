@@ -1,7 +1,9 @@
 locals {
   # Graviton families put a `g` after the generation digit (t4g, m7g, m7gd, c7gn, x2gd, g5g);
-  # GPU families like g6 or p5 start with their letter and so do not match.
-  arch = coalesce(var.arch, can(regex("^[a-z]+[0-9]+[a-z]*g[a-z]*\\.", var.instance_type)) ? "arm64" : "x86_64")
+  # GPU families like g6 or p5 start with their letter and so do not match. a1, the first
+  # Graviton, predates the suffix and is named outright, or it would get an amd64 AMI that
+  # RunInstances refuses.
+  arch = coalesce(var.arch, can(regex("^(a1|[a-z]+[0-9]+[a-z]*g[a-z]*)\\.", var.instance_type)) ? "arm64" : "x86_64")
 }
 
 # Canonical's Ubuntu 24.04 — the distro hostd-install.sh is tested against
@@ -132,4 +134,25 @@ resource "aws_instance" "this" {
   lifecycle {
     ignore_changes = [ami, user_data]
   }
+}
+
+# RunInstances also creates the primary network interface and, for spot, a spot request, and
+# aws_instance tags neither: provider v5 sends tag specifications for the instance and its
+# volumes only, and its default_tags go no further. Untagged, they would be the one footprint
+# of this machine that the orphan scan and cost allocation (spec §5.3) cannot attribute. Tags
+# are added just after launch, one aws_ec2_tag per label.
+resource "aws_ec2_tag" "eni" {
+  for_each = var.fd_labels
+
+  resource_id = aws_instance.this.primary_network_interface_id
+  key         = each.key
+  value       = each.value
+}
+
+resource "aws_ec2_tag" "spot_request" {
+  for_each = var.spot ? var.fd_labels : {}
+
+  resource_id = aws_instance.this.spot_instance_request_id
+  key         = each.key
+  value       = each.value
 }
