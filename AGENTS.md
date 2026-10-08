@@ -69,6 +69,9 @@ TEST_RUNNER_FLIGHTDECK_FLAKE_HUNT=1 FLIGHTDECK_TEST_THROTTLE=0 ./scripts/smoke.s
 ./scripts/test-hostd-install.sh      # the pasted installer, end to end in ubuntu:24.04; ends INSTALL PASS
 # (scripts/hostd-install.sh is the installer itself, not a command you run.)
 ./scripts/test-infra-presets.sh      # `tofu test` of the bundled cloud presets against mock providers (needs tofu, no Docker, no credentials); ends PRESETS PASS
+# NEVER run unasked — creates a REAL machine in the user's cloud account and costs money. Refuses
+# without FD_INFRA_LIVE=1; drives the installed app's `flightdeck`. See AGENT-OPERATIONS.md §3.
+FD_INFRA_LIVE=1 ./scripts/test-infra-live.sh aws|gcp   # ends INFRA LIVE PASS
 # Interop runs bind fixed ports 47410/47411 and share Packages/HostDaemonLinux/.build:
 # never run two at once, and never alongside test-hostd-linux.sh. serve and run publish 47410,
 # this Mac's own hostd port: turn Settings → Hosting off first.
@@ -124,6 +127,9 @@ Releases go through `scripts/swap-release.sh`, run detached — see
 | `Sources/FlightDeck/Hosts/` | The controller side: `HostRegistry` (`hosts.json`), `HostSecretStore` (Keychain), `HostLink` (one live link per host), `HostService`, and the Hosting tab's `HostAdminClient`. |
 | `Sources/FlightDeck/Delegation/` | Delegated execution, the app half: `DelegationService` (every `delegate.*`/`recipe.*` request, runs owned per tab; its seams are the protocols at the top of the file), `RunRegistry` (`delegation.json`), `PortForwarder`, `RouteShims`, `DelegationBootstrap` (shims in each tab's launch environment, built before the store), and `Live/` (the real seam conformers, built by `DelegationServiceFactory.live`). See ARCHITECTURE.md, "Delegated execution". |
 | `Packages/HostKit/Sources/HostKit/Delegation/` | Delegated execution, the shared and host half: the 1.1 wire (`DelegationWire.swift`, which tables every op and error code), `ChannelMux`, sync (`Snapshotter`, `BundleMaker`, `Workspace`, `ResultApplier`), `Runner` and `OutputSpool`, `ScreenLease`, `PortCheck`, `Preflight`, and the `delegate.toml` parser, writer and route matcher. Foundation-only like the rest of HostKit; the IOKit/CoreGraphics half is the `HostKitDarwin` target. |
+| `Packages/HostKit/Sources/HostKit/Infra/` | Cloud infra hosts, the shared half: `InfraConfig` (`[infra.<name>]`), HostKit's own `Duration` (it shadows `Swift.Duration` — write `Swift.Duration` at a clash), `CostModel`/`BudgetSettings`, `EnrollmentPayload`, `IdleTracker`. |
+| `Sources/FlightDeck/Infra/` | Cloud infra hosts, the app half: `InfraService` (the per-machine state machine, `infra.json`), `Reaper` (TTL, idle, budget, drift, failed-destroy retries), `ToolResolver`/`ToolPins` (tofu, aws, gcloud: `PATH` or a SHA-256-pinned managed copy), `TofuRunner`, `CloudInitRenderer`, `AWSAccount`/`GCPAccount` (incl. the orphan scan), `PriceCatalog`, `CostLedger`, `TailnetIntegration`. No test creates a cloud resource. See ARCHITECTURE.md, "Cloud infra hosts". |
+| `Resources/Infra/presets/` | The bundled OpenTofu presets `aws-linux` and `gcp-linux`, with lock files and `tofu test` suites. A folder reference: never run `tofu` in place (a `.terraform/` would ship in the app) — `test-infra-presets.sh` tests copies. |
 | `Resources/RouteShim/` | `flightdeck-route-shim.sh`, the one script every per-tab routing shim symlinks to. Bundled at `Contents/Resources/RouteShim/`; it finds this build's CLI through `FLIGHTDECK_CLI` or its own bundle before trusting `PATH`. |
 | `Sources/FlightDeckMobile/` | The iOS companion app: pairing screen (QR scan or typed code), fleet list. **Keep it flat** — `build-ios.sh`'s type-check fallback globs `*.swift` only, so a subdirectory goes silently unchecked on a machine with no iOS platform. See `docs/MOBILE.md`. |
 | `Tests/FlightDeckTests/` | Headless unit tests. `UITests/` drives the real app. |

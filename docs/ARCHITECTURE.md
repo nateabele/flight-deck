@@ -417,7 +417,169 @@ an in-process `DarwinHostServer`, real processes in temp repos, including `logs`
 relaunch and a real service downed by a shortened orphan timeout) and, against the Linux hostd in a
 container, by `test-hostd-linux-interop.sh run`. Neither has crossed to a real second machine.
 
-## Cloud machines in the app (Settings → Cloud, `Sources/FlightDeck/Infra/`)
+## Cloud infra hosts (sub-project E)
+
+`flightdeck infra up <name>` creates a machine in the user's own AWS or GCP account with OpenTofu,
+pairs it as an ordinary host with nothing typed, and `infra down` destroys it, so every delegation
+feature above works on a machine that did not exist a minute ago. Spec:
+[the cloud-infra spec](superpowers/specs/2026-10-07-cloud-infra-hosts-design.md) (its "As built"
+note lists where the code departs from it); plan:
+[the cloud-infra plan](superpowers/plans/2026-10-07-cloud-infra-hosts.md).
+
+**Units.**
+
+- **HostKit** (`Packages/HostKit/Sources/HostKit/Infra/`, Foundation-only, Linux too):
+  `InfraConfig` (the `[infra.<name>]` table, parsed by `DelegateConfigParser`), `Duration`
+  (`30m`, `4h`, `1d`), `CostModel` (rate × duration, worst case, cap decisions, `BudgetSettings`),
+  `EnrollmentPayload` (the one-time enroll file both ends read) and `IdleTracker`. HostKit's
+  `Duration` shadows `Swift.Duration` in every file that imports HostKit, so a file that needs
+  both writes `Swift.Duration` (or `HostKit.Duration`) at the clash site.
+- **Controller** (`Sources/FlightDeck/Infra/`): `ToolPins`/`ToolResolver`/`ToolDownloader`
+  (find or fetch `tofu`, `aws`, `gcloud`; find `tailscale`), `TofuRunner` and `InfraWorkdir` (one
+  OpenTofu workdir per machine), `CloudInitRenderer`, `CloudAccounts` (`AWSAccount`,
+  `GCPAccount`: sign-in, quota, console output, the orphan scan), `PriceCatalog`, `InfraRegistry`
+  (`infra.json`) and `CostLedger` (`infra-ledger.json`, kept apart so spend history outlives a
+  machine's record), `TailnetIntegration` and `HuJSONPatcher`, `InfraPreflight`, `InfraService`
+  (the state machine and every operation), `Reaper`, `InfraNotifier`, `SecretRedaction`, and
+  `InfraControl` (the `infra.*` requests' handler, and `run --on`'s auto-up).
+- **Presets** (`Resources/Infra/presets/{aws-linux,gcp-linux}/`): bundled OpenTofu modules with
+  provider lock files and `tofu test` suites on mock providers (`scripts/test-infra-presets.sh`).
+  `Resources/Infra` is a folder reference, so nothing may ever be left beside a preset: the script
+  tests copies under `build/`.
+- **Wire** (`Sources/FleetKit/InfraControlWire.swift`): `FleetRequest.infra(InfraRequest)` and its
+  frames (`infraProgress`, `infraMachine`, `infraList`, `infraDoctor`, `infraDone`). Refusals are
+  `infra_*` error codes, which the CLI exits 125 on.
+- **CLI** (`Sources/FlightDeckCLI/InfraCommands.swift`): `infra up|down|ls|doctor|extend`,
+  `down --orphan KIND:ID`, `ls --orphans`. The CLI holds no credential, state or budget; the app
+  does everything.
+- **hostd**: an `enroll` subcommand and admin op, `idleSince` in `host.info`, TCP keepalive, and a
+  transfer stall deadline (below).
+
+**The path of one `infra up`.** `InfraControl` loads the repo's `[infra.<name>]` and hands it to
+`InfraService.up`, which writes each state to `infra.json` *before* the step it names begins
+(`planned → provisioning → enrolling → ready ⇄ idle → destroying → gone`, plus `failed` and
+`orphaned`), so a crash or quit at any point leaves a record that the next launch's
+`resumeAfterLaunch` adopts (it enrolled) or destroys (its enroll window passed) — never a machine
+nobody knows about. In order: `InfraPreflight` (tools, config, caps and guardrails, credentials,
+region and type, quota, price, name not in use by another repo or a paired host, network mode),
+all before anything is created; the workdir (`infra/<name>/module/` plus
+`fd.auto.tfvars.json`); a fresh `FleetDeviceKey` and a provisioning `HostRecord`; user-data from
+`CloudInitRenderer`; `tofu init` then `apply -auto-approve -json`, one progress line per resource;
+outputs `fd_address`/`fd_instance_id`; then up to 10 minutes for the machine's hello over the
+ordinary `HostLink`, with the cloud's console output (redacted) attached to a timeout. Ctrl-C in
+the CLI leaves the app creating the machine; `infra down <name>` cancels it.
+
+**Enrollment** goes through the running hostd, never its files. `ControllerStore` reads
+`controllers.json` once at start, so a second process writing it would be ignored until a
+restart; instead `flightdeck-hostd enroll --file` sends `AdminRequest.enroll(payload)` over the
+admin socket and `serve` adds the controller to its live store. The file is deleted once spent
+or expired. A payload issued "in the future" (a fresh VM whose clock is behind the Mac's, before
+NTP syncs) is `notYetValid`: `enroll` re-checks every 5 s for up to 120 s and, if the clock still
+has not caught up, exits 1 **keeping** the file, because deleting it would strand a machine that
+a minute's patience would have enrolled.
+
+**cloud-init** (`CloudInitRenderer`, pure, golden-file tested). Every interpolated value is
+checked against a character set that cannot leave its YAML quotes or `sh -c` string, since
+user-data runs as root; the enroll line is pure-ASCII JSON (`\u`-escaping U+0085 and U+2028/9,
+which YAML reads as line breaks). In order:
+
+1. `bootcmd`, **every boot**: `iptables`/`ip6tables` reject the metadata endpoint for every uid
+   but root — `169.254.169.254`, and on AWS `fd00:ec2::254`. The enrollment secret is the
+   controller's long-lived PSK for this host and user-data stays readable for the machine's whole
+   life, so a workload that could read it could impersonate the controller. Firewall rules do not
+   survive a reboot, hence `bootcmd` and not `runcmd`.
+2. AWS only, the first `runcmd`: enable the TTL timer (below), before anything that can fail.
+3. Start `user@<uid>` and set `XDG_RUNTIME_DIR` (`enable-linger` returns before the user manager
+   is up), install hostd with `hostd-install.sh --sha256 … --no-pair`, then `enroll` as its own
+   entry, so a failing step never skips the next and the TTL covers a machine that never enrolls.
+4. Tailnet mode: install Tailscale and `tailscale up` with the single-use key.
+
+**Nothing outlives its TTL** — two independent guarantees, either alone sufficient:
+
+- **The machine.** AWS: a systemd timer at an absolute UTC deadline with `Persistent=true`
+  (a reboot clears a pending `shutdown -h +N`; a persistent timer fires at boot if the deadline
+  passed while stopped), armed first, plus `instance_initiated_shutdown_behavior = "terminate"` so
+  the poweroff ends billing. GCP: no on-machine timer at all — a guest poweroff only *stops* a GCE
+  VM, which keeps billing its disk and halts `max_run_duration`, so a timer firing first would
+  turn the guarantee into a leak; `scheduling.max_run_duration` with
+  `instance_termination_action = "DELETE"` is the guarantee. Because this deadline is fixed when
+  the machine boots, `infra extend` cannot move past the creation TTL (plan deviation 6).
+- **The controller.** `Reaper` (below) destroys at TTL after a 10-minute warning.
+
+**Networking.** Tailnet mode is chosen when the local `tailscale status` reports `Running` and an
+OAuth client for that same tailnet is in the Keychain: each `up` mints a single-use, preauthorized,
+ephemeral key tagged `tag:flightdeck-cloud` (15-minute expiry), and `fd_address` is the node's
+tailnet IP from the Tailscale API. Tailnet machines still get a public IP, used for egress only:
+the default VPC/network has no NAT, and cloud-init must download hostd. Inbound stays closed (the
+AWS security group has no ingress rule; GCP gets a deny-all-ingress rule). Public mode admits TCP
+47410 from this Mac's `/32` only — no SSH in either mode — and the delegation link is TLS-PSK with
+the enrolled key, so the open port answers no one else. The OAuth client itself is a manual
+checklist plus a clipboard paste into the Keychain: probe P1 found no API that creates one.
+
+**Re-apply never replaces a running machine.** Both presets `ignore_changes` the image (AMI /
+boot image: Canonical publishes a new Noble image weekly) and the user-data (re-rendered on every
+`up`), both force-new; without it, the public-IP re-apply that only moves `fd_allow_cidr` would
+destroy and recreate the machine. GCP firewall, network-tag and instance names are project-global,
+so GCP names carry a 12-hex owner prefix (`fd-<owner>-<name>`) and two controllers' `gpu` never
+collide; GCP firewalls take no labels, so their **description** carries
+`flightdeck-owner=… flightdeck-name=…` for the orphan scan.
+
+**Ownership.** `controllerID` is a UUID minted once per state directory (`infra-controller.json`);
+only its SHA-256's first 12 hex characters leave the Mac, as the `flightdeck-owner` label every
+resource carries. Per state directory, so a Debug build and the Release app never list, reap or
+"orphan" each other's machines.
+
+**Tools.** `ToolResolver` takes a user's own `tofu`/`aws`/`gcloud`/`tailscale` from the login
+shell's `PATH`, `/opt/homebrew/bin` or `/usr/local/bin` when its version is compatible, else a
+managed copy pinned in `ToolPins.swift`: **tofu 1.8.11**, **aws 2.37.10**, **gcloud 588**. Each
+download is checked against a compiled-in SHA-256 before it is unpacked; a mismatch is a hard
+failure. The AWS pkg is installed per user under `~/Library/Caches/dev.flightdeck/tools/aws`, not
+Application Support, because its installer refuses a path with a space. The gcloud tarball bundles
+no Python and macOS's 3.9 is too old, so the resolver finds a 3.10+ one and passes it as
+`CLOUDSDK_PYTHON`. Tailscale is never installed (it is a system network extension).
+
+**Idle.** hostd's `IdleTracker` reports `idleSince` in `host.info` (nil while anything runs, and
+always nil from the macOS hostd). The Reaper reaps only after it has watched the *same*
+`idleSince` for the whole idle period on this Mac's clock, so a host clock running behind can
+never reap early, and any activity in between restarts the count. Two hostd fixes keep a dead
+peer from pinning a host busy forever: TCP keepalive on every accepted socket (60 s idle, then
+probes every 15 s), and a 10-minute per-chunk deadline on transfers, which fail as
+`transfer_stalled`.
+
+**Reaper**, once a minute per machine, first destroy wins: drift (at most every 10 minutes,
+`tofu plan -refresh-only` with `-lock=false`: it writes nothing, so it must never hold the state
+lock a user's `down` or a re-apply needs; an instance its own timer ended is marked gone); TTL (warning 10 minutes
+before); idle; budget (a warning at the threshold, separately for the per-machine cap and the
+monthly cap, once each; at a cap, destroy after 5 minutes unless the cap was raised meanwhile —
+`extend` cannot override it). It **claims a name** before acting, exactly as `up`/`down` do, so it
+never races a user's `down`. A destroy that failed is retried with backoff 1, 5, 15, then every 30
+minutes. A public-mode machine whose link stays down has its firewall re-pointed at this Mac's
+current public IP — 30 s after the drop, every 3 minutes while it stays down, and on every network
+path change — because the Mac moving networks is the commonest reason the link fails.
+
+**Orphans.** `orphans()` asks each configured account for every resource carrying this
+controller's owner label that `infra.json` does not know, as kind-qualified refs
+(`instance:…`, `security-group:…`, `firewall:…`; a GCE instance and its firewall can share a
+name). An account it could not read lands in `unreadable` with the reason, so "none" is only
+ever said when every account was actually scanned. `infra doctor` includes the scan.
+
+**Secrets never leave in text.** `SecretRedaction` replaces `tskey-…` and any run of 64+ hex
+characters (the enrollment secret) in OpenTofu output and console text before it becomes an
+event, an error, a notification or an `infra.json` failure note: a failed apply's diagnostics
+can quote user-data, and a boot console can echo it.
+
+**Trust boundaries.** Cloud credentials never pass through Flight Deck: OpenTofu's providers and
+the CLIs read the user's own stores (AWS profiles and SSO cache, gcloud ADC). The Keychain holds
+only the Tailscale OAuth client and each machine's host key. Budgets and guardrails live in the
+user's settings; a repo can ask for a machine but never raise a cap.
+
+**Tested** by unit suites with fakes for every seam (`InfraEnvironment`: a fake `TofuRunner`,
+accounts, prices, tailnet, clock), HostKit's suite on macOS and Linux, hostd's `enroll` in the
+Linux container, and the presets' `tofu test` on mock providers. No test creates a cloud
+resource except `scripts/test-infra-live.sh`, which refuses without `FD_INFRA_LIVE=1` and has
+not yet run.
+
+### Cloud machines in the app (Settings → Cloud, `Sources/FlightDeck/Infra/`)
 
 `FlightDeckApp.init` builds `InfraService` eagerly, beside `HostService`, through
 `InfraLive.wire`: files beside `sessions.json` (`infra.json`, `infra-ledger.json`,

@@ -2914,3 +2914,52 @@ it still reports there, each diagnosed from the run's `.xcresult` screen recordi
   `created`, and `deleteNode` deletes every one tagged `tag:flightdeck-cloud`. `nodeAddress`
   does not filter by tag, so machine hostnames must be unique per machine and never collide
   with one of the user's own devices.
+
+## Cloud infra hosts: as built (2026-10-08)
+
+The [spec's as-built note](superpowers/specs/2026-10-07-cloud-infra-hosts-design.md#15-as-built-2026-10-08)
+lists the deliberate departures; this is what is unverified or not built.
+
+**Never run against a real cloud.**
+- **The live test has never run.** `FD_INFRA_LIVE=1 ./scripts/test-infra-live.sh aws|gcp` is
+  Nate's to run, once Settings → Cloud is set up; until it passes, nothing proves the presets,
+  cloud-init and enrollment work together on a real machine. Unit suites, `tofu test` on mock
+  providers and the Linux container are all this code has seen.
+- **The GUI checklist is Nate's:** Settings → Cloud and the Set up… sheet (sign-ins, Tailscale
+  policy diff and OAuth paste, budget, the Test button), and the four manual checks at the end of
+  [the plan](superpowers/plans/2026-10-07-cloud-infra-hosts.md#manual-checks-nates).
+- **GCP SKU descriptions and the price fixture are unverified against a live catalog.**
+  `GCPMachineTypes` maps a machine family to the SKU description stem it expects (`N2D AMD
+  Instance`, `Nvidia L4`…), and `Fixtures/prices/gcp-skus-compute.json` is constructed, not
+  captured (its `prices.provenance.json` entry says so: the recording machine had no GCP
+  credentials), so the test proves the matcher against Flight Deck's own reading of the
+  descriptions. A stem Google words differently prices nothing, and `up`
+  refuses while a cap is set. Probe P4 (three sample types within 1% of the published price) has
+  not run.
+- **The live per-user AWS pkg install has never run.** The managed `aws` 2.37.10 is installed
+  with `installer -target CurrentUserHomeDirectory` and a `customLocation` choice under
+  `~/Library/Caches/dev.flightdeck/tools/aws` (the pkg refuses a path with a space). Probe P3 —
+  that this works without admin rights on current macOS — is unconfirmed; a user with `aws` v2
+  on `PATH` never reaches it.
+- **The cloud-final user-manager hardening is unproven on a real image.** cloud-init starts
+  `user@<uid>` and exports `XDG_RUNTIME_DIR` before the installer's `systemctl --user`, because
+  `enable-linger` returns before the manager is up. That race was reasoned from systemd's
+  behaviour and tested only in a container, not on Canonical's Noble image under cloud-final.
+
+**Known gaps.**
+- **AWS quota ignores running usage** (detail under "account checks" above): `ok` can say yes
+  when the family's vCPU quota is already spent, and the apply then fails with AWS's own error.
+- **The disk price is a constant.** AWS prices the boot disk at the US gp3 list price; other
+  regions' gp3 rates and GCP's disk SKUs by region are not looked up. Disk is a small share of
+  a GPU machine's rate, so the error is cents.
+- **The macOS hostd has no idle tracker or keepalive.** Its `idleSince` is always nil (never
+  idle, so never idle-reaped) and it has no TCP keepalive or transfer stall deadline. No preset
+  creates a Mac, so no cloud machine runs it today; a Mac preset needs both first.
+- **The interop gate has no `enroll` mode** (spec §11 planned one). hostd's `enroll` is tested in
+  the Linux container's unit suite, against its own admin socket, but no gate drives a Darwin
+  controller's real `EnrollmentPayload` through to a hello.
+- **`extend` stops at the creation TTL** (spec deviation 6): to run longer, `down` and `up` again
+  with a longer `ttl`.
+
+**Not built** (spec §13): Mac instances, SkyPilot, Packer images, remote OpenTofu state, and
+native cloud budgets (AWS Budgets / GCP Budgets) as a backstop to Flight Deck's own caps.
