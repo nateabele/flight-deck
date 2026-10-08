@@ -319,10 +319,13 @@ final class AgentProfileMigrationTests: XCTestCase {
         XCTAssertFalse(String(decoding: try IntakeJSON.encoder.encode(decoded), as: UTF8.self).contains("account"))
         // Inside a whole config too, the shape `intake.json` actually stores.
         let config = PresetExpansion.config(for: .sketch, available: .defaults)!
-        var json = String(decoding: try IntakeJSON.encoder.encode(config), as: UTF8.self)
-        json = json.replacingOccurrences(of: #""harness":"codex""#, with: #""account":{"id":"w","home":"file:///accounts/w"},"harness":"codex""#)
-        XCTAssertTrue(json.contains(#""account""#), "the fixture carries the old key")
-        let reread = try IntakeJSON.decoder.decode(RoundConfig.self, from: Data(json.utf8))
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: IntakeJSON.encoder.encode(config)) as? [String: Any])
+        var integrator = try XCTUnwrap(object["integrator"] as? [String: Any])
+        integrator["account"] = ["id": "w", "home": "file:///accounts/w"]
+        object["integrator"] = integrator
+        let json = try JSONSerialization.data(withJSONObject: object)
+        XCTAssertTrue(String(decoding: json, as: UTF8.self).contains(#""account""#), "the fixture carries the old key")
+        let reread = try IntakeJSON.decoder.decode(RoundConfig.self, from: json)
         XCTAssertEqual(reread, config)
         XCTAssertFalse(String(decoding: try IntakeJSON.encoder.encode(reread), as: UTF8.self).contains("account"))
     }
