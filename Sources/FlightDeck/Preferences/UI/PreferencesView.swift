@@ -50,8 +50,10 @@ struct PreferencesView: View {
                 .tag(PreferencesTab.hosting)
 
             CloudSettingsTab(preferences: preferences, context: cloud)
-                .tabItem { Label("Cloud", systemImage: "cloud") }
-                .accessibilityIdentifier("prefs-cloud")
+                // On the tab's label, not the pane: on a container SwiftUI/macOS stamps the
+                // identifier over every descendant, hiding each `cloud-*` one (as Flight Control's
+                // comment below records).
+                .tabItem { Label("Cloud", systemImage: "cloud").accessibilityIdentifier("prefs-cloud") }
                 .tag(PreferencesTab.cloud)
 
             FlightControlSettingsTab(preferences: preferences, sessions: sessions, routing: routing)

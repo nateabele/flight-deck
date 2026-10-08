@@ -7,6 +7,8 @@ import SwiftUI
 struct CloudSettingsContext {
     let service: InfraService
     let tailnet: TailnetIntegration
+    /// GCP projects for the picker; throws when gcloud cannot list them (the field remains).
+    let listGCPProjects: @MainActor () async throws -> [String]
     let makeSetup: @MainActor () -> CloudSetupModel
 }
 
@@ -22,6 +24,11 @@ struct CloudSettingsTab: View {
     @State private var setup: CloudSetupModel?
     @State private var pendingDown: InfraMachine?
     @State private var downError: String?
+    /// nil until listed, and after a failed listing: then the project is a text field.
+    @State private var gcpProjects: [String]?
+    /// Each cloud's allowlist as typed, committed on Return or when the field loses focus.
+    @State private var allowlists: [String: AllowlistDraft] = [:]
+    @FocusState private var focusedAllowlist: String?
 
     var body: some View {
         Form {
@@ -31,9 +38,13 @@ struct CloudSettingsTab: View {
             machines
         }
         .formStyle(.grouped)
+        .onChange(of: focusedAllowlist) { old, _ in
+            if let old { commitAllowlist(old) }
+        }
         .task {
             awsProfiles = Self.readAWSProfiles()
             tailnetLine = Self.describe(await context.tailnet.mode())
+            gcpProjects = try? await context.listGCPProjects()
         }
         .sheet(item: Binding(get: { setup.map(SetupBox.init) }, set: { setup = $0?.model })) { box in
             CloudSetupSheet(model: box.model)
@@ -59,13 +70,24 @@ struct CloudSettingsTab: View {
             .accessibilityIdentifier("cloud-aws-profile")
             TextField("AWS region", text: cloudBinding(\.awsRegion))
                 .accessibilityIdentifier("cloud-aws-region")
-            TextField("GCP project", text: Binding(
-                get: { preferences.cloud.gcpProject ?? "" },
-                set: { value in
-                    let trimmed = value.trimmingCharacters(in: .whitespaces)
-                    preferences.updateCloud { $0.gcpProject = trimmed.isEmpty ? nil : trimmed }
-                }), prompt: Text("gcloud's default project"))
+            if let projects = gcpProjects, !projects.isEmpty {
+                Picker("GCP project", selection: cloudBinding(\.gcpProject)) {
+                    Text("gcloud's default project").tag(String?.none)
+                    // A saved project gcloud no longer lists stays selectable, not silently dropped.
+                    ForEach(Self.projectChoices(projects, saved: preferences.cloud.gcpProject), id: \.self) {
+                        Text($0).tag(String?.some($0))
+                    }
+                }
                 .accessibilityIdentifier("cloud-gcp-project")
+            } else {
+                TextField("GCP project", text: Binding(
+                    get: { preferences.cloud.gcpProject ?? "" },
+                    set: { value in
+                        let trimmed = value.trimmingCharacters(in: .whitespaces)
+                        preferences.updateCloud { $0.gcpProject = trimmed.isEmpty ? nil : trimmed }
+                    }), prompt: Text("gcloud's default project"))
+                    .accessibilityIdentifier("cloud-gcp-project")
+            }
             TextField("GCP region", text: cloudBinding(\.gcpRegion))
                 .accessibilityIdentifier("cloud-gcp-region")
             HStack {
@@ -111,6 +133,8 @@ struct CloudSettingsTab: View {
             ForEach(["aws", "gcp"], id: \.self) { cloud in
                 TextField("Allowed \(cloud == "aws" ? "AWS" : "GCP") types", text: allowlistBinding(cloud), axis: .vertical)
                     .lineLimit(1...4)
+                    .focused($focusedAllowlist, equals: cloud)
+                    .onSubmit { commitAllowlist(cloud) }
                     .accessibilityIdentifier("cloud-budget-allow-\(cloud)")
             }
             Text("Every figure is an estimate: compute and the boot disk, not egress, taxes or discounts. Allowed types are glob patterns, comma-separated; a repo asking for anything else is refused.")
@@ -200,11 +224,17 @@ struct CloudSettingsTab: View {
     }
 
     private func allowlistBinding(_ cloud: String) -> Binding<String> {
-        Binding(get: { (preferences.cloud.budget.allowedTypes[cloud] ?? []).joined(separator: ", ") },
-                set: { text in
-                    let patterns = text.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
-                    preferences.updateCloud { $0.budget.allowedTypes[cloud] = patterns }
-                })
+        Binding(get: { (allowlists[cloud] ?? AllowlistDraft(patterns: preferences.cloud.budget.allowedTypes[cloud] ?? [])).text },
+                set: { allowlists[cloud] = AllowlistDraft(text: $0) })
+    }
+
+    /// Parses what was typed into patterns. An emptied field puts back the saved list.
+    private func commitAllowlist(_ cloud: String) {
+        guard let draft = allowlists[cloud] else { return }
+        if let patterns = draft.commit() {
+            preferences.updateCloud { $0.budget.allowedTypes[cloud] = patterns }
+        }
+        allowlists[cloud] = nil
     }
 
     // MARK: - Pure
@@ -216,6 +246,11 @@ struct CloudSettingsTab: View {
         case .notConfigured(let tailnet): "Tailscale is running on \(tailnet) but not set up for Flight Deck, so machines use public mode. Set Up… turns on tailnet mode."
         case .mismatch(let local, let client): "This Mac is on \(local) but the saved OAuth client is for \(client): cloud machines are refused until Set Up… replaces it."
         }
+    }
+
+    static func projectChoices(_ listed: [String], saved: String?) -> [String] {
+        guard let saved, !listed.contains(saved) else { return listed }
+        return listed + [saved]
     }
 
     static func readAWSProfiles(home: URL = FileManager.default.homeDirectoryForCurrentUser) -> [String] {

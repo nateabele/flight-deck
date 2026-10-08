@@ -36,7 +36,9 @@ struct InfraEnvironment {
     var now: () -> Date
     var budget: () -> BudgetSettings
     /// The environment every tool starts from; the login-shell-repaired app environment.
-    var baseEnvironment: () -> [String: String] = InfraToolEnvironment.defaultBase
+    /// Async and `@Sendable`, so it runs off the main actor: the real one waits on a login
+    /// shell the first time, and `resumeAfterLaunch` reaches it from launch.
+    var baseEnvironment: @Sendable () async -> [String: String] = { InfraToolEnvironment.defaultBase() }
     /// How long a machine has to say hello once it has an address (spec §5.1: 10 minutes).
     var enrollTimeout: TimeInterval = 600
     /// How often, and for how long, `up` asks the Tailscale API whether the machine has joined.
@@ -82,10 +84,12 @@ final class InfraService {
 
     // MARK: - Tools
 
-    func tool(_ tool: InfraTool) async throws -> ResolvedTool {
+    /// `progress` (0...1) reaches only the caller that starts a download; one that joins an
+    /// in-flight provision just waits for it.
+    func tool(_ tool: InfraTool, progress: @escaping @Sendable (Double) -> Void = { _ in }) async throws -> ResolvedTool {
         if let inFlight = resolving[tool] { return try await inFlight.value }
         let resolver = env.resolver
-        let task = Task { try await resolver.resolve(tool, provision: true) }
+        let task = Task { try await resolver.resolve(tool, provision: true, progress: progress) }
         resolving[tool] = task
         defer { resolving[tool] = nil }
         return try await task.value
@@ -93,7 +97,8 @@ final class InfraService {
 
     private func tofu(cloud: String) async throws -> TofuRunning {
         let tofu = try await tool(.tofu)
-        let environment = InfraToolEnvironment.make(base: env.baseEnvironment(), tool: tofu.environment,
+        let base = await env.baseEnvironment()
+        let environment = InfraToolEnvironment.make(base: base, tool: tofu.environment,
                                                     provider: env.accounts[cloud]?.providerEnvironment() ?? [:])
         return env.tofu(tofu, environment)
     }

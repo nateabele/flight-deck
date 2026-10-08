@@ -145,14 +145,26 @@ struct CloudSetupSheet: View {
                     Spacer()
                     Button("Apply") { Task { try? await model.confirmPolicy(patch, token: token) } }
                         .controlSize(.small)
+                        .disabled(step.state == .running)
                         .accessibilityIdentifier("cloud-policy-apply")
                 }
             }
         case .oauth where step.state != .ok:
             // The step's detail says what was wrong with the clipboard.
-            Button("Paste from Clipboard") { _ = try? model.captureOAuthClientFromClipboard() }
+            Button("Paste from Clipboard") { Task { _ = try? await model.captureOAuthClientFromClipboard() } }
                 .controlSize(.small)
                 .accessibilityIdentifier("cloud-oauth-paste")
+        case .tools where step.state == .running:
+            if let progress = model.toolProgress {
+                HStack(spacing: 8) {
+                    ProgressView(value: progress)
+                    Text("\(Int((progress * 100).rounded()))%")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .frame(width: 36, alignment: .trailing)
+                }
+                .accessibilityIdentifier("cloud-tools-progress")
+            }
         default:
             EmptyView()
         }

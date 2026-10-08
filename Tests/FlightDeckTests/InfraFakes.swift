@@ -167,7 +167,7 @@ actor ApplyGate {
 }
 
 /// A signed-in account with room for any machine, whose console output a test chooses.
-final class FakeAccount: CloudAccount, @unchecked Sendable {
+final class FakeAccount: CloudAccount, ComputeAPIEnabling, @unchecked Sendable {
     let cloud: String
     private let lock = NSLock()
     private var _status: AccountStatus = .ready(identity: "123456789012")
@@ -195,6 +195,16 @@ final class FakeAccount: CloudAccount, @unchecked Sendable {
     /// What `quota` answers, for every region and type.
     var quotaResult: QuotaCheck { get { lock.withLock { _quota } } set { lock.withLock { _quota = newValue } } }
     func quota(region: String, instanceType: String) async throws -> QuotaCheck { quotaResult }
+    private var _compute: Result<ComputeAPIResult, Error> = .success(.enabled)
+    private var _computeCalls = 0
+    /// What `enableComputeAPI` answers, and how often it was asked.
+    var computeResult: Result<ComputeAPIResult, Error> {
+        get { lock.withLock { _compute } } set { lock.withLock { _compute = newValue } }
+    }
+    var computeCalls: Int { lock.withLock { _computeCalls } }
+    func enableComputeAPI() async throws -> ComputeAPIResult {
+        try lock.withLock { _computeCalls += 1; return try _compute.get() }
+    }
     func providerEnvironment() -> [String: String] { ["AWS_PROFILE": "example"] }
     func moduleVars() -> [String: String] { cloud == "gcp" ? ["project": "example-project"] : [:] }
     func consoleOutput(instanceID: String, region: String) async -> String? { console }
@@ -366,6 +376,8 @@ final class InfraHarness {
     /// How many of the next `env.publicIP` calls fail, as a lookup on a network that is not up yet.
     var publicIPFailures = 0
     var controllerID = "00000000-0000-4000-8000-000000000001"
+    /// What `env.baseEnvironment` answers; a test may make it slow or record where it ran.
+    var baseEnvironment: @Sendable () async -> [String: String] = { ["PATH": "/usr/bin:/bin:/login/shell/bin"] }
 
     lazy var service: InfraService = InfraService(registry: registry, ledger: ledger, hosts: hosts, env: environment())
 
@@ -418,7 +430,7 @@ final class InfraHarness {
             controllerID: controllerID,
             now: { [clock] in clock.now },
             budget: { [unowned self] in self.budget },
-            baseEnvironment: { ["PATH": "/usr/bin:/bin:/login/shell/bin"] },
+            baseEnvironment: baseEnvironment,
             enrollTimeout: enrollTimeout,
             tailnetJoin: (interval: 0.01, timeout: 1),
             launchGrace: 0)
@@ -516,6 +528,10 @@ final class CloudSetupHarness {
         var ran: [(host: String, command: [String])] = []
         var runOutput = "Linux example 6.8.0 x86_64 GNU/Linux\n"
         var runError: Error?
+        /// The secret each "clear the clipboard if it still holds this" was asked about.
+        var clearedSecrets: [String] = []
+        /// Seconds the fake run takes; it honours cancellation, as the real one must.
+        var runDelay: TimeInterval = 0
     }
     let spies = Spies()
     var opened: [URL] { spies.opened }
@@ -524,18 +540,23 @@ final class CloudSetupHarness {
     var runOutput: String { get { spies.runOutput } set { spies.runOutput = newValue } }
     var runError: Error? { get { spies.runError } set { spies.runError = newValue } }
     var savedOAuth: TailscaleOAuthClient? { secrets.load() }
+    var clearedSecrets: [String] { spies.clearedSecrets }
+    /// How long the test step's run may take before it is abandoned.
+    var testRunTimeout: TimeInterval = 180
 
     lazy var model = CloudSetupModel(
         service: infra.service, tailnet: tailnet, accounts: ["aws": infra.account, "gcp": infra.gcpAccount],
         open: { [spies] in spies.opened.append($0) }, clipboard: { [clipboard] in clipboard },
-        copy: { [spies] in spies.copied = $0 }, resolver: infra.resolver,
+        copy: { [spies] in spies.copied = $0 },
+        clearClipboard: { [spies] in spies.clearedSecrets.append($0) }, resolver: infra.resolver,
         budget: { [infra] in infra.budget },
         run: { [spies] host, command, _ in
             spies.ran.append((host, command))
+            if spies.runDelay > 0 { try await Task.sleep(nanoseconds: UInt64(spies.runDelay * 1e9)) }
             if let runError = spies.runError { throw runError }
             return spies.runOutput
         },
-        workRoot: infra.repo)
+        workRoot: infra.repo, testRunTimeout: testRunTimeout)
 
     private let clipboard: String?
 

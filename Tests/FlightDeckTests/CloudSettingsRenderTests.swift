@@ -27,7 +27,8 @@ final class CloudSettingsRenderTests: XCTestCase {
         try h.infra.registry.upsert(failed)
 
         let prefs = PreferencesStore(persistence: nil)
-        let context = CloudSettingsContext(service: h.infra.service, tailnet: h.tailnet, makeSetup: { h.model })
+        let context = CloudSettingsContext(service: h.infra.service, tailnet: h.tailnet,
+                                           listGCPProjects: { ["example-project", "example-two"] }, makeSetup: { h.model })
         try PlanningRender.write(CloudSettingsTab(preferences: prefs, context: context), size: NSSize(width: 720, height: 1100),
                                  to: dir.appendingPathComponent("cloud-tab.png"))
 

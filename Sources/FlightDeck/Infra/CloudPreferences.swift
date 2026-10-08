@@ -41,3 +41,21 @@ struct CloudPreferences: Codable, Equatable {
     /// By cloud, as the setup sheet asks for them.
     var regions: [String: String] { ["aws": awsRegion, "gcp": gcpRegion] }
 }
+
+/// One cloud's instance-type allowlist as the user types it. The text is kept as typed, so a
+/// comma about to be followed by the next pattern survives; it becomes patterns only on
+/// `commit` (Return, or the field losing focus). Writing parsed patterns back on every
+/// keystroke would rewrite "t4g.*, " to "t4g.*" and eat the comma.
+struct AllowlistDraft: Equatable {
+    var text: String
+
+    init(patterns: [String]) { text = patterns.joined(separator: ", ") }
+    init(text: String) { self.text = text }
+
+    /// The patterns, or nil when the field is empty: an emptied field keeps the previous
+    /// value, since an empty allowlist would refuse every machine of that cloud.
+    func commit() -> [String]? {
+        let patterns = text.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        return patterns.isEmpty ? nil : patterns
+    }
+}
