@@ -942,10 +942,10 @@ final class SessionStore: ObservableObject {
     /// The login a *new* tab for `agent` in `project` would run as, or why it cannot run.
     ///
     /// The one resolution both creation paths share, and the only place the distinction that
-    /// matters is drawn: `PreferencesStore.account(for:project:)` answers nil for two very
-    /// different situations, and conflating them is precisely the silent wrong-login bug.
+    /// matters is drawn: "no account" and "a named account that is gone" are very different
+    /// situations, and conflating them is precisely the silent wrong-login bug.
     ///
-    /// - `.success(nil)` — there is no account to name. A store with no `PreferencesStore`, or
+    /// - success with a nil `account` — there is no account to name. A store with no `PreferencesStore`, or
     ///   preferences holding no account for this agent at all. The tab launches with no
     ///   variable set, which is the agent's built-in home and exactly what it did before
     ///   accounts existed.
@@ -964,51 +964,56 @@ final class SessionStore: ObservableObject {
     ///
     /// `choosing` is the New Session dropdown's escape hatch (Task 14): a caller that already
     /// knows exactly which account it wants — because the user clicked it — names it directly
-    /// and skips `PreferencesStore.account(for:project:)` entirely. It still runs through the
-    /// same home check below, because a dropdown built moments ago can still be one relocate
+    /// and skips the project's assignment (and any pool lease) entirely. It still runs through
+    /// the same home check below, because a dropdown built moments ago can still be one relocate
     /// or one deletion stale by the time it is clicked.
+    ///
+    /// A POOL assignment leases here (unify brief R8): `AccountResolver` takes a `CapacityLedger`
+    /// lease on the pool's first member under soft and returns it on the resolution. The caller
+    /// owns it from then on — `fileLease(_:for:)` once the tab is in `repos` (released by
+    /// `closeSession`), or `accountResolver.release(_:)` on any path that fails before that. A
+    /// refusal from here has already given its lease back.
     private func launchAccount(
         for agent: AgentID, project: String, choosing explicit: UUID? = nil
-    ) -> Result<AgentAccount?, AgentLaunchError> {
-        guard let preferences else { return .success(nil) }
-        let account: AgentAccount?
+    ) -> Result<AccountResolution, AgentLaunchError> {
+        guard let preferences, let resolver = accountResolver else {
+            return .success(AccountResolution(agent: agent, account: nil, source: .unassigned))
+        }
+        let resolution: AccountResolution
         if let explicit {
             guard let named = preferences.account(id: explicit) else {
                 return .failure(.accountMissing(agent.displayName))
             }
-            account = named
+            resolution = AccountResolution(agent: agent, account: named, source: .assigned)
         } else {
-            // A tombstoned assignment counts as missing. This asked `account(id:) == nil`,
-            // which a tombstone answers non-nil — so the guard passed and the very next line
-            // called `account(for:project:)`, which answers nil for exactly that case. The
-            // `guard let account` below then read that nil as "no account to name", set no
-            // home variable, and launched the agent in its built-in home: the silent
-            // wrong-login substitution this whole method exists to refuse. Both readers of an
-            // assignment have to agree about a tombstone, and the answer that is safe is
-            // `.accountMissing`. (`markAccountRemoved` clears these assignments, so this is
-            // defence in depth, matching `account(for:project:)`'s own comment.)
-            switch preferences.projectSettings(project).accounts[agent] {
-            case .account(let assigned)?:
-                if preferences.account(id: assigned)?.isRemoved ?? true {
-                    return .failure(.accountMissing(agent.displayName))
-                }
-            case .pool?:
-                // A pool assignment that resolves to no live account (the pool is gone, or every
-                // member was removed) is missing for the same reason: launching in the built-in
-                // home instead would bill a login the project was never assigned.
-                if preferences.account(for: agent, project: project) == nil {
-                    return .failure(.accountMissing(agent.displayName))
-                }
-            case nil:
-                break
+            // A tombstoned assignment counts as missing, and so does a pool with no live member
+            // or one that is gone: launching in the built-in home instead is the silent
+            // wrong-login substitution this whole method exists to refuse. (`markAccountRemoved`
+            // and `removePool` clear such assignments, so this is defence in depth.) The resolver
+            // draws the same line `account(for:project:)` does, in one place.
+            switch resolver.resolve(agent: agent, project: project) {
+            case .success(let resolved): resolution = resolved
+            case .failure(let error): return .failure(error.launchError)
             }
-            account = preferences.account(for: agent, project: project)
         }
-        guard let account else { return .success(nil) }
+        guard let account = resolution.account else { return .success(resolution) }
         guard account.isBuiltIn || FileManager.default.fileExists(atPath: account.home.path) else {
+            resolver.release(resolution)
             return .failure(.accountHomeMissing(account.displayName))
         }
-        return .success(account)
+        return .success(resolution)
+    }
+
+    /// Hands a new tab's pool lease to the resolver under the tab's id, so `closeSession` gives
+    /// it back, and tells the user when the pool had no account under its hard limit — the tab
+    /// still starts (on the member with the most headroom), but a banner says it may stop.
+    /// Called only once the tab is in `repos`; a creation that fails before that releases
+    /// instead.
+    private func fileLease(_ resolution: AccountResolution, for session: Session) {
+        accountResolver?.hold(resolution, for: session.id)
+        if let notice = resolution.notice {
+            notifier?.notify(sessionID: session.id, title: notice.title, subtitle: session.title, body: notice.body)
+        }
     }
 
     /// Claude's adapter with this store's wiring on it.
@@ -1370,6 +1375,19 @@ final class SessionStore: ObservableObject {
     /// `objectWillChange` into this store's own, so a view that only observes `store` (e.g.
     /// `ProjectView`) still redraws when a project's `flywheelEnabled` flag flips.
     private var preferencesChangeForward: AnyCancellable?
+
+    /// Resolves a project's account assignment and owns the pool leases new tabs take (unify
+    /// brief R8). Planning runs use this same instance, so tabs and seats share one lease book.
+    /// Leases are held under the tab's session id from the moment the tab is filed and given
+    /// back in `closeSession`. nil without preferences: such a store has no accounts to lease.
+    ///
+    /// Built on `UsageService.shared.ledger` — the ledger every meter feeds — so a lease sees the
+    /// same headroom the Flight Control popover shows. Until `UsageService.attach` configures it
+    /// (and in tests), the ledger knows no pools and every pool launch is `.untracked`: its first
+    /// member, which is exactly what a pool did before leasing existed.
+    lazy var accountResolver: AccountResolver? = preferences.map {
+        AccountResolver(preferences: $0, ledger: UsageService.shared.ledger)
+    }
 
     /// The local control socket every launched tab is pointed at, or nil when the control
     /// socket is off. `FlightDeckApp` sets this (with `controlSecret`) when
@@ -2591,23 +2609,33 @@ final class SessionStore: ObservableObject {
     func newSession(
         in url: URL, at index: Int? = nil, account explicit: UUID? = nil,
         waking: DisplayWakePolicy = .wakeIfNeeded, selecting: Bool = true,
-        flywheelIdentity: FlywheelIdentity? = nil, overrides: LaunchOverrides? = nil
+        flywheelIdentity: FlywheelIdentity? = nil, overrides: LaunchOverrides? = nil,
+        resolved: AccountResolution? = nil
     ) -> Session {
         guard ensureTerminalCreatable(waking) else {
             launchFailureReporter.report(.terminalUnavailable(displayAsleep: true))
+            // A lease `createSession` took for this tab goes back: no tab will hold it.
+            if let resolved { accountResolver?.release(resolved) }
             // Un-inserted, exactly as the `launchAccount` failure path below does. The return
             // type stays non-optional on purpose: making it `Session?` broke 340 tests, because
             // nearly every fixture in the suite builds a store with a nil-returning provider.
             return Session(title: "", workingDirectory: url.path)
         }
         // Resolved before the title is minted, so a refusal does not burn a session number.
-        let account: AgentAccount?
-        switch launchAccount(for: .claude, project: url.path, choosing: explicit) {
-        case .success(let resolved): account = resolved
-        case .failure(let error):
-            launchFailureReporter.report(error)
-            return Session(title: "", workingDirectory: url.path)
+        // `resolved` is `createSession`'s own resolution, passed down so a pool is leased ONCE
+        // per tab: resolving again here would take a second lease that nothing ever holds.
+        let resolution: AccountResolution
+        if let resolved {
+            resolution = resolved
+        } else {
+            switch launchAccount(for: .claude, project: url.path, choosing: explicit) {
+            case .success(let r): resolution = r
+            case .failure(let error):
+                launchFailureReporter.report(error)
+                return Session(title: "", workingDirectory: url.path)
+            }
         }
+        let account = resolution.account
         // Stamped at birth, not left nil to be re-resolved later. nil would mean "the built-in
         // home" forever — correct only by accident today, and wrong the moment the user adds a
         // second login or reassigns this project's default, which would silently move every
@@ -2622,13 +2650,15 @@ final class SessionStore: ObservableObject {
         // caller that passed overrides directly.
         let options = (try? launchOptions(for: session.agent, project: url.path, overrides: overrides).get())
             ?? options(for: session.agent, project: url.path)
-        return addSession(
+        let filed = addSession(
             session,
             in: url,
             initialInput: adapter.launchCommand(adapter.binding(for: session), session, options),
             at: index,
             selecting: selecting
         )
+        fileLease(resolution, for: filed)
+        return filed
     }
 
     /// Creates a tab for any agent, negotiating conversation identity first for the agents
@@ -2675,13 +2705,19 @@ final class SessionStore: ObservableObject {
         // has to be told which choice is broken rather than watching a tab appear as somebody
         // else. Claude's path is checked here too, by falling through this switch before it
         // delegates: `newSession` reports the same refusal, but only this shape can return it.
-        let account: AgentAccount?
+        let resolution: AccountResolution
         switch launchAccount(for: agent, project: directory, choosing: explicit) {
-        case .success(let resolved): account = resolved
+        case .success(let resolved): resolution = resolved
         case .failure(let error):
             launchFailureReporter.report(error)
             return .failure(error)
         }
+        let account = resolution.account
+        // A pool lease taken above belongs to the tab this call files. Every path out that files
+        // no tab gives it back here; the two that do file one hand it to `fileLease` (the claude
+        // branch through `newSession`) and set `leaseHandedOff`.
+        var leaseHandedOff = false
+        defer { if !leaseHandedOff { accountResolver?.release(resolution) } }
         // Checked before anything is created on either branch, so an override the agent cannot
         // apply refuses the tab rather than launching it on the project's defaults.
         let launchOptions: AgentOptions
@@ -2708,10 +2744,13 @@ final class SessionStore: ObservableObject {
                 launchFailureReporter.report(failure)
                 return .failure(failure)
             }
+            // `newSession` now owns the lease: it files it with the tab, or releases it if the
+            // terminal cannot be created after all.
+            leaseHandedOff = true
             return .success(
                 newSession(
                     in: url, at: index, account: explicit, selecting: selecting,
-                    flywheelIdentity: identity, overrides: overrides
+                    flywheelIdentity: identity, overrides: overrides, resolved: resolution
                 ).id
             )
         }
@@ -2804,6 +2843,8 @@ final class SessionStore: ObservableObject {
             at: index,
             selecting: selecting
         )
+        leaseHandedOff = true
+        fileLease(resolution, for: session)
         return .success(session.id)
     }
 
@@ -4652,6 +4693,10 @@ final class SessionStore: ObservableObject {
         }
         repos[repoIndex].sessions.remove(at: sessionIndex)
         emit(.sessionRemoved(id: id))
+        // The tab's pool lease (unify brief R8) ends with the tab. Not when its agent exits: the
+        // shell stays bound to the leased home, and re-running the agent there bills the same
+        // login, so the tab is what holds the account.
+        accountResolver?.release(holder: id)
         delegationHooks?.sessionClosed(id)
         pluginReload.forget(id)
 
@@ -5418,13 +5463,14 @@ final class SessionStore: ObservableObject {
         // Resolved before anything is filed, the same as `newSession`: nil would mean "the
         // built-in home" forever, which is correct only until this project's login is set or
         // changes — the silent wrong-login substitution `newSession`'s own comment refuses.
-        let account: AgentAccount?
+        let resolution: AccountResolution
         switch launchAccount(for: agent, project: projectPath) {
-        case .success(let resolved): account = resolved
+        case .success(let resolved): resolution = resolved
         case .failure(let error):
             launchFailureReporter.report(error)
             return nil
         }
+        let account = resolution.account
 
         let session = Session(
             // Falls back to the id only when the title sanitizes to nothing usable — not
@@ -5454,6 +5500,9 @@ final class SessionStore: ObservableObject {
         }
         select(session.id, selecting: selecting)
         persist()
+        // `resumeExisting` has filed the tab, so its lease is held from here and released by
+        // `closeSession` like any other tab's.
+        fileLease(resolution, for: session)
 
         if deferred {
             codexRestoreTask = Task { [weak self] in
@@ -7780,6 +7829,12 @@ final class SessionStore: ObservableObject {
         return Set(repos.flatMap { repo in
             repo.sessions.filter { session in
                 let sessionAccount = preferences.resolvedAccountID(for: session.agent, in: session.accountID)
+                // A pool project's login is ANY live member: leasing spreads its tabs across
+                // them, so comparing against one member would mark the feature working.
+                if case .pool(let pool)? = preferences.projectSettings(repo.url.path).accounts[session.agent] {
+                    let members = preferences.effectivePools.first { $0.id == pool }?.accounts ?? []
+                    return !members.contains { $0 == sessionAccount }
+                }
                 let projectAccount = preferences.account(for: session.agent, project: repo.url.path)?.id
                 return SidebarRow.accountMismatched(session: sessionAccount, project: projectAccount)
             }.map(\.id)

@@ -212,6 +212,102 @@ final class AccountLaunchTests: XCTestCase {
         XCTAssertNotEqual(chosen.id, top.id, "the fixture must actually disagree with the default")
     }
 
+    // MARK: - Pool assignments lease (unify brief R8)
+
+    private final class NoticeSpy: Notifying {
+        var notices: [(id: UUID, title: String, body: String)] = []
+        func requestAuthorization() {}
+        func notify(sessionID: UUID, title: String, subtitle: String, body: String) {
+            notices.append((sessionID, title, body))
+        }
+        func withdraw(sessionID: UUID) {}
+    }
+
+    /// A project assigned a two-account claude pool, a ledger that knows the pool, and a store
+    /// whose resolver leases from that ledger rather than the app-wide one.
+    private func pooled() -> (SessionStore, CapacityLedger, AgentAccount, AgentAccount, NoticeSpy) {
+        let first = AgentAccount(agent: .claude, displayName: "First", home: home("first"))
+        let second = AgentAccount(agent: .claude, displayName: "Second", home: home("second"))
+        let preferences = PreferencesStore(persistence: nil)
+        preferences.preferences.accountList = AccountList(entries: [
+            .pool(AccountPool(id: "team", label: "Team", agent: .claude, members: [first, second])),
+        ])
+        preferences.preferences.storedProjectSettings = [
+            projectURL.path: ProjectSettings(accounts: [.claude: .pool("team")])
+        ]
+        let fixed = Date()
+        let ledger = CapacityLedger(now: { fixed })
+        ledger.configure(pools: preferences.effectivePools,
+                         accounts: preferences.preferences.accounts.map(CapacityPreferences.accountRef))
+        let store = makeStore(preferences)
+        store.accountResolver = AccountResolver(preferences: preferences, ledger: ledger)
+        let spy = NoticeSpy()
+        store.notifier = spy
+        return (store, ledger, first, second, spy)
+    }
+
+    private func reading(_ account: AgentAccount, _ utilization: Double) -> UsageReading {
+        UsageReading(account: CapacityPreferences.accountRef(account),
+                     windows: [UsageWindow(name: "5h", utilization: utilization, resetsAt: nil)],
+                     readAt: Date(), source: "test", hardRejection: false)
+    }
+
+    /// The lease is taken at creation, held for the tab's life, and given back when it closes.
+    func testATabOnAPoolProjectLeasesAMemberAndClosingGivesItBack() throws {
+        let (store, ledger, first, _, _) = pooled()
+        let session = store.newSession(in: projectURL)
+        XCTAssertEqual(session.accountID, first.id)
+        XCTAssertEqual(ledger.activeLeases(pool: "team").count, 1)
+        XCTAssertEqual(store.accountResolver?.leases(heldBy: session.id).count, 1)
+
+        store.closeSession(session.id)
+        XCTAssertEqual(ledger.activeLeases(pool: "team"), [])
+    }
+
+    /// The point of leasing: once the first member passes soft, the next tab lands on another.
+    func testATabSkipsAPoolMemberOverSoft() async throws {
+        let (store, ledger, first, second, _) = pooled()
+        ledger.ingest(reading(first, 0.9))
+        let result = await store.createSession(agent: .claude, in: projectURL.path)
+        let id = try result.get()
+        XCTAssertEqual(store.repos.flatMap(\.sessions).first { $0.id == id }?.accountID, second.id)
+        XCTAssertEqual(ledger.activeLeases(pool: "team").map(\.account.id), [second.id],
+                       "createSession leases once, not again inside newSession")
+    }
+
+    /// No member under hard: the tab still opens, on the member with most headroom, and the
+    /// user is told — never blocked silently, never moved off the pool.
+    func testWhenEveryMemberIsOverHardTheTabStartsAndTheUserIsTold() throws {
+        let (store, ledger, first, second, spy) = pooled()
+        ledger.ingest(reading(first, 0.99))
+        ledger.ingest(reading(second, 0.97))
+        let session = store.newSession(in: projectURL)
+        XCTAssertEqual(session.accountID, second.id)
+        XCTAssertEqual(spy.notices.map(\.id), [session.id])
+        XCTAssertTrue(spy.notices.first?.title.contains("Team") ?? false)
+    }
+
+    /// A refusal after the lease was taken must give it back, or the pool leaks a lease per
+    /// failed click.
+    func testARefusedPoolLaunchGivesItsLeaseBack() async {
+        let (store, ledger, first, _, _) = pooled()
+        try? FileManager.default.removeItem(at: first.home)
+        let result = await store.createSession(agent: .claude, in: projectURL.path)
+        guard case .failure(let error) = result else { return XCTFail("expected a refusal") }
+        XCTAssertEqual(error, .accountHomeMissing("First"))
+        XCTAssertEqual(ledger.activeLeases(pool: "team"), [])
+    }
+
+    /// A tab on any member of its project's pool is on the project's login: leasing spreads
+    /// tabs across members, and marking all but the first would mark the feature working.
+    func testATabOnAnyMemberOfItsProjectsPoolIsNotMismatched() throws {
+        let (store, ledger, first, _, _) = pooled()
+        ledger.ingest(reading(first, 0.9))
+        let session = store.newSession(in: projectURL)
+        XCTAssertNotEqual(session.accountID, first.id)
+        XCTAssertFalse(store.accountMismatchedSessionIDs.contains(session.id))
+    }
+
     // MARK: - The sidebar's account-mismatch marker
 
     /// `accountMismatchedSessionIDs` is what actually decides which sessions get
