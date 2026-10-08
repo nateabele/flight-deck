@@ -74,6 +74,8 @@ final class CLIRunner {
 
     /// The delegation verb in flight (`run`, `wait r7`, …), whose streams outlive one frame.
     private var delegateRunner: DelegateCommandRunner?
+    /// The `infra` verb in flight, whose `up` and `down` stream progress.
+    private var infraRunner: InfraCommandRunner?
     /// Raw run output to the CLI's own stdout/stderr, and `route-exec`'s exec of the real binary.
     private let write: (String, Data) throws -> Void
     private let execReal: (String, [String]) -> Void
@@ -302,6 +304,14 @@ final class CLIRunner {
             raw()
         case .delegate(let command):
             delegate(command)
+        case .infra(let command):
+            let runner = InfraCommandRunner(
+                command: command, cwd: context.cwd, wantsJSON: wantsJSON,
+                hooks: InfraRunnerHooks(send: { self.transport.send($0) },
+                                        expect: { cid, handler in self.replies[cid] = handler },
+                                        out: out, err: err, finish: { self.finish($0) }))
+            infraRunner = runner
+            runner.start()
         case .intakeRun:
             // main.swift intercepts `intake run` right after the usage check, before a
             // transport or this runner exists at all — the detached process has no fleet to
@@ -340,9 +350,11 @@ final class CLIRunner {
         runner.start()
     }
 
-    /// Ctrl-C, forwarded to the attached run (§6.1). Anything else just ends.
+    /// Ctrl-C, forwarded to the attached run (§6.1) or the `infra up` in flight. Anything
+    /// else just ends.
     func interrupt() {
         guard !finished else { return }
+        if let infraRunner { return infraRunner.interrupt() }
         guard let delegateRunner else { return finish(130) }
         delegateRunner.interrupt()
     }

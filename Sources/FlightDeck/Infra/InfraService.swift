@@ -414,7 +414,8 @@ final class InfraService {
     }
 
     /// The same checks `up` makes, with no recipe: the tool (never downloaded from here), every
-    /// account, the network mode, and each failed machine with what to do about it.
+    /// account, the network mode, each failed machine with what to do about it, and the orphan
+    /// scan (spec §7.3).
     func doctor() async -> [PreflightCheck] {
         let resolver = env.resolver
         var checks = [await InfraPreflight.tools { try await resolver.resolve(.tofu, provision: false) }]
@@ -423,9 +424,28 @@ final class InfraService {
         }
         checks.append(InfraPreflight.network(await env.tailnet.mode()))
         for m in registry.machines where m.state == .failed {
-            let failure = m.failure ?? "failed"
+            // A record written before failures were redacted still is, on the way out.
+            let failure = SecretRedaction.redact(m.failure ?? "failed")
             checks.append(PreflightCheck(name: "machine \(m.name)", ok: false, detail: failure,
                                          fix: InfraPreflight.fix(forFailure: failure) ?? "flightdeck infra down \(m.name)"))
+        }
+        return checks + orphanChecks(await orphans())
+    }
+
+    /// Spec §7.3's scan as doctor rows: each orphan with the command that deletes it, each
+    /// account that could not be read, and an all-clear only when every account was.
+    private func orphanChecks(_ scan: OrphanScan) -> [PreflightCheck] {
+        var checks = scan.found.map { r in
+            PreflightCheck(name: "orphan \(r.ref)", ok: false,
+                           detail: "\(r.cloud) \(r.region)\(r.name.map { " (\($0))" } ?? "") is labelled as this Mac's but no machine owns it",
+                           fix: "flightdeck infra down --orphan \(r.ref)")
+        }
+        for (cloud, why) in scan.unreadable.sorted(by: { $0.key < $1.key }) {
+            checks.append(PreflightCheck(name: "orphan scan \(cloud)", ok: false, detail: "could not scan \(cloud): \(why)",
+                                         fix: InfraPreflight.fix(forFailure: why) ?? "check the \(cloud) account in Settings → Cloud"))
+        }
+        if checks.isEmpty {
+            checks.append(PreflightCheck(name: "orphans", ok: true, detail: "none", fix: nil))
         }
         return checks
     }
@@ -737,6 +757,8 @@ final class InfraService {
 
     /// The text a failed machine records: OpenTofu's diagnostics, or the error itself, plus the
     /// IAM actions when AWS refused for permissions (spec §10's "each failure naming its fix").
+    /// Redacted: the diagnostics can quote the user-data's auth key and enrollment secret, and
+    /// this text goes to `infra.json`, notifications and the CLI.
     static func failureText(_ error: Error) -> String {
         let text: String
         switch error {
@@ -745,6 +767,6 @@ final class InfraService {
         case InfraError.enrollTimeout: text = "the machine did not enroll in time; its console output is in the error"
         default: text = String(describing: error)
         }
-        return InfraPreflight.fix(forFailure: text).map { "\(text)\n\($0)" } ?? text
+        return SecretRedaction.redact(InfraPreflight.fix(forFailure: text).map { "\(text)\n\($0)" } ?? text)
     }
 }
