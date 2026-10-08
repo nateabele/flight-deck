@@ -234,6 +234,20 @@ enum SubmoduleURL {
     /// ever credentials there); any other scheme keeps its user, which names the account (the
     /// `git` of `ssh://git@host/…`), and loses only a `:password`. An scp-style `user@host:path`
     /// cannot hold a password and is left alone.
+    /// The line of a failed fetch's stderr that says why. ssh prints its reason first
+    /// ("Permission denied (publickey)", "Host key verification failed") and git closes with a
+    /// generic "Could not read from remote repository" and advice, so the last line said
+    /// nothing. So: ssh's reason, else git's first `fatal:` (joined with the next line when it
+    /// ends in a colon, as "unable to connect to <host>:" does), else the last line.
+    static func failureDetail(_ stderr: String) -> String {
+        let lines = stderr.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        if let reason = lines.first(where: { $0.contains("Permission denied") || $0.contains("Host key") }) { return reason }
+        if let i = lines.firstIndex(where: { $0.hasPrefix("fatal:") }) {
+            return lines[i].hasSuffix(":") && i + 1 < lines.count ? "\(lines[i]) \(lines[i + 1])" : lines[i]
+        }
+        return lines.last ?? "git fetch failed"
+    }
+
     static func withoutCredentials(_ url: String) -> String {
         guard let scheme = url.range(of: "://") else { return url }
         let authorityStart = scheme.upperBound
@@ -362,8 +376,7 @@ extension Workspace {
                     return true
                 } catch GitError.failed(_, _, let stderr) {
                     if refusable && SubmoduleURL.refusedOneCommit(stderr) { return false }
-                    let detail = stderr.split(separator: "\n").last.map(String.init) ?? "git fetch failed"
-                    throw SyncError.submodule(path: path, problem: .fetchFailed(url: url, detail: detail))
+                    throw SyncError.submodule(path: path, problem: .fetchFailed(url: url, detail: SubmoduleURL.failureDetail(stderr)))
                 } catch GitError.timedOut(_, let seconds) {
                     throw SyncError.submodule(path: path, problem: .fetchFailed(url: url, detail: "timed out after \(Int(seconds))s"))
                 }

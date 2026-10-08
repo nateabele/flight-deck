@@ -519,6 +519,34 @@ final class SubmoduleSyncTests: XCTestCase {
         }
     }
 
+    /// The line of git's stderr a fetch failure reports is the one that says why. ssh puts the
+    /// reason first and git's generic "Could not read from remote repository" last, so the last
+    /// line hid "Permission denied (publickey)" and "Host key verification failed".
+    func testFetchFailureReportsTheLineThatSaysWhy() {
+        XCTAssertEqual(SubmoduleURL.failureDetail("""
+            git@example.com: Permission denied (publickey).
+            fatal: Could not read from remote repository.
+
+            Please make sure you have the correct access rights
+            and the repository exists.
+            """), "git@example.com: Permission denied (publickey).")
+        XCTAssertEqual(SubmoduleURL.failureDetail("""
+            Host key verification failed.
+            fatal: Could not read from remote repository.
+            """), "Host key verification failed.")
+        XCTAssertEqual(SubmoduleURL.failureDetail("""
+            warning: redirecting to https://example.com/lib.git/
+            fatal: Authentication failed for 'https://example.com/lib.git/'
+            """), "fatal: Authentication failed for 'https://example.com/lib.git/'")
+        XCTAssertEqual(SubmoduleURL.failureDetail("""
+            fatal: unable to connect to 192.0.2.1:
+            192.0.2.1[0: 192.0.2.1]: errno=Connection refused
+            """), "fatal: unable to connect to 192.0.2.1: 192.0.2.1[0: 192.0.2.1]: errno=Connection refused",
+            "a fatal line ending in a colon continues on the next")
+        XCTAssertEqual(SubmoduleURL.failureDetail("error: something odd\n"), "error: something odd")
+        XCTAssertEqual(SubmoduleURL.failureDetail(""), "git fetch failed")
+    }
+
     /// Only a server's refusal of the one commit earns the full fetch.
     func testOnlyARefusedCommitFallsBack() {
         for refused in ["error: Server does not allow request for unadvertised object 0123",
