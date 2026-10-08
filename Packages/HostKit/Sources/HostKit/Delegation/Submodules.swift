@@ -312,10 +312,29 @@ enum SubmoduleURL {
 extension Workspace {
     /// Where this controller's submodule caches live: one bare repository per submodule URL,
     /// beside (not inside) `workspaces/`, so `prune` and `usage`, which walk that directory as
-    /// repo roots, never mistake a cache for a repo. Kept across runs and prunes, like the
-    /// object store, so the next run fetches nothing it already has.
+    /// repo roots, never mistake a cache for a repo. Kept across runs, so the next run fetches
+    /// nothing it already has; `prune` deletes the ones no checkout uses any more, and
+    /// `usage` lists them.
     func submoduleCaches(controller: UUID) -> URL {
         root.appendingPathComponent("submodules/\(controller.uuidString)")
+    }
+
+    /// Deletes each of this controller's submodule caches that no checkout has a worktree of
+    /// any more, after `prune` deleted checkouts: all of them for a whole prune, and for one
+    /// repo's, those only that repo used. A cache another repo's checkout still uses keeps its
+    /// worktree record and stays. Under each cache's lock, so a placement in progress (which
+    /// fetches and adds its worktree in one hold of that lock) is never caught half done.
+    func pruneUnusedSubmoduleCaches(controller: UUID) throws {
+        let fm = FileManager.default
+        let base = submoduleCaches(controller: controller)
+        for name in (try? fm.contentsOfDirectory(atPath: base.path)) ?? [] {
+            let cache = base.appendingPathComponent(name)
+            try withStore(cache) {
+                _ = try? git.run(["worktree", "prune"], in: cache)
+                let live = (try? fm.contentsOfDirectory(atPath: cache.appendingPathComponent("worktrees").path)) ?? []
+                if live.isEmpty { try? fm.removeItem(at: cache) }
+            }
+        }
     }
 
     /// After the superproject's checkout: every gitlink in `top`'s `HEAD`, recursively, at its
