@@ -2653,7 +2653,10 @@ container; **nothing has run against a real second machine.**
   until the next replay.
 
 **Channel mux**
-- The unclaimed-channel cap is skipped once an `accept()` stream exists (controller side only).
+- The unclaimed-channel cap is skipped once an `accept()` stream exists (controller side only). **FIXED
+  (2026-10-08):** the stream buffers at most `maxUnclaimed` channels its consumer has not taken,
+  and one past that is closed at both ends. Nothing in the app consumes the stream today, so the
+  gap was latent.
 - `closedIDs` grows by one tombstone per channel ever closed on a connection; a busy forwarded
   port accumulates them until the link drops. Tombstoning only above a low-water mark would bound it.
   **FIXED (2026-10-08):** `ChannelMux.ClosedIDs` collapses each parity's contiguous run of closed

@@ -651,4 +651,43 @@ final class ChannelMuxTests: XCTestCase {
         }
         XCTAssertEqual(top.heldIndividually, 2, "only the last id of each parity is held one by one")
     }
+
+    /// The unclaimed cap used to stop applying once anyone called `accept()`: each new peer
+    /// channel was yielded into the stream, whose buffer had no bound, so a consumer that
+    /// stopped draining let a peer queue channels (each with a window of bytes) without end.
+    /// The stream now holds at most `maxUnclaimed`; one past that is closed like any other
+    /// channel past the cap.
+    func testAcceptStreamIsCappedLikeUnclaimedChannels() async throws {
+        let pair = MuxPair()
+        let stream = pair.controller.accept()     // nobody drains it yet
+        var opened: [any ByteChannel] = []
+        for _ in 0..<ChannelMux.maxUnclaimed {
+            let c = try await pair.host.open()
+            try await c.write(Data([1]))
+            opened.append(c)
+        }
+        let over = try await pair.host.open()
+        try await over.write(Data([1]))
+        // A read, not a check of state: if the channel stayed open it parks, and the timeout
+        // reports that instead of hanging the suite.
+        let closed = expectation(description: "past the cap is closed")
+        let reader = Task {
+            do { _ = try await over.read() } catch {
+                XCTAssertEqual(error as? ChannelMuxError, .closed)
+                closed.fulfill()
+            }
+        }
+        await fulfillment(of: [closed], timeout: 2)
+        reader.cancel()
+
+        // Every channel within the cap is still delivered, in order, and readable.
+        var got: [ChannelID] = []
+        for await channel in stream {
+            let first = try await channel.read()
+            XCTAssertEqual(first, Data([1]))
+            got.append(channel.id)
+            if got.count == opened.count { break }
+        }
+        XCTAssertEqual(got, opened.map(\.id))
+    }
 }
