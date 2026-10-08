@@ -2949,6 +2949,10 @@ it still reports there, each diagnosed from the run's `.xcresult` screen recordi
 - **No XCUITest drives the Rounds editor.** It is covered by `RoundConfigEditorTests` and by the
   offscreen renders in `RoundConfigEditorRenderTests` (`FD_ROUNDS_RENDER_DIR`), which include a
   four-family case. A UI test needs an intake fixture and an availability seam (spec §5).
+  The shaping-time editor (pause, change the reviewer, Save) is covered the same way:
+  `IntakeServiceRoundEditTests`, `ShapingEditTests` and `RoundsEditPausedRenderTests`
+  (`FD_ROUNDS_PAUSED_RENDER_DIR`). Its UI test also needs Grok offered on the UI-test Mac, which
+  depends on that machine's installed and signed-in CLIs.
 - **Gemini accounts.** agy has no home variable, and its login is in the per-user keyring. A
   Gemini seat always uses the built-in account, and the editor offers no Gemini accounts.
 - **The Flight Control UI tests fail on the UI-test Mac: diagnosed, not an app regression.**
