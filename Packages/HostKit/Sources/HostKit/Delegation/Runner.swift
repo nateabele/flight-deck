@@ -410,16 +410,24 @@ public final class Runner: RunControlling, @unchecked Sendable {
 
     private func beginAcquire(_ run: Run) {
         acquireHook?(run.id)
+        // From here, not from spawn: preparing the checkout (a first sync's apply, a submodule
+        // fetch that takes minutes) is the run's work too, and a Mac that idle-slept through it
+        // would stall the run before it started. Released with the run's other assertions,
+        // however it ends (`terminate`).
+        let idle = power.hold(.idleSleep, reason: "Flight Deck run \(run.id)")
         // The task is stored in the same critical section that publishes `.queued(.slot)`, so a
         // cancel that sees the phase always finds the task to cancel. A run already ended or
         // cancelled (a cancel landing between a screen grant and here) is left alone:
         // publishing `.queued(.slot)` over its exit would resurrect it and take a slot for it.
         var abandoned = false
+        var attached = false
         update(run) {
             guard !$0.phase.isTerminal, !$0.cancelRequested else {
                 abandoned = !$0.phase.isTerminal
                 return
             }
+            $0.assertions.append(idle)
+            attached = true
             $0.phase = .queued(.slot)
             $0.acquireTask = Task { [weak self] in
                 let notice = Task { [weak self] in
@@ -445,6 +453,7 @@ public final class Runner: RunControlling, @unchecked Sendable {
                 }
             }
         }
+        if !attached { idle.release() }
         if abandoned { terminate(run, .exited(.signal(SIGINT))) }
     }
 
@@ -474,7 +483,6 @@ public final class Runner: RunControlling, @unchecked Sendable {
             fail(run, error)
             return
         }
-        let idle = power.hold(.idleSleep, reason: "Flight Deck run \(run.id)")
         let pump = OutputPump(fds: process.fds) { [weak self] stream, data in
             self?.appendOutput(run, stream, data)
         }
@@ -486,7 +494,6 @@ public final class Runner: RunControlling, @unchecked Sendable {
             $0.lease = lease
             $0.pgid = process.pid
             $0.cwd = cwd
-            $0.assertions.append(idle)
             $0.phase = .running
             cancelledWhileQueued = $0.cancelRequested
         }
