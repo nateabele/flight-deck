@@ -48,7 +48,19 @@ enum InfraWorkdir {
 
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
-        try encoder.encode(vars).write(to: module.appendingPathComponent(varsFile), options: .atomic)
+        // Owner-only from the first byte: the vars hold the enrollment PSK (inside the user-data)
+        // and any Tailscale auth key. Written to a 0600 temp file and renamed over the old one,
+        // so neither a reader nor a crash ever sees it world-readable or half-written.
+        let data = try encoder.encode(vars)
+        let temp = module.appendingPathComponent(".\(varsFile).\(UUID().uuidString)")
+        guard fm.createFile(atPath: temp.path, contents: data, attributes: [.posixPermissions: 0o600]) else {
+            throw CocoaError(.fileWriteUnknown, userInfo: [NSFilePathErrorKey: temp.path])
+        }
+        guard rename(temp.path, module.appendingPathComponent(varsFile).path) == 0 else {
+            let error = POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+            try? fm.removeItem(at: temp)
+            throw error
+        }
         return workdir
     }
 

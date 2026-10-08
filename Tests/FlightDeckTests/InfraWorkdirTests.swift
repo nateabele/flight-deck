@@ -70,4 +70,15 @@ final class InfraWorkdirTests: XCTestCase {
         XCTAssertEqual(try String(contentsOf: copy.appendingPathComponent(".terraform.lock.hcl")), "pinned",
                        "a source with its own lock wins")
     }
+
+    /// The vars file carries the enrollment PSK and any Tailscale auth key: owner-only.
+    func testVarsFileIsOwnerOnly() throws {
+        let (tmp, module) = try makeModule()
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        for _ in 0..<2 {
+            let wd = try InfraWorkdir.prepare(root: tmp, name: "x", moduleSource: module, vars: ["fd_user_data": .string("secret")])
+            let attributes = try FileManager.default.attributesOfItem(atPath: wd.appendingPathComponent("module/fd.auto.tfvars.json").path)
+            XCTAssertEqual((attributes[.posixPermissions] as? NSNumber)?.intValue, 0o600)
+        }
+    }
 }
