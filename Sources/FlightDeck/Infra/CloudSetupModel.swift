@@ -160,7 +160,9 @@ final class CloudSetupModel: ObservableObject {
             // GCP creates nothing until the Compute Engine API is on; enabling is idempotent,
             // so the action is offered rather than checked (a check is a second slow call).
             set(id, .ok, "Signed in: \(identity)",
-                action: account is ComputeAPIEnabling ? Self.enableComputeAction : nil)
+                // Keyed on the step's own cloud: every live account conforms, and on the AWS
+                // step this button would run `perform(.aws)`, a sign-in.
+                action: id == .gcp && account is ComputeAPIEnabling ? Self.enableComputeAction : nil)
         case .signedOut(let fix): set(id, .failed, "Signed out. `\(fix)` signs in.", action: "Sign in")
         case .unavailable(let why): set(id, .failed, why)
         }
