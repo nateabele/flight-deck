@@ -715,7 +715,20 @@ synthesized `<agent>-default` of the agent's unpooled live accounts, then each p
 `storedAccounts` and `capacity.pools` are written as a mirror (claude and codex only) so an
 older build installed over this one keeps the same account ids. A project assigns each agent
 an `AccountAssignment` — `.account(UUID)` or `.pool(PoolID)` — stored under `accounts` and
-`accountPools` respectively, so the old key keeps its old shape.
+`accountPools` respectively, so the old key keeps its old shape. Settings → Accounts
+(`AccountsSettingsTab`, rules in `AccountsPaneModel`) is the only editor of the list.
+
+**One resolver turns an assignment into a login.** `AccountResolver` (`Agents/AccountResolver.swift`,
+`SessionStore.accountResolver`, built on `UsageService.shared.ledger`) answers which account a
+project's work for one agent runs as. No assignment → the agent's first live account; an account →
+that account (a tombstone is missing, never another login); a pool → a `CapacityLedger` lease on the
+first member under soft (`LeasePolicy`). When the ledger leases nothing the work still starts on a
+pool member: the first member if the ledger has not seen the pool yet, the first over-soft member,
+or — every member over hard — the one with the most headroom plus a notice to show. Tabs lease in
+`SessionStore.launchAccount`, hold the lease under the tab id once filed (`fileLease`, which posts
+the notice), and release it in `closeSession`; every creation path that fails after the lease gives
+it back. A tab whose agent exits keeps its lease: the shell stays bound to the leased home. Restored
+tabs do not re-lease. Planning runs use the same resolver with the run id as holder.
 
 **Adapter capabilities are optional statics, `nil` is the refusal.** `textChannel` (how a
 message is typed into the agent's live terminal), `dialogDriver` (how a select-list dialog
