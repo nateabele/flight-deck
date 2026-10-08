@@ -91,8 +91,34 @@ final class DetailLayoutTests: XCTestCase {
         XCTAssertEqual(DetailLayout.inspector(for: .parked, preset: .sketch), I.roundsEditor)
         // A single task runs no rounds, so there is nothing to configure.
         XCTAssertEqual(DetailLayout.inspector(for: .awaitingChoice, preset: .bead), I.nothing)
-        XCTAssertEqual(DetailLayout.inspector(for: .shaping, preset: .fullPlan), I.seat)
+        // Shaping: the Rounds editor unless an agent of the round in flight is selected.
+        XCTAssertEqual(DetailLayout.inspector(for: .shaping, preset: .fullPlan), I.roundsEditor)
+        XCTAssertEqual(DetailLayout.inspector(for: .shaping, preset: .fullPlan, seatSelected: true), I.seat)
         XCTAssertEqual(DetailLayout.inspector(for: .review, preset: .fullPlan), I.nothing)
+        XCTAssertEqual(DetailLayout.inspector(for: .review, preset: .fullPlan, seatSelected: true), I.nothing)
+    }
+
+    /// The Rounds editor is editable while shaping only when nothing is running the tape: no
+    /// live runner, no play still starting, and a status that is not running. Paused, stopped,
+    /// failed and a fresh idle tape all qualify; running and a tape that reached review do not.
+    func testRoundsEditorIsEditableOnlyWhileNothingRunsTheTape() {
+        typealias E = DetailLayout.RoundsEditing
+        let expected: [RunnerStatus: E] = [
+            .paused: .editable, .stopped: .editable, .failed: .editable, .idle: .editable,
+            .running: .readOnly, .reachedReview: .readOnly,
+        ]
+        for (status, mode) in expected {
+            XCTAssertEqual(DetailLayout.roundsEditing(state: .shaping, status: status, runnerLive: false, starting: false),
+                           mode, "\(status)")
+            XCTAssertEqual(DetailLayout.roundsEditing(state: .shaping, status: status, runnerLive: true, starting: false),
+                           .readOnly, "\(status) with a live runner")
+            XCTAssertEqual(DetailLayout.roundsEditing(state: .shaping, status: status, runnerLive: false, starting: true),
+                           .readOnly, "\(status) with a play starting")
+        }
+        // Before shaping, the editor edits the config `beginShaping` will start with — as now.
+        XCTAssertEqual(DetailLayout.roundsEditing(state: .awaitingChoice, status: .idle, runnerLive: false, starting: false), .editable)
+        XCTAssertEqual(DetailLayout.roundsEditing(state: .parked, status: .running, runnerLive: true, starting: true), .editable)
+        XCTAssertEqual(DetailLayout.roundsEditing(state: .review, status: .reachedReview, runnerLive: false, starting: false), .readOnly)
     }
 
     /// Spec §7.3: the notes rail is the inspector while the plan is focused — only while
@@ -100,7 +126,8 @@ final class DetailLayoutTests: XCTestCase {
     func testInspectorHostsTheNotesRailWhileThePlanIsFocused() {
         typealias I = DetailLayout.InspectorContent
         XCTAssertEqual(DetailLayout.inspector(for: .shaping, preset: .fullPlan, planFocused: true), I.notesRail)
-        XCTAssertEqual(DetailLayout.inspector(for: .shaping, preset: .fullPlan, planFocused: false), I.seat)
+        XCTAssertEqual(DetailLayout.inspector(for: .shaping, preset: .fullPlan, planFocused: false), I.roundsEditor)
+        XCTAssertEqual(DetailLayout.inspector(for: .shaping, preset: .fullPlan, planFocused: true, seatSelected: true), I.notesRail)
         XCTAssertEqual(DetailLayout.inspector(for: .awaitingChoice, preset: .fullPlan, planFocused: true), I.roundsEditor)
         XCTAssertEqual(DetailLayout.inspector(for: .review, preset: .fullPlan, planFocused: true), I.nothing)
     }

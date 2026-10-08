@@ -290,6 +290,14 @@ final class IntakeService: ObservableObject {
     /// yet folded on top (`overlays`) — what the detail pane draws and what `attentionCount`
     /// consults. Refreshed on the shared clock (`pollTapes`), and by `send` in the click's turn.
     @Published private(set) var tapes: [UUID: Tape] = [:]
+    /// The Rounds editor's unsaved edit of a shaping intake's config, per intake. Held here
+    /// rather than in the view so every play — the bar, the Run menu, the phone — saves it
+    /// first (`send`): a play that ran the saved agents while the editor showed others would
+    /// run a round nobody chose. Memory only; it dies with shaping (`save`).
+    @Published private(set) var roundConfigDrafts: [UUID: RoundConfig] = [:]
+    /// Why the last save of a shaping intake's config (or the play that tried to save it) was
+    /// refused, for the editor to show. Cleared by the next save that lands.
+    @Published private(set) var roundConfigRefusals: [UUID: String] = [:]
     /// The tape-shaping commands `send` queued that no tape read has acked yet, in seq order —
     /// see `TapeOverlay`. Only `tapes` shows them: `latestTapes` stays the runner's word, since
     /// liveness, resumption and announcements are about what it has done, not what was asked.
@@ -792,6 +800,14 @@ final class IntakeService: ObservableObject {
     /// ahead of the runner — before `startRunner`, which may block on a spawn.
     func send(_ id: UUID, _ command: TapeCommand) {
         guard intake(id)?.state == .shaping else { return }
+        // A play over an unsaved Rounds edit saves it first, before the command is queued and
+        // the runner started — the runner reads the config once, at its start. A draft that
+        // can't be saved holds the play back, with the reason in the editor, rather than run
+        // agents the editor no longer shows. The one exception is a runner already live (one
+        // folding a note, say): the play only retargets it, and holding it back would leave
+        // the bar dead for as long as that runner lives; the draft stays for the next pause.
+        if Self.startsRounds(command), roundConfigDrafts[id] != nil,
+           let refusal = commitRoundConfigDraft(id), refusal != Self.pauseToEdit { return }
         let seq: Int
         do { seq = try tapeStore(id).appendCommand(command) }
         catch { return fail(id, "Could not queue the command for the planning runner: \(error)") }
@@ -826,6 +842,72 @@ final class IntakeService: ObservableObject {
     func setDefaultPlay(_ id: UUID, _ mode: PlayMode) {
         guard let config = intake(id)?.roundConfig, config.defaultPlay != mode else { return }
         mutate(id) { $0.roundConfig = RoundConfigEditor.setting(config) { $0.defaultPlay = mode } }
+    }
+
+    // MARK: - Rounds edits while shaping
+
+    private static func startsRounds(_ command: TapeCommand) -> Bool {
+        switch command {
+        case .step, .nextMajor, .toReview: true
+        case .pause, .stop, .extend, .trim, .note, .removeNote, .editPlan: false
+        }
+    }
+
+    /// Whether a shaping intake's Rounds editor takes edits right now (`DetailLayout.roundsEditing`):
+    /// the runner's own liveness judgement — heartbeat or spawn grace — plus a play still
+    /// starting, over the newest tape read.
+    func roundConfigEditing(_ id: UUID) -> DetailLayout.RoundsEditing {
+        guard let i = intake(id) else { return .readOnly }
+        guard i.state == .shaping else { return DetailLayout.roundsEditing(state: i.state, status: .idle, runnerLive: false, starting: false) }
+        let tape = latestTapes[id] ?? tapeStore(id).loadTape()
+        return DetailLayout.roundsEditing(state: .shaping, status: tape.status,
+                                          runnerLive: runner?.isRunning(id, tape: tape) == true,
+                                          starting: pending[id] != nil)
+    }
+
+    /// What a shaping intake's editor may still change, from its tape.
+    func shapingEdit(_ id: UUID) -> ShapingEdit { ShapingEdit(tape: latestTapes[id] ?? tapeStore(id).loadTape()) }
+
+    /// Saves `config` as a shaping intake's round config, to apply from the next round. Returns
+    /// nil once saved, else why not: only while nothing runs the tape, and never a change to
+    /// what already ran (`ShapingEdit.refusal`). The write is `intake.json`'s usual atomic save
+    /// of the whole intake, with only `roundConfig` changed. Configs before shaping still go
+    /// through `beginShaping`; this path is for shaping alone.
+    @discardableResult
+    func saveRoundConfig(_ id: UUID, _ config: RoundConfig) -> String? {
+        guard let i = intake(id), i.state == .shaping, let saved = i.roundConfig else {
+            return "Planning has moved on, so these rounds can't change now."
+        }
+        guard roundConfigEditing(id) == .editable else { return Self.pauseToEdit }
+        if let refusal = shapingEdit(id).refusal(from: saved, to: config) { return refusal }
+        mutate(id) { $0.roundConfig = config }
+        roundConfigRefusals[id] = nil
+        return nil
+    }
+
+    /// The editor's line while a round runs, and the refusal of a save that lands then.
+    static let pauseToEdit = "Pause to change agents."
+
+    /// Holds (or, with nil, drops) the editor's unsaved edit. A draft equal to the saved config
+    /// is no edit, and is dropped so the editor never reads as unsaved for nothing.
+    func setRoundConfigDraft(_ id: UUID, _ config: RoundConfig?) {
+        let draft = config == intake(id)?.roundConfig ? nil : config
+        guard roundConfigDrafts[id] != draft else { return }
+        roundConfigDrafts[id] = draft
+        if draft == nil { roundConfigRefusals[id] = nil }
+    }
+
+    /// Saves the held edit. nil once saved (or with nothing held), else the refusal, which the
+    /// editor shows; the draft is kept on a refusal, to fix or revert.
+    @discardableResult
+    func commitRoundConfigDraft(_ id: UUID) -> String? {
+        guard let draft = roundConfigDrafts[id] else { return nil }
+        if let refusal = saveRoundConfig(id, draft) {
+            roundConfigRefusals[id] = refusal
+            return refusal
+        }
+        roundConfigDrafts[id] = nil
+        return nil
     }
 
     // MARK: - Phone commands (spec §6.5)
@@ -1944,6 +2026,10 @@ final class IntakeService: ObservableObject {
     /// keeps a triage start (`answer` saves before it sets one), only `.shaping` a round's.
     private func save(_ intake: Intake) {
         try? store.save(intake)
+        if intake.state != .shaping {
+            roundConfigDrafts[intake.id] = nil
+            roundConfigRefusals[intake.id] = nil
+        }
         if let n = intakes.firstIndex(where: { $0.id == intake.id }) {
             if let words = Self.announcement(from: intakes[n].state, to: intake.state) { announce(words) }
             intakes[n] = intake

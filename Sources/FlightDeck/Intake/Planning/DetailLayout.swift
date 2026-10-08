@@ -115,16 +115,42 @@ enum DetailLayout {
         }
     }
 
-    /// The Rounds editor while a fidelity with rounds is being chosen; while shaping, the notes
-    /// rail when the human is working in the plan, else the selected seat; nothing to inspect
-    /// otherwise.
-    static func inspector(for state: IntakeState, preset: Preset, planFocused: Bool = false) -> InspectorContent {
+    /// The Rounds editor while a fidelity with rounds is being chosen. While shaping: the notes
+    /// rail when the human is working in the plan; the selected agent when one of the round in
+    /// flight is selected; else the Rounds editor — editable between rounds, read-only while one
+    /// runs (`roundsEditing`). The editor replaced the "No Agent Selected" placeholder as the
+    /// resting state, so a paused intake opens onto the one thing there is to change in it.
+    /// `seatSelected` is false whenever no round is in flight: a selection left over from the
+    /// last round has nothing to show, and must not hide the editor once the run pauses.
+    static func inspector(for state: IntakeState, preset: Preset, planFocused: Bool = false,
+                          seatSelected: Bool = false) -> InspectorContent {
         switch state {
         case .awaitingChoice, .parked: preset == .bead ? .nothing : .roundsEditor
-        case .shaping: planFocused ? .notesRail : .seat
+        case .shaping: planFocused ? .notesRail : seatSelected ? .seat : .roundsEditor
         case .triaging, .needsAnswers, .review, .releasing, .released, .partiallyReleased, .failed, .interrupted,
              .discarded:
             .nothing
+        }
+    }
+
+    /// Whether the Rounds editor takes edits. Before shaping it edits the config `beginShaping`
+    /// will start with. While shaping, only when nothing runs the tape — no live runner, no play
+    /// still starting, and a status that isn't running: the runner reads the config once per
+    /// start, so an edit landing under a live one would change nothing it runs, and would be
+    /// silently undone in effect. `IntakeService.saveRoundConfig` refuses on the same rule.
+    enum RoundsEditing: Equatable { case editable, readOnly }
+
+    static func roundsEditing(state: IntakeState, status: RunnerStatus, runnerLive: Bool, starting: Bool) -> RoundsEditing {
+        switch state {
+        case .awaitingChoice, .parked: .editable
+        case .shaping:
+            switch status {
+            case .paused, .stopped, .failed, .idle: runnerLive || starting ? .readOnly : .editable
+            case .running, .reachedReview: .readOnly
+            }
+        case .triaging, .needsAnswers, .review, .releasing, .released, .partiallyReleased, .failed, .interrupted,
+             .discarded:
+            .readOnly
         }
     }
 
