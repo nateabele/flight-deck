@@ -32,7 +32,7 @@ variable "region" {
 }
 
 variable "zone" {
-  description = "Null means \"<region>-a\"."
+  description = "Null picks the region's first UP zone by name (not \"<region>-a\", which some regions lack)."
   type        = string
   default     = null
 }

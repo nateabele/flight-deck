@@ -183,11 +183,13 @@ enum InfraPreflight {
     // MARK: - AWS permissions
 
     /// Every IAM action the AWS preset and the checks around it use: create and destroy, the
-    /// data sources' lookups, the console on an enroll timeout, prices and quotas.
+    /// data sources' lookups, the console on an enroll timeout, prices and quotas. DeleteTags is
+    /// for destroy: the preset's aws_ec2_tag labels on the ENI and spot request are removed before
+    /// the instance is terminated, so without it `infra down` stops short of the machine.
     static let awsIAMActions = [
         "ec2:RunInstances", "ec2:TerminateInstances", "ec2:Describe*", "ec2:CreateSecurityGroup",
         "ec2:DeleteSecurityGroup", "ec2:AuthorizeSecurityGroupIngress", "ec2:AuthorizeSecurityGroupEgress",
-        "ec2:RevokeSecurityGroupEgress", "ec2:CreateTags", "ec2:DescribeInstanceTypeOfferings", "ec2:DescribeSubnets",
+        "ec2:RevokeSecurityGroupEgress", "ec2:CreateTags", "ec2:DeleteTags", "ec2:DescribeInstanceTypeOfferings", "ec2:DescribeSubnets",
         "ec2:DescribeVpcs", "ec2:GetConsoleOutput", "pricing:GetProducts", "servicequotas:GetServiceQuota",
     ]
 

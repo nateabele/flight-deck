@@ -132,3 +132,70 @@ run "reapply_keeps_the_machine" {
     error_message = "the re-apply must still move the firewall to the new /32"
   }
 }
+
+# The arch picks the AMI, and an amd64 image on an arm64 type (or the reverse) is refused by
+# RunInstances. The AMI name filter is the one observable place the derived arch lands.
+run "gpu_family_is_x86" {
+  command = plan
+
+  assert {
+    condition     = anytrue([for f in data.aws_ami.ubuntu.filter : anytrue([for v in f.values : strcontains(v, "-amd64-")])])
+    error_message = "g6 is an x86 GPU family, not Graviton"
+  }
+}
+
+run "graviton_is_arm" {
+  command = plan
+
+  variables {
+    instance_type = "m7g.large"
+  }
+
+  assert {
+    condition     = anytrue([for f in data.aws_ami.ubuntu.filter : anytrue([for v in f.values : strcontains(v, "-arm64-")])])
+    error_message = "m7g is Graviton"
+  }
+}
+
+# a1 is the first Graviton generation and the one family without the `g` suffix.
+run "a1_is_arm" {
+  command = plan
+
+  variables {
+    instance_type = "a1.large"
+  }
+
+  assert {
+    condition     = anytrue([for f in data.aws_ami.ubuntu.filter : anytrue([for v in f.values : strcontains(v, "-arm64-")])])
+    error_message = "a1 is Graviton (arm64)"
+  }
+}
+
+# RunInstances creates the primary ENI and, for spot, the spot request, and aws_instance tags
+# neither (the provider sends tag specifications for the instance and its volumes only; its
+# default_tags reach no further). So each gets fd_labels through aws_ec2_tag.
+run "eni_carries_the_labels" {
+  command = plan
+
+  assert {
+    condition     = { for k, t in aws_ec2_tag.eni : k => t.value } == var.fd_labels
+    error_message = "every fd_label on the instance's network interface"
+  }
+  assert {
+    condition     = length(aws_ec2_tag.spot_request) == 0
+    error_message = "no spot request to tag on an on-demand machine"
+  }
+}
+
+run "spot_request_carries_the_labels" {
+  command = plan
+
+  variables {
+    spot = true
+  }
+
+  assert {
+    condition     = { for k, t in aws_ec2_tag.spot_request : k => t.value } == var.fd_labels
+    error_message = "every fd_label on the spot request"
+  }
+}

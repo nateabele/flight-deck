@@ -110,7 +110,8 @@ struct GCPAccount: CloudAccount, ComputeAPIEnabling {
 
     /// `instanceID` is the preset's `fd_instance_id`, the instance's relative resource name
     /// (`projects/<p>/zones/<z>/instances/<n>`); the serial port wants the name and zone. A bare
-    /// name falls back to the preset's default zone, `<region>-a`.
+    /// name falls back to `<region>-a`, only a guess: the preset now picks the region's first UP
+    /// zone, so a module that outputs a bare name may land elsewhere and get no console.
     func consoleOutput(instanceID: String, region: String) async -> String? {
         let parts = instanceID.split(separator: "/").map(String.init)
         let zone = parts.firstIndex(of: "zones").flatMap { parts.indices.contains($0 + 1) ? parts[$0 + 1] : nil } ?? "\(region)-a"
