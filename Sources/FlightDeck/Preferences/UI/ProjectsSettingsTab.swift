@@ -133,8 +133,7 @@ struct ProjectsSettingsTab: View {
                             Picker("Agent", selection: agentBinding(for: path)) {
                                 Text("<Use global settings>").tag(AgentID?.none)
                                 // Tab-ready agents only (unify brief R4): this choice is what ⌘N
-                                // opens here, and grok/gemini cannot run a tab until their
-                                // adapters are real.
+                                // opens here, so an agent that cannot run a tab must not be one.
                                 ForEach(AgentID.tabReadyCases, id: \.self) { agent in
                                     Text(agent.displayName).tag(AgentID?.some(agent))
                                 }
