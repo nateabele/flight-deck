@@ -2720,7 +2720,8 @@ container; **nothing has run against a real second machine.**
 **Tests and tooling**
 - `scripts/test-unit.sh`'s class check can report a real class as unknown under load
   (`printf … | rg -qx` under `pipefail`: `rg -q` exits on its match and `printf` takes SIGPIPE).
-  Suggested fix: `rg -qx "$cls" <<<"$ALL_CLASSES"`.
+  Suggested fix: `rg -qx "$cls" <<<"$ALL_CLASSES"`. **FIXED (2026-10-08)** with exactly that;
+  reproduced first at the real list size (3 false "unknown class" in 2000 checks on one busy CPU).
 - `PromptDeliveredLoopbackTests.testPromptTypedFollowsTheAckOverTheWire` is load-flaky (passes alone
   and with the delegation contract reverted).
 - **"Listeners are released after any later failure" is checked only against a recording fake**
