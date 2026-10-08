@@ -2736,7 +2736,10 @@ container; **nothing has run against a real second machine.**
   on the LAN for the test's duration, so it can rename-collide with a real host named "mini".
 - `test-hostd-linux-interop.sh run|serve` publish `127.0.0.1:47410`, which this Mac's own hostd
   holds while Hosting is on (AGENT-OPERATIONS.md says to turn it off first). The script could check
-  the port and refuse with that advice instead of failing later.
+  the port and refuse with that advice instead of failing later. **FIXED (2026-10-08):** before `docker run`
+  it connects to each port the mode publishes and exits 2 if one answers, naming the port and, for
+  47410, Settings → Hosting. Before, `docker run` failed with exit 125 and left a Created container
+  behind, because the cleanup trap is armed only after it.
 - The HostKit `Delegation/*` file headers still say "Implemented by track Cn", which means nothing
   after the merge.
 
