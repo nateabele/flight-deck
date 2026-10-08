@@ -2,7 +2,8 @@ import Foundation
 
 // Sync (spec §4): the controller snapshots a worktree into a commit, bundles what the host
 // lacks, and the host fetches it into its per-repo object store and checks it out into a pool
-// slot. Implemented by track C2; the host router and `DelegationService` consume it.
+// slot. Implemented by `Snapshotter` and `BundleMaker` (controller) and `Workspace` (host); the
+// host router and `DelegationService` consume it.
 
 /// One snapshot commit and the workspace it belongs to, as both ends name it.
 public struct SnapshotRef: Codable, Sendable, Equatable {
@@ -103,7 +104,7 @@ public protocol WorkspaceStore: Sendable {
     /// past its 24h TTL. Making a bundle changes nothing, so a dropped transfer can ask again.
     func resultBundle(controller: UUID, repoRoot: String, runID: String) async throws -> URL?
     /// The controller has fetched and stored the result: the host drops it now. Until then it
-    /// survives (for retries) up to the TTL. Idempotent. (Added in C2 fix round 1.)
+    /// survives (for retries) up to the TTL. Idempotent.
     func ackResult(controller: UUID, repoRoot: String, runID: String) async throws
     /// Tars the checkout's paths matching `globs` (relative to the checkout root) into
     /// `runs/<runID>/`, at exit and before the slot is released: the next run in the slot

@@ -1,7 +1,7 @@
 import Foundation
 
-// Services and ports (spec §6.2, §7 steps 4–5). Implemented by track C5; codecs for the
-// enums live in `DelegationWire.swift`.
+// Services and ports (spec §6.2, §7 steps 4–5). Codecs for the enums live in
+// `DelegationWire.swift`.
 
 /// One `L:R` forward: local port `L` on the Mac's 127.0.0.1 to remote port `R` on the host.
 public struct PortMapping: Codable, Sendable, Equatable {

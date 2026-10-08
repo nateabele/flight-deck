@@ -13,7 +13,7 @@ public protocol HostPeer: AnyObject, Sendable {
 
 extension HostPeer {
     /// Drops the data. Only so every conformer from before channels (1.0 transports, test
-    /// fakes) still compiles; track C1 implements it for real in both hostds. Nothing sends a
+    /// fakes) still compiles; both hostds' peers implement it for real. Nothing sends a
     /// channel frame to a peer until a request has named a channel, so the drop is unreachable
     /// for a controller that checked the host's capabilities first.
     public func send(binary: Data) {}

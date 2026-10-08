@@ -480,7 +480,7 @@ public final class Workspace: WorkspaceStore, @unchecked Sendable {
     ///
     /// A glob that matches a *tracked* path throws: tracked files come back through the
     /// three-way-merged patch, and a tar would overwrite the user's concurrent edits instead.
-    /// Preflight refuses this earlier (C5); this is the backstop.
+    /// Preflight refuses this earlier (§7 step 3); this is the backstop.
     public func captureArtifacts(lease: CheckoutLease, runID: String, globs: [String]) async throws -> URL? {
         let runID = try SyncName.validate(runID)
         let out = root.appendingPathComponent("runs/\(runID)/artifacts.tar")

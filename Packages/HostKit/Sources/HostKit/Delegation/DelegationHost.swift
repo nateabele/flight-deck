@@ -75,8 +75,8 @@ public final class DelegationHost: @unchecked Sendable {
     }
 
     /// hostd's wiring: the workspace store and the run spools under the state root, the
-    /// runner releasing its slot only after the result and artifacts are taken (C2's order,
-    /// `RunLifecycle.workspace`), and the store's hourly expiry of results nobody fetched.
+    /// runner releasing its slot only after the result and artifacts are taken (the order
+    /// `RunLifecycle.workspace` keeps), and the store's hourly expiry of results nobody fetched.
     /// `power` and `console` are HostKitDarwin's on a Mac, HostKit's own (Linux) elsewhere.
     public static func standard(root: URL,
                                 power: any PowerAsserting = PowerAssertion.platformDefault,
