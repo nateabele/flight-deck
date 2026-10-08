@@ -598,6 +598,92 @@ final class SubmoduleSyncTests: XCTestCase {
         }
     }
 
+    // MARK: - Hardening
+
+    /// Two slots placing the same submodule at once share one cache: the second waits for the
+    /// first's fetch and worktree add (the cache lock), then reuses the commit, and each slot
+    /// gets its own worktree at the pin.
+    func testTwoSlotsPlaceTheSameSubmoduleAtOnce() async throws {
+        let scratch = TempRepo.scratch()
+        let (app, _, pin) = try makeApp(in: scratch)
+        let store = Workspace(root: scratch.appendingPathComponent("host"), poolSize: 2)
+        let first = try await push(app, to: store)
+        app.write("main.txt", "second\n")
+        try app.commitAll()
+        let second = try await push(app, to: store)
+        let gate = Gate()
+        store.submoduleFetchHook = { _ in gate.hold() }
+        defer { gate.open() }
+        let controller = self.controller
+        let a = Task { try await store.checkout(controller: controller, ref: first, pin: false) }
+        try await gate.waitUntilHeld()
+        let b = Task { try await store.checkout(controller: controller, ref: second, pin: false) }
+        try await Task.sleep(nanoseconds: 300_000_000)   // b reaches the cache lock a holds
+        gate.open()
+        let (la, lb) = (try await a.value, try await b.value)
+        XCTAssertNotEqual(la.slot, lb.slot)
+        XCTAssertEqual(try head(la, "lib"), pin)
+        XCTAssertEqual(try head(lb, "lib"), pin)
+        XCTAssertEqual(text(la, "main.txt"), "main\n")
+        XCTAssertEqual(text(lb, "main.txt"), "second\n")
+        let cache = try XCTUnwrap(try FileManager.default.contentsOfDirectory(
+            atPath: store.submoduleCaches(controller: controller).path).first)
+        let worktrees = try TempRepo.git(["worktree", "list", "--porcelain"],
+                                         in: store.submoduleCaches(controller: controller).appendingPathComponent(cache))
+        XCTAssertEqual(worktrees.components(separatedBy: "\nworktree ").count, 3, "the bare cache and one per slot")
+    }
+
+    /// A submodule commit fetched from a remote is untrusted: one whose tree has a gitlink
+    /// named `..` (git's own `mktree` accepts it) must fail its placement, and must not have
+    /// the host write or delete outside the submodule (placing `lib/..` would replace the
+    /// slot itself).
+    func testHostileGitlinkPathInASubmoduleIsRefused() async throws {
+        let scratch = TempRepo.scratch()
+        let (app, lib, _) = try makeApp(in: scratch)
+        let work = lib.work
+        let modules = try work.git("hash-object", "-w", "--stdin",
+                                   input: "[submodule \"evil\"]\n\tpath = ..\n\turl = \(lib.bare.path)\n")
+        let file = try work.git("hash-object", "-w", "--stdin", input: "evil\n")
+        let target = try work.git("rev-parse", "HEAD")
+        let tree = try work.git("mktree", input: "100644 blob \(modules)\t.gitmodules\n100644 blob \(file)\tlib.txt\n"
+                                    + "160000 commit \(target)\t..\n")
+        let evil = try work.git("commit-tree", tree, "-p", "HEAD", "-m", "evil")
+        try work.git("push", "-q", "origin", "\(evil):refs/heads/evil")
+        // The superproject pins lib at it, unpopulated (as a clone that never ran
+        // `submodule update` would): nothing local to check, so only the host sees the tree.
+        try app.git("submodule", "deinit", "-q", "-f", "lib")
+        try app.git("update-index", "--cacheinfo", "160000,\(evil),lib")
+        try app.git("commit", "-q", "-m", "pin evil")
+        let store = Workspace(root: scratch.appendingPathComponent("host"), poolSize: 1)
+        let ref = try await push(app, to: store)
+        let slots = scratch.appendingPathComponent("host/workspaces/\(controller.uuidString)/\(ref.repoRoot)/checkouts")
+
+        let error = await thrown { try await store.checkout(controller: controller, ref: ref, pin: false) }
+        XCTAssertNotNil(error, "placing a tree with a `..` gitlink must fail")
+        let slot = try XCTUnwrap(try FileManager.default.contentsOfDirectory(atPath: slots.path).first)
+        let main = slots.appendingPathComponent("\(slot)/\(ref.worktreeName)/main.txt")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: main.path), "the slot was not replaced through lib/..")
+    }
+
+    /// The transport list holds in git itself, whatever the pre-filter would have said and
+    /// whatever the cache's own config allows: an `ext::` URL (which runs a command) handed
+    /// straight to the fetch, into a cache configured to allow `ext`, runs nothing.
+    func testGitAllowProtocolHoldsWithThePreFilterBypassed() throws {
+        let scratch = TempRepo.scratch()
+        let (_, _, pin) = try makeApp(in: scratch)
+        let store = Workspace(root: scratch.appendingPathComponent("host"))
+        let cache = scratch.appendingPathComponent("cache.git")
+        try TempRepo.git(["init", "-q", "--bare", cache.path], in: scratch)
+        try TempRepo.git(["config", "protocol.ext.allow", "always"], in: cache)
+        let marker = scratch.appendingPathComponent("ext-ran")
+        let url = "ext::sh -c touch% \(marker.path)"
+        XCTAssertNotNil(SubmoduleURL.refusal(url), "the pre-filter would refuse it; this test goes around it")
+        for allowFile in [true, false] {
+            XCTAssertThrowsError(try store.fetchIfMissing(pin, from: url, into: cache, path: "lib", allowFile: allowFile))
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path), "git ran the ext:: command")
+    }
+
     // MARK: - Disk (§4.7)
 
     /// `host ls --disk` shows what the submodule caches cost, one row each, under the repo
