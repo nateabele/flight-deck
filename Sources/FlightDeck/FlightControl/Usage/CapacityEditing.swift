@@ -1,13 +1,10 @@
 import SwiftUI
 import IntakeKit
 
-/// The Capacity pane's pool edits as pure functions over the Accounts list (unify brief R6), so
+/// Pool edits (Settings → Accounts) as pure functions over the Accounts list (unify brief R6), so
 /// the pane is a thin binding and the rules are testable: synthesized default pools cannot be
 /// removed, ids are minted once, thresholds never cross, a pool holds one agent's accounts and
-/// an account is in at most one pool.
-///
-/// Track A moves pool editing into Settings → Accounts; these stay the model-level edits it
-/// builds on.
+/// an account is in at most one pool. `AccountsSettingsTab` and its pool popover call these.
 enum CapacityEditing {
     static func newPoolID(existing: [PoolID], random: () -> UUID = UUID.init) -> PoolID {
         while true {

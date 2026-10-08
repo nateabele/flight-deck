@@ -6,7 +6,8 @@ import IntakeKit
 /// closing a project removes it from `SessionStore` entirely.
 ///
 /// The detail pane is three sections: which agent (also the project's default, per
-/// `ProjectSettings.defaultAgent`), which of that agent's accounts, and that agent's options.
+/// `ProjectSettings.defaultAgent`), which account or pool each agent bills here, and that
+/// agent's options.
 /// The Agent picker doubles as both the default-agent setter AND the selector for what the
 /// sections below edit — but a per-project override applies whenever that agent launches here
 /// regardless of what the picker currently shows, so `hiddenOverrideSummary` names whichever
@@ -148,17 +149,26 @@ struct ProjectsSettingsTab: View {
                             }
                         }
 
-                        let accounts = preferences.preferences.accounts(for: selectedAgent)
-                        if accounts.count > 1 {
-                            Section("Account") {
-                                Picker("Account", selection: accountBinding(for: path, agent: selectedAgent)) {
-                                    Text("Default (\(accounts.first?.displayName ?? ""))").tag(UUID?.none)
-                                    ForEach(accounts) { account in
-                                        Text(account.displayName).tag(UUID?.some(account.id))
+                        // One row per agent with a choice to make, not just the agent being
+                        // edited: a project can run several agents (planning seats included),
+                        // and each bills its own assignment (unify brief R8).
+                        let list = preferences.preferences.accountList
+                        let choosable = AgentID.allCases.filter {
+                            Self.showsAccountPicker(for: $0, in: list, assigned: settings.accounts[$0])
+                        }
+                        if !choosable.isEmpty {
+                            Section {
+                                ForEach(choosable, id: \.self) { agent in
+                                    LabeledContent(agent.displayName) {
+                                        accountPicker(for: path, agent: agent, assigned: settings.accounts[agent])
                                     }
                                 }
-                                .labelsHidden()
-                                .accessibilityIdentifier("project-account-picker")
+                            } header: {
+                                Text("Accounts")
+                            } footer: {
+                                Text("A pool gives each new tab and planning run the first of its accounts under the pool's soft limit.")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
                             }
                         }
                     }
@@ -222,18 +232,73 @@ struct ProjectsSettingsTab: View {
         )
     }
 
-    /// Accounts only, for now: Track A adds pools to this picker (unify brief R8). A project
-    /// assigned a pool shows "Default" here; picking an account or Default replaces the pool.
-    private func accountBinding(for path: String, agent: AgentID) -> Binding<UUID?> {
+    /// One choice in the Account picker: nil is "Default" (the agent's topmost account).
+    struct AccountOption: Equatable {
+        var value: AccountAssignment?
+        var title: String
+        var isPool: Bool
+    }
+
+    /// What a project can bill `agent`'s work to (unify brief R8): Default — naming the account
+    /// it means today — then each live account of the agent in list order, then each of its
+    /// pools: the user's pools in list order, and last the agent's default pool (its unpooled
+    /// accounts), when it has one. Local pools are left out: they lease an endpoint slot, not an
+    /// account a tab could sign in as.
+    static func accountOptions(for agent: AgentID, in list: AccountList) -> [AccountOption] {
+        let accounts = list.accounts.filter { $0.agent == agent && !$0.isRemoved }
+        var options = [AccountOption(value: nil, title: accounts.first.map { "Default (\($0.displayName))" } ?? "Default",
+                                     isPool: false)]
+        options += accounts.map { AccountOption(value: .account($0.id), title: $0.displayName, isPool: false) }
+        let effective = list.effectivePools().filter { $0.agent == agent && $0.kind == .hosted }
+        options += effective.filter { !$0.isDefault }.map { AccountOption(value: .pool($0.id), title: $0.label, isPool: true) }
+        options += effective.filter(\.isDefault).map { AccountOption(value: .pool($0.id), title: $0.label, isPool: true) }
+        return options
+    }
+
+    /// Whether there is anything to choose: two accounts, or a pool the user made. (A lone
+    /// account's synthesized default pool is that same account, so it is no choice.) Always when
+    /// the project already names something, so a stale or pool assignment can be seen and undone.
+    static func showsAccountPicker(for agent: AgentID, in list: AccountList, assigned: AccountAssignment?) -> Bool {
+        if assigned != nil { return true }
+        let accounts = list.accounts.filter { $0.agent == agent && !$0.isRemoved }
+        let userPools = list.pools.filter { $0.agent == agent && !$0.isDefault && $0.kind == .hosted }
+        return accounts.count > 1 || !userPools.isEmpty
+    }
+
+    @ViewBuilder
+    private func accountPicker(for path: String, agent: AgentID, assigned: AccountAssignment?) -> some View {
+        let options = Self.accountOptions(for: agent, in: preferences.preferences.accountList)
+        Picker("Account", selection: accountBinding(for: path, agent: agent)) {
+            // By position: two accounts may share a display name.
+            ForEach(Array(options.filter { !$0.isPool }.enumerated()), id: \.offset) { _, option in
+                Text(option.title).tag(option.value)
+            }
+            let pools = options.filter(\.isPool)
+            if !pools.isEmpty {
+                Divider()
+                ForEach(Array(pools.enumerated()), id: \.offset) { _, option in
+                    Label(option.title, systemImage: "square.stack.3d.up").tag(option.value)
+                }
+            }
+            // An assignment that names something gone still has to be shown as what it is, or
+            // the picker silently reads "Default" while launches are refused as BROKEN.
+            if let assigned, !options.contains(where: { $0.value == assigned }) {
+                Divider()
+                Text("Missing \(assigned.poolID == nil ? "account" : "pool")").tag(AccountAssignment?.some(assigned))
+            }
+        }
+        .labelsHidden()
+        .fixedSize()
+        .accessibilityIdentifier("project-account-picker-\(agent.rawValue)")
+    }
+
+    /// Writes an account or a pool assignment; Default clears the agent's assignment.
+    private func accountBinding(for path: String, agent: AgentID) -> Binding<AccountAssignment?> {
         Binding(
-            get: { preferences.projectSettings(path).accounts[agent]?.accountID },
+            get: { preferences.projectSettings(path).accounts[agent] },
             set: { newValue in
                 var settings = preferences.projectSettings(path)
-                if let newValue {
-                    settings.accounts[agent] = .account(newValue)
-                } else {
-                    settings.accounts[agent] = nil
-                }
+                settings.accounts[agent] = newValue
                 preferences.setProjectSettings(path, settings)
             }
         )

@@ -168,11 +168,13 @@ final class PreferencesStore: ObservableObject {
     /// The account a new session for `agent` in `project` launches under. nil is BROKEN — an
     /// explicit assignment that no longer resolves must never silently become another login.
     ///
-    /// A POOL assignment (unify brief R8) resolves to the pool's first live account in lease
-    /// order. That is a placeholder for real leasing — Track A makes a tab launch on a pool
-    /// lease through `CapacityLedger` (first under soft, `LeasePolicy`) and release when the tab
-    /// ends; until then a pool behaves like "its top account". A pool with no live account, or
-    /// one that no longer exists, is BROKEN (nil) for the same reason a missing account is.
+    /// A POOL assignment (unify brief R8) answers the pool's first live account in lease order.
+    /// That is NOT what a launch runs as: launches resolve through `AccountResolver`, which
+    /// leases the first member under soft from `CapacityLedger` and so needs usage this store
+    /// does not have. This answer is for the callers that only need "the project's login, near
+    /// enough" with no ledger at hand (the status-line settings a new claude tab inherits). A
+    /// pool with no live account, or one that no longer exists, is BROKEN (nil) for the same
+    /// reason a missing account is.
     func account(for agent: AgentID, project: String) -> AgentAccount? {
         switch preferences.projectSettings[Self.key(project)]?.accounts[agent] {
         case .account(let assigned)?:
