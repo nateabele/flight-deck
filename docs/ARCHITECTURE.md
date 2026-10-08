@@ -390,7 +390,9 @@ user edited or deleted alone; a Debug build skips the copy, so it never writes t
 a running claude until `/reload-plugins`, and under fd-abduco a tab's claude outlives an app update.
 So at launch the app fingerprints the bundled plugin (`PluginReload`); when it changed, every claude
 tab whose daemon was already live is sent `/reload-plugins` through the gated `inject`, only while
-the status registry says idle and after any queued rename or prompt.
+the status registry says idle and after any queued rename or prompt. The command flips the registry row
+busy for about 90 ms; for a few seconds after sending it the store ignores that tab's idle/busy
+edges, so the reload neither marks the tab unread nor resets its "active N min ago".
 
 **At launch and on reconnect** `DelegationBootstrap.connect` hands `FleetService` the service
 `DelegationServiceFactory.live(hostService:sessionTitle:)` builds, before either socket starts.
