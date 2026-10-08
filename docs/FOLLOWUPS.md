@@ -2653,6 +2653,10 @@ container; **nothing has run against a real second machine.**
 - The unclaimed-channel cap is skipped once an `accept()` stream exists (controller side only).
 - `closedIDs` grows by one tombstone per channel ever closed on a connection; a busy forwarded
   port accumulates them until the link drops. Tombstoning only above a low-water mark would bound it.
+  **FIXED (2026-10-08):** `ChannelMux.ClosedIDs` collapses each parity's contiguous run of closed
+  ids into a watermark, so only ids closed above the oldest one still open (or never seen) are
+  held one by one. The drop rule is unchanged. A single long-lived channel still holds the
+  watermark back until it closes.
 - Throughput is about one 256 KiB window per round trip per channel (about 5 MiB/s on a 50 ms
   tailnet path). A larger or adaptive window is the lever if bundles or forwards prove slow.
 
