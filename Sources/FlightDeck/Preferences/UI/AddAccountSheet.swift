@@ -113,17 +113,23 @@ struct AccountDraft: Equatable {
     }
 }
 
-/// The "+" sheet under an agent's Accounts list: name a login, confirm or override where its
-/// home lives, and file it. Creating the directory here (rather than leaving it to the first
-/// launch) is what lets the row appear with a real, `Reveal in Finder`-able home immediately.
+/// Settings → Accounts' "Add Account…" sheet: pick the agent, name the login, confirm or
+/// override where its home lives, and file it at top level of the list. Creating the directory
+/// here (rather than leaving it to the first launch) is what lets the row appear with a real,
+/// `Reveal in Finder`-able home immediately.
+///
+/// Laid out like the Routing popovers Nate approved: labels right-aligned on the left, every
+/// control one width on the right. An agent that cannot take another account (gemini signs in
+/// through the system keychain — unify brief R5) shows the reason in place of the fields, so the
+/// refusal is stated before anything is typed rather than after Add.
 struct AddAccountSheet: View {
     @ObservedObject var preferences: PreferencesStore
-    let agent: AgentID
     /// Fires after the account is created and inserted, so the caller can offer "Sign In Now"
     /// — the sheet itself has no opinion about what happens next.
     let onAdd: (AgentAccount) -> Void
 
     @Environment(\.dismiss) private var dismiss
+    @State private var agent: AgentID
     @State private var draft: AccountDraft
     /// Once the user has picked or typed a location by hand, further name edits stop
     /// re-deriving it — the same "don't clobber a deliberate choice" rule `newDir` fields
@@ -132,95 +138,137 @@ struct AddAccountSheet: View {
 
     init(preferences: PreferencesStore, agent: AgentID, onAdd: @escaping (AgentAccount) -> Void) {
         self.preferences = preferences
-        self.agent = agent
         self.onAdd = onAdd
+        _agent = State(initialValue: agent)
         _draft = State(initialValue: AccountDraft(agent: agent))
     }
 
+    static let fieldWidth: CGFloat = 300
+
     private var validation: AccountDraft.Validation {
         AccountDraft.validate(home: draft.homePath, agent: agent, editing: nil, in: preferences)
+    }
+
+    /// Why this agent cannot take this account, from the list's own rule.
+    private var refusal: String? {
+        preferences.preferences.accountList.addRefusal(
+            for: AgentAccount(agent: agent, displayName: trimmedName, home: draft.trimmedHome))
     }
 
     private var trimmedName: String {
         draft.name.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Add \(agent.displayName) Account")
-                .font(.headline)
+    private var agentBinding: Binding<AgentID> {
+        Binding(get: { agent }, set: { next in
+            agent = next
+            // A new agent means a new home family: `~/.codex-work`, not `~/.claude-work`.
+            if !homeEditedByHand { draft.home = AccountDraft.defaultHome(for: next, name: draft.name) }
+        })
+    }
 
-            Form {
-                TextField(
-                    "Name",
-                    text: Binding(
-                        get: { draft.name },
-                        set: { newValue in
-                            draft.name = newValue
-                            if !homeEditedByHand {
-                                draft.home = AccountDraft.defaultHome(for: agent, name: newValue)
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("Add Account")
+                .font(.headline)
+                .padding(.horizontal, 20)
+                .padding(.top, 18)
+                .padding(.bottom, 14)
+
+            Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 12) {
+                row("Agent") {
+                    FillingPopUp(selection: agentBinding,
+                                 items: AgentID.allCases.map { ($0, $0.displayName) },
+                                 identifier: "account-add-agent")
+                }
+                if let refusal {
+                    GridRow {
+                        Color.clear.frame(width: 1, height: 1)
+                        Label { Text(refusal) } icon: { Image(systemName: "info.circle") }
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(width: Self.fieldWidth, alignment: .leading)
+                            .accessibilityIdentifier("account-add-refusal")
+                    }
+                } else {
+                    row("Name") {
+                        TextField("Work", text: Binding(
+                            get: { draft.name },
+                            set: { newValue in
+                                draft.name = newValue
+                                if !homeEditedByHand { draft.home = AccountDraft.defaultHome(for: agent, name: newValue) }
+                            }))
+                            .textFieldStyle(.roundedBorder)
+                            .accessibilityIdentifier("account-add-name")
+                    }
+                    row("Location") {
+                        HStack(spacing: 6) {
+                            TextField("", text: Binding(get: { draft.homePath },
+                                                        set: { draft.homePath = $0; homeEditedByHand = true }))
+                                .textFieldStyle(.roundedBorder)
+                                .accessibilityIdentifier("account-add-location")
+                            Button("Choose…") {
+                                guard let chosen = FolderPicker.choose() else { return }
+                                draft.home = chosen
+                                homeEditedByHand = true
                             }
                         }
-                    )
-                )
-                .accessibilityIdentifier("account-add-name")
-
-                LabeledContent("Location") {
-                    HStack(spacing: 6) {
-                        TextField(
-                            "",
-                            text: Binding(
-                                get: { draft.homePath },
-                                set: {
-                                    draft.homePath = $0
-                                    homeEditedByHand = true
-                                }
-                            )
-                        )
-                        .accessibilityIdentifier("account-add-location")
-
-                        Button("Choose…") {
-                            guard let chosen = FolderPicker.choose() else { return }
-                            draft.home = chosen
-                            homeEditedByHand = true
+                    }
+                    if let message = validation.message(for: agent) {
+                        GridRow {
+                            Color.clear.frame(width: 1, height: 1)
+                            Text(message)
+                                .font(.caption)
+                                .foregroundStyle(.red)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .frame(width: Self.fieldWidth, alignment: .leading)
                         }
                     }
                 }
-
-                if let message = validation.message(for: agent) {
-                    Text(message)
-                        .font(.caption)
-                        .foregroundStyle(.red)
-                }
             }
-            .formStyle(.grouped)
+            .padding(.horizontal, 20)
+            .padding(.bottom, 18)
 
+            Divider()
             HStack {
                 Spacer()
                 Button("Cancel") { dismiss() }
                     .keyboardShortcut(.cancelAction)
                 Button("Add") { add() }
                     .keyboardShortcut(.defaultAction)
-                    .disabled(trimmedName.isEmpty || validation != .ok)
+                    .disabled(refusal != nil || trimmedName.isEmpty || validation != .ok)
                     .accessibilityIdentifier("account-add-confirm")
             }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 12)
         }
-        .padding(16)
-        .frame(width: 380)
+        .fixedSize()
+    }
+
+    private func row<Control: View>(_ label: String, @ViewBuilder _ control: () -> Control) -> some View {
+        GridRow {
+            Text(label)
+                .foregroundStyle(.secondary)
+                .gridColumnAlignment(.trailing)
+            control()
+                .frame(width: Self.fieldWidth, alignment: .leading)
+                .accessibilityLabel(label)
+        }
     }
 
     private func add() {
         // Re-checked here, not only in `.disabled` above: this is the call that creates a
         // directory and files an account whose home "Also Delete Files…" will later offer to
         // trash, and a guard that lives only in a view modifier is one refactor from gone.
-        guard !trimmedName.isEmpty, validation == .ok else { return }
+        guard refusal == nil, !trimmedName.isEmpty, validation == .ok else { return }
         let home = draft.trimmedHome
         // Best-effort: an account whose directory could not be created yet is still a valid
         // registry entry — the agent creates it itself on first launch, same as the built-in
         // home always has.
         try? FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
         let account = AgentAccount(agent: agent, displayName: trimmedName, home: home)
-        preferences.addAccount(account)
+        guard preferences.addAccount(account) == nil else { return }
         dismiss()
         onAdd(account)
     }

@@ -18,6 +18,10 @@ struct PreferencesView: View {
                 .accessibilityIdentifier("prefs-agents")
                 .tag(PreferencesTab.agents)
 
+            AccountsSettingsTab(preferences: preferences, sessions: sessions)
+                .tabItem { Label("Accounts", systemImage: "person.crop.circle") }
+                .tag(PreferencesTab.accounts)
+
             ProjectsSettingsTab(preferences: preferences, sessions: sessions)
                 .tabItem { Label("Projects", systemImage: "folder") }
                 .accessibilityIdentifier("prefs-projects")

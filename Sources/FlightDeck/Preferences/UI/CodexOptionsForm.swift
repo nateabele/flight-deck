@@ -11,7 +11,7 @@ struct CodexOptionsForm: View {
     /// `FlagEditor` takes `flags` from its caller rather than always reading the global row.
     var projectOverride: Binding<CodexThreadOptions>?
     /// Rendered as the leading `Section` of this `Form`, mirroring `FlagEditor.header`. The
-    /// Agents tab uses it for the accounts list; the Projects tab passes nothing.
+    /// Projects tab uses it for the agent and account pickers; the Agents tab passes nothing.
     var header: (() -> AnyView)?
     @State private var newDir = ""
 

@@ -33,19 +33,11 @@ struct AgentsSettingsTab: View {
 
             Group {
                 let agent = selection ?? preferences.preferences.agents.first?.id ?? .claude
-                // Accounts ride in as each pane's leading section rather than as a region
-                // below it, so the whole detail side is one scroll: accounts, then the
-                // agent's options, then the launch command last.
-                let accounts = {
-                    AnyView(
-                        Section("Accounts") {
-                            AccountsSection(preferences: preferences, sessions: sessions, agent: agent)
-                        }
-                    )
-                }
+                // Accounts used to lead each pane; they are one list in Settings → Accounts now
+                // (unify brief R7), so this pane is the agent's options alone.
                 switch agent {
-                case .codex: CodexOptionsForm(preferences: preferences, header: accounts)
-                default:     ClaudeOptionsPane(preferences: preferences, leading: accounts)
+                case .codex: CodexOptionsForm(preferences: preferences)
+                default:     ClaudeOptionsPane(preferences: preferences)
                 }
             }
             .frame(minWidth: 380)
@@ -67,8 +59,8 @@ struct AgentsSettingsTab: View {
 /// that row, and `globalFlags` survives only as a decode-only legacy field.
 struct ClaudeOptionsPane: View {
     @ObservedObject var preferences: PreferencesStore
-    /// Emitted above this pane's own "Startup" section, inside the same `Form`. The Agents tab
-    /// uses it for the accounts list; the Projects tab passes nothing.
+    /// Emitted above this pane's own "Startup" section, inside the same `Form`. Nothing passes
+    /// it since accounts moved to their own tab; kept as the seam `FlagEditor.header` mirrors.
     var leading: (() -> AnyView)?
 
     /// Reads and writes the claude row's flags within `preferences.agents`, wherever that row
