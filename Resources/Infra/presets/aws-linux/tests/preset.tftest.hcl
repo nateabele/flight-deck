@@ -170,3 +170,32 @@ run "a1_is_arm" {
     error_message = "a1 is Graviton (arm64)"
   }
 }
+
+# RunInstances creates the primary ENI and, for spot, the spot request, and aws_instance tags
+# neither (the provider sends tag specifications for the instance and its volumes only; its
+# default_tags reach no further). So each gets fd_labels through aws_ec2_tag.
+run "eni_carries_the_labels" {
+  command = plan
+
+  assert {
+    condition     = { for k, t in aws_ec2_tag.eni : k => t.value } == var.fd_labels
+    error_message = "every fd_label on the instance's network interface"
+  }
+  assert {
+    condition     = length(aws_ec2_tag.spot_request) == 0
+    error_message = "no spot request to tag on an on-demand machine"
+  }
+}
+
+run "spot_request_carries_the_labels" {
+  command = plan
+
+  variables {
+    spot = true
+  }
+
+  assert {
+    condition     = { for k, t in aws_ec2_tag.spot_request : k => t.value } == var.fd_labels
+    error_message = "every fd_label on the spot request"
+  }
+}
