@@ -174,10 +174,3 @@ struct GrokAdapter: AgentAdapter {
         return out
     }
 }
-
-/// What a stub adapter throws for an operation its agent cannot perform yet. Distinct from a
-/// real failure so a caller's log says "not built" rather than "broken". (gemini's stub still
-/// throws it until its own track lands.)
-struct AgentStubUnsupported: Error, Equatable {
-    let agent: AgentID
-}

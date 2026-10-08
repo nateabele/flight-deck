@@ -40,6 +40,18 @@ enum TranscriptPointers {
         return TranscriptPointer(locator: .path(url.path), format: grokFormat, howToRead: grokHowToRead)
     }
 
+    static let geminiFormat = "Antigravity CLI (agy) transcript, JSONL: one step per line"
+    static let geminiHowToRead = "Read the last 200 lines first (`tail -n 200`). USER_INPUT records hold the user's request inside <USER_REQUEST>; PLANNER_RESPONSE records hold the model's reply and tool_calls; GENERIC records are tool results, in order after the call."
+
+    /// agy names the transcript after the conversation, under its own root, so the path is the
+    /// pin's; it exists once the tab's agy has recorded a step.
+    static func gemini(session: Session, paths: GeminiPaths = .default,
+                       exists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }) -> TranscriptPointer? {
+        let url = paths.transcript(session.pinnedConversationID)
+        guard exists(url.path) else { return nil }
+        return TranscriptPointer(locator: .path(url.path), format: geminiFormat, howToRead: geminiHowToRead)
+    }
+
     /// For the OpenCode adapter when it merges: `opencode export` against local storage, or the
     /// server's messages endpoint when the account runs its own server. Probe both against the
     /// OpenCode branch before relying on them.

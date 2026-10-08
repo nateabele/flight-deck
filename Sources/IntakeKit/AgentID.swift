@@ -46,12 +46,21 @@ public enum AgentID: String, Codable, CaseIterable, Sendable, CodingKeyRepresent
     /// Tracks G and M flip their agent here when its adapter passes its tests — one line, one
     /// place, so "can it run a tab" can never be answered two ways.
     public var tabReady: Bool {
+        if let override = Self.tabReadyOverride { return override.contains(self) }
         switch self {
         // grok: Track G's `GrokAdapter`, built from a live probe of grok 1.0.30's TUI.
-        case .claude, .codex, .grok: true
-        case .gemini: false
+        // gemini: Track M's `GeminiAdapter` drives agy (unify brief R5), proved by its own suite.
+        case .claude, .codex, .grok, .gemini: true
         }
     }
+
+    /// Test seam: the set of agents to treat as tab-ready inside `$tabReadyOverride.withValue`.
+    /// Every agent is tab-ready since Tracks G and M landed, so without it the R4 gates
+    /// (`Preferences.agents`, the agent migration, `RoutingCapabilityRegistry.standard`,
+    /// `StoreSwarmSpawner`) would have no "not ready" case left to prove they still filter —
+    /// and a gate nobody can exercise is one a later agent can silently break. Task-local, so a
+    /// test's override can never leak into another test or the app; nothing in the app sets it.
+    @TaskLocal public static var tabReadyOverride: Set<AgentID>?
 
     /// The agents a new tab can be opened on, in `allCases` order.
     public static var tabReadyCases: [AgentID] { allCases.filter(\.tabReady) }

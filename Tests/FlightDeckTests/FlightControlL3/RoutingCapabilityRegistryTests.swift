@@ -8,14 +8,18 @@ import IntakeKit
 /// registry — the same path claude and codex take.
 @MainActor
 final class RoutingCapabilityRegistryTests: XCTestCase {
-    /// Every TAB-READY agent (unify brief R4): routing opens a tab on its target, so a stub
-    /// agent is not one.
+    /// Every TAB-READY agent (unify brief R4): routing opens a tab on its target, so an agent
+    /// that cannot run a tab is not one. Every agent can today, so the test seam makes gemini
+    /// the stand-in for the one that cannot.
     func testStandardRegistryHasEveryTabReadyAgent() {
         let reg = RoutingCapabilityRegistry.standard()
         XCTAssertEqual(Set(reg.agents), Set(AgentID.tabReadyCases))
         XCTAssertEqual(reg.capabilities(for: .claude)?.accountModel, .login)
         XCTAssertNotNil(reg.capabilities(for: .grok), "Track G made grok tab-ready")
-        XCTAssertNil(reg.capabilities(for: .gemini))
+        XCTAssertNotNil(reg.capabilities(for: .gemini), "Track M made gemini tab-ready")
+        AgentID.$tabReadyOverride.withValue([.claude, .codex, .grok]) {
+            XCTAssertNil(RoutingCapabilityRegistry.standard().capabilities(for: .gemini))
+        }
     }
 
     func testAFakeHarnessIsRoutableThroughTheRegistry() async {
