@@ -2603,7 +2603,9 @@ container; **nothing has run against a real second machine.**
 - **Stale shim directories.** A tab closed while the app was not running (a crash, a hand-edited
   `sessions.json`) leaves `route-shims/<id>/` behind: a few dangling symlinks, never pruned.
 - **Spec §8 wording.** The shim runs `flightdeck route-exec <name> -- <args>` and the CLI does the
-  matching; the spec says the shim runs `flightdeck run <recipe> -- <argv>`. Same behaviour.
+  matching; the spec says the shim runs `flightdeck run <recipe> -- <argv>`. Same behaviour. **Resolved
+  (audited 2026-10-08):** spec §8 already carries the as-built note ("the shim calls `flightdeck
+  route-exec`, which matches"), so nothing is left to change.
 - **Unknown future `RunEvent` kinds** make the whole `event` frame fail to decode, and `HostLink`
   drops it. Fine for 1.x skew, but adding an event kind is a minor bump older controllers ignore.
 
