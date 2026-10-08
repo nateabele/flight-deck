@@ -306,20 +306,32 @@ before anything runs. Refused up front: LFS repos (`lfs_unsupported`) and git ol
 submodule (a gitlink is a commit id, covered by the tree check); what it lacks is where to fetch
 it, and only the controller knows that (its `.git/config`, the superproject's remote for a
 relative URL, its `insteadOf` rules). So the snapshot carries `SnapshotRef.submodules`, one
-`{path, commit, url}` per gitlink, nested ones included, with the URL already resolved. Before
+`{path, commit, url}` per gitlink, nested ones included, with the URL already resolved and any
+credentials stripped (an http(s) URL's userinfo, another scheme's password; the host fetches with
+its own). Before
 anything is recorded or sent, a populated submodule with uncommitted or untracked changes is
 refused (`submodule_dirty`), as is one at a commit no remote-tracking branch or tag of it contains
 (`submodule_unpushed`, a local-refs check: no network on every run), and a nested repository that
 has no URL (`submodule_no_url`). On the host, after the superproject's tree is verified, each
 gitlink is fetched into a per-URL bare cache, `<state root>/submodules/<controller slot>/`, kept
-across runs (a shallow fetch of the one commit, falling back to a full fetch for a server that
-refuses it; only `file`, `git`, `http`, `https` and `ssh` URLs, ssh in batch mode), and placed as a
-`git worktree` of that cache at its path, recursing into nested submodules. A nested gitlink with
-no pin falls back to its parent's committed `.gitmodules`. A URL the host cannot reach fails the
-checkout as `submodule_fetch_failed`, naming the path and the URL. A host advertises the
+across runs, and placed as a `git worktree` of that cache at its path, recursing into nested
+submodules. Placement runs after the store lock is released (a slow fetch must not stall the
+repo's other syncs), under each cache's own lock. The fetch is a shallow one of the pinned commit;
+only a server's refusal of exactly that ("unadvertised object", "not our ref") earns a full fetch,
+and a connection or auth failure is final. It is bounded: http gives up below 1000 B/s for 60 s,
+ssh runs in batch mode with a 15 s connect timeout and 15 s keepalives, and cancelling the run
+SIGKILLs git's process group (`GitRunner.offload` ties every git it runs to the calling task).
+Transports are `git`, `http`, `https` and `ssh`, plus `file` for the controller's own pins only. A
+nested gitlink with no pin falls back to its parent's committed `.gitmodules`. A URL the host
+cannot reach fails the checkout as `submodule_fetch_failed`, naming the path, the URL (credentials
+redacted) and git's reason line. The controller's excludes apply inside submodules too (their
+`clean` and the end-of-run status). `host ls --disk` lists each cache under the repo `submodules`,
+and `host prune` deletes the caches no remaining checkout uses. The run's idle-sleep assertion is
+held from acquire, so a long fetch does not let a Mac host sleep. A host advertises the
 `submodules` capability; the controller refuses to sync a snapshot with submodules to one that
-does not (`submodules_unsupported`), because it would drop the pins and run against empty
-directories. A submodule-free snapshot is byte-identical on the wire to what earlier builds sent.
+does not (`submodules_unsupported`), or whose capabilities it does not know yet, mid-reconnect
+(`host_unavailable`), because it would drop the pins and run against empty directories. A
+submodule-free snapshot is byte-identical on the wire to what earlier builds sent.
 
 **Results come back two ways.** Tracked changes are committed on the host as a child of the
 snapshot (`refs/fd/results/<run>`) and fetched as a one-commit bundle. The host keeps it until the

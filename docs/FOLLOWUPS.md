@@ -2599,11 +2599,14 @@ container; **nothing has run against a real second machine.**
   - **The host fetches with its own access.** Its git ignores `~/.gitconfig`
     (`GitRunner(isolated: true)`), so a credential helper configured there is not used: a
     private `https` submodule fails as `submodule_fetch_failed`. `ssh` URLs use the host
-    user's keys and agent, in batch mode (no prompts).
-  - **Submodule caches are never pruned or measured.** `<state root>/submodules/<slot>/` is
-    not in `host ls --disk`, survives `host prune`, and is not `gc`ed by the hourly sweep.
-    A big submodule fetched in full (a server that refuses a shallow fetch of one commit)
-    stays on disk until removed by hand.
+    user's keys and agent, in batch mode (no prompts). Credentials in the controller's URLs
+    are stripped before they travel, by design, so the controller's token never helps.
+  - **A `git://` fetch has no stall bound of its own.** http has a low-speed limit and ssh has
+    timeouts and keepalives, but git's own protocol has neither: a hung `git://` server holds
+    the fetch until `longTimeout` (an hour) or the run is cancelled, which now kills it.
+  - **Submodule caches are not `gc`ed.** `host ls --disk` lists them and `host prune` deletes
+    the ones no checkout uses (FIXED 2026-10-08), but the hourly sweep does not run `gc` in
+    them, so a cache a checkout still uses keeps every commit any slot ever pinned.
   - **Unverified across machines.** Tested with real git in temp dirs (HostKit's
     `SubmoduleSyncTests`), not with a real second host, and not with this repo, whose
     `vendor/boringssl` URL is on googlesource.com: a host has to reach both that and GitHub.
