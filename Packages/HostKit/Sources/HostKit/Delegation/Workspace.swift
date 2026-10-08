@@ -49,6 +49,13 @@ public final class Workspace: WorkspaceStore, @unchecked Sendable {
         set { lock.withLock { _applyHook = newValue } }
     }
     private var _applyHook: (@Sendable () -> Void)?
+    /// Test seam: runs as each submodule's fetch starts, inside its cache lock (a slow remote),
+    /// with the submodule's path.
+    var submoduleFetchHook: (@Sendable (String) -> Void)? {
+        get { lock.withLock { _submoduleFetchHook } }
+        set { lock.withLock { _submoduleFetchHook = newValue } }
+    }
+    private var _submoduleFetchHook: (@Sendable (String) -> Void)?
 
     public init(root: URL, poolSize: Int = 2, keep: Int = 5, resultTTL: TimeInterval = 24 * 3600,
                 git: GitRunner = GitRunner(isolated: true)) {
@@ -164,10 +171,7 @@ public final class Workspace: WorkspaceStore, @unchecked Sendable {
                 do {
                     try await GitRunner.offload { [self] in
                         applyHook?()
-                        return try withStore(storeURL(controller: controller, repoRoot: ref.repoRoot)) {
-                            try apply(ref, at: path, store: storeURL(controller: controller, repoRoot: ref.repoRoot),
-                                      controller: controller, exclusive: true)
-                        }
+                        try apply(ref, at: path, controller: controller, exclusive: true)
                     }
                 } catch {
                     lock.withLock {
@@ -280,8 +284,14 @@ public final class Workspace: WorkspaceStore, @unchecked Sendable {
     /// Submodules are placed after the superproject's tree is verified, and outside its
     /// rebuild-and-retry: a submodule that cannot be fetched (a URL the host cannot reach) would
     /// fail the same way after a rebuild, having paid for the fetch attempt twice.
-    private func apply(_ ref: SnapshotRef, at path: URL, store: URL, controller: UUID, exclusive: Bool) throws {
-        try applyTree(ref, at: path, store: store, exclusive: exclusive)
+    ///
+    /// And outside the store lock. That lock serializes every sync, apply, gc and prune of the
+    /// repo; a submodule fetch can take minutes (a big repository, a slow remote), and held
+    /// there it stalled every other agent syncing the same repo. The slot is still ours (leased,
+    /// not `ready`, so nobody joins it half placed) and each cache has its own lock.
+    private func apply(_ ref: SnapshotRef, at path: URL, controller: UUID, exclusive: Bool) throws {
+        let store = storeURL(controller: controller, repoRoot: ref.repoRoot)
+        try withStore(store) { try applyTree(ref, at: path, store: store, exclusive: exclusive) }
         try placeSubmodules(ref, in: path, controller: controller)
     }
 
@@ -399,10 +409,7 @@ public final class Workspace: WorkspaceStore, @unchecked Sendable {
             guard let (key, index) = leases[lease.id] else { return nil }
             return (key, index, pools[key]?[index]?.holders == [lease.id])
         }) else { throw SyncError.noCheckout }
-        let store = storeURL(controller: key.controller, repoRoot: key.repoRoot)
-        try await GitRunner.offload { [self] in
-            try withStore(store) { try apply(ref, at: lease.path, store: store, controller: key.controller, exclusive: alone) }
-        }
+        try await GitRunner.offload { [self] in try apply(ref, at: lease.path, controller: key.controller, exclusive: alone) }
         lock.withLock {
             pools[key]?[index]?.ref = ref
             pools[key]?[index]?.lastApplied = Date()
