@@ -64,10 +64,25 @@ struct LiveTofuRunner: TofuRunning {
             guard line["type"] as? String == "resource_drift",
                   let change = line["change"] as? [String: Any],
                   change["action"] as? String == "delete",
-                  let addr = (change["resource"] as? [String: Any])?["addr"] as? String else { return false }
-            // A deleted security group is not a gone machine; only the compute resource counts.
-            return ["instance", "virtual_machine", "droplet"].contains { addr.contains($0) }
+                  let resource = change["resource"] as? [String: Any] else { return false }
+            // A deleted security group, or an `aws_instance_profile`, is not a gone machine; only
+            // the compute resource's own type counts, so match the type, never a substring.
+            let type = resource["resource_type"] as? String ?? (resource["addr"] as? String).flatMap { Self.resourceType(addr: $0) }
+            return type.map(Self.machineTypes.contains) ?? false
         }
+    }
+
+    /// The resource types that ARE the machine, one per preset cloud.
+    static let machineTypes: Set<String> = ["aws_instance", "google_compute_instance"]
+
+    /// `aws_instance` from `aws_instance.this`, `module.box.aws_instance.this[0]` or
+    /// `aws_instance.this["a"]`: the segment before the resource name, after any `module.<n>`
+    /// prefixes.
+    static func resourceType(addr: String) -> String? {
+        var parts = addr.split(separator: ".", omittingEmptySubsequences: false).map(String.init)
+        while parts.count > 2, parts[0] == "module" { parts.removeFirst(2) }
+        if parts.first == "data" { return nil }
+        return parts.count >= 2 ? parts[0] : nil
     }
 
     // MARK: - plumbing

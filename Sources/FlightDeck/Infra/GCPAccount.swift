@@ -10,12 +10,16 @@ struct GCPAccount: CloudAccount {
     private let cli: CloudCLI
     private let signInCLI: CloudCLI
 
-    init(gcloud: URL, project: String?, runner: CommandRunner) {
+    /// `environment` is the resolved tool's own (`CLOUDSDK_PYTHON`, which gcloud cannot start
+    /// without); `base` replaces the login-shell-repaired app environment only in tests.
+    init(gcloud: URL, project: String?, runner: CommandRunner, environment: [String: String] = [:],
+         base: [String: String]? = nil) {
         self.project = project
         // A check must never sit on an interactive reauth prompt nobody can see; sign-in is
         // the one call that is meant to interact (it opens the browser).
-        self.cli = CloudCLI(executable: gcloud, runner: runner, extra: ["CLOUDSDK_CORE_DISABLE_PROMPTS": "1"])
-        self.signInCLI = CloudCLI(executable: gcloud, runner: runner, extra: [:])
+        self.cli = CloudCLI(executable: gcloud, runner: runner,
+                            extra: environment.merging(["CLOUDSDK_CORE_DISABLE_PROMPTS": "1"]) { _, new in new }, base: base)
+        self.signInCLI = CloudCLI(executable: gcloud, runner: runner, extra: environment, base: base)
     }
 
     private var projectArgs: [String] { project.map { ["--project", $0] } ?? [] }
@@ -82,6 +86,23 @@ struct GCPAccount: CloudAccount {
 
     func providerEnvironment() -> [String: String] {
         project.map { ["GOOGLE_CLOUD_PROJECT": $0, "CLOUDSDK_CORE_PROJECT": $0] } ?? [:]
+    }
+
+    func moduleVars() -> [String: String] {
+        project.map { ["project": $0] } ?? [:]
+    }
+
+    /// `instanceID` is the preset's `fd_instance_id`, the instance's relative resource name
+    /// (`projects/<p>/zones/<z>/instances/<n>`); the serial port wants the name and zone. A bare
+    /// name falls back to the preset's default zone, `<region>-a`.
+    func consoleOutput(instanceID: String, region: String) async -> String? {
+        let parts = instanceID.split(separator: "/").map(String.init)
+        let zone = parts.firstIndex(of: "zones").flatMap { parts.indices.contains($0 + 1) ? parts[$0 + 1] : nil } ?? "\(region)-a"
+        guard let name = parts.last,
+              let result = try? await cli.checked(["compute", "instances", "get-serial-port-output", name,
+                                                    "--zone", zone] + projectArgs) else { return nil }
+        let text = String(decoding: result.stdout, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.isEmpty ? nil : text
     }
 
     // MARK: - pure

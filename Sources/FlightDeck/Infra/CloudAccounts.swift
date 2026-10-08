@@ -38,18 +38,38 @@ protocol CloudAccount: Sendable {
     func quota(region: String, instanceType: String) async throws -> QuotaCheck
     /// What OpenTofu's provider needs to find the same account (`AWS_PROFILE`, `GOOGLE_CLOUD_PROJECT`…).
     func providerEnvironment() -> [String: String]
+    /// Module variables the account decides rather than the repo: the GCP preset's `project`.
+    func moduleVars() -> [String: String]
+    /// The machine's boot console, for a machine that never enrolled: cloud-init's own errors
+    /// are there. Nil when the CLI fails or the cloud has nothing yet; this only ever adds
+    /// detail to a failure already being reported.
+    func consoleOutput(instanceID: String, region: String) async -> String?
 }
 
-/// Runs one cloud CLI with the app's environment plus `extra`. The CLI's own directory leads
-/// `PATH`: gcloud's entry point execs siblings beside it, and a managed copy (Task 6) is not
-/// on the user's `PATH` at all.
+/// The environment every cloud tool runs with: the app's own, its PATH repaired from the login
+/// shell (an app launched from the Dock has launchd's bare PATH, which finds neither a Homebrew
+/// Python for gcloud nor a credential helper), then the resolved tool's own variables
+/// (`CLOUDSDK_PYTHON`), then the account's provider variables (`AWS_PROFILE`). One place, so
+/// OpenTofu and the CLIs can never disagree about which account they are in.
+enum InfraToolEnvironment {
+    static func make(base: [String: String], tool: [String: String] = [:], provider: [String: String] = [:]) -> [String: String] {
+        base.merging(tool) { _, new in new }.merging(provider) { _, new in new }
+    }
+
+    static func defaultBase() -> [String: String] { LoginShellPath.repairing(ProcessInfo.processInfo.environment) }
+}
+
+/// Runs one cloud CLI with `base` (`InfraToolEnvironment.defaultBase()` unless a test injects
+/// one) plus `extra`. The CLI's own directory leads `PATH`: gcloud's entry point execs siblings
+/// beside it, and a managed copy (Task 6) is not on the user's `PATH` at all.
 struct CloudCLI: Sendable {
     let executable: URL
     let runner: CommandRunner
     let extra: [String: String]
+    var base: [String: String]?
 
     func run(_ arguments: [String]) async throws -> CommandResult {
-        var env = ProcessInfo.processInfo.environment
+        var env = base ?? InfraToolEnvironment.defaultBase()
         let dir = executable.deletingLastPathComponent().path
         env["PATH"] = [dir, env["PATH"] ?? "/usr/bin:/bin"].joined(separator: ":")
         env.merge(extra) { _, new in new }

@@ -23,6 +23,10 @@ struct InfraMachine: Codable, Equatable, Identifiable, Sendable {
     var instanceID: String?
     var address: String?
     var hourlyUSD: Double?
+    /// When the machine's own TTL fires: AWS's poweroff timer, GCP's `max_run_duration`. Fixed
+    /// at creation, so `deadline` (the controller's) may move later only up to here (plan
+    /// deviation 6). Nil in a record written before it existed, which means `deadline`.
+    var machineDeadline: Date? = nil
     var id: String { name }
 }
 
