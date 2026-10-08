@@ -141,6 +141,7 @@ struct PromptComposer: View {
             // a long message does not push the conversation off screen entirely.
             TextField("Message", text: draft, axis: .vertical)
                 .focused($isFocused)
+                .accessibilityIdentifier("composer-field")
                 .lineLimit(1...6)
                 .textFieldStyle(.plain)
                 .font(.body)

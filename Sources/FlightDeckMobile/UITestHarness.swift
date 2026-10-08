@@ -149,7 +149,7 @@ private struct PromptKeyboardHarness: View {
                                acceptsTypedAnswers: true, activity: "waiting",
                                openPromptCall: .call("toolu_HARNESS"), answerless: false,
                                onAbortBlocked: {}, fromSubagent: nil,
-                               onTypingChange: { typing = $0 })
+                               onHidesComposerChange: { typing = $0 })
                     if !typing { PromptComposer(session: session, model: model) }
                 }
             }
