@@ -45,6 +45,13 @@ enum TailnetMode: Equatable, Sendable {
     case mismatch(local: String, client: String)
 }
 
+/// A cloud machine's node as the Tailscale API lists it: its IPv4 once it has one, and the key
+/// `tailscale lock sign` takes under Tailnet Lock.
+struct TailnetNode: Equatable, Sendable {
+    let address: String?
+    let nodeKey: String?
+}
+
 enum TailnetError: Error, Equatable {
     case unexpectedResponse(String)
     case lockSignFailed
@@ -150,11 +157,20 @@ final class TailnetIntegration: @unchecked Sendable {
         return key
     }
 
-    /// The node's tailnet IPv4, or nil while it has not joined. When a hostname matches more
-    /// than one device, the newest wins: an older one is a previous machine's leftover node.
+    /// The node's tailnet IPv4, or nil while it has not joined.
     func nodeAddress(client: TailscaleOAuthClient, hostname: String) async throws -> String? {
-        let node = try await devices(client, hostname: hostname).max { ($0.created ?? "") < ($1.created ?? "") }
-        return node?.addresses?.first { $0.contains(".") }
+        try await cloudNode(client: client, hostname: hostname)?.address
+    }
+
+    /// The cloud machine's node, or nil while it has not joined. Only a `cloudTag` node counts,
+    /// as for `deleteNode`: one of the user's own devices that happens to share the hostname
+    /// must never become a host's address. When several match, the newest wins: an older one
+    /// is a previous machine's leftover node.
+    func cloudNode(client: TailscaleOAuthClient, hostname: String) async throws -> TailnetNode? {
+        let node = try await devices(client, hostname: hostname)
+            .filter { $0.tags?.contains(Self.cloudTag) == true }
+            .max { ($0.created ?? "") < ($1.created ?? "") }
+        return node.map { TailnetNode(address: $0.addresses?.first { $0.contains(".") }, nodeKey: $0.nodeKey) }
     }
 
     /// The tag every cloud machine joins with (spec §6.1).
@@ -176,6 +192,7 @@ final class TailnetIntegration: @unchecked Sendable {
         let hostname: String
         let addresses: [String]?
         let created: String?
+        let nodeKey: String?
         let tags: [String]?
     }
 

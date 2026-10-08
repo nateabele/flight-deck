@@ -166,4 +166,51 @@ final class CloudAccountsTests: XCTestCase {
                              runner: SystemCommandRunner()).providerEnvironment()
         XCTAssertEqual(env, ["GOOGLE_CLOUD_PROJECT": "example-project", "CLOUDSDK_CORE_PROJECT": "example-project"])
     }
+
+    // MARK: - Task 14 carries
+
+    /// Carry 5: with no profile there is no SSO session to log into, so sign-in says how to
+    /// make one instead of running a login that cannot work.
+    func testAWSSignInWithoutProfilePointsAtConfigureSSO() async throws {
+        let aws = try FakeExecutable.make("aws", script: FakeExecutable.record(to: log))
+        do { try await AWSAccount(aws: aws, profile: nil, runner: SystemCommandRunner()).signIn(); XCTFail() }
+        catch CloudAccountError.failed(let why) { XCTAssertTrue(why.contains("aws configure sso"), why) }
+        XCTAssertEqual(FakeExecutable.calls(log), [], "nothing run")
+    }
+
+    /// Carry 4: a CLI runs with the given base environment (the app's, PATH-repaired from the login
+    /// shell) plus the resolved tool's own variables, its directory leading PATH.
+    func testCLIEnvironmentCarriesTheToolsVariablesAndTheBasePath() async throws {
+        let gc = try FakeExecutable.make("gcloud", script: #"echo "$CLOUDSDK_PYTHON|$PATH" >> '\#(log.path)'; echo token"#)
+        _ = await GCPAccount(gcloud: gc, project: "example-project", runner: SystemCommandRunner(),
+                             environment: ["CLOUDSDK_PYTHON": "/opt/example/python3.12"],
+                             base: ["PATH": "/usr/bin:/bin:/login/shell/bin"]).status()
+        let dir = gc.deletingLastPathComponent().path
+        XCTAssertEqual(FakeExecutable.calls(log), ["/opt/example/python3.12|\(dir):/usr/bin:/bin:/login/shell/bin"])
+    }
+
+    /// Carry 10: the console output shown when a machine never enrolls.
+    func testAWSConsoleOutput() async throws {
+        let aws = try FakeExecutable.make("aws", script: FakeExecutable.record(to: log) + "\necho 'cloud-init: boot log'")
+        let out = await AWSAccount(aws: aws, profile: "dev", runner: SystemCommandRunner())
+            .consoleOutput(instanceID: "i-0abc", region: "us-east-1")
+        XCTAssertEqual(out, "cloud-init: boot log")
+        XCTAssertEqual(FakeExecutable.calls(log),
+                       ["ec2 get-console-output --instance-id i-0abc --latest --output text --region us-east-1 --profile dev"])
+    }
+
+    func testGCPConsoleOutputFromTheInstanceID() async throws {
+        let gc = try FakeExecutable.make("gcloud", script: FakeExecutable.record(to: log) + "\necho 'serial: boot log'")
+        let out = await GCPAccount(gcloud: gc, project: "example-project", runner: SystemCommandRunner())
+            .consoleOutput(instanceID: "projects/example-project/zones/us-central1-b/instances/fd-gpu-0a1b", region: "us-central1")
+        XCTAssertEqual(out, "serial: boot log")
+        XCTAssertEqual(FakeExecutable.calls(log),
+                       ["compute instances get-serial-port-output fd-gpu-0a1b --zone us-central1-b --project example-project"])
+    }
+
+    func testConsoleOutputIsNilWhenTheCLIFails() async throws {
+        let aws = try FakeExecutable.make("aws", script: "echo denied >&2; exit 255")
+        let out = await AWSAccount(aws: aws, profile: nil, runner: SystemCommandRunner()).consoleOutput(instanceID: "i-1", region: "us-east-1")
+        XCTAssertNil(out)
+    }
 }

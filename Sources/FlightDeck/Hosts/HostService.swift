@@ -17,6 +17,13 @@ enum HostPairingError: Error, Equatable {
     case cancelled
 }
 
+/// Why `HostService.enroll` did not add a host.
+enum HostEnrollError: Error, Equatable {
+    /// A paired host already has this name. Enrollment never renames ("gpu-2"): the name is
+    /// the one the repo's `[infra.<name>]` and `run --on` use, so a rename would strand them.
+    case nameInUse(String)
+}
+
 /// Owns the host registry and one `HostLink` per paired host, and pairs new ones.
 @MainActor
 final class HostService: ObservableObject {
@@ -151,6 +158,29 @@ final class HostService: ObservableObject {
     /// Ends any pairing in flight; its `pair` call throws `.cancelled`.
     func cancelPairing() {
         settlePairing(.failure(HostPairingError.cancelled))
+    }
+
+    /// Adds a host whose key this Mac minted itself (a cloud machine enrolled through its
+    /// user-data), so there is no pairing exchange. `endpoints` may be empty while the machine
+    /// has no address yet; `setEndpoints` supplies it once it does.
+    @discardableResult
+    func enroll(key: FleetDeviceKey, name: String, endpoints: [String]) throws -> HostRecord {
+        if case .success = registry.resolve(name: name) { throw HostEnrollError.nameInUse(name) }
+        return try adopt((key, "fd-\(name)", name, endpoints))
+    }
+
+    /// Replaces a host's addresses and redials: a link only reads its endpoints when it races,
+    /// so one started with none would otherwise keep browsing Bonjour for a cloud machine that
+    /// is never on this network.
+    func setEndpoints(slot: UUID, _ endpoints: [String]) {
+        guard var record = registry.hosts.first(where: { $0.slot == slot }) else { return }
+        record.endpoints = Array(endpoints.prefix(HostRecord.maxEndpoints))
+        save(record)
+        guard let key = registry.key(for: slot), let link = links.removeValue(forKey: slot) else { return }
+        link.onStateChange = nil
+        link.onEndpointsChanged = nil
+        link.stop()
+        open(record, key: key)
     }
 
     /// Works while the host is offline. The host keeps our slot until someone revokes it there.
