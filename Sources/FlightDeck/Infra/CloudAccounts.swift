@@ -76,6 +76,18 @@ protocol CloudAccount: Sendable {
     func deleteOwned(_ resource: OwnedResource) async throws
 }
 
+/// What asking to turn on the Compute Engine API came to (spec §9, GCP sign-in).
+enum ComputeAPIResult: Equatable, Sendable {
+    case enabled
+    /// This account may not enable services; the API's console page, where an owner can.
+    case needsConsole(URL)
+}
+
+/// A GCP account, which needs the Compute Engine API on before anything can be created.
+protocol ComputeAPIEnabling: Sendable {
+    func enableComputeAPI() async throws -> ComputeAPIResult
+}
+
 /// The environment every cloud tool runs with: the app's own, its PATH repaired from the login
 /// shell (an app launched from the Dock has launchd's bare PATH, which finds neither a Homebrew
 /// Python for gcloud nor a credential helper), then the resolved tool's own variables

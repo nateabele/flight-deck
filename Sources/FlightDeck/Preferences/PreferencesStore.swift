@@ -139,6 +139,16 @@ final class PreferencesStore: ObservableObject {
         preferences.capacity = next
     }
 
+    /// Settings → Cloud, defaults filled. A read, like `capacity`.
+    var cloud: CloudPreferences { preferences.cloud ?? CloudPreferences() }
+
+    /// One edit, one write, like `updateCapacity`.
+    func updateCloud(_ edit: (inout CloudPreferences) -> Void) {
+        var next = cloud
+        edit(&next)
+        preferences.cloud = next
+    }
+
     /// The account a new session for `agent` in `project` launches under. nil is BROKEN — an
     /// explicit assignment that no longer resolves must never silently become another login.
     func account(for agent: AgentID, project: String) -> AgentAccount? {

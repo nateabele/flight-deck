@@ -417,6 +417,32 @@ an in-process `DarwinHostServer`, real processes in temp repos, including `logs`
 relaunch and a real service downed by a shortened orphan timeout) and, against the Linux hostd in a
 container, by `test-hostd-linux-interop.sh run`. Neither has crossed to a real second machine.
 
+## Cloud machines in the app (Settings → Cloud, `Sources/FlightDeck/Infra/`)
+
+`FlightDeckApp.init` builds `InfraService` eagerly, beside `HostService`, through
+`InfraLive.wire`: files beside `sessions.json` (`infra.json`, `infra-ledger.json`,
+`infra-prices.json`, `infra-controller.json`, `infra/` work directories, `tools/`), both clouds as
+`LiveCloudAccount`s that resolve their CLI on first use (never at launch, where the login-shell
+search path would block main) and read the profile/project from `CloudChoices`, a lock-guarded copy
+of `Preferences.cloud` kept current by a sink. It then starts the `Reaper` and runs
+`resumeAfterLaunch()`, and `makeFleetService` sets `FleetService.infra` before either socket starts.
+The controller id behind the `flightdeck-owner` label is a UUID minted once into
+`infra-controller.json`, not the preferences' `installID`: Debug and Release share that defaults
+domain but not a state directory, so a shared id would make each build's orphan scan offer the
+other's machines. Public mode's address is `checkip.amazonaws.com` (5 s), accepted only as a dotted
+quad. Under `-FlightDeckResetState` the same wiring uses a scratch directory, an empty tool search
+path, in-memory Tailscale secrets and no Reaper or resume.
+
+Settings → Cloud (`CloudSettingsTab`) edits `CloudPreferences` (AWS profile from `~/.aws/config`,
+GCP project, the regions the setup sheet uses, `BudgetSettings`), shows the tailnet mode and lists
+machines with their §8.4 cost line and a Down button. Settings → Hosts badges a host that is an
+infra machine with its rate and spend. **Set Up…** opens `CloudSetupSheet` over
+`CloudSetupModel` (spec §9): every step is a live check plus its automation, and every effect
+(open URL, clipboard, copy, the delegated `uname -a` of the test step) is an injected closure. The
+OAuth client is created by hand (probe P1: the API cannot create one), from a two-item checklist
+and Paste from Clipboard; the policy step diffs with `HuJSONPatcher` and writes with the fetched
+`ETag`, falling back to copying `HuJSONPatcher.snippet` and opening the policy editor.
+
 ## Preferences
 
 `Sources/FlightDeck/Preferences/` holds a pure core and a SwiftUI shell over it.

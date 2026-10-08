@@ -68,4 +68,20 @@ final class CostModelTests: XCTestCase {
         XCTAssertFalse(CostModel.globMatches("m6i.*large", "m6i.metal"))
         XCTAssertFalse(CostModel.globMatches("t3.*", "t3a.micro"))
     }
+
+    /// A budget saved before a field existed keeps every value it has; only the missing field
+    /// takes its default. A cap reset to the default would silently raise a user's lower one.
+    func testAnOldBudgetBlobKeepsItsValues() throws {
+        let old = #"{"monthlyCapUSD": 20, "warnFraction": 0.9, "maxConcurrent": 1, "maxTTL": {"seconds": 3600}}"#
+        let b = try JSONDecoder().decode(BudgetSettings.self, from: Data(old.utf8))
+        XCTAssertEqual(b.monthlyCapUSD, 20)
+        XCTAssertEqual(b.warnFraction, 0.9)
+        XCTAssertEqual(b.maxConcurrent, 1)
+        XCTAssertEqual(b.maxTTL, Duration(seconds: 3600))
+        XCTAssertNil(b.perMachineCapUSD, "an absent optional cap is no cap, as it was saved")
+        XCTAssertEqual(b.maxIdle, BudgetSettings.default.maxIdle)
+        XCTAssertEqual(b.allowedTypes, BudgetSettings.default.allowedTypes)
+        let round = try JSONDecoder().decode(BudgetSettings.self, from: JSONEncoder().encode(BudgetSettings.default))
+        XCTAssertEqual(round, .default)
+    }
 }
