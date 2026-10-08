@@ -288,7 +288,7 @@ public final class DelegationHostServices: @unchecked Sendable {
     /// Pipes until both directions have ended, with backpressure both ways: the next read on
     /// either side waits until the last chunk has been written to the other.
     ///
-    /// The half-close rules (C5's fix, applied host side):
+    /// The half-close rules (the controller's port forwarder's, applied host side):
     ///   - EOF in one direction half-closes the other side (`finish`, `shutdown(SHUT_WR)`) and
     ///     leaves the other direction running, so a client that half-closes after its request
     ///     still reads the reply.

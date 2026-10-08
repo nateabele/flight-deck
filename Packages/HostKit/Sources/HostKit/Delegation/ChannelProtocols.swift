@@ -22,7 +22,7 @@ import Foundation
 // controller, which then names its id in the request; the host claims it with
 // `ChannelAccepting.accept`.
 //
-// Rules both muxes follow (C1 implements them; each names the failure it prevents):
+// Rules both muxes follow (`ChannelMux` implements them; each names the failure it prevents):
 //   - A credit frame is an additive increment, never an absolute window: frames can cross in
 //     flight, and an absolute value would let a stale grant shrink or double the window.
 //   - Odd ids belong to the controller, even ids to the host, and no id is reused on a
@@ -40,7 +40,7 @@ import Foundation
 
 public typealias ChannelID = UInt32
 
-/// One open channel. Implemented by the mux (track C1); consumed by sync, runs and ports.
+/// One open channel. Implemented by `ChannelMux`'s channels; consumed by sync, runs and ports.
 public protocol ByteChannel: AnyObject, Sendable {
     var id: ChannelID { get }
     /// Suspends while the peer has granted no credit, so a slow reader backs up its writer

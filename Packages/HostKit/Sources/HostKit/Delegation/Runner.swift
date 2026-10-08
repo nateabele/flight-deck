@@ -81,7 +81,7 @@ public enum RunPhase: Sendable, Equatable {
 }
 
 /// What happens to a run's checkout slot when it ends, injected because the slot belongs to
-/// `WorkspaceStore` (track C2). Both run before the run reports its exit, and `atExit` runs
+/// `WorkspaceStore` (`Workspace`). Both run before the run reports its exit, and `atExit` runs
 /// before `release`: once the slot is released the next run's checkout wipes the tree, so a
 /// result commit or an artifact taken after that would capture someone else's files.
 public struct RunLifecycle: Sendable {

@@ -1,7 +1,8 @@
 import Foundation
 
-// `.flightdeck/delegate.toml` (spec §8), as parsed. The parser, validation and route matching
-// are track C4's; these are the values every other track reads.
+// `.flightdeck/delegate.toml` (spec §8), as parsed. Parsing and validation are
+// `DelegateConfigParser`'s and route matching `RouteMatcher`'s; these are the values the rest
+// of delegation reads.
 
 public struct DelegateConfig: Sendable, Equatable {
     public var defaultHost: String?

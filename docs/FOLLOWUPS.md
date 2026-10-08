@@ -2742,7 +2742,9 @@ container; **nothing has run against a real second machine.**
   47410, Settings → Hosting. Before, `docker run` failed with exit 125 and left a Created container
   behind, because the cleanup trap is armed only after it.
 - The HostKit `Delegation/*` file headers still say "Implemented by track Cn", which means nothing
-  after the merge.
+  after the merge. **FIXED (2026-10-08):** each now names the type that implements it
+  (`Runner`, `ChannelMux`, `DelegateConfigParser`, `Workspace`…); `HostServerCore`'s `send(binary:)`
+  note too.
 
 ## Hidden tabs and idle polling CPU (2026-10-05)
 

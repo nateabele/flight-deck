@@ -1,8 +1,8 @@
 import Foundation
 
 // Runs (spec §6): a command in its own process group on the host, with its output spooled so
-// a dropped controller can reattach from an offset. Implemented by track C3; the host router
-// and `DelegationService` consume it. Codecs for the enums live in `DelegationWire.swift`.
+// a dropped controller can reattach from an offset. Implemented by `Runner` and `OutputSpool`;
+// the host router (`DelegationHost`) and `DelegationService` consume it. Codecs for the enums live in `DelegationWire.swift`.
 
 /// What to run, as the controller resolved it from the CLI and the recipe.
 public struct RunSpec: Codable, Sendable, Equatable {
@@ -176,7 +176,7 @@ public struct LeaseHolderOwner: Sendable, Equatable {
     }
 }
 
-/// The host's runner (track C3).
+/// The host's runner; `Runner` is the real one.
 public protocol RunControlling: Sendable {
     /// Registers `spec` and returns its run id at once, before it holds a slot: a run waiting
     /// on the screen or a busy pool must already be nameable, so the controller can attach,
