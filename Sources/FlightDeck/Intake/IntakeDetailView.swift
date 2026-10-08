@@ -809,14 +809,22 @@ struct IntakeDetailView: View {
     /// sits outside the ScrollView every other inspector shares.
     private var inspector: some View {
         PlanFocusReader(notes: notes) { planFocused in
-            let content = DetailLayout.inspector(for: intake.state, preset: selectedPreset, planFocused: planFocused)
+            // A selection only counts while its round is in flight: once the run pauses the
+            // inspector goes back to the Rounds editor, the thing there is to change.
+            let content = DetailLayout.inspector(for: intake.state, preset: selectedPreset, planFocused: planFocused,
+                                                 seatSelected: selectedSeat != nil && tape?.roundInProgress != nil)
             if content == .notesRail {
                 notesRailSlot
             } else {
                 ScrollView {
                     Group {
                         switch content {
-                        case .roundsEditor: roundsEditor
+                        case .roundsEditor:
+                            if intake.state == .shaping {
+                                ShapingRoundsPanel(service: service, intake: intake)
+                            } else {
+                                roundsEditor
+                            }
                         case .seat: seatInspector
                         case .notesRail: EmptyView()
                         case .nothing:

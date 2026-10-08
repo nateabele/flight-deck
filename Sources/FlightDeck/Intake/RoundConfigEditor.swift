@@ -50,6 +50,12 @@ struct RoundConfigEditor: View {
     /// codex's own `model/list`, when routing has already fetched it this launch — never
     /// fetched from here, since that spawns an app-server.
     var codexListedModels: [String] = []
+    /// Set once shaping has started: which agents already ran (shown disabled, "already ran")
+    /// and the tape's extend/trim counters, which the caps are shown and saved against. nil
+    /// before shaping, where every field is open and a cap is just the cap.
+    var shaping: ShapingEdit?
+    /// While a round runs: the whole panel shows, disabled (`DetailLayout.RoundsEditing`).
+    var readOnly = false
 
     var body: some View {
         // The whole inspector panel, under a plain title: a disclosure here would be a second
@@ -63,7 +69,11 @@ struct RoundConfigEditor: View {
             Divider()
             capsForm
         }
+        .disabled(readOnly)
     }
+
+    /// The caption beside an agent whose stages have all run.
+    static let alreadyRan = "already ran"
 
     /// Spec §3.9. No settings URL: those pages move.
     static let dataUseNote = "Check Google's data settings before using Gemini agents on private repos."
@@ -83,6 +93,7 @@ struct RoundConfigEditor: View {
         return VStack(alignment: .leading, spacing: 12) {
             ForEach(Array(rows.enumerated()), id: \.element.keyPath) { index, row in
                 if let choice = Self.choice(for: row.keyPath, in: config) {
+                    let ran = shaping?.isLocked(row.keyPath) == true
                     if index > 0 { Divider() }
                     VStack(alignment: .leading, spacing: 6) {
                         HStack(alignment: .firstTextBaseline, spacing: 6) {
@@ -92,6 +103,9 @@ struct RoundConfigEditor: View {
                             Text(UIText.sentenceCase(UIText.roleName(row.role))).font(.callout.weight(.semibold))
                             if let persona = row.persona, persona != .general {
                                 Text(persona.rawValue).font(.caption).foregroundStyle(.secondary)
+                            }
+                            if ran {
+                                Text(Self.alreadyRan).font(.caption).foregroundStyle(.secondary)
                             }
                         }
                         HStack(spacing: 8) {
@@ -122,13 +136,15 @@ struct RoundConfigEditor: View {
                                 .font(.caption).foregroundStyle(.secondary)
                         }
                     }
+                    // Its stages are on the tape: a change would reach no round that runs.
+                    .disabled(ran)
                 }
                 // Directly under the reviewer row (spec: coverage §8) rather than folded into
                 // its own block above — the policy can be live with no crossReviewer row yet
                 // showing (nothing seeded), so it can't be gated on `Self.choice(for:)` the way
                 // every other row is.
                 if row.keyPath == .reviewer, config.reviewer != nil {
-                    crossCheckPicker
+                    crossCheckPicker.disabled(shaping?.isLocked(.reviewer) == true)
                 }
             }
         }
@@ -241,20 +257,23 @@ struct RoundConfigEditor: View {
         Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 6) {
             GridRow {
                 Text("Refinement cap").foregroundStyle(.secondary)
-                Stepper("\(config.refinementCap)", value: refinementCapBinding, in: 0...12)
+                Stepper("\(refinementCapBinding.wrappedValue)", value: refinementCapBinding,
+                        in: (shaping?.refinementFloor ?? 0)...max(12, refinementCapBinding.wrappedValue))
+                    .disabled(shaping?.refineDone == true)
             }
             // Polish, fresh eyes and dedup are all seated by the polisher; with none, these
             // controls would promise rounds the planner never runs (`TapePlanner.sequence`).
             GridRow {
                 Text("Polish cap").foregroundStyle(.secondary)
-                Stepper("\(config.polishCap)", value: polishCapBinding, in: 0...12)
-                    .disabled(!Self.polishControlsEnabled(config))
+                Stepper("\(polishCapBinding.wrappedValue)", value: polishCapBinding,
+                        in: (shaping?.polishFloor ?? 0)...max(12, polishCapBinding.wrappedValue))
+                    .disabled(!Self.polishControlsEnabled(config) || shaping?.polishDone == true)
             }
             .help(Self.polishControlsHelp(config))
             GridRow {
                 Text("Fresh eyes + dedup").foregroundStyle(.secondary)
                 Toggle("", isOn: freshEyesBinding).labelsHidden()
-                    .disabled(!Self.polishControlsEnabled(config))
+                    .disabled(!Self.polishControlsEnabled(config) || shaping?.freshEyesDone == true)
             }
             .help(Self.polishControlsHelp(config))
             GridRow {
@@ -307,12 +326,22 @@ struct RoundConfigEditor: View {
         )
     }
 
+    /// While shaping, the rounds the stage will run — cap plus the tape's extend/trim counter —
+    /// so the number agrees with the board's bracket; the cap saved is the one that gives it
+    /// (`ShapingEdit.settingRefinementTotal`), and a + already pressed is never counted twice.
     private var refinementCapBinding: Binding<Int> {
-        Binding(get: { config.refinementCap }, set: { newValue in config = Self.setting(config) { $0.refinementCap = newValue } })
+        Binding(get: { shaping?.refinementTotal(config) ?? config.refinementCap },
+                set: { newValue in
+                    config = shaping?.settingRefinementTotal(config, to: newValue)
+                        ?? Self.setting(config) { $0.refinementCap = newValue }
+                })
     }
 
     private var polishCapBinding: Binding<Int> {
-        Binding(get: { config.polishCap }, set: { newValue in config = Self.setting(config) { $0.polishCap = newValue } })
+        Binding(get: { shaping?.polishTotal(config) ?? config.polishCap },
+                set: { newValue in
+                    config = shaping?.settingPolishTotal(config, to: newValue) ?? Self.setting(config) { $0.polishCap = newValue }
+                })
     }
 
     private var freshEyesBinding: Binding<Bool> {
