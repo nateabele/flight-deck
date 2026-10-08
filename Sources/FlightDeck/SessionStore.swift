@@ -5694,6 +5694,9 @@ final class SessionStore: ObservableObject {
         for id in ids { setUnread(id, true) }
     }
 
+    /// Test seam: what `flushPluginReloads`' `onSent` records, without driving a terminal.
+    func pluginReloadSentForTesting(_ id: UUID) { pluginReload.sent(id, at: now()) }
+
     /// Test seam. Production leaves this nil and injection goes to the live surface.
     var injectorOverride: TextInjecting?
 
@@ -7440,7 +7443,10 @@ final class SessionStore: ObservableObject {
                 into: id,
                 // Re-asked after the settle: a turn that started meanwhile makes it wait.
                 stillWanted: { [weak self] in self?.pluginReloadsDue().contains(id) ?? false },
-                onSent: { [weak self] in self?.pluginReload.sent(id) }
+                onSent: { [weak self] in
+                    guard let self else { return }
+                    self.pluginReload.sent(id, at: self.now())
+                }
             )
         }
     }
@@ -8658,6 +8664,8 @@ final class SessionStore: ObservableObject {
         // "active N min ago" even on a tick whose published fields end up equal.
         let stamp = now()
         for (id, status) in next where previous[id]?.activity != status.activity {
+            // Flight Deck's own `/reload-plugins` is not activity the row should report.
+            if pluginReload.masks(id, from: previous[id]?.activity, to: status.activity, now: stamp) { continue }
             lastActiveAtByID[id] = stamp
         }
         let previousOpenPromptAgents = openPromptAgents
@@ -8776,7 +8784,9 @@ final class SessionStore: ObservableObject {
         // check.
         emitActivity(transitions, backgroundWorkChanged: backgroundWorkChanged,
                      openPromptChanged: openPromptChanged)
-        applyReadState(transitions)
+        applyReadState(transitions, now: stamp)
+        // After `applyReadState`, which still needs the window this tick may close.
+        pluginReload.settle(transitions, now: stamp)
         deliverNotifications(transitions)
         cancelSupersededPrompts(transitions)
         // Below the three-axis guard above, so this writes only on a real transition — a
@@ -8788,9 +8798,12 @@ final class SessionStore: ObservableObject {
     }
 
     /// One read/unread decision per session, over every edge this tick produced.
-    private func applyReadState(_ transitions: [StatusTransition]) {
+    private func applyReadState(_ transitions: [StatusTransition], now: Date) {
         let active = appIsActive()
         for transition in transitions {
+            // The reload blip finished nothing the user missed, and saw nothing they watched.
+            if pluginReload.masks(transition.id, from: transition.old?.activity,
+                                  to: transition.new?.activity, now: now) { continue }
             switch SessionReadPolicy.change(
                 old: transition.old, new: transition.new,
                 // `selectedProjectID == nil` matters as much as the session match: while a

@@ -15,8 +15,20 @@ import Foundation
 /// existing gated `inject`, which refuses a dialog and an unreadable screen. That gate admits a
 /// busy composer, though, and whether claude runs a `/reload-plugins` queued mid-turn as a
 /// command is unprobed. So the caller asks only while the tab is idle.
+///
+/// **It must not look like work.** Measured against Claude Code 2.1.293: the command flips the
+/// tab's registry row to `busy` for about 90 ms and back to `idle`. A poll that lands inside
+/// that blip reads it as a finished turn, which marks the tab unread and resets its "active N
+/// min ago". The store typed the command into a tab it knew was idle, so it owns that blip:
+/// `sent` opens a short quiet window, and `masks` names the idle/busy edges inside it that the
+/// store must not stamp or mark. The window is a safety bound, not the signal. A busy spell
+/// that outlives it is real work and goes through as usual.
 struct PluginReload {
     static let command = "/reload-plugins"
+
+    /// How long after the command a tab's idle/busy edges count as the reload's own. About
+    /// fifty times the measured blip; most blips fall between polls and are never seen at all.
+    static let quietWindow: TimeInterval = 5
 
     /// The `UserDefaults` key holding the plugin fingerprint the previous app run of this
     /// build shipped. Per build because Debug and Release share one defaults domain but not
@@ -30,6 +42,9 @@ struct PluginReload {
     /// registry ticks find it idle before the injection lands.
     private(set) var pending: Set<UUID>
 
+    /// Tabs whose reload blip may still be on its way, with when the quiet window closes.
+    private(set) var quietUntil: [UUID: Date] = [:]
+
     /// `adopted` are the tabs whose claude was already running when this app run started.
     /// A tab this run launches loads the current plugin itself, and never belongs here.
     init(adopted: some Sequence<UUID>, pluginChanged: Bool) {
@@ -40,10 +55,37 @@ struct PluginReload {
 
     /// Called from `inject`'s `onSent`, never before: a drive that unwound typed nothing, and
     /// the tab must stay pending so the next idle tick retries it.
-    mutating func sent(_ id: UUID) { pending.remove(id) }
+    mutating func sent(_ id: UUID, at now: Date) {
+        pending.remove(id)
+        quietUntil[id] = now.addingTimeInterval(Self.quietWindow)
+    }
 
     /// A relaunched or closed tab no longer has a stale claude to reload.
-    mutating func forget(_ id: UUID) { pending.remove(id) }
+    mutating func forget(_ id: UUID) {
+        pending.remove(id)
+        quietUntil.removeValue(forKey: id)
+    }
+
+    /// Whether this edge is the reload's own blip: idle to busy or busy to idle, inside the
+    /// tab's quiet window. A `waiting` edge is never masked, since a dialog wants the user.
+    func masks(_ id: UUID, from old: SessionActivity?, to new: SessionActivity?, now: Date) -> Bool {
+        guard let until = quietUntil[id], now < until else { return false }
+        let blip: Set<SessionActivity?> = [.idle, .busy]
+        return old != new && blip.contains(old) && blip.contains(new)
+    }
+
+    /// Closes the windows this tick finished: the blip landed back on idle, the tab reached
+    /// something other than idle or busy, or the window ran out.
+    mutating func settle(_ transitions: [StatusTransition], now: Date) {
+        for transition in transitions where quietUntil[transition.id] != nil {
+            switch transition.new?.activity {
+            case .busy: continue
+            case .idle: if transition.old?.activity == .busy { quietUntil.removeValue(forKey: transition.id) }
+            case .waiting, nil: quietUntil.removeValue(forKey: transition.id)
+            }
+        }
+        quietUntil = quietUntil.filter { now < $0.value }
+    }
 
     /// A digest of every file under the plugin: path and bytes. A skill, hook script or
     /// manifest change all count, since `/reload-plugins` is what picks up any of them.
