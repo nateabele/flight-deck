@@ -19,14 +19,19 @@ enum EnrollCommand {
     struct Outcome: Equatable {
         let exitCode: Int32
         let message: String
+        /// Said on stderr whatever the exit code: a spent file that could not be deleted.
+        var warnings: [String] = []
     }
 
     static let clockWait: TimeInterval = 120
     static let clockRetry: TimeInterval = 5
 
-    /// `now` and `sleep` are injected so the clock wait is testable without sleeping.
+    /// `now` and `sleep` are injected so the clock wait is testable without sleeping, and
+    /// `remove` so the undeletable-file warning is: the test container runs as root, which
+    /// deletes from a directory it has no write bit on, so no on-disk setup reaches that path.
     static func run(file: URL, now: () -> Date = Date.init,
                     sleep: (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) },
+                    remove: (URL) throws -> Void = { try FileManager.default.removeItem(at: $0) },
                     send: (AdminRequest) -> AdminReply) -> Outcome {
         let payload: EnrollmentPayload
         do {
@@ -48,16 +53,16 @@ enum EnrollCommand {
                 return Outcome(exitCode: 1, message: "enrollment is not valid yet: this machine's clock is behind "
                     + "the controller's (issued \(payload.issuedAt), now \(now())); kept \(file.path) to retry")
             } catch let error as EnrollmentError {
-                if error == .expired { remove(file) }
-                return Outcome(exitCode: 1, message: "enrollment \(LinuxHostd.describe(error))")
+                let warnings = error == .expired ? spend(file, remove: remove) : []
+                return Outcome(exitCode: 1, message: "enrollment \(LinuxHostd.describe(error))", warnings: warnings)
             } catch {
                 return Outcome(exitCode: 1, message: "enrollment refused: \(error)")
             }
         }
         switch send(.enroll(payload)) {
         case .ok:
-            remove(file)
-            return Outcome(exitCode: 0, message: "enrolled \(payload.controllerName) in slot \(payload.slot.uuidString)")
+            return Outcome(exitCode: 0, message: "enrolled \(payload.controllerName) in slot \(payload.slot.uuidString)",
+                           warnings: spend(file, remove: remove))
         case .failed(let message):
             return Outcome(exitCode: 1, message: message)
         case let other:
@@ -66,11 +71,10 @@ enum EnrollCommand {
     }
 
     /// A spent file that survives still holds a controller's secret, so failing to delete it is
-    /// worth saying, though the enrollment itself stands.
-    private static func remove(_ file: URL) {
-        do { try FileManager.default.removeItem(at: file) } catch {
-            FileHandle.standardError.write(Data(
-                "flightdeck-hostd: warning: could not delete \(file.path): \(error)\n".utf8))
+    /// worth saying, though the outcome itself stands: an enroll still exits 0.
+    private static func spend(_ file: URL, remove: (URL) throws -> Void) -> [String] {
+        do { try remove(file); return [] } catch {
+            return ["could not delete \(file.path): \(error); it still holds a controller's secret, so delete it by hand"]
         }
     }
 }

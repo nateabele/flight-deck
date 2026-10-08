@@ -123,6 +123,9 @@ case "enroll":
     guard let path = option("--file", in: args) else { usage() }
     let root = stateRoot(args)
     let outcome = EnrollCommand.run(file: URL(fileURLWithPath: path)) { adminRequest($0, root: root) }
+    for warning in outcome.warnings {
+        FileHandle.standardError.write(Data("flightdeck-hostd: warning: \(warning)\n".utf8))
+    }
     if outcome.exitCode == 0 { say(outcome.message) } else { fail(outcome.message, code: outcome.exitCode) }
 case "echo":
     let gate = gateKey(args)

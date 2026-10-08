@@ -204,6 +204,43 @@ final class EnrollCommandTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
     }
 
+    /// What `FileManager.removeItem` throws when the file's directory is not writable. Injected
+    /// rather than staged on disk: the test container runs as root, which deletes from a 0500
+    /// directory anyway, so a real read-only directory would never exercise this path there.
+    private static func notPermitted(_ url: URL) throws {
+        throw CocoaError(.fileWriteNoPermission,
+                         userInfo: [NSFilePathErrorKey: url.path, NSUnderlyingErrorKey: POSIXError(.EACCES)])
+    }
+
+    /// The enrollment stands even when its spent file cannot be deleted (a tmpfs remounted
+    /// read-only, a file written by another user): exit 0, but say the secret is still on disk.
+    func testUndeletableFileAfterEnrollWarnsAndStillSucceeds() throws {
+        let p = payload(), url = try file(p)
+        var removed: [URL] = []
+        let out = EnrollCommand.run(file: url, remove: { removed.append($0); try Self.notPermitted($0) }) { _ in .ok }
+        XCTAssertEqual(out.exitCode, 0, out.message)
+        XCTAssertEqual(removed, [url])
+        XCTAssertEqual(out.warnings.count, 1)
+        let warning = try XCTUnwrap(out.warnings.first)
+        XCTAssertTrue(warning.hasPrefix("could not delete \(url.path): "), warning)
+        XCTAssertTrue(warning.contains("still holds a controller's secret"), warning)
+    }
+
+    func testUndeletableExpiredFileWarnsToo() throws {
+        let url = try file(payload(issued: Date(timeIntervalSinceNow: -3600)))
+        let out = EnrollCommand.run(file: url, remove: Self.notPermitted) { _ in XCTFail("sent"); return .ok }
+        XCTAssertEqual(out.exitCode, 1)
+        XCTAssertTrue(out.message.contains("expired"), out.message)
+        XCTAssertEqual(out.warnings.count, 1)
+        let warning = try XCTUnwrap(out.warnings.first)
+        XCTAssertTrue(warning.hasPrefix("could not delete \(url.path): "), warning)
+    }
+
+    func testDeletedFileHasNoWarning() throws {
+        let url = try file(payload())
+        XCTAssertEqual(EnrollCommand.run(file: url) { _ in .ok }.warnings, [])
+    }
+
     func testExpiredIsDeletedWithoutAskingHostd() throws {
         let url = try file(payload(issued: Date(timeIntervalSinceNow: -3600)))
         let out = EnrollCommand.run(file: url) { _ in XCTFail("sent"); return .ok }
