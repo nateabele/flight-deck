@@ -692,8 +692,8 @@ only on the machine the work was done on.
 ## Agents
 
 `Sources/FlightDeck/Agents/` is the per-agent adapter protocol referenced from "Session
-status pipeline" above — `AgentAdapter`, implemented by `ClaudeAdapter`, `CodexAdapter`, and
-the stubs `GrokAdapter` and `GeminiAdapter`, dispatched through the `AgentID` switch rather
+status pipeline" above — `AgentAdapter`, implemented by `ClaudeAdapter`, `CodexAdapter`,
+`GeminiAdapter` (`Agents/Gemini/`, driving the Antigravity CLI `agy`) and the stub `GrokAdapter`, dispatched through the `AgentID` switch rather
 than held as an existentially typed value. Each supplies its own runtime, dialog driver, turn
 recovery and timeline mapper.
 
@@ -704,8 +704,8 @@ storage format, and files keep the JSON key `harness` wherever they used it. Eac
 `static var profile` is the agent's headless facet — the same `AgentProfile` the runner gets
 from `AgentProfiles.profile(for:)`. `AgentID.tabReady` gates every surface that opens a tab
 (the agent list behind the New Session menus and ⌘N, a project's default-agent picker,
-`RoutingCapabilityRegistry.standard()`, `SwarmSpawner`); grok and gemini are planning-only
-until their adapters are real. The headless types are `HeadlessRequest`, `HeadlessCommand`,
+`RoutingCapabilityRegistry.standard()`, `SwarmSpawner`); grok is planning-only until its
+adapter is real. The headless types are `HeadlessRequest`, `HeadlessCommand`,
 `HeadlessOutput`, `HeadlessSession` (`Sources/IntakeKit/Headless.swift`).
 
 **Accounts and pools are one list.** `AccountList` (`Agents/AccountList.swift`, stored as
@@ -727,6 +727,19 @@ agent that cannot support a capability is refused it at one site instead of scat
 predicate that could disagree with the implementation. `turnRecovery` additionally decides,
 per agent, which of its own error vocabulary is worth retrying — see "API-error auto-retry"
 in [FOLLOWUPS.md](FOLLOWUPS.md) for the codex allowlist and its fail-closed default.
+
+**Gemini learns its identity after launch.** agy cannot be told a conversation id: it mints
+one on the first submit (and on `/clear`), and answers `--conversation=<unknown>` by silently
+minting a fresh one. So a gemini tab is born pinned to its own id, `resumeCommand` resumes only
+an id that has a step store (`conversations/<id>.db`), and `GeminiRuntime` re-pins the tab
+(`AgentEvent.rebound`) to whichever `presence/<id>.lock` a process in the tab's own tree
+(its fd-abduco daemon or its surface's shell) holds open — per-tab, so concurrent launches
+cannot cross. Status comes from agy's own files, read-only, with nothing installed into agy:
+busy/idle from `conversation_summaries.status`, waiting from a WAITING row in the step store
+(which `GeminiOpenPromptReader` also reads — agy never writes a waiting step to its JSONL), the
+title from `annotations/<id>.pbtxt`. Quota is `agy -p /usage --output-format json` (no tokens),
+run only after `agy models` confirms agy is signed in. Deny on an agy dialog is its last row,
+never Escape, which cancels the whole turn.
 
 ## Tab navigation
 

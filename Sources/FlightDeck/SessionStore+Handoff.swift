@@ -11,7 +11,10 @@ extension AgentID {
         switch self {
         case .claude: return "/exit"
         case .codex: return "/quit"
-        case .grok, .gemini: return nil
+        // agy has no exit slash command anyone has verified — it leaves on Ctrl-C pressed twice,
+        // which is a key sequence, not a message `submitPrompt` can type.
+        case .gemini: return nil
+        case .grok: return nil
         }
     }
 }

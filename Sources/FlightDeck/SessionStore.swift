@@ -1056,7 +1056,7 @@ final class SessionStore: ObservableObject {
         case .grok:
             adapter = GrokAdapter()
         case .gemini:
-            adapter = GeminiAdapter()
+            adapter = GeminiAdapter(paths: geminiPaths)
         }
         adapters[instance] = adapter
         return adapter
@@ -1084,8 +1084,19 @@ final class SessionStore: ObservableObject {
         switch instance.agent {
         case .codex:
             return makeCodexStackIfNeeded(account: instance.account).runtime
-        case .grok, .gemini:
-            // Nothing to observe until Tracks G/M build a runtime; see `UnobservedAgentRuntime`.
+        case .gemini:
+            // agy's identity, liveness and status are read off its own files, scoped to the
+            // processes THIS tab owns: its fd-abduco daemon (a detached session is not a
+            // descendant of its surface) and its surface's shell. See `GeminiRuntime`.
+            let runtime = GeminiRuntime(clock: clock, paths: geminiPaths, roots: { [weak self] tab in
+                guard let self else { return [] }
+                return [self.daemonControl.daemonPID(tab), self.processRegistry.process(for: tab)?.identity.pid]
+                    .compactMap { $0 }
+            })
+            runtimes[instance] = runtime
+            return runtime
+        case .grok:
+            // Nothing to observe until Track G builds a runtime; see `UnobservedAgentRuntime`.
             let runtime = UnobservedAgentRuntime()
             runtimes[instance] = runtime
             return runtime
@@ -1170,6 +1181,10 @@ final class SessionStore: ObservableObject {
     var transcriptsRootOverride: URL?
     var statusRootOverride: URL?
     var codexIndexURLOverride: URL?
+    /// agy's root (`~/.gemini/antigravity-cli`), the same kind of seam: a fixture run points it
+    /// at a temporary directory so no gemini tab ever reads or resumes against the real one.
+    /// Read when a gemini adapter or runtime is first built, so set it before any gemini tab.
+    var geminiPaths: GeminiPaths = .default
     /// The hook-event log's directory, the same override shape as the three above but for a
     /// root that is not per-account: `HookEventWatcher` tails one file for the whole app, so
     /// there is one override rather than one keyed by account. Nil means the real
@@ -2591,7 +2606,8 @@ final class SessionStore: ObservableObject {
     func newSession(
         in url: URL, at index: Int? = nil, account explicit: UUID? = nil,
         waking: DisplayWakePolicy = .wakeIfNeeded, selecting: Bool = true,
-        flywheelIdentity: FlywheelIdentity? = nil, overrides: LaunchOverrides? = nil
+        flywheelIdentity: FlywheelIdentity? = nil, overrides: LaunchOverrides? = nil,
+        agent: AgentID = .claude
     ) -> Session {
         guard ensureTerminalCreatable(waking) else {
             launchFailureReporter.report(.terminalUnavailable(displayAsleep: true))
@@ -2602,7 +2618,10 @@ final class SessionStore: ObservableObject {
         }
         // Resolved before the title is minted, so a refusal does not burn a session number.
         let account: AgentAccount?
-        switch launchAccount(for: .claude, project: url.path, choosing: explicit) {
+        // `agent`, not `.claude`: this is also the creation path of every agent that mints or
+        // learns its own id (`negotiatesIdentity == false` — gemini, through `createSession`),
+        // and a hard-coded claude here opened a CLAUDE tab when gemini was asked for.
+        switch launchAccount(for: agent, project: url.path, choosing: explicit) {
         case .success(let resolved): account = resolved
         case .failure(let error):
             launchFailureReporter.report(error)
@@ -2613,7 +2632,7 @@ final class SessionStore: ObservableObject {
         // second login or reassigns this project's default, which would silently move every
         // existing tab's conversation to a home it was never written in.
         let session = Session(
-            title: nextSessionTitle(), workingDirectory: url.path, accountID: account?.id,
+            title: nextSessionTitle(), workingDirectory: url.path, agent: agent, accountID: account?.id,
             flywheelIdentity: flywheelIdentity
         )
         let adapter = adapter(for: instance(for: session))
@@ -2711,7 +2730,7 @@ final class SessionStore: ObservableObject {
             return .success(
                 newSession(
                     in: url, at: index, account: explicit, selecting: selecting,
-                    flywheelIdentity: identity, overrides: overrides
+                    flywheelIdentity: identity, overrides: overrides, agent: agent
                 ).id
             )
         }
@@ -2855,10 +2874,9 @@ final class SessionStore: ObservableObject {
             if case .value(let value)? = flags.values["--model"] { model = value } else { model = "claude" }
         case .codex(let codexOptions):
             model = codexOptions.model ?? "codex"
-        // No model option yet on either (`GrokOptions`/`GeminiOptions` are empty), so the
-        // agent's name is the placeholder, as for the other two.
+        // No model option yet (`GrokOptions` is empty), so the agent's name is the placeholder.
         case .grok: model = "grok"
-        case .gemini: model = "gemini"
+        case .gemini(let geminiOptions): model = GeminiAdapter.model(for: geminiOptions)
         }
         let coordinator = flywheelCoordinator
         let program = FlywheelProgram.rawValue(for: agent)
@@ -5989,10 +6007,15 @@ final class SessionStore: ObservableObject {
             // that guard, or is a genuine external rename — and neither outcome can queue a
             // second injection.
             injectPendingRename(id, name)
-        case .grok, .gemini:
-            // Stubs: no rename channel to either agent yet (unify brief P0; Tracks G/M probe
-            // one). The local title above is the whole rename, which is what a tab with no
-            // channel can honestly offer.
+        case .gemini:
+            // agy's `/rename <name>` is one submission with an inline argument (probed: it
+            // answers `Conversation renamed to: <name>` and rewrites `annotations/<id>.pbtxt`),
+            // so it takes claude's queued composer route; `GeminiAdapter.renameTyping` is nil.
+            injectPendingRename(id, name)
+        case .grok:
+            // Stub: no rename channel to grok yet (unify brief P0; Track G probes one). The
+            // local title above is the whole rename, which is what a tab with no channel can
+            // honestly offer.
             break
         }
         // True means the name was ACCEPTED and the local title changed — not that the agent
@@ -9477,7 +9500,24 @@ final class SessionStore: ObservableObject {
         // `sessions.json`.
         case .lifecycle(let readiness):
             composerReadinessByTab[tabID] = readiness
+        case .rebound(let binding):
+            repinRebound(tabID, to: binding)
         }
+    }
+
+    /// The tab's agent named its conversation after launch (`AgentEvent.rebound`). Pins the tab
+    /// to it, keeps the transcript path the agent reported, and re-attaches the runtime, whose
+    /// attachment names the conversation the tab has just left. `repinCodex`'s shape without
+    /// codex's ever-pinned bookkeeping, which only codex's pin reconciler reads.
+    private func repinRebound(_ tabID: UUID, to binding: AgentBinding) {
+        guard let at = locate(tabID),
+              repos[at.repo].sessions[at.session].pinnedConversationID != binding.conversationID
+        else { return }
+        repos[at.repo].sessions[at.session].pinnedConversationID = binding.conversationID
+        repos[at.repo].sessions[at.session].transcriptPath = binding.transcriptURL?.path
+        stopWatching(tabID)
+        startWatching(tabID: tabID)
+        persist()
     }
 
     /// An agent reported what it is doing.

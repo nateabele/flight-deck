@@ -26,8 +26,9 @@ final class AgentUnificationTests: XCTestCase {
 
     // MARK: R4 — tab readiness
 
-    func testOnlyClaudeAndCodexAreTabReady() {
-        XCTAssertEqual(AgentID.tabReadyCases, [.claude, .codex])
+    /// gemini joined when Track M's adapter passed its suite (`GeminiAdapterTests`).
+    func testOnlyAgentsWithARealAdapterAreTabReady() {
+        XCTAssertEqual(AgentID.tabReadyCases, [.claude, .codex, .gemini])
     }
 
     /// The agent list is the new-tab surface (menus, ⌘N): a stored list naming a stub agent must
@@ -37,8 +38,8 @@ final class AgentUnificationTests: XCTestCase {
         prefs.storedAgents = [AgentSettings(id: .grok, options: .grok(GrokOptions())),
                               AgentSettings(id: .claude, options: .claude(FlagSet())),
                               AgentSettings(id: .gemini, options: .gemini(GeminiOptions()))]
-        XCTAssertEqual(prefs.agents.map(\.id), [.claude])
-        XCTAssertEqual(NewSessionAffordance.slots(for: prefs.agents).count, 1)
+        XCTAssertEqual(prefs.agents.map(\.id), [.claude, .gemini])
+        XCTAssertEqual(NewSessionAffordance.slots(for: prefs.agents).count, 2)
     }
 
     /// The migration appends any tab-ready agent a stored list lacks — how grok appears the
@@ -46,22 +47,21 @@ final class AgentUnificationTests: XCTestCase {
     func testMigrationAddsMissingTabReadyAgentsOnly() {
         var prefs = Preferences(storedAgents: [AgentSettings(id: .codex, options: .codex(CodexThreadOptions()))])
         prefs.migrateAgentsIfNeeded()
-        XCTAssertEqual(prefs.storedAgents?.map(\.id), [.codex, .claude], "appended, so no shortcut moves")
+        XCTAssertEqual(prefs.storedAgents?.map(\.id), [.codex, .claude, .gemini], "appended, so no shortcut moves")
     }
 
     /// Routing sends a task to an agent by opening a tab on it.
     func testRoutingTargetsAreTabReadyAgentsOnly() {
         let registry = RoutingCapabilityRegistry.standard()
-        XCTAssertEqual(registry.agents, [.claude, .codex])
+        XCTAssertEqual(registry.agents, [.claude, .codex, .gemini])
         XCTAssertNil(registry.capabilities(for: .grok))
-        XCTAssertNil(registry.capabilities(for: .gemini))
     }
 
     // MARK: Stubs
 
     /// Every optional capability is the stated refusal, not a claude-shaped default.
     func testStubAdaptersRefuseEveryOptionalCapability() {
-        for agent in [AgentID.grok, .gemini] {
+        for agent in [AgentID.grok] {
             XCTAssertNil(agent.textChannel, "\(agent)")
             XCTAssertNil(agent.renameTyping, "\(agent)")
             XCTAssertNil(agent.dialogDriver, "\(agent)")
@@ -75,7 +75,7 @@ final class AgentUnificationTests: XCTestCase {
     }
 
     func testStubRoutingCapabilitiesAreUnsupported() async {
-        for caps in [GrokRoutingCapabilities() as any AgentRoutingCapabilities, GeminiRoutingCapabilities()] {
+        for caps in [GrokRoutingCapabilities() as any AgentRoutingCapabilities] {
             let catalog = await caps.modelCatalog()
             XCTAssertNil(catalog.value, "\(caps.agent)")
         }

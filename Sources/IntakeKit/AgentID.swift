@@ -48,7 +48,9 @@ public enum AgentID: String, Codable, CaseIterable, Sendable, CodingKeyRepresent
     public var tabReady: Bool {
         switch self {
         case .claude, .codex: true
-        case .grok, .gemini: false
+        // Track M: `GeminiAdapter` drives agy (unify brief R5), proved by its own suite.
+        case .gemini: true
+        case .grok: false
         }
     }
 

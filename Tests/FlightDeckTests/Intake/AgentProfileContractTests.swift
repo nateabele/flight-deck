@@ -91,12 +91,13 @@ final class AgentProfileContractTests: XCTestCase {
 
     /// What `agentHarnessID == nil` used to say — "grok and gemini are not tab or routing
     /// agents" — is `tabReady` now that there is one agent identity (unify brief R4).
-    func testGrokAndGeminiAreNotTabReadyYet() {
+    /// gemini became tab-ready with Track M's adapter; grok waits for Track G's.
+    func testGrokIsNotTabReadyYet() {
         XCTAssertTrue(AgentID.claude.tabReady)
         XCTAssertTrue(AgentID.codex.tabReady)
         XCTAssertFalse(AgentID.grok.tabReady)
-        XCTAssertFalse(AgentID.gemini.tabReady)
-        XCTAssertEqual(AgentID.tabReadyCases, [.claude, .codex])
+        XCTAssertTrue(AgentID.gemini.tabReady)
+        XCTAssertEqual(AgentID.tabReadyCases, [.claude, .codex, .gemini])
     }
 
     // MARK: Refusal
