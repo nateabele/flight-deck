@@ -188,6 +188,27 @@ final class IntakeServiceTests: XCTestCase {
         XCTAssertEqual(resolver.released, [lease], "the pool lease lives only as long as the turn")
     }
 
+    /// Triage on a pool whose every member is over its hard limit still runs, and tells the
+    /// user — the notice a tab in the same project would post.
+    func testTriageOnAnAllOverHardPoolPostsTheNotice() async throws {
+        let account = AgentAccount(agent: .codex, displayName: "CX", home: root.appendingPathComponent("accounts/cx"))
+        let notice = AccountNotice(title: "Every account in “CX pool” is over its limit", body: "Started on “CX”.")
+        let resolver = StubAccountResolver(.success(ResolvedAccount(agent: .codex, account: account, lease: nil,
+                                                                   label: "CX pool · CX", notice: notice)))
+        let svc = IntakeService(store: IntakeStore(root: root), headless: AccountRecordingHeadlessRunner(Self.codex(Self.questions)),
+                                processRunner: MutableRunner(Self.brReplies(Self.openGraph)),
+                                triageSettings: TriageSettings(agent: .codex, model: "m1", effort: "high"),
+                                inject: { _, _, _, _ in true }, hasSession: { _, _ in false })
+        svc.accountResolver = resolver
+        var heard: [(UUID, String, AccountNotice)] = []
+        svc.onAccountNotice = { heard.append(($0, $1, $2)) }
+        let id = await capture(svc, project: "/w/proj")
+        XCTAssertEqual(intake(svc, id).state, .needsAnswers, "the turn still runs")
+        XCTAssertEqual(heard.map(\.0), [id])
+        XCTAssertEqual(heard.map(\.1), ["/w/proj"])
+        XCTAssertEqual(heard.map(\.2), [notice])
+    }
+
     /// An assignment that cannot be honoured fails triage with the reason, running nothing.
     func testTriageRefusesAnUnresolvableAccount() async throws {
         let resolver = StubAccountResolver(.failure(.accountMissing(.codex)))

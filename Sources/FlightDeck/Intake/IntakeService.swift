@@ -1096,6 +1096,10 @@ final class IntakeService: ObservableObject {
     /// `SessionStore`, which owns preferences, so this service never reads them itself. nil (a
     /// test host) runs triage on the built-in home and shows no billing line.
     var accountResolver: AccountResolving?
+    /// Told when triage starts on a pool whose every member is over its hard limit (intake id,
+    /// project path, notice) — the runner's starts report through `IntakeRunnerController
+    /// .onAccountNotice`. `SessionStore` posts both as a user notification.
+    var onAccountNotice: ((UUID, String, AccountNotice) -> Void)?
 
     /// What each agent bills for `project`, for the Rounds editor's read-only "Bills:" line.
     /// Read when the editor draws, never captured, so a reassignment in Settings shows next time.
@@ -1930,7 +1934,11 @@ final class IntakeService: ObservableObject {
         if let accountResolver {
             switch accountResolver.acquire(settings.agent, project: project.path) {
             case .failure(let error): return .failure(TurnFailure(message: "Could not run triage: \(error.message)", raw: nil))
-            case .success(let resolved): billing = resolved.entry
+            case .success(let resolved):
+                billing = resolved.entry
+                // Every member of the assigned pool is over its hard limit: triage still runs,
+                // inside the pool, and the user is told, as a tab would tell them.
+                if let notice = resolved.notice { onAccountNotice?(id, project.path, notice) }
             }
         }
         defer { if let lease = billing?.lease { accountResolver?.release(lease.lease) } }

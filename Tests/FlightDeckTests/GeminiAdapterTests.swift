@@ -114,6 +114,10 @@ private final class AgyScreen: TextInjecting {
     func sendArrowDown() { keys.append("down") }
     func sendArrowUp() { keys.append("up") }
     func sendEscape() { keys.append("esc") }
+    // grok's keyed answers (`TextInjecting`); recorded so a gemini path that reached for them
+    // would show up in `keys` rather than vanish.
+    func sendCharacterKey(_ character: Character) { keys.append("key:\(character)") }
+    func sendControlKey(_ letter: Character) { keys.append("ctrl:\(letter)") }
     func readViewport() -> String? { screen(draft) }
 }
 

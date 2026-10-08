@@ -93,7 +93,7 @@ final class PlanningAccountsTests: XCTestCase {
 
     func testNoAssignmentBillsTheAgentsFirstLiveAccountAsTabsDo() throws {
         let store = preferences()
-        let resolver = LedgerAccountResolver(preferences: store, ledger: ledger(for: store))
+        let resolver = AccountResolver(preferences: store, ledger: ledger(for: store))
         let claude = try resolver.acquire(.claude, project: project).get()
         XCTAssertEqual(claude.account?.id, personal.id)
         XCTAssertNil(claude.lease)
@@ -104,7 +104,7 @@ final class PlanningAccountsTests: XCTestCase {
 
     func testAnAssignedAccountIsBilled() throws {
         let store = preferences([.claude: .account(spare.id)])
-        let resolver = LedgerAccountResolver(preferences: store, ledger: ledger(for: store))
+        let resolver = AccountResolver(preferences: store, ledger: ledger(for: store))
         let entry = try resolver.acquire(.claude, project: project).get().entry
         XCTAssertEqual(entry.accountID, spare.id)
         XCTAssertEqual(entry.home, spare.home)
@@ -116,7 +116,7 @@ final class PlanningAccountsTests: XCTestCase {
     /// built-in home, no id to credit.
     func testAnAgentWithNoAccountRecordRunsInItsBuiltInHome() throws {
         let store = preferences()
-        let resolver = LedgerAccountResolver(preferences: store, ledger: ledger(for: store))
+        let resolver = AccountResolver(preferences: store, ledger: ledger(for: store))
         let grok = try resolver.acquire(.grok, project: project).get()
         XCTAssertNil(grok.account)
         XCTAssertNil(grok.entry.home)
@@ -130,7 +130,7 @@ final class PlanningAccountsTests: XCTestCase {
         let builtIn = AgentAccount(agent: .codex, displayName: "Default", home: AgentID.codex.builtInHome)
         let store = PreferencesStore(persistence: nil)
         store.preferences.accountList = AccountList(entries: [.account(builtIn)])
-        let entry = try LedgerAccountResolver(preferences: store, ledger: CapacityLedger()).acquire(.codex, project: project).get().entry
+        let entry = try AccountResolver(preferences: store, ledger: CapacityLedger()).acquire(.codex, project: project).get().entry
         XCTAssertEqual(entry.accountID, builtIn.id)
         XCTAssertNil(entry.home)
     }
@@ -139,7 +139,7 @@ final class PlanningAccountsTests: XCTestCase {
         let store = preferences([.claude: .pool("team")])
         let ledger = ledger(for: store)
         overSoft(work, in: ledger)
-        let resolver = LedgerAccountResolver(preferences: store, ledger: ledger)
+        let resolver = AccountResolver(preferences: store, ledger: ledger)
         XCTAssertEqual(resolver.billing(.claude, project: project), AccountBilling(text: "Team pool"))
         let resolved = try resolver.acquire(.claude, project: project).get()
         XCTAssertEqual(resolved.account?.id, spare.id, "Work is over soft, so Spare is leased")
@@ -152,26 +152,80 @@ final class PlanningAccountsTests: XCTestCase {
     /// A broken assignment refuses rather than silently billing another login.
     func testABrokenAssignmentRefusesAndTheEditorSaysSo() {
         let store = preferences([.claude: .account(UUID()), .codex: .pool("gone")])
-        let resolver = LedgerAccountResolver(preferences: store, ledger: ledger(for: store))
+        let resolver = AccountResolver(preferences: store, ledger: ledger(for: store))
         XCTAssertEqual(resolver.acquire(.claude, project: project).failure, .accountMissing(.claude))
         XCTAssertEqual(resolver.acquire(.codex, project: project).failure, .poolUnavailable("gone", .codex))
         XCTAssertTrue(resolver.billing(.claude, project: project).problem)
         XCTAssertTrue(resolver.billing(.codex, project: project).problem)
     }
 
-    /// A pool with nothing leasable still runs inside the pool — on its least-used member,
-    /// unleased — and never on a login outside it (Track A's rule for tabs).
-    func testAPoolWithNothingLeasableRunsOnItsLeastUsedMemberUnleased() throws {
+    /// A pool with every member over SOFT still runs inside the pool — on its first over-soft
+    /// member in lease order, unleased and with no notice (soft means "prefer another", not
+    /// "stop") — and never on a login outside it. The tab rule, from the shared resolver.
+    func testAPoolWithEveryMemberOverSoftRunsOnItsFirstOverSoftMemberUnleased() throws {
         let store = preferences([.claude: .pool("team")])
         let ledger = ledger(for: store)
         overSoft(work, in: ledger)
         ledger.ingest(UsageReading(account: CapacityPreferences.accountRef(spare),
                                    windows: [UsageWindow(name: "five_hour", utilization: 0.85, resetsAt: nil)],
                                    readAt: Date(), source: "test", hardRejection: false))
-        let resolved = try LedgerAccountResolver(preferences: store, ledger: ledger).acquire(.claude, project: project).get()
-        XCTAssertEqual(resolved.account?.id, spare.id)
+        let resolved = try AccountResolver(preferences: store, ledger: ledger).acquire(.claude, project: project).get()
+        XCTAssertEqual(resolved.account?.id, work.id)
         XCTAssertNil(resolved.lease)
+        XCTAssertNil(resolved.notice)
         XCTAssertEqual(ledger.activeLeases(pool: "team").count, 0)
+    }
+
+    private func overHard(_ account: AgentAccount, _ utilization: Double, in ledger: CapacityLedger) {
+        ledger.ingest(UsageReading(account: CapacityPreferences.accountRef(account),
+                                   windows: [UsageWindow(name: "five_hour", utilization: utilization, resetsAt: nil)],
+                                   readAt: Date(), source: "test", hardRejection: false))
+    }
+
+    /// Every member over HARD: the seat runs on the member with the most headroom, unleased,
+    /// and carries the tab's over-limit notice so planning can tell the user.
+    func testAPoolWithEveryMemberOverHardCarriesTheOverLimitNotice() throws {
+        let store = preferences([.claude: .pool("team")])
+        let ledger = ledger(for: store)
+        overHard(work, 1.0, in: ledger)
+        overHard(spare, 0.99, in: ledger)
+        let resolved = try AccountResolver(preferences: store, ledger: ledger).acquire(.claude, project: project).get()
+        XCTAssertEqual(resolved.account?.id, spare.id, "most headroom")
+        XCTAssertNil(resolved.lease)
+        let notice = try XCTUnwrap(resolved.notice)
+        XCTAssertEqual(notice.title, "Every account in “Team” is over its limit")
+        XCTAssertTrue(notice.body.contains("Spare"), notice.body)
+    }
+
+    /// A runner started on an all-over-hard pool tells the user once, after the start succeeded.
+    func testARunnerStartOnAnAllOverHardPoolPostsTheNotice() throws {
+        var now = Date(timeIntervalSince1970: 1_000)
+        let rig = try rig(clock: { now })
+        overHard(work, 1.0, in: rig.ledger)
+        overHard(spare, 1.0, in: rig.ledger)
+        var heard: [(UUID, String, AccountNotice)] = []
+        rig.controller.onAccountNotice = { heard.append(($0, $1, $2)) }
+        rig.spawner.onSpawn = { self.goLive(rig) }
+        XCTAssertNoThrow(try rig.controller.ensureRunning(rig.id).get())
+        XCTAssertEqual(heard.count, 1)
+        XCTAssertEqual(heard.first?.0, rig.id)
+        XCTAssertEqual(heard.first?.1, project)
+        XCTAssertEqual(heard.first?.2.title, "Every account in “Team” is over its limit")
+        _ = now
+    }
+
+    /// A start refused for another agent's broken assignment says nothing about the pool it
+    /// briefly resolved: the run never started.
+    func testARefusedStartPostsNoOverLimitNotice() throws {
+        let rig = try rig([.claude: .pool("team"), .codex: .account(UUID())], clock: { Date() })
+        overHard(work, 1.0, in: rig.ledger)
+        overHard(spare, 1.0, in: rig.ledger)
+        var heard = 0
+        rig.controller.onAccountNotice = { _, _, _ in heard += 1 }
+        guard case .failure(.accountUnavailable) = rig.controller.ensureRunning(rig.id) else {
+            return XCTFail("expected an account refusal")
+        }
+        XCTAssertEqual(heard, 0)
     }
 
     func testAPoolWithNoLiveMemberIsUnavailable() {
@@ -179,7 +233,7 @@ final class PlanningAccountsTests: XCTestCase {
         try? store.updateAccountList { list throws(AccountListError) in
             try list.addPool(AccountPool(id: "empty", label: "Empty", agent: .claude))
         }
-        let resolver = LedgerAccountResolver(preferences: store, ledger: ledger(for: store))
+        let resolver = AccountResolver(preferences: store, ledger: ledger(for: store))
         XCTAssertEqual(resolver.acquire(.claude, project: project).failure, .poolUnavailable("empty", .claude))
     }
 
@@ -187,7 +241,7 @@ final class PlanningAccountsTests: XCTestCase {
     func testAcquiringSeveralAgentsReleasesEarlierLeasesWhenOneFails() {
         let store = preferences([.claude: .pool("team"), .codex: .account(UUID())])
         let ledger = ledger(for: store)
-        let resolver = LedgerAccountResolver(preferences: store, ledger: ledger)
+        let resolver = AccountResolver(preferences: store, ledger: ledger)
         XCTAssertEqual(resolver.acquire([.claude, .codex], project: project).failure, .accountMissing(.codex))
         XCTAssertEqual(ledger.activeLeases(pool: "team").count, 0)
     }
@@ -230,7 +284,7 @@ final class PlanningAccountsTests: XCTestCase {
         let control: Control
         let spawner: Spawner
         let ledger: CapacityLedger
-        let resolver: LedgerAccountResolver
+        let resolver: AccountResolver
         let intakesRoot: URL
         let id: UUID
         var directory: URL { IntakeStore(root: intakesRoot).directory(for: id) }
@@ -243,7 +297,7 @@ final class PlanningAccountsTests: XCTestCase {
                      control: Control = Control(), clock: @escaping () -> Date) throws -> Rig {
         let store = store ?? preferences(assignments)
         let ledger = ledger ?? self.ledger(for: store)
-        let resolver = LedgerAccountResolver(preferences: store, ledger: ledger)
+        let resolver = AccountResolver(preferences: store, ledger: ledger)
         let fakeBinary = tempDir.appendingPathComponent("fake-fd-abduco")
         try Data("#!/bin/sh\nexit 0\n".utf8).write(to: fakeBinary)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fakeBinary.path)

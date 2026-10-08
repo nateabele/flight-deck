@@ -84,11 +84,16 @@ final class AgentUnificationTests: XCTestCase {
     /// which would launch `claude` in a tab labelled grok.
     func testTheStoreAnswersEachAgentWithItsOwnAdapter() {
         let store = SessionStore(provider: nil, persistence: nil)
+        // Set before the first `adapter(for:)`, which caches the adapter with the paths it saw.
+        store.geminiPaths = GeminiPaths(root: URL(fileURLWithPath: "/agy-fixture", isDirectory: true))
         XCTAssertTrue(store.adapter(for: .grok, account: nil) is GrokAdapter)
         XCTAssertTrue(store.adapter(for: .gemini, account: nil) is GeminiAdapter)
+        // The real gemini adapter binds agy's transcript under the store's own root — the stub
+        // this replaced bound nothing, and claude's adapter would bind a claude projects path.
         let session = Session(title: "g", workingDirectory: "/tmp", agent: .gemini)
         let adapter = store.adapter(for: .gemini, account: nil)
-        XCTAssertNil(adapter.binding(for: session).transcriptURL)
+        XCTAssertEqual(adapter.binding(for: session).transcriptURL,
+                       store.geminiPaths.transcript(session.pinnedConversationID))
     }
 
     /// Gemini has no home variable (keychain login), so binding an account sets nothing — a

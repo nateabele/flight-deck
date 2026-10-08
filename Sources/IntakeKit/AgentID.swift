@@ -47,7 +47,7 @@ public enum AgentID: String, Codable, CaseIterable, Sendable, CodingKeyRepresent
     /// place, so "can it run a tab" can never be answered two ways.
     public var tabReady: Bool {
         if let override = Self.tabReadyOverride { return override.contains(self) }
-        switch self {
+        return switch self {
         // grok: Track G's `GrokAdapter`, built from a live probe of grok 1.0.30's TUI.
         // gemini: Track M's `GeminiAdapter` drives agy (unify brief R5), proved by its own suite.
         case .claude, .codex, .grok, .gemini: true

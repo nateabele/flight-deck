@@ -1630,12 +1630,15 @@ final class SessionStore: ObservableObject {
         // One resolver for the runner's starts and triage's turns, leasing from the ledger every
         // Level 3 lease uses (unify brief R9). No preferences (a bare test store): no resolver,
         // and planning runs on built-in homes.
-        let accounts: AccountResolving? = preferences.map { LedgerAccountResolver(preferences: $0, ledger: UsageService.shared.ledger) }
+        // The resolver tabs use, so a planning seat and a tab in one project bill alike and a
+        // pool's leases sit in one ledger.
+        let accounts: AccountResolving? = accountResolver
+        let runner = IntakeRunnerController(daemon: daemon, control: daemonControl,
+                                            spawner: FdAbducoRunnerSpawner(), intakesRoot: root, accounts: accounts)
         let service = IntakeService(
             store: IntakeStore(root: root),
             clock: clock,
-            runner: IntakeRunnerController(daemon: daemon, control: daemonControl,
-                                           spawner: FdAbducoRunnerSpawner(), intakesRoot: root, accounts: accounts),
+            runner: runner,
             inject: { [weak self] project, agent, text, token in
                 guard let self, let session = self.session(project: project, agentName: agent) else { return false }
                 return self.submitPrompt(text, token: token, to: session.id).errorCode == nil
@@ -1647,6 +1650,15 @@ final class SessionStore: ObservableObject {
         // before `FlightDeckApp` attaches routing — and must still see it.
         service.encodeRouting = { [weak self] in self?.flightControlRouting }
         service.accountResolver = accounts
+        // Every member of a planning pool over its hard limit: the same banner a tab posts
+        // (`fileLease`), keyed by the intake so a second start replaces rather than stacks it.
+        let postNotice: (UUID, String, AccountNotice) -> Void = { [weak self] id, project, notice in
+            self?.notifier?.notify(sessionID: id, title: notice.title,
+                                   subtitle: "Planning · \(URL(fileURLWithPath: project).lastPathComponent)",
+                                   body: notice.body)
+        }
+        runner.onAccountNotice = postNotice
+        service.onAccountNotice = postNotice
         intakeChangeForward = service.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
         // Straight to the summary refresh, never through `objectWillChange`: a seat settling
         // must not redraw every view of the store (see `SeatFeed`), only reach the phone.
