@@ -105,11 +105,21 @@ final class FakeTofu: TofuRunning, @unchecked Sendable {
 
     func initialize(workdir: URL) async throws { record("init") }
 
+    /// When set, every `apply` suspends here until the test opens it.
+    let applyGate = ApplyGate()
+    private var _hold = false
+    var holdApply: Bool { get { lock.withLock { _hold } } set { lock.withLock { _hold = newValue } } }
+
     func apply(workdir: URL, progress: @escaping @Sendable (TofuProgress) -> Void) async throws {
         record("apply")
+        if holdApply { await applyGate.wait() }
+        // From a background-priority thread, as the live runner's stdout reader is: a caller
+        // that hops each event to the main actor without waiting can see them after it moved on.
+        await Task.detached(priority: .background) {
+            progress(TofuProgress(resource: "aws_instance.this", action: "create", done: false))
+            progress(TofuProgress(resource: "aws_instance.this", action: "create", done: true))
+        }.value
         if let failApply { throw failApply }
-        progress(TofuProgress(resource: "aws_instance.this", action: "create", done: false))
-        progress(TofuProgress(resource: "aws_instance.this", action: "create", done: true))
         await afterApply?(workdir)
     }
 
@@ -128,6 +138,21 @@ final class FakeTofu: TofuRunning, @unchecked Sendable {
     func refreshShowsGone(workdir: URL) async throws -> Bool {
         record("refresh")
         return refreshGone
+    }
+}
+
+/// Suspends every `wait()` until `open()`; later waits pass straight through.
+actor ApplyGate {
+    private var opened = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+    func wait() async {
+        if opened { return }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+    func open() {
+        opened = true
+        waiters.forEach { $0.resume() }
+        waiters = []
     }
 }
 
@@ -219,11 +244,11 @@ extension InfraMachine {
                         network: NetworkMode = .public, hourlyUSD: Double? = 0.5,
                         createdAt: Date = InfraMachine.fixtureNow,
                         deadline: Date = InfraMachine.fixtureNow.addingTimeInterval(3600),
-                        machineDeadline: Date? = nil) -> InfraMachine {
+                        machineDeadline: Date? = nil, enrollingSince: Date? = nil) -> InfraMachine {
         InfraMachine(name: name, repoRoot: repoRoot, cloud: cloud, instanceType: instanceType, region: region, slot: slot,
                      state: state, failure: nil, network: network, createdAt: createdAt, deadline: deadline,
                      idle: .init(seconds: 1800), allowCIDR: nil, instanceID: "i-1", address: nil, hourlyUSD: hourlyUSD,
-                     machineDeadline: machineDeadline)
+                     machineDeadline: machineDeadline, enrollingSince: enrollingSince)
     }
 }
 

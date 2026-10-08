@@ -42,9 +42,10 @@ struct InfraEnvironment {
     /// How often, and for how long, `up` asks the Tailscale API whether the machine has joined.
     var tailnetJoin: (interval: TimeInterval, timeout: TimeInterval) = (2, 300)
     /// At launch, how long an enrolling machine's link gets to come up before a machine already
-    /// past its enroll timeout is destroyed: `HostService.start()` reads keys asynchronously,
-    /// so "offline" at the first look only means "not dialled yet".
-    var launchGrace: TimeInterval = 30
+    /// past its enroll window is destroyed: `HostService.start()` reads keys asynchronously, so
+    /// "offline" at the first look only means "not dialled yet". Longer than one full HostLink
+    /// backoff cycle (1+2+4+8+16+30+30 s), so a host that is up is dialled at least once.
+    var launchGrace: TimeInterval = 90
 }
 
 /// The cloud machines' state machine (spec §7.1) and every `infra.*` operation: preflight,
@@ -61,6 +62,12 @@ final class InfraService {
     /// One provisioning task per tool: a second caller awaits the first's download instead of
     /// racing it into the same managed directory (Task 6 has no lock of its own).
     private var resolving: [InfraTool: Task<ResolvedTool, Error>] = [:]
+    /// Names an `up` or `down` is working on, lowercased. Claimed with no suspension between
+    /// the check and the insert, so two operations on one machine can never interleave.
+    private var busy: Set<String> = []
+    /// Each `up` in flight and its worst case, counted by the next launch's guardrails until
+    /// it is done: without it two `up`s could both pass max-concurrent and the monthly cap.
+    private var launching: [String: Double] = [:]
 
     private static let logger = Logger(subsystem: "dev.flightdeck.FlightDeck", category: "infra")
     /// Tailscale auth keys outlive the boot that redeems them by this much at most.
@@ -95,6 +102,8 @@ final class InfraService {
 
     func up(name: String, config: InfraConfig, repoRoot: URL,
             events: @escaping (InfraEvent) -> Void) async throws -> InfraMachine {
+        try claim(name)
+        defer { release(name) }
         let repo = repoRoot.standardizedFileURL
         if let running = try takeOver(name, repo: repo) {
             events(.cost(costLine(for: running, now: env.now())))
@@ -104,12 +113,19 @@ final class InfraService {
         let cloud = Self.cloud(of: config, accounts: env.accounts)
         let plan = InfraLaunchPlan(name: name, config: config, cloud: cloud, moduleSource: moduleSource(config, repo),
                               catalogHourly: await price(config, cloud: cloud))
+        // Reserve this launch and read everyone else's in one synchronous step: of two
+        // concurrent `up`s, the later one always sees the earlier.
+        let key = name.lowercased()
+        let others = launching.filter { $0.key != key }
+        launching[key] = (plan.catalogHourly ?? config.maxHourly).map { CostModel.worstCase(hourly: $0, ttl: config.ttl) } ?? 0
+        let counted = Set(registry.machines.filter { $0.state != .gone }.map { $0.name.lowercased() }).union(others.keys)
+        let running = counted.subtracting([key]).count
+        let monthToDate = ledger.monthToDate(now: env.now()) + others.values.reduce(0, +)
         let account = cloud.flatMap { env.accounts[$0] }
         let mode = await env.tailnet.mode()
         let checks = await InfraPreflight.run(.init(
             plan: plan, resolveTofu: { try await self.tool(.tofu) }, account: account, tailnetMode: mode,
-            budget: env.budget(), running: registry.machines.filter { $0.state != .gone }.count,
-            monthToDate: ledger.monthToDate(now: env.now())))
+            budget: env.budget(), running: running, monthToDate: monthToDate))
         guard let cloud, checks.allSatisfy(\.ok) else { throw InfraError.preflight(checks) }
         if case .notConfigured = mode {
             events(.progress("Tailscale is running but not set up for Flight Deck, so \(name) uses public mode; Settings → Cloud → Set up… turns on tailnet mode."))
@@ -181,10 +197,7 @@ final class InfraService {
         // running instance, and its hours are real until `down` closes the segment.
         let applyStart = env.now()
         if let rate = machine.hourlyUSD { try ledger.open(name: name, hourlyUSD: rate, at: applyStart) }
-        try await tofu.apply(workdir: workdir) { p in
-            guard !p.done else { return }
-            Task { @MainActor in events(.progress("\(p.action) \(p.resource)")) }
-        }
+        try await Self.forwardingProgress(events) { try await tofu.apply(workdir: workdir, progress: $0) }
 
         let outputs = try await tofu.outputs(workdir: workdir)
         machine.instanceID = outputs.instanceID
@@ -207,6 +220,7 @@ final class InfraService {
         machine.address = address
         hosts.setEndpoints(slot: key.slot, [Self.endpoint(address)])
         machine.state = .enrolling
+        machine.enrollingSince = env.now()
         try registry.upsert(machine)
 
         events(.progress("waiting for \(name) to enroll"))
@@ -294,6 +308,8 @@ final class InfraService {
     // MARK: - down
 
     func down(name: String, events: @escaping (InfraEvent) -> Void) async throws {
+        try claim(name)
+        defer { release(name) }
         guard var machine = registry.machine(named: name) else { throw InfraError.notFound(name) }
         machine.state = .destroying
         try registry.upsert(machine)
@@ -304,10 +320,7 @@ final class InfraService {
             do {
                 let tofu = try await tofu(cloud: machine.cloud)
                 events(.progress("destroying \(name)"))
-                try await tofu.destroy(workdir: workdir) { p in
-                    guard !p.done else { return }
-                    Task { @MainActor in events(.progress("\(p.action) \(p.resource)")) }
-                }
+                try await Self.forwardingProgress(events) { try await tofu.destroy(workdir: workdir, progress: $0) }
             } catch {
                 // Never removed while resources may still exist: the record is how anyone finds them.
                 let message = "destroy: " + Self.failureText(error)
@@ -324,21 +337,28 @@ final class InfraService {
                 Self.logger.error("\(name, privacy: .public): tailnet node not deleted: \(String(describing: error), privacy: .public)")
             }
         }
+        do { try ledger.close(name: name, at: env.now()) } catch {
+            // Kept, never forgotten: a record removed with its segment still open would bill
+            // this machine into every month-to-date from now on, with nothing left to close it.
+            let message = "destroyed, but the cost ledger could not be written (\(error.localizedDescription)); run `flightdeck infra down \(name)` again"
+            machine.state = .failed
+            machine.failure = message
+            try? registry.upsert(machine)
+            events(.failed(message))
+            throw error
+        }
         try discard(machine)
         events(.progress("\(name) destroyed"))
     }
 
-    /// Forgets a machine whose resources are gone: its host and key, its open cost segment,
-    /// its work directory, and finally its record.
+    /// Forgets a machine whose resources are destroyed and whose cost segment is closed: its
+    /// host and key, its work directory, and finally its record.
     private func discard(_ machine: InfraMachine) throws {
         if let slot = machine.slot {
             hosts.forget(slot: slot)
         } else if case .success(let host) = hosts.registry.resolve(name: machine.name), host.serviceName == "fd-\(machine.name)" {
             // Enrolled, then interrupted before the slot reached `infra.json`.
             hosts.forget(slot: host.slot)
-        }
-        do { try ledger.close(name: machine.name, at: env.now()) } catch {
-            Self.logger.error("\(machine.name, privacy: .public): cost segment not closed: \(String(describing: error), privacy: .public)")
         }
         try? FileManager.default.removeItem(at: registry.workdir(for: machine.name))
         try registry.remove(name: machine.name)
@@ -418,12 +438,13 @@ final class InfraService {
             case .enrolling:
                 if isOnline(m) { markReady(m.name) } else { enrolling.append(m) }
             case .planned, .provisioning:
-                if now > m.deadline {
+                // A gone instance is still destroyed first: its security group, firewall rule
+                // and the rest of tfstate outlive it.
+                let expired = now > m.deadline
+                if expired {
                     await downLogged(m.name)
                 } else if await refreshShowsGone(m) {
-                    do { try discard(m) } catch {
-                        Self.logger.error("\(m.name, privacy: .public): could not forget a gone machine: \(String(describing: error), privacy: .public)")
-                    }
+                    await downLogged(m.name)
                 }
             case .destroying:
                 await downLogged(m.name)
@@ -433,7 +454,7 @@ final class InfraService {
         }
         await withTaskGroup(of: Void.self) { group in
             for m in enrolling {
-                let wait = max(m.createdAt.addingTimeInterval(env.enrollTimeout).timeIntervalSince(now), env.launchGrace)
+                let wait = enrollWait(for: m, now: now)
                 group.addTask { @MainActor in
                     if let slot = m.slot, await self.waitOnline(slot: slot, timeout: wait) {
                         self.markReady(m.name)
@@ -443,6 +464,13 @@ final class InfraService {
                 }
             }
         }
+    }
+
+    /// What is left of an enrolling machine's window — counted from `enrollingSince`, so a slow
+    /// apply does not eat into it — but never less than `launchGrace`.
+    func enrollWait(for m: InfraMachine, now: Date) -> TimeInterval {
+        let began = m.enrollingSince ?? m.createdAt
+        return max(began.addingTimeInterval(env.enrollTimeout).timeIntervalSince(now), env.launchGrace)
     }
 
     private func isOnline(_ m: InfraMachine) -> Bool {
@@ -471,6 +499,41 @@ final class InfraService {
         do { try await down(name: name) { _ in } } catch {
             Self.logger.error("\(name, privacy: .public): destroy at launch failed: \(String(describing: error), privacy: .public)")
         }
+    }
+
+    // MARK: - Plumbing
+
+    private func claim(_ name: String) throws {
+        guard busy.insert(name.lowercased()).inserted else {
+            throw InfraError.refused("\(name) is already being created or destroyed")
+        }
+    }
+
+    private func release(_ name: String) {
+        busy.remove(name.lowercased())
+        launching[name.lowercased()] = nil
+    }
+
+    /// Runs one OpenTofu step, handing each resource it starts to `events` in order, and only
+    /// returns (or throws) once every one of them has been delivered — so no progress line can
+    /// arrive after the `ready` or `failed` that ends the operation.
+    private static func forwardingProgress(
+        _ events: @escaping (InfraEvent) -> Void,
+        _ step: (@escaping @Sendable (TofuProgress) -> Void) async throws -> Void
+    ) async throws {
+        let (stream, continuation) = AsyncStream.makeStream(of: TofuProgress.self)
+        let forward = Task { @MainActor in
+            for await p in stream where !p.done { events(.progress("\(p.action) \(p.resource)")) }
+        }
+        do {
+            try await step { continuation.yield($0) }
+        } catch {
+            continuation.finish()
+            await forward.value
+            throw error
+        }
+        continuation.finish()
+        await forward.value
     }
 
     // MARK: - Cost line (spec §8.4)

@@ -62,6 +62,8 @@ final class InfraServiceTests: XCTestCase {
         try await h.service.down(name: "gpu") { _ in }
         XCTAssertEqual(h.tofu.calls.last, "destroy")
         XCTAssertNil(h.registry.machine(named: "gpu")); XCTAssertTrue(h.hosts.registry.hosts.isEmpty)
+        // Billing began with the apply; down ends it even though the machine never came up.
+        XCTAssertEqual(h.ledger.spent(name: "gpu", now: h.now.addingTimeInterval(3600)), h.ledger.spent(name: "gpu", now: h.now))
     }
 
     /// Review Focus 1.
@@ -238,7 +240,9 @@ final class InfraServiceTests: XCTestCase {
         h.tofu.refreshGone = true
         await h.service.resumeAfterLaunch()
         XCTAssertNil(h.registry.machine(named: "c")); XCTAssertTrue(h.tofu.destroyed.contains("c"))
-        XCTAssertNil(h.registry.machine(named: "d")); XCTAssertFalse(h.tofu.destroyed.contains("d"))
+        // Destroyed before it is forgotten: the instance is gone, but its security group and
+        // the rest of tfstate may not be.
+        XCTAssertNil(h.registry.machine(named: "d")); XCTAssertTrue(h.tofu.destroyed.contains("d"))
     }
 
     func testResumeDestroysAnEnrollmentThatTimedOut() async throws {
@@ -249,6 +253,140 @@ final class InfraServiceTests: XCTestCase {
         await h.service.resumeAfterLaunch()
         XCTAssertNil(h.registry.machine(named: "e")); XCTAssertTrue(h.tofu.destroyed.contains("e"))
         XCTAssertTrue(h.hosts.registry.hosts.isEmpty)
+    }
+}
+
+/// Collects each concurrent `up`'s outcome by name.
+@MainActor
+final class Outcomes {
+    var byName: [String: Result<InfraMachine, Error>] = [:]
+}
+
+extension InfraServiceTests {
+    // MARK: - Fix round 1
+
+    /// Two `up`s for one name at once: exactly one proceeds; the other is refused at once and
+    /// never touches the record the first one owns.
+    func testConcurrentUpsOfOneNameRefuseTheSecond() async throws {
+        h.tofu.outputs = TofuOutputs(address: "198.51.100.7", instanceID: "i-1", hourlyUSD: nil)
+        h.hostComesOnline(after: .applied)
+        let service = h.service, repo = h.repo, config = gpu
+        let outcomes = Outcomes()
+        for i in 0..<2 {
+            Task {
+                do { outcomes.byName["\(i)"] = .success(try await service.up(name: "gpu", config: config, repoRoot: repo) { _ in }) }
+                catch { outcomes.byName["\(i)"] = .failure(error) }
+            }
+        }
+        try await waitUntil { outcomes.byName.count == 2 }
+        let ready = outcomes.byName.values.compactMap { try? $0.get() }
+        let refused = outcomes.byName.values.compactMap { r -> String? in
+            if case .failure(InfraError.refused(let why)) = r { return why }; return nil
+        }
+        XCTAssertEqual(ready.count, 1)
+        XCTAssertEqual(refused, ["gpu is already being created or destroyed"])
+        XCTAssertEqual(h.registry.machine(named: "gpu")?.state, .ready)
+        XCTAssertEqual(h.hosts.registry.hosts.map(\.name), ["gpu"])
+    }
+
+    /// A `down` while the `up` is still applying is refused too, and leaves the record alone.
+    func testDownWhileUpIsInFlightIsRefused() async throws {
+        h.tofu.outputs = TofuOutputs(address: "198.51.100.7", instanceID: "i-1", hourlyUSD: nil)
+        h.hostComesOnline(after: .applied)
+        h.tofu.holdApply = true
+        let service = h.service, repo = h.repo, config = gpu
+        let first = Task { try await service.up(name: "gpu", config: config, repoRoot: repo) { _ in } }
+        try await waitUntil { self.h.tofu.calls.contains("apply") }
+        let before = h.registry.machine(named: "gpu")
+        do { try await service.down(name: "gpu") { _ in }; XCTFail() }
+        catch InfraError.refused(let why) { XCTAssertEqual(why, "gpu is already being created or destroyed") }
+        XCTAssertEqual(h.registry.machine(named: "gpu"), before)
+        await h.tofu.applyGate.open()
+        let m = try await first.value
+        XCTAssertEqual(m.state, .ready)
+    }
+
+    /// The concurrency guardrail counts launches still in flight: with a limit of one, two `up`s
+    /// for different names cannot both pass it.
+    func testMaxConcurrentCountsLaunchesInFlight() async throws {
+        h.budget.maxConcurrent = 1
+        h.tofu.outputs = TofuOutputs(address: "198.51.100.7", instanceID: "i-1", hourlyUSD: nil)
+        h.hostComesOnline(after: .applied)
+        h.tofu.holdApply = true
+        let service = h.service, repo = h.repo, config = gpu
+        let outcomes = Outcomes()
+        for name in ["gpu", "db"] {
+            Task {
+                do { outcomes.byName[name] = .success(try await service.up(name: name, config: config, repoRoot: repo) { _ in }) }
+                catch { outcomes.byName[name] = .failure(error) }
+            }
+        }
+        try await waitUntil { outcomes.byName.count == 1 }
+        await h.tofu.applyGate.open()
+        try await waitUntil { outcomes.byName.count == 2 }
+        let refused = outcomes.byName.values.filter { r in
+            if case .failure(InfraError.preflight(let checks)) = r { return checks.contains { $0.name == "budget" && !$0.ok } }
+            return false
+        }
+        XCTAssertEqual(refused.count, 1)
+        XCTAssertEqual(outcomes.byName.values.compactMap { try? $0.get() }.count, 1)
+        XCTAssertEqual(h.tofu.calls.filter { $0 == "apply" }.count, 1)
+    }
+
+    /// The enroll window runs from when the machine began enrolling, not from creation: one that
+    /// became `enrolling` 6 minutes in and is relaunched at 10.5 minutes still has 5.5 minutes.
+    func testRelaunchWaitsOutTheEnrollWindowFromWhenEnrollingBegan() async throws {
+        let slot = try h.hosts.enroll(key: .mint(), name: "f", endpoints: ["198.51.100.9:47410"]).slot
+        let m = InfraMachine.fixture(name: "f", state: .enrolling, slot: slot, createdAt: h.now.addingTimeInterval(-630),
+                                     deadline: h.now.addingTimeInterval(3000), enrollingSince: h.now.addingTimeInterval(-270))
+        try h.registry.upsert(m)
+        try h.prepareWorkdir("f")
+        XCTAssertEqual(h.service.enrollWait(for: m, now: h.now), 330, accuracy: 0.001)
+        let harness: InfraHarness = h
+        Task { try? await Task.sleep(nanoseconds: 200_000_000); harness.hostOnline("f") }
+        await h.service.resumeAfterLaunch()
+        XCTAssertEqual(h.registry.machine(named: "f")?.state, .ready)
+        XCTAssertFalse(h.tofu.destroyed.contains("f"))
+    }
+
+    /// Records `enrollingSince` as the machine starts enrolling.
+    func testUpRecordsWhenEnrollingBegan() async throws {
+        h.tofu.outputs = TofuOutputs(address: "198.51.100.7", instanceID: "i-1", hourlyUSD: nil)
+        h.hostComesOnline(after: .applied)
+        let m = try await h.service.up(name: "gpu", config: gpu, repoRoot: h.repo) { _ in }
+        XCTAssertEqual(m.enrollingSince, h.now)
+    }
+
+    /// If the spend ledger cannot be closed, the machine is not forgotten: it would bill forever.
+    func testDownKeepsTheRecordWhenTheLedgerCannotClose() async throws {
+        try h.registry.upsert(.fixture(name: "gpu"))
+        try h.prepareWorkdir("gpu")
+        try h.ledger.open(name: "gpu", hourlyUSD: 0.5, at: h.now.addingTimeInterval(-600))
+        let file = h.root.appendingPathComponent("infra-ledger.json")
+        try FileManager.default.removeItem(at: file)
+        try FileManager.default.createDirectory(at: file, withIntermediateDirectories: false)
+        do { try await h.service.down(name: "gpu") { _ in }; XCTFail() } catch {}
+        let m = try XCTUnwrap(h.registry.machine(named: "gpu"))
+        XCTAssertEqual(m.state, .failed)
+        XCTAssertTrue(m.failure?.contains("ledger") == true, m.failure ?? "")
+    }
+
+    /// Progress reaches the caller in order and before the terminal event, success or failure.
+    func testProgressArrivesBeforeTheOutcome() async throws {
+        h.tofu.outputs = TofuOutputs(address: "198.51.100.7", instanceID: "i-1", hourlyUSD: nil)
+        h.hostComesOnline(after: .applied)
+        var events: [InfraEvent] = []
+        _ = try await h.service.up(name: "gpu", config: gpu, repoRoot: h.repo) { events.append($0) }
+        let progress = try XCTUnwrap(events.firstIndex(of: .progress("create aws_instance.this")), "\(events)")
+        let cost = try XCTUnwrap(events.firstIndex { if case .cost = $0 { return true }; return false })
+        XCTAssertLessThan(progress, cost)
+
+        events = []
+        h.tofu.failApply = TofuError.failed(step: "apply", message: "boom")
+        do { _ = try await h.service.up(name: "db", config: gpu, repoRoot: h.repo) { events.append($0) }; XCTFail() } catch {}
+        let failedProgress = try XCTUnwrap(events.firstIndex(of: .progress("create aws_instance.this")), "\(events)")
+        let failed = try XCTUnwrap(events.firstIndex { if case .failed = $0 { return true }; return false })
+        XCTAssertLessThan(failedProgress, failed)
     }
 }
 
