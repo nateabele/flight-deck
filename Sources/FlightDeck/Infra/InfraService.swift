@@ -649,6 +649,18 @@ final class InfraService {
         return parts.joined(separator: " · ")
     }
 
+    /// The same figures as `costLine`, as `--json` carries them (spec §8.4), with the line.
+    func wire(_ m: InfraMachine, now: Date) -> WireInfraMachine {
+        WireInfraMachine(
+            name: m.name, cloud: m.cloud, instanceType: m.instanceType, region: m.region, state: m.state.rawValue,
+            network: m.network.rawValue, hourlyUsd: m.hourlyUSD, spentUsd: ledger.spent(name: m.name, now: now),
+            ttlRemaining: max(0, Int(m.deadline.timeIntervalSince(now))), monthUsd: ledger.monthToDate(now: now),
+            monthCapUsd: env.budget().monthlyCapUSD, failure: m.failure, costLine: costLine(for: m, now: now))
+    }
+
+    /// The service's clock, so a caller stamps every machine in one answer with the same `now`.
+    var now: Date { env.now() }
+
     /// Whole minutes, as `1h12m`; never negative, and `0m` rather than `0s`.
     static func span(_ interval: TimeInterval) -> String {
         let seconds = max(0, Int(interval)) / 60 * 60

@@ -616,10 +616,11 @@ final class CLIRunner {
                 self.out(self.wantsJSON ? CLIOutput.json(info) : CLIOutput.hostInfo(info))
             case .ack, .snapshot, .event, .phoneRequest: self.out(CLIOutput.line(frame))
             case .delegateStarted, .delegateNotice, .delegateOutput, .delegateExit, .delegateRuns,
-                 .delegatePatch, .delegateApplied, .recipes, .recipeCheck, .hostDisk:
-                // Delegation verbs never come through here — `DelegateCommandRunner` sends and
-                // reads them, streams included — so no request here draws one; printed raw like
-                // the arm above rather than dropped.
+                 .delegatePatch, .delegateApplied, .recipes, .recipeCheck, .hostDisk,
+                 .infraProgress, .infraMachine, .infraList, .infraDoctor, .infraDone:
+                // Delegation and infra verbs never come through here — their own runners send
+                // and read them, streams included — so no request here draws one; printed raw
+                // like the arm above rather than dropped.
                 self.out(CLIOutput.line(frame))
             }
             self.finish(0)

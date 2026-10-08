@@ -932,9 +932,10 @@ public final class FleetSocketServer: @unchecked Sendable {
                 // nowhere to put. One `Bool` on `queue` — where this closure has just
                 // asserted it is — makes it impossible instead of merely documented.
                 //
-                // A delegation stream (`flightdeck run`) is the one request answered with many
-                // frames: its `delegateStarted`/`delegateNotice`/`delegateOutput` frames pass
-                // and leave the `cid` open, and its terminal frame closes it like any reply.
+                // A delegation stream (`flightdeck run`) and an infra `up`/`down` are the
+                // requests answered with many frames: their `delegateStarted`/`delegateNotice`/
+                // `delegateOutput`/`infraProgress` frames pass and leave the `cid` open, and the
+                // terminal frame closes it like any reply.
                 // Every frame any other request draws is terminal, so for those this is the
                 // same answered-once rule it always was. `ReplyStream` holds that rule, and the
                 // stream's backpressure.
@@ -1078,21 +1079,22 @@ public enum FleetSocketError: Error {
 
 public extension ServerFrame {
     /// More frames may follow this one on its `cid` (a delegation stream, see
-    /// `DelegationControlWire.swift`). Exhaustive with no `default`, so a new reply case cannot
-    /// compile until someone decides whether it ends its request; deciding wrong either way is
-    /// a hang (a stream closed early) or a stray frame (a reply left open).
+    /// `DelegationControlWire.swift`, or an infra `up`/`down`, see `InfraControlWire.swift`).
+    /// Exhaustive with no `default`, so a new reply case cannot compile until someone decides
+    /// whether it ends its request; deciding wrong either way is a hang (a stream closed
+    /// early) or a stray frame (a reply left open).
     ///
     /// `delegateStarted` is non-terminal here even though a detached run ends on it
     /// (`DelegationControlWire.swift`): the frame alone cannot say which it is, and the app
     /// sends nothing after a detached one, so leaving that `cid` open costs nothing.
     var continuesStream: Bool {
         switch self {
-        case .delegateStarted, .delegateNotice, .delegateOutput:
+        case .delegateStarted, .delegateNotice, .delegateOutput, .infraProgress:
             return true
         case .snapshot, .event, .ack, .err, .page, .newSessionOptions, .macEndpoints, .recentlyClosed,
              .conversations, .searchHits, .session, .phoneRequest, .intakeDetail, .intakePlan, .hostList,
              .hostInfo, .delegateExit, .delegateRuns, .delegatePatch, .delegateApplied, .recipes,
-             .recipeCheck, .hostDisk:
+             .recipeCheck, .hostDisk, .infraMachine, .infraList, .infraDoctor, .infraDone:
             return false
         }
     }
