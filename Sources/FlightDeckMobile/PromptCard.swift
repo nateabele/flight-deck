@@ -97,6 +97,23 @@ struct PromptCard: View {
         }
     }
 
+    /// Collapses a question card to its title line, and back.
+    private func minimizeButton(for open: OpenPrompt) -> some View {
+        let minimized = minimizedFor == open.callID
+        return Button {
+            if !minimized { typingFocused = false }
+            withAnimation(.snappy) { minimizedFor = minimized ? nil : open.callID }
+        } label: {
+            Image(systemName: minimized ? "chevron.up.circle.fill" : "chevron.down.circle.fill")
+                .font(.title3)
+                .symbolRenderingMode(.hierarchical)
+                .foregroundStyle(.secondary)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(minimized ? "Expand" : "Minimize")
+        .accessibilityIdentifier("prompt-minimize")
+    }
+
     static func isQuestion(_ open: OpenPrompt) -> Bool {
         if case .question = open { return true }
         return false
@@ -371,14 +388,11 @@ struct PromptCard: View {
             ScrollViewReader { scroller in
             ScrollView {
             VStack(alignment: .leading, spacing: 10) {
-                // Clear of the minimize button in the opposite corner, on a question.
-                let leading: CGFloat = Self.isQuestion(open) ? 28 : 0
                 let minimized = minimizedFor == open.callID
                 if let origin = Self.origin(fromSubagent), !minimized {
                     Text(origin)
                         .font(.caption2.weight(.semibold))
                         .foregroundStyle(.orange)
-                        .padding(.leading, leading)
                 }
                 // Only a single question's header sits up here; in a set each question draws
                 // its own beside its options, where it says which question it belongs to.
@@ -387,16 +401,19 @@ struct PromptCard: View {
                     Text(header.uppercased())
                         .font(.caption2.weight(.semibold))
                         .foregroundStyle(.orange)
-                        .padding(.leading, leading)
                 }
-                Text(Self.title(for: open, agent: agent))
-                    .font(.callout.weight(.medium))
-                    // Minimized, the card is one line — enough to say what is waiting.
-                    .lineLimit(minimized ? 1 : nil)
-                    .fixedSize(horizontal: false, vertical: true)
-                    // Clear of the dismiss button in the corner.
-                    .padding(.trailing, 24)
-                    .padding(.leading, leading)
+                // The minimize button sits on the title's own line, so the heading above it
+                // keeps the card's left edge.
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    if Self.isQuestion(open) { minimizeButton(for: open) }
+                    Text(Self.title(for: open, agent: agent))
+                        .font(.callout.weight(.medium))
+                        // Minimized, the card is one line — enough to say what is waiting.
+                        .lineLimit(minimized ? 1 : nil)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                // Clear of the dismiss button in the corner.
+                .padding(.trailing, 24)
                 if !minimized {
                 if let subtitle = Self.subtitle(for: open) {
                     Text(subtitle)
@@ -439,24 +456,6 @@ struct PromptCard: View {
                     withAnimation { scroller.scrollTo(Self.typedRowID, anchor: .bottom) }
                 }
             }
-            }
-            .overlay(alignment: .topLeading) {
-                if Self.isQuestion(open) {
-                    let minimized = minimizedFor == open.callID
-                    Button {
-                        if !minimized { typingFocused = false }
-                        withAnimation(.snappy) { minimizedFor = minimized ? nil : open.callID }
-                    } label: {
-                        Image(systemName: minimized ? "chevron.up.circle.fill"
-                                                    : "chevron.down.circle.fill")
-                            .font(.title3)
-                            .symbolRenderingMode(.hierarchical)
-                            .foregroundStyle(.secondary)
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel(minimized ? "Expand" : "Minimize")
-                    .accessibilityIdentifier("prompt-minimize")
-                }
             }
             .onChange(of: Self.hidesComposer(for: open, minimized: minimizedFor == open.callID),
                       initial: true) { _, hides in onHidesComposerChange(hides) }
@@ -568,19 +567,21 @@ struct PromptCard: View {
                 }
             }
 
+            // In a set only: a lone question's header and words are already the card's own
+            // heading and title above, and drawing them here again showed them twice.
+            if questions.count > 1 {
             VStack(alignment: .leading, spacing: 4) {
                 if let header = question.header, !header.isEmpty {
                     Text(header.uppercased())
                         .font(.caption2.weight(.semibold))
                         .foregroundStyle(.orange)
                 }
-                if questions.count > 1 {
-                    Text(question.question)
-                        .font(.footnote.weight(.medium))
-                        .fixedSize(horizontal: false, vertical: true)
-                }
+                Text(question.question)
+                    .font(.footnote.weight(.medium))
+                    .fixedSize(horizontal: false, vertical: true)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+            }
 
             ForEach(Array(question.options.enumerated()), id: \.offset) { option, choice in
                 Button {

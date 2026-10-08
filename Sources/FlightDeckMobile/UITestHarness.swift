@@ -116,7 +116,14 @@ private struct PromptKeyboardHarness: View {
     @State private var typing = false
     private let session = WireSession(id: UUID(), title: "Harness", agent: "claude",
                                       activity: "waiting", acceptsTypedAnswers: true)
-    private let open = OpenPrompt.question(callID: "toolu_HARNESS", [
+    /// `-UITestSingle YES` keeps only the first question, so a lone question's heading and
+    /// title layout can be looked at too.
+    private var open: OpenPrompt {
+        guard UserDefaults.standard.bool(forKey: "UITestSingle"),
+              case .question(let call, let questions) = set else { return set }
+        return .question(callID: call, [questions[0]])
+    }
+    private let set = OpenPrompt.question(callID: "toolu_HARNESS", [
         PromptQuestion(header: "Color", question: "Which color do you like best?",
                        options: [.init(label: "Red", detail: "Warm and bold"),
                                  .init(label: "Blue", detail: "Cool and calm")]),
