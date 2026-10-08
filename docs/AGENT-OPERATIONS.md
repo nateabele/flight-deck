@@ -271,6 +271,41 @@ theirs elsewhere. Four consequences for anyone working here:
   refreshes it. A Debug build that predates this fix did write it, and the next Release start
   rewrites it.
 
+### Cloud machines (sub-project E)
+
+`flightdeck infra up` and `run --on <infra name>` create real machines in the user's AWS or GCP
+account. They cost money by the hour, and every guard below exists because the failure is a bill.
+
+- **Never run `scripts/test-infra-live.sh` unasked.** It creates a real machine (the smallest
+  type, a 15-minute TTL: cents) and refuses without `FD_INFRA_LIVE=1`; setting that variable
+  yourself is not the user asking. The same goes for `flightdeck infra up`, an `auto_up` run and
+  the setup sheet's **Test** button. Everything else about infra is tested without a cloud: the
+  unit suites fake every seam, and `test-infra-presets.sh` runs `tofu test` on mock providers.
+- **Never delete or hand-edit `infra.json`, `infra-ledger.json`, `infra-controller.json` or
+  `infra/<name>/`.** The workdir holds the machine's OpenTofu state: delete it and `infra down`
+  can no longer destroy what it created, so the machine runs on (until its TTL) as an orphan.
+  `infra-controller.json` holds this state directory's controller id: delete it and every
+  machine this build made becomes another controller's, invisible to its orphan scan.
+- **Debug and Release are separate controllers.** Each state directory mints its own
+  `controllerID`, so a Debug build neither lists nor reaps nor "orphans" the Release app's
+  machines, and the reverse. Look for a machine from the build that created it.
+- **Finding and destroying orphans.** `flightdeck infra ls --orphans` lists every resource that
+  carries this controller's `flightdeck-owner` label but no workdir knows, as `KIND:ID`
+  (`instance:…`, `security-group:…`, `firewall:…`); `flightdeck infra down --orphan KIND:ID`
+  deletes one. "orphans: none" is printed only when every account was read; an account it
+  could not scan is named with the reason instead (`could not scan aws: …`), which means *look
+  again*, not *clean*. `flightdeck infra doctor` includes the same scan. A machine still in
+  `infra ls` (say `failed`) is not an orphan: `flightdeck infra down <name>` destroys it, and
+  the Reaper already retries a failed destroy (1, 5, 15, then every 30 minutes).
+- **If Flight Deck itself is gone** (the state directory lost, another Mac), find the machines
+  in the cloud console by label: AWS resources tagged `flightdeck-owner`, GCE instances labelled
+  `flightdeck-owner` and firewall rules whose description starts `flightdeck-owner=`, all named
+  `fd-…`. They still die at their TTL on their own (AWS's on-machine timer; GCP's
+  `max_run_duration`), but a security group or firewall rule left behind only goes when deleted.
+- **Quitting the app does not stop a machine, and that is fine.** The TTL is enforced on the
+  machine too, so a quit, a sleeping Mac or a lost laptop cannot leave one running past it; on
+  relaunch the app adopts or destroys every machine it was in the middle of creating.
+
 ## 4. State: where it lives, what never to delete
 
 | What | Where |
@@ -282,6 +317,7 @@ theirs elsewhere. Four consequences for anyone working here:
 | Paired controllers (host side) | `~/Library/Application Support/Flight Deck Host/controllers.json`, mode 0600 in a 0700 directory (Linux: `$XDG_DATA_HOME` or `~/.local/share/flightdeck-hostd`) |
 | Delegated runs (controller side) | `~/Library/Application Support/Flight Deck/delegation.json` (the run registry), `delegation/` beside it (each run's output copy and result bundles), `route-shims/<session id>/` (per-tab shims, rebuilt at launch) |
 | Delegated work (host side) | Under the hostd's state root: `workspaces/<controller slot>/` (object stores and checkouts, cleared only by `flightdeck host prune`) and `runs/<id>/` (spooled output, pruned after 24 h) |
+| Cloud machines (controller side) | `~/Library/Application Support/Flight Deck/infra.json` (the machines), `infra-ledger.json` (spend, kept after a machine is gone), `infra-controller.json` (this state directory's controller id), `infra/<name>/` (each machine's OpenTofu workdir **and state**); the Tailscale OAuth client in the Keychain. Managed tools under `tools/` beside them, except the AWS CLI, under `~/Library/Caches/dev.flightdeck/tools/aws` |
 
 - **Never `defaults delete dev.flightdeck.FlightDeck`.** It nukes preferences; it used to nuke
   every session too, on every smoke run. Delete individual geometry keys only — the list
