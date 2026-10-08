@@ -598,6 +598,50 @@ final class SubmoduleSyncTests: XCTestCase {
         }
     }
 
+    // MARK: - Disk (§4.7)
+
+    /// `host ls --disk` shows what the submodule caches cost, one row each, under the repo
+    /// column `submodules`: a big submodule fetched in full is gigabytes nobody could see.
+    func testDiskUsageCountsSubmoduleCaches() async throws {
+        let scratch = TempRepo.scratch()
+        let (app, _, _) = try makeApp(in: scratch)
+        let store = Workspace(root: scratch.appendingPathComponent("host"))
+        _ = try await store.checkout(controller: controller, ref: try await push(app, to: store), pin: false)
+        let rows = try await store.usage(controller: controller).filter { $0.repoRoot == "submodules" }
+        XCTAssertEqual(rows.count, 1, "\(rows)")
+        XCTAssertTrue(rows.first?.worktreeName.hasPrefix("lib-") ?? false, "\(rows)")
+        XCTAssertGreaterThan(rows.first?.bytes ?? 0, 0)
+    }
+
+    /// `host prune` frees the caches no checkout uses any more: all of them for a whole prune,
+    /// and for one repo's, those only that repo used. A cache another repo's checkout still
+    /// has a worktree of stays.
+    func testPruneRemovesSubmoduleCachesNoCheckoutUses() async throws {
+        let scratch = TempRepo.scratch()
+        let lib = try makeRemote("lib", in: scratch, ["lib.txt": "v1\n"])
+        let other = try makeRemote("other", in: scratch, ["other.txt": "o\n"])
+        func app(_ name: String, _ subs: [Remote]) throws -> TempRepo {
+            let repo = try TempRepo(at: scratch.appendingPathComponent(name))
+            repo.write("\(name).txt", "\(name)\n")
+            for sub in subs { try repo.git("submodule", "add", "-q", sub.bare.path, sub.bare.deletingPathExtension().lastPathComponent) }
+            try repo.commitAll()
+            return repo
+        }
+        let a = try app("a", [lib, other]), b = try app("b", [lib])
+        let store = Workspace(root: scratch.appendingPathComponent("host"))
+        let refA = try await push(a, to: store), refB = try await push(b, to: store)
+        await store.release(try await store.checkout(controller: controller, ref: refA, pin: false))
+        await store.release(try await store.checkout(controller: controller, ref: refB, pin: false))
+        let caches = store.submoduleCaches(controller: controller)
+        func names() -> [String] { ((try? FileManager.default.contentsOfDirectory(atPath: caches.path)) ?? []).sorted() }
+        XCTAssertEqual(names().count, 2)
+
+        try await store.prune(controller: controller, repoRoot: refA.repoRoot)
+        XCTAssertEqual(names().map { String($0.prefix(4)) }, ["lib-"], "b still uses lib; only a used other")
+        try await store.prune(controller: controller, repoRoot: nil)
+        XCTAssertEqual(names(), [])
+    }
+
     // MARK: - Results (§4.5)
 
     /// A run's edits inside a submodule never ride the result (the result is the superproject's

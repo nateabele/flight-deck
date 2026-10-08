@@ -547,6 +547,7 @@ public final class Workspace: WorkspaceStore, @unchecked Sendable {
     /// per store with an empty `worktreeName` for the shared object store.
     public func usage(controller: UUID) async throws -> [WorkspaceUsage] {
         let base = root.appendingPathComponent("workspaces/\(controller.uuidString)")
+        let caches = submoduleCaches(controller: controller)
         return try await GitRunner.offload { () -> [WorkspaceUsage] in
             let fm = FileManager.default
             var rows: [WorkspaceUsage] = []
@@ -561,6 +562,12 @@ public final class Workspace: WorkspaceStore, @unchecked Sendable {
                     }
                 }
                 rows += byName.sorted { $0.key < $1.key }.map { WorkspaceUsage(repoRoot: repoRoot, worktreeName: $0.key, bytes: $0.value) }
+            }
+            // The submodule caches, one row each under the repo column `submodules` (never a
+            // root commit, so no row is mistaken for a repo's): a submodule fetched in full can
+            // be gigabytes, and they sit outside `workspaces/`.
+            for name in ((try? fm.contentsOfDirectory(atPath: caches.path)) ?? []).sorted() {
+                rows.append(WorkspaceUsage(repoRoot: "submodules", worktreeName: name, bytes: Self.bytes(caches.appendingPathComponent(name))))
             }
             return rows
         }
@@ -589,6 +596,7 @@ public final class Workspace: WorkspaceStore, @unchecked Sendable {
                     if fm.fileExists(atPath: store.path) { try git.run(["worktree", "prune"], in: store) }
                 }
             }
+            try pruneUnusedSubmoduleCaches(controller: controller)
         }
     }
 
