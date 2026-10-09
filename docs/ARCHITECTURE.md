@@ -209,6 +209,19 @@ other-writable, checked before bind. It is not authenticated beyond that, so any
 same user can arm a window, which is already equivalent to that user's other powers. A new hostd
 never takes over a live admin socket and never unlinks its successor's.
 
+**Keep awake while plugged in** (`KeepAwakeHolder`, `HostingSettings`, `IOKitPowerSource`). A
+macOS-host setting, off by default, in Settings → Hosting. When on and the Mac is on AC, the hostd
+holds a `PreventUserIdleSystemSleep` and a `PreventUserIdleDisplaySleep` assertion, both named
+"Flight Deck hosting: keep awake while plugged in" in `pmset -g assertions`, so neither idle display
+sleep nor the screen saver starts and a "require password" lock never follows. That lock is what
+fails XCUITest ("Running Background") on a UI-test host. It lets go on battery (or a UPS, or an
+unreadable source), takes them back on AC (`IOPSNotificationCreateRunLoopSource` on the main run
+loop), and releases on SIGTERM; IOKit drops a dead process's assertions anyway. It lives in the
+hostd, not the app, so it holds while Flight Deck is not running. The setting is
+`<state root>/hosting.json`, read at launch and written by the admin requests `keepAwake` /
+`setKeepAwake` (save first, apply only if the save worked). It writes no system setting and cannot
+undo a manual lock. A Linux hostd answers both requests `failed`: it has no display session to keep.
+
 **Where secrets live.** Controller side: `hosts.json` (Application Support, never `sessions.json`)
 holds names and addresses; each host's PSK is a Keychain item (`dev.flightdeck.host`). Host side: the
 controllers' PSKs are in `controllers.json`, mode `0600` in a `0700` state root, on both platforms

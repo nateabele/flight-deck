@@ -240,6 +240,10 @@ final class LinuxHostd: @unchecked Sendable {
             return .ok
         case .arm:
             return arm()
+        case .keepAwake, .setKeepAwake:
+            // A Linux host has no display session to keep from locking, and its runs already
+            // hold their own systemd-inhibit sleep lock; the option is the macOS host's.
+            return .failed("Keeping the host awake while plugged in is available on Mac hosts only.")
         }
     }
 

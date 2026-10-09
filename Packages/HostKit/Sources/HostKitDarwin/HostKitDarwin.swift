@@ -10,6 +10,7 @@
 import CoreGraphics
 import Foundation
 import HostKit
+import IOKit.ps
 import IOKit.pwr_mgt
 
 public struct IOKitPowerAssertions: PowerAsserting {
@@ -29,6 +30,65 @@ public struct IOKitPowerAssertions: PowerAsserting {
         guard result == kIOReturnSuccess else { return .none() }
         let held = id
         return PowerAssertion { _ = IOPMAssertionRelease(held) }
+    }
+}
+
+/// IOKit's providing power source, watched through `IOPSNotificationCreateRunLoopSource` on the
+/// main run loop (hostd runs AppKit's, for the screen panel), for "keep this Mac awake while
+/// plugged in" (`KeepAwakeHolder`).
+public final class IOKitPowerSource: PowerSourceMonitoring, @unchecked Sendable {
+    private let lock = NSLock()
+    private var onChange: (@Sendable (PowerSource) -> Void)?
+    private var runLoopSource: CFRunLoopSource?
+
+    public init() {}
+
+    public var current: PowerSource {
+        guard let info = IOPSCopyPowerSourcesInfo()?.takeRetainedValue() else { return .unknown }
+        let type = IOPSGetProvidingPowerSourceType(info)?.takeUnretainedValue() as String?
+        return Self.source(providingType: type)
+    }
+
+    /// A desktop Mac reports AC too. A UPS supplying power means the mains are out, which is
+    /// battery for this purpose: the point is not to drain a battery keeping a screen lit.
+    public static func source(providingType type: String?) -> PowerSource {
+        switch type {
+        case kIOPMACPowerKey: .ac
+        case kIOPMBatteryPowerKey, kIOPMUPSPowerKey: .battery
+        default: .unknown
+        }
+    }
+
+    public func start(onChange: @escaping @Sendable (PowerSource) -> Void) {
+        lock.withLock { self.onChange = onChange }
+        // Unretained: `stop()` invalidates the source before this object can go, and the
+        // holder keeps it alive until then.
+        let context = Unmanaged.passUnretained(self).toOpaque()
+        guard let source = IOPSNotificationCreateRunLoopSource({ context in
+            guard let context else { return }
+            let monitor = Unmanaged<IOKitPowerSource>.fromOpaque(context).takeUnretainedValue()
+            monitor.fire()
+        }, context)?.takeRetainedValue() else { return }
+        lock.withLock { runLoopSource = source }
+        CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+    }
+
+    public func stop() {
+        let source: CFRunLoopSource? = lock.withLock {
+            onChange = nil
+            defer { runLoopSource = nil }
+            return runLoopSource
+        }
+        // Invalidate is thread-safe and removes it from every run loop; a callback already
+        // dequeued finds `onChange` nil.
+        if let source { CFRunLoopSourceInvalidate(source) }
+    }
+
+    deinit { stop() }
+
+    private func fire() {
+        guard let onChange = lock.withLock({ self.onChange }) else { return }
+        onChange(current)
     }
 }
 

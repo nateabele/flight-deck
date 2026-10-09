@@ -4,10 +4,16 @@ import Foundation
 //
 //   request  {"t":"status"} | {"t":"arm"} | {"t":"cancelArm"} | {"t":"ls"}
 //            {"t":"revoke","slot":uuid}
+//            {"t":"keepAwake"} | {"t":"setKeepAwake","on":bool}
 //   reply    {"t":"status","paired":int,"armedUntil":date?,"listeningPort":int?,"hostName":string}
 //            {"t":"armed","code":string,"expiresAt":date,"pairingPort":int?}
 //            {"t":"controllers","controllers":[{"slot":uuid,"name":string,"pairedAt":date}]}
+//            {"t":"keepAwake","enabled":bool,"holding":bool,"power":"ac"|"battery"|"unknown"}
 //            {"t":"ok"} | {"t":"failed","message":string}
+//
+// `keepAwake`/`setKeepAwake` (both answered by the `keepAwake` reply) came after the first
+// release: a hostd from before them answers `failed("bad request")`, and a Linux hostd, which
+// has no display to keep on, answers `failed` with its reason.
 //
 // Dates are reference-date doubles (HostWire's default), nil optionals are omitted. Tags are
 // spelled out for the same reason as HostWire's: a Linux `flightdeck-hostd pair` and a running
@@ -19,10 +25,14 @@ public enum AdminRequest: Codable, Sendable, Equatable {
     case cancelArm
     case listControllers
     case revoke(slot: UUID)
+    /// Reads "keep this Mac awake while plugged in" and whether it is holding now.
+    case keepAwake
+    /// Sets it, persists it in the host's state root, and answers like `keepAwake`.
+    case setKeepAwake(Bool)
 
-    enum CodingKeys: String, CodingKey { case t, slot }
+    enum CodingKeys: String, CodingKey { case t, slot, on }
 
-    private enum Tag: String, Codable { case status, arm, cancelArm, ls, revoke }
+    private enum Tag: String, Codable { case status, arm, cancelArm, ls, revoke, keepAwake, setKeepAwake }
 
     public func encode(to encoder: any Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
@@ -34,6 +44,10 @@ public enum AdminRequest: Codable, Sendable, Equatable {
         case .revoke(let slot):
             try c.encode(Tag.revoke, forKey: .t)
             try c.encode(slot, forKey: .slot)
+        case .keepAwake: try c.encode(Tag.keepAwake, forKey: .t)
+        case .setKeepAwake(let on):
+            try c.encode(Tag.setKeepAwake, forKey: .t)
+            try c.encode(on, forKey: .on)
         }
     }
 
@@ -45,6 +59,8 @@ public enum AdminRequest: Codable, Sendable, Equatable {
         case .cancelArm: self = .cancelArm
         case .ls: self = .listControllers
         case .revoke: self = .revoke(slot: try c.decode(UUID.self, forKey: .slot))
+        case .keepAwake: self = .keepAwake
+        case .setKeepAwake: self = .setKeepAwake(try c.decode(Bool.self, forKey: .on))
         }
     }
 }
@@ -75,14 +91,16 @@ public enum AdminReply: Codable, Sendable, Equatable {
     /// first release: an older peer's reply decodes as nil and an older decoder ignores the key.
     case armed(code: String, expiresAt: Date, pairingPort: Int? = nil)
     case controllers([AdminController])
+    case keepAwake(KeepAwakeStatus)
     case ok
     case failed(String)
 
     enum CodingKeys: String, CodingKey {
         case t, paired, armedUntil, listeningPort, hostName, code, expiresAt, pairingPort, controllers, message
+        case enabled, holding, power
     }
 
-    private enum Tag: String, Codable { case status, armed, controllers, ok, failed }
+    private enum Tag: String, Codable { case status, armed, controllers, keepAwake, ok, failed }
 
     public func encode(to encoder: any Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
@@ -101,6 +119,11 @@ public enum AdminReply: Codable, Sendable, Equatable {
         case .controllers(let list):
             try c.encode(Tag.controllers, forKey: .t)
             try c.encode(list, forKey: .controllers)
+        case .keepAwake(let status):
+            try c.encode(Tag.keepAwake, forKey: .t)
+            try c.encode(status.enabled, forKey: .enabled)
+            try c.encode(status.holding, forKey: .holding)
+            try c.encode(status.power, forKey: .power)
         case .ok: try c.encode(Tag.ok, forKey: .t)
         case .failed(let message):
             try c.encode(Tag.failed, forKey: .t)
@@ -121,6 +144,10 @@ public enum AdminReply: Codable, Sendable, Equatable {
                           expiresAt: try c.decode(Date.self, forKey: .expiresAt),
                           pairingPort: try c.decodeIfPresent(Int.self, forKey: .pairingPort))
         case .controllers: self = .controllers(try c.decode([AdminController].self, forKey: .controllers))
+        case .keepAwake:
+            self = .keepAwake(KeepAwakeStatus(enabled: try c.decode(Bool.self, forKey: .enabled),
+                                              holding: try c.decode(Bool.self, forKey: .holding),
+                                              power: try c.decode(PowerSource.self, forKey: .power)))
         case .ok: self = .ok
         case .failed: self = .failed(try c.decode(String.self, forKey: .message))
         }

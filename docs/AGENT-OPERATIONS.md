@@ -228,6 +228,11 @@ at all: hostd's `NSApplication` checked in with LaunchServices as `dev.flightdec
   paired controller as `SLOT<TAB>NAME<TAB>PAIRED-AT` (`--json` for JSON); `flightdeck-hostd revoke
   SLOT` unpairs one and cuts its live connection. Both exit 2 when hostd is not running. A Mac host
   does the same from Settings → Hosting.
+- **"Keep this Mac awake while plugged in" is hostd's, not the app's.** Settings → Hosting writes
+  it through the admin socket into `<state root>/hosting.json`; the hostd reads that file at launch.
+  While it holds, `pmset -g assertions` lists `Flight Deck hosting: keep awake while plugged in`
+  twice (system and display). A hostd older than the app shows "older than this app" under the
+  toggle; restart the hostd so it runs the new binary.
 - **Never launch the hostd binary or `Flight Deck Host.app` by hand from `DerivedData/` to "try it".** It binds 47410 and
   the admin socket in the real state root, which belong to the live hostd.
 - Interop tests (`test-hostd-linux-interop.sh`) bind fixed ports (47410, 47411) and share the

@@ -3347,3 +3347,22 @@ same `RoundChip` (ARCHITECTURE.md, "Round chips and the rounds timeline"). What 
   dedup; the disabled polish controls and their explanation that used to show are gone with it.
 - **A round planned but not yet run picks nothing in the main view** — there is nothing of it
   there to show. Only done and live chips move the main view.
+
+## Keep a host awake while plugged in (2026-10-09, round 2 `hosting-keep-awake`)
+
+Shipped: Settings → Hosting → "Keep this Mac awake while plugged in", held by the macOS hostd
+(`KeepAwakeHolder`). Open items:
+
+- **Unverified live on the UI-test Mac**: that holding `PreventUserIdleDisplaySleep` stops the
+  screen saver as well as display sleep there (Apple documents the display half; the screen-saver
+  half is the behaviour video players rely on, not observed here), and so that the screen no
+  longer locks between UI runs. Check `pmset -g assertions` and leave the Mac idle past its
+  screen-saver delay.
+- **`holding` means "asked IOKit", not "IOKit said yes".** `IOKitPowerAssertions.hold` returns an
+  empty assertion when `IOPMAssertionCreateWithName` fails, and the status line would still say
+  "Keeping awake". Not seen; the fix is a `PowerAsserting` that reports failure.
+- **No CLI on a macOS host.** The macOS hostd has only `serve`, so a headless Mac host is set by
+  writing `hosting.json` before a hostd restart, or by sending `{"on":true,"t":"setKeepAwake"}` to
+  its admin socket. A `flightdeck-hostd keep-awake on|off` subcommand would be the tidy form.
+- **Linux: not applicable.** A Linux hostd answers `failed`; it has no display session, and its runs
+  already hold `systemd-inhibit` sleep locks.

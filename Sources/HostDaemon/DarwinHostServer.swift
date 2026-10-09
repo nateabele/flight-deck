@@ -101,6 +101,13 @@ final class DarwinHostServer: @unchecked Sendable {
 
     private var admin: AdminSocketServer?
 
+    /// "Keep this Mac awake while plugged in". Nil (every loopback test's server) answers the
+    /// admin requests with `failed`, so no test takes a real assertion through hostd.
+    private let keepAwake: KeepAwakeHolder?
+    /// Serialises the settings file's read-modify-write. The admin socket serves one request
+    /// at a time today; this keeps a second writer from undoing that assumption silently.
+    private let settingsLock = NSLock()
+
     /// Held across a pairing's consume-then-add and by `status`, for `LinuxHostd`'s reason: a
     /// `pair` poll landing between the two would see the window closed and the count
     /// unchanged, and report "expired" for a controller that has just paired.
@@ -127,11 +134,14 @@ final class DarwinHostServer: @unchecked Sendable {
     /// for 47411 with the developer's own hostd or a sibling test shard.
     /// `delegation` is the run/sync/service router (`main.swift` passes
     /// `DelegationHost.standard`); nil serves `host.info` alone, as a 1.0 host did.
+    /// `keepAwake` is the holder `main.swift` builds over IOKit; the server persists the
+    /// setting in `HostingSettings` and forwards it.
     init(root: URL, port: NWEndpoint.Port?, hostName: @escaping @Sendable () -> String,
          endpoints: @escaping @Sendable (UInt16) -> [String] = { _ in [] },
          probe: HostInfoProbe? = nil, delegation: DelegationHost? = nil,
-         pairingPort: NWEndpoint.Port? = nil) {
+         pairingPort: NWEndpoint.Port? = nil, keepAwake: KeepAwakeHolder? = nil) {
         self.root = root
+        self.keepAwake = keepAwake
         requestedPort = port
         requestedPairingPort = pairingPort
         self.hostName = hostName
@@ -490,8 +500,27 @@ final class DarwinHostServer: @unchecked Sendable {
             return .ok
         case .arm:
             return arm()
+        case .keepAwake:
+            guard let keepAwake else { return Self.keepAwakeUnavailable }
+            return .keepAwake(keepAwake.status)
+        case .setKeepAwake(let on):
+            guard let keepAwake else { return Self.keepAwakeUnavailable }
+            // Saved before it is applied, and not applied if the save fails: otherwise the
+            // tab would show a setting the next hostd launch silently drops.
+            settingsLock.lock(); defer { settingsLock.unlock() }
+            var settings = HostingSettings.load(root: root)
+            settings.keepAwakeWhilePluggedIn = on
+            do {
+                try settings.save(root: root)
+            } catch {
+                return .failed("Could not save the keep-awake setting: \(error.localizedDescription)")
+            }
+            keepAwake.setEnabled(on)
+            return .keepAwake(keepAwake.status)
         }
     }
+
+    private static let keepAwakeUnavailable = AdminReply.failed("This host cannot keep itself awake.")
 
     /// A fresh code replaces any armed one (PairingWindow's rule), and the old listener is
     /// stopped before the new one exists, so an abandoned code can never pair. Answers only
