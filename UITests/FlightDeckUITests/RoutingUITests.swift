@@ -24,6 +24,7 @@ final class RoutingUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments += ["-ApplePersistenceIgnoreState", "YES", "-FlightDeckResetState", "YES",
                                 "-FlightDeckRoutingFixture", "YES"]
+        dismissFlightDeckCrashReports()
         app.launch()
         app.activate()
         XCTAssertTrue(app.windows.firstMatch.waitForExistence(timeout: 15), "no window appeared")
