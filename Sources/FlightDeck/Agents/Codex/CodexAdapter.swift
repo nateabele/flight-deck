@@ -45,6 +45,8 @@ struct CodexAdapter: AgentAdapter {
     /// safe (codex's own status line, as a positive discriminator) and for why the draft is
     /// restored by re-typing rather than by the Ctrl-Y ring codex was never shown to keep.
     static let textChannel: AgentTextChannel? = CodexTextChannel()
+    /// Carries a conversation to another account's home (`AgentID.conversationTransfer`).
+    static let conversationTransfer: AgentConversationTransfer? = CodexConversationTransfer()
 
     /// **The stage `thread/name/set` cannot reach.** That call renames the thread's own
     /// metadata over JSON-RPC, but it types nothing at the pty a running `codex resume` is

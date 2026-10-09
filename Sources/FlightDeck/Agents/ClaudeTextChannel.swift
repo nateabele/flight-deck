@@ -114,6 +114,26 @@ struct ClaudeTextChannel: AgentTextChannel {
         return Self.isComposerBox(viewport)
     }
 
+    /// See `AgentTextChannel.draft`. The screen cannot tell claude's rotating placeholder from a
+    /// draft by colour (`InputBar`), so it is told by its shape: every hint claude rotates
+    /// through is `Try "…"`. A real draft of exactly that shape is read as empty — the one way
+    /// this loses text, and a far rarer one than the alternative, pasting the hint into the next
+    /// composer as if the user had typed it.
+    func draft(_ injector: TextInjecting) -> String? {
+        guard let viewport = injector.readViewport(), Self.isComposerBox(viewport),
+              let bar = InputBar.read(fromViewport: viewport)
+        else { return nil }
+        let text = bar.rows.map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }.joined(separator: " ")
+        return Self.isPlaceholder(text) ? "" : text
+    }
+
+    /// The empty box's two looks: the rotating `Try "…"` hint, and the queued-messages hint.
+    static func isPlaceholder(_ text: String) -> Bool {
+        text.isEmpty || text == queuedMessagesHint
+            || (text.hasPrefix("Try \"") && text.hasSuffix("\"") && text.count > 6)
+    }
+
     /// Every ordinary claude dialog carries this footer token, and a composer never does: a
     /// permission prompt shows `Esc to cancel · Tab to amend`, an `AskUserQuestion`
     /// `Esc to cancel`, the unprompted auto-mode nudge `Enter to confirm · Esc to cancel`.

@@ -69,6 +69,14 @@ struct CodexTextChannel: AgentTextChannel, AgentRenameTyping {
         return bar
     }
 
+    /// See `AgentTextChannel.draft`. One row only, as `composer` reads it: a multi-row box is
+    /// unreadable here (nil), which refuses a rollover rather than guessing at its rows.
+    func draft(_ injector: TextInjecting) -> String? {
+        guard let bar = composer(injector) else { return nil }
+        let content = bar.content.trimmingCharacters(in: .whitespaces)
+        return content == Self.placeholder ? "" : content
+    }
+
     func isComposerEmpty(_ injector: TextInjecting) -> Bool {
         guard let bar = composer(injector) else { return false }
         let content = bar.content.trimmingCharacters(in: .whitespaces)

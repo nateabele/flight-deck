@@ -23,6 +23,8 @@ struct ClaudeAdapter: AgentAdapter {
     /// their sha256s. Everything `SessionStore` types — a phone's message, `/rename`, an
     /// answer to a dialog — goes into that box or that list.
     static let textChannel: AgentTextChannel? = ClaudeTextChannel()
+    /// Carries a conversation to another account's home (`AgentID.conversationTransfer`).
+    static let conversationTransfer: AgentConversationTransfer? = ClaudeConversationTransfer()
     static let dialogDriver: AgentDialogDriver? = ClaudeDialogDriver()
 
     /// Claude's own transience predicate, carried on the transcript record — see

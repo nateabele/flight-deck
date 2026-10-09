@@ -18,6 +18,8 @@ struct GrokAdapter: AgentAdapter {
     nonisolated static var profile: any AgentProfile { AgentProfiles.profile(for: id) }
 
     static let textChannel: AgentTextChannel? = GrokTextChannel()
+    /// Carries a conversation to another account's home (`AgentID.conversationTransfer`).
+    static let conversationTransfer: AgentConversationTransfer? = GrokConversationTransfer()
     static let dialogDriver: AgentDialogDriver? = GrokDialogDriver()
     static let openPromptReader: AgentOpenPromptReader? = GrokOpenPromptReader()
     static let searchCorpus: AgentSearchCorpus? = GrokSearchCorpus()
