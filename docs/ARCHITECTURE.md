@@ -1623,10 +1623,17 @@ Pool leases are released when the runner is seen gone — `reap`, or the per-tic
 `syncAccountLeases` for an exit nobody reported (finish, crash, kill) — and a relaunched app
 re-adopts a live runner's leases from its `accounts.json` (`CapacityLedger.adopt`). Each start
 re-leases, which is the rollover point. Triage resolves the same way per turn and releases its
-lease when the turn ends. Index refresh is app-wide, not project-scoped: `CapabilityIndexService`
-resolves claude through the same resolver with its run directory as the project (which nothing
-assigns, so claude's first live account, like an unassigned project's tab), binds every source's run
-to that home, and releases any lease when the refresh ends.
+lease when the turn ends. Index refresh is app-wide, not project-scoped, so it has its own
+assignment: `CapacityPreferences.indexAccount` (stored as `indexAccountID`/`indexPool`), picked on
+the Capability Index pane with the same `AccountAssignmentPicker` the Projects pane uses.
+`AccountResolver.resolveIndex` resolves it by the project rules; unset means claude's pool
+(`defaultIndexPool`: the one user hosted claude pool if exactly one exists, else `claude-default`,
+else — no claude account at all — the unassigned rule). `CapabilityIndexService` takes the lease
+before the first source, binds every source's run to that home, and releases it when the refresh
+ends — success, failed sources or `cancelRefresh()` (which SIGTERMs the running claude and writes
+no snapshot). Each source's folded stream is published as `CapabilityIndexService.seatActivities`,
+stamped with the billed account id, and `UsageEnvironment.live` adds them to the seats
+`UsageService` credits. Removing the assigned account or pool resets the index to Default.
 Every seat's usage is credited to the account it billed (`UsageService.ingestHeadlessSeats`): claude
 from its `rate_limit_event`s, codex from the rollout its run wrote (`SeatActivity.conversationID` →
 `CodexRolloutFile`; `codex exec --json` has no rate limits on stdout), grok from its home's billing

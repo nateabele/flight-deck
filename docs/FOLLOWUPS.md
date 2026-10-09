@@ -3110,9 +3110,19 @@ resume. What is still open:
   because it changes what the pool meter shows.
 - **The lease sweep walks the process tree.** Only for tabs in a pool-assigned project or holding
   a lease, every 5 s. Not measured on a large fleet.
-- **The index refresh takes no lease today.** It is app-wide, resolved as an unassigned project
-  (claude's first live account). Giving it a pool needs a setting (an "Account" picker on the
-  index pane) or treating no assignment as the agent's default pool.
+- **The index refresh takes no lease today.** RESOLVED (round 2, index-refresh-pool): the index has
+  its own assignment (`CapacityPreferences.indexAccount`, an account-or-pool picker under Refresh
+  agent on the Capability Index pane). Unset is claude's pool — the one user claude pool if there
+  is exactly one, else `claude-default` — leased for the refresh and released on success, failure
+  and cancel (new Stop button). Each source's `rate_limit_event`s meter the leased account.
+  Claude only: every source runs `claude -p`. Unverified live: no real refresh was run (it spends
+  tokens), and the picker and Stop button have not been clicked in the app. GUI check for Nate:
+  with a claude pool, open Settings → Flight Control → Capability Index, see "Default (<pool>
+  pool)" under Refresh agent, press Refresh now and watch the pool's lease count in Flight Control
+  rise by one, then press Stop and watch it drop.
+- **A refresh's lease is not re-adopted after a relaunch.** Quitting mid-refresh kills the run (it
+  is in-process, unlike a planning runner), and the ledger is in memory, so nothing leaks; noted
+  only because planning re-adopts and the index does not need to.
 - **Codex seat rollouts are found by start date.** `CodexRolloutFile` lists the seat's local start
   day and its neighbours under `$CODEX_HOME/sessions`. A codex that ever files rollouts by another
   scheme would silently stop metering seats.
