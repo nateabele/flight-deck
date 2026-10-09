@@ -1,4 +1,5 @@
 import Foundation
+import IntakeKit
 
 /// What one look at an agy tab found. Gathered off the main actor; folded on it.
 struct GeminiObservation: Equatable, Sendable {
@@ -51,7 +52,11 @@ struct GeminiObserver: Sendable {
 ///   ~0.4 s of a submit, `IDLE` at turn end and after a deny — watched at 4 Hz, 2026-10-08);
 /// - **waiting**: a step with status WAITING in the conversation's step store, which appears
 ///   before the dialog is drawn and changes on the answer;
-/// - **title**: `annotations/<id>.pbtxt`.
+/// - **title**: `annotations/<id>.pbtxt`;
+/// - **⌘K text**: `brain/<id>/.system_generated/logs/transcript_full.jsonl`, tailed on the same
+///   beat (`GeminiTranscriptTail`). agy appends a request ~30 ms after it is submitted and a reply
+///   when it finishes (probed live on agy 1.3.1, 2026-10-09), so this is as live as claude's own
+///   transcript, and new messages are searchable before any backfill.
 ///
 /// What this costs, stated: an Esc interrupt leaves `status` to agy's own transition (hooks
 /// would not have helped: an interrupt fires no Stop either), and nothing here classifies an API
@@ -66,6 +71,9 @@ final class GeminiRuntime: AgentRuntime {
         var live = false
         var activity: SessionActivity?
         var title: String?
+        /// Where this tab's transcript has been read to for ⌘K. Starts at byte 0, never at the
+        /// end: see `GeminiTranscriptTail.start`.
+        var transcript = GeminiTranscriptTail.start
     }
 
     private weak var clock: WatchClock?
@@ -75,8 +83,24 @@ final class GeminiRuntime: AgentRuntime {
     private var subscribers: [Subscriber] = []
     private var isPolling = false
 
+    /// Where a conversation's text goes for ⌘K search. A closure re-read on every batch, for
+    /// `ClaudeRuntime.searchIndex`'s reason: the index is wired in after runtimes may already
+    /// be watching, and is nil in tests that never wire it.
+    private let searchIndex: () -> SearchIndex?
+    /// The tab's project and the directory its agent works in, keyed by TAB rather than by
+    /// conversation as claude's and codex's are. This runtime always knows the tab, and a tab
+    /// mid-`.rebound` has a pin that is changing under it; the tab id does not change.
+    private let projectPath: (UUID) -> String?
+    private let workingDirectory: (UUID) -> String?
+
     init(clock: WatchClock?, paths: GeminiPaths, roots: @escaping (UUID) -> [pid_t],
-         observer: GeminiObserver? = nil) {
+         observer: GeminiObserver? = nil,
+         searchIndex: @escaping () -> SearchIndex? = { nil },
+         projectPath: @escaping (UUID) -> String? = { _ in nil },
+         workingDirectory: @escaping (UUID) -> String? = { _ in nil }) {
+        self.searchIndex = searchIndex
+        self.projectPath = projectPath
+        self.workingDirectory = workingDirectory
         self.clock = clock
         self.paths = paths
         self.roots = roots
@@ -99,24 +123,61 @@ final class GeminiRuntime: AgentRuntime {
     private func poll() {
         guard !isPolling, !subscribers.isEmpty else { return }
         isPolling = true
-        let work = subscribers.map { ($0.token, $0.binding.conversationID, roots($0.tab)) }
+        let work = subscribers.map { ($0.token, $0.binding.conversationID, roots($0.tab), transcriptURL(of: $0), $0.transcript) }
         let observer = self.observer
         Task { [weak self] in
             let results = await Task.detached(priority: .utility) {
-                work.map { ($0.0, observer.observe(bound: $0.1, roots: $0.2)) }
+                work.map { ($0.0, observer.observe(bound: $0.1, roots: $0.2),
+                            GeminiTranscriptTail.read($0.3, from: $0.4, conversationID: $0.1)) }
             }.value
             guard let self else { return }
             self.isPolling = false
-            for (token, observation) in results { self.apply(observation, to: token) }
+            for (token, observation, tail) in results {
+                self.index(tail, for: token)
+                self.apply(observation, to: token)
+            }
         }
     }
 
     /// Synchronous pass, so tests need no expectations.
     func drain() {
         for subscriber in subscribers {
+            let tail = GeminiTranscriptTail.read(transcriptURL(of: subscriber), from: subscriber.transcript,
+                                                 conversationID: subscriber.binding.conversationID)
+            index(tail, for: subscriber.token)
             apply(observer.observe(bound: subscriber.binding.conversationID, roots: roots(subscriber.tab)),
                   to: subscriber.token)
         }
+    }
+
+    /// A placeholder binding may carry no URL; agy's layout names the file from the id alone.
+    private func transcriptURL(of subscriber: Subscriber) -> URL {
+        subscriber.binding.transcriptURL ?? paths.transcript(subscriber.binding.conversationID)
+    }
+
+    /// Records how far the tail got and hands what it found to the index.
+    ///
+    /// Indexed BEFORE the observation is applied: a `.rebound` in that observation detaches this
+    /// subscriber, and the lines read for the old binding must not be dropped on the way out.
+    private func index(_ tail: GeminiTranscriptTail.Read, for token: AttachmentToken) {
+        guard let at = subscribers.firstIndex(where: { $0.token == token }) else { return }
+        // Only advance a cursor whose read matched the subscriber it came back to: a re-attach
+        // between the read and here starts its own tail, and must not inherit this one's offset.
+        guard subscribers[at].transcript == tail.from else { return }
+        subscribers[at].transcript = tail.cursor
+        let subscriber = subscribers[at]
+        guard !tail.messages.isEmpty, let index = searchIndex(),
+              let project = projectPath(subscriber.tab),
+              let workingDirectory = workingDirectory(subscriber.tab)
+        else { return }
+        let ref = TranscriptRef(
+            url: tail.url, projectPath: project, accountHome: AgentID.gemini.builtInHome,
+            workingDirectory: workingDirectory, conversationID: GeminiPaths.name(subscriber.binding.conversationID),
+            agent: .gemini, provenance: nil, indexedName: nil, modified: Date()
+        )
+        // `offset: nil` — see `SearchIndex.ingest`. The backfill keeps its own resume point;
+        // the overlap this tail re-reads from byte 0 is a no-op through `message_identity`.
+        try? index.ingest(tail.messages, for: ref, offset: nil)
     }
 
     /// Folds one observation into the tab's state and reports what changed. Events are
@@ -154,5 +215,37 @@ final class GeminiRuntime: AgentRuntime {
         subscribers[index] = subscriber
         let onEvent = subscriber.onEvent
         for event in events { onEvent(event) }
+    }
+}
+
+/// One read of a gemini transcript for ⌘K: `TailReader` plus `GeminiSearchCorpus`'s line rule,
+/// so live rows are the rows the backfill would write for the same lines.
+enum GeminiTranscriptTail {
+    struct Read: Sendable {
+        let url: URL
+        let from: TailCursor
+        let cursor: TailCursor
+        let messages: [IndexedMessage]
+    }
+
+    /// **From byte 0, not from the end** — the opposite of claude's and codex's watchers, which
+    /// skip a file that predates them. agy names a new tab's conversation only once the first
+    /// request is submitted, and writes that request to this file in the same instant (~30 ms,
+    /// probed 2026-10-09); the `.rebound` re-attach therefore always finds it already on disk,
+    /// and an end-of-file start would make the first thing the user typed unsearchable until the
+    /// next backfill. Re-reading a resumed conversation's history is safe — the index ignores a
+    /// message it already holds — and cheap: agy transcripts are tens of KB (largest seen: 71 KB).
+    static let start = TailCursor(offset: 0, hasChosenStart: true)
+
+    static func read(_ url: URL, from cursor: TailCursor, conversationID: UUID) -> Read {
+        let tail = TailReader.read(url: url, offset: cursor.offset, hasChosenStart: cursor.hasChosenStart)
+        let corpus = GeminiSearchCorpus()
+        let name = GeminiPaths.name(conversationID)
+        let messages = zip(tail.lines, tail.lineOffsets).flatMap { line, offset in
+            corpus.indexedMessages(inLine: line, conversationID: name, at: Int(offset))
+        }
+        return Read(url: url, from: cursor,
+                    cursor: TailCursor(offset: tail.offset, hasChosenStart: tail.hasChosenStart),
+                    messages: messages)
     }
 }

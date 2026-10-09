@@ -13,9 +13,21 @@ final class GrokRuntime: AgentRuntime {
 
     private var sources: [UUID: Source] = [:]
     private let clock: WatchClock?
+    /// Where a session's text goes for ⌘K, and which project and directory it is filed under:
+    /// `ClaudeRuntime`'s three closures, keyed by conversation and re-read on every batch for the
+    /// same reasons (the index is wired in late; a tab can move project or into a worktree).
+    private let searchIndex: () -> SearchIndex?
+    private let projectPath: (UUID) -> String?
+    private let workingDirectory: (UUID) -> String?
 
-    init(clock: WatchClock? = nil) {
+    init(clock: WatchClock? = nil,
+         searchIndex: @escaping () -> SearchIndex? = { nil },
+         projectPath: @escaping (UUID) -> String? = { _ in nil },
+         workingDirectory: @escaping (UUID) -> String? = { _ in nil }) {
         self.clock = clock
+        self.searchIndex = searchIndex
+        self.projectPath = projectPath
+        self.workingDirectory = workingDirectory
     }
 
     func attach(
@@ -31,7 +43,14 @@ final class GrokRuntime: AgentRuntime {
         subscribers.add(token, onEvent)
         let watcher = binding.transcriptURL.map {
             GrokSessionWatcher(transcript: $0, conversationID: id, clock: clock,
-                               onEvent: { subscribers.emit($0) })
+                               onEvent: { subscribers.emit($0) },
+                               // Passed unconditionally, for `ClaudeRuntime.attach`'s reason: a
+                               // session attached before search is wired would otherwise never
+                               // become searchable. The cost is nil here — `GrokScan` already
+                               // decodes every `updates.jsonl` line for question signals.
+                               onMessages: { [weak self] url, messages in
+                                   self?.index(messages, from: url, conversationID: id)
+                               })
         }
         sources[id] = Source(subscribers: subscribers, watcher: watcher)
         watcher?.start()
@@ -44,6 +63,22 @@ final class GrokRuntime: AgentRuntime {
         guard source.subscribers.isEmpty else { return }
         source.watcher?.stop()
         sources[token.conversationID] = nil
+    }
+
+    private func index(_ messages: [IndexedMessage], from url: URL, conversationID id: UUID) {
+        guard let index = searchIndex(), let path = projectPath(id),
+              let workingDirectory = workingDirectory(id)
+        else { return }
+        let ref = TranscriptRef(
+            url: url, projectPath: path, accountHome: AgentID.grok.builtInHome,
+            workingDirectory: workingDirectory, conversationID: id.uuidString.lowercased(),
+            // nil: a tab is an interactive TUI session, never the headless kind the backfill
+            // marks automated.
+            agent: .grok, provenance: nil, indexedName: nil, modified: Date()
+        )
+        // `offset: nil` — see `SearchIndex.ingest`. This watcher starts a pre-existing file at
+        // its end, so its position is never the backfill's resume point.
+        try? index.ingest(messages, for: ref, offset: nil)
     }
 
     /// Test seam mirroring `ClaudeRuntime.drainForTesting()`.
@@ -64,6 +99,9 @@ final class GrokSessionWatcher {
     private let sessionsRoot: URL
     private let conversationID: UUID
     private let onEvent: (AgentEvent) -> Void
+    /// The prompts and replies this pass read, with the file they came from (the directory can
+    /// move from the computed guess to where grok really wrote it; see `GrokScan.read`).
+    private let onMessages: (URL, [IndexedMessage]) -> Void
     private weak var clock: WatchClock?
 
     private var events = TailCursor()
@@ -79,7 +117,9 @@ final class GrokSessionWatcher {
     private var isPolling = false
 
     init(transcript: URL, conversationID: UUID, clock: WatchClock? = nil,
-         onEvent: @escaping (AgentEvent) -> Void) {
+         onEvent: @escaping (AgentEvent) -> Void,
+         onMessages: @escaping (URL, [IndexedMessage]) -> Void = { _, _ in }) {
+        self.onMessages = onMessages
         directory = transcript.deletingLastPathComponent()
         sessionsRoot = GrokSessionFiles.sessionsRoot(ofTranscript: transcript)
         self.conversationID = conversationID
@@ -152,6 +192,9 @@ final class GrokSessionWatcher {
             discrete.forEach(onEvent)
         }
         if announcedLive { report() }
+        if !scan.messages.isEmpty {
+            onMessages(scan.directory.appendingPathComponent(GrokSessionFiles.transcriptName), scan.messages)
+        }
         if let summary = scan.summary, summary.isManual, summary.title != lastManualTitle {
             lastManualTitle = summary.title
             onEvent(.title(summary.title))
@@ -205,6 +248,9 @@ struct GrokScan: Sendable {
     var registered: Bool?
     var steps: [Step] = []
     var sawLines = false
+    /// `updates.jsonl`'s new prompts and replies, by `GrokSearchCorpus`'s rule — so a live row is
+    /// the row the backfill would write for the same line.
+    var messages: [IndexedMessage] = []
 
     static func read(_ input: Input) -> GrokScan {
         var directory = input.directory
@@ -242,6 +288,11 @@ struct GrokScan: Sendable {
         let updateTail = TailReader.read(url: directory.appendingPathComponent(GrokSessionFiles.transcriptName),
                                          offset: input.updates.offset, hasChosenStart: input.updates.hasChosenStart)
         scan.updates = TailCursor(offset: updateTail.offset, hasChosenStart: updateTail.hasChosenStart)
+        let corpus = GrokSearchCorpus()
+        let name = input.conversationID.uuidString.lowercased()
+        for (line, offset) in zip(updateTail.lines, updateTail.lineOffsets) {
+            scan.messages += corpus.indexedMessages(inLine: line, conversationID: name, at: Int(offset))
+        }
         for line in updateTail.lines {
             guard let record = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any]
             else { continue }
