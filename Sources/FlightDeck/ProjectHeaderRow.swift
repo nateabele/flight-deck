@@ -78,7 +78,7 @@ struct ProjectHeaderRow: View {
             // cannot watch the mouse-up: `NSTableView` swallows that one inside its own tracking
             // loop, where no local monitor can see it. That file's doc comment has the
             // measurements. The upshot here is that only a click landing in the chevron's zone
-            // (`SidebarClickIntent.chevronZoneWidth`, measured from the row's leading edge)
+            // (`SidebarClickIntent.chevronZoneWidth`: everything left of the name, measured from the cell)
             // collapses the row; a click anywhere else on it selects the project instead —
             // `SidebarInputMonitor.selectRow`, wired to `store.selectProject`, opens the
             // per-project view — and a drag anywhere on the row still reorders. Finder and the
