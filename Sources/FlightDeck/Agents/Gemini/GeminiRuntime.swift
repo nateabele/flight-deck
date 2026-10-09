@@ -70,6 +70,8 @@ final class GeminiRuntime: AgentRuntime {
         let onEvent: (AgentEvent) -> Void
         var live = false
         var activity: SessionActivity?
+        /// The WAITING step's call id at the last look, for the supersede below.
+        var pendingCall: String?
         var title: String?
         /// Where this tab's transcript has been read to for ⌘K. Starts at byte 0, never at the
         /// end: see `GeminiTranscriptTail.start`.
@@ -206,7 +208,17 @@ final class GeminiRuntime: AgentRuntime {
                 subscriber.activity = activity
                 events.append(.activity(activity))
                 if activity == .idle, wasWorking { events.append(.turnEnded) }
+            } else if activity == .waiting, observation.pending?.callID != subscriber.pendingCall {
+                // **A supersede: one dialog answered and the next raised between two looks.**
+                // The activity is `waiting` on both sides, so nothing above reports it — and the
+                // store re-derives which dialog is open only when something is reported. A
+                // fleet with a claude tab would catch it on the next registry tick; a fleet of
+                // agy tabs alone has no such tick, and the phone would keep the first dialog's
+                // card, answerable, for a call agy has left. Re-reporting `waiting` is a commit
+                // that changes no status and moves only the open call.
+                events.append(.activity(.waiting))
             }
+            subscriber.pendingCall = observation.pending?.callID
             if let title = observation.title, title != subscriber.title {
                 subscriber.title = title
                 events.append(.title(title))

@@ -54,4 +54,6 @@ struct ClaudeOpenPromptReader: AgentOpenPromptReader {
     func subagentTranscripts(for transcript: URL) -> URL? {
         transcript.deletingPathExtension().appendingPathComponent("subagents", isDirectory: true)
     }
+    /// The blocked `tool_use` is written when the dialog is raised (`ClaudeOpenCall`).
+    var transcriptCarriesOpenPrompt: Bool { true }
 }

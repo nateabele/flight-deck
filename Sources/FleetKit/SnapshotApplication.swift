@@ -66,7 +66,7 @@ extension FleetSnapshot {
 
         case .activityChanged(let id, let activity, let waitingFor, let subagentCount,
                               let hasBackgroundWork, let openPromptCall, let answerless,
-                              let subagents, let openPromptAgent):
+                              let subagents, let openPromptAgent, let openPrompt):
             // The wire version was deliberately not bumped for the `hasBackgroundWork`
             // split, so an older Mac can still send the pre-decomposition `"shell"` string
             // here, on the incremental path rather than a fresh snapshot. Same
@@ -93,6 +93,10 @@ extension FleetSnapshot {
                 // phone keeps routing an answer to a subagent file that no longer holds it.
                 $0.subagents = subagents
                 $0.openPromptAgent = openPromptAgent
+                // Overwritten unconditionally, like `openPromptCall` beside it, and for the
+                // stale-card reason: a fold that kept the last dialog's words when an event
+                // stopped carrying them would leave a superseded card drawable.
+                $0.openPrompt = openPrompt
             }
 
         case .unreadChanged(let id, let isUnread):

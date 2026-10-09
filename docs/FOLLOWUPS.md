@@ -3025,9 +3025,12 @@ and the phone unit bundle are green; everything below is what no automated run h
     with the account pickers). Rendered for Projects only; glance at Settings → Agents too.
   - *Planning on a spent pool:* the banner is a user notification keyed by the intake id;
     clicking it activates the app and selects nothing.
-- **The phone shows no gemini permission card.** The open prompt is derived on the Mac only
-  (agy's JSONL never holds the waiting call); the phone's own `OpenPrompt.find` cannot see it.
-  Needs a wire change that sends the Mac's derivation.
+- ~~**The phone shows no gemini permission card.**~~ Fixed 2026-10-09 (round 2,
+  `gemini-phone-prompt`): the Mac sends its derivation as `WireSession.openPrompt` for any
+  reader with `transcriptCarriesOpenPrompt == false`. See ARCHITECTURE.md, "A gemini dialog
+  reaches the phone in words". Still unverified: a real agy dialog answered from a real phone
+  (Allow, and Deny on the last row), and a supersede with a real agy (approve in the terminal,
+  next dialog raised) clearing the old card on the phone.
 - **grok has no hook, so no turn recovery and no hard rejection.** Rate-limit and final-failure
   signals reach grok only through a `StopFailure` hook in the user's `$GROK_HOME/hooks/`, which
   Flight Deck does not install. Claude Code plugin hooks still load inside grok tabs, because the

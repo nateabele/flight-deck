@@ -233,11 +233,13 @@ final class PromptService {
     func pushedOpenPrompt(inSession session: UUID) -> Result<OpenPrompt, TimelineErrorCode> {
         guard let agent = store.agent(of: session),
               agent.dialogDriver != nil,
-              agent.openPromptReader != nil
+              let reader = agent.openPromptReader
         else { return .failure("unsupported_agent") }
         // Never nil: an unpolled derive always settles inline.
-        return attributingSubagents(session, derive(session, polled: false))
+        let result = attributingSubagents(session, derive(session, polled: false))
             ?? .failure("prompt_changed")
+        recordOffer(session, result, reader: reader)
+        return result
     }
 
     /// `pushedOpenPrompt` for `SessionStore`'s registry tick, which must never block the main
@@ -246,9 +248,38 @@ final class PromptService {
     func polledOpenPrompt(inSession session: UUID) -> Result<OpenPrompt, TimelineErrorCode>? {
         guard let agent = store.agent(of: session),
               agent.dialogDriver != nil,
-              agent.openPromptReader != nil
+              let reader = agent.openPromptReader
         else { return .failure("unsupported_agent") }
-        return attributingSubagents(session, derive(session, polled: true))
+        let result = attributingSubagents(session, derive(session, polled: true))
+        recordOffer(session, result, reader: reader)
+        return result
+    }
+
+    /// The dialog the last push/poll derivation found for `session`, in words, when it must be
+    /// SENT rather than derived on the phone — nil otherwise. Read by `SessionStore` straight
+    /// after `openPromptProbe` succeeds, the way `openPromptAgent(inSession:)` is, so the id and
+    /// the words come from one derivation and can never name two different calls.
+    func offeredOpenPrompt(inSession session: UUID) -> OpenPrompt? { offers[session] }
+
+    /// Written by every scheduled derivation, cleared by every one that does not qualify, so an
+    /// entry never outlives the dialog it describes. See `offeredOpenPrompt(inSession:)`.
+    private var offers: [UUID: OpenPrompt] = [:]
+
+    /// **Only for a reader whose transcript cannot carry the dialog**
+    /// (`AgentOpenPromptReader.transcriptCarriesOpenPrompt`). For claude and grok the phone
+    /// derives the card from its own copy of the transcript, and sending the words as well
+    /// would be two sources for one card that could disagree. A subagent's dialog is never
+    /// offered either: it is read from the subagent's own file, which the phone fetches.
+    private func recordOffer(
+        _ session: UUID, _ result: Result<OpenPrompt, TimelineErrorCode>?,
+        reader: any AgentOpenPromptReader
+    ) {
+        if !reader.transcriptCarriesOpenPrompt, case .success(let open)? = result,
+           attributedAgents[session] == nil {
+            offers[session] = open
+        } else {
+            offers[session] = nil
+        }
     }
 
     /// The tab's own derivation missed. If the hook log named a subagent's call
@@ -375,10 +406,20 @@ final class PromptService {
         derived = derived.filter { store.status(for: $0.key)?.activity == .waiting }
         subagentScans = subagentScans.filter { store.status(for: $0.key)?.activity == .waiting }
         attributedAgents = attributedAgents.filter { store.status(for: $0.key)?.activity == .waiting }
+        offers = offers.filter { store.status(for: $0.key)?.activity == .waiting }
         let read: TranscriptRead
         switch preflight(session) {
         case .failure(let code): return .failure(code)
         case .success(let r): read = r
+        }
+        // **Never cached for a reader whose dialog is not in the transcript.** The stamp below
+        // is a sound key only because a new dialog is an append to that file; agy raises its
+        // next dialog in its step store, and an approval answered at the keyboard can be
+        // followed by the next dialog before the transcript moves — the cache would then serve
+        // the superseded call, and the phone would keep a card the Mac has left. `scan` reads
+        // once and never widens for such a reader, so the uncached read is one bounded look.
+        guard read.reader.transcriptCarriesOpenPrompt else {
+            return Self.scanToEnd(read, tail: tail)
         }
         // Taken BEFORE the read, so an append racing the read leaves the entry keyed on the
         // older stamp and the next tick re-derives — the safe direction.
@@ -558,7 +599,10 @@ final class PromptService {
             if let open = read.reader.openPrompt(inTranscriptAt: read.url, tail: lines, activity: read.activity) {
                 return .settled(.success(open))
             }
-            guard hasMore, step.limit < maxTailRecords, lines.count > step.previousCount
+            // A reader whose dialog is never a transcript record has nothing a wider window
+            // could find (see `transcriptCarriesOpenPrompt`): one look, and its answer stands.
+            guard read.reader.transcriptCarriesOpenPrompt,
+                  hasMore, step.limit < maxTailRecords, lines.count > step.previousCount
             else { return .settled(.failure("prompt_changed")) }
             step = WidenStep(limit: step.limit * 8, previousCount: lines.count)
             if let reads, performed >= reads { return .needsWider(step) }

@@ -26,4 +26,7 @@ struct GrokOpenPromptReader: AgentOpenPromptReader {
     func subagentTranscripts(for transcript: URL) -> URL? { nil }
 
     func openPrompt(inSubagentTail lines: [SourceLine]) -> OpenPrompt? { nil }
+
+    /// The pending `tool_call` is in the transcript; `waiting` says it is a dialog.
+    var transcriptCarriesOpenPrompt: Bool { true }
 }

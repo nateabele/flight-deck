@@ -45,7 +45,7 @@ final class SessionStoreSubagentLifecycleTests: XCTestCase {
 
     private func activityEvents(_ replicator: FleetReplicator, _ id: UUID) -> [[WireSubagent]?] {
         replicator.recorded.compactMap {
-            if case .activityChanged(id, _, _, _, _, _, _, let subs, _) = $0 { return subs }
+            if case .activityChanged(id, _, _, _, _, _, _, let subs, _, _) = $0 { return subs }
             return nil
         }
     }
