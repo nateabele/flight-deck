@@ -161,7 +161,7 @@ targets:
         # With a team identity the requirement becomes identifier + anchor + leaf OU, which
         # is stable across rebuilds, so a permission granted once stays granted. Every
         # `scripts/swap-release.sh` run before this change reset them all.
-        DEVELOPMENT_TEAM: 2T9E3N27J8
+        DEVELOPMENT_TEAM: ZM74LQ6QWG
         CODE_SIGN_STYLE: Automatic
         CODE_SIGN_IDENTITY: Apple Development
         INFOPLIST_KEY_NSHumanReadableCopyright: ""
@@ -384,7 +384,7 @@ targets:
         PRODUCT_MODULE_NAME: FlightDeckCLI
         LD_RUNPATH_SEARCH_PATHS: "@executable_path/../Frameworks"
         HEADER_SEARCH_PATHS: $(SRCROOT)/vendor/boringssl-artifacts/include
-        DEVELOPMENT_TEAM: 2T9E3N27J8
+        DEVELOPMENT_TEAM: ZM74LQ6QWG
         CODE_SIGN_STYLE: Automatic
         CODE_SIGN_IDENTITY: Apple Development
 
@@ -449,7 +449,7 @@ targets:
         # HostDaemonBundleLayoutTests.testEveryRpathLibraryOfTheHelperResolvesInsideTheApp.
         LD_RUNPATH_SEARCH_PATHS: "@executable_path/../Frameworks @executable_path/../../../../../Frameworks"
         HEADER_SEARCH_PATHS: $(SRCROOT)/vendor/boringssl-artifacts/include
-        DEVELOPMENT_TEAM: 2T9E3N27J8
+        DEVELOPMENT_TEAM: ZM74LQ6QWG
         CODE_SIGN_STYLE: Automatic
         CODE_SIGN_IDENTITY: Apple Development
 
@@ -500,7 +500,7 @@ targets:
       base:
         SWIFT_VERSION: "6.0"
         PRODUCT_MODULE_NAME: FlightDeckMobile
-        PRODUCT_BUNDLE_IDENTIFIER: dev.flightdeck.FlightDeckMobile
+        PRODUCT_BUNDLE_IDENTIFIER: io.radify.flightdeck.FlightDeckMobile
         TARGETED_DEVICE_FAMILY: "1,2"
         # The source art is a full-bleed square with no alpha, deliberately. iOS applies its
         # own superellipse mask at roughly 22% of the icon's width, which is far deeper than
@@ -524,7 +524,7 @@ targets:
         # is scoped to `iphoneos` for the reason the old comment gave for omitting it entirely:
         # pinned unconditionally it drags the simulator build onto a provisioning profile too,
         # so a profile problem would take out both destinations at once instead of one.
-        DEVELOPMENT_TEAM[sdk=iphoneos*]: 2T9E3N27J8
+        DEVELOPMENT_TEAM[sdk=iphoneos*]: ZM74LQ6QWG
         CODE_SIGN_IDENTITY[sdk=iphonesimulator*]: "-"
         CODE_SIGN_IDENTITY[sdk=iphoneos*]: Apple Development
         CODE_SIGNING_REQUIRED: "YES"
@@ -621,7 +621,10 @@ targets:
         # the same keychain-access-group reason the host does. See FlightDeckMobile above.
         CODE_SIGN_IDENTITY[sdk=iphonesimulator*]: "-"
         CODE_SIGN_IDENTITY[sdk=iphoneos*]: Apple Development
-        DEVELOPMENT_TEAM[sdk=iphoneos*]: 2T9E3N27J8
+        DEVELOPMENT_TEAM[sdk=iphoneos*]: ZM74LQ6QWG
+        # Explicit, not from bundleIdPrefix: the dev.flightdeck.* iOS IDs are registered to an
+        # older team, and a device build needs an ID this team can provision.
+        PRODUCT_BUNDLE_IDENTIFIER: io.radify.flightdeck.FlightDeckMobileUITests
         CODE_SIGNING_REQUIRED: "YES"
         CODE_SIGNING_ALLOWED: "YES"
 

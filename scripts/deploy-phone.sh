@@ -15,7 +15,7 @@ cd "$(dirname "$0")/.."
 # debugging enabled this runs over Wi-Fi (`transportType: localNetwork`) and over USB
 # otherwise, with no change here.
 DEVICE="${DEVICE:-Mobile3}"
-BUNDLE_ID="dev.flightdeck.FlightDeckMobile"
+BUNDLE_ID="io.radify.flightdeck.FlightDeckMobile"
 
 # Flags, order-independent:
 #   --release    build (and install) Release instead of Debug
@@ -27,7 +27,7 @@ BUNDLE_ID="dev.flightdeck.FlightDeckMobile"
 # Debug's un-optimised binary is the wrong thing to judge scrolling and launch time by.
 #
 # Signing does not change between the two. `project.yml` pins CODE_SIGN_IDENTITY[sdk=iphoneos*]
-# to `Apple Development` and the team to 2T9E3N27J8 for both configurations, so `--release`
+# to `Apple Development` and the team to ZM74LQ6QWG for both configurations, so `--release`
 # still produces a development-signed build for THIS device — it is not a distribution build
 # and will not install anywhere else.
 CONFIG=Debug

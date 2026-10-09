@@ -37,7 +37,7 @@ xcrun simctl boot <udid>            # or open -a Simulator
 xcodebuild -project FlightDeck.xcodeproj -scheme FlightDeckMobile \
   -configuration Debug -destination 'id=<udid>' -derivedDataPath DerivedData build
 xcrun simctl install <udid> DerivedData/Build/Products/Debug-iphonesimulator/FlightDeckMobile.app
-xcrun simctl launch  <udid> dev.flightdeck.FlightDeckMobile
+xcrun simctl launch  <udid> io.radify.flightdeck.FlightDeckMobile
 xcrun simctl io      <udid> screenshot shot.png
 ```
 
