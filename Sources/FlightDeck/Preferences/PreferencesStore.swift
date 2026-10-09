@@ -227,10 +227,8 @@ final class PreferencesStore: ObservableObject {
         switch (global ?? AgentOptions.empty(for: agent), override) {
         case (.claude(let g), .claude(let p)?): return .claude(FlagSetMerge.merge(global: g, project: p))
         case (.codex(let g), .codex(let p)?):   return .codex(CodexThreadOptions.merge(global: g, project: p))
-        // grok and gemini have no option fields yet, so there is nothing to merge: the project's
-        // payload (if any) is the global one. Tracks G/M add a merge here with their fields.
-        case (.grok, .grok(let p)?):            return .grok(p)
-        case (.gemini, .gemini(let p)?):        return .gemini(p)
+        case (.grok(let g), .grok(let p)?):     return .grok(GrokOptions.merge(global: g, project: p))
+        case (.gemini(let g), .gemini(let p)?): return .gemini(GeminiOptions.merge(global: g, project: p))
         case (let g, _):                        return g
         }
     }

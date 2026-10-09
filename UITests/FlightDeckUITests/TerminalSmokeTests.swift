@@ -2650,6 +2650,23 @@ final class TerminalSmokeTests: XCTestCase {
             XCTAssertFalse((field.value as? String ?? "").contains("--dangerously-skip-permissions"))
         }
 
+        // grok's and gemini's rows once fell through to Claude's flag pane, so picking a model
+        // "for grok" edited claude's global flags. Each now opens its own model pane
+        // (`AgentOptionsPane`); asserting the command field is GONE is what catches the fall-through.
+        XCTContext.runActivity(named: "the grok and gemini rows open their own model panes") { _ in
+            let prefs = preferencesWindow(app)
+            for (row, binary) in [("Grok", "grok"), ("Gemini", "agy")] {
+                prefs.staticTexts[row].firstMatch.click()
+                XCTAssertTrue(prefs.popUpButtons["Model"].waitForExistence(timeout: 5), "\(row): no Model picker")
+                let launch = prefs.staticTexts["tab-model-launch-\(row.lowercased())"]
+                XCTAssertTrue(launch.waitForExistence(timeout: 5), "\(row): no launch command preview")
+                XCTAssertTrue((launch.value as? String ?? launch.label).hasPrefix(binary),
+                              "\(row): preview was \(launch.value ?? launch.label)")
+                XCTAssertFalse(prefs.textViews["command-field"].exists, "\(row) still shows Claude's flag pane")
+            }
+            prefs.staticTexts["Claude"].firstMatch.click()
+        }
+
         // Close Preferences so the groups below act on the main window.
         app.typeKey("w", modifierFlags: .command)
 

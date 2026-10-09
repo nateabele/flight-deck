@@ -3042,10 +3042,35 @@ and the phone unit bundle are green; everything below is what no automated run h
   suite, alone, and on a clean detached checkout of master (2026-10-09, `gemini-live-index`). So
   it is not a load flake and not caused by that track. Either the notes-rail close race above
   has come back, or this Mac's window and animation state differs. Not investigated.
-- **No model picker for grok or gemini tabs.** `GrokOptions` (model, effort) and
-  `GeminiOptions.model` exist and routing overrides set them; gemini tabs default to
-  `gemini-3.1-pro-high`.
+- ~~**No model picker for grok or gemini tabs.**~~ Fixed 2026-10-09 (`tab-model-pickers`):
+  Settings → Agents and → Projects have a model pane for each; see the entry below.
 - **`FlywheelProgram` names are guesses.** `grok` and `agy` as Agent-Mail `--program` values are
   unverified; no grok or gemini agent has joined a live swarm.
 - **Every agent is tab-ready.** The R4 gate stays (`AgentID.tabReady`) for the next agent; its
   tests use the task-local seam `AgentID.$tabReadyOverride` to stand one agent in as not ready.
+
+## grok and gemini tab model pickers (2026-10-09, `tab-model-pickers`)
+
+Settings → Agents and → Projects now edit grok's model and effort and gemini's model and
+`--mode` (`TabModelOptionsForm`), merged field by field per project and applied at launch and
+resume. What is still open:
+
+- **No GUI run.** The panes are unit-tested and rendered offscreen only. `TerminalSmokeTests`
+  gained the activity "the grok and gemini rows open their own model panes"; it has not run.
+  Check by hand: pick a grok model and effort, open a grok tab, and read its footer
+  (`Grok 4.7 Fast (low)`); set gemini's mode to plan and read agy's footer (`plan ·`).
+- **grok has no mode picker.** grok 1.0.30's TUI accepts `--permission-mode plan`, but a probe
+  (2026-10-09) still raised the ordinary Edit permission card for a write, so its effect on a
+  tab is unproven, and `GrokDialogDriver` is built on the default mode's cards. Re-probe on a
+  later grok before adding it to `GrokOptions`.
+- **Routing still lists models its own way.** `GrokRoutingCapabilities.modelCatalog` offers the
+  profile's static aliases, and `GeminiRoutingCapabilities` runs its own `agy models`. Settings
+  reads planning's detection instead. They agree on the ids today; folding routing onto
+  `IntakeService.detectedModels` would make it one probe.
+- **Another load flake.** `PlanReadingPositionTests.testBreadcrumbNamesTheSectionScrolledUnderThePinnedBlock`
+  failed once in this track's full run (`PlanFoldingTests.swift:258`) and passed when run alone, as
+  did `PlanningRenderTests.testASeatBeatRedrawsTheLiveCardAlone` (listed above).
+- **A resumed tab takes today's settings.** As for claude and codex, a resume re-resolves the
+  project's options, so changing the model in Settings moves an existing grok or gemini tab to
+  the new model at its next resume.
+

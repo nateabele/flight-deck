@@ -15,6 +15,9 @@ import IntakeKit
 struct ProjectsSettingsTab: View {
     @ObservedObject var preferences: PreferencesStore
     @ObservedObject var sessions: SessionStore
+    /// Where grok's and gemini's model lists come from; nil uses the store's own planning
+    /// service. A seam for the offscreen renders, as on `AgentsSettingsTab`.
+    var modelSource: IntakeService?
 
     /// The selection lives on the store, not in `@State`, so a caller outside this view can
     /// point the pane at one project — "Configure…" on a sidebar project row opens Settings
@@ -175,14 +178,25 @@ struct ProjectsSettingsTab: View {
             }
 
             Group {
-                switch selectedAgent {
+                switch AgentOptionsPane(agent: selectedAgent) {
                 case .codex:
                     CodexOptionsForm(
                         preferences: preferences,
                         projectOverride: codexOptionsBinding(for: path),
                         header: sections
                     )
-                default:
+                case .model(let agent):
+                    DetectedModelsReader(service: modelSource ?? sessions.intakeService) { available in
+                        TabModelOptionsForm(
+                            agent: agent,
+                            options: optionsBinding(for: path, agent: agent),
+                            inherited: preferences.preferences.agents.first { $0.id == agent }?.options
+                                ?? .empty(for: agent),
+                            available: available,
+                            header: sections
+                        )
+                    }
+                case .claudeFlags:
                     FlagEditor(
                         flags: claudeFlagsBinding(for: path),
                         inherited: globalClaudeFlags,
@@ -325,9 +339,17 @@ struct ProjectsSettingsTab: View {
         )
     }
 
+    /// grok's or gemini's project override, as the whole `AgentOptions` arm their form edits.
+    private func optionsBinding(for path: String, agent: AgentID) -> Binding<AgentOptions> {
+        Binding(
+            get: { preferences.projectSettings(path).options[agent] ?? .empty(for: agent) },
+            set: { newValue in setOptions(newValue, for: agent, path: path) }
+        )
+    }
+
     /// An emptied override is a removal, not an empty override: persisting the empty value
     /// would keep the project listed forever with its badge hidden and "Remove Overrides"
-    /// disabled, leaving no way to delete it. Shared by both agents' bindings.
+    /// disabled, leaving no way to delete it. Shared by every agent's binding.
     private func setOptions(_ options: AgentOptions, for agent: AgentID, path: String) {
         var settings = preferences.projectSettings(path)
         settings.options[agent] = options.isEmpty ? nil : options

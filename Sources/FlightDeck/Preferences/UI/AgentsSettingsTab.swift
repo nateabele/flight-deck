@@ -8,6 +8,9 @@ import IntakeKit
 struct AgentsSettingsTab: View {
     @ObservedObject var preferences: PreferencesStore
     @ObservedObject var sessions: SessionStore
+    /// Where grok's and gemini's model lists come from; nil uses the store's own planning
+    /// service. A seam for the offscreen renders, which must not build a real one.
+    var modelSource: IntakeService?
     @State private var selection: AgentID?
 
     var body: some View {
@@ -35,13 +38,29 @@ struct AgentsSettingsTab: View {
                 let agent = selection ?? preferences.preferences.agents.first?.id ?? .claude
                 // Accounts used to lead each pane; they are one list in Settings → Accounts now
                 // (unify brief R7), so this pane is the agent's options alone.
-                switch agent {
-                case .codex: CodexOptionsForm(preferences: preferences)
-                default:     ClaudeOptionsPane(preferences: preferences)
+                switch AgentOptionsPane(agent: agent) {
+                case .codex:       CodexOptionsForm(preferences: preferences)
+                case .claudeFlags: ClaudeOptionsPane(preferences: preferences)
+                case .model(let agent):
+                    DetectedModelsReader(service: modelSource ?? sessions.intakeService) { available in
+                        TabModelOptionsForm(agent: agent, options: globalOptions(agent), available: available)
+                    }
                 }
             }
             .frame(minWidth: 380)
         }
+    }
+
+    /// The agent's global row, looked up by id like `CodexOptionsForm.options` — the list's
+    /// order is the shortcut binding, not a storage index.
+    private func globalOptions(_ agent: AgentID) -> Binding<AgentOptions> {
+        Binding(
+            get: { preferences.preferences.agents.first { $0.id == agent }?.options ?? .empty(for: agent) },
+            set: { newValue in
+                guard let index = preferences.preferences.agents.firstIndex(where: { $0.id == agent }) else { return }
+                preferences.preferences.agents[index].options = newValue
+            }
+        )
     }
 
     private func shortcut(for agent: AgentID) -> String {
