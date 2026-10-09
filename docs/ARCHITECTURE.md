@@ -66,6 +66,13 @@ Net: **~97% of `GhosttyEmbed/` is reused Ghostty code**; the Flight-Deck-authore
 
 ## Runtime model
 
+- **Environment before `ghostty_init`:** `ghostty_init` starts a `sentry-init` thread that walks
+  `environ` without libc's lock, then sets LANG/LANGUAGE on the calling thread when LANG is
+  missing — which it is for every launchd-started app. That `setenv` frees `environ` under the
+  walk (a SIGSEGV in `posix.getenv`). `LaunchLocale` makes the same changes first — at the top of
+  `FlightDeckApp.init` and again inside `GhosttyApp`'s one-time init, before `ghostty_init` — so
+  libghostty's `ensureLocale` finds nothing to set. Flight Deck itself must never `setenv` once
+  libghostty is up: its renderer and IO threads read the environment the same way.
 - **Tick loop:** `libghostty` only advances when `ghostty_app_tick` is called. `GhosttyApp`'s `wakeup` callback does `DispatchQueue.main.async { tick() }` (thread-safe), and `TerminalPane` kicks an initial tick so the first frame renders.
 - **Retention:** one process-wide `GhosttyApp.shared`, held **weakly** by `SessionStore` (the store must not co-own a static that already owns itself for the life of the process). **This is the thing to change before multi-window/multi-session** — see the teardown-lifetime item in [FOLLOWUPS.md](FOLLOWUPS.md).
 - **Light/dark appearance:** the terminal follows the system appearance. `GhosttyApp` loads
