@@ -228,4 +228,43 @@ final class SessionSleepControllerTests: XCTestCase {
         XCTAssertEqual(counts.resolve, 1, "not idle long enough again: the walk is not even asked")
         XCTAssertTrue(daemon.stopped.isEmpty)
     }
+
+    /// The freeze hook runs BEFORE the surface goes: the store reads the composer draft off that
+    /// surface there (it is the last moment a screen exists to read) and gives the pool lease
+    /// back. Torn down first, the draft would be unreadable and a rollover could lose it.
+    func testTheFreezeHookRunsBeforeTheSurfaceIsTornDown() {
+        let id = UUID(); let daemon = DaemonSpy(); var events: [String] = []
+        let ctrl = SessionSleepController(
+            policy: SleepPolicy(idleThreshold: 0), daemonControl: daemon,
+            inspector: FixedInspector(result: []), resolver: FixedResolver(pgid: 222),
+            inputs: SleepInputs(candidates: { [id] }, activity: { _ in .idle },
+                                selectedID: { nil }, reportsBackgroundWork: { _ in false },
+                                daemonPID: { _ in 111 }),
+            tearDownSurface: { _ in events.append("teardown") },
+            onFreeze: { _ in events.append("freeze") }, now: { Date() })
+        ctrl.tick()
+        XCTAssertEqual(events, ["freeze", "teardown"])
+        XCTAssertEqual(daemon.stopped, [id])
+    }
+
+    /// A thaw that replaces the agent forgets it without resuming it: SIGCONT would wake an
+    /// agent on a spent account, and the rebuilt surface would be thrown away at once.
+    func testForgetDropsASleeperWithoutWakingIt() {
+        let id = UUID(); let daemon = DaemonSpy(); var rebuilt: [UUID] = []
+        let ctrl = SessionSleepController(
+            policy: SleepPolicy(idleThreshold: 0), daemonControl: daemon,
+            inspector: FixedInspector(result: []), resolver: FixedResolver(pgid: 222),
+            inputs: SleepInputs(candidates: { [id] }, activity: { _ in .idle },
+                                selectedID: { nil }, reportsBackgroundWork: { _ in false },
+                                daemonPID: { _ in 111 }),
+            tearDownSurface: { _ in }, rebuildSurface: { rebuilt.append($0) }, now: { Date() })
+        ctrl.tick()
+        XCTAssertTrue(ctrl.asleep.contains(id))
+        ctrl.forget(id)
+        XCTAssertFalse(ctrl.asleep.contains(id))
+        XCTAssertEqual(daemon.conted, [])
+        XCTAssertEqual(rebuilt, [])
+        ctrl.wake(id)
+        XCTAssertEqual(daemon.conted, [], "a forgotten session is not asleep, so wake is a no-op")
+    }
 }

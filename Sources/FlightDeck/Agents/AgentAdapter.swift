@@ -573,6 +573,26 @@ protocol AgentTextChannel {
     /// forgets.
     func isKnownNonComposer(_ injector: TextInjecting) -> Bool
 
+    /// The text sitting unsent in this agent's composer, read off the screen without touching
+    /// it: `""` for an empty box (the agent's own placeholder counts as empty), nil when no
+    /// composer this conformer recognises is on screen.
+    ///
+    /// **What it is for: carrying a draft across a process restart.** A smart-sleep thaw that
+    /// rolls a conversation onto another account kills the frozen agent and resumes the
+    /// conversation in a new one (`SessionStore.rollOver`); the kill ring every `submit` relies
+    /// on dies with the old process, so the draft has to be read as text before the freeze
+    /// (`SessionStore.agentFroze`) and pasted into the new composer afterwards. nil there
+    /// means "could not tell", and the store refuses the rollover rather than risk the draft.
+    ///
+    /// Where the screen cannot tell a wrapped row from a typed line break (claude, agy,
+    /// OpenCode), rows are joined with a space: each word-wraps its composer, so a wrap is a
+    /// space far more often than a newline the user typed, and a paste that gains a space beats
+    /// one that gains a line break in mid-sentence. grok's reader keeps its own row rule.
+    ///
+    /// No default, for the reason `isKnownNonComposer` has none: `""` would read as "this agent
+    /// never holds a draft", and a new conformer would silently lose every one.
+    func draft(_ injector: TextInjecting) -> String?
+
     /// Type `text` and submit it, preserving whatever draft was there — or refuse.
     ///
     /// Returns false having sent nothing. Returns true and then runs `onFinished` EXACTLY ONCE
@@ -838,6 +858,21 @@ extension AgentID {
         case .grok: GrokAdapter.searchCorpus
         case .gemini: GeminiAdapter.searchCorpus
         case .opencode: OpenCodeAdapter.searchCorpus
+        }
+    }
+
+    /// How this agent's conversation is carried into another account's home, or nil when it
+    /// cannot be (`AgentConversationTransfer`). Consulted by `SessionStore`'s smart-sleep thaw,
+    /// which rolls an idle conversation off a spent account only through this. A static on each
+    /// concrete adapter rather than a protocol requirement, so the exhaustive switch here is
+    /// what makes a new agent state its own answer.
+    var conversationTransfer: AgentConversationTransfer? {
+        switch self {
+        case .claude: ClaudeAdapter.conversationTransfer
+        case .codex: CodexAdapter.conversationTransfer
+        case .grok: GrokAdapter.conversationTransfer
+        case .gemini: GeminiAdapter.conversationTransfer
+        case .opencode: OpenCodeAdapter.conversationTransfer
         }
     }
 

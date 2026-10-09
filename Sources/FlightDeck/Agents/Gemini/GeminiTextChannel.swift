@@ -56,6 +56,16 @@ struct GeminiTextChannel: AgentTextChannel {
         return Self.isEmptyContent(bar.content)
     }
 
+    /// See `AgentTextChannel.draft`. agy's placeholder is the mode hint `isEmptyContent` names.
+    func draft(_ injector: TextInjecting) -> String? {
+        guard let viewport = injector.readViewport(), Self.isComposerBox(viewport),
+              let bar = InputBar.read(fromViewport: viewport, marker: Self.marker)
+        else { return nil }
+        let text = bar.rows.map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }.joined(separator: " ")
+        return Self.isEmptyContent(text) ? "" : text
+    }
+
     func hasComposerBox(_ injector: TextInjecting) -> Bool {
         guard let viewport = injector.readViewport() else { return false }
         return Self.isComposerBox(viewport)

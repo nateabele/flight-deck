@@ -25,6 +25,9 @@ struct GeminiAdapter: AgentAdapter {
     nonisolated static var profile: any AgentProfile { AgentProfiles.profile(for: id) }
 
     static let textChannel: AgentTextChannel? = GeminiTextChannel()
+    /// nil: agy signs in through the OS keyring and has no home variable, so gemini has exactly
+    /// one account (unify brief R5) and there is no other home to carry a conversation into.
+    static let conversationTransfer: AgentConversationTransfer? = nil
     static let dialogDriver: AgentDialogDriver? = GeminiDialogDriver()
     static let openPromptReader: AgentOpenPromptReader? = GeminiOpenPromptReader()
     static let searchCorpus: AgentSearchCorpus? = GeminiSearchCorpus()

@@ -40,6 +40,14 @@ struct OpenCodeTextChannel: AgentTextChannel {
         }
     }
 
+    /// See `AgentTextChannel.draft`. The gutter rows' text, with OpenCode's `Ask anything…`
+    /// placeholder read as empty — the same rule `isComposerEmpty` uses.
+    func draft(_ injector: TextInjecting) -> String? {
+        guard let viewport = injector.readViewport(), let rows = Self.composerRows(viewport) else { return nil }
+        let text = rows.map(Self.gutterContent).filter { !$0.isEmpty }.joined(separator: " ")
+        return text.hasPrefix("Ask anything") ? "" : text
+    }
+
     func hasComposerBox(_ injector: TextInjecting) -> Bool {
         guard let viewport = injector.readViewport() else { return false }
         return Self.hasComposerBox(viewport)

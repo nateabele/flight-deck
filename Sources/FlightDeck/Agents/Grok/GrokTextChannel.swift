@@ -32,6 +32,15 @@ struct GrokTextChannel: AgentTextChannel {
         return composer.draft.isEmpty
     }
 
+    /// See `AgentTextChannel.draft`. grok draws no placeholder (`GrokScreen`), so what the box
+    /// holds is the draft.
+    func draft(_ injector: TextInjecting) -> String? {
+        guard let viewport = injector.readViewport(),
+              let composer = GrokScreen.composer(inViewport: viewport)
+        else { return nil }
+        return composer.draft
+    }
+
     func hasComposerBox(_ injector: TextInjecting) -> Bool {
         guard let viewport = injector.readViewport() else { return false }
         return GrokScreen.composer(inViewport: viewport) != nil

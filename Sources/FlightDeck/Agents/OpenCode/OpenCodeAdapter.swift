@@ -25,6 +25,8 @@ struct OpenCodeAdapter: AgentAdapter {
     nonisolated static var profile: any AgentProfile { AgentProfiles.profile(for: id) }
 
     static let textChannel: AgentTextChannel? = OpenCodeTextChannel()
+    /// Carries a conversation to another account's data root (`AgentID.conversationTransfer`).
+    static let conversationTransfer: AgentConversationTransfer? = OpenCodeConversationTransfer()
 
     /// **`nil`, because there is no modal to drive — not because rename is missing.** Codex
     /// needs this to type its two-stage `/rename` into the TUI it cannot otherwise reach. An

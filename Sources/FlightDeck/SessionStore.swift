@@ -1117,7 +1117,8 @@ final class SessionStore: ObservableObject {
 
     /// Whether `session`'s agent process is running: a process started as the agent's binary
     /// under the tab's fd-abduco daemon or its surface (`AgentProcessProbe`). Settable so tests
-    /// script it. A SIGSTOP'd (asleep) agent is still a process, so it still reads running.
+    /// script it. A SIGSTOP'd (asleep) agent is still a process, so it still reads running —
+    /// which is why `reconcileTabLeases` asks the sleep controller first.
     lazy var agentProcessRunning: (Session) -> Bool = { [weak self] session in
         guard let self else { return false }
         let roots = [self.daemonControl.daemonPID(session.id),
@@ -1156,10 +1157,12 @@ final class SessionStore: ObservableObject {
     /// Before this, a lease lasted as long as the tab and restored tabs took none, so
     /// `activeLeases` over-counted exited agents and under-counted every relaunch.
     ///
-    /// **A sleeping agent keeps its lease.** Smart sleep SIGSTOPs an idle agent and keeps its
-    /// process; it resumes the same conversation on the same login the moment the tab is
-    /// selected, and nothing can move it to another account meanwhile. It is a running agent
-    /// on that account, and the lease is the count of those.
+    /// **A frozen agent holds no lease** (Nate's ruling, replacing round 2's "a sleeping agent
+    /// keeps its lease"). Smart sleep SIGSTOPs it, so it bills nothing, and counting it starved
+    /// the pool for as long as it slept. `agentFroze` gives the lease back at the freeze and
+    /// this sweep never re-takes one for a tab the sleep controller holds — the process probe
+    /// would otherwise see the stopped process and re-lease it on the next pass. The thaw
+    /// re-leases (`thawInPlace`) or moves the conversation (`rollOver`).
     func reconcileTabLeases() {
         guard let preferences, let resolver = accountResolver else { return }
         let t = now()
@@ -1167,6 +1170,11 @@ final class SessionStore: ObservableObject {
         for session in repos.flatMap(\.sessions) {
             present.insert(session.id)
             let holds = !resolver.leases(heldBy: session.id).isEmpty
+            if sleepController.asleep.contains(session.id) || rollingOver.contains(session.id) {
+                tabLeaseAgentGoneSince[session.id] = nil
+                if holds { resolver.release(holder: session.id) }
+                continue
+            }
             var pooled = false
             if case .pool? = preferences.projectSettings(session.workingDirectory).accounts[session.agent] { pooled = true }
             // A tab in an unpooled project that holds nothing has nothing to reconcile, and
@@ -1188,6 +1196,221 @@ final class SessionStore: ObservableObject {
             }
         }
         tabLeaseAgentGoneSince = tabLeaseAgentGoneSince.filter { present.contains($0.key) }
+    }
+
+    // MARK: - Smart sleep moves the lease, and a spent account moves the conversation
+
+    /// What a frozen agent's composer held when it froze, for a thaw that restarts it on another
+    /// account (`rollOver`): the kill ring every `submit` relies on dies with the old process,
+    /// so the draft has to be read as text while a screen still exists to read it.
+    struct FrozenComposer: Equatable {
+        /// Frozen at its idle composer, as opposed to inside a dialog: smart sleep freezes
+        /// `.waiting` agents too (`SleepPolicy` refuses only `.busy`), and those are mid-turn.
+        var idle: Bool
+        /// `""` for an empty box, nil when the composer could not be read.
+        var draft: String?
+    }
+
+    private(set) var frozenComposers: [UUID: FrozenComposer] = [:]
+    /// Tabs whose thaw is carrying their conversation to another account right now.
+    private(set) var rollingOver: Set<UUID> = []
+    /// Drafts read off a frozen agent, waiting for the resumed agent's composer
+    /// (`flushPendingDrafts`). Expire after `draftRestoreWindow`.
+    private(set) var pendingDrafts: [UUID: DeferredPrompt] = [:]
+    /// How long a carried draft waits for the resumed agent's composer. A resume that has not
+    /// drawn one in two minutes is stuck on something else (a trust prompt, a sign-in), and
+    /// pasting into whatever finally appears is a guess.
+    static let draftRestoreWindow: TimeInterval = 120
+
+    /// Whether hand-offs need confirmation (`HandoffSettings.confirm`), read on every thaw.
+    /// Settable so tests can turn it on: production reads Settings, where it is false until a
+    /// confirm surface exists (`CapacityPreferences.confirmSurfaceExists`).
+    lazy var handoffsNeedConfirmation: () -> Bool = { [weak self] in
+        self?.preferences?.capacity.handoffSettings.confirm ?? false
+    }
+
+    /// The sleep controller's freeze hook, run before the surface is torn down: gives the tab's
+    /// pool lease back (a frozen agent bills nothing) and records its composer for a thaw that
+    /// may have to restart it elsewhere.
+    func agentFroze(_ id: UUID) {
+        accountResolver?.release(holder: id)
+        tabLeaseAgentGoneSince[id] = nil
+        let idle = statuses[id]?.activity == .idle
+        let reader = injectorOverride ?? surfaces[id]
+        let draft = reader.flatMap { session(for: id)?.agent.textChannel?.draft($0) }
+        frozenComposers[id] = FrozenComposer(idle: idle, draft: draft)
+    }
+
+    /// The thaw decision for one frozen tab. Everything that can only be known here — whether
+    /// the tab could move at all — becomes the `blocked` argument; the pool rules are the
+    /// resolver's (`AccountResolver.thawPlan`).
+    private func thawPlan(for session: Session, frozen: FrozenComposer?) -> ThawPlan {
+        guard let resolver = accountResolver, !accountIsMissing(for: session),
+              let account = account(for: session)
+        else { return .inPlace(nil) }
+        // A swarm agent's account is the hand-off driver's to move (L3-U): it reassigns the
+        // task to a fresh agent and retires this one. Rolling the tab too would race it.
+        if swarmServiceIfBuilt?.agentRecord(session.id) != nil { return .inPlace(nil) }
+        let blocked: ThawBlocker?
+        if session.agent.conversationTransfer == nil { blocked = .cannotTransfer }
+        else if frozen?.idle != true { blocked = .midTurn }
+        else if frozen?.draft == nil { blocked = .unreadableDraft }
+        else if handoffsNeedConfirmation() { blocked = .needsConfirmation }
+        else { blocked = nil }
+        return resolver.thawPlan(agent: session.agent, project: session.workingDirectory,
+                                 account: account, blocked: blocked)
+    }
+
+    /// Wakes a frozen agent where it is and re-leases the account it runs as — `reacquire`, so
+    /// the lease names THAT account even past soft or the pool's concurrency cap: the
+    /// conversation lives in its home, and a running agent counts against its pool whatever
+    /// the pool would rather.
+    private func thawInPlace(_ id: UUID, notice: ThawNotice?) {
+        sleepController.wake(id)
+        guard let session = session(for: id) else { return }
+        if !accountIsMissing(for: session), let account = account(for: session) {
+            accountResolver?.reacquire(agent: session.agent, project: session.workingDirectory,
+                                       account: account, for: id)
+        }
+        if let notice { notify(notice, session: session) }
+    }
+
+    private func notify(_ notice: ThawNotice, session: Session) {
+        let title: String, body: String
+        switch notice {
+        case .noHeadroom(let pool, let account):
+            title = "Every account in “\(pool)” is over its limit"
+            body = "This tab resumed on “\(account)” anyway. It may stop until a limit resets."
+        case .stayed(let blocker, let account):
+            title = "“\(account)” is over its limit"
+            switch blocker {
+            case .midTurn:
+                body = "This tab was asleep in the middle of a turn, so it resumed on “\(account)” rather than move to another account."
+            case .unreadableDraft:
+                body = "Flight Deck could not read this tab’s unsent text, so it resumed on “\(account)” rather than risk losing it."
+            case .cannotTransfer:
+                body = "\(session.agent.displayName) cannot carry a conversation to another account, so this tab resumed on “\(account)”."
+            case .needsConfirmation:
+                body = "Hand-offs need confirmation, so this tab resumed on “\(account)” instead of moving."
+            }
+        }
+        notifier?.notify(sessionID: session.id, title: title, subtitle: session.title, body: body)
+    }
+
+    /// Carries a frozen, idle tab's conversation from its spent account to `account` and resumes
+    /// it there, in the same tab, under the same conversation id — the L3-U hand-off's account
+    /// move done for a manual tab. Not `HandoffDriver` itself: that hands a swarm TASK to a new
+    /// agent with a prompt pointing at the old transcript, a fresh conversation, and a manual
+    /// tab has no task and must keep its conversation whole.
+    ///
+    /// Ordered so nothing is lost on any failure: the copy is made while the frozen agent still
+    /// exists (a failed copy wakes it in place, on the spent account, with a notice); only then
+    /// is the old agent killed, the tab restamped and the agent resumed under the new home. The
+    /// draft read at the freeze is pasted back once the new composer is up (`pendingDrafts`).
+    private func rollOver(_ id: UUID, to account: AgentAccount, resolution: AccountResolution, draft: String) async {
+        defer { rollingOver.remove(id) }
+        guard let old = session(for: id), let transfer = old.agent.conversationTransfer,
+              let from = self.account(for: old)
+        else {
+            accountResolver?.release(resolution)
+            return thawInPlace(id, notice: nil)
+        }
+        let moved: Session
+        do {
+            moved = try await transfer.transfer(old, from: from.home, to: account.home)
+        } catch {
+            accountResolver?.release(resolution)
+            thawInPlace(id, notice: nil)
+            notifier?.notify(sessionID: id, title: "“\(from.displayName)” is over its limit", subtitle: old.title,
+                             body: "Moving this conversation to “\(account.displayName)” failed (\(error)), so it resumed on “\(from.displayName)”.")
+            return
+        }
+        // Closed while the copy ran: nothing to resume, and the lease is nobody's.
+        guard let at = locate(id) else {
+            accountResolver?.release(resolution)
+            sleepController.forget(id)
+            return
+        }
+
+        // Retire the frozen agent. Its surface went at the freeze; `terminate` SIGCONTs the
+        // stopped group before SIGTERM, so it dies rather than sitting stopped forever.
+        sleepController.forget(id)
+        tearDownSurface(for: id)
+        daemonControl.terminate(id)
+        stopWatching(id)
+
+        var updated = repos[at.repo].sessions[at.session]
+        updated.accountID = account.id
+        updated.transcriptPath = moved.transcriptPath
+        repos[at.repo].sessions[at.session] = updated
+        statuses.removeValue(forKey: id)
+        resetComposerReadiness(for: id, conversation: updated.pinnedConversationID)
+        // After the restamp: each asks whether any tab is still on the OLD account, keyed the
+        // way the stacks are (`instance(for:)`, which can collapse a built-in account to nil).
+        let oldKey = instance(for: old).account
+        stopCodexIfUnused(account: oldKey)
+        stopOpenCodeIfUnused(account: oldKey)
+        stopStatusWatchingIfUnused(account: oldKey)
+        persist()
+
+        let options = options(for: updated.agent, project: updated.workingDirectory)
+        let command: String
+        if updated.agent.negotiatesIdentity {
+            // codex and OpenCode: the new account's server is started and the conversation
+            // settled against it BEFORE the shell exists, so the resume command is the cold
+            // create's own typed text. `resumeRestoredCodex` types after the fact, and only into
+            // a tab whose daemon is not live — which a just-created one already is.
+            let instance = instance(for: updated)
+            let prepared = try? await preparedAdapter(for: instance)
+            let adapter = prepared ?? self.adapter(for: instance)
+            var binding = adapter.binding(for: updated)
+            if prepared != nil, let settled = try? await adapter.rebind(for: updated, options: options) {
+                binding = settled
+            }
+            if binding.conversationID != updated.pinnedConversationID { repinCodex(id, to: binding) }
+            guard let current = session(for: id) else { accountResolver?.release(resolution); return }
+            if let codex = adapter as? CodexAdapter {
+                command = codex.coldCreateCommand(binding, current, options)
+            } else {
+                command = adapter.resumeCommand(binding, current, options)
+            }
+        } else {
+            let adapter = adapter(for: instance(for: updated))
+            command = adapter.resumeCommand(adapter.binding(for: updated), updated, options)
+        }
+        // Closed while the server settled: the lease is nobody's.
+        guard locate(id) != nil else { accountResolver?.release(resolution); return }
+        makeAttachSurface(id: id, typed: command)
+        // Same order and reason as `insertSession`: sized before anything prints.
+        report(terminalSize, to: id)
+        provider?.tick()
+        startWatching(tabID: id)
+
+        if resolution.lease != nil {
+            accountResolver?.hold(resolution, for: id)
+        } else {
+            accountResolver?.reacquire(agent: updated.agent, project: updated.workingDirectory, account: account, for: id)
+        }
+        if !draft.isEmpty {
+            pendingDrafts[id] = DeferredPrompt(text: draft, deadline: now().addingTimeInterval(Self.draftRestoreWindow))
+        }
+        notifier?.notify(sessionID: id, title: "“\(from.displayName)” is over its limit", subtitle: updated.title,
+                         body: "This conversation moved to “\(account.displayName)” and resumed there.")
+        objectWillChange.send()
+    }
+
+    /// Pastes each carried draft into its resumed agent's composer, once that composer is on
+    /// screen. Pasted, never submitted (`sendText` is a bracketed paste; no Return). A box that
+    /// already holds text means the user typed before the restore got there: theirs wins, and
+    /// the carried draft is dropped rather than spliced into it.
+    private func flushPendingDrafts() {
+        let t = now()
+        for (id, pending) in pendingDrafts {
+            guard t < pending.deadline else { pendingDrafts[id] = nil; continue }
+            guard let gate = injectionGate(id), let current = gate.channel.draft(gate.injector) else { continue }
+            pendingDrafts[id] = nil
+            if current.isEmpty { gate.injector.sendText(pending.text) }
+        }
     }
 
     /// Claude's adapter with this store's wiring on it.
@@ -1935,6 +2158,8 @@ final class SessionStore: ObservableObject {
             self.report(self.terminalSize, to: id)
             self.provider?.tick()
         },
+        // Before the surface goes: the composer is read off it, and the lease given back.
+        onFreeze: { [weak self] in self?.agentFroze($0) },
         // Read every tick, unlike the threshold above: flipping the Off switch in Preferences
         // must take effect immediately, not on the next launch.
         sleepEnabled: { [weak self] in self?.preferences?.idleSleepEnabled ?? true },
@@ -2214,8 +2439,12 @@ final class SessionStore: ObservableObject {
     /// terminal) and by the sleep controller's wake path — a SIGSTOP'd agent's daemon is still
     /// `daemonControl.isLive`, so `LaunchPlan.decide` returns `.attach` and the daemon's ring
     /// replay restores the screen. On success this also sets `surfaces[id]`.
+    ///
+    /// `typed` replaces the adapter's launch command for a cold create: a smart-sleep rollover
+    /// (`rollOver`) relaunches an EXISTING conversation, which is the resume command, not the
+    /// launch command (claude's names a NEW session id, and would fail on one that exists).
     @discardableResult
-    func makeAttachSurface(id: UUID) -> Ghostty.SurfaceView? {
+    func makeAttachSurface(id: UUID, typed override: String? = nil) -> Ghostty.SurfaceView? {
         guard let at = locate(id) else { return nil }
         let session = repos[at.repo].sessions[at.session]
 
@@ -2230,7 +2459,7 @@ final class SessionStore: ObservableObject {
         let adapter = adapter(for: instance(for: session))
         let options = options(for: session.agent, project: session.workingDirectory)
         let shell = preferences?.resolvedShell() ?? ShellResolver.resolve()
-        let typedText = adapter.launchCommand(adapter.binding(for: session), session, options)
+        let typedText = override ?? adapter.launchCommand(adapter.binding(for: session), session, options)
         do {
             try daemon.ensureDirectory()
             let plan = try LaunchPlan.decide(
@@ -2397,9 +2626,28 @@ final class SessionStore: ObservableObject {
     /// `asleep` on close — and `wake(_:)`'s `rebuildSurface` closure calls `makeAttachSurface`,
     /// which returns nil for a session `locate` can no longer find. That is an acceptable
     /// no-op: a gone session has no surface to rebuild, and nothing here crashes on it.
+    ///
+    /// **A thaw re-decides the tab's account** (round 2, sleep-lease-rollover): the freeze gave
+    /// the pool lease back, so waking either re-leases the same account or — when that account
+    /// is spent — carries the conversation to another one (`thawPlan`, `rollOver`). A rollover
+    /// runs asynchronously; until it lands the tab has no surface and `injector(for:)` answers
+    /// nil, so nothing is typed into the agent being replaced.
     @MainActor
     func wakeIfAsleep(_ id: UUID) {
-        if sleepController.asleep.contains(id) { sleepController.wake(id) }
+        guard sleepController.asleep.contains(id), !rollingOver.contains(id) else { return }
+        guard let session = session(for: id) else { return sleepController.wake(id) }
+        let frozen = frozenComposers.removeValue(forKey: id)
+        switch thawPlan(for: session, frozen: frozen) {
+        case .inPlace(let notice):
+            thawInPlace(id, notice: notice)
+        case .rollOver(let account, let resolution):
+            rollingOver.insert(id)
+            // Never inline: this is reached from `TerminalPane.updateNSView`, where mutating
+            // the store would publish during a view update.
+            Task { @MainActor [weak self] in
+                await self?.rollOver(id, to: account, resolution: resolution, draft: frozen?.draft ?? "")
+            }
+        }
     }
 
     /// Test seam for frontmost-ness; production reads `NSApplication`.
@@ -4958,6 +5206,9 @@ final class SessionStore: ObservableObject {
         accountResolver?.release(holder: id)
         delegationHooks?.sessionClosed(id)
         pluginReload.forget(id)
+        // A tab closed while frozen or mid-rollover leaves nothing to restore a draft into.
+        frozenComposers[id] = nil
+        pendingDrafts[id] = nil
 
         // Detach and park rather than release. Two reasons this is not just `= nil`:
         //
@@ -8758,6 +9009,9 @@ final class SessionStore: ObservableObject {
     /// Safe to run twice in one instant: every flush below is idempotent and
     /// deadline-guarded, and `inject` refuses re-entry for a tab already mid-settle.
     private func maintenanceTick() {
+        // First: a carried draft goes back into its composer before anything else is typed
+        // there, so every later injection (which preserves drafts) types around it.
+        flushPendingDrafts()
         // This is the retry tick for deferred renames: a rename usually waits on something
         // that never shows up in `statuses` at all — the user clearing their half-typed
         // draft moves no status, so gating the retry on a status change would strand it.
@@ -9825,6 +10079,10 @@ final class SessionStore: ObservableObject {
 
     private func injector(for id: UUID) -> TextInjecting? {
         wakeIfAsleep(id)   // rebuilds the surface (+ SIGCONT) if this session was asleep
+        // Mid-rollover the agent on screen (if any) is the one being replaced: anything typed
+        // now would land in a process about to be killed. nil defers every caller to a later
+        // tick, which finds the resumed agent.
+        guard !rollingOver.contains(id) else { return nil }
         return injectorOverride ?? surfaces[id]
     }
 

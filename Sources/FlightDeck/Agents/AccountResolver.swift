@@ -83,6 +83,37 @@ enum AccountResolutionError: Error, Equatable, Sendable {
     }
 }
 
+/// Why a frozen tab whose account is spent stays on it at thaw instead of rolling over.
+enum ThawBlocker: Equatable, Sendable {
+    /// Frozen with a dialog open (smart sleep freezes `.waiting` agents as well as idle ones): a
+    /// tool call is in flight, and killing the process would abandon it.
+    case midTurn
+    /// The composer could not be read at the freeze, so a draft might be there that a restart
+    /// would lose.
+    case unreadableDraft
+    /// The agent has no way to carry a conversation to another home (`conversationTransfer`).
+    case cannotTransfer
+    /// Hand-offs need confirmation (`HandoffSettings.confirm`) and a thaw has nobody to ask.
+    case needsConfirmation
+}
+
+/// What a smart-sleep thaw does with a frozen tab's agent (`AccountResolver.thawPlan`).
+enum ThawPlan: Equatable {
+    /// Wake the frozen agent where it is and re-lease the account it runs as. The notice is
+    /// non-nil when that account is spent and the user must be told why it stayed.
+    case inPlace(ThawNotice?)
+    /// The account is spent and `to` has headroom: carry the conversation there and resume it.
+    /// `resolution` holds the lease the store must hold for the tab, or release if the move fails.
+    case rollOver(to: AgentAccount, resolution: AccountResolution)
+}
+
+enum ThawNotice: Equatable {
+    /// No other member of the pool has headroom.
+    case noHeadroom(pool: String, account: String)
+    /// Another member had headroom, but this tab could not move.
+    case stayed(ThawBlocker, account: String)
+}
+
 /// Resolves a project's assignment for one agent and owns the leases it hands out.
 ///
 /// Lease lifecycle, for every caller:
@@ -232,6 +263,33 @@ final class AccountResolver {
     }
 
     func leases(heldBy holder: UUID) -> [AccountLease] { holds[holder] ?? [] }
+
+    /// Decides a smart-sleep thaw (round 2, sleep-lease-rollover). A frozen agent holds no
+    /// lease (`SessionStore.agentFroze` released it); this answers what its tab does on waking:
+    /// - its project gives the agent no hosted pool that lists `account`, or `account` is not
+    ///   spent → `.inPlace(nil)`: wake it, re-lease the same account (`reacquire`, even over
+    ///   soft or the pool's concurrency cap — the conversation lives in that home);
+    /// - `account` is spent (over its pool's hard threshold, or refused by its provider) and
+    ///   `blocked` says the tab cannot move → `.inPlace(.stayed)`;
+    /// - spent, and the pool leases another member (`LeasePolicy`) or has one merely over soft
+    ///   → `.rollOver` to it, with the lease (if any) on the resolution;
+    /// - spent, and every other member is spent too → `.inPlace(.noHeadroom)`, never a dead tab.
+    func thawPlan(agent: AgentID, project: String, account: AgentAccount, blocked: ThawBlocker?) -> ThawPlan {
+        guard case .pool(let id)? = preferences.projectSettings(project).accounts[agent],
+              let pool = preferences.effectivePools.first(where: { $0.id == id && $0.agent == agent }),
+              pool.kind == .hosted, pool.accounts.contains(account.id)
+        else { return .inPlace(nil) }
+        let state = ledger.headroom(pool: id).first { $0.account.id == account.id }?.state
+        guard state == .overHard else { return .inPlace(nil) }
+        if let blocked { return .inPlace(.stayed(blocked, account: account.displayName)) }
+        let noHeadroom = ThawPlan.inPlace(.noHeadroom(pool: pool.label, account: account.displayName))
+        guard case .success(let resolution) = resolvePool(id, agent: agent, leasing: true) else { return noHeadroom }
+        guard let next = resolution.account, next.id != account.id, resolution.fallback != .allOverHard else {
+            release(resolution)
+            return noHeadroom
+        }
+        return .rollOver(to: next, resolution: resolution)
+    }
 
     /// Re-takes the lease for work that is ALREADY running as `account` — a tab restored after
     /// a relaunch, or one whose agent came back after it exited — and holds it for `holder`.
