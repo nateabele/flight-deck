@@ -834,8 +834,24 @@ started as the agent's binary (argv[0] = the profile's `binaryName`; `p_comm` is
 name for claude and grok) runs under the tab's fd-abduco daemon or surface. Gone for 30 s → the
 lease is released; running with none → `AccountResolver.reacquire` adopts a lease on the account the
 tab is stamped with, never a fresh pick, and only when the project's pool lists it. That is also how
-tabs restored after a relaunch lease again. A SIGSTOP'd (smart-sleep) agent is still a process, so
-it keeps its lease. Planning runs use the same resolver through its `AccountResolving`
+tabs restored after a relaunch lease again. **Smart sleep moves the lease** (round 2,
+sleep-lease-rollover; this replaced "a SIGSTOP'd agent keeps its lease"): the sleep controller's
+freeze hook (`SessionStore.agentFroze`) releases the tab's lease at once and records its composer
+draft (`AgentTextChannel.draft`) while the surface still exists, and the sweep never re-leases a
+tab the controller holds. The thaw (`wakeIfAsleep`) asks `AccountResolver.thawPlan`: an account
+that is not spent (not over its pool's hard threshold, not refused) wakes in place and re-leases
+THE SAME account through `reacquire`, even past soft or the pool's cap. A spent one, when the
+agent froze idle at a readable composer, the agent has an `AgentID.conversationTransfer` and
+hand-offs need no confirmation, rolls over (`SessionStore.rollOver`): the pool leases another
+member, the conversation is copied into that account's home (claude `projects/<cwd>/<id>.jsonl`
+plus its `<id>/` sidecar; codex the dated rollout plus its `session_index.jsonl` line, with the
+tab's `transcriptPath` repointed; grok the `sessions/<cwd>/<id>/` directory; OpenCode `opencode
+export` from the old data root and `import` into the new, run in the tab's directory), the frozen
+process is killed, the tab is restamped and the same conversation id is resumed under the new home,
+and the draft is pasted (never submitted) once the new composer is up. Any blocker — frozen in a
+dialog, unreadable composer, gemini (single account), confirm on — or no other member with
+headroom thaws in place on the spent account with a notice; a swarm agent's account is left to the
+hand-off driver. Planning runs use the same resolver through its `AccountResolving`
 conformance (`Intake/PlanningAccounts.swift`), but keep their own lease book (the runner
 controller's `heldAccounts` plus `accounts.json`, which survives a relaunch) rather than
 `hold(for:)`, so one lease is never in two books.

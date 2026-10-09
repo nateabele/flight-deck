@@ -3142,6 +3142,47 @@ resume. What is still open:
   day and its neighbours under `$CODEX_HOME/sessions`. A codex that ever files rollouts by another
   scheme would silently stop metering seats.
 
+## Smart sleep moves the lease; a spent account moves the conversation (2026-10-09, round 2 sleep-lease-rollover)
+
+Replaces round 2 accounts-leases' ruling that a SIGSTOP'd agent keeps its lease (Nate rejected it).
+Freeze releases the lease; thaw re-leases the same account; a spent account rolls an idle
+conversation onto another pool member in the same tab. See ARCHITECTURE.md, "One resolver turns
+an assignment into a login".
+
+- **Never run in the app.** Every path is unit-tested (`SleepLeaseRolloverTests`,
+  `ConversationTransferTests`, `ComposerDraftTests`), and the per-CLI transfer was probed by hand,
+  but no real tab has frozen, thawed and rolled over. GUI check for Nate: put a project on a two-
+  account claude pool, let a tab smart-sleep with half a sentence in its composer (pool count drops
+  by one at once), push the first account over hard (or wait for a real limit), select the tab:
+  it should resume the same conversation on the second account with the half sentence back in the
+  box, unsent, and a notification saying it moved.
+- **codex and grok resume under a second home with full model context is unverified.** Only one
+  codex and one grok login exist here, and copying credentials to fake a second risks rotating the
+  real refresh token. What was proven (2026-10-09): codex-cli 0.160.0 `exec resume` and the
+  app-server's `thread/read` find a rollout copied into a home whose state database never saw the
+  thread; grok 1.0.30 `grok export <id>` finds a copied session directory by id under a new
+  `GROK_HOME` (the `-r` path stops at "Not signed in" in an empty home). claude 2.1.295 was
+  proven end to end across two real signed-in homes (the copy answered a codeword from the first
+  home's turn). OpenCode 1.18.34 export/import was proven against a running server on the second
+  data root, but not resumed with a model.
+- **The old home keeps a stale copy.** The transfer copies, never moves, so a failed relaunch still
+  finds the conversation where it was. ⌘K search may list the conversation under both accounts.
+- **The codex and OpenCode rollover path is not unit-tested through the store.** It needs a real
+  app-server or `opencode serve`; the transfer itself is tested, and the store path reuses
+  `preparedAdapter`/`rebind` as a reopen does.
+- **claude's placeholder is recognised by shape.** `ClaudeTextChannel.draft` reads `Try "…"` and the
+  queued-messages hint as empty. A real draft of exactly that shape is lost on a rollover; a hint
+  of a new shape is pasted into the resumed composer as if typed (never submitted).
+- **A carried draft gains spaces for wrapped rows.** claude, agy and OpenCode word-wrap their
+  composer and the screen cannot tell a wrap from a typed newline, so wrapped rows are joined with
+  a space.
+- **Thaw-time notices only.** A tab whose account goes spent while it is awake is not moved; only a
+  thaw re-decides. A swarm agent is never rolled by a thaw (the hand-off driver owns its account),
+  and its swarm lease is not released at freeze.
+- **The resumed claude tab may raise the folder-trust dialog** if the new account has never
+  trusted the project directory (each `CLAUDE_CONFIG_DIR` keeps its own `.claude.json`). The draft
+  waits for the composer (up to two minutes) and is dropped after.
+
 ## grok phone answers: sets, checkboxes, typed, subagent cards (2026-10-09, round 2)
 
 Question sets, multi-select and typed answers now drive grok from the phone, and a subagent's
