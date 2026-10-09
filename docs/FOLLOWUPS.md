@@ -3148,8 +3148,22 @@ permission card is offered as the child's own call. Evidence: `.superpowers/grok
   check accepts a shown prefix).
 - **A background subagent's card while the parent runs some OTHER tool** is refused (no card):
   the parent's own open call is then not a subagent wait, and which card is up cannot be read.
-- **The question deny is still Ctrl+C**, which cancels the turn. grok's gentler Shift+X dismiss
-  ("continue without an answer") is not wired.
+- ~~**The question deny is still Ctrl+C**, which cancels the turn.~~ Fixed 2026-10-09 (round 2
+  `grok-dismiss`): Deny on a grok QUESTION is Shift+x ("dismiss, the agent continues"), read-guarded
+  (`AgentQuestionDismisser`, `SessionStore.performDismiss`): Tab first on a parked card, nothing
+  into an open editor, a card still up after the press filed as `keyed-screen-mismatch`. The phone's
+  blind Abort dismisses a question card too. Probed on grok 1.0.30 under a pty emulating Ghostty's
+  kitty encoding, not on a real Ghostty surface: the uppercase-letter key event (`sendCharacterKey("X")`,
+  Shift consumed) was traced through `key_encode.zig` to send plain `X`, never run on a surface.
+- **A grok PERMISSION deny still cancels the turn.** Ctrl+C and the card's own "No, reject" digit
+  both end it (`turn_ended cancelled`, `permission_rejected`, probed). The one non-cancelling refusal
+  is "No, reject" WITH typed feedback (`↓` to the row, type, Return: `permission_resolved
+  decision:"followup"`, the text becomes a user message, the turn goes on). The phone has no
+  deny-with-a-message, so this is not wired.
+- **grok's composer CAN draw a placeholder** (`│ ❯ Build anything`), seen once on 1.0.30 after a Tab
+  sent with the keyboard parked in the scrollback and no card up. `GrokScreen.composer` would read
+  it as a draft, and `GrokTextChannel` would stash it with Ctrl+S before typing. Not reproduced
+  or handled.
 
 ## OpenCode adapter and planning harness (2026-10-09, round 2 opencode)
 

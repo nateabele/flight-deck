@@ -731,7 +731,11 @@ is `updates.jsonl` (ACP `session/update` records, `GrokTimelineMapper`), status 
 rounded box with no placeholder; a draft is set aside with grok's own Ctrl+S stash
 (`GrokTextChannel`). Its cards are answered by the row's own key and never by Return
 (`GrokDialogDriver`, `AgentKeyedDialogDriver`), because the first card of a session focuses
-"always-approve"; deny and interrupt are Ctrl+C (`AgentAdapter.interruptKey`). A question —
+"always-approve"; a permission deny and interrupt are Ctrl+C (`AgentAdapter.interruptKey`). A
+question's deny is Shift+x instead, grok's "dismiss, the agent continues", where Ctrl+C would
+cancel the turn (`AgentQuestionDismisser`, `SessionStore.performDismiss`): read-guarded like an
+answer — Tab first when the card's keyboard is parked, never into an open editor, and a card still
+up after the press is filed as `keyed-screen-mismatch`, never pressed again. A question —
 one or a set, single-select, checkbox or typed — is answered by `GrokAnswerPlan` through
 `AgentKeyedQuestionDriver` and `SessionStore.performKeyed`: each step re-reads the card and
 must find the right question (`[i/n]`), its labels and its checkboxes before any key goes out,

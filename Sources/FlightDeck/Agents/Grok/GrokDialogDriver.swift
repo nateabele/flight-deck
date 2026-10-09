@@ -8,10 +8,16 @@ import Foundation
 /// (`3` allowed a write, `4` rejected one); Return submits whatever row is focused; and the
 /// first card of a session focuses always-approve, the next one whichever row was chosen last.
 ///
-/// **Deny is Ctrl+C, not Escape.** grok's Escape on a card "parks focus in the scrollback. It
-/// never answers or dismisses the request" (user guide ch. 3, and seen live); Ctrl+C cancels
-/// the request. One key, no reading — the property `AgentDialogDriver.deny` asks for.
-struct GrokDialogDriver: AgentKeyedQuestionDriver {
+/// **Deny is Ctrl+C, not Escape — for a PERMISSION card.** grok's Escape on a card "parks focus
+/// in the scrollback. It never answers or dismisses the request" (user guide ch. 3, and seen
+/// live); Ctrl+C cancels the request. One key, no reading — the property
+/// `AgentDialogDriver.deny` asks for. It cancels the whole turn, and so does the card's own
+/// "No, reject" digit (probed, 1.0.30: `turn_ended cancelled`, `permission_rejected`), so there
+/// is no gentler blind key to pick.
+///
+/// **A QUESTION is dismissed with Shift+x instead** (`AgentQuestionDismisser`): the tool returns
+/// "User declined to answer the questions…" and the turn goes on, where Ctrl+C would end it.
+struct GrokDialogDriver: AgentKeyedQuestionDriver, AgentQuestionDismisser {
     func focusedRow(inViewport viewport: String) -> Int? {
         let rows = GrokScreen.cardRows(inViewport: viewport)
         let focused = rows.indices.filter { rows[$0].focused }
@@ -61,5 +67,23 @@ struct GrokDialogDriver: AgentKeyedQuestionDriver {
     func keystrokes(for step: KeyedAnswerStep, questions: [PromptQuestion],
                     inViewport viewport: String) -> [KeyedKeystroke]? {
         GrokAnswerPlan.keystrokes(for: step, questions: questions, inViewport: viewport)
+    }
+
+    /// Shift+x on a card that holds the keyboard; Tab first on a parked one; nothing into an open
+    /// editor, where `X` is a letter of the answer. The card must be the transcript's: the
+    /// question on screen (`[i/n]` of the same count on a set) must read as that question's
+    /// text, so a card that replaced it is never the one dismissed.
+    func dismissStep(for questions: [PromptQuestion]?, inViewport viewport: String) -> QuestionDismissStep {
+        guard let card = GrokScreen.questionCard(inViewport: viewport) else { return .absent }
+        if let questions {
+            let index = (card.position?.index ?? 1) - 1
+            guard (card.position?.count ?? 1) == questions.count, questions.indices.contains(index),
+                  let title = card.title,
+                  GrokAnswerPlan.titleMatches(title, question: questions[index].question)
+            else { return .absent }
+        }
+        if card.editorText == nil, card.hasKeyboard { return .press([.character(GrokScreen.dismissKey)]) }
+        if card.editorText == nil, card.parked { return .refocus([.tab]) }
+        return .blocked
     }
 }

@@ -362,6 +362,7 @@ final class TargetedInjector: TextInjecting {
     func sendYank() { base.sendYank() }
     func sendArrowDown() { base.sendArrowDown() }
     func sendArrowUp() { base.sendArrowUp() }
+    func sendTab() { base.sendTab() }
     func sendEscape() { base.sendEscape() }
     func sendCharacterKey(_ character: Character) { base.sendCharacterKey(character) }
     func sendControlKey(_ letter: Character) { base.sendControlKey(letter) }
