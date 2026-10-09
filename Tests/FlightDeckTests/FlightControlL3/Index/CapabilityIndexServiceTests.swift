@@ -52,6 +52,41 @@ final class CapabilityIndexServiceTests: XCTestCase {
         XCTAssertEqual(IndexSnapshotStore(directory: dir).list().count, 1)
     }
 
+    /// Round 2, item 11: the refresh bills the account the resolver names for claude (its run's
+    /// directory is its project, which no project assigns, so this is the agent's first live
+    /// account — the same as an unassigned project's tab), binds that home, and gives any pool
+    /// lease back when the run ends.
+    func testARefreshRunsAsTheResolvedAccountAndGivesItsLeaseBack() async throws {
+        try seedConfig()
+        let h = ScriptedIndexHeadless()
+        answerA(h)
+        let service = make(h)
+        let home = dir.appendingPathComponent("work-home", isDirectory: true)
+        let account = AgentAccount(agent: .claude, displayName: "Work", home: home)
+        let lease = AccountLease(pool: "team", account: CapacityPreferences.accountRef(account))
+        let resolver = IndexStubResolver(.success(ResolvedAccount(agent: .claude, account: account, lease: lease, label: "Team pool")))
+        service.accountResolver = resolver
+        await service.refreshNow()
+        XCTAssertEqual(resolver.asked.map(\.0), [.claude])
+        XCTAssertEqual(h.accounts, [AgentAccountRef(id: account.id.uuidString, home: home)])
+        XCTAssertEqual(resolver.released, [lease])
+        XCTAssertNotNil(service.current, "the run itself still happened")
+    }
+
+    /// A broken assignment is refused, never swapped for another login, and spends nothing.
+    func testARefreshWhoseAccountCannotResolveRunsNothing() async throws {
+        try seedConfig()
+        let h = ScriptedIndexHeadless()
+        answerA(h)
+        let service = make(h)
+        let resolver = IndexStubResolver(.failure(.accountMissing(.claude)))   // held: the service's ref is weak
+        service.accountResolver = resolver
+        await service.refreshNow()
+        XCTAssertEqual(h.ran, [])
+        XCTAssertNotNil(service.problem)
+        XCTAssertFalse(service.isRefreshing)
+    }
+
     func testFirstRefreshIsNeverAutomatic() throws {
         try seedConfig()
         let h = ScriptedIndexHeadless()
@@ -196,4 +231,19 @@ final class CapabilityIndexServiceTests: XCTestCase {
         XCTAssertNil(service.scores.first { $0.model == IndexFixtures.sol }, "the mid-run rejection must unscore the model in the written snapshot")
         XCTAssertNil(service.current?.scores.first { $0.model == IndexFixtures.sol })
     }
+}
+
+@MainActor
+private final class IndexStubResolver: AccountResolving {
+    let result: Result<ResolvedAccount, AccountResolutionError>
+    private(set) var asked: [(AgentID, String)] = []
+    private(set) var released: [AccountLease] = []
+    init(_ result: Result<ResolvedAccount, AccountResolutionError>) { self.result = result }
+    func billing(_ agent: AgentID, project: String) -> AccountBilling { AccountBilling(text: "stub") }
+    func acquire(_ agent: AgentID, project: String) -> Result<ResolvedAccount, AccountResolutionError> {
+        asked.append((agent, project))
+        return result
+    }
+    func release(_ lease: AccountLease) { released.append(lease) }
+    func adopt(_ lease: AccountLease) {}
 }

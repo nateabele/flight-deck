@@ -459,6 +459,8 @@ struct FlightDeckApp: App {
             // Settings. Until L3-R fills `modelCatalog()` these are the L3-0
             // stubs' empty catalogs, so a refresh proposes no aliases before integration.
             catalogs: { await RoutingCapabilityRegistry.standard().catalogs(enabled: Set(AgentID.allCases)) })
+        // The refresh bills a resolved claude account, not the built-in home (round 2, item 11).
+        service.accountResolver = store.accountResolver
         service.startScheduling(clock: store.watchClock)
         return service
     }
