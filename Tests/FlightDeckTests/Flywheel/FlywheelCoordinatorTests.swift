@@ -45,6 +45,11 @@ final class FlywheelCoordinatorTests: XCTestCase {
     func testProgramMapping() {
         XCTAssertEqual(FlywheelProgram.rawValue(for: .claude), "claude-code")
         XCTAssertEqual(FlywheelProgram.rawValue(for: .codex), "codex-cli")
+        // Pinned to what ntm registers for the same CLIs (its `agentTypeToProgram` passes
+        // `grok` and `agy` through unchanged), so an agent Flight Deck boots and one ntm
+        // boots show up under one program in `am agents list` and share one ATC population.
+        XCTAssertEqual(FlywheelProgram.rawValue(for: .grok), "grok")
+        XCTAssertEqual(FlywheelProgram.rawValue(for: .gemini), "agy")
     }
 
     func testNonZeroExitThrows() async {

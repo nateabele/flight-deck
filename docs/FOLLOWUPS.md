@@ -3044,8 +3044,18 @@ and the phone unit bundle are green; everything below is what no automated run h
   has come back, or this Mac's window and animation state differs. Not investigated.
 - ~~**No model picker for grok or gemini tabs.**~~ Fixed 2026-10-09 (`tab-model-pickers`):
   Settings → Agents and → Projects have a model pane for each; see the entry below.
-- **`FlywheelProgram` names are guesses.** `grok` and `agy` as Agent-Mail `--program` values are
-  unverified; no grok or gemini agent has joined a live swarm.
+- **`FlywheelProgram` names: VERIFIED 2026-10-09** (am 0.3.35, grok 1.0.30, agy 1.3.2).
+  `--program` is free text: `am` stores and lists it but never validates it, and neither the
+  pre-commit guard nor file reservations read it. `grok` and `agy` are what ntm itself registers
+  (`agentTypeToProgram` passes both through), and `agy` is in Agent Mail's known-program list as
+  Antigravity. Live, in a scratch repo with isolated Agent Mail storage, Flight Deck's exact
+  setup and `am macros start-session` flow booted a grok and an agy identity next to claude and
+  codex ones; all four sent and received mail; the guard blocked each non-holder's commit to a
+  reserved file and let the holder's through, for grok and agy holders alike; and real headless
+  `grok -p` and `agy -p` runs sent mail under the injected `AGENT_NAME`. Only consequence of the
+  names: ATC's liveness prior (live only under `am serve-http`) files both as "unknown" (300s
+  silence before suspicion, against 60s for claude-code and 120s for codex-cli), the same as for
+  ntm's agents. Still unseen: a grok or gemini *tab* in a real Flight Control swarm in the app.
 - **Every agent is tab-ready.** The R4 gate stays (`AgentID.tabReady`) for the next agent; its
   tests use the task-local seam `AgentID.$tabReadyOverride` to stand one agent in as not ready.
 
