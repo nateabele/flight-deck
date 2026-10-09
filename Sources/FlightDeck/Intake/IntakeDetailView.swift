@@ -345,7 +345,7 @@ struct IntakeDetailView: View {
                                  openRound: $openRound,
                                  selectedSeat: $selectedSeat,
                                  dwell: dwell,
-                                 showConfig: { showRoundConfig($0) },
+                                 showConfig: { showRoundConfig($0.stage) },
                                  controlBar: { now in
                                      AnyView(inCard(.bar, height: barHeight) { controlBar(tape, now: now, seats: seats) })
                                  },

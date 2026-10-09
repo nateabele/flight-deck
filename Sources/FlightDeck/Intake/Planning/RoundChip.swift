@@ -44,7 +44,7 @@ struct RoundChip: View {
             }
         }
         .padding(.leading, 6)
-        .padding(.trailing, model.agents.isEmpty ? 8 : 4)
+        .padding(.trailing, model.agents.isEmpty ? 8 : 5)
         .frame(height: Self.agentSize + 8)
         .background(fill, in: Capsule())
         .overlay(Capsule().strokeBorder(stroke, style: strokeStyle))

@@ -12,6 +12,9 @@ struct ShapingRoundsPanel: View {
     let intake: Intake
     /// The section a round's stack opened the inspector on (`RoundConfigEditor.highlight`).
     var highlight: RoundsSection?
+    /// The picked stage and chip, shared with the main view (`RoundConfigEditor.selection`).
+    var selection: Binding<RoundTimeline.Selection?>?
+    var onPickRound: ((RoundChipModel) -> Void)?
 
     var body: some View {
         if let saved = intake.roundConfig {
@@ -48,11 +51,20 @@ struct ShapingRoundsPanel: View {
                                   codexListedModels: CodexRoutingCatalog.shared.cachedModelIDs,
                                   shaping: service.shapingEdit(intake.id), readOnly: editing == .readOnly,
                                   recheck: .init(isRunning: service.isDetectingAgents) { [service] in _ = service.recheckAgents() },
-                                  highlight: highlight)
+                                  highlight: highlight,
+                                  tape: service.tapes[intake.id], starting: Self.starting(service.pending[intake.id]),
+                                  selection: selection, onPickRound: onPickRound)
             }
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier("inspector-rounds-shaping")
         }
+    }
+
+    /// The round a play just asked for, live on the timeline before the runner writes it — as
+    /// the live card's header already shows it.
+    static func starting(_ pending: PendingStart?) -> PlannedRound? {
+        if case .round(let round)? = pending?.kind { return round }
+        return nil
     }
 
     /// The line over the panel: why it is locked, or when an edit takes effect.

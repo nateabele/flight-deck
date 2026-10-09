@@ -43,6 +43,19 @@ struct RoundConfigEditor: View {
     /// The section a round's stack just opened the inspector on, marked until the pane clears
     /// it — a section near the end can't scroll to the top, so the mark is what says which.
     var highlight: RoundsSection?
+    /// The tape the timeline marks rounds done and live from (nil before shaping: all planned),
+    /// and a start a play just asked for, live before the runner writes it.
+    var tape: Tape?
+    var starting: PlannedRound?
+    /// The picked stage and chip, when the pane shares it with the main view (`IntakeDetailView`
+    /// keeps it, so a round clicked there is picked here and back). nil keeps it in the editor.
+    var selection: Binding<RoundTimeline.Selection?>?
+    /// A chip picked here: the pane shows that round in the main view, if it has run or runs.
+    var onPickRound: ((RoundChipModel) -> Void)?
+
+    /// The selection when no pane shares one — a render, the awaiting-choice editor before a
+    /// pane wires it. Scoped to this view so a pick never invalidates anything above it.
+    @State private var ownSelection: RoundTimeline.Selection?
 
     /// What the "Check again" button needs from the service: whether a detection is running
     /// (spinner, button disabled) and how to start one.
@@ -110,53 +123,114 @@ struct RoundConfigEditor: View {
         AgentID.planningOrder.compactMap { available.unavailable[$0] }.filter { !$0.hasSuffix("not installed") }
     }
 
-    /// One block per seat, its controls on two lines. A five-column grid needed ~530 pt, and an
-    /// inspector column is narrower than that — the Model field collapsed to nothing and the
-    /// Fallback picker ran off the panel's edge.
+    /// The rounds as a timeline (one row per stage, in run order, a chip per round) with the
+    /// picked stage's agents beneath its chips. A seat's controls sit on two lines: a five-column
+    /// grid needed ~530 pt, and an inspector column is narrower than that.
     ///
-    /// Grouped under one heading per kind of round (`RoundsSection`), each with the stack of
-    /// agents its rounds run — the same stack the main view draws on those rounds, so a round
-    /// there visibly matches its config here, and a click on its stack scrolls to its heading.
+    /// Each chip is a `RoundChip` from `RoundTimeline` — the same chip the main view's round
+    /// cards and live header draw — so a round there visibly matches its chip here, and picking
+    /// either picks the other. The pickers stay role-based: an edit applies to the whole stage,
+    /// which the caption under them says.
     private var stackedSlots: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            ForEach(Self.sections(of: config), id: \.section) { group in
-                VStack(alignment: .leading, spacing: 10) {
-                    sectionHeading(group.section)
-                    if group.section == .synthesis {
-                        Text(Self.synthesisIntegratorNote).font(.caption).foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
+        let rows = RoundTimeline.rows(config: config, tape: tape, starting: starting)
+        let picked = currentSelection
+        let revealed = picked?.section ?? RoundTimeline.defaultSection(rows)
+        let groups = Self.sections(of: config)
+        return VStack(alignment: .leading, spacing: 14) {
+            ForEach(rows, id: \.section) { row in
+                VStack(alignment: .leading, spacing: 8) {
+                    sectionHeading(row.section, open: row.section == revealed)
+                    if row.chips.isEmpty {
+                        Text(Self.noRounds).font(.caption).foregroundStyle(.tertiary)
+                    } else {
+                        ChipFlow {
+                            ForEach(row.chips) { chip in
+                                RoundChip(model: chip, selected: picked?.round == chip.key) { pick(chip) }
+                            }
+                        }
                     }
-                    ForEach(Array(group.rows.enumerated()), id: \.element.keyPath) { index, row in
-                        if index > 0 { Divider() }
-                        slotBlock(row)
+                    if row.section == revealed {
+                        stagePanel(row.section, rows: groups.first { $0.section == row.section }?.rows ?? [])
                     }
                 }
-                .id(group.section.anchor)
+                .id(row.section.anchor)
             }
         }
+        .animation(.smooth(duration: 0.2), value: revealed)
+    }
+
+    /// Under a stage with no rounds planned (a refine cap of 0).
+    static let noRounds = "No rounds"
+
+    private var currentSelection: RoundTimeline.Selection? { selection?.wrappedValue ?? ownSelection }
+
+    private func select(_ next: RoundTimeline.Selection?) {
+        if let selection { selection.wrappedValue = next } else { ownSelection = next }
+    }
+
+    private func pick(_ chip: RoundChipModel) {
+        let next = RoundTimeline.select(currentSelection, chip: chip.key)
+        select(next)
+        if next.round != nil { onPickRound?(chip) }
+    }
+
+    /// The picked stage's controls: what the edit reaches, every seat the stage runs, then the
+    /// stage's own settings — the caps live with the rounds they count.
+    @ViewBuilder
+    private func stagePanel(_ section: RoundsSection,
+                            rows: [(role: String, persona: DrafterPersona?, keyPath: SlotKeyPath)]) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(RoundTimeline.caption(section)).font(.caption).foregroundStyle(.secondary)
+                .accessibilityIdentifier("rounds-stage-caption")
+            if section == .synthesis {
+                Text(Self.synthesisIntegratorNote).font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            ForEach(Array(rows.enumerated()), id: \.element.keyPath) { index, row in
+                if index > 0 { Divider() }
+                slotBlock(row)
+            }
+            switch section {
+            case .refine: refineCap
+            case .polish: polishControls
+            default: EmptyView()
+            }
+        }
+        .padding(.top, 2)
+        .transition(.opacity)
     }
 
     /// Where the synthesis section says who merges it: the integrator's one row sits under
-    /// Refine, but it runs in the synthesis round too, and its glyph is in this heading's stack.
+    /// Refine, but it runs in the synthesis round too, and its glyph is in its chip's stack.
     static let synthesisIntegratorNote = "The integrator, set under Refine, merges the synthesis."
 
-    private func sectionHeading(_ section: RoundsSection) -> some View {
-        HStack(spacing: 8) {
-            Text(section.title)
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(.secondary)
-                .textCase(.uppercase)
-            Spacer(minLength: 8)
-            AgentStack(entries: AgentStackModel.section(section, config: config), size: 18)
+    /// The stage's heading: a disclosure that reveals its agents. The chevron is the System
+    /// Settings / Xcode inspector cue for "this opens"; only one stage is open at a time, so the
+    /// column stays short enough for the pickers to sit beside their chips.
+    private func sectionHeading(_ section: RoundsSection, open: Bool) -> some View {
+        Button { select(RoundTimeline.Selection(section: section, round: nil)) } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(.tertiary)
+                    .rotationEffect(.degrees(open ? 90 : 0))
+                Text(section.title)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .textCase(.uppercase)
+                Spacer(minLength: 8)
+            }
+            .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
         .padding(.bottom, 2)
         .overlay(alignment: .bottom) { Rectangle().fill(.separator).frame(height: 0.5) }
         .padding(.horizontal, 6)
         .padding(.vertical, 3)
         .background(Color.accentColor.opacity(highlight == section ? 0.16 : 0), in: RoundedRectangle(cornerRadius: 6))
         .padding(.horizontal, -6)
-        .accessibilityElement(children: .combine)
         .accessibilityAddTraits(.isHeader)
+        .accessibilityValue(open ? "expanded" : "collapsed")
         .accessibilityIdentifier("rounds-section-\(section.rawValue)")
     }
 
@@ -314,41 +388,51 @@ struct RoundConfigEditor: View {
         .pickerStyle(.menu)
     }
 
-    /// The caps/toggle/default-play controls below the seats, as a compact label-left
-    /// two-column form rather than each control spelling its own label out in full.
-    private var capsForm: some View {
+    /// Refine's round count, under its agents: changing it adds or takes chips off the strip
+    /// above as it changes.
+    private var refineCap: some View {
+        HStack(spacing: 8) {
+            Text("Rounds").foregroundStyle(.secondary)
+            Stepper("\(refinementCapBinding.wrappedValue)", value: refinementCapBinding,
+                    in: (shaping?.refinementFloor ?? 0)...max(12, refinementCapBinding.wrappedValue))
+                .disabled(shaping?.refineDone == true)
+                .accessibilityLabel("Refine rounds")
+        }
+        .font(.callout)
+    }
+
+    /// Polish's round count and fresh eyes + dedup — all three run on the polisher, so they sit
+    /// with it. The row only exists with a polisher seated (`RoundTimeline.sections`).
+    private var polishControls: some View {
         Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 6) {
             GridRow {
-                Text("Refinement cap").foregroundStyle(.secondary)
-                Stepper("\(refinementCapBinding.wrappedValue)", value: refinementCapBinding,
-                        in: (shaping?.refinementFloor ?? 0)...max(12, refinementCapBinding.wrappedValue))
-                    .disabled(shaping?.refineDone == true)
-            }
-            // Polish, fresh eyes and dedup are all seated by the polisher; with none, these
-            // controls would promise rounds the planner never runs (`TapePlanner.sequence`).
-            GridRow {
-                Text("Polish cap").foregroundStyle(.secondary)
+                Text("Rounds").foregroundStyle(.secondary)
                 Stepper("\(polishCapBinding.wrappedValue)", value: polishCapBinding,
                         in: (shaping?.polishFloor ?? 0)...max(12, polishCapBinding.wrappedValue))
-                    .disabled(!Self.polishControlsEnabled(config) || shaping?.polishDone == true)
+                    .disabled(shaping?.polishDone == true)
+                    .accessibilityLabel("Polish rounds")
             }
-            .help(Self.polishControlsHelp(config))
             GridRow {
                 Text("Fresh eyes + dedup").foregroundStyle(.secondary)
                 Toggle("", isOn: freshEyesBinding).labelsHidden()
-                    .disabled(!Self.polishControlsEnabled(config) || shaping?.freshEyesDone == true)
+                    .disabled(shaping?.freshEyesDone == true)
             }
-            .help(Self.polishControlsHelp(config))
-            GridRow {
-                Text("Default play").foregroundStyle(.secondary)
-                Picker("", selection: defaultPlayBinding) {
-                    Text("Step").tag(PlayMode.step)
-                    Text("Next major").tag(PlayMode.nextMajor)
-                    Text("To review").tag(PlayMode.toReview)
-                }
-                .labelsHidden()
-                .pickerStyle(.menu)
+        }
+        .font(.callout)
+    }
+
+    /// Default play, the one setting that belongs to no stage.
+    private var capsForm: some View {
+        HStack(spacing: 10) {
+            Text("Default play").foregroundStyle(.secondary)
+            Picker("", selection: defaultPlayBinding) {
+                Text("Step").tag(PlayMode.step)
+                Text("Next major").tag(PlayMode.nextMajor)
+                Text("To review").tag(PlayMode.toReview)
             }
+            .labelsHidden()
+            .pickerStyle(.menu)
+            .fixedSize()
         }
     }
 

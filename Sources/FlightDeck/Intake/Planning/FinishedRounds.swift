@@ -26,12 +26,16 @@ struct FinishedRounds: View, Equatable {
     /// Shows a round in the plan — `LiveCard` applies the head-follows rule.
     let select: (Int) -> Void
     let setOpen: (Int?) -> Void
-    /// Opens the Rounds inspector on the section that configures a round's stage — what a click
-    /// on a card's agent stack does. Nil draws the stack inert (renders).
-    var showConfig: ((Stage) -> Void)? = nil
+    /// Opens the Rounds inspector on a round's chip — what a click on a card's chip does. Nil
+    /// draws the chip inert (renders).
+    var showConfig: ((RoundKey) -> Void)? = nil
+    /// The round picked in the Rounds inspector: its card's chip shows picked, as the chip there
+    /// does. Apart from the card's own highlight, which follows the plan's checkpoint — a live
+    /// round picked over a plan showing the head must not light the head's chip.
+    var pickedRound: RoundKey? = nil
 
     static func == (a: Self, b: Self) -> Bool {
-        a.cards == b.cards && a.planSelection == b.planSelection && a.open == b.open
+        a.cards == b.cards && a.planSelection == b.planSelection && a.open == b.open && a.pickedRound == b.pickedRound
     }
 
     private enum Metrics {
@@ -126,6 +130,12 @@ struct FinishedRounds: View, Equatable {
             // unless a panel is open, whose caret needs its card on screen to point at.
             .onAppear { proxy.scrollTo(open ?? cards.last?.checkpointID, anchor: open == nil ? .trailing : nil) }
             .onChange(of: cards.last?.checkpointID) { _, id in proxy.scrollTo(id, anchor: .trailing) }
+            // A round picked elsewhere (its chip in the Rounds inspector, the board) brings its
+            // card into the strip, so the highlight it moves to is on screen.
+            .onChange(of: highlighted) { _, id in
+                guard let id else { return }
+                withAnimation(reduceMotion ? nil : Self.motion) { proxy.scrollTo(id) }
+            }
             // An arrow key can open a card that is scrolled out of the strip: bring it in, by
             // the least scroll, so the caret has a card to point at.
             .onChange(of: open) { _, id in
@@ -170,13 +180,11 @@ struct FinishedRounds: View, Equatable {
                     .foregroundStyle(.tertiary)
             }
             HStack(spacing: 6) {
-                Text(face.name).font(.system(size: 12.5, weight: .semibold))
-                Spacer(minLength: 6)
-                // The agents that ran it, as the Rounds inspector's section for its stage draws
-                // them — the click is the card's way to its config.
-                if !card.agents.isEmpty {
-                    AgentStack(entries: card.agents, size: 15, action: showConfig.map { show in { show(card.stage) } })
-                }
+                // The round as the Rounds inspector's timeline draws it — the same chip, picked
+                // when it is picked there — and the click is the card's way to it there.
+                RoundChip(model: card.chip, selected: pickedRound == card.chip.key,
+                          action: showConfig.map { show in { show(card.chip.key) } })
+                Spacer(minLength: 4)
                 outcomeGlyph(face)
             }
             HStack(spacing: 6) {
@@ -224,7 +232,7 @@ struct FinishedRounds: View, Equatable {
         .accessibilityAction { activate(card.checkpointID) }
         // The card is one element, so the stack inside it can't be reached on its own: its
         // agents ride on the card's value and its click is a named action.
-        .accessibilityAction(named: "Show Agents in Inspector") { showConfig?(card.stage) }
+        .accessibilityAction(named: "Show Agents in Inspector") { showConfig?(card.chip.key) }
         .accessibilityIdentifier("round-card-\(card.checkpointID)")
     }
 
