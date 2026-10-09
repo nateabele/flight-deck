@@ -13,6 +13,13 @@ import IntakeKit
 /// and its result. So the call id the phone's card carries back is the id OpenCode's reply
 /// endpoint takes, and `OpenCodePromptResponder` needs no lookup to answer it.
 struct OpenCodeOpenPromptReader: AgentOpenPromptReader {
+    /// **true.** OpenCode itself persists no pending request, but Flight Deck's mirror does:
+    /// the runtime APPENDS a `prompt.asked` record the moment `permission.asked` /
+    /// `question.asked` arrives (and on reconnect, for one raised while nobody listened), so a
+    /// new dialog moves the mirror's stamp and the phone — whose feed IS the mirror, through
+    /// `OpenCodeTimelineMapper` — derives the card itself with `OpenPrompt.find`.
+    var transcriptCarriesOpenPrompt: Bool { true }
+
     func openPrompt(inTranscriptTail lines: [SourceLine], activity: SessionActivity?) -> OpenPrompt? {
         let items = lines.flatMap { OpenCodeTimelineMapper.items(inLine: $0.text, at: $0.offset) }
         return OpenPrompt.find(

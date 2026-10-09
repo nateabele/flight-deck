@@ -81,6 +81,11 @@ TEST_RUNNER_FLIGHTDECK_FLAKE_HUNT=1 FLIGHTDECK_TEST_THROTTLE=0 ./scripts/smoke.s
 # have a specific reason to.
 ./scripts/test-codex-live.sh
 
+# The OpenCode adapter AND OpenCode headless planning against a REAL `opencode` and a scripted
+# model (scripts/opencodeprobe/fake_llm.py): no GPU, no tokens, and your own OpenCode config and
+# data are never touched. Under a minute after the build; needs `opencode` >= 1.18.0 on PATH.
+./scripts/test-opencode-live.sh
+
 flightdeck ls                   # drive Flight Deck itself from a tab's own shell — see docs/HANDOFF.md
 ```
 
@@ -112,7 +117,7 @@ Releases go through `scripts/swap-release.sh`, run detached — see
 | Path | What |
 |---|---|
 | `Sources/FlightDeck/` | The app. `SessionStore` is the single source of truth (`@MainActor`). |
-| `Sources/FlightDeck/Agents/` | The `AgentAdapter` protocol and both conformers, `ClaudeAdapter` and `CodexAdapter` (the latter under `Agents/Codex/`) — identity, the text/dialog/rename channels, and now `AgentSearchCorpus`, the capability that makes an agent's history searchable. |
+| `Sources/FlightDeck/Agents/` | The `AgentAdapter` protocol and its conformers — `ClaudeAdapter`, `CodexAdapter`, `GrokAdapter`, `GeminiAdapter` and `OpenCodeAdapter` (each under `Agents/<Name>/` except claude's) — identity, the text/dialog/rename channels, `AgentSearchCorpus`, `promptResponder`, and `AgentForwardCompatibility` (keeps `sessions.json`/`preferences.v1` readable by older builds). |
 | `Sources/FlightDeck/GhosttyEmbed/` | **Adapt-copied Ghostty** (MIT, provenance-marked). Vendored-ish — prefer re-pulling upstream to hand-editing. |
 | `Sources/FlightDeck/Preferences/` | Pure flag catalog/parser/serializer/merge + SwiftUI shell. |
 | `Sources/FleetKit/` | Wire types, event fold, pairing payload, and both socket halves — plus both platforms' pairing stores. Swift 6, `Foundation`, `Network`, and `Security` only — compiled for iOS too, which is what enforces that. |

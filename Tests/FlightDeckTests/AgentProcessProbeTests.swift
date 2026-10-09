@@ -56,4 +56,14 @@ final class AgentProcessProbeTests: XCTestCase {
         child.waitUntilExit()
         XCTAssertFalse(AgentProcessProbe().isRunning(.grok, under: [getpid()]))
     }
+
+    /// An OpenCode tab's agent is its `opencode attach` client: the shell runs `opencode`, and the
+    /// client is a single process with that argv[0] (probed on opencode 1.18.34 with
+    /// `opencode serve`: no child, `ps -o args` reads `opencode serve …`). The per-account
+    /// `opencode serve` is spawned by Flight Deck, not under the tab, so it is never the match.
+    func testAnOpenCodeTabsAttachClientIsItsAgent() throws {
+        _ = try spawn(argv0: "opencode")
+        XCTAssertTrue(AgentProcessProbe().isRunning(.opencode, under: [getpid()]))
+        XCTAssertFalse(AgentProcessProbe().isRunning(.claude, under: [getpid()]))
+    }
 }

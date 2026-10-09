@@ -2330,7 +2330,7 @@ flagged as most likely to differ from the tests. The maintainer's to run.
     - The materialized claude plugin copy is refreshed before `/reload-plugins`.
     - Settings: one Flight Control tab with Routing, Capability index, Capacity and Task kinds
       sections (Settings → Flight Control → Capacity); the temporary top-level tabs are gone.
-  - **OpenCode routing capabilities wait for the opencode-adapter merge; `RoutingCapabilityRegistry.standard()` will fail to compile until it states them, which is intended.**
+  - **OpenCode routing capabilities** — RESOLVED 2026-10-09 (round 2 opencode): `OpenCodeRoutingCapabilities`.
   - **Still open** (unresolved probe outcomes and deferred minors, carried from every branch):
     - The changed triage/change-set strict-mode schema (`taskKind`/`kindProposal`) WAS probed
       live on 2026-10-05: claude 2.1.289 (haiku) and codex-cli 0.160.0 (gpt-5.6-terra) both accept
@@ -2361,8 +2361,7 @@ flagged as most likely to differ from the tests. The maintainer's to run.
       with no claude meter; `spendControlReached`
       is ignored; the silent-status-line check is suppressed by any other reading on the account; a codex
       read that never returns stops that account's polling until restart; the OpenCode transcript
-      command interpolates its session id and server URL unquoted (quote them when the adapter
-      lands); `/usage` shows a third window ("Current week (Fable)") that the status line's
+      pointer is now the tab's mirror file, a path (round 2 opencode), so nothing is interpolated; `/usage` shows a third window ("Current week (Fable)") that the status line's
       `rate_limits` does not report either; `UsageService.revision` bumps on every tick, so swarm rows re-evaluate each tick.
     - Swarm: the Observe events lane is a nil stub (activity stands in); the Assignment lane is
       hidden when the tab has no Observe (am) agent row; claude/codex accept only the hard-coded
@@ -2383,7 +2382,7 @@ flagged as most likely to differ from the tests. The maintainer's to run.
       during a pending confirmation; the swarm drawer pixel test captures the first render without
       settling; the task-level hold test (`testATaskInHandoffIsNeitherClaimedNorTreatedAsReopened`)
       never ran red against the unfixed code (proved by mutation only); Tasks 9 and 10 were not
-      shown failing first; OpenCode must feed `AgentOutputScan` once its adapter lands.
+      shown failing first; OpenCode now feeds `AgentOutputScan` from its mirror (round 2 opencode).
     - Test flakes seen under load, each passing alone: `PlanEditorKeystrokeTests` frame budget
       (16.1 to 16.7 ms), `PlanningRenderTests.testASeatBeatRedrawsTheLiveCardAlone`,
       `DelegationLifecycleTests.testUnknownRunFromTheHostEndsTheRunAsDied`.
@@ -3141,3 +3140,38 @@ permission card is offered as the child's own call. Evidence: `.superpowers/grok
   the parent's own open call is then not a subagent wait, and which card is up cannot be read.
 - **The question deny is still Ctrl+C**, which cancels the turn. grok's gentler Shift+X dismiss
   ("continue without an answer") is not wired.
+
+## OpenCode adapter and planning harness (2026-10-09, round 2 opencode)
+
+Ported from the unmerged 2026-10-04 `opencode-adapter` worktree onto the unified agent model and
+merged. `.opencode` is tab-ready and headless-ready. Verified by the unit suite and by
+`scripts/test-opencode-live.sh` (a real `opencode` 1.18.34 with a scripted model, tabs and
+planning seats). What remains:
+
+- **Never run in the GUI.** The New Session entry, `opencode attach` inside a Ghostty tab, the
+  phone's timeline and answer cards for an OpenCode tab, `OpenCodeOptionsForm`, and an OpenCode
+  seat in the Rounds editor are unverified end to end. The screen grammar came from pyte captures,
+  not `ghostty_surface_read_text`; a difference would show first as `hasComposerBox` refusing.
+- **Never run against a real model.** Every live run used the fake model. A real provider's turn
+  (and whether a real model reliably returns bare JSON from the prompt-borne schema) is unverified.
+- **No account is seeded for an existing install** (the rule grok and gemini follow): OpenCode tabs
+  run in `~/.local/share` until the person adds or scans for an account. A fresh install seeds it.
+- **Older builds and the shared files — mitigated, not free.** The side keys
+  (`AgentForwardCompatibility`) keep a pre-unify build from resetting everything, but a build that
+  SAVES drops them, so after a rollback the moved tabs and settings are gone. grok and gemini are
+  moved aside too (they are outside `readableByEveryBuild`), so the installed unify Release, if
+  swapped back in, shows no grok/gemini tabs and re-adds their agent rows with empty options.
+- **`XDG_DATA_HOME` in a non-default account's tab** is seen by every XDG-aware tool in that shell.
+- **A switched session is not followed.** `/new` or `/sessions` in an attached TUI moves it to
+  another session while the tab stays pinned; nothing re-pins it (codex has `CodexPinReconciler`).
+  `resetContext` is unsupported for the same reason.
+- **No hand-off exit and no usage meter.** `exitCommand` is nil (the text channel is
+  `prompt_async`, where `/exit` is a message to the model); OpenCode reports no quota.
+- **A TUI attached after a request was raised does not draw it**; a server restart loses the
+  in-flight turn, queue and pending requests; an abort before the model's first chunk is a plain
+  `session.idle`; OpenCode's bash tool sometimes reports `(no output)` (all measured on 1.18.34).
+- **The mirror never shrinks** (an OpenCode undo leaves the message in the mirror).
+- **The planning default model is `opencode models`' first line**, not the person's configured
+  default — `opencode models` does not mark one.
+- **The integrator's edit pattern assumes OpenCode's worktree is the nearest `.git` ancestor**
+  (else `/`). Probed for both; a linked-worktree `.git` FILE is treated the same, unprobed.

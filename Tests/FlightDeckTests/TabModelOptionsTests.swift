@@ -143,5 +143,6 @@ final class TabModelOptionsTests: XCTestCase {
         XCTAssertEqual(AgentOptionsPane(agent: .codex), .codex)
         XCTAssertEqual(AgentOptionsPane(agent: .grok), .model(.grok))
         XCTAssertEqual(AgentOptionsPane(agent: .gemini), .model(.gemini))
+        XCTAssertEqual(AgentOptionsPane(agent: .opencode), .opencode, "provider/model plus the OpenCode agent: its own form")
     }
 }

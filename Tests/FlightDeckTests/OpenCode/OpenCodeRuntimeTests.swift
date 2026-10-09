@@ -44,6 +44,33 @@ final class OpenCodeRuntimeTests: XCTestCase {
         XCTAssertEqual(events, [.activity(.busy), .title("Renamed"), .turnAborted])
     }
 
+    /// Flight Control's contested detection: a `BLOCKED:` line the agent writes reaches the tab
+    /// as `.outputSignals`, read off the freshly mirrored assistant message — the same channel
+    /// claude, codex and grok report it on. Never the user's message, which quotes the marker.
+    func testABlockedLineInAMirroredReplyIsReported() async throws {
+        let db = try SyntheticOpenCodeDatabase()
+        try db.session("ses_sig", directory: "/w", title: "t")
+        try db.message("msg_u", session: "ses_sig", created: 1, data: ["role": "user"])
+        try db.part("prt_u", message: "msg_u", session: "ses_sig", data: ["type": "text", "text": "say BLOCKED: if stuck"])
+        try db.message("msg_a", session: "ses_sig", created: 2, data: ["role": "assistant", "time": ["completed": 3]])
+        try db.part("prt_a", message: "msg_a", session: "ses_sig", data: ["type": "text", "text": "Tried it.\nBLOCKED: tests need a database"])
+        let runtime = OpenCodeRuntime(server: FakeOpenCodeServer(running: false, databaseURL: db.url))
+        var seen: [AgentEvent] = []
+        let binding = AgentBinding(conversationID: OpenCodeIdentity.conversationID(forSession: "ses_sig"),
+                                   transcriptURL: OpenCodeFixtures.temporaryDirectory().appendingPathComponent("ses_sig.jsonl"))
+        let token = runtime.attach(binding, for: UUID()) { seen.append($0) }
+        defer { runtime.detach(token) }
+        let deadline = Date().addingTimeInterval(5)
+        while !seen.contains(where: { if case .outputSignals = $0 { true } else { false } }), Date() < deadline {
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        let reported: [[AgentOutputSignal]] = seen.compactMap { event in
+            if case .outputSignals(let signals) = event { return signals }
+            return nil
+        }
+        XCTAssertEqual(reported, [[.blocked("tests need a database")]])
+    }
+
     func testAStrangersSignalsAreIgnored() {
         send(.activity(session: "ses_other", .busy), .title(session: "ses_other", "x"))
         XCTAssertEqual(events, [])

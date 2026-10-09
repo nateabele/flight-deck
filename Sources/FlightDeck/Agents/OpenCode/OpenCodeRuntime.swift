@@ -442,12 +442,25 @@ final class OpenCodeRuntime: AgentRuntime {
             }.value
             guard let self else { return }
             self.index(appended, of: id, mirror: mirror)
+            self.scanForSignals(appended, of: id)
             guard var current = self.sources[id] else { return }
             current.syncing = false
             let again = current.syncAgain
             self.sources[id] = current
             if again { self.sync(id) }
         }
+    }
+
+    /// Guard blocks and `BLOCKED:` lines in freshly mirrored messages (Flight Control's contested
+    /// detection), through the one channel every agent's report takes — as claude's transcript
+    /// tail, codex's rollout and grok's updates already do.
+    private func scanForSignals(_ lines: [String], of id: UUID) {
+        let signals = lines.flatMap { line -> [AgentOutputSignal] in
+            guard let record = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any] else { return [] }
+            return AgentOutputScan.signals(line: line, record: record)
+        }
+        guard !signals.isEmpty else { return }
+        sources[id]?.subscribers.emit(.outputSignals(signals))
     }
 
     /// Streams freshly mirrored messages into ⌘K, as `CodexRuntime` does for its rollouts.
