@@ -2993,8 +2993,11 @@ it still reports there, each diagnosed from the run's `.xcresult` screen recordi
 - **The ledger re-adopts leases only on the first tick after relaunch.** Between launch and that
   tick, a local pool could hand a live runner's slot to someone else. No live user of local pools
   in planning today.
-- **Only claude seats meter usage.** `ingestHeadlessSeats` credits claude `rate_limit_event`s;
-  codex/grok/gemini seats carry `accountID` but report no readings.
+- **Only claude seats meter usage.** RESOLVED (round 2, accounts-leases): codex seats read their
+  rollout's `rate_limits`, grok seats their home's billing line, gemini seats poll agy `/usage`
+  while running, and any non-claude seat stopped by its limit refuses its account. What stays
+  open: a grok seat's reading is only as fresh as that account's last TUI turn (headless grok
+  logs no billing line), and none of the three has been seen against a live planning run.
 
 ## Unify agents, grok/gemini tabs, account pools (2026-10-08, integration)
 
@@ -3084,3 +3087,24 @@ resume. What is still open:
   project's options, so changing the model in Settings moves an existing grok or gemini tab to
   the new model at its next resume.
 
+## Tab leases follow the agent; every seat meters (2026-10-09, round 2 accounts-leases)
+
+- **Restored tabs re-lease and leases follow the agent process.** RESOLVED: `SessionStore
+  .reconcileTabLeases` (every 5 s) releases a tab's lease 30 s after its agent process is gone
+  and re-takes it on the tab's own account when the agent runs again, which also covers a tab
+  restored after a relaunch. Unverified live: the probe was tested on real child processes
+  (argv[0], SIGSTOP), not on a real Flight Deck tab under fd-abduco. A GUI check: open a tab in a
+  project assigned a pool, quit the agent (`/exit`), and watch the pool's lease count in Flight
+  Control drop within ~35 s; run the agent again and watch it return.
+- **A dropdown-chosen account inside the project's pool now leases once its agent runs.** Before,
+  an explicit dropdown choice skipped leasing entirely; the sweep counts any running tab whose
+  account the project's pool lists. Intended (the lease counts running agents per account), noted
+  because it changes what the pool meter shows.
+- **The lease sweep walks the process tree.** Only for tabs in a pool-assigned project or holding
+  a lease, every 5 s. Not measured on a large fleet.
+- **The index refresh takes no lease today.** It is app-wide, resolved as an unassigned project
+  (claude's first live account). Giving it a pool needs a setting (an "Account" picker on the
+  index pane) or treating no assignment as the agent's default pool.
+- **Codex seat rollouts are found by start date.** `CodexRolloutFile` lists the seat's local start
+  day and its neighbours under `$CODEX_HOME/sessions`. A codex that ever files rollouts by another
+  scheme would silently stop metering seats.
