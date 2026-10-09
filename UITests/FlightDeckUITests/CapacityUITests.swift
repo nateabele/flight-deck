@@ -62,6 +62,7 @@ final class CapacityUITests: XCTestCase {
             "-FlightControlMeterGallery", "YES",
         ]
         continueAfterFailure = true
+        dismissFlightDeckCrashReports()
         app.launch()
         app.activate()
 

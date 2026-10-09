@@ -2879,24 +2879,30 @@ it still reports there, each diagnosed from the run's `.xcresult` screen recordi
 - **Both codex tests: the UI-test Mac's environment.** an older codex-cli is below
   `CodexProcessTransport.minimumVersion` (0.142.4), so creating a codex session is refused and the
   tests fail with "creating a codex session added no row". Upgrading codex on the UI-test Mac fixes it.
-- **`testProjectHeadingsReorderByDragging`, "clicking a project's chevron did not collapse it":
-  macOS 15 sidebar geometry.** The recording shows the click landing just right of the chevron
-  glyph and selecting the project instead. On macOS 15 the `NSTableRowView` starts at the window
-  edge and the heading content (chevron at ~15–22pt) is inset 16pt inside it, so the test's
-  "element left edge + 10pt" is 26pt into the row, past `SidebarClickIntent.chevronZoneWidth`
-  (22pt). The test's comment assumes the row edge is "a few points" left of the element, which
-  is true of macOS 26. This is also a product issue on macOS 14/15 (the deployment target is
-  14.0): the collapse target there is roughly the glyph alone. Measuring the zone from the
-  heading's content edge rather than the row view's would fix both; not done here because it
-  changes product hit-testing and needs a run on macOS 26 too.
-- **`testTheWholeShellInOneSession`, "dragging blank row space did not reorder either": macOS 15
-  accessibility frames.** `blankSpace(inRow:)` presses 40pt right of the session title's frame;
-  on macOS 15 that frame spans the cell, so the press lands in the terminal pane (visible in the
-  recording), and the title-drag group after it has no control to stand on.
-- **Same test, "the context menu renames a session": undiagnosed.** The Rename menu item is
-  clicked, no `session-title-field` appears, and the recording shows the session order changing
-  (to 3, 2, 1) at that moment, as if a drop from the earlier drag groups landed late. Not chased
-  further within the time box.
+- **FIXED 2026-10-09 (branch `smoke-macos15`): `testProjectHeadingsReorderByDragging`, "clicking
+  a project's chevron did not collapse it".** A product bug on macOS 14/15: the collapse zone was
+  the leading 22pt of the `NSTableRowView`, which there starts 10pt left of the cell, so only the
+  glyph collapsed and a click in the gap before the name selected the project. The zone is now
+  everything left of the name, measured from the cell (`SidebarClickIntent.inChevronZone`).
+  Passed on the UI-test Mac (macOS 15.7.2). **Unverified on macOS 26:** the 18pt in-cell width
+  comes from the README capture (chevron 6pt and name 18pt inside the cell), not from a run.
+- **FIXED 2026-10-09: `testTheWholeShellInOneSession`, "dragging blank row space did not
+  reorder either".** A test bug: "40pt right of the title" landed in the terminal pane because
+  the title's macOS 15 frame can span the cell. The press is now 65% across the sidebar. The
+  title-drag group now presses the title text itself (+28pt), for the same reason: at the
+  element's centre it pressed blank space on macOS 15 and passed without testing the text.
+- **FIXED 2026-10-09: same test, "the context menu renames a session".** A product bug: Rename
+  from the row menu on a row that was not selected selected it, the re-parented terminal took
+  focus, and the field's focus loss committed and closed it within one frame. `TerminalPane`
+  no longer moves focus to a surface whose session is being renamed. (The "order changing to
+  3, 2, 1" in the 10-06 note was the title-drag group's own result, not a late drop.)
+- **FIXED 2026-10-09: same test, "typing in the command field updates the controls".** A test
+  bug, not the dialog: on the UI-test Mac's narrower Settings window the command wraps, the
+  click put the caret before `--verbose`, and the field read `'--brief--verbose'`. The test
+  now moves the caret to the end (⌘↓) before typing. The dialog XCUITest reported was macOS's
+  "Flight Deck quit unexpectedly." from the libghostty relaunch crash. Every UI class now
+  closes that dialog (Ignore) before launching (`dismissFlightDeckCrashReports`). That path has
+  not yet run against a real dialog: none was up for the verifying run.
 - **`testPermissionBypassConfirmationUnderChurn` (the flake hunt) on the UI-test Mac:** fails at once with
   "Unable to find hit point for ScrollView" at y≈2600: the Preferences command field is off the UI-test Mac's
   1125pt-tall screen. A screen-size environment failure, not the race it hunts.

@@ -28,6 +28,7 @@ final class SwarmUITests: XCTestCase {
         app.launchArguments += ["-ApplePersistenceIgnoreState", "YES", "-FlightDeckResetState", "YES",
                                 "-FlightDeckFixture", fixture, "-FlightControlFixtureBackend", fixture,
                                 "-FlightDeckDaemonDir", daemonDirectory]
+        dismissFlightDeckCrashReports()
         app.launch()
         app.activate()
         XCTAssertTrue(app.windows.firstMatch.waitForExistence(timeout: 20), "no window appeared")

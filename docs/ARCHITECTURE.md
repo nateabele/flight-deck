@@ -494,6 +494,18 @@ mechanism just for project drags. `ProjectHeaderRow` draws the chevron, name, an
 collapsed) the session count and status glyph in place of the system group header a `Section`
 would have drawn, so nothing about the on-screen result actually needed `Section` to begin with.
 
+A header click collapses only on the chevron's side of the row: `SidebarInputMonitor` decides
+it after the press, and `SidebarClickIntent.inChevronZone` is everything left of the project
+name, measured from the row's cell view (`SidebarInputMonitor.contentLeadingX`), not from the
+`NSTableRowView`. The two differ by 10pt on macOS 14/15, where the row view starts at the window
+edge; measuring from the row edge left only the glyph clickable there. A click right of the
+zone selects the project.
+
+A rename field and the terminal compete for focus when the row menu renames a row that was not
+selected: the selection change re-parents that row's terminal, and `TerminalPane` normally hands
+a re-parented surface focus. It skips that when the selected session is the one being renamed
+(`TerminalPane.claimsFocusOnReparent`), because the field's focus loss commits it and closes it.
+
 `SidebarReorder.apply` holds the whole reorder policy — what a drag of a given row may legally
 move to, and what it does to the projects it passes over — as a pure function over
 `[Repo]`/`[SidebarRow]`/index set, so it is unit-tested without instantiating any SwiftUI.
