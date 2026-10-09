@@ -2224,7 +2224,16 @@ final class TerminalSmokeTests: XCTestCase {
             rename.click()
 
             let field = app.textFields["session-title-field"]
-            XCTAssertTrue(field.waitForExistence(timeout: 5))
+            // `guard`, not a bare assertion, in this and the three rename groups below: typing
+            // into a field that never appeared is not an assertion failure but an XCUITest
+            // error ("Failed to get matching snapshot"), and that ABORTS the whole test. On the
+            // UI-test Mac (macOS 15) this field did not open, and the abort hid every group
+            // after it — Preferences, the grok/gemini model panes, Copy, ⌘F — so a single
+            // rename failure read as a dozen unknowns. The failure is still recorded.
+            guard field.waitForExistence(timeout: 5) else {
+                XCTFail("the row menu's Rename did not open the rename field")
+                return
+            }
             field.typeKey("a", modifierFlags: .command)
             // "renamed" was never on screen before this point, so the assertion below cannot
             // pass vacuously.
@@ -2259,8 +2268,10 @@ final class TerminalSmokeTests: XCTestCase {
                 .coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
                 .doubleClick()
             let field = app.textFields["session-title-field"]
-            XCTAssertTrue(field.waitForExistence(timeout: 5),
-                          "double-clicking a row title must open the rename field")
+            guard field.waitForExistence(timeout: 5) else {
+                XCTFail("double-clicking a row title must open the rename field")
+                return
+            }
             // A double-click must open exactly ONE field. This and the unchanged-titles check
             // below are what distinguish "renamed the row I clicked" from "renamed some other
             // row": a mechanism that resolved the wrong row would still open exactly one field,
@@ -2328,8 +2339,10 @@ final class TerminalSmokeTests: XCTestCase {
             // off the table and break this.
             app.typeKey(.return, modifierFlags: [])
             let field = app.textFields["session-title-field"]
-            XCTAssertTrue(field.waitForExistence(timeout: 5),
-                          "Return did not open the rename field while the sidebar had focus")
+            guard field.waitForExistence(timeout: 5) else {
+                XCTFail("Return did not open the rename field while the sidebar had focus")
+                return
+            }
 
             // MEASURED, not assumed: the plan required that Return not be hijacked while the
             // rename field ITSELF is open, and the negative activity below only measures
@@ -2415,8 +2428,10 @@ final class TerminalSmokeTests: XCTestCase {
 
             app.typeKey("r", modifierFlags: .command)
             let field = app.textFields["session-title-field"]
-            XCTAssertTrue(field.waitForExistence(timeout: 5),
-                          "Cmd-R did not open the rename field for the selected session")
+            guard field.waitForExistence(timeout: 5) else {
+                XCTFail("Cmd-R did not open the rename field for the selected session")
+                return
+            }
 
             field.typeKey("a", modifierFlags: .command)
             // "cmdR renamed" was never on screen before this point, so the assertion below
