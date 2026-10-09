@@ -298,7 +298,7 @@ final class DetailLayoutTests: XCTestCase {
         XCTAssertEqual(actions, { var same = actions; same.heatmap = .init(open: false) {}; return same }())
         actions.heatmap?.toggle()
         XCTAssertEqual(toggled, 1)
-        XCTAssertEqual(PlanningCommands.heatmapTitle(open: false), "Show Section Heatmap")
-        XCTAssertEqual(PlanningCommands.heatmapTitle(open: true), "Hide Section Heatmap")
+        XCTAssertEqual(RunMenuController.heatmapTitle(open: false), "Show Section Heatmap")
+        XCTAssertEqual(RunMenuController.heatmapTitle(open: true), "Hide Section Heatmap")
     }
 }

@@ -3308,13 +3308,21 @@ tab. Two causes, both from `4e13c49d`, both fixed:
   re-evaluated root 1, project 1, detail 2, live card 2 (`ProjectViewInspectorLiveTests`). Now
   `InspectorModeStore`, observed by the column alone: 0, 0, 0, 0, the inspector 1–2.
 
+Then every menu (the maintainer: "No menu should blink ever"): no `Commands` reads state any more, and the
+Tools, Run, View ▸ Inspector and File ▸ New … Session menus are AppKit items inside SwiftUI-authored
+shells (ARCHITECTURE.md, "The menu bar never rebuilds"). `scripts/test-menu-bar.sh` (a lane of every
+full `test-unit.sh`) counts main-menu removals: on `956ee992` 10 in 10 switches between two
+projects' tabs and 6 in 6 preference edits; now 0 across every transition it drives.
+
 Still open:
-- **The Run menu still blinks the Tools menu** (pre-existing, `PlanningCommands`, since its
-  `@FocusedValue`). Its focused value changes when a shaping plan comes on or off screen and
-  whenever the lit transport buttons change mid-run, and the same harness pruned Tools on 10 of 10
-  of those. Moving it onto `PaneMenuRegistry` the way View ▸ Inspector went is the fix; left out
-  of this change because the maintainer's report and the previous Release's behaviour point at the
-  inspector, and it is nine items with live titles to re-verify.
+- **Key-window changes are not driven by the gate.** It never activates (so it takes no focus on
+  this Mac), and an inactive app has no key window: focus changes between Flight Deck's own
+  windows, and focused values, can't be exercised there. No `Commands` reads a focused value any
+  more (`MenuBarStabilityTests`), and items inside SwiftUI's own menus survived every
+  reconciliation measured, but a rebuild SwiftUI makes on activation or a key-window change is
+  unmeasured. `AppKitMenuSlot` puts the items back a turn later if one ever happens; that would
+  show as a blink inside an open menu, not in the bar. The UI-test Mac's screen was locked all
+  afternoon, so the activated run could not be repeated there.
 - **"Opening the inspector renders blank columns" (the maintainer's screenshot, same Release) did not
   reproduce offscreen.** `testOpeningTheInspectorSettlesWithEveryColumnDrawn` hosts `RootView`,
   opens the inspector on a shaping plan and finds no idle re-evaluation, the Notes/Rounds control

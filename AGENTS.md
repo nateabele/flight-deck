@@ -54,6 +54,7 @@ or revert blind — check `git status` and leave changes that aren't yours alone
 ./scripts/smoke.sh              # GUI UITest on the UI-test Mac, ends "SMOKE PASS" (see rule 4);
                                 # result bundle + log copied back to DerivedData/smoke-remote/
 ./scripts/test-ui-flight-control.sh  # SwarmUITests on a stub br/am/agent fixture, run on the UI-test Mac via smoke-remote.sh — never loop it
+./scripts/test-menu-bar.sh      # the menu-bar gate: a SwiftUI app around the real Commands + AppKit menus + RootView, fails on any main-menu removal; no focus taken, safe here; also a lane of every full test-unit.sh
 
 # Flake hunting — loops one suspect sequence 20x in a single launch (rule 4).
 # The TEST_RUNNER_ prefix is mandatory; without it the case is silently SKIPPED. smoke-remote.sh

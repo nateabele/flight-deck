@@ -8684,7 +8684,7 @@ final class SessionStore: ObservableObject {
     /// active session's project, else the last one that was active, else the first repo.
     /// Mirrors `createFromMenu`'s own routing (which folder a new tab lands in) but has no
     /// side effects — no folder picker, no creation — so `SessionSidebar`'s account dropdown
-    /// and `SessionCommands`'s File menu can both ask "which project" without duplicating that
+    /// and the File menu's New Session rows (`NewSessionMenuController`) can both ask "which project" without duplicating that
     /// walk or triggering it.
     var currentProjectPath: String? {
         if let activeID = selectedSessionID, let at = locate(activeID) {

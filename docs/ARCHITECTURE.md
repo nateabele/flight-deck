@@ -966,16 +966,19 @@ detail has no business being reachable from the tools subsystem, or from any fut
 silently inherit another agent's working-directory logic — the compiler makes it answer for
 its own.
 
-**The Tools menu is AppKit, not a SwiftUI `Commands` group**, for the reason
-`SessionCommands` already documents: SwiftUI cannot vary a `.keyboardShortcut` at runtime,
-and a user-recorded chord is dynamic by definition. `ToolsMenuController` assigns each
+**The Tools menu's items are AppKit, not SwiftUI buttons**: SwiftUI cannot vary a
+`.keyboardShortcut` at runtime, and a user-recorded chord is dynamic by definition. `ToolsMenuController` assigns each
 tool's `ToolShortcut` straight onto `NSMenuItem.keyEquivalent` /
 `keyEquivalentModifierMask`, which is a plain property and can change whenever the
 preferences pane changes it. `MenuKeyEquivalents` covers the new menu with **no change at
 all** — it walks the whole main menu and names no specific shortcut, so a Tools item added
 after that file was written routes the same way ⌘Q already does.
 
-**Being AppKit costs one thing, and it is not obvious: SwiftUI prunes the menu back out.**
+**The menu itself is SwiftUI's (`ToolsMenuShell`), since 2026-10-09; the items live inside it
+(`AppKitMenuSlot`).** See "The menu bar never rebuilds" below. The history, for why: until then
+the Tools menu was an AppKit top-level menu, and
+
+**Being AppKit cost one thing, and it was not obvious: SwiftUI pruned the menu back out.**
 SwiftUI owns `NSApp.mainMenu` and removes items it did not author, on a reconciliation pass
 that runs *after* `applicationDidFinishLaunching`. So installing once always loses — the item
 lands correctly between View and Window, and is gone a moment later from that same `NSMenu`
@@ -984,12 +987,33 @@ instance. The symptom is not a missing menu but broken shortcuts: with nothing t
 `lastPerformKeyEvent` timestamp matches on the second pass, and the terminal receives a
 synthesized keyDown carrying `characters` — a literal "o" in the running agent's prompt.
 
-`ToolsMenuController` therefore keeps a weak reference to its host menu and observes
-`NSMenu.didRemoveItemNotification`, re-inserting whenever its item disappears. A timed
-re-install would have been enough at launch and wrong afterwards: SwiftUI rebuilds its
-commands when observed state changes, and `SessionCommands` observes preferences, so editing
-a tool can prune the menu again — killing the shortcuts at the exact moment the user
-configures them.
+`ToolsMenuController` therefore observed `NSMenu.didRemoveItemNotification` and re-inserted
+the menu a turn after each prune. That healed the shortcuts but not the blink: every
+reconciliation removed the menu and put it back, and reconciliations came on every tab switch.
+
+**The menu bar never rebuilds (2026-10-09, the maintainer: "No menu should blink ever").** SwiftUI
+reconciles the whole main menu whenever any `Commands` body is re-evaluated — any observed
+object publishing, any focused value changing, even with identical output — and removes every
+top-level menu it did not author. Measured in bare SwiftUI apps: the old `SessionCommands`
+(observing the current project) removed the Tools menu 11 times in 10 switches between two
+projects' tabs; a `Commands` observing an object whose output never changes still removed it; a
+focused value driving the Run menu or View ▸ Inspector removed it on every plan/terminal switch.
+Items inside a menu SwiftUI authored were never removed. So:
+- **No `Commands` reads state.** `FlightDeckCommands` (`MenuShells.swift`) is the app's whole
+  set, and every member is constant. `MenuBarStabilityTests` fails on any property wrapper in a
+  `Commands`.
+- **Every stateful menu is AppKit items inside a SwiftUI-authored shell**, kept in place by
+  `AppKitMenuSlot` (which still re-checks on every change to the bar, as a backstop): Tools
+  (`ToolsMenuShell` + `ToolsMenuController`), Run (`RunMenuShell` + `RunMenuController`),
+  View ▸ Inspector (`InspectorMenuShell` + `InspectorMenuController`), and File ▸ New … Session
+  (`NewSessionMenuController`, above Add Project…, rewritten in place when the project changes).
+  Enablement, checkmarks and the heatmap title are answered by `validateMenuItem`; the Run and
+  Inspector items find the plan pane in the key window through `PaneMenuRegistry`, which the
+  pane feeds with a `PaneMenuAnchor` view.
+- **`scripts/test-menu-bar.sh`** builds a SwiftUI app around the real commands, controllers and
+  `RootView`, drives tab, plan, inspector, intake, preference, Settings and window transitions,
+  and fails on any removal. It runs as a lane of every full `test-unit.sh`. With the app
+  inactive, key-window changes can't be driven there.
 
 **"Configure Tools…" opens Settings by driving SwiftUI's own menu item**, via
 `SettingsMenuItem.locate(in:)`, rather than by sending `showSettingsWindow:`. That selector is
@@ -1898,12 +1922,10 @@ none of it is engine state, all of it is a view or the service glue that feeds o
     **A mode switch redraws the column alone.** The mode store is its own `ObservableObject`,
     observed only by `InspectorModeReader` around the column: as a `@Published` on
     `IntakeService` (which `SessionStore` forwards) each click redrew `RootView`, `ProjectView`
-    and the pane. And View ▸ Inspector is AppKit items (`InspectorMenuController`), validated on
-    demand against `PaneMenuRegistry`, which the pane feeds through a `PaneMenuAnchor` view —
-    never a focused value read by a SwiftUI `Commands`: every change to a `Commands` body's
-    output makes SwiftUI reconcile the main menu, which prunes the Tools menu
-    (`ToolsMenuController`) until it heals a turn later, so each mode or tab switch blinked it.
-    The submenu heals into View the same way when SwiftUI prunes or replaces that menu. Focus no longer picks the content: the plan editor taking
+    and the pane. And View ▸ Inspector is AppKit items (`InspectorMenuController`) in a constant
+    SwiftUI shell, validated on demand against `PaneMenuRegistry`, which the pane feeds through a
+    `PaneMenuAnchor` view — never a focused value read by a SwiftUI `Commands`, which rebuilt the
+    menu bar on each mode or tab switch (see "The menu bar never rebuilds"). Focus no longer picks the content: the plan editor taking
     focus used to swap the Rounds editor for the notes rail (`PlanNotesController.planFocused`,
     removed). Explicit openers switch the mode in the open — starting a note (Notes), Edit in
     Inspector, selecting an agent of the running round (Rounds, drilled in on the agent with a

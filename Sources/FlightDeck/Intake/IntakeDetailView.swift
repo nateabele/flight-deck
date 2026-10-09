@@ -217,13 +217,13 @@ struct IntakeDetailView: View {
             inspector
                 .inspectorColumnWidth(min: 300, ideal: 440, max: 640)
         }
-        // Scene-wide, not focus-scoped: nothing in the document takes focus on a click (the
-        // transport keys are plain buttons), so a focused value left ⌘' and ⌘. dark the whole
-        // time a run was on screen. No terminal shares the window's detail column while an
-        // intake is shown, so no surface competes for them. One modifier with an optional
-        // value, not one per branch: switching branches gave the pane a new identity each time
-        // the run started or stopped, resetting every piece of state below.
-        .focusedSceneValue(\.planningActions, planningActions)
+        // The Run menu's target, per window, not per focus: nothing in the document takes focus
+        // on a click (the transport keys are plain buttons), and a focus-scoped value left ⌘' and
+        // ⌘. dark the whole time a run was on screen. A registry the AppKit menu reads on demand,
+        // never a focused value, whose every change rebuilt the menu bar (`RunMenuController`).
+        // One modifier with an optional value, not one per branch: switching branches gave the
+        // pane a new identity each time the run started or stopped, resetting the state below.
+        .background(PaneMenuAnchor(registry: PaneMenus.planning, value: planningActions))
         // Esc closes the heatmap from anywhere in the pane, not only while it holds focus: a
         // click into the plan moves focus to the editor, and the map stayed open under it.
         // The round panel likewise, once no heatmap is open over it.

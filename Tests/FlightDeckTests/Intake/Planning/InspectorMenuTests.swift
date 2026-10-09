@@ -3,9 +3,10 @@ import SwiftUI
 import XCTest
 @testable import FlightDeck
 
-/// View ▸ Inspector as AppKit items over `PaneMenuRegistry`. What these pin is the shape that
-/// keeps the menu bar still: a mode or tab switch changes what validation answers, never the
-/// menu itself, and the submenu survives SwiftUI pruning or replacing View.
+/// View ▸ Inspector as AppKit items over `PaneMenuRegistry`, inside the submenu SwiftUI authors
+/// (`InspectorMenuShell`). What these pin is the shape that keeps the menu bar still: a mode or
+/// tab switch changes what validation answers, never the menu itself, and the items survive
+/// SwiftUI replacing the shell.
 @MainActor
 final class InspectorMenuTests: XCTestCase {
     private typealias Mode = DetailLayout.InspectorMode
@@ -44,17 +45,22 @@ final class InspectorMenuTests: XCTestCase {
         return item
     }
 
+    /// View as SwiftUI builds it: the sidebar item, then the shell with its one placeholder.
     private static func viewMenu() -> NSMenu {
         let view = NSMenu(title: "View")
         view.addItem(NSMenuItem(title: "Show Sidebar", action: #selector(NSSplitViewController.toggleSidebar(_:)), keyEquivalent: "s"))
+        let shell = NSMenu(title: InspectorMenuShell.title)
+        shell.addItem(NSMenuItem(title: "—", action: nil, keyEquivalent: ""))
+        view.addItem(host(shell))
         view.addItem(.separator())
         view.addItem(NSMenuItem(title: "Enter Full Screen", action: #selector(NSWindow.toggleFullScreen(_:)), keyEquivalent: "f"))
         return view
     }
 
     private var view: NSMenu { mainMenu.items.first { $0.submenu?.title == "View" }!.submenu! }
+    private var shell: NSMenu { view.items.first { $0.submenu?.title == InspectorMenuShell.title }!.submenu! }
 
-    private func item(_ mode: Mode) -> NSMenuItem { controller.menu.items.first { $0.title == mode.title }! }
+    private func item(_ mode: Mode) -> NSMenuItem { controller.items.first { $0.title == mode.title }! }
 
     private func actions(modes: [Mode] = [.notes, .rounds]) -> InspectorModeActions {
         InspectorModeActions(intakeID: UUID(), modes: modes, mode: { [unowned self] in mode },
@@ -72,9 +78,9 @@ final class InspectorMenuTests: XCTestCase {
 
     private func turn() { RunLoop.current.run(until: Date().addingTimeInterval(0.05)) }
 
-    func testTheSubmenuSitsAfterTheSidebarItemWithItsChords() {
-        let index = view.items.firstIndex { $0.submenu === controller.menu }
-        XCTAssertEqual(index, 1, "right after Show Sidebar, where CommandGroup(after: .sidebar) put it")
+    func testTheItemsFillTheShellWithTheirChords() {
+        XCTAssertEqual(shell.items.filter { !$0.isHidden }.map(\.title), ["Notes", "Rounds"])
+        XCTAssertEqual(shell.items.filter(\.isHidden).map(\.title), ["—"], "SwiftUI's placeholder, hidden, not removed")
         XCTAssertEqual(item(.notes).keyEquivalent, "1")
         XCTAssertEqual(item(.rounds).keyEquivalent, "2")
         XCTAssertEqual(item(.rounds).keyEquivalentModifierMask, [.command, .option])
@@ -90,7 +96,7 @@ final class InspectorMenuTests: XCTestCase {
     /// same items. That is the whole fix — nothing for SwiftUI to reconcile.
     func testAModeSwitchMovesTheCheckmarkWithoutTouchingTheMenu() {
         _ = showPane(actions())
-        let items = controller.menu.items.map(ObjectIdentifier.init)
+        let items = shell.items.map(ObjectIdentifier.init)
         XCTAssertTrue(controller.validateMenuItem(item(.rounds)))
         XCTAssertEqual(item(.rounds).state, .on)
         XCTAssertEqual(item(.notes).state, .off)
@@ -100,8 +106,7 @@ final class InspectorMenuTests: XCTestCase {
         _ = controller.validateMenuItem(item(.notes)); _ = controller.validateMenuItem(item(.rounds))
         XCTAssertEqual(item(.notes).state, .on)
         XCTAssertEqual(item(.rounds).state, .off)
-        XCTAssertEqual(controller.menu.items.map(ObjectIdentifier.init), items, "the menu was not rebuilt")
-        XCTAssertTrue(view.items.contains { $0.submenu === controller.menu })
+        XCTAssertEqual(shell.items.map(ObjectIdentifier.init), items, "the menu was not rebuilt")
     }
 
     func testASingleTaskOffersNotesOnly() {
@@ -122,18 +127,13 @@ final class InspectorMenuTests: XCTestCase {
         XCTAssertFalse(controller.validateMenuItem(item(.notes)), "the window shows no plan any more")
     }
 
-    /// SwiftUI prunes items it didn't author from View, or hands the bar a fresh View menu; the
-    /// submenu comes back a turn later either way.
-    func testTheSubmenuHealsAfterAPruneOrAReplacedViewMenu() {
-        view.removeItem(at: view.items.firstIndex { $0.submenu === controller.menu }!)
-        turn()
-        XCTAssertTrue(view.items.contains { $0.submenu === controller.menu }, "healed after a prune")
-
+    /// If SwiftUI ever rebuilds the shell or View (a fresh `NSMenu`), the items follow a turn later.
+    func testTheItemsFollowARebuiltShell() {
         let viewIndex = mainMenu.items.firstIndex { $0.submenu?.title == "View" }!
         mainMenu.removeItem(at: viewIndex)
         mainMenu.insertItem(Self.host(Self.viewMenu()), at: viewIndex)
         turn()
-        XCTAssertTrue(view.items.contains { $0.submenu === controller.menu }, "healed into the new View menu")
-        XCTAssertEqual(view.items.filter { $0.submenu === controller.menu }.count, 1)
+        XCTAssertEqual(shell.items.filter { !$0.isHidden }.map(\.title), ["Notes", "Rounds"], "moved into the new shell")
+        XCTAssertTrue(controller.menu === shell)
     }
 }

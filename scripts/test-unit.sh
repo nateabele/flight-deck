@@ -186,6 +186,18 @@ if [ -n "$SERIAL_CLASSES" ]; then
   fi
 fi
 
+# The menu-bar gate (scripts/test-menu-bar.sh): a SwiftUI app scene, which xctest can't host, so
+# it runs here as one more lane of every full run, against the build above. It counts what SwiftUI
+# removes from the main menu across tab, plan, inspector and Settings transitions — the Tools
+# menu blinking (2026-10-09). Off with FD_SKIP_MENUBAR=1.
+if [ -z "${FD_SKIP_MENUBAR:-}" ]; then
+  if ! FD_SKIP_BUILD=1 ./scripts/test-menu-bar.sh > "$LOGDIR/menubar.log" 2>&1; then
+    rc=1
+    echo "=== menu-bar lane FAILED ($LOGDIR/menubar.log)" >&2
+    grep -E "^MENUBAR|removals=\[[^]]" "$LOGDIR/menubar.log" >&2 || true
+  fi
+fi
+
 # Refresh the per-class timings the next run balances with, and report one total.
 cat "$LOGDIR"/shard*.log "$SERIAL_LOG" | python3 -c '
 import re, sys, collections
@@ -198,4 +210,5 @@ print(f"Executed {n} test cases across all shards")
 ' "$TIMINGS_CACHE"
 serial_note=""
 if [ -n "$SERIAL_CLASSES" ]; then serial_note=" + serial lane"; fi
+if [ -z "${FD_SKIP_MENUBAR:-}" ]; then serial_note="$serial_note + menu-bar lane"; fi
 echo "** SHARDED UNIT RUN $([ "$rc" = 0 ] && echo PASSED || echo FAILED) ($SHARDS shards$serial_note; logs in $LOGDIR) **"

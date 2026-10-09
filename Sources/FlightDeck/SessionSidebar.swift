@@ -584,8 +584,8 @@ struct SessionSidebar: View {
                 // the trailing shortcut hint never drew at all. A plain `Button` fills the
                 // sidebar and renders the whole label.
                 //
-                // Neither branch carries a `.keyboardShortcut`. `SessionCommands` owns every
-                // one of these chords in the File menu, statically; a view-level copy here was
+                // Neither branch carries a `.keyboardShortcut`. The File menu owns every one of
+                // these chords (`NewSessionMenuController`); a view-level copy here was
                 // both redundant and unreachable while the terminal has focus, because
                 // `MenuKeyEquivalents.perform` only re-offers Ghostty-swallowed keys to
                 // `NSApp.mainMenu`. Worse, SwiftUI propagates a shortcut set on a `Menu` to
@@ -680,8 +680,8 @@ struct SessionSidebar: View {
             agents: agents, preferences: preferences.preferences,
             resolved: preferences.resolvedAccounts(for: agents, project: project)
         )
-        // Same chord placement the File menu renders, from the same rule: `SessionCommands`
-        // and this dropdown both read `NewSessionAffordance.chords`, so the two can't drift
+        // Same chord placement the File menu renders, from the same rule: the File menu
+        // (`NewSessionMenuModel`) and this dropdown both read `NewSessionAffordance.chords`, so the two can't drift
         // into disagreeing about what ⌘N does.
         let chords = NewSessionAffordance.chords(for: entries, agents: agents)
         ForEach(Array(entries.enumerated()), id: \.offset) { _, entry in

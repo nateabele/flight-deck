@@ -12,7 +12,8 @@ struct InspectorModeActions {
     var select: (DetailLayout.InspectorMode) -> Void
 }
 
-/// Which plan pane each window shows, for a menu AppKit owns (`InspectorMenuController`). Fed by
+/// Which plan pane each window shows, for a menu AppKit owns (`InspectorMenuController`,
+/// `RunMenuController`). Fed by
 /// `PaneMenuAnchor`, a view in the pane; read only when the menu validates or an item fires.
 ///
 /// **Why not a `@FocusedValue` read by a SwiftUI `Commands`,** which is what the inspector items
@@ -69,14 +70,17 @@ final class PaneMenuRegistry<Value> {
 enum PaneMenus {
     /// View ▸ Inspector's.
     static let inspector = PaneMenuRegistry<InspectorModeActions>()
+    /// The Run menu's: the shaping run on screen (`RunMenuController`).
+    static let planning = PaneMenuRegistry<PlanningActions>()
 }
 
 /// Puts a pane's menu value in a `PaneMenuRegistry` for as long as the pane is in a window.
 /// Nothing here publishes: the registry is a plain table the menu reads on demand, so a new value
-/// (a mode switch, a re-render) costs one dictionary write and rebuilds nothing.
+/// (a mode switch, a re-render) costs one dictionary write and rebuilds nothing. A nil value (a
+/// plan that is not shaping, for the Run menu) is the pane showing nothing for that menu.
 struct PaneMenuAnchor<Value>: NSViewRepresentable {
     let registry: PaneMenuRegistry<Value>
-    let value: Value
+    let value: Value?
 
     func makeNSView(context: Context) -> AnchorView {
         let view = AnchorView()
@@ -118,10 +122,10 @@ struct PaneMenuAnchor<Value>: NSViewRepresentable {
 /// Keynote/Pages place for them. Each item shows the column on its mode, checked while it is
 /// the one showing; ⌥⌘I still only shows and hides the column.
 ///
-/// **AppKit, not a SwiftUI `Commands`.** Enablement and the checkmark come from
-/// `validateMenuItem`, which AppKit asks when the menu opens and before a chord fires, so a mode
-/// or tab switch rebuilds nothing and SwiftUI never reconciles the menu bar over it
-/// (`PaneMenuRegistry` has the measurement).
+/// **AppKit items in a constant SwiftUI shell (`InspectorMenuShell`), not a SwiftUI `Commands`
+/// reading state.** Enablement and the checkmark come from `validateMenuItem`, which AppKit asks
+/// when the menu opens and before a chord fires, so a mode or tab switch rebuilds nothing and
+/// SwiftUI never reconciles the menu bar over it (`AppKitMenuSlot` has the measurements).
 ///
 /// **The chords, checked against Ghostty.** libghostty's macOS defaults
 /// (`vendor/ghostty/src/config/Config.zig`) bind ⌘1–⌘8 (`goto_tab`) and ⌘9 (`last_tab`) with
@@ -131,68 +135,32 @@ struct PaneMenuAnchor<Value>: NSViewRepresentable {
 /// are disabled, and a disabled item never claims its key.
 @MainActor
 final class InspectorMenuController: NSObject, NSMenuItemValidation {
-    let menu = NSMenu(title: "Inspector")
-    /// The item in the View menu that holds `menu`.
-    let hostItem = NSMenuItem(title: "Inspector", action: nil, keyEquivalent: "")
+    /// Notes, then Rounds.
+    let items: [NSMenuItem]
     private let registry: PaneMenuRegistry<InspectorModeActions>
     /// The window the items act on; the key window, else the main one. A seam for tests, which
     /// run with no key window.
     var window: () -> NSWindow? = { NSApp.keyWindow ?? NSApp.mainWindow }
-    private weak var mainMenu: NSMenu?
-    private var observers: [NSObjectProtocol] = []
+    /// Inside the `InspectorMenuShell` submenu SwiftUI authored, its placeholder hidden.
+    private lazy var slot = AppKitMenuSlot(path: ["View", InspectorMenuShell.title], hidesOthers: true, items: items)
 
     init(registry: PaneMenuRegistry<InspectorModeActions> = PaneMenus.inspector) {
         self.registry = registry
-        super.init()
-        for mode in DetailLayout.InspectorMode.allCases {
+        items = DetailLayout.InspectorMode.allCases.map { mode in
             let item = NSMenuItem(title: mode.title, action: #selector(select(_:)), keyEquivalent: String(mode.shortcut))
             item.keyEquivalentModifierMask = [.command, .option]
             item.representedObject = mode.rawValue
-            item.target = self
-            menu.addItem(item)
+            return item
         }
-        hostItem.submenu = menu
+        super.init()
+        for item in items { item.target = self }
     }
 
-    /// Puts the submenu in View and keeps it there. SwiftUI owns the main menu and prunes items
-    /// it didn't author whenever it reconciles (`ToolsMenuController.install`), and it may hand
-    /// View a fresh `NSMenu` while doing so — so any item removed from the bar or from View is
-    /// answered, a turn later, by putting this back if it is gone.
-    func install(in mainMenu: NSMenu) {
-        self.mainMenu = mainMenu
-        heal()
-        guard observers.isEmpty else { return }
-        for name in [NSMenu.didRemoveItemNotification, NSMenu.didAddItemNotification] {
-            observers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] note in
-                // Hop a turn: this fires during SwiftUI's mutation, and changing a menu inside its
-                // own change notification is not safe.
-                let changed = note.object as AnyObject?
-                DispatchQueue.main.async {
-                    MainActor.assumeIsolated {
-                        guard let self, let mainMenu = self.mainMenu else { return }
-                        // Only the bar and View concern us; every other menu's churn is ignored.
-                        guard changed === mainMenu || changed === self.viewMenu(in: mainMenu) else { return }
-                        self.heal()
-                    }
-                }
-            })
-        }
-    }
+    /// Moves the items into the shell and keeps them there (`AppKitMenuSlot`).
+    func install(in mainMenu: NSMenu) { slot.install(in: mainMenu) }
 
-    private func viewMenu(in mainMenu: NSMenu) -> NSMenu? {
-        mainMenu.items.first { $0.submenu?.title == "View" }?.submenu
-    }
-
-    /// Inserts the submenu if View doesn't hold it — after the sidebar item, where
-    /// `CommandGroup(after: .sidebar)` put it, else above Enter Full Screen, else last.
-    private func heal() {
-        guard let mainMenu, let view = viewMenu(in: mainMenu) else { return }
-        guard hostItem.menu !== view else { return }
-        hostItem.menu?.removeItem(hostItem)
-        let afterSidebar = view.items.firstIndex { $0.action == #selector(NSSplitViewController.toggleSidebar(_:)) }.map { $0 + 1 }
-        let beforeFullScreen = view.items.firstIndex { $0.action == #selector(NSWindow.toggleFullScreen(_:)) }
-        view.insertItem(hostItem, at: afterSidebar ?? beforeFullScreen ?? view.items.count)
-    }
+    /// The menu holding the items once installed.
+    var menu: NSMenu? { slot.host }
 
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
         guard let mode = mode(of: item) else { return true }
@@ -211,9 +179,5 @@ final class InspectorMenuController: NSObject, NSMenuItemValidation {
 
     private func mode(of item: NSMenuItem) -> DetailLayout.InspectorMode? {
         (item.representedObject as? String).flatMap(DetailLayout.InspectorMode.init(rawValue:))
-    }
-
-    deinit {
-        for observer in observers { NotificationCenter.default.removeObserver(observer) }
     }
 }

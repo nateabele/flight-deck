@@ -485,13 +485,7 @@ struct FlightDeckApp: App {
         RootWindow(store: store, preferences: preferences,
                    phoneActiveSessions: fleet.phoneActiveSessions)
             .commands {
-                SessionCommands(store: store, preferences: preferences)
-                EditCommands()
-                FontSizeCommands(store: store, preferences: preferences)
-                TabNavigationCommands(store: store)
-                SearchCommands()
-                PlanningCommands()
-                ShortcutOverlayCommands()
+                FlightDeckCommands(store: store, preferences: preferences)
             }
 
         // A `Settings` scene gives ⌘, and the standard Preferences window for free.

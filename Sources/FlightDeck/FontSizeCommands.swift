@@ -24,7 +24,11 @@ import SwiftUI
 /// changed without the other — an absolute set makes that desync impossible.
 struct FontSizeCommands: Commands {
     let store: SessionStore
-    @ObservedObject var preferences: PreferencesStore
+    /// Plain `let`, not `@ObservedObject`: the actions read the size when pressed, and the items
+    /// never change. Observing it re-evaluated these commands on every preference edit, and any
+    /// re-evaluation — even one with identical output — makes SwiftUI reconcile the main menu
+    /// (`AppKitMenuSlot`).
+    let preferences: PreferencesStore
 
     var body: some Commands {
         // `.toolbar` is the group SwiftUI places in the View menu.
