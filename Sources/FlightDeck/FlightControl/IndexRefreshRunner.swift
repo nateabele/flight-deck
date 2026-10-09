@@ -10,6 +10,9 @@ struct IndexRefreshPlan: Sendable {
     var agent: IndexAgentSettings
     var previous: IndexSnapshot?
     var workDirectory: URL
+    /// The home every run of this refresh is bound to (nil: claude's built-in home), as
+    /// `CapabilityIndexService` resolved it before the refresh started.
+    var account: AgentAccountRef? = nil
 }
 
 struct IndexRefreshOutcome: Sendable {
@@ -131,7 +134,8 @@ struct IndexRefreshRunner: Sendable {
         let meter = IndexTokenMeter(cwd: plan.workDirectory, budget: budget)
         let headless = self.headless
         let cwd = plan.workDirectory
-        let run = Task { try await headless.run(command, cwd: cwd, onStdout: { meter.feed($0) }) }
+        let account = plan.account
+        let run = Task { try await headless.run(command, cwd: cwd, account: account, onStdout: { meter.feed($0) }) }
         // Cancelling the task terminates the process (`SystemCommandRunner`'s cancellation
         // handler sends SIGTERM), which is how a run is stopped at the cap.
         meter.whenOver { run.cancel() }

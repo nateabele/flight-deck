@@ -54,6 +54,10 @@ final class CapabilityIndexService: ObservableObject {
     private let catalogs: @MainActor () async -> AdapterCatalogs
     private let now: () -> Date
     private weak var clock: WatchClock?
+    /// Which claude login a refresh bills (round 2, item 11). Before this the refresh always ran
+    /// in the built-in `~/.claude`, whatever the Accounts list said. nil (tests, reset launches):
+    /// the built-in home, as before. Weak: the store owns the resolver.
+    weak var accountResolver: AccountResolving?
 
     init(directory: URL, runner: IndexRefreshRunner = IndexRefreshRunner(),
          catalogs: @escaping @MainActor () async -> AdapterCatalogs = { AdapterCatalogs([]) },
@@ -138,9 +142,29 @@ final class CapabilityIndexService: ObservableObject {
     private func performRefresh() async {
         let cats = await catalogs()
         knownCatalogs = cats
-        let plan = IndexRefreshPlan(sources: config.sources, aliases: config.aliases, catalogs: cats, agent: config.agent,
-                                    previous: current, workDirectory: directory.appendingPathComponent("work", isDirectory: true))
+        let work = directory.appendingPathComponent("work", isDirectory: true)
+        // Resolved through the same `AccountResolver` as tabs and planning seats, with the run's
+        // directory as its project — the refresh is app-wide, and no project assigns that
+        // directory, so it bills claude's first live account exactly as an unassigned project's
+        // tab does. A pool lease (should that rule ever lease) is held for the whole refresh and
+        // given back when it ends. A broken assignment refuses: never another login.
+        var billing: RunnerAccounts.Entry?
+        if let accountResolver {
+            switch accountResolver.acquire(.claude, project: work.path) {
+            case .failure(let error):
+                problem = "Could not refresh the index: \(error.message)"
+                lastLog = ["refused: \(error.message)"]
+                isRefreshing = false
+                return
+            case .success(let resolved):
+                billing = resolved.entry
+            }
+        }
+        var plan = IndexRefreshPlan(sources: config.sources, aliases: config.aliases, catalogs: cats, agent: config.agent,
+                                    previous: current, workDirectory: work)
+        plan.account = billing?.ref
         let outcome = await runner.refresh(plan)
+        if let lease = billing?.lease { accountResolver?.release(lease.lease) }
         mutateConfig { $0.aliases.addProposals(outcome.proposals) }
         lastLog = outcome.log
         // The plan captured aliases and sources before a run that can last minutes. Re-score with
