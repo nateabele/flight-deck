@@ -33,6 +33,12 @@ final class PromptComposerTests: XCTestCase {
         XCTAssertNil(PromptComposer.unavailable(for: session(agent: "grok")))
     }
 
+    /// OpenCode's Mac side sends the message over the session's own API (`prompt_async`), which
+    /// queues it behind a running turn, so the phone offers the field.
+    func testAnOpenCodeTabIsOfferedAField() {
+        XCTAssertNil(PromptComposer.unavailable(for: session(agent: "opencode")))
+    }
+
     /// An agent this build has never heard of is refused too. `WireSession.agent` is a
     /// `String` precisely so a new agent does not take the snapshot down — and an unknown
     /// agent has no known input box either.

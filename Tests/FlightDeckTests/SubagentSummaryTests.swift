@@ -33,6 +33,13 @@ final class SubagentSummaryTests: XCTestCase {
     /// The load-bearing case. Codex has no sub-agent ground truth at all, so the honest
     /// answer is silence — never "0 subagents", which would claim none are running when the
     /// truth is that nobody knows.
+    /// OpenCode has ground truth: its subagents are child sessions the Mac watches over the
+    /// server's event stream, and the count is the children currently busy (`OpenCodeRuntime`).
+    func testOpenCodeReportsItsCount() {
+        XCTAssertEqual(session(agent: "opencode", subagents: 2).subagentSummary, "2 subagents")
+        XCTAssertNil(session(agent: "opencode", subagents: 0).subagentSummary)
+    }
+
     func testCodexSaysNothingEvenAtZero() {
         XCTAssertNil(session(agent: "codex", subagents: 0).subagentSummary)
     }
