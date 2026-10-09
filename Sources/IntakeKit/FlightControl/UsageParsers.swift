@@ -112,6 +112,48 @@ public enum CodexRateLimitParser {
     }
 }
 
+/// codex's rollout file (`$CODEX_HOME/sessions/YYYY/MM/DD/rollout-<stamp>-<thread>.jsonl`), the
+/// only place a headless `codex exec` run reports its account's rate limits: its `--json`
+/// stdout carries token counts and nothing else (codex-cli 0.160.0, probed 2026-10-09), while
+/// the rollout it writes has an `event_msg` `token_count` per turn whose `rate_limits` is the
+/// app-server snapshot in snake_case — `used_percent` 0–100, `window_minutes`, `resets_at` unix
+/// seconds, `limit_id`, `rate_limit_reached_type`.
+public enum CodexRolloutRateLimits {
+    /// The newest `token_count` in `text` that carries `rate_limits`, as buckets, with its
+    /// timestamp. nil when no line carries one.
+    public static func newest(inRolloutTail text: String) -> (buckets: [String: CodexRateBucket], readAt: Date?)? {
+        for line in text.split(separator: "\n").reversed() where line.contains("\"rate_limits\"") {
+            guard let object = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
+                  let payload = object["payload"] as? [String: Any],
+                  payload["type"] as? String == "token_count",
+                  let limits = payload["rate_limits"] as? [String: Any]
+            else { continue }
+            let id = limits["limit_id"] as? String ?? "codex"
+            let bucket = CodexRateBucket(limitId: id, primary: window(limits["primary"], limitId: id),
+                                         secondary: window(limits["secondary"], limitId: id),
+                                         reachedType: limits["rate_limit_reached_type"] as? String)
+            guard bucket.primary != nil || bucket.secondary != nil || bucket.reachedType != nil else { continue }
+            let stamp = (object["timestamp"] as? String).flatMap(timestamp(_:))
+            return ([id: bucket], stamp)
+        }
+        return nil
+    }
+
+    static func window(_ raw: Any?, limitId: String) -> UsageWindow? {
+        guard let w = raw as? [String: Any], let used = (w["used_percent"] as? NSNumber)?.doubleValue else { return nil }
+        let minutes = (w["window_minutes"] as? NSNumber)?.intValue
+        let resets = (w["resets_at"] as? NSNumber).map { Date(timeIntervalSince1970: $0.doubleValue) }
+        let base = UsageWindowName.forDuration(minutes: minutes)
+        return UsageWindow(name: limitId == "codex" ? base : "\(limitId):\(base)", utilization: used / 100, resetsAt: resets)
+    }
+
+    static func timestamp(_ raw: String) -> Date? {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter.date(from: raw) ?? ISO8601DateFormatter().date(from: raw)
+    }
+}
+
 /// claude's stream-json `rate_limit_event.rate_limit_info`. `unifiedWindows` utilization is
 /// already 0–1; `resetsAt` is unix seconds.
 public enum ClaudeRateLimitParser {

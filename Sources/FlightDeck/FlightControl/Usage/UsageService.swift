@@ -127,6 +127,10 @@ final class UsageService: ObservableObject {
     private var lastGrokBilling: [UUID: Date] = [:]
     private var lastGeminiPoll: Date?
     private var geminiReadInFlight = false
+    /// Seats already turned into a refusal or a rollout reading, so a seat re-read every tick
+    /// (its `activity.json` stays put while the intake shapes) reports once, not every 30 s.
+    private var seatRejectionsSeen: Set<String> = []
+    private var codexRolloutsSeen: Set<String> = []
     private struct WeakTap { weak var tap: UsageMeterTap? }
     private var taps: [WeakTap] = []
     private var firstSeen: [UUID: Date] = [:]
@@ -218,13 +222,14 @@ final class UsageService: ObservableObject {
     func tick() async {
         let t = now()
         let sessions = environment.sessions()
+        let seats = environment.seatActivities()
         for s in sessions where firstSeen[s.id] == nil { firstSeen[s.id] = t }
         ingestUsageFiles(sessions)
-        ingestHeadlessSeats()
+        ingestHeadlessSeats(seats)
         ingestAPIErrors(sessions, at: t)
         await pollCodex(sessions, at: t)
-        ingestGrokBilling(sessions)
-        await pollGemini(sessions, at: t)
+        ingestGrokBilling(sessions, seats: seats)
+        await pollGemini(sessions, seats: seats, at: t)
         flagSilentStatusLine(sessions, at: t)
         noticeManualTabs(sessions)
         revision += 1
@@ -300,8 +305,14 @@ final class UsageService: ObservableObject {
     /// grok's weekly meter, from the billing line its own log carries (`GrokBillingSource`):
     /// one read per account with a grok tab, ingested only when the line is newer than the last
     /// one taken, so a quiet account is not re-stamped fresh every tick.
-    private func ingestGrokBilling(_ sessions: [Session]) {
+    ///
+    /// A grok planning seat's account is read the same way: headless `grok -p` writes NO billing
+    /// line of its own (grok 1.0.30, probed 2026-10-09 — only the TUI fetches the credits
+    /// config), so a seat meters its account only from the line that account's TUI last left in
+    /// the same home. That is still the right account's quota, just as fresh as its last TUI turn.
+    private func ingestGrokBilling(_ sessions: [Session], seats: [SeatActivity] = []) {
         let ids = Set(sessions.filter { $0.agent == .grok }.compactMap { environment.resolvedAccountID(.grok, $0.accountID) })
+            .union(seats.filter { $0.agent == .grok }.compactMap { seatAccount($0)?.id })
         for id in ids {
             guard let ref = ref(forAccount: id),
                   let home = environment.accounts().first(where: { $0.id == id })?.home,
@@ -331,13 +342,66 @@ final class UsageService: ObservableObject {
     /// the pool keep leasing an account that is in fact exhausted. A seat with no id (an agent
     /// with no account record, or a runner from before R9) ran in the built-in home, so it is
     /// credited there, as every seat once was.
-    private func ingestHeadlessSeats() {
-        let builtIn = environment.resolvedAccountID(.claude, nil).flatMap(ref(forAccount:))
-        for reading in headless.readings(from: environment.seatActivities(), account: { [self] seat in
-            // An id that no longer names an account (purged since) credits nobody: its numbers
-            // are not the built-in login's either.
-            seat.accountID.map { ref(forAccount: $0) } ?? builtIn
-        }) { ingest(reading) }
+    ///
+    /// Every agent's seat feeds the meter it can (round 2, item 10), each credited to the account
+    /// the seat billed:
+    /// - claude: the stream's `rate_limit_event`s (`HeadlessClaudeUsageSource`);
+    /// - codex: the rollout the seat wrote in its CODEX_HOME (`ingestCodexSeatRollouts`);
+    /// - grok: its home's billing log line (`ingestGrokBilling`);
+    /// - gemini: agy's `/usage`, polled while the seat runs (`pollGemini`);
+    /// - every non-claude agent: a seat that ended on its vendor's limit refuses its account.
+    private func ingestHeadlessSeats(_ seats: [SeatActivity]) {
+        for reading in headless.readings(from: seats, account: { [self] in seatAccount($0) }) { ingest(reading) }
+        ingestSeatRejections(seats)
+        ingestCodexSeatRollouts(seats)
+    }
+
+    /// The account a seat billed. An id that no longer names an account (purged since) credits
+    /// nobody: its numbers are not the built-in login's either. No id is the agent's built-in.
+    private func seatAccount(_ seat: SeatActivity) -> AccountRef? {
+        if let id = seat.accountID { return ref(forAccount: id) }
+        return environment.resolvedAccountID(seat.agent, nil).flatMap(ref(forAccount:))
+    }
+
+    /// grok and agy streams carry no quota numbers at all, and codex's only in its rollout; what
+    /// every one of them does carry is the refusal itself ("You hit your weekly limit.",
+    /// "usage limit reached", a 429). Classified by the shared vocabulary every profile uses, so
+    /// an overloaded API is never read as this account's limit. Claude is left to its own
+    /// `rate_limit_event`, which says the same thing with a reset time.
+    private func ingestSeatRejections(_ seats: [SeatActivity]) {
+        for seat in seats where seat.agent != .claude {
+            guard let error = seat.error, AgentErrorVocabulary.classify(text: error) == .rateLimited,
+                  let account = seatAccount(seat) else { continue }
+            let key = "\(seat.agent.rawValue)|\(seat.startedAt.timeIntervalSince1970)"
+            guard seatRejectionsSeen.insert(key).inserted else { continue }
+            ingest(UsageReading(account: account, windows: [], readAt: seat.lastEventAt ?? seat.startedAt,
+                                source: "\(seat.agent.displayName) headless", hardRejection: true))
+        }
+        if seatRejectionsSeen.count > 4_096 { seatRejectionsSeen.removeAll() }
+    }
+
+    /// A codex seat's rate limits, from the rollout it wrote: `codex exec --json` has none on
+    /// stdout (codex-cli 0.160.0, probed 2026-10-09). Read once per seat event; a rollout not
+    /// written yet is tried again next tick, until the seat finishes.
+    private func ingestCodexSeatRollouts(_ seats: [SeatActivity]) {
+        for seat in seats where seat.agent == .codex {
+            guard let thread = seat.conversationID, let account = seatAccount(seat) else { continue }
+            let at = seat.lastEventAt ?? seat.startedAt
+            let key = "\(thread)|\(at.timeIntervalSince1970)"
+            guard !codexRolloutsSeen.contains(key) else { continue }
+            let home = environment.accounts().first { $0.id == account.id }?.home ?? AgentID.codex.builtInHome
+            if let url = CodexRolloutFile.find(home: home, thread: thread, near: seat.startedAt),
+               let tail = CodexRolloutFile.tail(url),
+               let found = CodexRolloutRateLimits.newest(inRolloutTail: tail),
+               let reading = CodexRateLimitParser.reading(found.buckets, account: account, readAt: found.readAt ?? at,
+                                                          source: "codex rollout") {
+                codexRolloutsSeen.insert(key)
+                ingest(reading)
+            } else if seat.finished {
+                codexRolloutsSeen.insert(key)
+            }
+        }
+        if codexRolloutsSeen.count > 4_096 { codexRolloutsSeen.removeAll() }
     }
 
     private func ingestAPIErrors(_ sessions: [Session], at t: Date) {
@@ -381,10 +445,15 @@ final class UsageService: ObservableObject {
     /// `GeminiUsageSource.pollInterval`, and only while a gemini tab exists: each read spawns agy
     /// twice. No reading is not an error worth flagging — agy may simply be signed out, and
     /// `GeminiUsageSource.read` refuses to run `/usage` then rather than open a browser.
-    private func pollGemini(_ sessions: [Session], at t: Date) async {
-        guard let tab = sessions.first(where: { $0.agent == .gemini }), !geminiReadInFlight,
-              lastGeminiPoll.map({ t.timeIntervalSince($0) >= GeminiUsageSource.pollInterval }) ?? true,
-              let ref = accountRef(for: tab)
+    ///
+    /// A RUNNING gemini planning seat counts like a tab, credited to the account it billed: agy's
+    /// headless stream reports tokens and nothing about quota (agy 1.3.2), so this poll is the
+    /// only meter a seat-only gemini account has. A finished seat starts no poll.
+    private func pollGemini(_ sessions: [Session], seats: [SeatActivity] = [], at t: Date) async {
+        let target = sessions.first(where: { $0.agent == .gemini }).flatMap(accountRef(for:))
+            ?? seats.first(where: { $0.agent == .gemini && !$0.finished }).flatMap(seatAccount)
+        guard let ref = target, !geminiReadInFlight,
+              lastGeminiPoll.map({ t.timeIntervalSince($0) >= GeminiUsageSource.pollInterval }) ?? true
         else { return }
         lastGeminiPoll = t
         geminiReadInFlight = true
