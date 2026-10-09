@@ -60,6 +60,11 @@ public struct SeatActivity: Codable, Equatable, Sendable {
     /// `UsageService` credits the built-in account for either, as it always did. Without it a
     /// claude seat's `rate_limit_event`s on a pooled Work login would meter the built-in one.
     public var accountID: UUID?
+    /// The agent's own id for this run's conversation, when its stream names one: codex's
+    /// `thread.started.thread_id`. Read by `UsageService` to find the codex rollout, which is
+    /// where a headless codex seat's rate-limit windows are — `codex exec --json` itself carries
+    /// none (codex-cli 0.160.0, probed 2026-10-09).
+    public var conversationID: String?
     public init(agent: AgentID, startedAt: Date, accountID: UUID? = nil) {
         self.agent = agent; self.startedAt = startedAt; self.accountID = accountID
     }
@@ -74,6 +79,7 @@ public struct SeatActivity: Codable, Equatable, Sendable {
         case rateLimitWindows, rateLimitStatus, rateLimitResetsAt, startedAt, lastEventAt, costUSD
         case finished, error
         case accountID = "account"
+        case conversationID = "conversation"
     }
 }
 
@@ -374,6 +380,8 @@ public struct ActivityParser: Sendable {
 
     private mutating func foldCodex(_ type: String, _ obj: [String: Any]) {
         switch type {
+        case "thread.started":
+            activity.conversationID = obj["thread_id"] as? String
         case "turn.completed":
             // Per turn; summed so a stream that ever carries two turns still reads cumulative.
             if let usage = obj["usage"] as? [String: Any] {

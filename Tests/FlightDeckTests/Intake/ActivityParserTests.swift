@@ -90,6 +90,16 @@ final class ActivityParserTests: XCTestCase {
         XCTAssertNil(a.error)
     }
 
+    /// The thread id is what finds the codex rollout, the only place a headless codex seat's
+    /// rate limits are written; it must survive the round trip through `activity.json`.
+    func testCodexThreadIDIsRecordedAndPersisted() throws {
+        var p = parser(.codex)
+        p.feed(line(["type": "thread.started", "thread_id": "0000-thread"]))
+        XCTAssertEqual(p.activity.conversationID, "0000-thread")
+        let decoded = try JSONDecoder().decode(SeatActivity.self, from: JSONEncoder().encode(p.activity))
+        XCTAssertEqual(decoded.conversationID, "0000-thread")
+    }
+
     // MARK: - Headline
 
     func testCodexReasoningHeadlineIsTheFirstSentenceWithoutBold() {
