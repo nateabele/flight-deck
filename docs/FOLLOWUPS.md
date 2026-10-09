@@ -2926,7 +2926,7 @@ it still reports there, each diagnosed from the run's `.xcresult` screen recordi
   seat bills the project's grok assignment like every seat (unify brief R9); with no grok account
   record it runs in the built-in home.
 - **Model ids drift.** The aliases (`grok-4.7`, …) are fallbacks only. Detection reads
-  `grok models` at each launch.
+  `grok models` at launch, on "Check again", and on app activation while an agent is signed out.
 
 ## Gemini as a planning harness (2026-10-07, Track M)
 
@@ -3255,3 +3255,21 @@ planning seats). What remains:
   default — `opencode models` does not mark one.
 - **The integrator's edit pattern assumes OpenCode's worktree is the nearest `.git` ancestor**
   (else `/`). Probed for both; a linked-worktree `.git` FILE is treated the same, unprobed.
+
+## Re-checking planning agents without a relaunch (2026-10-09, round 2 recheck-agents)
+
+Planning's agent detection ran once per launch, so an agent signed in afterwards (`grok login`)
+stayed unavailable in the Rounds editor and the tab model pickers until a relaunch. Fixed: the
+editor has "Check again" under its sign-in notes, and the app re-checks on becoming active while
+an agent is signed out (at most once a minute). What remains:
+
+- **The login-shell PATH is not re-read.** A re-check reuses the PATH `LoginShellPath` resolved
+  once per run. A CLI installed into a directory already on that PATH is found; one installed
+  into a NEW PATH directory still needs a relaunch (rounds spawn with the same cached PATH, so
+  offering it would fail at round time anyway).
+- **No button for a CLI that is merely not installed.** "Check again" shows only beside a note the
+  editor draws (signed out, or a check that failed or timed out); "not installed" has no note.
+  Installing a CLI mid-session is picked up by the next press made for another reason, or a relaunch.
+- **Routing is not refreshed.** `GrokRoutingCapabilities`/`GeminiRoutingCapabilities` keep their
+  own lists (see "Routing still lists models its own way" above), so a re-check does not reach them.
+- **GUI-unverified.** Rendered offscreen only; pressing it against a real `grok login` is the maintainer's.

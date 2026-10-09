@@ -845,7 +845,8 @@ struct IntakeDetailView: View {
         if let config = editedConfig {
             RoundConfigEditor(preset: selectedPreset, config: Binding(get: { config }, set: { editedConfig = $0 }),
                               available: service.availableModels(), billing: service.planningBilling(project: intake.projectPath),
-                              codexListedModels: CodexRoutingCatalog.shared.cachedModelIDs)
+                              codexListedModels: CodexRoutingCatalog.shared.cachedModelIDs,
+                              recheck: .init(isRunning: service.isDetectingAgents) { [service] in _ = service.recheckAgents() })
         }
     }
 

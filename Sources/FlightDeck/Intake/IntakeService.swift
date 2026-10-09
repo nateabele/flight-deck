@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import FleetKit
 import IntakeKit
 import OSLog
@@ -350,6 +351,22 @@ final class IntakeService: ObservableObject {
     /// (`DetectedModelsReader`): a pane opened before the probe lands must refresh when it does,
     /// or it would keep offering the built-in fallback list as if it were the account's.
     @Published private(set) var availableModelsCache: AvailableModels?
+    /// True while a detection runs (launch warm-up, "Check again", or an app-active re-check),
+    /// for the Rounds editor's spinner.
+    @Published private(set) var isDetectingAgents = false
+    /// Planning's agent detection: `TriageSettings.available()` in the app — the login-shell
+    /// PATH plus each profile's sign-in check, 20 s per probe. A seam so tests never spawn a CLI.
+    private let detectAgents: @Sendable () -> AvailableModels
+    /// The detection in flight, which every caller joins: two presses of "Check again", or a
+    /// press during the launch probe, must not spawn every CLI's sign-in check twice and then
+    /// race to publish.
+    private var detection: Task<Void, Never>?
+    /// When the last detection started, for `appDidBecomeActive`'s once-a-minute limit. nil
+    /// when the cache was handed in (a test) rather than detected.
+    private var lastDetectionStart: Date?
+    /// How long `appDidBecomeActive` waits after one detection before starting another.
+    static let activeRecheckInterval: TimeInterval = 60
+    private var activeObserver: AnyCancellable?
     /// nil in a host that cannot run planning rounds; `beginShaping` then fails the intake
     /// with that reason instead of leaving it shaping with nothing behind it.
     private let runner: IntakeRunnerControlling?
@@ -471,8 +488,10 @@ final class IntakeService: ObservableObject {
         now: @escaping () -> Date = Date.init,
         defaults: UserDefaults = .standard,
         readFile: @escaping @Sendable (URL) -> Data? = { try? Data(contentsOf: $0) },
-        announce: @escaping (String) -> Void = IntakeService.postAnnouncement
+        announce: @escaping (String) -> Void = IntakeService.postAnnouncement,
+        detectAgents: @escaping @Sendable () -> AvailableModels = { TriageSettings.available() }
     ) {
+        self.detectAgents = detectAgents
         self.store = store
         self.headless = headless
         self.processRunner = processRunner
@@ -528,15 +547,52 @@ final class IntakeService: ObservableObject {
         }
         clock?.add(self) { [weak self] in self?.pollTapes() }
 
-        // Warm the model probe off the main actor so Start never waits on a login shell.
-        if availableModelsCache == nil {
-            Task.detached { [weak self] in
-                let detected = TriageSettings.available()
-                await MainActor.run { [weak self] in
-                    if self?.availableModelsCache == nil { self?.availableModelsCache = detected }
-                }
-            }
+        // Warm the model probe off the main actor so Start never waits on a login shell. Through
+        // `recheckAgents`, so a "Check again" pressed before it lands joins it.
+        if availableModelsCache == nil { recheckAgents() }
+
+        // A CLI signed in while Flight Deck was in the background (`grok login` in another
+        // terminal) shows up when the human comes back, without a press. `appDidBecomeActive`
+        // decides whether that is worth a probe.
+        activeObserver = NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)
+            .sink { [weak self] _ in MainActor.assumeIsolated { _ = self?.appDidBecomeActive() } }
+    }
+
+    // MARK: - Agent detection
+
+    /// Re-runs planning's agent detection off the main actor and publishes the result, so every
+    /// agent menu reading `availableModelsCache` (the Rounds editor, Settings' tab model pickers
+    /// through `DetectedModelsReader`) refreshes — detection used to run once per launch, and an
+    /// agent signed in after it stayed "unavailable" until a relaunch. Joins a detection already
+    /// running rather than starting a second. Never touches a round config: a role whose agent
+    /// is now unavailable keeps it, and the editor labels it so.
+    @discardableResult
+    func recheckAgents() -> Task<Void, Never> {
+        if let detection { return detection }
+        isDetectingAgents = true
+        lastDetectionStart = now()
+        let detect = detectAgents
+        let task = Task { @MainActor [weak self] in
+            let detected = await Task.detached { detect() }.value
+            guard let self else { return }
+            self.availableModelsCache = detected
+            self.isDetectingAgents = false
+            self.detection = nil
         }
+        detection = task
+        return task
+    }
+
+    /// The app became active: re-detect only when the last detection left an agent signed out
+    /// (the one case a login elsewhere can change) and at most once a minute, since a check can
+    /// ask a server (`agy models`) and switching apps is frequent. A CLI that is merely not
+    /// installed does not count — it would cost a probe on every activation, for nothing the
+    /// editor shows. Returns the detection it started or joined, nil when it skipped.
+    @discardableResult
+    func appDidBecomeActive() -> Task<Void, Never>? {
+        guard let available = availableModelsCache, RoundConfigEditor.offersRecheck(available) else { return nil }
+        if let last = lastDetectionStart, now().timeIntervalSince(last) < Self.activeRecheckInterval { return nil }
+        return recheckAgents()
     }
 
     // MARK: - Reads

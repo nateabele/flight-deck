@@ -37,13 +37,29 @@ struct RoundConfigEditor: View {
     var shaping: ShapingEdit?
     /// While a round runs: the whole panel shows, disabled (`DetailLayout.RoundsEditing`).
     var readOnly = false
+    /// "Check again" beside the sign-in notes: re-runs agent detection
+    /// (`IntakeService.recheckAgents`). nil (a render or a test host) shows no button.
+    var recheck: AgentRecheck?
+
+    /// What the "Check again" button needs from the service: whether a detection is running
+    /// (spinner, button disabled) and how to start one.
+    struct AgentRecheck {
+        var isRunning: Bool
+        var action: () -> Void
+    }
 
     var body: some View {
         // The whole inspector panel, under a plain title: a disclosure here would be a second
         // way to hide what the panel was opened to show.
         VStack(alignment: .leading, spacing: 14) {
             Text(Self.label(preset: preset, config: config)).font(.headline)
-            ForEach(Self.availabilityNotes(available), id: \.self) { note in
+            ForEach(Self.unavailableNotes(available), id: \.self) { note in
+                Text(note).font(.caption).foregroundStyle(.secondary)
+            }
+            if let recheck, Self.offersRecheck(available) {
+                recheckRow(recheck)
+            }
+            ForEach(Self.dataUseNotes(available), id: \.self) { note in
                 Text(note).font(.caption).foregroundStyle(.secondary)
             }
             stackedSlots
@@ -51,6 +67,31 @@ struct RoundConfigEditor: View {
             capsForm
         }
         .disabled(readOnly)
+    }
+
+    /// Directly under the sign-in notes it answers: an agent signed in after launch (`grok
+    /// login`) otherwise stayed missing from every menu until Flight Deck was relaunched.
+    private func recheckRow(_ recheck: AgentRecheck) -> some View {
+        HStack(spacing: 6) {
+            Button(Self.recheckTitle, action: recheck.action)
+                .controlSize(.small)
+                .disabled(recheck.isRunning)
+                .help("Look for signed-in agents again")
+                .accessibilityIdentifier("rounds-recheck-agents")
+            if recheck.isRunning {
+                ProgressView().controlSize(.small)
+                Text("Checking…").font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    static let recheckTitle = "Check again"
+
+    /// Only beside a note the editor shows: a sign-in hint, or a check that failed or timed out
+    /// (which reads as the same hint). A CLI that is merely not installed has no note, so a
+    /// button there would sit beside nothing.
+    static func offersRecheck(_ available: AvailableModels) -> Bool {
+        !unavailableNotes(available).isEmpty
     }
 
     /// The caption beside an agent whose stages have all run.
@@ -154,8 +195,8 @@ struct RoundConfigEditor: View {
 
     private func harnessPicker(for keyPath: SlotKeyPath) -> some View {
         Picker("AgentID", selection: harnessBinding(for: keyPath)) {
-            ForEach(Self.agents(in: available), id: \.self) { agent in
-                Text(agent.rawValue).tag(agent)
+            ForEach(Self.pickerAgents(in: available, chosen: Self.choice(for: keyPath, in: config)?.agent), id: \.self) { agent in
+                Text(Self.agentLabel(agent, available: available)).tag(agent)
             }
         }
         .labelsHidden()
@@ -446,7 +487,13 @@ struct RoundConfigEditor: View {
     /// consumer-plan harness that IS offered (spec §3.9). One list, so a harness never gets
     /// its reason shown twice by two blocks.
     static func availabilityNotes(_ available: AvailableModels) -> [String] {
-        var notes = unavailableNotes(available)
+        unavailableNotes(available) + dataUseNotes(available)
+    }
+
+    /// The data-use cautions alone, for each consumer-plan agent that IS offered — drawn after
+    /// "Check again" so the button sits with the notes it re-checks.
+    static func dataUseNotes(_ available: AvailableModels) -> [String] {
+        var notes: [String] = []
         if available.choice(for: .grok) != nil {
             notes.append("Grok may use prompts to improve its models. Check xAI's data settings before using it on private repos.")
         }
@@ -579,6 +626,20 @@ struct RoundConfigEditor: View {
     /// in the list would let the human pick a model no adapter can run.
     static func agents(in available: AvailableModels) -> [AgentID] {
         available.agents
+    }
+
+    /// `agents(in:)`, plus the row's own agent when detection no longer offers it — a re-check
+    /// that finds an agent signed out must not blank a role the human already gave it (a menu
+    /// Picker whose selection has no tag draws empty). Never rewrites the config.
+    static func pickerAgents(in available: AvailableModels, chosen: AgentID?) -> [AgentID] {
+        let offered = agents(in: available)
+        guard let chosen, !offered.contains(chosen) else { return offered }
+        return offered + [chosen]
+    }
+
+    /// The picker's label for an agent: its name, marked when detection does not offer it.
+    static func agentLabel(_ agent: AgentID, available: AvailableModels) -> String {
+        available.choice(for: agent) == nil ? "\(agent.rawValue) (unavailable)" : agent.rawValue
     }
 
     /// The fallback Picker's one non-"None" option: the first available model of ANOTHER family

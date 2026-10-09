@@ -44,7 +44,8 @@ struct ShapingRoundsPanel: View {
                                                   set: { [service, id = intake.id] in service.setRoundConfigDraft(id, $0) }),
                                   available: service.availableModels(), billing: service.planningBilling(project: intake.projectPath),
                                   codexListedModels: CodexRoutingCatalog.shared.cachedModelIDs,
-                                  shaping: service.shapingEdit(intake.id), readOnly: editing == .readOnly)
+                                  shaping: service.shapingEdit(intake.id), readOnly: editing == .readOnly,
+                                  recheck: .init(isRunning: service.isDetectingAgents) { [service] in _ = service.recheckAgents() })
             }
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier("inspector-rounds-shaping")

@@ -96,6 +96,31 @@ final class RoundConfigEditorRenderTests: XCTestCase {
         }
     }
 
+    /// "Check again" under a signed-out agent's note, idle and mid-check, with a reviewer row
+    /// still holding grok after a re-check found it signed out ("grok (unavailable)"). Light and
+    /// dark.
+    @MainActor
+    func testRenderRecheckAgents() throws {
+        guard let dir = ProcessInfo.processInfo.environment["FD_ROUNDS_RENDER_DIR"] else {
+            throw XCTSkip("set FD_ROUNDS_RENDER_DIR to render the round-config-editor PNGs")
+        }
+        var config = try XCTUnwrap(PresetExpansion.config(for: .featurePlan, available: .defaults))
+        config.crossReviewer = Slot(ModelChoice(agent: .grok, model: "grok-4.7", effort: "high"))
+        var available = AvailableModels.defaults
+        available.unavailable[.grok] = "Grok: run `grok login` in a terminal to sign in"
+        for running in [false, true] {
+            for (name, appearance) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
+                let recheck = RoundConfigEditor.AgentRecheck(isRunning: running) {}
+                try render(RoundConfigEditor(preset: .featurePlan, config: .constant(config), available: available,
+                                             recheck: recheck),
+                           size: NSSize(width: 420, height: 640),
+                           to: URL(fileURLWithPath: dir)
+                               .appendingPathComponent("rounds-editor-recheck\(running ? "-running" : "")-\(name).png"),
+                           appearance: appearance)
+            }
+        }
+    }
+
     /// Parked offscreen `NSHostingView` + `layer.render(in:)` — screencapture is denied here,
     /// and `cacheDisplay` drops layer-backed SwiftUI content.
     @MainActor

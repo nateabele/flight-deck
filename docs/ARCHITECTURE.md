@@ -465,7 +465,10 @@ and resume by `PreferencesStore.resolvedOptions`, which merges a project's field
 global row's (a nil field inherits). `AgentOptionsPane` picks each agent's editor; grok and gemini
 share `TabModelOptionsForm`, whose model menu is planning's detection
 (`IntakeService.detectedModels`, the `grok models`/`agy models` run at launch) rather than a probe
-of its own. A routed launch (`SessionStore.launchOptions`) lays the task's overrides on top of the
+of its own. Detection re-runs on the Rounds editor's "Check again" (shown beside a sign-in note)
+and when the app becomes active while an agent is signed out, at most once a minute
+(`IntakeService.recheckAgents`/`appDidBecomeActive`); concurrent requests join one run, and a
+role whose agent drops out keeps it, labelled "(unavailable)". A routed launch (`SessionStore.launchOptions`) lays the task's overrides on top of the
 same resolved value through `GrokLaunchOverrides`/`GeminiLaunchOverrides`, so a hand-picked and a
 routed model are one setting.
 
