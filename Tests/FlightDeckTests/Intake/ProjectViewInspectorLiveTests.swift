@@ -37,6 +37,15 @@ final class ProjectViewInspectorLiveTests: XCTestCase {
     }
 
     func testInspectorClosesFromTheEditorAndIsRememberedPerProject() throws {
+        // With every display asleep AppKit never finishes the column's open animation, so
+        // `.inspector` drops every later `false`, even one sent 3 s after the open. Measured
+        // 2026-10-09 on unchanged code back to 61e58016: 3 of 3 passes with the displays
+        // awake, a failure at the "panel itself collapsed" check on every run with them asleep.
+        // So an unattended suite run went red overnight. The human can't press ⌥⌘I at a dark
+        // screen, so it is no product bug. A skip, not a looser check: this test is the only
+        // guard on the close race, and only an awake display can show whether it holds.
+        try XCTSkipIf(Self.everyDisplayAsleep(),
+                      "every display is asleep: AppKit's column animation never completes, so the close can't be judged")
         let (store, a, b, session, window) = try openTwoShapingProjects()
         XCTAssertEqual(toggleLabel(in: window), "Show Inspector", "hidden by default (spec §3)")
 
@@ -160,6 +169,14 @@ final class ProjectViewInspectorLiveTests: XCTestCase {
         window.orderFrontRegardless()
         self.window = window
         return window
+    }
+
+    private static func everyDisplayAsleep() -> Bool {
+        var count: UInt32 = 0
+        guard CGGetOnlineDisplayList(0, nil, &count) == .success, count > 0 else { return true }
+        var displays = [CGDirectDisplayID](repeating: 0, count: Int(count))
+        guard CGGetOnlineDisplayList(count, &displays, &count) == .success else { return true }
+        return displays.prefix(Int(count)).allSatisfy { CGDisplayIsAsleep($0) != 0 }
     }
 
     private func settle(_ seconds: TimeInterval = 0.6) {

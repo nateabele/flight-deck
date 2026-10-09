@@ -3044,10 +3044,16 @@ and the phone unit bundle are green; everything below is what no automated run h
   re-reads a resumed conversation's history once per attach. It is deduplicated, but it costs a
   full read of each restored gemini tab's transcript at launch (tens of KB each today).
 - **`ProjectViewInspectorLiveTests.testInspectorClosesFromTheEditorAndIsRememberedPerProject`
-  fails on master `587fb3f7`.** It failed at line 58 ("the panel itself collapsed"): in the full
-  suite, alone, and on a clean detached checkout of master (2026-10-09, `gemini-live-index`). So
-  it is not a load flake and not caused by that track. Either the notes-rail close race above
-  has come back, or this Mac's window and animation state differs. Not investigated.
+  failed on master `587fb3f7` (resolved 2026-10-09, `inspector-test-fix`).** It failed at line 58
+  ("the panel itself collapsed") because every display was asleep, not because of a code change.
+  With all displays asleep, AppKit never finishes the column's open animation, and `.inspector`
+  then drops every later `false`. A close sent 3 s after the open was dropped too. The same code
+  fails back to `61e58016`, the commit that added the test. Measured: 3 of 3 passes with the
+  displays awake, and a failure on every run with them asleep. The test now skips when every
+  online display is asleep. It is not loosened: a skipped run says nothing about the close race,
+  so judge that test only from a run with an awake display. A suite run with the displays asleep
+  (an unattended run overnight) skips it and does not guard it. Not a product bug: nobody can
+  press ⌥⌘I at a dark screen.
 - ~~**No model picker for grok or gemini tabs.**~~ Fixed 2026-10-09 (`tab-model-pickers`):
   Settings → Agents and → Projects have a model pane for each; see the entry below.
 - **`FlywheelProgram` names: VERIFIED 2026-10-09** (am 0.3.35, grok 1.0.30, agy 1.3.2).
