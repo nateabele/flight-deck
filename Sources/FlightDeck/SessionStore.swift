@@ -970,8 +970,8 @@ final class SessionStore: ObservableObject {
     ///
     /// A POOL assignment leases here (unify brief R8): `AccountResolver` takes a `CapacityLedger`
     /// lease on the pool's first member under soft and returns it on the resolution. The caller
-    /// owns it from then on — `fileLease(_:for:)` once the tab is in `repos` (released by
-    /// `closeSession`), or `accountResolver.release(_:)` on any path that fails before that. A
+    /// owns it from then on — `fileLease(_:for:)` once the tab is in `repos` (released when the
+    /// agent process exits, by `reconcileTabLeases`, or by `closeSession`), or `accountResolver.release(_:)` on any path that fails before that. A
     /// refusal from here has already given its lease back.
     private func launchAccount(
         for agent: AgentID, project: String, choosing explicit: UUID? = nil
@@ -1004,8 +1004,8 @@ final class SessionStore: ObservableObject {
         return .success(resolution)
     }
 
-    /// Hands a new tab's pool lease to the resolver under the tab's id, so `closeSession` gives
-    /// it back, and tells the user when the pool had no account under its hard limit — the tab
+    /// Hands a new tab's pool lease to the resolver under the tab's id, so `reconcileTabLeases`
+    /// (agent exit) or `closeSession` gives it back, and tells the user when the pool had no account under its hard limit — the tab
     /// still starts (on the member with the most headroom), but a banner says it may stop.
     /// Called only once the tab is in `repos`; a creation that fails before that releases
     /// instead.
@@ -5624,8 +5624,8 @@ final class SessionStore: ObservableObject {
         }
         select(session.id, selecting: selecting)
         persist()
-        // `resumeExisting` has filed the tab, so its lease is held from here and released by
-        // `closeSession` like any other tab's.
+        // `resumeExisting` has filed the tab, so its lease is held from here and follows the
+        // agent process like any other tab's (`reconcileTabLeases`, `closeSession`).
         fileLease(resolution, for: session)
 
         if deferred {
