@@ -1091,18 +1091,34 @@ final class SessionStore: ObservableObject {
         case .codex:
             return makeCodexStackIfNeeded(account: instance.account).runtime
         case .grok:
-            // grok's per-session files, tailed on the shared clock; see `GrokRuntime`.
-            let runtime = GrokRuntime(clock: clock)
+            // grok's per-session files, tailed on the shared clock; see `GrokRuntime`. The
+            // search closures are `ClaudeRuntime`'s below, for the same reasons.
+            let runtime = GrokRuntime(clock: clock, searchIndex: { [weak self] in self?.searchIndex },
+                projectPath: { [weak self] conversationID in
+                    self?.repos.flatMap(\.sessions)
+                        .first { $0.pinnedConversationID == conversationID }?.workingDirectory
+                },
+                workingDirectory: { [weak self] conversationID in
+                    self?.repos.flatMap(\.sessions)
+                        .first { $0.pinnedConversationID == conversationID }?.transcriptDirectory
+                })
             runtimes[instance] = runtime
             return runtime
         case .gemini:
             // agy's identity, liveness and status are read off its own files, scoped to the
             // processes THIS tab owns: its fd-abduco daemon (a detached session is not a
             // descendant of its surface) and its surface's shell. See `GeminiRuntime`.
+            // Its ⌘K closures are keyed by tab, not conversation: see `GeminiRuntime.projectPath`.
             let runtime = GeminiRuntime(clock: clock, paths: geminiPaths, roots: { [weak self] tab in
                 guard let self else { return [] }
                 return [self.daemonControl.daemonPID(tab), self.processRegistry.process(for: tab)?.identity.pid]
                     .compactMap { $0 }
+            }, searchIndex: { [weak self] in self?.searchIndex },
+            projectPath: { [weak self] tab in
+                self?.repos.flatMap(\.sessions).first { $0.id == tab }?.workingDirectory
+            },
+            workingDirectory: { [weak self] tab in
+                self?.repos.flatMap(\.sessions).first { $0.id == tab }?.transcriptDirectory
             })
             runtimes[instance] = runtime
             return runtime

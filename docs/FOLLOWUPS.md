@@ -3029,6 +3029,14 @@ and the phone unit bundle are green; everything below is what no automated run h
   signals reach grok only through a `StopFailure` hook in the user's `$GROK_HOME/hooks/`, which
   Flight Deck does not install. Claude Code plugin hooks still load inside grok tabs, because the
   tab's shell keeps the real `HOME`.
+- **⌘K live indexing for grok and gemini (fixed 2026-10-09, `gemini-live-index`).** Both tabs
+  now ingest new prompts and replies on the watch beat, like claude and codex, instead of waiting
+  for the next backfill. Unit-tested on synthetic lines only. The live write timing is probed:
+  agy 1.3.1 wrote the request to `transcript_full.jsonl` ~30 ms after submit, and the reply at
+  turn end. Not seen in the real app: a gemini tab's first request after the `.rebound` showing
+  up in ⌘K, and a grok tab's live rows. A gemini tail starts at byte 0, not at the end. This
+  re-reads a resumed conversation's history once per attach. It is deduplicated, but it costs a
+  full read of each restored gemini tab's transcript at launch (tens of KB each today).
 - **No model picker for grok or gemini tabs.** `GrokOptions` (model, effort) and
   `GeminiOptions.model` exist and routing overrides set them; gemini tabs default to
   `gemini-3.1-pro-high`.

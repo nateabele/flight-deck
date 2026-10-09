@@ -1352,12 +1352,19 @@ The real corpus confirmed it — 362 transcripts, 361 MB read, 14.5 MB of conver
 concurrent walk was the planned fallback if that number came back too slow; it wasn't needed
 and isn't built.
 
-**Two clocks, not one.** Live sessions need no separate mechanism: `ClaudeRuntime` and
-`CodexRuntime` each already run one watcher per attached tab on the shared `WatchClock` (for
-titles and sub-agent counts, or turn boundaries), and that watcher's `onMessages` hook also
-extracts conversation text and calls `SearchIndex.ingest(_:for:offset: nil)` — the `nil`
-offset marks a live-ingest row rather than a backfill read position, since the watcher tails
-from end-of-file and has no notion of "how much of this file's history is indexed." Everything
+**Two clocks, not one.** Live sessions need no separate mechanism: `ClaudeRuntime`,
+`CodexRuntime` and `GrokRuntime` each already run one watcher per attached tab on the shared
+`WatchClock` (for titles and sub-agent counts, turn boundaries, or grok's status files), and
+that watcher's `onMessages` hook also extracts conversation text and calls
+`SearchIndex.ingest(_:for:offset: nil)` — the `nil` offset marks a live-ingest row rather than
+a backfill read position, since the watcher tails from end-of-file and has no notion of "how
+much of this file's history is indexed." `GeminiRuntime` tails `transcript_full.jsonl` on its
+own poll beat (`GeminiTranscriptTail`) and differs in one way: it starts at byte 0, not at
+the end. agy names a new tab's conversation only at the first submit, and writes that request in
+the same instant. So the `.rebound` re-attach always finds it already on disk, and an
+end-of-file start would lose it. The overlap with the backfill is a no-op through
+`message_identity`. Gemini and grok extract with their own `AgentSearchCorpus`, so a live
+row is the row the backfill would write for the same line. Everything
 that watcher does not cover — every conversation's history up to the moment the app
 launched — is `SearchIndexBuilder`'s job: an `actor`, off the main actor, walking transcripts
 newest-first (the conversation you want is overwhelmingly a recent one, so search becomes
