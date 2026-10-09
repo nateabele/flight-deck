@@ -74,8 +74,13 @@ public enum AgentOutputScan {
     }
 
     /// Text the agent itself wrote: claude `assistant` records; codex assistant `message` items
-    /// and `agent_message` events. Never a user record — the task prompt contains "BLOCKED:".
+    /// and `agent_message` events; an OpenCode mirror's assistant `message` (`parts` of type
+    /// `text`). Never a user record — the task prompt contains "BLOCKED:".
     static func assistantTexts(in record: [String: Any]) -> [String] {
+        if record["type"] as? String == "message", record["role"] as? String == "assistant",
+           let parts = record["parts"] as? [[String: Any]] {
+            return parts.filter { $0["type"] as? String == "text" }.compactMap { $0["text"] as? String }
+        }
         if record["type"] as? String == "assistant",
            let message = record["message"] as? [String: Any], let content = message["content"] as? [[String: Any]] {
             return content.filter { $0["type"] as? String == "text" }.compactMap { $0["text"] as? String }

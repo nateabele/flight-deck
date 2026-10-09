@@ -95,14 +95,14 @@ extension AgentOptions {
             switch self {
             case .grok(let o): o.model
             case .gemini(let o): o.model
-            case .claude, .codex: nil
+            case .claude, .codex, .opencode: nil
             }
         }
         set {
             switch self {
             case .grok(var o): o.model = newValue; self = .grok(o)
             case .gemini(var o): o.model = newValue; self = .gemini(o)
-            case .claude, .codex: break
+            case .claude, .codex, .opencode: break
             }
         }
     }

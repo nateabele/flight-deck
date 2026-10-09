@@ -81,7 +81,7 @@ struct TabModelOptionsForm: View {
         switch options {
         case .grok(let grok): "grok -s ⟨generated⟩" + GrokAdapter.flagTail(grok)
         case .gemini(let gemini): "agy --model \(GeminiAdapter.model(for: gemini))" + GeminiAdapter.modeFlag(gemini)
-        case .claude, .codex: ""
+        case .claude, .codex, .opencode: ""
         }
     }
 

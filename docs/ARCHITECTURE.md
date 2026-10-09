@@ -452,7 +452,8 @@ override must outlive that so it is still there if the same path is reopened lat
 
 Every agent's options are one `AgentOptions` arm — claude's `FlagSet`, codex's
 `CodexThreadOptions`, grok's `GrokOptions` (model, effort), gemini's `GeminiOptions` (model,
-`--mode`) — held on its row in Settings → Agents and per project, and resolved for every launch
+`--mode`), OpenCode's `OpenCodeOptions` (`provider/model`, OpenCode agent; sent in the body that
+creates the session, edited in `OpenCodeOptionsForm`) — held on its row in Settings → Agents and per project, and resolved for every launch
 and resume by `PreferencesStore.resolvedOptions`, which merges a project's fields over the
 global row's (a nil field inherits). `AgentOptionsPane` picks each agent's editor; grok and gemini
 share `TabModelOptionsForm`, whose model menu is planning's detection
@@ -704,11 +705,12 @@ only on the machine the work was done on.
 
 `Sources/FlightDeck/Agents/` is the per-agent adapter protocol referenced from "Session
 status pipeline" above — `AgentAdapter`, implemented by `ClaudeAdapter`, `CodexAdapter`,
-`GrokAdapter` and `GeminiAdapter` (`Agents/Gemini/`, driving the Antigravity CLI `agy`), dispatched through the `AgentID` switch rather
+`GrokAdapter`, `GeminiAdapter` (`Agents/Gemini/`, driving the Antigravity CLI `agy`) and
+`OpenCodeAdapter` (`Agents/OpenCode/`), dispatched through the `AgentID` switch rather
 than held as an existentially typed value. Each supplies its own runtime, dialog driver, turn
 recovery and timeline mapper.
 
-**One agent identity.** `AgentID` (`claude`, `codex`, `grok`, `gemini`) lives in IntakeKit,
+**One agent identity.** `AgentID` (`claude`, `codex`, `grok`, `gemini`, `opencode`) lives in IntakeKit,
 because the planning runner links IntakeKit alone; it replaced the app's old `AgentID`,
 IntakeKit's `Harness`/`ModelFamily` and Level 3's string `HarnessID`. Raw values are the
 storage format, and files keep the JSON key `harness` wherever they used it. Each adapter's
@@ -745,6 +747,44 @@ to the child (`AgentOpenPromptReader.owningSubagent`, `vouchedSubagentPrompt`,
 hook log. Usage is the weekly figure from the billing line in `$GROK_HOME/logs/unified.jsonl`
 (`GrokBillingSource`). The evidence is `.superpowers/grok-tui-facts.md` and
 `grok-tui-facts-2.md` (grok 1.0.30).
+
+**OpenCode is the server-shaped agent** (`Agents/OpenCode/`, probed on opencode 1.18.34). One
+`opencode serve` per account (`OpenCodeServer`, spawned detached and re-adopted across Flight Deck
+restarts, password-protected, port kept stable so attached TUIs reconnect by themselves); every
+tab is `opencode attach <url> --dir <cwd> -s <ses_id>` against it, which is also the process a
+tab's lease follows (argv[0] `opencode`). An account's home is an XDG data root bound by
+`XDG_DATA_HOME` (`~/.local/share`, a sibling such as `~/.local/share-work`): OpenCode has no
+narrower variable for its database and provider logins. Almost every capability is a request to
+the server rather than keystrokes: a phone message is `prompt_async` (per session, queued behind
+a running turn, never touches the composer), a rename is `PATCH /session`, and a permission or
+question is answered by its request id through `AgentAdapter.promptResponder`, which
+`SessionStore.answerPrompt`/`abortPrompt` consult before any keystroke driver. Channels learn
+which tab they act for from `TargetedInjector`, the addressed `TextInjecting` the injection gate
+hands every channel. Identity is negotiated and **derived**: OpenCode mints `ses_…` ids and
+accepts none, so the store's `UUID` is a name-based UUID of it (`OpenCodeIdentity`). History
+lives in SQLite, so `OpenCodeMirror` keeps one append-only JSONL file per session — settled
+messages plus `prompt.asked`/`prompt.resolved` records for requests OpenCode never persists —
+and the timeline pager, ⌘K, the prompt reader (`transcriptCarriesOpenPrompt` is true), Flight
+Control's `AgentOutputScan` and the hand-off transcript pointer read that file like any other
+transcript. A subagent is a child session; `OpenCodeRuntime` folds children onto the root tab.
+OpenCode reports no quota, so it has no usage meter (`OpenCodeRoutingCapabilities`).
+
+Headless planning runs `opencode run --format json` (`OpenCodeProfile`, `HeadlessCommand
+.openCodeArguments`). It has no schema flag, so the schema rides in the prompt and `SchemaRepair`
+gets its one resumed retry (`-s <id>`). A seat is one of two OpenCode agents defined in
+`OPENCODE_CONFIG_CONTENT` — read-only (`read`/`grep`/`glob`/`list`, every other tool `deny`, which
+removes it from the model's list) or the integrator (those plus `edit` under its work dir, by a
+pattern relative to the git worktree holding it, the form OpenCode matches) — with
+`OPENCODE_DISABLE_PROJECT_CONFIG` set, because a project `opencode.json` beat
+`OPENCODE_PERMISSION` when probed. `OpenCodeLiveTests` runs both the tab adapter and these seats
+against a real `opencode` with a scripted model (`scripts/test-opencode-live.sh`).
+
+**A new `AgentID` must not break an older build's files.** `sessions.json` and `preferences.v1`
+are written with every entry naming an agent outside `AgentID.readableByEveryBuild` (claude and
+codex — what a pre-unify build can decode) moved to side keys older builds ignore, and merged
+back on load (`AgentForwardCompatibility`); the side keys decode element by element, so a later
+build's unknown agent costs that entry and never the file. `AccountList.legacyAccounts`/`legacyPools`
+filter the flat mirrors by the same set. An older build that SAVES drops the side keys.
 
 **Accounts and pools are one list.** `AccountList` (`Agents/AccountList.swift`, stored as
 `Preferences.storedAccountList`) holds accounts and single-agent pools, one level deep, each
