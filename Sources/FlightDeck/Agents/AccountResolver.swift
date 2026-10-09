@@ -192,4 +192,27 @@ final class AccountResolver {
     }
 
     func leases(heldBy holder: UUID) -> [AccountLease] { holds[holder] ?? [] }
+
+    /// Re-takes the lease for work that is ALREADY running as `account` — a tab restored after
+    /// a relaunch, or one whose agent came back after it exited — and holds it for `holder`.
+    /// True when a lease is now held.
+    ///
+    /// Never `resolve`: that picks the member with the most headroom, and a running agent cannot
+    /// be moved to another login — its conversation lives in this account's home. So the lease
+    /// names `account` as-is, taken through `CapacityLedger.adopt` with no headroom check, the
+    /// way planning re-adopts a relaunched runner's leases. Only when `project` assigns `agent`
+    /// a hosted pool that still lists `account`: an account outside the pool runs on no pool,
+    /// and leasing it there would count it against capacity it does not use.
+    @discardableResult
+    func reacquire(agent: AgentID, project: String, account: AgentAccount, for holder: UUID) -> Bool {
+        guard leases(heldBy: holder).isEmpty else { return true }
+        guard case .pool(let id)? = preferences.projectSettings(project).accounts[agent],
+              let pool = preferences.effectivePools.first(where: { $0.id == id && $0.agent == agent }),
+              pool.kind == .hosted, pool.accounts.contains(account.id), !account.isRemoved
+        else { return false }
+        let lease = AccountLease(pool: id, account: CapacityPreferences.accountRef(account))
+        ledger.adopt(lease)
+        holds[holder, default: []].append(lease)
+        return true
+    }
 }
