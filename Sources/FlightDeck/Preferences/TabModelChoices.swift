@@ -12,12 +12,17 @@ enum AgentOptionsPane: Equatable {
     /// A model picker over the CLI's own list, plus whatever knobs its TUI takes
     /// (`TabModelOptionsForm`).
     case model(AgentID)
+    /// OpenCode's model and OpenCode agent (`OpenCodeOptionsForm`). Not `.model`: its model is
+    /// `provider/model` across whatever providers the person configured, and the pane also
+    /// chooses which OpenCode agent (`build`, `plan`, their own) drives the session.
+    case opencode
 
     init(agent: AgentID) {
         switch agent {
         case .claude: self = .claudeFlags
         case .codex: self = .codex
         case .grok, .gemini: self = .model(agent)
+        case .opencode: self = .opencode
         }
     }
 }

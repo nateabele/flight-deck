@@ -107,7 +107,8 @@ public enum AgentErrorVocabulary {
             return agy["error"] as? String ?? status
         }
         switch obj["type"] as? String {
-        case "error": return obj["message"] as? String
+        // OpenCode's `run --format json` nests it: `{"type":"error","error":{"data":{…}}}`.
+        case "error": return obj["message"] as? String ?? OpenCodeProfile.errorMessage(obj)
         case "turn.failed": return (obj["error"] as? [String: Any])?["message"] as? String
         default:
             // Keyed on `is_error` itself rather than `type == "result"`: `--output-format json`

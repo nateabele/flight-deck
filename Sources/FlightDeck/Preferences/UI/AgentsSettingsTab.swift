@@ -41,6 +41,7 @@ struct AgentsSettingsTab: View {
                 switch AgentOptionsPane(agent: agent) {
                 case .codex:       CodexOptionsForm(preferences: preferences)
                 case .claudeFlags: ClaudeOptionsPane(preferences: preferences)
+                case .opencode:    OpenCodeOptionsForm(preferences: preferences)
                 case .model(let agent):
                     DetectedModelsReader(service: modelSource ?? sessions.intakeService) { available in
                         TabModelOptionsForm(agent: agent, options: globalOptions(agent), available: available)

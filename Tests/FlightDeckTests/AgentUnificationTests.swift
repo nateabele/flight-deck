@@ -15,6 +15,7 @@ final class AgentUnificationTests: XCTestCase {
         let adapters: [(AgentID, any AgentProfile)] = [
             (ClaudeAdapter.id, ClaudeAdapter.profile), (CodexAdapter.id, CodexAdapter.profile),
             (GrokAdapter.id, GrokAdapter.profile), (GeminiAdapter.id, GeminiAdapter.profile),
+            (OpenCodeAdapter.id, OpenCodeAdapter.profile),
         ]
         XCTAssertEqual(adapters.map(\.0), AgentID.allCases)
         for (id, profile) in adapters {
@@ -29,7 +30,7 @@ final class AgentUnificationTests: XCTestCase {
     /// grok joined with Track G's adapter (`Grok*Tests`), gemini with Track M's
     /// (`GeminiAdapterTests`).
     func testEveryAgentWithARealAdapterIsTabReady() {
-        XCTAssertEqual(AgentID.tabReadyCases, [.claude, .codex, .grok, .gemini])
+        XCTAssertEqual(AgentID.tabReadyCases, [.claude, .codex, .grok, .gemini, .opencode])
     }
 
     /// The seam the gate tests below use — it must reach `tabReadyCases` too, and must not
@@ -62,7 +63,7 @@ final class AgentUnificationTests: XCTestCase {
     func testMigrationAddsMissingTabReadyAgentsOnly() {
         var prefs = Preferences(storedAgents: [AgentSettings(id: .codex, options: .codex(CodexThreadOptions()))])
         prefs.migrateAgentsIfNeeded()
-        XCTAssertEqual(prefs.storedAgents?.map(\.id), [.codex, .claude, .grok, .gemini], "appended, so no shortcut moves")
+        XCTAssertEqual(prefs.storedAgents?.map(\.id), [.codex, .claude, .grok, .gemini, .opencode], "appended, so no shortcut moves")
 
         var gated = Preferences(storedAgents: [AgentSettings(id: .codex, options: .codex(CodexThreadOptions()))])
         AgentID.$tabReadyOverride.withValue([.claude, .codex, .grok]) { gated.migrateAgentsIfNeeded() }
@@ -72,7 +73,7 @@ final class AgentUnificationTests: XCTestCase {
     /// Routing sends a task to an agent by opening a tab on it.
     func testRoutingTargetsAreTabReadyAgentsOnly() {
         let registry = RoutingCapabilityRegistry.standard()
-        XCTAssertEqual(registry.agents, [.claude, .codex, .grok, .gemini])
+        XCTAssertEqual(registry.agents, [.claude, .codex, .grok, .gemini, .opencode])
         AgentID.$tabReadyOverride.withValue([.claude, .codex, .grok]) {
             let gated = RoutingCapabilityRegistry.standard()
             XCTAssertEqual(gated.agents, [.claude, .codex, .grok])

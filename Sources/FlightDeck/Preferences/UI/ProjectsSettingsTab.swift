@@ -196,6 +196,12 @@ struct ProjectsSettingsTab: View {
                             header: sections
                         )
                     }
+                case .opencode:
+                    OpenCodeOptionsForm(
+                        preferences: preferences,
+                        projectOverride: openCodeOptionsBinding(for: path),
+                        header: sections
+                    )
                 case .claudeFlags:
                     FlagEditor(
                         flags: claudeFlagsBinding(for: path),
@@ -336,6 +342,17 @@ struct ProjectsSettingsTab: View {
                 return opts
             },
             set: { newValue in setOptions(.codex(newValue), for: .codex, path: path) }
+        )
+    }
+
+    private func openCodeOptionsBinding(for path: String) -> Binding<OpenCodeOptions> {
+        Binding(
+            get: {
+                guard case .opencode(let opts)? = preferences.projectSettings(path).options[.opencode]
+                else { return OpenCodeOptions() }
+                return opts
+            },
+            set: { newValue in setOptions(.opencode(newValue), for: .opencode, path: path) }
         )
     }
 

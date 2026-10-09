@@ -7,7 +7,14 @@ extension AgentID {
     /// equivalent to setting nothing, so making it a concrete home removes a "nil means
     /// default" branch from every watcher and every launch path.
     var builtInHome: URL {
-        let home = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+        builtInHome(under: URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true))
+    }
+
+    /// The built-in home below an arbitrary root — the user's home in production, a temp
+    /// directory in tests. Spelled as a path RELATIVE to that root because not every agent's
+    /// home is a direct child of it: OpenCode's is two levels down, and code that rebuilt a
+    /// home from `builtInHome.lastPathComponent` alone put it at `~/share`.
+    func builtInHome(under home: URL) -> URL {
         switch self {
         case .claude: return home.appendingPathComponent(".claude", isDirectory: true)
         case .codex:  return home.appendingPathComponent(".codex", isDirectory: true)
@@ -19,6 +26,10 @@ extension AgentID {
         // `Preferences.migrateAccountsIfNeeded`). Its login is in the keyring, not here — which
         // is why gemini has exactly one account (unify brief R5).
         case .gemini: return home.appendingPathComponent(".gemini", isDirectory: true)
+        // OpenCode's home is an XDG DATA ROOT, not its own dot-directory (see
+        // `OpenCodeProfile.homeEnvironmentKey`): two levels down, which is why
+        // `builtInHome(under:)` exists.
+        case .opencode: return home.appendingPathComponent(".local/share", isDirectory: true)
         }
     }
 
@@ -38,6 +49,7 @@ extension AgentID {
         case .codex:  return CodexProfile.homeEnvironmentKey
         case .grok:   return GrokProfile.homeEnvironmentKey
         case .gemini: return nil
+        case .opencode: return OpenCodeProfile.homeEnvironmentKey
         }
     }
 }

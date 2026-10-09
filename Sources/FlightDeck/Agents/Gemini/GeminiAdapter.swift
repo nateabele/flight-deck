@@ -29,6 +29,10 @@ struct GeminiAdapter: AgentAdapter {
     static let openPromptReader: AgentOpenPromptReader? = GeminiOpenPromptReader()
     static let searchCorpus: AgentSearchCorpus? = GeminiSearchCorpus()
 
+    /// **`nil`.** agy offers no API a running TUI's pending request can be answered through;
+    /// its dialogs are on its screen only.
+    static let promptResponder: AgentPromptResponder? = nil
+
     /// **nil: agy's `/rename` is single-stage.** `/rename <name>` executes with its inline
     /// argument (a bare `/rename` answers `Error: Please provide a new name`), so the plain
     /// `textChannel.submit("/rename <name>")` is the whole rename — claude's shape, not codex's

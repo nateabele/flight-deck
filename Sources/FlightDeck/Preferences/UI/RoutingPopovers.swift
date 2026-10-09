@@ -360,7 +360,7 @@ struct RoutingCompilerPopover: View {
         case .claude: next.model = "haiku"
         case .codex: next.model = models?.defaultModel ?? models?.models.first?.id ?? ""
         // Not agent agents (spec §3.1): the popup above never offers them.
-        case .grok, .gemini: return
+        case .grok, .gemini, .opencode: return
         }
         preferences.routingCompilerSettings = next
     }

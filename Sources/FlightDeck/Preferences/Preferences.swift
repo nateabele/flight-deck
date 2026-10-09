@@ -132,6 +132,9 @@ struct Preferences: Codable, Equatable {
     /// Keyed by standardized project path, replacing `projectFlags`. Optional for the same
     /// reason; `migrateProjectSettingsIfNeeded` folds the old field in.
     var storedProjectSettings: [String: ProjectSettings]?
+    /// What `storedForOlderBuilds` set aside for agents an older build cannot decode. Nil in
+    /// memory; only ever non-nil in the encoded blob. See `AgentForwardCompatibility`.
+    var laterAgents: LaterAgentPreferences?
     /// Phones paired to this Mac, each holding the secret its TLS handshake is authenticated
     /// with. Optional for exactly the reason `confirmations` is — see that property's
     /// comment; a non-optional field here would fail to decode every existing
@@ -399,7 +402,7 @@ struct Preferences: Codable, Equatable {
         }
         var seeded: [AgentAccount] = []
         for agent in AgentID.allCases {
-            let builtIn = homeRoot.appendingPathComponent(agent.builtInHome.lastPathComponent, isDirectory: true)
+            let builtIn = agent.builtInHome(under: homeRoot)
             seeded.append(AgentAccount(
                 agent: agent,
                 displayName: AccountDirectory.identity(atHome: builtIn, agent: agent)?.email ?? "Default",

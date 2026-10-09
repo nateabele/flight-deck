@@ -302,6 +302,88 @@ protocol AgentAdapter {
     /// **The key that stops this agent's running turn** — or cancels the dialog it is blocked on.
     /// Escape for claude and codex; grok ignores Escape for both and takes Ctrl+C.
     static var interruptKey: AgentInterruptKey { get }
+
+    /// **How this agent answers a dialog over its own API, by the request's id — or `nil`, the
+    /// refusal that leaves the keystroke paths (`dialogDriver`, `AgentKeyedDialogDriver`) as the
+    /// only ones.**
+    ///
+    /// The one capability that never touches the screen. Claude, codex, grok and gemini can
+    /// only be answered the way a person answers them — keys counted against a screen grammar —
+    /// so every answer there is interlocked against a re-read of the viewport. OpenCode exposes
+    /// the request itself (`permission.asked`, `question.asked`, each with an id) and an
+    /// endpoint that resolves it, so an answer names the exact request it means and cannot land
+    /// on the wrong row, because there are no rows.
+    ///
+    /// **Consulted BEFORE `dialogDriver`, and that order is the point.** A drive the screen
+    /// confuses refuses, but a reply to a request that is no longer pending simply fails on the
+    /// server. `SessionStore.answerPrompt` and `abortPrompt` take this path when it exists.
+    ///
+    /// No default, for `searchCorpus`'s reason: `nil` is a real answer most agents give, and an
+    /// agent added later should have to say which side of it it is on.
+    static var promptResponder: AgentPromptResponder? { get }
+}
+
+/// **Who a channel is acting for.** The adapter instance that owns the tab's agent (its account,
+/// its server), and where that tab is working right now.
+///
+/// Exists because `AgentTextChannel` and `AgentDialogDriver` are static, screen-only objects —
+/// "nothing either channel does reads adapter state" holds for every agent whose channel is
+/// keystrokes. It does not hold for an agent whose channel is a request to its own server: that
+/// request has to name a conversation and reach the right account's process. The store is the
+/// only place that knows both, so it hands them over rather than each channel growing a
+/// registry of its own.
+@MainActor
+struct AgentTarget {
+    let adapter: any AgentAdapter
+    let location: AgentLocation
+}
+
+/// **A tab's terminal, addressed.** Forwards every keystroke and read to the real surface, and
+/// carries the `AgentTarget` alongside it.
+///
+/// A decorator rather than a new parameter on `AgentTextChannel.submit`, so the screen-driven
+/// conformers — and the tests that drive them with a fake injector — are untouched: they never
+/// look past the `TextInjecting` they are handed, and this IS one. A channel that needs the
+/// address (`OpenCodeTextChannel`) asks for it by type, and refuses when it is missing rather
+/// than guessing a tab.
+@MainActor
+final class TargetedInjector: TextInjecting {
+    let base: TextInjecting
+    let target: AgentTarget
+
+    init(base: TextInjecting, target: AgentTarget) {
+        self.base = base
+        self.target = target
+    }
+
+    func sendText(_ text: String) { base.sendText(text) }
+    func sendReturn() { base.sendReturn() }
+    func sendKillLine() { base.sendKillLine() }
+    func sendYank() { base.sendYank() }
+    func sendArrowDown() { base.sendArrowDown() }
+    func sendArrowUp() { base.sendArrowUp() }
+    func sendEscape() { base.sendEscape() }
+    func sendCharacterKey(_ character: Character) { base.sendCharacterKey(character) }
+    func sendControlKey(_ letter: Character) { base.sendControlKey(letter) }
+    func readViewport() -> String? { base.readViewport() }
+}
+
+/// Answering an agent's dialog by the id of the request it raised. See
+/// `AgentAdapter.promptResponder`.
+///
+/// Synchronous in shape and asynchronous in effect, for `answerPrompt`'s reason: the store
+/// answers a phone with a dispatch verdict NOW, and the agent's own record of the reply — the
+/// `*.replied` event, the mirror line — is what tells the phone it landed. Everything that can
+/// be checked without the network (the answer fits the open prompt, the labels match the Mac's
+/// own copy) is checked before this returns; a `false` means nothing was sent.
+@MainActor
+protocol AgentPromptResponder {
+    func answer(_ open: OpenPrompt, with answer: PromptAnswer, for target: AgentTarget) -> Bool
+
+    /// Refuse whatever this tab's agent is blocked on, with no prompt in hand — the
+    /// counterpart of `AgentDialogDriver.deny` for `abortPrompt`, which exists precisely for a
+    /// dialog this Mac cannot name.
+    func abort(for target: AgentTarget)
 }
 
 /// How `SessionStore.interruptTurn` stops a turn. A stated key rather than a method so the store
@@ -688,6 +770,7 @@ extension AgentID {
         case .codex: CodexAdapter.textChannel
         case .grok: GrokAdapter.textChannel
         case .gemini: GeminiAdapter.textChannel
+        case .opencode: OpenCodeAdapter.textChannel
         }
     }
 
@@ -700,6 +783,7 @@ extension AgentID {
         case .codex: CodexAdapter.renameTyping
         case .grok: GrokAdapter.renameTyping
         case .gemini: GeminiAdapter.renameTyping
+        case .opencode: OpenCodeAdapter.renameTyping
         }
     }
 
@@ -712,6 +796,7 @@ extension AgentID {
         case .codex: CodexAdapter.dialogDriver
         case .grok: GrokAdapter.dialogDriver
         case .gemini: GeminiAdapter.dialogDriver
+        case .opencode: OpenCodeAdapter.dialogDriver
         }
     }
 
@@ -723,6 +808,7 @@ extension AgentID {
         case .codex: CodexAdapter.turnRecovery
         case .grok: GrokAdapter.turnRecovery
         case .gemini: GeminiAdapter.turnRecovery
+        case .opencode: OpenCodeAdapter.turnRecovery
         }
     }
 
@@ -734,6 +820,7 @@ extension AgentID {
         case .codex: CodexAdapter.openPromptReader
         case .grok: GrokAdapter.openPromptReader
         case .gemini: GeminiAdapter.openPromptReader
+        case .opencode: OpenCodeAdapter.openPromptReader
         }
     }
 
@@ -749,6 +836,7 @@ extension AgentID {
         case .codex: CodexAdapter.searchCorpus
         case .grok: GrokAdapter.searchCorpus
         case .gemini: GeminiAdapter.searchCorpus
+        case .opencode: OpenCodeAdapter.searchCorpus
         }
     }
 
@@ -760,6 +848,7 @@ extension AgentID {
         case .codex: CodexAdapter.negotiatesIdentity
         case .grok: GrokAdapter.negotiatesIdentity
         case .gemini: GeminiAdapter.negotiatesIdentity
+        case .opencode: OpenCodeAdapter.negotiatesIdentity
         }
     }
 
@@ -770,6 +859,19 @@ extension AgentID {
         case .codex: CodexAdapter.needsRuntimeStart
         case .grok: GrokAdapter.needsRuntimeStart
         case .gemini: GeminiAdapter.needsRuntimeStart
+        case .opencode: OpenCodeAdapter.needsRuntimeStart
+        }
+    }
+
+    /// See `AgentAdapter.promptResponder`. Consulted by `SessionStore.answerPrompt`,
+    /// `abortPrompt` and `PromptService`, which each take the id-addressed path first.
+    var promptResponder: AgentPromptResponder? {
+        switch self {
+        case .claude: ClaudeAdapter.promptResponder
+        case .codex: CodexAdapter.promptResponder
+        case .grok: GrokAdapter.promptResponder
+        case .gemini: GeminiAdapter.promptResponder
+        case .opencode: OpenCodeAdapter.promptResponder
         }
     }
 
@@ -780,6 +882,7 @@ extension AgentID {
         case .codex: CodexAdapter.interruptKey
         case .grok: GrokAdapter.interruptKey
         case .gemini: GeminiAdapter.interruptKey
+        case .opencode: OpenCodeAdapter.interruptKey
         }
     }
 
@@ -791,6 +894,7 @@ extension AgentID {
         case .codex: CodexAdapter.hasStatusRegistry
         case .grok: GrokAdapter.hasStatusRegistry
         case .gemini: GeminiAdapter.hasStatusRegistry
+        case .opencode: OpenCodeAdapter.hasStatusRegistry
         }
     }
 }
@@ -808,6 +912,7 @@ extension AgentID {
         case .codex: CodexAdapter.profile
         case .grok: GrokAdapter.profile
         case .gemini: GeminiAdapter.profile
+        case .opencode: OpenCodeAdapter.profile
         }
     }
 
@@ -819,6 +924,7 @@ extension AgentID {
         case .codex: CodexAdapter.sanitizedTitle(raw)
         case .grok: GrokAdapter.sanitizedTitle(raw)
         case .gemini: GeminiAdapter.sanitizedTitle(raw)
+        case .opencode: OpenCodeAdapter.sanitizedTitle(raw)
         }
     }
 
@@ -830,6 +936,7 @@ extension AgentID {
         case .codex: CodexAdapter.title(fromTranscriptAt: url)
         case .grok: GrokAdapter.title(fromTranscriptAt: url)
         case .gemini: GeminiAdapter.title(fromTranscriptAt: url)
+        case .opencode: OpenCodeAdapter.title(fromTranscriptAt: url)
         }
     }
 
@@ -844,6 +951,7 @@ extension AgentID {
         case .codex: CodexAdapter.timelineItems(inLine: line, at: offset)
         case .grok: GrokAdapter.timelineItems(inLine: line, at: offset)
         case .gemini: GeminiAdapter.timelineItems(inLine: line, at: offset)
+        case .opencode: OpenCodeAdapter.timelineItems(inLine: line, at: offset)
         }
     }
 
@@ -854,6 +962,7 @@ extension AgentID {
         case .codex: CodexAdapter.homeMarkerFile
         case .grok: GrokAdapter.homeMarkerFile
         case .gemini: GeminiAdapter.homeMarkerFile
+        case .opencode: OpenCodeAdapter.homeMarkerFile
         }
     }
 
@@ -863,6 +972,7 @@ extension AgentID {
         case .codex: CodexAdapter.identity(fromHomeData: data)
         case .grok: GrokAdapter.identity(fromHomeData: data)
         case .gemini: GeminiAdapter.identity(fromHomeData: data)
+        case .opencode: OpenCodeAdapter.identity(fromHomeData: data)
         }
     }
 

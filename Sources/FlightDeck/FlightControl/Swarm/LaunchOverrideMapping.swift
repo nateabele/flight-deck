@@ -88,6 +88,25 @@ enum GeminiLaunchOverrides {
     }
 }
 
+/// OpenCode's half: the model is `OpenCodeOptions.model`, sent in the body that creates the
+/// session. Only a `provider/model` id is taken — OpenCode refuses a session whose model names
+/// no provider. No knobs (see `OpenCodeRoutingCapabilities.knobSchema`).
+enum OpenCodeLaunchOverrides {
+    static func apply(_ overrides: LaunchOverrides, to options: AgentOptions) -> RoutingCapability<AgentOptions> {
+        guard case .opencode(var opencode) = options else { return .unsupported(reason: "opencode was handed another agent's options") }
+        if let model = overrides.model {
+            guard OpenCodeOptions(model: model).modelReference != nil else {
+                return .unsupported(reason: "\(model) names no provider; OpenCode needs provider/model")
+            }
+            opencode.model = model
+        }
+        if let knob = overrides.knobs.keys.sorted().first {
+            return .unsupported(reason: "opencode has no knob \(knob)")
+        }
+        return .supported(.opencode(opencode))
+    }
+}
+
 enum ContextResetError: Error, Equatable { case refused(String) }
 
 /// A context reset is a slash command typed into the agent's own composer: `/clear` for claude,

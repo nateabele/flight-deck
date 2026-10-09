@@ -22,6 +22,11 @@ struct GrokAdapter: AgentAdapter {
     static let openPromptReader: AgentOpenPromptReader? = GrokOpenPromptReader()
     static let searchCorpus: AgentSearchCorpus? = GrokSearchCorpus()
 
+    /// **`nil`.** grok's permission requests carry no id in `events.jsonl` (`GrokStatusFold`
+    /// counts them for that reason) and grok exposes no endpoint that answers one, so its
+    /// dialogs are answered by key (`GrokDialogDriver`).
+    static let promptResponder: AgentPromptResponder? = nil
+
     /// **`nil`: `/rename <name>` is one submission**, typed through `textChannel` like claude's
     /// (probed: no modal, the slash menu row executes on Return with its argument). There is no
     /// second stage to drive.

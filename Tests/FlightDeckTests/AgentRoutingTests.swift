@@ -374,6 +374,7 @@ final class AgentRoutingTests: XCTestCase {
         }
         static let openPromptReader: AgentOpenPromptReader? = ClaudeAdapter.openPromptReader
         static let searchCorpus: AgentSearchCorpus? = ClaudeAdapter.searchCorpus
+        static let promptResponder: AgentPromptResponder? = ClaudeAdapter.promptResponder
 
         func prepare(for session: Session, options: AgentOptions) async throws -> AgentBinding {
             binding(for: session)
@@ -424,6 +425,7 @@ final class AgentRoutingTests: XCTestCase {
         static var needsRuntimeStart: Bool { ClaudeAdapter.needsRuntimeStart }
         static var hasStatusRegistry: Bool { ClaudeAdapter.hasStatusRegistry }
         static var openPromptReader: (any AgentOpenPromptReader)? { ClaudeAdapter.openPromptReader }
+        static let promptResponder: AgentPromptResponder? = ClaudeAdapter.promptResponder
         static var searchCorpus: (any AgentSearchCorpus)? { ClaudeAdapter.searchCorpus }
         nonisolated static var homeMarkerFile: String { ClaudeAdapter.homeMarkerFile }
 

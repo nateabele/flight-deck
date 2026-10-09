@@ -277,7 +277,7 @@ final class UsageService: ObservableObject {
         case .codex: return TranscriptPointers.codex(session: session)
         case .grok: return TranscriptPointers.grok(session: session, home: grokHome(for: session))
         case .gemini: return TranscriptPointers.gemini(session: session)
-        default: return nil
+        case .opencode: return TranscriptPointers.openCode(session: session)
         }
     }
 

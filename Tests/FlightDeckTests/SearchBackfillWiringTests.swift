@@ -54,7 +54,7 @@ final class SearchBackfillWiringTests: XCTestCase {
             switch agent {
             case .claude: StubCorpus(refs: [claudeRef])
             case .codex: StubCorpus(refs: [codexRef])
-            case .grok, .gemini: nil
+            case .grok, .gemini, .opencode: nil
             }
         }
 
@@ -70,7 +70,7 @@ final class SearchBackfillWiringTests: XCTestCase {
             switch agent {
             case .claude: StubCorpus(refs: [older])
             case .codex: StubCorpus(refs: [newer])
-            case .grok, .gemini: nil
+            case .grok, .gemini, .opencode: nil
             }
         }
 
@@ -85,7 +85,7 @@ final class SearchBackfillWiringTests: XCTestCase {
             switch agent {
             case .claude: nil
             case .codex: StubCorpus(refs: [codexRef])
-            case .grok, .gemini: nil
+            case .grok, .gemini, .opencode: nil
             }
         }
 

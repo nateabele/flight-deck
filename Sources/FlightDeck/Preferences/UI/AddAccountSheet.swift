@@ -77,8 +77,12 @@ struct AccountDraft: Equatable {
             .map { $0.isLetter || $0.isNumber ? String($0) : "-" }
             .joined()
             .split(separator: "-").joined(separator: "-")
-        let base = agent.builtInHome.lastPathComponent
-        return URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+        // A sibling of the built-in home, beside it rather than always under `$HOME` — the same
+        // place `AccountDirectory.discover` scans, so an account made here is found again later
+        // (OpenCode's `~/.local/share-<slug>`, not `~/share-<slug>`).
+        let builtIn = agent.builtInHome
+        let base = builtIn.lastPathComponent
+        return builtIn.deletingLastPathComponent()
             .appendingPathComponent(slug.isEmpty ? base : "\(base)-\(slug)", isDirectory: true)
     }
 

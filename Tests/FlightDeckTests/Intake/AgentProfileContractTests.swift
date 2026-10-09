@@ -97,7 +97,8 @@ final class AgentProfileContractTests: XCTestCase {
         XCTAssertTrue(AgentID.codex.tabReady)
         XCTAssertTrue(AgentID.grok.tabReady)
         XCTAssertTrue(AgentID.gemini.tabReady)
-        XCTAssertEqual(AgentID.tabReadyCases, [.claude, .codex, .grok, .gemini])
+        XCTAssertTrue(AgentID.opencode.tabReady)
+        XCTAssertEqual(AgentID.tabReadyCases, [.claude, .codex, .grok, .gemini, .opencode])
     }
 
     // MARK: Refusal
@@ -134,7 +135,8 @@ final class AgentProfileContractTests: XCTestCase {
         let grok = ModelChoice(agent: .grok, model: "grok-4.6", effort: "high")
         let gemini = ModelChoice(agent: .gemini, model: "pro", effort: "")
         let claude = ModelChoice(agent: .claude, model: "opus", effort: "high")
-        let available = AvailableModels(choices: [.grok: grok, .gemini: gemini, .claude: claude])
+        let opencode = ModelChoice(agent: .opencode, model: "ollama/m", effort: "")
+        let available = AvailableModels(choices: [.grok: grok, .gemini: gemini, .claude: claude, .opencode: opencode])
         // Each new harness is offered exactly when its track has opened the gate for it.
         let expected = AgentID.planningOrder.filter { $0 != .codex && AgentProfiles.headlessReady.contains($0) }
         XCTAssertEqual(available.agents, expected)

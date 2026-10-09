@@ -99,6 +99,9 @@ enum AgentOptions: Equatable, Sendable {
     case grok(GrokOptions)
     /// agy's launch options (`GeminiOptions`): the model slug.
     case gemini(GeminiOptions)
+    /// OpenCode's launch options (`OpenCodeOptions`): model and OpenCode agent, both sent in
+    /// the body that creates the session.
+    case opencode(OpenCodeOptions)
 
     var agent: AgentID {
         switch self {
@@ -106,6 +109,7 @@ enum AgentOptions: Equatable, Sendable {
         case .codex: .codex
         case .grok: .grok
         case .gemini: .gemini
+        case .opencode: .opencode
         }
     }
 
@@ -117,6 +121,7 @@ enum AgentOptions: Equatable, Sendable {
         case .codex: .codex(CodexThreadOptions())
         case .grok: .grok(GrokOptions())
         case .gemini: .gemini(GeminiOptions())
+        case .opencode: .opencode(OpenCodeOptions())
         }
     }
 }

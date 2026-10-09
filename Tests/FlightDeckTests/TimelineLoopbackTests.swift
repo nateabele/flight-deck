@@ -71,6 +71,7 @@ final class TimelineLoopbackTests: XCTestCase {
         }
         static let openPromptReader: AgentOpenPromptReader? = ClaudeAdapter.openPromptReader
         static let searchCorpus: AgentSearchCorpus? = ClaudeAdapter.searchCorpus
+        static let promptResponder: AgentPromptResponder? = ClaudeAdapter.promptResponder
         let url: URL?
         func prepare(for session: Session, options: AgentOptions) async throws -> AgentBinding {
             binding(for: session)

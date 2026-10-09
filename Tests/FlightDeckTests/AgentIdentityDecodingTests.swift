@@ -121,13 +121,14 @@ final class AgentIdentityDecodingTests: XCTestCase {
         XCTAssertEqual(try JSONDecoder().decode(CapacityPool.self, from: JSONEncoder().encode(pool)), pool)
     }
 
-    /// `HarnessID` accepted any string, and local pools named adapters like "opencode". One such
+    /// `HarnessID` accepted any string, and local pools named adapters like "opencode" (a real case since the OpenCode adapter; "aider" stands in
+    /// for an agent no build knows). One such
     /// pool must cost that pool, not the whole `preferences.v1` (decoded with `try?`, so a throw
     /// there resets every preference).
     func testAPoolNamingAnUnknownAgentIsDroppedNotFatal() throws {
         var blob = try object(JSONEncoder().encode(Preferences()))
         blob["capacity"] = ["pools": [
-            ["id": "pool-local001", "label": "Ollama", "harness": "opencode", "kind": "local", "accounts": [],
+            ["id": "pool-local001", "label": "Ollama", "harness": "aider", "kind": "local", "accounts": [],
              "softThreshold": 0.8, "hardThreshold": 0.95, "endpoint": "http://localhost:11434", "concurrencyCap": 2],
             ["id": "pool-b", "label": "B", "harness": "claude", "kind": "hosted", "accounts": [],
              "softThreshold": 0.8, "hardThreshold": 0.95, "concurrencyCap": 2],
@@ -164,10 +165,10 @@ final class AgentIdentityDecodingTests: XCTestCase {
     /// A rule naming an agent this build has no case for must not take the rule list with it.
     func testARuleNamingAnUnknownAgentDegradesToFailed() throws {
         let rules = json("""
-        [{"id":"r1","sentence":"use opencode for docs","state":"confirmed",
+        [{"id":"r1","sentence":"use aider for docs","state":"confirmed",
           "compiled":{"match":{"any":[{"dimension":"docs-prose","atLeast":0.5}]},
-                      "assign":{"harness":"opencode","model":"m","knobs":{},"pool":"p"}},
-          "compiler":{"harness":"opencode","model":"m"}},
+                      "assign":{"harness":"aider","model":"m","knobs":{},"pool":"p"}},
+          "compiler":{"harness":"aider","model":"m"}},
          {"id":"r2","sentence":"codex for tests","state":"confirmed",
           "compiled":{"match":{"any":[{"kind":"tests"}]},"assign":{"harness":"codex","model":"gpt-6-sol","pool":"codex-default"}}}]
         """)
@@ -184,7 +185,7 @@ final class AgentIdentityDecodingTests: XCTestCase {
     /// An execution block naming an unknown agent is an invalid block, reported as one — it used
     /// to pass as a `HarnessID` and fail later at spawn.
     func testAnExecutionBlockNamingAnUnknownAgentIsInvalid() throws {
-        let context = #"{"flight_deck":{"execution":{"v":1,"kind":"tests","harness":"opencode","model":"m","pool":"p","source":{"by":"rule","reason":"r","at":"2026-10-07T00:00:00Z"}}}}"#
+        let context = #"{"flight_deck":{"execution":{"v":1,"kind":"tests","harness":"aider","model":"m","pool":"p","source":{"by":"rule","reason":"r","at":"2026-10-07T00:00:00Z"}}}}"#
         let result = ExecutionBlockCodec.decode(agentContext: context)
         guard case .failure(.invalidField(let field, _)) = result else {
             return XCTFail("expected an invalid harness field, got \(String(describing: result))")
@@ -219,7 +220,8 @@ final class AgentIdentityDecodingTests: XCTestCase {
     }
 
     func testRawValuesAreTheStorageFormat() {
-        XCTAssertEqual(AgentID.allCases.map(\.rawValue), ["claude", "codex", "grok", "gemini"])
-        XCTAssertEqual(AgentID.planningOrder, [.codex, .claude, .grok, .gemini], "the old Harness.allCases order")
+        XCTAssertEqual(AgentID.allCases.map(\.rawValue), ["claude", "codex", "grok", "gemini", "opencode"])
+        XCTAssertEqual(AgentID.planningOrder, [.codex, .claude, .grok, .gemini, .opencode],
+                       "the old Harness.allCases order, opencode appended")
     }
 }

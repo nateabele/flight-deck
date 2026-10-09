@@ -251,7 +251,7 @@ final class AccountListTests: XCTestCase {
 
         var raw = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
         var entries = try XCTUnwrap(raw["entries"] as? [Any])
-        entries.append(["account": ["id": UUID().uuidString, "agent": "opencode", "displayName": "X", "home": "file:///tmp/x/"]])
+        entries.append(["account": ["id": UUID().uuidString, "agent": "aider", "displayName": "X", "home": "file:///tmp/x/"]])
         raw["entries"] = entries
         let decoded = try JSONDecoder().decode(AccountList.self, from: JSONSerialization.data(withJSONObject: raw))
         XCTAssertEqual(decoded, list, "an entry a newer build wrote costs that entry, not every preference")

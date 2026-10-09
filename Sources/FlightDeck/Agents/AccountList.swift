@@ -380,18 +380,19 @@ struct AccountList: Equatable, Sendable {
     /// re-seeding new ones that orphan every tab and project assignment. claude and codex only:
     /// an older build cannot decode any other agent, and one undecodable account fails the whole
     /// `preferences.v1` decode, which resets every preference.
-    var legacyAccounts: [AgentAccount] { accounts.filter { Self.legacyAgents.contains($0.agent) } }
+    var legacyAccounts: [AgentAccount] { accounts.filter(\.agent.isReadableByEveryBuild) }
 
     /// The `capacity.pools` mirror, for the same older builds and with the same filter.
     var legacyPools: [CapacityPool] {
-        pools.filter { Self.legacyAgents.contains($0.agent) }.map { pool in
+        pools.filter(\.agent.isReadableByEveryBuild).map { pool in
             var legacy = pool.capacityPool
             legacy.accounts = pool.members.map(\.id)
             return legacy
         }
     }
 
-    static let legacyAgents: Set<AgentID> = [.claude, .codex]
+    // The filter is `AgentID.readableByEveryBuild` — the one answer to "can every build read
+    // this agent", shared with the side fields of `AgentForwardCompatibility`.
 }
 
 extension AccountList: Codable {

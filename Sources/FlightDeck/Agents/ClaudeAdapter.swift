@@ -79,6 +79,10 @@ struct ClaudeAdapter: AgentAdapter {
 
     static let searchCorpus: AgentSearchCorpus? = ClaudeSearchCorpus()
 
+    /// **`nil`.** Claude's dialogs exist only on its screen — no API names a pending request —
+    /// so they are answered by `dialogDriver`'s keystrokes or not at all.
+    static let promptResponder: AgentPromptResponder? = nil
+
     private static let logger = Logger(
         subsystem: Bundle.main.bundleIdentifier ?? "dev.flightdeck.FlightDeck",
         category: String(describing: ClaudeAdapter.self)

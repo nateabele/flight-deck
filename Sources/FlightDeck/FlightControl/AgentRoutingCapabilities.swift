@@ -79,6 +79,7 @@ final class RoutingCapabilityRegistry {
             case .codex: CodexRoutingCapabilities()
             case .grok: GrokRoutingCapabilities()
             case .gemini: GeminiRoutingCapabilities()
+            case .opencode: OpenCodeRoutingCapabilities()
             }
         })
     }
@@ -233,6 +234,72 @@ final class GeminiRoutingCapabilities: AgentRoutingCapabilities {
 }
 
 extension GeminiRoutingCapabilities: CommandSinkAttachable {}
+
+/// OpenCode's routing answers. Its accounts are XDG data roots holding PROVIDER credentials
+/// (`OpenCodeProfile.homeEnvironmentKey`), not one vendor login, so the account model is
+/// `.providerKeys`.
+@MainActor
+final class OpenCodeRoutingCapabilities: AgentRoutingCapabilities {
+    let agent: AgentID = .opencode
+    let accountModel: AccountModel = .providerKeys
+    /// No knobs. OpenCode's only effort-like flag, `--variant`, is provider-specific — a value
+    /// one provider takes another rejects (`OpenCodeProfile.modelCatalog`).
+    var knobSchema: [String: [String]] { [:] }
+
+    /// `opencode models` (read-only, no tokens; also the sign-in check): every model of every
+    /// provider OpenCode can reach. Listed once per run.
+    private var listed: [ModelEntry]?
+    var list: @Sendable () async -> [String]? = {
+        await Task.detached(priority: .utility) { () -> [String]? in
+            let path = LoginShellPath.repairing()["PATH"]
+            let candidates = (path ?? "").split(separator: ":").map { "\($0)/opencode" }
+                + ["\(NSHomeDirectory())/.opencode/bin/opencode"]
+            guard let executable = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) })
+            else { return nil }
+            let profile = OpenCodeProfile()
+            guard let output = SignInProbe.system.run(executable, profile.signInCheck.arguments, path ?? ""),
+                  profile.signInCheck.readiness(output) == .ready else { return nil }
+            return profile.parseModelList(output.stdout)
+        }.value
+    }
+
+    func modelCatalog() async -> RoutingCapability<[ModelEntry]> {
+        if let listed { return .supported(listed) }
+        guard let ids = await list(), !ids.isEmpty else {
+            return .unsupported(reason: "opencode is not installed or reaches no provider (`opencode models` listed nothing)")
+        }
+        let entries = ids.map { ModelEntry(id: $0, displayName: $0, knobs: []) }
+        listed = entries
+        return .supported(entries)
+    }
+
+    /// **Unsupported: OpenCode never states a quota.** It records tokens and cost per message,
+    /// but no provider limit or reset — there is nothing to divide by, so a utilization figure
+    /// would be invented. Rollover therefore never moves an OpenCode tab for capacity.
+    func usageMeterSource(account: AgentAccount?) -> RoutingCapability<any UsageMeterSource> {
+        .unsupported(reason: "OpenCode reports tokens and cost per message, never a provider quota")
+    }
+
+    func transcriptPointer(for session: Session) -> RoutingCapability<TranscriptPointer> {
+        guard let pointer = TranscriptPointers.openCode(session: session) else {
+            return .unsupported(reason: "no OpenCode mirror on disk for this conversation yet")
+        }
+        return .supported(pointer)
+    }
+
+    /// **Unsupported, and it is Flight Deck that cannot.** OpenCode's `/new` is a TUI command
+    /// that switches the attached TUI to a NEW session id; the tab is pinned to its session
+    /// (`opencode attach … -s <id>`) and nothing re-pins it, so after a reset the tab would
+    /// watch a conversation nobody writes. And the text channel cannot type it anyway: it
+    /// delivers over `prompt_async`, where `/new` is a message to the model.
+    func resetContext(_ session: Session) async throws -> RoutingCapability<Void> {
+        .unsupported(reason: "OpenCode's /new starts a session the tab is not attached to, and Flight Deck cannot type TUI commands into an OpenCode tab")
+    }
+
+    func applying(_ overrides: LaunchOverrides, to options: AgentOptions) -> RoutingCapability<AgentOptions> {
+        OpenCodeLaunchOverrides.apply(overrides, to: options)
+    }
+}
 
 /// Owned by L3-S. Spawns (or the caller reuses) an agent for `task` and submits `firstPrompt`
 /// once its composer is ready. L3-U's hand-off calls it with the hand-off prompt.
