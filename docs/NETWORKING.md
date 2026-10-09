@@ -177,7 +177,7 @@ exists because a phone in a pocket answers nothing and never disconnects.
 ### `phone.logs`
 
 The phone logs its own connection lifecycle, prompt derivation and answers through
-`FlightDeckMobile.PhoneLog` (`os.Logger`, subsystem `dev.flightdeck.FlightDeckMobile`, categories
+`FlightDeckMobile.PhoneLog` (`os.Logger`, subsystem `io.radify.flightdeck.FlightDeckMobile`, categories
 `connection` / `prompt` / `answer`), and the Mac pulls them with
 `scripts/answer-trigger.sh logs [seconds]` — behind the same `FlightDeckAnswerTrigger` gate as
 the answer drive, because pulling logs off a phone belongs behind the gate that drives a
