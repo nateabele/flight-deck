@@ -3285,13 +3285,13 @@ The planning inspector's Notes/Rounds modes and the per-round agent stacks shipp
   ⌥⌘1/⌥⌘2 and View ▸ Inspector, the click from a round's stack scrolling the inspector to its
   section, the agent drill-in's back button, and VoiceOver on the segments and the card's
   "Show Agents in Inspector" action.
-- **The departures board's slots carry no stack.** The split-flap tape has no room in a slot, and
+- **The departures board's slots carry no stack** (nor, since `rounds-timeline-editor`, a chip). The split-flap tape has no room in a slot, and
   its hover card was left alone; the cards under it and the live round's header carry the stacks.
-- **A stack's click is a nested button inside a tappable card**, never clicked by hand. SwiftUI
-  normally gives a nested `Button` the click; if the card's tap gesture wins instead, the stack
+- **A chip's click is a nested button inside a tappable card**, never clicked by hand. SwiftUI
+  normally gives a nested `Button` the click; if the card's tap gesture wins instead, the chip
   opens the round's detail panel rather than the inspector.
 - **A synthesis round's stack includes the integrator**, whose editor row lives under Refine;
-  the Synthesis section says so in a note rather than repeating the row.
+  the Synthesis stage says so in a note rather than repeating the row.
 
 ### The menu bar blinked on every mode or tab switch (fixed 2026-10-09, `inspector-mode-flicker`)
 
@@ -3321,3 +3321,21 @@ Still open:
   laid out, and the sidebar's and Intakes list's rows present — on `4e13c49d` and on the fix.
   The offscreen window is never key, so it has no menu bar or focused values, which is where the
   two causes above lived. Unverified until the maintainer opens the inspector on the next Release.
+
+## Rounds timeline editor (2026-10-09, `rounds-timeline-editor`)
+
+The Rounds editor is the round timeline and the main view's round cards and live header draw the
+same `RoundChip` (ARCHITECTURE.md, "Round chips and the rounds timeline"). What remains:
+
+- **GUI-unverified.** Pinned by `RoundParticipantsTests`, `RoundTimelineTests` and the offscreen
+  `RoundsTimelineRenderTests`; the two-way pick (main view ↔ inspector), the strip following a
+  cap's stepper, and the card strip scrolling to a round picked in the inspector have not been
+  clicked in the running app.
+- **No per-round overrides.** A chip picks a round, but the pickers still set the role for the
+  whole stage; the caption says so. Per-round agents would need a config model change.
+- **Fresh eyes and dedup sit in the Polish strip** after the numbered rounds (they run on the
+  polisher); they have no row of their own.
+- **A Sketch shows no Polish row.** With no polisher the planner plans no polish, fresh eyes or
+  dedup; the disabled polish controls and their explanation that used to show are gone with it.
+- **A round planned but not yet run picks nothing in the main view** — there is nothing of it
+  there to show. Only done and live chips move the main view.

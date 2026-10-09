@@ -1913,8 +1913,23 @@ none of it is engine state, all of it is a view or the service glue that feeds o
     (`AgentBadge`, `AgentID.monogram`/`.tint` — no vendor marks, the repo is public), and every
     round drawn in the main view (finished-round cards, the live round's header) carries an
     overlapping stack of its distinct agents (`AgentStackModel`, max 3 then "+N", tooltip per
-    role). The Rounds editor groups its rows under one heading per `RoundsSection` with the same
-    stack; clicking a round's stack opens Rounds scrolled to (and briefly marking) its section.
+    role).
+  - **Round chips and the rounds timeline** (`Planning/RoundChip.swift`,
+    `Planning/RoundTimeline.swift`, 2026-10-09): every round is drawn as one `RoundChip` — progress
+    mark (done / live / planned, dashed), the board's name ("Refine 2"), a cross-check mark, and
+    its agent stack — from a `RoundChipModel` built by `RoundTimeline`. The finished-round cards,
+    the live round's header and the Rounds editor all draw that chip, and a card's chip is the very
+    value the editor's timeline holds for that round (`RoundTimelineTests`). Who runs a round comes
+    from `IntakeKit.RoundParticipants`, which `TapePlanner`'s sequence (cross-check selection),
+    `LiveSeats.expected` and the editor all read, so the editor can't show a round the runner
+    won't run. The Rounds editor is one row per stage (Draft, Synthesis, Refine, Encode, Polish)
+    with a strip of chips (Refine and Polish numbered up to their caps plus the tape's extends);
+    its stage headings are disclosures, and picking a heading or a chip reveals that stage's
+    pickers, captioned "Applies to every Refine round" — the config stays role-based. The pick
+    (`RoundTimeline.Selection`) is held by the detail pane and shared both ways: a round's chip
+    clicked in the main view opens Rounds on it; a chip picked in the inspector shows that round
+    in the main view (a done round's checkpoint, the live card), and a card or board pick moves
+    the inspector's pick to its chip.
   - `ReleaseReviewView.swift` — the release sheet (spec §10); `IntakeGraphReader.swift` and
     `BeadWriter.swift`/`IntakeDelivery.swift` are release's engine-facing neighbors, not views.
   - `Planning/FloatingCard.swift`, `Planning/UIText.swift` — shared across the above (see below).
