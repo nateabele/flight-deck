@@ -752,8 +752,14 @@ pool member: the first member if the ledger has not seen the pool yet, the first
 or — every member over hard — the one with the most headroom plus a notice to show. Tabs lease in
 `SessionStore.launchAccount`, hold the lease under the tab id once filed (`fileLease`, which posts
 the notice), and release it in `closeSession`; every creation path that fails after the lease gives
-it back. A tab whose agent exits keeps its lease: the shell stays bound to the leased home. Restored
-tabs do not re-lease. Planning runs use the same resolver through its `AccountResolving`
+it back. **The lease follows the agent process, not the tab** (round 2): `SessionStore
+.reconcileTabLeases`, every 5 s from `maintenanceTick`, asks `AgentProcessProbe` whether a process
+started as the agent's binary (argv[0] = the profile's `binaryName`; `p_comm` is a versioned file
+name for claude and grok) runs under the tab's fd-abduco daemon or surface. Gone for 30 s → the
+lease is released; running with none → `AccountResolver.reacquire` adopts a lease on the account the
+tab is stamped with, never a fresh pick, and only when the project's pool lists it. That is also how
+tabs restored after a relaunch lease again. A SIGSTOP'd (smart-sleep) agent is still a process, so
+it keeps its lease. Planning runs use the same resolver through its `AccountResolving`
 conformance (`Intake/PlanningAccounts.swift`), but keep their own lease book (the runner
 controller's `heldAccounts` plus `accounts.json`, which survives a relaunch) rather than
 `hold(for:)`, so one lease is never in two books.
@@ -1545,7 +1551,15 @@ Pool leases are released when the runner is seen gone — `reap`, or the per-tic
 `syncAccountLeases` for an exit nobody reported (finish, crash, kill) — and a relaunched app
 re-adopts a live runner's leases from its `accounts.json` (`CapacityLedger.adopt`). Each start
 re-leases, which is the rollover point. Triage resolves the same way per turn and releases its
-lease when the turn ends. Index refresh is not project-scoped and stays on the built-in home.
+lease when the turn ends. Index refresh is app-wide, not project-scoped: `CapabilityIndexService`
+resolves claude through the same resolver with its run directory as the project (which nothing
+assigns, so claude's first live account, like an unassigned project's tab), binds every source's run
+to that home, and releases any lease when the refresh ends.
+Every seat's usage is credited to the account it billed (`UsageService.ingestHeadlessSeats`): claude
+from its `rate_limit_event`s, codex from the rollout its run wrote (`SeatActivity.conversationID` →
+`CodexRolloutFile`; `codex exec --json` has no rate limits on stdout), grok from its home's billing
+log line (headless grok writes none itself), gemini from agy `/usage` polled while the seat runs, and
+any non-claude seat that ended on a limit message refuses its account.
 
 *The runner.* `flightdeck intake run <id> --root <intakesRoot>` (the bundled CLI, which links
 `IntakeKit`) is spawned by `IntakeRunnerController` inside its own fd-abduco daemon (`-n`,
