@@ -65,9 +65,13 @@ struct RoundCard: Identifiable, Equatable {
     var notesApplied: [String] = []
     /// The round's stage, which its stack's click opens in the Rounds inspector.
     var stage: Stage = .draft
-    /// Who ran the round (`AgentStackModel.ran`) — the card's avatar stack; what the config
-    /// asked for when the record predates its slots.
-    var agents: [RoundAgent] = []
+    /// The round as a chip (`RoundTimeline.chip`): its name, who ran it and its cross-check —
+    /// the same value the Rounds inspector's timeline draws for this round, so the card and the
+    /// inspector's chip are one chip, not two that agree.
+    var chip: RoundChipModel = RoundChipModel(key: RoundKey(stage: .draft, round: 0), name: "", agents: [],
+                                              crossCheck: false, progress: .done)
+    /// Who ran the round — the chip's stack.
+    var agents: [RoundAgent] { chip.agents }
     var id: Int { checkpointID }
 }
 
@@ -228,9 +232,7 @@ struct ShapingModel {
                 allSections: r.sectionsChanged.map(Self.heading),
                 notesApplied: r.annotations.map(\.note),
                 stage: cp.stage,
-                agents: r.slots.isEmpty
-                    ? intake.roundConfig.map { AgentStackModel.planned(stage: cp.stage, crossCheck: false, config: $0) } ?? []
-                    : AgentStackModel.ran(r))
+                chip: RoundTimeline.chip(cp, config: intake.roundConfig))
         }
     }
 

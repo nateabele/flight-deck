@@ -451,20 +451,11 @@ struct RoundConfigEditor: View {
         return parts.joined(separator: " · ")
     }
 
-    /// The refine rounds that would cross-check at the current caps — `TapePlanner`'s own
-    /// first/last/every rule, but over `refinementCap` alone: the editor has no tape (and so
-    /// no `extraRefinement`) to fold in. Empty whenever `config.crossChecks` is false (`.off`,
-    /// no crossReviewer yet, or a same-family pairing that can't cross-check anything).
+    /// The refine rounds that would cross-check at the current cap — `RoundParticipants`' rule,
+    /// the one the planner runs, over `refinementCap` alone: the summary has no tape (and so no
+    /// `extraRefinement`) to fold in. Empty whenever `config.crossChecks` is false.
     static func crossCheckRounds(_ config: RoundConfig) -> [Int] {
-        guard config.crossChecks, let policy = config.crossCheck, config.refinementCap > 0 else { return [] }
-        let total = config.refinementCap
-        return (1...total).filter { round in
-            switch policy {
-            case .off: false
-            case .firstAndLast: round == 1 || round == total
-            case .every: true
-            }
-        }
+        RoundParticipants.crossCheckRounds(of: config.refinementCap, config: config)
     }
 
     /// Whether the crossReviewer picked the same family as the reviewer — the caption under its

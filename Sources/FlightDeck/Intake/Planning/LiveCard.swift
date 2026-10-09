@@ -330,28 +330,16 @@ enum LiveSeats {
     static func expected(_ round: PlannedRound, config: RoundConfig?) -> [(base: String, requested: Slot?)] {
         guard let c = config else { return [] }
         let p = "\(round.stage.rawValue)-\(round.round)-"
-        switch round.stage {
-        case .draft:
-            return c.drafters.enumerated().map { (base: "\(p)drafter-\($0.offset)", requested: $0.element) }
-        case .synthesis:
-            return [(base: "\(p)synthesizer", requested: c.synthesizer), (base: "\(p)integrator", requested: Slot(c.integrator))]
-        case .refine:
-            // The reviewer runs its choice with no persona (`RoundExecutor.refine`), so the row
-            // doesn't claim one the engine never asked for.
-            guard round.crossCheck else {
-                return [(base: "\(p)reviewer", requested: c.reviewer.map { Slot($0.choice) }),
-                        (base: "\(p)integrator", requested: Slot(c.integrator))]
+        // Who runs the round is `RoundParticipants`' answer — the same one the planner and the
+        // Rounds editor's timeline read — so the rows can't list a seat the chips don't.
+        return RoundParticipants.of(round, config: c).map { seat in
+            let base = p + seat.role + (seat.index.map { "-\($0)" } ?? "")
+            switch seat.role {
+            // The reviewers run their choice with no persona (`RoundExecutor.refine`), so the
+            // row doesn't claim one the engine never asked for.
+            case "reviewer", "crossReviewer": return (base: base, requested: seat.slot.map { Slot($0.choice) })
+            default: return (base: base, requested: seat.slot)
             }
-            // A cross-check round runs a second reviewer (`RoundExecutor.crossCheckRefine`)
-            // between the usual two, so the queued list matches the seats the engine actually
-            // starts instead of showing the cross-reviewer as an unexpected extra run.
-            return [(base: "\(p)reviewer", requested: c.reviewer.map { Slot($0.choice) }),
-                    (base: "\(p)crossReviewer", requested: c.crossReviewer.map { Slot($0.choice) }),
-                    (base: "\(p)integrator", requested: Slot(c.integrator))]
-        case .encode:
-            return [(base: "\(p)encoder", requested: Slot(c.encoder))]
-        case .polish, .freshEyes, .dedup:
-            return [(base: "\(p)polisher", requested: c.polisher.map { Slot($0) })]
         }
     }
 
