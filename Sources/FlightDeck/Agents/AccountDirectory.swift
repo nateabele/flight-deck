@@ -40,14 +40,18 @@ enum AccountDirectory {
     /// Sibling homes under `directory`, excluding the agent's built-in one — which is seeded
     /// explicitly and must not be discovered twice.
     static func discover(in directory: URL, agent: AgentID) -> [URL] {
-        let builtInName = agent.builtInHome.lastPathComponent
+        // Siblings of the built-in home, wherever under `directory` that home sits — directly
+        // below it for most agents, two levels down for OpenCode (`.local/share`).
+        let builtIn = agent.builtInHome(under: directory)
+        let builtInName = builtIn.lastPathComponent
+        let parent = builtIn.deletingLastPathComponent()
         // `.skipsHiddenFiles` hides dot-directories, which is every candidate — enumerate names
         // instead and filter by prefix.
-        let names = (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: parent.path)) ?? []
         return names
             .filter { $0.hasPrefix(builtInName + "-") }
             .sorted()
-            .map { directory.appendingPathComponent($0, isDirectory: true) }
+            .map { parent.appendingPathComponent($0, isDirectory: true) }
             .filter { looksLikeHome($0, agent: agent) }
     }
 

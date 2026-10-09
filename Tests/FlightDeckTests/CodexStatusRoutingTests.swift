@@ -44,6 +44,7 @@ final class CodexStatusRoutingTests: XCTestCase {
         }
         static let openPromptReader: AgentOpenPromptReader? = CodexAdapter.openPromptReader
         static let searchCorpus: AgentSearchCorpus? = CodexAdapter.searchCorpus
+        static let promptResponder: AgentPromptResponder? = CodexAdapter.promptResponder
         let thread: UUID
 
         func prepare(for session: Session, options: AgentOptions) async throws -> AgentBinding {

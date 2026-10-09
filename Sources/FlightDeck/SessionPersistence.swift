@@ -173,6 +173,10 @@ struct SessionSnapshot: Codable, Equatable {
     /// decodes an optional with `decodeIfPresent`, so every existing `sessions.json` still
     /// decodes. Written `nil` when both stacks are empty, so the common file stays readable.
     var selectionHistory: SelectionHistory?
+    /// Entries for agents an older build cannot decode, set aside on the way to disk so that
+    /// build still reads every other tab — see `AgentForwardCompatibility`. Always nil in
+    /// memory: `load` merges it back and `save` recomputes it.
+    var laterAgentSessions: LaterAgentList<Entry>?
 }
 
 @MainActor
@@ -197,11 +201,12 @@ final class UserDefaultsSessionPersistence: SessionPersisting {
 
     func load() -> SessionSnapshot? {
         guard let data = defaults.data(forKey: key) else { return nil }
-        return try? JSONDecoder().decode(SessionSnapshot.self, from: data)
+        return (try? JSONDecoder().decode(SessionSnapshot.self, from: data))?.restoringLaterAgents()
     }
 
+    /// Written in the shape every build can read — see `AgentForwardCompatibility`.
     func save(_ snapshot: SessionSnapshot) {
-        guard let data = try? JSONEncoder().encode(snapshot) else { return }
+        guard let data = try? JSONEncoder().encode(snapshot.storedForOlderBuilds()) else { return }
         defaults.set(data, forKey: key)
     }
 }
@@ -262,7 +267,9 @@ final class FileSessionPersistence: SessionPersisting {
     ///
     /// Every `?? defaultDirectory()` caller (search index, answer-trigger and control sockets,
     /// intakes root) inherits the split from here.
-    static func defaultDirectory(debug: Bool = SessionDaemon.isDebugBuild) -> URL {
+    /// `nonisolated` because it is a pure path computation, and the OpenCode mirror root is
+    /// derived from it off the main actor during a search backfill.
+    nonisolated static func defaultDirectory(debug: Bool = SessionDaemon.isDebugBuild) -> URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
                 .appendingPathComponent("Library/Application Support", isDirectory: true)
@@ -273,13 +280,14 @@ final class FileSessionPersistence: SessionPersisting {
     func load() -> SessionSnapshot? {
         if let data = try? Data(contentsOf: fileURL),
            let snapshot = try? JSONDecoder().decode(SessionSnapshot.self, from: data) {
-            return snapshot
+            return snapshot.restoringLaterAgents()
         }
         return migrateFromDefaults()
     }
 
     func save(_ snapshot: SessionSnapshot) {
-        guard let data = try? JSONEncoder().encode(snapshot) else { return }
+        // Written in the shape every build can read — see `AgentForwardCompatibility`.
+        guard let data = try? JSONEncoder().encode(snapshot.storedForOlderBuilds()) else { return }
         write(data)
     }
 
@@ -293,8 +301,9 @@ final class FileSessionPersistence: SessionPersisting {
     private func migrateFromDefaults() -> SessionSnapshot? {
         guard let legacyDefaults,
               let data = legacyDefaults.data(forKey: Self.legacyKey),
-              let snapshot = try? JSONDecoder().decode(SessionSnapshot.self, from: data)
+              let decoded = try? JSONDecoder().decode(SessionSnapshot.self, from: data)
         else { return nil }
+        let snapshot = decoded.restoringLaterAgents()
 
         guard write(data) else {
             Self.logger.warning("session migration deferred: file write failed")

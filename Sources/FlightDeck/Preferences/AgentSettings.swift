@@ -12,7 +12,7 @@ struct AgentSettings: Codable, Equatable {
 }
 
 extension AgentOptions: Codable {
-    private enum CodingKeys: String, CodingKey { case agent, flags, codex, grok, gemini }
+    private enum CodingKeys: String, CodingKey { case agent, flags, codex, grok, gemini, opencode }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -23,6 +23,7 @@ extension AgentOptions: Codable {
         // only knew the bare agent name must still decode.
         case .grok:   self = .grok(try c.decodeIfPresent(GrokOptions.self, forKey: .grok) ?? GrokOptions())
         case .gemini: self = .gemini(try c.decodeIfPresent(GeminiOptions.self, forKey: .gemini) ?? GeminiOptions())
+        case .opencode: self = .opencode(try c.decodeIfPresent(OpenCodeOptions.self, forKey: .opencode) ?? OpenCodeOptions())
         }
     }
 
@@ -34,6 +35,7 @@ extension AgentOptions: Codable {
         case .codex(let o):  try c.encode(o, forKey: .codex)
         case .grok(let o):   try c.encode(o, forKey: .grok)
         case .gemini(let o): try c.encode(o, forKey: .gemini)
+        case .opencode(let o): try c.encode(o, forKey: .opencode)
         }
     }
 }

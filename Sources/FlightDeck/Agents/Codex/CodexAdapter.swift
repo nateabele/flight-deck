@@ -151,6 +151,11 @@ struct CodexAdapter: AgentAdapter {
 
     static let searchCorpus: AgentSearchCorpus? = CodexSearchCorpus()
 
+    /// **`nil`.** A codex tab's turns run in the `codex resume` TUI that holds the thread's
+    /// writer lock, not through the app-server Flight Deck talks to, so no approval request
+    /// reaches Flight Deck with an id it could answer by.
+    static let promptResponder: AgentPromptResponder? = nil
+
     let rpc: CodexRPC
 
     /// Deadline for `read`, in seconds. `CodexRPC.request` has none of its own — only the

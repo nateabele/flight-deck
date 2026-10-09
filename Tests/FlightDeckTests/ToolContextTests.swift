@@ -153,6 +153,7 @@ final class ToolContextTests: XCTestCase {
         }
         static let openPromptReader: AgentOpenPromptReader? = ClaudeAdapter.openPromptReader
         static let searchCorpus: AgentSearchCorpus? = ClaudeAdapter.searchCorpus
+        static let promptResponder: AgentPromptResponder? = ClaudeAdapter.promptResponder
         static let pinned = UUID(uuidString: "99999999-8888-7777-6666-555555555555")!
 
         func prepare(for session: Session, options: AgentOptions) async throws -> AgentBinding {

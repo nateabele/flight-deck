@@ -14,8 +14,8 @@ enum TranscriptPointers {
     static let codexHowToRead = "Read the last 300 lines first (`tail -n 300`). response_item records hold the messages and tool calls; event_msg records hold tool output."
     static let grokFormat = "grok session updates, JSONL: one ACP session/update notification per line"
     static let grokHowToRead = "Read the last 200 lines first (`tail -n 200`). params.update.sessionUpdate names each record: user_message_chunk and agent_message_chunk hold the conversation, tool_call and tool_call_update the tools and their results."
-    static let openCodeFormat = "OpenCode session export, JSON"
-    static let openCodeHowToRead = "Run the command and read its output; the last messages show where the work stopped."
+    static let openCodeFormat = "Flight Deck's mirror of an OpenCode session, JSONL: one message per line"
+    static let openCodeHowToRead = "Read the last 100 lines first (`tail -n 100`). \"type\":\"message\" records carry role and parts: text and reasoning parts hold the words, tool parts the call (state.input) and its result (state.output). prompt.asked / prompt.resolved records are permission requests and questions."
 
     static func claude(session: Session, projectsRoot: URL,
                        exists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }) -> TranscriptPointer? {
@@ -52,11 +52,13 @@ enum TranscriptPointers {
         return TranscriptPointer(locator: .path(url.path), format: geminiFormat, howToRead: geminiHowToRead)
     }
 
-    /// For the OpenCode adapter when it merges: `opencode export` against local storage, or the
-    /// server's messages endpoint when the account runs its own server. Probe both against the
-    /// OpenCode branch before relying on them.
-    static func openCode(sessionID: String, serverURL: URL?) -> TranscriptPointer {
-        let command = serverURL.map { "curl -s \($0.absoluteString)/session/\(sessionID)/message" } ?? "opencode export \(sessionID)"
-        return TranscriptPointer(locator: .command(command), format: openCodeFormat, howToRead: openCodeHowToRead)
+    /// The tab's mirror (`OpenCodeMirror`): the one OpenCode history that is a plain file. Not
+    /// `opencode export`, which reads the built-in account's data unless `XDG_DATA_HOME` names
+    /// the tab's, nor the server's message endpoint, which answers only with the account
+    /// server's password — a hand-off reader has neither.
+    static func openCode(session: Session,
+                         exists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }) -> TranscriptPointer? {
+        guard let path = session.transcriptPath, exists(path) else { return nil }
+        return TranscriptPointer(locator: .path(path), format: openCodeFormat, howToRead: openCodeHowToRead)
     }
 }

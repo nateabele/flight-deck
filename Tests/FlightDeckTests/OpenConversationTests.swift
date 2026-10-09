@@ -436,6 +436,7 @@ final class OpenConversationTests: XCTestCase {
         }
         static let openPromptReader: AgentOpenPromptReader? = CodexAdapter.openPromptReader
         static let searchCorpus: AgentSearchCorpus? = CodexAdapter.searchCorpus
+        static let promptResponder: AgentPromptResponder? = CodexAdapter.promptResponder
         static let turnRecovery: AgentTurnRecovery? = CodexAdapter.turnRecovery
         let thread: UUID
 

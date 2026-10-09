@@ -47,6 +47,8 @@ public enum FailureDiagnosis {
                     action = haystack.contains("not eligible")
                         ? "Run `agy` in a terminal and verify your Google account"
                         : "Run `agy` in a terminal to sign in"
+                // OpenCode signs into providers, not an account (`opencode auth login`).
+                case .opencode?: action = "Run `opencode auth login` in a terminal"
                 }
             }
             return Diagnosis(category: .authExpired, detail: tail(stderr, errorText), action: action)

@@ -16,6 +16,9 @@ extension AgentID {
         // agy has no exit slash command anyone has verified — it leaves on Ctrl-C pressed twice,
         // which is a key sequence, not a message `submitPrompt` can type.
         case .gemini: return nil
+        // OpenCode's text channel is its API (`prompt_async`), not keystrokes: `/exit` sent that
+        // way is a message to the model, never a command to the attached TUI.
+        case .opencode: return nil
         }
     }
 }

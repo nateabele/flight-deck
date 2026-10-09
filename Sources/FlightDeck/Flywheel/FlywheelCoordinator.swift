@@ -57,6 +57,7 @@ enum FlywheelProgram {
         // `gemini-cli` (120s) would claim the retired Gemini CLI and split us from ntm.
         case .grok: "grok"
         case .gemini: "agy"
+        case .opencode: "opencode"
         }
     }
 }

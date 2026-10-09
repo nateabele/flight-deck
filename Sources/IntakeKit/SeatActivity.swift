@@ -211,6 +211,67 @@ public struct ActivityParser: Sendable {
         case .grok: foldGrok(type, obj)
         // Unreachable: gemini (agy) tags its events `event`, so it is folded above.
         case .gemini: break
+        case .opencode: foldOpenCode(type, obj)
+        }
+    }
+
+    /// `opencode run --format json` (opencode 1.18.34): `step_start`, then per part a `text` or
+    /// `tool_use` event (`part.tool`, `part.state.input`), then `step_finish` with that step's
+    /// `tokens` and `cost`; a failure is an `error` event. A turn is several steps — one per
+    /// tool round — and only the last ends with `reason: "stop"`.
+    private mutating func foldOpenCode(_ type: String, _ obj: [String: Any]) {
+        let part = obj["part"] as? [String: Any] ?? [:]
+        switch type {
+        case "text":
+            // The model's words while it works, as for agy — never the structured answer itself.
+            if let text = part["text"] as? String,
+               let lead = text.trimmingCharacters(in: .whitespacesAndNewlines).first, !"{[`".contains(lead) {
+                setHeadline(text)
+            }
+        case "tool_use":
+            let state = part["state"] as? [String: Any] ?? [:]
+            foldOpenCodeTool(part["tool"] as? String ?? "", state["input"] as? [String: Any] ?? [:])
+        case "step_finish":
+            if let tokens = part["tokens"] as? [String: Any] {
+                let cache = tokens["cache"] as? [String: Any] ?? [:]
+                activity.inputTokens = (activity.inputTokens ?? 0) + int(tokens["input"]) + int(cache["read"])
+                activity.outputTokens = (activity.outputTokens ?? 0) + int(tokens["output"]) + int(tokens["reasoning"])
+            }
+            if let cost = part["cost"] as? Double { activity.costUSD = (activity.costUSD ?? 0) + cost }
+            if part["reason"] as? String == "stop" { activity.finished = true }
+        case "error":
+            activity.error = OpenCodeProfile.errorMessage(obj) ?? "error"
+        default: break
+        }
+    }
+
+    /// OpenCode's built-in tool ids. Its file tools name their path `filePath`.
+    private mutating func foldOpenCodeTool(_ name: String, _ input: [String: Any]) {
+        let path = ["filePath", "path", "file_path"].lazy.compactMap { input[$0] as? String }.first
+        switch name {
+        case "read":
+            if let path { touch(path) }
+            activity.action = ActivityAction(verb: "Reading", object: path.map(display))
+        case "edit", "write", "patch", "multiedit":
+            if let path { touch(path) }
+            activity.action = ActivityAction(verb: "Editing", object: path.map(display))
+        case "grep":
+            activity.action = ActivityAction(verb: "Searching", object: (input["pattern"] as? String).map(quoted))
+        case "glob", "list":
+            activity.action = ActivityAction(verb: "Listing", object: (input["pattern"] as? String ?? path).map(display))
+        case "bash":
+            if let command = input["command"] as? String { foldCommand(command, unwrapShell: false) }
+        case "webfetch":
+            activity.action = ActivityAction(verb: "Fetching", object: input["url"] as? String)
+        case "todowrite":
+            let todos = input["todos"] as? [[String: Any]] ?? []
+            let done = todos.filter { $0["status"] as? String == "completed" }.count
+            let active = todos.first { $0["status"] as? String == "in_progress" }
+                ?? todos.first { $0["status"] as? String != "completed" }
+            activity.steps = ActivitySteps(done: done, total: todos.count,
+                                           current: active.flatMap { $0["content"] as? String })
+        default:
+            activity.action = ActivityAction(verb: "Using", object: name.isEmpty ? nil : name)
         }
     }
 

@@ -22,6 +22,9 @@ public enum AgentID: String, Codable, CaseIterable, Sendable, CodingKeyRepresent
     case codex
     case grok
     case gemini
+    /// OpenCode (`opencode`). Its tabs are `opencode attach` clients of one `opencode serve` per
+    /// account (`OpenCodeAdapter`); headless planning runs `opencode run` (`OpenCodeProfile`).
+    case opencode
 
     public var displayName: String {
         switch self {
@@ -29,6 +32,7 @@ public enum AgentID: String, Codable, CaseIterable, Sendable, CodingKeyRepresent
         case .codex: "Codex"
         case .grok: "Grok"
         case .gemini: "Gemini"
+        case .opencode: "OpenCode"
         }
     }
 
@@ -43,14 +47,18 @@ public enum AgentID: String, Codable, CaseIterable, Sendable, CodingKeyRepresent
     /// Planning availability is NOT this: a planning run is headless, and whether an agent is
     /// offered there stays sign-in detected (`IntakeService.available()`).
     ///
-    /// Tracks G and M flip their agent here when its adapter passes its tests — one line, one
-    /// place, so "can it run a tab" can never be answered two ways.
+    /// An agent is flipped here when its adapter passes its tests — one line, one place, so
+    /// "can it run a tab" can never be answered two ways.
     public var tabReady: Bool {
         if let override = Self.tabReadyOverride { return override.contains(self) }
         return switch self {
         // grok: Track G's `GrokAdapter`, built from a live probe of grok 1.0.30's TUI.
         // gemini: Track M's `GeminiAdapter` drives agy (unify brief R5), proved by its own suite.
         case .claude, .codex, .grok, .gemini: true
+        // opencode: the 1.18.34-probed adapter, ported onto the unified model; its suite
+        // (Tests/FlightDeckTests/OpenCode) and the live fake-model run
+        // (`scripts/test-opencode-live.sh`) pass.
+        case .opencode: true
         }
     }
 
@@ -69,5 +77,5 @@ public enum AgentID: String, Codable, CaseIterable, Sendable, CodingKeyRepresent
     /// cross-check fallback search them: codex first. This was `Harness.allCases`' order, and the
     /// round presets are built around it (seat "A" is codex when codex is installed), so it is
     /// kept verbatim rather than inheriting the tab side's claude-first order.
-    public static let planningOrder: [AgentID] = [.codex, .claude, .grok, .gemini]
+    public static let planningOrder: [AgentID] = [.codex, .claude, .grok, .gemini, .opencode]
 }

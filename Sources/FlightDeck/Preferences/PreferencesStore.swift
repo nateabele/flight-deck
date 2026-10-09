@@ -24,11 +24,14 @@ final class UserDefaultsPreferencesPersistence: PreferencesPersisting {
 
     func load() -> Preferences? {
         guard let data = defaults.data(forKey: key) else { return nil }
-        return try? JSONDecoder().decode(Preferences.self, from: data)
+        return (try? JSONDecoder().decode(Preferences.self, from: data))?.restoringLaterAgents()
     }
 
     func save(_ preferences: Preferences) {
-        guard let data = try? JSONEncoder().encode(preferences) else { return }
+        // Written in the shape every build can read. A Debug build shares this defaults domain
+        // with the installed Release, so this is the file an older build reads next — see
+        // `AgentForwardCompatibility`.
+        guard let data = try? JSONEncoder().encode(preferences.storedForOlderBuilds()) else { return }
         defaults.set(data, forKey: key)
     }
 }
@@ -229,6 +232,7 @@ final class PreferencesStore: ObservableObject {
         case (.codex(let g), .codex(let p)?):   return .codex(CodexThreadOptions.merge(global: g, project: p))
         case (.grok(let g), .grok(let p)?):     return .grok(GrokOptions.merge(global: g, project: p))
         case (.gemini(let g), .gemini(let p)?): return .gemini(GeminiOptions.merge(global: g, project: p))
+        case (.opencode(let g), .opencode(let p)?): return .opencode(OpenCodeOptions.merge(global: g, project: p))
         case (let g, _):                        return g
         }
     }

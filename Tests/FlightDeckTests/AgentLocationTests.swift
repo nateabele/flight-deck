@@ -73,6 +73,7 @@ final class AgentLocationTests: XCTestCase {
         }
         static let openPromptReader: AgentOpenPromptReader? = ClaudeAdapter.openPromptReader
         static let searchCorpus: AgentSearchCorpus? = ClaudeAdapter.searchCorpus
+        static let promptResponder: AgentPromptResponder? = ClaudeAdapter.promptResponder
         func prepare(for session: Session, options: AgentOptions) async throws -> AgentBinding {
             binding(for: session)
         }

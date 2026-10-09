@@ -845,6 +845,91 @@ final class SessionStore: ObservableObject {
     /// must not clear a guard the first still needs.
     private var codexCreationsInFlight: [UUID?: Int] = [:]
 
+    /// OpenCode's half of the adapter/runtime registries: the account's `opencode serve`, and
+    /// the adapter and runtime that both speak to it. Held together for `CodexStack`'s reason —
+    /// neither is usable without the server the other also points at.
+    @MainActor
+    private final class OpenCodeStack {
+        let server: OpenCodeServing
+        let adapter: OpenCodeAdapter
+        let runtime: OpenCodeRuntime
+
+        init(
+            server: OpenCodeServing,
+            searchIndex: @escaping () -> SearchIndex?,
+            projectPath: @escaping (UUID) -> String?,
+            workingDirectory: @escaping (UUID) -> String?
+        ) {
+            self.server = server
+            adapter = OpenCodeAdapter(server: server)
+            runtime = OpenCodeRuntime(
+                server: server, searchIndex: searchIndex,
+                projectPath: projectPath, workingDirectory: workingDirectory
+            )
+        }
+    }
+
+    /// One per account, built on first use, like `codexStacks` — and building one starts
+    /// nothing: `startOpenCode` is the only thing that adopts or spawns a server.
+    private var openCodeStacks: [UUID?: OpenCodeStack] = [:]
+
+    /// The start in flight per account, so N tabs created at once wait on one spawn. Cleared
+    /// when it finishes, success or not, because `OpenCodeServer.start` re-checks health and is
+    /// cheap to repeat, and a server that died between two creations must be noticed by the
+    /// second one rather than answered from a stale success.
+    private var openCodeStarts: [UUID?: Task<Void, Error>] = [:]
+
+    /// `codexCreationsInFlight`'s twin: a creation between "asked for a server" and "tab
+    /// inserted" must not have that server stopped under it by a concurrent close.
+    private var openCodeCreationsInFlight: [UUID?: Int] = [:]
+
+    /// Test seam: what serves an account's home. The committed suite installs a fake, so no
+    /// test ever spawns `opencode`.
+    var openCodeServerFactory: (URL) -> OpenCodeServing = { OpenCodeServer(home: $0) }
+
+    var openCodeStackCountForTesting: Int { openCodeStacks.count }
+
+    private func makeOpenCodeStackIfNeeded(account: UUID?) -> OpenCodeStack {
+        if let existing = openCodeStacks[account] { return existing }
+        // Live closures for the same reason `makeCodexStackIfNeeded` gives.
+        let stack = OpenCodeStack(
+            server: openCodeServerFactory(home(ofAccount: account, agent: .opencode)),
+            searchIndex: { [weak self] in self?.searchIndex },
+            projectPath: { [weak self] conversationID in
+                self?.repos.flatMap(\.sessions)
+                    .first { $0.pinnedConversationID == conversationID }?.workingDirectory
+            },
+            workingDirectory: { [weak self] conversationID in
+                self?.repos.flatMap(\.sessions)
+                    .first { $0.pinnedConversationID == conversationID }?.transcriptDirectory
+            }
+        )
+        openCodeStacks[account] = stack
+        return stack
+    }
+
+    private func startOpenCode(account: UUID?) async throws {
+        if let running = openCodeStarts[account] { return try await running.value }
+        let stack = makeOpenCodeStackIfNeeded(account: account)
+        let task = Task { @MainActor in try await stack.server.start() }
+        openCodeStarts[account] = task
+        defer { openCodeStarts[account] = nil }
+        try await task.value
+    }
+
+    /// Stops one account's server once its last OpenCode tab is gone. Nothing is lost by it —
+    /// every session is in the account's database — and a server left running would hold a
+    /// port and a model connection for tabs that no longer exist. Quitting Flight Deck does NOT
+    /// come through here: see `OpenCodeServer` for why the server outlives the app.
+    private func stopOpenCodeIfUnused(account: UUID?) {
+        guard let stack = openCodeStacks[account] else { return }
+        guard openCodeCreationsInFlight[account, default: 0] == 0 else { return }
+        let live = AgentInstance(agent: .opencode, account: account)
+        guard !repos.flatMap(\.sessions).contains(where: { instance(for: $0) == live }) else { return }
+        stack.server.stop()
+        openCodeStacks[account] = nil
+    }
+
     /// Every codex thread this run has seen a tab pinned to, whether or not a tab still holds
     /// it. `reconcileCodexPins` treats all of them as untakeable.
     ///
@@ -1152,6 +1237,10 @@ final class SessionStore: ObservableObject {
             })
         case .gemini:
             adapter = GeminiAdapter(paths: geminiPaths)
+        case .opencode:
+            // From the account's stack, like codex, and for codex's reason: the adapter is
+            // useless without the server the runtime also watches.
+            return makeOpenCodeStackIfNeeded(account: instance.account).adapter
         }
         adapters[instance] = adapter
         return adapter
@@ -1179,6 +1268,8 @@ final class SessionStore: ObservableObject {
         switch instance.agent {
         case .codex:
             return makeCodexStackIfNeeded(account: instance.account).runtime
+        case .opencode:
+            return makeOpenCodeStackIfNeeded(account: instance.account).runtime
         case .grok:
             // grok's per-session files, tailed on the shared clock; see `GrokRuntime`. The
             // search closures are `ClaudeRuntime`'s below, for the same reasons.
@@ -2919,9 +3010,22 @@ final class SessionStore: ObservableObject {
         // could be killed between `thread/start` and `thread/name/set`, which evaporates the
         // thread, because naming is what commits it — under the `legacy` history contract
         // `CodexAdapter.historyMode` pins.
-        codexCreationsInFlight[instance.account, default: 0] += 1
+        //
+        // OpenCode keeps its own count, for the same reason against its own server: a close of
+        // the account's last OpenCode tab mid-creation must not stop the server this session is
+        // being created on.
+        if agent == .opencode {
+            openCodeCreationsInFlight[instance.account, default: 0] += 1
+        } else {
+            codexCreationsInFlight[instance.account, default: 0] += 1
+        }
         defer {
-            codexCreationsInFlight[instance.account, default: 0] -= 1
+            if agent == .opencode {
+                openCodeCreationsInFlight[instance.account, default: 0] -= 1
+                stopOpenCodeIfUnused(account: instance.account)
+            } else {
+                codexCreationsInFlight[instance.account, default: 0] -= 1
+            }
             // Deferred, not skipped. A tab closed while this was in flight had its teardown
             // declined above; if this creation failed, nothing else will ever run it, and the
             // app-server would outlive every codex tab. A creation that SUCCEEDED inserted
@@ -2973,7 +3077,7 @@ final class SessionStore: ObservableObject {
         // `codexThreadsEverPinned`. Recorded here rather than left to `repinCodex`, which this
         // path never calls: a thread this tab was born on must stay untakeable by its
         // neighbours even after the tab is closed.
-        codexThreadsEverPinned.insert(binding.conversationID)
+        if agent == .codex { codexThreadsEverPinned.insert(binding.conversationID) }
         let adapter = adapter(for: instance)
         addSession(
             session,
@@ -3037,6 +3141,7 @@ final class SessionStore: ObservableObject {
             model = codexOptions.model ?? "codex"
         case .grok(let grokOptions): model = grokOptions.model ?? "grok"
         case .gemini(let geminiOptions): model = GeminiAdapter.model(for: geminiOptions)
+        case .opencode(let openCodeOptions): model = openCodeOptions.model ?? "opencode"
         }
         let coordinator = flywheelCoordinator
         let program = FlywheelProgram.rawValue(for: agent)
@@ -3445,6 +3550,10 @@ final class SessionStore: ObservableObject {
         if instance.agent == .codex { startCodexPinReconcilerIfNeeded() }
         if let registered = adapters[instance] { return registered }
         guard instance.agent.needsRuntimeStart else { return adapter(for: instance) }
+        if instance.agent == .opencode {
+            try await startOpenCode(account: instance.account)
+            return makeOpenCodeStackIfNeeded(account: instance.account).adapter
+        }
         try await startCodex(account: instance.account)
         return makeCodexStackIfNeeded(account: instance.account).adapter
     }
@@ -3523,6 +3632,8 @@ final class SessionStore: ObservableObject {
             return .prepareFailed(message)
         case CodexRPCError.malformed(let what):
             return .prepareFailed("Codex sent something unusable (\(what)).")
+        case let openCode as OpenCodeError:
+            return .agentFailed(agent: "OpenCode", why: openCode.errorDescription ?? String(describing: openCode))
         default:
             return .prepareFailed(
                 (error as? LocalizedError)?.errorDescription ?? String(describing: error)
@@ -4314,7 +4425,10 @@ final class SessionStore: ObservableObject {
             // already had is typed — the degraded path's own contract.
             let prepared = preparedPerAccount[instance] ?? nil
             let adapter = prepared ?? self.adapter(for: instance)
-            let options = options(for: .codex, project: session.workingDirectory)
+            // The tab's own agent: codex and OpenCode both restore through here (every agent
+            // that negotiates identity does), and OpenCode's `rebind` creates a fresh session
+            // with these options when the pinned one was deleted.
+            let options = options(for: session.agent, project: session.workingDirectory)
 
             var binding = adapter.binding(for: session)
             if prepared != nil,
@@ -4336,6 +4450,12 @@ final class SessionStore: ObservableObject {
             // cannot reach the app-server must still produce a usable tab.
             if prepared != nil, let codexAdapter = adapter as? CodexAdapter,
                let read = try? await codexAdapter.read(binding), let title = read.title {
+                apply(.title(title), to: tabID)
+            }
+            // OpenCode's twin of the read above: the session row's own title, for a rename
+            // made in a TUI while Flight Deck was closed. Its event stream starts live, too.
+            if prepared != nil, let openCode = adapter as? OpenCodeAdapter,
+               let title = await openCode.title(of: binding, directory: repinned.transcriptDirectory) {
                 apply(.title(title), to: tabID)
             }
 
@@ -4556,8 +4676,9 @@ final class SessionStore: ObservableObject {
         guard let at = locate(tabID) else { return }
         // The chokepoint for both re-pinning callers — see `codexThreadsEverPinned`. Includes
         // the candidate `reconcileCodexPins` has just adopted, so a thread stays this tab's
-        // even after it closes.
-        codexThreadsEverPinned.insert(binding.conversationID)
+        // even after it closes. Codex only: an OpenCode tab re-pinned by `rebind` (its session
+        // was deleted) comes through here too, and its id is not a codex thread.
+        if repos[at.repo].sessions[at.session].agent == .codex { codexThreadsEverPinned.insert(binding.conversationID) }
         repos[at.repo].sessions[at.session].pinnedConversationID = binding.conversationID
         repos[at.repo].sessions[at.session].transcriptPath = binding.transcriptURL?.path
         stopWatching(tabID)
@@ -4864,6 +4985,7 @@ final class SessionStore: ObservableObject {
         // store with no accounts configured at all, where the one nil key serves everything
         // and closing any tab runs exactly the check it always did.
         stopCodexIfUnused(account: closed.account)
+        stopOpenCodeIfUnused(account: closed.account)
         // Not per account, unlike the line above: the reconciler is one object covering every
         // login, so it goes only when the last codex tab anywhere has gone.
         stopCodexPinReconcilerIfUnused()
@@ -6186,6 +6308,23 @@ final class SessionStore: ObservableObject {
             // answers `Conversation renamed to: <name>` and rewrites `annotations/<id>.pbtxt`),
             // so it takes claude's queued composer route; `GeminiAdapter.renameTyping` is nil.
             injectPendingRename(id, name)
+        case .opencode:
+            // The wire call alone, and that is the whole rename: OpenCode's server owns the
+            // title and every attached TUI redraws it from the server's own `session.updated`
+            // event (live-probed: the header changed within a second with nothing typed). There
+            // is no pty half to type — see `OpenCodeAdapter.renameTyping`. Logged for codex's
+            // reason: a failure must leave evidence even though it does not alert.
+            let adapter = adapter(for: instance(for: session))
+            let binding = adapter.binding(for: session)
+            Task {
+                do {
+                    try await adapter.rename(binding, to: name)
+                } catch {
+                    Self.renameLogger.error(
+                        "opencode rename failed for \(binding.conversationID.uuidString.lowercased(), privacy: .public): \(String(describing: error), privacy: .public)"
+                    )
+                }
+            }
         }
         // True means the name was ACCEPTED and the local title changed — not that the agent
         // has been told. The codex arm above is deliberately fire-and-forget and the claude
@@ -6640,7 +6779,21 @@ final class SessionStore: ObservableObject {
         _ open: OpenPrompt, with answer: PromptAnswer, in id: UUID, token: UUID
     ) -> AnswerDispatch {
         guard let at = locate(id) else { return .unknownSession }
-        guard let driver = repos[at.repo].sessions[at.session].agent.dialogDriver else {
+        let agent = repos[at.repo].sessions[at.session].agent
+        // **By request id first, when the agent can be answered that way** — see
+        // `AgentAdapter.promptResponder` for why it outranks a drive. The guards it keeps are
+        // the ones that are not about the screen: the duplicate token, and `waiting`. An answer
+        // for a prompt that is no longer pending fails on the agent's server rather than
+        // landing anywhere, so the screen interlocks below have nothing left to protect.
+        if let responder = agent.promptResponder {
+            if answeredPromptTokens[id, default: []].contains(token) { return .duplicate }
+            guard statuses[id]?.activity == .waiting else { return .notWaiting }
+            guard let target = agentTarget(for: id) else { return .unknownSession }
+            guard responder.answer(open, with: answer, for: target) else { return .unanswerable }
+            remember(answered: token, for: id)
+            return .dispatched
+        }
+        guard let driver = agent.dialogDriver else {
             return .unsupportedAgent
         }
         if answeredPromptTokens[id, default: []].contains(token) { return .duplicate }
@@ -6954,7 +7107,14 @@ final class SessionStore: ObservableObject {
             return .unreadableScreen
         }
         remember(answered: token, for: id)
-        driver.deny(injector)
+        // An agent that can refuse by request id does, rather than sending a blind key — it
+        // rejects exactly what is pending, subagents' requests included.
+        if let responder = repos[at.repo].sessions[at.session].agent.promptResponder,
+           let target = agentTarget(for: id) {
+            responder.abort(for: target)
+        } else {
+            driver.deny(injector)
+        }
         return .dispatched
     }
 
@@ -7548,7 +7708,37 @@ final class SessionStore: ObservableObject {
         // so it is the one place that can refuse a second injection for a tab that already
         // has one resolving.
         guard !injecting.contains(id) else { return nil }
-        return (channel, injector)
+        // Handed over ADDRESSED. The screen-driven channels never look past the
+        // `TextInjecting` they receive, and this still is one; a channel that delivers over its
+        // agent's own API needs to know which conversation and which account's server — see
+        // `TargetedInjector`.
+        guard let target = agentTarget(for: id) else { return (channel, injector) }
+        return (channel, TargetedInjector(base: injector, target: target))
+    }
+
+    /// The tab's agent and where it is working, as `AgentTarget`. Nil for a tab the store no
+    /// longer holds — or whose adapter has not been built.
+    ///
+    /// Only an adapter that ALREADY exists is used. `adapter(for:)` builds on a miss, and the
+    /// injection gate runs for every agent's tabs: an orphaned codex tab, whose account
+    /// collapses to the nil key, would otherwise get an unstarted nil-account codex stack built
+    /// behind it on every injection. A live tab's adapter exists by the time anything is typed
+    /// into it, because attaching its runtime built it.
+    private func agentTarget(for id: UUID) -> AgentTarget? {
+        guard let session = session(for: id) else { return nil }
+        let instance = instance(for: session)
+        let adapter: (any AgentAdapter)?
+        if let registered = adapters[instance] {
+            adapter = registered
+        } else {
+            switch instance.agent {
+            case .codex: adapter = codexStacks[instance.account]?.adapter
+            case .opencode: adapter = openCodeStacks[instance.account]?.adapter
+            case .claude, .grok, .gemini: adapter = nil
+            }
+        }
+        guard let adapter else { return nil }
+        return AgentTarget(adapter: adapter, location: adapter.location(for: session))
     }
 
     /// **The tab's reported readiness, re-checked against the process at the instant of

@@ -205,6 +205,10 @@ public enum OpenPrompt: Equatable, Sendable {
     ///   grok joined when its Mac gained a keyed dialog driver (`GrokDialogDriver`): its
     ///   transcript pairs `tool_call`/`tool_call_update` the way claude's pairs
     ///   `tool_use`/`tool_result`, so the same rule reads it.
+    ///   `opencode` joined by a third route: its Mac answers over OpenCode's own reply
+    ///   endpoints, by request id, with no keystroke at all (`OpenCodePromptResponder`). Its
+    ///   feed carries the request id as the call id, so the pairing below needs nothing
+    ///   agent-specific.
     ///
     ///   This is presentation only. The refusal that protects a terminal is
     ///   `SessionStore.answerPrompt`'s, over on the Mac, and it is not weakened by anything
@@ -226,7 +230,7 @@ public enum OpenPrompt: Equatable, Sendable {
     public static func find(
         in items: [TimelineItem], agent: String?, activity: String?
     ) -> OpenPrompt? {
-        guard agent == "claude" || agent == "grok" else { return nil }
+        guard agent == "claude" || agent == "grok" || agent == "opencode" else { return nil }
         guard activity == "waiting" else { return nil }
 
         // Built from the WHOLE feed first. A merged feed can hold a result above its own call

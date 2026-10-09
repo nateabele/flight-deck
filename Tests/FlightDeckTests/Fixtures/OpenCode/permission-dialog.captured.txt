@@ -1,0 +1,47 @@
+
+  ┃                                                                                                                     session 8
+  ┃  RUN_LS please
+  ┃                                                                                                                     Context
+                                                                                                                        0 tokens
+  ┃                                                                                                                     0% used
+  ┃  $ ls                                                                                                               $0.00 spent
+  ┃
+  ┃  (no output)                                                                                                        LSP
+  ┃                                                                                                                     LSPs are disabled
+
+     Tool finished.
+
+     ▣  Build · fake-model · 1m 38s
+
+  ┃
+  ┃  RUN_LS again
+  ┃
+
+     $ ls
+
+     ▣  Build · fake-model
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  ┃
+  ┃  △ Permission required
+  ┃    # Shell command
+  ┃                                                                                                                     /private/tmp/claude-501/-Users-me-
+  ┃  $ ls                                                                                                               Projects-flight-deck/
+  ┃                                                                                                                     c2d6bebb-899f-475d-b216-6ead77244eeb/
+  ┃                                                                                                                     scratchpad/fx/proj2
+  ┃   Allow once   Allow always   Reject                               ctrl+f fullscreen  ⇆ select  enter confirm
+  ┃                                                                                                                     • OpenCode 1.18.34

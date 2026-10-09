@@ -105,6 +105,7 @@ extension AgentOptions {
         // No fields yet, so nothing to override; `==` keeps this right once fields arrive.
         case .grok(let options): return options == GrokOptions()
         case .gemini(let options): return options == GeminiOptions()
+        case .opencode(let options): return options.isEmpty
         }
     }
 }

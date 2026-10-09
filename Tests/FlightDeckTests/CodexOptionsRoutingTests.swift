@@ -53,6 +53,7 @@ final class CodexOptionsRoutingTests: XCTestCase {
         }
         static let openPromptReader: AgentOpenPromptReader? = CodexAdapter.openPromptReader
         static let searchCorpus: AgentSearchCorpus? = CodexAdapter.searchCorpus
+        static let promptResponder: AgentPromptResponder? = CodexAdapter.promptResponder
         private(set) var prepared: [AgentOptions] = []
 
         func prepare(for session: Session, options: AgentOptions) async throws -> AgentBinding {

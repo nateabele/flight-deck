@@ -1,0 +1,14 @@
+{
+  "captured": "2026-10-04",
+  "opencode": "1.18.34 (opencode serve + opencode attach)",
+  "model": "scripts/opencodeprobe/fake_llm.py behind @ai-sdk/openai-compatible, so every turn is reproducible",
+  "isolation": "XDG_DATA_HOME, XDG_STATE_HOME and XDG_CONFIG_HOME pointed at a scratch directory; OPENCODE_SERVER_PASSWORD set; permission bash=ask, edit=ask",
+  "screens": {
+    "method": "the TUI ran under a pty mirrored into a pyte 160x48 screen; text exactly as pyte rendered it, trailing spaces kept",
+    "caveat": "pyte does not emulate the alternate screen (ESC[?1049h/l), which OpenCode uses. after-exit.captured.txt was therefore re-rendered by replaying the raw byte stream with the alternate screen emulated, which is what Ghostty shows; every other screen was captured while the TUI owned the (alternate) screen, where the distinction does not arise",
+    "path-scrub": "the scratch directory was replaced by /Users/dev/work where it appeared whole; fragments wrapped across lines were left as rendered"
+  },
+  "global-events.captured.jsonl": "GET /global/event during the same run, message.part.delta / server.heartbeat / plugin.added / sync / catalog.updated lines removed",
+  "esc-abort-events.captured.jsonl": "GET /global/event from an earlier isolated server whose model was a real Ollama glm-4.7-flash; the session.status / session.error / session.idle lines of one session around Esc-Esc pressed in its attached TUI",
+  "opencode.captured.db": "the run's opencode.db, copied with sqlite3 .backup and VACUUMed out of WAL mode"
+}

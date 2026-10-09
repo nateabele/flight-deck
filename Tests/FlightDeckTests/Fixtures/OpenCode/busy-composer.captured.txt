@@ -1,0 +1,47 @@
+     Tool finished.
+                                                                                                                        session 8
+     ▣  Build · fake-model · 1m 38s
+                                                                                                                        Context
+  ┃                                                                                                                     0 tokens
+  ┃  RUN_LS again                                                                                                       0% used
+  ┃                                                                                                                     $0.00 spent
+
+  ┃                                                                                                                     LSP
+  ┃  $ ls                                                                                                               LSPs are disabled
+  ┃
+  ┃  b.txt
+  ┃
+
+     Tool finished.
+
+     ▣  Build · fake-model · 23.3s
+
+  ┃
+  ┃  ASK_QUESTION now
+  ┃
+
+  ┃
+  ┃  # Questions
+  ┃
+  ┃  Proceed with the fake task?
+  ┃  Yes
+  ┃
+
+     Tool finished.
+
+     ▣  Build · fake-model · 4.3s
+
+  ┃
+  ┃  SLOW please
+  ┃
+
+     tick 0. tick 1. tick 2. tick 3. tick 4. tick 5.
+
+     ▣  Build · fake-model
+
+  ┃                                                                                                                     /private/tmp/claude-501/-Users-me-
+  ┃  my unsent draft                                                                                                    Projects-flight-deck/
+  ┃                                                                                                                     c2d6bebb-899f-475d-b216-6ead77244eeb/
+  ┃  Build · fake-model Fake                                                                                            scratchpad/fx/proj2
+  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+   ⬝⬝⬝⬝⬝⬝⬝⬝  esc interrupt                                                               tab agents  ctrl+p commands    • OpenCode 1.18.34

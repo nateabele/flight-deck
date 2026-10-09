@@ -52,11 +52,12 @@ final class LaunchOverrideMappingTests: XCTestCase {
     }
 
     /// Every routable agent maps a model override onto its own options. gemini takes only a
-    /// Gemini slug (`GeminiLaunchOverrides`), so it is asked with one.
+    /// Gemini slug (`GeminiLaunchOverrides`) and opencode only `provider/model`
+    /// (`OpenCodeLaunchOverrides`), so each is asked with one.
     func testStandardRegistrySupportsOverridesForEveryRoutableAgent() {
         let registry = RoutingCapabilityRegistry.standard()
         for id in AgentID.tabReadyCases {
-            let model = id == .gemini ? "gemini-3.8-flash-low" : "m"
+            let model = id == .gemini ? "gemini-3.8-flash-low" : id == .opencode ? "ollama/m" : "m"
             guard case .supported = registry.capabilities(for: id)!
                 .applying(LaunchOverrides(model: model, knobs: [:]), to: AgentOptions.empty(for: id)) else {
                 return XCTFail("\(id) should map a model override")

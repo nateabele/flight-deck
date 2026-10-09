@@ -69,7 +69,11 @@ struct PromptComposer: View {
         // Neither goes through an agent API — codex's would refuse anyway, because its tab
         // holds the thread's writer lock. An agent this build has never heard of is refused
         // here, which is right: nobody knows where its input box is or what it looks like.
-        guard session.agent == "claude" || session.agent == "codex" || session.agent == "grok" else {
+        //
+        // opencode is typeable by a third route, its own API: the Mac sends the message to the
+        // session's server (`prompt_async`), which queues it behind a running turn.
+        guard session.agent == "claude" || session.agent == "codex" || session.agent == "grok"
+            || session.agent == "opencode" else {
             return "Flight Deck can't type into a \(session.agent) session from here."
         }
         // `nil` is "no agent process registered" and is NOT `idle` — a statusless tab has no

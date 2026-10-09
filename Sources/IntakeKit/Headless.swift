@@ -279,7 +279,38 @@ public enum HeadlessCommand {
             // `GeminiProfile.isGeminiModel`), so it is refused, never run.
             guard GeminiProfile.isGeminiModel(r.model) else { throw .modelOutsideFamily(agent: r.agent, model: r.model) }
             return ("agy", geminiArguments(r), [])
+        case .opencode:
+            return ("opencode", openCodeArguments(r), [])
         }
+    }
+
+    /// Every headless `opencode run` (probed on opencode 1.18.34, 2026-10-09 — see
+    /// `OpenCodeProfile` for each fact):
+    /// - `--format json`: one event per line, each with `sessionID`; the answer is the last
+    ///   message's text (`OpenCodeProfile.parse`).
+    /// - the schema rides in the prompt — `run` has no schema flag — and `SchemaRepair` resumes
+    ///   once on an answer that does not validate;
+    /// - `--agent` picks one of the two agents `OpenCodeProfile.environment(…arguments:)`
+    ///   defines: read-only (read/grep/glob/list, nothing else exists) or the integrator (those
+    ///   plus edits under `--dir` only). Never `--auto`, which approves everything not denied;
+    /// - `--dir` is the cwd, stated so the integrator's edit rule is rooted where the run is;
+    /// - `-m` only when a model is set: empty means OpenCode's own configured default, and
+    ///   `--variant` only when an effort is (it is provider-specific).
+    /// Resume is `-s <id>` — the id the run itself reported, never `--continue`, which resumes
+    /// the most recent session (another seat's, with parallel seats).
+    static func openCodeArguments(_ r: HeadlessRequest) -> [String] {
+        let agent: String
+        switch r.access {
+        case .readOnly: agent = OpenCodeProfile.readOnlyAgent
+        case .writeInWork: agent = OpenCodeProfile.integratorAgent
+        }
+        var args = ["run", "--format", "json", "--agent", agent, "--dir", r.cwd.path]
+        if !r.model.isEmpty { args += ["-m", r.model] }
+        if !r.effort.isEmpty { args += ["--variant", r.effort] }
+        if let s = r.resumeSessionID { args += ["-s", s] }
+        // The message last, after `--`, so a prompt that starts with `-` stays a message.
+        args += ["--", r.prompt + OpenCodeProfile.schemaInstruction(r.schemaJSON)]
+        return args
     }
 
     /// Appended to every read-only agy seat's prompt. agy ends a headless turn with NO answer
@@ -349,6 +380,10 @@ public enum HeadlessCommand {
         // grok child, triage and round alike, must come through here.
         case GrokProfile().binaryName: environment = GrokProfile().environment(base: base, account: account)
         case GeminiProfile().binaryName: environment = GeminiProfile().environment(base: base, account: account)
+        // The seat's permission set is environment (`OPENCODE_CONFIG_CONTENT`), not argv — so,
+        // like grok's isolation, every opencode child must come through here.
+        case OpenCodeProfile().binaryName:
+            environment = OpenCodeProfile().environment(base: base, account: account, arguments: command.arguments)
         default: environment = base
         }
         for key in command.unsetEnvironment { environment.removeValue(forKey: key) }
@@ -405,7 +440,22 @@ public enum HeadlessOutput {
             return try grokParse(stdout)
         case .gemini:
             return try geminiParse(stdout)
+        case .opencode:
+            return try openCodeParse(stdout)
         }
+    }
+
+    /// `opencode run --format json` (see `OpenCodeProfile.parse`). An `error` event wins over
+    /// any answer — `run` exits 0 on a failed turn, so it is the only failure signal there is.
+    private static func openCodeParse(_ stdout: Data) throws -> (sessionID: String, structured: Data) {
+        let run = OpenCodeProfile.parse(stdout)
+        if let error = run.error { throw ParseError.isError(error) }
+        guard let session = run.sessionID else { throw ParseError.noSession }
+        guard let answer = run.answer else { throw ParseError.noResult }
+        let text = OpenCodeProfile.jsonText(in: answer)
+        let data = Data(text.utf8)
+        guard (try? JSONSerialization.jsonObject(with: data)) != nil else { throw ParseError.notJSON(answer) }
+        return (session, data)
     }
 
     /// grok `--output-format streaming-messages-json`: NDJSON whose every line carries
@@ -486,7 +536,13 @@ public enum HeadlessOutput {
     /// still be resumed (`SchemaRepair`). agy only: claude and codex runs keep reporting no
     /// session on a parse failure, exactly as before.
     public static func reportedSession(_ agent: AgentID, stdout: Data) -> String? {
-        agent == .gemini ? geminiSession(stdout) : nil
+        switch agent {
+        case .gemini: return geminiSession(stdout)
+        // OpenCode has no native schema, so an answer that is not JSON is the normal thing
+        // `SchemaRepair` resumes — which needs the session the run reported.
+        case .opencode: return OpenCodeProfile.parse(stdout).sessionID
+        default: return nil
+        }
     }
 
     /// The structured answer in a claude `result` object. `is_error` means `result` holds the

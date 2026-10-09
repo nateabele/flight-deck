@@ -1,0 +1,47 @@
+  ┃
+  ┃  RUN_LS please                                                                                                      session 8
+  ┃
+                                                                                                                        Context
+  ┃                                                                                                                     0 tokens
+  ┃  $ ls                                                                                                               0% used
+  ┃                                                                                                                     $0.00 spent
+  ┃  (no output)
+  ┃                                                                                                                     LSP
+                                                                                                                        LSPs are disabled
+     Tool finished.
+
+     ▣  Build · fake-model · 1m 38s
+
+  ┃
+  ┃  RUN_LS again
+  ┃
+
+  ┃
+  ┃  $ ls
+  ┃
+  ┃  b.txt
+  ┃
+
+     Tool finished.
+
+     ▣  Build · fake-model · 23.3s
+
+  ┃
+  ┃  ASK_QUESTION now
+  ┃
+
+     → Asked 1 question
+
+     ▣  Build · fake-model
+
+  ┃
+  ┃  Proceed with the fake task?
+  ┃
+  ┃  1. Yes
+  ┃     Continue
+  ┃  2. No                                                                                                              /private/tmp/claude-501/-Users-me-
+  ┃     Stop here                                                                                                       Projects-flight-deck/
+  ┃  3. Type your own answer                                                                                            c2d6bebb-899f-475d-b216-6ead77244eeb/
+  ┃                                                                                                                     scratchpad/fx/proj2
+  ┃  ↑↓ select  enter submit  esc dismiss
+  ┃                                                                                                                     • OpenCode 1.18.34
