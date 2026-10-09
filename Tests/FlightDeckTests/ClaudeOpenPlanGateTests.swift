@@ -69,4 +69,71 @@ final class ClaudeOpenPlanGateTests: XCTestCase {
     func testAnEmptyWindowFindsNothing() {
         XCTAssertNil(ClaudeOpenPlanGate.find(in: []))
     }
+
+    // MARK: Widening
+
+    /// A transcript as `TranscriptPager.page(anchor: .latest)` serves it: the last `limit`
+    /// lines, and whether anything precedes them.
+    private func tail(of lines: [SourceLine]) -> (Int) -> (lines: [SourceLine], hasMore: Bool) {
+        { limit in (Array(lines.suffix(limit)), lines.count > limit) }
+    }
+
+    /// The live transcript tail of 2026-10-09's "The Plan" (expression-editor), reduced to its
+    /// record types: the open `ExitPlanMode` call, the six bookkeeping lines claude writes after
+    /// every turn, then two messages queued while the gate was open — a background task's
+    /// notification and another session's merge request. Nine lines, so a fixed
+    /// `PromptService.tailRecords` (8) window held only the bookkeeping: no call id, no gate,
+    /// no banner on the phone, while `PromptService` (which widens) reported the same call open.
+    func testAnOpenGateCrowdedOutOfTheFirstWindowIsFoundByWidening() {
+        let bookkeeping = [
+            #"{"type":"last-prompt","lastPrompt":"ship it","sessionId":"s"}"#,
+            #"{"type":"custom-title","customTitle":"The Plan","sessionId":"s"}"#,
+            #"{"type":"agent-name","agentName":"The Plan","sessionId":"s"}"#,
+            #"{"type":"mode","mode":"normal","sessionId":"s"}"#,
+            #"{"type":"permission-mode","permissionMode":"plan","sessionId":"s"}"#,
+            #"{"type":"atis-latch","atis":"","sessionId":"s"}"#,
+            #"{"type":"queue-operation","operation":"enqueue","content":"<task-notification>done</task-notification>","sessionId":"s"}"#,
+            #"{"type":"queue-operation","operation":"enqueue","content":"MERGE REQUEST","sessionId":"s"}"#,
+        ]
+        let lines = ([exitPlanMode("toolu_PLAN")] + bookkeeping).enumerated()
+            .map { line($0.offset * 100, $0.element) }
+        XCTAssertEqual(lines.count, PromptService.tailRecords + 1,
+                       "the call must sit just outside the first window")
+        XCTAssertNil(ClaudeOpenPlanGate.find(in: Array(lines.suffix(PromptService.tailRecords))),
+                     "precondition: the fixed first window cannot see the call")
+
+        XCTAssertEqual(ClaudeOpenPlanGate.find(tail: tail(of: lines)), "toolu_PLAN")
+    }
+
+    /// The first window answers the common case with one read, and an answered gate stays
+    /// closed however far back the reader looks.
+    func testWideningReadsOnceWhenTheFirstWindowFindsTheCall() {
+        var reads: [Int] = []
+        let lines = [line(0, exitPlanMode("toolu_PLAN"))]
+        let found = ClaudeOpenPlanGate.find { limit in
+            reads.append(limit)
+            return (lines, false)
+        }
+        XCTAssertEqual(found, "toolu_PLAN")
+        XCTAssertEqual(reads, [PromptService.tailRecords])
+    }
+
+    /// Nothing to find terminates — on `hasMore` false, and on a wider read that returned no
+    /// more lines than the last — rather than climbing to the ceiling on every registry tick.
+    func testWideningStopsWhenTheFileRunsOut() {
+        let lines = (0..<20).map { line($0 * 100, #"{"type":"mode","mode":"normal"}"#) }
+        var reads = 0
+        XCTAssertNil(ClaudeOpenPlanGate.find { limit in
+            reads += 1
+            return tail(of: lines)(limit)
+        })
+        XCTAssertEqual(reads, 2, "8 lines with more above, then all 20 with none")
+
+        var stalled = 0
+        XCTAssertNil(ClaudeOpenPlanGate.find { _ in
+            stalled += 1
+            return (Array(lines.prefix(5)), true)
+        })
+        XCTAssertEqual(stalled, 2, "a wider read that grew nothing cannot find more")
+    }
 }
