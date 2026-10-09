@@ -3037,6 +3037,11 @@ and the phone unit bundle are green; everything below is what no automated run h
   up in ⌘K, and a grok tab's live rows. A gemini tail starts at byte 0, not at the end. This
   re-reads a resumed conversation's history once per attach. It is deduplicated, but it costs a
   full read of each restored gemini tab's transcript at launch (tens of KB each today).
+- **`ProjectViewInspectorLiveTests.testInspectorClosesFromTheEditorAndIsRememberedPerProject`
+  fails on master `587fb3f7`.** It failed at line 58 ("the panel itself collapsed"): in the full
+  suite, alone, and on a clean detached checkout of master (2026-10-09, `gemini-live-index`). So
+  it is not a load flake and not caused by that track. Either the notes-rail close race above
+  has come back, or this Mac's window and animation state differs. Not investigated.
 - **No model picker for grok or gemini tabs.** `GrokOptions` (model, effort) and
   `GeminiOptions.model` exist and routing overrides set them; gemini tabs default to
   `gemini-3.1-pro-high`.
