@@ -52,9 +52,12 @@ struct UsageEnvironment {
             codexRead: { [weak store] account in try await store?.codexRateLimitsRead(account: account) },
             // `intakeService` is lazy, but reading it here is safe: `collapsedStatus` already
             // builds it unconditionally, so this adds no side effect that was not already there.
+            // The capability index's refresh runs are seats too: each is stamped with the account
+            // the refresh leased, so its rate limits meter that account, not the built-in one.
             seatActivities: { [weak store] in
-                guard let intake = store?.intakeService else { return [] }
-                return intake.seatActivities.values.flatMap(\.values) + Array(intake.triageActivities.values)
+                let index = store?.capabilityIndexService?.seatActivities ?? []
+                guard let intake = store?.intakeService else { return index }
+                return intake.seatActivities.values.flatMap(\.values) + Array(intake.triageActivities.values) + index
             },
             notifier: { [weak store] in store?.notifier },
             isSwarmSession: { _ in false },

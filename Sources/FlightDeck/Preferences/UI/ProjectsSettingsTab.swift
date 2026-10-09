@@ -162,7 +162,7 @@ struct ProjectsSettingsTab: View {
                             Section {
                                 ForEach(choosable, id: \.self) { agent in
                                     LabeledContent(agent.displayName) {
-                                        accountPicker(for: path, agent: agent, assigned: settings.accounts[agent])
+                                        accountPicker(for: path, agent: agent)
                                     }
                                 }
                             } header: {
@@ -252,11 +252,7 @@ struct ProjectsSettingsTab: View {
     }
 
     /// One choice in the Account picker: nil is "Default" (the agent's topmost account).
-    struct AccountOption: Equatable {
-        var value: AccountAssignment?
-        var title: String
-        var isPool: Bool
-    }
+    typealias AccountOption = AccountAssignmentOption
 
     /// What a project can bill `agent`'s work to (unify brief R8): Default — naming the account
     /// it means today — then each live account of the agent in list order, then each of its
@@ -284,31 +280,10 @@ struct ProjectsSettingsTab: View {
         return accounts.count > 1 || !userPools.isEmpty
     }
 
-    @ViewBuilder
-    private func accountPicker(for path: String, agent: AgentID, assigned: AccountAssignment?) -> some View {
-        let options = Self.accountOptions(for: agent, in: preferences.preferences.accountList)
-        Picker("Account", selection: accountBinding(for: path, agent: agent)) {
-            // By position: two accounts may share a display name.
-            ForEach(Array(options.filter { !$0.isPool }.enumerated()), id: \.offset) { _, option in
-                Text(option.title).tag(option.value)
-            }
-            let pools = options.filter(\.isPool)
-            if !pools.isEmpty {
-                Divider()
-                ForEach(Array(pools.enumerated()), id: \.offset) { _, option in
-                    Label(option.title, systemImage: "square.stack.3d.up").tag(option.value)
-                }
-            }
-            // An assignment that names something gone still has to be shown as what it is, or
-            // the picker silently reads "Default" while launches are refused as BROKEN.
-            if let assigned, !options.contains(where: { $0.value == assigned }) {
-                Divider()
-                Text("Missing \(assigned.poolID == nil ? "account" : "pool")").tag(AccountAssignment?.some(assigned))
-            }
-        }
-        .labelsHidden()
-        .fixedSize()
-        .accessibilityIdentifier("project-account-picker-\(agent.rawValue)")
+    private func accountPicker(for path: String, agent: AgentID) -> some View {
+        AccountAssignmentPicker(options: Self.accountOptions(for: agent, in: preferences.preferences.accountList),
+                                selection: accountBinding(for: path, agent: agent),
+                                identifier: "project-account-picker-\(agent.rawValue)")
     }
 
     /// Writes an account or a pool assignment; Default clears the agent's assignment.

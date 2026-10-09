@@ -83,6 +83,13 @@ final class CapabilityIndexUITests: XCTestCase {
         XCTAssertTrue(cell.label.hasPrefix("0.80"), "cell label: \(cell.label)")
         shoot(app, "1-heatmap")
 
+        // The refresh's account assignment (round 2, index-refresh-pool): the account-or-pool
+        // picker is on the pane, and with nothing chosen it reads Default.
+        let accountPicker = prefs.descendants(matching: .any)["index-account-picker"].firstMatch
+        XCTAssertTrue(accountPicker.waitForExistence(timeout: 5), "the Refresh agent account picker is missing")
+        let accountTitle = (accountPicker.value as? String) ?? accountPicker.label
+        XCTAssertTrue(accountTitle.hasPrefix("Default"), "an unset index assignment reads Default: \(accountTitle)")
+
         cell.click()
         let citation = app.descendants(matching: .any)["index-citation-url"].firstMatch
         XCTAssertTrue(citation.waitForExistence(timeout: 5), "clicking a cell must show its cited rows")

@@ -126,27 +126,48 @@ extension AccountResolver: AccountResolving {
     }
 
     func acquire(_ agent: AgentID, project: String) -> Result<ResolvedAccount, AccountResolutionError> {
-        resolve(agent: agent, project: project).map { resolution in
-            let label: String
-            if case .pool(let id) = resolution.source {
-                let pool = AccountBilling.poolName(poolLabel(id))
-                label = resolution.account.map { "\(pool) · \($0.displayName)" } ?? pool
-            } else {
-                label = Self.name(resolution.account, agent: agent)
-            }
-            return ResolvedAccount(agent: agent, account: resolution.account, lease: resolution.lease,
-                                   label: label, notice: resolution.notice)
+        resolve(agent: agent, project: project).map(resolved)
+    }
+
+    fileprivate func resolved(_ resolution: AccountResolution) -> ResolvedAccount {
+        let agent = resolution.agent
+        let label: String
+        if case .pool(let id) = resolution.source {
+            let pool = AccountBilling.poolName(poolLabel(id))
+            label = resolution.account.map { "\(pool) · \($0.displayName)" } ?? pool
+        } else {
+            label = Self.name(resolution.account, agent: agent)
         }
+        return ResolvedAccount(agent: agent, account: resolution.account, lease: resolution.lease,
+                               label: label, notice: resolution.notice)
     }
 
     func release(_ lease: AccountLease) { ledger.release(lease) }
     func adopt(_ lease: AccountLease) { ledger.adopt(lease) }
 
-    private func poolLabel(_ id: PoolID) -> String {
+    fileprivate func poolLabel(_ id: PoolID) -> String {
         preferences.effectivePools.first { $0.id == id }?.label ?? id.rawValue
     }
 
-    private static func name(_ account: AgentAccount?, agent: AgentID) -> String {
+    fileprivate static func name(_ account: AgentAccount?, agent: AgentID) -> String {
         account?.displayName ?? "\(agent.displayName) built-in"
+    }
+}
+
+/// The capability index's account seam (round 2, index-refresh-pool). The index is app-wide —
+/// no project — so it has its own assignment (`PreferencesStore.indexAccount`, Default: claude's
+/// pool), resolved by the same `AccountResolver` rules as a project's. Its own protocol rather
+/// than two more `AccountResolving` requirements, which every planning stub would then carry.
+@MainActor
+protocol IndexAccountResolving: AnyObject {
+    /// Resolves the index's assignment for `agent`, leasing when it names a pool. The caller owns
+    /// the lease and must `release` it when the refresh ends, however it ends.
+    func acquireIndexAccount(_ agent: AgentID) -> Result<ResolvedAccount, AccountResolutionError>
+    func release(_ lease: AccountLease)
+}
+
+extension AccountResolver: IndexAccountResolving {
+    func acquireIndexAccount(_ agent: AgentID) -> Result<ResolvedAccount, AccountResolutionError> {
+        resolveIndex(agent: agent).map(resolved)
     }
 }

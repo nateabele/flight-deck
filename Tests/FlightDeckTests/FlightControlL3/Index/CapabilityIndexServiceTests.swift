@@ -52,10 +52,9 @@ final class CapabilityIndexServiceTests: XCTestCase {
         XCTAssertEqual(IndexSnapshotStore(directory: dir).list().count, 1)
     }
 
-    /// Round 2, item 11: the refresh bills the account the resolver names for claude (its run's
-    /// directory is its project, which no project assigns, so this is the agent's first live
-    /// account — the same as an unassigned project's tab), binds that home, and gives any pool
-    /// lease back when the run ends.
+    /// The refresh bills the account the resolver names for the index's claude assignment
+    /// (`IndexAccountTests` covers which one), binds that home, and gives any pool lease back
+    /// when the run ends.
     func testARefreshRunsAsTheResolvedAccountAndGivesItsLeaseBack() async throws {
         try seedConfig()
         let h = ScriptedIndexHeadless()
@@ -67,7 +66,7 @@ final class CapabilityIndexServiceTests: XCTestCase {
         let resolver = IndexStubResolver(.success(ResolvedAccount(agent: .claude, account: account, lease: lease, label: "Team pool")))
         service.accountResolver = resolver
         await service.refreshNow()
-        XCTAssertEqual(resolver.asked.map(\.0), [.claude])
+        XCTAssertEqual(resolver.asked, [.claude])
         XCTAssertEqual(h.accounts, [AgentAccountRef(id: account.id.uuidString, home: home)])
         XCTAssertEqual(resolver.released, [lease])
         XCTAssertNotNil(service.current, "the run itself still happened")
@@ -234,16 +233,14 @@ final class CapabilityIndexServiceTests: XCTestCase {
 }
 
 @MainActor
-private final class IndexStubResolver: AccountResolving {
+private final class IndexStubResolver: IndexAccountResolving {
     let result: Result<ResolvedAccount, AccountResolutionError>
-    private(set) var asked: [(AgentID, String)] = []
+    private(set) var asked: [AgentID] = []
     private(set) var released: [AccountLease] = []
     init(_ result: Result<ResolvedAccount, AccountResolutionError>) { self.result = result }
-    func billing(_ agent: AgentID, project: String) -> AccountBilling { AccountBilling(text: "stub") }
-    func acquire(_ agent: AgentID, project: String) -> Result<ResolvedAccount, AccountResolutionError> {
-        asked.append((agent, project))
+    func acquireIndexAccount(_ agent: AgentID) -> Result<ResolvedAccount, AccountResolutionError> {
+        asked.append(agent)
         return result
     }
     func release(_ lease: AccountLease) { released.append(lease) }
-    func adopt(_ lease: AccountLease) {}
 }

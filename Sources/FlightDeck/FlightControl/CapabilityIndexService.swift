@@ -41,6 +41,11 @@ final class CapabilityIndexService: ObservableObject {
     @Published private(set) var isRefreshing = false
     @Published private(set) var lastLog: [String] = []
     @Published private(set) var problem: String?
+    /// One per source run by the latest refresh (the one in flight, if any), each stamped with
+    /// the account it billed. `UsageService` folds these with planning's seats, so a refresh's
+    /// `rate_limit_event`s meter the account it leased — the pool then stops leasing an account
+    /// the refresh found exhausted.
+    @Published private(set) var seatActivities: [SeatActivity] = []
     /// The catalogs the last refresh saw, for the alias "Map to…" menu.
     @Published private(set) var knownCatalogs = AdapterCatalogs([])
 
@@ -48,16 +53,19 @@ final class CapabilityIndexService: ObservableObject {
     let directory: URL
     /// The refresh in flight, if any — exposed so tests (and nothing else) can await it.
     private(set) var refreshTask: Task<Void, Never>?
+    private var refreshGeneration = 0
 
     private let store: IndexSnapshotStore
     private let runner: IndexRefreshRunner
     private let catalogs: @MainActor () async -> AdapterCatalogs
     private let now: () -> Date
     private weak var clock: WatchClock?
-    /// Which claude login a refresh bills (round 2, item 11). Before this the refresh always ran
-    /// in the built-in `~/.claude`, whatever the Accounts list said. nil (tests, reset launches):
-    /// the built-in home, as before. Weak: the store owns the resolver.
-    weak var accountResolver: AccountResolving?
+    /// Which claude login a refresh bills: the index's own assignment (Settings → Flight Control
+    /// → Capability Index), Default claude's pool, leased for the length of the refresh. Before
+    /// round 2 the refresh always ran in the built-in `~/.claude`; item 11 then resolved it as an
+    /// unassigned project, which billed claude's first live account and never leased. nil
+    /// (tests, reset launches): the built-in home. Weak: the store owns the resolver.
+    weak var accountResolver: IndexAccountResolving?
 
     init(directory: URL, runner: IndexRefreshRunner = IndexRefreshRunner(),
          catalogs: @escaping @MainActor () async -> AdapterCatalogs = { AdapterCatalogs([]) },
@@ -139,34 +147,63 @@ final class CapabilityIndexService: ObservableObject {
         await startRefresh()?.value
     }
 
+    /// Stops the refresh in flight: the running claude is terminated, the sources not yet run
+    /// are skipped, no snapshot is written, and the account lease is given back.
+    func cancelRefresh() {
+        refreshTask?.cancel()
+    }
+
     private func performRefresh() async {
         let cats = await catalogs()
         knownCatalogs = cats
         let work = directory.appendingPathComponent("work", isDirectory: true)
-        // Resolved through the same `AccountResolver` as tabs and planning seats, with the run's
-        // directory as its project — the refresh is app-wide, and no project assigns that
-        // directory, so it bills claude's first live account exactly as an unassigned project's
-        // tab does. A pool lease (should that rule ever lease) is held for the whole refresh and
-        // given back when it ends. A broken assignment refuses: never another login.
-        var billing: RunnerAccounts.Entry?
+        // A broken STORED assignment refuses: never another login. The lease (when the
+        // assignment is a pool) is held for the whole refresh and given back below on every
+        // path that got one — success, failed sources, cancel — since `runner.refresh` never
+        // throws and every path after it falls through to the release.
+        var billing: ResolvedAccount?
         if let accountResolver {
-            switch accountResolver.acquire(.claude, project: work.path) {
+            switch accountResolver.acquireIndexAccount(.claude) {
             case .failure(let error):
-                problem = "Could not refresh the index: \(error.message)"
-                lastLog = ["refused: \(error.message)"]
+                problem = "Could not refresh the index: \(Self.message(error))"
+                lastLog = ["refused: \(Self.message(error))"]
                 isRefreshing = false
                 return
             case .success(let resolved):
-                billing = resolved.entry
+                billing = resolved
             }
         }
         var plan = IndexRefreshPlan(sources: config.sources, aliases: config.aliases, catalogs: cats, agent: config.agent,
                                     previous: current, workDirectory: work)
-        plan.account = billing?.ref
-        let outcome = await runner.refresh(plan)
-        if let lease = billing?.lease { accountResolver?.release(lease.lease) }
+        plan.account = billing?.entry.ref
+        plan.accountID = billing?.account?.id
+        seatActivities = []
+        refreshGeneration += 1
+        let generation = refreshGeneration
+        let outcome = await runner.refresh(plan) { activity in
+            // Generation-checked: a hop still queued when the refresh ends (or when the next one
+            // starts) must not add a source twice, or add last week's to this week's list.
+            Task { @MainActor [weak self] in
+                guard let self, self.refreshGeneration == generation, !self.seatActivities.contains(activity) else { return }
+                self.seatActivities.append(activity)
+            }
+        }
+        if let lease = billing?.lease { accountResolver?.release(lease) }
+        // The outcome's list is complete; the hops above may still be queued behind this one.
+        refreshGeneration += 1
+        seatActivities = outcome.activities
+        var log = outcome.log
+        if let billing { log.insert("billed: \(billing.label)", at: 0) }
+        if let notice = billing?.notice { log.insert("\(notice.title). \(notice.body)", at: 1) }
+        lastLog = log
+        guard !outcome.cancelled else {
+            // Nothing is written: a snapshot of a cancelled refresh would push a real one out of
+            // the twelve kept, and its skipped sources would read as failures.
+            lastLog.append("refresh cancelled; no snapshot written")
+            isRefreshing = false
+            return
+        }
         mutateConfig { $0.aliases.addProposals(outcome.proposals) }
-        lastLog = outcome.log
         // The plan captured aliases and sources before a run that can last minutes. Re-score with
         // the config as it is NOW: an edit made mid-run otherwise leaves a newer snapshot scored
         // with the old mapping as current, and the config and the displayed scores disagree.
@@ -179,6 +216,17 @@ final class CapabilityIndexService: ObservableObject {
         }
         reload()
         isRefreshing = false
+    }
+
+    /// `AccountResolutionError.message` names "this project" and Settings → Projects; the index
+    /// has neither, and its fix is its own picker.
+    static func message(_ error: AccountResolutionError) -> String {
+        switch error {
+        case .accountMissing:
+            "the account chosen for the capability index no longer exists — choose another under Refresh agent"
+        case .poolUnavailable(let pool, _):
+            "the pool chosen for the capability index (\(pool)) has no account to use — choose another under Refresh agent"
+        }
     }
 
     // MARK: - Rollback
