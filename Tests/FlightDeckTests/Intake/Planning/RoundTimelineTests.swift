@@ -185,4 +185,16 @@ final class RoundTimelineTests: XCTestCase {
         XCTAssertEqual(RoundTimeline.caption(.polish), "Applies to every Polish round")
         XCTAssertEqual(RoundTimeline.caption(.draft), "Applies to the Draft round")
     }
+
+    /// A round picked in the main view (its checkpoint, or nil = the head being followed) picks
+    /// its chip in the inspector; a tape with nothing on it leaves the pick alone.
+    func testMainViewPickSelectsTheInspectorChip() {
+        let tape = Tape(checkpoints: [ran(1, .draft, 0), ran(2, .synthesis, 0), ran(3, .refine, 1)])
+        XCTAssertEqual(RoundTimeline.selection(forPlanCheckpoint: 2, in: tape), .round(RoundKey(stage: .synthesis, round: 0)))
+        XCTAssertEqual(RoundTimeline.selection(forPlanCheckpoint: nil, in: tape), .round(RoundKey(stage: .refine, round: 1)))
+        XCTAssertNil(RoundTimeline.selection(forPlanCheckpoint: nil, in: .empty))
+        // And back: the inspector's pick of the same round targets the same checkpoint.
+        let rows = RoundTimeline.rows(config: config(), tape: tape)
+        XCTAssertEqual(RoundTimeline.mainTarget(for: RoundKey(stage: .synthesis, round: 0), rows: rows, tape: tape), .checkpoint(2))
+    }
 }

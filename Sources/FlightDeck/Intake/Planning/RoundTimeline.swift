@@ -169,6 +169,14 @@ enum RoundTimeline {
         tape.checkpoints.first { $0.id == id }.map { RoundKey(stage: $0.stage, round: $0.round) }
     }
 
+    /// The inspector's pick when the main view moves its plan to a round (a card, the board,
+    /// ⌘[): that round's chip — nil checkpoint meaning the head, which the main view follows.
+    /// nil when the tape has no such round, so the pick is left as it was.
+    static func selection(forPlanCheckpoint id: Int?, in tape: Tape) -> Selection? {
+        guard let cp = id.flatMap({ id in tape.checkpoints.first { $0.id == id } }) ?? tape.head else { return nil }
+        return .round(RoundKey(stage: cp.stage, round: cp.round))
+    }
+
     /// Where a chip picked in the inspector takes the main view: a round that ran shows its
     /// checkpoint (nil checkpoint = follow the head, the main view's rule for the newest round);
     /// the running round, the live card; a round still to run, nowhere — the main view has
