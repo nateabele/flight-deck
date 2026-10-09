@@ -39,6 +39,10 @@ protocol TextInjecting: AnyObject {
     /// that could only go down would wrap or stall.
     func sendArrowUp()
 
+    /// Tab, as a real key event. grok's parked question card takes its keyboard back on Tab
+    /// (`Tab/Space:question` in its bar); a paste of `\t` would be text, not that key.
+    func sendTab()
+
     /// Escape: refuse the dialog outright.
     ///
     /// **This is the whole delivery mechanism for a denial, and it reads nothing.** No
@@ -48,7 +52,8 @@ protocol TextInjecting: AnyObject {
     /// not on a row. See `PromptAnswer.deny`.
     func sendEscape()
 
-    /// One printable key — a digit or a lowercase letter — as a real key event, never a paste.
+    /// One printable key — a digit, a letter (uppercase is Shift+letter) or Space — as a real
+    /// key event, never a paste.
     ///
     /// **Exists for grok, whose dialogs are answered by a key and must never be answered by
     /// Return.** A grok permission card opens with "don't ask again for anything" focused
@@ -108,15 +113,28 @@ extension Ghostty.SurfaceView: TextInjecting {
 
     func sendArrowDown() { sendBareKey(.arrowDown) }
     func sendArrowUp() { sendBareKey(.arrowUp) }
+    func sendTab() { sendBareKey(.tab) }
     func sendEscape() { sendBareKey(.escape) }
 
     /// `text:` IS stated here, unlike `sendBareKey`: a digit has a textual form, and under the
     /// legacy encoding that text is what the program receives. Ghostty names a digit key
     /// `digitN` and a letter key by the letter, which is the whole mapping.
+    ///
+    /// **An uppercase letter is Shift plus the letter's key** (grok's Shift+x dismiss), with
+    /// Shift marked CONSUMED by the text, as AppKit reports a real Shift+x. That makes ghostty's
+    /// kitty encoder send the plain text `X` on press — the bytes grok 1.0.30 was probed with
+    /// under its flags 3 (facts-2 §6) — and, with no unshifted codepoint stated, nothing on
+    /// release (see `sendControl`'s comment for why that holds). Legacy encoding sends `X` too.
+    /// Traced through `key_encode.zig`, not run on a real surface.
     func sendCharacterKey(_ character: Character) {
-        guard let surfaceModel, let key = Self.key(for: character) else { return }
-        surfaceModel.sendKeyEvent(.init(key: key, action: .press, text: String(character)))
-        surfaceModel.sendKeyEvent(.init(key: key, action: .release))
+        guard let surfaceModel else { return }
+        let shifted = character.isASCII && character.isLetter && character.isUppercase
+        let base = shifted ? Character(character.lowercased()) : character
+        guard let key = Self.key(for: base) else { return }
+        let mods: Ghostty.Input.Mods = shifted ? .shift : []
+        surfaceModel.sendKeyEvent(.init(key: key, action: .press, text: String(character),
+                                        mods: mods, consumedMods: mods))
+        surfaceModel.sendKeyEvent(.init(key: key, action: .release, mods: mods))
         screenChanged()
     }
 

@@ -537,6 +537,7 @@ final class CodexTextChannelTests: XCTestCase {
         func sendYank() { actions.append(.yank) }
         func sendArrowDown() { actions.append(.arrowDown) }
         func sendArrowUp() { actions.append(.arrowUp) }
+        func sendTab() {}
         func sendEscape() { actions.append(.escape) }
         func sendCharacterKey(_ character: Character) {}
         func sendControlKey(_ letter: Character) {}

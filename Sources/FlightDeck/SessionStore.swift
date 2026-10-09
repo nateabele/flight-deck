@@ -6813,6 +6813,14 @@ final class SessionStore: ObservableObject {
             return .unreadableScreen
         }
 
+        // A question refused WITHOUT cancelling the turn, where the agent has a key for it
+        // (grok's Shift+x — see `AgentQuestionDismisser`). Read-guarded, unlike the blind deny
+        // below: the shared deny on grok is Ctrl+C, which ends the agent's whole turn.
+        if answer == .deny, case .question(_, let questions) = open,
+           let dismisser = driver as? AgentQuestionDismisser {
+            return dismissQuestion(questions, dismisser: dismisser, injector: injector, id: id, token: token)
+        }
+
         // An agent whose list must never see a Return answers by key instead (grok — see
         // `AgentKeyedDialogDriver`). Deny stays on the shared path below: one key, nothing read.
         if let keyed = driver as? AgentKeyedDialogDriver, answer != .deny {
@@ -7112,10 +7120,103 @@ final class SessionStore: ObservableObject {
         if let responder = repos[at.repo].sessions[at.session].agent.promptResponder,
            let target = agentTarget(for: id) {
             responder.abort(for: target)
+        } else if let dismisser = driver as? AgentQuestionDismisser,
+                  let screen = injector.readViewport(),
+                  dismisser.dismissStep(for: nil, inViewport: screen).startsDismiss {
+            // A question card is what is up: dismissed, so the turn goes on, rather than the
+            // blind deny's Ctrl+C ending it. Anything else — a permission card, a screen this
+            // build cannot read — keeps the blind deny this path exists for.
+            injecting.insert(id)
+            performDismiss(nil, dismisser: dismisser, injector: injector, id: id, phase: .start, rereads: 0)
         } else {
             driver.deny(injector)
         }
         return .dispatched
+    }
+
+    /// `answerPrompt`'s `.deny` for a question an `AgentQuestionDismisser` can dismiss. The first
+    /// read is checked here, synchronously, so a screen that does not show this question's card
+    /// with a key it can take — another card, an open editor, nothing — is refused
+    /// `unreadable_screen` with nothing sent and the screen filed (`keyed-screen-mismatch`).
+    private func dismissQuestion(
+        _ questions: [PromptQuestion], dismisser: AgentQuestionDismisser,
+        injector: TextInjecting, id: UUID, token: UUID
+    ) -> AnswerDispatch {
+        guard let viewport = injector.readViewport() else {
+            recordEarlyAbort(.unreadableBeforePress)
+            return .unreadableScreen
+        }
+        guard dismisser.dismissStep(for: questions, inViewport: viewport).startsDismiss else {
+            answerAbortSink(AnswerAbort(check: .keyedScreenMismatch, step: nil, purpose: nil, from: 0, to: 0,
+                                        expected: Self.dismissExpectation, focused: nil, viewport: viewport))
+            return .unreadableScreen
+        }
+        remember(answered: token, for: id)
+        injecting.insert(id)
+        performDismiss(questions, dismisser: dismisser, injector: injector, id: id, phase: .start, rereads: 0)
+        return .dispatched
+    }
+
+    /// Where a dismiss drive is. Each phase re-reads before it acts and never re-sends its own
+    /// keys: a Tab or a dismiss that has not repainted yet is waited for (`keyedRereads`
+    /// settles), not pressed again — a second Shift+x on the NEXT card would dismiss a question
+    /// nobody refused.
+    enum DismissPhase: Int { case start = 0, refocused = 1, pressed = 2 }
+
+    /// The `expected` an aborted dismiss files: what the drive was waiting to see.
+    private static let dismissExpectation = "question card holding the keyboard"
+
+    private func performDismiss(
+        _ questions: [PromptQuestion]?, dismisser: AgentQuestionDismisser,
+        injector: TextInjecting, id: UUID, phase: DismissPhase, rereads: Int
+    ) {
+        guard let screen = injector.readViewport() else {
+            answerAbortSink(AnswerAbort(check: .unreadableBeforePress, step: phase.rawValue, purpose: nil,
+                                        from: 0, to: 0, expected: nil, focused: nil, viewport: nil))
+            injecting.remove(id)
+            return
+        }
+        func send(_ keys: [KeyedKeystroke], then next: DismissPhase) {
+            for key in keys {
+                switch key {
+                case .character(let character): injector.sendCharacterKey(character)
+                case .arrowUp: injector.sendArrowUp()
+                case .arrowDown: injector.sendArrowDown()
+                case .paste(let text): injector.sendText(text)
+                case .returnKey: injector.sendReturn()
+                case .tab: injector.sendTab()
+                }
+            }
+            injectionSettle { [weak self] in
+                self?.performDismiss(questions, dismisser: dismisser, injector: injector, id: id,
+                                     phase: next, rereads: 0)
+            }
+        }
+        switch (phase, dismisser.dismissStep(for: questions, inViewport: screen)) {
+        case (.pressed, .absent):
+            injecting.remove(id)   // the card closed: dismissed
+            return
+        case (.start, .press(let keys)), (.refocused, .press(let keys)):
+            send(keys, then: .pressed)
+            return
+        case (.start, .refocus(let keys)):
+            send(keys, then: .refocused)
+            return
+        default:
+            break
+        }
+        if rereads < Self.keyedRereads {
+            injectionSettle { [weak self] in
+                self?.performDismiss(questions, dismisser: dismisser, injector: injector, id: id,
+                                     phase: phase, rereads: rereads + 1)
+            }
+            return
+        }
+        answerAbortSink(AnswerAbort(
+            check: .keyedScreenMismatch, step: phase.rawValue, purpose: nil, from: 0, to: 0,
+            expected: phase == .pressed ? "question card closed" : Self.dismissExpectation,
+            focused: nil, viewport: screen))
+        injecting.remove(id)
     }
 
     /// Answer a whole set of questions in one drive.
@@ -7489,6 +7590,7 @@ final class SessionStore: ObservableObject {
             case .arrowDown: injector.sendArrowDown()
             case .paste(let text): injector.sendText(text)
             case .returnKey: injector.sendReturn()
+            case .tab: injector.sendTab()
             }
         }
         injectionSettle { [weak self] in

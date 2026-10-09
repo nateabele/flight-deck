@@ -94,6 +94,7 @@ final class GrokTextChannelTests: XCTestCase {
         func sendYank() { actions.append(.other) }
         func sendArrowDown() { actions.append(.other) }
         func sendArrowUp() { actions.append(.other) }
+        func sendTab() { actions.append(.other) }
         func sendEscape() { actions.append(.escape) }
     }
 

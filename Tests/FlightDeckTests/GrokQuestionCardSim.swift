@@ -9,7 +9,10 @@ import FleetKit
 /// - Space toggles the focused checkbox and stays; `↑`/`↓` move the cursor, clamped;
 /// - `z` opens the free-text editor (ticking `z` on a checkbox question); a paste goes into it;
 ///   Return there commits the text and advances (submits on the last);
-/// - Return on a closed editor answers the focused row — what the drive must never rely on.
+/// - Return on a closed editor answers the focused row — what the drive must never rely on;
+/// - `X` (Shift+x) dismisses the card and the turn goes on, whether the card holds the keyboard
+///   or it is parked (both seen live, facts-2 §6); in an open editor it is just a letter;
+/// - Tab gives a parked card its keyboard back.
 ///
 /// The cursor is NOT drawn, as grok draws it in colour only. `startFocus` lets a test put it
 /// somewhere other than row 1 to prove the drive never assumes where it is.
@@ -27,12 +30,19 @@ final class GrokQuestionCardSim: TextInjecting {
         var typed: String?
     }
 
-    enum Event: Equatable { case key(Character), up, down, paste(String), ret, control(Character), escape }
+    enum Event: Equatable { case key(Character), up, down, paste(String), ret, control(Character), escape, tab }
 
     let questions: [Question]
     private(set) var current = 0
     private(set) var answers: [Answer]
     private(set) var submitted = false
+    /// Shift+x landed: grok answered the tool "User declined to answer the questions" and the
+    /// turn went on.
+    private(set) var dismissed = false
+    /// Drop every Shift+x without acting — a dismiss the TUI lost.
+    var ignoreDismiss = false
+    /// The turn was cancelled (Ctrl+C) — what a question's Deny must no longer do.
+    private(set) var cancelled = false
     private(set) var events: [Event] = []
     private var focus: Int
     private var editing = false
@@ -50,19 +60,20 @@ final class GrokQuestionCardSim: TextInjecting {
     }
 
     private var question: Question { questions[current] }
+    private var closed: Bool { submitted || dismissed || cancelled }
     private var freeRow: Int { question.labels.count }
 
     // MARK: TextInjecting
 
     func sendText(_ text: String) {
         events.append(.paste(text))
-        guard !submitted, !parked, editing else { return }
+        guard !closed, !parked, editing else { return }
         buffer += text
     }
 
     func sendReturn() {
         events.append(.ret)
-        guard !submitted, !parked else { return }
+        guard !closed, !parked else { return }
         if editing {
             answers[current].typed = buffer
             if !question.multi { answers[current].options = [] }
@@ -76,7 +87,12 @@ final class GrokQuestionCardSim: TextInjecting {
 
     func sendCharacterKey(_ character: Character) {
         events.append(.key(character))
-        guard !submitted, !parked else { return }
+        guard !closed else { return }
+        if character == "X", !editing {
+            if !ignoreDismiss { dismissed = true }
+            return
+        }
+        guard !parked else { return }
         if editing { buffer.append(character); return }
         if character == " " {
             spaces += 1
@@ -102,7 +118,15 @@ final class GrokQuestionCardSim: TextInjecting {
         advance()
     }
 
-    func sendControlKey(_ letter: Character) { events.append(.control(letter)) }
+    func sendControlKey(_ letter: Character) {
+        events.append(.control(letter))
+        if letter == "c", !closed { cancelled = true }
+    }
+    func sendTab() {
+        events.append(.tab)
+        guard !closed, !editing else { return }
+        if parked { parked = false } else { focus = focus == freeRow ? 0 : focus + 1 }
+    }
     func clearEventsForTesting() { events.removeAll() }
     func sendArrowUp() {
         events.append(.up)
@@ -130,7 +154,7 @@ final class GrokQuestionCardSim: TextInjecting {
     // MARK: Screen
 
     func readViewport() -> String? {
-        if submitted {
+        if closed {
             return """
               main ~/proj   25K / 256K │ [Dashboard]
 

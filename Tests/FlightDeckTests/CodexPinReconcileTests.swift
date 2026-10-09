@@ -104,6 +104,7 @@ final class CodexPinReconcileTests: XCTestCase {
         func sendYank() {}
         func sendArrowDown() {}
         func sendArrowUp() {}
+        func sendTab() {}
         func sendEscape() {}
         func sendCharacterKey(_ character: Character) {}
         func sendControlKey(_ letter: Character) {}

@@ -37,6 +37,8 @@ enum KeyedKeystroke: Equatable {
     /// Return. Only ever planned to commit an editor's text — never on an option row, where
     /// it would submit whatever the cursor sits on.
     case returnKey
+    /// Tab (`sendTab`): grok's way of handing a parked card its keyboard back.
+    case tab
 }
 
 /// One step of a keyed drive over a set of questions: what the screen must show before the
@@ -87,4 +89,43 @@ protocol AgentKeyedQuestionDriver: AgentKeyedDialogDriver {
     /// expects. Called on a fresh read before every step.
     func keystrokes(for step: KeyedAnswerStep, questions: [PromptQuestion],
                     inViewport viewport: String) -> [KeyedKeystroke]?
+}
+
+/// What dismissing a question card takes on the screen as read now. See
+/// `AgentQuestionDismisser`.
+enum QuestionDismissStep: Equatable {
+    /// The card holds the keyboard: these keys dismiss it.
+    case press([KeyedKeystroke])
+    /// The card is up but its keyboard is parked elsewhere: these keys give it back, and the
+    /// dismiss waits for a read that says they did.
+    case refocus([KeyedKeystroke])
+    /// The card is up in a state the dismiss cannot be keyed into (an open editor would take
+    /// the key as text).
+    case blocked
+    /// No card of these questions is on screen.
+    case absent
+
+    /// A drive can begin from here: there is a key to send.
+    var startsDismiss: Bool {
+        switch self {
+        case .press, .refocus: return true
+        case .blocked, .absent: return false
+        }
+    }
+}
+
+/// **A question refused without cancelling the turn.**
+///
+/// The shared `deny` is one blind key, and for grok that key is Ctrl+C — which on a QUESTION
+/// card cancels the agent's whole turn. grok has a gentler key for exactly this, Shift+x,
+/// "Dismiss the question (the agent continues without an answer)" (probed live on 1.0.30: the
+/// tool returns "User declined to answer the questions…" and the model goes on). Unlike
+/// `deny`, the dismiss is read-guarded like the keyed answer drive: a key that lands in an
+/// open editor or on another card is not a refusal, so the store reads before every press and
+/// after the last one, and files `keyed-screen-mismatch` instead of pressing blind.
+@MainActor
+protocol AgentQuestionDismisser: AgentDialogDriver {
+    /// The step for `questions`' card on this screen. `questions` nil (the abort path, which has
+    /// no call to compare) accepts any question card.
+    func dismissStep(for questions: [PromptQuestion]?, inViewport viewport: String) -> QuestionDismissStep
 }

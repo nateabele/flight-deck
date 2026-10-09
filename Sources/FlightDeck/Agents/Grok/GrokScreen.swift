@@ -168,12 +168,20 @@ enum GrokScreen {
         /// stays drawn but a digit goes to the scrollback instead, and the bar trades
         /// `Shift+x:dismiss` for `Tab/Space:question` (probed).
         let hasKeyboard: Bool
+        /// The keyboard is parked in the scrollback (`Tab/Space:question` in the bar): Tab gives
+        /// it back to the card. Neither this nor `hasKeyboard` means some other state — an open
+        /// editor — that a key meant for the rows must not be sent into.
+        let parked: Bool
         /// The free-text row is open as an editor (`z (●) ❯ …`, bar `Esc:back`): what is typed
         /// now is text, not keys.
         let editorText: String?
     }
 
     static let questionKeyboardToken = "Shift+x:dismiss"
+    static let parkedKeyboardToken = "Tab/Space:question"
+    /// Shift+x: dismiss the question and let the turn go on (facts-2 §6). Sent as the shifted
+    /// letter's text; lowercase `x` does nothing on the card (probed).
+    static let dismissKey: Character = "X"
     static let editorBarToken = "Esc:back"
     static let editorMarker = "❯"
 
@@ -213,6 +221,7 @@ enum GrokScreen {
         return QuestionCard(
             title: title, options: options, freeText: free, position: position,
             hasKeyboard: bar.contains { $0.contains(questionKeyboardToken) },
+            parked: bar.contains { $0.contains(parkedKeyboardToken) },
             editorText: editorText)
     }
 

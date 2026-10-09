@@ -113,6 +113,7 @@ private final class AgyScreen: TextInjecting {
     func sendYank() { keys.append("yank"); draft = ring }
     func sendArrowDown() { keys.append("down") }
     func sendArrowUp() { keys.append("up") }
+    func sendTab() { keys.append("tab") }
     func sendEscape() { keys.append("esc") }
     // grok's keyed answers (`TextInjecting`); recorded so a gemini path that reached for them
     // would show up in `keys` rather than vanish.
