@@ -98,10 +98,9 @@ final class TimelineService {
         // A subagent's feed is its own file. The id came off the wire, so it is validated
         // before any path is built from it: "../../x" must never reach the file system.
         if let subagent {
-            guard SubagentID.isValid(subagent),
-                  let dir = agent.openPromptReader?.subagentTranscripts(for: url)
+            guard let file = agent.openPromptReader?.subagentTranscript(for: url, agent: subagent)
             else { return .failure("unknown_agent") }
-            url = dir.appendingPathComponent("agent-\(subagent).jsonl")
+            url = file
         }
         let sidechain = subagent != nil
         let fileURL = url

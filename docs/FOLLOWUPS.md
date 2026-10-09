@@ -3117,3 +3117,27 @@ resume. What is still open:
 - **Codex seat rollouts are found by start date.** `CodexRolloutFile` lists the seat's local start
   day and its neighbours under `$CODEX_HOME/sessions`. A codex that ever files rollouts by another
   scheme would silently stop metering seats.
+
+## grok phone answers: sets, checkboxes, typed, subagent cards (2026-10-09, round 2)
+
+Question sets, multi-select and typed answers now drive grok from the phone, and a subagent's
+permission card is offered as the child's own call. Evidence: `.superpowers/grok-tui-facts-2.md`
+(grok 1.0.30, probed in a pty that answered grok's kitty query; grok pushed flags 3).
+
+- **No Ghostty surface has run any of it.** The probe emulated Ghostty's byte encoding under kitty
+  flags 3; the unit tests drive a modelled card (`GrokQuestionCardSim`). GUI check for Nate, in a
+  real grok tab: from the phone answer (a) a three-question set mixing a radio, two checkboxes and
+  a typed answer, (b) a lone checkbox question with two boxes, (c) a typed answer, (d) a background
+  and a foreground subagent's write card. On a stall, read `~/Library/Logs/flight-deck-answer.log`
+  first: a `check=keyed-screen-mismatch` record carries the screen the step refused.
+- **Space is a new key event** (`sendCharacterKey(" ")` → Ghostty's `space` key with text " ").
+  Never sent on a real surface by any test.
+- **Not probed, so not offered or not claimed:** a subagent's QUESTION card (the reader offers only a
+  child's permission); two cards at once (refused as ambiguous); Return on the free-text row of a
+  LAST multi-select question (driven as on the other questions; the user guide says it submits);
+  more than nine options (keys `a`–`f`, user guide only); a very long typed answer (the editor
+  check accepts a shown prefix).
+- **A background subagent's card while the parent runs some OTHER tool** is refused (no card):
+  the parent's own open call is then not a subagent wait, and which card is up cannot be read.
+- **The question deny is still Ctrl+C**, which cancels the turn. grok's gentler Shift+X dismiss
+  ("continue without an answer") is not wired.

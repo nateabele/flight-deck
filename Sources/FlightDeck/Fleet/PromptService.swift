@@ -107,6 +107,8 @@ final class PromptService {
     private struct Derived {
         let url: URL
         let stamp: TranscriptStamp
+        /// `AgentOpenPromptReader.auxiliaryStamp` at the time of the read.
+        var auxiliary: String? = nil
         let result: Result<OpenPrompt, TimelineErrorCode>
     }
 
@@ -161,7 +163,13 @@ final class PromptService {
         session: UUID, agent: String?, call: String, answer: PromptAnswer, token: UUID
     ) -> Result<Void, TimelineErrorCode> {
         let derived: Result<OpenPrompt, TimelineErrorCode>
-        if let agent {
+        if let agent, case .success(let read) = preflight(session),
+           let vouched = read.reader.vouchedSubagentPrompt(inTranscriptAt: read.url, agent: agent) {
+            // An agent whose own files say a subagent's call is a dialog (grok: the child's
+            // unresolved `permission_requested`) needs no hook log to vouch for it. The reader
+            // validates the id before it builds a path.
+            derived = .success(vouched)
+        } else if let agent {
             // Checked before any path is built: this id came off the wire.
             guard SubagentID.isValid(agent) else {
                 record(session, sent: call, open: nil, code: "unknown_agent")
@@ -304,7 +312,7 @@ final class PromptService {
         _ session: UUID, _ result: Result<OpenPrompt, TimelineErrorCode>?
     ) -> Result<OpenPrompt, TimelineErrorCode>? {
         guard case .failure(let code)? = result, code.code == "prompt_changed" else {
-            if case .success? = result { attributedAgents[session] = nil }
+            if case .success(let open)? = result { attributedAgents[session] = owningSubagent(session, open) }
             return result
         }
         if let dialog = pendingDialog(session), let agent = dialog.agentID,
@@ -328,10 +336,18 @@ final class PromptService {
     /// that is not waiting, or no transcript. The id is validated here too because it reaches
     /// a path; the wire edge refuses it first, but this is the layer that builds the path.
     private func subagentOpenPrompt(_ session: UUID, agent: String) -> OpenPrompt? {
-        guard SubagentID.isValid(agent), case .success(let read) = preflight(session),
-              let dir = read.reader.subagentTranscripts(for: read.url) else { return nil }
-        let lines = tail(dir.appendingPathComponent("agent-\(agent).jsonl"), Self.tailRecords).lines
+        guard case .success(let read) = preflight(session),
+              let file = read.reader.subagentTranscript(for: read.url, agent: agent) else { return nil }
+        let lines = tail(file, Self.tailRecords).lines
         return read.reader.openPrompt(inSubagentTail: lines)
+    }
+
+    /// The subagent the tab's own derivation took its open call from, if any — grok's reader
+    /// finds a child's card itself (`AgentOpenPromptReader.owningSubagent`), where claude's is
+    /// attributed through the hook log above.
+    private func owningSubagent(_ session: UUID, _ open: OpenPrompt) -> String? {
+        guard case .success(let read) = preflight(session) else { return nil }
+        return read.reader.owningSubagent(of: open, inTranscriptAt: read.url)
     }
 
     /// Per-tab, per-file answers for `subagentHoldsOpenCall`, keyed on each file's stamp the
@@ -428,21 +444,23 @@ final class PromptService {
             // missing file, so the uncached derivation is as cheap as a cache hit.
             return Self.scanToEnd(read, tail: tail)
         }
-        if let hit = derived[session], hit.url == read.url, hit.stamp == stamp {
+        // The reader's other inputs, taken before the read for the stamp's reason.
+        let auxiliary = read.reader.auxiliaryStamp(forTranscriptAt: read.url)
+        if let hit = derived[session], hit.url == read.url, hit.stamp == stamp, hit.auxiliary == auxiliary {
             return hit.result
         }
         if !polled {
             let result = Self.scanToEnd(read, tail: tail)
-            derived[session] = Derived(url: read.url, stamp: stamp, result: result)
+            derived[session] = Derived(url: read.url, stamp: stamp, auxiliary: auxiliary, result: result)
             return result
         }
         if widening.contains(session) { return staleRefusal(session) }
         switch Self.scan(read, tail: tail, reads: 1) {
         case .settled(let result):
-            derived[session] = Derived(url: read.url, stamp: stamp, result: result)
+            derived[session] = Derived(url: read.url, stamp: stamp, auxiliary: auxiliary, result: result)
             return result
         case .needsWider(let step):
-            widen(session, read, stamp: stamp, from: step)
+            widen(session, read, stamp: stamp, auxiliary: auxiliary, from: step)
             return staleRefusal(session)
         }
     }
@@ -453,7 +471,8 @@ final class PromptService {
     }
 
     private func widen(
-        _ session: UUID, _ read: TranscriptRead, stamp: TranscriptStamp, from step: WidenStep
+        _ session: UUID, _ read: TranscriptRead, stamp: TranscriptStamp, auxiliary: String?,
+        from step: WidenStep
     ) {
         widening.insert(session)
         let tail = self.tail
@@ -463,7 +482,8 @@ final class PromptService {
                 MainActor.assumeIsolated {
                     guard let self else { return }
                     self.widening.remove(session)
-                    self.derived[session] = Derived(url: read.url, stamp: stamp, result: result)
+                    self.derived[session] = Derived(url: read.url, stamp: stamp, auxiliary: auxiliary,
+                                                    result: result)
                     self.onPolledSettled?()
                 }
             }

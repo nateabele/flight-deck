@@ -1,3 +1,4 @@
+import FleetKit
 import Foundation
 
 /// **A dialog answered by one keypress that names the row — never by Return.**
@@ -20,5 +21,70 @@ protocol AgentKeyedDialogDriver: AgentDialogDriver {
     func allowKey(inViewport viewport: String) -> Character?
 
     /// The key of option `index` of a single question, or nil unless that row reads `label`.
+    /// The store's question answers go through `AgentKeyedQuestionDriver`'s checked program
+    /// instead, which resolves the same printed key per step; this stays as the one-row lookup.
     func optionKey(_ index: Int, label: String, inViewport viewport: String) -> Character?
+}
+
+/// One keystroke of a keyed answer drive, as `SessionStore` sends it.
+enum KeyedKeystroke: Equatable {
+    /// A printable key as a key event (`sendCharacterKey`): a row's own key, or Space.
+    case character(Character)
+    case arrowUp
+    case arrowDown
+    /// Text for an open editor, as a bracketed paste (`sendText`).
+    case paste(String)
+    /// Return. Only ever planned to commit an editor's text — never on an option row, where
+    /// it would submit whatever the cursor sits on.
+    case returnKey
+}
+
+/// One step of a keyed drive over a set of questions: what the screen must show before the
+/// step's keys go out, and the keys.
+///
+/// **Each step is checked against a fresh read of the screen and nothing is pressed unless it
+/// matches**, because a keyed agent's digits COMMIT (grok's advance the question and submit on
+/// the last one, facts-2 §0.3): a key that lands on the wrong question is an answer, not a
+/// cursor move. A step that does not match aborts the drive with the dialog left for a person.
+struct KeyedAnswerStep: Equatable {
+    struct Expectation: Equatable {
+        /// Which question of the set must be on screen, 0-based.
+        let question: Int
+        /// For a multi-select question, exactly which options must read checked; nil on a
+        /// single-select question.
+        let checked: Set<Int>?
+        /// The free-text editor must be open and show this text (empty right after opening);
+        /// nil means it must be closed.
+        let editor: String?
+    }
+
+    enum Key: Equatable {
+        /// The printed key of option N, read off the screen at the time of the step.
+        case option(Int)
+        /// The key that opens the free-text row.
+        case freeText
+        /// Toggle the focused checkbox.
+        case toggle
+        case up
+        case down
+        case paste(String)
+        /// Commit the editor's text.
+        case commitText
+    }
+
+    let expect: Expectation
+    let keys: [Key]
+}
+
+/// Whole-set answers for a keyed agent: question sets, multi-select and typed answers.
+@MainActor
+protocol AgentKeyedQuestionDriver: AgentKeyedDialogDriver {
+    /// The drive for these picks, or nil when the agent cannot take that shape — the store
+    /// answers `unanswerable` then, before any key.
+    func answerPlan(for questions: [PromptQuestion], picks: [[AnswerPlan.Pick]]) -> [KeyedAnswerStep]?
+
+    /// The keystrokes for `step` on this screen, or nil when the screen is not what the step
+    /// expects. Called on a fresh read before every step.
+    func keystrokes(for step: KeyedAnswerStep, questions: [PromptQuestion],
+                    inViewport viewport: String) -> [KeyedKeystroke]?
 }
