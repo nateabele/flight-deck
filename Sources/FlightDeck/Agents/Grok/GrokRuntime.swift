@@ -108,6 +108,8 @@ final class GrokSessionWatcher {
     private var updates = TailCursor()
     private var summaryStamp: Date?
     private var registryStamp: Date?
+    private var children: [String: GrokScan.Child] = [:]
+    private var finishedChildren: Set<String> = []
     /// Whether grok's process registry last listed this session. nil until first read.
     private var registered: Bool?
     private var fold = GrokStatusFold()
@@ -148,7 +150,8 @@ final class GrokSessionWatcher {
     private func scanInput() -> GrokScan.Input {
         GrokScan.Input(directory: directory, sessionsRoot: sessionsRoot, conversationID: conversationID,
                        events: events, updates: updates, summaryStamp: summaryStamp,
-                       registryStamp: registryStamp)
+                       registryStamp: registryStamp, children: children,
+                       finishedChildren: finishedChildren)
     }
 
     private func apply(_ scan: GrokScan) {
@@ -157,6 +160,8 @@ final class GrokSessionWatcher {
         updates = scan.updates
         summaryStamp = scan.summaryStamp
         registryStamp = scan.registryStamp
+        children = scan.children
+        finishedChildren = scan.finishedChildren
 
         // grok's process registry (`active_sessions.json`) lists a session from launch to exit
         // (probed, SIGHUP included), so it is the liveness signal for a session that has not
@@ -187,6 +192,7 @@ final class GrokSessionWatcher {
             case .event(let type, let outcome): discrete = fold.apply(eventType: type, outcome: outcome)
             case .question(let signal): fold.apply(signal)
             case .signals(let signals): discrete = [.outputSignals(signals)]
+            case .childPermissions(let count): fold.apply(childPermissions: count)
             }
             report()
             discrete.forEach(onEvent)
@@ -227,6 +233,16 @@ struct GrokScan: Sendable {
         let updates: TailCursor
         let summaryStamp: Date?
         var registryStamp: Date? = nil
+        var children: [String: Child] = [:]
+        var finishedChildren: Set<String> = []
+    }
+
+    /// One running subagent, as the last poll left it. Its `events.jsonl` is re-read only when
+    /// its modification date moves.
+    struct Child: Sendable, Equatable {
+        var directory: URL?
+        var stamp: Date?
+        var holdsPermission = false
     }
 
     /// One state-bearing line, in file order within each file — events first, then updates.
@@ -236,6 +252,9 @@ struct GrokScan: Sendable {
         case event(type: String, outcome: String?)
         case question(GrokStatusFold.QuestionSignal)
         case signals([AgentOutputSignal])
+        /// How many running subagents hold a permission card (`GrokSubagents`). Emitted on every
+        /// poll of a session that has a `subagents/` directory, last, so it reflects this poll.
+        case childPermissions(Int)
     }
 
     var directory: URL
@@ -246,6 +265,8 @@ struct GrokScan: Sendable {
     var registryStamp: Date?
     /// Whether `active_sessions.json` lists this session; nil when the file did not change.
     var registered: Bool?
+    var children: [String: Child] = [:]
+    var finishedChildren: Set<String> = []
     var steps: [Step] = []
     var sawLines = false
     /// `updates.jsonl`'s new prompts and replies, by `GrokSearchCorpus`'s rule — so a live row is
@@ -266,6 +287,7 @@ struct GrokScan: Sendable {
 
         var scan = GrokScan(directory: directory, events: input.events, updates: input.updates,
                             summaryStamp: input.summaryStamp, registryStamp: input.registryStamp)
+        scan.finishedChildren = input.finishedChildren
 
         let registry = GrokSessionFiles.registryURL(sessionsRoot: input.sessionsRoot)
         let registryStamp = (try? registry.resourceValues(forKeys: [.contentModificationDateKey]))?
@@ -303,6 +325,32 @@ struct GrokScan: Sendable {
             if !signals.isEmpty { scan.steps.append(.signals(signals)) }
         }
         scan.sawLines = !eventTail.lines.isEmpty || !updateTail.lines.isEmpty
+
+        // Subagents' cards, which only their own files mark (see `GrokSubagents`). One directory
+        // listing per poll, and only for a session that has ever spawned one.
+        let subagents = directory.appendingPathComponent(GrokSubagents.directoryName, isDirectory: true)
+        if FileManager.default.fileExists(atPath: subagents.path) {
+            let listing = GrokSubagents.children(ofSessionDirectory: directory, skipping: input.finishedChildren)
+            scan.finishedChildren.formUnion(listing.finished)
+            for id in listing.running {
+                var child = input.children[id] ?? Child()
+                if child.directory == nil {
+                    child.directory = GrokSubagents.childDirectory(id, sessionsRoot: input.sessionsRoot)
+                }
+                if let dir = child.directory {
+                    let events = dir.appendingPathComponent(GrokSessionFiles.eventsName)
+                    let stamp = (try? events.resourceValues(forKeys: [.contentModificationDateKey]))?
+                        .contentModificationDate
+                    if stamp != child.stamp {
+                        child.stamp = stamp
+                        child.holdsPermission = (try? Data(contentsOf: events))
+                            .map(GrokSubagents.holdsPermission(eventsData:)) ?? false
+                    }
+                }
+                scan.children[id] = child
+            }
+            scan.steps.append(.childPermissions(scan.children.values.filter(\.holdsPermission).count))
+        }
 
         let summaryURL = directory.appendingPathComponent(GrokSessionFiles.summaryName)
         let stamp = (try? summaryURL.resourceValues(forKeys: [.contentModificationDateKey]))?

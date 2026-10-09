@@ -729,9 +729,22 @@ is `updates.jsonl` (ACP `session/update` records, `GrokTimelineMapper`), status 
 rounded box with no placeholder; a draft is set aside with grok's own Ctrl+S stash
 (`GrokTextChannel`). Its cards are answered by the row's own key and never by Return
 (`GrokDialogDriver`, `AgentKeyedDialogDriver`), because the first card of a session focuses
-"always-approve"; deny and interrupt are Ctrl+C (`AgentAdapter.interruptKey`). Usage is the
-weekly figure from the billing line in `$GROK_HOME/logs/unified.jsonl` (`GrokBillingSource`).
-The evidence is `.superpowers/grok-tui-facts.md` (grok 1.0.30).
+"always-approve"; deny and interrupt are Ctrl+C (`AgentAdapter.interruptKey`). A question —
+one or a set, single-select, checkbox or typed — is answered by `GrokAnswerPlan` through
+`AgentKeyedQuestionDriver` and `SessionStore.performKeyed`: each step re-reads the card and
+must find the right question (`[i/n]`), its labels and its checkboxes before any key goes out,
+because a grok digit commits (it advances, and submits on the last question). Extra boxes are
+ticked with Space after clamping the colour-only cursor with `↑`; a typed answer is `z`, a
+paste and the one Return the drive ever sends, into the open editor. grok writes
+`multi_select`, which `GrokTimelineMapper` renames for the phone. A subagent's permission card
+is drawn in the parent's TUI but recorded only in the child's own session
+(`<parent>/subagents/<id>/meta.json` names it; `GrokSubagents`): the runtime counts running
+children's unresolved requests into `waiting`, and the reader offers the child's call, attributed
+to the child (`AgentOpenPromptReader.owningSubagent`, `vouchedSubagentPrompt`,
+`subagentTranscript(for:agent:)`) so the phone reads the child's file and the answer needs no
+hook log. Usage is the weekly figure from the billing line in `$GROK_HOME/logs/unified.jsonl`
+(`GrokBillingSource`). The evidence is `.superpowers/grok-tui-facts.md` and
+`grok-tui-facts-2.md` (grok 1.0.30).
 
 **Accounts and pools are one list.** `AccountList` (`Agents/AccountList.swift`, stored as
 `Preferences.storedAccountList`) holds accounts and single-agent pools, one level deep, each

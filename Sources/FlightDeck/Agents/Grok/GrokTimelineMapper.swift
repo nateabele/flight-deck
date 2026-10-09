@@ -18,10 +18,11 @@ import Foundation
 /// `background_tasks` and the rest are bookkeeping.
 ///
 /// **`ask_user_question` is a `.prompt`, not a `.toolCall`**, for the same reason claude's
-/// `AskUserQuestion` is: its body is the question set `OpenPrompt.find` parses. Its input shape
-/// was not captured live (the probe answered one by keypress, not by reading the record);
-/// grok's string table names the same `questions` member claude uses, and a body that does not
-/// parse yields no card at all — `OpenPrompt.find` refuses rather than drawing Allow/Deny.
+/// `AskUserQuestion` is: its body is the question set `OpenPrompt.find` parses. Captured live
+/// (facts-2 §0.2): `{"questions":[{"question","options":[{"label","description"}],
+/// "multi_select"}]}` — claude's shape but for the snake-case `multi_select`, which
+/// `questionInput` renames, and a body that does not parse yields no card at all —
+/// `OpenPrompt.find` refuses rather than drawing Allow/Deny.
 enum GrokTimelineMapper {
     static let questionTool = "ask_user_question"
 
@@ -56,7 +57,7 @@ enum GrokTimelineMapper {
             let input = update["rawInput"] as? [String: Any] ?? [:]
             if name == questionTool {
                 return [item(id, .prompt, TimelineItem.Body(
-                    text: json(input), tool: name, callID: callID), at)]
+                    text: json(questionInput(input)), tool: name, callID: callID), at)]
             }
             return [item(id, .toolCall, TimelineItem.Body(
                 text: ToolInputSummary.pretty(input), summary: ToolInputSummary.text(for: input),
@@ -71,6 +72,23 @@ enum GrokTimelineMapper {
         default:
             return []
         }
+    }
+
+    /// `ask_user_question`'s input in the shape `PromptQuestion` reads: grok spells claude's
+    /// `multiSelect` as `multi_select` (probed, grok 1.0.30). Without the rename every grok
+    /// checkbox question reads as single-select, and the phone offers one pick where grok takes
+    /// several — and a single pick's key on a checkbox question COMMITS it (facts-2 §0.3).
+    static func questionInput(_ input: [String: Any]) -> [String: Any] {
+        guard let questions = input["questions"] as? [[String: Any]] else { return input }
+        var out = input
+        out["questions"] = questions.map { question -> [String: Any] in
+            var question = question
+            if question["multiSelect"] == nil, let flag = question["multi_select"] as? Bool {
+                question["multiSelect"] = flag
+            }
+            return question
+        }
+        return out
     }
 
     /// The tool's own name (`_meta["x.ai/tool"].name`, e.g. `write`, `run_terminal_command`),

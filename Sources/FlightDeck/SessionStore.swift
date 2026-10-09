@@ -7196,10 +7196,11 @@ final class SessionStore: ObservableObject {
     /// picks AND submits, so there is no cursor to move, no landing to confirm and no Return
     /// that could commit a focused durable grant (grok's first card focuses always-approve).
     ///
-    /// Narrower than the arrow drive on purpose: one single-select question, or a permission's
-    /// plain "Yes". A set of questions, a checkbox question or a typed answer is `.unanswerable`
-    /// here — grok's multi-question card walks with ←/→ and its free-text row submits on Return,
-    /// neither of which was probed, so neither is pressed.
+    /// A permission's plain "Yes" is that one key. A question — one or a set, single-select,
+    /// checkbox or typed — goes through `driveKeyed`, the driver's own step-by-step program
+    /// (`AgentKeyedQuestionDriver`), whose FIRST step is checked here against the screen already
+    /// read, so a dialog this Mac does not recognise is refused before the phone is told
+    /// `dispatched`. A keyed driver with no question program answers questions `unanswerable`.
     private func answerByKey(
         _ open: OpenPrompt, with answer: PromptAnswer, keyed: AgentKeyedDialogDriver,
         injector: TextInjecting, id: UUID, token: UUID
@@ -7225,39 +7226,115 @@ final class SessionStore: ObservableObject {
             }
             key = found
         case .option, .answers:
-            let pick: (index: Int, label: String)
-            switch answer {
-            case .option(let index, let label): pick = (index, label)
-            case .answers(let selections):
-                guard selections.count == 1, selections[0].count == 1, selections[0][0].text == nil
-                else { return .unanswerable }
-                pick = (selections[0][0].index, selections[0][0].label)
-            default: return .unanswerable
-            }
             guard case .question(_, let questions) = open else {
                 recordEarlyAbort(.optionNotQuestion, injector: injector)
                 return .unreadableScreen
             }
-            guard questions.count == 1, let question = questions.first,
-                  question.isAnswerable, !question.multiSelect
+            guard let program = keyed as? AgentKeyedQuestionDriver else { return .unanswerable }
+            let picks: [[AnswerPlan.Pick]]
+            switch answer {
+            case .option(let index, let label):
+                // One index names one list, so `.option` means a lone question; a set is the
+                // whole-set payload's job, as on the arrow path.
+                guard questions.count == 1, let question = questions.first else { return .unanswerable }
+                guard question.options.indices.contains(index), question.options[index].label == label else {
+                    let expected = question.options.indices.contains(index) ? question.options[index].label : nil
+                    recordEarlyAbort(.optionLabelMismatch, expected: expected, injector: injector)
+                    return .unreadableScreen
+                }
+                picks = [[.option(index)]]
+            case .answers(let selections):
+                guard selections.count == questions.count else {
+                    recordEarlyAbort(.setCountMismatch, injector: injector)
+                    return .unreadableScreen
+                }
+                // The client's labels against this Mac's own transcript copy, as on the arrow
+                // path; a typed answer is held to its position, the free-text row.
+                for (question, chosen) in zip(questions, selections) {
+                    for selection in chosen {
+                        if selection.text != nil {
+                            guard selection.index == question.options.count else {
+                                recordEarlyAbort(.setLabelMismatch, injector: injector)
+                                return .unreadableScreen
+                            }
+                            continue
+                        }
+                        guard question.options.indices.contains(selection.index),
+                              question.options[selection.index].label == selection.label
+                        else {
+                            let expected = question.options.indices.contains(selection.index)
+                                ? question.options[selection.index].label : nil
+                            recordEarlyAbort(.setLabelMismatch, expected: expected, injector: injector)
+                            return .unreadableScreen
+                        }
+                    }
+                }
+                picks = selections.map { $0.map { $0.text.map(AnswerPlan.Pick.typed) ?? .option($0.index) } }
+            default:
+                return .unanswerable
+            }
+            guard let plan = program.answerPlan(for: questions, picks: picks), let first = plan.first
             else { return .unanswerable }
-            guard question.options.indices.contains(pick.index),
-                  question.options[pick.index].label == pick.label
-            else {
-                let expected = question.options.indices.contains(pick.index)
-                    ? question.options[pick.index].label : nil
-                recordEarlyAbort(.optionLabelMismatch, expected: expected, injector: injector)
+            guard program.keystrokes(for: first, questions: questions, inViewport: viewport) != nil else {
+                recordEarlyAbort(.keyedScreenMismatch, injector: injector)
                 return .unreadableScreen
             }
-            guard let found = keyed.optionKey(pick.index, label: pick.label, inViewport: viewport) else {
-                recordEarlyAbort(.optionRowMismatch, expected: pick.label, injector: injector)
-                return .unreadableScreen
-            }
-            key = found
+            remember(answered: token, for: id)
+            injecting.insert(id)
+            performKeyed(plan, at: 0, questions: questions, driver: program, injector: injector, id: id, rereads: 0)
+            return .dispatched
         }
         remember(answered: token, for: id)
         injector.sendCharacterKey(key)
         return .dispatched
+    }
+
+    /// How many extra settles a keyed step waits for the screen to show what it expects before
+    /// the drive gives up. A commit repaints the NEXT question asynchronously, and grok's repaint
+    /// was seen to take longer than one 120ms settle under load in the probe; re-reading costs
+    /// nothing, and only a read is retried — never a key.
+    static let keyedRereads = 8
+
+    /// One keyed step: read, check, press, settle, next. Every step is checked against a fresh
+    /// read, because a keyed agent's keys commit (see `KeyedAnswerStep`); a mismatch after the
+    /// re-reads files a `keyed-screen-mismatch` abort and leaves the card for a person.
+    private func performKeyed(
+        _ steps: [KeyedAnswerStep], at index: Int, questions: [PromptQuestion],
+        driver: AgentKeyedQuestionDriver, injector: TextInjecting, id: UUID, rereads: Int
+    ) {
+        guard index < steps.count else { injecting.remove(id); return }
+        guard let screen = injector.readViewport() else {
+            answerAbortSink(AnswerAbort(check: .unreadableBeforePress, step: index, purpose: nil,
+                                        from: 0, to: 0, expected: nil, focused: nil, viewport: nil))
+            injecting.remove(id)
+            return
+        }
+        guard let keys = driver.keystrokes(for: steps[index], questions: questions, inViewport: screen) else {
+            if rereads < Self.keyedRereads {
+                injectionSettle { [weak self] in
+                    self?.performKeyed(steps, at: index, questions: questions, driver: driver,
+                                       injector: injector, id: id, rereads: rereads + 1)
+                }
+                return
+            }
+            answerAbortSink(AnswerAbort(check: .keyedScreenMismatch, step: index, purpose: nil,
+                                        from: 0, to: 0, expected: nil, focused: nil, viewport: screen))
+            injecting.remove(id)
+            return
+        }
+        for key in keys {
+            switch key {
+            case .character(let character): injector.sendCharacterKey(character)
+            case .arrowUp: injector.sendArrowUp()
+            case .arrowDown: injector.sendArrowDown()
+            case .paste(let text): injector.sendText(text)
+            case .returnKey: injector.sendReturn()
+            }
+        }
+        injectionSettle { [weak self] in
+            self?.performKeyed(steps, at: index + 1, questions: questions, driver: driver,
+                               injector: injector, id: id, rereads: 0)
+        }
     }
 
     /// Files an answered token against a tab, oldest evicted first. See `answeredPromptTokens`.
@@ -9983,6 +10060,8 @@ struct AnswerAbort: Equatable {
         case optionLabelMismatch = "option-label-mismatch"
         case optionCursorOutside = "option-cursor-outside"
         case optionRowMismatch   = "option-row-mismatch"
+        /// A keyed drive's step found a screen other than the one it expects (`KeyedAnswerStep`).
+        case keyedScreenMismatch = "keyed-screen-mismatch"
     }
 
     let check: Check

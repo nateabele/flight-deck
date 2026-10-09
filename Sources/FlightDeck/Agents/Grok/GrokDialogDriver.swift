@@ -1,3 +1,4 @@
+import FleetKit
 import Foundation
 
 /// grok's permission and question cards, read and answered.
@@ -10,7 +11,7 @@ import Foundation
 /// **Deny is Ctrl+C, not Escape.** grok's Escape on a card "parks focus in the scrollback. It
 /// never answers or dismisses the request" (user guide ch. 3, and seen live); Ctrl+C cancels
 /// the request. One key, no reading — the property `AgentDialogDriver.deny` asks for.
-struct GrokDialogDriver: AgentKeyedDialogDriver {
+struct GrokDialogDriver: AgentKeyedQuestionDriver {
     func focusedRow(inViewport viewport: String) -> Int? {
         let rows = GrokScreen.cardRows(inViewport: viewport)
         let focused = rows.indices.filter { rows[$0].focused }
@@ -50,5 +51,15 @@ struct GrokDialogDriver: AgentKeyedDialogDriver {
         let rows = GrokScreen.cardRows(inViewport: viewport).filter { $0.key != "z" }
         guard rows.indices.contains(index), GrokScreen.row(rows[index], reads: label) else { return nil }
         return rows[index].key
+    }
+
+    /// A question set, a checkbox question or a typed answer, keyed — see `GrokAnswerPlan`.
+    func answerPlan(for questions: [PromptQuestion], picks: [[AnswerPlan.Pick]]) -> [KeyedAnswerStep]? {
+        GrokAnswerPlan.plan(for: questions, picks: picks)
+    }
+
+    func keystrokes(for step: KeyedAnswerStep, questions: [PromptQuestion],
+                    inViewport viewport: String) -> [KeyedKeystroke]? {
+        GrokAnswerPlan.keystrokes(for: step, questions: questions, inViewport: viewport)
     }
 }

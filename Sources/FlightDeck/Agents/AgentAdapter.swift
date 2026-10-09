@@ -374,12 +374,47 @@ protocol AgentOpenPromptReader: Sendable {
     /// `true` without earning it ships an agent whose phone card never appears, and one that
     /// took `false` sends dialog text for an agent whose phone already derives it.
     var transcriptCarriesOpenPrompt: Bool { get }
+
+    /// The file holding subagent `agent`'s transcript, or nil for an id this agent never
+    /// minted. `agent` came off the wire, so the id is validated here before any path is built
+    /// from it. The default is claude's layout, `subagentTranscripts(for:)/agent-<id>.jsonl`;
+    /// grok keeps each subagent in a session directory of its own (`GrokOpenPromptReader`).
+    func subagentTranscript(for transcript: URL, agent: String) -> URL?
+
+    /// The subagent whose file holds `open`, when `openPrompt(inTranscriptAt:…)` derived it
+    /// from one rather than from the tab's own transcript — so the phone can read that file for
+    /// the card. The default is nil: claude's attribution comes from its hook log instead
+    /// (`PromptService.attributingSubagents`).
+    func owningSubagent(of open: OpenPrompt, inTranscriptAt url: URL) -> String?
+
+    /// Subagent `agent`'s open dialog, when this reader can tell on its own that it IS a dialog
+    /// and not a running tool — what claude needs its hook log to say. Nil by default, which
+    /// leaves `PromptService.answer` on the hook-log path.
+    func vouchedSubagentPrompt(inTranscriptAt url: URL, agent: String) -> OpenPrompt?
+
+    /// Whatever else, beside the transcript itself, the derivation read — as a value that
+    /// changes when that input does. `PromptService` keys its cache on the transcript's stamp
+    /// AND this, so a reader that also reads other files (grok: its running subagents' events,
+    /// where a child's next card can appear without the parent's transcript moving) is never
+    /// served a superseded call. Nil by default: the transcript is the only input.
+    func auxiliaryStamp(forTranscriptAt url: URL) -> String?
 }
 
 extension AgentOpenPromptReader {
     func openPrompt(inTranscriptAt url: URL, tail lines: [SourceLine], activity: SessionActivity?) -> OpenPrompt? {
         openPrompt(inTranscriptTail: lines, activity: activity)
     }
+
+    func subagentTranscript(for transcript: URL, agent: String) -> URL? {
+        guard SubagentID.isValid(agent), let dir = subagentTranscripts(for: transcript) else { return nil }
+        return dir.appendingPathComponent("agent-\(agent).jsonl")
+    }
+
+    func owningSubagent(of open: OpenPrompt, inTranscriptAt url: URL) -> String? { nil }
+
+    func vouchedSubagentPrompt(inTranscriptAt url: URL, agent: String) -> OpenPrompt? { nil }
+
+    func auxiliaryStamp(forTranscriptAt url: URL) -> String? { nil }
 }
 
 /// **Typing a message into a live agent and submitting it.**

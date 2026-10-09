@@ -25,10 +25,19 @@ struct GrokStatusFold: Equatable {
     private(set) var turnActive = false
     private(set) var pendingPermissions = 0
     private(set) var openQuestions: Set<String> = []
+    /// Running subagents holding a permission card. Their cards are drawn in this session's TUI
+    /// but marked only in their own `events.jsonl` (facts-2 §4) — a foreground subagent's parent
+    /// reads `busy` throughout — so the watcher counts them and sets this; turn records here
+    /// never clear it, because a background child outlives its parent's turn.
+    private(set) var childPermissions = 0
 
     var activity: SessionActivity {
-        if pendingPermissions > 0 || !openQuestions.isEmpty { return .waiting }
+        if pendingPermissions > 0 || !openQuestions.isEmpty || childPermissions > 0 { return .waiting }
         return turnActive ? .busy : .idle
+    }
+
+    mutating func apply(childPermissions count: Int) {
+        childPermissions = max(0, count)
     }
 
     /// One `events.jsonl` record. Returns the discrete events it implies beyond the activity

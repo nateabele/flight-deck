@@ -55,8 +55,9 @@ protocol TextInjecting: AnyObject {
     /// (`GrokDialogDriver`), so Return on an unmoved cursor grants always-approve; its own
     /// digit (`3` for a plain "Yes") picks and submits in one press. `sendText("3")` cannot do
     /// that job: it is a bracketed paste, and a TUI reads a paste as text for whatever field
-    /// has focus, not as the keypress that selects a row. A character with no key of its own
-    /// sends nothing.
+    /// has focus, not as the keypress that selects a row. Space is a key too — grok toggles a
+    /// checkbox row with it (facts-2 §0.4) — and is sent as Ghostty's `space` key with its text.
+    /// A character with no key of its own sends nothing.
     func sendCharacterKey(_ character: Character)
 
     /// Ctrl plus one letter, as a real key event — the same route `sendKillLine` takes.
@@ -127,6 +128,7 @@ extension Ghostty.SurfaceView: TextInjecting {
 
     private static func key(for character: Character) -> Ghostty.Input.Key? {
         guard character.isASCII else { return nil }
+        if character == " " { return .space }
         if character.isNumber { return Ghostty.Input.Key(rawValue: "digit\(character)") }
         guard character.isLetter, character.isLowercase else { return nil }
         return Ghostty.Input.Key(rawValue: String(character))
