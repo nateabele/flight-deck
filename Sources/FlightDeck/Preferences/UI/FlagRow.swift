@@ -12,6 +12,13 @@ struct FlagRow: View {
     @Binding var value: FlagValue?
     var inherited: FlagValue?
     var onRevert: (() -> Void)?
+    /// The menu's "unset" row when nothing is inherited. "Default" for claude's flags; a grok or
+    /// gemini model row names the model a tab would then run (`TabModelChoices.defaultModelTitle`).
+    var defaultTitle: String = "Default"
+    /// A `.choice` menu's width. 160 fits claude's values; a model id with its "Inherited: " or
+    /// "Default (…)" prefix does not, and truncated to "Inherited: grok-4…" it hides the one
+    /// thing the row is there to show.
+    var choiceWidth: CGFloat = 160
 
     /// Local draft for `.list` only — see `listDraft` below for why the model can't back
     /// the text field directly.
@@ -62,7 +69,7 @@ struct FlagRow: View {
 
         case .negatable:
             Picker("", selection: negatableBinding) {
-                Text(defaultItemLabel("Default")).tag("")
+                Text(defaultItemLabel(defaultTitle)).tag("")
                 Text("On").tag("on")
                 Text("Off").tag("off")
             }
@@ -76,7 +83,7 @@ struct FlagRow: View {
         case .choice(let options, let allowsCustom):
             HStack(spacing: 6) {
                 Picker("", selection: choiceBinding(options, allowsCustom: allowsCustom)) {
-                    Text(defaultItemLabel("Default")).tag("")
+                    Text(defaultItemLabel(defaultTitle)).tag("")
                     ForEach(options, id: \.self) { Text($0).tag($0) }
                     if allowsCustom { Text("Custom…").tag(customTag) }
                     // `allowsCustom == false` specs (`--effort`, `--permission-mode`) have
@@ -101,7 +108,7 @@ struct FlagRow: View {
                 }
                 .labelsHidden()
                 // Trailing for the same reason as `.negatable` above: one input column.
-                .frame(width: 160, alignment: .trailing)
+                .frame(width: choiceWidth, alignment: .trailing)
                 .accessibilityIdentifier(spec.label)
 
                 if allowsCustom, isCustomValue(options) {

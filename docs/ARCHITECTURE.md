@@ -450,6 +450,17 @@ Project overrides are keyed by standardized path in `Preferences.projectFlags`, 
 `Repo` — closing a project (`SessionStore.closeProject`) removes its `Repo` outright, and an
 override must outlive that so it is still there if the same path is reopened later.
 
+Every agent's options are one `AgentOptions` arm — claude's `FlagSet`, codex's
+`CodexThreadOptions`, grok's `GrokOptions` (model, effort), gemini's `GeminiOptions` (model,
+`--mode`) — held on its row in Settings → Agents and per project, and resolved for every launch
+and resume by `PreferencesStore.resolvedOptions`, which merges a project's fields over the
+global row's (a nil field inherits). `AgentOptionsPane` picks each agent's editor; grok and gemini
+share `TabModelOptionsForm`, whose model menu is planning's detection
+(`IntakeService.detectedModels`, the `grok models`/`agy models` run at launch) rather than a probe
+of its own. A routed launch (`SessionStore.launchOptions`) lays the task's overrides on top of the
+same resolved value through `GrokLaunchOverrides`/`GeminiLaunchOverrides`, so a hand-picked and a
+routed model are one setting.
+
 Unknown flags are preserved verbatim in `FlagSet.passthrough` and warned about rather than
 rejected, so a `claude` release that adds a flag does not make the field lossy.
 

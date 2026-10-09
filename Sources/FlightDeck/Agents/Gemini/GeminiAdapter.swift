@@ -117,7 +117,16 @@ struct GeminiAdapter: AgentAdapter {
     }
 
     func launchCommand(_ binding: AgentBinding, _ session: Session, _ options: AgentOptions) -> String {
-        "agy --model \(Self.model(for: geminiOptions(options)))\n"
+        "agy --model \(Self.model(for: geminiOptions(options)))\(Self.modeFlag(geminiOptions(options)))\n"
+    }
+
+    /// ` --mode <mode>` for a mode agy accepts (`GeminiOptions.modes`), else nothing: a stored
+    /// value is typed at a shell, so one outside the list is dropped rather than quoted and
+    /// left for agy to refuse at launch. Applied at resume too, as the model is — agy takes
+    /// `--mode` on `--conversation` the same as on a fresh launch.
+    nonisolated static func modeFlag(_ options: GeminiOptions) -> String {
+        guard let mode = options.mode, GeminiOptions.modes.contains(mode) else { return "" }
+        return " --mode \(mode)"
     }
 
     /// Resume only a conversation agy actually has. `agy --conversation=<unknown>` does not fail
@@ -129,7 +138,7 @@ struct GeminiAdapter: AgentAdapter {
         guard paths.conversationExists(binding.conversationID, exists: exists) else {
             return launchCommand(binding, session, options)
         }
-        return "agy --conversation=\(GeminiPaths.name(binding.conversationID)) --model \(Self.model(for: geminiOptions(options)))\n"
+        return "agy --conversation=\(GeminiPaths.name(binding.conversationID)) --model \(Self.model(for: geminiOptions(options)))\(Self.modeFlag(geminiOptions(options)))\n"
     }
 
     /// Unreachable in production: `SessionStore.rename` types gemini's `/rename` through the

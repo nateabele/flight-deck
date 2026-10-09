@@ -345,7 +345,11 @@ final class IntakeService: ObservableObject {
     private static let collapsedListDefaultsKey = "IntakeListCollapsedByProject"
     /// Filled off the main actor by a detached probe started in `init` (the login-shell PATH
     /// lookup behind it can take seconds on first use); nil until that lands.
-    private var availableModelsCache: AvailableModels?
+    ///
+    /// Published because Settings' grok and gemini model pickers read it too
+    /// (`DetectedModelsReader`): a pane opened before the probe lands must refresh when it does,
+    /// or it would keep offering the built-in fallback list as if it were the account's.
+    @Published private(set) var availableModelsCache: AvailableModels?
     /// nil in a host that cannot run planning rounds; `beginShaping` then fails the intake
     /// with that reason instead of leaving it shaping with nothing behind it.
     private let runner: IntakeRunnerControlling?
@@ -1091,6 +1095,11 @@ final class IntakeService: ObservableObject {
     func availableModels() -> AvailableModels {
         availableModelsCache ?? .defaults
     }
+
+    /// The detection itself, or nil until it lands — unlike `availableModels()`, which stands the
+    /// stock defaults in for it. Settings' tab model pickers need the difference: "no list yet"
+    /// and "the CLI listed these" are different notes (`TabModelChoices`).
+    var detectedModels: AvailableModels? { availableModelsCache }
 
     /// Resolves which account each planning agent bills for a project (unify brief R9) — set by
     /// `SessionStore`, which owns preferences, so this service never reads them itself. nil (a

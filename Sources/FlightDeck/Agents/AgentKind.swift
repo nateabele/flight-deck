@@ -124,9 +124,21 @@ enum AgentOptions: Equatable, Sendable {
 /// grok's per-agent launch options: the TUI's `-m <model>` and `--effort <level>` (probed on
 /// grok 1.0.30; see `GrokAdapter.launchCommand`). Every field is optional, so a row stored
 /// before it existed — the empty payload of the P0 stub — still decodes.
+///
+/// grok's `--permission-mode` is deliberately NOT here: the TUI accepts it, but a probe on grok
+/// 1.0.30 (2026-10-09) launched with `--permission-mode plan` still raised the ordinary Edit
+/// permission card for a write, so what the flag does to a tab is unproven — and
+/// `GrokDialogDriver` is built on the default mode's cards.
 struct GrokOptions: Codable, Equatable, Sendable {
     var model: String?
     var effort: String?
+
+    /// Claude's and codex's rule (`CodexThreadOptions.merge`): a nil project field inherits, a
+    /// set one overrides. Without it a project that set only the effort replaced the whole
+    /// payload and silently dropped the global model.
+    static func merge(global: GrokOptions, project: GrokOptions) -> GrokOptions {
+        GrokOptions(model: project.model ?? global.model, effort: project.effort ?? global.effort)
+    }
 }
 
 /// Gemini's (`agy`'s) per-agent launch options. Every field is optional, so a row stored before
@@ -136,7 +148,21 @@ struct GeminiOptions: Codable, Equatable, Sendable {
     /// are honoured (`GeminiAdapter.model(for:)`): agy also serves Claude and GPT-OSS models,
     /// and a gemini tab running one of those would be a gemini tab in name only.
     var model: String?
+    /// `agy --mode <mode>`: `accept-edits` or `plan`; nil is agy's own default ("request
+    /// review"). Probed in agy 1.3.1's TUI (`.superpowers/agy-tui-facts.md`): the footer shows
+    /// the mode, and `GeminiTextChannel` already reads both modes' empty-composer placeholders,
+    /// since Shift+Tab reaches them from any tab anyway.
+    var mode: String?
 
-    init(model: String? = nil) { self.model = model }
+    /// Every value `--mode` accepts (agy 1.3.1 `--help`). A stored value outside it is never
+    /// typed (`GeminiAdapter.modeFlag`) — it is going to a shell.
+    static let modes = ["accept-edits", "plan"]
+
+    init(model: String? = nil, mode: String? = nil) { self.model = model; self.mode = mode }
+
+    /// The same nil-inherits rule as `GrokOptions.merge`.
+    static func merge(global: GeminiOptions, project: GeminiOptions) -> GeminiOptions {
+        GeminiOptions(model: project.model ?? global.model, mode: project.mode ?? global.mode)
+    }
 }
 

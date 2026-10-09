@@ -168,6 +168,12 @@ struct GrokAdapter: AgentAdapter {
     /// model id is user-typed text going to a shell.
     private func flags(_ options: AgentOptions) -> String {
         guard case .grok(let grok) = options else { return "" }
+        return Self.flagTail(grok)
+    }
+
+    /// The tail itself, shared with Settings' launch-command preview so the preview is the
+    /// command a tab types rather than a second spelling of it.
+    static func flagTail(_ grok: GrokOptions) -> String {
         var out = ""
         if let model = grok.model, !model.isEmpty { out += " -m \(ClaudeSession.shellQuoted(model))" }
         if let effort = grok.effort, !effort.isEmpty { out += " --effort \(ClaudeSession.shellQuoted(effort))" }
