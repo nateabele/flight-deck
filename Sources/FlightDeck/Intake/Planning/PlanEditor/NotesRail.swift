@@ -218,9 +218,6 @@ final class PlanNotesController: ObservableObject {
     let geometry = NotesGeometry()
 
     @Published var draft: NoteDraft? { didSet { if draft?.kind != oldValue?.kind || draft?.id != oldValue?.id { marksChanged() } } }
-    /// The rail has the inspector: the human is working in the plan (spec §3). Set when the
-    /// editor takes focus or a draft starts; the detail pane clears it when a seat is chosen.
-    @Published var planFocused = false
     /// The human's edit hunks on the plan head — the "3 edits" of the next-round tooltip.
     @Published private(set) var edits = 0
     @Published var tapeNotes: [TapeNote] = [] { didSet { if tapeNotes != oldValue { prune() } } }
@@ -229,7 +226,10 @@ final class PlanNotesController: ObservableObject {
 
     /// Queues a command for this intake's runner; bound by the detail pane.
     var send: (TapeCommand) -> Void = { _ in }
-    /// Opens the inspector so a draft started from the toolbar has somewhere to be written.
+    /// Opens the inspector in Notes mode so a draft started from the toolbar has somewhere to be
+    /// written. An explicit switch, and the only one the rail makes: focus in the plan used to
+    /// hand the rail the inspector too, which took the Rounds editor away whenever the human
+    /// clicked into the plan just to read it.
     var showRail: () -> Void = {}
     /// The checkpoint whose plan the editor shows — what a new anchor is selected in.
     var checkpoint: Int?
@@ -277,7 +277,6 @@ final class PlanNotesController: ObservableObject {
         sent = []
         removed = []
         tapeNotes = []
-        planFocused = false
         edits = 0
         checkpoint = nil
         selection = nil
@@ -326,7 +325,6 @@ final class PlanNotesController: ObservableObject {
     private func begin(_ next: NoteDraft) {
         commitDraft()
         draft = next
-        planFocused = true
         showRail()
     }
 
@@ -389,7 +387,7 @@ final class PlanNotesController: ObservableObject {
     private func marksChanged() { onMarksChanged?() }
 }
 
-/// The notes rail (spec §7.3): the inspector column while the plan is focused. Cards sit beside
+/// The notes rail (spec §7.3): the inspector's Notes mode while shaping. Cards sit beside
 /// their quote's line and follow the editor as it scrolls; notes with no place in the text are
 /// stacked at the top; the draft being written is a card like the others, focused.
 struct NotesRail: View {

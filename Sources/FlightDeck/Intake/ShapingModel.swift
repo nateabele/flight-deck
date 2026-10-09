@@ -34,6 +34,8 @@ struct SlotBadge: Equatable {
     var diagnosis: String?
     /// The model that actually ran ("codex gpt-6-sol"), for the round's detail panel.
     var model: String = ""
+    /// The agent that ran, for its glyph beside the seat in the detail panel.
+    var agent: AgentID?
 }
 
 struct RoundCard: Identifiable, Equatable {
@@ -61,6 +63,11 @@ struct RoundCard: Identifiable, Equatable {
     var allSections: [String] = []
     /// The human's notes the round consumed, as written.
     var notesApplied: [String] = []
+    /// The round's stage, which its stack's click opens in the Rounds inspector.
+    var stage: Stage = .draft
+    /// Who ran the round (`AgentStackModel.ran`) — the card's avatar stack; what the config
+    /// asked for when the record predates its slots.
+    var agents: [RoundAgent] = []
     var id: Int { checkpointID }
 }
 
@@ -219,7 +226,11 @@ struct ShapingModel {
                 duration: (cp.startedAt ?? (index > 0 ? tape.checkpoints[index - 1].createdAt : nil))
                     .map { max(0, cp.createdAt.timeIntervalSince($0)) },
                 allSections: r.sectionsChanged.map(Self.heading),
-                notesApplied: r.annotations.map(\.note))
+                notesApplied: r.annotations.map(\.note),
+                stage: cp.stage,
+                agents: r.slots.isEmpty
+                    ? intake.roundConfig.map { AgentStackModel.planned(stage: cp.stage, crossCheck: false, config: $0) } ?? []
+                    : AgentStackModel.ran(r))
         }
     }
 
@@ -245,7 +256,7 @@ struct ShapingModel {
         case .substituted: "Ran \(modelName(slot.used)) instead of \(modelName(slot.requested))" + reason
         case .failed: "Failed" + reason
         }
-        return SlotBadge(label: label, status: slot.status, diagnosis: diagnosis, model: modelName(slot.used))
+        return SlotBadge(label: label, status: slot.status, diagnosis: diagnosis, model: modelName(slot.used), agent: slot.used.agent)
     }
 
     // MARK: - Pill

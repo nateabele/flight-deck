@@ -3273,3 +3273,22 @@ an agent is signed out (at most once a minute). What remains:
 - **Routing is not refreshed.** `GrokRoutingCapabilities`/`GeminiRoutingCapabilities` keep their
   own lists (see "Routing still lists models its own way" above), so a re-check does not reach them.
 - **GUI-unverified.** Rendered offscreen only; pressing it against a real `grok login` is the maintainer's.
+
+## Inspector modes and agent stacks (2026-10-09, `inspector-modes`)
+
+The planning inspector's Notes/Rounds modes and the per-round agent stacks shipped
+(ARCHITECTURE.md, "The inspector has two explicit modes"). What remains:
+
+- **GUI-unverified.** Pinned by unit tests (`DetailLayoutTests`, `AgentStackModelTests`,
+  `IntakeServiceSelectionTests`) and the offscreen `ProjectViewInspectorLiveTests` (the segmented
+  control exists and stays on Rounds with the plan focused). Not yet seen in the running app:
+  ⌥⌘1/⌥⌘2 and View ▸ Inspector, the click from a round's stack scrolling the inspector to its
+  section, the agent drill-in's back button, and VoiceOver on the segments and the card's
+  "Show Agents in Inspector" action.
+- **The departures board's slots carry no stack.** The split-flap tape has no room in a slot, and
+  its hover card was left alone; the cards under it and the live round's header carry the stacks.
+- **A stack's click is a nested button inside a tappable card**, never clicked by hand. SwiftUI
+  normally gives a nested `Button` the click; if the card's tap gesture wins instead, the stack
+  opens the round's detail panel rather than the inspector.
+- **A synthesis round's stack includes the integrator**, whose editor row lives under Refine;
+  the Synthesis section says so in a note rather than repeating the row.

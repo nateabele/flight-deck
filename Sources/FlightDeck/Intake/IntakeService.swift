@@ -295,6 +295,12 @@ final class IntakeService: ObservableObject {
     /// `projectKey`. Here for the reason `inspectorProjects` is: as `ProjectView` `@State` the
     /// list sprang back open on every switch to another project or tab and back.
     @Published private(set) var collapsedListProjects: Set<String> = []
+    /// The inspector mode last chosen for each plan (`DetailLayout.InspectorMode`). Per plan, not
+    /// per project: one plan is being annotated while another is being set up, and the mode is
+    /// the human's choice of which, which the old focus-driven switch kept overruling. Here, not
+    /// in the pane's `@State`, for `inspectorProjects`' reason: `ProjectView` keys the pane on
+    /// the intake, so a trip to another plan and back reset it.
+    @Published private(set) var inspectorModes: [UUID: DetailLayout.InspectorMode] = [:]
     /// Each `.shaping` intake's `tape.json` as last read, with the clicks the runner hasn't acked
     /// yet folded on top (`overlays`) — what the detail pane draws and what `attentionCount`
     /// consults. Refreshed on the shared clock (`pollTapes`), and by `send` in the click's turn.
@@ -344,6 +350,8 @@ final class IntakeService: ObservableObject {
     private static let inspectorDefaultsKey = "IntakeInspectorByProject"
     /// `UserDefaults` key for `collapsedListProjects`, persisted as an array of paths.
     private static let collapsedListDefaultsKey = "IntakeListCollapsedByProject"
+    /// `UserDefaults` key for `inspectorModes`, persisted as `[uuidString: rawValue]`.
+    private static let inspectorModeDefaultsKey = "IntakeInspectorModeByIntake"
     /// Filled off the main actor by a detached probe started in `init` (the login-shell PATH
     /// lookup behind it can take seconds on first use); nil until that lands.
     ///
@@ -514,6 +522,11 @@ final class IntakeService: ObservableObject {
         }
         inspectorProjects = Set(defaults.stringArray(forKey: Self.inspectorDefaultsKey) ?? [])
         collapsedListProjects = Set(defaults.stringArray(forKey: Self.collapsedListDefaultsKey) ?? [])
+        if let raw = defaults.dictionary(forKey: Self.inspectorModeDefaultsKey) as? [String: String] {
+            inspectorModes = Dictionary(uniqueKeysWithValues: raw.compactMap { key, value in
+                UUID(uuidString: key).flatMap { id in DetailLayout.InspectorMode(rawValue: value).map { (id, $0) } }
+            })
+        }
 
         // Launch recovery: a turn or release in flight when FD quit has no process left to
         // finish it. Saying "triaging" forever would hide that; `.interrupted` asks the human.
@@ -714,6 +727,23 @@ final class IntakeService: ObservableObject {
         guard inspectorProjects.contains(key) != shown else { return }
         if shown { inspectorProjects.insert(key) } else { inspectorProjects.remove(key) }
         defaults.set(inspectorProjects.sorted(), forKey: Self.inspectorDefaultsKey)
+    }
+
+    /// The inspector mode last chosen for intake `id`; nil before the human chose one, which
+    /// `DetailLayout.inspectorMode` turns into the plan's default.
+    func inspectorMode(_ id: UUID) -> DetailLayout.InspectorMode? { inspectorModes[id] }
+
+    /// Records the mode chosen for `id` and persists it. A write that changes nothing is
+    /// dropped, as `setInspectorShown`'s is.
+    func setInspectorMode(_ mode: DetailLayout.InspectorMode, for id: UUID) {
+        guard inspectorModes[id] != mode else { return }
+        inspectorModes[id] = mode
+        persistInspectorModes()
+    }
+
+    private func persistInspectorModes() {
+        defaults.set(Dictionary(uniqueKeysWithValues: inspectorModes.map { ($0.key.uuidString, $0.value.rawValue) }),
+                     forKey: Self.inspectorModeDefaultsKey)
     }
 
     /// Whether `project`'s Intakes list is collapsed to its rail — expanded until the human
@@ -1592,6 +1622,8 @@ final class IntakeService: ObservableObject {
         }
         i.state = .discarded
         save(i)
+        // A discarded plan is never shown again, so its remembered mode would only grow the key.
+        if inspectorModes.removeValue(forKey: id) != nil { persistInspectorModes() }
         flapPolicies[id] = nil
         flapSeeded.remove(id)
         return true

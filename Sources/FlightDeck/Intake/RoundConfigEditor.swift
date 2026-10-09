@@ -40,6 +40,9 @@ struct RoundConfigEditor: View {
     /// "Check again" beside the sign-in notes: re-runs agent detection
     /// (`IntakeService.recheckAgents`). nil (a render or a test host) shows no button.
     var recheck: AgentRecheck?
+    /// The section a round's stack just opened the inspector on, marked until the pane clears
+    /// it — a section near the end can't scroll to the top, so the mark is what says which.
+    var highlight: RoundsSection?
 
     /// What the "Check again" button needs from the service: whether a detection is running
     /// (spinner, button disabled) and how to start one.
@@ -110,61 +113,105 @@ struct RoundConfigEditor: View {
     /// One block per seat, its controls on two lines. A five-column grid needed ~530 pt, and an
     /// inspector column is narrower than that — the Model field collapsed to nothing and the
     /// Fallback picker ran off the panel's edge.
+    ///
+    /// Grouped under one heading per kind of round (`RoundsSection`), each with the stack of
+    /// agents its rounds run — the same stack the main view draws on those rounds, so a round
+    /// there visibly matches its config here, and a click on its stack scrolls to its heading.
     private var stackedSlots: some View {
-        let rows = Self.slots(of: config)
-        return VStack(alignment: .leading, spacing: 12) {
-            ForEach(Array(rows.enumerated()), id: \.element.keyPath) { index, row in
-                if let choice = Self.choice(for: row.keyPath, in: config) {
-                    let ran = shaping?.isLocked(row.keyPath) == true
-                    if index > 0 { Divider() }
-                    VStack(alignment: .leading, spacing: 6) {
-                        HStack(alignment: .firstTextBaseline, spacing: 6) {
-                            // `.capitalized` title-cases every word, which turns "cross-check
-                            // agent" into "Cross-Check Agent" — `sentenceCase` only raises the
-                            // first letter, so the role reads as the phrase `UIText` intends.
-                            Text(UIText.sentenceCase(UIText.roleName(row.role))).font(.callout.weight(.semibold))
-                            if let persona = row.persona, persona != .general {
-                                Text(persona.rawValue).font(.caption).foregroundStyle(.secondary)
-                            }
-                            if ran {
-                                Text(Self.alreadyRan).font(.caption).foregroundStyle(.secondary)
-                            }
-                        }
-                        HStack(spacing: 8) {
-                            harnessPicker(for: row.keyPath).fixedSize()
-                            modelField(for: row.keyPath, agent: choice.agent)
-                            if !Self.effortChoices(for: choice.agent).isEmpty {
-                                effortPicker(for: row.keyPath, agent: choice.agent).fixedSize()
-                            }
-                        }
-                        if let line = Self.billingLine(billing[choice.agent]) {
-                            billingLabel(line, problem: billing[choice.agent]?.problem == true)
-                        }
-                        if Self.supportsFallback(row.keyPath) {
-                            HStack(spacing: 8) {
-                                Text("Fallback").foregroundStyle(.secondary)
-                                fallbackPicker(for: row.keyPath, choice: choice).fixedSize()
-                            }
-                            .font(.callout)
-                        }
-                        // Only reached once the crossReviewer row itself is showing (policy
-                        // not off), so the caption never appears while the picker reads "Off".
-                        if row.keyPath == .crossReviewer, Self.crossCheckSameFamily(config) {
-                            Text("Same family as the reviewer, so rounds won't cross-check.")
-                                .font(.caption).foregroundStyle(.secondary)
-                        }
+        VStack(alignment: .leading, spacing: 18) {
+            ForEach(Self.sections(of: config), id: \.section) { group in
+                VStack(alignment: .leading, spacing: 10) {
+                    sectionHeading(group.section)
+                    if group.section == .synthesis {
+                        Text(Self.synthesisIntegratorNote).font(.caption).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
-                    // Its stages are on the tape: a change would reach no round that runs.
-                    .disabled(ran)
+                    ForEach(Array(group.rows.enumerated()), id: \.element.keyPath) { index, row in
+                        if index > 0 { Divider() }
+                        slotBlock(row)
+                    }
                 }
-                // Directly under the reviewer row (spec: coverage §8) rather than folded into
-                // its own block above — the policy can be live with no crossReviewer row yet
-                // showing (nothing seeded), so it can't be gated on `Self.choice(for:)` the way
-                // every other row is.
-                if row.keyPath == .reviewer, config.reviewer != nil {
-                    crossCheckPicker.disabled(shaping?.isLocked(.reviewer) == true)
+                .id(group.section.anchor)
+            }
+        }
+    }
+
+    /// Where the synthesis section says who merges it: the integrator's one row sits under
+    /// Refine, but it runs in the synthesis round too, and its glyph is in this heading's stack.
+    static let synthesisIntegratorNote = "The integrator, set under Refine, merges the synthesis."
+
+    private func sectionHeading(_ section: RoundsSection) -> some View {
+        HStack(spacing: 8) {
+            Text(section.title)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .textCase(.uppercase)
+            Spacer(minLength: 8)
+            AgentStack(entries: AgentStackModel.section(section, config: config), size: 18)
+        }
+        .padding(.bottom, 2)
+        .overlay(alignment: .bottom) { Rectangle().fill(.separator).frame(height: 0.5) }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 3)
+        .background(Color.accentColor.opacity(highlight == section ? 0.16 : 0), in: RoundedRectangle(cornerRadius: 6))
+        .padding(.horizontal, -6)
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isHeader)
+        .accessibilityIdentifier("rounds-section-\(section.rawValue)")
+    }
+
+    @ViewBuilder
+    private func slotBlock(_ row: (role: String, persona: DrafterPersona?, keyPath: SlotKeyPath)) -> some View {
+        if let choice = Self.choice(for: row.keyPath, in: config) {
+            let ran = shaping?.isLocked(row.keyPath) == true
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    // `.capitalized` title-cases every word, which turns "cross-check
+                    // agent" into "Cross-Check Agent" — `sentenceCase` only raises the
+                    // first letter, so the role reads as the phrase `UIText` intends.
+                    Text(UIText.sentenceCase(UIText.roleName(row.role))).font(.callout.weight(.semibold))
+                    if let persona = row.persona, persona != .general {
+                        Text(persona.rawValue).font(.caption).foregroundStyle(.secondary)
+                    }
+                    if ran {
+                        Text(Self.alreadyRan).font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                HStack(spacing: 8) {
+                    // The glyph the main view's stacks draw for this agent, beside its picker.
+                    AgentBadge(agent: choice.agent, size: 18)
+                    harnessPicker(for: row.keyPath).fixedSize()
+                    modelField(for: row.keyPath, agent: choice.agent)
+                    if !Self.effortChoices(for: choice.agent).isEmpty {
+                        effortPicker(for: row.keyPath, agent: choice.agent).fixedSize()
+                    }
+                }
+                if let line = Self.billingLine(billing[choice.agent]) {
+                    billingLabel(line, problem: billing[choice.agent]?.problem == true)
+                }
+                if Self.supportsFallback(row.keyPath) {
+                    HStack(spacing: 8) {
+                        Text("Fallback").foregroundStyle(.secondary)
+                        fallbackPicker(for: row.keyPath, choice: choice).fixedSize()
+                    }
+                    .font(.callout)
+                }
+                // Only reached once the crossReviewer row itself is showing (policy
+                // not off), so the caption never appears while the picker reads "Off".
+                if row.keyPath == .crossReviewer, Self.crossCheckSameFamily(config) {
+                    Text("Same family as the reviewer, so rounds won't cross-check.")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
             }
+            // Its stages are on the tape: a change would reach no round that runs.
+            .disabled(ran)
+        }
+        // Directly under the reviewer row (spec: coverage §8) rather than folded into
+        // its own block above — the policy can be live with no crossReviewer row yet
+        // showing (nothing seeded), so it can't be gated on `Self.choice(for:)` the way
+        // every other row is.
+        if row.keyPath == .reviewer, config.reviewer != nil {
+            crossCheckPicker.disabled(shaping?.isLocked(.reviewer) == true)
         }
     }
 
@@ -526,6 +573,28 @@ struct RoundConfigEditor: View {
             rows.append(("polisher", nil, .polisher))
         }
         return rows
+    }
+
+    /// `slots(of:)`'s rows under the inspector section each belongs to, in run order — every
+    /// row once. The integrator sits under Refine, the stage it runs every round of; synthesis
+    /// runs it once more, which that section's note and stack say (`synthesisIntegratorNote`).
+    static func sections(of config: RoundConfig)
+        -> [(section: RoundsSection, rows: [(role: String, persona: DrafterPersona?, keyPath: SlotKeyPath)])] {
+        let rows = slots(of: config)
+        return RoundsSection.allCases.compactMap { section in
+            let mine = rows.filter { Self.section(of: $0.keyPath) == section }
+            return mine.isEmpty ? nil : (section, mine)
+        }
+    }
+
+    static func section(of keyPath: SlotKeyPath) -> RoundsSection {
+        switch keyPath {
+        case .drafter: .draft
+        case .synthesizer: .synthesis
+        case .reviewer, .crossReviewer, .integrator: .refine
+        case .encoder: .encode
+        case .polisher: .polish
+        }
     }
 
     /// Applies `mutate` to a copy of `config` and marks it customized — the one path every

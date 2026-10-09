@@ -112,6 +112,26 @@ final class IntakeServiceSelectionTests: XCTestCase {
         XCTAssertFalse(relaunched.inspectorShown(forProject: "/b"))
     }
 
+    // MARK: - Inspector mode
+
+    /// The inspector's mode is per plan and survives a relaunch; a discarded plan's is dropped.
+    func testInspectorModeIsPerPlanAndPersists() throws {
+        let a = try seed(project: "/a")
+        let b = try seed(project: "/a", intent: "Another")
+        let svc = makeService()
+        XCTAssertNil(svc.inspectorMode(a), "nothing chosen yet: the layout picks the default")
+        svc.setInspectorMode(.notes, for: a)
+        svc.setInspectorMode(.rounds, for: b)
+        XCTAssertEqual(svc.inspectorMode(a), .notes)
+        XCTAssertEqual(svc.inspectorMode(b), .rounds, "one plan's mode never moves another's")
+        let relaunched = makeService()
+        XCTAssertEqual(relaunched.inspectorMode(a), .notes)
+        XCTAssertEqual(relaunched.inspectorMode(b), .rounds)
+        XCTAssertTrue(relaunched.discard(a))
+        XCTAssertNil(makeService().inspectorMode(a))
+        XCTAssertEqual(makeService().inspectorMode(b), .rounds)
+    }
+
     // MARK: - Intakes list collapsed to its rail
 
     /// Per project, and kept by the service rather than `ProjectView` `@State` for the reason

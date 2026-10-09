@@ -35,6 +35,9 @@ struct LiveCard: View {
     /// the rows show (`DwellBank.peek`). Triage and the renders keep their own.
     fileprivate var sharedDwell: DwellBank?
     private var dwell: DwellBank { sharedDwell ?? ownDwell }
+    /// Opens the Rounds inspector on a stage's section: what a click on a round's agent stack
+    /// does, here and on the finished-round cards. Nil (triage, renders) draws stacks inert.
+    fileprivate var showConfig: ((Stage) -> Void)?
 
     /// `activity` is `IntakeService.triageActivity(_:)`; `pending` its `pending[id]`.
     static func triage(intake: Intake, activity: SeatActivity?, pending: PendingStart?) -> LiveCard {
@@ -56,14 +59,14 @@ struct LiveCard: View {
                         results: [String: SeatResult] = [:], pending: PendingStart?, editConflict: EditConflictNotice? = nil,
                         selectedRound: Binding<Int?> = .constant(nil), openRound: Binding<Int?> = .constant(nil),
                         selectedSeat: Binding<String?> = .constant(nil),
-                        dwell: DwellBank? = nil,
+                        dwell: DwellBank? = nil, showConfig: ((Stage) -> Void)? = nil,
                         controlBar: @escaping (Date) -> AnyView, board: @escaping (Date) -> AnyView) -> LiveCard {
         LiveCard(intake: intake,
                  kind: .shaping(tape: tape, seats: SeatFiles(activities: activities, records: records, results: results),
                                 editConflict: editConflict, selectedRound: selectedRound, openRound: openRound,
                                 selectedSeat: selectedSeat,
                                 controlBar: controlBar, board: board),
-                 pending: pending, sharedDwell: dwell)
+                 pending: pending, sharedDwell: dwell, showConfig: showConfig)
     }
 
     var body: some View {
@@ -111,7 +114,8 @@ struct LiveCard: View {
                                    // Choosing the head goes back to following it, the same rule
                                    // the board's slots follow.
                                    select: { selectedRound.wrappedValue = $0 == head ? nil : $0 },
-                                   setOpen: { openRound.wrappedValue = $0 })
+                                   setOpen: { openRound.wrappedValue = $0 },
+                                   showConfig: showConfig)
                         .equatable()
                 }
             }
@@ -188,6 +192,11 @@ struct LiveCard: View {
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(.secondary)
                 .textCase(.uppercase)
+            if let (round, entries) = roundAgents, !entries.isEmpty {
+                // The round's agents as the inspector's section for its stage draws them.
+                AgentStack(entries: entries, size: 15, action: showConfig.map { show in { show(round.stage) } })
+                    .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + 4 }
+            }
             if pending == nil, seats.count > 1 {
                 // Agents done out of agents: the one progress fraction a round honestly has.
                 let done = seats.filter { $0.model.glyph == .done }.count
@@ -208,6 +217,13 @@ struct LiveCard: View {
             }
         }
         .padding(.horizontal, 12)
+    }
+
+    /// The running (or starting) round and the agents its config seats, for the header's stack.
+    private var roundAgents: (PlannedRound, [RoundAgent])? {
+        guard case .shaping(let tape, _, _, _, _, _, _, _) = kind, let round = tape.roundInProgress ?? pendingRound,
+              let config = intake.roundConfig else { return nil }
+        return (round, AgentStackModel.planned(stage: round.stage, crossCheck: round.crossCheck, config: config))
     }
 
     private var sectionTitle: String {

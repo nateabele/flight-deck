@@ -67,8 +67,12 @@ struct IntakeDetailView: View {
     /// nil for none. Here rather than in the strip so it outlives the live card's 1 Hz redraws,
     /// and per intake like the rest: `ProjectView` keys this view on the intake's id.
     @State private var openRound: Int?
-    /// The seat the inspector details (`LiveSeat.id`).
+    /// The seat the inspector details (`LiveSeat.id`) — the Rounds mode drilled in on it.
     @State private var selectedSeat: String?
+    /// The Rounds section a round's stack last asked the inspector to show, which the inspector
+    /// scrolls to and briefly marks (`showRoundConfig`). A fresh value per click, so clicking the
+    /// same round twice scrolls back to it.
+    @State private var roundsReveal: RoundsReveal?
     /// The seat rows' headline holds, shared with the seat inspector so it never says what the
     /// row is still holding back (`DwellBank.peek`). A fresh bank per intake (`bindNotes`).
     @State private var dwell = DwellBank()
@@ -224,8 +228,11 @@ struct IntakeDetailView: View {
         .onChange(of: intake.id, initial: true) { bindNotes() }
         .onChange(of: showsInspector, initial: true) { _, shown in presentColumn(shown) }
         .onChange(of: service.notes(intake.id), initial: true) { _, onTape in notes.tapeNotes = onTape }
-        // Choosing a seat is asking the inspector about the run, not the plan.
-        .onChange(of: selectedSeat) { _, seat in if seat != nil { notes.planFocused = false } }
+        // Choosing a seat is asking the inspector about the run: the switch to Rounds is made
+        // here, in the open, by the click — the segmented control moves with it — where focus
+        // used to swap the column's content with nothing on screen saying so.
+        .onChange(of: selectedSeat) { _, seat in if seat != nil { showInspector(.rounds) } }
+        .focusedSceneValue(\.inspectorModeActions, inspectorModeActions)
         // An open round panel follows the plan's round when the board, ⌘[ or a banner moves
         // it: a panel describing one round over a plan showing another reads as a stale pane.
         .onChange(of: selectedCheckpoint) { _, checkpoint in
@@ -336,6 +343,7 @@ struct IntakeDetailView: View {
                                  openRound: $openRound,
                                  selectedSeat: $selectedSeat,
                                  dwell: dwell,
+                                 showConfig: { showRoundConfig($0) },
                                  controlBar: { now in
                                      AnyView(inCard(.bar, height: barHeight) { controlBar(tape, now: now, seats: seats) })
                                  },
@@ -536,7 +544,10 @@ struct IntakeDetailView: View {
         dwell = DwellBank()
         notes.reset()
         notes.send = { [service, id = intake.id] in service.send(id, $0) }
-        notes.showRail = { [$showsInspector] in $showsInspector.wrappedValue = true }
+        notes.showRail = { [$showsInspector, service, id = intake.id] in
+            service.setInspectorMode(.notes, for: id)
+            $showsInspector.wrappedValue = true
+        }
     }
 
     // MARK: - Plan
@@ -554,10 +565,7 @@ struct IntakeDetailView: View {
                             selection: final ? nil : selectedCheckpoint, select: final ? .constant(nil) : $selectedCheckpoint,
                             focus: final ? nil : planFocus, churn: final ? nil : churnLane(),
                             noteShown: service.editNoteShown.contains(intake.id), notes: final ? nil : notes,
-                            onOpenNotes: {
-                                notes.planFocused = true
-                                showsInspector = true
-                            })
+                            onOpenNotes: { showInspector(.notes) })
             .equatable()
             .environment(\.pageObscuredTop, pinnedHeight)
             .environment(\.planReading, final ? nil : reading)
@@ -680,7 +688,7 @@ struct IntakeDetailView: View {
                         .font(.callout)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
-                    Button("Edit in Inspector") { showsInspector = true }
+                    Button("Edit in Inspector") { showInspector(.rounds) }
                         .buttonStyle(.link)
                         // The only way to change a stage's round count before the run: say so,
                         // since the summary line alone reads as a fixed description.
@@ -805,35 +813,99 @@ struct IntakeDetailView: View {
 
     // MARK: - Inspector
 
-    /// The rail fills the column edge to edge and scrolls with the editor, not on its own, so it
-    /// sits outside the ScrollView every other inspector shares.
+    /// The fidelity the inspector's modes are decided from: the one chosen, or the one being
+    /// chosen; nil before either exists (triage), which offers both modes, each empty.
+    private var inspectorPreset: Preset? {
+        if let chosen = intake.chosenPreset { return chosen }
+        switch intake.state {
+        case .awaitingChoice, .parked: return selectedPreset
+        default: return nil
+        }
+    }
+
+    private var inspectorMode: DetailLayout.InspectorMode {
+        DetailLayout.inspectorMode(stored: service.inspectorMode(intake.id), preset: inspectorPreset)
+    }
+
+    /// Switches the mode — the header's control, ⌥⌘1/⌥⌘2 and the View menu all come here.
+    private func selectInspectorMode(_ mode: DetailLayout.InspectorMode) {
+        service.setInspectorMode(mode, for: intake.id)
+    }
+
+    /// Switches to `mode` and opens the column: every opener that names what it opens onto
+    /// (Edit in Inspector, a note being started, an agent selected, a round's stack).
+    private func showInspector(_ mode: DetailLayout.InspectorMode) {
+        selectInspectorMode(mode)
+        showsInspector = true
+    }
+
+    /// A round's stack, clicked: the Rounds mode on the section that configures that round —
+    /// out of an agent's drill-in, since the config is what the click asked for.
+    private func showRoundConfig(_ stage: Stage) {
+        selectedSeat = nil
+        showInspector(.rounds)
+        roundsReveal = RoundsReveal(section: .of(stage))
+    }
+
+    /// What the View ▸ Inspector items and their chords act on.
+    private var inspectorModeActions: InspectorModeActions {
+        InspectorModeActions(intakeID: intake.id, modes: DetailLayout.inspectorModes(preset: inspectorPreset),
+                             mode: inspectorMode, select: { [service, $showsInspector, id = intake.id] mode in
+                                 service.setInspectorMode(mode, for: id)
+                                 $showsInspector.wrappedValue = true
+                             })
+    }
+
+    /// The mode control over the column, then the mode's content. The rail fills the column edge
+    /// to edge and scrolls with the editor, not on its own, so it sits outside the ScrollView
+    /// every other content shares.
     private var inspector: some View {
-        PlanFocusReader(notes: notes) { planFocused in
-            // A selection only counts while its round is in flight: once the run pauses the
-            // inspector goes back to the Rounds editor, the thing there is to change.
-            let content = DetailLayout.inspector(for: intake.state, preset: selectedPreset, planFocused: planFocused,
-                                                 seatSelected: selectedSeat != nil && tape?.roundInProgress != nil)
+        let preset = inspectorPreset
+        let mode = inspectorMode
+        // A selection only counts while its round is in flight: once the run pauses the Rounds
+        // mode goes back to the editor, the thing there is to change.
+        let content = DetailLayout.inspector(for: intake.state, preset: preset, mode: mode,
+                                             seatSelected: selectedSeat != nil && tape?.roundInProgress != nil,
+                                             hasRoundConfig: intake.roundConfig != nil)
+        return VStack(spacing: 0) {
+            InspectorModeHeader(modes: DetailLayout.inspectorModes(preset: preset), mode: mode, select: selectInspectorMode)
+            Divider()
             if content == .notesRail {
                 notesRailSlot
             } else {
-                ScrollView {
-                    Group {
-                        switch content {
-                        case .roundsEditor:
-                            if intake.state == .shaping {
-                                ShapingRoundsPanel(service: service, intake: intake)
-                            } else {
-                                roundsEditor
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        Group {
+                            switch content {
+                            case .roundsEditor:
+                                if intake.state == .shaping {
+                                    ShapingRoundsPanel(service: service, intake: intake, highlight: roundsReveal?.section)
+                                } else {
+                                    roundsEditor
+                                }
+                            case .roundsRecord: roundsRecord
+                            case .seat: seatInspector
+                            case .notesRail: EmptyView()
+                            case .empty(let placeholder):
+                                InspectorPlaceholder(title: placeholder.title, message: placeholder.message)
                             }
-                        case .seat: seatInspector
-                        case .notesRail: EmptyView()
-                        case .nothing:
-                            InspectorPlaceholder(title: "Nothing to Inspect",
-                                                 message: "The rounds for a plan, and the agents of a running round, show here.")
                         }
+                        .padding(16)
+                        .frame(maxWidth: .infinity, alignment: .topLeading)
                     }
-                    .padding(16)
-                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                    // After the column (or the mode) has laid out: a scroll asked for before the
+                    // section exists goes nowhere. The mark then fades, so it says "this one"
+                    // without staying as a second selection.
+                    .task(id: roundsReveal) {
+                        guard let reveal = roundsReveal else { return }
+                        try? await Task.sleep(nanoseconds: 120_000_000)
+                        withAnimation(reduceMotion ? nil : .smooth(duration: 0.3)) {
+                            proxy.scrollTo(reveal.section.anchor, anchor: .top)
+                        }
+                        try? await Task.sleep(nanoseconds: 1_600_000_000)
+                        guard !Task.isCancelled, roundsReveal == reveal else { return }
+                        withAnimation(reduceMotion ? nil : .easeOut(duration: 0.4)) { roundsReveal = nil }
+                    }
                 }
             }
         }
@@ -846,7 +918,24 @@ struct IntakeDetailView: View {
             RoundConfigEditor(preset: selectedPreset, config: Binding(get: { config }, set: { editedConfig = $0 }),
                               available: service.availableModels(), billing: service.planningBilling(project: intake.projectPath),
                               codexListedModels: CodexRoutingCatalog.shared.cachedModelIDs,
-                              recheck: .init(isRunning: service.isDetectingAgents) { [service] in _ = service.recheckAgents() })
+                              recheck: .init(isRunning: service.isDetectingAgents) { [service] in _ = service.recheckAgents() },
+                              highlight: roundsReveal?.section)
+        }
+    }
+
+    /// From review on: the config that planned this plan, read-only — so the rounds the plan
+    /// went through still have a page saying who ran them.
+    @ViewBuilder
+    private var roundsRecord: some View {
+        if let config = intake.roundConfig {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("The agents that planned this. Planning is over, so nothing here changes.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                RoundConfigEditor(preset: intake.chosenPreset ?? .featurePlan, config: .constant(config),
+                                  available: service.availableModels(), readOnly: true, highlight: roundsReveal?.section)
+            }
         }
     }
 
@@ -855,8 +944,23 @@ struct IntakeDetailView: View {
     /// own `LiveClock`, on the card's whole seconds, and through the card's own reads — the
     /// pending substitution and the row's dwell hold. With `Date()` and the raw files it froze
     /// between seat writes, and could say "Running" beside a row that said the seat had stalled.
-    @ViewBuilder
     private var seatInspector: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            // The way back out of the drill-in, named for where it goes: the agent is a detail
+            // of the Rounds mode, not a third mode, so the segmented control stays on Rounds.
+            Button { selectedSeat = nil } label: {
+                Label("Rounds", systemImage: "chevron.backward").labelStyle(.titleAndIcon)
+            }
+            .buttonStyle(.borderless)
+            .help("Back to the round's agents and settings")
+            .accessibilityLabel("Back to Rounds")
+            .accessibilityIdentifier("inspector-seat-back")
+            seatDetail
+        }
+    }
+
+    @ViewBuilder
+    private var seatDetail: some View {
         if let tape, let round = tape.roundInProgress, let selectedSeat {
             let pending = service.pending[intake.id]
             SeatReader(feed: service.seats, id: intake.id) { seats in
@@ -878,7 +982,7 @@ struct IntakeDetailView: View {
         }
     }
 
-    /// The notes rail, while the plan is focused (`DetailLayout.InspectorContent.notesRail`).
+    /// The notes rail, the Notes mode while shaping (`DetailLayout.InspectorContent.notesRail`).
     private var notesRailSlot: some View {
         NotesRail(controller: notes, roundName: { [tape] id in
             tape?.checkpoints.first { $0.id == id }.map(PlanSection.checkpointName)
@@ -1372,14 +1476,6 @@ private struct WheelToDocument: NSViewRepresentable {
     }
 }
 
-/// Re-reads only whether the plan is focused, so the inspector switches to the rail and back
-/// without the detail pane observing every note keystroke.
-private struct PlanFocusReader<Content: View>: View {
-    @ObservedObject var notes: PlanNotesController
-    @ViewBuilder let content: (Bool) -> Content
-
-    var body: some View { content(notes.planFocused) }
-}
 
 /// "4 notes for the next round" beside the plan's heading; opens the rail. Absent with no
 /// pending notes (`NotesRailModel.summary`).

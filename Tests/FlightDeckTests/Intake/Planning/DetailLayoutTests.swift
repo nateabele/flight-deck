@@ -85,17 +85,67 @@ final class DetailLayoutTests: XCTestCase {
         XCTAssertEqual(RoundConfigEditor.summary(preset: .sketch, config: config), "Sketch · 1 drafter")
     }
 
-    func testInspectorHostsTheRoundsEditorOrTheSeat() {
+    /// The inspector's modes are explicit (Notes, Rounds), never picked by focus. A single task
+    /// runs no rounds, so it offers Notes alone.
+    func testInspectorOffersNotesAndRoundsExceptForASingleTask() {
+        typealias M = DetailLayout.InspectorMode
+        XCTAssertEqual(DetailLayout.inspectorModes(preset: .fullPlan), [M.notes, .rounds])
+        XCTAssertEqual(DetailLayout.inspectorModes(preset: .sketch), [M.notes, .rounds])
+        XCTAssertEqual(DetailLayout.inspectorModes(preset: .bead), [M.notes])
+        XCTAssertEqual(DetailLayout.inspectorModes(preset: nil), [M.notes, .rounds], "no fidelity yet: both, each empty")
+        XCTAssertEqual(M.notes.title, "Notes")
+        XCTAssertEqual(M.rounds.title, "Rounds")
+        XCTAssertEqual(M.allCases.map(\.shortcut), ["1", "2"])
+    }
+
+    /// The mode shown is the one the human last chose for this plan; with none chosen yet, Rounds
+    /// where there are rounds (the editor was the resting state), else Notes. A remembered mode
+    /// the plan no longer offers (Rounds, once a single task was chosen) falls back to Notes.
+    func testInspectorModeIsTheRememberedOneOrADefault() {
+        typealias M = DetailLayout.InspectorMode
+        XCTAssertEqual(DetailLayout.inspectorMode(stored: nil, preset: .fullPlan), M.rounds)
+        XCTAssertEqual(DetailLayout.inspectorMode(stored: nil, preset: .bead), M.notes)
+        XCTAssertEqual(DetailLayout.inspectorMode(stored: .notes, preset: .fullPlan), M.notes)
+        XCTAssertEqual(DetailLayout.inspectorMode(stored: .rounds, preset: .fullPlan), M.rounds)
+        XCTAssertEqual(DetailLayout.inspectorMode(stored: .rounds, preset: .bead), M.notes)
+    }
+
+    /// What each mode hosts. Focus no longer decides any of it: the plan being focused used to
+    /// swap the Rounds editor for the notes rail behind the human's back.
+    func testInspectorContentFollowsTheModeNotFocus() {
         typealias I = DetailLayout.InspectorContent
-        XCTAssertEqual(DetailLayout.inspector(for: .awaitingChoice, preset: .fullPlan), I.roundsEditor)
-        XCTAssertEqual(DetailLayout.inspector(for: .parked, preset: .sketch), I.roundsEditor)
-        // A single task runs no rounds, so there is nothing to configure.
-        XCTAssertEqual(DetailLayout.inspector(for: .awaitingChoice, preset: .bead), I.nothing)
-        // Shaping: the Rounds editor unless an agent of the round in flight is selected.
-        XCTAssertEqual(DetailLayout.inspector(for: .shaping, preset: .fullPlan), I.roundsEditor)
-        XCTAssertEqual(DetailLayout.inspector(for: .shaping, preset: .fullPlan, seatSelected: true), I.seat)
-        XCTAssertEqual(DetailLayout.inspector(for: .review, preset: .fullPlan), I.nothing)
-        XCTAssertEqual(DetailLayout.inspector(for: .review, preset: .fullPlan, seatSelected: true), I.nothing)
+        // Rounds: the editor before and between rounds, the selected agent while one runs.
+        XCTAssertEqual(DetailLayout.inspector(for: .awaitingChoice, preset: .fullPlan, mode: .rounds), I.roundsEditor)
+        XCTAssertEqual(DetailLayout.inspector(for: .parked, preset: .sketch, mode: .rounds), I.roundsEditor)
+        XCTAssertEqual(DetailLayout.inspector(for: .shaping, preset: .fullPlan, mode: .rounds), I.roundsEditor)
+        XCTAssertEqual(DetailLayout.inspector(for: .shaping, preset: .fullPlan, mode: .rounds, seatSelected: true), I.seat)
+        // From review on, the config that planned it, read-only — the rounds still have a home.
+        XCTAssertEqual(DetailLayout.inspector(for: .review, preset: .fullPlan, mode: .rounds, hasRoundConfig: true),
+                       I.roundsRecord)
+        XCTAssertEqual(DetailLayout.inspector(for: .review, preset: .fullPlan, mode: .rounds, seatSelected: true,
+                                              hasRoundConfig: true), I.roundsRecord)
+        XCTAssertEqual(DetailLayout.inspector(for: .failed, preset: .fullPlan, mode: .rounds, hasRoundConfig: true),
+                       I.roundsRecord)
+        XCTAssertEqual(DetailLayout.inspector(for: .triaging, preset: nil, mode: .rounds), I.empty(.noRounds))
+        XCTAssertEqual(DetailLayout.inspector(for: .triaging, preset: nil, mode: .notes), I.empty(.notesBeforePlanning))
+        // Notes: the rail while shaping — the one state with a plan to note on — whatever is
+        // selected; an empty state that says why everywhere else.
+        XCTAssertEqual(DetailLayout.inspector(for: .shaping, preset: .fullPlan, mode: .notes), I.notesRail)
+        XCTAssertEqual(DetailLayout.inspector(for: .shaping, preset: .fullPlan, mode: .notes, seatSelected: true), I.notesRail)
+        XCTAssertEqual(DetailLayout.inspector(for: .awaitingChoice, preset: .fullPlan, mode: .notes),
+                       I.empty(.notesBeforePlanning))
+        XCTAssertEqual(DetailLayout.inspector(for: .awaitingChoice, preset: .bead, mode: .notes), I.empty(.notesSingleTask))
+        XCTAssertEqual(DetailLayout.inspector(for: .review, preset: .fullPlan, mode: .notes), I.empty(.notesFinal))
+        // A mode the plan doesn't offer reads as Notes, never as an empty Rounds.
+        XCTAssertEqual(DetailLayout.inspector(for: .awaitingChoice, preset: .bead, mode: .rounds), I.empty(.notesSingleTask))
+    }
+
+    /// Every empty state names itself and says what would fill it.
+    func testEveryEmptyStateSaysWhatFillsIt() {
+        for placeholder in [DetailLayout.Placeholder.noRounds, .notesBeforePlanning, .notesSingleTask, .notesFinal] {
+            XCTAssertFalse(placeholder.title.isEmpty)
+            XCTAssertFalse(placeholder.message.isEmpty)
+        }
     }
 
     /// The Rounds editor is editable while shaping only when nothing is running the tape: no
@@ -119,17 +169,6 @@ final class DetailLayoutTests: XCTestCase {
         XCTAssertEqual(DetailLayout.roundsEditing(state: .awaitingChoice, status: .idle, runnerLive: false, starting: false), .editable)
         XCTAssertEqual(DetailLayout.roundsEditing(state: .parked, status: .running, runnerLive: true, starting: true), .editable)
         XCTAssertEqual(DetailLayout.roundsEditing(state: .review, status: .reachedReview, runnerLive: false, starting: false), .readOnly)
-    }
-
-    /// Spec §7.3: the notes rail is the inspector while the plan is focused — only while
-    /// shaping, the one state with a plan to annotate.
-    func testInspectorHostsTheNotesRailWhileThePlanIsFocused() {
-        typealias I = DetailLayout.InspectorContent
-        XCTAssertEqual(DetailLayout.inspector(for: .shaping, preset: .fullPlan, planFocused: true), I.notesRail)
-        XCTAssertEqual(DetailLayout.inspector(for: .shaping, preset: .fullPlan, planFocused: false), I.roundsEditor)
-        XCTAssertEqual(DetailLayout.inspector(for: .shaping, preset: .fullPlan, planFocused: true, seatSelected: true), I.notesRail)
-        XCTAssertEqual(DetailLayout.inspector(for: .awaitingChoice, preset: .fullPlan, planFocused: true), I.roundsEditor)
-        XCTAssertEqual(DetailLayout.inspector(for: .review, preset: .fullPlan, planFocused: true), I.nothing)
     }
 
     /// Back is navigation in the plan viewer, never a tape command (the `ControlBar.onBack`

@@ -11,7 +11,7 @@ import XCTest
 /// key-equivalent dispatch. The toggle's label ("Show Inspector" / "Hide Inspector") is what
 /// reads the state back, the way the human reads it.
 ///
-/// Pins the two reported bugs: the inspector (the notes rail, with the plan focused) must
+/// Pins the two reported bugs: the inspector (opened with the plan focused) must
 /// close from ⌥⌘I while the plan editor holds focus, and stay closed; and its open state is
 /// per project and survives the detail column showing something else in between — it was
 /// `ProjectView` `@State`, which a switch away and back reset.
@@ -49,8 +49,9 @@ final class ProjectViewInspectorLiveTests: XCTestCase {
         let (store, a, b, session, window) = try openTwoShapingProjects()
         XCTAssertEqual(toggleLabel(in: window), "Show Inspector", "hidden by default (spec §3)")
 
-        // Into the plan, as a click would: the plan focused is what puts the notes rail in the
-        // inspector, and the editor holding focus is where ⌥⌘I has to still work.
+        // Into the plan, as a click would: the editor holding focus is where ⌥⌘I has to still
+        // work. Focus no longer picks the inspector's content (its mode does), so this is also
+        // where the old focus-driven swap to the notes rail would show.
         let editor = try XCTUnwrap(find(PlanNSTextView.self, in: try XCTUnwrap(window.contentView)))
         XCTAssertTrue(window.makeFirstResponder(editor))
         XCTAssertTrue(pressInspectorChord(in: window))
@@ -58,6 +59,13 @@ final class ProjectViewInspectorLiveTests: XCTestCase {
         XCTAssertEqual(toggleLabel(in: window), "Hide Inspector")
         XCTAssertEqual(inspectorCollapsed(in: window), false)
         XCTAssertTrue(window.firstResponder === editor, "the chord was sent with the editor focused")
+        // The mode control is there, still on Rounds (a paused Feature plan's default), with the
+        // plan focused: the focus that used to hand the column to the notes rail moves nothing.
+        let modes = try XCTUnwrap(all(NSSegmentedControl.self, in: try XCTUnwrap(window.contentView)).first { control in
+            (0..<control.segmentCount).map { control.label(forSegment: $0) } == ["Notes", "Rounds"]
+        }, "the inspector's Notes/Rounds control")
+        XCTAssertEqual(modes.segmentCount, 2)
+        XCTAssertEqual(modes.label(forSegment: modes.selectedSegment), "Rounds")
 
         // Pressed while the column is still opening (it takes about a second here) — the case
         // the close was lost in. Settled long enough for the open, then the close, to finish.
@@ -204,6 +212,10 @@ final class ProjectViewInspectorLiveTests: XCTestCase {
         guard let content = window.contentView else { return nil }
         let all = controllers(content)
         return all.flatMap(\.splitViewItems).first { $0.behavior == .inspector }?.isCollapsed
+    }
+
+    private func all<T: NSView>(_ type: T.Type, in view: NSView) -> [T] {
+        ((view as? T).map { [$0] } ?? []) + view.subviews.flatMap { all(type, in: $0) }
     }
 
     private func find<T: NSView>(_ type: T.Type, in view: NSView) -> T? {

@@ -1891,6 +1891,22 @@ none of it is engine state, all of it is a view or the service glue that feeds o
     toolbar), `NotesRail.swift` (the side rail of note/edit cards, tracking the editor's scroll).
   - `IntakeService.swift` — the service described above, plus `ShapingModel.swift` (pure
     view-model folds over a `Tape`) and `RoundConfigEditor.swift` (the Rounds inspector editor).
+  - **The inspector has two explicit modes, Notes and Rounds** (`DetailLayout.InspectorMode`,
+    2026-10-09). A segmented control in the column's header, ⌥⌘1/⌥⌘2 and View ▸ Inspector
+    (`Planning/InspectorCommands.swift`, published through `InspectorModeActions`) switch them;
+    the choice is remembered per plan (`IntakeService.inspectorModes`, UserDefaults
+    `IntakeInspectorModeByIntake`). Focus no longer picks the content: the plan editor taking
+    focus used to swap the Rounds editor for the notes rail (`PlanNotesController.planFocused`,
+    removed). Explicit openers switch the mode in the open — starting a note (Notes), Edit in
+    Inspector, selecting an agent of the running round (Rounds, drilled in on the agent with a
+    "‹ Rounds" back button), and a round's agent stack. A single task offers Notes alone; from
+    review on, Rounds shows the config that planned the plan, read-only.
+  - **Agent stacks** (`Planning/AgentStack.swift`): every agent has one monogram disc
+    (`AgentBadge`, `AgentID.monogram`/`.tint` — no vendor marks, the repo is public), and every
+    round drawn in the main view (finished-round cards, the live round's header) carries an
+    overlapping stack of its distinct agents (`AgentStackModel`, max 3 then "+N", tooltip per
+    role). The Rounds editor groups its rows under one heading per `RoundsSection` with the same
+    stack; clicking a round's stack opens Rounds scrolled to (and briefly marking) its section.
   - `ReleaseReviewView.swift` — the release sheet (spec §10); `IntakeGraphReader.swift` and
     `BeadWriter.swift`/`IntakeDelivery.swift` are release's engine-facing neighbors, not views.
   - `Planning/FloatingCard.swift`, `Planning/UIText.swift` — shared across the above (see below).

@@ -10,6 +10,8 @@ import SwiftUI
 struct ShapingRoundsPanel: View {
     @ObservedObject var service: IntakeService
     let intake: Intake
+    /// The section a round's stack opened the inspector on (`RoundConfigEditor.highlight`).
+    var highlight: RoundsSection?
 
     var body: some View {
         if let saved = intake.roundConfig {
@@ -45,7 +47,8 @@ struct ShapingRoundsPanel: View {
                                   available: service.availableModels(), billing: service.planningBilling(project: intake.projectPath),
                                   codexListedModels: CodexRoutingCatalog.shared.cachedModelIDs,
                                   shaping: service.shapingEdit(intake.id), readOnly: editing == .readOnly,
-                                  recheck: .init(isRunning: service.isDetectingAgents) { [service] in _ = service.recheckAgents() })
+                                  recheck: .init(isRunning: service.isDetectingAgents) { [service] in _ = service.recheckAgents() },
+                                  highlight: highlight)
             }
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier("inspector-rounds-shaping")

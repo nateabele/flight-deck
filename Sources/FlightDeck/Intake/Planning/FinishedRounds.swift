@@ -26,6 +26,9 @@ struct FinishedRounds: View, Equatable {
     /// Shows a round in the plan — `LiveCard` applies the head-follows rule.
     let select: (Int) -> Void
     let setOpen: (Int?) -> Void
+    /// Opens the Rounds inspector on the section that configures a round's stage — what a click
+    /// on a card's agent stack does. Nil draws the stack inert (renders).
+    var showConfig: ((Stage) -> Void)? = nil
 
     static func == (a: Self, b: Self) -> Bool {
         a.cards == b.cards && a.planSelection == b.planSelection && a.open == b.open
@@ -169,6 +172,11 @@ struct FinishedRounds: View, Equatable {
             HStack(spacing: 6) {
                 Text(face.name).font(.system(size: 12.5, weight: .semibold))
                 Spacer(minLength: 6)
+                // The agents that ran it, as the Rounds inspector's section for its stage draws
+                // them — the click is the card's way to its config.
+                if !card.agents.isEmpty {
+                    AgentStack(entries: card.agents, size: 15, action: showConfig.map { show in { show(card.stage) } })
+                }
                 outcomeGlyph(face)
             }
             HStack(spacing: 6) {
@@ -210,11 +218,22 @@ struct FinishedRounds: View, Equatable {
         .onExitCommand(perform: self.open == nil ? nil : close)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(face.accessibilityLabel)
-        .accessibilityValue(open ? "Expanded" : "Collapsed")
+        .accessibilityValue(Self.accessibilityValue(card, open: open))
         .accessibilityHint(open ? "Closes the round's details" : "Shows the round's details below the rounds")
         .accessibilityAddTraits(highlighted ? [.isButton, .isSelected] : .isButton)
         .accessibilityAction { activate(card.checkpointID) }
+        // The card is one element, so the stack inside it can't be reached on its own: its
+        // agents ride on the card's value and its click is a named action.
+        .accessibilityAction(named: "Show Agents in Inspector") { showConfig?(card.stage) }
         .accessibilityIdentifier("round-card-\(card.checkpointID)")
+    }
+
+    /// "Collapsed, Agents: Codex, Claude" — the card is one element, so its stack's agents are
+    /// said here.
+    private static func accessibilityValue(_ card: RoundCard, open: Bool) -> String {
+        let state = open ? "Expanded" : "Collapsed"
+        guard !card.agents.isEmpty else { return state }
+        return state + ", " + AgentStackModel.accessibilityLabel(card.agents)
     }
 
     @ViewBuilder
@@ -411,6 +430,7 @@ private struct RoundDetailView: View {
                 VStack(alignment: .leading, spacing: 1) {
                     HStack(alignment: .firstTextBaseline, spacing: 6) {
                         FinishedRounds.statusSymbol(seat.status)
+                        if let agent = seat.agent { AgentBadge(agent: agent, size: 14).alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + 4 } }
                         Text(seat.label).font(.system(size: 12, weight: .medium))
                         Text(seat.model).font(.system(size: 12)).foregroundStyle(.secondary)
                     }
