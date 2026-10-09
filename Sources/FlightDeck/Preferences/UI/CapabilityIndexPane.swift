@@ -9,6 +9,8 @@ import SwiftUI
 /// should name the same snapshot whatever zone it was taken in.
 struct CapabilityIndexPane: View {
     @ObservedObject var service: CapabilityIndexService
+    /// Where the refresh's account assignment lives (`PreferencesStore.indexAccount`).
+    @ObservedObject var preferences: PreferencesStore
     @State private var selectedCell: CellSelection?
     @State private var editing: ManualDraft?
 
@@ -63,6 +65,11 @@ struct CapabilityIndexPane: View {
             Button(service.isRefreshing ? "Refreshing…" : "Refresh now") { service.startRefresh() }
                 .disabled(service.isRefreshing)
                 .accessibilityIdentifier("index-refresh-now")
+            if service.isRefreshing {
+                Button("Stop") { service.cancelRefresh() }
+                    .help("Stop the refresh, keep the current snapshot and give back the account it leased")
+                    .accessibilityIdentifier("index-refresh-stop")
+            }
             Button("Roll back") { service.rollBack() }
                 .disabled(!service.canRollBack || service.isRefreshing)
                 .help("Make the previous snapshot current")
@@ -275,6 +282,16 @@ struct CapabilityIndexPane: View {
     private var agentSection: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text("Refresh agent").font(.headline)
+            // Trailing-aligned like a FlagRow, at the width of the controls row below so the menu
+            // ends where the token cap does rather than at the far edge of the heatmap.
+            HStack {
+                Text("Account")
+                Spacer()
+                AccountAssignmentPicker(options: IndexAccountChoices.options(for: .claude, in: preferences.preferences.accountList),
+                                        selection: $preferences.indexAccount,
+                                        identifier: "index-account-picker")
+            }
+            .frame(width: 476)
             HStack {
                 TextField("Model", text: Binding(get: { service.config.agent.model },
                                                  set: { var a = service.config.agent; a.model = $0; service.setAgent(a) }))
@@ -290,6 +307,8 @@ struct CapabilityIndexPane: View {
                     .frame(width: 120)
             }
             Text("Runs claude -p with web search and fetch only, once per enabled source. Sources left when the token cap is reached keep their previous values and are marked stale.")
+                .font(.caption).foregroundStyle(.secondary)
+            Text("On a pool, the refresh leases the pool's first account under its soft limit and gives it back when the refresh ends. Claude only: every source runs claude.")
                 .font(.caption).foregroundStyle(.secondary)
             Text("The token cap counts all tokens the agent processes, including cached input it re-reads each turn.")
                 .font(.caption).foregroundStyle(.secondary)

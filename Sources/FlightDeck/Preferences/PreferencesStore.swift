@@ -166,6 +166,18 @@ final class PreferencesStore: ObservableObject {
             guard settings.accounts != before else { continue }
             preferences.projectSettings[path] = settings.isEmpty ? nil : settings
         }
+        if indexAccount == .pool(id) { indexAccount = nil }
+    }
+
+    /// What the capability index's refresh bills (`CapacityPreferences.indexAccount`); nil is
+    /// Default. Writes only on a change: `preferences`' didSet persists every assignment, and a
+    /// picker re-sets its value when the pane redraws.
+    var indexAccount: AccountAssignment? {
+        get { preferences.capacity?.indexAccount }
+        set {
+            guard newValue != indexAccount else { return }
+            updateCapacity { $0.indexAccount = newValue }
+        }
     }
 
     /// The account a new session for `agent` in `project` launches under. nil is BROKEN — an
@@ -313,6 +325,9 @@ final class PreferencesStore: ObservableObject {
             guard settings.accounts != before else { continue }
             preferences.projectSettings[path] = settings.isEmpty ? nil : settings
         }
+        // Back to Default for the reason project assignments are cleared: an index that names a
+        // removed account would refuse every weekly refresh until someone opened its pane.
+        if indexAccount == .account(id) { indexAccount = nil }
     }
 
     func projectSettings(_ path: String) -> ProjectSettings {

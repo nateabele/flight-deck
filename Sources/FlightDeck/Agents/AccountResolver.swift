@@ -110,7 +110,14 @@ final class AccountResolver {
     /// question with no side effect (a menu checkmark, a preview), and never returns a lease.
     func resolve(agent: AgentID, project: String,
                  leasing: Bool = true) -> Result<AccountResolution, AccountResolutionError> {
-        switch preferences.projectSettings(project).accounts[agent] {
+        resolve(agent: agent, assignment: preferences.projectSettings(project).accounts[agent], leasing: leasing)
+    }
+
+    /// One assignment, whoever holds it — a project's (above) or the capability index's
+    /// (`resolveIndex`). One set of rules, so an index on a pool leases exactly as a tab would.
+    func resolve(agent: AgentID, assignment: AccountAssignment?,
+                 leasing: Bool = true) -> Result<AccountResolution, AccountResolutionError> {
+        switch assignment {
         case nil:
             let first = preferences.preferences.accounts.first { $0.agent == agent && !$0.isRemoved }
             return .success(AccountResolution(agent: agent, account: first, source: .unassigned))
@@ -172,6 +179,39 @@ final class AccountResolver {
             title: "Every account in “\(pool.label)” is over its limit",
             body: "Started on “\(account.displayName)”, the one with the most headroom left. It may stop until a limit resets.")
         return .success(made(account, fallback: .allOverHard, notice: notice))
+    }
+
+    // MARK: The capability index
+
+    /// The pool an UNSET index assignment uses for `agent`: the agent's one user pool when it has
+    /// exactly one (hosted — a local pool leases an endpoint slot, not a login), else its
+    /// synthesized `<agent>-default` pool, else nil (the agent has no account at all). Two user
+    /// pools are not guessed between: the default pool holds the unpooled accounts, which no
+    /// project has claimed for itself.
+    nonisolated static func defaultIndexPool(for agent: AgentID, in pools: [CapacityPool]) -> PoolID? {
+        let mine = pools.filter { $0.agent == agent && $0.kind == .hosted }
+        let user = mine.filter { !$0.isDefault }
+        if user.count == 1 { return user[0].id }
+        return mine.first(where: \.isDefault)?.id
+    }
+
+    /// What the index's refresh bills for `agent`: the stored choice, else the default pool.
+    /// Only claude is ever asked — every source runs `claude -p` (`IndexExtraction.command`) —
+    /// but the rule is per agent so a second extraction agent needs no new one.
+    func indexAssignment(_ agent: AgentID) -> AccountAssignment? {
+        if agent == .claude, let stored = preferences.indexAccount { return stored }
+        return Self.defaultIndexPool(for: agent, in: preferences.effectivePools).map(AccountAssignment.pool)
+    }
+
+    /// Resolves the index's assignment, leasing when it is a pool. A STORED choice that no longer
+    /// resolves is refused like a project's; the derived default never is — a default pool the
+    /// ledger cannot use (no live member) falls back to the unassigned rule, so an install with
+    /// no claude account still refreshes in the built-in home, as it always did.
+    func resolveIndex(agent: AgentID, leasing: Bool = true) -> Result<AccountResolution, AccountResolutionError> {
+        let stored = agent == .claude ? preferences.indexAccount : nil
+        let result = resolve(agent: agent, assignment: indexAssignment(agent), leasing: leasing)
+        if stored == nil, case .failure = result { return resolve(agent: agent, assignment: nil, leasing: leasing) }
+        return result
     }
 
     /// Records `resolution`'s lease (if any) as held by `holder` — a tab's id, a runner's id —

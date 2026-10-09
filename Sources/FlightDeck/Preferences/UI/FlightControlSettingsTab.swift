@@ -81,7 +81,7 @@ struct FlightControlSettingsTab: View {
                 case .kinds: TaskKindsPane(routing: routing, project: project)
                 case .capabilityIndex:
                     if let index = sessions.capabilityIndexService {
-                        CapabilityIndexPane(service: index)
+                        CapabilityIndexPane(service: index, preferences: preferences)
                     } else {
                         Text("The capability index is not running in this window.")
                             .foregroundStyle(.secondary).padding()
