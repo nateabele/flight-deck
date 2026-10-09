@@ -73,6 +73,14 @@ struct IntakeDetailView: View {
     /// scrolls to and briefly marks (`showRoundConfig`). A fresh value per click, so clicking the
     /// same round twice scrolls back to it.
     @State private var roundsReveal: RoundsReveal?
+    /// The round picked in the Rounds timeline, shared both ways with the main view: a chip
+    /// clicked on a card or the live header picks it there, a chip picked there shows its round
+    /// here, and a card or board pick moves it. Plain view state on purpose — nothing above this
+    /// pane and no menu reads it, so a pick redraws the pane and nothing app-wide.
+    @State private var roundPick: RoundTimeline.Selection?
+    /// A fresh value each time a chip picked in the inspector asks the document to bring the
+    /// live card (and its round cards) into view.
+    @State private var mainReveal: UUID?
     /// The seat rows' headline holds, shared with the seat inspector so it never says what the
     /// row is still holding back (`DwellBank.peek`). A fresh bank per intake (`bindNotes`).
     @State private var dwell = DwellBank()
@@ -185,6 +193,12 @@ struct IntakeDetailView: View {
                 // The heatmap lives in the card's board, never the pinned copy's: opened
                 // while the block is pinned (the cell on the pinned bar, the Run menu), it
                 // would open out of sight, so the document brings the card to it.
+                // A chip picked in the inspector: its round's card or the live header is in the
+                // live card, which may be scrolled out of sight under the plan.
+                .onChange(of: mainReveal) { _, reveal in
+                    guard reveal != nil else { return }
+                    withAnimation(reduceMotion ? nil : .default) { proxy.scrollTo(Self.cardAnchor, anchor: .top) }
+                }
                 .onChange(of: heatmap == nil) { _, closed in
                     guard !closed, pinned else { return }
                     withAnimation(reduceMotion ? nil : .default) { proxy.scrollTo(Self.cardAnchor, anchor: .top) }
@@ -238,6 +252,11 @@ struct IntakeDetailView: View {
         // An open round panel follows the plan's round when the board, ⌘[ or a banner moves
         // it: a panel describing one round over a plan showing another reads as a stale pane.
         .onChange(of: selectedCheckpoint) { _, checkpoint in
+            // The plan moved to a round (a card, the board, ⌘[): the inspector's pick follows,
+            // so its chip and the card picked here are the same round.
+            if let tape, let pick = RoundTimeline.selection(forPlanCheckpoint: checkpoint, in: tape), pick != roundPick {
+                roundPick = pick
+            }
             guard openRound != nil, let round = checkpoint ?? tape?.head?.id, round != openRound else { return }
             withAnimation(reduceMotion ? nil : .smooth(duration: 0.3)) { openRound = round }
         }
@@ -345,7 +364,8 @@ struct IntakeDetailView: View {
                                  openRound: $openRound,
                                  selectedSeat: $selectedSeat,
                                  dwell: dwell,
-                                 showConfig: { showRoundConfig($0.stage) },
+                                 showConfig: { showRoundConfig($0) },
+                                 pickedRound: roundPick?.round,
                                  controlBar: { now in
                                      AnyView(inCard(.bar, height: barHeight) { controlBar(tape, now: now, seats: seats) })
                                  },
@@ -841,12 +861,30 @@ struct IntakeDetailView: View {
         showsInspector = true
     }
 
-    /// A round's stack, clicked: the Rounds mode on the section that configures that round —
-    /// out of an agent's drill-in, since the config is what the click asked for.
-    private func showRoundConfig(_ stage: Stage) {
+    /// A round's chip, clicked in the main view: the Rounds mode with that chip picked and its
+    /// stage scrolled to — out of an agent's drill-in, since the round is what the click asked for.
+    private func showRoundConfig(_ key: RoundKey) {
         selectedSeat = nil
         showInspector(.rounds)
-        roundsReveal = RoundsReveal(section: .of(stage))
+        roundPick = .round(key)
+        roundsReveal = RoundsReveal(section: .of(key.stage))
+    }
+
+    /// A chip picked in the inspector: the round it names, shown here — a finished round's
+    /// checkpoint (the head by following it), or the live card for the running one. A round
+    /// still to run has nothing here to show (`RoundTimeline.mainTarget`).
+    private func showRoundInMain(_ chip: RoundChipModel) {
+        guard let config = intake.roundConfig else { return }
+        let rows = RoundTimeline.rows(config: service.roundConfigDrafts[intake.id] ?? config, tape: tape)
+        switch RoundTimeline.mainTarget(for: chip.key, rows: rows, tape: tape) {
+        case .checkpoint(let id):
+            selectedCheckpoint = id
+            mainReveal = UUID()
+        case .live:
+            mainReveal = UUID()
+        case .none:
+            break
+        }
     }
 
     /// What the View ▸ Inspector items and their chords act on. The mode is a closure the menu
@@ -894,7 +932,8 @@ struct IntakeDetailView: View {
                             switch content {
                             case .roundsEditor:
                                 if intake.state == .shaping {
-                                    ShapingRoundsPanel(service: service, intake: intake, highlight: roundsReveal?.section)
+                                    ShapingRoundsPanel(service: service, intake: intake, highlight: roundsReveal?.section,
+                                                       selection: $roundPick, onPickRound: { showRoundInMain($0) })
                                 } else {
                                     roundsEditor
                                 }
@@ -934,7 +973,7 @@ struct IntakeDetailView: View {
                               available: service.availableModels(), billing: service.planningBilling(project: intake.projectPath),
                               codexListedModels: CodexRoutingCatalog.shared.cachedModelIDs,
                               recheck: .init(isRunning: service.isDetectingAgents) { [service] in _ = service.recheckAgents() },
-                              highlight: roundsReveal?.section)
+                              highlight: roundsReveal?.section, selection: $roundPick)
         }
     }
 
@@ -949,7 +988,8 @@ struct IntakeDetailView: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 RoundConfigEditor(preset: intake.chosenPreset ?? .featurePlan, config: .constant(config),
-                                  available: service.availableModels(), readOnly: true, highlight: roundsReveal?.section)
+                                  available: service.availableModels(), readOnly: true, highlight: roundsReveal?.section,
+                                  tape: finalTape, selection: $roundPick)
             }
         }
     }

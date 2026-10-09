@@ -80,9 +80,8 @@ struct RoundConfigEditor: View {
             }
             stackedSlots
             Divider()
-            capsForm
+            capsForm.disabled(readOnly)
         }
-        .disabled(readOnly)
     }
 
     /// Directly under the sign-in notes it answers: an agent signed in after launch (`grok
@@ -197,6 +196,9 @@ struct RoundConfigEditor: View {
             }
         }
         .padding(.top, 2)
+        // Only the settings lock while a round runs: the timeline above stays live, since
+        // picking a chip changes nothing that runs — it shows the round.
+        .disabled(readOnly)
         .transition(.opacity)
     }
 
