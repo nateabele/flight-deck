@@ -60,9 +60,49 @@ content to look at.
 
 The relaunch is the point — `devicectl install` leaves the old process running the old code, and
 reading a stale build's behaviour has happened here more than once. `DEVICE` defaults to
-`Mobile3`; a `State` of `unavailable` in `xcrun devicectl list devices` means the phone is
-asleep, off the network, or unplugged, and no way of addressing it (name, UDID, ECID) will get
-past that — it is the device, not the identifier.
+`Mobile3`. A `State` of `unavailable` in `xcrun devicectl list devices` means CoreDevice cannot
+*find* the phone. Addressing it differently (name, UDID, ECID) will not help: the identifier is
+not the problem. Plugging in a cable always works. Over Wi-Fi, check whether discovery is the
+problem before blaming the phone.
+
+#### `unavailable` on Wi-Fi: the phone is there, its Bonjour advert is not
+
+A wireless phone is found only through its multicast mDNS advert for `_remotepairing._tcp`. On
+2026-10-09 the phone sat `unavailable` for over an hour on the same Wi-Fi as the Mac and still
+had a network path the whole time. It answered ping, lockdownd's port 62078 was open, and
+Tailscale reported a `direct` LAN path. Its multicast adverts never reached the Mac, almost
+certainly because the router filters multicast. A browse found nothing:
+`dns-sd -B _remotepairing._tcp local.` stays empty. Asked over **unicast**, though, the phone
+answered in full.
+
+So hand the Mac the advert yourself:
+
+```
+# 1. The phone's LAN address. Use Tailscale's "direct <ip>:<port>" for the iPhone if you have it.
+#    arp alone misleads: the phone uses a private Wi-Fi MAC, and an "iphone" arp entry can be a
+#    different device.
+tailscale status
+
+# 2. Ask the phone's own mDNS responder for its records (unicast, port 5353).
+dig +short @<phone-ip> -p 5353 _remotepairing._tcp.local PTR      # -> <uuid>._remotepairing._tcp.local.
+dig +noall +answer @<phone-ip> -p 5353 <uuid>._remotepairing._tcp.local SRV TXT
+
+# 3. Re-advertise it from this Mac as a Bonjour proxy, with the SRV port and every TXT pair.
+nohup dns-sd -P <uuid> _remotepairing._tcp local <srv-port> <phone>-proxy.local <phone-ip> \
+  identifier=<uuid> authTag=<…> ver=<…> minVer=<…> flags=<…> &
+```
+
+Within seconds the phone lists as `available (paired)` and `deploy-phone.sh` works.
+
+- **The proxy's host name must not be the phone's own.** `Mobile3.local` is already claimed,
+  and `dns-sd` reports `Name in use, please choose another`. That error is also a clue: the
+  phone's *host* record does get through, and only the service advert is lost.
+- **The proxy goes stale.** It hard-codes the phone's IP, port and `authTag`. When any of them
+  changes, the phone goes back to `unavailable`. Kill the `dns-sd -P` process, re-run step 2 and
+  register again.
+- **The real fix is the network.** Turn off multicast filtering, IGMP snooping or client
+  isolation on the router, or keep the phone off a guest network. The proxy routes around the
+  router; it does not fix it.
 
 ### An offscreen render
 
