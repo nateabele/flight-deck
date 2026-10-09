@@ -1016,6 +1016,83 @@ final class SessionStore: ObservableObject {
         }
     }
 
+    // MARK: - Tab leases follow the agent process
+
+    /// Whether `session`'s agent process is running: a process started as the agent's binary
+    /// under the tab's fd-abduco daemon or its surface (`AgentProcessProbe`). Settable so tests
+    /// script it. A SIGSTOP'd (asleep) agent is still a process, so it still reads running.
+    lazy var agentProcessRunning: (Session) -> Bool = { [weak self] session in
+        guard let self else { return false }
+        let roots = [self.daemonControl.daemonPID(session.id),
+                     self.processRegistry.process(for: session.id)?.identity.pid].compactMap { $0 }
+        guard !roots.isEmpty else { return false }
+        return AgentProcessProbe(inspector: self.processInspector).isRunning(session.agent, under: roots)
+    }
+
+    /// How often `maintenanceTick` reconciles tab leases. Each pass walks the process tree of
+    /// every tab that holds a lease or sits in a pool-assigned project, so it is spaced well
+    /// apart from the 500 ms tick; a lease that is a few seconds late moves nothing a user sees.
+    static let tabLeaseSweepInterval: TimeInterval = 5
+    /// How long a leased tab's agent must be gone before its lease is given back. Covers the
+    /// boot of a new tab — its lease is taken in `launchAccount`, before the shell has typed the
+    /// agent's command — so a fresh tab does not drop and re-take its lease on every launch.
+    static let tabLeaseReleaseGrace: TimeInterval = 30
+    private var tabLeaseAgentGoneSince: [UUID: Date] = [:]
+    private var lastTabLeaseSweep: Date?
+
+    private func reconcileTabLeasesIfDue() {
+        let t = now()
+        if let last = lastTabLeaseSweep, t.timeIntervalSince(last) < Self.tabLeaseSweepInterval { return }
+        lastTabLeaseSweep = t
+        reconcileTabLeases()
+    }
+
+    /// Makes each tab's pool lease follow its AGENT process, not the tab (unify round 2, item 9):
+    /// - agent running, no lease, its project assigns a pool that lists the tab's account →
+    ///   re-take the lease on THAT account (`AccountResolver.reacquire`). This is how a tab
+    ///   restored after a relaunch leases again (item 8): the ledger is in memory and starts
+    ///   empty, and a restored tab never passes through `launchAccount`. Never a different
+    ///   account — the running agent's conversation lives in its own account's home.
+    /// - lease held, agent gone for `tabLeaseReleaseGrace` → release. An idle tab whose agent
+    ///   exited no longer counts against its pool; re-running the agent re-takes it.
+    ///
+    /// Before this, a lease lasted as long as the tab and restored tabs took none, so
+    /// `activeLeases` over-counted exited agents and under-counted every relaunch.
+    ///
+    /// **A sleeping agent keeps its lease.** Smart sleep SIGSTOPs an idle agent and keeps its
+    /// process; it resumes the same conversation on the same login the moment the tab is
+    /// selected, and nothing can move it to another account meanwhile. It is a running agent
+    /// on that account, and the lease is the count of those.
+    func reconcileTabLeases() {
+        guard let preferences, let resolver = accountResolver else { return }
+        let t = now()
+        var present: Set<UUID> = []
+        for session in repos.flatMap(\.sessions) {
+            present.insert(session.id)
+            let holds = !resolver.leases(heldBy: session.id).isEmpty
+            var pooled = false
+            if case .pool? = preferences.projectSettings(session.workingDirectory).accounts[session.agent] { pooled = true }
+            // A tab in an unpooled project that holds nothing has nothing to reconcile, and
+            // costs no process walk.
+            guard holds || pooled else { tabLeaseAgentGoneSince[session.id] = nil; continue }
+            if agentProcessRunning(session) {
+                tabLeaseAgentGoneSince[session.id] = nil
+                if !holds, !accountIsMissing(for: session), let account = account(for: session) {
+                    resolver.reacquire(agent: session.agent, project: session.workingDirectory,
+                                       account: account, for: session.id)
+                }
+            } else if holds {
+                let since = tabLeaseAgentGoneSince[session.id] ?? t
+                tabLeaseAgentGoneSince[session.id] = since
+                if t.timeIntervalSince(since) >= Self.tabLeaseReleaseGrace {
+                    resolver.release(holder: session.id)
+                    tabLeaseAgentGoneSince[session.id] = nil
+                }
+            }
+        }
+        tabLeaseAgentGoneSince = tabLeaseAgentGoneSince.filter { present.contains($0.key) }
+    }
+
     /// Claude's adapter with this store's wiring on it.
     ///
     /// A builder rather than a stored literal now that there is one per account, but the
@@ -4740,9 +4817,9 @@ final class SessionStore: ObservableObject {
         }
         repos[repoIndex].sessions.remove(at: sessionIndex)
         emit(.sessionRemoved(id: id))
-        // The tab's pool lease (unify brief R8) ends with the tab. Not when its agent exits: the
-        // shell stays bound to the leased home, and re-running the agent there bills the same
-        // login, so the tab is what holds the account.
+        // The tab's pool lease (unify brief R8) ends with the tab at the latest. While the tab
+        // lives, `reconcileTabLeases` also gives it back when the agent process exits and
+        // re-takes it when the agent runs again.
         accountResolver?.release(holder: id)
         delegationHooks?.sessionClosed(id)
         pluginReload.forget(id)
@@ -8317,6 +8394,8 @@ final class SessionStore: ObservableObject {
         // After every queue above, so a user's own text always reaches an idle composer
         // first; `inject` refuses a tab already mid-drive, and this retries next tick.
         flushPluginReloads()
+        // Throttled inside: a tab's pool lease follows its agent process (see the method).
+        reconcileTabLeasesIfDue()
     }
 
     /// Rebuilds `statuses` from a registry scan and keeps each tab's anchor current.

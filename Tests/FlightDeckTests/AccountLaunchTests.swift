@@ -308,6 +308,79 @@ final class AccountLaunchTests: XCTestCase {
         XCTAssertFalse(store.accountMismatchedSessionIDs.contains(session.id))
     }
 
+    // MARK: - Tab leases follow the agent process (round 2, items 8 and 9)
+
+    /// A tab restored after a relaunch never passes through `launchAccount`, and the ledger is in
+    /// memory, so before this the pool counted none of them. Once the restored tab's agent runs,
+    /// it leases again — on the account the tab is STAMPED with, even when the ledger would now
+    /// pick another member: the running agent's conversation lives in that account's home.
+    func testARestoredTabReLeasesTheAccountItRunsAsOnceItsAgentRuns() throws {
+        let (pooledStore, ledger, first, second, _) = pooled()
+        let preferences = try XCTUnwrap(pooledStore.preferences)
+        let persistence = StubPersistence()
+        let id = UUID()
+        persistence.stored = SessionSnapshot(
+            sessions: [.init(id: id, title: "s", workingDirectory: projectURL.path,
+                             pinnedConversationID: UUID(), accountID: second.id)],
+            sessionCounter: 1
+        )
+        let store = makeStore(preferences, persistence: persistence)
+        store.accountResolver = AccountResolver(preferences: preferences, ledger: ledger)
+        var running = false
+        store.agentProcessRunning = { _ in running }
+        XCTAssertTrue(store.restore(directoryExists: { _ in true }))
+        ledger.ingest(reading(first, 0.1))   // a fresh lease would pick `first`
+
+        store.reconcileTabLeases()
+        XCTAssertEqual(ledger.activeLeases(pool: "team"), [], "no agent yet, no lease")
+
+        running = true
+        store.reconcileTabLeases()
+        XCTAssertEqual(ledger.activeLeases(pool: "team").map(\.account.id), [second.id])
+        XCTAssertEqual(store.accountResolver?.leases(heldBy: id).count, 1)
+
+        store.reconcileTabLeases()
+        XCTAssertEqual(ledger.activeLeases(pool: "team").count, 1, "re-taken once, not every sweep")
+    }
+
+    /// The lease follows the agent, not the tab: an exited agent gives it back after the grace,
+    /// and running the agent again in the same tab re-takes it on the same account.
+    func testATabsLeaseIsReleasedWhenItsAgentExitsAndRetakenWhenItRunsAgain() throws {
+        let (store, ledger, _, _, _) = pooled()
+        var clock = Date()
+        store.now = { clock }
+        var running = true
+        store.agentProcessRunning = { _ in running }
+        let session = store.newSession(in: projectURL)
+        XCTAssertEqual(ledger.activeLeases(pool: "team").count, 1)
+
+        store.reconcileTabLeases()
+        XCTAssertEqual(ledger.activeLeases(pool: "team").count, 1, "a running agent keeps its launch lease")
+
+        running = false
+        store.reconcileTabLeases()
+        XCTAssertEqual(ledger.activeLeases(pool: "team").count, 1, "inside the grace a booting tab keeps it")
+        clock += SessionStore.tabLeaseReleaseGrace
+        store.reconcileTabLeases()
+        XCTAssertEqual(ledger.activeLeases(pool: "team"), [], "an exited agent no longer counts")
+
+        running = true
+        store.reconcileTabLeases()
+        XCTAssertEqual(ledger.activeLeases(pool: "team").map(\.account.id), [session.accountID])
+    }
+
+    /// A tab explicitly started on an account outside its project's pool runs on no pool; a
+    /// sweep must not count it against one.
+    func testARunningTabOnAnAccountOutsideItsPoolTakesNoLease() {
+        let (store, ledger, _, _, _) = pooled()
+        let outside = AgentAccount(agent: .claude, displayName: "Outside", home: home("outside"))
+        store.preferences?.preferences.accounts.append(outside)
+        store.agentProcessRunning = { _ in true }
+        _ = store.newSession(in: projectURL, account: outside.id)
+        store.reconcileTabLeases()
+        XCTAssertEqual(ledger.activeLeases(pool: "team"), [])
+    }
+
     // MARK: - The sidebar's account-mismatch marker
 
     /// `accountMismatchedSessionIDs` is what actually decides which sessions get
