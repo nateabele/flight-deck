@@ -7,6 +7,15 @@ carried forward on trust.
 
 ## Resolved (kept for the reasoning trail)
 
+- **SIGSEGV in `posix.getenv` on libghostty's `sentry-init` thread — FIXED (2026-10-09).** A
+  Debug app relaunched by the UI tests crashed with the main thread in libghostty's
+  `ensureLocale`. `ghostty_init` spawns `sentry-init`, which walks `environ` without libc's lock,
+  then `setenv`s LANG and LANGUAGE when LANG is unset (every Dock/Finder/XCUITest launch); adding
+  a variable frees the old `environ` array under the walk. A C repro of that pattern segfaults on
+  this Mac in 2 of 3 runs. `LaunchLocale` now sets what `ensureLocale` would, before
+  `ghostty_init`, so libghostty mutates nothing (`LaunchLocaleTests`). **Remaining:** an
+  unloadable `LC_ALL`/`LC_*` in the app's launch environment still makes `ensureLocale` fall
+  back and `setenv` — only reachable by `launchctl setenv`-ing a bad value; not handled.
 - **Teardown UAF hazard on window close — FIXED** in the multi-session foundation. The
   hazard was that `GhosttyApp.deinit` frees the libghostty app synchronously while
   `Ghostty.Surface.deinit` defers `ghostty_surface_free` to a later main-actor `Task`, so a

@@ -131,6 +131,12 @@ struct FlightDeckApp: App {
     }
 
     init() {
+        // First, before anything below starts a thread: the locale variables libghostty would
+        // otherwise `setenv` mid-launch, while threads read `environ` (see `LaunchLocale`).
+        // `GhosttyApp`'s one-time init calls it again right before `ghostty_init`, where it
+        // then finds nothing to change — that call is the guarantee, this one the wider margin.
+        LaunchLocale.prepareProcessEnvironment()
+
         // Constructed eagerly, unlike the store: this only reads `UserDefaults`, and both
         // the Settings scene and the store below need the *same* instance.
         //
