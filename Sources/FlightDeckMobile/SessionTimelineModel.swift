@@ -157,6 +157,10 @@ final class SessionTimelineModel {
     /// scanning the main feed would find the PARENT's open call (or none) and offer Allow for
     /// the wrong command.
     @ObservationIgnored private var statusPromptAgent: String?
+    /// The Mac's own derivation of the open dialog, for an agent whose transcript cannot carry
+    /// it (`WireSession.openPrompt`) — gemini's agy keeps a waiting call in a store only the Mac
+    /// can read, so the feed here never holds a record to derive a card from.
+    @ObservationIgnored private var statusOffer: WireOpenPrompt?
     /// The blocked subagent's own tail, kept apart from `feed` for the reason above.
     private(set) var subagentPage: [TimelineItem] = []
 
@@ -550,15 +554,16 @@ final class SessionTimelineModel {
     /// changed. A supersede — same activity, different open call — still lands here because
     /// `call` is part of the comparison.
     func updateStatus(agent: String?, activity: String?, call: OpenPromptIdentity,
-                      promptAgent: String? = nil) {
+                      promptAgent: String? = nil, offered: WireOpenPrompt? = nil) {
         guard agent != statusAgent || activity != statusActivity || call != statusCall
-            || promptAgent != statusPromptAgent else { return }
+            || promptAgent != statusPromptAgent || offered != statusOffer else { return }
         let callMoved = call != statusCall
         let agentMoved = promptAgent != statusPromptAgent
         statusAgent = agent
         statusActivity = activity
         statusCall = call
         statusPromptAgent = promptAgent
+        statusOffer = offered
         if promptAgent == nil {
             subagentPage = []
         } else if agentMoved || callMoved {
@@ -1033,7 +1038,8 @@ final class SessionTimelineModel {
     /// this feature adds no request and no reply frame: a question appearing is a status change
     /// (already pushed) plus records (already fetched on that change), and a question being
     /// answered on the Mac is a `tool_result` arriving on the next fetch. What the status
-    /// gained is the call's *id* — `call` below — and never a word of the question.
+    /// gained is the call's *id* — `call` below — and, for an agent whose transcript cannot
+    /// carry the call at all, the Mac's own words for it (see the last paragraph).
     ///
     /// A function of `agent`, `activity` and `call` rather than reading stored state itself, so
     /// it cannot go stale on its own: the caller passes the live `WireSession` fields it is
@@ -1055,9 +1061,15 @@ final class SessionTimelineModel {
     /// offers Allow for a command nobody is being asked about. `.unreported` is the one state
     /// that defers to this end — see `OpenPromptIdentity`; a Mac too old to send the field
     /// still gets today's behaviour rather than a phone that shows no cards at all.
+    ///
+    /// **Where the transcript cannot say, the Mac's own words stand in for the derivation** —
+    /// `statusOffer`, sent only for an agent whose dialog is never a transcript record. It goes
+    /// through the same veto as a derived card: shown only while `waiting` and only while
+    /// `call` names it, so a superseded or closed dialog leaves nothing to tap.
     func blocked(agent: String?, activity: String?, call: OpenPromptIdentity) -> OpenPrompt? {
         let items = statusPromptAgent == nil ? feed.items : subagentPage
         let derived = OpenPrompt.find(in: items, agent: agent, activity: activity)
+            ?? (activity == "waiting" ? statusOffer?.prompt : nil)
         let shown = Self.shown(derived: derived, call: call)
         note(derived: derived, macSays: call, shown: shown)
         return shown

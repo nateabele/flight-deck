@@ -38,4 +38,8 @@ struct GeminiOpenPromptReader: AgentOpenPromptReader {
     /// any capture, so there is no subagent file to look in.
     func subagentTranscripts(for transcript: URL) -> URL? { nil }
     func openPrompt(inSubagentTail lines: [SourceLine]) -> OpenPrompt? { nil }
+
+    /// agy writes no WAITING step to `transcript_full.jsonl` (see the type's comment), so the
+    /// phone's copy of the transcript holds nothing to derive the dialog from: the Mac sends it.
+    var transcriptCarriesOpenPrompt: Bool { false }
 }

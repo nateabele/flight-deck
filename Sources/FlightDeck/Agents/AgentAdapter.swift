@@ -352,6 +352,28 @@ protocol AgentOpenPromptReader: Sendable {
     /// Separate from `openPrompt(inTranscriptTail:activity:)` because claude marks every
     /// record in a subagent's file as a sidechain, which the main-transcript reading skips.
     func openPrompt(inSubagentTail lines: [SourceLine]) -> OpenPrompt?
+
+    /// Whether the open call is a RECORD in the transcript the timeline feed serves — so a
+    /// client holding that feed can derive the dialog itself (`OpenPrompt.find`).
+    ///
+    /// **Two consequences, and both follow from the one fact.**
+    ///
+    /// - **What goes on the wire.** `true` and the phone derives the dialog from its own copy of
+    ///   the transcript; only the call id travels. `false` and there is nothing in the phone's
+    ///   copy to derive from, so the Mac sends its own derivation (`WireOpenPrompt`) — without
+    ///   it the phone draws "Waiting for you" over a dialog it has no card for.
+    /// - **What `PromptService` may cache and widen.** Its stamp-keyed cache is sound only
+    ///   because a new dialog is an append that moves the transcript's stamp; its widen loop
+    ///   exists only to look past bookkeeping lines for a record. Neither holds for a reader
+    ///   whose dialog is not in the transcript, so `false` reads fresh every time and never
+    ///   widens — a superseded dialog with an unchanged transcript would otherwise be served
+    ///   from the cache, and a nil answer would scan the whole transcript every tick for a
+    ///   record that cannot be there.
+    ///
+    /// **No default.** There is no majority answer that is safe to inherit: a reader that took
+    /// `true` without earning it ships an agent whose phone card never appears, and one that
+    /// took `false` sends dialog text for an agent whose phone already derives it.
+    var transcriptCarriesOpenPrompt: Bool { get }
 }
 
 extension AgentOpenPromptReader {

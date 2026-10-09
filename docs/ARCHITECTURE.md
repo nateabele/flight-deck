@@ -788,6 +788,25 @@ title from `annotations/<id>.pbtxt`. Quota is `agy -p /usage --output-format jso
 run only after `agy models` confirms agy is signed in. Deny on an agy dialog is its last row,
 never Escape, which cancels the whole turn.
 
+**A gemini dialog reaches the phone in words.** Every other agent's phone card is derived on
+the phone from its own copy of the transcript, and only the call id travels
+(`WireSession.openPromptCall`). That cannot work for agy, whose waiting call is never a
+transcript record. So `AgentOpenPromptReader.transcriptCarriesOpenPrompt` (no default; claude
+and grok `true`, gemini `false`) decides two things. First, for a `false` reader the Mac sends
+its own derivation as `WireSession.openPrompt` (`WireOpenPrompt`: call id, kind, tool, summary
+or questions), on the same `activityChanged` as the call id, so a supersede moves both in one
+fold and a closed dialog clears both. The phone uses it only when its own `OpenPrompt.find`
+finds nothing, and only while `waiting` and while `openPromptCall` names the same call. The
+answer goes back through the normal `prompt.answer` path, `PromptService` re-derives from the
+step store before a key moves, and the gemini driver denies on the last row, never with Esc.
+Second, `PromptService` neither caches a `false` reader's answer on the transcript's stamp
+(a new dialog does not move the transcript) nor widens its tail read (no window can hold the
+record). `GeminiRuntime` reports `waiting` again when the waiting call changes while the tab
+stays `waiting`, so a fleet with no claude tab, and therefore no registry tick, still re-derives
+on a supersede. The field is absent for every other agent, so an older phone sees the bytes it
+always saw. A `kind` this build cannot draw decodes to no card, and a malformed value drops the
+card, not the snapshot (`try?`).
+
 ## Tab navigation
 
 ⌘⇧[ / ⌘⇧] move the selection along `sidebarRows` — exactly what the sidebar draws, top to

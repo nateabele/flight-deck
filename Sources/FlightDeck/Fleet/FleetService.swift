@@ -196,6 +196,12 @@ final class FleetService: ObservableObject {
         store.openPromptAgentProbe = { [weak prompts] id in
             prompts?.openPromptAgent(inSession: id)
         }
+        // The words of the dialog just probed, for an agent whose phone cannot derive them
+        // (gemini) — see `WireOpenPrompt`. Same object, same derivation, so the id pushed and
+        // the words pushed beside it cannot disagree.
+        store.openPromptOfferProbe = { [weak prompts] id in
+            prompts?.offeredOpenPrompt(inSession: id)
+        }
         prompts.onPolledSettled = { [weak store] in store?.recommitStatuses() }
         store.openPromptProbeInline = { [weak prompts] id in
             prompts?.pushedOpenPrompt(inSession: id).map(\.callID)

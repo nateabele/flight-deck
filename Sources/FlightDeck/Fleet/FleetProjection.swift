@@ -39,7 +39,8 @@ enum FleetProjection {
                 intakes: store.intakeSummaries[$0.id] ?? nil,
                 swarm: store.swarmSummaries[$0.id] ?? nil,
                 subagentTrees: store.subagentTrees,
-                openPromptAgents: store.openPromptAgents
+                openPromptAgents: store.openPromptAgents,
+                openPromptOffers: store.openPromptOffers
             )
         })
     }
@@ -53,7 +54,8 @@ enum FleetProjection {
         intakes: [WireIntakeSummary]? = nil,
         swarm: WireSwarm? = nil,
         subagentTrees: [UUID: SubagentTree] = [:],
-        openPromptAgents: [UUID: String] = [:]
+        openPromptAgents: [UUID: String] = [:],
+        openPromptOffers: [UUID: OpenPrompt] = [:]
     ) -> WireProject {
         WireProject(
             id: repo.id,
@@ -69,7 +71,8 @@ enum FleetProjection {
                     planGates: planGates,
                     allowsBlockedAbort: allowsBlockedAbort,
                     subagents: subagentModel(of: $0, trees: subagentTrees, status: statuses[$0.id]),
-                    openPromptAgent: openPromptAgents[$0.id]
+                    openPromptAgent: openPromptAgents[$0.id],
+                    openPrompt: openPromptOffers[$0.id]
                 )
             },
             intakes: intakes,
@@ -83,7 +86,8 @@ enum FleetProjection {
         hasBackgroundWork: Bool, openPromptCall: String?,
         apiError: SessionAPIError?,
         planGates: PlanGateService? = nil, allowsBlockedAbort: Bool = false,
-        subagents: SubagentTree? = nil, openPromptAgent: String? = nil
+        subagents: SubagentTree? = nil, openPromptAgent: String? = nil,
+        openPrompt: OpenPrompt? = nil
     ) -> WireSession {
         WireSession(
             id: session.id,
@@ -117,7 +121,10 @@ enum FleetProjection {
             subagents: subagents.map {
                 wire($0, blocked: openPromptAgent, call: openPromptCall)
             },
-            openPromptAgent: openPromptAgent
+            openPromptAgent: openPromptAgent,
+            // Only for an agent whose transcript cannot carry the dialog — `SessionStore`
+            // records no offer for any other — so a claude tab's bytes are unchanged.
+            openPrompt: openPrompt.map(WireOpenPrompt.init)
         )
     }
 

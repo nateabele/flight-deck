@@ -130,6 +130,18 @@ final class SessionStore: ObservableObject {
     /// Rebuilt wholesale by every `commitStatuses`, like `openPromptCalls` beside it.
     private(set) var openPromptAgents: [UUID: String] = [:]
 
+    /// The dialog `openPromptCalls` names, in words, for a tab whose agent's transcript cannot
+    /// carry it (`AgentOpenPromptReader.transcriptCarriesOpenPrompt`) — what goes on the wire as
+    /// `WireSession.openPrompt`. Asked straight after `openPromptProbe` succeeds, like
+    /// `openPromptAgentProbe`, so the id and the words answer about the same derivation. Nil
+    /// for a store with no fleet attached, read as "nothing to send".
+    var openPromptOfferProbe: ((UUID) -> OpenPrompt?)?
+
+    /// This tick's offered dialog for each tab `openPromptOfferProbe` answered for. Rebuilt
+    /// wholesale by every `commitStatuses`, like `openPromptCalls` beside it — which is what
+    /// retires a superseded dialog's words on the same tick that retires its id.
+    private(set) var openPromptOffers: [UUID: OpenPrompt] = [:]
+
     /// Session ids in most-recently-active order (index 0 == current selection).
     /// Consulted by `closeSession` so closing the active tab returns to the tab you
     /// were on before it rather than the top of the sidebar. Not persisted: after a
@@ -2020,7 +2032,8 @@ final class SessionStore: ObservableObject {
             planGates: planGates,
             subagents: FleetProjection.subagentModel(
                 of: session, trees: subagentTrees, status: statuses[session.id]),
-            openPromptAgent: openPromptAgents[session.id]
+            openPromptAgent: openPromptAgents[session.id],
+            openPrompt: openPromptOffers[session.id]
         )
     }
 
@@ -3715,7 +3728,8 @@ final class SessionStore: ObservableObject {
                     backgroundWork: backgroundWorkSessions,
                     openPromptCalls: openPromptCalls, apiErrors: apiErrors,
                     planGates: planGates,
-                    subagentTrees: subagentTrees, openPromptAgents: openPromptAgents
+                    subagentTrees: subagentTrees, openPromptAgents: openPromptAgents,
+                    openPromptOffers: openPromptOffers
                 ),
                 at: repoIndex
             ))
@@ -5266,7 +5280,8 @@ final class SessionStore: ObservableObject {
                         backgroundWork: backgroundWorkSessions,
                         openPromptCalls: openPromptCalls, apiErrors: apiErrors,
                         planGates: planGates,
-                        subagentTrees: subagentTrees, openPromptAgents: openPromptAgents
+                        subagentTrees: subagentTrees, openPromptAgents: openPromptAgents,
+                        openPromptOffers: openPromptOffers
                     ), at: at
                 ))
             }
@@ -8965,6 +8980,7 @@ final class SessionStore: ObservableObject {
             lastActiveAtByID[id] = stamp
         }
         let previousOpenPromptAgents = openPromptAgents
+        let previousOpenPromptOffers = openPromptOffers
         // Shadowed, mutable: `derivedOpenPromptCalls` fills in `answerless` on every `waiting`
         // entry below, ahead of every comparison this function makes — a tick where only that
         // field moves must be recognized as a change exactly like any other, not smuggled in
@@ -9023,6 +9039,7 @@ final class SessionStore: ObservableObject {
         if backgroundWork != backgroundWorkSessions { backgroundWorkSessions = backgroundWork }
         openPromptCalls = derived.calls
         openPromptAgents = derived.agents
+        openPromptOffers = derived.offers
         openPromptFailureCodes = derived.codes
         // THREE axes, not one. A task starting or ending under an otherwise-idle tab moves
         // only `backgroundWork` — guarding on `statuses` alone swallowed that tick entirely,
@@ -9036,6 +9053,9 @@ final class SessionStore: ObservableObject {
             // The same call id moving from the parent to a subagent (or between subagents)
             // changes where the phone must read it, so it is a change even though the id is not.
             || openPromptAgents != previousOpenPromptAgents
+            // The words of a dialog the phone cannot derive; they move with the id in practice,
+            // and are compared anyway so they can never move alone without reaching the wire.
+            || openPromptOffers != previousOpenPromptOffers
         else { return }
         // A session that HAD a status and no longer does means its `claude` exited.
         // Drop its sub-agent count too, so a later process reusing the same session
@@ -9061,6 +9081,8 @@ final class SessionStore: ObservableObject {
             .filter { previousOpenPromptCalls[$0] != openPromptCalls[$0] }
             .union(Set(previousOpenPromptAgents.keys).union(openPromptAgents.keys)
                 .filter { previousOpenPromptAgents[$0] != openPromptAgents[$0] })
+            .union(Set(previousOpenPromptOffers.keys).union(openPromptOffers.keys)
+                .filter { previousOpenPromptOffers[$0] != openPromptOffers[$0] })
         // `openPromptChanged` is deliberately not unioned in: a tab with a dialog has a status,
         // so it is already in `next.keys`, and adding it would only be a way for this set to
         // disagree with itself.
@@ -9191,7 +9213,8 @@ final class SessionStore: ObservableObject {
                 openPromptCall: openPromptIdentity(of: transition.id),
                 answerless: transition.new?.answerless ?? false,
                 subagents: wireSubagents(of: transition.id),
-                openPromptAgent: openPromptAgents[transition.id]
+                openPromptAgent: openPromptAgents[transition.id],
+                openPrompt: openPromptOffers[transition.id].map(WireOpenPrompt.init)
             )
         })
     }
@@ -9236,9 +9259,11 @@ final class SessionStore: ObservableObject {
     /// two can never read as two different moments for what is one underlying fact.
     private func derivedOpenPromptCalls(
         _ next: inout [UUID: SessionStatus]
-    ) -> (calls: [UUID: String], codes: [UUID: String], agents: [UUID: String]) {
+    ) -> (calls: [UUID: String], codes: [UUID: String], agents: [UUID: String],
+          offers: [UUID: OpenPrompt]) {
         var calls: [UUID: String] = [:]
         var agents: [UUID: String] = [:]
+        var offers: [UUID: OpenPrompt] = [:]
         var codes: [UUID: String] = [:]
         let now = now()
         // Snapshotted before the loop, deliberately: the loop below mutates `next[id]` on every
@@ -9253,6 +9278,11 @@ final class SessionStore: ObservableObject {
             case .success(let callID):
                 calls[id] = callID
                 agents[id] = openPromptAgentProbe?(id)
+                // Kept only when it names the call just probed: words for any other call would
+                // put one dialog's text on the wire under another's id.
+                if let offer = openPromptOfferProbe?(id), offer.callID == callID {
+                    offers[id] = offer
+                }
                 stuckPromptEpisodes[id] = nil
                 next[id]?.answerless = false
             case .failure(let code) where code.code == "prompt_changed":
@@ -9278,7 +9308,7 @@ final class SessionStore: ObservableObject {
         for id in staleEpisodeIDs {
             stuckPromptEpisodes[id] = nil
         }
-        return (calls, codes, agents)
+        return (calls, codes, agents, offers)
     }
 
     /// One tab's identity as it goes on the wire. Never `.unreported` — this build always
@@ -9364,7 +9394,8 @@ final class SessionStore: ObservableObject {
             openPromptCall: openPromptIdentity(of: id),
             answerless: status.answerless,
             subagents: wireSubagents(of: id),
-            openPromptAgent: openPromptAgents[id]
+            openPromptAgent: openPromptAgents[id],
+            openPrompt: openPromptOffers[id].map(WireOpenPrompt.init)
         ))
     }
 
@@ -9405,7 +9436,8 @@ final class SessionStore: ObservableObject {
             // only writer of it — rides along unchanged.
             answerless: status.answerless,
             subagents: wireSubagents(of: id),
-            openPromptAgent: openPromptAgents[id]
+            openPromptAgent: openPromptAgents[id],
+            openPrompt: openPromptOffers[id].map(WireOpenPrompt.init)
         ))
     }
 
@@ -9607,7 +9639,8 @@ final class SessionStore: ObservableObject {
                     backgroundWork: backgroundWorkSessions,
                     openPromptCalls: openPromptCalls, apiErrors: apiErrors,
                     planGates: planGates,
-                    subagentTrees: subagentTrees, openPromptAgents: openPromptAgents
+                    subagentTrees: subagentTrees, openPromptAgents: openPromptAgents,
+                    openPromptOffers: openPromptOffers
                 ),
                 at: destination
             ))

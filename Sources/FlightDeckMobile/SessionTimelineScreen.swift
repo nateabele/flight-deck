@@ -325,7 +325,8 @@ struct SessionTimelineScreen: View {
         .task(id: model.sessionID) {
             model.updateStatus(agent: session?.agent, activity: session?.activity,
                                call: session?.openPromptCall ?? .unreported,
-                               promptAgent: session?.openPromptAgent)
+                               promptAgent: session?.openPromptAgent,
+                               offered: session?.openPrompt)
             model.open()
         }
         // Reported from the SCREEN rather than the model: the model is cached per tab and
@@ -408,7 +409,8 @@ struct SessionTimelineScreen: View {
             model.loadNewer()
             model.updateStatus(agent: session?.agent, activity: session?.activity,
                                call: session?.openPromptCall ?? .unreported,
-                               promptAgent: session?.openPromptAgent)
+                               promptAgent: session?.openPromptAgent,
+                               offered: session?.openPrompt)
         }
         // The second event trigger, and it fires where the first cannot. A dialog answered at
         // the keyboard with the next one raised immediately never leaves `waiting`, so
@@ -420,12 +422,23 @@ struct SessionTimelineScreen: View {
             model.loadNewer()
             model.updateStatus(agent: session?.agent, activity: session?.activity,
                                call: session?.openPromptCall ?? .unreported,
-                               promptAgent: session?.openPromptAgent)
+                               promptAgent: session?.openPromptAgent,
+                               offered: session?.openPrompt)
+        }
+        // The Mac's words for a dialog this phone cannot derive (gemini). They move with
+        // `openPromptCall` above in practice; observed on their own so a change to them alone
+        // still reaches the card.
+        .onChange(of: session?.openPrompt) { _, _ in
+            model.updateStatus(agent: session?.agent, activity: session?.activity,
+                               call: session?.openPromptCall ?? .unreported,
+                               promptAgent: session?.openPromptAgent,
+                               offered: session?.openPrompt)
         }
         .onChange(of: session?.openPromptAgent) { _, _ in
             model.updateStatus(agent: session?.agent, activity: session?.activity,
                                call: session?.openPromptCall ?? .unreported,
-                               promptAgent: session?.openPromptAgent)
+                               promptAgent: session?.openPromptAgent,
+                               offered: session?.openPrompt)
         }
         // The timer, and it is not redundant with the event above: `emitActivity` on the Mac
         // filters to genuine transitions, so a turn that runs busy for four minutes emits

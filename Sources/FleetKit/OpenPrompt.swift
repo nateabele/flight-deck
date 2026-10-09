@@ -8,6 +8,11 @@ import Foundation
 /// carries it in `TimelineItem.Body.text`. So this is a *derivation* both ends run over data
 /// they already hold — which is also why it lives in `FleetKit` and not in either app. The Mac
 /// and the phone must not run two versions of this rule.
+///
+/// **One exception, and it is not a return of `PendingPrompt`.** For an agent whose transcript
+/// never holds the open call (gemini's agy), there is nothing on the phone to derive from, so
+/// the Mac's own derivation rides `WireSession.openPrompt` — which is why this type is `Codable`
+/// (`Wire.swift`). Every agent whose transcript does carry the call still derives it on both ends.
 public struct PromptQuestion: Equatable, Hashable, Sendable {
     public struct Option: Equatable, Hashable, Sendable {
         public var label: String
