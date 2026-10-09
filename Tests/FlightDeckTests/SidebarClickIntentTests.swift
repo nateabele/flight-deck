@@ -298,6 +298,60 @@ final class SidebarPressedControlTests: XCTestCase {
     }
 }
 
+/// Where a header click collapses. The zone is measured from the row's CONTENT (its cell
+/// view), not from the `NSTableRowView`: macOS 15 starts the row view at the window edge and
+/// insets the cell 10pt inside it, so a zone measured from the row edge ended right at the
+/// chevron glyph's trailing edge there and a click just past the glyph selected the project
+/// instead (`testProjectHeadingsReorderByDragging` on the UI-test Mac, 2026-10-06 and -09).
+///
+/// The geometry below is measured, not guessed: on macOS 15 (UI-test Mac recording, 2pt per
+/// pixel) the row view starts at window x=0, the cell at 10, the chevron glyph spans 16-23 and
+/// the project name starts at 28; on macOS 26 (the README capture) the chevron starts 6pt and
+/// the name 18pt inside the cell's selection pill, the same in-cell layout.
+@MainActor
+final class SidebarChevronZoneTests: XCTestCase {
+    // macOS 15: the cell starts 10pt inside the row view.
+    func testTheGapBetweenTheChevronAndTheNameCollapsesOnMacOS15() {
+        // x=26 is where the UI test clicked and the old row-relative 22pt zone missed.
+        XCTAssertTrue(SidebarClickIntent.inChevronZone(pressX: 26, contentLeadingX: 10))
+    }
+
+    func testTheChevronGlyphCollapsesOnMacOS15() {
+        XCTAssertTrue(SidebarClickIntent.inChevronZone(pressX: 19, contentLeadingX: 10))
+    }
+
+    func testTheRowMarginBeforeTheCellCollapses() {
+        // Left of the cell is still "the chevron's side" of the row; nothing else lives there.
+        XCTAssertTrue(SidebarClickIntent.inChevronZone(pressX: 3, contentLeadingX: 10))
+    }
+
+    func testTheProjectNameSelectsOnMacOS15() {
+        XCTAssertFalse(SidebarClickIntent.inChevronZone(pressX: 28, contentLeadingX: 10))
+        XCTAssertFalse(SidebarClickIntent.inChevronZone(pressX: 120, contentLeadingX: 10))
+    }
+
+    // macOS 26: the cell starts at the row view's edge.
+    func testTheZoneEndsWhereTheNameStartsOnMacOS26() {
+        XCTAssertTrue(SidebarClickIntent.inChevronZone(pressX: 10, contentLeadingX: 0))
+        XCTAssertTrue(SidebarClickIntent.inChevronZone(pressX: 17, contentLeadingX: 0))
+        XCTAssertFalse(SidebarClickIntent.inChevronZone(pressX: 18, contentLeadingX: 0))
+    }
+
+    func testTheContentLeadingEdgeIsTheRowsFirstSubview() {
+        // SwiftUI's real tree is row -> cell view -> hosting view; the cell's x is the inset.
+        let row = NSTableRowView(frame: NSRect(x: 0, y: 0, width: 240, height: 28))
+        row.addSubview(NSView(frame: NSRect(x: 10, y: 0, width: 220, height: 28)))
+
+        XCTAssertEqual(SidebarInputMonitor.contentLeadingX(in: row), 10)
+    }
+
+    func testARowWithNoCellMeasuresFromItsOwnEdge() {
+        let row = NSTableRowView(frame: NSRect(x: 0, y: 0, width: 240, height: 28))
+
+        XCTAssertEqual(SidebarInputMonitor.contentLeadingX(in: row), 0)
+    }
+}
+
 /// Which `NSTableView` is the sidebar's — the fix for the bug where a click on `ProjectView`'s
 /// Intakes list (also a table, in the same window) was treated as a click on the sidebar row at
 /// the same index. See the file's "Scoping" doc comment.
