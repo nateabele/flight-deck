@@ -119,9 +119,16 @@ private struct PromptKeyboardHarness: View {
     /// `-UITestSingle YES` keeps only the first question, so a lone question's heading and
     /// title layout can be looked at too.
     private var open: OpenPrompt {
-        guard UserDefaults.standard.bool(forKey: "UITestSingle"),
-              case .question(let call, let questions) = set else { return set }
-        return .question(callID: call, [questions[0]])
+        guard UserDefaults.standard.bool(forKey: "UITestSingle") else { return set }
+        return .question(callID: "toolu_HARNESS", [PromptQuestion(
+            header: "Reconnect",
+            question: "When the phone has lost its connection to the Mac for more than a few "
+                + "minutes and then reconnects, should the conversation jump to the newest "
+                + "message, or stay where the reader was?",
+            options: [.init(label: "Stay and offer",
+                            detail: "Keep the reader's place and show a 'New messages' button."),
+                      .init(label: "Jump to newest",
+                            detail: "Scroll straight to the newest message on reconnect.")])])
     }
     private let set = OpenPrompt.question(callID: "toolu_HARNESS", [
         PromptQuestion(header: "Color", question: "Which color do you like best?",
