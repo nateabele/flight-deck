@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import IntakeKit
 import SwiftUI
 import XCTest
@@ -107,6 +108,71 @@ final class ProjectViewInspectorLiveTests: XCTestCase {
         settle(2.0)
         XCTAssertEqual(toggleLabel(in: window), "Hide Inspector")
         XCTAssertEqual(inspectorCollapsed(in: window), false, "the held close saw the reopen and stood down")
+    }
+
+    /// A Notes/Rounds switch redraws the inspector and nothing around it. Before, the mode lived
+    /// in a `@Published` on `IntakeService`, which `SessionStore` forwards, so each click
+    /// re-evaluated `RootView`, `ProjectView`, the detail pane and its live card (measured on
+    /// `4e13c49d`: root 1, project 1, detail 2, live card 2 per switch).
+    ///
+    /// The window's own clock (tape polls, the live card's ticks) still publishes now and then,
+    /// and under a loaded suite one landed inside a sample. So a sample counts only when
+    /// `SessionStore` published nothing while it settled; a publish made by the click itself
+    /// (the old code's, synchronous in `sendAction`) does not disqualify it, so this still fails
+    /// against `4e13c49d`.
+    func testAModeSwitchRedrawsTheInspectorAlone() throws {
+        let (store, _, _, _, window) = try openTwoShapingProjects()
+        XCTAssertTrue(pressInspectorChord(in: window))
+        settle(1.5)
+        let modes = try XCTUnwrap(all(NSSegmentedControl.self, in: try XCTUnwrap(window.contentView)).first { control in
+            (0..<control.segmentCount).map { control.label(forSegment: $0) } == ["Notes", "Rounds"]
+        }, "the inspector's Notes/Rounds control")
+        XCTAssertEqual(modes.label(forSegment: modes.selectedSegment), "Rounds")
+
+        var background = 0
+        let sub = store.objectWillChange.sink { _ in background += 1 }
+        defer { sub.cancel() }
+        var clean: [[String: Int]] = []
+        for segment in [0, 1, 0, 1, 0, 1, 0, 1] {
+            RenderProbe.reset()
+            modes.selectedSegment = segment
+            XCTAssertTrue(modes.sendAction(modes.action, to: modes.target), "the control's click reaches SwiftUI")
+            background = 0
+            settle(0.3)
+            XCTAssertEqual(modes.label(forSegment: modes.selectedSegment), ["Notes", "Rounds"][segment])
+            if background == 0 { clean.append(RenderProbe.counts) }
+        }
+        XCTAssertGreaterThanOrEqual(clean.count, 3, "too few switches free of the window's own publishes")
+        for (step, count) in clean.enumerated() {
+            XCTAssertGreaterThan(count["inspector"] ?? 0, 0, "switch \(step) redrew the inspector: \(count)")
+            for part in ["root", "project", "detail", "liveCard", "header", "plan"] {
+                XCTAssertEqual(count[part] ?? 0, 0, "switch \(step) redrew \(part): \(count)")
+            }
+        }
+    }
+
+    /// Opening the inspector settles: the window stops re-evaluating, and every column still has
+    /// content. The maintainer's 2026-10-09 screenshot after ⌥⌘I showed the sidebar, the Intakes list and
+    /// the inspector as blank panes with only the plan drawn — the main thread busy redrawing.
+    func testOpeningTheInspectorSettlesWithEveryColumnDrawn() throws {
+        let (_, _, _, _, window) = try openTwoShapingProjects()
+        XCTAssertTrue(pressInspectorChord(in: window))
+        settle(2.0)
+        RenderProbe.reset()
+        settle(2.0)
+        let idle = RenderProbe.counts
+        for part in ["root", "project", "detail", "inspector", "header", "plan"] {
+            XCTAssertLessThanOrEqual(idle[part] ?? 0, 1, "\(part) kept re-evaluating with nothing changing: \(idle)")
+        }
+        let content = try XCTUnwrap(window.contentView)
+        let inspector = try XCTUnwrap(all(NSSegmentedControl.self, in: content).first { control in
+            (0..<control.segmentCount).map { control.label(forSegment: $0) } == ["Notes", "Rounds"]
+        }, "the inspector's Notes/Rounds control")
+        XCTAssertGreaterThan(inspector.frame.width, 0)
+        XCTAssertNotNil(inspector.window, "the control is in the window")
+        // The sidebar's and the Intakes list's rows are still there beside it.
+        let lists = all(NSTableView.self, in: content).filter { $0.numberOfRows > 0 && $0.visibleRect.height > 0 }
+        XCTAssertGreaterThanOrEqual(lists.count, 2, "sidebar and Intakes list both drawn: \(lists.map(\.numberOfRows))")
     }
 
     // MARK: - Fixtures

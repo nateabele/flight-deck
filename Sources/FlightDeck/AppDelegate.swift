@@ -36,6 +36,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// `installToolsMenu`, which is on the main actor.
     @MainActor
     private lazy var toolsMenu = ToolsMenuController()
+    /// View ▸ Inspector, AppKit for the reason `InspectorMenuController` gives; `lazy` for
+    /// `toolsMenu`'s.
+    @MainActor
+    private lazy var inspectorMenu = InspectorMenuController()
 
     /// Watches `PreferencesStore.tools` so the menu stays in sync with edits made in the
     /// Settings window. Torn down implicitly on dealloc, same as any other `AnyCancellable`.
@@ -104,6 +108,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// the real work.
     func applicationDidFinishLaunching(_ notification: Notification) {
         installToolsMenu()
+        installInspectorMenu()
         // Same order-independent retry `installToolsMenu` gets, and for the same reason: the
         // store can be constructed either side of this delegate registering its
         // `.flightDeckStoreReady` observer, so neither hop alone is guaranteed to see it.
@@ -211,6 +216,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         if let mainMenu = NSApp.mainMenu { toolsMenu.install(in: mainMenu) }
+    }
+
+    /// Needs no store, unlike the Tools menu, only a main menu with a View menu in it. SwiftUI
+    /// builds both asynchronously, so a launch that finds neither tries again next turn.
+    @MainActor
+    private func installInspectorMenu(attempt: Int = 0) {
+        if let mainMenu = NSApp.mainMenu, mainMenu.items.contains(where: { $0.submenu?.title == "View" }) {
+            inspectorMenu.install(in: mainMenu)
+        } else if attempt < 50 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+                MainActor.assumeIsolated { self?.installInspectorMenu(attempt: attempt + 1) }
+            }
+        }
     }
 
     /// What one backfill pass should do, decided from what discovery found rather than why it

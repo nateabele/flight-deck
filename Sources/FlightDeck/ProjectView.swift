@@ -89,6 +89,7 @@ struct ProjectView: View {
     }
 
     var body: some View {
+        let _ = RenderProbe.hit("project")
         Group {
             if isFlywheelEnabled {
                 intakeSplitView

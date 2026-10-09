@@ -1893,9 +1893,17 @@ none of it is engine state, all of it is a view or the service glue that feeds o
     view-model folds over a `Tape`) and `RoundConfigEditor.swift` (the Rounds inspector editor).
   - **The inspector has two explicit modes, Notes and Rounds** (`DetailLayout.InspectorMode`,
     2026-10-09). A segmented control in the column's header, ⌥⌘1/⌥⌘2 and View ▸ Inspector
-    (`Planning/InspectorCommands.swift`, published through `InspectorModeActions`) switch them;
-    the choice is remembered per plan (`IntakeService.inspectorModes`, UserDefaults
-    `IntakeInspectorModeByIntake`). Focus no longer picks the content: the plan editor taking
+    (`Planning/InspectorMenu.swift`) switch them; the choice is remembered per plan
+    (`InspectorModeStore`, owned by `IntakeService`, UserDefaults `IntakeInspectorModeByIntake`).
+    **A mode switch redraws the column alone.** The mode store is its own `ObservableObject`,
+    observed only by `InspectorModeReader` around the column: as a `@Published` on
+    `IntakeService` (which `SessionStore` forwards) each click redrew `RootView`, `ProjectView`
+    and the pane. And View ▸ Inspector is AppKit items (`InspectorMenuController`), validated on
+    demand against `PaneMenuRegistry`, which the pane feeds through a `PaneMenuAnchor` view —
+    never a focused value read by a SwiftUI `Commands`: every change to a `Commands` body's
+    output makes SwiftUI reconcile the main menu, which prunes the Tools menu
+    (`ToolsMenuController`) until it heals a turn later, so each mode or tab switch blinked it.
+    The submenu heals into View the same way when SwiftUI prunes or replaces that menu. Focus no longer picks the content: the plan editor taking
     focus used to swap the Rounds editor for the notes rail (`PlanNotesController.planFocused`,
     removed). Explicit openers switch the mode in the open — starting a note (Notes), Edit in
     Inspector, selecting an agent of the running round (Rounds, drilled in on the agent with a

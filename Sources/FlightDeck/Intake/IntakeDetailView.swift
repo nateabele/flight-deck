@@ -232,7 +232,9 @@ struct IntakeDetailView: View {
         // here, in the open, by the click — the segmented control moves with it — where focus
         // used to swap the column's content with nothing on screen saying so.
         .onChange(of: selectedSeat) { _, seat in if seat != nil { showInspector(.rounds) } }
-        .focusedSceneValue(\.inspectorModeActions, inspectorModeActions)
+        // View ▸ Inspector's target, in a registry the AppKit menu reads on demand — never a
+        // focused value, whose every change rebuilt the menu bar (`PaneMenuRegistry`).
+        .background(PaneMenuAnchor(registry: PaneMenus.inspector, value: inspectorModeActions))
         // An open round panel follows the plan's round when the board, ⌘[ or a banner moves
         // it: a panel describing one round over a plan showing another reads as a stale pane.
         .onChange(of: selectedCheckpoint) { _, checkpoint in
@@ -847,19 +849,32 @@ struct IntakeDetailView: View {
         roundsReveal = RoundsReveal(section: .of(stage))
     }
 
-    /// What the View ▸ Inspector items and their chords act on.
+    /// What the View ▸ Inspector items and their chords act on. The mode is a closure the menu
+    /// calls when it validates, so the pane never reads it here: reading it would make a mode
+    /// switch this pane's business again.
     private var inspectorModeActions: InspectorModeActions {
-        InspectorModeActions(intakeID: intake.id, modes: DetailLayout.inspectorModes(preset: inspectorPreset),
-                             mode: inspectorMode, select: { [service, $showsInspector, id = intake.id] mode in
-                                 service.setInspectorMode(mode, for: id)
-                                 $showsInspector.wrappedValue = true
-                             })
+        let preset = inspectorPreset
+        return InspectorModeActions(intakeID: intake.id, modes: DetailLayout.inspectorModes(preset: preset),
+                                    mode: { [service, id = intake.id] in
+                                        DetailLayout.inspectorMode(stored: service.inspectorMode(id), preset: preset)
+                                    },
+                                    select: { [service, $showsInspector, id = intake.id] mode in
+                                        service.setInspectorMode(mode, for: id)
+                                        $showsInspector.wrappedValue = true
+                                    })
+    }
+
+    /// The column, redrawn on its own when the mode changes (`InspectorModeReader`): the pane
+    /// around it doesn't observe the mode, so a Notes/Rounds switch redraws this alone.
+    private var inspector: some View {
+        InspectorModeReader(store: service.inspectorModeStore) { inspectorContent }
     }
 
     /// The mode control over the column, then the mode's content. The rail fills the column edge
     /// to edge and scrolls with the editor, not on its own, so it sits outside the ScrollView
     /// every other content shares.
-    private var inspector: some View {
+    private var inspectorContent: some View {
+        let _ = RenderProbe.hit("inspector")
         let preset = inspectorPreset
         let mode = inspectorMode
         // A selection only counts while its round is in flight: once the run pauses the Rounds
@@ -1476,6 +1491,15 @@ private struct WheelToDocument: NSViewRepresentable {
     }
 }
 
+
+/// Observes only the inspector's mode, so a Notes/Rounds switch re-evaluates the column and not
+/// the detail pane, `ProjectView` or `RootView` around it (`InspectorModeStore`).
+private struct InspectorModeReader<Content: View>: View {
+    @ObservedObject var store: InspectorModeStore
+    @ViewBuilder let content: () -> Content
+
+    var body: some View { content() }
+}
 
 /// "4 notes for the next round" beside the plan's heading; opens the rail. Absent with no
 /// pending notes (`NotesRailModel.summary`).

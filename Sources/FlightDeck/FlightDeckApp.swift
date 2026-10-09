@@ -491,7 +491,6 @@ struct FlightDeckApp: App {
                 TabNavigationCommands(store: store)
                 SearchCommands()
                 PlanningCommands()
-                InspectorCommands()
                 ShortcutOverlayCommands()
             }
 

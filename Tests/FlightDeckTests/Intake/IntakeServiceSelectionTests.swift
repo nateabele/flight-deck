@@ -132,6 +132,21 @@ final class IntakeServiceSelectionTests: XCTestCase {
         XCTAssertEqual(makeService().inspectorMode(b), .rounds)
     }
 
+    /// A mode switch is not news to anything but the inspector. `SessionStore` forwards every
+    /// `IntakeService` publish into its own, so a mode kept in a `@Published` here redrew the
+    /// whole window — root, sidebar, the project page — on each Notes/Rounds click.
+    func testAModeSwitchDoesNotPublishTheService() throws {
+        let a = try seed(project: "/a")
+        let svc = makeService()
+        var publishes = 0
+        let sub = svc.objectWillChange.sink { _ in publishes += 1 }
+        defer { sub.cancel() }
+        svc.setInspectorMode(.notes, for: a)
+        svc.setInspectorMode(.rounds, for: a)
+        XCTAssertEqual(svc.inspectorMode(a), .rounds)
+        XCTAssertEqual(publishes, 0, "a mode switch republished IntakeService \(publishes) times")
+    }
+
     // MARK: - Intakes list collapsed to its rail
 
     /// Per project, and kept by the service rather than `ProjectView` `@State` for the reason

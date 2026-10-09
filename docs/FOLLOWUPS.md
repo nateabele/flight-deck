@@ -3292,3 +3292,32 @@ The planning inspector's Notes/Rounds modes and the per-round agent stacks shipp
   opens the round's detail panel rather than the inspector.
 - **A synthesis round's stack includes the integrator**, whose editor row lives under Refine;
   the Synthesis section says so in a note rather than repeating the row.
+
+### The menu bar blinked on every mode or tab switch (fixed 2026-10-09, `inspector-mode-flicker`)
+
+The maintainer, on the Release from `4e13c49d`: the Tools menu vanished and came back, and much of the
+window redrew on a lag, on each Notes/Rounds switch and each switch between a plan and another
+tab. Two causes, both from `4e13c49d`, both fixed:
+- View ▸ Inspector was a SwiftUI `Commands` reading a focused value that carried the mode and
+  existed only while a plan was on screen. Any change in a `Commands` body's output makes SwiftUI
+  reconcile the main menu, which prunes the AppKit Tools menu until `ToolsMenuController` heals
+  it. Measured in a standalone SwiftUI app with a Tools menu inserted the same way: 10 prunes in
+  10 mode switches and 10 in 10 plan/terminal switches (macOS 15 focused value; macOS 26
+  observed object, same 1:1). Now AppKit items (`InspectorMenuController`): 0 in 10.
+- The mode was a `@Published` on `IntakeService`, which `SessionStore` forwards: each switch
+  re-evaluated root 1, project 1, detail 2, live card 2 (`ProjectViewInspectorLiveTests`). Now
+  `InspectorModeStore`, observed by the column alone: 0, 0, 0, 0, the inspector 1–2.
+
+Still open:
+- **The Run menu still blinks the Tools menu** (pre-existing, `PlanningCommands`, since its
+  `@FocusedValue`). Its focused value changes when a shaping plan comes on or off screen and
+  whenever the lit transport buttons change mid-run, and the same harness pruned Tools on 10 of 10
+  of those. Moving it onto `PaneMenuRegistry` the way View ▸ Inspector went is the fix; left out
+  of this change because the maintainer's report and the previous Release's behaviour point at the
+  inspector, and it is nine items with live titles to re-verify.
+- **"Opening the inspector renders blank columns" (the maintainer's screenshot, same Release) did not
+  reproduce offscreen.** `testOpeningTheInspectorSettlesWithEveryColumnDrawn` hosts `RootView`,
+  opens the inspector on a shaping plan and finds no idle re-evaluation, the Notes/Rounds control
+  laid out, and the sidebar's and Intakes list's rows present — on `4e13c49d` and on the fix.
+  The offscreen window is never key, so it has no menu bar or focused values, which is where the
+  two causes above lived. Unverified until the maintainer opens the inspector on the next Release.

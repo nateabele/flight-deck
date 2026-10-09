@@ -23,6 +23,7 @@ struct RootView: View {
     @State private var observeDAGSelectedBeadID: String?
 
     var body: some View {
+        let _ = RenderProbe.hit("root")
         NavigationSplitView {
             SessionSidebar(store: store, preferences: preferences,
                            phoneActiveSessions: phoneActiveSessions)
