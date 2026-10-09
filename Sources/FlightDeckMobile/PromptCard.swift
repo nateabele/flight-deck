@@ -114,6 +114,21 @@ struct PromptCard: View {
         .accessibilityIdentifier("prompt-minimize")
     }
 
+    /// The card's heading line: a lone question's header, uppercased, or nil.
+    static func heading(for open: OpenPrompt) -> String? {
+        guard case .question(_, let questions) = open, questions.count == 1,
+              let header = questions[0].header, !header.isEmpty else { return nil }
+        return header.uppercased()
+    }
+
+    /// The card's title — minimized, one line, which is enough to say what is waiting.
+    private func titleText(for open: OpenPrompt, minimized: Bool) -> some View {
+        Text(Self.title(for: open, agent: agent))
+            .font(.callout.weight(.medium))
+            .lineLimit(minimized ? 1 : nil)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
     static func isQuestion(_ open: OpenPrompt) -> Bool {
         if case .question = open { return true }
         return false
@@ -389,31 +404,34 @@ struct PromptCard: View {
             ScrollView {
             VStack(alignment: .leading, spacing: 10) {
                 let minimized = minimizedFor == open.callID
+                // A lone question's header is the card's heading; in a set each question draws
+                // its own beside its options, where it says which question it belongs to.
+                let heading = minimized ? nil : Self.heading(for: open)
+                // **The first line carries both corner controls**: the minimize button at its
+                // leading end, level with the × at its trailing end, and whatever opens the
+                // card — the heading, or the title when there is none — moved over beside it.
+                // Everything under that line keeps the card's left edge.
+                HStack(alignment: .center, spacing: 8) {
+                    if Self.isQuestion(open) { minimizeButton(for: open) }
+                    if let heading {
+                        Text(heading)
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.orange)
+                    } else {
+                        titleText(for: open, minimized: minimized)
+                    }
+                    Spacer(minLength: 0)
+                }
+                // Clear of the dismiss button in the corner.
+                .padding(.trailing, 24)
                 if let origin = Self.origin(fromSubagent), !minimized {
                     Text(origin)
                         .font(.caption2.weight(.semibold))
                         .foregroundStyle(.orange)
                 }
-                // Only a single question's header sits up here; in a set each question draws
-                // its own beside its options, where it says which question it belongs to.
-                if case .question(_, let questions) = open, questions.count == 1,
-                   let header = questions[0].header, !header.isEmpty, !minimized {
-                    Text(header.uppercased())
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(.orange)
+                if heading != nil {
+                    titleText(for: open, minimized: false)
                 }
-                // The minimize button sits on the title's own line, so the heading above it
-                // keeps the card's left edge.
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    if Self.isQuestion(open) { minimizeButton(for: open) }
-                    Text(Self.title(for: open, agent: agent))
-                        .font(.callout.weight(.medium))
-                        // Minimized, the card is one line — enough to say what is waiting.
-                        .lineLimit(minimized ? 1 : nil)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                // Clear of the dismiss button in the corner.
-                .padding(.trailing, 24)
                 if !minimized {
                 if let subtitle = Self.subtitle(for: open) {
                     Text(subtitle)

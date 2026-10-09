@@ -84,24 +84,27 @@ final class PromptKeyboardUITests: XCTestCase {
         XCTAssertFalse(composer.exists, "expanded again, the message box goes again")
     }
 
-    /// A lone question shows its heading once, at the card's left edge, and the minimize
-    /// button beside the title line below it rather than beside the heading.
-    func testALoneQuestionShowsItsHeadingOnceWithTheButtonOnTheTitleLine() {
+    /// A lone question shows its heading once, on the card's first line beside the minimize
+    /// button and level with the ×, and its title below at the card's left edge.
+    func testALoneQuestionsHeadingSharesTheFirstLineWithBothCornerButtons() {
         let app = XCUIApplication()
         app.launchArguments += ["-UITestHarness", "promptKeyboard", "-UITestSingle", "YES"]
         app.launch()
         let card = app.otherElements["prompt-card"]
         XCTAssertTrue(card.waitForExistence(timeout: 20))
         attach(app, "7-single")
-        XCTAssertEqual(app.staticTexts.matching(identifier: "COLOR").count, 1, "heading shown once")
-        XCTAssertEqual(app.staticTexts.matching(identifier: "Which color do you like best?").count, 1,
-                       "title shown once")
-        let heading = app.staticTexts["COLOR"]
-        let title = app.staticTexts["Which color do you like best?"]
+        XCTAssertEqual(app.staticTexts.matching(identifier: "RECONNECT").count, 1, "heading shown once")
+        let titles = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH 'When the phone'"))
+        XCTAssertEqual(titles.count, 1, "title shown once")
+        let heading = app.staticTexts["RECONNECT"]
+        let title = titles.element
         let toggle = app.buttons["prompt-minimize"]
-        XCTAssertLessThan(heading.frame.minX, toggle.frame.minX, "the heading keeps the left edge")
-        XCTAssertGreaterThan(toggle.frame.minY, heading.frame.maxY - 2, "the button is below the heading")
-        XCTAssertGreaterThan(title.frame.minX, toggle.frame.maxX, "the title sits after the button")
+        let close = app.buttons["Dismiss"]
+        XCTAssertEqual(toggle.frame.midY, close.frame.midY, accuracy: 1, "the two corner buttons are level")
+        XCTAssertEqual(heading.frame.midY, toggle.frame.midY, accuracy: 2, "the heading is on their line")
+        XCTAssertGreaterThan(heading.frame.minX, toggle.frame.maxX, "the heading moves over for the button")
+        XCTAssertEqual(title.frame.minX, toggle.frame.minX, accuracy: 3, "the title keeps the left edge (text frames start a glyph-bearing in)")
+        XCTAssertGreaterThan(title.frame.minY, toggle.frame.maxY - 1, "the title is below that line")
     }
 
     /// The keyboard's drawn top edge, suggestion bar included — see the first measurement.
