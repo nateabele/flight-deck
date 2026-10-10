@@ -8,7 +8,7 @@ import IntakeKit
 final class MeterFormatterTests: XCTestCase {
     private let utc = TimeZone(identifier: "UTC")!
     private let posix = Locale(identifier: "en_US_POSIX")
-    private let pool = CapacityPool.hosted(id: "claude-default", label: "Claude default", harness: "claude", accounts: [UsageRefs.workID, UsageRefs.spareID])
+    private let pool = CapacityPool.hosted(id: "claude-default", label: "Claude default", agent: .claude, accounts: [UsageRefs.workID, UsageRefs.spareID])
 
     func testAgeWording() {
         XCTAssertEqual(MeterFormatter.age(5), "just now")
@@ -54,7 +54,7 @@ final class MeterFormatterTests: XCTestCase {
 
     func testPoolsAndTheLocalNote() {
         let ledger = CapacityLedger()
-        let local = CapacityPool.local(id: "ollama", label: "Ollama", harness: "opencode", endpoint: "http://localhost:11434")
+        let local = CapacityPool.local(id: "ollama", label: "Ollama", agent: .gemini, endpoint: "http://localhost:11434")
         ledger.configure(pools: [pool, local], accounts: [UsageRefs.work, UsageRefs.spare])
         _ = ledger.lease(pool: "ollama")
         let models = MeterFormatter.pools(ledger, now: Date())
@@ -66,7 +66,7 @@ final class MeterFormatterTests: XCTestCase {
 
     func testTheRowMeterAppearsOnlyPastSoftAndPicksTheWorstPool() {
         let ledger = CapacityLedger()
-        let strict = CapacityPool.hosted(id: "strict", label: "Strict", harness: "claude", accounts: [UsageRefs.workID], soft: 0.5, hard: 0.6)
+        let strict = CapacityPool.hosted(id: "strict", label: "Strict", agent: .claude, accounts: [UsageRefs.workID], soft: 0.5, hard: 0.6)
         ledger.configure(pools: [pool, strict], accounts: [UsageRefs.work, UsageRefs.spare])
         let now = Date()
         ledger.ingest(UsageRefs.reading(UsageRefs.work, 0.40, at: now))

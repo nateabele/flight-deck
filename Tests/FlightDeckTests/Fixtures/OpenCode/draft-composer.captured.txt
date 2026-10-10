@@ -1,0 +1,47 @@
+
+  ┃                                                                                                                     session 8
+  ┃  RUN_LS please
+  ┃                                                                                                                     Context
+                                                                                                                        0 tokens
+  ┃                                                                                                                     0% used
+  ┃  $ ls                                                                                                               $0.00 spent
+  ┃
+  ┃  (no output)                                                                                                        LSP
+  ┃                                                                                                                     LSPs are disabled
+
+     Tool finished.
+
+     ▣  Build · fake-model · 1m 38s
+
+  ┃
+  ┃  RUN_LS again
+  ┃
+
+  ┃
+  ┃  $ ls
+  ┃
+  ┃  b.txt
+  ┃
+
+     Tool finished.
+
+     ▣  Build · fake-model · 23.3s
+
+
+
+
+
+
+
+
+
+
+
+
+  ┃
+  ┃  my unsent draft                                                                                                    /private/tmp/claude-501/-Users-me-
+  ┃                                                                                                                     Projects-flight-deck/
+  ┃  Build · fake-model Fake                                                                                            c2d6bebb-899f-475d-b216-6ead77244eeb/
+  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀    scratchpad/fx/proj2
+   /private/tmp/claude-501/-Users-me-Projects-flight-deck/c2d6bebb-899f-475d-tab       ctrl+p
+   b216-6ead77244eeb/scratchpad/fx/proj2                                                      agents    commands        • OpenCode 1.18.34

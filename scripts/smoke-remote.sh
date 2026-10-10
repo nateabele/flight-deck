@@ -21,6 +21,8 @@
 #   FD_UITEST_ONLY    space-separated -only-testing: identifiers (default FlightDeckUITests), so
 #                     any UI-test script can run its own selection here instead of on this
 #                     Mac's screen, e.g. FD_UITEST_ONLY="FlightDeckUITests/FlightControlUITests"
+#                     A selection whose every case skipped (a TEST_RUNNER_* gate unset) ends
+#                     "SMOKE SKIPPED" with exit status 5, never "SMOKE PASS".
 #
 # Never falls back to running here: an unreachable host is a failure that says so.
 set -euo pipefail
@@ -254,4 +256,6 @@ if [ "$rc" -ne 0 ]; then
   echo "SMOKE FAIL (rc=$rc) — full log: $LOG, result bundle: $OUT/run.xcresult"
   exit "$rc"
 fi
-echo "SMOKE PASS"
+# PASS, or SKIPPED (exit 5) when named classes skipped every case — see lib-smoke-verdict.sh.
+source scripts/lib-smoke-verdict.sh
+smoke_verdict "$OUT/run.log" "${ONLY[@]}"

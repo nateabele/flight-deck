@@ -65,6 +65,24 @@ struct TerminalPane: NSViewRepresentable {
     )
     #endif
 
+    /// Whether a surface just attached for `selected` should take keyboard focus.
+    ///
+    /// Not while that same session's rename field is open. The row menu's Rename on a row that
+    /// is not selected selects it and opens its field in one step (`SessionRow.beginRename`), so
+    /// the re-parent below lands with the field already focused. Taking focus then resigned the
+    /// field, its focus-loss handler committed the unchanged title, and the field closed within
+    /// one frame — a UI-test Mac recording shows it for a single frame at 30 fps, and the smoke
+    /// test's "the context menu renames a session" failed every run on macOS 15. Double-click
+    /// and Return never hit it: their first click (or an earlier one) already switched session,
+    /// so the focus move had run before the field opened.
+    ///
+    /// Keyed to the SELECTED session, not to any open field: clicking row B while row A's field
+    /// is open may attach B's surface before A's commit clears `renamingSessionID`, and B's
+    /// terminal must still get the keyboard.
+    static func claimsFocusOnReparent(selected: UUID?, renaming: UUID?) -> Bool {
+        renaming == nil || renaming != selected
+    }
+
     func makeNSView(context: Context) -> TerminalHostView {
         let container = TerminalHostView()
         container.autoresizingMask = [.width, .height]
@@ -113,7 +131,11 @@ struct TerminalPane: NSViewRepresentable {
             surface.frame = container.bounds
             surface.autoresizingMask = [.width, .height]
             container.addSubview(surface)
-            Ghostty.moveFocus(to: surface)
+            if Self.claimsFocusOnReparent(
+                selected: store.selectedSessionID, renaming: store.renamingSessionID
+            ) {
+                Ghostty.moveFocus(to: surface)
+            }
         }
 
         // A deliberate second route to the same fact, ahead of the activation report below.

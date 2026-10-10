@@ -30,13 +30,13 @@ final class CapabilityRankTests: XCTestCase {
     }
 
     func testUnknownModelIsOmittedNeverZero() {
-        let ranked = CapabilityScoring.rank(kind: tests, candidates: [ModelRef(harness: "codex", model: "gpt-6-terra"),
+        let ranked = CapabilityScoring.rank(kind: tests, candidates: [ModelRef(agent: .codex, model: "gpt-6-terra"),
                                                                       IndexFixtures.bare(sol)], scores: scores)
         XCTAssertEqual(ranked.map(\.model), [sol])
     }
 
     func testTiesGoToCatalogOrder() {
-        let a = ModelRef(harness: "fake", model: "a"), b = ModelRef(harness: "fake", model: "b")
+        let a = ModelRef(agent: .grok, model: "a"), b = ModelRef(agent: .grok, model: "b")
         let tied = [ModelScores(model: a, dimensions: ["agentic-coding": DimensionScore(score: 0.5, confidence: 1)]),
                     ModelScores(model: b, dimensions: ["agentic-coding": DimensionScore(score: 0.5, confidence: 1)])]
         XCTAssertEqual(CapabilityScoring.rank(kind: tests, candidates: [b, a], scores: tied).map(\.model), [b, a])
@@ -44,13 +44,13 @@ final class CapabilityRankTests: XCTestCase {
     }
 
     func testCandidateWithKnobsMatchesExactly() {
-        let low = ModelRef(harness: "codex", model: "gpt-6-sol", knobs: ["effort": "low"])
+        let low = ModelRef(agent: .codex, model: "gpt-6-sol", knobs: ["effort": "low"])
         XCTAssertEqual(CapabilityScoring.rank(kind: tests, candidates: [low], scores: scores), [])
         XCTAssertEqual(CapabilityScoring.rank(kind: tests, candidates: [sol], scores: scores).map(\.model), [sol])
     }
 
     func testBareCandidatePicksTheBestKnobVariant() {
-        let low = ModelRef(harness: "codex", model: "gpt-6-sol", knobs: ["effort": "low"])
+        let low = ModelRef(agent: .codex, model: "gpt-6-sol", knobs: ["effort": "low"])
         let variants = [ModelScores(model: low, dimensions: ["test-authoring": DimensionScore(score: 0.4, confidence: 1)]),
                         ModelScores(model: sol, dimensions: ["test-authoring": DimensionScore(score: 0.8, confidence: 1)])]
         XCTAssertEqual(CapabilityScoring.rank(kind: tests, candidates: [IndexFixtures.bare(sol)], scores: variants).map(\.model), [sol])

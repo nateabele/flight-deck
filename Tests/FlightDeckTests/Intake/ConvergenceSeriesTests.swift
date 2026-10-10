@@ -6,7 +6,7 @@ import IntakeKit
 /// files — no store, no runner.
 final class ConvergenceSeriesTests: XCTestCase {
     let t0 = Date(timeIntervalSince1970: 0)
-    func model(_ name: String) -> ModelChoice { ModelChoice(harness: .codex, model: name, effort: "high") }
+    func model(_ name: String) -> ModelChoice { ModelChoice(agent: .codex, model: name, effort: "high") }
 
     /// A tally whose agree ratio ((agree + ½·somewhat) / verdicts) is exactly `ratio`.
     func tally(_ ratio: Double) -> VerdictTally {
@@ -371,7 +371,7 @@ final class ConvergenceSeriesTests: XCTestCase {
     func testCrossCheckPointCountsIssuesNotProposals() throws {
         // R1 is a cross-check of 6 proposals in 4 issues ([0,1], [2,3], 4, 5); R2 is a plain round of 2.
         let codex = model("A")
-        let claude = ModelChoice(harness: .claude, model: "B", effort: "high")
+        let claude = ModelChoice(agent: .claude, model: "B", effort: "high")
         let r1 = Checkpoint(id: 1, stage: .refine, round: 1, major: false, createdAt: t0,
                             record: RoundRecord(slots: [
                                 SlotOutcome(role: "reviewer", used: codex, requested: codex, status: .ok),

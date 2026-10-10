@@ -69,6 +69,18 @@ Gemini harness drives:
 - In that case, re-probe every Gemini row of the table above against `agy`, and record the
   result in §10.
 
+**Ruling (Track M, 2026-10-07): the Gemini harness drives `agy`, not `gemini`.** The Gemini
+column of the table above describes the `gemini` CLI, which the harness does NOT use. For `agy`
+(1.2.3, auto-updated to 1.3.1 the same day): headless is `agy -p <prompt>`; output is
+`--output-format text|json|stream-json`; the schema is native (`--json-schema <file|json>`, the
+answer in `structured_output`); the model is `--model <id>` with the effort part of the id
+(`gemini-3.1-pro-high`), so FD passes no `--effort`; read-only is the DEFAULT mode plus
+`--sandbox` — `--mode plan` is a workflow, not a boundary (see §10) — and write mode is
+`--mode accept-edits --sandbox`; resume is `--conversation <id>` with the id agy reports
+(`conversation_id`), and there is no flag to pre-assign one; the sign-in check and model list
+are both `agy models`. A signed-out `agy -p` opens a Google sign-in in the browser instead of
+failing, so the harness runs `agy models` before every seat (`headlessSignInPreflight`).
+
 ## 3. Design
 
 ### 3.0 `AgentProfile` — one source of truth per CLI (IntakeKit, pure)
@@ -380,6 +392,30 @@ grep `error:`.
 - One **real Refine round** with drafters claude + grok and a gemini reviewer, on a scratch
   intake. Record the round outcome, each seat's duration and tokens, and whether the cross-check
   coverage numbers make sense. This is the evidence for success criteria 2, 3 and 6.
+  - **As built (2026-10-07, branch `planning-4way`):** `Planning4WayLiveTests`, gated on
+    `FLIGHTDECK_PLANNING_4WAY_LIVE=1`. Its shape differs from the line above: claude + codex
+    draft, Grok reviews, Gemini cross-checks, claude integrates, so each family has a role and
+    the cross-check yields a Grok-vs-Gemini coverage reading. The executor runs reviewers fresh
+    each round on purpose, so criterion 3 is checked by one resumed turn per read-only seat:
+    the same session id must come back, and the seat must recall a project the prompt does not
+    name. Seat models come from detection. `FLIGHTDECK_PLANNING_4WAY_FAMILIES=3` drops Gemini.
+  - **Result, four families (one run):** passed in 1224 s for Draft + Refine.
+
+    | Seat | Model | Time | Tokens in / out |
+    |---|---|---|---|
+    | claude drafter | opus/high | 73 s | 35k / 7k |
+    | codex drafter | gpt-6-sol/high | 42 s | 70k / 3k |
+    | Grok reviewer | grok-4.7/medium | 745 s | 118k / 41k |
+    | Gemini cross-check | gemini-3.1-pro-high | 138 s | 111k / 44k |
+    | claude integrator | opus/high | 406 s | 105k / 48k |
+
+    - Gemini needed 1 answerless-turn resume. No other seat needed a repair.
+    - Coverage read Grok vs Gemini as two families: n1 38, n2 4, both 4, band saturated.
+    - All four resumes came back on their own session and recalled the project, in 3–8 s.
+  - **Grok effort.** In the three-family run the Grok reviewer at high took 763 s and 337k
+    input tokens. At medium it took 745 s and 118k. Medium cut tokens, not time, because the
+    time is grok's own reasoning: 52k of 56k output tokens were thinking at high. New Grok agents
+    now start at medium; any agent can still be set higher (the maintainer's ruling).
 
 **UI tests.** These run only on the UI-test Mac, never on this Mac:
 `FD_UITEST_ONLY="FlightDeckUITests/<RoundsEditor class>" ./scripts/smoke-remote.sh`. Neither CLI
@@ -450,15 +486,24 @@ not need real accounts.
 
 | Probe | Grok | Gemini |
 |---|---|---|
-| Binary chosen | | |
-| Version / date | | |
-| Signed-in check command | | |
-| Model list command and output | | |
-| Strict `--json-schema` / schema appendix | | |
-| Session id source | | |
-| Resume by id | | |
-| Read-only enforcement verified | | |
-| Isolation flags | | |
-| Auth-failure text | | |
-| Bad-model text | | |
-| Rate-limit text | | |
+| Binary chosen | `grok` (`~/.local/bin/grok`) | `agy` (Antigravity CLI), `~/.local/bin/agy`. Not `gemini`: Google stopped serving AI Pro accounts from it on 2026-06-18. |
+| Version / date | grok 1.0.30 (04b7ffed98c6), 2026-10-07; models grok-4.7 (default), grok-4.7-build-fast, grok-4.6, grok-4.5 | 1.2.3, then 1.3.1 (self-updated), 2026-10-07. 1.3.1 changed `--print-timeout`'s default from 5m to 0 (wait for the turn) and widened `--effort` to `low…max`. |
+| Signed-in check command | `grok models`. It exits 0 in both states; signed out, its first line is "You are not authenticated.", signed in it is "You are logged in with grok.com." | `agy models`. Signed out: exit 1, stderr "Error: Please sign in to view available models. Launch the CLI without arguments to sign in." — and it does NOT start a sign-in. A signed-out `agy -p` DOES (opens the browser, waits 60 s for a code). `agy mcp list` / `agy plugin list` need no sign-in. |
+| Model list command and output | `grok models`: `Default model: <id>`, then `Available models:` with one model per line, `*` before the default (also suffixed `(default)`) and `-` before the others. The list is read at runtime; the default moved from 4.6 to 4.7 before the first probe | `agy models`: `<id>\t<display name>` per line on stdout, "Fetching available models..." on stderr. Lists Gemini 3.8/3.7/3.6 Flash (high/medium/low), Gemini 3.1 Pro (high/low), Claude Opus/Sonnet 5.5, GPT-OSS 120B. The harness keeps only `gemini-*` ids; default `gemini-3.1-pro-high`. |
+| Strict `--json-schema` / schema appendix | Accepted unchanged: the real `triage-schema.json` and `RoundSchemas.review`, both strict. The answer is in `result.structured_output` (and as text in `result`). `--output-format streaming-messages-json` is honored alongside `--json-schema` | Native `--json-schema`, enforced; the answer is `structured_output` (the `response` text can carry extra keys, so it is never used). Gemini refuses `null` inside `enum` (400 INVALID_ARGUMENT on the raw triage schema); `GeminiSchema` rewrites each nullable enum to an equivalent `anyOf`, which agy accepted with the triage and integrate schemas. Passed inline. No schema appendix and no `SchemaValidator`. |
+| Session id source | Every line has `session_id`; it equals the minted `--session-id`. A failed start reports `""` | `conversation_id` on `init`, on every `step_update`, and on the `result`. No flag to pre-assign one, so FD records the reported id. |
+| Resume by id | `--resume <uuid>` keeps the id and remembers (it answered "4817"). The resume needs the same `--cwd` and `GROK_HOME` | `--conversation <id>`: the same id comes back and the turn remembers the earlier one (asked for 417, got 417). Never `--continue` (most recent = another seat's). |
+| Read-only enforcement verified | Yes. Asked to create `pwned.txt` and to search `search_tool`/`use_tool` for a write tool, it found none and wrote no file. The init tools were `read_file, list_dir, grep, search_tool, use_tool` | Yes, but NOT by `--mode plan`: with permissions skipped, plan mode wrote NOTES.md and edited README.md. In the default mode every write needs a permission headless mode cannot grant, so it is auto-denied (nothing written, including `.md`). `--sandbox` lets read-only shell commands run and blocks their writes. Never `--dangerously-skip-permissions`: with it a sandbox-blocked write was retried unsandboxed and succeeded. A denied tool ENDS the turn (SUCCESS, no `structured_output`, `denied_actions`); one resume of that conversation answers, so FD repairs it once. Integrator: `--mode accept-edits` in its work dir edited plan.md; a write to ../OUTSIDE.md was denied. |
+| Isolation flags | `GROK_*_{HOOKS,MCPS,RULES,SKILLS,AGENTS}_ENABLED=0` for CLAUDE, CURSOR and CODEX are NOT enough, because Claude Code plugins and their hooks still loaded. Setting **`HOME` = `GROK_HOME`** removes every plugin, MCP server and hook (`grok inspect --json`). Also `GROK_MEMORY=0`, `GROK_DISABLE_AUTOUPDATER=1` | None exist. Permission rules (`command(…)`, `read_file(<abs>)`, `write_file(<abs>)`, allow/deny) live in `~/.gemini/antigravity-cli/settings.json` and `~/.gemini/config/projects/`; none are configured here, and a user allow rule for writes WOULD weaken read-only (FOLLOWUP). No MCP servers or plugins configured. |
+| Auth-failure text | Exit 1. stderr: `Error: Not signed in. To authenticate without a browser, run: grok login --device-code …`. The stream has an `is_error` result with that text in `errors[]` and `session_id:""` (signed out, and an empty `GROK_HOME`) | Signed out: stderr "Authentication required. Please visit the URL to log in: …", result `{"status":"ERROR","error":"authentication failed or timed out","conversation_id":""}`, exit 1. Signed in but unverified: "Eligibility check failed: Your current account is not eligible for Antigravity. Verify your account to continue." (403 PERMISSION_DENIED), exit 1, no tokens. Both classify as `authExpired`. |
+| Bad-model text | Exit 1. `Couldn't set model 'grok-bogus-9': Invalid params: "unknown model id". Run 'grok models' …` on stderr and in `errors[]`. No silent fallback | Exit 1. stderr and `result.error`: `invalid model selection (--model "x" --effort ""): model x is not recognized as a known model or custom model in settings`, then the available models. Classified `harnessError`. |
+| Rate-limit text | Not provoked. Matched from the 1.0.30 string table: "You hit your weekly limit.", "…rate limit for your plan", "…credit limit…", "out of credits", "Too Many Requests". UNVERIFIED | Not observed. `RESOURCE_EXHAUSTED` / quota / 429 matched, UNVERIFIED. |
+
+**Integration probes and fixes (2026-10-07, branch `planning-4way`):**
+- **Grok `Read(<glob>)` denies work.** On grok 1.0.30, `--deny 'Read(**/.git/**)'` made a read
+  of `.git/HEAD` return "Denied by permission policy: deny rule on read matching "**/.git/**"".
+  Every grok seat now denies `.git` and `.beads` reads. Before this, the first live reviewer
+  spent 8 of its 26 tool calls in that metadata.
+- **Gemini's default model.** agy marks no default and lists Flash first. Detection seeds a
+  seat with the first listed model, so `GeminiProfile.parseModelList` now puts
+  `gemini-3.1-pro-high` first whenever the account lists it.

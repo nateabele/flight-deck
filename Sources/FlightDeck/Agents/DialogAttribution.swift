@@ -52,7 +52,11 @@ struct DialogAttribution {
             pending[r.sessionID] = nil
             return .cleared(r.sessionID)
         case "UserPromptSubmit":
-            pending[r.sessionID] = nil
+            // Only the main agent's dialog: Esc is the one way to submit a prompt past it,
+            // and Esc fires no hook. A subagent's dialog stays up through the parent's next
+            // turn — a background task finishing is delivered as one — and dropping it here
+            // left "The Plan" (2026-10-09) with no card for a dialog still on screen.
+            if pending[r.sessionID]?.agentID == nil { pending[r.sessionID] = nil }
             return .promptSubmitted(r.sessionID, now())
         case "SessionEnd":
             pending[r.sessionID] = nil

@@ -2,10 +2,11 @@ import Combine
 import Foundation
 
 /// Republishes `SessionStore.currentProjectPath` only when it actually changes, so
-/// `SessionCommands` — which deliberately does not observe `store` wholesale (see that type's
-/// own doc comment) — can still rebuild its agent-order-dependent items when the active
-/// project changes, without also rebuilding for every unrelated `SessionStore` mutation (a
-/// title edit, an unread flag, the transcript watcher's 500ms poll).
+/// `NewSessionMenuController` can rewrite File ▸ New … Session when the active project changes,
+/// without also rewriting for every unrelated `SessionStore` mutation (a title edit, an unread
+/// flag, the transcript watcher's 500ms poll). It used to feed `SessionCommands`, a SwiftUI
+/// `Commands`; observing it there rebuilt the whole menu bar on each switch (2026-10-09), so the
+/// rows are AppKit items now and nothing in a `Commands` may observe this.
 ///
 /// Task 14 gave `SessionCommands` a File-menu item whose key equivalent captures `slot.agent`
 /// at the time `body` is built. Before this task, agent ordering was project-independent, so

@@ -135,7 +135,8 @@ public struct IntakeRunner: Sendable {
             let started = await keeper.startRound(next)
             let inputs = RoundInputs(intake: intake, config: config, tape: started, store: keeper.store,
                                      project: URL(fileURLWithPath: intake.projectPath, isDirectory: true),
-                                     environment: environment, now: now)
+                                     environment: environment,
+                                     accounts: RunnerAccounts.load(from: keeper.store.intakeDirectory), now: now)
             let executor = self.executor
             let round = Task { try await executor.run(next, inputs) }
             let watcher = Task { [pollInterval] in

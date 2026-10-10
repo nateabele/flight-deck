@@ -153,7 +153,7 @@ final class SwarmControllerFailureTests: XCTestCase {
 
     func testASpillIsNotLeasedWhenTheSwarmPausesWhileCatalogsLoad() async {
         let rig = SwarmRig()
-        let spilled = SwarmFixtures.block("claude-subs", model: "opus", harness: "claude")
+        let spilled = SwarmFixtures.block("claude-subs", model: "opus", agent: .claude)
         rig.leases("claude-subs", 1)
         rig.router.spills["tests"] = Assignment(block: spilled)
         rig.backend.ready = [SwarmFixtures.task("fx-1", SwarmFixtures.block())]

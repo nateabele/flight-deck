@@ -392,25 +392,25 @@ final class RoundPromptsTests: XCTestCase {
     }
 
     func testDecodesLiveCodexReviewOutput() throws {
-        let out = try HarnessOutput.parse(.codex, stdout: try liveFixture("round-review-codex-live", "jsonl"))
+        let out = try HeadlessOutput.parse(.codex, stdout: try liveFixture("round-review-codex-live", "jsonl"))
         let review = try RoundPrompts.decode(ReviewOutput.self, out.structured)
         XCTAssertFalse(review.changes.isEmpty)
     }
 
     func testDecodesLiveClaudeReviewOutput() throws {
-        let out = try HarnessOutput.parse(.claude, stdout: try liveFixture("round-review-claude-live", "json"))
+        let out = try HeadlessOutput.parse(.claude, stdout: try liveFixture("round-review-claude-live", "json"))
         let review = try RoundPrompts.decode(ReviewOutput.self, out.structured)
         XCTAssertFalse(review.changes.isEmpty)
     }
 
     func testDecodesLiveCodexChangeSetOutput() throws {
-        let out = try HarnessOutput.parse(.codex, stdout: try liveFixture("round-changeset-codex-live", "jsonl"))
+        let out = try HeadlessOutput.parse(.codex, stdout: try liveFixture("round-changeset-codex-live", "jsonl"))
         let cs = try RoundPrompts.decode(ChangeSetOutput.self, out.structured)
         XCTAssertEqual(cs.changeSet.ops.count, 0)
     }
 
     func testDecodesLiveClaudeChangeSetOutput() throws {
-        let out = try HarnessOutput.parse(.claude, stdout: try liveFixture("round-changeset-claude-live", "json"))
+        let out = try HeadlessOutput.parse(.claude, stdout: try liveFixture("round-changeset-claude-live", "json"))
         let cs = try RoundPrompts.decode(ChangeSetOutput.self, out.structured)
         XCTAssertEqual(cs.changeSet.ops.count, 0)
     }

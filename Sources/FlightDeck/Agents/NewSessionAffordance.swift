@@ -1,4 +1,5 @@
 import AppKit
+import IntakeKit
 import SwiftUI
 
 /// Maps the ordered agent list onto New Session shortcuts, labels and glyphs.
@@ -45,8 +46,8 @@ enum NewSessionAffordance {
     }
 
     /// `.keyboardShortcut(_:modifiers:)` wants SwiftUI's `EventModifiers`, not the `NSEvent`
-    /// flags `resolve`/`ModifierWatcher` work in — the two call sites (`SessionCommands`,
-    /// `SessionSidebar`) both need this, so it lives on the type they both already import.
+    /// flags `resolve`/`ModifierWatcher` work in — `SessionSidebar` needs this, so it lives on
+    /// the type it already imports.
     static func eventModifiers(_ modifiers: NSEvent.ModifierFlags) -> EventModifiers {
         var result: EventModifiers = []
         if modifiers.contains(.command) { result.insert(.command) }
@@ -104,7 +105,7 @@ enum NewSessionAffordance {
     /// rather than trusting the caller to pass the live list. The filtering has to live in the
     /// signature, not in a convention each call site remembers: a call site that passed the raw
     /// `accounts` array here would compile fine and would keep a removed login's row in the
-    /// menu, letting it launch a tab keyed on an id the next launch purges. `SessionCommands`
+    /// menu, letting it launch a tab keyed on an id the next launch purges. `NewSessionMenuModel`
     /// and `SessionSidebar` both call this instead of `menu(accounts:)` directly so that mistake
     /// can't happen at either site — or a future third one.
     static func menu(
@@ -143,7 +144,7 @@ enum NewSessionAffordance {
     ///
     /// An account absent from the result carries no chord: a leaf that is not the shortcut
     /// leaf, or any agent past the third. Built with `reduce` for the same reason
-    /// `SessionCommands` does — nothing enforces one row per `AgentID`, and a duplicate must
+    /// `NewSessionMenuModel` does — nothing enforces one row per `AgentID`, and a duplicate must
     /// not crash the menu, so last position wins.
     static func chords(
         for entries: [MenuEntry], agents: [AgentSettings]

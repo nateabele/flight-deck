@@ -19,9 +19,9 @@ extension RoutingService {
                              baseEnvironment: { LoginShellPath.repairing(ProcessInfo.processInfo.environment) })
             },
             loadCatalogs: { [weak preferences] in
-                await registry.catalogs(enabled: Set((preferences?.preferences.agents ?? []).map(\.id.harnessID)))
+                await registry.catalogs(enabled: Set((preferences?.preferences.agents ?? []).map(\.id)))
             },
-            pools: DefaultPoolDirectory(harnesses: registry.harnesses),
+            pools: DefaultPoolDirectory(agents: registry.agents),
             tasks: BrOpenTaskReader(),
             writer: BeadWriter(actor: "flightdeck-routing"))
     }

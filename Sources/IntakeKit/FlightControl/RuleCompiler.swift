@@ -55,12 +55,12 @@ extension RoutingRule {
 }
 
 /// One headless model call per sentence (spec §3) — `claude -p` haiku by default — through the
-/// same `HarnessCommand` every planning round uses, read-only, in a scratch directory.
+/// same `HeadlessCommand` every planning round uses, read-only, in a scratch directory.
 public struct RuleCompiler: RuleCompiling {
     public let runner: any CommandRunner
     public let settings: RuleCompilerSettings
     public let workDirectory: URL
-    /// Where `HarnessCommand` reads the user's codex/claude settings from. A test passes a
+    /// Where `HeadlessCommand` reads the user's codex/claude settings from. A test passes a
     /// scratch directory so it never reads the operator's own.
     public let home: URL
     public let baseEnvironment: @Sendable () -> [String: String]
@@ -82,15 +82,15 @@ public struct RuleCompiler: RuleCompiling {
         } catch {
             return .unavailable("could not prepare \(workDirectory.path): \(error)")
         }
-        let request = HarnessRequest(harness: settings.harness, model: settings.model, effort: settings.effort,
+        let request = HeadlessRequest(agent: settings.agent, model: settings.model, effort: settings.effort,
                                      cwd: workDirectory, readableDirs: [], prompt: RuleCompilerPrompt.text(input),
                                      schemaFile: schemaFile, schemaJSON: RuleCompilerPrompt.schemaJSON, resumeSessionID: nil)
         // A compiler set to a planning-only harness (grok/gemini, not an agent harness — spec
         // §3.1) with no builder yet reads as unavailable, the same as a missing binary.
         let command: (executable: String, arguments: [String], unsetEnvironment: [String])
-        do { command = try HarnessCommand.build(request, home: home) }
-        catch { return .unavailable("\(settings.harness.rawValue) cannot compile rules: \(error)") }
-        let environment = HarnessCommand.environment(for: command, base: baseEnvironment(), home: home)
+        do { command = try HeadlessCommand.build(request, home: home) }
+        catch { return .unavailable("\(settings.agent.rawValue) cannot compile rules: \(error)") }
+        let environment = HeadlessCommand.environment(for: command, base: baseEnvironment(), home: home)
         let result: CommandResult
         do {
             result = try await runner.run(executable: command.executable, arguments: command.arguments, cwd: workDirectory,
@@ -103,7 +103,7 @@ public struct RuleCompiler: RuleCompiling {
             return .unavailable("\(command.executable) exited \(result.exitCode)" + (line.isEmpty ? "" : ": \(line)"))
         }
         let structured: Data
-        do { structured = try HarnessOutput.parse(settings.harness, stdout: result.stdout).structured }
+        do { structured = try HeadlessOutput.parse(settings.agent, stdout: result.stdout).structured }
         catch { return .malformed("\(error)") }
         do { return .wire(try JSONDecoder().decode(RuleCompilerWire.self, from: structured)) }
         catch { return .malformed("not the rule shape: \(error)") }

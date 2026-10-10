@@ -74,6 +74,8 @@ enum TimelineStyle {
         switch agent {
         case "claude": return "Claude"
         case "codex": return "Codex"
+        // Not the default's capitalisation ("Opencode"): the product spells it OpenCode.
+        case "opencode": return "OpenCode"
         default: return agent.prefix(1).uppercased() + agent.dropFirst()
         }
     }

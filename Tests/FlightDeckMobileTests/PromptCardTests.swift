@@ -63,6 +63,15 @@ final class PromptCardTests: XCTestCase {
         }
     }
 
+    /// The message box gives way to an expanded question's own inputs, and comes back when the
+    /// card is minimized; a permission card, with no inputs of its own, never takes it.
+    func testAnExpandedQuestionHidesTheComposerAndAMinimizedOneGivesItBack() {
+        XCTAssertTrue(PromptCard.hidesComposer(for: question(), minimized: false))
+        XCTAssertFalse(PromptCard.hidesComposer(for: question(), minimized: true))
+        XCTAssertFalse(PromptCard.hidesComposer(for: permission, minimized: false))
+        XCTAssertFalse(PromptCard.hidesComposer(for: nil, minimized: false))
+    }
+
     // MARK: Typed answers
 
     /// A pasted newline is flattened rather than refused — in claude's field it would be

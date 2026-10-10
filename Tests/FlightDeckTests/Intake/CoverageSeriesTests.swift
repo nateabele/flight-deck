@@ -6,7 +6,7 @@ final class CoverageSeriesTests: XCTestCase {
     /// `a` issues only family A raised, `b` only B, `shared` raised by both, all accepted; plus
     /// `rejected` proposals from A the integrator disagreed with.
     private func reading(a: Int, b: Int, shared: Int, rejected: Int = 0, clusters given: Bool = true,
-                         families: [ModelFamily] = [.codex, .claude], verdicts: Bool = true) -> CoverageReading {
+                         families: [AgentID] = [.codex, .claude], verdicts: Bool = true) -> CoverageReading {
         var proposers: [Int] = [], clusters: [[Int]] = [], changes: [ProposedChange] = [], vs: [ChangeVerdict] = []
         func add(_ p: Int, _ text: String, _ v: Verdict) -> Int {
             proposers.append(p); changes.append(ProposedChange(section: "## \(text)", rationale: text, edit: text))

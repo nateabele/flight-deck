@@ -1,5 +1,6 @@
 import FleetKit
 import XCTest
+import IntakeKit
 @testable import FlightDeck
 
 /// Pager plus mapper plus budget. The three things this adds on top of Task 5 are the ones a

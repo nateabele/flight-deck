@@ -1,4 +1,5 @@
 import Foundation
+import IntakeKit
 
 @MainActor
 protocol ToolLaunching {

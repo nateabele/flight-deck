@@ -97,10 +97,42 @@ final class PluginReloadTests: XCTestCase {
     func testATabLeavesTheQueueOnceSentOrForgotten() {
         let a = UUID(), b = UUID()
         var reload = PluginReload(adopted: [a, b], pluginChanged: true)
-        reload.sent(a)
+        reload.sent(a, at: Date())
         reload.forget(b)
         XCTAssertFalse(reload.needsReload(a))
         XCTAssertFalse(reload.needsReload(b))
+    }
+
+    func testOnlyIdleBusyEdgesInsideTheWindowAreMasked() {
+        let a = UUID(), other = UUID(), t0 = Date()
+        var reload = PluginReload(adopted: [a], pluginChanged: true)
+        reload.sent(a, at: t0)
+        XCTAssertTrue(reload.masks(a, from: .idle, to: .busy, now: t0))
+        XCTAssertTrue(reload.masks(a, from: .busy, to: .idle, now: t0))
+        XCTAssertFalse(reload.masks(a, from: .busy, to: .waiting, now: t0), "a dialog wants the user")
+        XCTAssertFalse(reload.masks(a, from: .busy, to: nil, now: t0), "an exit is not the blip")
+        XCTAssertFalse(reload.masks(a, from: .busy, to: .idle,
+                                    now: t0.addingTimeInterval(PluginReload.quietWindow)),
+                       "a busy spell that outlives the window is real work")
+        XCTAssertFalse(reload.masks(other, from: .busy, to: .idle, now: t0))
+    }
+
+    func testTheWindowClosesWhenTheBlipLandsOrSomethingElseHappens() {
+        let landed = UUID(), dialog = UUID(), unseen = UUID(), t0 = Date()
+        var reload = PluginReload(adopted: [landed, dialog, unseen], pluginChanged: true)
+        for id in [landed, dialog, unseen] { reload.sent(id, at: t0) }
+        reload.settle([
+            StatusTransition(id: landed, old: SessionStatus(activity: .idle), new: SessionStatus(activity: .busy)),
+            StatusTransition(id: dialog, old: SessionStatus(activity: .idle), new: SessionStatus(activity: .busy)),
+        ], now: t0)
+        XCTAssertEqual(Set(reload.quietUntil.keys), [landed, dialog, unseen], "busy is the blip under way")
+        reload.settle([
+            StatusTransition(id: landed, old: SessionStatus(activity: .busy), new: SessionStatus(activity: .idle)),
+            StatusTransition(id: dialog, old: SessionStatus(activity: .busy), new: SessionStatus(activity: .waiting)),
+        ], now: t0)
+        XCTAssertEqual(Set(reload.quietUntil.keys), [unseen])
+        reload.settle([], now: t0.addingTimeInterval(PluginReload.quietWindow))
+        XCTAssertTrue(reload.quietUntil.isEmpty, "a blip no poll saw expires with its window")
     }
 
     func testCommandIsTheOneP1Verified() {

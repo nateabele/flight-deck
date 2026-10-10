@@ -30,6 +30,24 @@ struct HostingSettingsTab: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
+            Section {
+                Toggle("Keep this Mac awake while plugged in", isOn: Binding(
+                    get: { keepAwakeStatus?.enabled ?? false },
+                    set: { controller.setKeepAwake($0) }
+                ))
+                .disabled(keepAwakeStatus == nil)
+                .accessibilityIdentifier("hosting-keep-awake")
+
+                keepAwakeLine
+
+                // Says what it cannot do, so nobody leaves a test Mac locked by hand and
+                // expects this to have stopped it.
+                Text("On a power adapter, the host stops this Mac and its display from sleeping when idle, so the screen saver does not start and the screen does not lock between runs. On battery it lets go. It cannot undo a lock you start yourself, and it changes no system settings.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             Section("Controllers") {
                 VStack(alignment: .leading, spacing: 4) {
                     List {
@@ -109,6 +127,45 @@ struct HostingSettingsTab: View {
             Button("Cancel", role: .cancel) { pendingRevocation = nil }
         } message: { paired in
             Text("\(paired.name) will be disconnected immediately and will have to be paired again.")
+        }
+    }
+
+    private var keepAwakeStatus: KeepAwakeStatus? {
+        if case .available(let status) = controller.keepAwake { return status }
+        return nil
+    }
+
+    @ViewBuilder
+    private var keepAwakeLine: some View {
+        switch controller.keepAwake {
+        case .unknown:
+            EmptyView()
+        case .unsupported:
+            keepAwakeStatusText("The running host service is older than this app. Turn hosting off and on to restart it.",
+                                color: .orange)
+        case .available(let status):
+            if let text = Self.keepAwakeText(status) {
+                keepAwakeStatusText(text, color: status.holding ? .secondary : .orange)
+            }
+        }
+    }
+
+    private func keepAwakeStatusText(_ text: String, color: Color) -> some View {
+        Text(text)
+            .font(.callout)
+            .foregroundStyle(color)
+            .fixedSize(horizontal: false, vertical: true)
+            .accessibilityIdentifier("hosting-keep-awake-status")
+    }
+
+    /// Nil while the option is off: there is nothing to report.
+    static func keepAwakeText(_ status: KeepAwakeStatus) -> String? {
+        guard status.enabled else { return nil }
+        if status.holding { return "Keeping awake — on power adapter" }
+        switch status.power {
+        case .battery: return "Not holding: on battery"
+        case .unknown: return "Not holding: power source unknown"
+        case .ac: return "Not holding"
         }
     }
 

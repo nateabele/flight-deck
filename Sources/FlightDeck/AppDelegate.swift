@@ -1,4 +1,5 @@
 import AppKit
+import IntakeKit
 import Combine
 import FleetKit
 import OSLog
@@ -28,13 +29,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// having landed.
     private weak var store: SessionStore?
 
-    /// Owned here rather than by a SwiftUI scene: it inserts an AppKit menu into
-    /// `NSApp.mainMenu`, which is app-level state with no SwiftUI owner. `lazy` rather than an
+    /// Owned here rather than by a SwiftUI scene: it fills the SwiftUI-authored Tools shell
+    /// (`ToolsMenuShell`) with AppKit items, which is app-level state with no SwiftUI owner. `lazy` rather than an
     /// eager default: `ToolsMenuController.init` is main-actor-isolated, and `AppDelegate`'s
     /// own (synthesized) init is not, so construction has to be deferred to first access from
     /// `installToolsMenu`, which is on the main actor.
     @MainActor
     private lazy var toolsMenu = ToolsMenuController()
+    /// View ▸ Inspector and Run: AppKit items in SwiftUI shells, for the reason
+    /// `AppKitMenuSlot` gives; `lazy` for `toolsMenu`'s.
+    @MainActor
+    private lazy var inspectorMenu = InspectorMenuController()
+    @MainActor
+    private lazy var runMenu = RunMenuController()
+    /// File ▸ New … Session; built once the store exists (`installToolsMenu`).
+    @MainActor
+    private var newSessionMenu: NewSessionMenuController?
 
     /// Watches `PreferencesStore.tools` so the menu stays in sync with edits made in the
     /// Settings window. Torn down implicitly on dealloc, same as any other `AnyCancellable`.
@@ -103,6 +113,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// the real work.
     func applicationDidFinishLaunching(_ notification: Notification) {
         installToolsMenu()
+        installPaneMenus()
         // Same order-independent retry `installToolsMenu` gets, and for the same reason: the
         // store can be constructed either side of this delegate registering its
         // `.flightDeckStoreReady` observer, so neither hop alone is guaranteed to see it.
@@ -172,9 +183,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         true
     }
 
-    /// Wires the Tools menu to the live store and its preferences. Safe to call more than
-    /// once — see the two call sites above — because `install(in:)` removes any previous copy
-    /// before inserting, and every closure assigned here is idempotent to reassign.
+    /// Wires the Tools menu and File ▸ New … Session to the live store and its preferences.
+    /// Safe to call more than once — see the two call sites above — because `install(in:)` is
+    /// idempotent, and every closure assigned here is idempotent to reassign.
     @MainActor
     private func installToolsMenu() {
         // Same fallback as `applicationShouldTerminate`: the store-ready notification is not
@@ -209,7 +220,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
-        if let mainMenu = NSApp.mainMenu { toolsMenu.install(in: mainMenu) }
+        if newSessionMenu == nil { newSessionMenu = NewSessionMenuController(store: store, preferences: preferences) }
+        if let mainMenu = NSApp.mainMenu {
+            toolsMenu.install(in: mainMenu)
+            newSessionMenu?.install(in: mainMenu)
+        }
+    }
+
+    /// View ▸ Inspector and Run need no store, only a main menu. SwiftUI builds it
+    /// asynchronously, so a launch that finds none tries again; once installed, each slot
+    /// follows its shell as SwiftUI adds it (`AppKitMenuSlot`).
+    @MainActor
+    private func installPaneMenus(attempt: Int = 0) {
+        if let mainMenu = NSApp.mainMenu {
+            inspectorMenu.install(in: mainMenu)
+            runMenu.install(in: mainMenu)
+        } else if attempt < 50 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+                MainActor.assumeIsolated { self?.installPaneMenus(attempt: attempt + 1) }
+            }
+        }
     }
 
     /// What one backfill pass should do, decided from what discovery found rather than why it

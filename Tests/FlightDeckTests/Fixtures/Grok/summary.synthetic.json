@@ -1,0 +1,12 @@
+{
+  "info": {
+    "id": "0199c6a0-1111-7aaa-8bbb-000000000001",
+    "cwd": "/tmp/proj"
+  },
+  "session_summary": "Write hello",
+  "num_messages": 4,
+  "current_model_id": "grok-4.7",
+  "session_kind": "interactive",
+  "generated_title": "Write Hello To A File",
+  "title_is_manual": false
+}

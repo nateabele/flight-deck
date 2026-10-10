@@ -29,13 +29,13 @@ public enum RuleCompilerPrompt {
         let kinds = input.kinds.filter(\.isLive).map { k in
             "- \(k.id.rawValue) (\(k.name)): \(k.description). Weights: \(k.weightsText)"
         }.joined(separator: "\n")
-        let agents = input.catalogs.order.compactMap { input.catalogs.byHarness[$0] }.map { c -> String in
+        let agents = input.catalogs.order.compactMap { input.catalogs.byAgent[$0] }.map { c -> String in
             let models = c.models.map { "\($0.id) (\($0.displayName))" }.joined(separator: ", ")
             let knobs = c.knobSchema.sorted { $0.key < $1.key }.map { "\($0.key) = \($0.value.joined(separator: " | "))" }
-            return "- \(c.harness.rawValue) (\(c.enabled ? "enabled" : "not enabled")). Default model: \(c.defaultModel ?? "none"). "
+            return "- \(c.agent.rawValue) (\(c.enabled ? "enabled" : "not enabled")). Default model: \(c.defaultModel ?? "none"). "
                 + "Models: \(models.isEmpty ? "none" : models). Options: \(knobs.isEmpty ? "none" : knobs.joined(separator: "; "))"
         }.joined(separator: "\n")
-        let pools = input.pools.map { "- \($0.id.rawValue) (\($0.harness.rawValue))" }.joined(separator: "\n")
+        let pools = input.pools.map { "- \($0.id.rawValue) (\($0.agent.rawValue))" }.joined(separator: "\n")
 
         return """
         You compile one routing rule for Flight Deck. A routing rule says which coding agent, \

@@ -34,6 +34,8 @@ struct SlotBadge: Equatable {
     var diagnosis: String?
     /// The model that actually ran ("codex gpt-6-sol"), for the round's detail panel.
     var model: String = ""
+    /// The agent that ran, for its glyph beside the seat in the detail panel.
+    var agent: AgentID?
 }
 
 struct RoundCard: Identifiable, Equatable {
@@ -61,6 +63,15 @@ struct RoundCard: Identifiable, Equatable {
     var allSections: [String] = []
     /// The human's notes the round consumed, as written.
     var notesApplied: [String] = []
+    /// The round's stage, which its stack's click opens in the Rounds inspector.
+    var stage: Stage = .draft
+    /// The round as a chip (`RoundTimeline.chip`): its name, who ran it and its cross-check —
+    /// the same value the Rounds inspector's timeline draws for this round, so the card and the
+    /// inspector's chip are one chip, not two that agree.
+    var chip: RoundChipModel = RoundChipModel(key: RoundKey(stage: .draft, round: 0), name: "", agents: [],
+                                              crossCheck: false, progress: .done)
+    /// Who ran the round — the chip's stack.
+    var agents: [RoundAgent] { chip.agents }
     var id: Int { checkpointID }
 }
 
@@ -219,7 +230,9 @@ struct ShapingModel {
                 duration: (cp.startedAt ?? (index > 0 ? tape.checkpoints[index - 1].createdAt : nil))
                     .map { max(0, cp.createdAt.timeIntervalSince($0)) },
                 allSections: r.sectionsChanged.map(Self.heading),
-                notesApplied: r.annotations.map(\.note))
+                notesApplied: r.annotations.map(\.note),
+                stage: cp.stage,
+                chip: RoundTimeline.chip(cp, config: intake.roundConfig))
         }
     }
 
@@ -245,7 +258,7 @@ struct ShapingModel {
         case .substituted: "Ran \(modelName(slot.used)) instead of \(modelName(slot.requested))" + reason
         case .failed: "Failed" + reason
         }
-        return SlotBadge(label: label, status: slot.status, diagnosis: diagnosis, model: modelName(slot.used))
+        return SlotBadge(label: label, status: slot.status, diagnosis: diagnosis, model: modelName(slot.used), agent: slot.used.agent)
     }
 
     // MARK: - Pill
@@ -395,7 +408,7 @@ struct ShapingModel {
         case .rateLimited: "rate limited"
         case .authExpired: "auth expired"
         case .timeout: "timed out"
-        case .harnessError: "harness error"
+        case .harnessError: "agent error"
         case .invalidOutput: "invalid output"
         }
     }
@@ -410,5 +423,5 @@ struct ShapingModel {
         }
     }
 
-    private static func modelName(_ m: ModelChoice) -> String { "\(m.harness.rawValue) \(m.model)" }
+    private static func modelName(_ m: ModelChoice) -> String { "\(m.agent.rawValue) \(m.model)" }
 }

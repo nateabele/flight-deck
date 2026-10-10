@@ -11,9 +11,57 @@ enum DetailLayout {
     /// in the same slot — a form, a choice, a summary — with nothing ticking.
     enum Section: Equatable { case header, clarifications, liveCard, stageBody, plan, actionBar }
 
-    /// What the trailing inspector shows (spec §3). `notesRail` takes it while the plan is
-    /// focused (spec §7.3).
-    enum InspectorContent: Equatable { case roundsEditor, seat, notesRail, nothing }
+    /// The inspector's two modes, chosen by the human with the segmented control in its header,
+    /// ⌥⌘1/⌥⌘2 or View ▸ Inspector — never by focus. It used to switch on its own: the notes rail
+    /// while the plan text had focus, the selected agent while one was selected, the Rounds
+    /// editor otherwise, so a click into the plan to read it took the editor away mid-edit and the
+    /// column read as two unrelated panels taking turns (the maintainer, 2026-10-09: "The sidebar is also
+    /// for notes, which is confusing"). Remembered per plan (`IntakeService.inspectorMode`).
+    enum InspectorMode: String, CaseIterable, Codable {
+        case notes, rounds
+
+        var title: String {
+            switch self {
+            case .notes: "Notes"
+            case .rounds: "Rounds"
+            }
+        }
+
+        var symbol: String {
+            switch self {
+            case .notes: "note.text"
+            case .rounds: "person.2"
+            }
+        }
+
+        /// The digit of its ⌥⌘ chord, in segment order — Xcode's inspector-tab chords.
+        var shortcut: Character {
+            switch self {
+            case .notes: "1"
+            case .rounds: "2"
+            }
+        }
+    }
+
+    /// What the trailing inspector shows (spec §3), decided from the mode the human chose.
+    /// `seat` is the Rounds mode drilled in on an agent of the running round; `roundsRecord` the
+    /// config that planned a plan past shaping, read-only.
+    enum InspectorContent: Equatable { case roundsEditor, roundsRecord, seat, notesRail, empty(Placeholder) }
+
+    /// An empty state: what the mode would show, and why it shows nothing yet.
+    struct Placeholder: Equatable {
+        let title: String
+        let message: String
+
+        static let noRounds = Placeholder(title: "No Rounds",
+                                          message: "Rounds are set up once triage recommends a fidelity with planning rounds.")
+        static let notesBeforePlanning = Placeholder(title: "No Notes",
+                                                     message: "Notes go on the plan once planning starts. Select text in the plan to note on it.")
+        static let notesSingleTask = Placeholder(title: "No Notes",
+                                                 message: "A single task is written straight from triage, with no plan to note on.")
+        static let notesFinal = Placeholder(title: "Plan Is Final",
+                                            message: "Notes reach the plan while its rounds run. The final plan takes none.")
+    }
 
     static func sections(for state: IntakeState, hasClarifications: Bool) -> [Section] {
         var out: [Section] = [.header]
@@ -115,16 +163,69 @@ enum DetailLayout {
         }
     }
 
-    /// The Rounds editor while a fidelity with rounds is being chosen; while shaping, the notes
-    /// rail when the human is working in the plan, else the selected seat; nothing to inspect
-    /// otherwise.
-    static func inspector(for state: IntakeState, preset: Preset, planFocused: Bool = false) -> InspectorContent {
+    /// The modes a plan offers, in segment order. A single task runs no rounds, so it has
+    /// nothing for a Rounds mode to configure and offers Notes alone. `preset` is nil until a
+    /// fidelity is in view (triage): both modes, each with its empty state, so the column doesn't
+    /// lose a segment and grow it back as triage finishes.
+    static func inspectorModes(preset: Preset?) -> [InspectorMode] {
+        preset == .bead ? [.notes] : [.notes, .rounds]
+    }
+
+    /// The mode shown: the one last chosen for this plan while the plan still offers it, else
+    /// Rounds where there are rounds — the editor was the inspector's resting state, and a plan
+    /// waiting on its fidelity opens onto the one thing there is to change in it — else Notes.
+    static func inspectorMode(stored: InspectorMode?, preset: Preset?) -> InspectorMode {
+        let modes = inspectorModes(preset: preset)
+        if let stored, modes.contains(stored) { return stored }
+        return modes.contains(.rounds) ? .rounds : .notes
+    }
+
+    /// What `mode` hosts in `state`. Rounds: the editor while a fidelity is being chosen and
+    /// while shaping — editable between rounds, read-only while one runs (`roundsEditing`) —
+    /// drilled in on the selected agent of the round in flight; from review on, the config that
+    /// planned it. Notes: the rail while shaping, the one state with a plan to note on; an empty
+    /// state elsewhere. `seatSelected` is false whenever no round is in flight: a selection left
+    /// over from the last round has nothing to show, and must not hide the editor once the run
+    /// pauses. A mode the plan doesn't offer reads as Notes.
+    static func inspector(for state: IntakeState, preset: Preset?, mode: InspectorMode, seatSelected: Bool = false,
+                          hasRoundConfig: Bool = false) -> InspectorContent {
+        switch inspectorModes(preset: preset).contains(mode) ? mode : .notes {
+        case .notes:
+            if preset == .bead { return .empty(.notesSingleTask) }
+            switch state {
+            case .shaping: return .notesRail
+            case .review, .releasing, .released, .partiallyReleased, .discarded: return .empty(.notesFinal)
+            case .triaging, .needsAnswers, .awaitingChoice, .parked, .failed, .interrupted: return .empty(.notesBeforePlanning)
+            }
+        case .rounds:
+            switch state {
+            case .awaitingChoice, .parked: return .roundsEditor
+            case .shaping: return seatSelected ? .seat : .roundsEditor
+            case .review, .releasing, .released, .partiallyReleased, .failed, .interrupted, .discarded:
+                return hasRoundConfig ? .roundsRecord : .empty(.noRounds)
+            case .triaging, .needsAnswers: return .empty(.noRounds)
+            }
+        }
+    }
+
+    /// Whether the Rounds editor takes edits. Before shaping it edits the config `beginShaping`
+    /// will start with. While shaping, only when nothing runs the tape — no live runner, no play
+    /// still starting, and a status that isn't running: the runner reads the config once per
+    /// start, so an edit landing under a live one would change nothing it runs, and would be
+    /// silently undone in effect. `IntakeService.saveRoundConfig` refuses on the same rule.
+    enum RoundsEditing: Equatable { case editable, readOnly }
+
+    static func roundsEditing(state: IntakeState, status: RunnerStatus, runnerLive: Bool, starting: Bool) -> RoundsEditing {
         switch state {
-        case .awaitingChoice, .parked: preset == .bead ? .nothing : .roundsEditor
-        case .shaping: planFocused ? .notesRail : .seat
+        case .awaitingChoice, .parked: .editable
+        case .shaping:
+            switch status {
+            case .paused, .stopped, .failed, .idle: runnerLive || starting ? .readOnly : .editable
+            case .running, .reachedReview: .readOnly
+            }
         case .triaging, .needsAnswers, .review, .releasing, .released, .partiallyReleased, .failed, .interrupted,
              .discarded:
-            .nothing
+            .readOnly
         }
     }
 

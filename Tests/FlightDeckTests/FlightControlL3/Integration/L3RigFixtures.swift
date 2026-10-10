@@ -7,13 +7,13 @@ extension L3IntegrationRig {
     static let testsToCodexRule = RoutingRule(
         id: "r-tests", sentence: "Use Codex for unit and integration tests",
         compiled: CompiledRule(match: .any([.dimension("test-authoring", atLeast: 0.5)]),
-                               assign: RuleAssign(harness: "codex", model: "gpt-6-sol",
+                               assign: RuleAssign(agent: .codex, model: "gpt-6-sol",
                                                   knobs: ["effort": "high"], pool: "codex-default")),
         state: .confirmed)
 
     /// Two codex accounts, one ready task (`fx-valid`), the tests-to-codex rule confirmed.
     static func standard() throws -> L3IntegrationRig {
-        try make(accounts: ["Work", "Personal"], harness: "codex", rule: testsToCodexRule, readyTasks: ["fx-valid"])
+        try make(accounts: ["Work", "Personal"], agent: .codex, rule: testsToCodexRule, readyTasks: ["fx-valid"])
     }
 
     /// Launches one agent on Work, then pushes Work over hard with the agent idle, and ticks:

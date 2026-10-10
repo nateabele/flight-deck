@@ -1,7 +1,7 @@
 import Foundation
 
 /// The one setting from the operator's `~/.codex/config.toml` every headless codex run carries
-/// back: `service_tier`. `HarnessCommand.codexIsolation`'s `--ignore-user-config` drops the
+/// back: `service_tier`. `HeadlessCommand.codexIsolation`'s `--ignore-user-config` drops the
 /// file wholesale — its MCP servers and hooks, which is the point, but also `service_tier`,
 /// which on this machine is `"fast"`. Without it every round seat silently ran on the default
 /// tier, slower than the user's own codex. Nothing else is read: the file also starts MCP

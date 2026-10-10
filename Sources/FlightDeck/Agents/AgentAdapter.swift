@@ -1,5 +1,6 @@
 import FleetKit
 import Foundation
+import IntakeKit
 
 /// Everything `SessionStore` needs from an agent, and nothing about how that agent works.
 ///
@@ -10,6 +11,18 @@ import Foundation
 @MainActor
 protocol AgentAdapter {
     static var id: AgentID { get }
+
+    /// **This agent's headless facet** (unify brief R3): the IntakeKit `AgentProfile` — model
+    /// catalog, error vocabulary, child environment, sign-in check and headless command — that
+    /// planning runs it through. `AgentAdapter` is the one per-agent type; the profile is the
+    /// part of it the planning runner can see, because the runner is a separate process that
+    /// links IntakeKit and has no adapters.
+    ///
+    /// Every conformer answers `AgentProfiles.profile(for: id)`, the registry the runner uses,
+    /// so a tab and a planning run on one agent reach the same answers by construction — no
+    /// behaviour lives in two places. `nonisolated` because a profile is `Sendable` and pure,
+    /// and its readers (detection, the rule compiler) are not on the main actor.
+    nonisolated static var profile: any AgentProfile { get }
 
     /// Establishes conversation identity BEFORE anything is typed into a terminal.
     ///
@@ -285,6 +298,100 @@ protocol AgentAdapter {
     /// members with a genuine majority answer (`rebind`, `environment`); this has none, and a
     /// silent default is how a third agent would ship looking searchable and finding nothing.
     static var searchCorpus: AgentSearchCorpus? { get }
+
+    /// **The key that stops this agent's running turn** — or cancels the dialog it is blocked on.
+    /// Escape for claude and codex; grok ignores Escape for both and takes Ctrl+C.
+    static var interruptKey: AgentInterruptKey { get }
+
+    /// **How this agent answers a dialog over its own API, by the request's id — or `nil`, the
+    /// refusal that leaves the keystroke paths (`dialogDriver`, `AgentKeyedDialogDriver`) as the
+    /// only ones.**
+    ///
+    /// The one capability that never touches the screen. Claude, codex, grok and gemini can
+    /// only be answered the way a person answers them — keys counted against a screen grammar —
+    /// so every answer there is interlocked against a re-read of the viewport. OpenCode exposes
+    /// the request itself (`permission.asked`, `question.asked`, each with an id) and an
+    /// endpoint that resolves it, so an answer names the exact request it means and cannot land
+    /// on the wrong row, because there are no rows.
+    ///
+    /// **Consulted BEFORE `dialogDriver`, and that order is the point.** A drive the screen
+    /// confuses refuses, but a reply to a request that is no longer pending simply fails on the
+    /// server. `SessionStore.answerPrompt` and `abortPrompt` take this path when it exists.
+    ///
+    /// No default, for `searchCorpus`'s reason: `nil` is a real answer most agents give, and an
+    /// agent added later should have to say which side of it it is on.
+    static var promptResponder: AgentPromptResponder? { get }
+}
+
+/// **Who a channel is acting for.** The adapter instance that owns the tab's agent (its account,
+/// its server), and where that tab is working right now.
+///
+/// Exists because `AgentTextChannel` and `AgentDialogDriver` are static, screen-only objects —
+/// "nothing either channel does reads adapter state" holds for every agent whose channel is
+/// keystrokes. It does not hold for an agent whose channel is a request to its own server: that
+/// request has to name a conversation and reach the right account's process. The store is the
+/// only place that knows both, so it hands them over rather than each channel growing a
+/// registry of its own.
+@MainActor
+struct AgentTarget {
+    let adapter: any AgentAdapter
+    let location: AgentLocation
+}
+
+/// **A tab's terminal, addressed.** Forwards every keystroke and read to the real surface, and
+/// carries the `AgentTarget` alongside it.
+///
+/// A decorator rather than a new parameter on `AgentTextChannel.submit`, so the screen-driven
+/// conformers — and the tests that drive them with a fake injector — are untouched: they never
+/// look past the `TextInjecting` they are handed, and this IS one. A channel that needs the
+/// address (`OpenCodeTextChannel`) asks for it by type, and refuses when it is missing rather
+/// than guessing a tab.
+@MainActor
+final class TargetedInjector: TextInjecting {
+    let base: TextInjecting
+    let target: AgentTarget
+
+    init(base: TextInjecting, target: AgentTarget) {
+        self.base = base
+        self.target = target
+    }
+
+    func sendText(_ text: String) { base.sendText(text) }
+    func sendReturn() { base.sendReturn() }
+    func sendKillLine() { base.sendKillLine() }
+    func sendYank() { base.sendYank() }
+    func sendArrowDown() { base.sendArrowDown() }
+    func sendArrowUp() { base.sendArrowUp() }
+    func sendTab() { base.sendTab() }
+    func sendEscape() { base.sendEscape() }
+    func sendCharacterKey(_ character: Character) { base.sendCharacterKey(character) }
+    func sendControlKey(_ letter: Character) { base.sendControlKey(letter) }
+    func readViewport() -> String? { base.readViewport() }
+}
+
+/// Answering an agent's dialog by the id of the request it raised. See
+/// `AgentAdapter.promptResponder`.
+///
+/// Synchronous in shape and asynchronous in effect, for `answerPrompt`'s reason: the store
+/// answers a phone with a dispatch verdict NOW, and the agent's own record of the reply — the
+/// `*.replied` event, the mirror line — is what tells the phone it landed. Everything that can
+/// be checked without the network (the answer fits the open prompt, the labels match the Mac's
+/// own copy) is checked before this returns; a `false` means nothing was sent.
+@MainActor
+protocol AgentPromptResponder {
+    func answer(_ open: OpenPrompt, with answer: PromptAnswer, for target: AgentTarget) -> Bool
+
+    /// Refuse whatever this tab's agent is blocked on, with no prompt in hand — the
+    /// counterpart of `AgentDialogDriver.deny` for `abortPrompt`, which exists precisely for a
+    /// dialog this Mac cannot name.
+    func abort(for target: AgentTarget)
+}
+
+/// How `SessionStore.interruptTurn` stops a turn. A stated key rather than a method so the store
+/// keeps the one injector call site.
+enum AgentInterruptKey: Equatable, Sendable {
+    case escape
+    case controlC
 }
 
 /// Deriving what an agent is blocked on from a window of its transcript.
@@ -308,6 +415,12 @@ protocol AgentAdapter {
 protocol AgentOpenPromptReader: Sendable {
     func openPrompt(inTranscriptTail lines: [SourceLine], activity: SessionActivity?) -> OpenPrompt?
 
+    /// The same derivation, told which transcript the lines came from. What `PromptService`
+    /// calls. The default ignores the path and is `openPrompt(inTranscriptTail:activity:)`;
+    /// gemini overrides it because agy never writes a WAITING step to its transcript, so the
+    /// open call has to be read from the conversation's step store, which only the path names.
+    func openPrompt(inTranscriptAt url: URL, tail lines: [SourceLine], activity: SessionActivity?) -> OpenPrompt?
+
     /// Where this agent writes its background subagents' transcripts for the conversation in
     /// `transcript`, or nil if it has none.
     ///
@@ -322,6 +435,69 @@ protocol AgentOpenPromptReader: Sendable {
     /// Separate from `openPrompt(inTranscriptTail:activity:)` because claude marks every
     /// record in a subagent's file as a sidechain, which the main-transcript reading skips.
     func openPrompt(inSubagentTail lines: [SourceLine]) -> OpenPrompt?
+
+    /// Whether the open call is a RECORD in the transcript the timeline feed serves — so a
+    /// client holding that feed can derive the dialog itself (`OpenPrompt.find`).
+    ///
+    /// **Two consequences, and both follow from the one fact.**
+    ///
+    /// - **What goes on the wire.** `true` and the phone derives the dialog from its own copy of
+    ///   the transcript; only the call id travels. `false` and there is nothing in the phone's
+    ///   copy to derive from, so the Mac sends its own derivation (`WireOpenPrompt`) — without
+    ///   it the phone draws "Waiting for you" over a dialog it has no card for.
+    /// - **What `PromptService` may cache and widen.** Its stamp-keyed cache is sound only
+    ///   because a new dialog is an append that moves the transcript's stamp; its widen loop
+    ///   exists only to look past bookkeeping lines for a record. Neither holds for a reader
+    ///   whose dialog is not in the transcript, so `false` reads fresh every time and never
+    ///   widens — a superseded dialog with an unchanged transcript would otherwise be served
+    ///   from the cache, and a nil answer would scan the whole transcript every tick for a
+    ///   record that cannot be there.
+    ///
+    /// **No default.** There is no majority answer that is safe to inherit: a reader that took
+    /// `true` without earning it ships an agent whose phone card never appears, and one that
+    /// took `false` sends dialog text for an agent whose phone already derives it.
+    var transcriptCarriesOpenPrompt: Bool { get }
+
+    /// The file holding subagent `agent`'s transcript, or nil for an id this agent never
+    /// minted. `agent` came off the wire, so the id is validated here before any path is built
+    /// from it. The default is claude's layout, `subagentTranscripts(for:)/agent-<id>.jsonl`;
+    /// grok keeps each subagent in a session directory of its own (`GrokOpenPromptReader`).
+    func subagentTranscript(for transcript: URL, agent: String) -> URL?
+
+    /// The subagent whose file holds `open`, when `openPrompt(inTranscriptAt:…)` derived it
+    /// from one rather than from the tab's own transcript — so the phone can read that file for
+    /// the card. The default is nil: claude's attribution comes from its hook log instead
+    /// (`PromptService.attributingSubagents`).
+    func owningSubagent(of open: OpenPrompt, inTranscriptAt url: URL) -> String?
+
+    /// Subagent `agent`'s open dialog, when this reader can tell on its own that it IS a dialog
+    /// and not a running tool — what claude needs its hook log to say. Nil by default, which
+    /// leaves `PromptService.answer` on the hook-log path.
+    func vouchedSubagentPrompt(inTranscriptAt url: URL, agent: String) -> OpenPrompt?
+
+    /// Whatever else, beside the transcript itself, the derivation read — as a value that
+    /// changes when that input does. `PromptService` keys its cache on the transcript's stamp
+    /// AND this, so a reader that also reads other files (grok: its running subagents' events,
+    /// where a child's next card can appear without the parent's transcript moving) is never
+    /// served a superseded call. Nil by default: the transcript is the only input.
+    func auxiliaryStamp(forTranscriptAt url: URL) -> String?
+}
+
+extension AgentOpenPromptReader {
+    func openPrompt(inTranscriptAt url: URL, tail lines: [SourceLine], activity: SessionActivity?) -> OpenPrompt? {
+        openPrompt(inTranscriptTail: lines, activity: activity)
+    }
+
+    func subagentTranscript(for transcript: URL, agent: String) -> URL? {
+        guard SubagentID.isValid(agent), let dir = subagentTranscripts(for: transcript) else { return nil }
+        return dir.appendingPathComponent("agent-\(agent).jsonl")
+    }
+
+    func owningSubagent(of open: OpenPrompt, inTranscriptAt url: URL) -> String? { nil }
+
+    func vouchedSubagentPrompt(inTranscriptAt url: URL, agent: String) -> OpenPrompt? { nil }
+
+    func auxiliaryStamp(forTranscriptAt url: URL) -> String? { nil }
 }
 
 /// **Typing a message into a live agent and submitting it.**
@@ -396,6 +572,26 @@ protocol AgentTextChannel {
     /// `ClaudeDialogVetoTests` and `CodexDialogVetoTests` — and the compiler catches one that
     /// forgets.
     func isKnownNonComposer(_ injector: TextInjecting) -> Bool
+
+    /// The text sitting unsent in this agent's composer, read off the screen without touching
+    /// it: `""` for an empty box (the agent's own placeholder counts as empty), nil when no
+    /// composer this conformer recognises is on screen.
+    ///
+    /// **What it is for: carrying a draft across a process restart.** A smart-sleep thaw that
+    /// rolls a conversation onto another account kills the frozen agent and resumes the
+    /// conversation in a new one (`SessionStore.rollOver`); the kill ring every `submit` relies
+    /// on dies with the old process, so the draft has to be read as text before the freeze
+    /// (`SessionStore.agentFroze`) and pasted into the new composer afterwards. nil there
+    /// means "could not tell", and the store refuses the rollover rather than risk the draft.
+    ///
+    /// Where the screen cannot tell a wrapped row from a typed line break (claude, agy,
+    /// OpenCode), rows are joined with a space: each word-wraps its composer, so a wrap is a
+    /// space far more often than a newline the user typed, and a paste that gains a space beats
+    /// one that gains a line break in mid-sentence. grok's reader keeps its own row rule.
+    ///
+    /// No default, for the reason `isKnownNonComposer` has none: `""` would read as "this agent
+    /// never holds a draft", and a new conformer would silently lose every one.
+    func draft(_ injector: TextInjecting) -> String?
 
     /// Type `text` and submit it, preserving whatever draft was there — or refuse.
     ///
@@ -555,9 +751,13 @@ extension AgentAdapter {
     /// nothing else may repoint (see `PreferencesStore.sessionEnvironment`).
     func environment(for account: AgentAccount) -> [String: String] {
         var environment = launchEnvironment
-        environment[account.agent.homeEnvironmentKey] = account.home.path
+        if let key = account.agent.homeEnvironmentKey { environment[key] = account.home.path }
         return environment
     }
+
+    /// Escape: what claude and codex both take, verified against each (`interruptTurn`'s own
+    /// comment). An agent that does not — grok — states its own.
+    static var interruptKey: AgentInterruptKey { .escape }
 
     /// Nothing beyond the account binding, for an agent that reports no lifecycle of its own.
     /// Codex takes this default: its readiness comes from rollout evidence on disk, which
@@ -589,6 +789,9 @@ extension AgentID {
         switch self {
         case .claude: ClaudeAdapter.textChannel
         case .codex: CodexAdapter.textChannel
+        case .grok: GrokAdapter.textChannel
+        case .gemini: GeminiAdapter.textChannel
+        case .opencode: OpenCodeAdapter.textChannel
         }
     }
 
@@ -599,6 +802,9 @@ extension AgentID {
         switch self {
         case .claude: ClaudeAdapter.renameTyping
         case .codex: CodexAdapter.renameTyping
+        case .grok: GrokAdapter.renameTyping
+        case .gemini: GeminiAdapter.renameTyping
+        case .opencode: OpenCodeAdapter.renameTyping
         }
     }
 
@@ -609,6 +815,9 @@ extension AgentID {
         switch self {
         case .claude: ClaudeAdapter.dialogDriver
         case .codex: CodexAdapter.dialogDriver
+        case .grok: GrokAdapter.dialogDriver
+        case .gemini: GeminiAdapter.dialogDriver
+        case .opencode: OpenCodeAdapter.dialogDriver
         }
     }
 
@@ -618,6 +827,9 @@ extension AgentID {
         switch self {
         case .claude: ClaudeAdapter.turnRecovery
         case .codex: CodexAdapter.turnRecovery
+        case .grok: GrokAdapter.turnRecovery
+        case .gemini: GeminiAdapter.turnRecovery
+        case .opencode: OpenCodeAdapter.turnRecovery
         }
     }
 
@@ -627,6 +839,9 @@ extension AgentID {
         switch self {
         case .claude: ClaudeAdapter.openPromptReader
         case .codex: CodexAdapter.openPromptReader
+        case .grok: GrokAdapter.openPromptReader
+        case .gemini: GeminiAdapter.openPromptReader
+        case .opencode: OpenCodeAdapter.openPromptReader
         }
     }
 
@@ -640,6 +855,24 @@ extension AgentID {
         switch self {
         case .claude: ClaudeAdapter.searchCorpus
         case .codex: CodexAdapter.searchCorpus
+        case .grok: GrokAdapter.searchCorpus
+        case .gemini: GeminiAdapter.searchCorpus
+        case .opencode: OpenCodeAdapter.searchCorpus
+        }
+    }
+
+    /// How this agent's conversation is carried into another account's home, or nil when it
+    /// cannot be (`AgentConversationTransfer`). Consulted by `SessionStore`'s smart-sleep thaw,
+    /// which rolls an idle conversation off a spent account only through this. A static on each
+    /// concrete adapter rather than a protocol requirement, so the exhaustive switch here is
+    /// what makes a new agent state its own answer.
+    var conversationTransfer: AgentConversationTransfer? {
+        switch self {
+        case .claude: ClaudeAdapter.conversationTransfer
+        case .codex: CodexAdapter.conversationTransfer
+        case .grok: GrokAdapter.conversationTransfer
+        case .gemini: GeminiAdapter.conversationTransfer
+        case .opencode: OpenCodeAdapter.conversationTransfer
         }
     }
 
@@ -649,6 +882,9 @@ extension AgentID {
         switch self {
         case .claude: ClaudeAdapter.negotiatesIdentity
         case .codex: CodexAdapter.negotiatesIdentity
+        case .grok: GrokAdapter.negotiatesIdentity
+        case .gemini: GeminiAdapter.negotiatesIdentity
+        case .opencode: OpenCodeAdapter.negotiatesIdentity
         }
     }
 
@@ -657,6 +893,32 @@ extension AgentID {
         switch self {
         case .claude: ClaudeAdapter.needsRuntimeStart
         case .codex: CodexAdapter.needsRuntimeStart
+        case .grok: GrokAdapter.needsRuntimeStart
+        case .gemini: GeminiAdapter.needsRuntimeStart
+        case .opencode: OpenCodeAdapter.needsRuntimeStart
+        }
+    }
+
+    /// See `AgentAdapter.promptResponder`. Consulted by `SessionStore.answerPrompt`,
+    /// `abortPrompt` and `PromptService`, which each take the id-addressed path first.
+    var promptResponder: AgentPromptResponder? {
+        switch self {
+        case .claude: ClaudeAdapter.promptResponder
+        case .codex: CodexAdapter.promptResponder
+        case .grok: GrokAdapter.promptResponder
+        case .gemini: GeminiAdapter.promptResponder
+        case .opencode: OpenCodeAdapter.promptResponder
+        }
+    }
+
+    /// See `AgentAdapter.interruptKey`. Consulted by `SessionStore.interruptTurn`.
+    var interruptKey: AgentInterruptKey {
+        switch self {
+        case .claude: ClaudeAdapter.interruptKey
+        case .codex: CodexAdapter.interruptKey
+        case .grok: GrokAdapter.interruptKey
+        case .gemini: GeminiAdapter.interruptKey
+        case .opencode: OpenCodeAdapter.interruptKey
         }
     }
 
@@ -666,6 +928,9 @@ extension AgentID {
         switch self {
         case .claude: ClaudeAdapter.hasStatusRegistry
         case .codex: CodexAdapter.hasStatusRegistry
+        case .grok: GrokAdapter.hasStatusRegistry
+        case .gemini: GeminiAdapter.hasStatusRegistry
+        case .opencode: OpenCodeAdapter.hasStatusRegistry
         }
     }
 }
@@ -675,12 +940,27 @@ extension AgentID {
 /// answers preference migration before a store exists. Same construction table, same reason
 /// — the answers live on the adapters so a third agent states its own.
 extension AgentID {
+    /// See `AgentAdapter.profile`. The app's way to an agent's headless facet; the planning
+    /// runner, which has no adapters, asks `AgentProfiles.profile(for:)` — the same object.
+    var profile: any AgentProfile {
+        switch self {
+        case .claude: ClaudeAdapter.profile
+        case .codex: CodexAdapter.profile
+        case .grok: GrokAdapter.profile
+        case .gemini: GeminiAdapter.profile
+        case .opencode: OpenCodeAdapter.profile
+        }
+    }
+
     /// See `AgentAdapter.sanitizedTitle`. Consulted by `SessionStore.rename`,
     /// `injectPendingRename` and `applyExternalTitle`.
     func sanitizedTitle(_ raw: String) -> String? {
         switch self {
         case .claude: ClaudeAdapter.sanitizedTitle(raw)
         case .codex: CodexAdapter.sanitizedTitle(raw)
+        case .grok: GrokAdapter.sanitizedTitle(raw)
+        case .gemini: GeminiAdapter.sanitizedTitle(raw)
+        case .opencode: OpenCodeAdapter.sanitizedTitle(raw)
         }
     }
 
@@ -690,6 +970,9 @@ extension AgentID {
         switch self {
         case .claude: ClaudeAdapter.title(fromTranscriptAt: url)
         case .codex: CodexAdapter.title(fromTranscriptAt: url)
+        case .grok: GrokAdapter.title(fromTranscriptAt: url)
+        case .gemini: GeminiAdapter.title(fromTranscriptAt: url)
+        case .opencode: OpenCodeAdapter.title(fromTranscriptAt: url)
         }
     }
 
@@ -702,6 +985,9 @@ extension AgentID {
         switch self {
         case .claude: ClaudeTimelineMapper.items(inLine: line, at: offset, sidechain: sidechain)
         case .codex: CodexAdapter.timelineItems(inLine: line, at: offset)
+        case .grok: GrokAdapter.timelineItems(inLine: line, at: offset)
+        case .gemini: GeminiAdapter.timelineItems(inLine: line, at: offset)
+        case .opencode: OpenCodeAdapter.timelineItems(inLine: line, at: offset)
         }
     }
 
@@ -710,6 +996,9 @@ extension AgentID {
         switch self {
         case .claude: ClaudeAdapter.homeMarkerFile
         case .codex: CodexAdapter.homeMarkerFile
+        case .grok: GrokAdapter.homeMarkerFile
+        case .gemini: GeminiAdapter.homeMarkerFile
+        case .opencode: OpenCodeAdapter.homeMarkerFile
         }
     }
 
@@ -717,6 +1006,9 @@ extension AgentID {
         switch self {
         case .claude: ClaudeAdapter.identity(fromHomeData: data)
         case .codex: CodexAdapter.identity(fromHomeData: data)
+        case .grok: GrokAdapter.identity(fromHomeData: data)
+        case .gemini: GeminiAdapter.identity(fromHomeData: data)
+        case .opencode: OpenCodeAdapter.identity(fromHomeData: data)
         }
     }
 

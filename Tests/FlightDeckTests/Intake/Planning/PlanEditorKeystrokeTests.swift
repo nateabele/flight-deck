@@ -22,7 +22,7 @@ final class PlanEditorKeystrokeTests: XCTestCase {
     }
 
     static func cycle() -> ConvergenceCycle {
-        let codex = ModelChoice(harness: .codex, model: "gpt-6-sol", effort: "high")
+        let codex = ModelChoice(agent: .codex, model: "gpt-6-sol", effort: "high")
         func point(_ round: Int, _ changes: Int, _ agree: Double, _ churn: [String: Int]) -> ConvergencePoint {
             ConvergencePoint(checkpoint: round + 2, stage: .refine, round: round, changeCount: changes,
                              linesChurned: churn.values.reduce(0, +), agreeRatio: agree, sectionChurn: churn, reviewerModel: codex)

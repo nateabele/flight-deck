@@ -1,5 +1,6 @@
 import FleetKit
 import XCTest
+import IntakeKit
 @testable import FlightDeck
 
 /// Codex has no status registry behind it: it reports what it is doing outright, and those
@@ -17,6 +18,7 @@ final class CodexStatusRoutingTests: XCTestCase {
     /// tab that comes back is pinned to it. No transport, so nothing here can spawn or hang.
     private struct StubCodexAdapter: AgentAdapter {
         static let id: AgentID = .codex
+        nonisolated static var profile: any AgentProfile { AgentProfiles.profile(for: .codex) }
         /// Codex's answers, because this stands in for codex. The store reads both
         /// capabilities off `AgentID`, not off the injected adapter, so a stub that said
         /// otherwise would be describing an agent that does not exist.
@@ -42,6 +44,7 @@ final class CodexStatusRoutingTests: XCTestCase {
         }
         static let openPromptReader: AgentOpenPromptReader? = CodexAdapter.openPromptReader
         static let searchCorpus: AgentSearchCorpus? = CodexAdapter.searchCorpus
+        static let promptResponder: AgentPromptResponder? = CodexAdapter.promptResponder
         let thread: UUID
 
         func prepare(for session: Session, options: AgentOptions) async throws -> AgentBinding {

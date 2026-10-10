@@ -104,9 +104,9 @@ final class RoutingServiceEditingTests: XCTestCase {
     func testSwitchingAgentTakesItsDefaultModelAndPoolAndKeepsAnEffortItAccepts() async throws {
         let svc = make()
         let id = try await confirmedRule(svc)
-        XCTAssertNil(svc.adjust(id, in: .global, .setHarness("claude")))
+        XCTAssertNil(svc.adjust(id, in: .global, .setAgent(.claude)))
         let a = try XCTUnwrap(rule(svc, id).compiled?.assign)
-        XCTAssertEqual(a.harness, "claude")
+        XCTAssertEqual(a.agent, .claude)
         XCTAssertEqual(a.model, "opus")
         XCTAssertEqual(a.pool, "claude-default", "codex's pool cannot serve claude")
         XCTAssertEqual(a.knobs, ["effort": "high"], "claude's opus also declares effort high")
@@ -147,7 +147,7 @@ final class RoutingServiceEditingTests: XCTestCase {
         let svc = make()
         let id = try await confirmedRule(svc)
         let options = svc.targetOptions(for: try XCTUnwrap(rule(svc, id).compiled?.assign))
-        XCTAssertEqual(options.harnesses, ["codex", "claude"])
+        XCTAssertEqual(options.agents, [.codex, .claude])
         XCTAssertEqual(options.models.map(\.id), ["gpt-6-sol", "gpt-6-luna"])
         XCTAssertEqual(options.knobs["effort"], ["low", "medium", "high"])
         XCTAssertEqual(options.pools.map(\.id), ["codex-default"], "only the agent's own pools")
@@ -157,12 +157,12 @@ final class RoutingServiceEditingTests: XCTestCase {
 
     func testSwitchingToAHintsModelAdjustsTheTarget() async throws {
         let hint = RuleHint(ruleID: "r1", text: "opus scores 0.2 higher on test-authoring (confidence 0.8)",
-                            snapshotDate: D.at, suggested: ModelRef(harness: "claude", model: "opus"))
+                            snapshotDate: D.at, suggested: ModelRef(agent: .claude, model: "opus"))
         let svc = make(hints: FixedHints(fixed: hint))
         let id = try await confirmedRule(svc)
         XCTAssertNil(svc.applyHint(hint, in: .global))
         let r = try rule(svc, id)
-        XCTAssertEqual(r.compiled?.assign.harness, "claude")
+        XCTAssertEqual(r.compiled?.assign.agent, .claude)
         XCTAssertEqual(r.compiled?.assign.model, "opus")
         XCTAssertEqual(r.compiled?.assign.pool, "claude-default")
         XCTAssertEqual(r.state, .confirmed)

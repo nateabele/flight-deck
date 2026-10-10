@@ -20,7 +20,7 @@ final class RuleCompilerLiveTests: XCTestCase {
         let proposal = await compiler.propose(input)
         let outcome = RuleCompilation.finish(proposal, input: input)
         guard case .compiled(let rule) = outcome else { return XCTFail("\(outcome) — proposal: \(proposal)") }
-        XCTAssertEqual(rule.assign.harness, "codex")
+        XCTAssertEqual(rule.assign.agent, .codex)
         XCTAssertTrue(rule.match.terms.contains { term in
             if case .dimension("test-authoring", _) = term { return true }
             return false

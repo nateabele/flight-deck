@@ -11,7 +11,7 @@ final class CoverageCellModelTests: XCTestCase {
         CoverageSeries.verdict(readings: readings, preset: preset, convergence: convergence,
                                refineRoundsRemaining: remaining, crossCheckAhead: false, failedCrossCheckRound: failed)
     }
-    private func reading(n1: Int, n2: Int, both: Int, round: Int = 1, families: [ModelFamily] = [.codex, .claude]) -> CoverageReading {
+    private func reading(n1: Int, n2: Int, both: Int, round: Int = 1, families: [AgentID] = [.codex, .claude]) -> CoverageReading {
         // Build through CoverageSeries.reading so the numbers are the fold's, not hand-set.
         var proposers: [Int] = [], changes: [ProposedChange] = [], vs: [ChangeVerdict] = [], clusters: [[Int]] = []
         func add(_ p: Int, _ t: String) -> Int {

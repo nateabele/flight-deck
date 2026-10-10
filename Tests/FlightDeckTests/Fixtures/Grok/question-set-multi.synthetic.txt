@@ -1,0 +1,19 @@
+  main ~/proj   25K / 256K │ [Dashboard]
+
+     › ask me three things
+     ◆ Ask 3 questions
+   ◆ Waiting on answers for 3 questions                                       3.3s ⇣25.5k [stop]
+
+  ┃
+  ┃  Pick toppings
+  ┃
+  ┃
+  ┃  1 [x] Cheese  Melted on top                                                          █
+  ┃  2 [ ] Ham     Thin slices                                                            █
+  ┃  3 [ ] Olives  Black ones                                                             █
+  ┃  z [ ] Type your answer here
+  ┃
+  ┃  [2/3] ↑/↓ navigate · ←/→ question · y copy                         Enter:select
+  ┃
+
+  Tab:next answer  │  Esc:unselect  │  Shift+x:dismiss

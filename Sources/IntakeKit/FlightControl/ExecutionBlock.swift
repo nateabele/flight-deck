@@ -1,12 +1,18 @@
 import Foundation
 
-/// A model as a harness names it, with the knobs it runs at.
+/// A model as an agent names it, with the knobs it runs at.
 public struct ModelRef: Codable, Hashable, Sendable {
-    public var harness: HarnessID
+    public var agent: AgentID
     public var model: String
     public var knobs: [String: String]
-    public init(harness: HarnessID, model: String, knobs: [String: String] = [:]) {
-        self.harness = harness; self.model = model; self.knobs = knobs
+    public init(agent: AgentID, model: String, knobs: [String: String] = [:]) {
+        self.agent = agent; self.model = model; self.knobs = knobs
+    }
+
+    /// `agent` keeps its pre-unification JSON key, `harness` (unify brief R1).
+    private enum CodingKeys: String, CodingKey {
+        case agent = "harness"
+        case model, knobs
     }
 }
 
@@ -36,7 +42,7 @@ public struct ExecutionBlock: Equatable, Sendable {
 
     public var v: Int
     public var kind: KindID
-    public var harness: HarnessID
+    public var agent: AgentID
     public var model: String
     public var knobs: [String: String]
     public var pool: PoolID
@@ -46,12 +52,12 @@ public struct ExecutionBlock: Equatable, Sendable {
     /// Reserved for remote hosts; always nil in v1.
     public var host: String?
 
-    public init(v: Int = ExecutionBlock.currentVersion, kind: KindID, harness: HarnessID, model: String,
+    public init(v: Int = ExecutionBlock.currentVersion, kind: KindID, agent: AgentID, model: String,
                 knobs: [String: String] = [:], pool: PoolID, source: AssignmentSource,
                 pinned: Bool = false, host: String? = nil) {
-        self.v = v; self.kind = kind; self.harness = harness; self.model = model; self.knobs = knobs
+        self.v = v; self.kind = kind; self.agent = agent; self.model = model; self.knobs = knobs
         self.pool = pool; self.source = source; self.pinned = pinned; self.host = host
     }
 
-    public var modelRef: ModelRef { ModelRef(harness: harness, model: model, knobs: knobs) }
+    public var modelRef: ModelRef { ModelRef(agent: agent, model: model, knobs: knobs) }
 }

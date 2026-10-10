@@ -4,6 +4,17 @@
 
 Start here if you're picking up Flight Deck fresh. This is the map; the linked docs have the detail.
 
+> **▶ One agent identity, grok and gemini tabs, account pools (2026-10-08) — merged to `master`.**
+> `AgentID` (IntakeKit: claude, codex, grok, gemini) is the only agent type; `Harness`,
+> `ModelFamily` and `HarnessID` are gone, and each `AgentAdapter` carries its headless
+> `profile`. grok (`Agents/Grok/`) and gemini (`Agents/Gemini/`, driving the Antigravity CLI
+> `agy`) run in tabs through real adapters. Settings → Accounts is one list of accounts and
+> single-agent pools; a project assigns each agent an account or a pool, and tabs and every
+> planning seat bill it through one `AccountResolver` and one `CapacityLedger` (the Rounds
+> editor's per-seat account picker is gone). GUI checks still owed are in
+> [FOLLOWUPS.md](FOLLOWUPS.md), "Unify agents, grok/gemini tabs, account pools"; no UI test has
+> run on this work yet. Details: [ARCHITECTURE.md](ARCHITECTURE.md), "Agents".
+
 > **▶ Flight Control on the phone (2026-09-29) — Phase 1 (watch, read-only) built on branch `fc-mobile-watch`; Phase 2 (steer) on `fc-mobile-steer`.**
 > The phone lists a project's intakes at the top of its section (with a "N need you" badge and an
 > in-app banner on a live transition to needing you), and opens an intake to its board strip,

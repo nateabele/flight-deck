@@ -4,8 +4,8 @@ import AppKit
 ///
 /// That choice is what makes the Tools menu possible at all: these values are assigned
 /// straight onto `NSMenuItem.keyEquivalent` / `keyEquivalentModifierMask`, and the menu has to
-/// be AppKit because SwiftUI cannot vary a `.keyboardShortcut` at runtime (see
-/// `SessionCommands`) while a user-recorded chord is dynamic by definition.
+/// be AppKit because SwiftUI cannot vary a `.keyboardShortcut` at runtime, while a
+/// user-recorded chord is dynamic by definition.
 struct ToolShortcut: Codable, Equatable {
     /// Always lowercase. `NSMenuItem.keyEquivalent` is case-sensitive, and an uppercase letter
     /// there means "shift is part of the equivalent" — so storing "O" would silently demand

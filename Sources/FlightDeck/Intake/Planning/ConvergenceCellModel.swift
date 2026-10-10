@@ -147,7 +147,7 @@ extension ConvergenceCellModel {
     }
 
     /// "codex gpt-6-sol" — the harness and the model, the two things a swap changes.
-    private static func name(_ m: ModelChoice) -> String { "\(m.harness.rawValue) \(m.model)" }
+    private static func name(_ m: ModelChoice) -> String { "\(m.agent.rawValue) \(m.model)" }
 }
 
 // MARK: - Heatmap

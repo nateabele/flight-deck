@@ -7,7 +7,7 @@ final class SpillTests: XCTestCase {
     private typealias D = RoutingTestData
 
     private func r3Block(pool: PoolID = "codex-subs", pinned: Bool = false) -> ExecutionBlock {
-        ExecutionBlock(kind: "snapshot-tests", harness: "codex", model: "gpt-6-sol", knobs: ["effort": "high"], pool: pool,
+        ExecutionBlock(kind: "snapshot-tests", agent: .codex, model: "gpt-6-sol", knobs: ["effort": "high"], pool: pool,
                        source: AssignmentSource(by: .rule, ruleId: "r3", reason: "test-authoring 0.8 → codex", at: D.at),
                        pinned: pinned)
     }
@@ -15,7 +15,7 @@ final class SpillTests: XCTestCase {
     func testTheRulesFallbackPoolIsTriedFirst() throws {
         let rule = D.r3(fallbackPool: "claude-subs")
         let s = try XCTUnwrap(RouterCore.spill(r3Block(), kind: D.snapshot, exhausted: ["codex-subs"], D.context(global: [rule])))
-        XCTAssertEqual(s.block.pool, "claude-subs"); XCTAssertEqual(s.block.harness, "claude")
+        XCTAssertEqual(s.block.pool, "claude-subs"); XCTAssertEqual(s.block.agent, .claude)
         XCTAssertEqual(s.block.model, "opus", "another agent's pool runs that agent's default model")
         XCTAssertEqual(s.block.knobs, [:])
         XCTAssertEqual(s.block.source, AssignmentSource(by: .spill, ruleId: "r3", reason: "codex-subs exhausted → claude-subs/opus", at: D.at))
@@ -29,7 +29,7 @@ final class SpillTests: XCTestCase {
     }
 
     func testWithoutAFallbackPoolTheRulesRunAgainWithoutTheExhaustedPool() throws {
-        let r4 = D.rule("r4", .any([.dimension("test-authoring", atLeast: 0.5)]), "claude", "opus", pool: "claude-default")
+        let r4 = D.rule("r4", .any([.dimension("test-authoring", atLeast: 0.5)]), .claude, "opus", pool: "claude-default")
         let s = try XCTUnwrap(RouterCore.spill(r3Block(), kind: D.snapshot, exhausted: ["codex-subs"], D.context(global: [D.r3(), r4])))
         XCTAssertEqual(s.block.source, AssignmentSource(by: .spill, ruleId: "r4", reason: "codex-subs exhausted → claude-default/opus", at: D.at))
     }

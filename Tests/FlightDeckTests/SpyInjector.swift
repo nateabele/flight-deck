@@ -22,6 +22,12 @@ final class SpyInjector: TextInjecting {
         /// as a list of numbers.
         case arrow(Int)
         case escape
+        /// A printable key sent as a key event (`sendCharacterKey`) — grok's digit answers.
+        case key(Character)
+        /// Ctrl+<letter> (`sendControlKey`) — grok's Ctrl+C cancel and Ctrl+S stash.
+        case control(Character)
+        /// Tab (`sendTab`) — hands a parked grok question card its keyboard back.
+        case tab
     }
 
     var events: [Event] = []
@@ -92,7 +98,10 @@ final class SpyInjector: TextInjecting {
 
     func sendArrowDown() { move(by: 1) }
     func sendArrowUp() { move(by: -1) }
+    func sendTab() { record(.tab) }
     func sendEscape() { record(.escape) }
+    func sendCharacterKey(_ character: Character) { record(.key(character)) }
+    func sendControlKey(_ letter: Character) { record(.control(letter)) }
 
     /// Every send goes through here, because the transcript entry and the cache drop below are
     /// the same event: a keystroke has gone to the terminal, so whatever was read before it no

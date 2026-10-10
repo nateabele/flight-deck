@@ -369,10 +369,14 @@ final class SidebarInputMonitor {
         // `NSEvent.mouseLocation`, and a reorder can slide the rows under the pointer in between.
         let downOnScreen = window.convertPoint(toScreen: downPoint)
         let pressedRowControl = Self.pressedControl(in: rowView, at: downPoint)
-        // The row view's own coordinate space, not the window's: that is what
-        // `SidebarClickIntent.chevronZoneWidth` is measured against, and it is stable across a
-        // scroll — `downPoint` is a window point captured at press time, before any of that.
-        let inChevronZone = rowView.convert(downPoint, from: nil).x < SidebarClickIntent.chevronZoneWidth
+        // The row view's own coordinate space, not the window's: it is stable across a scroll —
+        // `downPoint` is a window point captured at press time, before any of that. The zone
+        // itself is measured from the row's cell, not the row's edge; see
+        // `SidebarClickIntent.chevronZoneWidth` for the macOS 15 failure that cost.
+        let inChevronZone = SidebarClickIntent.inChevronZone(
+            pressX: rowView.convert(downPoint, from: nil).x,
+            contentLeadingX: Self.contentLeadingX(in: rowView)
+        )
 
         // `.default` ONLY. A block that also listed `.eventTracking` — or a
         // `DispatchQueue.main.async`, which effectively does, since event tracking is a common
@@ -464,6 +468,22 @@ final class SidebarInputMonitor {
                 window.makeFirstResponder(table)
             }
         }
+    }
+
+    /// Where the row's content starts, in the row view's coordinates: the leading edge of its
+    /// cell view. macOS 15 insets the cell 10pt inside a row view that starts at the window edge;
+    /// macOS 26 starts the cell at the row's edge. The chevron zone is measured from here so the
+    /// same strip of the header collapses on both — see `SidebarClickIntent.chevronZoneWidth`.
+    ///
+    /// The table's own answer (`view(atColumn: 0)`, the sidebar's one column) when the row is
+    /// managed by a table, else the row's first subview — SwiftUI's tree is row → cell →
+    /// hosting view, and a row built by hand in a test has no columns. A row with neither
+    /// measures from its own edge, which is the old behaviour.
+    ///
+    /// Not private so it can be tested against a built row view.
+    static func contentLeadingX(in rowView: NSTableRowView) -> CGFloat {
+        let column = rowView.numberOfColumns > 0 ? rowView.view(atColumn: 0) as? NSView : nil
+        return (column ?? rowView.subviews.first).map { $0.frame.minX } ?? 0
     }
 
     /// Whether a press landed on a real AppKit control inside the row — in a project header, the
@@ -612,14 +632,33 @@ enum SidebarClickIntent {
     /// that was dragged. See the file's doc comment.
     static let dragThreshold: CGFloat = 4.0
 
-    /// Width, from the row view's leading edge, of the strip where a header click collapses.
-    /// The chevron is a SwiftUI `Image`, not an `NSControl`, so there is no view to hit-test —
-    /// the zone is geometry. The earlier note here rejected a "reserved strip of guessed width"
-    /// because the WHOLE row toggled then and a strip would have shrunk the target; now the row
-    /// body selects the project (the per-project view) and only the chevron may collapse, so a
-    /// strip is the only way to tell the two apart. 22pt covers the list's leading inset plus the
-    /// `.imageScale(.small)` chevron with margin.
-    static let chevronZoneWidth: CGFloat = 22
+    /// Width, from the row's CONTENT leading edge (its cell view, see
+    /// `SidebarInputMonitor.contentLeadingX(in:)`), of the strip where a header click collapses:
+    /// everything left of the project name. The chevron is a SwiftUI `Image`, not an
+    /// `NSControl`, so there is no view to hit-test — the zone is geometry. The earlier note here
+    /// rejected a "reserved strip of guessed width" because the WHOLE row toggled then and a
+    /// strip would have shrunk the target; now the row body selects the project (the
+    /// per-project view) and only the chevron may collapse, so a strip is the only way to tell
+    /// the two apart.
+    ///
+    /// Measured, on both OS generations the app ships to: the header's content starts 6pt into
+    /// the cell, the `.imageScale(.small)` chevron spans 6-13 and the name starts at 18 — on
+    /// macOS 15 (UI-test Mac recording) and on macOS 26 (the README capture) alike.
+    ///
+    /// It used to be 22pt from the `NSTableRowView`'s edge. That was right on macOS 26, where
+    /// the cell starts at the row's edge, and wrong on macOS 14/15, where the row view starts at
+    /// the window edge and the cell 10pt inside it: the zone there ended at the glyph's trailing
+    /// edge, so a click just past the glyph — the gap before the name — selected the project
+    /// instead of collapsing it, and `testProjectHeadingsReorderByDragging` failed on the UI-test
+    /// Mac every run. Measuring from the cell is what makes the target the same on both.
+    static let chevronZoneWidth: CGFloat = 18
+
+    /// Whether a press at `pressX` (the row view's coordinates) is on the chevron's side of a
+    /// header: anywhere left of the name, including the row margin before the cell, where
+    /// nothing else lives. `contentLeadingX` is the cell's leading edge in the same space.
+    static func inChevronZone(pressX: CGFloat, contentLeadingX: CGFloat) -> Bool {
+        pressX < contentLeadingX + chevronZoneWidth
+    }
 
     /// Whether a press/release pair should toggle the row it landed on.
     ///

@@ -7,21 +7,49 @@ extension AgentID {
     /// equivalent to setting nothing, so making it a concrete home removes a "nil means
     /// default" branch from every watcher and every launch path.
     var builtInHome: URL {
-        let home = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+        builtInHome(under: URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true))
+    }
+
+    /// The built-in home below an arbitrary root — the user's home in production, a temp
+    /// directory in tests. Spelled as a path RELATIVE to that root because not every agent's
+    /// home is a direct child of it: OpenCode's is two levels down, and code that rebuilt a
+    /// home from `builtInHome.lastPathComponent` alone put it at `~/share`.
+    func builtInHome(under home: URL) -> URL {
         switch self {
         case .claude: return home.appendingPathComponent(".claude", isDirectory: true)
         case .codex:  return home.appendingPathComponent(".codex", isDirectory: true)
+        // grok keeps its login, config and sessions under `$GROK_HOME`, default `~/.grok`
+        // (`GrokProfile.environment`).
+        case .grok:   return home.appendingPathComponent(".grok", isDirectory: true)
+        // agy's own files live under `~/.gemini/antigravity-cli`, but `~/.gemini` is the
+        // directory a migration seeds from (it must be a direct child of `$HOME`, see
+        // `Preferences.migrateAccountsIfNeeded`). Its login is in the keyring, not here — which
+        // is why gemini has exactly one account (unify brief R5).
+        case .gemini: return home.appendingPathComponent(".gemini", isDirectory: true)
+        // OpenCode's home is an XDG DATA ROOT, not its own dot-directory (see
+        // `OpenCodeProfile.homeEnvironmentKey`): two levels down, which is why
+        // `builtInHome(under:)` exists.
+        case .opencode: return home.appendingPathComponent(".local/share", isDirectory: true)
         }
     }
 
-    /// The variable that binds a process to a home. Read by `AgentAdapter.environment(for:)`,
-    /// and nowhere else — callers name accounts, never variables. Spelled by the CLI's profile,
-    /// which planning seats bind through too, so a tab and a seat on one account can never
-    /// name its home differently.
-    var homeEnvironmentKey: String {
+    /// The variable that binds a process to a home, or nil for an agent that has none. Read by
+    /// `AgentAdapter.environment(for:)` and `PreferencesStore.sessionEnvironment`, and nowhere
+    /// else — callers name accounts, never variables. Spelled by the CLI's profile, which
+    /// planning seats bind through too, so a tab and a seat on one account can never name its
+    /// home differently.
+    ///
+    /// nil is gemini's honest answer: `agy` has no home-relocation variable and signs in through
+    /// the OS keyring (`GeminiProfile.environment`), so there is nothing to bind and only its
+    /// built-in account exists. Optional rather than a made-up name, which would be set on every
+    /// gemini launch and bind nothing.
+    var homeEnvironmentKey: String? {
         switch self {
         case .claude: return ClaudeProfile.homeEnvironmentKey
         case .codex:  return CodexProfile.homeEnvironmentKey
+        case .grok:   return GrokProfile.homeEnvironmentKey
+        case .gemini: return nil
+        case .opencode: return OpenCodeProfile.homeEnvironmentKey
         }
     }
 }

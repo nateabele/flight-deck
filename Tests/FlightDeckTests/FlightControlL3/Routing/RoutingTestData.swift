@@ -19,38 +19,38 @@ enum RoutingTestData {
     static let kinds = [tests, snapshot, golden, algorithm, docs]
 
     static let catalogs = AdapterCatalogs([
-        AdapterCatalog(harness: "codex",
+        AdapterCatalog(agent: .codex,
                        models: [ModelEntry(id: "gpt-6-sol", displayName: "GPT-6-Sol", knobs: ["effort"]),
                                 ModelEntry(id: "gpt-6-luna", displayName: "GPT-6-Luna", knobs: ["effort"])],
                        knobSchema: ["effort": ["low", "medium", "high"]], defaultModel: "gpt-6-sol", enabled: true),
-        AdapterCatalog(harness: "claude",
+        AdapterCatalog(agent: .claude,
                        models: [ModelEntry(id: "opus", displayName: "Opus", knobs: ["effort"]),
                                 ModelEntry(id: "haiku", displayName: "Haiku", knobs: ["effort"])],
                        knobSchema: ["effort": ["low", "medium", "high"]], defaultModel: "opus", enabled: true),
     ])
 
     /// `catalogs` with the named harnesses switched off.
-    static func catalogsDisabling(_ off: Set<HarnessID>) -> AdapterCatalogs {
+    static func catalogsDisabling(_ off: Set<AgentID>) -> AdapterCatalogs {
         AdapterCatalogs(catalogs.order.compactMap { h -> AdapterCatalog? in
-            guard var c = catalogs.byHarness[h] else { return nil }
+            guard var c = catalogs.byAgent[h] else { return nil }
             if off.contains(h) { c.enabled = false }
             return c
         })
     }
 
     static let pools = [
-        PoolSummary(id: "codex-default", harness: "codex", label: "codex"),
-        PoolSummary(id: "codex-subs", harness: "codex", label: "codex subscriptions"),
-        PoolSummary(id: "claude-default", harness: "claude", label: "claude"),
-        PoolSummary(id: "claude-subs", harness: "claude", label: "claude subscriptions"),
+        PoolSummary(id: "codex-default", agent: .codex, label: "codex"),
+        PoolSummary(id: "codex-subs", agent: .codex, label: "codex subscriptions"),
+        PoolSummary(id: "claude-default", agent: .claude, label: "claude"),
+        PoolSummary(id: "claude-subs", agent: .claude, label: "claude subscriptions"),
     ]
-    static let defaultPools: [HarnessID: PoolID] = ["codex": "codex-default", "claude": "claude-default"]
+    static let defaultPools: [AgentID: PoolID] = [.codex: "codex-default", .claude: "claude-default"]
 
-    static func rule(_ id: String, _ match: RuleMatch, _ harness: HarnessID, _ model: String,
+    static func rule(_ id: String, _ match: RuleMatch, _ agent: AgentID, _ model: String,
                      knobs: [String: String] = [:], pool: PoolID, fallbackPool: PoolID? = nil,
                      state: RuleState = .confirmed) -> RoutingRule {
         RoutingRule(id: id, sentence: "rule \(id)",
-                    compiled: CompiledRule(match: match, assign: RuleAssign(harness: harness, model: model, knobs: knobs,
+                    compiled: CompiledRule(match: match, assign: RuleAssign(agent: agent, model: model, knobs: knobs,
                                                                             pool: pool, fallbackPool: fallbackPool)),
                     state: state)
     }
@@ -59,15 +59,15 @@ enum RoutingTestData {
     static func r3(pool: PoolID = "codex-subs", fallbackPool: PoolID? = nil, state: RuleState = .confirmed) -> RoutingRule {
         rule("r3", .any([.dimension("test-authoring", atLeast: 0.5), .dimension("algorithmic-reasoning", atLeast: 0.6),
                          .kind("tests")]),
-             "codex", "gpt-6-sol", knobs: ["effort": "high"], pool: pool, fallbackPool: fallbackPool, state: state)
+             .codex, "gpt-6-sol", knobs: ["effort": "high"], pool: pool, fallbackPool: fallbackPool, state: state)
     }
 
     static func context(project: [RoutingRule] = [], global: [RoutingRule] = [], kinds: [TaskKind] = RoutingTestData.kinds,
                         catalogs: AdapterCatalogs = RoutingTestData.catalogs, pools: [PoolSummary] = RoutingTestData.pools,
-                        defaultPools: [HarnessID: PoolID] = RoutingTestData.defaultPools,
-                        defaultHarness: HarnessID? = "claude",
+                        defaultPools: [AgentID: PoolID] = RoutingTestData.defaultPools,
+                        defaultAgent: AgentID? = .claude,
                         index: any CapabilityIndex = NullCapabilityIndex()) -> RoutingContext {
         RoutingContext(projectRules: project, globalRules: global, kinds: kinds, catalogs: catalogs, pools: pools,
-                       defaultPools: defaultPools, defaultHarness: defaultHarness, index: index, now: at)
+                       defaultPools: defaultPools, defaultAgent: defaultAgent, index: index, now: at)
     }
 }

@@ -31,7 +31,7 @@ final class RoutingRenderTests: XCTestCase {
 
     /// Never answers within the render, so the rule it was asked about stays mid-compile.
     private struct HangingCompiler: RuleCompiling {
-        var ref: CompilerRef { CompilerRef(harness: "claude", model: "haiku") }
+        var ref: CompilerRef { CompilerRef(agent: .claude, model: "haiku") }
         func propose(_ input: RuleCompilerInput) async -> RuleProposal {
             try? await Task.sleep(nanoseconds: 60_000_000_000)
             return .unavailable("render")
@@ -46,17 +46,17 @@ final class RoutingRenderTests: XCTestCase {
 
         let prefs = PreferencesStore(persistence: nil)
         let at = Date(timeIntervalSince1970: 1_790_000_000)
-        let haiku = CompilerRef(harness: "claude", model: "haiku")
+        let haiku = CompilerRef(agent: .claude, model: "haiku")
         prefs.globalRoutingRules = [
             RoutingRule(id: "g1", sentence: "Use Codex for unit and integration tests, and for complex algorithms",
                         compiled: CompiledRule(match: .any([.dimension("test-authoring", atLeast: 0.5),
                                                             .dimension("algorithmic-reasoning", atLeast: 0.6), .kind("tests")]),
-                                               assign: RuleAssign(harness: "codex", model: "gpt-6-sol", knobs: ["effort": "high"],
+                                               assign: RuleAssign(agent: .codex, model: "gpt-6-sol", knobs: ["effort": "high"],
                                                                   pool: "codex-default")),
                         state: .compiled, compiledAt: at, compiler: haiku),
             RoutingRule(id: "g2", sentence: "Simple implementation tasks go to Claude Haiku",
                         compiled: CompiledRule(match: .any([.kind("implement-simple")]),
-                                               assign: RuleAssign(harness: "claude", model: "haiku", knobs: ["effort": "low"],
+                                               assign: RuleAssign(agent: .claude, model: "haiku", knobs: ["effort": "low"],
                                                                   pool: "claude-default")),
                         state: .confirmed, compiledAt: at, compiler: haiku, adjusted: true),
             RoutingRule(id: "g3", sentence: "Anything UI-heavy uses Sonnet", state: .failed,
@@ -66,7 +66,7 @@ final class RoutingRenderTests: XCTestCase {
         ]
         let svc = RoutingService(preferences: prefs, kindStore: KindRegistryStore(),
                                  makeCompiler: { HangingCompiler() }, loadCatalogs: { RoutingUIFixture.catalogs },
-                                 pools: DefaultPoolDirectory(harnesses: ["claude", "codex"]), hints: FixtureHints(),
+                                 pools: DefaultPoolDirectory(agents: [.claude, .codex]), hints: FixtureHints(),
                                  tasks: FixtureOpenTasks(), writer: FixtureBlockWriter(), fixtureProjects: [project.path])
         _ = await svc.catalogs()
         svc.startCompile("g4", in: .global)

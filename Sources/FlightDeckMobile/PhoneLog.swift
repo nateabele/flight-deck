@@ -35,7 +35,7 @@ enum PhoneLog {
     /// Read from the bundle with the literal as a fallback, matching `PromptLifecycleLog` on
     /// the Mac: a test bundle has its own identifier, and a subsystem that silently became
     /// the test host's would make `entries(seconds:limit:)` return nothing with no hint why.
-    static let subsystem = Bundle.main.bundleIdentifier ?? "dev.flightdeck.FlightDeckMobile"
+    static let subsystem = Bundle.main.bundleIdentifier ?? "io.radify.flightdeck.FlightDeckMobile"
 
     /// Dialling, connecting, snapshots and resume points — the phone's counterpart to the
     /// Mac's `resume lastSeq=… mode=…` line.

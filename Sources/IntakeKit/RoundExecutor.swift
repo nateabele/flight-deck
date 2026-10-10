@@ -12,10 +12,15 @@ public struct RoundInputs: Sendable {
     public var project: URL
     public var environment: [String: String]
     public var now: @Sendable () -> Date
+    /// The accounts the app resolved for this runner (`<intake>/accounts.json`). nil — no file,
+    /// from a runner a build before R9 spawned — runs every seat on its built-in home, as such
+    /// a runner always did.
+    public var accounts: RunnerAccounts?
     public init(intake: Intake, config: RoundConfig, tape: Tape, store: TapeStore, project: URL,
-                environment: [String: String], now: @escaping @Sendable () -> Date = { Date() }) {
+                environment: [String: String], accounts: RunnerAccounts? = nil,
+                now: @escaping @Sendable () -> Date = { Date() }) {
         self.intake = intake; self.config = config; self.tape = tape; self.store = store
-        self.project = project; self.environment = environment; self.now = now
+        self.project = project; self.environment = environment; self.accounts = accounts; self.now = now
     }
 }
 
@@ -258,7 +263,7 @@ public struct RoundExecutor: Sendable {
             // family makes this a same-family round, and coverage must not count it as two.
             let crossRecord = CrossCheckRecord(
                 proposers: proposers,
-                families: [ModelFamily(primary.outcome.used.harness), ModelFamily(cross.choice.harness)],
+                families: [primary.outcome.used.agent, cross.choice.agent],
                 clusters: result.integrated?.clusters(forChanges: merged.count), blindOrderSeed: seed)
             var files = result.files
             files[CrossCheckRecord.fileName] = try IntakeJSON.encoder.encode(crossRecord)
@@ -555,7 +560,7 @@ public struct RoundExecutor: Sendable {
     private func seat<T: Decodable & Sendable>(_ type: T.Type, _ planned: PlannedRound, _ role: String,
                                                persona: DrafterPersona? = nil, _ choice: ModelChoice, prompt: String,
                                                schema: String, cwd: URL, readable: [URL],
-                                               access: HarnessAccess = .readOnly,
+                                               access: HeadlessAccess = .readOnly,
                                                inputs: RoundInputs, _ record: inout RoundRecord) async throws -> T {
         switch try await attempt(type, runName(planned, role), choice, prompt: prompt, schema: schema, cwd: cwd,
                                  readable: readable, access: access, inputs: inputs) {
@@ -574,7 +579,7 @@ public struct RoundExecutor: Sendable {
     /// always passed explicitly (a codex resume otherwise falls back to its config default).
     private func attempt<T: Decodable & Sendable>(_ type: T.Type, _ name: String, _ choice: ModelChoice, prompt: String,
                                                   schema: String, cwd: URL, readable: [URL],
-                                                  access: HarnessAccess = .readOnly,
+                                                  access: HeadlessAccess = .readOnly,
                                                   resume: String? = nil, isRepair: Bool = false,
                                                   inputs: RoundInputs) async throws -> Attempt<T> {
         try Task.checkCancellation()
@@ -587,27 +592,52 @@ public struct RoundExecutor: Sendable {
         let schemaFile = dir.appendingPathComponent("schema.json")
         try Data(schema.utf8).write(to: schemaFile, options: .atomic)
 
-        let request = HarnessRequest(harness: choice.harness, model: choice.model, effort: choice.effort, cwd: cwd,
+        // The project's account for this agent, as the app resolved it at this runner's start.
+        // An agent the file leaves out was added to the config after the runner started (only
+        // a hand edit can do that): running it on the built-in home would bill an account the
+        // project never chose, so the seat pauses and the next ▶ re-resolves.
+        let billing: RunnerAccounts.Entry?
+        if let accounts = inputs.accounts {
+            guard let entry = accounts.agents[choice.agent] else {
+                return .failed(Diagnosis(category: .harnessError,
+                                         detail: "No account was resolved for \(choice.agent.displayName) when planning started",
+                                         action: "Press play again so Flight Deck picks this project's \(choice.agent.displayName) account."),
+                               sessionID: nil)
+            }
+            billing = entry
+        } else {
+            billing = nil
+        }
+        let request = HeadlessRequest(agent: choice.agent, model: choice.model, effort: choice.effort, cwd: cwd,
                                      readableDirs: readable, prompt: prompt, schemaFile: schemaFile, schemaJSON: schema,
-                                     resumeSessionID: resume, access: access, account: choice.account)
+                                     resumeSessionID: resume, access: access, account: billing?.ref)
         // `build` traps on an invalid write-mode request; checking first turns a wiring bug
         // into a paused round instead of a crashed runner.
-        if let invalid = HarnessCommand.validate(request) {
-            return .failed(Diagnosis(category: .harnessError, detail: "invalid harness request: \(invalid)",
+        if let invalid = HeadlessCommand.validate(request) {
+            return .failed(Diagnosis(category: .harnessError, detail: "invalid headless request: \(invalid)",
                                      action: "This is a Flight Deck bug — report it."), sessionID: nil)
         }
         // A harness with no builder yet (grok/gemini until Tracks G/M) pauses the round with the
         // reason rather than crashing it or guessing an argv. `AvailableModels` keeps such a
         // harness out of every config, so reaching this means a hand-edited or newer intake.
         let command: (executable: String, arguments: [String], unsetEnvironment: [String])
-        do { command = try HarnessCommand.build(request, home: userHome) }
-        catch {
-            return .failed(Diagnosis(category: .harnessError, detail: "\(choice.harness.rawValue) cannot run in planning rounds yet: \(error)",
-                                     action: "Switch this slot to another harness."), sessionID: nil)
+        do { command = try HeadlessCommand.build(request, home: userHome) }
+        catch .modelOutsideFamily(let agent, let model) {
+            return .failed(Diagnosis(category: .harnessError,
+                                     detail: "\(model) is not a \(agent.displayName) model",
+                                     action: "Pick a \(agent.displayName) model for this slot."), sessionID: nil)
         }
-        // The seat's own account, when the Rounds editor bound one: nil is the built-in home.
-        let environment = HarnessCommand.environment(for: command, base: inputs.environment, home: userHome,
+        catch {
+            return .failed(Diagnosis(category: .harnessError, detail: "\(choice.agent.rawValue) cannot run in planning rounds yet: \(error)",
+                                     action: "Switch this slot to another agent."), sessionID: nil)
+        }
+        // The project's account for the seat's agent (`billing`): nil is the built-in home.
+        let environment = HeadlessCommand.environment(for: command, base: inputs.environment, home: userHome,
                                                      account: request.account)
+        let profile = AgentProfiles.profile(for: choice.agent)
+        if profile.headlessSignInPreflight, let signedOut = await signedOutDiagnosis(profile, cwd: cwd, environment: environment) {
+            return .failed(signedOut, sessionID: nil)
+        }
 
         // stdout is appended live, chunk by chunk as the child writes it, so the stream on disk
         // is never more than a pipe read behind the child — the runner's reader thread is the
@@ -619,8 +649,8 @@ public struct RoundExecutor: Sendable {
         }
         let stream = try FileHandle(forWritingTo: stdoutFile)
         defer { try? stream.close() }
-        let activity = ActivityPublisher(harness: choice.harness, project: inputs.project, cwd: cwd,
-                                         destination: dir.appendingPathComponent("activity.json"), now: inputs.now)
+        let activity = ActivityPublisher(agent: choice.agent, project: inputs.project, cwd: cwd,
+                                         accountID: billing?.accountID, destination: dir.appendingPathComponent("activity.json"), now: inputs.now)
         activity.start()
 
         let runFile = dir.appendingPathComponent("run.json")
@@ -654,7 +684,7 @@ public struct RoundExecutor: Sendable {
         var outcome: Attempt<T>
         do {
             guard result.exitCode == 0 else { throw NonZeroExit() }
-            let parsed = try HarnessOutput.parse(choice.harness, stdout: result.stdout)
+            let parsed = try HeadlessOutput.parse(choice.agent, stdout: result.stdout)
             session = parsed.sessionID
             do {
                 outcome = .ok(try RoundPrompts.decode(type, parsed.structured), sessionID: parsed.sessionID)
@@ -662,12 +692,14 @@ public struct RoundExecutor: Sendable {
                 // Classified against the error alone, not stdout: a plan that merely MENTIONS
                 // "401" or "rate limit" must not read as an auth or quota failure.
                 outcome = .failed(FailureDiagnosis.classify(exitCode: 0, stdout: Data(), stderr: "", parseError: error,
-                                                            harness: choice.harness), sessionID: parsed.sessionID)
+                                                            agent: choice.agent), sessionID: parsed.sessionID)
             }
         } catch {
+            // agy reports its conversation even on a turn that produced no answer, and that
+            // turn is resumable (`SchemaRepair`); every other harness still reports none here.
             outcome = .failed(FailureDiagnosis.classify(exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr,
-                                                        parseError: error is NonZeroExit ? nil : error, harness: choice.harness),
-                              sessionID: nil)
+                                                        parseError: error is NonZeroExit ? nil : error, agent: choice.agent),
+                              sessionID: error is NonZeroExit ? nil : HeadlessOutput.reportedSession(choice.agent, stdout: result.stdout))
         }
         // The finished record goes down BEFORE stderr: a write that fails would otherwise
         // leave a pid with no `finished`, which a restart's reaper reads as a child still
@@ -680,7 +712,7 @@ public struct RoundExecutor: Sendable {
         // (Track M); it is nil for every native-schema harness, so claude/codex never get here.
         // The repair runs in its own `-repair` run dir so the failed answer stays on disk.
         if case .failed(let diagnosis, let failedSession) = outcome,
-           let repair = SchemaRepair.retry(profile: AgentProfiles.profile(for: choice.harness), failure: diagnosis,
+           let repair = SchemaRepair.retry(profile: AgentProfiles.profile(for: choice.agent), failure: diagnosis,
                                            sessionID: failedSession, access: access, isRepair: isRepair) {
             return try await attempt(type, name + "-repair", choice, prompt: repair.prompt, schema: schema, cwd: cwd,
                                      readable: readable, access: access, resume: repair.resumeSessionID,
@@ -690,6 +722,21 @@ public struct RoundExecutor: Sendable {
     }
 
     private struct NonZeroExit: Error {}
+
+    /// The sign-in preflight (`AgentProfile.headlessSignInPreflight`): a CLI whose headless run
+    /// starts an interactive sign-in when signed out — `agy -p` opens a Google sign-in in the
+    /// human's browser — is checked with its read-only `signInCheck` first, and a signed-out
+    /// account pauses the seat as `authExpired` without the run ever being spawned. A check that
+    /// cannot even run falls through to the real run, whose own failure is then diagnosed.
+    private func signedOutDiagnosis(_ profile: any AgentProfile, cwd: URL, environment: [String: String]) async -> Diagnosis? {
+        let check = profile.signInCheck
+        guard let result = try? await runner.run(executable: profile.binaryName, arguments: check.arguments,
+                                                 cwd: cwd, environment: environment) else { return nil }
+        let output = SignInCheckOutput(stdout: String(decoding: result.stdout, as: UTF8.self), stderr: result.stderr,
+                                       exitCode: result.exitCode)
+        guard case .signedOut(let hint) = check.readiness(output) else { return nil }
+        return Diagnosis(category: .authExpired, detail: hint, action: hint)
+    }
 
     private static func write(_ run: RunRecord, to url: URL) throws {
         try IntakeJSON.encoder.encode(run).write(to: url, options: .atomic)

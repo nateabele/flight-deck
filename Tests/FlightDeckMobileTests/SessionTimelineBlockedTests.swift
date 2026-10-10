@@ -605,4 +605,88 @@ final class SessionTimelineBlockedTests: XCTestCase {
                            promptAgent: "a28ad87b")
         XCTAssertNil(model.blockedPrompt, "the main feed's call is not the subagent's")
     }
+
+    // MARK: A dialog the Mac sends (gemini)
+
+    /// agy's words for its dialog, as the Mac sends them — the feed here never holds a record
+    /// for a waiting agy call, so this is the only place the card can come from.
+    private func geminiOffer(_ call: String, tool: String = "write_to_file",
+                             summary: String = "Create a.txt") -> WireOpenPrompt {
+        WireOpenPrompt(.permission(callID: call, tool: tool, summary: summary))
+    }
+
+    /// **The card a gemini tab never had.** An empty feed, the Mac naming `call_9` and sending
+    /// its words: the card is drawn from them, and an answer names that call.
+    func testAGeminiDialogIsDrawnFromTheMacsWordsAndAnsweredByItsCall() {
+        let (model, stub) = makeModel()
+        model.loadLatest()
+        stub.answer(.success(page([], session: model.sessionID)))
+        model.updateStatus(agent: "gemini", activity: "waiting", call: .call("call_9"),
+                           offered: geminiOffer("call_9"))
+        XCTAssertEqual(model.blockedPrompt,
+                       .permission(callID: "call_9", tool: "write_to_file", summary: "Create a.txt"))
+
+        model.answer(.deny, to: "call_9")
+        guard case .answerPrompt(model.sessionID, _, "call_9", .deny, nil)? = stub.sent else {
+            return XCTFail("expected a deny naming the sent call, got \(String(describing: stub.sent))")
+        }
+    }
+
+    /// **The Mac's words pass the same veto a derived card does.** A call it no longer names,
+    /// "nothing open", or a session that is not waiting all mean no card.
+    func testTheMacsWordsAreVetoedExactlyLikeADerivedCard() {
+        let (model, stub) = makeModel()
+        model.loadLatest()
+        stub.answer(.success(page([], session: model.sessionID)))
+        model.updateStatus(agent: "gemini", activity: "waiting", call: .call("call_9"),
+                           offered: geminiOffer("call_9"))
+        XCTAssertNotNil(model.blocked(agent: "gemini", activity: "waiting", call: .call("call_9")),
+                        "the premise: while the Mac agrees, the card is drawn")
+        XCTAssertNil(model.blocked(agent: "gemini", activity: "waiting", call: .call("call_10")))
+        XCTAssertNil(model.blocked(agent: "gemini", activity: "waiting", call: .noPrompt))
+        XCTAssertNil(model.blocked(agent: "gemini", activity: "busy", call: .call("call_9")))
+    }
+
+    /// **No dead card.** A supersede replaces the card with the next dialog's; a closed dialog
+    /// leaves none — both from status pushes alone, with nothing fetched.
+    func testASupersededGeminiDialogReplacesTheCardAndAClosedOneClearsIt() {
+        let (model, stub) = makeModel()
+        model.loadLatest()
+        stub.answer(.success(page([], session: model.sessionID)))
+        model.updateStatus(agent: "gemini", activity: "waiting", call: .call("call_9"),
+                           offered: geminiOffer("call_9"))
+        XCTAssertEqual(model.blockedPrompt?.callID, "call_9")
+
+        model.updateStatus(agent: "gemini", activity: "waiting", call: .call("call_10"),
+                           offered: geminiOffer("call_10", tool: "run_command", summary: "ls"))
+        XCTAssertEqual(model.blockedPrompt,
+                       .permission(callID: "call_10", tool: "run_command", summary: "ls"))
+
+        model.updateStatus(agent: "gemini", activity: "waiting", call: .noPrompt, offered: nil)
+        XCTAssertNil(model.blockedPrompt)
+    }
+
+    /// A kind a newer Mac adds is not drawn as anything this build would have to guess at.
+    func testAnOfferedKindThisBuildCannotDrawIsNoCard() {
+        let (model, stub) = makeModel()
+        model.loadLatest()
+        stub.answer(.success(page([], session: model.sessionID)))
+        model.updateStatus(agent: "gemini", activity: "waiting", call: .call("call_9"),
+                           offered: WireOpenPrompt(callID: "call_9", kind: "survey"))
+        XCTAssertNil(model.blockedPrompt)
+    }
+
+    /// A pushed dialog ends the chase at once: there is no record to wait for.
+    func testAnOfferedDialogIsNeverChased() async {
+        let (model, stub) = makeModel()
+        model.promptRetries = Array(repeating: .milliseconds(30), count: 3)
+        model.loadLatest()
+        stub.answer(.success(page([], session: model.sessionID)))
+        model.updateStatus(agent: "gemini", activity: "waiting", call: .call("call_9"),
+                           offered: geminiOffer("call_9"))
+        let asked = stub.requests.count
+        await model.chaseBlockedPrompt(agent: "gemini", activity: "waiting", call: .call("call_9"))
+        XCTAssertEqual(stub.requests.count, asked, "nothing to fetch for a card already in hand")
+        XCTAssertFalse(model.blockedChaseExhausted)
+    }
 }

@@ -17,6 +17,11 @@ final class SessionSleepController {
     private let inputs: SleepInputs
     private let tearDownSurface: (UUID) -> Void
     private let rebuildSurface: (UUID) -> Void
+    /// Runs as an agent is frozen, BEFORE its surface is torn down: the last moment its screen
+    /// can still be read (`SessionStore.agentFroze` reads the composer draft there) and the
+    /// moment its pool lease stops counting — a frozen agent bills nothing, and holding its
+    /// lease would starve the pool for as long as it sleeps.
+    private let onFreeze: (UUID) -> Void
     /// Live Off switch: consulted on every `tick()`, not read once at construction — unlike
     /// `policy`'s threshold, flipping this in Preferences must take effect immediately rather
     /// than waiting for the next launch. Defaults to `{ true }` so every existing
@@ -44,11 +49,13 @@ final class SessionSleepController {
          resolver: AgentGroupResolving, inputs: SleepInputs,
          tearDownSurface: @escaping (UUID) -> Void,
          rebuildSurface: @escaping (UUID) -> Void = { _ in },
+         onFreeze: @escaping (UUID) -> Void = { _ in },
          sleepEnabled: @escaping () -> Bool = { true },
          evaluationInterval: TimeInterval = 0, now: @escaping () -> Date) {
         self.policy = policy; self.daemonControl = daemonControl; self.inspector = inspector
         self.resolver = resolver; self.inputs = inputs
         self.tearDownSurface = tearDownSurface; self.rebuildSurface = rebuildSurface
+        self.onFreeze = onFreeze
         self.sleepEnabled = sleepEnabled; self.evaluationInterval = evaluationInterval
         self.now = now
     }
@@ -107,6 +114,7 @@ final class SessionSleepController {
     }
 
     private func sleep(_ id: UUID) {
+        onFreeze(id)               // first: the surface is still there to read
         tearDownSurface(id)        // Axis B: drop the attach client (detach path)
         daemonControl.stop(id)     // Axis A: SIGSTOP the agent group
         asleep.insert(id)
@@ -120,5 +128,14 @@ final class SessionSleepController {
         daemonControl.cont(id)     // ensure the agent is running FIRST
         asleep.remove(id)
         rebuildSurface(id)         // then re-attach; the daemon's ring replay restores the screen
+    }
+
+    /// Stops tracking a frozen session WITHOUT resuming it — for a thaw that replaces the agent
+    /// instead of waking it (`SessionStore.rollOver` moves the conversation to another account
+    /// and kills the frozen process). Calling `wake` there would SIGCONT an agent on a spent
+    /// account and re-attach a surface that is about to be thrown away.
+    func forget(_ id: UUID) {
+        asleep.remove(id)
+        idleSince[id] = nil
     }
 }

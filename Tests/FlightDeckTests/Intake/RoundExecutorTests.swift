@@ -8,7 +8,7 @@ final class ScriptedHarnessRunner: CommandRunner, @unchecked Sendable {
     struct Call {
         var executable: String, arguments: [String], cwd: URL, environment: [String: String], processGroup: Bool
         var prompt: String {
-            if executable == "claude", let i = arguments.firstIndex(of: "-p") { return arguments[i + 1] }
+            if executable == "claude" || executable == "agy", let i = arguments.firstIndex(of: "-p") { return arguments[i + 1] }
             return arguments.last ?? ""
         }
         var model: String? {
@@ -30,7 +30,7 @@ final class ScriptedHarnessRunner: CommandRunner, @unchecked Sendable {
             guard let i = arguments.firstIndex(of: "--output-schema") else { return nil }
             return URL(fileURLWithPath: arguments[i + 1]).deletingLastPathComponent()
         }
-        var isResume: Bool { arguments.contains("resume") || arguments.contains("--resume") }
+        var isResume: Bool { arguments.contains("resume") || arguments.contains("--resume") || arguments.contains("--conversation") }
     }
 
     private let lock = NSLock()
@@ -50,6 +50,9 @@ final class ScriptedHarnessRunner: CommandRunner, @unchecked Sendable {
     var bvExitCode: Int32 = 0
     var bvStdout = #"{"ok":true}"#
     var nextPID: Int32 = 4000
+    /// What `agy models` (the gemini sign-in preflight) answers. Signed in by default, so a
+    /// gemini seat runs; a test sets the signed-out text to exercise the preflight.
+    var agyModels = CommandResult(stdout: Data("gemini-3.8-pro\n".utf8), stderr: "", exitCode: 0)
     let script: @Sendable (Call) -> CommandResult
     var onCall: (@Sendable (Call) -> Void)?
 
@@ -79,6 +82,7 @@ final class ScriptedHarnessRunner: CommandRunner, @unchecked Sendable {
             let out = arguments.first == "list" ? graphList : graphEdges
             return CommandResult(stdout: Data(out.utf8), stderr: "", exitCode: 0)
         }
+        if executable == "agy", arguments == ["models"] { return agyModels }
         if executable == "bv" {
             // `RoundExecutor.buildShadowAnalytics` — FD's own `bv --robot-insights/-plan/-priority`
             // runs against the shadow, never the agent's. Scripted the same way `br` is above:
@@ -91,7 +95,7 @@ final class ScriptedHarnessRunner: CommandRunner, @unchecked Sendable {
     }
 }
 
-// MARK: - Harness-shaped outputs
+// MARK: - AgentID-shaped outputs
 
 func codexOK(_ session: String, _ json: String) -> CommandResult {
     let started = #"{"type":"thread.started","thread_id":"\#(session)"}"#
@@ -112,9 +116,24 @@ func claudeOK(_ session: String, _ json: String) -> CommandResult {
                          stderr: "", exitCode: 0)
 }
 
+/// `agy --output-format stream-json`'s shape: init, then the final `result` with
+/// `structured_output`.
+func agyOK(_ session: String, _ json: String) -> CommandResult {
+    let structured = try! JSONSerialization.jsonObject(with: Data(json.utf8))
+    let initLine = try! JSONSerialization.data(withJSONObject: ["event": "init", "conversation_id": session])
+    let result = try! JSONSerialization.data(withJSONObject: ["event": "result", "result": [
+        "conversation_id": session, "status": "SUCCESS", "response": json, "structured_output": structured]])
+    return CommandResult(stdout: Data((String(decoding: initLine, as: UTF8.self) + "\n" + String(decoding: result, as: UTF8.self) + "\n").utf8),
+                         stderr: "", exitCode: 0)
+}
+
 /// Answers in whichever shape the call's harness speaks.
 func ok(_ call: ScriptedHarnessRunner.Call, _ session: String, _ json: String) -> CommandResult {
-    call.executable == "claude" ? claudeOK(session, json) : codexOK(session, json)
+    switch call.executable {
+    case "claude": claudeOK(session, json)
+    case "agy": agyOK(session, json)
+    default: codexOK(session, json)
+    }
 }
 
 func failed(_ stderr: String) -> CommandResult { CommandResult(stdout: Data(), stderr: stderr, exitCode: 1) }
@@ -122,8 +141,8 @@ func failed(_ stderr: String) -> CommandResult { CommandResult(stdout: Data(), s
 func json<T: Encodable>(_ value: T) -> String { String(decoding: try! IntakeJSON.encoder.encode(value), as: UTF8.self) }
 
 final class RoundExecutorTests: XCTestCase {
-    let codexA = ModelChoice(harness: .codex, model: "A", effort: "high")
-    let claudeB = ModelChoice(harness: .claude, model: "B", effort: "medium")
+    let codexA = ModelChoice(agent: .codex, model: "A", effort: "high")
+    let claudeB = ModelChoice(agent: .claude, model: "B", effort: "medium")
     let now = Date(timeIntervalSince1970: 1_790_000_000)
     var root: URL!
 
@@ -262,28 +281,77 @@ final class RoundExecutorTests: XCTestCase {
         XCTAssertNil(codex.environment["ANTHROPIC_BASE_URL"])
     }
 
-    /// A seat bound to an account (the Rounds editor's picker) runs in that account's home:
-    /// claude via `CLAUDE_CONFIG_DIR` and that home's own settings `env`, codex via `CODEX_HOME`.
-    /// An unbound seat in the same round still runs on the built-in account.
-    func testASeatBoundToAnAccountRunsInThatAccountsHome() async throws {
+    /// Every seat runs as the account the app resolved for its AGENT when the runner started
+    /// (`RunnerAccounts`, unify brief R9): claude via `CLAUDE_CONFIG_DIR` and that home's own
+    /// settings `env`, codex via `CODEX_HOME`. Both seats of one agent bill the same account, and
+    /// each seat's activity records the account id usage attribution credits.
+    func testEverySeatRunsAsItsAgentsResolvedAccount() async throws {
         let workHome = root.appendingPathComponent("accounts/work")
         try FileManager.default.createDirectory(at: workHome, withIntermediateDirectories: true)
         try Data(#"{"env":{"ANTHROPIC_BASE_URL":"http://work"}}"#.utf8).write(to: workHome.appendingPathComponent("settings.json"))
-        let work = AgentAccountRef(id: "work", home: workHome)
-        var boundClaude = claudeB; boundClaude.account = work
-        var boundCodex = codexA; boundCodex.model = "C"; boundCodex.account = AgentAccountRef(id: "cx", home: workHome)
+        let codexHome = root.appendingPathComponent("accounts/cx")
+        let claudeID = UUID(), codexID = UUID()
+        let accounts = RunnerAccounts(agents: [
+            .claude: RunnerAccounts.Entry(accountID: claudeID, home: workHome, label: "Work pool · Work"),
+            .codex: RunnerAccounts.Entry(accountID: codexID, home: codexHome, label: "CX"),
+        ])
+        var codexC = codexA; codexC.model = "C"
         let runner = ScriptedHarnessRunner { call in ok(call, "s-\(call.model!)", json(DraftOutput(plan: "# P"))) }
-        let cfg = config(drafters: [Slot(boundClaude), Slot(boundCodex), Slot(codexA)])
-        _ = try checkpoint(try await executor(runner).run(PlannedRound(stage: .draft, round: 0, major: true), inputs(cfg)))
+        let cfg = config(drafters: [Slot(claudeB), Slot(codexC), Slot(codexA)])
+        var inputs = inputs(cfg)
+        inputs.accounts = accounts
+        _ = try checkpoint(try await executor(runner).run(PlannedRound(stage: .draft, round: 0, major: true), inputs))
         let drafters = runner.calls("drafter")
         let claude = try XCTUnwrap(drafters.first { $0.executable == "claude" })
         XCTAssertEqual(claude.environment["CLAUDE_CONFIG_DIR"], workHome.path)
         XCTAssertEqual(claude.environment["ANTHROPIC_BASE_URL"], "http://work")
         XCTAssertNil(claude.environment["CLAUDE_CODE_CHILD_SESSION"])
-        let codexBound = try XCTUnwrap(drafters.first { $0.model == "C" })
-        XCTAssertEqual(codexBound.environment["CODEX_HOME"], workHome.path)
-        let codexBuiltIn = try XCTUnwrap(drafters.first { $0.model == "A" })
-        XCTAssertNil(codexBuiltIn.environment["CODEX_HOME"], "an unbound seat stays on the built-in account")
+        for model in ["A", "C"] {
+            let codex = try XCTUnwrap(drafters.first { $0.model == model })
+            XCTAssertEqual(codex.environment["CODEX_HOME"], codexHome.path, "every codex seat bills the project's codex account")
+        }
+        let activities = store.runNames(forRound: PlannedRound(stage: .draft, round: 0, major: true)).compactMap { name -> SeatActivity? in
+            let file = store.runDirectory(name).appendingPathComponent("activity.json")
+            return try? IntakeJSON.decoder.decode(SeatActivity.self, from: Data(contentsOf: file))
+        }
+        XCTAssertEqual(Set(activities.filter { $0.agent == .claude }.map(\.accountID)), [claudeID])
+        XCTAssertEqual(Set(activities.filter { $0.agent == .codex }.map(\.accountID)), [codexID])
+    }
+
+    /// A built-in account is credited by id but its CLI keeps its own default home: no home
+    /// variable is set, exactly as before planning billed projects.
+    func testABuiltInAccountSetsNoHomeVariable() async throws {
+        let builtIn = UUID()
+        let runner = ScriptedHarnessRunner { call in ok(call, "s", json(DraftOutput(plan: "# P"))) }
+        var inputs = inputs(config(drafters: [Slot(claudeB)]))
+        inputs.accounts = RunnerAccounts(agents: [.claude: RunnerAccounts.Entry(accountID: builtIn, home: nil, label: "Default"),
+                                                  .codex: RunnerAccounts.Entry(accountID: nil, home: nil, label: "Codex built-in")])
+        _ = try checkpoint(try await executor(runner).run(PlannedRound(stage: .draft, round: 0, major: true), inputs))
+        let claude = try XCTUnwrap(runner.calls("drafter").first)
+        XCTAssertNil(claude.environment["CLAUDE_CONFIG_DIR"])
+    }
+
+    /// No `accounts.json` (a runner a pre-R9 build spawned): every seat on its built-in home.
+    func testNoResolvedAccountsRunsEverySeatOnItsBuiltInHome() async throws {
+        let runner = ScriptedHarnessRunner { call in ok(call, "s-\(call.model!)", json(DraftOutput(plan: "# P"))) }
+        _ = try checkpoint(try await executor(runner).run(PlannedRound(stage: .draft, round: 0, major: true),
+                                                          inputs(config(drafters: [Slot(claudeB), Slot(codexA)]))))
+        for call in runner.calls("drafter") {
+            XCTAssertNil(call.environment["CLAUDE_CONFIG_DIR"])
+            XCTAssertNil(call.environment["CODEX_HOME"])
+        }
+    }
+
+    /// An agent the runner's accounts leave out pauses its seat rather than billing a login the
+    /// project never chose.
+    func testAnAgentWithNoResolvedAccountPausesRatherThanRunOnTheBuiltInHome() async throws {
+        let runner = ScriptedHarnessRunner { call in ok(call, "s", json(DraftOutput(plan: "# P"))) }
+        var inputs = inputs(config(drafters: [Slot(claudeB)]))
+        inputs.accounts = RunnerAccounts(agents: [.codex: RunnerAccounts.Entry(accountID: nil, home: nil, label: "Codex built-in")])
+        let result = try await executor(runner).run(PlannedRound(stage: .draft, round: 0, major: true), inputs)
+        guard case .paused(let diagnosis, _) = result else { return XCTFail("expected a pause, got \(result)") }
+        XCTAssertTrue(diagnosis.detail.contains("No account was resolved for Claude"), diagnosis.detail)
+        XCTAssertTrue(runner.calls("drafter").isEmpty, "nothing ran")
     }
 
     func testDrafterFallsBackOnce() async throws {

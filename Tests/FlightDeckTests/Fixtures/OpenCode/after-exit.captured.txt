@@ -1,0 +1,47 @@
+                                   ▄
+  █▀▀█ █▀▀█ █▀▀█ █▀▀▄ █▀▀▀ █▀▀█ █▀▀█ █▀▀█
+  █  █ █  █ █▀▀▀ █  █ █    █  █ █  █ █▀▀▀ run `chsh -s /bin/zsh`.
+  ▀▀▀▀ █▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀pport.apple.com/kb/HT208050.
+me@mac proj2 % opencode attach http://127.0.0.1:47940 --dir /private/tmp/claude-501/-Users-me-Projects-flight-deck/c2d6bebb-899f-475d-b216-6e
+  Session   session 8/fx/proj2 -s ses_ef6c9549fffeN3i4Mb4QHBuHGh
+  Continue  opencode -s ses_ef6c9549fffeN3i4Mb4QHBuHGh
+
+me@mac proj2 %
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

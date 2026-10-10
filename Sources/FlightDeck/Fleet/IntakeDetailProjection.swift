@@ -79,7 +79,7 @@ enum IntakeDetailProjection {
             verdicts: c.record.tally.map { WireVerdicts(agreed: $0.agree, somewhat: $0.somewhat, declined: $0.disagree) },
             note: c.record.note, sectionsChanged: c.record.sectionsChanged,
             agents: slots.map { s in
-                WireRoundAgent(role: s.role, ran: "\(s.used.harness.rawValue) · \(s.used.model) · \(s.used.effort)",
+                WireRoundAgent(role: s.role, ran: "\(s.used.agent.rawValue) · \(s.used.model) · \(s.used.effort)",
                                status: s.status.rawValue, detail: s.diagnosis?.detail)
             },
             // Located against no blocks: the round list names the notes; the plan screen pins them.

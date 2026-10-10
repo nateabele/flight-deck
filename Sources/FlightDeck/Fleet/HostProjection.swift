@@ -21,6 +21,11 @@ enum HostProjection {
         case .refused(let reason):
             status = "refused"
             detail = reason
+        case .keyUnavailable(let reason):
+            // Still "offline" for scripts that match on it (testq does), with the reason that
+            // a bare "offline" hid for two hours on 2026-10-10.
+            status = "offline"
+            detail = reason
         }
         return WireHost(name: record.name, platform: record.platform, status: status,
                         detail: detail, lastSeenAt: record.lastSeenAt)
@@ -57,6 +62,9 @@ enum HostProjection {
                 return ("host_refused", reason)
             }
             let seen = record?.lastSeenAt.map { "last seen \(relative($0, now: now))" } ?? "never seen"
+            if let record, case .keyUnavailable(let reason)? = state(record.slot) {
+                return ("host_offline", "\(shown) is offline (\(seen)): \(reason)")
+            }
             return ("host_offline", "\(shown) is offline (\(seen))")
         case HostLinkError.timedOut:
             return ("host_timeout", "\(shown) did not answer within \(Int(HostLink.requestTimeout))s")

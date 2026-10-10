@@ -1,4 +1,5 @@
 import Foundation
+import IntakeKit
 
 /// A single terminal session. In this foundation a session is just a titled
 /// terminal rooted at a working directory; agent/worktree state comes later.

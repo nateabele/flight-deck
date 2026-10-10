@@ -1,5 +1,6 @@
 import FleetKit
 import Foundation
+import IntakeKit
 
 /// One entry from codex's `thread/list` — trimmed to exactly what `threads(inDirectory:)`'s
 /// caller (`CodexPinReconciler`) needs to tell whether a tab is still driving the thread its
@@ -25,6 +26,9 @@ private let codexThreadListLimit = 10
 struct CodexAdapter: AgentAdapter {
     static let id: AgentID = .codex
 
+    /// The headless facet (unify brief R3): the profile planning runs this agent through.
+    nonisolated static var profile: any AgentProfile { AgentProfiles.profile(for: id) }
+
     /// **Typed at the pty, never through the app-server — and the distinction is permanent.**
     ///
     /// The app-server route is genuinely closed: a codex tab is a `codex resume <id>` TUI
@@ -41,6 +45,8 @@ struct CodexAdapter: AgentAdapter {
     /// safe (codex's own status line, as a positive discriminator) and for why the draft is
     /// restored by re-typing rather than by the Ctrl-Y ring codex was never shown to keep.
     static let textChannel: AgentTextChannel? = CodexTextChannel()
+    /// Carries a conversation to another account's home (`AgentID.conversationTransfer`).
+    static let conversationTransfer: AgentConversationTransfer? = CodexConversationTransfer()
 
     /// **The stage `thread/name/set` cannot reach.** That call renames the thread's own
     /// metadata over JSON-RPC, but it types nothing at the pty a running `codex resume` is
@@ -146,6 +152,11 @@ struct CodexAdapter: AgentAdapter {
     static let openPromptReader: AgentOpenPromptReader? = nil
 
     static let searchCorpus: AgentSearchCorpus? = CodexSearchCorpus()
+
+    /// **`nil`.** A codex tab's turns run in the `codex resume` TUI that holds the thread's
+    /// writer lock, not through the app-server Flight Deck talks to, so no approval request
+    /// reaches Flight Deck with an id it could answer by.
+    static let promptResponder: AgentPromptResponder? = nil
 
     let rpc: CodexRPC
 

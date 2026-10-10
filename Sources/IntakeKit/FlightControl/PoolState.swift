@@ -16,7 +16,7 @@ public struct CapacityPool: Codable, Equatable, Sendable, Identifiable {
     /// Stable for the pool's life; renaming changes only `label`. Execution blocks store this.
     public var id: PoolID
     public var label: String
-    public var harness: HarnessID
+    public var agent: AgentID
     public var kind: Kind
     /// Hosted: account ids, in lease order. Empty for a local pool.
     public var accounts: [UUID]
@@ -27,30 +27,37 @@ public struct CapacityPool: Codable, Equatable, Sendable, Identifiable {
     public var endpoint: String?
     public var concurrencyCap: Int
 
-    public init(id: PoolID, label: String, harness: HarnessID, kind: Kind, accounts: [UUID],
+    public init(id: PoolID, label: String, agent: AgentID, kind: Kind, accounts: [UUID],
                 softThreshold: Double, hardThreshold: Double, endpoint: String?, concurrencyCap: Int) {
-        self.id = id; self.label = label; self.harness = harness; self.kind = kind; self.accounts = accounts
+        self.id = id; self.label = label; self.agent = agent; self.kind = kind; self.accounts = accounts
         self.softThreshold = softThreshold; self.hardThreshold = hardThreshold
         self.endpoint = endpoint; self.concurrencyCap = concurrencyCap
     }
 
-    public static func hosted(id: PoolID, label: String, harness: HarnessID, accounts: [UUID],
+    public static func hosted(id: PoolID, label: String, agent: AgentID, accounts: [UUID],
                               soft: Double = defaultSoftThreshold, hard: Double = defaultHardThreshold) -> CapacityPool {
-        CapacityPool(id: id, label: label, harness: harness, kind: .hosted, accounts: accounts,
+        CapacityPool(id: id, label: label, agent: agent, kind: .hosted, accounts: accounts,
                      softThreshold: soft, hardThreshold: hard, endpoint: nil, concurrencyCap: defaultConcurrencyCap)
     }
 
-    public static func local(id: PoolID, label: String, harness: HarnessID, endpoint: String,
+    public static func local(id: PoolID, label: String, agent: AgentID, endpoint: String,
                              cap: Int = defaultConcurrencyCap) -> CapacityPool {
-        CapacityPool(id: id, label: label, harness: harness, kind: .local, accounts: [],
+        CapacityPool(id: id, label: label, agent: agent, kind: .local, accounts: [],
                      softThreshold: defaultSoftThreshold, hardThreshold: defaultHardThreshold,
                      endpoint: endpoint, concurrencyCap: cap)
     }
 
     /// `<adapter>-default`: the pool every adapter gets without asking (L3-U §2).
-    public static func defaultID(for harness: HarnessID) -> PoolID { PoolID("\(harness.rawValue)-default") }
+    public static func defaultID(for agent: AgentID) -> PoolID { PoolID("\(agent.rawValue)-default") }
 
-    public var isDefault: Bool { id == Self.defaultID(for: harness) }
+    public var isDefault: Bool { id == Self.defaultID(for: agent) }
+
+    /// `agent` keeps its pre-unification JSON key, `harness` (unify brief R1): pools are stored
+    /// in `preferences.v1` (`capacity.pools`, kept as the downgrade mirror of the Accounts list).
+    private enum CodingKeys: String, CodingKey {
+        case agent = "harness"
+        case id, label, kind, accounts, softThreshold, hardThreshold, endpoint, concurrencyCap
+    }
 }
 
 public enum PoolValidationError: Error, Equatable, Sendable {

@@ -48,9 +48,18 @@ final class CapabilityIndexUITests: XCTestCase {
             throw XCTSkip("INDEX_UI unset; run with TEST_RUNNER_INDEX_UI=1 -only-testing:FlightDeckUITests/CapabilityIndexUITests")
         }
         continueAfterFailure = false
+        // Fail here, by name, rather than three steps later as "No snapshot yet": the app treats a
+        // missing fixture folder as an empty index, so a run that was not given INDEX_UI_FIXTURE
+        // (smoke-remote.sh straight, not scripts/test-ui-capability-index.sh) looks like a UI bug.
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: fixturePath, isDirectory: &isDirectory), isDirectory.boolValue else {
+            XCTFail("capability index fixture folder does not exist at \(fixturePath); on the UI-test Mac run scripts/test-ui-capability-index.sh, which rsyncs it and sets TEST_RUNNER_INDEX_UI_FIXTURE")
+            return
+        }
         let app = XCUIApplication()
         app.launchArguments += ["-ApplePersistenceIgnoreState", "YES", "-FlightDeckResetState", "YES",
                                 "-FlightDeckCapabilityIndexFixture", fixturePath]
+        dismissFlightDeckCrashReports()
         app.launch()
         app.activate()
         XCTAssertTrue(app.windows.firstMatch.waitForExistence(timeout: 15), "no window appeared")
@@ -58,7 +67,7 @@ final class CapabilityIndexUITests: XCTestCase {
         app.typeKey(",", modifierFlags: .command)
         let prefs = preferencesWindow(app)
         XCTAssertTrue(prefs.waitForExistence(timeout: 10), "Settings never opened")
-        prefs.buttons["Flight Control"].click()
+        prefs.openFlightControlTab()
         prefs.selectFlightControlSection("fc-section-index")
 
         let heatmap = prefs.descendants(matching: .any)["index-heatmap"]
@@ -74,6 +83,13 @@ final class CapabilityIndexUITests: XCTestCase {
         XCTAssertTrue(cell.waitForExistence(timeout: 5))
         XCTAssertTrue(cell.label.hasPrefix("0.80"), "cell label: \(cell.label)")
         shoot(app, "1-heatmap")
+
+        // The refresh's account assignment (round 2, index-refresh-pool): the account-or-pool
+        // picker is on the pane, and with nothing chosen it reads Default.
+        let accountPicker = prefs.descendants(matching: .any)["index-account-picker"].firstMatch
+        XCTAssertTrue(accountPicker.waitForExistence(timeout: 5), "the Refresh agent account picker is missing")
+        let accountTitle = (accountPicker.value as? String) ?? accountPicker.label
+        XCTAssertTrue(accountTitle.hasPrefix("Default"), "an unset index assignment reads Default: \(accountTitle)")
 
         cell.click()
         let citation = app.descendants(matching: .any)["index-citation-url"].firstMatch

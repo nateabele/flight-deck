@@ -19,8 +19,8 @@ import XCTest
 final class ConvergenceRenderTests: XCTestCase {
     private var root: URL!
     private let now = Date()
-    private let codex = ModelChoice(harness: .codex, model: "gpt-6-sol", effort: "high")
-    private let claude = ModelChoice(harness: .claude, model: "opus", effort: "high")
+    private let codex = ModelChoice(agent: .codex, model: "gpt-6-sol", effort: "high")
+    private let claude = ModelChoice(agent: .claude, model: "opus", effort: "high")
 
     override func setUp() {
         super.setUp()
@@ -57,7 +57,7 @@ final class ConvergenceRenderTests: XCTestCase {
             intakes[scenario.name] = intake
         }
 
-        let service = IntakeService(store: store, triageSettings: TriageSettings(harness: .codex, model: "gpt-6-sol", effort: "high"),
+        let service = IntakeService(store: store, triageSettings: TriageSettings(agent: .codex, model: "gpt-6-sol", effort: "high"),
                                     availableModels: .defaults, inject: { _, _, _, _ in true }, hasSession: { _, _ in false })
         await service.launchRecovery?.value
         service.pollTapes()

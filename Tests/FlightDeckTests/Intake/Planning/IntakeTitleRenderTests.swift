@@ -56,7 +56,7 @@ final class IntakeTitleRenderTests: XCTestCase {
         short.state = .needsAnswers
         short.exchanges = [round1, TriageExchange(questions: ["Should it link to docs/AGENT-OPERATIONS.md §2?"])]
         for i in [long, short] { try store.save(i) }
-        let service = IntakeService(store: store, triageSettings: TriageSettings(harness: .codex, model: "m1", effort: "high"),
+        let service = IntakeService(store: store, triageSettings: TriageSettings(agent: .codex, model: "m1", effort: "high"),
                                     availableModels: .defaults, inject: { _, _, _, _ in true }, hasSession: { _, _ in false })
 
         for (name, appearance) in Self.appearances {

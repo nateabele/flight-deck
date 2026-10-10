@@ -45,7 +45,7 @@ final class UsageParsersTests: XCTestCase {
     func testCodexReadingIsWorstAcrossBuckets() throws {
         let buckets = CodexRateLimitParser.readResponse(try UsageFixtures.object("codex-rate-limits-read"))
         let at = usageISO("2026-10-04T18:00:00Z")
-        let r = try XCTUnwrap(CodexRateLimitParser.reading(buckets, account: AccountRef(harness: "codex", id: UUID(), label: "C"), readAt: at))
+        let r = try XCTUnwrap(CodexRateLimitParser.reading(buckets, account: AccountRef(agent: .codex, id: UUID(), label: "C"), readAt: at))
         XCTAssertEqual(r.worstWindow?.name, "codex_bengalfox:five_hour")
         XCTAssertEqual(r.worstWindow?.utilization ?? 0, 0.88, accuracy: 1e-9)
         XCTAssertFalse(r.hardRejection)
@@ -66,7 +66,7 @@ final class UsageParsersTests: XCTestCase {
         let snap: [String: Any] = ["limitId": "codex", "primary": ["usedPercent": 100, "windowDurationMins": 300, "resetsAt": 1791154800],
                                    "rateLimitReachedType": "rate_limit_reached"]
         let buckets = CodexRateLimitParser.readResponse(["rateLimits": snap])
-        let r = CodexRateLimitParser.reading(buckets, account: AccountRef(harness: "codex", id: UUID(), label: "C"), readAt: Date())
+        let r = CodexRateLimitParser.reading(buckets, account: AccountRef(agent: .codex, id: UUID(), label: "C"), readAt: Date())
         XCTAssertEqual(r?.hardRejection, true)
         XCTAssertEqual(r?.worstWindow?.resetsAt, usageISO("2026-10-04T23:00:00Z"))
     }

@@ -82,6 +82,13 @@ public final class CapacityLedger: CapacityReader, PoolAllocator, @unchecked Sen
 
     public func release(_ lease: AccountLease) { lock.withLock { _ = active.removeValue(forKey: lease.id) } }
 
+    /// Re-registers a lease taken by an earlier launch of the app, whose holder outlived it — a
+    /// planning runner under fd-abduco keeps billing across an app quit, but this ledger is
+    /// in-memory and starts empty. Without it a local pool would hand that runner's slot to a
+    /// second holder. Taken as-is, with no headroom check: the holder is already running on it.
+    /// Idempotent by lease id.
+    public func adopt(_ lease: AccountLease) { lock.withLock { active[lease.id] = lease } }
+
     public func activeLeases(pool id: PoolID) -> [AccountLease] {
         lock.withLock { active.values.filter { $0.pool == id }.sorted { $0.id.uuidString < $1.id.uuidString } }
     }
@@ -108,7 +115,7 @@ public final class CapacityLedger: CapacityReader, PoolAllocator, @unchecked Sen
     }
 
     private func activeCount(_ pool: PoolID) -> Int { active.values.filter { $0.pool == pool }.count }
-    private func slot(_ pool: CapacityPool) -> AccountRef { AccountRef(harness: pool.harness, id: nil, label: pool.label) }
+    private func slot(_ pool: CapacityPool) -> AccountRef { AccountRef(agent: pool.agent, id: nil, label: pool.label) }
 
     private func strictestHard(for account: UUID) -> Double {
         pools.filter { $0.kind == .hosted && $0.accounts.contains(account) }.map(\.hardThreshold).min()

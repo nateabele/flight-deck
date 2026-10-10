@@ -130,6 +130,18 @@ final class SessionStore: ObservableObject {
     /// Rebuilt wholesale by every `commitStatuses`, like `openPromptCalls` beside it.
     private(set) var openPromptAgents: [UUID: String] = [:]
 
+    /// The dialog `openPromptCalls` names, in words, for a tab whose agent's transcript cannot
+    /// carry it (`AgentOpenPromptReader.transcriptCarriesOpenPrompt`) — what goes on the wire as
+    /// `WireSession.openPrompt`. Asked straight after `openPromptProbe` succeeds, like
+    /// `openPromptAgentProbe`, so the id and the words answer about the same derivation. Nil
+    /// for a store with no fleet attached, read as "nothing to send".
+    var openPromptOfferProbe: ((UUID) -> OpenPrompt?)?
+
+    /// This tick's offered dialog for each tab `openPromptOfferProbe` answered for. Rebuilt
+    /// wholesale by every `commitStatuses`, like `openPromptCalls` beside it — which is what
+    /// retires a superseded dialog's words on the same tick that retires its id.
+    private(set) var openPromptOffers: [UUID: OpenPrompt] = [:]
+
     /// Session ids in most-recently-active order (index 0 == current selection).
     /// Consulted by `closeSession` so closing the active tab returns to the tab you
     /// were on before it rather than the top of the sidebar. Not persisted: after a
@@ -522,10 +534,7 @@ final class SessionStore: ObservableObject {
     /// default.
     private func options(for agent: AgentID, project: String) -> AgentOptions {
         let options: AgentOptions
-        switch agent {
-        case .claude: options = preferences?.resolvedOptions(for: agent, project: project) ?? .claude(FlagSet())
-        case .codex:  options = preferences?.resolvedOptions(for: agent, project: project) ?? .codex(CodexThreadOptions())
-        }
+        options = preferences?.resolvedOptions(for: agent, project: project) ?? AgentOptions.empty(for: agent)
         // The bundled plugin rides in as an ordinary `--plugin-dir` entry so it serialises,
         // quotes and round-trips exactly like a user's own. Done here rather than in
         // `ClaudeAdapter` so `launchCommand`/`resumeCommand` stay byte-identical
@@ -560,7 +569,7 @@ final class SessionStore: ObservableObject {
     func launchOptions(for agent: AgentID, project: String, overrides: LaunchOverrides?) -> Result<AgentOptions, AgentLaunchError> {
         let base = options(for: agent, project: project)
         guard let overrides, overrides.model != nil || !overrides.knobs.isEmpty else { return .success(base) }
-        guard let capabilities = routingCapabilities.capabilities(for: agent.harnessID) else {
+        guard let capabilities = routingCapabilities.capabilities(for: agent) else {
             return .failure(.prepareFailed("\(agent.displayName) has no routing capabilities"))
         }
         switch capabilities.applying(overrides, to: base) {
@@ -836,6 +845,91 @@ final class SessionStore: ObservableObject {
     /// must not clear a guard the first still needs.
     private var codexCreationsInFlight: [UUID?: Int] = [:]
 
+    /// OpenCode's half of the adapter/runtime registries: the account's `opencode serve`, and
+    /// the adapter and runtime that both speak to it. Held together for `CodexStack`'s reason —
+    /// neither is usable without the server the other also points at.
+    @MainActor
+    private final class OpenCodeStack {
+        let server: OpenCodeServing
+        let adapter: OpenCodeAdapter
+        let runtime: OpenCodeRuntime
+
+        init(
+            server: OpenCodeServing,
+            searchIndex: @escaping () -> SearchIndex?,
+            projectPath: @escaping (UUID) -> String?,
+            workingDirectory: @escaping (UUID) -> String?
+        ) {
+            self.server = server
+            adapter = OpenCodeAdapter(server: server)
+            runtime = OpenCodeRuntime(
+                server: server, searchIndex: searchIndex,
+                projectPath: projectPath, workingDirectory: workingDirectory
+            )
+        }
+    }
+
+    /// One per account, built on first use, like `codexStacks` — and building one starts
+    /// nothing: `startOpenCode` is the only thing that adopts or spawns a server.
+    private var openCodeStacks: [UUID?: OpenCodeStack] = [:]
+
+    /// The start in flight per account, so N tabs created at once wait on one spawn. Cleared
+    /// when it finishes, success or not, because `OpenCodeServer.start` re-checks health and is
+    /// cheap to repeat, and a server that died between two creations must be noticed by the
+    /// second one rather than answered from a stale success.
+    private var openCodeStarts: [UUID?: Task<Void, Error>] = [:]
+
+    /// `codexCreationsInFlight`'s twin: a creation between "asked for a server" and "tab
+    /// inserted" must not have that server stopped under it by a concurrent close.
+    private var openCodeCreationsInFlight: [UUID?: Int] = [:]
+
+    /// Test seam: what serves an account's home. The committed suite installs a fake, so no
+    /// test ever spawns `opencode`.
+    var openCodeServerFactory: (URL) -> OpenCodeServing = { OpenCodeServer(home: $0) }
+
+    var openCodeStackCountForTesting: Int { openCodeStacks.count }
+
+    private func makeOpenCodeStackIfNeeded(account: UUID?) -> OpenCodeStack {
+        if let existing = openCodeStacks[account] { return existing }
+        // Live closures for the same reason `makeCodexStackIfNeeded` gives.
+        let stack = OpenCodeStack(
+            server: openCodeServerFactory(home(ofAccount: account, agent: .opencode)),
+            searchIndex: { [weak self] in self?.searchIndex },
+            projectPath: { [weak self] conversationID in
+                self?.repos.flatMap(\.sessions)
+                    .first { $0.pinnedConversationID == conversationID }?.workingDirectory
+            },
+            workingDirectory: { [weak self] conversationID in
+                self?.repos.flatMap(\.sessions)
+                    .first { $0.pinnedConversationID == conversationID }?.transcriptDirectory
+            }
+        )
+        openCodeStacks[account] = stack
+        return stack
+    }
+
+    private func startOpenCode(account: UUID?) async throws {
+        if let running = openCodeStarts[account] { return try await running.value }
+        let stack = makeOpenCodeStackIfNeeded(account: account)
+        let task = Task { @MainActor in try await stack.server.start() }
+        openCodeStarts[account] = task
+        defer { openCodeStarts[account] = nil }
+        try await task.value
+    }
+
+    /// Stops one account's server once its last OpenCode tab is gone. Nothing is lost by it —
+    /// every session is in the account's database — and a server left running would hold a
+    /// port and a model connection for tabs that no longer exist. Quitting Flight Deck does NOT
+    /// come through here: see `OpenCodeServer` for why the server outlives the app.
+    private func stopOpenCodeIfUnused(account: UUID?) {
+        guard let stack = openCodeStacks[account] else { return }
+        guard openCodeCreationsInFlight[account, default: 0] == 0 else { return }
+        let live = AgentInstance(agent: .opencode, account: account)
+        guard !repos.flatMap(\.sessions).contains(where: { instance(for: $0) == live }) else { return }
+        stack.server.stop()
+        openCodeStacks[account] = nil
+    }
+
     /// Every codex thread this run has seen a tab pinned to, whether or not a tab still holds
     /// it. `reconcileCodexPins` treats all of them as untakeable.
     ///
@@ -945,10 +1039,10 @@ final class SessionStore: ObservableObject {
     /// The login a *new* tab for `agent` in `project` would run as, or why it cannot run.
     ///
     /// The one resolution both creation paths share, and the only place the distinction that
-    /// matters is drawn: `PreferencesStore.account(for:project:)` answers nil for two very
-    /// different situations, and conflating them is precisely the silent wrong-login bug.
+    /// matters is drawn: "no account" and "a named account that is gone" are very different
+    /// situations, and conflating them is precisely the silent wrong-login bug.
     ///
-    /// - `.success(nil)` — there is no account to name. A store with no `PreferencesStore`, or
+    /// - success with a nil `account` — there is no account to name. A store with no `PreferencesStore`, or
     ///   preferences holding no account for this agent at all. The tab launches with no
     ///   variable set, which is the agent's built-in home and exactly what it did before
     ///   accounts existed.
@@ -967,40 +1061,356 @@ final class SessionStore: ObservableObject {
     ///
     /// `choosing` is the New Session dropdown's escape hatch (Task 14): a caller that already
     /// knows exactly which account it wants — because the user clicked it — names it directly
-    /// and skips `PreferencesStore.account(for:project:)` entirely. It still runs through the
-    /// same home check below, because a dropdown built moments ago can still be one relocate
+    /// and skips the project's assignment (and any pool lease) entirely. It still runs through
+    /// the same home check below, because a dropdown built moments ago can still be one relocate
     /// or one deletion stale by the time it is clicked.
+    ///
+    /// A POOL assignment leases here (unify brief R8): `AccountResolver` takes a `CapacityLedger`
+    /// lease on the pool's first member under soft and returns it on the resolution. The caller
+    /// owns it from then on — `fileLease(_:for:)` once the tab is in `repos` (released when the
+    /// agent process exits, by `reconcileTabLeases`, or by `closeSession`), or `accountResolver.release(_:)` on any path that fails before that. A
+    /// refusal from here has already given its lease back.
     private func launchAccount(
         for agent: AgentID, project: String, choosing explicit: UUID? = nil
-    ) -> Result<AgentAccount?, AgentLaunchError> {
-        guard let preferences else { return .success(nil) }
-        let account: AgentAccount?
+    ) -> Result<AccountResolution, AgentLaunchError> {
+        guard let preferences, let resolver = accountResolver else {
+            return .success(AccountResolution(agent: agent, account: nil, source: .unassigned))
+        }
+        let resolution: AccountResolution
         if let explicit {
             guard let named = preferences.account(id: explicit) else {
                 return .failure(.accountMissing(agent.displayName))
             }
-            account = named
+            resolution = AccountResolution(agent: agent, account: named, source: .assigned)
         } else {
-            // A tombstoned assignment counts as missing. This asked `account(id:) == nil`,
-            // which a tombstone answers non-nil — so the guard passed and the very next line
-            // called `account(for:project:)`, which answers nil for exactly that case. The
-            // `guard let account` below then read that nil as "no account to name", set no
-            // home variable, and launched the agent in its built-in home: the silent
-            // wrong-login substitution this whole method exists to refuse. Both readers of an
-            // assignment have to agree about a tombstone, and the answer that is safe is
-            // `.accountMissing`. (`markAccountRemoved` clears these assignments, so this is
-            // defence in depth, matching `account(for:project:)`'s own comment.)
-            if let assigned = preferences.projectSettings(project).accounts[agent],
-               preferences.account(id: assigned)?.isRemoved ?? true {
-                return .failure(.accountMissing(agent.displayName))
+            // A tombstoned assignment counts as missing, and so does a pool with no live member
+            // or one that is gone: launching in the built-in home instead is the silent
+            // wrong-login substitution this whole method exists to refuse. (`markAccountRemoved`
+            // and `removePool` clear such assignments, so this is defence in depth.) The resolver
+            // draws the same line `account(for:project:)` does, in one place.
+            switch resolver.resolve(agent: agent, project: project) {
+            case .success(let resolved): resolution = resolved
+            case .failure(let error): return .failure(error.launchError)
             }
-            account = preferences.account(for: agent, project: project)
         }
-        guard let account else { return .success(nil) }
+        guard let account = resolution.account else { return .success(resolution) }
         guard account.isBuiltIn || FileManager.default.fileExists(atPath: account.home.path) else {
+            resolver.release(resolution)
             return .failure(.accountHomeMissing(account.displayName))
         }
-        return .success(account)
+        return .success(resolution)
+    }
+
+    /// Hands a new tab's pool lease to the resolver under the tab's id, so `reconcileTabLeases`
+    /// (agent exit) or `closeSession` gives it back, and tells the user when the pool had no account under its hard limit — the tab
+    /// still starts (on the member with the most headroom), but a banner says it may stop.
+    /// Called only once the tab is in `repos`; a creation that fails before that releases
+    /// instead.
+    private func fileLease(_ resolution: AccountResolution, for session: Session) {
+        accountResolver?.hold(resolution, for: session.id)
+        if let notice = resolution.notice {
+            notifier?.notify(sessionID: session.id, title: notice.title, subtitle: session.title, body: notice.body)
+        }
+    }
+
+    // MARK: - Tab leases follow the agent process
+
+    /// Whether `session`'s agent process is running: a process started as the agent's binary
+    /// under the tab's fd-abduco daemon or its surface (`AgentProcessProbe`). Settable so tests
+    /// script it. A SIGSTOP'd (asleep) agent is still a process, so it still reads running —
+    /// which is why `reconcileTabLeases` asks the sleep controller first.
+    lazy var agentProcessRunning: (Session) -> Bool = { [weak self] session in
+        guard let self else { return false }
+        let roots = [self.daemonControl.daemonPID(session.id),
+                     self.processRegistry.process(for: session.id)?.identity.pid].compactMap { $0 }
+        guard !roots.isEmpty else { return false }
+        return AgentProcessProbe(inspector: self.processInspector).isRunning(session.agent, under: roots)
+    }
+
+    /// How often `maintenanceTick` reconciles tab leases. Each pass walks the process tree of
+    /// every tab that holds a lease or sits in a pool-assigned project, so it is spaced well
+    /// apart from the 500 ms tick; a lease that is a few seconds late moves nothing a user sees.
+    static let tabLeaseSweepInterval: TimeInterval = 5
+    /// How long a leased tab's agent must be gone before its lease is given back. Covers the
+    /// boot of a new tab — its lease is taken in `launchAccount`, before the shell has typed the
+    /// agent's command — so a fresh tab does not drop and re-take its lease on every launch.
+    static let tabLeaseReleaseGrace: TimeInterval = 30
+    private var tabLeaseAgentGoneSince: [UUID: Date] = [:]
+    private var lastTabLeaseSweep: Date?
+
+    private func reconcileTabLeasesIfDue() {
+        let t = now()
+        if let last = lastTabLeaseSweep, t.timeIntervalSince(last) < Self.tabLeaseSweepInterval { return }
+        lastTabLeaseSweep = t
+        reconcileTabLeases()
+    }
+
+    /// Makes each tab's pool lease follow its AGENT process, not the tab (unify round 2, item 9):
+    /// - agent running, no lease, its project assigns a pool that lists the tab's account →
+    ///   re-take the lease on THAT account (`AccountResolver.reacquire`). This is how a tab
+    ///   restored after a relaunch leases again (item 8): the ledger is in memory and starts
+    ///   empty, and a restored tab never passes through `launchAccount`. Never a different
+    ///   account — the running agent's conversation lives in its own account's home.
+    /// - lease held, agent gone for `tabLeaseReleaseGrace` → release. An idle tab whose agent
+    ///   exited no longer counts against its pool; re-running the agent re-takes it.
+    ///
+    /// Before this, a lease lasted as long as the tab and restored tabs took none, so
+    /// `activeLeases` over-counted exited agents and under-counted every relaunch.
+    ///
+    /// **A frozen agent holds no lease** (the maintainer's ruling, replacing round 2's "a sleeping agent
+    /// keeps its lease"). Smart sleep SIGSTOPs it, so it bills nothing, and counting it starved
+    /// the pool for as long as it slept. `agentFroze` gives the lease back at the freeze and
+    /// this sweep never re-takes one for a tab the sleep controller holds — the process probe
+    /// would otherwise see the stopped process and re-lease it on the next pass. The thaw
+    /// re-leases (`thawInPlace`) or moves the conversation (`rollOver`).
+    func reconcileTabLeases() {
+        guard let preferences, let resolver = accountResolver else { return }
+        let t = now()
+        var present: Set<UUID> = []
+        for session in repos.flatMap(\.sessions) {
+            present.insert(session.id)
+            let holds = !resolver.leases(heldBy: session.id).isEmpty
+            if sleepController.asleep.contains(session.id) || rollingOver.contains(session.id) {
+                tabLeaseAgentGoneSince[session.id] = nil
+                if holds { resolver.release(holder: session.id) }
+                continue
+            }
+            var pooled = false
+            if case .pool? = preferences.projectSettings(session.workingDirectory).accounts[session.agent] { pooled = true }
+            // A tab in an unpooled project that holds nothing has nothing to reconcile, and
+            // costs no process walk.
+            guard holds || pooled else { tabLeaseAgentGoneSince[session.id] = nil; continue }
+            if agentProcessRunning(session) {
+                tabLeaseAgentGoneSince[session.id] = nil
+                if !holds, !accountIsMissing(for: session), let account = account(for: session) {
+                    resolver.reacquire(agent: session.agent, project: session.workingDirectory,
+                                       account: account, for: session.id)
+                }
+            } else if holds {
+                let since = tabLeaseAgentGoneSince[session.id] ?? t
+                tabLeaseAgentGoneSince[session.id] = since
+                if t.timeIntervalSince(since) >= Self.tabLeaseReleaseGrace {
+                    resolver.release(holder: session.id)
+                    tabLeaseAgentGoneSince[session.id] = nil
+                }
+            }
+        }
+        tabLeaseAgentGoneSince = tabLeaseAgentGoneSince.filter { present.contains($0.key) }
+    }
+
+    // MARK: - Smart sleep moves the lease, and a spent account moves the conversation
+
+    /// What a frozen agent's composer held when it froze, for a thaw that restarts it on another
+    /// account (`rollOver`): the kill ring every `submit` relies on dies with the old process,
+    /// so the draft has to be read as text while a screen still exists to read it.
+    struct FrozenComposer: Equatable {
+        /// Frozen at its idle composer, as opposed to inside a dialog: smart sleep freezes
+        /// `.waiting` agents too (`SleepPolicy` refuses only `.busy`), and those are mid-turn.
+        var idle: Bool
+        /// `""` for an empty box, nil when the composer could not be read.
+        var draft: String?
+    }
+
+    private(set) var frozenComposers: [UUID: FrozenComposer] = [:]
+    /// Tabs whose thaw is carrying their conversation to another account right now.
+    private(set) var rollingOver: Set<UUID> = []
+    /// Drafts read off a frozen agent, waiting for the resumed agent's composer
+    /// (`flushPendingDrafts`). Expire after `draftRestoreWindow`.
+    private(set) var pendingDrafts: [UUID: DeferredPrompt] = [:]
+    /// How long a carried draft waits for the resumed agent's composer. A resume that has not
+    /// drawn one in two minutes is stuck on something else (a trust prompt, a sign-in), and
+    /// pasting into whatever finally appears is a guess.
+    static let draftRestoreWindow: TimeInterval = 120
+
+    /// Whether hand-offs need confirmation (`HandoffSettings.confirm`), read on every thaw.
+    /// Settable so tests can turn it on: production reads Settings, where it is false until a
+    /// confirm surface exists (`CapacityPreferences.confirmSurfaceExists`).
+    lazy var handoffsNeedConfirmation: () -> Bool = { [weak self] in
+        self?.preferences?.capacity.handoffSettings.confirm ?? false
+    }
+
+    /// The sleep controller's freeze hook, run before the surface is torn down: gives the tab's
+    /// pool lease back (a frozen agent bills nothing) and records its composer for a thaw that
+    /// may have to restart it elsewhere.
+    func agentFroze(_ id: UUID) {
+        accountResolver?.release(holder: id)
+        tabLeaseAgentGoneSince[id] = nil
+        let idle = statuses[id]?.activity == .idle
+        let reader = injectorOverride ?? surfaces[id]
+        let draft = reader.flatMap { session(for: id)?.agent.textChannel?.draft($0) }
+        frozenComposers[id] = FrozenComposer(idle: idle, draft: draft)
+    }
+
+    /// The thaw decision for one frozen tab. Everything that can only be known here — whether
+    /// the tab could move at all — becomes the `blocked` argument; the pool rules are the
+    /// resolver's (`AccountResolver.thawPlan`).
+    private func thawPlan(for session: Session, frozen: FrozenComposer?) -> ThawPlan {
+        guard let resolver = accountResolver, !accountIsMissing(for: session),
+              let account = account(for: session)
+        else { return .inPlace(nil) }
+        // A swarm agent's account is the hand-off driver's to move (L3-U): it reassigns the
+        // task to a fresh agent and retires this one. Rolling the tab too would race it.
+        if swarmServiceIfBuilt?.agentRecord(session.id) != nil { return .inPlace(nil) }
+        let blocked: ThawBlocker?
+        if session.agent.conversationTransfer == nil { blocked = .cannotTransfer }
+        else if frozen?.idle != true { blocked = .midTurn }
+        else if frozen?.draft == nil { blocked = .unreadableDraft }
+        else if handoffsNeedConfirmation() { blocked = .needsConfirmation }
+        else { blocked = nil }
+        return resolver.thawPlan(agent: session.agent, project: session.workingDirectory,
+                                 account: account, blocked: blocked)
+    }
+
+    /// Wakes a frozen agent where it is and re-leases the account it runs as — `reacquire`, so
+    /// the lease names THAT account even past soft or the pool's concurrency cap: the
+    /// conversation lives in its home, and a running agent counts against its pool whatever
+    /// the pool would rather.
+    private func thawInPlace(_ id: UUID, notice: ThawNotice?) {
+        sleepController.wake(id)
+        guard let session = session(for: id) else { return }
+        if !accountIsMissing(for: session), let account = account(for: session) {
+            accountResolver?.reacquire(agent: session.agent, project: session.workingDirectory,
+                                       account: account, for: id)
+        }
+        if let notice { notify(notice, session: session) }
+    }
+
+    private func notify(_ notice: ThawNotice, session: Session) {
+        let title: String, body: String
+        switch notice {
+        case .noHeadroom(let pool, let account):
+            title = "Every account in “\(pool)” is over its limit"
+            body = "This tab resumed on “\(account)” anyway. It may stop until a limit resets."
+        case .stayed(let blocker, let account):
+            title = "“\(account)” is over its limit"
+            switch blocker {
+            case .midTurn:
+                body = "This tab was asleep in the middle of a turn, so it resumed on “\(account)” rather than move to another account."
+            case .unreadableDraft:
+                body = "Flight Deck could not read this tab’s unsent text, so it resumed on “\(account)” rather than risk losing it."
+            case .cannotTransfer:
+                body = "\(session.agent.displayName) cannot carry a conversation to another account, so this tab resumed on “\(account)”."
+            case .needsConfirmation:
+                body = "Hand-offs need confirmation, so this tab resumed on “\(account)” instead of moving."
+            }
+        }
+        notifier?.notify(sessionID: session.id, title: title, subtitle: session.title, body: body)
+    }
+
+    /// Carries a frozen, idle tab's conversation from its spent account to `account` and resumes
+    /// it there, in the same tab, under the same conversation id — the L3-U hand-off's account
+    /// move done for a manual tab. Not `HandoffDriver` itself: that hands a swarm TASK to a new
+    /// agent with a prompt pointing at the old transcript, a fresh conversation, and a manual
+    /// tab has no task and must keep its conversation whole.
+    ///
+    /// Ordered so nothing is lost on any failure: the copy is made while the frozen agent still
+    /// exists (a failed copy wakes it in place, on the spent account, with a notice); only then
+    /// is the old agent killed, the tab restamped and the agent resumed under the new home. The
+    /// draft read at the freeze is pasted back once the new composer is up (`pendingDrafts`).
+    private func rollOver(_ id: UUID, to account: AgentAccount, resolution: AccountResolution, draft: String) async {
+        defer { rollingOver.remove(id) }
+        guard let old = session(for: id), let transfer = old.agent.conversationTransfer,
+              let from = self.account(for: old)
+        else {
+            accountResolver?.release(resolution)
+            return thawInPlace(id, notice: nil)
+        }
+        let moved: Session
+        do {
+            moved = try await transfer.transfer(old, from: from.home, to: account.home)
+        } catch {
+            accountResolver?.release(resolution)
+            thawInPlace(id, notice: nil)
+            notifier?.notify(sessionID: id, title: "“\(from.displayName)” is over its limit", subtitle: old.title,
+                             body: "Moving this conversation to “\(account.displayName)” failed (\(error)), so it resumed on “\(from.displayName)”.")
+            return
+        }
+        // Closed while the copy ran: nothing to resume, and the lease is nobody's.
+        guard let at = locate(id) else {
+            accountResolver?.release(resolution)
+            sleepController.forget(id)
+            return
+        }
+
+        // Retire the frozen agent. Its surface went at the freeze; `terminate` SIGCONTs the
+        // stopped group before SIGTERM, so it dies rather than sitting stopped forever.
+        sleepController.forget(id)
+        tearDownSurface(for: id)
+        daemonControl.terminate(id)
+        stopWatching(id)
+
+        var updated = repos[at.repo].sessions[at.session]
+        updated.accountID = account.id
+        updated.transcriptPath = moved.transcriptPath
+        repos[at.repo].sessions[at.session] = updated
+        statuses.removeValue(forKey: id)
+        resetComposerReadiness(for: id, conversation: updated.pinnedConversationID)
+        // After the restamp: each asks whether any tab is still on the OLD account, keyed the
+        // way the stacks are (`instance(for:)`, which can collapse a built-in account to nil).
+        let oldKey = instance(for: old).account
+        stopCodexIfUnused(account: oldKey)
+        stopOpenCodeIfUnused(account: oldKey)
+        stopStatusWatchingIfUnused(account: oldKey)
+        persist()
+
+        let options = options(for: updated.agent, project: updated.workingDirectory)
+        let command: String
+        if updated.agent.negotiatesIdentity {
+            // codex and OpenCode: the new account's server is started and the conversation
+            // settled against it BEFORE the shell exists, so the resume command is the cold
+            // create's own typed text. `resumeRestoredCodex` types after the fact, and only into
+            // a tab whose daemon is not live — which a just-created one already is.
+            let instance = instance(for: updated)
+            let prepared = try? await preparedAdapter(for: instance)
+            let adapter = prepared ?? self.adapter(for: instance)
+            var binding = adapter.binding(for: updated)
+            if prepared != nil, let settled = try? await adapter.rebind(for: updated, options: options) {
+                binding = settled
+            }
+            if binding.conversationID != updated.pinnedConversationID { repinCodex(id, to: binding) }
+            guard let current = session(for: id) else { accountResolver?.release(resolution); return }
+            if let codex = adapter as? CodexAdapter {
+                command = codex.coldCreateCommand(binding, current, options)
+            } else {
+                command = adapter.resumeCommand(binding, current, options)
+            }
+        } else {
+            let adapter = adapter(for: instance(for: updated))
+            command = adapter.resumeCommand(adapter.binding(for: updated), updated, options)
+        }
+        // Closed while the server settled: the lease is nobody's.
+        guard locate(id) != nil else { accountResolver?.release(resolution); return }
+        makeAttachSurface(id: id, typed: command)
+        // Same order and reason as `insertSession`: sized before anything prints.
+        report(terminalSize, to: id)
+        provider?.tick()
+        startWatching(tabID: id)
+
+        if resolution.lease != nil {
+            accountResolver?.hold(resolution, for: id)
+        } else {
+            accountResolver?.reacquire(agent: updated.agent, project: updated.workingDirectory, account: account, for: id)
+        }
+        if !draft.isEmpty {
+            pendingDrafts[id] = DeferredPrompt(text: draft, deadline: now().addingTimeInterval(Self.draftRestoreWindow))
+        }
+        notifier?.notify(sessionID: id, title: "“\(from.displayName)” is over its limit", subtitle: updated.title,
+                         body: "This conversation moved to “\(account.displayName)” and resumed there.")
+        objectWillChange.send()
+    }
+
+    /// Pastes each carried draft into its resumed agent's composer, once that composer is on
+    /// screen. Pasted, never submitted (`sendText` is a bracketed paste; no Return). A box that
+    /// already holds text means the user typed before the restore got there: theirs wins, and
+    /// the carried draft is dropped rather than spliced into it.
+    private func flushPendingDrafts() {
+        let t = now()
+        for (id, pending) in pendingDrafts {
+            guard t < pending.deadline else { pendingDrafts[id] = nil; continue }
+            guard let gate = injectionGate(id), let current = gate.channel.draft(gate.injector) else { continue }
+            pendingDrafts[id] = nil
+            if current.isEmpty { gate.injector.sendText(pending.text) }
+        }
     }
 
     /// Claude's adapter with this store's wiring on it.
@@ -1036,10 +1446,25 @@ final class SessionStore: ObservableObject {
     /// and whatever a caller injected.
     func adapter(for instance: AgentInstance) -> any AgentAdapter {
         if let existing = adapters[instance] { return existing }
-        if instance.agent == .codex {
+        let adapter: any AgentAdapter
+        switch instance.agent {
+        case .codex:
             return makeCodexStackIfNeeded(account: instance.account).adapter
+        case .claude:
+            adapter = makeClaudeAdapter(account: instance.account)
+        case .grok:
+            // The home is resolved per derivation, like claude's projects root, so a fixture
+            // root or a relocated account is picked up rather than frozen here.
+            adapter = GrokAdapter(home: { [weak self] in
+                self?.home(ofAccount: instance.account, agent: .grok) ?? AgentID.grok.builtInHome
+            })
+        case .gemini:
+            adapter = GeminiAdapter(paths: geminiPaths)
+        case .opencode:
+            // From the account's stack, like codex, and for codex's reason: the adapter is
+            // useless without the server the runtime also watches.
+            return makeOpenCodeStackIfNeeded(account: instance.account).adapter
         }
-        let adapter = makeClaudeAdapter(account: instance.account)
         adapters[instance] = adapter
         return adapter
     }
@@ -1063,8 +1488,45 @@ final class SessionStore: ObservableObject {
     /// app-server does send would reach nobody.
     func runtime(for instance: AgentInstance) -> any AgentRuntime {
         if let existing = runtimes[instance] { return existing }
-        if instance.agent == .codex {
+        switch instance.agent {
+        case .codex:
             return makeCodexStackIfNeeded(account: instance.account).runtime
+        case .opencode:
+            return makeOpenCodeStackIfNeeded(account: instance.account).runtime
+        case .grok:
+            // grok's per-session files, tailed on the shared clock; see `GrokRuntime`. The
+            // search closures are `ClaudeRuntime`'s below, for the same reasons.
+            let runtime = GrokRuntime(clock: clock, searchIndex: { [weak self] in self?.searchIndex },
+                projectPath: { [weak self] conversationID in
+                    self?.repos.flatMap(\.sessions)
+                        .first { $0.pinnedConversationID == conversationID }?.workingDirectory
+                },
+                workingDirectory: { [weak self] conversationID in
+                    self?.repos.flatMap(\.sessions)
+                        .first { $0.pinnedConversationID == conversationID }?.transcriptDirectory
+                })
+            runtimes[instance] = runtime
+            return runtime
+        case .gemini:
+            // agy's identity, liveness and status are read off its own files, scoped to the
+            // processes THIS tab owns: its fd-abduco daemon (a detached session is not a
+            // descendant of its surface) and its surface's shell. See `GeminiRuntime`.
+            // Its ⌘K closures are keyed by tab, not conversation: see `GeminiRuntime.projectPath`.
+            let runtime = GeminiRuntime(clock: clock, paths: geminiPaths, roots: { [weak self] tab in
+                guard let self else { return [] }
+                return [self.daemonControl.daemonPID(tab), self.processRegistry.process(for: tab)?.identity.pid]
+                    .compactMap { $0 }
+            }, searchIndex: { [weak self] in self?.searchIndex },
+            projectPath: { [weak self] tab in
+                self?.repos.flatMap(\.sessions).first { $0.id == tab }?.workingDirectory
+            },
+            workingDirectory: { [weak self] tab in
+                self?.repos.flatMap(\.sessions).first { $0.id == tab }?.transcriptDirectory
+            })
+            runtimes[instance] = runtime
+            return runtime
+        case .claude:
+            break
         }
         // `searchIndex`, `projectPath` and `workingDirectory` are closures, re-read on every
         // message batch rather than resolved once here — see `ClaudeRuntime.init` — so a
@@ -1144,6 +1606,10 @@ final class SessionStore: ObservableObject {
     var transcriptsRootOverride: URL?
     var statusRootOverride: URL?
     var codexIndexURLOverride: URL?
+    /// agy's root (`~/.gemini/antigravity-cli`), the same kind of seam: a fixture run points it
+    /// at a temporary directory so no gemini tab ever reads or resumes against the real one.
+    /// Read when a gemini adapter or runtime is first built, so set it before any gemini tab.
+    var geminiPaths: GeminiPaths = .default
     /// The hook-event log's directory, the same override shape as the three above but for a
     /// root that is not per-account: `HookEventWatcher` tails one file for the whole app, so
     /// there is one override rather than one keyed by account. Nil means the real
@@ -1344,6 +1810,19 @@ final class SessionStore: ObservableObject {
     /// `objectWillChange` into this store's own, so a view that only observes `store` (e.g.
     /// `ProjectView`) still redraws when a project's `flywheelEnabled` flag flips.
     private var preferencesChangeForward: AnyCancellable?
+
+    /// Resolves a project's account assignment and owns the pool leases new tabs take (unify
+    /// brief R8). Planning runs use this same instance, so tabs and seats share one lease book.
+    /// Leases are held under the tab's session id from the moment the tab is filed and given
+    /// back in `closeSession`. nil without preferences: such a store has no accounts to lease.
+    ///
+    /// Built on `UsageService.shared.ledger` — the ledger every meter feeds — so a lease sees the
+    /// same headroom the Flight Control popover shows. Until `UsageService.attach` configures it
+    /// (and in tests), the ledger knows no pools and every pool launch is `.untracked`: its first
+    /// member, which is exactly what a pool did before leasing existed.
+    lazy var accountResolver: AccountResolver? = preferences.map {
+        AccountResolver(preferences: $0, ledger: UsageService.shared.ledger)
+    }
 
     /// The local control socket every launched tab is pointed at, or nil when the control
     /// socket is off. `FlightDeckApp` sets this (with `controlSecret`) when
@@ -1567,11 +2046,18 @@ final class SessionStore: ObservableObject {
     /// test's control is the one the runner is probed through too.
     private(set) lazy var intakeService: IntakeService = {
         let root = resolvedIntakesRoot
+        // One resolver for the runner's starts and triage's turns, leasing from the ledger every
+        // Level 3 lease uses (unify brief R9). No preferences (a bare test store): no resolver,
+        // and planning runs on built-in homes.
+        // The resolver tabs use, so a planning seat and a tab in one project bill alike and a
+        // pool's leases sit in one ledger.
+        let accounts: AccountResolving? = accountResolver
+        let runner = IntakeRunnerController(daemon: daemon, control: daemonControl,
+                                            spawner: FdAbducoRunnerSpawner(), intakesRoot: root, accounts: accounts)
         let service = IntakeService(
             store: IntakeStore(root: root),
             clock: clock,
-            runner: IntakeRunnerController(daemon: daemon, control: daemonControl,
-                                           spawner: FdAbducoRunnerSpawner(), intakesRoot: root),
+            runner: runner,
             inject: { [weak self] project, agent, text, token in
                 guard let self, let session = self.session(project: project, agentName: agent) else { return false }
                 return self.submitPrompt(text, token: token, to: session.id).errorCode == nil
@@ -1582,9 +2068,16 @@ final class SessionStore: ObservableObject {
         // Resolved at each release, not captured now: this service is built lazily — often
         // before `FlightDeckApp` attaches routing — and must still see it.
         service.encodeRouting = { [weak self] in self?.flightControlRouting }
-        service.planningAccounts = { [weak self] in
-            PlanningAccountOption.options(from: self?.preferences?.preferences.accounts ?? [])
+        service.accountResolver = accounts
+        // Every member of a planning pool over its hard limit: the same banner a tab posts
+        // (`fileLease`), keyed by the intake so a second start replaces rather than stacks it.
+        let postNotice: (UUID, String, AccountNotice) -> Void = { [weak self] id, project, notice in
+            self?.notifier?.notify(sessionID: id, title: notice.title,
+                                   subtitle: "Planning · \(URL(fileURLWithPath: project).lastPathComponent)",
+                                   body: notice.body)
         }
+        runner.onAccountNotice = postNotice
+        service.onAccountNotice = postNotice
         intakeChangeForward = service.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
         // Straight to the summary refresh, never through `objectWillChange`: a seat settling
         // must not redraw every view of the store (see `SeatFeed`), only reach the phone.
@@ -1665,6 +2158,8 @@ final class SessionStore: ObservableObject {
             self.report(self.terminalSize, to: id)
             self.provider?.tick()
         },
+        // Before the surface goes: the composer is read off it, and the lease given back.
+        onFreeze: { [weak self] in self?.agentFroze($0) },
         // Read every tick, unlike the threshold above: flipping the Off switch in Preferences
         // must take effect immediately, not on the next launch.
         sleepEnabled: { [weak self] in self?.preferences?.idleSleepEnabled ?? true },
@@ -1853,7 +2348,8 @@ final class SessionStore: ObservableObject {
             planGates: planGates,
             subagents: FleetProjection.subagentModel(
                 of: session, trees: subagentTrees, status: statuses[session.id]),
-            openPromptAgent: openPromptAgents[session.id]
+            openPromptAgent: openPromptAgents[session.id],
+            openPrompt: openPromptOffers[session.id]
         )
     }
 
@@ -1943,8 +2439,12 @@ final class SessionStore: ObservableObject {
     /// terminal) and by the sleep controller's wake path — a SIGSTOP'd agent's daemon is still
     /// `daemonControl.isLive`, so `LaunchPlan.decide` returns `.attach` and the daemon's ring
     /// replay restores the screen. On success this also sets `surfaces[id]`.
+    ///
+    /// `typed` replaces the adapter's launch command for a cold create: a smart-sleep rollover
+    /// (`rollOver`) relaunches an EXISTING conversation, which is the resume command, not the
+    /// launch command (claude's names a NEW session id, and would fail on one that exists).
     @discardableResult
-    func makeAttachSurface(id: UUID) -> Ghostty.SurfaceView? {
+    func makeAttachSurface(id: UUID, typed override: String? = nil) -> Ghostty.SurfaceView? {
         guard let at = locate(id) else { return nil }
         let session = repos[at.repo].sessions[at.session]
 
@@ -1959,7 +2459,7 @@ final class SessionStore: ObservableObject {
         let adapter = adapter(for: instance(for: session))
         let options = options(for: session.agent, project: session.workingDirectory)
         let shell = preferences?.resolvedShell() ?? ShellResolver.resolve()
-        let typedText = adapter.launchCommand(adapter.binding(for: session), session, options)
+        let typedText = override ?? adapter.launchCommand(adapter.binding(for: session), session, options)
         do {
             try daemon.ensureDirectory()
             let plan = try LaunchPlan.decide(
@@ -2126,9 +2626,28 @@ final class SessionStore: ObservableObject {
     /// `asleep` on close — and `wake(_:)`'s `rebuildSurface` closure calls `makeAttachSurface`,
     /// which returns nil for a session `locate` can no longer find. That is an acceptable
     /// no-op: a gone session has no surface to rebuild, and nothing here crashes on it.
+    ///
+    /// **A thaw re-decides the tab's account** (round 2, sleep-lease-rollover): the freeze gave
+    /// the pool lease back, so waking either re-leases the same account or — when that account
+    /// is spent — carries the conversation to another one (`thawPlan`, `rollOver`). A rollover
+    /// runs asynchronously; until it lands the tab has no surface and `injector(for:)` answers
+    /// nil, so nothing is typed into the agent being replaced.
     @MainActor
     func wakeIfAsleep(_ id: UUID) {
-        if sleepController.asleep.contains(id) { sleepController.wake(id) }
+        guard sleepController.asleep.contains(id), !rollingOver.contains(id) else { return }
+        guard let session = session(for: id) else { return sleepController.wake(id) }
+        let frozen = frozenComposers.removeValue(forKey: id)
+        switch thawPlan(for: session, frozen: frozen) {
+        case .inPlace(let notice):
+            thawInPlace(id, notice: notice)
+        case .rollOver(let account, let resolution):
+            rollingOver.insert(id)
+            // Never inline: this is reached from `TerminalPane.updateNSView`, where mutating
+            // the store would publish during a view update.
+            Task { @MainActor [weak self] in
+                await self?.rollOver(id, to: account, resolution: resolution, draft: frozen?.draft ?? "")
+            }
+        }
     }
 
     /// Test seam for frontmost-ness; production reads `NSApplication`.
@@ -2565,29 +3084,42 @@ final class SessionStore: ObservableObject {
     func newSession(
         in url: URL, at index: Int? = nil, account explicit: UUID? = nil,
         waking: DisplayWakePolicy = .wakeIfNeeded, selecting: Bool = true,
-        flywheelIdentity: FlywheelIdentity? = nil, overrides: LaunchOverrides? = nil
+        flywheelIdentity: FlywheelIdentity? = nil, overrides: LaunchOverrides? = nil,
+        agent: AgentID = .claude, resolved: AccountResolution? = nil
     ) -> Session {
         guard ensureTerminalCreatable(waking) else {
             launchFailureReporter.report(.terminalUnavailable(displayAsleep: true))
+            // A lease `createSession` took for this tab goes back: no tab will hold it.
+            if let resolved { accountResolver?.release(resolved) }
             // Un-inserted, exactly as the `launchAccount` failure path below does. The return
             // type stays non-optional on purpose: making it `Session?` broke 340 tests, because
             // nearly every fixture in the suite builds a store with a nil-returning provider.
             return Session(title: "", workingDirectory: url.path)
         }
         // Resolved before the title is minted, so a refusal does not burn a session number.
-        let account: AgentAccount?
-        switch launchAccount(for: .claude, project: url.path, choosing: explicit) {
-        case .success(let resolved): account = resolved
-        case .failure(let error):
-            launchFailureReporter.report(error)
-            return Session(title: "", workingDirectory: url.path)
+        // `resolved` is `createSession`'s own resolution, passed down so a pool is leased ONCE
+        // per tab: resolving again here would take a second lease that nothing ever holds.
+        // `agent`, not `.claude`: every agent that mints or learns its own conversation id
+        // (`negotiatesIdentity == false` — grok and gemini) lands here from `createSession`, and a
+        // hard-coded claude here opened a CLAUDE tab under the other agent's name.
+        let resolution: AccountResolution
+        if let resolved {
+            resolution = resolved
+        } else {
+            switch launchAccount(for: agent, project: url.path, choosing: explicit) {
+            case .success(let r): resolution = r
+            case .failure(let error):
+                launchFailureReporter.report(error)
+                return Session(title: "", workingDirectory: url.path)
+            }
         }
+        let account = resolution.account
         // Stamped at birth, not left nil to be re-resolved later. nil would mean "the built-in
         // home" forever — correct only by accident today, and wrong the moment the user adds a
         // second login or reassigns this project's default, which would silently move every
         // existing tab's conversation to a home it was never written in.
         let session = Session(
-            title: nextSessionTitle(), workingDirectory: url.path, accountID: account?.id,
+            title: nextSessionTitle(), workingDirectory: url.path, agent: agent, accountID: account?.id,
             flywheelIdentity: flywheelIdentity
         )
         let adapter = adapter(for: instance(for: session))
@@ -2596,13 +3128,15 @@ final class SessionStore: ObservableObject {
         // caller that passed overrides directly.
         let options = (try? launchOptions(for: session.agent, project: url.path, overrides: overrides).get())
             ?? options(for: session.agent, project: url.path)
-        return addSession(
+        let filed = addSession(
             session,
             in: url,
             initialInput: adapter.launchCommand(adapter.binding(for: session), session, options),
             at: index,
             selecting: selecting
         )
+        fileLease(resolution, for: filed)
+        return filed
     }
 
     /// Creates a tab for any agent, negotiating conversation identity first for the agents
@@ -2649,13 +3183,19 @@ final class SessionStore: ObservableObject {
         // has to be told which choice is broken rather than watching a tab appear as somebody
         // else. Claude's path is checked here too, by falling through this switch before it
         // delegates: `newSession` reports the same refusal, but only this shape can return it.
-        let account: AgentAccount?
+        let resolution: AccountResolution
         switch launchAccount(for: agent, project: directory, choosing: explicit) {
-        case .success(let resolved): account = resolved
+        case .success(let resolved): resolution = resolved
         case .failure(let error):
             launchFailureReporter.report(error)
             return .failure(error)
         }
+        let account = resolution.account
+        // A pool lease taken above belongs to the tab this call files. Every path out that files
+        // no tab gives it back here; the two that do file one hand it to `fileLease` (the claude
+        // branch through `newSession`) and set `leaseHandedOff`.
+        var leaseHandedOff = false
+        defer { if !leaseHandedOff { accountResolver?.release(resolution) } }
         // Checked before anything is created on either branch, so an override the agent cannot
         // apply refuses the tab rather than launching it on the project's defaults.
         let launchOptions: AgentOptions
@@ -2682,10 +3222,13 @@ final class SessionStore: ObservableObject {
                 launchFailureReporter.report(failure)
                 return .failure(failure)
             }
+            // `newSession` now owns the lease: it files it with the tab, or releases it if the
+            // terminal cannot be created after all.
+            leaseHandedOff = true
             return .success(
                 newSession(
                     in: url, at: index, account: explicit, selecting: selecting,
-                    flywheelIdentity: identity, overrides: overrides
+                    flywheelIdentity: identity, overrides: overrides, agent: agent, resolved: resolution
                 ).id
             )
         }
@@ -2715,9 +3258,22 @@ final class SessionStore: ObservableObject {
         // could be killed between `thread/start` and `thread/name/set`, which evaporates the
         // thread, because naming is what commits it — under the `legacy` history contract
         // `CodexAdapter.historyMode` pins.
-        codexCreationsInFlight[instance.account, default: 0] += 1
+        //
+        // OpenCode keeps its own count, for the same reason against its own server: a close of
+        // the account's last OpenCode tab mid-creation must not stop the server this session is
+        // being created on.
+        if agent == .opencode {
+            openCodeCreationsInFlight[instance.account, default: 0] += 1
+        } else {
+            codexCreationsInFlight[instance.account, default: 0] += 1
+        }
         defer {
-            codexCreationsInFlight[instance.account, default: 0] -= 1
+            if agent == .opencode {
+                openCodeCreationsInFlight[instance.account, default: 0] -= 1
+                stopOpenCodeIfUnused(account: instance.account)
+            } else {
+                codexCreationsInFlight[instance.account, default: 0] -= 1
+            }
             // Deferred, not skipped. A tab closed while this was in flight had its teardown
             // declined above; if this creation failed, nothing else will ever run it, and the
             // app-server would outlive every codex tab. A creation that SUCCEEDED inserted
@@ -2769,7 +3325,7 @@ final class SessionStore: ObservableObject {
         // `codexThreadsEverPinned`. Recorded here rather than left to `repinCodex`, which this
         // path never calls: a thread this tab was born on must stay untakeable by its
         // neighbours even after the tab is closed.
-        codexThreadsEverPinned.insert(binding.conversationID)
+        if agent == .codex { codexThreadsEverPinned.insert(binding.conversationID) }
         let adapter = adapter(for: instance)
         addSession(
             session,
@@ -2778,6 +3334,8 @@ final class SessionStore: ObservableObject {
             at: index,
             selecting: selecting
         )
+        leaseHandedOff = true
+        fileLease(resolution, for: session)
         return .success(session.id)
     }
 
@@ -2829,6 +3387,9 @@ final class SessionStore: ObservableObject {
             if case .value(let value)? = flags.values["--model"] { model = value } else { model = "claude" }
         case .codex(let codexOptions):
             model = codexOptions.model ?? "codex"
+        case .grok(let grokOptions): model = grokOptions.model ?? "grok"
+        case .gemini(let geminiOptions): model = GeminiAdapter.model(for: geminiOptions)
+        case .opencode(let openCodeOptions): model = openCodeOptions.model ?? "opencode"
         }
         let coordinator = flywheelCoordinator
         let program = FlywheelProgram.rawValue(for: agent)
@@ -3237,6 +3798,10 @@ final class SessionStore: ObservableObject {
         if instance.agent == .codex { startCodexPinReconcilerIfNeeded() }
         if let registered = adapters[instance] { return registered }
         guard instance.agent.needsRuntimeStart else { return adapter(for: instance) }
+        if instance.agent == .opencode {
+            try await startOpenCode(account: instance.account)
+            return makeOpenCodeStackIfNeeded(account: instance.account).adapter
+        }
         try await startCodex(account: instance.account)
         return makeCodexStackIfNeeded(account: instance.account).adapter
     }
@@ -3315,6 +3880,8 @@ final class SessionStore: ObservableObject {
             return .prepareFailed(message)
         case CodexRPCError.malformed(let what):
             return .prepareFailed("Codex sent something unusable (\(what)).")
+        case let openCode as OpenCodeError:
+            return .agentFailed(agent: "OpenCode", why: openCode.errorDescription ?? String(describing: openCode))
         default:
             return .prepareFailed(
                 (error as? LocalizedError)?.errorDescription ?? String(describing: error)
@@ -3520,7 +4087,8 @@ final class SessionStore: ObservableObject {
                     backgroundWork: backgroundWorkSessions,
                     openPromptCalls: openPromptCalls, apiErrors: apiErrors,
                     planGates: planGates,
-                    subagentTrees: subagentTrees, openPromptAgents: openPromptAgents
+                    subagentTrees: subagentTrees, openPromptAgents: openPromptAgents,
+                    openPromptOffers: openPromptOffers
                 ),
                 at: repoIndex
             ))
@@ -4105,7 +4673,10 @@ final class SessionStore: ObservableObject {
             // already had is typed — the degraded path's own contract.
             let prepared = preparedPerAccount[instance] ?? nil
             let adapter = prepared ?? self.adapter(for: instance)
-            let options = options(for: .codex, project: session.workingDirectory)
+            // The tab's own agent: codex and OpenCode both restore through here (every agent
+            // that negotiates identity does), and OpenCode's `rebind` creates a fresh session
+            // with these options when the pinned one was deleted.
+            let options = options(for: session.agent, project: session.workingDirectory)
 
             var binding = adapter.binding(for: session)
             if prepared != nil,
@@ -4127,6 +4698,12 @@ final class SessionStore: ObservableObject {
             // cannot reach the app-server must still produce a usable tab.
             if prepared != nil, let codexAdapter = adapter as? CodexAdapter,
                let read = try? await codexAdapter.read(binding), let title = read.title {
+                apply(.title(title), to: tabID)
+            }
+            // OpenCode's twin of the read above: the session row's own title, for a rename
+            // made in a TUI while Flight Deck was closed. Its event stream starts live, too.
+            if prepared != nil, let openCode = adapter as? OpenCodeAdapter,
+               let title = await openCode.title(of: binding, directory: repinned.transcriptDirectory) {
                 apply(.title(title), to: tabID)
             }
 
@@ -4347,8 +4924,9 @@ final class SessionStore: ObservableObject {
         guard let at = locate(tabID) else { return }
         // The chokepoint for both re-pinning callers — see `codexThreadsEverPinned`. Includes
         // the candidate `reconcileCodexPins` has just adopted, so a thread stays this tab's
-        // even after it closes.
-        codexThreadsEverPinned.insert(binding.conversationID)
+        // even after it closes. Codex only: an OpenCode tab re-pinned by `rebind` (its session
+        // was deleted) comes through here too, and its id is not a codex thread.
+        if repos[at.repo].sessions[at.session].agent == .codex { codexThreadsEverPinned.insert(binding.conversationID) }
         repos[at.repo].sessions[at.session].pinnedConversationID = binding.conversationID
         repos[at.repo].sessions[at.session].transcriptPath = binding.transcriptURL?.path
         stopWatching(tabID)
@@ -4622,8 +5200,15 @@ final class SessionStore: ObservableObject {
         }
         repos[repoIndex].sessions.remove(at: sessionIndex)
         emit(.sessionRemoved(id: id))
+        // The tab's pool lease (unify brief R8) ends with the tab at the latest. While the tab
+        // lives, `reconcileTabLeases` also gives it back when the agent process exits and
+        // re-takes it when the agent runs again.
+        accountResolver?.release(holder: id)
         delegationHooks?.sessionClosed(id)
         pluginReload.forget(id)
+        // A tab closed while frozen or mid-rollover leaves nothing to restore a draft into.
+        frozenComposers[id] = nil
+        pendingDrafts[id] = nil
 
         // Detach and park rather than release. Two reasons this is not just `= nil`:
         //
@@ -4651,6 +5236,7 @@ final class SessionStore: ObservableObject {
         // store with no accounts configured at all, where the one nil key serves everything
         // and closing any tab runs exactly the check it always did.
         stopCodexIfUnused(account: closed.account)
+        stopOpenCodeIfUnused(account: closed.account)
         // Not per account, unlike the line above: the reconciler is one object covering every
         // login, so it goes only when the last codex tab anywhere has gone.
         stopCodexPinReconcilerIfUnused()
@@ -5067,7 +5653,8 @@ final class SessionStore: ObservableObject {
                         backgroundWork: backgroundWorkSessions,
                         openPromptCalls: openPromptCalls, apiErrors: apiErrors,
                         planGates: planGates,
-                        subagentTrees: subagentTrees, openPromptAgents: openPromptAgents
+                        subagentTrees: subagentTrees, openPromptAgents: openPromptAgents,
+                        openPromptOffers: openPromptOffers
                     ), at: at
                 ))
             }
@@ -5388,13 +5975,14 @@ final class SessionStore: ObservableObject {
         // Resolved before anything is filed, the same as `newSession`: nil would mean "the
         // built-in home" forever, which is correct only until this project's login is set or
         // changes — the silent wrong-login substitution `newSession`'s own comment refuses.
-        let account: AgentAccount?
+        let resolution: AccountResolution
         switch launchAccount(for: agent, project: projectPath) {
-        case .success(let resolved): account = resolved
+        case .success(let resolved): resolution = resolved
         case .failure(let error):
             launchFailureReporter.report(error)
             return nil
         }
+        let account = resolution.account
 
         let session = Session(
             // Falls back to the id only when the title sanitizes to nothing usable — not
@@ -5424,6 +6012,9 @@ final class SessionStore: ObservableObject {
         }
         select(session.id, selecting: selecting)
         persist()
+        // `resumeExisting` has filed the tab, so its lease is held from here and follows the
+        // agent process like any other tab's (`reconcileTabLeases`, `closeSession`).
+        fileLease(resolution, for: session)
 
         if deferred {
             codexRestoreTask = Task { [weak self] in
@@ -5694,6 +6285,9 @@ final class SessionStore: ObservableObject {
         for id in ids { setUnread(id, true) }
     }
 
+    /// Test seam: what `flushPluginReloads`' `onSent` records, without driving a terminal.
+    func pluginReloadSentForTesting(_ id: UUID) { pluginReload.sent(id, at: now()) }
+
     /// Test seam. Production leaves this nil and injection goes to the live surface.
     var injectorOverride: TextInjecting?
 
@@ -5956,6 +6550,32 @@ final class SessionStore: ObservableObject {
             // that guard, or is a genuine external rename — and neither outcome can queue a
             // second injection.
             injectPendingRename(id, name)
+        case .grok:
+            // claude's shape: `/rename <name>` is one submission into grok's composer, and it
+            // is the whole of grok's rename — it writes the session's `summary.json` itself.
+            injectPendingRename(id, name)
+        case .gemini:
+            // agy's `/rename <name>` is one submission with an inline argument (probed: it
+            // answers `Conversation renamed to: <name>` and rewrites `annotations/<id>.pbtxt`),
+            // so it takes claude's queued composer route; `GeminiAdapter.renameTyping` is nil.
+            injectPendingRename(id, name)
+        case .opencode:
+            // The wire call alone, and that is the whole rename: OpenCode's server owns the
+            // title and every attached TUI redraws it from the server's own `session.updated`
+            // event (live-probed: the header changed within a second with nothing typed). There
+            // is no pty half to type — see `OpenCodeAdapter.renameTyping`. Logged for codex's
+            // reason: a failure must leave evidence even though it does not alert.
+            let adapter = adapter(for: instance(for: session))
+            let binding = adapter.binding(for: session)
+            Task {
+                do {
+                    try await adapter.rename(binding, to: name)
+                } catch {
+                    Self.renameLogger.error(
+                        "opencode rename failed for \(binding.conversationID.uuidString.lowercased(), privacy: .public): \(String(describing: error), privacy: .public)"
+                    )
+                }
+            }
         }
         // True means the name was ACCEPTED and the local title changed — not that the agent
         // has been told. The codex arm above is deliberately fire-and-forget and the claude
@@ -6410,7 +7030,21 @@ final class SessionStore: ObservableObject {
         _ open: OpenPrompt, with answer: PromptAnswer, in id: UUID, token: UUID
     ) -> AnswerDispatch {
         guard let at = locate(id) else { return .unknownSession }
-        guard let driver = repos[at.repo].sessions[at.session].agent.dialogDriver else {
+        let agent = repos[at.repo].sessions[at.session].agent
+        // **By request id first, when the agent can be answered that way** — see
+        // `AgentAdapter.promptResponder` for why it outranks a drive. The guards it keeps are
+        // the ones that are not about the screen: the duplicate token, and `waiting`. An answer
+        // for a prompt that is no longer pending fails on the agent's server rather than
+        // landing anywhere, so the screen interlocks below have nothing left to protect.
+        if let responder = agent.promptResponder {
+            if answeredPromptTokens[id, default: []].contains(token) { return .duplicate }
+            guard statuses[id]?.activity == .waiting else { return .notWaiting }
+            guard let target = agentTarget(for: id) else { return .unknownSession }
+            guard responder.answer(open, with: answer, for: target) else { return .unanswerable }
+            remember(answered: token, for: id)
+            return .dispatched
+        }
+        guard let driver = agent.dialogDriver else {
             return .unsupportedAgent
         }
         if answeredPromptTokens[id, default: []].contains(token) { return .duplicate }
@@ -6428,6 +7062,20 @@ final class SessionStore: ObservableObject {
         guard !injecting.contains(id) else {
             recordEarlyAbort(.tabBusy, injector: injector)
             return .unreadableScreen
+        }
+
+        // A question refused WITHOUT cancelling the turn, where the agent has a key for it
+        // (grok's Shift+x — see `AgentQuestionDismisser`). Read-guarded, unlike the blind deny
+        // below: the shared deny on grok is Ctrl+C, which ends the agent's whole turn.
+        if answer == .deny, case .question(_, let questions) = open,
+           let dismisser = driver as? AgentQuestionDismisser {
+            return dismissQuestion(questions, dismisser: dismisser, injector: injector, id: id, token: token)
+        }
+
+        // An agent whose list must never see a Return answers by key instead (grok — see
+        // `AgentKeyedDialogDriver`). Deny stays on the shared path below: one key, nothing read.
+        if let keyed = driver as? AgentKeyedDialogDriver, answer != .deny {
+            return answerByKey(open, with: answer, keyed: keyed, injector: injector, id: id, token: token)
         }
 
         switch answer {
@@ -6718,8 +7366,108 @@ final class SessionStore: ObservableObject {
             return .unreadableScreen
         }
         remember(answered: token, for: id)
-        driver.deny(injector)
+        // An agent that can refuse by request id does, rather than sending a blind key — it
+        // rejects exactly what is pending, subagents' requests included.
+        if let responder = repos[at.repo].sessions[at.session].agent.promptResponder,
+           let target = agentTarget(for: id) {
+            responder.abort(for: target)
+        } else if let dismisser = driver as? AgentQuestionDismisser,
+                  let screen = injector.readViewport(),
+                  dismisser.dismissStep(for: nil, inViewport: screen).startsDismiss {
+            // A question card is what is up: dismissed, so the turn goes on, rather than the
+            // blind deny's Ctrl+C ending it. Anything else — a permission card, a screen this
+            // build cannot read — keeps the blind deny this path exists for.
+            injecting.insert(id)
+            performDismiss(nil, dismisser: dismisser, injector: injector, id: id, phase: .start, rereads: 0)
+        } else {
+            driver.deny(injector)
+        }
         return .dispatched
+    }
+
+    /// `answerPrompt`'s `.deny` for a question an `AgentQuestionDismisser` can dismiss. The first
+    /// read is checked here, synchronously, so a screen that does not show this question's card
+    /// with a key it can take — another card, an open editor, nothing — is refused
+    /// `unreadable_screen` with nothing sent and the screen filed (`keyed-screen-mismatch`).
+    private func dismissQuestion(
+        _ questions: [PromptQuestion], dismisser: AgentQuestionDismisser,
+        injector: TextInjecting, id: UUID, token: UUID
+    ) -> AnswerDispatch {
+        guard let viewport = injector.readViewport() else {
+            recordEarlyAbort(.unreadableBeforePress)
+            return .unreadableScreen
+        }
+        guard dismisser.dismissStep(for: questions, inViewport: viewport).startsDismiss else {
+            answerAbortSink(AnswerAbort(check: .keyedScreenMismatch, step: nil, purpose: nil, from: 0, to: 0,
+                                        expected: Self.dismissExpectation, focused: nil, viewport: viewport))
+            return .unreadableScreen
+        }
+        remember(answered: token, for: id)
+        injecting.insert(id)
+        performDismiss(questions, dismisser: dismisser, injector: injector, id: id, phase: .start, rereads: 0)
+        return .dispatched
+    }
+
+    /// Where a dismiss drive is. Each phase re-reads before it acts and never re-sends its own
+    /// keys: a Tab or a dismiss that has not repainted yet is waited for (`keyedRereads`
+    /// settles), not pressed again — a second Shift+x on the NEXT card would dismiss a question
+    /// nobody refused.
+    enum DismissPhase: Int { case start = 0, refocused = 1, pressed = 2 }
+
+    /// The `expected` an aborted dismiss files: what the drive was waiting to see.
+    private static let dismissExpectation = "question card holding the keyboard"
+
+    private func performDismiss(
+        _ questions: [PromptQuestion]?, dismisser: AgentQuestionDismisser,
+        injector: TextInjecting, id: UUID, phase: DismissPhase, rereads: Int
+    ) {
+        guard let screen = injector.readViewport() else {
+            answerAbortSink(AnswerAbort(check: .unreadableBeforePress, step: phase.rawValue, purpose: nil,
+                                        from: 0, to: 0, expected: nil, focused: nil, viewport: nil))
+            injecting.remove(id)
+            return
+        }
+        func send(_ keys: [KeyedKeystroke], then next: DismissPhase) {
+            for key in keys {
+                switch key {
+                case .character(let character): injector.sendCharacterKey(character)
+                case .arrowUp: injector.sendArrowUp()
+                case .arrowDown: injector.sendArrowDown()
+                case .paste(let text): injector.sendText(text)
+                case .returnKey: injector.sendReturn()
+                case .tab: injector.sendTab()
+                }
+            }
+            injectionSettle { [weak self] in
+                self?.performDismiss(questions, dismisser: dismisser, injector: injector, id: id,
+                                     phase: next, rereads: 0)
+            }
+        }
+        switch (phase, dismisser.dismissStep(for: questions, inViewport: screen)) {
+        case (.pressed, .absent):
+            injecting.remove(id)   // the card closed: dismissed
+            return
+        case (.start, .press(let keys)), (.refocused, .press(let keys)):
+            send(keys, then: .pressed)
+            return
+        case (.start, .refocus(let keys)):
+            send(keys, then: .refocused)
+            return
+        default:
+            break
+        }
+        if rereads < Self.keyedRereads {
+            injectionSettle { [weak self] in
+                self?.performDismiss(questions, dismisser: dismisser, injector: injector, id: id,
+                                     phase: phase, rereads: rereads + 1)
+            }
+            return
+        }
+        answerAbortSink(AnswerAbort(
+            check: .keyedScreenMismatch, step: phase.rawValue, purpose: nil, from: 0, to: 0,
+            expected: phase == .pressed ? "question card closed" : Self.dismissExpectation,
+            focused: nil, viewport: screen))
+        injecting.remove(id)
     }
 
     /// Answer a whole set of questions in one drive.
@@ -6954,6 +7702,154 @@ final class SessionStore: ObservableObject {
         return .dispatched
     }
 
+    /// **One keypress that names the row, read off the screen — the whole drive for a keyed
+    /// agent.** Every check runs before the key: the open prompt's own shape, the client's label
+    /// against this Mac's transcript copy, and the screen's row for that label. The key then
+    /// picks AND submits, so there is no cursor to move, no landing to confirm and no Return
+    /// that could commit a focused durable grant (grok's first card focuses always-approve).
+    ///
+    /// A permission's plain "Yes" is that one key. A question — one or a set, single-select,
+    /// checkbox or typed — goes through `driveKeyed`, the driver's own step-by-step program
+    /// (`AgentKeyedQuestionDriver`), whose FIRST step is checked here against the screen already
+    /// read, so a dialog this Mac does not recognise is refused before the phone is told
+    /// `dispatched`. A keyed driver with no question program answers questions `unanswerable`.
+    private func answerByKey(
+        _ open: OpenPrompt, with answer: PromptAnswer, keyed: AgentKeyedDialogDriver,
+        injector: TextInjecting, id: UUID, token: UUID
+    ) -> AnswerDispatch {
+        guard let viewport = injector.readViewport() else {
+            recordEarlyAbort(.unreadableBeforePress)
+            return .unreadableScreen
+        }
+        let key: Character
+        switch answer {
+        case .deny:
+            remember(answered: token, for: id)
+            keyed.deny(injector)
+            return .dispatched
+        case .allow:
+            guard case .permission = open else {
+                recordEarlyAbort(.allowNotPermission, injector: injector)
+                return .unreadableScreen
+            }
+            guard let found = keyed.allowKey(inViewport: viewport) else {
+                recordEarlyAbort(.optionRowMismatch, expected: "Yes", injector: injector)
+                return .unreadableScreen
+            }
+            key = found
+        case .option, .answers:
+            guard case .question(_, let questions) = open else {
+                recordEarlyAbort(.optionNotQuestion, injector: injector)
+                return .unreadableScreen
+            }
+            guard let program = keyed as? AgentKeyedQuestionDriver else { return .unanswerable }
+            let picks: [[AnswerPlan.Pick]]
+            switch answer {
+            case .option(let index, let label):
+                // One index names one list, so `.option` means a lone question; a set is the
+                // whole-set payload's job, as on the arrow path.
+                guard questions.count == 1, let question = questions.first else { return .unanswerable }
+                guard question.options.indices.contains(index), question.options[index].label == label else {
+                    let expected = question.options.indices.contains(index) ? question.options[index].label : nil
+                    recordEarlyAbort(.optionLabelMismatch, expected: expected, injector: injector)
+                    return .unreadableScreen
+                }
+                picks = [[.option(index)]]
+            case .answers(let selections):
+                guard selections.count == questions.count else {
+                    recordEarlyAbort(.setCountMismatch, injector: injector)
+                    return .unreadableScreen
+                }
+                // The client's labels against this Mac's own transcript copy, as on the arrow
+                // path; a typed answer is held to its position, the free-text row.
+                for (question, chosen) in zip(questions, selections) {
+                    for selection in chosen {
+                        if selection.text != nil {
+                            guard selection.index == question.options.count else {
+                                recordEarlyAbort(.setLabelMismatch, injector: injector)
+                                return .unreadableScreen
+                            }
+                            continue
+                        }
+                        guard question.options.indices.contains(selection.index),
+                              question.options[selection.index].label == selection.label
+                        else {
+                            let expected = question.options.indices.contains(selection.index)
+                                ? question.options[selection.index].label : nil
+                            recordEarlyAbort(.setLabelMismatch, expected: expected, injector: injector)
+                            return .unreadableScreen
+                        }
+                    }
+                }
+                picks = selections.map { $0.map { $0.text.map(AnswerPlan.Pick.typed) ?? .option($0.index) } }
+            default:
+                return .unanswerable
+            }
+            guard let plan = program.answerPlan(for: questions, picks: picks), let first = plan.first
+            else { return .unanswerable }
+            guard program.keystrokes(for: first, questions: questions, inViewport: viewport) != nil else {
+                recordEarlyAbort(.keyedScreenMismatch, injector: injector)
+                return .unreadableScreen
+            }
+            remember(answered: token, for: id)
+            injecting.insert(id)
+            performKeyed(plan, at: 0, questions: questions, driver: program, injector: injector, id: id, rereads: 0)
+            return .dispatched
+        }
+        remember(answered: token, for: id)
+        injector.sendCharacterKey(key)
+        return .dispatched
+    }
+
+    /// How many extra settles a keyed step waits for the screen to show what it expects before
+    /// the drive gives up. A commit repaints the NEXT question asynchronously, and grok's repaint
+    /// was seen to take longer than one 120ms settle under load in the probe; re-reading costs
+    /// nothing, and only a read is retried — never a key.
+    static let keyedRereads = 8
+
+    /// One keyed step: read, check, press, settle, next. Every step is checked against a fresh
+    /// read, because a keyed agent's keys commit (see `KeyedAnswerStep`); a mismatch after the
+    /// re-reads files a `keyed-screen-mismatch` abort and leaves the card for a person.
+    private func performKeyed(
+        _ steps: [KeyedAnswerStep], at index: Int, questions: [PromptQuestion],
+        driver: AgentKeyedQuestionDriver, injector: TextInjecting, id: UUID, rereads: Int
+    ) {
+        guard index < steps.count else { injecting.remove(id); return }
+        guard let screen = injector.readViewport() else {
+            answerAbortSink(AnswerAbort(check: .unreadableBeforePress, step: index, purpose: nil,
+                                        from: 0, to: 0, expected: nil, focused: nil, viewport: nil))
+            injecting.remove(id)
+            return
+        }
+        guard let keys = driver.keystrokes(for: steps[index], questions: questions, inViewport: screen) else {
+            if rereads < Self.keyedRereads {
+                injectionSettle { [weak self] in
+                    self?.performKeyed(steps, at: index, questions: questions, driver: driver,
+                                       injector: injector, id: id, rereads: rereads + 1)
+                }
+                return
+            }
+            answerAbortSink(AnswerAbort(check: .keyedScreenMismatch, step: index, purpose: nil,
+                                        from: 0, to: 0, expected: nil, focused: nil, viewport: screen))
+            injecting.remove(id)
+            return
+        }
+        for key in keys {
+            switch key {
+            case .character(let character): injector.sendCharacterKey(character)
+            case .arrowUp: injector.sendArrowUp()
+            case .arrowDown: injector.sendArrowDown()
+            case .paste(let text): injector.sendText(text)
+            case .returnKey: injector.sendReturn()
+            case .tab: injector.sendTab()
+            }
+        }
+        injectionSettle { [weak self] in
+            self?.performKeyed(steps, at: index + 1, questions: questions, driver: driver,
+                               injector: injector, id: id, rereads: 0)
+        }
+    }
+
     /// Files an answered token against a tab, oldest evicted first. See `answeredPromptTokens`.
     private func remember(answered token: UUID, for id: UUID) {
         var tokens = answeredPromptTokens[id, default: []]
@@ -7165,7 +8061,37 @@ final class SessionStore: ObservableObject {
         // so it is the one place that can refuse a second injection for a tab that already
         // has one resolving.
         guard !injecting.contains(id) else { return nil }
-        return (channel, injector)
+        // Handed over ADDRESSED. The screen-driven channels never look past the
+        // `TextInjecting` they receive, and this still is one; a channel that delivers over its
+        // agent's own API needs to know which conversation and which account's server — see
+        // `TargetedInjector`.
+        guard let target = agentTarget(for: id) else { return (channel, injector) }
+        return (channel, TargetedInjector(base: injector, target: target))
+    }
+
+    /// The tab's agent and where it is working, as `AgentTarget`. Nil for a tab the store no
+    /// longer holds — or whose adapter has not been built.
+    ///
+    /// Only an adapter that ALREADY exists is used. `adapter(for:)` builds on a miss, and the
+    /// injection gate runs for every agent's tabs: an orphaned codex tab, whose account
+    /// collapses to the nil key, would otherwise get an unstarted nil-account codex stack built
+    /// behind it on every injection. A live tab's adapter exists by the time anything is typed
+    /// into it, because attaching its runtime built it.
+    private func agentTarget(for id: UUID) -> AgentTarget? {
+        guard let session = session(for: id) else { return nil }
+        let instance = instance(for: session)
+        let adapter: (any AgentAdapter)?
+        if let registered = adapters[instance] {
+            adapter = registered
+        } else {
+            switch instance.agent {
+            case .codex: adapter = codexStacks[instance.account]?.adapter
+            case .opencode: adapter = openCodeStacks[instance.account]?.adapter
+            case .claude, .grok, .gemini: adapter = nil
+            }
+        }
+        guard let adapter else { return nil }
+        return AgentTarget(adapter: adapter, location: adapter.location(for: session))
     }
 
     /// **The tab's reported readiness, re-checked against the process at the instant of
@@ -7440,7 +8366,10 @@ final class SessionStore: ObservableObject {
                 into: id,
                 // Re-asked after the settle: a turn that started meanwhile makes it wait.
                 stillWanted: { [weak self] in self?.pluginReloadsDue().contains(id) ?? false },
-                onSent: { [weak self] in self?.pluginReload.sent(id) }
+                onSent: { [weak self] in
+                    guard let self else { return }
+                    self.pluginReload.sent(id, at: self.now())
+                }
             )
         }
     }
@@ -7739,6 +8668,12 @@ final class SessionStore: ObservableObject {
         return Set(repos.flatMap { repo in
             repo.sessions.filter { session in
                 let sessionAccount = preferences.resolvedAccountID(for: session.agent, in: session.accountID)
+                // A pool project's login is ANY live member: leasing spreads its tabs across
+                // them, so comparing against one member would mark the feature working.
+                if case .pool(let pool)? = preferences.projectSettings(repo.url.path).accounts[session.agent] {
+                    let members = preferences.effectivePools.first { $0.id == pool }?.accounts ?? []
+                    return !members.contains { $0 == sessionAccount }
+                }
                 let projectAccount = preferences.account(for: session.agent, project: repo.url.path)?.id
                 return SidebarRow.accountMismatched(session: sessionAccount, project: projectAccount)
             }.map(\.id)
@@ -7749,7 +8684,7 @@ final class SessionStore: ObservableObject {
     /// active session's project, else the last one that was active, else the first repo.
     /// Mirrors `createFromMenu`'s own routing (which folder a new tab lands in) but has no
     /// side effects — no folder picker, no creation — so `SessionSidebar`'s account dropdown
-    /// and `SessionCommands`'s File menu can both ask "which project" without duplicating that
+    /// and the File menu's New Session rows (`NewSessionMenuController`) can both ask "which project" without duplicating that
     /// walk or triggering it.
     var currentProjectPath: String? {
         if let activeID = selectedSessionID, let at = locate(activeID) {
@@ -7972,7 +8907,9 @@ final class SessionStore: ObservableObject {
                 pendingDialogRaisedAt[conversation] = now()
             case .cleared(let conversation): pendingDialogs[conversation] = nil
             case .promptSubmitted(let conversation, let at):
-                pendingDialogs[conversation] = nil
+                // A subagent's dialog outlives the parent's next turn — see
+                // `DialogAttribution`'s UserPromptSubmit case.
+                if pendingDialogs[conversation]?.agentID == nil { pendingDialogs[conversation] = nil }
                 lastPromptSubmits[conversation] = at
             }
         }
@@ -8074,6 +9011,9 @@ final class SessionStore: ObservableObject {
     /// Safe to run twice in one instant: every flush below is idempotent and
     /// deadline-guarded, and `inject` refuses re-entry for a tab already mid-settle.
     private func maintenanceTick() {
+        // First: a carried draft goes back into its composer before anything else is typed
+        // there, so every later injection (which preserves drafts) types around it.
+        flushPendingDrafts()
         // This is the retry tick for deferred renames: a rename usually waits on something
         // that never shows up in `statuses` at all — the user clearing their half-typed
         // draft moves no status, so gating the retry on a status change would strand it.
@@ -8094,6 +9034,8 @@ final class SessionStore: ObservableObject {
         // After every queue above, so a user's own text always reaches an idle composer
         // first; `inject` refuses a tab already mid-drive, and this retries next tick.
         flushPluginReloads()
+        // Throttled inside: a tab's pool lease follows its agent process (see the method).
+        reconcileTabLeasesIfDue()
     }
 
     /// Rebuilds `statuses` from a registry scan and keeps each tab's anchor current.
@@ -8658,9 +9600,12 @@ final class SessionStore: ObservableObject {
         // "active N min ago" even on a tick whose published fields end up equal.
         let stamp = now()
         for (id, status) in next where previous[id]?.activity != status.activity {
+            // Flight Deck's own `/reload-plugins` is not activity the row should report.
+            if pluginReload.masks(id, from: previous[id]?.activity, to: status.activity, now: stamp) { continue }
             lastActiveAtByID[id] = stamp
         }
         let previousOpenPromptAgents = openPromptAgents
+        let previousOpenPromptOffers = openPromptOffers
         // Shadowed, mutable: `derivedOpenPromptCalls` fills in `answerless` on every `waiting`
         // entry below, ahead of every comparison this function makes — a tick where only that
         // field moves must be recognized as a change exactly like any other, not smuggled in
@@ -8719,6 +9664,7 @@ final class SessionStore: ObservableObject {
         if backgroundWork != backgroundWorkSessions { backgroundWorkSessions = backgroundWork }
         openPromptCalls = derived.calls
         openPromptAgents = derived.agents
+        openPromptOffers = derived.offers
         openPromptFailureCodes = derived.codes
         // THREE axes, not one. A task starting or ending under an otherwise-idle tab moves
         // only `backgroundWork` — guarding on `statuses` alone swallowed that tick entirely,
@@ -8732,6 +9678,9 @@ final class SessionStore: ObservableObject {
             // The same call id moving from the parent to a subagent (or between subagents)
             // changes where the phone must read it, so it is a change even though the id is not.
             || openPromptAgents != previousOpenPromptAgents
+            // The words of a dialog the phone cannot derive; they move with the id in practice,
+            // and are compared anyway so they can never move alone without reaching the wire.
+            || openPromptOffers != previousOpenPromptOffers
         else { return }
         // A session that HAD a status and no longer does means its `claude` exited.
         // Drop its sub-agent count too, so a later process reusing the same session
@@ -8757,6 +9706,8 @@ final class SessionStore: ObservableObject {
             .filter { previousOpenPromptCalls[$0] != openPromptCalls[$0] }
             .union(Set(previousOpenPromptAgents.keys).union(openPromptAgents.keys)
                 .filter { previousOpenPromptAgents[$0] != openPromptAgents[$0] })
+            .union(Set(previousOpenPromptOffers.keys).union(openPromptOffers.keys)
+                .filter { previousOpenPromptOffers[$0] != openPromptOffers[$0] })
         // `openPromptChanged` is deliberately not unioned in: a tab with a dialog has a status,
         // so it is already in `next.keys`, and adding it would only be a way for this set to
         // disagree with itself.
@@ -8776,7 +9727,9 @@ final class SessionStore: ObservableObject {
         // check.
         emitActivity(transitions, backgroundWorkChanged: backgroundWorkChanged,
                      openPromptChanged: openPromptChanged)
-        applyReadState(transitions)
+        applyReadState(transitions, now: stamp)
+        // After `applyReadState`, which still needs the window this tick may close.
+        pluginReload.settle(transitions, now: stamp)
         deliverNotifications(transitions)
         cancelSupersededPrompts(transitions)
         // Below the three-axis guard above, so this writes only on a real transition — a
@@ -8788,9 +9741,12 @@ final class SessionStore: ObservableObject {
     }
 
     /// One read/unread decision per session, over every edge this tick produced.
-    private func applyReadState(_ transitions: [StatusTransition]) {
+    private func applyReadState(_ transitions: [StatusTransition], now: Date) {
         let active = appIsActive()
         for transition in transitions {
+            // The reload blip finished nothing the user missed, and saw nothing they watched.
+            if pluginReload.masks(transition.id, from: transition.old?.activity,
+                                  to: transition.new?.activity, now: now) { continue }
             switch SessionReadPolicy.change(
                 old: transition.old, new: transition.new,
                 // `selectedProjectID == nil` matters as much as the session match: while a
@@ -8882,7 +9838,8 @@ final class SessionStore: ObservableObject {
                 openPromptCall: openPromptIdentity(of: transition.id),
                 answerless: transition.new?.answerless ?? false,
                 subagents: wireSubagents(of: transition.id),
-                openPromptAgent: openPromptAgents[transition.id]
+                openPromptAgent: openPromptAgents[transition.id],
+                openPrompt: openPromptOffers[transition.id].map(WireOpenPrompt.init)
             )
         })
     }
@@ -8927,9 +9884,11 @@ final class SessionStore: ObservableObject {
     /// two can never read as two different moments for what is one underlying fact.
     private func derivedOpenPromptCalls(
         _ next: inout [UUID: SessionStatus]
-    ) -> (calls: [UUID: String], codes: [UUID: String], agents: [UUID: String]) {
+    ) -> (calls: [UUID: String], codes: [UUID: String], agents: [UUID: String],
+          offers: [UUID: OpenPrompt]) {
         var calls: [UUID: String] = [:]
         var agents: [UUID: String] = [:]
+        var offers: [UUID: OpenPrompt] = [:]
         var codes: [UUID: String] = [:]
         let now = now()
         // Snapshotted before the loop, deliberately: the loop below mutates `next[id]` on every
@@ -8944,6 +9903,11 @@ final class SessionStore: ObservableObject {
             case .success(let callID):
                 calls[id] = callID
                 agents[id] = openPromptAgentProbe?(id)
+                // Kept only when it names the call just probed: words for any other call would
+                // put one dialog's text on the wire under another's id.
+                if let offer = openPromptOfferProbe?(id), offer.callID == callID {
+                    offers[id] = offer
+                }
                 stuckPromptEpisodes[id] = nil
                 next[id]?.answerless = false
             case .failure(let code) where code.code == "prompt_changed":
@@ -8969,7 +9933,7 @@ final class SessionStore: ObservableObject {
         for id in staleEpisodeIDs {
             stuckPromptEpisodes[id] = nil
         }
-        return (calls, codes, agents)
+        return (calls, codes, agents, offers)
     }
 
     /// One tab's identity as it goes on the wire. Never `.unreported` — this build always
@@ -9055,7 +10019,8 @@ final class SessionStore: ObservableObject {
             openPromptCall: openPromptIdentity(of: id),
             answerless: status.answerless,
             subagents: wireSubagents(of: id),
-            openPromptAgent: openPromptAgents[id]
+            openPromptAgent: openPromptAgents[id],
+            openPrompt: openPromptOffers[id].map(WireOpenPrompt.init)
         ))
     }
 
@@ -9096,7 +10061,8 @@ final class SessionStore: ObservableObject {
             // only writer of it — rides along unchanged.
             answerless: status.answerless,
             subagents: wireSubagents(of: id),
-            openPromptAgent: openPromptAgents[id]
+            openPromptAgent: openPromptAgents[id],
+            openPrompt: openPromptOffers[id].map(WireOpenPrompt.init)
         ))
     }
 
@@ -9115,6 +10081,10 @@ final class SessionStore: ObservableObject {
 
     private func injector(for id: UUID) -> TextInjecting? {
         wakeIfAsleep(id)   // rebuilds the surface (+ SIGCONT) if this session was asleep
+        // Mid-rollover the agent on screen (if any) is the one being replaced: anything typed
+        // now would land in a process about to be killed. nil defers every caller to a later
+        // tick, which finds the resumed agent.
+        guard !rollingOver.contains(id) else { return nil }
         return injectorOverride ?? surfaces[id]
     }
 
@@ -9133,7 +10103,12 @@ final class SessionStore: ObservableObject {
         guard let status = statuses[id],
               status.agentActivity == .busy || (includingDialog && status.activity == .waiting),
               let injector = injector(for: id) else { return false }
-        injector.sendEscape()
+        // The agent's own stop key: Escape for claude and codex, Ctrl+C for grok, whose Escape
+        // neither cancels a turn nor answers a card (`GrokAdapter.interruptKey`).
+        switch session(for: id)?.agent.interruptKey ?? .escape {
+        case .escape: injector.sendEscape()
+        case .controlC: injector.sendControlKey("c")
+        }
         return true
     }
 
@@ -9293,7 +10268,8 @@ final class SessionStore: ObservableObject {
                     backgroundWork: backgroundWorkSessions,
                     openPromptCalls: openPromptCalls, apiErrors: apiErrors,
                     planGates: planGates,
-                    subagentTrees: subagentTrees, openPromptAgents: openPromptAgents
+                    subagentTrees: subagentTrees, openPromptAgents: openPromptAgents,
+                    openPromptOffers: openPromptOffers
                 ),
                 at: destination
             ))
@@ -9429,7 +10405,24 @@ final class SessionStore: ObservableObject {
         // `sessions.json`.
         case .lifecycle(let readiness):
             composerReadinessByTab[tabID] = readiness
+        case .rebound(let binding):
+            repinRebound(tabID, to: binding)
         }
+    }
+
+    /// The tab's agent named its conversation after launch (`AgentEvent.rebound`). Pins the tab
+    /// to it, keeps the transcript path the agent reported, and re-attaches the runtime, whose
+    /// attachment names the conversation the tab has just left. `repinCodex`'s shape without
+    /// codex's ever-pinned bookkeeping, which only codex's pin reconciler reads.
+    private func repinRebound(_ tabID: UUID, to binding: AgentBinding) {
+        guard let at = locate(tabID),
+              repos[at.repo].sessions[at.session].pinnedConversationID != binding.conversationID
+        else { return }
+        repos[at.repo].sessions[at.session].pinnedConversationID = binding.conversationID
+        repos[at.repo].sessions[at.session].transcriptPath = binding.transcriptURL?.path
+        stopWatching(tabID)
+        startWatching(tabID: tabID)
+        persist()
     }
 
     /// An agent reported what it is doing.
@@ -9619,6 +10612,8 @@ struct AnswerAbort: Equatable {
         case optionLabelMismatch = "option-label-mismatch"
         case optionCursorOutside = "option-cursor-outside"
         case optionRowMismatch   = "option-row-mismatch"
+        /// A keyed drive's step found a screen other than the one it expects (`KeyedAnswerStep`).
+        case keyedScreenMismatch = "keyed-screen-mismatch"
     }
 
     let check: Check

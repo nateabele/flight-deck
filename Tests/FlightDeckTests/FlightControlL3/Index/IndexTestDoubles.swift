@@ -13,6 +13,16 @@ final class ScriptedIndexHeadless: HeadlessRunner, @unchecked Sendable {
     private(set) var ran: [String] = []
     private(set) var prompts: [String] = []
     private(set) var commands: [[String]] = []
+    /// The account each run was bound to (nil: the built-in home).
+    private(set) var accounts: [AgentAccountRef?] = []
+
+    func run(_ command: (executable: String, arguments: [String], unsetEnvironment: [String]), cwd: URL,
+             account: AgentAccountRef?, onStdout: (@Sendable (Data) -> Void)?) async throws -> (stdout: Data, stderr: String, exitCode: Int32) {
+        lock.withLock { accounts.append(account) }
+        let result = try await run(command, cwd: cwd)
+        if let onStdout, !result.stdout.isEmpty { onStdout(result.stdout) }
+        return result
+    }
 
     func run(_ command: (executable: String, arguments: [String], unsetEnvironment: [String]),
              cwd: URL) async throws -> (stdout: Data, stderr: String, exitCode: Int32) {

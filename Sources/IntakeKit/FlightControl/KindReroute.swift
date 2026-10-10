@@ -65,7 +65,7 @@ public enum KindReroute {
                 var block = assignment.block
                 // Keeps the "unroutable: " prefix; the contract's own test decides what is unroutable.
                 if assignment.isUnroutable { plan.unroutable[row.id] = block.source.reason; continue }
-                if block.harness == old.harness, block.model == old.model, block.knobs == old.knobs, block.pool == old.pool { continue }
+                if block.agent == old.agent, block.model == old.model, block.knobs == old.knobs, block.pool == old.pool { continue }
                 block.kind = old.kind
                 plan.changes.append(Change(id: row.id, block: block))
             }

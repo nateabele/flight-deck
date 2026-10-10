@@ -21,9 +21,13 @@ extension WireSession {
     /// One implementation, shared by the list's status glyph and the timeline's header, so
     /// the two screens cannot come to different conclusions about the same session.
     public var subagentSummary: String? {
-        // Only claude has ground truth here. Add an agent to this list when — and only
-        // when — something actually emits a count for it.
-        guard agent == "claude", subagentCount > 0 else { return nil }
+        // Only claude and opencode have ground truth here. Add an agent to this list when —
+        // and only when — something actually emits a count for it.
+        //
+        // `opencode` emits one: its subagents run as child sessions the Mac watches over the
+        // server's event stream, and the count is the children currently busy
+        // (`OpenCodeRuntime`).
+        guard agent == "claude" || agent == "opencode", subagentCount > 0 else { return nil }
         return "\(subagentCount) subagent\(subagentCount == 1 ? "" : "s")"
     }
 }

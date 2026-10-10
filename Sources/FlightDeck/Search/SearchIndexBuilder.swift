@@ -1,4 +1,5 @@
 import Foundation
+import IntakeKit
 
 /// Reads transcript history into the index, once, without getting in anybody's way.
 ///

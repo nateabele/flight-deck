@@ -1,5 +1,6 @@
 import FleetKit
 import Foundation
+import IntakeKit
 
 enum TimelineReadFailure: Error, Equatable, Sendable {
     /// The transcript could not be read as one, and the client should say "no history" and be

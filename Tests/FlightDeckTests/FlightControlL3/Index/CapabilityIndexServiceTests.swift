@@ -52,6 +52,40 @@ final class CapabilityIndexServiceTests: XCTestCase {
         XCTAssertEqual(IndexSnapshotStore(directory: dir).list().count, 1)
     }
 
+    /// The refresh bills the account the resolver names for the index's claude assignment
+    /// (`IndexAccountTests` covers which one), binds that home, and gives any pool lease back
+    /// when the run ends.
+    func testARefreshRunsAsTheResolvedAccountAndGivesItsLeaseBack() async throws {
+        try seedConfig()
+        let h = ScriptedIndexHeadless()
+        answerA(h)
+        let service = make(h)
+        let home = dir.appendingPathComponent("work-home", isDirectory: true)
+        let account = AgentAccount(agent: .claude, displayName: "Work", home: home)
+        let lease = AccountLease(pool: "team", account: CapacityPreferences.accountRef(account))
+        let resolver = IndexStubResolver(.success(ResolvedAccount(agent: .claude, account: account, lease: lease, label: "Team pool")))
+        service.accountResolver = resolver
+        await service.refreshNow()
+        XCTAssertEqual(resolver.asked, [.claude])
+        XCTAssertEqual(h.accounts, [AgentAccountRef(id: account.id.uuidString, home: home)])
+        XCTAssertEqual(resolver.released, [lease])
+        XCTAssertNotNil(service.current, "the run itself still happened")
+    }
+
+    /// A broken assignment is refused, never swapped for another login, and spends nothing.
+    func testARefreshWhoseAccountCannotResolveRunsNothing() async throws {
+        try seedConfig()
+        let h = ScriptedIndexHeadless()
+        answerA(h)
+        let service = make(h)
+        let resolver = IndexStubResolver(.failure(.accountMissing(.claude)))   // held: the service's ref is weak
+        service.accountResolver = resolver
+        await service.refreshNow()
+        XCTAssertEqual(h.ran, [])
+        XCTAssertNotNil(service.problem)
+        XCTAssertFalse(service.isRefreshing)
+    }
+
     func testFirstRefreshIsNeverAutomatic() throws {
         try seedConfig()
         let h = ScriptedIndexHeadless()
@@ -121,11 +155,11 @@ final class CapabilityIndexServiceTests: XCTestCase {
     func testManualScoresReachTheLiveIndex() throws {
         try seedConfig()
         let service = make(ScriptedIndexHeadless())
-        let local = ModelRef(harness: "opencode", model: "ollama/qwen")
+        let local = ModelRef(agent: .gemini, model: "ollama/qwen")
         service.setManual(ManualModelScores(model: local, dimensions: ["agentic-coding": 0.9]))
         XCTAssertEqual(service.live.rank(kind: kind, candidates: [local]).first?.score, 0.9)
         XCTAssertEqual(service.scores.first { $0.model == local }?.dimensions["agentic-coding"]?.origin, .manual)
-        let renamed = ModelRef(harness: "opencode", model: "ollama/qwen3")
+        let renamed = ModelRef(agent: .gemini, model: "ollama/qwen3")
         service.setManual(ManualModelScores(model: renamed, dimensions: ["agentic-coding": 0.8]), replacing: local)
         XCTAssertEqual(service.config.manual.map(\.model), [renamed])
         XCTAssertEqual(IndexConfig.load(from: dir.appendingPathComponent("config.json")).config.manual.map(\.model), [renamed], "hand scores persist")
@@ -196,4 +230,17 @@ final class CapabilityIndexServiceTests: XCTestCase {
         XCTAssertNil(service.scores.first { $0.model == IndexFixtures.sol }, "the mid-run rejection must unscore the model in the written snapshot")
         XCTAssertNil(service.current?.scores.first { $0.model == IndexFixtures.sol })
     }
+}
+
+@MainActor
+private final class IndexStubResolver: IndexAccountResolving {
+    let result: Result<ResolvedAccount, AccountResolutionError>
+    private(set) var asked: [AgentID] = []
+    private(set) var released: [AccountLease] = []
+    init(_ result: Result<ResolvedAccount, AccountResolutionError>) { self.result = result }
+    func acquireIndexAccount(_ agent: AgentID) -> Result<ResolvedAccount, AccountResolutionError> {
+        asked.append(agent)
+        return result
+    }
+    func release(_ lease: AccountLease) { released.append(lease) }
 }

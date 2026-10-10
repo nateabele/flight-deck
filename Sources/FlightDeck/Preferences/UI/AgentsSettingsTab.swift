@@ -1,4 +1,5 @@
 import SwiftUI
+import IntakeKit
 
 /// Replaces the old single-agent Claude tab. The list on the left is both the agent
 /// registry and the shortcut binding — row 1 is ⌘N, row 2 ⌘⇧N, row 3 ⌘⇧⌥N — so the shortcut
@@ -7,6 +8,9 @@ import SwiftUI
 struct AgentsSettingsTab: View {
     @ObservedObject var preferences: PreferencesStore
     @ObservedObject var sessions: SessionStore
+    /// Where grok's and gemini's model lists come from; nil uses the store's own planning
+    /// service. A seam for the offscreen renders, which must not build a real one.
+    var modelSource: IntakeService?
     @State private var selection: AgentID?
 
     var body: some View {
@@ -32,23 +36,32 @@ struct AgentsSettingsTab: View {
 
             Group {
                 let agent = selection ?? preferences.preferences.agents.first?.id ?? .claude
-                // Accounts ride in as each pane's leading section rather than as a region
-                // below it, so the whole detail side is one scroll: accounts, then the
-                // agent's options, then the launch command last.
-                let accounts = {
-                    AnyView(
-                        Section("Accounts") {
-                            AccountsSection(preferences: preferences, sessions: sessions, agent: agent)
-                        }
-                    )
-                }
-                switch agent {
-                case .codex: CodexOptionsForm(preferences: preferences, header: accounts)
-                default:     ClaudeOptionsPane(preferences: preferences, leading: accounts)
+                // Accounts used to lead each pane; they are one list in Settings → Accounts now
+                // (unify brief R7), so this pane is the agent's options alone.
+                switch AgentOptionsPane(agent: agent) {
+                case .codex:       CodexOptionsForm(preferences: preferences)
+                case .claudeFlags: ClaudeOptionsPane(preferences: preferences)
+                case .opencode:    OpenCodeOptionsForm(preferences: preferences)
+                case .model(let agent):
+                    DetectedModelsReader(service: modelSource ?? sessions.intakeService) { available in
+                        TabModelOptionsForm(agent: agent, options: globalOptions(agent), available: available)
+                    }
                 }
             }
             .frame(minWidth: 380)
         }
+    }
+
+    /// The agent's global row, looked up by id like `CodexOptionsForm.options` — the list's
+    /// order is the shortcut binding, not a storage index.
+    private func globalOptions(_ agent: AgentID) -> Binding<AgentOptions> {
+        Binding(
+            get: { preferences.preferences.agents.first { $0.id == agent }?.options ?? .empty(for: agent) },
+            set: { newValue in
+                guard let index = preferences.preferences.agents.firstIndex(where: { $0.id == agent }) else { return }
+                preferences.preferences.agents[index].options = newValue
+            }
+        )
     }
 
     private func shortcut(for agent: AgentID) -> String {
@@ -66,8 +79,8 @@ struct AgentsSettingsTab: View {
 /// that row, and `globalFlags` survives only as a decode-only legacy field.
 struct ClaudeOptionsPane: View {
     @ObservedObject var preferences: PreferencesStore
-    /// Emitted above this pane's own "Startup" section, inside the same `Form`. The Agents tab
-    /// uses it for the accounts list; the Projects tab passes nothing.
+    /// Emitted above this pane's own "Startup" section, inside the same `Form`. Nothing passes
+    /// it since accounts moved to their own tab; kept as the seam `FlagEditor.header` mirrors.
     var leading: (() -> AnyView)?
 
     /// Reads and writes the claude row's flags within `preferences.agents`, wherever that row

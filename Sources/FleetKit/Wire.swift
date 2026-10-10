@@ -92,7 +92,8 @@ public struct WirePlanGate: Codable, Equatable, Sendable {
 /// another while the session stayed `waiting` moved nothing on the wire at all — and a phone
 /// went on drawing a card, and offering buttons, for a dialog its Mac had already left. Naming
 /// the call makes that a wire change. The phone still reads the question out of its own copy
-/// of the transcript.
+/// of the transcript — except for an agent whose transcript never holds the call, where the
+/// Mac sends its words alongside this id (`WireOpenPrompt`).
 ///
 /// **Three states, because "nobody said" and "nothing is open" are different facts.** A Mac
 /// built before this field omits the key, and a client that read absence as "no dialog" would
@@ -137,6 +138,114 @@ extension KeyedDecodingContainer {
         guard contains(key) else { return .unreported }
         if try decodeNil(forKey: key) { return .noPrompt }
         return .call(try decode(String.self, forKey: key))
+    }
+}
+
+/// The open dialog itself — its words, not only its id — sent by the Mac for an agent whose
+/// transcript cannot carry it.
+///
+/// **The exception to `OpenPromptIdentity`'s "identity, and deliberately nothing else", and
+/// it is scoped to exactly the agents that rule cannot serve.** For claude and grok the call is
+/// a record in the transcript the phone already fetches, so both ends derive the dialog from the
+/// same bytes and nothing but the id needs to travel. agy (gemini) never writes a WAITING step to
+/// its transcript at all — the call lives only in its SQLite step store, which only the Mac can
+/// read — so a phone left to derive it would find nothing, and a gemini tab blocked on a
+/// permission showed "Waiting for you" with no card to answer it. The Mac sends its derivation
+/// for such an agent (`AgentOpenPromptReader.transcriptCarriesOpenPrompt == false`), and only
+/// for such an agent: a claude tab never carries this field, so its bytes are unchanged.
+///
+/// **It never replaces the veto.** The phone shows it only while `openPromptCall` names the
+/// same call, and it rides the same `activityChanged` event as that id — so the supersede that
+/// moves the id moves this with it, and a dialog that closes clears both on one event.
+///
+/// `kind` is a `String`, not an enum, for `WireSession.agent`'s reason: a kind this build has
+/// never heard of decodes to a value whose `prompt` is nil — no card — rather than to a decode
+/// failure that would take the whole snapshot down with it.
+public struct WireOpenPrompt: Codable, Equatable, Sendable {
+    public var callID: String
+    /// `"permission"` or `"question"`.
+    public var kind: String
+    public var tool: String?
+    public var summary: String?
+    public var questions: [PromptQuestion]?
+
+    public init(
+        callID: String, kind: String, tool: String? = nil, summary: String? = nil,
+        questions: [PromptQuestion]? = nil
+    ) {
+        self.callID = callID
+        self.kind = kind
+        self.tool = tool
+        self.summary = summary
+        self.questions = questions
+    }
+
+    public init(_ open: OpenPrompt) {
+        switch open {
+        case .permission(let id, let tool, let summary):
+            self.init(callID: id, kind: "permission", tool: tool, summary: summary)
+        case .question(let id, let questions):
+            self.init(callID: id, kind: "question", questions: questions)
+        }
+    }
+
+    /// The dialog, or nil for a kind this build cannot draw — and for a question with nothing
+    /// in it, which is not a shape any reader produces and must not become an empty card.
+    public var prompt: OpenPrompt? {
+        switch kind {
+        case "permission":
+            return .permission(callID: callID, tool: tool, summary: summary)
+        case "question":
+            guard let questions, !questions.isEmpty else { return nil }
+            return .question(callID: callID, questions)
+        default:
+            return nil
+        }
+    }
+}
+
+/// Spelled out so a newer Mac's extra keys and an older one's missing optional keys both decode:
+/// only the question's text and its options are required, exactly as `init?(question:)` reads a
+/// transcript's.
+extension PromptQuestion: Codable {
+    enum CodingKeys: String, CodingKey {
+        case header, question, options, multiSelect, unanswerable
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            header: try c.decodeIfPresent(String.self, forKey: .header),
+            question: try c.decode(String.self, forKey: .question),
+            options: try c.decode([Option].self, forKey: .options),
+            multiSelect: try c.decodeIfPresent(Bool.self, forKey: .multiSelect) ?? false,
+            unanswerable: try c.decodeIfPresent(String.self, forKey: .unanswerable)
+        )
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encodeIfPresent(header, forKey: .header)
+        try c.encode(question, forKey: .question)
+        try c.encode(options, forKey: .options)
+        try c.encode(multiSelect, forKey: .multiSelect)
+        try c.encodeIfPresent(unanswerable, forKey: .unanswerable)
+    }
+}
+
+extension PromptQuestion.Option: Codable {
+    enum CodingKeys: String, CodingKey { case label, detail }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(label: try c.decode(String.self, forKey: .label),
+                  detail: try c.decodeIfPresent(String.self, forKey: .detail))
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(label, forKey: .label)
+        try c.encodeIfPresent(detail, forKey: .detail)
     }
 }
 
@@ -204,6 +313,10 @@ public struct WireSession: Codable, Equatable, Sendable, Identifiable {
     /// is the conversation's own. Without it a phone pages the parent's feed for a call that
     /// lives in a subagent's file and never finds the card's tool call.
     public var openPromptAgent: String?
+    /// The dialog `openPromptCall` names, in words, for an agent whose transcript cannot carry
+    /// it — see `WireOpenPrompt`. Nil for every other agent and for every tab with nothing open;
+    /// a client derives those itself, exactly as before.
+    public var openPrompt: WireOpenPrompt?
 
     public init(
         id: UUID, title: String, agent: String,
@@ -217,7 +330,8 @@ public struct WireSession: Codable, Equatable, Sendable, Identifiable {
         answerless: Bool = false,
         acceptsTypedAnswers: Bool = false,
         subagents: [WireSubagent]? = nil,
-        openPromptAgent: String? = nil
+        openPromptAgent: String? = nil,
+        openPrompt: WireOpenPrompt? = nil
     ) {
         self.id = id
         self.title = title
@@ -235,6 +349,7 @@ public struct WireSession: Codable, Equatable, Sendable, Identifiable {
         self.acceptsTypedAnswers = acceptsTypedAnswers
         self.subagents = subagents
         self.openPromptAgent = openPromptAgent
+        self.openPrompt = openPrompt
     }
 
     /// Spelled out rather than synthesized, because `openPromptCall` is not `Codable` — its
@@ -252,7 +367,7 @@ public struct WireSession: Codable, Equatable, Sendable, Identifiable {
     enum CodingKeys: String, CodingKey {
         case id, title, agent, activity, waitingFor, subagentCount, isUnread
         case hasBackgroundWork, planGate, openPromptCall, apiError, allowsBlockedAbort
-        case answerless, acceptsTypedAnswers, subagents, openPromptAgent
+        case answerless, acceptsTypedAnswers, subagents, openPromptAgent, openPrompt
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -279,6 +394,9 @@ public struct WireSession: Codable, Equatable, Sendable, Identifiable {
         // from, so a codex tab must not write a key an older phone would have to ignore.
         try c.encodeIfPresent(subagents, forKey: .subagents)
         try c.encodeIfPresent(openPromptAgent, forKey: .openPromptAgent)
+        // Absent, not `null`: a claude tab — every tab an older phone knows how to draw — must
+        // put exactly the bytes on the wire it always has.
+        try c.encodeIfPresent(openPrompt, forKey: .openPrompt)
     }
 
     public init(from decoder: any Decoder) throws {
@@ -339,6 +457,9 @@ public struct WireSession: Codable, Equatable, Sendable, Identifiable {
         // subagent model", which tells the phone to fall back on `subagentCount` alone.
         subagents = try c.decodeIfPresent([WireSubagent].self, forKey: .subagents)
         openPromptAgent = try c.decodeIfPresent(String.self, forKey: .openPromptAgent)
+        // `try?`, not `try`: this is the one field here whose shape a newer Mac might grow, and
+        // a dialog this build cannot read must cost one card, never the whole snapshot.
+        openPrompt = try? c.decodeIfPresent(WireOpenPrompt.self, forKey: .openPrompt)
     }
 }
 

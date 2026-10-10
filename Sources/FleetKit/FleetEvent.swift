@@ -49,12 +49,18 @@ public enum FleetEvent: Equatable, Sendable {
     /// is already a `SessionStatus` change, and reaches here exactly as `waitingFor` moving on
     /// its own would. Defaulted for the same reason `openPromptCall` is: every existing
     /// construction site compiles unchanged.
+    ///
+    /// `openPrompt` is the dialog `openPromptCall` names, in words, for an agent whose
+    /// transcript cannot carry it (`WireOpenPrompt`). It rides HERE rather than on an event of
+    /// its own so a supersede moves the id and the words in one fold: two events would leave a
+    /// window in which a phone held the new id beside the old dialog's words.
     case activityChanged(id: UUID, activity: String?, waitingFor: String?,
                          subagentCount: Int, hasBackgroundWork: Bool,
                          openPromptCall: OpenPromptIdentity = .unreported,
                          answerless: Bool = false,
                          subagents: [WireSubagent]? = nil,
-                         openPromptAgent: String? = nil)
+                         openPromptAgent: String? = nil,
+                         openPrompt: WireOpenPrompt? = nil)
     case unreadChanged(id: UUID, isUnread: Bool)
 
     /// This session's last turn died on an API error, or a newer record cleared it.
@@ -106,7 +112,7 @@ extension FleetEvent {
         switch self {
         case .sessionAdded(let s, _, _): return s.id
         case .sessionRemoved(let id), .sessionMoved(let id, _, _),
-             .renamed(let id, _, _), .activityChanged(let id, _, _, _, _, _, _, _, _),
+             .renamed(let id, _, _), .activityChanged(let id, _, _, _, _, _, _, _, _, _),
              .unreadChanged(let id, _), .planGateChanged(let id, _),
              .promptExpired(let id, _), .promptTyped(let id, _), .apiErrorChanged(let id, _):
             return id

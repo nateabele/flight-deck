@@ -73,7 +73,7 @@ final class FixtureSessionPersistence: SessionPersisting {
             Self.logger.error("fixture snapshot did not decode; seeding normally instead")
             return nil
         }
-        return snapshot
+        return snapshot.restoringLaterAgents()
     }
 
     /// Deliberately empty — see the type's doc comment. Do not "fix" this.

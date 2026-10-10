@@ -52,14 +52,28 @@ final class DialogAttributionTests: XCTestCase {
                      "no matching PreToolUse and no tool_use_id: nothing is attributed")
     }
 
-    /// Review Focus 4: a new user turn means the old dialog is gone.
-    func testUserPromptSubmitClearsThePendingDialog() {
+    /// Review Focus 4: a new user turn means the main agent's old dialog is gone — the only
+    /// way to submit one past it is Esc, which fires no hook.
+    func testUserPromptSubmitClearsTheMainAgentsPendingDialog() {
         var a = DialogAttribution()
-        _ = a.apply(line("PermissionRequest", agent: "a28ad87b", toolUseID: "toolu_X"))
+        _ = a.apply(line("PermissionRequest", toolUseID: "toolu_X"))
         guard case .promptSubmitted(let id, _)? = a.apply(line("UserPromptSubmit")) else {
             return XCTFail("expected promptSubmitted")
         }
         XCTAssertEqual(id, sid)
+        XCTAssertNil(a.apply(line("PostToolUse", toolUseID: "toolu_X")), "already cleared")
+    }
+
+    /// "The Plan" (2026-10-09): a background task finishing is delivered to the parent as a
+    /// new user turn, with a subagent's dialog still on screen. That turn says nothing about
+    /// the subagent's dialog, which stays attributed until its own PostToolUse.
+    func testASubagentsDialogOutlivesTheParentsNextTurn() {
+        var a = DialogAttribution()
+        _ = a.apply(line("PermissionRequest", agent: "a28ad87b", toolUseID: "toolu_X"))
+        guard case .promptSubmitted? = a.apply(line("UserPromptSubmit")) else {
+            return XCTFail("expected promptSubmitted")
+        }
+        XCTAssertEqual(a.apply(line("PostToolUse", agent: "a28ad87b", toolUseID: "toolu_X")), .cleared(sid))
     }
 
     func testPostToolUseForTheAttributedCallClearsIt() {

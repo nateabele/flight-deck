@@ -227,7 +227,7 @@ final class HandoffHostTests: XCTestCase {
         store.notifier = notifier
         let host = StoreHandoffHost(store: store, logURL: FileManager.default.temporaryDirectory.appendingPathComponent("unused.jsonl"))
         let request = HandoffRequest(task: TaskRef(id: "fd-1", project: URL(fileURLWithPath: "/p")),
-                                     block: ExecutionBlock(kind: "tests", harness: "claude", model: "opus", pool: "claude-default",
+                                     block: ExecutionBlock(kind: "tests", agent: .claude, model: "opus", pool: "claude-default",
                                                            source: AssignmentSource(by: .rule, reason: "r", at: Date())),
                                      oldAgent: "BlueLake", oldSession: SessionRef(id: id, agentName: "BlueLake"),
                                      transcript: nil, reservedFiles: [], fromAccount: UsageRefs.work)

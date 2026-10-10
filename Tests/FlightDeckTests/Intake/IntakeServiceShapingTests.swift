@@ -55,7 +55,7 @@ final class IntakeServiceShapingTests: XCTestCase {
 
     private func makeService() -> IntakeService {
         IntakeService(store: IntakeStore(root: root),
-                      triageSettings: TriageSettings(harness: .codex, model: "m1", effort: "high"),
+                      triageSettings: TriageSettings(agent: .codex, model: "m1", effort: "high"),
                       availableModels: .defaults, clock: clock, runner: runner,
                       inject: { _, _, _, _ in true }, hasSession: { _, _ in false })
     }

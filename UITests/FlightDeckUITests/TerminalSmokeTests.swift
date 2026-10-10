@@ -23,6 +23,13 @@ import XCTest
 /// Order is load-bearing: read-only checks first, then the mutations that build on each
 /// other (⌘N → rename → close), and ⌘Q strictly last because it terminates the app.
 final class TerminalSmokeTests: XCTestCase {
+    /// Before every launch: a crash in an earlier test leaves macOS's crash-report dialog over
+    /// the screen. See `dismissFlightDeckCrashReports`.
+    override func setUp() {
+        super.setUp()
+        dismissFlightDeckCrashReports()
+    }
+
     /// Settles the runloop briefly so a late-arriving duplicate event (e.g. a double-fired
     /// ⌘N) has a chance to show up before the surrounding assertion re-checks state.
     private func settle() {
@@ -318,11 +325,14 @@ final class TerminalSmokeTests: XCTestCase {
                 "precondition: both projects expanded, one session row each (rows=\(rows.count))"
             )
 
-            // The chevron zone is the leading 22pt of the ROW view
-            // (`SidebarClickIntent.chevronZoneWidth`), measured from the `NSTableRowView`'s
-            // leading edge — which sits a few points left of the header element's own frame.
-            // +10 from the element's left edge lands inside that zone without having to guess
-            // exactly where the row's edge falls relative to the element's.
+            // The chevron zone is everything left of the project name, measured from the row's
+            // cell (`SidebarClickIntent.chevronZoneWidth`). The header element's frame starts
+            // where its content does, 6pt into the cell, with the glyph at +0..+7 and the name
+            // at +12, so +10 is the gap between the glyph and the name — deliberately the
+            // hardest point in the zone, not the glyph's centre. That is the spot macOS 14/15
+            // used to miss: the zone was then measured from the NSTableRowView's edge, which on
+            // those OSes is 10pt left of the cell, so it ended at the glyph and this click
+            // selected the project instead (every UI-test Mac run until 2026-10-09).
             let chevron = headers.element(boundBy: 0)
                 .coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0.5))
                 .withOffset(CGVector(dx: 10, dy: 0))
@@ -2130,10 +2140,20 @@ final class TerminalSmokeTests: XCTestCase {
         // Blank row space to the right of a title: the region that always worked by hand.
         // Used as the CONTROL below — if a drag from here does not reorder either, the
         // failure is XCUITest's inability to drive a SwiftUI list reorder, not the app.
+        //
+        // Placed by the SIDEBAR's frame, not the title's: on macOS 15 the title element's frame
+        // can span the whole cell, so "40pt right of the title" landed in the terminal pane
+        // (the UI-test Mac recording shows the press selecting terminal text) and this control
+        // failed on every run there. 65% across the sidebar is past any title this fixture
+        // creates ("session N" ends ~30% across) and short of the hover-revealed close button,
+        // which sits against the trailing edge and would close the session if pressed.
         func blankSpace(inRow index: Int, dy: CGFloat = 0) -> XCUICoordinate {
-            rows.element(boundBy: index)
-                .coordinate(withNormalizedOffset: CGVector(dx: 1.0, dy: 0.5))
-                .withOffset(CGVector(dx: 40, dy: dy))
+            let sidebar = window.outlines.firstMatch.frame
+            let title = rows.element(boundBy: index).frame
+            return app.windows.firstMatch.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(
+                dx: sidebar.minX + sidebar.width * 0.65 - window.frame.minX,
+                dy: title.midY + dy - window.frame.minY
+            ))
         }
 
         XCTContext.runActivity(named: "control: a session reorders by dragging blank row space") { _ in
@@ -2181,9 +2201,20 @@ final class TerminalSmokeTests: XCTestCase {
         XCTContext.runActivity(named: "a session reorders by dragging its title text") { _ in
             let before = (0..<3).map { rows.element(boundBy: $0).value as? String }
 
-            rows.element(boundBy: 0).press(
-                forDuration: 0.6, thenDragTo: rows.element(boundBy: 2)
-            )
+            // Pressed on the title's TEXT, at a coordinate, not at the element's centre: on
+            // macOS 15 the title element's frame can span the cell, so its centre is blank row
+            // space and this group would pass without ever pressing the text. +28 is inside the
+            // text whether the frame starts at the text or at the row's 16pt status column
+            // (text at +20) — the two frames XCUITest was seen to report.
+            rows.element(boundBy: 0)
+                .coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0.5))
+                .withOffset(CGVector(dx: 28, dy: 0))
+                .press(
+                    forDuration: 0.6,
+                    thenDragTo: rows.element(boundBy: 2)
+                        .coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0.5))
+                        .withOffset(CGVector(dx: 28, dy: 0))
+                )
             settle()
 
             let after = (0..<3).map { rows.element(boundBy: $0).value as? String }
@@ -2224,7 +2255,16 @@ final class TerminalSmokeTests: XCTestCase {
             rename.click()
 
             let field = app.textFields["session-title-field"]
-            XCTAssertTrue(field.waitForExistence(timeout: 5))
+            // `guard`, not a bare assertion, in this and the three rename groups below: typing
+            // into a field that never appeared is not an assertion failure but an XCUITest
+            // error ("Failed to get matching snapshot"), and that ABORTS the whole test. On the
+            // UI-test Mac (macOS 15) this field did not open, and the abort hid every group
+            // after it — Preferences, the grok/gemini model panes, Copy, ⌘F — so a single
+            // rename failure read as a dozen unknowns. The failure is still recorded.
+            guard field.waitForExistence(timeout: 5) else {
+                XCTFail("the row menu's Rename did not open the rename field")
+                return
+            }
             field.typeKey("a", modifierFlags: .command)
             // "renamed" was never on screen before this point, so the assertion below cannot
             // pass vacuously.
@@ -2259,8 +2299,10 @@ final class TerminalSmokeTests: XCTestCase {
                 .coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
                 .doubleClick()
             let field = app.textFields["session-title-field"]
-            XCTAssertTrue(field.waitForExistence(timeout: 5),
-                          "double-clicking a row title must open the rename field")
+            guard field.waitForExistence(timeout: 5) else {
+                XCTFail("double-clicking a row title must open the rename field")
+                return
+            }
             // A double-click must open exactly ONE field. This and the unchanged-titles check
             // below are what distinguish "renamed the row I clicked" from "renamed some other
             // row": a mechanism that resolved the wrong row would still open exactly one field,
@@ -2328,8 +2370,10 @@ final class TerminalSmokeTests: XCTestCase {
             // off the table and break this.
             app.typeKey(.return, modifierFlags: [])
             let field = app.textFields["session-title-field"]
-            XCTAssertTrue(field.waitForExistence(timeout: 5),
-                          "Return did not open the rename field while the sidebar had focus")
+            guard field.waitForExistence(timeout: 5) else {
+                XCTFail("Return did not open the rename field while the sidebar had focus")
+                return
+            }
 
             // MEASURED, not assumed: the plan required that Return not be hijacked while the
             // rename field ITSELF is open, and the negative activity below only measures
@@ -2415,8 +2459,10 @@ final class TerminalSmokeTests: XCTestCase {
 
             app.typeKey("r", modifierFlags: .command)
             let field = app.textFields["session-title-field"]
-            XCTAssertTrue(field.waitForExistence(timeout: 5),
-                          "Cmd-R did not open the rename field for the selected session")
+            guard field.waitForExistence(timeout: 5) else {
+                XCTFail("Cmd-R did not open the rename field for the selected session")
+                return
+            }
 
             field.typeKey("a", modifierFlags: .command)
             // "cmdR renamed" was never on screen before this point, so the assertion below
@@ -2592,6 +2638,13 @@ final class TerminalSmokeTests: XCTestCase {
             XCTAssertEqual(checkbox.value as? Int, 0)
 
             field.click()
+            // To the end of the text before typing: a click puts the caret wherever it lands.
+            // On the UI-test Mac's narrower Settings window the command wraps, the click landed
+            // at the end of the first line — which is the START of the editable flags — and
+            // " --brief" went in before "--verbose" as one token, '--brief--verbose' (seen in
+            // the recording), so no checkbox could turn on. ⌘↓ is NSTextView's
+            // moveToEndOfDocument, which is where a user appending a flag puts it.
+            field.typeKey(.downArrow, modifierFlags: .command)
             field.typeText(" --brief")
             field.typeKey(.return, modifierFlags: .command)
 
@@ -2648,6 +2701,23 @@ final class TerminalSmokeTests: XCTestCase {
             XCTAssertEqual(checkbox.value as? Int, 0, "Cancel left the bypass enabled")
             let field = prefs.textViews["command-field"]
             XCTAssertFalse((field.value as? String ?? "").contains("--dangerously-skip-permissions"))
+        }
+
+        // grok's and gemini's rows once fell through to Claude's flag pane, so picking a model
+        // "for grok" edited claude's global flags. Each now opens its own model pane
+        // (`AgentOptionsPane`); asserting the command field is GONE is what catches the fall-through.
+        XCTContext.runActivity(named: "the grok and gemini rows open their own model panes") { _ in
+            let prefs = preferencesWindow(app)
+            for (row, binary) in [("Grok", "grok"), ("Gemini", "agy")] {
+                prefs.staticTexts[row].firstMatch.click()
+                XCTAssertTrue(prefs.popUpButtons["Model"].waitForExistence(timeout: 5), "\(row): no Model picker")
+                let launch = prefs.staticTexts["tab-model-launch-\(row.lowercased())"]
+                XCTAssertTrue(launch.waitForExistence(timeout: 5), "\(row): no launch command preview")
+                XCTAssertTrue((launch.value as? String ?? launch.label).hasPrefix(binary),
+                              "\(row): preview was \(launch.value ?? launch.label)")
+                XCTAssertFalse(prefs.textViews["command-field"].exists, "\(row) still shows Claude's flag pane")
+            }
+            prefs.staticTexts["Claude"].firstMatch.click()
         }
 
         // Close Preferences so the groups below act on the main window.

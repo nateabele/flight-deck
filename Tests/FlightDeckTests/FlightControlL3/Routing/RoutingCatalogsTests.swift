@@ -12,7 +12,7 @@ final class RoutingCatalogsTests: XCTestCase {
     }
 
     func testClaudeOffersItsAliasesWithOpusFirstAndAnEffortKnob() async throws {
-        let caps = try XCTUnwrap(RoutingCapabilityRegistry.standard().capabilities(for: "claude"))
+        let caps = try XCTUnwrap(RoutingCapabilityRegistry.standard().capabilities(for: .claude))
         let catalog = await caps.modelCatalog()
         let models = try XCTUnwrap(catalog.value)
         XCTAssertEqual(models.first?.id, "opus", "opus is Flight Deck's default claude model everywhere else")
@@ -76,12 +76,12 @@ final class RoutingCatalogsTests: XCTestCase {
 
     func testTheRegistryCombinesRealClaudeWithAnyOtherAgent() async {
         let codex = FakeRoutingCapabilities()
-        codex.harness = "codex"
+        codex.agent = .codex
         codex.catalog = .supported([ModelEntry(id: "gpt-6-sol", displayName: "GPT-6-Sol", knobs: ["effort"])])
         codex.knobSchema = ["effort": ["low", "high"]]
-        let cats = await RoutingCapabilityRegistry([ClaudeRoutingCapabilities(), codex]).catalogs(enabled: ["claude", "codex"])
-        XCTAssertEqual(cats.byHarness["claude"]?.defaultModel, "opus")
-        XCTAssertTrue(cats.knobsValid(ModelRef(harness: "claude", model: "haiku", knobs: ["effort": "xhigh"])))
-        XCTAssertTrue(cats.contains(ModelRef(harness: "codex", model: "gpt-6-sol")))
+        let cats = await RoutingCapabilityRegistry([ClaudeRoutingCapabilities(), codex]).catalogs(enabled: [.claude, .codex])
+        XCTAssertEqual(cats.byAgent[.claude]?.defaultModel, "opus")
+        XCTAssertTrue(cats.knobsValid(ModelRef(agent: .claude, model: "haiku", knobs: ["effort": "xhigh"])))
+        XCTAssertTrue(cats.contains(ModelRef(agent: .codex, model: "gpt-6-sol")))
     }
 }

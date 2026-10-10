@@ -3,7 +3,7 @@ import Foundation
 // The shared per-CLI agent profile (grok/gemini planning spec §3.0). Today four kinds of
 // knowledge about each CLI — its model catalog, its error spellings, the child-session scrub
 // and its account binding — are copied between the tab side (`AgentAdapter`) and the headless
-// side (`Harness`), and two copies have already drifted. A profile is the one place each of
+// side (`AgentID`), and two copies have already drifted. A profile is the one place each of
 // those answers lives, so a new CLI (grok, gemini) is a profile plus a harness, not a fifth copy.
 //
 // This file is the CONTRACT that three parallel tracks build against: P (claude + codex),
@@ -113,7 +113,7 @@ public struct ProfileModelCatalog: Sendable, Equatable {
 
 /// Which account a run bills: an opaque id plus the CLI's config home for that account (the
 /// directory a profile binds via `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, or grok's/gemini's
-/// equivalent). Pure — no Keychain, no file reads — so it rides on `HarnessRequest`.
+/// equivalent). Pure — no Keychain, no file reads — so it rides on `HeadlessRequest`.
 public struct AgentAccountRef: Codable, Hashable, Sendable {
     public var id: String
     public var home: URL
@@ -126,10 +126,11 @@ public struct AgentAccountRef: Codable, Hashable, Sendable {
 /// planning. Pure and Sendable: no process spawning, no file reads — a caller runs the commands
 /// it describes and hands the output back in.
 public protocol AgentProfile: Sendable {
-    /// The headless harness this profile describes. Its raw value (`claude`, `codex`, `grok`,
-    /// `gemini`) is the CLI's id everywhere — including L3's `HarnessID`.
-    var id: Harness { get }
-    var family: ModelFamily { get }
+    /// The agent this profile describes — the one identity tabs, planning, routing and pools all
+    /// share (unify brief R1). It is also the model family coverage and cross-check count over:
+    /// `ModelFamily` was a copy of this enum and is gone, so a family's display name is
+    /// `id.displayName`.
+    var id: AgentID { get }
     /// The executable looked up on the login shell's PATH.
     var binaryName: String { get }
     var signInCheck: SignInCheck { get }
@@ -147,86 +148,54 @@ public protocol AgentProfile: Sendable {
     /// home (nil = the built-in account, i.e. `base` as is), re-applies whatever an isolation
     /// flag drops, and removes the child-session variables.
     func environment(base: [String: String], account: AgentAccountRef?) -> [String: String]
-    /// Non-nil while this conformer is still a Track 0 stub: one of `AgentProfileStub`'s
-    /// constants, naming the track that owns it. A track deletes its conformer's override when
-    /// the real profile lands; tests assert on this, never on behaviour, to tell stub from real.
+    /// Non-nil marks a conformer that is still a placeholder (Track 0 shipped all four as stubs,
+    /// each naming the track that would replace it). Every conformer is real now, so all return
+    /// nil; the requirement stays so a future CLI can land its profile before its harness, and
+    /// `AgentProfileContractTests` fails if any shipped profile is still a placeholder.
     var unimplemented: String? { get }
+    /// Whether a headless run must be preceded by `signInCheck`. True for a CLI whose headless
+    /// mode, when signed out, STARTS an interactive sign-in (opens a browser, waits for a
+    /// code) instead of failing fast — `agy -p` does, so a seat on a signed-out account would
+    /// launch a Google sign-in in the human's browser. The executor runs the check first and
+    /// pauses the round with `authExpired` rather than spawning the run.
+    var headlessSignInPreflight: Bool { get }
+    /// Text a parse failure carries when the CLI ended the turn without any answer for a reason
+    /// a resume fixes (agy's auto-denied tool). `SchemaRepair` resumes such a run once even for
+    /// a native-schema harness. nil: the CLI has no such failure.
+    var answerlessTurnMarker: String? { get }
 }
 
 public extension AgentProfile {
     var unimplemented: String? { nil }
-}
-
-/// The stub markers. Each names the track that replaces the stub. When no conformer returns
-/// one any more, delete this enum — a reference to it left anywhere is then a compile error,
-/// which is the point.
-public enum AgentProfileStub {
-    public static let trackP = "unimplemented in track P"
-    public static let trackG = "unimplemented in track G"
-    public static let trackM = "unimplemented in track M"
+    var headlessSignInPreflight: Bool { false }
+    var answerlessTurnMarker: String? { nil }
 }
 
 // MARK: - Registry
 
 public enum AgentProfiles {
-    /// One profile per `Harness` case, in `Harness.allCases` order.
-    public static let all: [any AgentProfile] = Harness.allCases.map { AgentProfiles.profile(for: $0) }
+    /// One profile per `AgentID` case, in `AgentID.planningOrder` order.
+    public static let all: [any AgentProfile] = AgentID.planningOrder.map { AgentProfiles.profile(for: $0) }
 
-    public static func profile(for harness: Harness) -> any AgentProfile {
-        switch harness {
+    public static func profile(for agent: AgentID) -> any AgentProfile {
+        switch agent {
         case .claude: ClaudeProfile()
         case .codex: CodexProfile()
         case .grok: GrokProfile()
         case .gemini: GeminiProfile()
+        case .opencode: OpenCodeProfile()
         }
     }
 
-    /// The harnesses whose headless command and output parser exist (`HarnessCommand.build`,
-    /// `HarnessOutput.parse`). The availability gate: `AvailableModels` never holds a harness
+    /// The harnesses whose headless command and output parser exist (`HeadlessCommand.build`,
+    /// `HeadlessOutput.parse`). The availability gate: `AvailableModels` never holds a harness
     /// outside this set, so a round can never be configured to run a harness that would only
     /// fail at round time. Track G adds `.grok` and Track M adds `.gemini` when their builders
     /// land — and not before, which is what keeps master shippable meanwhile.
-    public static let headlessReady: Set<Harness> = [.claude, .codex]
+    public static let headlessReady: Set<AgentID> = [.claude, .codex, .grok, .gemini, .opencode]
 }
 
-// MARK: - Stub conformers (Track 0)
+// MARK: - Conformers
 //
-// Each returns explicit "unimplemented" values that tests detect: an empty catalog, a classifier
-// that recognizes nothing, and `base` unchanged for the environment. No `fatalError` — a stub is
-// reachable from shipping code (`FailureDiagnosis` reads `binaryName`), so it must answer safely.
-// `id`, `family`, `binaryName` and `hasNativeSchema` are facts, not implementation, and are real.
-
-private func stubSignInCheck(_ marker: String) -> SignInCheck {
-    SignInCheck(arguments: [], signedOutHint: marker, isSignedIn: { _ in false })
-}
-
-public struct GrokProfile: AgentProfile {
-    public init() {}
-    public var id: Harness { .grok }
-    public var family: ModelFamily { .grok }
-    public var binaryName: String { "grok" }
-    public var signInCheck: SignInCheck { stubSignInCheck(AgentProfileStub.trackG) }
-    public var modelCatalog: ProfileModelCatalog { .empty }
-    public func parseModelList(_ stdout: String) -> [String] { [] }
-    /// `grok --json-schema` (grok 1.0.30, spec §2). Strict-mode compatibility is Track G's probe.
-    public var hasNativeSchema: Bool { true }
-    public func classify(error: AgentErrorSignal) -> AgentFailureKind? { nil }
-    public func environment(base: [String: String], account: AgentAccountRef?) -> [String: String] { base }
-    public var unimplemented: String? { AgentProfileStub.trackG }
-}
-
-public struct GeminiProfile: AgentProfile {
-    public init() {}
-    public var id: Harness { .gemini }
-    public var family: ModelFamily { .gemini }
-    /// May become `agy` if Track M's probe finds `gemini -p` refuses an AI Pro account (spec §2).
-    public var binaryName: String { "gemini" }
-    public var signInCheck: SignInCheck { stubSignInCheck(AgentProfileStub.trackM) }
-    public var modelCatalog: ProfileModelCatalog { .empty }
-    public func parseModelList(_ stdout: String) -> [String] { [] }
-    /// gemini 0.59.0 has no schema flag (spec §2), so its seats take the repair path.
-    public var hasNativeSchema: Bool { false }
-    public func classify(error: AgentErrorSignal) -> AgentFailureKind? { nil }
-    public func environment(base: [String: String], account: AgentAccountRef?) -> [String: String] { base }
-    public var unimplemented: String? { AgentProfileStub.trackM }
-}
+// Each lives in its own file: ClaudeProfile.swift, CodexProfile.swift (Track P),
+// GrokProfile.swift (Track G) and GeminiProfile.swift (Track M).

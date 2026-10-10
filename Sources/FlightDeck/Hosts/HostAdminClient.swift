@@ -72,6 +72,19 @@ final class HostingController: ObservableObject {
     /// failed revoke says nothing about whether the host is running.
     @Published private(set) var actionError: String?
 
+    /// "Keep this Mac awake while plugged in", as the running hostd holds it. The setting
+    /// lives with hostd (`HostingSettings`), not in the app's defaults, because hostd applies
+    /// it while the app is not running.
+    enum KeepAwakeState: Equatable {
+        /// No hostd answering, so nothing to show or set.
+        case unknown
+        /// A hostd from before the option (it answers `failed("bad request")`): the app was
+        /// updated but the LaunchAgent still runs the old binary.
+        case unsupported
+        case available(KeepAwakeStatus)
+    }
+    @Published private(set) var keepAwake: KeepAwakeState = .unknown
+
     /// `<HostStateRoot>/admin.sock`, the same path `DarwinHostServer` binds. Computed from the
     /// same `HostStateRoot.default()`, never spelled out, so the two cannot drift apart.
     nonisolated static var defaultAdminPath: String {
@@ -209,6 +222,31 @@ final class HostingController: ObservableObject {
         }
     }
 
+    /// Shown on the toggle at once rather than after the round trip, so it does not flick
+    /// back while hostd answers; the reply (or a failure's read-back) then replaces it.
+    @discardableResult
+    func setKeepAwake(_ on: Bool) -> Task<Void, Never> {
+        actionError = nil
+        if case .available(let current) = keepAwake {
+            keepAwake = .available(KeepAwakeStatus(enabled: on, holding: current.holding, power: current.power))
+        }
+        let path = adminPath
+        return Task { [weak self] in
+            let reply = await Self.send(.setKeepAwake(on), path: path)
+            guard let self else { return }
+            switch reply {
+            case .success(.keepAwake(let status)):
+                keepAwake = .available(status)
+            case .success(.failed(let message)):
+                actionError = message
+                await loadKeepAwake(generation: generation)
+            default:
+                actionError = "The host service did not confirm the keep-awake setting."
+                await loadKeepAwake(generation: generation)
+            }
+        }
+    }
+
     /// What "Copy pairing details" copies: the best address, at the window's port, and the
     /// code — one paste into the other Mac's address field fills both of its fields.
     var pairingDetails: String? {
@@ -255,6 +293,7 @@ final class HostingController: ObservableObject {
                 if paired || expired || armedUntil == nil { closeWindow() }
             }
             await loadControllers(generation: generation)
+            await loadKeepAwake(generation: generation)
         case .success(.failed(let message)):
             state = .failed(message)
         case .success:
@@ -279,9 +318,21 @@ final class HostingController: ObservableObject {
         controllers = list
     }
 
+    private func loadKeepAwake(generation: Int) async {
+        let reply = await Self.send(.keepAwake, path: adminPath)
+        guard generation == self.generation else { return }
+        switch reply {
+        case .success(.keepAwake(let status)): keepAwake = .available(status)
+        // Any `failed`: an older hostd ("bad request"), or one that cannot hold assertions.
+        case .success(.failed): keepAwake = .unsupported
+        default: keepAwake = .unknown
+        }
+    }
+
     /// What the host knew stops being true once it is off or gone: a Revoke button for a
     /// controller of a hostd that is not running would only fail.
     private func clearHost() {
+        keepAwake = .unknown
         controllers = []
         closeWindow()
     }

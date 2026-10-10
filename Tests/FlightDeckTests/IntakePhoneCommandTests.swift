@@ -56,7 +56,7 @@ final class IntakePhoneCommandTests: XCTestCase {
     private func makeService() async -> IntakeService {
         let svc = IntakeService(store: IntakeStore(root: root), headless: InertHeadlessRunner(),
                                 processRunner: SilentProcessRunner(),
-                                triageSettings: TriageSettings(harness: .codex, model: "m1", effort: "high"),
+                                triageSettings: TriageSettings(agent: .codex, model: "m1", effort: "high"),
                                 availableModels: .defaults, runner: runner,
                                 inject: { _, _, _, _ in true }, hasSession: { _, _ in false },
                                 now: { [unowned self] in self.clockNow },

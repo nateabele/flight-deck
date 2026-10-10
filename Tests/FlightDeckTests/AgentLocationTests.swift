@@ -1,5 +1,6 @@
 import FleetKit
 import XCTest
+import IntakeKit
 @testable import FlightDeck
 
 /// The seam that keeps an agent's path derivation out of the tools subsystem. `location(for:)`
@@ -46,6 +47,7 @@ final class AgentLocationTests: XCTestCase {
     /// Mirrors `ClaudeAdapter` with only `location` replaced.
     private struct RelocatingAdapter: AgentAdapter {
         static let id: AgentID = .claude
+        nonisolated static var profile: any AgentProfile { AgentProfiles.profile(for: .claude) }
         /// Claude's answers, because this stands in for claude — the store reads both
         /// capabilities off `AgentID`, so a stub that disagreed would describe an agent that
         /// does not exist.
@@ -71,6 +73,7 @@ final class AgentLocationTests: XCTestCase {
         }
         static let openPromptReader: AgentOpenPromptReader? = ClaudeAdapter.openPromptReader
         static let searchCorpus: AgentSearchCorpus? = ClaudeAdapter.searchCorpus
+        static let promptResponder: AgentPromptResponder? = ClaudeAdapter.promptResponder
         func prepare(for session: Session, options: AgentOptions) async throws -> AgentBinding {
             binding(for: session)
         }

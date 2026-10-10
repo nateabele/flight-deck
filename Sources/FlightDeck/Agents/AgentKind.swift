@@ -2,19 +2,9 @@ import FleetKit
 import Foundation
 import IntakeKit
 
-/// Which coding agent a tab runs. The raw value is a storage format — it is written into
-/// `sessions.json` — so it is spelled explicitly rather than derived from the case name.
-enum AgentID: String, Codable, CaseIterable, Sendable {
-    case claude
-    case codex
-
-    var displayName: String {
-        switch self {
-        case .claude: "Claude"
-        case .codex: "Codex"
-        }
-    }
-}
+// `AgentID` itself lives in IntakeKit (unify brief R1): the planning runner links IntakeKit
+// alone and must name the same agents a tab does. The app-side answers about an agent — its
+// adapter's capabilities, its built-in home, its routing — are extensions in this module.
 
 /// What a prepared session is bound to: the agent's own conversation identity, and where
 /// its transcript lives when the agent reports one.
@@ -87,6 +77,12 @@ enum AgentEvent: Equatable, Sendable {
     /// detection). Carried as an event so claude's transcript tail and codex's rollout tail reach
     /// the store through the one channel every agent report already takes.
     case outputSignals([AgentOutputSignal])
+    /// The tab's agent is running a different conversation than the one the tab is pinned to,
+    /// and this is it. For an agent that cannot be told an id up front — agy mints its own on
+    /// the first submit and on `/clear`, and silently mints a new one for a resume of an id it
+    /// does not know — so identity is learned after launch rather than negotiated before it.
+    /// The store re-pins the tab and re-attaches its runtime to the new binding.
+    case rebound(AgentBinding)
 }
 
 /// Per-agent settings payload.
@@ -97,17 +93,81 @@ enum AgentEvent: Equatable, Sendable {
 enum AgentOptions: Equatable, Sendable {
     case claude(FlagSet)
     case codex(CodexThreadOptions)
+    /// grok's launch options (`GrokOptions`): model and effort. A payload, rather than a bare
+    /// case, so a new option is a new optional field on `GrokOptions` and not a change to how a
+    /// stored `AgentOptions` is spelled.
+    case grok(GrokOptions)
+    /// agy's launch options (`GeminiOptions`): the model slug.
+    case gemini(GeminiOptions)
+    /// OpenCode's launch options (`OpenCodeOptions`): model and OpenCode agent, both sent in
+    /// the body that creates the session.
+    case opencode(OpenCodeOptions)
 
     var agent: AgentID {
         switch self {
         case .claude: .claude
         case .codex: .codex
+        case .grok: .grok
+        case .gemini: .gemini
+        case .opencode: .opencode
+        }
+    }
+
+    /// The payload that overrides nothing, per agent — what a project or agent row with no
+    /// options of its own carries.
+    static func empty(for agent: AgentID) -> AgentOptions {
+        switch agent {
+        case .claude: .claude(FlagSet())
+        case .codex: .codex(CodexThreadOptions())
+        case .grok: .grok(GrokOptions())
+        case .gemini: .gemini(GeminiOptions())
+        case .opencode: .opencode(OpenCodeOptions())
         }
     }
 }
 
-/// So `[AgentID: T]` encodes as a JSON object keyed `"claude"` / `"codex"` rather than Swift's
-/// default alternating-array form. The stdlib supplies the whole implementation for a
-/// `String`-backed `RawRepresentable` (SE-0320), which is why the body is empty — and the raw
-/// values are already documented above as a storage format, so this keeps that promise legible.
-extension AgentID: CodingKeyRepresentable {}
+/// grok's per-agent launch options: the TUI's `-m <model>` and `--effort <level>` (probed on
+/// grok 1.0.30; see `GrokAdapter.launchCommand`). Every field is optional, so a row stored
+/// before it existed — the empty payload of the P0 stub — still decodes.
+///
+/// grok's `--permission-mode` is deliberately NOT here: the TUI accepts it, but a probe on grok
+/// 1.0.30 (2026-10-09) launched with `--permission-mode plan` still raised the ordinary Edit
+/// permission card for a write, so what the flag does to a tab is unproven — and
+/// `GrokDialogDriver` is built on the default mode's cards.
+struct GrokOptions: Codable, Equatable, Sendable {
+    var model: String?
+    var effort: String?
+
+    /// Claude's and codex's rule (`CodexThreadOptions.merge`): a nil project field inherits, a
+    /// set one overrides. Without it a project that set only the effort replaced the whole
+    /// payload and silently dropped the global model.
+    static func merge(global: GrokOptions, project: GrokOptions) -> GrokOptions {
+        GrokOptions(model: project.model ?? global.model, effort: project.effort ?? global.effort)
+    }
+}
+
+/// Gemini's (`agy`'s) per-agent launch options. Every field is optional, so a row stored before
+/// it existed still decodes.
+struct GeminiOptions: Codable, Equatable, Sendable {
+    /// The `agy --model` slug. nil launches `GeminiAdapter.defaultModel`. Only `gemini-*` slugs
+    /// are honoured (`GeminiAdapter.model(for:)`): agy also serves Claude and GPT-OSS models,
+    /// and a gemini tab running one of those would be a gemini tab in name only.
+    var model: String?
+    /// `agy --mode <mode>`: `accept-edits` or `plan`; nil is agy's own default ("request
+    /// review"). Probed in agy 1.3.1's TUI (`.superpowers/agy-tui-facts.md`): the footer shows
+    /// the mode, and `GeminiTextChannel` already reads both modes' empty-composer placeholders,
+    /// since Shift+Tab reaches them from any tab anyway.
+    var mode: String?
+
+    /// Every value `--mode` accepts (agy 1.3.1 `--help`). A stored value outside it is never
+    /// typed (`GeminiAdapter.modeFlag`) — it is going to a shell.
+    static let modes = ["accept-edits", "plan"]
+
+    init(model: String? = nil, mode: String? = nil) { self.model = model; self.mode = mode }
+
+    /// The same nil-inherits rule as `GrokOptions.merge`.
+    static func merge(global: GeminiOptions, project: GeminiOptions) -> GeminiOptions {
+        GeminiOptions(model: project.model ?? global.model, mode: project.mode ?? global.mode)
+    }
+}
+

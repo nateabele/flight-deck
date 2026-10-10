@@ -7,6 +7,27 @@ carried forward on trust.
 
 ## Resolved (kept for the reasoning trail)
 
+- **Every paired host stuck "offline" behind one Keychain prompt — FIXED (2026-10-10).** The
+  11:57 Release was signed by `Apple Development: the maintainer (NEXCPPHDU2)`, team 2T9E3N27J8.
+  The `dev.flightdeck.host` items trust `Apple Development: dana@personal.example (KH7XHRF6M9)` with
+  partition `teamid:ZM74LQ6QWG`, so securityd prompted at launch (12:05:31). `HostService.start()`
+  read every key in one detached task and opened no link until the last read returned, so the
+  unanswered prompt kept m3 and jeeves undialled for over two hours. `host ls` showed only
+  "offline", and testq fell back to local-only without a word. The sample showed the cooperative
+  thread parked in `SecItemCopyMatching`. The unified log had no outbound :47410 connection
+  since launch. Now each host's read runs independently, a slow read says it is waiting on the
+  Keychain, and a failed read is retried on a capped backoff (`HostKeyReadTests`).
+  **Remaining:** see "Host keys in the legacy keychain" below.
+
+- **SIGSEGV in `posix.getenv` on libghostty's `sentry-init` thread — FIXED (2026-10-09).** A
+  Debug app relaunched by the UI tests crashed with the main thread in libghostty's
+  `ensureLocale`. `ghostty_init` spawns `sentry-init`, which walks `environ` without libc's lock,
+  then `setenv`s LANG and LANGUAGE when LANG is unset (every Dock/Finder/XCUITest launch); adding
+  a variable frees the old `environ` array under the walk. A C repro of that pattern segfaults on
+  this Mac in 2 of 3 runs. `LaunchLocale` now sets what `ensureLocale` would, before
+  `ghostty_init`, so libghostty mutates nothing (`LaunchLocaleTests`). **Remaining:** an
+  unloadable `LC_ALL`/`LC_*` in the app's launch environment still makes `ensureLocale` fall
+  back and `setenv` — only reachable by `launchctl setenv`-ing a bad value; not handled.
 - **Teardown UAF hazard on window close — FIXED** in the multi-session foundation. The
   hazard was that `GhosttyApp.deinit` frees the libghostty app synchronously while
   `Ghostty.Surface.deinit` defers `ghostty_surface_free` to a later main-actor `Task`, so a
@@ -23,6 +44,31 @@ carried forward on trust.
   every libghostty binding. `Sources/FlightDeck/MenuKeyEquivalents.swift` now offers consumed
   bindings to `NSApp.mainMenu` first; it is keyed to no specific shortcut, so menu items
   added later are covered automatically.
+
+
+## Host keys in the legacy keychain (open, 2026-10-10)
+
+A build signed by any identity other than the one that created a host's key prompts for that key
+at launch. Two ways to stop it:
+
+1. **Sign every release with the ZM74LQ6QWG identity (`dana@personal.example`), and have the release
+   refuse any other team.** This removes the prompt at its source. The item ACL is already a
+   designated requirement (leaf CN plus team), not a cdhash, so rebuilds signed by the same
+   identity are trusted without a prompt. This check belongs to the release scripts.
+2. **Move the items to the data-protection keychain** (`kSecUseDataProtectionKeychain`, with a
+   `keychain-access-groups` entry `ZM74LQ6QWG.dev.flightdeck.host`). Access is then by team, not
+   by ACL, and there is never a prompt. It is not small:
+   - `keychain-access-groups` is a restricted entitlement. The installed app has no
+     `embedded.provisionprofile`, and without one AMFI refuses to launch it. A Developer ID build
+     needs a Developer ID provisioning profile with Keychain Sharing, and the headless release
+     build needs `-allowProvisioningUpdates` or a checked-in profile.
+   - It needs a one-time migration: read the legacy item (which may prompt once more), write it
+     to the data-protection keychain, delete the legacy item, and fall back to the legacy read
+     while any item remains there. `KeychainPairedMacStore` and the phone are unaffected.
+   - The SecAccess / trusted-application route is deprecated. Do not use it.
+
+Recommendation: (1) now, because it is cheap and fixes the cause. Then (2) when the app gains a
+provisioning profile for another reason.
 
 ## Deferred to the harness-adapter / block-model phase
 
@@ -2330,7 +2376,7 @@ flagged as most likely to differ from the tests. The maintainer's to run.
     - The materialized claude plugin copy is refreshed before `/reload-plugins`.
     - Settings: one Flight Control tab with Routing, Capability index, Capacity and Task kinds
       sections (Settings → Flight Control → Capacity); the temporary top-level tabs are gone.
-  - **OpenCode routing capabilities wait for the opencode-adapter merge; `RoutingCapabilityRegistry.standard()` will fail to compile until it states them, which is intended.**
+  - **OpenCode routing capabilities** — RESOLVED 2026-10-09 (round 2 opencode): `OpenCodeRoutingCapabilities`.
   - **Still open** (unresolved probe outcomes and deferred minors, carried from every branch):
     - The changed triage/change-set strict-mode schema (`taskKind`/`kindProposal`) WAS probed
       live on 2026-10-05: claude 2.1.289 (haiku) and codex-cli 0.160.0 (gpt-5.6-terra) both accept
@@ -2361,8 +2407,7 @@ flagged as most likely to differ from the tests. The maintainer's to run.
       with no claude meter; `spendControlReached`
       is ignored; the silent-status-line check is suppressed by any other reading on the account; a codex
       read that never returns stops that account's polling until restart; the OpenCode transcript
-      command interpolates its session id and server URL unquoted (quote them when the adapter
-      lands); `/usage` shows a third window ("Current week (Fable)") that the status line's
+      pointer is now the tab's mirror file, a path (round 2 opencode), so nothing is interpolated; `/usage` shows a third window ("Current week (Fable)") that the status line's
       `rate_limits` does not report either; `UsageService.revision` bumps on every tick, so swarm rows re-evaluate each tick.
     - Swarm: the Observe events lane is a nil stub (activity stands in); the Assignment lane is
       hidden when the tab has no Observe (am) agent row; claude/codex accept only the hard-coded
@@ -2383,7 +2428,7 @@ flagged as most likely to differ from the tests. The maintainer's to run.
       during a pending confirmation; the swarm drawer pixel test captures the first render without
       settling; the task-level hold test (`testATaskInHandoffIsNeitherClaimedNorTreatedAsReopened`)
       never ran red against the unfixed code (proved by mutation only); Tasks 9 and 10 were not
-      shown failing first; OpenCode must feed `AgentOutputScan` once its adapter lands.
+      shown failing first; OpenCode now feeds `AgentOutputScan` from its mirror (round 2 opencode).
     - Test flakes seen under load, each passing alone: `PlanEditorKeystrokeTests` frame budget
       (16.1 to 16.7 ms), `PlanningRenderTests.testASeatBeatRedrawsTheLiveCardAlone`,
       `DelegationLifecycleTests.testUnknownRunFromTheHostEndsTheRunAsDied`.
@@ -2916,24 +2961,30 @@ it still reports there, each diagnosed from the run's `.xcresult` screen recordi
 - **Both codex tests: the UI-test Mac's environment.** an older codex-cli is below
   `CodexProcessTransport.minimumVersion` (0.142.4), so creating a codex session is refused and the
   tests fail with "creating a codex session added no row". Upgrading codex on the UI-test Mac fixes it.
-- **`testProjectHeadingsReorderByDragging`, "clicking a project's chevron did not collapse it":
-  macOS 15 sidebar geometry.** The recording shows the click landing just right of the chevron
-  glyph and selecting the project instead. On macOS 15 the `NSTableRowView` starts at the window
-  edge and the heading content (chevron at ~15–22pt) is inset 16pt inside it, so the test's
-  "element left edge + 10pt" is 26pt into the row, past `SidebarClickIntent.chevronZoneWidth`
-  (22pt). The test's comment assumes the row edge is "a few points" left of the element, which
-  is true of macOS 26. This is also a product issue on macOS 14/15 (the deployment target is
-  14.0): the collapse target there is roughly the glyph alone. Measuring the zone from the
-  heading's content edge rather than the row view's would fix both; not done here because it
-  changes product hit-testing and needs a run on macOS 26 too.
-- **`testTheWholeShellInOneSession`, "dragging blank row space did not reorder either": macOS 15
-  accessibility frames.** `blankSpace(inRow:)` presses 40pt right of the session title's frame;
-  on macOS 15 that frame spans the cell, so the press lands in the terminal pane (visible in the
-  recording), and the title-drag group after it has no control to stand on.
-- **Same test, "the context menu renames a session": undiagnosed.** The Rename menu item is
-  clicked, no `session-title-field` appears, and the recording shows the session order changing
-  (to 3, 2, 1) at that moment, as if a drop from the earlier drag groups landed late. Not chased
-  further within the time box.
+- **FIXED 2026-10-09 (branch `smoke-macos15`): `testProjectHeadingsReorderByDragging`, "clicking
+  a project's chevron did not collapse it".** A product bug on macOS 14/15: the collapse zone was
+  the leading 22pt of the `NSTableRowView`, which there starts 10pt left of the cell, so only the
+  glyph collapsed and a click in the gap before the name selected the project. The zone is now
+  everything left of the name, measured from the cell (`SidebarClickIntent.inChevronZone`).
+  Passed on the UI-test Mac (macOS 15.7.2). **Unverified on macOS 26:** the 18pt in-cell width
+  comes from the README capture (chevron 6pt and name 18pt inside the cell), not from a run.
+- **FIXED 2026-10-09: `testTheWholeShellInOneSession`, "dragging blank row space did not
+  reorder either".** A test bug: "40pt right of the title" landed in the terminal pane because
+  the title's macOS 15 frame can span the cell. The press is now 65% across the sidebar. The
+  title-drag group now presses the title text itself (+28pt), for the same reason: at the
+  element's centre it pressed blank space on macOS 15 and passed without testing the text.
+- **FIXED 2026-10-09: same test, "the context menu renames a session".** A product bug: Rename
+  from the row menu on a row that was not selected selected it, the re-parented terminal took
+  focus, and the field's focus loss committed and closed it within one frame. `TerminalPane`
+  no longer moves focus to a surface whose session is being renamed. (The "order changing to
+  3, 2, 1" in the 10-06 note was the title-drag group's own result, not a late drop.)
+- **FIXED 2026-10-09: same test, "typing in the command field updates the controls".** A test
+  bug, not the dialog: on the UI-test Mac's narrower Settings window the command wraps, the
+  click put the caret before `--verbose`, and the field read `'--brief--verbose'`. The test
+  now moves the caret to the end (⌘↓) before typing. The dialog XCUITest reported was macOS's
+  "Flight Deck quit unexpectedly." from the libghostty relaunch crash. Every UI class now
+  closes that dialog (Ignore) before launching (`dismissFlightDeckCrashReports`). That path has
+  not yet run against a real dialog: none was up for the verifying run.
 - **`testPermissionBypassConfirmationUnderChurn` (the flake hunt) on the UI-test Mac:** fails at once with
   "Unable to find hit point for ScrollView" at y≈2600: the Preferences command field is off the UI-test Mac's
   1125pt-tall screen. A screen-size environment failure, not the race it hunts.
@@ -3008,3 +3059,463 @@ lists the deliberate departures; this is what is unverified or not built.
 
 **Not built** (spec §13): Mac instances, SkyPilot, Packer images, remote OpenTofu state, and
 native cloud budgets (AWS Budgets / GCP Budgets) as a backstop to Flight Deck's own caps.
+
+## Grok as a planning harness (2026-10-07, Track G)
+
+- **Data use.** xAI's consumer plans may use prompts to train its models. Check xAI's data
+  settings before you use a Grok agent on a private repo. The Rounds editor shows the same note
+  whenever Grok is offered.
+- **Rate-limit spellings are unverified.** grok's usage-limit messages come from its 1.0.30
+  string table. No live run has produced one. The first real weekly-limit failure must be
+  captured as a fixture.
+- **Isolation is `HOME`, not flags.** grok finds Claude Code plugins under `~/.claude/plugins`,
+  and no compat switch covers that path. `GrokProfile.environment` sets `HOME` to the grok home.
+  If a grok update reads plugins from another path, a seat inherits hooks again. To check, read
+  `grok inspect --json` under the seat environment.
+- **Project hooks.** A project the operator has trusted in grok still runs its own
+  `.grok/config.toml` hooks and MCP servers. This is the same behaviour as when the operator
+  runs grok there.
+- **Accounts.** `GrokProfile.environment` binds `GROK_HOME` (and `HOME`) for an account. A grok
+  seat bills the project's grok assignment like every seat (unify brief R9); with no grok account
+  record it runs in the built-in home.
+- **Model ids drift.** The aliases (`grok-4.7`, …) are fallbacks only. Detection reads
+  `grok models` at launch, on "Check again", and on app activation while an agent is signed out.
+
+## Gemini as a planning harness (2026-10-07, Track M)
+
+- **Read-only depends on agy's own settings.** A Gemini seat is read-only because agy's default
+  permission mode, with `--sandbox`, auto-denies every write in a headless run. `--mode plan` is
+  NOT a boundary: in a probe it wrote files. If the maintainer ever adds a `write_file(...)` **allow** rule
+  to `~/.gemini/antigravity-cli/settings.json` or to a project under `~/.gemini/config/projects/`,
+  read-only seats could write there. Fix: an FD-owned deny rule. Flight Deck does not write to
+  agy's config today.
+- **Lost answers cost a resume.** agy ENDS a turn on any tool it auto-denies, with no answer.
+  The one schema-repair resume (`AgentProfile.answerlessTurnMarker`) recovers it. The first
+  four-family live round needed 1 such resume for its 1 Gemini seat. Expect about one per seat.
+  If the second turn also ends without an answer, the seat fails as `invalidOutput`.
+- **Rate-limit spellings are unverified.** `RESOURCE_EXHAUSTED`, quota, 429 and "too many
+  requests" come from Google's API docs. No live run has produced one. Capture the first real
+  one as a fixture.
+- **Data use.** Google's consumer plans may use prompts to improve its models. Check Google's data
+  settings before you use a Gemini agent on a private repo. The Rounds editor shows the same note
+  whenever Gemini is offered.
+
+## Four-family planning rounds (2026-10-07, branch `planning-4way`)
+
+- **The Grok reviewer is the slow seat.** In the first four-family live round it took 745 s at
+  medium effort. Its previous run at high took 763 s. The next-slowest seat was the claude
+  integrator at 406 s. Medium cut Grok's input tokens from 337k to 118k but barely changed the
+  time: the time is the model's reasoning. If rounds stay slow, the next levers are `low`
+  effort for the Grok reviewer, or `grok-4.7-build-fast`. Neither has been measured.
+- **Grok proposes many changes.** In that round Grok proposed 38 changes and Gemini proposed 4.
+  All 4 of Gemini's matched one of Grok's, so the coverage band read "saturated". That one round
+  is not enough to judge Grok's precision. The integrator then spent 406 s applying them.
+- **Gemini resume token counts look cumulative.** The resumed Gemini turn reported 162k in and
+  45k out for a one-sentence answer. agy's `usage` on a `--conversation` turn appears to cover
+  the whole conversation. Check before reading Gemini token counts as per turn.
+- **No XCUITest drives the Rounds editor.** It is covered by `RoundConfigEditorTests` and by the
+  offscreen renders in `RoundConfigEditorRenderTests` (`FD_ROUNDS_RENDER_DIR`), which include a
+  four-family case. A UI test needs an intake fixture and an availability seam (spec §5).
+  The shaping-time editor (pause, change the reviewer, Save) is covered the same way:
+  `IntakeServiceRoundEditTests`, `ShapingEditTests` and `RoundsEditPausedRenderTests`
+  (`FD_ROUNDS_PAUSED_RENDER_DIR`). Its UI test also needs Grok offered on the UI-test Mac, which
+  depends on that machine's installed and signed-in CLIs.
+- **Gemini accounts.** agy has no home variable, and its login is in the per-user keyring. A
+  Gemini seat always uses the built-in account, and the editor offers no Gemini accounts.
+- **The Flight Control UI tests fail on the UI-test Mac: diagnosed, not an app regression.**
+  On 2026-10-07 `RoutingUITests` (all 6) and `CapacityUITests` failed with their gates set, on
+  master `2e922a11` and on `planning-4way` alike, with "the Flight Control tab did not open".
+  - *Cause:* the run's recordings show a Little Snitch connection alert ("Flight Deck wants to
+    connect to api.anthropic.com", badged TERMINATED) over the Settings toolbar. The Flight
+    Control tab button sits under it, so every click hit the alert and Settings stayed on Agents
+    (the hierarchy dumps agree). Little Snitch's own log on the UI-test Mac puts the alert up at
+    18:11:10, two seconds after that day's first gated run started its runner, and it was still
+    up hours later. The routing-redesign pass (6/6, 2026-10-06 16:53) ran while no alert was up.
+    Which process inside the app made the connection is unconfirmed: Little Snitch's traffic
+    log needs root. The likeliest is the seed session's real `claude`.
+  - *Fixed in the tests:* the Flight Control classes open the tab through `openFlightControlTab`,
+    and click tabs and sections through `clickUnlessCovered`. That refuses to click under a
+    Little Snitch, system-alert or SecurityAgent window and fails naming it, with a full-screen
+    screenshot. A click on such an alert could answer it.
+  - *Fixed in `smoke-remote.sh`:* it prints the passed/failed/skipped counts. A named selection
+    whose every case skipped ends `SMOKE SKIPPED` (exit 5), not `SMOKE PASS`.
+  - *Still open, needs a person at the UI-test Mac:* dismiss the alert, and add a Little Snitch
+    rule so the Debug build's agents can reach api.anthropic.com without asking. Also keep the
+    screen unlocked during runs. The re-run after the fix (2026-10-07 18:37) found the display
+    asleep and failed all 6 at launch with "Failed to activate application … Running
+    Background", so `RoutingUITests`, `CapacityUITests`, `CapabilityIndexUITests` and
+    `SwarmUITests` have no green run on master yet. Run each once, with its script
+    (`test-routing-ui.sh`, `test-ui-capacity.sh`, `test-ui-capability-index.sh`,
+    `test-ui-flight-control.sh`), once the alert is gone.
+
+## Planning bills the project's accounts (2026-10-08, unify Track P)
+
+- **A pool with nothing leasable runs unleased.** RESOLVED at integration (2026-10-08):
+  planning now resolves through the tabs' `AccountResolver`, so it follows the tab rules (every
+  member over soft → the first over-soft member, no notice; every member over hard → the one with
+  the most headroom, and the runner start or triage turn posts the same "Every account in … is
+  over its limit" banner a tab posts).
+- **Fallback seats are not shown billing.** The Rounds editor's "Bills:" line names the seat's
+  primary agent only; a fallback to another agent bills that agent's assignment, unshown.
+- **The ledger re-adopts leases only on the first tick after relaunch.** Between launch and that
+  tick, a local pool could hand a live runner's slot to someone else. No live user of local pools
+  in planning today.
+- **Only claude seats meter usage.** RESOLVED (round 2, accounts-leases): codex seats read their
+  rollout's `rate_limits`, grok seats their home's billing line, gemini seats poll agy `/usage`
+  while running, and any non-claude seat stopped by its limit refuses its account. What stays
+  open: a grok seat's reading is only as fresh as that account's last TUI turn (headless grok
+  logs no billing line), and none of the three has been seen against a live planning run.
+
+## Unify agents, grok/gemini tabs, account pools (2026-10-08, integration)
+
+Merged from `unify-grok`, `unify-gemini`, `unify-accounts` and `unify-planning`. The unit suite
+and the phone unit bundle are green; everything below is what no automated run has seen.
+
+- **No UI test ran.** The UI-test Mac's screen was locked (`CGSSessionScreenIsLocked`), and
+  `CapacityUITests` failed at launch with "Failed to activate application … Running
+  Background" before any of its steps. `CapacityUITests` was changed by this work (add-pool now
+  goes Capacity → "Edit Pools in Accounts…" → Accounts → "Add Pool…") and has never passed in
+  that shape. Unlock the UI-test Mac, then run each once: `test-ui-capacity.sh`,
+  `test-routing-ui.sh`, `test-ui-capability-index.sh`, `test-ui-flight-control.sh`. The Little
+  Snitch alert in the entry above may still be up.
+- **GUI checks for a person (none can run here):**
+  - *grok tab:* the composer gate; the Ctrl+S stash round trip around a phone prompt; digit
+    answers and Ctrl+C under Ghostty's kitty keyboard mode; the phone permission and question
+    cards; the status glyphs (from `events.jsonl` + `active_sessions.json`); `/rename`.
+  - *gemini (`agy`) tab:* launch, the `.rebound` re-pin after the first submit, the status
+    glyphs, a phone answer, Ctrl-U/Ctrl-Y under kitty keyboard mode, and a narrow terminal.
+    Whether `agy --conversation=<id>` holds its presence lock before the next submit is
+    unverified, so a resumed gemini tab may read not-live until then.
+  - *Accounts tab:* drag and drop (reorder, into and out of a pool, the cross-agent refusal) and
+    the pool popover's anchor. The row model is unit-tested; the gestures are not.
+  - *Projects and Agents panes:* `FlagRow`'s pickers are now trailing-aligned (one input column
+    with the account pickers). Rendered for Projects only; glance at Settings → Agents too.
+  - *Planning on a spent pool:* the banner is a user notification keyed by the intake id;
+    clicking it activates the app and selects nothing.
+- ~~**The phone shows no gemini permission card.**~~ Fixed 2026-10-09 (round 2,
+  `gemini-phone-prompt`): the Mac sends its derivation as `WireSession.openPrompt` for any
+  reader with `transcriptCarriesOpenPrompt == false`. See ARCHITECTURE.md, "A gemini dialog
+  reaches the phone in words". Still unverified: a real agy dialog answered from a real phone
+  (Allow, and Deny on the last row), and a supersede with a real agy (approve in the terminal,
+  next dialog raised) clearing the old card on the phone.
+- **grok has no hook, so no turn recovery and no hard rejection.** Rate-limit and final-failure
+  signals reach grok only through a `StopFailure` hook in the user's `$GROK_HOME/hooks/`, which
+  Flight Deck does not install. Claude Code plugin hooks still load inside grok tabs, because the
+  tab's shell keeps the real `HOME`.
+- **⌘K live indexing for grok and gemini (fixed 2026-10-09, `gemini-live-index`).** Both tabs
+  now ingest new prompts and replies on the watch beat, like claude and codex, instead of waiting
+  for the next backfill. Unit-tested on synthetic lines only. The live write timing is probed:
+  agy 1.3.1 wrote the request to `transcript_full.jsonl` ~30 ms after submit, and the reply at
+  turn end. Not seen in the real app: a gemini tab's first request after the `.rebound` showing
+  up in ⌘K, and a grok tab's live rows. A gemini tail starts at byte 0, not at the end. This
+  re-reads a resumed conversation's history once per attach. It is deduplicated, but it costs a
+  full read of each restored gemini tab's transcript at launch (tens of KB each today).
+- **`ProjectViewInspectorLiveTests.testInspectorClosesFromTheEditorAndIsRememberedPerProject`
+  failed on master `587fb3f7` (resolved 2026-10-09, `inspector-test-fix`).** It failed at line 58
+  ("the panel itself collapsed") because every display was asleep, not because of a code change.
+  With all displays asleep, AppKit never finishes the column's open animation, and `.inspector`
+  then drops every later `false`. A close sent 3 s after the open was dropped too. The same code
+  fails back to `61e58016`, the commit that added the test. Measured: 3 of 3 passes with the
+  displays awake, and a failure on every run with them asleep. The test now skips when every
+  online display is asleep. It is not loosened: a skipped run says nothing about the close race,
+  so judge that test only from a run with an awake display. A suite run with the displays asleep
+  (an unattended run overnight) skips it and does not guard it. Not a product bug: nobody can
+  press ⌥⌘I at a dark screen.
+- ~~**No model picker for grok or gemini tabs.**~~ Fixed 2026-10-09 (`tab-model-pickers`):
+  Settings → Agents and → Projects have a model pane for each; see the entry below.
+- **`FlywheelProgram` names: VERIFIED 2026-10-09** (am 0.3.35, grok 1.0.30, agy 1.3.2).
+  `--program` is free text: `am` stores and lists it but never validates it, and neither the
+  pre-commit guard nor file reservations read it. `grok` and `agy` are what ntm itself registers
+  (`agentTypeToProgram` passes both through), and `agy` is in Agent Mail's known-program list as
+  Antigravity. Live, in a scratch repo with isolated Agent Mail storage, Flight Deck's exact
+  setup and `am macros start-session` flow booted a grok and an agy identity next to claude and
+  codex ones; all four sent and received mail; the guard blocked each non-holder's commit to a
+  reserved file and let the holder's through, for grok and agy holders alike; and real headless
+  `grok -p` and `agy -p` runs sent mail under the injected `AGENT_NAME`. Only consequence of the
+  names: ATC's liveness prior (live only under `am serve-http`) files both as "unknown" (300s
+  silence before suspicion, against 60s for claude-code and 120s for codex-cli), the same as for
+  ntm's agents. Still unseen: a grok or gemini *tab* in a real Flight Control swarm in the app.
+- **Every agent is tab-ready.** The R4 gate stays (`AgentID.tabReady`) for the next agent; its
+  tests use the task-local seam `AgentID.$tabReadyOverride` to stand one agent in as not ready.
+
+## grok and gemini tab model pickers (2026-10-09, `tab-model-pickers`)
+
+Settings → Agents and → Projects now edit grok's model and effort and gemini's model and
+`--mode` (`TabModelOptionsForm`), merged field by field per project and applied at launch and
+resume. What is still open:
+
+- **No GUI run.** The panes are unit-tested and rendered offscreen only. `TerminalSmokeTests`
+  gained the activity "the grok and gemini rows open their own model panes"; it has not run.
+  Check by hand: pick a grok model and effort, open a grok tab, and read its footer
+  (`Grok 4.7 Fast (low)`); set gemini's mode to plan and read agy's footer (`plan ·`).
+- **grok has no mode picker.** grok 1.0.30's TUI accepts `--permission-mode plan`, but a probe
+  (2026-10-09) still raised the ordinary Edit permission card for a write, so its effect on a
+  tab is unproven, and `GrokDialogDriver` is built on the default mode's cards. Re-probe on a
+  later grok before adding it to `GrokOptions`.
+- **Routing still lists models its own way.** `GrokRoutingCapabilities.modelCatalog` offers the
+  profile's static aliases, and `GeminiRoutingCapabilities` runs its own `agy models`. Settings
+  reads planning's detection instead. They agree on the ids today; folding routing onto
+  `IntakeService.detectedModels` would make it one probe.
+- **Another load flake.** `PlanReadingPositionTests.testBreadcrumbNamesTheSectionScrolledUnderThePinnedBlock`
+  failed once in this track's full run (`PlanFoldingTests.swift:258`) and passed when run alone, as
+  did `PlanningRenderTests.testASeatBeatRedrawsTheLiveCardAlone` (listed above).
+- **A resumed tab takes today's settings.** As for claude and codex, a resume re-resolves the
+  project's options, so changing the model in Settings moves an existing grok or gemini tab to
+  the new model at its next resume.
+
+## Tab leases follow the agent; every seat meters (2026-10-09, round 2 accounts-leases)
+
+- **Restored tabs re-lease and leases follow the agent process.** RESOLVED: `SessionStore
+  .reconcileTabLeases` (every 5 s) releases a tab's lease 30 s after its agent process is gone
+  and re-takes it on the tab's own account when the agent runs again, which also covers a tab
+  restored after a relaunch. Unverified live: the probe was tested on real child processes
+  (argv[0], SIGSTOP), not on a real Flight Deck tab under fd-abduco. A GUI check: open a tab in a
+  project assigned a pool, quit the agent (`/exit`), and watch the pool's lease count in Flight
+  Control drop within ~35 s; run the agent again and watch it return.
+- **A dropdown-chosen account inside the project's pool now leases once its agent runs.** Before,
+  an explicit dropdown choice skipped leasing entirely; the sweep counts any running tab whose
+  account the project's pool lists. Intended (the lease counts running agents per account), noted
+  because it changes what the pool meter shows.
+- **The lease sweep walks the process tree.** Only for tabs in a pool-assigned project or holding
+  a lease, every 5 s. Not measured on a large fleet.
+- **The index refresh takes no lease today.** RESOLVED (round 2, index-refresh-pool): the index has
+  its own assignment (`CapacityPreferences.indexAccount`, an account-or-pool picker under Refresh
+  agent on the Capability Index pane). Unset is claude's pool — the one user claude pool if there
+  is exactly one, else `claude-default` — leased for the refresh and released on success, failure
+  and cancel (new Stop button). Each source's `rate_limit_event`s meter the leased account.
+  Claude only: every source runs `claude -p`. Unverified live: no real refresh was run (it spends
+  tokens), and the picker and Stop button have not been clicked in the app. GUI check for the maintainer:
+  with a claude pool, open Settings → Flight Control → Capability Index, see "Default (<pool>
+  pool)" under Refresh agent, press Refresh now and watch the pool's lease count in Flight Control
+  rise by one, then press Stop and watch it drop.
+- **A refresh's lease is not re-adopted after a relaunch.** Quitting mid-refresh kills the run (it
+  is in-process, unlike a planning runner), and the ledger is in memory, so nothing leaks; noted
+  only because planning re-adopts and the index does not need to.
+- **Codex seat rollouts are found by start date.** `CodexRolloutFile` lists the seat's local start
+  day and its neighbours under `$CODEX_HOME/sessions`. A codex that ever files rollouts by another
+  scheme would silently stop metering seats.
+
+## Smart sleep moves the lease; a spent account moves the conversation (2026-10-09, round 2 sleep-lease-rollover)
+
+Replaces round 2 accounts-leases' ruling that a SIGSTOP'd agent keeps its lease (the maintainer rejected it).
+Freeze releases the lease; thaw re-leases the same account; a spent account rolls an idle
+conversation onto another pool member in the same tab. See ARCHITECTURE.md, "One resolver turns
+an assignment into a login".
+
+- **Never run in the app.** Every path is unit-tested (`SleepLeaseRolloverTests`,
+  `ConversationTransferTests`, `ComposerDraftTests`), and the per-CLI transfer was probed by hand,
+  but no real tab has frozen, thawed and rolled over. GUI check for the maintainer: put a project on a two-
+  account claude pool, let a tab smart-sleep with half a sentence in its composer (pool count drops
+  by one at once), push the first account over hard (or wait for a real limit), select the tab:
+  it should resume the same conversation on the second account with the half sentence back in the
+  box, unsent, and a notification saying it moved.
+- **codex and grok resume under a second home with full model context is unverified.** Only one
+  codex and one grok login exist here, and copying credentials to fake a second risks rotating the
+  real refresh token. What was proven (2026-10-09): codex-cli 0.160.0 `exec resume` and the
+  app-server's `thread/read` find a rollout copied into a home whose state database never saw the
+  thread; grok 1.0.30 `grok export <id>` finds a copied session directory by id under a new
+  `GROK_HOME` (the `-r` path stops at "Not signed in" in an empty home). claude 2.1.295 was
+  proven end to end across two real signed-in homes (the copy answered a codeword from the first
+  home's turn). OpenCode 1.18.34 export/import was proven against a running server on the second
+  data root, but not resumed with a model.
+- **The old home keeps a stale copy.** The transfer copies, never moves, so a failed relaunch still
+  finds the conversation where it was. ⌘K search may list the conversation under both accounts.
+- **The codex and OpenCode rollover path is not unit-tested through the store.** It needs a real
+  app-server or `opencode serve`; the transfer itself is tested, and the store path reuses
+  `preparedAdapter`/`rebind` as a reopen does.
+- **claude's placeholder is recognised by shape.** `ClaudeTextChannel.draft` reads `Try "…"` and the
+  queued-messages hint as empty. A real draft of exactly that shape is lost on a rollover; a hint
+  of a new shape is pasted into the resumed composer as if typed (never submitted).
+- **A carried draft gains spaces for wrapped rows.** claude, agy and OpenCode word-wrap their
+  composer and the screen cannot tell a wrap from a typed newline, so wrapped rows are joined with
+  a space.
+- **Thaw-time notices only.** A tab whose account goes spent while it is awake is not moved; only a
+  thaw re-decides. A swarm agent is never rolled by a thaw (the hand-off driver owns its account),
+  and its swarm lease is not released at freeze.
+- **The resumed claude tab may raise the folder-trust dialog** if the new account has never
+  trusted the project directory (each `CLAUDE_CONFIG_DIR` keeps its own `.claude.json`). The draft
+  waits for the composer (up to two minutes) and is dropped after.
+
+## grok phone answers: sets, checkboxes, typed, subagent cards (2026-10-09, round 2)
+
+Question sets, multi-select and typed answers now drive grok from the phone, and a subagent's
+permission card is offered as the child's own call. Evidence: `.superpowers/grok-tui-facts-2.md`
+(grok 1.0.30, probed in a pty that answered grok's kitty query; grok pushed flags 3).
+
+- **No Ghostty surface has run any of it.** The probe emulated Ghostty's byte encoding under kitty
+  flags 3; the unit tests drive a modelled card (`GrokQuestionCardSim`). GUI check for the maintainer, in a
+  real grok tab: from the phone answer (a) a three-question set mixing a radio, two checkboxes and
+  a typed answer, (b) a lone checkbox question with two boxes, (c) a typed answer, (d) a background
+  and a foreground subagent's write card. On a stall, read `~/Library/Logs/flight-deck-answer.log`
+  first: a `check=keyed-screen-mismatch` record carries the screen the step refused.
+- **Space is a new key event** (`sendCharacterKey(" ")` → Ghostty's `space` key with text " ").
+  Never sent on a real surface by any test.
+- **Not probed, so not offered or not claimed:** a subagent's QUESTION card (the reader offers only a
+  child's permission); two cards at once (refused as ambiguous); Return on the free-text row of a
+  LAST multi-select question (driven as on the other questions; the user guide says it submits);
+  more than nine options (keys `a`–`f`, user guide only); a very long typed answer (the editor
+  check accepts a shown prefix).
+- **A background subagent's card while the parent runs some OTHER tool** is refused (no card):
+  the parent's own open call is then not a subagent wait, and which card is up cannot be read.
+- ~~**The question deny is still Ctrl+C**, which cancels the turn.~~ Fixed 2026-10-09 (round 2
+  `grok-dismiss`): Deny on a grok QUESTION is Shift+x ("dismiss, the agent continues"), read-guarded
+  (`AgentQuestionDismisser`, `SessionStore.performDismiss`): Tab first on a parked card, nothing
+  into an open editor, a card still up after the press filed as `keyed-screen-mismatch`. The phone's
+  blind Abort dismisses a question card too. Probed on grok 1.0.30 under a pty emulating Ghostty's
+  kitty encoding, not on a real Ghostty surface: the uppercase-letter key event (`sendCharacterKey("X")`,
+  Shift consumed) was traced through `key_encode.zig` to send plain `X`, never run on a surface.
+- **A grok PERMISSION deny still cancels the turn.** Ctrl+C and the card's own "No, reject" digit
+  both end it (`turn_ended cancelled`, `permission_rejected`, probed). The one non-cancelling refusal
+  is "No, reject" WITH typed feedback (`↓` to the row, type, Return: `permission_resolved
+  decision:"followup"`, the text becomes a user message, the turn goes on). The phone has no
+  deny-with-a-message, so this is not wired.
+- **grok's composer CAN draw a placeholder** (`│ ❯ Build anything`), seen once on 1.0.30 after a Tab
+  sent with the keyboard parked in the scrollback and no card up. `GrokScreen.composer` would read
+  it as a draft, and `GrokTextChannel` would stash it with Ctrl+S before typing. Not reproduced
+  or handled.
+
+## OpenCode adapter and planning harness (2026-10-09, round 2 opencode)
+
+Ported from the unmerged 2026-10-04 `opencode-adapter` worktree onto the unified agent model and
+merged. `.opencode` is tab-ready and headless-ready. Verified by the unit suite and by
+`scripts/test-opencode-live.sh` (a real `opencode` 1.18.34 with a scripted model, tabs and
+planning seats). What remains:
+
+- **Never run in the GUI.** The New Session entry, `opencode attach` inside a Ghostty tab, the
+  phone's timeline and answer cards for an OpenCode tab, `OpenCodeOptionsForm`, and an OpenCode
+  seat in the Rounds editor are unverified end to end. The screen grammar came from pyte captures,
+  not `ghostty_surface_read_text`; a difference would show first as `hasComposerBox` refusing.
+- **Never run against a real model.** Every live run used the fake model. A real provider's turn
+  (and whether a real model reliably returns bare JSON from the prompt-borne schema) is unverified.
+- **No account is seeded for an existing install** (the rule grok and gemini follow): OpenCode tabs
+  run in `~/.local/share` until the person adds or scans for an account. A fresh install seeds it.
+- **Older builds and the shared files — mitigated, not free.** The side keys
+  (`AgentForwardCompatibility`) keep a pre-unify build from resetting everything, but a build that
+  SAVES drops them, so after a rollback the moved tabs and settings are gone. grok and gemini are
+  moved aside too (they are outside `readableByEveryBuild`), so the installed unify Release, if
+  swapped back in, shows no grok/gemini tabs and re-adds their agent rows with empty options.
+- **`XDG_DATA_HOME` in a non-default account's tab** is seen by every XDG-aware tool in that shell.
+- **A switched session is not followed.** `/new` or `/sessions` in an attached TUI moves it to
+  another session while the tab stays pinned; nothing re-pins it (codex has `CodexPinReconciler`).
+  `resetContext` is unsupported for the same reason.
+- **No hand-off exit and no usage meter.** `exitCommand` is nil (the text channel is
+  `prompt_async`, where `/exit` is a message to the model); OpenCode reports no quota.
+- **A TUI attached after a request was raised does not draw it**; a server restart loses the
+  in-flight turn, queue and pending requests; an abort before the model's first chunk is a plain
+  `session.idle`; OpenCode's bash tool sometimes reports `(no output)` (all measured on 1.18.34).
+- **The mirror never shrinks** (an OpenCode undo leaves the message in the mirror).
+- **The planning default model is `opencode models`' first line**, not the person's configured
+  default — `opencode models` does not mark one.
+- **The integrator's edit pattern assumes OpenCode's worktree is the nearest `.git` ancestor**
+  (else `/`). Probed for both; a linked-worktree `.git` FILE is treated the same, unprobed.
+
+## Re-checking planning agents without a relaunch (2026-10-09, round 2 recheck-agents)
+
+Planning's agent detection ran once per launch, so an agent signed in afterwards (`grok login`)
+stayed unavailable in the Rounds editor and the tab model pickers until a relaunch. Fixed: the
+editor has "Check again" under its sign-in notes, and the app re-checks on becoming active while
+an agent is signed out (at most once a minute). What remains:
+
+- **The login-shell PATH is not re-read.** A re-check reuses the PATH `LoginShellPath` resolved
+  once per run. A CLI installed into a directory already on that PATH is found; one installed
+  into a NEW PATH directory still needs a relaunch (rounds spawn with the same cached PATH, so
+  offering it would fail at round time anyway).
+- **No button for a CLI that is merely not installed.** "Check again" shows only beside a note the
+  editor draws (signed out, or a check that failed or timed out); "not installed" has no note.
+  Installing a CLI mid-session is picked up by the next press made for another reason, or a relaunch.
+- **Routing is not refreshed.** `GrokRoutingCapabilities`/`GeminiRoutingCapabilities` keep their
+  own lists (see "Routing still lists models its own way" above), so a re-check does not reach them.
+- **GUI-unverified.** Rendered offscreen only; pressing it against a real `grok login` is the maintainer's.
+
+## Inspector modes and agent stacks (2026-10-09, `inspector-modes`)
+
+The planning inspector's Notes/Rounds modes and the per-round agent stacks shipped
+(ARCHITECTURE.md, "The inspector has two explicit modes"). What remains:
+
+- **GUI-unverified.** Pinned by unit tests (`DetailLayoutTests`, `AgentStackModelTests`,
+  `IntakeServiceSelectionTests`) and the offscreen `ProjectViewInspectorLiveTests` (the segmented
+  control exists and stays on Rounds with the plan focused). Not yet seen in the running app:
+  ⌥⌘1/⌥⌘2 and View ▸ Inspector, the click from a round's stack scrolling the inspector to its
+  section, the agent drill-in's back button, and VoiceOver on the segments and the card's
+  "Show Agents in Inspector" action.
+- **The departures board's slots carry no stack** (nor, since `rounds-timeline-editor`, a chip). The split-flap tape has no room in a slot, and
+  its hover card was left alone; the cards under it and the live round's header carry the stacks.
+- **A chip's click is a nested button inside a tappable card**, never clicked by hand. SwiftUI
+  normally gives a nested `Button` the click; if the card's tap gesture wins instead, the chip
+  opens the round's detail panel rather than the inspector.
+- **A synthesis round's stack includes the integrator**, whose editor row lives under Refine;
+  the Synthesis stage says so in a note rather than repeating the row.
+
+### The menu bar blinked on every mode or tab switch (fixed 2026-10-09, `inspector-mode-flicker`)
+
+The maintainer, on the Release from `4e13c49d`: the Tools menu vanished and came back, and much of the
+window redrew on a lag, on each Notes/Rounds switch and each switch between a plan and another
+tab. Two causes, both from `4e13c49d`, both fixed:
+- View ▸ Inspector was a SwiftUI `Commands` reading a focused value that carried the mode and
+  existed only while a plan was on screen. Any change in a `Commands` body's output makes SwiftUI
+  reconcile the main menu, which prunes the AppKit Tools menu until `ToolsMenuController` heals
+  it. Measured in a standalone SwiftUI app with a Tools menu inserted the same way: 10 prunes in
+  10 mode switches and 10 in 10 plan/terminal switches (macOS 15 focused value; macOS 26
+  observed object, same 1:1). Now AppKit items (`InspectorMenuController`): 0 in 10.
+- The mode was a `@Published` on `IntakeService`, which `SessionStore` forwards: each switch
+  re-evaluated root 1, project 1, detail 2, live card 2 (`ProjectViewInspectorLiveTests`). Now
+  `InspectorModeStore`, observed by the column alone: 0, 0, 0, 0, the inspector 1–2.
+
+Then every menu (the maintainer: "No menu should blink ever"): no `Commands` reads state any more, and the
+Tools, Run, View ▸ Inspector and File ▸ New … Session menus are AppKit items inside SwiftUI-authored
+shells (ARCHITECTURE.md, "The menu bar never rebuilds"). `scripts/test-menu-bar.sh` (a lane of every
+full `test-unit.sh`) counts main-menu removals: on `956ee992` 10 in 10 switches between two
+projects' tabs and 6 in 6 preference edits; now 0 across every transition it drives.
+
+Still open:
+- **Key-window changes are not driven by the gate.** It never activates (so it takes no focus on
+  this Mac), and an inactive app has no key window: focus changes between Flight Deck's own
+  windows, and focused values, can't be exercised there. No `Commands` reads a focused value any
+  more (`MenuBarStabilityTests`), and items inside SwiftUI's own menus survived every
+  reconciliation measured, but a rebuild SwiftUI makes on activation or a key-window change is
+  unmeasured. `AppKitMenuSlot` puts the items back a turn later if one ever happens; that would
+  show as a blink inside an open menu, not in the bar. The UI-test Mac's screen was locked all
+  afternoon, so the activated run could not be repeated there.
+- **"Opening the inspector renders blank columns" (the maintainer's screenshot, same Release) did not
+  reproduce offscreen.** `testOpeningTheInspectorSettlesWithEveryColumnDrawn` hosts `RootView`,
+  opens the inspector on a shaping plan and finds no idle re-evaluation, the Notes/Rounds control
+  laid out, and the sidebar's and Intakes list's rows present — on `4e13c49d` and on the fix.
+  The offscreen window is never key, so it has no menu bar or focused values, which is where the
+  two causes above lived. Unverified until the maintainer opens the inspector on the next Release.
+
+## Rounds timeline editor (2026-10-09, `rounds-timeline-editor`)
+
+The Rounds editor is the round timeline and the main view's round cards and live header draw the
+same `RoundChip` (ARCHITECTURE.md, "Round chips and the rounds timeline"). What remains:
+
+- **GUI-unverified.** Pinned by `RoundParticipantsTests`, `RoundTimelineTests` and the offscreen
+  `RoundsTimelineRenderTests`; the two-way pick (main view ↔ inspector), the strip following a
+  cap's stepper, and the card strip scrolling to a round picked in the inspector have not been
+  clicked in the running app.
+- **No per-round overrides.** A chip picks a round, but the pickers still set the role for the
+  whole stage; the caption says so. Per-round agents would need a config model change.
+- **Fresh eyes and dedup sit in the Polish strip** after the numbered rounds (they run on the
+  polisher); they have no row of their own.
+- **A Sketch shows no Polish row.** With no polisher the planner plans no polish, fresh eyes or
+  dedup; the disabled polish controls and their explanation that used to show are gone with it.
+- **A round planned but not yet run picks nothing in the main view** — there is nothing of it
+  there to show. Only done and live chips move the main view.
+
+## Keep a host awake while plugged in (2026-10-09, round 2 `hosting-keep-awake`)
+
+Shipped: Settings → Hosting → "Keep this Mac awake while plugged in", held by the macOS hostd
+(`KeepAwakeHolder`). Open items:
+
+- **Unverified live on the UI-test Mac**: that holding `PreventUserIdleDisplaySleep` stops the
+  screen saver as well as display sleep there (Apple documents the display half; the screen-saver
+  half is the behaviour video players rely on, not observed here), and so that the screen no
+  longer locks between UI runs. Check `pmset -g assertions` and leave the Mac idle past its
+  screen-saver delay.
+- **`holding` means "asked IOKit", not "IOKit said yes".** `IOKitPowerAssertions.hold` returns an
+  empty assertion when `IOPMAssertionCreateWithName` fails, and the status line would still say
+  "Keeping awake". Not seen; the fix is a `PowerAsserting` that reports failure.
+- **No CLI on a macOS host.** The macOS hostd has only `serve`, so a headless Mac host is set by
+  writing `hosting.json` before a hostd restart, or by sending `{"on":true,"t":"setKeepAwake"}` to
+  its admin socket. A `flightdeck-hostd keep-awake on|off` subcommand would be the tidy form.
+- **Linux: not applicable.** A Linux hostd answers `failed`; it has no display session, and its runs
+  already hold `systemd-inhibit` sleep locks.

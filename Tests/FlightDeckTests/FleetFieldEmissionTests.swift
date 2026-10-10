@@ -238,7 +238,7 @@ final class FleetFieldEmissionTests: XCTestCase {
                          description: "Done one", state: "done"),
         ]
         XCTAssertTrue(replicator.recorded.contains {
-            if case .activityChanged(session.id, _, _, _, _, _, _, let subs, _) = $0 {
+            if case .activityChanged(session.id, _, _, _, _, _, _, let subs, _, _) = $0 {
                 return subs == expected
             }
             return false
@@ -256,7 +256,7 @@ final class FleetFieldEmissionTests: XCTestCase {
         store.applyRegistryForTesting([session.id: SessionStatus(activity: .waiting)])
 
         XCTAssertTrue(replicator.recorded.contains {
-            if case .activityChanged(session.id, _, _, _, _, .call("toolu_SUB"), _, let subs, "a28ad87b") = $0 {
+            if case .activityChanged(session.id, _, _, _, _, .call("toolu_SUB"), _, let subs, "a28ad87b", _) = $0 {
                 return subs?.first { $0.id == "a28ad87b" }?.state == "blocked"
             }
             return false

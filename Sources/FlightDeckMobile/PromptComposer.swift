@@ -65,11 +65,15 @@ struct PromptComposer: View {
         // unrecognised agent falls here, which is right — an agent nobody has heard of has no
         // known input box either.
         //
-        // claude and codex are both typeable, by the same route: text into the tab's pty.
+        // claude, codex and grok are all typeable, by the same route: text into the tab's pty.
         // Neither goes through an agent API — codex's would refuse anyway, because its tab
         // holds the thread's writer lock. An agent this build has never heard of is refused
         // here, which is right: nobody knows where its input box is or what it looks like.
-        guard session.agent == "claude" || session.agent == "codex" else {
+        //
+        // opencode is typeable by a third route, its own API: the Mac sends the message to the
+        // session's server (`prompt_async`), which queues it behind a running turn.
+        guard session.agent == "claude" || session.agent == "codex" || session.agent == "grok"
+            || session.agent == "opencode" else {
             return "Flight Deck can't type into a \(session.agent) session from here."
         }
         // `nil` is "no agent process registered" and is NOT `idle` — a statusless tab has no
@@ -141,6 +145,7 @@ struct PromptComposer: View {
             // a long message does not push the conversation off screen entirely.
             TextField("Message", text: draft, axis: .vertical)
                 .focused($isFocused)
+                .accessibilityIdentifier("composer-field")
                 .lineLimit(1...6)
                 .textFieldStyle(.plain)
                 .font(.body)

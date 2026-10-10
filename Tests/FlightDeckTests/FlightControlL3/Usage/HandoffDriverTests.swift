@@ -33,7 +33,7 @@ final class HandoffDriverTests: XCTestCase {
 
     private let oldID = UUID(), newID = UUID()
     private let project = URL(fileURLWithPath: "/p/proj")
-    private lazy var block = ExecutionBlock(kind: "tests", harness: "claude", model: "opus", pool: "claude-default",
+    private lazy var block = ExecutionBlock(kind: "tests", agent: .claude, model: "opus", pool: "claude-default",
                                             source: AssignmentSource(by: .rule, reason: "r", at: Date(timeIntervalSince1970: 0)))
     private lazy var oldLease = AccountLease(pool: "claude-default", account: UsageRefs.work)
     private lazy var newLease = AccountLease(pool: "claude-default", account: UsageRefs.spare)
@@ -223,7 +223,7 @@ final class HandoffDriverTests: XCTestCase {
 
     func testNoAccountFreeSpillsThroughTheRouter() async {
         allocator.leases["claude-default"] = []
-        let spilled = ExecutionBlock(kind: "tests", harness: "codex", model: "gpt-6-sol", pool: "codex-default",
+        let spilled = ExecutionBlock(kind: "tests", agent: .codex, model: "gpt-6-sol", pool: "codex-default",
                                      source: AssignmentSource(by: .spill, reason: "claude-default exhausted", at: Date(timeIntervalSince1970: 0)))
         let kind = TaskKind(id: "tests", name: "Tests", description: "d", dimensions: ["test-authoring": 0.9], origin: .seed, createdAt: Date(timeIntervalSince1970: 0))
         host.kinds["tests"] = kind
@@ -242,7 +242,7 @@ final class HandoffDriverTests: XCTestCase {
     /// project to find the swarm. Before, the host was told only the two sessions.
     func testMarkHandedOffCarriesTheSpawnedBlockLeaseAndTask() async throws {
         allocator.leases["claude-default"] = []
-        let spilled = ExecutionBlock(kind: "tests", harness: "codex", model: "gpt-6-sol", pool: "codex-default",
+        let spilled = ExecutionBlock(kind: "tests", agent: .codex, model: "gpt-6-sol", pool: "codex-default",
                                      source: AssignmentSource(by: .spill, reason: "claude-default exhausted", at: Date(timeIntervalSince1970: 0)))
         host.kinds["tests"] = TaskKind(id: "tests", name: "Tests", description: "d", dimensions: ["test-authoring": 0.9],
                                        origin: .seed, createdAt: Date(timeIntervalSince1970: 0))
@@ -513,11 +513,11 @@ final class HandoffDriverTests: XCTestCase {
         allocator.leases["claude-default"] = []
         host.kinds["tests"] = TaskKind(id: "tests", name: "Tests", description: "d", dimensions: [:], origin: .seed,
                                        createdAt: Date(timeIntervalSince1970: 0))
-        router.spills["tests"] = Assignment(block: ExecutionBlock(kind: "tests", harness: "codex", model: "gpt-6-sol", pool: "codex-default",
+        router.spills["tests"] = Assignment(block: ExecutionBlock(kind: "tests", agent: .codex, model: "gpt-6-sol", pool: "codex-default",
                                                                   source: AssignmentSource(by: .spill, reason: "s", at: Date(timeIntervalSince1970: 0))))
         allocator.leases["codex-default"] = [AccountLease(pool: "codex-default", account: UsageRefs.codex)]
         let directory = FakePoolDirectory()
-        directory.summaries = [PoolSummary(id: "codex-default", harness: "codex", label: "Codex default")]
+        directory.summaries = [PoolSummary(id: "codex-default", agent: .codex, label: "Codex default")]
         pools = directory
         host.activities[oldID] = .idle
         let d = driver()
@@ -532,12 +532,12 @@ final class HandoffDriverTests: XCTestCase {
         allocator.leases["claude-default"] = []
         host.kinds["tests"] = TaskKind(id: "tests", name: "Tests", description: "d", dimensions: [:], origin: .seed,
                                        createdAt: Date(timeIntervalSince1970: 0))
-        router.spills["tests"] = Assignment(block: ExecutionBlock(kind: "tests", harness: "codex", model: "gpt-6-sol", pool: "codex-default",
+        router.spills["tests"] = Assignment(block: ExecutionBlock(kind: "tests", agent: .codex, model: "gpt-6-sol", pool: "codex-default",
                                                                   source: AssignmentSource(by: .spill, reason: "s", at: Date(timeIntervalSince1970: 0))))
         allocator.leases["codex-default"] = [AccountLease(pool: "codex-default", account: UsageRefs.codex)]
         let directory = FakePoolDirectory()
-        directory.summaries = [PoolSummary(id: "claude-default", harness: "claude", label: "Claude default"),
-                               PoolSummary(id: "codex-default", harness: "codex", label: "Codex default")]
+        directory.summaries = [PoolSummary(id: "claude-default", agent: .claude, label: "Claude default"),
+                               PoolSummary(id: "codex-default", agent: .codex, label: "Codex default")]
         pools = directory
         host.activities[oldID] = .idle
         await driver().evaluate([agent])

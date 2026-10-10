@@ -66,6 +66,13 @@ Net: **~97% of `GhosttyEmbed/` is reused Ghostty code**; the Flight-Deck-authore
 
 ## Runtime model
 
+- **Environment before `ghostty_init`:** `ghostty_init` starts a `sentry-init` thread that walks
+  `environ` without libc's lock, then sets LANG/LANGUAGE on the calling thread when LANG is
+  missing — which it is for every launchd-started app. That `setenv` frees `environ` under the
+  walk (a SIGSEGV in `posix.getenv`). `LaunchLocale` makes the same changes first — at the top of
+  `FlightDeckApp.init` and again inside `GhosttyApp`'s one-time init, before `ghostty_init` — so
+  libghostty's `ensureLocale` finds nothing to set. Flight Deck itself must never `setenv` once
+  libghostty is up: its renderer and IO threads read the environment the same way.
 - **Tick loop:** `libghostty` only advances when `ghostty_app_tick` is called. `GhosttyApp`'s `wakeup` callback does `DispatchQueue.main.async { tick() }` (thread-safe), and `TerminalPane` kicks an initial tick so the first frame renders.
 - **Retention:** one process-wide `GhosttyApp.shared`, held **weakly** by `SessionStore` (the store must not co-own a static that already owns itself for the life of the process). **This is the thing to change before multi-window/multi-session** — see the teardown-lifetime item in [FOLLOWUPS.md](FOLLOWUPS.md).
 - **Light/dark appearance:** the terminal follows the system appearance. `GhosttyApp` loads
@@ -211,12 +218,34 @@ other-writable, checked before bind. It is not authenticated beyond that, so any
 same user can arm a window, which is already equivalent to that user's other powers. A new hostd
 never takes over a live admin socket and never unlinks its successor's.
 
+**Keep awake while plugged in** (`KeepAwakeHolder`, `HostingSettings`, `IOKitPowerSource`). A
+macOS-host setting, off by default, in Settings → Hosting. When on and the Mac is on AC, the hostd
+holds a `PreventUserIdleSystemSleep` and a `PreventUserIdleDisplaySleep` assertion, both named
+"Flight Deck hosting: keep awake while plugged in" in `pmset -g assertions`, so neither idle display
+sleep nor the screen saver starts and a "require password" lock never follows. That lock is what
+fails XCUITest ("Running Background") on a UI-test host. It lets go on battery (or a UPS, or an
+unreadable source), takes them back on AC (`IOPSNotificationCreateRunLoopSource` on the main run
+loop), and releases on SIGTERM; IOKit drops a dead process's assertions anyway. It lives in the
+hostd, not the app, so it holds while Flight Deck is not running. The setting is
+`<state root>/hosting.json`, read at launch and written by the admin requests `keepAwake` /
+`setKeepAwake` (save first, apply only if the save worked). It writes no system setting and cannot
+undo a manual lock. A Linux hostd answers both requests `failed`: it has no display session to keep.
+
 **Where secrets live.** Controller side: `hosts.json` (Application Support, never `sessions.json`)
 holds names and addresses; each host's PSK is a Keychain item (`dev.flightdeck.host`). Host side: the
 controllers' PSKs are in `controllers.json`, mode `0600` in a `0700` state root, on both platforms
 (Mac: `~/Library/Application Support/Flight Deck Host`; Linux: `$XDG_DATA_HOME/flightdeck-hostd`
 or `~/.local/share/flightdeck-hostd`). A pairing is one slot per controller; revoking closes that
 controller's live connection within a second and refuses its next connect.
+
+**Reading the keys at launch.** `HostService.start()` reads each host's PSK on its own GCD thread
+and opens that host's link as soon as its read returns. A read can block for as long as a Keychain
+prompt stays unanswered: the items are in the legacy login keychain, whose ACL trusts the signing
+identity that created them, so a build signed by a different identity (or team) prompts. After
+`HostService.keyReadPatience` (3 s) the host shows `.keyUnavailable("waiting for Keychain access:
+…")`. A failed read (prompt denied, keychain locked) is retried after 5, 15, 30, 60, 120 and then
+every 300 s, never given up; only a *missing* item is final (`.refused`, re-pair). `host ls`
+reports `.keyUnavailable` as status `offline` with the reason in `detail`.
 
 **Placement, and the open question.** The macOS hostd is a LaunchAgent, so it runs in the GUI login
 session (it stops at logout, which the Hosting tab says). That placement is the spec's bet for
@@ -433,7 +462,9 @@ user edited or deleted alone; a Debug build skips the copy, so it never writes t
 a running claude until `/reload-plugins`, and under fd-abduco a tab's claude outlives an app update.
 So at launch the app fingerprints the bundled plugin (`PluginReload`); when it changed, every claude
 tab whose daemon was already live is sent `/reload-plugins` through the gated `inject`, only while
-the status registry says idle and after any queued rename or prompt.
+the status registry says idle and after any queued rename or prompt. The command flips the registry row
+busy for about 90 ms; for a few seconds after sending it the store ignores that tab's idle/busy
+edges, so the reload neither marks the tab unread nor resets its "active N min ago".
 
 **At launch and on reconnect** `DelegationBootstrap.connect` hands `FleetService` the service
 `DelegationServiceFactory.live(hostService:sessionTitle:)` builds, before either socket starts.
@@ -682,6 +713,21 @@ Project overrides are keyed by standardized path in `Preferences.projectFlags`, 
 `Repo` — closing a project (`SessionStore.closeProject`) removes its `Repo` outright, and an
 override must outlive that so it is still there if the same path is reopened later.
 
+Every agent's options are one `AgentOptions` arm — claude's `FlagSet`, codex's
+`CodexThreadOptions`, grok's `GrokOptions` (model, effort), gemini's `GeminiOptions` (model,
+`--mode`), OpenCode's `OpenCodeOptions` (`provider/model`, OpenCode agent; sent in the body that
+creates the session, edited in `OpenCodeOptionsForm`) — held on its row in Settings → Agents and per project, and resolved for every launch
+and resume by `PreferencesStore.resolvedOptions`, which merges a project's fields over the
+global row's (a nil field inherits). `AgentOptionsPane` picks each agent's editor; grok and gemini
+share `TabModelOptionsForm`, whose model menu is planning's detection
+(`IntakeService.detectedModels`, the `grok models`/`agy models` run at launch) rather than a probe
+of its own. Detection re-runs on the Rounds editor's "Check again" (shown beside a sign-in note)
+and when the app becomes active while an agent is signed out, at most once a minute
+(`IntakeService.recheckAgents`/`appDidBecomeActive`); concurrent requests join one run, and a
+role whose agent drops out keeps it, labelled "(unavailable)". A routed launch (`SessionStore.launchOptions`) lays the task's overrides on top of the
+same resolved value through `GrokLaunchOverrides`/`GeminiLaunchOverrides`, so a hand-picked and a
+routed model are one setting.
+
 Unknown flags are preserved verbatim in `FlagSet.passthrough` and warned about rather than
 rejected, so a `claude` release that adds a flag does not make the field lossy.
 
@@ -706,6 +752,18 @@ projects and sessions instead of needing a second, hand-rolled `.draggable`/`.dr
 mechanism just for project drags. `ProjectHeaderRow` draws the chevron, name, and (when
 collapsed) the session count and status glyph in place of the system group header a `Section`
 would have drawn, so nothing about the on-screen result actually needed `Section` to begin with.
+
+A header click collapses only on the chevron's side of the row: `SidebarInputMonitor` decides
+it after the press, and `SidebarClickIntent.inChevronZone` is everything left of the project
+name, measured from the row's cell view (`SidebarInputMonitor.contentLeadingX`), not from the
+`NSTableRowView`. The two differ by 10pt on macOS 14/15, where the row view starts at the window
+edge; measuring from the row edge left only the glyph clickable there. A click right of the
+zone selects the project.
+
+A rename field and the terminal compete for focus when the row menu renames a row that was not
+selected: the selection change re-parents that row's terminal, and `TerminalPane` normally hands
+a re-parented surface focus. It skips that when the selected session is the one being renamed
+(`TerminalPane.claimsFocusOnReparent`), because the field's focus loss commits it and closes it.
 
 `SidebarReorder.apply` holds the whole reorder policy — what a drag of a given row may legally
 move to, and what it does to the projects it passes over — as a pure function over
@@ -923,10 +981,139 @@ authority**, because the ledger those notes cite
 only on the machine the work was done on.
 ## Agents
 
-`Sources/FlightDeck/Agents/` is the per-harness adapter protocol referenced from "Session
-status pipeline" above — `AgentAdapter`, with two implementations today, `ClaudeAdapter` and
-`CodexAdapter`, dispatched through the `AgentID` switch rather than held as an existentially
-typed value. Each supplies its own runtime, dialog driver, turn recovery and timeline mapper.
+`Sources/FlightDeck/Agents/` is the per-agent adapter protocol referenced from "Session
+status pipeline" above — `AgentAdapter`, implemented by `ClaudeAdapter`, `CodexAdapter`,
+`GrokAdapter`, `GeminiAdapter` (`Agents/Gemini/`, driving the Antigravity CLI `agy`) and
+`OpenCodeAdapter` (`Agents/OpenCode/`), dispatched through the `AgentID` switch rather
+than held as an existentially typed value. Each supplies its own runtime, dialog driver, turn
+recovery and timeline mapper.
+
+**One agent identity.** `AgentID` (`claude`, `codex`, `grok`, `gemini`, `opencode`) lives in IntakeKit,
+because the planning runner links IntakeKit alone; it replaced the app's old `AgentID`,
+IntakeKit's `Harness`/`ModelFamily` and Level 3's string `HarnessID`. Raw values are the
+storage format, and files keep the JSON key `harness` wherever they used it. Each adapter's
+`static var profile` is the agent's headless facet — the same `AgentProfile` the runner gets
+from `AgentProfiles.profile(for:)`. `AgentID.tabReady` gates every surface that opens a tab
+(the agent list behind the New Session menus and ⌘N, a project's default-agent picker,
+`RoutingCapabilityRegistry.standard()`, `SwarmSpawner`); every agent is tab-ready now that
+grok and gemini have real adapters, and the gate stays so a future agent can exist headless
+first (`AgentID.$tabReadyOverride` is the test seam that keeps the gate exercised). The
+headless types are `HeadlessRequest`, `HeadlessCommand`,
+`HeadlessOutput`, `HeadlessSession` (`Sources/IntakeKit/Headless.swift`).
+
+**grok** (`Agents/Grok/`) runs `grok -s <tab id>` and resumes with `grok -r <id> || grok -s
+<id>`. Its session lives in `$GROK_HOME/sessions/<percent-encoded cwd>/<id>/`: the transcript
+is `updates.jsonl` (ACP `session/update` records, `GrokTimelineMapper`), status comes from
+`events.jsonl` plus the `active_sessions.json` process registry (`GrokRuntime`, folded by
+`GrokStatusFold`; no hook is installed), and the title from `summary.json`. Its composer is a
+rounded box with no placeholder; a draft is set aside with grok's own Ctrl+S stash
+(`GrokTextChannel`). Its cards are answered by the row's own key and never by Return
+(`GrokDialogDriver`, `AgentKeyedDialogDriver`), because the first card of a session focuses
+"always-approve"; a permission deny and interrupt are Ctrl+C (`AgentAdapter.interruptKey`). A
+question's deny is Shift+x instead, grok's "dismiss, the agent continues", where Ctrl+C would
+cancel the turn (`AgentQuestionDismisser`, `SessionStore.performDismiss`): read-guarded like an
+answer — Tab first when the card's keyboard is parked, never into an open editor, and a card still
+up after the press is filed as `keyed-screen-mismatch`, never pressed again. A question —
+one or a set, single-select, checkbox or typed — is answered by `GrokAnswerPlan` through
+`AgentKeyedQuestionDriver` and `SessionStore.performKeyed`: each step re-reads the card and
+must find the right question (`[i/n]`), its labels and its checkboxes before any key goes out,
+because a grok digit commits (it advances, and submits on the last question). Extra boxes are
+ticked with Space after clamping the colour-only cursor with `↑`; a typed answer is `z`, a
+paste and the one Return the drive ever sends, into the open editor. grok writes
+`multi_select`, which `GrokTimelineMapper` renames for the phone. A subagent's permission card
+is drawn in the parent's TUI but recorded only in the child's own session
+(`<parent>/subagents/<id>/meta.json` names it; `GrokSubagents`): the runtime counts running
+children's unresolved requests into `waiting`, and the reader offers the child's call, attributed
+to the child (`AgentOpenPromptReader.owningSubagent`, `vouchedSubagentPrompt`,
+`subagentTranscript(for:agent:)`) so the phone reads the child's file and the answer needs no
+hook log. Usage is the weekly figure from the billing line in `$GROK_HOME/logs/unified.jsonl`
+(`GrokBillingSource`). The evidence is `.superpowers/grok-tui-facts.md` and
+`grok-tui-facts-2.md` (grok 1.0.30).
+
+**OpenCode is the server-shaped agent** (`Agents/OpenCode/`, probed on opencode 1.18.34). One
+`opencode serve` per account (`OpenCodeServer`, spawned detached and re-adopted across Flight Deck
+restarts, password-protected, port kept stable so attached TUIs reconnect by themselves); every
+tab is `opencode attach <url> --dir <cwd> -s <ses_id>` against it, which is also the process a
+tab's lease follows (argv[0] `opencode`). An account's home is an XDG data root bound by
+`XDG_DATA_HOME` (`~/.local/share`, a sibling such as `~/.local/share-work`): OpenCode has no
+narrower variable for its database and provider logins. Almost every capability is a request to
+the server rather than keystrokes: a phone message is `prompt_async` (per session, queued behind
+a running turn, never touches the composer), a rename is `PATCH /session`, and a permission or
+question is answered by its request id through `AgentAdapter.promptResponder`, which
+`SessionStore.answerPrompt`/`abortPrompt` consult before any keystroke driver. Channels learn
+which tab they act for from `TargetedInjector`, the addressed `TextInjecting` the injection gate
+hands every channel. Identity is negotiated and **derived**: OpenCode mints `ses_…` ids and
+accepts none, so the store's `UUID` is a name-based UUID of it (`OpenCodeIdentity`). History
+lives in SQLite, so `OpenCodeMirror` keeps one append-only JSONL file per session — settled
+messages plus `prompt.asked`/`prompt.resolved` records for requests OpenCode never persists —
+and the timeline pager, ⌘K, the prompt reader (`transcriptCarriesOpenPrompt` is true), Flight
+Control's `AgentOutputScan` and the hand-off transcript pointer read that file like any other
+transcript. A subagent is a child session; `OpenCodeRuntime` folds children onto the root tab.
+OpenCode reports no quota, so it has no usage meter (`OpenCodeRoutingCapabilities`).
+
+Headless planning runs `opencode run --format json` (`OpenCodeProfile`, `HeadlessCommand
+.openCodeArguments`). It has no schema flag, so the schema rides in the prompt and `SchemaRepair`
+gets its one resumed retry (`-s <id>`). A seat is one of two OpenCode agents defined in
+`OPENCODE_CONFIG_CONTENT` — read-only (`read`/`grep`/`glob`/`list`, every other tool `deny`, which
+removes it from the model's list) or the integrator (those plus `edit` under its work dir, by a
+pattern relative to the git worktree holding it, the form OpenCode matches) — with
+`OPENCODE_DISABLE_PROJECT_CONFIG` set, because a project `opencode.json` beat
+`OPENCODE_PERMISSION` when probed. `OpenCodeLiveTests` runs both the tab adapter and these seats
+against a real `opencode` with a scripted model (`scripts/test-opencode-live.sh`).
+
+**A new `AgentID` must not break an older build's files.** `sessions.json` and `preferences.v1`
+are written with every entry naming an agent outside `AgentID.readableByEveryBuild` (claude and
+codex — what a pre-unify build can decode) moved to side keys older builds ignore, and merged
+back on load (`AgentForwardCompatibility`); the side keys decode element by element, so a later
+build's unknown agent costs that entry and never the file. `AccountList.legacyAccounts`/`legacyPools`
+filter the flat mirrors by the same set. An older build that SAVES drops the side keys.
+
+**Accounts and pools are one list.** `AccountList` (`Agents/AccountList.swift`, stored as
+`Preferences.storedAccountList`) holds accounts and single-agent pools, one level deep, each
+account at most once. `PreferencesStore.effectivePools` derives Level 3's pools from it: a
+synthesized `<agent>-default` of the agent's unpooled live accounts, then each pool entry.
+`storedAccounts` and `capacity.pools` are written as a mirror (claude and codex only) so an
+older build installed over this one keeps the same account ids. A project assigns each agent
+an `AccountAssignment` — `.account(UUID)` or `.pool(PoolID)` — stored under `accounts` and
+`accountPools` respectively, so the old key keeps its old shape. Settings → Accounts
+(`AccountsSettingsTab`, rules in `AccountsPaneModel`) is the only editor of the list.
+
+**One resolver turns an assignment into a login.** `AccountResolver` (`Agents/AccountResolver.swift`,
+`SessionStore.accountResolver`, built on `UsageService.shared.ledger`) answers which account a
+project's work for one agent runs as. No assignment → the agent's first live account; an account →
+that account (a tombstone is missing, never another login); a pool → a `CapacityLedger` lease on the
+first member under soft (`LeasePolicy`). When the ledger leases nothing the work still starts on a
+pool member: the first member if the ledger has not seen the pool yet, the first over-soft member,
+or — every member over hard — the one with the most headroom plus a notice to show. Tabs lease in
+`SessionStore.launchAccount`, hold the lease under the tab id once filed (`fileLease`, which posts
+the notice), and release it in `closeSession`; every creation path that fails after the lease gives
+it back. **The lease follows the agent process, not the tab** (round 2): `SessionStore
+.reconcileTabLeases`, every 5 s from `maintenanceTick`, asks `AgentProcessProbe` whether a process
+started as the agent's binary (argv[0] = the profile's `binaryName`; `p_comm` is a versioned file
+name for claude and grok) runs under the tab's fd-abduco daemon or surface. Gone for 30 s → the
+lease is released; running with none → `AccountResolver.reacquire` adopts a lease on the account the
+tab is stamped with, never a fresh pick, and only when the project's pool lists it. That is also how
+tabs restored after a relaunch lease again. **Smart sleep moves the lease** (round 2,
+sleep-lease-rollover; this replaced "a SIGSTOP'd agent keeps its lease"): the sleep controller's
+freeze hook (`SessionStore.agentFroze`) releases the tab's lease at once and records its composer
+draft (`AgentTextChannel.draft`) while the surface still exists, and the sweep never re-leases a
+tab the controller holds. The thaw (`wakeIfAsleep`) asks `AccountResolver.thawPlan`: an account
+that is not spent (not over its pool's hard threshold, not refused) wakes in place and re-leases
+THE SAME account through `reacquire`, even past soft or the pool's cap. A spent one, when the
+agent froze idle at a readable composer, the agent has an `AgentID.conversationTransfer` and
+hand-offs need no confirmation, rolls over (`SessionStore.rollOver`): the pool leases another
+member, the conversation is copied into that account's home (claude `projects/<cwd>/<id>.jsonl`
+plus its `<id>/` sidecar; codex the dated rollout plus its `session_index.jsonl` line, with the
+tab's `transcriptPath` repointed; grok the `sessions/<cwd>/<id>/` directory; OpenCode `opencode
+export` from the old data root and `import` into the new, run in the tab's directory), the frozen
+process is killed, the tab is restamped and the same conversation id is resumed under the new home,
+and the draft is pasted (never submitted) once the new composer is up. Any blocker — frozen in a
+dialog, unreadable composer, gemini (single account), confirm on — or no other member with
+headroom thaws in place on the spent account with a notice; a swarm agent's account is left to the
+hand-off driver. Planning runs use the same resolver through its `AccountResolving`
+conformance (`Intake/PlanningAccounts.swift`), but keep their own lease book (the runner
+controller's `heldAccounts` plus `accounts.json`, which survives a relaunch) rather than
+`hold(for:)`, so one lease is never in two books.
 
 **Adapter capabilities are optional statics, `nil` is the refusal.** `textChannel` (how a
 message is typed into the agent's live terminal), `dialogDriver` (how a select-list dialog
@@ -938,6 +1125,38 @@ agent that cannot support a capability is refused it at one site instead of scat
 predicate that could disagree with the implementation. `turnRecovery` additionally decides,
 per agent, which of its own error vocabulary is worth retrying — see "API-error auto-retry"
 in [FOLLOWUPS.md](FOLLOWUPS.md) for the codex allowlist and its fail-closed default.
+
+**Gemini learns its identity after launch.** agy cannot be told a conversation id: it mints
+one on the first submit (and on `/clear`), and answers `--conversation=<unknown>` by silently
+minting a fresh one. So a gemini tab is born pinned to its own id, `resumeCommand` resumes only
+an id that has a step store (`conversations/<id>.db`), and `GeminiRuntime` re-pins the tab
+(`AgentEvent.rebound`) to whichever `presence/<id>.lock` a process in the tab's own tree
+(its fd-abduco daemon or its surface's shell) holds open — per-tab, so concurrent launches
+cannot cross. Status comes from agy's own files, read-only, with nothing installed into agy:
+busy/idle from `conversation_summaries.status`, waiting from a WAITING row in the step store
+(which `GeminiOpenPromptReader` also reads — agy never writes a waiting step to its JSONL), the
+title from `annotations/<id>.pbtxt`. Quota is `agy -p /usage --output-format json` (no tokens),
+run only after `agy models` confirms agy is signed in. Deny on an agy dialog is its last row,
+never Escape, which cancels the whole turn.
+
+**A gemini dialog reaches the phone in words.** Every other agent's phone card is derived on
+the phone from its own copy of the transcript, and only the call id travels
+(`WireSession.openPromptCall`). That cannot work for agy, whose waiting call is never a
+transcript record. So `AgentOpenPromptReader.transcriptCarriesOpenPrompt` (no default; claude
+and grok `true`, gemini `false`) decides two things. First, for a `false` reader the Mac sends
+its own derivation as `WireSession.openPrompt` (`WireOpenPrompt`: call id, kind, tool, summary
+or questions), on the same `activityChanged` as the call id, so a supersede moves both in one
+fold and a closed dialog clears both. The phone uses it only when its own `OpenPrompt.find`
+finds nothing, and only while `waiting` and while `openPromptCall` names the same call. The
+answer goes back through the normal `prompt.answer` path, `PromptService` re-derives from the
+step store before a key moves, and the gemini driver denies on the last row, never with Esc.
+Second, `PromptService` neither caches a `false` reader's answer on the transcript's stamp
+(a new dialog does not move the transcript) nor widens its tail read (no window can hold the
+record). `GeminiRuntime` reports `waiting` again when the waiting call changes while the tab
+stays `waiting`, so a fleet with no claude tab, and therefore no registry tick, still re-derives
+on a supersede. The field is absent for every other agent, so an older phone sees the bytes it
+always saw. A `kind` this build cannot draw decodes to no card, and a malformed value drops the
+card, not the snapshot (`try?`).
 
 ## Tab navigation
 
@@ -1003,16 +1222,19 @@ detail has no business being reachable from the tools subsystem, or from any fut
 silently inherit another agent's working-directory logic — the compiler makes it answer for
 its own.
 
-**The Tools menu is AppKit, not a SwiftUI `Commands` group**, for the reason
-`SessionCommands` already documents: SwiftUI cannot vary a `.keyboardShortcut` at runtime,
-and a user-recorded chord is dynamic by definition. `ToolsMenuController` assigns each
+**The Tools menu's items are AppKit, not SwiftUI buttons**: SwiftUI cannot vary a
+`.keyboardShortcut` at runtime, and a user-recorded chord is dynamic by definition. `ToolsMenuController` assigns each
 tool's `ToolShortcut` straight onto `NSMenuItem.keyEquivalent` /
 `keyEquivalentModifierMask`, which is a plain property and can change whenever the
 preferences pane changes it. `MenuKeyEquivalents` covers the new menu with **no change at
 all** — it walks the whole main menu and names no specific shortcut, so a Tools item added
 after that file was written routes the same way ⌘Q already does.
 
-**Being AppKit costs one thing, and it is not obvious: SwiftUI prunes the menu back out.**
+**The menu itself is SwiftUI's (`ToolsMenuShell`), since 2026-10-09; the items live inside it
+(`AppKitMenuSlot`).** See "The menu bar never rebuilds" below. The history, for why: until then
+the Tools menu was an AppKit top-level menu, and
+
+**Being AppKit cost one thing, and it was not obvious: SwiftUI pruned the menu back out.**
 SwiftUI owns `NSApp.mainMenu` and removes items it did not author, on a reconciliation pass
 that runs *after* `applicationDidFinishLaunching`. So installing once always loses — the item
 lands correctly between View and Window, and is gone a moment later from that same `NSMenu`
@@ -1021,12 +1243,33 @@ instance. The symptom is not a missing menu but broken shortcuts: with nothing t
 `lastPerformKeyEvent` timestamp matches on the second pass, and the terminal receives a
 synthesized keyDown carrying `characters` — a literal "o" in the running agent's prompt.
 
-`ToolsMenuController` therefore keeps a weak reference to its host menu and observes
-`NSMenu.didRemoveItemNotification`, re-inserting whenever its item disappears. A timed
-re-install would have been enough at launch and wrong afterwards: SwiftUI rebuilds its
-commands when observed state changes, and `SessionCommands` observes preferences, so editing
-a tool can prune the menu again — killing the shortcuts at the exact moment the user
-configures them.
+`ToolsMenuController` therefore observed `NSMenu.didRemoveItemNotification` and re-inserted
+the menu a turn after each prune. That healed the shortcuts but not the blink: every
+reconciliation removed the menu and put it back, and reconciliations came on every tab switch.
+
+**The menu bar never rebuilds (2026-10-09, the maintainer: "No menu should blink ever").** SwiftUI
+reconciles the whole main menu whenever any `Commands` body is re-evaluated — any observed
+object publishing, any focused value changing, even with identical output — and removes every
+top-level menu it did not author. Measured in bare SwiftUI apps: the old `SessionCommands`
+(observing the current project) removed the Tools menu 11 times in 10 switches between two
+projects' tabs; a `Commands` observing an object whose output never changes still removed it; a
+focused value driving the Run menu or View ▸ Inspector removed it on every plan/terminal switch.
+Items inside a menu SwiftUI authored were never removed. So:
+- **No `Commands` reads state.** `FlightDeckCommands` (`MenuShells.swift`) is the app's whole
+  set, and every member is constant. `MenuBarStabilityTests` fails on any property wrapper in a
+  `Commands`.
+- **Every stateful menu is AppKit items inside a SwiftUI-authored shell**, kept in place by
+  `AppKitMenuSlot` (which still re-checks on every change to the bar, as a backstop): Tools
+  (`ToolsMenuShell` + `ToolsMenuController`), Run (`RunMenuShell` + `RunMenuController`),
+  View ▸ Inspector (`InspectorMenuShell` + `InspectorMenuController`), and File ▸ New … Session
+  (`NewSessionMenuController`, above Add Project…, rewritten in place when the project changes).
+  Enablement, checkmarks and the heatmap title are answered by `validateMenuItem`; the Run and
+  Inspector items find the plan pane in the key window through `PaneMenuRegistry`, which the
+  pane feeds with a `PaneMenuAnchor` view.
+- **`scripts/test-menu-bar.sh`** builds a SwiftUI app around the real commands, controllers and
+  `RootView`, drives tab, plan, inspector, intake, preference, Settings and window transitions,
+  and fails on any removal. It runs as a lane of every full `test-unit.sh`. With the app
+  inactive, key-window changes can't be driven there.
 
 **"Configure Tools…" opens Settings by driving SwiftUI's own menu item**, via
 `SettingsMenuItem.locate(in:)`, rather than by sending `showSettingsWindow:`. That selector is
@@ -1520,12 +1763,19 @@ The real corpus confirmed it — 362 transcripts, 361 MB read, 14.5 MB of conver
 concurrent walk was the planned fallback if that number came back too slow; it wasn't needed
 and isn't built.
 
-**Two clocks, not one.** Live sessions need no separate mechanism: `ClaudeRuntime` and
-`CodexRuntime` each already run one watcher per attached tab on the shared `WatchClock` (for
-titles and sub-agent counts, or turn boundaries), and that watcher's `onMessages` hook also
-extracts conversation text and calls `SearchIndex.ingest(_:for:offset: nil)` — the `nil`
-offset marks a live-ingest row rather than a backfill read position, since the watcher tails
-from end-of-file and has no notion of "how much of this file's history is indexed." Everything
+**Two clocks, not one.** Live sessions need no separate mechanism: `ClaudeRuntime`,
+`CodexRuntime` and `GrokRuntime` each already run one watcher per attached tab on the shared
+`WatchClock` (for titles and sub-agent counts, turn boundaries, or grok's status files), and
+that watcher's `onMessages` hook also extracts conversation text and calls
+`SearchIndex.ingest(_:for:offset: nil)` — the `nil` offset marks a live-ingest row rather than
+a backfill read position, since the watcher tails from end-of-file and has no notion of "how
+much of this file's history is indexed." `GeminiRuntime` tails `transcript_full.jsonl` on its
+own poll beat (`GeminiTranscriptTail`) and differs in one way: it starts at byte 0, not at
+the end. agy names a new tab's conversation only at the first submit, and writes that request in
+the same instant. So the `.rebound` re-attach always finds it already on disk, and an
+end-of-file start would lose it. The overlap with the backfill is a no-op through
+`message_identity`. Gemini and grok extract with their own `AgentSearchCorpus`, so a live
+row is the row the backfill would write for the same line. Everything
 that watcher does not cover — every conversation's history up to the moment the app
 launched — is `SearchIndexBuilder`'s job: an `actor`, off the main actor, walking transcripts
 newest-first (the conversation you want is overwhelmingly a recent one, so search becomes
@@ -1674,6 +1924,44 @@ a stage still running lengthens it and moves its major checkpoint to the new las
 last round of each stage is a **major** checkpoint (⏭'s stop). Release is never a tape target:
 the tape stops at release review and the existing release flow takes over unchanged.
 
+*Which accounts planning bills (unify brief R9).* Every planning seat bills the project's
+assignment for its agent (Settings → Projects) — an account, or a pool leased through the
+`CapacityLedger` (first under soft) — and with no assignment the agent's first live account, as
+a new tab would; an agent with no account record runs in its CLI's built-in home. There is no
+per-seat account: `ModelChoice` no longer carries one (an old `account` key decodes and is
+dropped on save), and the Rounds editor shows each seat's "Bills: …" line read-only. The runner
+has no preferences, so the APP resolves: at every runner start `IntakeRunnerController` resolves
+each agent the round config can run (fallbacks included) through `AccountResolving` — the tabs'
+own `AccountResolver` — and writes `<intake>/accounts.json` (`RunnerAccounts`) before
+spawning; `RoundExecutor` binds each seat to its agent's entry and records the account id on the
+seat's `activity.json`, which is what `UsageService` credits. A broken assignment (a removed
+account, a pool that is gone or has no live member) refuses the start
+(`RunnerStartError.accountUnavailable`); a pool with nothing leasable runs on a member unleased by
+the tab rules (first over-soft member; every member over hard → most headroom), never on a login
+outside the pool. In the all-over-hard case the runner start (`IntakeRunnerController
+.onAccountNotice`) and a triage turn (`IntakeService.onAccountNotice`) post the same banner a tab
+does, and only after the start succeeded.
+Pool leases are released when the runner is seen gone — `reap`, or the per-tick
+`syncAccountLeases` for an exit nobody reported (finish, crash, kill) — and a relaunched app
+re-adopts a live runner's leases from its `accounts.json` (`CapacityLedger.adopt`). Each start
+re-leases, which is the rollover point. Triage resolves the same way per turn and releases its
+lease when the turn ends. Index refresh is app-wide, not project-scoped, so it has its own
+assignment: `CapacityPreferences.indexAccount` (stored as `indexAccountID`/`indexPool`), picked on
+the Capability Index pane with the same `AccountAssignmentPicker` the Projects pane uses.
+`AccountResolver.resolveIndex` resolves it by the project rules; unset means claude's pool
+(`defaultIndexPool`: the one user hosted claude pool if exactly one exists, else `claude-default`,
+else — no claude account at all — the unassigned rule). `CapabilityIndexService` takes the lease
+before the first source, binds every source's run to that home, and releases it when the refresh
+ends — success, failed sources or `cancelRefresh()` (which SIGTERMs the running claude and writes
+no snapshot). Each source's folded stream is published as `CapabilityIndexService.seatActivities`,
+stamped with the billed account id, and `UsageEnvironment.live` adds them to the seats
+`UsageService` credits. Removing the assigned account or pool resets the index to Default.
+Every seat's usage is credited to the account it billed (`UsageService.ingestHeadlessSeats`): claude
+from its `rate_limit_event`s, codex from the rollout its run wrote (`SeatActivity.conversationID` →
+`CodexRolloutFile`; `codex exec --json` has no rate limits on stdout), grok from its home's billing
+log line (headless grok writes none itself), gemini from agy `/usage` polled while the seat runs, and
+any non-claude seat that ended on a limit message refuses its account.
+
 *The runner.* `flightdeck intake run <id> --root <intakesRoot>` (the bundled CLI, which links
 `IntakeKit`) is spawned by `IntakeRunnerController` inside its own fd-abduco daemon (`-n`,
 socket `<daemon dir>/intake-<uuid lowercased>.sock` — a name `SessionDaemon.liveSessionIDs()`
@@ -1790,7 +2078,7 @@ diagnosis). Drafters run in parallel; synthesis and refine have a seat propose `
 and the **integrator** apply them to `work/plan.md`; encode, polish, fresh-eyes and dedup each
 return a whole change set in the triage schema. Each seat is one headless `codex exec --json` /
 `claude -p` turn with an explicit model and effort (resumes included), a JSON schema, and its
-own `runs/` directory. Isolation, on every seat, fresh and resumed (`HarnessCommand`): claude
+own `runs/` directory. Isolation, on every seat, fresh and resumed (`HeadlessCommand`): claude
 runs with `--restricted --strict-mcp-config` (no user/project/local settings files, so no
 standing Bash allows, and no MCP servers) and `--tools` naming the only built-ins that exist;
 because `--restricted` also drops the settings file's `env` block (this machine's
@@ -1883,6 +2171,43 @@ none of it is engine state, all of it is a view or the service glue that feeds o
     toolbar), `NotesRail.swift` (the side rail of note/edit cards, tracking the editor's scroll).
   - `IntakeService.swift` — the service described above, plus `ShapingModel.swift` (pure
     view-model folds over a `Tape`) and `RoundConfigEditor.swift` (the Rounds inspector editor).
+  - **The inspector has two explicit modes, Notes and Rounds** (`DetailLayout.InspectorMode`,
+    2026-10-09). A segmented control in the column's header, ⌥⌘1/⌥⌘2 and View ▸ Inspector
+    (`Planning/InspectorMenu.swift`) switch them; the choice is remembered per plan
+    (`InspectorModeStore`, owned by `IntakeService`, UserDefaults `IntakeInspectorModeByIntake`).
+    **A mode switch redraws the column alone.** The mode store is its own `ObservableObject`,
+    observed only by `InspectorModeReader` around the column: as a `@Published` on
+    `IntakeService` (which `SessionStore` forwards) each click redrew `RootView`, `ProjectView`
+    and the pane. And View ▸ Inspector is AppKit items (`InspectorMenuController`) in a constant
+    SwiftUI shell, validated on demand against `PaneMenuRegistry`, which the pane feeds through a
+    `PaneMenuAnchor` view — never a focused value read by a SwiftUI `Commands`, which rebuilt the
+    menu bar on each mode or tab switch (see "The menu bar never rebuilds"). Focus no longer picks the content: the plan editor taking
+    focus used to swap the Rounds editor for the notes rail (`PlanNotesController.planFocused`,
+    removed). Explicit openers switch the mode in the open — starting a note (Notes), Edit in
+    Inspector, selecting an agent of the running round (Rounds, drilled in on the agent with a
+    "‹ Rounds" back button), and a round's agent stack. A single task offers Notes alone; from
+    review on, Rounds shows the config that planned the plan, read-only.
+  - **Agent stacks** (`Planning/AgentStack.swift`): every agent has one monogram disc
+    (`AgentBadge`, `AgentID.monogram`/`.tint` — no vendor marks, the repo is public), and every
+    round drawn in the main view (finished-round cards, the live round's header) carries an
+    overlapping stack of its distinct agents (`AgentStackModel`, max 3 then "+N", tooltip per
+    role).
+  - **Round chips and the rounds timeline** (`Planning/RoundChip.swift`,
+    `Planning/RoundTimeline.swift`, 2026-10-09): every round is drawn as one `RoundChip` — progress
+    mark (done / live / planned, dashed), the board's name ("Refine 2"), a cross-check mark, and
+    its agent stack — from a `RoundChipModel` built by `RoundTimeline`. The finished-round cards,
+    the live round's header and the Rounds editor all draw that chip, and a card's chip is the very
+    value the editor's timeline holds for that round (`RoundTimelineTests`). Who runs a round comes
+    from `IntakeKit.RoundParticipants`, which `TapePlanner`'s sequence (cross-check selection),
+    `LiveSeats.expected` and the editor all read, so the editor can't show a round the runner
+    won't run. The Rounds editor is one row per stage (Draft, Synthesis, Refine, Encode, Polish)
+    with a strip of chips (Refine and Polish numbered up to their caps plus the tape's extends);
+    its stage headings are disclosures, and picking a heading or a chip reveals that stage's
+    pickers, captioned "Applies to every Refine round" — the config stays role-based. The pick
+    (`RoundTimeline.Selection`) is held by the detail pane and shared both ways: a round's chip
+    clicked in the main view opens Rounds on it; a chip picked in the inspector shows that round
+    in the main view (a done round's checkpoint, the live card), and a card or board pick moves
+    the inspector's pick to its chip.
   - `ReleaseReviewView.swift` — the release sheet (spec §10); `IntakeGraphReader.swift` and
     `BeadWriter.swift`/`IntakeDelivery.swift` are release's engine-facing neighbors, not views.
   - `Planning/FloatingCard.swift`, `Planning/UIText.swift` — shared across the above (see below).

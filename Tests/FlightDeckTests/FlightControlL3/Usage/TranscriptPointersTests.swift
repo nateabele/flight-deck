@@ -37,9 +37,16 @@ final class TranscriptPointersTests: XCTestCase {
                                               exists: { _ in false }))
     }
 
-    func testOpenCodeIsACommand() {
-        XCTAssertEqual(TranscriptPointers.openCode(sessionID: "ses_1", serverURL: nil).locator, .command("opencode export ses_1"))
-        XCTAssertEqual(TranscriptPointers.openCode(sessionID: "ses_1", serverURL: URL(string: "http://127.0.0.1:4096")).locator,
-                       .command("curl -s http://127.0.0.1:4096/session/ses_1/message"))
+    /// The tab's mirror (`OpenCodeMirror`), a plain JSONL file — not `opencode export` (which
+    /// reads the built-in account's data unless `XDG_DATA_HOME` is set) nor the server's message
+    /// endpoint (which needs the account's server password).
+    func testOpenCodePointsAtTheTabsMirror() {
+        let session = Session(title: "t", workingDirectory: "/p", agent: .opencode, transcriptPath: "/m/ses_1.jsonl")
+        let p = TranscriptPointers.openCode(session: session, exists: { _ in true })
+        XCTAssertEqual(p?.locator, .path("/m/ses_1.jsonl"))
+        XCTAssertEqual(p?.format, TranscriptPointers.openCodeFormat)
+        XCTAssertNil(TranscriptPointers.openCode(session: session, exists: { _ in false }))
+        XCTAssertNil(TranscriptPointers.openCode(session: Session(title: "t", workingDirectory: "/p", agent: .opencode),
+                                                 exists: { _ in true }))
     }
 }

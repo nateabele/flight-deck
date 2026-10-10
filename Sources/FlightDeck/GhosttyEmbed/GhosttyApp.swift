@@ -54,9 +54,20 @@ final class GhosttyApp {
 
     /// One-time global libghostty initialization. libghostty requires
     /// `ghostty_init` exactly once per process before any other API call.
-    private static let didInit: Bool = {
-        ghostty_init(UInt(CommandLine.argc), CommandLine.unsafeArgv) == GHOSTTY_SUCCESS
-    }()
+    private static let didInit: Bool = initializeLibrary(
+        prepareEnvironment: LaunchLocale.prepareProcessEnvironment,
+        initialize: { ghostty_init(UInt(CommandLine.argc), CommandLine.unsafeArgv) == GHOSTTY_SUCCESS }
+    )
+
+    /// The environment must be final before `ghostty_init`, not after: `ghostty_init` starts a
+    /// `sentry-init` thread that walks `environ` without libc's lock, then sets LANG/LANGUAGE on
+    /// this thread if they are missing — and that `setenv` frees `environ` under the walk
+    /// (SIGSEGV in `posix.getenv`). `LaunchLocale` sets them first, so libghostty sets nothing.
+    /// A seam so the order is pinned by `LaunchLocaleTests`.
+    static func initializeLibrary(prepareEnvironment: () -> Void, initialize: () -> Bool) -> Bool {
+        prepareEnvironment()
+        return initialize()
+    }
 
     init?() {
         guard GhosttyApp.didInit else {

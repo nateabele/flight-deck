@@ -103,7 +103,7 @@ final class BoardModelTests: XCTestCase {
     /// A landed round is a cross-check on the board only if its cross-check agent did not fail —
     /// the sparkline and heatmap already draw such a round plain, and the three must agree.
     func testLandedRoundWithAFailedCrossCheckAgentIsPlain() throws {
-        let codex = ModelChoice(harness: .codex, model: "gpt-5", effort: "high")
+        let codex = ModelChoice(agent: .codex, model: "gpt-5", effort: "high")
         let failed = RoundRecord(slots: [SlotOutcome(role: "crossReviewer", used: codex, requested: codex, status: .failed)])
         let ok = RoundRecord(slots: [SlotOutcome(role: "crossReviewer", used: codex, requested: codex, status: .ok)])
         let tape = Tape(checkpoints: [cp(1, .draft, major: true, at: 0), cp(2, .synthesis, major: true, at: 180),

@@ -29,7 +29,7 @@ final class ObserveAssignmentLaneTests: XCTestCase {
         var block = SwarmFixtures.block(kind: "snapshot-tests")
         block.knobs = ["effort": "high"]
         block.source = AssignmentSource(by: .rule, ruleId: "r3", reason: "test-authoring 0.8 → codex", at: now)
-        let lease = AccountLease(pool: "codex-subs", account: AccountRef(harness: "codex", id: UUID(), label: "Work"))
+        let lease = AccountLease(pool: "codex-subs", account: AccountRef(agent: .codex, id: UUID(), label: "Work"))
         var me = SwarmAgentRecord(session: UUID(), agentName: "BlueLake", block: block, lease: lease, task: "fx-1",
                                   state: .working, stateSince: now)
         let previous = SwarmAgentRecord(session: UUID(), agentName: "GreenFox", block: block, lease: nil, task: nil,

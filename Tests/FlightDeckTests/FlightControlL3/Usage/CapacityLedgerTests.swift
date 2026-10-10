@@ -9,7 +9,7 @@ import IntakeKit
 final class CapacityLedgerTests: XCTestCase {
     private var clock: UsageTestClock!
     private var ledger: CapacityLedger!
-    private let pool = CapacityPool.hosted(id: "claude-default", label: "Claude default", harness: "claude",
+    private let pool = CapacityPool.hosted(id: "claude-default", label: "Claude default", agent: .claude,
                                            accounts: [UsageRefs.workID, UsageRefs.spareID])
 
     override func setUp() {
@@ -88,7 +88,7 @@ final class CapacityLedgerTests: XCTestCase {
 
     func testTimelineFixtureDrivesLeasesThroughSoftHardAndReset() throws {
         let t = try L3Fixtures.usageTimeline()
-        ledger.configure(pools: [CapacityPool.hosted(id: "solo", label: "Solo", harness: "claude", accounts: [UsageRefs.workID])],
+        ledger.configure(pools: [CapacityPool.hosted(id: "solo", label: "Solo", agent: .claude, accounts: [UsageRefs.workID])],
                          accounts: [UsageRefs.work])
         var leased: [Bool] = []
         for r in t {
@@ -100,7 +100,7 @@ final class CapacityLedgerTests: XCTestCase {
     }
 
     func testLocalPoolLeasesUpToItsCap() {
-        let local = CapacityPool.local(id: "ollama", label: "Ollama", harness: "opencode", endpoint: "http://localhost:11434")
+        let local = CapacityPool.local(id: "ollama", label: "Ollama", agent: .gemini, endpoint: "http://localhost:11434")
         ledger.configure(pools: [local], accounts: [])
         let a = ledger.lease(pool: "ollama"), b = ledger.lease(pool: "ollama")
         XCTAssertNotNil(a); XCTAssertNotNil(b)
@@ -127,7 +127,7 @@ final class CapacityLedgerTests: XCTestCase {
     /// Review focus: the meter is per account, so two pools listing one account must agree on
     /// its reading; leases, though, are per pool, and releasing one must not free the other.
     func testTwoPoolsSharingAnAccountSeeOneReadingAndLeaseIndependently() {
-        let strict = CapacityPool.hosted(id: "strict", label: "Strict", harness: "claude", accounts: [UsageRefs.workID], soft: 0.5, hard: 0.6)
+        let strict = CapacityPool.hosted(id: "strict", label: "Strict", agent: .claude, accounts: [UsageRefs.workID], soft: 0.5, hard: 0.6)
         ledger.configure(pools: [pool, strict], accounts: [UsageRefs.work, UsageRefs.spare])
         ledger.ingest(UsageRefs.reading(UsageRefs.work, 0.55, at: clock.now))
         XCTAssertEqual(ledger.headroom(pool: "claude-default").first?.worstUtilization, 0.55)

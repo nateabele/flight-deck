@@ -88,7 +88,7 @@ public enum RuleMatch: Codable, Equatable, Sendable {
 
 /// Where a matching rule sends the task.
 public struct RuleAssign: Codable, Equatable, Sendable {
-    public var harness: HarnessID
+    public var agent: AgentID
     public var model: String
     public var knobs: [String: String]
     /// Never absent once validated: a sentence that names no pool gets the adapter's default
@@ -100,19 +100,23 @@ public struct RuleAssign: Codable, Equatable, Sendable {
     /// compiled form so a later change of default is not a silent re-route.
     public var modelDefaulted: Bool
 
-    public init(harness: HarnessID, model: String, knobs: [String: String] = [:], pool: PoolID,
+    public init(agent: AgentID, model: String, knobs: [String: String] = [:], pool: PoolID,
                 fallbackPool: PoolID? = nil, modelDefaulted: Bool = false) {
-        self.harness = harness; self.model = model; self.knobs = knobs; self.pool = pool
+        self.agent = agent; self.model = model; self.knobs = knobs; self.pool = pool
         self.fallbackPool = fallbackPool; self.modelDefaulted = modelDefaulted
     }
 
-    private enum CodingKeys: String, CodingKey { case harness, model, knobs, pool, fallbackPool, modelDefaulted }
+    /// `agent` is spelled `harness` in every `routing.json` and preferences blob (unify brief R1).
+    private enum CodingKeys: String, CodingKey {
+        case agent = "harness"
+        case model, knobs, pool, fallbackPool, modelDefaulted
+    }
 
     /// `knobs` and `modelDefaulted` are optional on read: the spec's own example omits
     /// `modelDefaulted`, and a hand-edited `routing.json` should not stop decoding over it.
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        harness = try c.decode(HarnessID.self, forKey: .harness)
+        agent = try c.decode(AgentID.self, forKey: .agent)
         model = try c.decode(String.self, forKey: .model)
         knobs = try c.decodeIfPresent([String: String].self, forKey: .knobs) ?? [:]
         pool = try c.decode(PoolID.self, forKey: .pool)
@@ -132,22 +136,33 @@ public enum RuleState: String, Codable, Sendable { case draft, compiled, confirm
 
 /// Which model compiled a rule — recorded so a surprising compile can be traced to its compiler.
 public struct CompilerRef: Codable, Equatable, Sendable {
-    public var harness: HarnessID
+    public var agent: AgentID
     public var model: String
-    public init(harness: HarnessID, model: String) { self.harness = harness; self.model = model }
+    public init(agent: AgentID, model: String) { self.agent = agent; self.model = model }
+
+    private enum CodingKeys: String, CodingKey {
+        case agent = "harness"
+        case model
+    }
 }
 
 /// The headless call that compiles a sentence. A cheap model by default: the output is a small,
 /// schema-constrained object that a validator checks anyway (spec §3).
 public struct RuleCompilerSettings: Codable, Equatable, Sendable {
-    public var harness: Harness
+    public var agent: AgentID
     public var model: String
     public var effort: String
-    public init(harness: Harness = .claude, model: String = "haiku", effort: String = "low") {
-        self.harness = harness; self.model = model; self.effort = effort
+    public init(agent: AgentID = .claude, model: String = "haiku", effort: String = "low") {
+        self.agent = agent; self.model = model; self.effort = effort
     }
     public static let `default` = RuleCompilerSettings()
-    public var ref: CompilerRef { CompilerRef(harness: HarnessID(harness.rawValue), model: model) }
+    public var ref: CompilerRef { CompilerRef(agent: agent, model: model) }
+
+    /// Stored in `preferences.v1` under `harness` (unify brief R1).
+    private enum CodingKeys: String, CodingKey {
+        case agent = "harness"
+        case model, effort
+    }
 }
 
 public struct RoutingRule: Codable, Equatable, Sendable, Identifiable {
@@ -172,6 +187,9 @@ public struct RoutingRule: Codable, Equatable, Sendable, Identifiable {
 
     private enum CodingKeys: String, CodingKey { case id, sentence, compiled, state, failure, compiledAt, compiler, adjusted }
 
+    /// What a rule whose compiled form could not be read says in Settings (see `init(from:)`).
+    public static let unreadableCompileFailure = "This rule names an agent this version of Flight Deck does not know. Recompile it."
+
     /// Hand-written only for `adjusted`: every `routing.json` and preferences blob saved before
     /// it existed lacks the key, and a synthesized decoder would refuse those files outright,
     /// dropping the user's whole rule list.
@@ -179,11 +197,23 @@ public struct RoutingRule: Codable, Equatable, Sendable, Identifiable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(String.self, forKey: .id)
         sentence = try c.decode(String.self, forKey: .sentence)
-        compiled = try c.decodeIfPresent(CompiledRule.self, forKey: .compiled)
         state = try c.decode(RuleState.self, forKey: .state)
         failure = try c.decodeIfPresent(String.self, forKey: .failure)
+        // A compiled rule that names an agent this build has no `AgentID` case for (a rule a
+        // newer build wrote, or a hand-edited file) must not take the whole rule list down with
+        // it: `AgentID` used to be a free string and accepted anything, and one throw here
+        // fails the enclosing `routing.json` or `preferences.v1` decode — and preferences.v1 is
+        // decoded with `try?`, so that would silently reset every preference. The rule degrades
+        // to `failed` instead, which routes nothing and tells the user to recompile it.
+        do {
+            compiled = try c.decodeIfPresent(CompiledRule.self, forKey: .compiled)
+        } catch {
+            compiled = nil
+            state = .failed
+            failure = Self.unreadableCompileFailure
+        }
         compiledAt = try c.decodeIfPresent(Date.self, forKey: .compiledAt)
-        compiler = try c.decodeIfPresent(CompilerRef.self, forKey: .compiler)
+        compiler = try? c.decodeIfPresent(CompilerRef.self, forKey: .compiler)
         adjusted = try c.decodeIfPresent(Bool.self, forKey: .adjusted) ?? false
     }
 
@@ -247,7 +277,7 @@ public enum RuleText {
         case 2: lhs = "\(parts[0]) \(joiner) \(parts[1])"
         default: lhs = parts.dropLast().joined(separator: ", ") + ", \(joiner) " + parts[parts.count - 1]
         }
-        var rhs = [c.assign.harness.rawValue, c.assign.model + (c.assign.modelDefaulted ? " (default model)" : "")]
+        var rhs = [c.assign.agent.rawValue, c.assign.model + (c.assign.modelDefaulted ? " (default model)" : "")]
         rhs += c.assign.knobs.sorted { $0.key < $1.key }.map { "\($0.key) \($0.value)" }
         rhs.append("pool \(c.assign.pool.rawValue)")
         if let fallback = c.assign.fallbackPool { rhs.append("else pool \(fallback.rawValue)") }

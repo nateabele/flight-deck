@@ -101,7 +101,7 @@ final class L3IntegrationRig {
     private var titles: [String: String] = [:]
     private let claudeAccount: AgentAccount
 
-    private init(accounts: [String], harness: HarnessID, rule: RoutingRule) throws {
+    private init(accounts: [String], agent: AgentID, rule: RoutingRule) throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("fd-l3-rig-\(UUID().uuidString)", isDirectory: true)
         self.root = root
         projectURL = root.appendingPathComponent("project", isDirectory: true).standardizedFileURL
@@ -111,7 +111,7 @@ final class L3IntegrationRig {
 
         // Hermetic: a nil persistence never reads or writes the real preferences domain.
         preferences = PreferencesStore(persistence: nil)
-        guard let agent = AgentID(rawValue: harness.rawValue) else { throw CocoaError(.featureUnsupported) }
+        guard let agent = AgentID(rawValue: agent.rawValue) else { throw CocoaError(.featureUnsupported) }
         // The tabs the rig opens are claude tabs (no process, no app-server); their transcripts
         // resolve under this synthetic account's home, never the developer's ~/.claude.
         claudeAccount = AgentAccount(agent: .claude, displayName: "Rig Claude", home: root.appendingPathComponent("claude-home"))
@@ -123,7 +123,7 @@ final class L3IntegrationRig {
         // Catalogs as production builds them: a harness whose agent is not in Settings is disabled.
         // The swarm's own (empty) registry is deliberately not the source of catalogs.
         routing = RoutingServiceSupport.make(prefs: preferences, loadCatalogs: { [prefs = preferences] in
-            let on = Set(prefs.preferences.agents.map(\.id.harnessID))
+            let on = Set(prefs.preferences.agents.map(\.id))
             return RoutingTestData.catalogsDisabling(Set(RoutingTestData.catalogs.order).subtracting(on))
         })
 
@@ -141,7 +141,7 @@ final class L3IntegrationRig {
             apiErrors: { [weak store] in store?.apiErrors ?? [:] },
             accounts: { [weak prefs] in prefs?.preferences.accounts ?? [] },
             resolvedAccountID: { agent, stored in stored ?? (agent == .claude ? claudeID : nil) },
-            capacity: { [weak prefs] in prefs?.capacity ?? CapacityPreferences() },
+            pools: { [weak prefs] in prefs?.effectivePools ?? [] },
             usageDirectory: root.appendingPathComponent("usage", isDirectory: true),
             codexRead: { _ in nil }, seatActivities: { [] }, notifier: { nil }, isSwarmSession: { _ in false })
         let ledger = CapacityLedger(now: { clock.now })
@@ -159,8 +159,8 @@ final class L3IntegrationRig {
         spawner.discard = { [weak store] in store?.closeSession($0, recordingHistory: false) }
     }
 
-    static func make(accounts: [String], harness: HarnessID, rule: RoutingRule, readyTasks: [String]) throws -> L3IntegrationRig {
-        let rig = try L3IntegrationRig(accounts: accounts, harness: harness, rule: rule)
+    static func make(accounts: [String], agent: AgentID, rule: RoutingRule, readyTasks: [String]) throws -> L3IntegrationRig {
+        let rig = try L3IntegrationRig(accounts: accounts, agent: agent, rule: rule)
         rig.store.useSwarmService(rig.swarm)
         rig.store.flightControlRouting = rig.routing
         // The result is deliberately dropped: only the store may keep the graph alive, which is
@@ -231,10 +231,12 @@ final class L3IntegrationRig {
     }
 
     func addPool(id: PoolID, accounts labels: [String]) {
-        let ids = preferences.preferences.accounts.filter { labels.contains($0.displayName) }.map(\.id)
-        let harness = preferences.preferences.accounts.first { labels.contains($0.displayName) }?.agent.harnessID ?? "codex"
-        preferences.updateCapacity { capacity in
-            capacity.pools = (capacity.pools ?? []) + [.hosted(id: id, label: id.rawValue, harness: harness, accounts: ids)]
+        // Pools live in the Accounts list now (unify brief R6), and an account is in at most one
+        // pool: pooling these takes them out of their agent's default.
+        let members = preferences.preferences.accounts.filter { labels.contains($0.displayName) }
+        let agent = members.first?.agent ?? .codex
+        try? preferences.updateAccountList { list throws(AccountListError) in
+            try list.addPool(AccountPool(id: id, label: id.rawValue, agent: agent, members: members))
         }
         usage.reconfigure()
     }

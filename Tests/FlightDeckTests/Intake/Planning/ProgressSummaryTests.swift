@@ -24,7 +24,7 @@ final class ProgressSummaryTests: XCTestCase {
     }
 
     private func triage(seconds: TimeInterval, files: [String: Int]) -> SeatActivity {
-        var a = SeatActivity(harness: .codex, startedAt: t0.addingTimeInterval(-1000))
+        var a = SeatActivity(agent: .codex, startedAt: t0.addingTimeInterval(-1000))
         a.lastEventAt = a.startedAt.addingTimeInterval(seconds)
         a.footprint = files
         a.finished = true

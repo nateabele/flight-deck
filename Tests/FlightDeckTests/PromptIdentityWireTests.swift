@@ -115,6 +115,12 @@ final class PromptIdentityWireTests: XCTestCase {
         store.openPromptProbe = { [weak prompts] session in
             prompts?.pushedOpenPrompt(inSession: session).map(\.callID)
         }
+        // Installed as `FleetService` installs it, so every exact-event assertion below also
+        // proves a claude tab's dialog travels as an id alone: its phone derives the words from
+        // the transcript, and `WireSession.openPrompt` is for agents whose phone cannot.
+        store.openPromptOfferProbe = { [weak prompts] session in
+            prompts?.offeredOpenPrompt(inSession: session)
+        }
         let session = store.newSession(in: tmp)
         let replicator = attachedReplicator(to: store)
         let sink = Sink()

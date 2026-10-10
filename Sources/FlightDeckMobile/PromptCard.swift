@@ -69,6 +69,9 @@ struct PromptCard: View {
     /// The subagent this dialog belongs to, when it is not the conversation's own. Without it
     /// a reader allows a command believing the main agent asked for it.
     var fromSubagent: WireSubagent? = nil
+    /// Told whether the screen should hide its composer — `hidesComposer(for:minimized:)` —
+    /// whenever that changes, and `false` when the card leaves.
+    var onHidesComposerChange: (Bool) -> Void = { _ in }
 
     static func origin(_ s: WireSubagent?) -> String? {
         s.map { "From \($0.type) — \($0.description)" }
@@ -92,6 +95,55 @@ struct PromptCard: View {
         // about.
         case .permission: return true
         }
+    }
+
+    /// Collapses a question card to its title line, and back.
+    private func minimizeButton(for open: OpenPrompt) -> some View {
+        let minimized = minimizedFor == open.callID
+        return Button {
+            if !minimized { typingFocused = false }
+            withAnimation(.snappy) { minimizedFor = minimized ? nil : open.callID }
+        } label: {
+            Image(systemName: minimized ? "chevron.up.circle.fill" : "chevron.down.circle.fill")
+                .font(.title3)
+                .symbolRenderingMode(.hierarchical)
+                .foregroundStyle(.secondary)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(minimized ? "Expand" : "Minimize")
+        .accessibilityIdentifier("prompt-minimize")
+    }
+
+    /// The card's heading line: a lone question's header, uppercased, or nil.
+    static func heading(for open: OpenPrompt) -> String? {
+        guard case .question(_, let questions) = open, questions.count == 1,
+              let header = questions[0].header, !header.isEmpty else { return nil }
+        return header.uppercased()
+    }
+
+    /// The card's title — minimized, one line, which is enough to say what is waiting.
+    private func titleText(for open: OpenPrompt, minimized: Bool) -> some View {
+        Text(Self.title(for: open, agent: agent))
+            .font(.callout.weight(.medium))
+            .lineLimit(minimized ? 1 : nil)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    static func isQuestion(_ open: OpenPrompt) -> Bool {
+        if case .question = open { return true }
+        return false
+    }
+
+    /// Whether the message box should be out of the way: while a question is up and expanded.
+    ///
+    /// **A question's own inputs replace it.** The card and the composer ride the keyboard as
+    /// one inset, so with both showing the composer sat between the card and the keyboard (122pt
+    /// of it, measured on the simulator), and two text fields on one screen asked which one this
+    /// was. A minimized card gives the composer back — that is what minimizing is for — and a
+    /// permission card never takes it, having no inputs of its own.
+    static func hidesComposer(for open: OpenPrompt?, minimized: Bool) -> Bool {
+        guard case .question = open else { return false }
+        return !minimized
     }
 
     /// Whether the corner × is offered: on every dialog, until an answer to it is in flight.
@@ -331,28 +383,56 @@ struct PromptCard: View {
     /// Which question is on screen. Reset with the picks, for the same reason: a page left
     /// over from the last dialog would open this one part-way through.
     @State private var page = 0
+    /// The card's own height, so its scroll view is never taller than what it holds. `nil`
+    /// until first measured, which lets that one layout take whatever height it needs.
+    @State private var cardHeight: CGFloat?
+    /// The scroll target for the typed row and what follows it — see the card's scroll view.
+    static let typedRowID = "prompt-typed-row"
+    /// Whether the "Type something" field has the keyboard.
+    @FocusState private var typingFocused: Bool
+    /// The call whose card the reader minimized. Keyed on the call, like `picks`, so the next
+    /// dialog opens expanded rather than inheriting a collapse made for a different question.
+    @State private var minimizedFor: String?
 
     var body: some View {
         if let open {
+            // **A scroll view no taller than its content**, so a card that fits looks exactly as
+            // it did, and one that does not — a long question paged to with the keyboard up —
+            // scrolls inside the room it has instead of pushing its own top under the
+            // navigation bar, which is what it did on device.
+            ScrollViewReader { scroller in
+            ScrollView {
             VStack(alignment: .leading, spacing: 10) {
-                if let origin = Self.origin(fromSubagent) {
+                let minimized = minimizedFor == open.callID
+                // A lone question's header is the card's heading; in a set each question draws
+                // its own beside its options, where it says which question it belongs to.
+                let heading = minimized ? nil : Self.heading(for: open)
+                // **The first line carries both corner controls**: the minimize button at its
+                // leading end, level with the × at its trailing end, and whatever opens the
+                // card — the heading, or the title when there is none — moved over beside it.
+                // Everything under that line keeps the card's left edge.
+                HStack(alignment: .center, spacing: 8) {
+                    if Self.isQuestion(open) { minimizeButton(for: open) }
+                    if let heading {
+                        Text(heading)
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.orange)
+                    } else {
+                        titleText(for: open, minimized: minimized)
+                    }
+                    Spacer(minLength: 0)
+                }
+                // Clear of the dismiss button in the corner.
+                .padding(.trailing, 24)
+                if let origin = Self.origin(fromSubagent), !minimized {
                     Text(origin)
                         .font(.caption2.weight(.semibold))
                         .foregroundStyle(.orange)
                 }
-                // Only a single question's header sits up here; in a set each question draws
-                // its own beside its options, where it says which question it belongs to.
-                if case .question(_, let questions) = open, questions.count == 1,
-                   let header = questions[0].header, !header.isEmpty {
-                    Text(header.uppercased())
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(.orange)
+                if heading != nil {
+                    titleText(for: open, minimized: false)
                 }
-                Text(Self.title(for: open, agent: agent))
-                    .font(.callout.weight(.medium))
-                    .fixedSize(horizontal: false, vertical: true)
-                    // Clear of the dismiss button in the corner.
-                    .padding(.trailing, 24)
+                if !minimized {
                 if let subtitle = Self.subtitle(for: open) {
                     Text(subtitle)
                         .font(.footnote.monospaced())
@@ -372,7 +452,34 @@ struct PromptCard: View {
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+                }
             }
+            // Full width whatever it holds: minimized to its title, the stack is only as wide
+            // as those words, and the × in its corner would follow them in from the edge.
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { cardHeight = $0 }
+            }
+            .scrollBounceBehavior(.basedOnSize)
+            .frame(maxHeight: cardHeight)
+            // A new question is a new decision: put the keyboard away, as the terminal does
+            // when its cursor leaves the row, so the next question is read whole first.
+            .onChange(of: page) { typingFocused = false }
+            // The field sits last in the card, so a card squeezed by the keyboard has it at the
+            // clipped edge — half a field to type into. Brought into view once the keyboard
+            // has settled, together with the row of buttons under it.
+            .onChange(of: typingFocused) { _, focused in
+                guard focused else { return }
+                Task { @MainActor in
+                    try? await Task.sleep(for: .milliseconds(350))
+                    withAnimation { scroller.scrollTo(Self.typedRowID, anchor: .bottom) }
+                }
+            }
+            }
+            .onChange(of: Self.hidesComposer(for: open, minimized: minimizedFor == open.callID),
+                      initial: true) { _, hides in onHidesComposerChange(hides) }
+            // The card can leave while it is hiding the composer — answered, or dismissed from
+            // the Mac — and no other change would ever tell the screen to bring it back.
+            .onDisappear { onHidesComposerChange(false) }
             .overlay(alignment: .topTrailing) {
                 if Self.showsDismiss(for: open, state: state) {
                     Button { model.answer(.deny, to: open.callID) } label: {
@@ -385,6 +492,8 @@ struct PromptCard: View {
                     .accessibilityLabel("Dismiss")
                 }
             }
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("prompt-card")
             .modifier(CardChrome())
         } else if Self.showsBlocked(
             exhausted: blockedChaseExhausted, allowsAbort: allowsBlockedAbort,
@@ -476,19 +585,21 @@ struct PromptCard: View {
                 }
             }
 
+            // In a set only: a lone question's header and words are already the card's own
+            // heading and title above, and drawing them here again showed them twice.
+            if questions.count > 1 {
             VStack(alignment: .leading, spacing: 4) {
                 if let header = question.header, !header.isEmpty {
                     Text(header.uppercased())
                         .font(.caption2.weight(.semibold))
                         .foregroundStyle(.orange)
                 }
-                if questions.count > 1 {
-                    Text(question.question)
-                        .font(.footnote.weight(.medium))
-                        .fixedSize(horizontal: false, vertical: true)
-                }
+                Text(question.question)
+                    .font(.footnote.weight(.medium))
+                    .fixedSize(horizontal: false, vertical: true)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+            }
 
             ForEach(Array(question.options.enumerated()), id: \.offset) { option, choice in
                 Button {
@@ -511,10 +622,10 @@ struct PromptCard: View {
                             Text(detail)
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
-                                // A real description runs to a line and a half and is the only
-                                // thing saying what the option MEANS. Clamped so four options
-                                // still fit above the keyboard.
-                                .lineLimit(3)
+                                // Never clamped: a description is the only thing saying what the
+                                // option MEANS, and an ellipsis hides exactly the clause that
+                                // decides between two options. The card scrolls when the options
+                                // outgrow the room above the keyboard, so height is not a reason.
                                 .fixedSize(horizontal: false, vertical: true)
                         }
                     }
@@ -542,15 +653,19 @@ struct PromptCard: View {
                 }
             }
 
-            if acceptsTypedAnswers {
-                typedRow(question: question, index: index, call: call,
-                         immediate: immediate, enabled: enabled)
+            // One unit, under one id, so scrolling to it shows the field AND the buttons that
+            // send what was typed — same 10pt spacing as the card's own stack.
+            VStack(alignment: .leading, spacing: 10) {
+                if acceptsTypedAnswers {
+                    typedRow(question: question, index: index, call: call,
+                             immediate: immediate, enabled: enabled)
+                }
+                if !immediate {
+                    navigation(call: call, questions: questions, index: index,
+                               isLast: isLast, enabled: enabled)
+                }
             }
-
-            if !immediate {
-                navigation(call: call, questions: questions, index: index,
-                           isLast: isLast, enabled: enabled)
-            }
+            .id(Self.typedRowID)
 
         case .permission(let call, _, _):
             HStack(spacing: 8) {
@@ -612,6 +727,8 @@ extension PromptCard {
                 }
             ))
             .font(.footnote)
+            .focused($typingFocused)
+            .accessibilityIdentifier("prompt-typed-field")
             .submitLabel(immediate ? .send : .done)
             .onSubmit { if immediate { send() } }
             if immediate {

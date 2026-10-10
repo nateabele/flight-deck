@@ -1,4 +1,5 @@
 import XCTest
+import IntakeKit
 @testable import FlightDeck
 
 /// Task 6: when a session's daemon is already live at restore, the agent never stopped — so
@@ -136,7 +137,10 @@ final class ResumeGatingTests: XCTestCase {
         func sendYank() {}
         func sendArrowDown() {}
         func sendArrowUp() {}
+        func sendTab() {}
         func sendEscape() {}
+        func sendCharacterKey(_ character: Character) {}
+        func sendControlKey(_ letter: Character) {}
         func readViewport() -> String? { nil }
     }
 

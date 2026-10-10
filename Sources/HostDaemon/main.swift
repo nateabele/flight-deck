@@ -39,13 +39,19 @@ let root = HostStateRoot.default()
 let delegation = DelegationHost.standard(root: root, power: IOKitPowerAssertions(), console: DarwinConsoleSession(),
                                          screenSupported: true)
 
+// "Keep this Mac awake while plugged in" (Settings → Hosting): held here rather than in the app
+// so it holds while Flight Deck is not running, which is the UI-test Mac's ordinary state. Read
+// from the state root at launch; the admin socket's `setKeepAwake` changes and saves it.
+let keepAwake = KeepAwakeHolder(power: IOKitPowerAssertions(), source: IOKitPowerSource(),
+                                enabled: HostingSettings.load(root: root).keepAwakeWhilePluggedIn)
+
 // Advertised in every helloAck, so a controller that paired over Bonjour on the LAN also
 // learns this Mac's tailnet address and can still reach it after leaving the room.
 let server = DarwinHostServer(root: root, port: 47410, hostName: { hostName },
                               endpoints: { LocalEndpoints.advertised(port: $0) }, delegation: delegation,
                               // Fixed, so a controller across a tailnet (no Bonjour) can pair
                               // by typing this Mac's address alone, as it does a Linux host.
-                              pairingPort: DarwinHostServer.pairingPort)
+                              pairingPort: DarwinHostServer.pairingPort, keepAwake: keepAwake)
 
 // The "UI tests running — don't touch" panel is up exactly while a run holds the screen lease
 // (§6.3), so whoever sits at the Mac does not grab the mouse mid-test.
@@ -73,6 +79,9 @@ let signals = [SIGTERM, SIGINT].map { sig in
     let source = DispatchSource.makeSignalSource(signal: sig, queue: .global())
     source.setEventHandler {
         server.stop()
+        // IOKit drops a dead process's assertions anyway; releasing first means a hostd that
+        // hangs in `shutdown` below does not keep the Mac awake for launchd's 20 s.
+        keepAwake.shutdown()
         let done = DispatchSemaphore(value: 0)
         Task {
             await delegation.shutdown()

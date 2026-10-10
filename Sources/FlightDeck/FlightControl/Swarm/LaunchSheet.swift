@@ -44,7 +44,7 @@ final class LaunchSheetModel: ObservableObject {
         var summary: String {
             guard let b = block else { return "—" }
             let knobs = ConfigKey.knobsText(b.knobs)
-            return [b.harness.rawValue, b.model, knobs.isEmpty ? nil : knobs, b.pool.rawValue].compactMap { $0 }.joined(separator: " · ")
+            return [b.agent.rawValue, b.model, knobs.isEmpty ? nil : knobs, b.pool.rawValue].compactMap { $0 }.joined(separator: " · ")
         }
     }
 
@@ -52,7 +52,7 @@ final class LaunchSheetModel: ObservableObject {
     /// The agents the Override picker offers: those enabled in the catalogs routing uses (Settings'
     /// agents), never every registered harness — an override to an agent the user turned off
     /// would launch it anyway.
-    @Published private(set) var harnesses: [HarnessID] = []
+    @Published private(set) var agents: [AgentID] = []
     @Published private(set) var loading = false
     @Published private(set) var error: String?
     @Published var cap: Int = 3
@@ -74,18 +74,18 @@ final class LaunchSheetModel: ObservableObject {
     }
 
     /// The pools the Override picker offers for `harness`; empty means the sheet falls back to free text.
-    func poolOptions(for harness: HarnessID) -> [PoolSummary] { directory?.pools().filter { $0.harness == harness } ?? [] }
-    func defaultPool(for harness: HarnessID) -> PoolID? { directory?.defaultPool(for: harness) }
+    func poolOptions(for agent: AgentID) -> [PoolSummary] { directory?.pools().filter { $0.agent == agent } ?? [] }
+    func defaultPool(for agent: AgentID) -> PoolID? { directory?.defaultPool(for: agent) }
 
     /// The pool to show after the harness changes: its default, else its first listed pool, else
     /// empty (free text). Never the previous harness's pool.
-    func pool(afterChangingTo harness: HarnessID) -> String {
-        (defaultPool(for: harness) ?? poolOptions(for: harness).first?.id)?.rawValue ?? ""
+    func pool(afterChangingTo agent: AgentID) -> String {
+        (defaultPool(for: agent) ?? poolOptions(for: agent).first?.id)?.rawValue ?? ""
     }
 
     /// A listed pool for `harness` when the directory has any; else any non-empty text.
-    func isValidPool(_ pool: String, for harness: HarnessID) -> Bool {
-        let options = poolOptions(for: harness)
+    func isValidPool(_ pool: String, for agent: AgentID) -> Bool {
+        let options = poolOptions(for: agent)
         return options.isEmpty ? !pool.isEmpty : options.contains { $0.id.rawValue == pool }
     }
 
@@ -104,8 +104,8 @@ final class LaunchSheetModel: ObservableObject {
         directory = deps.pools
         let router = deps.makeRouter()
         let kinds = (try? deps.kinds.kinds(project: projectURL)) ?? []
-        let catalogs = await (deps.catalogs ?? { await self.registry.catalogs(enabled: Set(self.registry.harnesses)) })()
-        harnesses = catalogs.order.filter { catalogs.byHarness[$0]?.enabled == true }
+        let catalogs = await (deps.catalogs ?? { await self.registry.catalogs(enabled: Set(self.registry.agents)) })()
+        agents = catalogs.order.filter { catalogs.byAgent[$0]?.enabled == true }
         rows = tasks.filter { request.filter.admits($0.id) }
             .map { route($0, router: router, kinds: kinds, catalogs: catalogs) }
         // Spec §3: a local pool (every slot has no account) defaults to its own slot count.
@@ -140,8 +140,8 @@ final class LaunchSheetModel: ObservableObject {
             } else {
                 row.unroutable = "unknown kind \(block.kind)"
             }
-            if let routed = row.block, registry.capabilities(for: routed.harness) == nil {
-                row.unroutable = "no adapter named \(routed.harness)"
+            if let routed = row.block, registry.capabilities(for: routed.agent) == nil {
+                row.unroutable = "no adapter named \(routed.agent)"
             }
         }
         return row
@@ -149,9 +149,9 @@ final class LaunchSheetModel: ObservableObject {
 
     /// Spec §3 "Override": sets `pinned`, writes the block back, keeps the task's kind (a task
     /// with no block yet gets the seed `implement-simple`).
-    func override(_ rowID: String, harness: HarnessID, model: String, knobs: [String: String], pool: PoolID) async -> Bool {
+    func override(_ rowID: String, agent: AgentID, model: String, knobs: [String: String], pool: PoolID) async -> Bool {
         guard let index = rows.firstIndex(where: { $0.id == rowID }), rows[index].canOverride else { return false }
-        let block = ExecutionBlock(kind: rows[index].kind ?? "implement-simple", harness: harness, model: model,
+        let block = ExecutionBlock(kind: rows[index].kind ?? "implement-simple", agent: agent, model: model,
                                    knobs: knobs, pool: pool,
                                    source: AssignmentSource(by: .manual, reason: "set in the launch sheet", at: now()),
                                    pinned: true)
@@ -164,7 +164,7 @@ final class LaunchSheetModel: ObservableObject {
         rows[index].kind = block.kind
         rows[index].chip = .pinned
         rows[index].changed = false
-        rows[index].unroutable = registry.capabilities(for: harness) == nil ? "no adapter named \(harness)" : nil
+        rows[index].unroutable = registry.capabilities(for: agent) == nil ? "no adapter named \(agent)" : nil
         return true
     }
 
@@ -207,7 +207,7 @@ struct LaunchSheet: View {
     @StateObject var model: LaunchSheetModel
     let onClose: () -> Void
     @State private var editing: String?
-    @State private var draftHarness: HarnessID = "claude"
+    @State private var draftAgent: AgentID = .claude
     @State private var draftModel = ""
     @State private var draftKnobs = ""
     @State private var draftPool = ""
@@ -227,10 +227,10 @@ struct LaunchSheet: View {
                     if let chip = row.chip { Text(chip.rawValue).font(.caption2).padding(.horizontal, 6).background(Capsule().fill(.quaternary)) }
                     Button("Override…") {
                         editing = row.id
-                        draftHarness = row.block?.harness ?? "claude"
+                        draftAgent = row.block?.agent ?? .claude
                         draftModel = row.block?.model ?? ""
                         draftKnobs = row.block.map { ConfigKey.knobsText($0.knobs) } ?? ""
-                        draftPool = row.block?.pool.rawValue ?? model.defaultPool(for: draftHarness)?.rawValue ?? ""
+                        draftPool = row.block?.pool.rawValue ?? model.defaultPool(for: draftAgent)?.rawValue ?? ""
                     }
                     .disabled(!row.canOverride)
                     .accessibilityIdentifier("launch-override-\(row.id)")
@@ -268,15 +268,15 @@ struct LaunchSheet: View {
 
     private func overrideEditor(_ id: String) -> some View {
         HStack {
-            Picker("Agent", selection: $draftHarness) {
-                ForEach(model.harnesses, id: \.self) { Text($0.rawValue).tag($0) }
+            Picker("Agent", selection: $draftAgent) {
+                ForEach(model.agents, id: \.self) { Text($0.rawValue).tag($0) }
             }.frame(width: 140)
-            .onChange(of: draftHarness) { harness in
-                draftPool = model.pool(afterChangingTo: harness)
+            .onChange(of: draftAgent) { agent in
+                draftPool = model.pool(afterChangingTo: agent)
             }
             TextField("Model", text: $draftModel).frame(width: 140)
             TextField("Knobs, e.g. effort=high", text: $draftKnobs).frame(width: 180)
-            let options = model.poolOptions(for: draftHarness)
+            let options = model.poolOptions(for: draftAgent)
             if options.isEmpty {
                 TextField("Pool", text: $draftPool).frame(width: 140)
             } else {
@@ -286,10 +286,10 @@ struct LaunchSheet: View {
             }
             Button("Save") {
                 guard let knobs = LaunchSheetModel.parseKnobs(draftKnobs), !draftModel.isEmpty,
-                      model.isValidPool(draftPool, for: draftHarness) else { return }
-                Task { if await model.override(id, harness: draftHarness, model: draftModel, knobs: knobs, pool: PoolID(draftPool)) { editing = nil } }
+                      model.isValidPool(draftPool, for: draftAgent) else { return }
+                Task { if await model.override(id, agent: draftAgent, model: draftModel, knobs: knobs, pool: PoolID(draftPool)) { editing = nil } }
             }
-            .disabled(!model.isValidPool(draftPool, for: draftHarness))
+            .disabled(!model.isValidPool(draftPool, for: draftAgent))
             Button("Close") { editing = nil }
         }
         .font(.caption)
@@ -300,7 +300,7 @@ private extension ExecutionBlock {
     /// What a router decides, without the timestamp and prose it stamps on every answer: comparing
     /// those would make every unpinned row look changed, and rewrite it, on every Launch.
     func sameRouting(as other: ExecutionBlock) -> Bool {
-        kind == other.kind && harness == other.harness && model == other.model && knobs == other.knobs
+        kind == other.kind && agent == other.agent && model == other.model && knobs == other.knobs
             && pool == other.pool && source.by == other.source.by && source.ruleId == other.source.ruleId
     }
 }

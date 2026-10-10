@@ -1,4 +1,5 @@
 import Foundation
+import IntakeKit
 
 /// **One transcript this agent has written, and everything the index needs to file it.**
 ///

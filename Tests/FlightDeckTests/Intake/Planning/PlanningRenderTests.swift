@@ -16,8 +16,8 @@ import XCTest
 final class PlanningRenderTests: XCTestCase {
     private var root: URL!
     private let now = Date()
-    private let codex = ModelChoice(harness: .codex, model: "gpt-6-sol", effort: "high")
-    private let claude = ModelChoice(harness: .claude, model: "opus", effort: "high")
+    private let codex = ModelChoice(agent: .codex, model: "gpt-6-sol", effort: "high")
+    private let claude = ModelChoice(agent: .claude, model: "opus", effort: "high")
 
     override func setUp() {
         super.setUp()
@@ -100,7 +100,7 @@ final class PlanningRenderTests: XCTestCase {
         try writeTape(for: review.id, store: store, running: false)
         try writeTape(for: released.id, store: store, running: false)
 
-        let service = IntakeService(store: store, triageSettings: TriageSettings(harness: .codex, model: "gpt-6-sol", effort: "high"),
+        let service = IntakeService(store: store, triageSettings: TriageSettings(agent: .codex, model: "gpt-6-sol", effort: "high"),
                                     availableModels: .defaults, inject: { _, _, _, _ in true }, hasSession: { _, _ in false })
         service.pollTapes()
 
@@ -272,7 +272,7 @@ final class PlanningRenderTests: XCTestCase {
             intakes[scenario.name] = intake
         }
 
-        let service = IntakeService(store: store, triageSettings: TriageSettings(harness: .codex, model: "gpt-6-sol", effort: "high"),
+        let service = IntakeService(store: store, triageSettings: TriageSettings(agent: .codex, model: "gpt-6-sol", effort: "high"),
                                     availableModels: .defaults, inject: { _, _, _, _ in true }, hasSession: { _, _ in false })
         await service.launchRecovery?.value
         service.pollTapes()
@@ -326,7 +326,7 @@ final class PlanningRenderTests: XCTestCase {
         intake.roundConfig = config
         try store.save(intake)
         try writeTape(for: intake.id, store: store, running: true)
-        let service = IntakeService(store: store, triageSettings: TriageSettings(harness: .codex, model: "gpt-6-sol", effort: "high"),
+        let service = IntakeService(store: store, triageSettings: TriageSettings(agent: .codex, model: "gpt-6-sol", effort: "high"),
                                     availableModels: .defaults, inject: { _, _, _, _ in true }, hasSession: { _, _ in false })
         service.pollTapes()
 
@@ -344,7 +344,7 @@ final class PlanningRenderTests: XCTestCase {
         // A seat beat: the integrator's activity file moves on.
         let activity = TapeStore(intakeDirectory: store.directory(for: intake.id)).runDirectory("refine-2-integrator")
             .appendingPathComponent("activity.json")
-        var moved = SeatActivity(harness: .codex, startedAt: now.addingTimeInterval(-41))
+        var moved = SeatActivity(agent: .codex, startedAt: now.addingTimeInterval(-41))
         moved.headline = "Checking the ranking against §2"
         try write(moved, to: activity)
         try FileManager.default.setAttributes([.modificationDate: now.addingTimeInterval(30)], ofItemAtPath: activity.path)
@@ -394,7 +394,7 @@ final class PlanningRenderTests: XCTestCase {
         intake.roundConfig = config
         try store.save(intake)
         try writeTape(for: intake.id, store: store, running: true, plan: Self.longPlan)
-        let service = IntakeService(store: store, triageSettings: TriageSettings(harness: .codex, model: "gpt-6-sol", effort: "high"),
+        let service = IntakeService(store: store, triageSettings: TriageSettings(agent: .codex, model: "gpt-6-sol", effort: "high"),
                                     availableModels: .defaults, inject: { _, _, _, _ in true }, hasSession: { _, _ in false })
         service.pollTapes()
         for (name, y) in [("top", 0), ("plan", 2400), ("end", .infinity)] as [(String, CGFloat)] {
@@ -455,12 +455,12 @@ final class PlanningRenderTests: XCTestCase {
             tape.roundInProgress = PlannedRound(stage: .refine, round: 2, major: false)
             tape.roundStartedAt = now.addingTimeInterval(-200)
             tape.heartbeat = now
-            var reviewer = SeatActivity(harness: .codex, startedAt: now.addingTimeInterval(-199))
+            var reviewer = SeatActivity(agent: .codex, startedAt: now.addingTimeInterval(-199))
             reviewer.footprint = ["Dispatch": 7, "Core": 4, "docs": 2, "Mobile": 1, "Tests": 3]
             reviewer.inputTokens = 96_000
             reviewer.outputTokens = 7_400
             reviewer.finished = true
-            var integrator = SeatActivity(harness: .codex, startedAt: now.addingTimeInterval(-41))
+            var integrator = SeatActivity(agent: .codex, startedAt: now.addingTimeInterval(-41))
             integrator.headline = "Applying the §4 ranking change"
             integrator.action = ActivityAction(verb: "Editing", object: "plan.md")
             integrator.inputTokens = 52_000

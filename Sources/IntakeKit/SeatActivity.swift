@@ -24,7 +24,7 @@ public struct ActivitySteps: Codable, Equatable, Sendable {
 /// really emit: neither harness reports a percentage or an ETA, so there are none here, and
 /// `costUSD` exists only because claude's final `result` states one (codex never does).
 public struct SeatActivity: Codable, Equatable, Sendable {
-    public var harness: Harness
+    public var agent: AgentID
     /// The latest reasoning (codex) or thinking (claude) summary: its first sentence, markdown
     /// bold stripped, at most `ActivityParser.headlineLimit` characters.
     public var headline: String?
@@ -54,7 +54,33 @@ public struct SeatActivity: Codable, Equatable, Sendable {
     public var costUSD: Double?
     public var finished = false
     public var error: String?
-    public init(harness: Harness, startedAt: Date) { self.harness = harness; self.startedAt = startedAt }
+    /// The Accounts-list id of the account this seat billed (unify brief R9), as the app
+    /// resolved it for the project when the runner started. nil is the agent's built-in home
+    /// with no account record, or a runner from a build before planning billed projects —
+    /// `UsageService` credits the built-in account for either, as it always did. Without it a
+    /// claude seat's `rate_limit_event`s on a pooled Work login would meter the built-in one.
+    public var accountID: UUID?
+    /// The agent's own id for this run's conversation, when its stream names one: codex's
+    /// `thread.started.thread_id`. Read by `UsageService` to find the codex rollout, which is
+    /// where a headless codex seat's rate-limit windows are — `codex exec --json` itself carries
+    /// none (codex-cli 0.160.0, probed 2026-10-09).
+    public var conversationID: String?
+    public init(agent: AgentID, startedAt: Date, accountID: UUID? = nil) {
+        self.agent = agent; self.startedAt = startedAt; self.accountID = accountID
+    }
+
+    /// `agent` keeps the JSON key `harness` (unify brief R1): a runner from an older build may
+    /// still be writing `activity.json` for a round this build is drawing. Every other property
+    /// keeps its own name — listed in full because a stored property left out of `CodingKeys`
+    /// silently stops being encoded.
+    private enum CodingKeys: String, CodingKey {
+        case agent = "harness"
+        case headline, action, footprint, steps, inputTokens, outputTokens, rateLimitedAt
+        case rateLimitWindows, rateLimitStatus, rateLimitResetsAt, startedAt, lastEventAt, costUSD
+        case finished, error
+        case accountID = "account"
+        case conversationID = "conversation"
+    }
 }
 
 /// What one seat produced, written to `runs/<run>/result.json` the moment that seat's own
@@ -126,15 +152,19 @@ public struct ActivityParser: Sendable {
     /// per message id and summed — adding each event's would count a message several times.
     private var claudeUsage: [String: (input: Int, output: Int)] = [:]
     private var codexTurns: (input: Int, output: Int) = (0, 0)
+    /// agy streams its answer as `text_delta`s; the headline is the first sentence of the
+    /// response so far, so the deltas are joined before it is cut.
+    private var geminiResponse = ""
 
     /// `project` is what footprint and display paths are relative to; `cwd` (default: the
     /// project) is what a relative path in a shell command resolves against — the integrator
     /// runs in the intake's work dir, not the project.
-    public init(harness: Harness, project: URL, cwd: URL? = nil, now: @escaping @Sendable () -> Date) {
+    public init(agent: AgentID, project: URL, cwd: URL? = nil, accountID: UUID? = nil,
+                now: @escaping @Sendable () -> Date) {
         self.project = project.standardizedFileURL
         self.cwd = (cwd ?? project).standardizedFileURL
         self.now = now
-        activity = SeatActivity(harness: harness, startedAt: now())
+        activity = SeatActivity(agent: agent, startedAt: now(), accountID: accountID)
     }
 
     public mutating func feed(_ data: Data) {
@@ -165,20 +195,254 @@ public struct ActivityParser: Sendable {
     // MARK: - Fold
 
     private mutating func fold(_ line: Data) {
-        guard let obj = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
-              let type = obj["type"] as? String else { return }
+        guard let obj = try? JSONSerialization.jsonObject(with: line) as? [String: Any] else { return }
+        // agy tags its events `event`, not `type` (agy 1.2.3 stream-json).
+        if activity.agent == .gemini {
+            guard let event = obj["event"] as? String ?? obj["type"] as? String else { return }
+            activity.lastEventAt = now()
+            foldGemini(event, obj)
+            return
+        }
+        guard let type = obj["type"] as? String else { return }
         activity.lastEventAt = now()
-        switch activity.harness {
+        switch activity.agent {
         case .codex: foldCodex(type, obj)
         case .claude: foldClaude(type, obj)
-        // Generic until Tracks G/M capture real streams: `lastEventAt` (set above) still shows
-        // the seat is alive; guessing at an unprobed event schema could only mislabel it.
-        case .grok, .gemini: break
+        case .grok: foldGrok(type, obj)
+        // Unreachable: gemini (agy) tags its events `event`, so it is folded above.
+        case .gemini: break
+        case .opencode: foldOpenCode(type, obj)
+        }
+    }
+
+    /// `opencode run --format json` (opencode 1.18.34): `step_start`, then per part a `text` or
+    /// `tool_use` event (`part.tool`, `part.state.input`), then `step_finish` with that step's
+    /// `tokens` and `cost`; a failure is an `error` event. A turn is several steps — one per
+    /// tool round — and only the last ends with `reason: "stop"`.
+    private mutating func foldOpenCode(_ type: String, _ obj: [String: Any]) {
+        let part = obj["part"] as? [String: Any] ?? [:]
+        switch type {
+        case "text":
+            // The model's words while it works, as for agy — never the structured answer itself.
+            if let text = part["text"] as? String,
+               let lead = text.trimmingCharacters(in: .whitespacesAndNewlines).first, !"{[`".contains(lead) {
+                setHeadline(text)
+            }
+        case "tool_use":
+            let state = part["state"] as? [String: Any] ?? [:]
+            foldOpenCodeTool(part["tool"] as? String ?? "", state["input"] as? [String: Any] ?? [:])
+        case "step_finish":
+            if let tokens = part["tokens"] as? [String: Any] {
+                let cache = tokens["cache"] as? [String: Any] ?? [:]
+                activity.inputTokens = (activity.inputTokens ?? 0) + int(tokens["input"]) + int(cache["read"])
+                activity.outputTokens = (activity.outputTokens ?? 0) + int(tokens["output"]) + int(tokens["reasoning"])
+            }
+            if let cost = part["cost"] as? Double { activity.costUSD = (activity.costUSD ?? 0) + cost }
+            if part["reason"] as? String == "stop" { activity.finished = true }
+        case "error":
+            activity.error = OpenCodeProfile.errorMessage(obj) ?? "error"
+        default: break
+        }
+    }
+
+    /// OpenCode's built-in tool ids. Its file tools name their path `filePath`.
+    private mutating func foldOpenCodeTool(_ name: String, _ input: [String: Any]) {
+        let path = ["filePath", "path", "file_path"].lazy.compactMap { input[$0] as? String }.first
+        switch name {
+        case "read":
+            if let path { touch(path) }
+            activity.action = ActivityAction(verb: "Reading", object: path.map(display))
+        case "edit", "write", "patch", "multiedit":
+            if let path { touch(path) }
+            activity.action = ActivityAction(verb: "Editing", object: path.map(display))
+        case "grep":
+            activity.action = ActivityAction(verb: "Searching", object: (input["pattern"] as? String).map(quoted))
+        case "glob", "list":
+            activity.action = ActivityAction(verb: "Listing", object: (input["pattern"] as? String ?? path).map(display))
+        case "bash":
+            if let command = input["command"] as? String { foldCommand(command, unwrapShell: false) }
+        case "webfetch":
+            activity.action = ActivityAction(verb: "Fetching", object: input["url"] as? String)
+        case "todowrite":
+            let todos = input["todos"] as? [[String: Any]] ?? []
+            let done = todos.filter { $0["status"] as? String == "completed" }.count
+            let active = todos.first { $0["status"] as? String == "in_progress" }
+                ?? todos.first { $0["status"] as? String != "completed" }
+            activity.steps = ActivitySteps(done: done, total: todos.count,
+                                           current: active.flatMap { $0["content"] as? String })
+        default:
+            activity.action = ActivityAction(verb: "Using", object: name.isEmpty ? nil : name)
+        }
+    }
+
+    /// grok `--output-format streaming-messages-json` is claude's stream shape (`assistant`
+    /// messages of `thinking`/`tool_use` blocks, a final `result`) with grok's own tool names.
+    /// It has no `rate_limit_event`, so a grok seat never reports usage windows.
+    private mutating func foldGrok(_ type: String, _ obj: [String: Any]) {
+        switch type {
+        case "assistant":
+            guard let message = obj["message"] as? [String: Any] else { return }
+            if let usage = message["usage"] as? [String: Any] {
+                // Keyed per message like claude's, so a message whose usage repeats on every
+                // block is counted once; a message with no id is its own entry.
+                let id = message["id"] as? String ?? "grok-\(claudeUsage.count)"
+                claudeUsage[id] = (claudeInput(usage), int(usage["output_tokens"]))
+                activity.inputTokens = claudeUsage.values.reduce(0) { $0 + $1.input }
+                activity.outputTokens = claudeUsage.values.reduce(0) { $0 + $1.output }
+            }
+            for block in message["content"] as? [[String: Any]] ?? [] {
+                switch block["type"] as? String {
+                case "thinking": setHeadline(block["thinking"] as? String)
+                case "tool_use": foldGrokTool(block["name"] as? String ?? "", block["input"] as? [String: Any] ?? [:])
+                default: break
+                }
+            }
+        case "result":
+            if let cost = obj["total_cost_usd"] as? Double { activity.costUSD = cost }
+            if let usage = obj["usage"] as? [String: Any] {
+                // grok zeroes every bucket when its usage ledger is incomplete — "unknown",
+                // not "nothing"; keep the per-message sums rather than overwrite them with 0.
+                let input = claudeInput(usage), output = int(usage["output_tokens"])
+                if input + output > 0 { activity.inputTokens = input; activity.outputTokens = output }
+            }
+            if obj["is_error"] as? Bool == true {
+                let errors = (obj["errors"] as? [Any] ?? []).compactMap { ($0 as? [String: Any])?["message"] as? String ?? $0 as? String }
+                activity.error = errors.first ?? obj["result"] as? String ?? obj["subtype"] as? String ?? "error"
+            }
+            activity.finished = true
+        case "error":
+            activity.error = obj["message"] as? String ?? "error"
+        default: break
+        }
+    }
+
+    /// grok's internal tool ids (`--tools` vocabulary). Its file tools name their path
+    /// `target_file`/`path` rather than claude's `file_path`, so every spelling is tried.
+    private mutating func foldGrokTool(_ name: String, _ input: [String: Any]) {
+        let path = ["target_file", "file_path", "path", "filePath", "file"].lazy.compactMap { input[$0] as? String }.first
+        switch name {
+        case "read_file":
+            if let path { touch(path) }
+            activity.action = ActivityAction(verb: "Reading", object: path.map(display))
+        case "search_replace", "write", "write_file", "edit_file", "apply_patch", "delete_file":
+            if let path { touch(path) }
+            activity.action = ActivityAction(verb: "Editing", object: path.map(display))
+        case "grep", "file_search":
+            let pattern = input["pattern"] as? String ?? input["query"] as? String
+            activity.action = ActivityAction(verb: "Searching", object: pattern.map(quoted))
+        case "list_dir", "glob":
+            let target = input["target_directory"] as? String ?? input["pattern"] as? String ?? path
+            activity.action = ActivityAction(verb: "Listing", object: target.map(display))
+        case "run_terminal_cmd":
+            if let command = input["command"] as? String { foldCommand(command, unwrapShell: false) }
+        case "web_search":
+            activity.action = ActivityAction(verb: "Searching the web", object: input["query"] as? String)
+        case "web_fetch":
+            activity.action = ActivityAction(verb: "Fetching", object: input["url"] as? String)
+        case "todo_write":
+            let todos = input["todos"] as? [[String: Any]] ?? []
+            let done = todos.filter { $0["status"] as? String == "completed" }.count
+            let active = todos.first { $0["status"] as? String == "in_progress" }
+                ?? todos.first { $0["status"] as? String != "completed" }
+            activity.steps = ActivitySteps(done: done, total: todos.count,
+                                           current: active.flatMap { $0["content"] as? String })
+        case "StructuredOutput":
+            // `--json-schema`'s answer tool, as with claude: the seat handing back its result.
+            break
+        default:
+            activity.action = ActivityAction(verb: "Using", object: name.isEmpty ? nil : name)
+        }
+    }
+
+    /// `agy --output-format stream-json`: `init`, then one `step_update` per step state change
+    /// (`step_type` user_input / agent_response / tool / checkpoint), then `result`.
+    private mutating func foldGemini(_ event: String, _ obj: [String: Any]) {
+        switch event {
+        case "step_update":
+            guard let step = obj["step_update"] as? [String: Any] else { return }
+            if let usage = step["usage"] as? [String: Any] { foldGeminiUsage(usage) }
+            switch step["step_type"] as? String {
+            case "tool":
+                let info = step["tool_info"] as? [String: Any] ?? [:]
+                let name = step["tool_name"] as? String ?? info["name"] as? String ?? ""
+                foldGeminiTool(name, geminiParameters(info["parameters"]))
+            case "agent_response":
+                // The model's own words while it works: its first sentence is the headline,
+                // the nearest thing agy streams to claude's thinking or codex's reasoning.
+                // Not when that text is the structured answer itself: a headline reading
+                // `{"changeSet": …` says nothing.
+                if let text = step["text_delta"] as? String {
+                    geminiResponse += text
+                    let lead = geminiResponse.trimmingCharacters(in: .whitespacesAndNewlines).first
+                    if let lead, !"{[`".contains(lead) { setHeadline(geminiResponse) }
+                }
+            default: break
+            }
+        case "result":
+            let result = obj["result"] as? [String: Any] ?? [:]
+            if let usage = result["usage"] as? [String: Any] { foldGeminiUsage(usage) }
+            if let status = result["status"] as? String, status != "SUCCESS" {
+                activity.error = result["error"] as? String ?? status
+            } else if result["structured_output"] == nil,
+                      let denied = result["denied_actions"] as? [[String: Any]], !denied.isEmpty {
+                // SUCCESS with no answer: agy auto-denied a tool and ended the turn (probed
+                // 2026-10-07). The row says what was denied rather than looking finished-fine.
+                activity.error = "denied: " + denied.compactMap { $0["action"] as? String }.joined(separator: ", ")
+            }
+            activity.finished = true
+        default: break
+        }
+    }
+
+    private mutating func foldGeminiUsage(_ usage: [String: Any]) {
+        activity.inputTokens = int(usage["input_tokens"]) + int(usage["cache_read_tokens"])
+        activity.outputTokens = int(usage["output_tokens"]) + int(usage["thinking_tokens"])
+    }
+
+    /// `tool_info.parameters` arrives as an object, or as that object's JSON text.
+    private func geminiParameters(_ any: Any?) -> [String: Any] {
+        if let dict = any as? [String: Any] { return dict }
+        if let text = any as? String, let dict = try? JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any] {
+            return dict
+        }
+        return [:]
+    }
+
+    /// agy's tool names (the Antigravity agent's tool set). Unknown ones read "Using <name>".
+    private mutating func foldGeminiTool(_ name: String, _ input: [String: Any]) {
+        let path = ["AbsolutePath", "absolute_path", "file_path", "path", "TargetFile", "target_file", "DirectoryPath",
+                    "directory_path", "SearchPath", "search_path"].lazy.compactMap { input[$0] as? String }.first
+        switch name {
+        case "view_file", "read_file", "view_file_outline", "view_code_item":
+            if let path { touch(path) }
+            activity.action = ActivityAction(verb: "Reading", object: path.map(display))
+        case "write_to_file", "replace_file_content", "multi_replace_file_content", "write_file", "edit_file", "replace":
+            if let path { touch(path) }
+            activity.action = ActivityAction(verb: "Editing", object: path.map(display))
+        case "grep_search", "search_file_content", "codebase_search":
+            let query = ["Query", "query", "pattern"].lazy.compactMap { input[$0] as? String }.first
+            activity.action = ActivityAction(verb: "Searching", object: query.map(quoted))
+        case "list_dir", "find_by_name", "list_directory", "glob":
+            activity.action = ActivityAction(verb: "Listing", object: path.map(display))
+        case "run_command", "run_shell_command":
+            if let command = ["CommandLine", "command_line", "command"].lazy.compactMap({ input[$0] as? String }).first {
+                foldCommand(command, unwrapShell: false)
+            } else {
+                activity.action = ActivityAction(verb: "Running", object: nil)
+            }
+        case "search_web", "google_web_search":
+            activity.action = ActivityAction(verb: "Searching the web", object: input["query"] as? String)
+        case "read_url_content", "web_fetch":
+            activity.action = ActivityAction(verb: "Fetching", object: (input["Url"] ?? input["url"]) as? String)
+        default:
+            activity.action = ActivityAction(verb: "Using", object: name.isEmpty ? nil : name)
         }
     }
 
     private mutating func foldCodex(_ type: String, _ obj: [String: Any]) {
         switch type {
+        case "thread.started":
+            activity.conversationID = obj["thread_id"] as? String
         case "turn.completed":
             // Per turn; summed so a stream that ever carries two turns still reads cumulative.
             if let usage = obj["usage"] as? [String: Any] {

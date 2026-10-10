@@ -2,11 +2,12 @@ import Foundation
 import IntakeKit
 @testable import FlightDeck
 
-/// A third harness, `"fake"`, so "any registered adapter" is exercised from day one without
-/// adding an `AgentID` case (which would touch every exhaustive switch in the app).
+/// A conformer for an agent the standard registry does not register — grok, which is not
+/// tab-ready (unify brief R4) — so "any registered adapter" is exercised without a real one.
+/// It used to be a free-string harness, `"fake"`; `AgentID` has only real agents now.
 @MainActor
 final class FakeRoutingCapabilities: AgentRoutingCapabilities {
-    var harness: HarnessID = "fake"
+    var agent: AgentID = .grok
     var accountModel: AccountModel = .login
     var knobSchema: [String: [String]] = [:]
     var catalog: RoutingCapability<[ModelEntry]> = .supported([])
