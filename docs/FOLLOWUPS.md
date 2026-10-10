@@ -7,6 +7,18 @@ carried forward on trust.
 
 ## Resolved (kept for the reasoning trail)
 
+- **Every paired host stuck "offline" behind one Keychain prompt — FIXED (2026-10-10).** The
+  11:57 Release was signed by `Apple Development: the maintainer (NEXCPPHDU2)`, team 2T9E3N27J8.
+  The `dev.flightdeck.host` items trust `Apple Development: dana@personal.example (KH7XHRF6M9)` with
+  partition `teamid:ZM74LQ6QWG`, so securityd prompted at launch (12:05:31). `HostService.start()`
+  read every key in one detached task and opened no link until the last read returned, so the
+  unanswered prompt kept m3 and jeeves undialled for over two hours. `host ls` showed only
+  "offline", and testq fell back to local-only without a word. The sample showed the cooperative
+  thread parked in `SecItemCopyMatching`. The unified log had no outbound :47410 connection
+  since launch. Now each host's read runs independently, a slow read says it is waiting on the
+  Keychain, and a failed read is retried on a capped backoff (`HostKeyReadTests`).
+  **Remaining:** see "Host keys in the legacy keychain" below.
+
 - **SIGSEGV in `posix.getenv` on libghostty's `sentry-init` thread — FIXED (2026-10-09).** A
   Debug app relaunched by the UI tests crashed with the main thread in libghostty's
   `ensureLocale`. `ghostty_init` spawns `sentry-init`, which walks `environ` without libc's lock,
@@ -32,6 +44,31 @@ carried forward on trust.
   every libghostty binding. `Sources/FlightDeck/MenuKeyEquivalents.swift` now offers consumed
   bindings to `NSApp.mainMenu` first; it is keyed to no specific shortcut, so menu items
   added later are covered automatically.
+
+
+## Host keys in the legacy keychain (open, 2026-10-10)
+
+A build signed by any identity other than the one that created a host's key prompts for that key
+at launch. Two ways to stop it:
+
+1. **Sign every release with the ZM74LQ6QWG identity (`dana@personal.example`), and have the release
+   refuse any other team.** This removes the prompt at its source. The item ACL is already a
+   designated requirement (leaf CN plus team), not a cdhash, so rebuilds signed by the same
+   identity are trusted without a prompt. This check belongs to the release scripts.
+2. **Move the items to the data-protection keychain** (`kSecUseDataProtectionKeychain`, with a
+   `keychain-access-groups` entry `ZM74LQ6QWG.dev.flightdeck.host`). Access is then by team, not
+   by ACL, and there is never a prompt. It is not small:
+   - `keychain-access-groups` is a restricted entitlement. The installed app has no
+     `embedded.provisionprofile`, and without one AMFI refuses to launch it. A Developer ID build
+     needs a Developer ID provisioning profile with Keychain Sharing, and the headless release
+     build needs `-allowProvisioningUpdates` or a checked-in profile.
+   - It needs a one-time migration: read the legacy item (which may prompt once more), write it
+     to the data-protection keychain, delete the legacy item, and fall back to the legacy read
+     while any item remains there. `KeychainPairedMacStore` and the phone are unaffected.
+   - The SecAccess / trusted-application route is deprecated. Do not use it.
+
+Recommendation: (1) now, because it is cheap and fixes the cause. Then (2) when the app gains a
+provisioning profile for another reason.
 
 ## Deferred to the harness-adapter / block-model phase
 
