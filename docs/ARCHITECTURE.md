@@ -355,6 +355,14 @@ written into a new marker. gc evicts before it touches git, and one store's fail
 stops the rest: on a full disk git's own steps fail with ENOSPC, and they used to abort gc before
 anything was freed. Submodule caches are not part of retention (FOLLOWUPS).
 
+`host ls --disk` (`Workspace.usage`) stats every file of every checkout, and the controller waits
+up to an hour for it (`LiveHostLink.bulkReplyTimeout`). On the full jeeves disk that walk ran for
+minutes. It now runs on a global queue, one per controller at a time (asking again joins it), and
+`usage` answers within `usageBudget` (10 s): the walk's rows if it finished, otherwise the last
+finished walk's, otherwise every row at what has been counted so far. `host info` is not this
+path: `HostInfoProbe` reads free space with one `statvfs`, and the controller caps the request at
+`HostLink.requestTimeout` (10 s).
+
 **Submodules** (`Submodules.swift`, spec §4.2 step 4). The snapshot's tree already pins each
 submodule (a gitlink is a commit id, covered by the tree check); what it lacks is where to fetch
 it, and only the controller knows that (its `.git/config`, the superproject's remote for a
