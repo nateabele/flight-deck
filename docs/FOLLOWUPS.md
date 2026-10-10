@@ -2733,6 +2733,19 @@ container; **nothing has run against a real second machine.**
     submodule worktrees go with it, but the caches are deleted only by `host prune`.
   - **"Worktree gone" is not detected** on purpose: the host cannot see the controller's
     worktrees, and the TTL covers it.
+- **`host ls --disk` sat for minutes on a big, full host — FIXED (2026-10-10).** `Workspace.usage`
+  stats every file of every checkout, under the controller's one-hour bulk timeout; on jeeves
+  (60 GB of checkouts) it ran for minutes. It now answers within 10 s (ARCHITECTURE.md,
+  "Checkout retention"). What stays open:
+  - **A figure past the budget is stale or partial, unmarked.** The wire's `WorkspaceUsage` has no
+    field to say "last hour's figure" or "still counting", so a reader cannot tell. Adding one is
+    a wire change (`DelegationWire.swift`).
+  - **The reported `host info` hang was not reproduced.** By the code it cannot last past 10 s:
+    `FleetService` answers `host.info` from `HostService.info`, whose `HostLink.request` expires at
+    `HostLink.requestTimeout` (10 s); on the host, `HostInfoProbe.gather` reads free space with one
+    `statvfs`, which took 0.4 ms on a full tmpfs (`FullDiskTests`, run with `FD_FULL_VOLUME`).
+    If `host info` itself hangs again, look at the app's main actor (the reply and the timer both
+    land there) or at the CLI's socket, not at the host.
 
 **Controller adapters**
 - A replay is recognised when offsets go backwards or a state event arrives, so a `queued`→`started`

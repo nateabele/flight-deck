@@ -73,6 +73,24 @@ public final class Workspace: WorkspaceStore, @unchecked Sendable {
         set { lock.withLock { _evictionHook = newValue } }
     }
     private var _evictionHook: (@Sendable (URL) -> Void)?
+    /// Test seam: runs as `usage`'s walk starts measuring each directory (a slow disk).
+    var usageWalkHook: (@Sendable (URL) -> Void)? {
+        get { lock.withLock { _usageWalkHook } }
+        set { lock.withLock { _usageWalkHook = newValue } }
+    }
+    private var _usageWalkHook: (@Sendable (URL) -> Void)?
+    /// How long `usage` waits for its walk before answering from the last finished one. The
+    /// controller would wait an hour (`LiveHostLink.bulkReplyTimeout`), and a person at
+    /// `host ls --disk` should not.
+    var usageBudget: TimeInterval {
+        get { lock.withLock { _usageBudget } }
+        set { lock.withLock { _usageBudget = newValue } }
+    }
+    private var _usageBudget: TimeInterval = 10
+    /// The walk measuring each controller's usage right now, joined by every `usage` call made
+    /// meanwhile, and the rows of the last one to finish.
+    private var usageWalks: [UUID: UsageWalk] = [:]
+    private var usageCache: [UUID: [WorkspaceUsage]] = [:]
 
     public init(root: URL, poolSize: Int = 2, keep: Int = 5, resultTTL: TimeInterval = 24 * 3600,
                 checkoutIdleTTL: TimeInterval = 3 * 24 * 3600,
@@ -596,32 +614,101 @@ public final class Workspace: WorkspaceStore, @unchecked Sendable {
 
     /// One row per checked-out worktree (the sum of its slots, build output included) plus one
     /// per store with an empty `worktreeName` for the shared object store.
+    ///
+    /// The figure is a walk that stats every file of every checkout, and its cost is the file
+    /// count: on the jeeves hostd, 60 GB of build output, it ran for minutes while the CLI
+    /// waited (the controller allows an hour). So it is bounded. The walk runs on a global
+    /// queue, one per controller at a time (asking again joins it: a second walk on a struggling
+    /// disk only slows the first), and `usage` waits for it up to `usageBudget`. Past that it
+    /// answers with the rows of the last walk that finished, or, before any has, with every row
+    /// at what has been counted so far (lower bounds; the wire has no field to say so). The
+    /// walk carries on and its rows answer the next ask.
     public func usage(controller: UUID) async throws -> [WorkspaceUsage] {
+        let (walk, budget, start) = lock.withLock { () -> (UsageWalk, TimeInterval, Bool) in
+            if let running = usageWalks[controller] { return (running, _usageBudget, false) }
+            let walk = UsageWalk()
+            usageWalks[controller] = walk
+            return (walk, _usageBudget, true)
+        }
+        if start {
+            DispatchQueue.global().async { [self] in
+                let rows = measureUsage(controller: controller, into: walk)
+                lock.withLock {
+                    usageCache[controller] = rows
+                    usageWalks[controller] = nil
+                }
+                walk.finish(rows)
+            }
+        }
+        if let rows = try await GitRunner.offload({ walk.wait(budget) }) { return rows }
+        return lock.withLock { usageCache[controller] } ?? walk.partial
+    }
+
+    /// The walk itself. Every row is posted first, at zero, so an answer given mid-walk still
+    /// names every checkout; each is filled in as its directories are summed.
+    private func measureUsage(controller: UUID, into walk: UsageWalk) -> [WorkspaceUsage] {
         let base = root.appendingPathComponent("workspaces/\(controller.uuidString)")
         let caches = submoduleCaches(controller: controller)
-        return try await GitRunner.offload { () -> [WorkspaceUsage] in
-            let fm = FileManager.default
-            var rows: [WorkspaceUsage] = []
-            for repoRoot in ((try? fm.contentsOfDirectory(atPath: base.path)) ?? []).sorted() {
-                let repo = base.appendingPathComponent(repoRoot)
-                rows.append(WorkspaceUsage(repoRoot: repoRoot, worktreeName: "", bytes: Self.bytes(repo.appendingPathComponent("store.git"))))
-                var byName: [String: Int64] = [:]
-                let checkouts = repo.appendingPathComponent("checkouts")
-                for slot in (try? fm.contentsOfDirectory(atPath: checkouts.path)) ?? [] {
-                    for name in Self.worktreeNames(in: checkouts.appendingPathComponent(slot)) {
-                        byName[name, default: 0] += Self.bytes(checkouts.appendingPathComponent("\(slot)/\(name)"))
-                    }
+        let hook = usageWalkHook
+        let fm = FileManager.default
+        var targets: [(repoRoot: String, name: String, dirs: [URL])] = []
+        for repoRoot in ((try? fm.contentsOfDirectory(atPath: base.path)) ?? []).sorted() {
+            let repo = base.appendingPathComponent(repoRoot)
+            targets.append((repoRoot, "", [repo.appendingPathComponent("store.git")]))
+            var byName: [String: [URL]] = [:]
+            let checkouts = repo.appendingPathComponent("checkouts")
+            for slot in (try? fm.contentsOfDirectory(atPath: checkouts.path)) ?? [] {
+                for name in Self.worktreeNames(in: checkouts.appendingPathComponent(slot)) {
+                    byName[name, default: []].append(checkouts.appendingPathComponent("\(slot)/\(name)"))
                 }
-                rows += byName.sorted { $0.key < $1.key }.map { WorkspaceUsage(repoRoot: repoRoot, worktreeName: $0.key, bytes: $0.value) }
             }
-            // The submodule caches, one row each under the repo column `submodules` (never a
-            // root commit, so no row is mistaken for a repo's): a submodule fetched in full can
-            // be gigabytes, and they sit outside `workspaces/`.
-            for name in ((try? fm.contentsOfDirectory(atPath: caches.path)) ?? []).sorted() {
-                rows.append(WorkspaceUsage(repoRoot: "submodules", worktreeName: name, bytes: Self.bytes(caches.appendingPathComponent(name))))
-            }
-            return rows
+            targets += byName.sorted { $0.key < $1.key }.map { (repoRoot, $0.key, $0.value) }
         }
+        // The submodule caches, one row each under the repo column `submodules` (never a
+        // root commit, so no row is mistaken for a repo's): a submodule fetched in full can
+        // be gigabytes, and they sit outside `workspaces/`.
+        for name in ((try? fm.contentsOfDirectory(atPath: caches.path)) ?? []).sorted() {
+            targets.append(("submodules", name, [caches.appendingPathComponent(name)]))
+        }
+        var rows = targets.map { WorkspaceUsage(repoRoot: $0.repoRoot, worktreeName: $0.name, bytes: 0) }
+        walk.progress(rows)
+        for (i, target) in targets.enumerated() {
+            var sum: Int64 = 0
+            for dir in target.dirs {
+                hook?(dir)
+                sum += Self.bytes(dir)
+            }
+            rows[i] = WorkspaceUsage(repoRoot: target.repoRoot, worktreeName: target.name, bytes: sum)
+            walk.progress(rows)
+        }
+        return rows
+    }
+
+    /// One controller's usage walk, as the `usage` calls waiting on it see it.
+    private final class UsageWalk: @unchecked Sendable {
+        private let lock = NSLock()
+        private var rows: [WorkspaceUsage] = []
+        private var finished: [WorkspaceUsage]?
+        private let done = DispatchSemaphore(value: 0)
+
+        func progress(_ rows: [WorkspaceUsage]) { lock.withLock { self.rows = rows } }
+
+        func finish(_ rows: [WorkspaceUsage]) {
+            lock.withLock { self.rows = rows; finished = rows }
+            done.signal()
+        }
+
+        /// The finished rows, or nil if the walk is still going after `seconds`. Blocks a
+        /// dispatch thread (callers are inside `offload`), and passes the signal on, so every
+        /// waiter wakes.
+        func wait(_ seconds: TimeInterval) -> [WorkspaceUsage]? {
+            guard done.wait(timeout: .now() + seconds) == .success else { return nil }
+            done.signal()
+            return lock.withLock { finished }
+        }
+
+        /// Every row, each at what has been counted so far.
+        var partial: [WorkspaceUsage] { lock.withLock { rows } }
     }
 
     /// Deletes the checkouts (and with them their build output) for one repo, or for all of
