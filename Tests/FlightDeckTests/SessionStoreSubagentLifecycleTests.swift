@@ -142,13 +142,26 @@ final class SessionStoreSubagentLifecycleTests: XCTestCase {
         XCTAssertNil(store.pendingDialog(for: session.id), "B's own edge retires it")
     }
 
-    func testAPromptSubmitRetiresThePendingDialogAndIsRemembered() {
+    func testAPromptSubmitRetiresTheMainAgentsDialogAndIsRemembered() {
+        let (store, session) = make()
+        let conversation = session.pinnedConversationID
+        let at = Date(timeIntervalSince1970: 2_000_000)
+        store.ingestDialogChangesForTesting([.raised(conversation, PendingDialog(agentID: nil, callID: "toolu_MAIN"))])
+        store.ingestDialogChangesForTesting([.promptSubmitted(conversation, at)])
+        XCTAssertNil(store.pendingDialog(for: session.id))
+        XCTAssertEqual(store.lastPromptSubmits[conversation], at)
+    }
+
+    /// "The Plan" (2026-10-09): the parent's next turn — here a background task's
+    /// notification — does not answer a subagent's dialog. Dropping it left the phone with no
+    /// card, and then with the main agent's running Bash in its place.
+    func testAPromptSubmitKeepsASubagentsDialog() {
         let (store, session) = make()
         let conversation = session.pinnedConversationID
         let at = Date(timeIntervalSince1970: 2_000_000)
         store.ingestDialogChangesForTesting([.raised(conversation, dialog)])
         store.ingestDialogChangesForTesting([.promptSubmitted(conversation, at)])
-        XCTAssertNil(store.pendingDialog(for: session.id))
+        XCTAssertEqual(store.pendingDialog(for: session.id), dialog)
         XCTAssertEqual(store.lastPromptSubmits[conversation], at)
     }
 
