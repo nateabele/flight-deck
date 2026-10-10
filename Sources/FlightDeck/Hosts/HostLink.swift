@@ -12,6 +12,10 @@ enum HostLinkState: Equatable {
     case offline(lastSeen: Date?)
     /// The host turned us away and the link has stopped retrying; the text is for the user.
     case refused(String)
+    /// Not dialling yet: the host's key could not be read from the Keychain (a prompt waiting
+    /// on the user, or a denied one). Set by `HostService`, never by a link, and retried, so
+    /// unlike `.refused` it is not a dead end. The text is for the user.
+    case keyUnavailable(String)
 }
 
 enum HostLinkError: Error, Equatable {
