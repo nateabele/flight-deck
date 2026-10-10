@@ -188,6 +188,14 @@ final class PromptService {
                 derived = subagentOpenPrompt(session, agent: agent)
                     .map { .success($0) } ?? .failure("prompt_changed")
             }
+        } else if let attributed = attributedSubagentPrompt(session) {
+            // The dialog on screen is a subagent's, so a main-agent call cannot be what the
+            // tap answers: the parent's derivation would offer whatever tool the main agent
+            // has in flight, and Allow would land on the subagent's dialog — a different
+            // command from the one the phone showed ("The Plan", 2026-10-09). The subagent's
+            // call id never equals a main-agent call's, so this refuses `prompt_changed` and
+            // logs the call that IS open.
+            derived = .success(attributed.open)
         } else {
             derived = openPrompt(inSession: session)
         }
@@ -308,20 +316,34 @@ final class PromptService {
     /// screen. Only a call the PermissionRequest hook NAMED is offered, which is what
     /// `pendingDialog` carries; every other open call stays the `"subagent_prompt"` refusal,
     /// which errs toward claude's own wording on screen.
+    ///
+    /// **A named subagent dialog is asked first, ahead of the tab's own derivation.** The
+    /// parent keeps working while its subagent waits, and the tab reads `waiting` throughout,
+    /// so the parent's derivation offers whatever tool the main agent has in flight — a running
+    /// call, not a dialog. "The Plan" (2026-10-09) showed four of those in three minutes, and
+    /// an Allow tap on one approved the subagent's dialog, a different command.
     private func attributingSubagents(
         _ session: UUID, _ result: Result<OpenPrompt, TimelineErrorCode>?
     ) -> Result<OpenPrompt, TimelineErrorCode>? {
+        if let attributed = attributedSubagentPrompt(session) {
+            attributedAgents[session] = attributed.agent
+            return .success(attributed.open)
+        }
         guard case .failure(let code)? = result, code.code == "prompt_changed" else {
             if case .success(let open)? = result { attributedAgents[session] = owningSubagent(session, open) }
             return result
         }
-        if let dialog = pendingDialog(session), let agent = dialog.agentID,
-           let open = subagentOpenPrompt(session, agent: agent), open.callID == dialog.callID {
-            attributedAgents[session] = agent
-            return .success(open)
-        }
         attributedAgents[session] = nil
         return subagentHoldsOpenCall(session) ? .failure("subagent_prompt") : result
+    }
+
+    /// The hook log's subagent dialog, confirmed still unresolved in that subagent's own file.
+    /// Nil for a main-agent dialog, no dialog, or one the file has since answered.
+    private func attributedSubagentPrompt(_ session: UUID) -> (agent: String, open: OpenPrompt)? {
+        guard let dialog = pendingDialog(session), let agent = dialog.agentID,
+              let open = subagentOpenPrompt(session, agent: agent), open.callID == dialog.callID
+        else { return nil }
+        return (agent, open)
     }
 
     /// The subagent whose file held the call the last push/poll derivation returned. Written

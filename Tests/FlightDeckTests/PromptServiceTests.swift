@@ -877,6 +877,45 @@ final class PromptServiceTests: XCTestCase {
         XCTAssertFalse(spy.events.isEmpty, "the dialog was driven")
     }
 
+    // MARK: A subagent's dialog outranks the parent's running tool — "The Plan" (2026-10-09)
+
+    /// **The live failure.** A background subagent raised a Bash dialog while the main agent
+    /// kept working. The tab read `waiting`, so the parent's own derivation offered whatever
+    /// Bash the MAIN agent had in flight — a running tool, not a dialog — and an Allow tap on
+    /// that card pressed Allow on the subagent's dialog, a different command from the one the
+    /// phone showed. The hook log's attribution, confirmed against the subagent's file, names
+    /// the dialog actually on screen and must win.
+    private func subagentDialogBehindAMainAgentCall() throws
+        -> (PromptService, SpyInjector, UUID) {
+        let (service, store, spy, id) = makeService(activity: .waiting)
+        try writeTranscript(for: store, id, [bashLine("toolu_MAIN")])
+        try writeSubagent(for: store, id, agent: "a28ad87b", [sidechain(bashLine("toolu_SUB"))])
+        service.pendingDialog = { _ in PendingDialog(agentID: "a28ad87b", callID: "toolu_SUB") }
+        let parent = [SourceLine(offset: 0, text: bashLine("toolu_MAIN"))]
+        let sub = [SourceLine(offset: 0, text: sidechain(bashLine("toolu_SUB")))]
+        service.tail = { url, _ in (url.path.contains("/subagents/") ? sub : parent, false) }
+        spy.showOptions(["Yes", "No"], selected: 0)
+        return (service, spy, id)
+    }
+
+    func testAnAttributedSubagentDialogOutranksTheMainAgentsRunningCall() throws {
+        let (service, _, id) = try subagentDialogBehindAMainAgentCall()
+        XCTAssertEqual(try service.pushedOpenPrompt(inSession: id).get().callID, "toolu_SUB")
+        XCTAssertEqual(service.openPromptAgent(inSession: id), "a28ad87b")
+        XCTAssertEqual(try service.polledOpenPrompt(inSession: id)?.get().callID, "toolu_SUB")
+    }
+
+    /// The tap that happened: the main agent's call, no agent. Refused, nothing typed.
+    func testAnAnswerForTheMainAgentsCallIsRefusedWhileASubagentDialogIsUp() throws {
+        let (service, spy, id) = try subagentDialogBehindAMainAgentCall()
+        XCTAssertEqual(code(service.answer(session: id, agent: nil, call: "toolu_MAIN",
+                                           answer: .allow, token: UUID())), "prompt_changed")
+        XCTAssertTrue(spy.events.isEmpty, "nothing typed")
+        XCTAssertNil(code(service.answer(session: id, agent: "a28ad87b", call: "toolu_SUB",
+                                         answer: .allow, token: UUID())))
+        XCTAssertFalse(spy.events.isEmpty, "the subagent's own card still answers")
+    }
+
     /// Review Focus 2: an open call that no PermissionRequest named is a running tool.
     func testAnAnswerForASubagentWithNoPendingDialogIsRefused() throws {
         let (service, store, spy, id) = makeService(activity: .waiting)

@@ -8907,7 +8907,9 @@ final class SessionStore: ObservableObject {
                 pendingDialogRaisedAt[conversation] = now()
             case .cleared(let conversation): pendingDialogs[conversation] = nil
             case .promptSubmitted(let conversation, let at):
-                pendingDialogs[conversation] = nil
+                // A subagent's dialog outlives the parent's next turn — see
+                // `DialogAttribution`'s UserPromptSubmit case.
+                if pendingDialogs[conversation]?.agentID == nil { pendingDialogs[conversation] = nil }
                 lastPromptSubmits[conversation] = at
             }
         }
