@@ -287,6 +287,39 @@ final class SubmoduleSyncTests: XCTestCase {
         XCTAssertNil(commit, "nothing changed: no stray gitlink in the result")
     }
 
+    /// Two `service.sync`s on one shared slot (a service and an `exec` beside it) used to place
+    /// submodules side by side, outside every lock: one's stale-submodule sweep could delete a
+    /// worktree the other had just placed. Placement is serialized per slot, and both end with
+    /// every submodule at its pin.
+    func testConcurrentReapplyOnASharedSlotPlacesSubmodulesOneAtATime() async throws {
+        let scratch = TempRepo.scratch()
+        let (app, lib, _) = try makeApp(in: scratch)
+        let store = Workspace(root: scratch.appendingPathComponent("host"), poolSize: 1)
+        let first = try await push(app, to: store)
+        let service = try await store.checkout(controller: controller, ref: first, pin: true)
+        let exec = try await store.existingCheckout(controller: controller, repoRoot: first.repoRoot, wtKey: first.wtKey)
+        XCTAssertEqual(exec.slot, service.slot, "the exec shares the service's slot")
+
+        let tip = try lib.work.git("rev-parse", "HEAD")
+        let sub = app.url.appendingPathComponent("lib")
+        try TempRepo.git(["fetch", "-q", "origin"], in: sub)
+        try TempRepo.git(["checkout", "-q", tip], in: sub)
+        try app.commitAll()
+        let second = try await push(app, to: store)
+
+        let overlap = Overlap()
+        store.placementHook = { _ in overlap.enter(); usleep(300_000); overlap.leave() }
+        async let a = store.reapply(service, ref: second)
+        async let b = store.reapply(exec, ref: second)
+        let (la, lb) = try await (a, b)
+        XCTAssertEqual(overlap.most, 1, "two placements ran in one slot at once")
+        for lease in [la, lb] {
+            XCTAssertEqual(try head(lease, "lib"), tip)
+            XCTAssertEqual(text(lease, "lib/lib.txt"), "v2\n")
+        }
+        XCTAssertEqual(try TempRepo.git(["status", "--porcelain"], in: la.path), "")
+    }
+
     /// Nested submodules recurse, on both ends.
     func testNestedSubmoduleChecksOut() async throws {
         let scratch = TempRepo.scratch()

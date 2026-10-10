@@ -341,12 +341,20 @@ extension Workspace {
     /// commit. The commit is the tree's (already verified), never the pin's; the pin supplies
     /// only the URL. A gitlink with no pin (nested in a submodule the controller never
     /// initialized) falls back to its parent's `.gitmodules`.
+    ///
+    /// One placement per slot at a time (`withPlacement`). A first checkout holds its slot
+    /// alone, but `reapply` (`service.sync`) runs in a slot an `exec` may share, and two of
+    /// them placing side by side had one's stale-submodule sweep delete a worktree the other
+    /// had just placed, or both rebuilding the same submodule's worktree at once.
     func placeSubmodules(_ ref: SnapshotRef, in top: URL, controller: UUID) throws {
-        let pins = Dictionary(ref.submodules.map { ($0.path, $0) }, uniquingKeysWith: { first, _ in first })
-        var placed: [String] = []
-        try place(in: top, prefix: "", parentURL: nil, pins: pins, caches: submoduleCaches(controller: controller),
-                  ignoring: Self.controllerIgnores(top), placed: &placed)
-        try sweepStaleSubmodules(in: top, keeping: placed)
+        try withPlacement(top) {
+            placementHook?(top)
+            let pins = Dictionary(ref.submodules.map { ($0.path, $0) }, uniquingKeysWith: { first, _ in first })
+            var placed: [String] = []
+            try place(in: top, prefix: "", parentURL: nil, pins: pins, caches: submoduleCaches(controller: controller),
+                      ignoring: Self.controllerIgnores(top), placed: &placed)
+            try sweepStaleSubmodules(in: top, keeping: placed)
+        }
     }
 
     /// `ignoring` config for the controller's excludes, as `finish` wrote them into the slot's

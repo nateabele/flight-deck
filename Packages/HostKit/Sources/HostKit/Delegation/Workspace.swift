@@ -56,6 +56,12 @@ public final class Workspace: WorkspaceStore, @unchecked Sendable {
         set { lock.withLock { _submoduleFetchHook = newValue } }
     }
     private var _submoduleFetchHook: (@Sendable (String) -> Void)?
+    /// Test seam: runs as a slot's submodule placement starts, with the slot's path.
+    var placementHook: (@Sendable (URL) -> Void)? {
+        get { lock.withLock { _placementHook } }
+        set { lock.withLock { _placementHook = newValue } }
+    }
+    private var _placementHook: (@Sendable (URL) -> Void)?
 
     public init(root: URL, poolSize: Int = 2, keep: Int = 5, resultTTL: TimeInterval = 24 * 3600,
                 git: GitRunner = GitRunner(isolated: true)) {
@@ -287,8 +293,10 @@ public final class Workspace: WorkspaceStore, @unchecked Sendable {
     ///
     /// And outside the store lock. That lock serializes every sync, apply, gc and prune of the
     /// repo; a submodule fetch can take minutes (a big repository, a slow remote), and held
-    /// there it stalled every other agent syncing the same repo. The slot is still ours (leased,
-    /// not `ready`, so nobody joins it half placed) and each cache has its own lock.
+    /// there it stalled every other agent syncing the same repo. Placement takes the slot's own
+    /// lock instead (`withPlacement`), and each cache has its own. On a first checkout the slot
+    /// is also not `ready`, so nobody joins it half placed; on a `reapply` it may be shared (an
+    /// `exec` beside a service), which is what the slot lock is for.
     private func apply(_ ref: SnapshotRef, at path: URL, controller: UUID, exclusive: Bool) throws {
         let store = storeURL(controller: controller, repoRoot: ref.repoRoot)
         try withStore(store) { try applyTree(ref, at: path, store: store, exclusive: exclusive) }
@@ -653,6 +661,13 @@ public final class Workspace: WorkspaceStore, @unchecked Sendable {
     /// Serializes git work per store: `worktree add`, `fetch` and ref transactions on one bare
     /// repo would otherwise race on its lock files and fail one of two concurrent syncs.
     /// Blocks a dispatch thread, never the cooperative pool (every caller is inside `offload`).
+    /// Serializes submodule placement in one slot. Keyed by the slot's path through the same
+    /// table as the store locks (a slot path is never a store path); always taken before a
+    /// cache lock and never while holding the store lock, so the order is fixed.
+    func withPlacement<T>(_ slot: URL, _ body: () throws -> T) throws -> T {
+        try withStore(slot.appendingPathComponent(".flightdeck-placement"), body)
+    }
+
     func withStore<T>(_ store: URL, _ body: () throws -> T) throws -> T {
         let storeLock = lock.withLock { () -> NSLock in
             if let l = storeLocks[store.path] { return l }

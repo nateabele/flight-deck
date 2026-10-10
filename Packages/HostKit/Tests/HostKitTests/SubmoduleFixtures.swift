@@ -247,3 +247,13 @@ final class TCPStub: @unchecked Sendable {
         } == 0
     }
 }
+
+/// How many threads were inside a section at once, at most.
+final class Overlap: @unchecked Sendable {
+    private let lock = NSLock()
+    private var now = 0
+    private var peak = 0
+    func enter() { lock.withLock { now += 1; peak = max(peak, now) } }
+    func leave() { lock.withLock { now -= 1 } }
+    var most: Int { lock.withLock { peak } }
+}
