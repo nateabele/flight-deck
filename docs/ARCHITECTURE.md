@@ -318,11 +318,16 @@ has no URL (`submodule_no_url`). On the host, after the superproject's tree is v
 gitlink is fetched into a per-URL bare cache, `<state root>/submodules/<controller slot>/`, kept
 across runs, and placed as a `git worktree` of that cache at its path, recursing into nested
 submodules. Placement runs after the store lock is released (a slow fetch must not stall the
-repo's other syncs), under each cache's own lock. The fetch is a shallow one of the pinned commit;
+repo's other syncs), under a per-slot placement lock (a `service.sync` may share its slot with an
+`exec`) and each cache's own lock. The fetch is a shallow one of the pinned commit;
 only a server's refusal of exactly that ("unadvertised object", "not our ref") earns a full fetch,
 and a connection or auth failure is final. It is bounded: http gives up below 1000 B/s for 60 s,
-ssh runs in batch mode with a 15 s connect timeout and 15 s keepalives, and cancelling the run
-SIGKILLs git's process group (`GitRunner.offload` ties every git it runs to the calling task).
+ssh runs in batch mode with a 15 s connect timeout and 15 s keepalives, a `git://` fetch is killed
+after 120 s without progress output, and cancelling the run SIGKILLs git's process group
+(`GitRunner.offload` ties every git it runs to the calling task; `GitRunner` starts git with
+`posix_spawn` as a group leader, with no blocked signals and only its own pipes). A fetched
+submodule commit recording a nested gitlink at an unsafe path (`.`, `..`, `.git`) is refused by
+name (`submodule_unsafe_path`) before any of it is checked out.
 Transports are `git`, `http`, `https` and `ssh`, plus `file` for the controller's own pins only. A
 nested gitlink with no pin falls back to its parent's committed `.gitmodules`. A URL the host
 cannot reach fails the checkout as `submodule_fetch_failed`, naming the path, the URL (credentials

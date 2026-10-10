@@ -2601,9 +2601,9 @@ container; **nothing has run against a real second machine.**
     private `https` submodule fails as `submodule_fetch_failed`. `ssh` URLs use the host
     user's keys and agent, in batch mode (no prompts). Credentials in the controller's URLs
     are stripped before they travel, by design, so the controller's token never helps.
-  - **A `git://` fetch has no stall bound of its own.** http has a low-speed limit and ssh has
-    timeouts and keepalives, but git's own protocol has neither: a hung `git://` server holds
-    the fetch until `longTimeout` (an hour) or the run is cancelled, which now kills it.
+  - **A `git://` fetch had no stall bound of its own — FIXED (2026-10-10).** It now fetches
+    with `--progress` under a watchdog that kills it after 120 s without output
+    (`Workspace.submoduleStallTimeout`). http and ssh keep their own bounds.
   - **Submodule caches are not `gc`ed.** `host ls --disk` lists them and `host prune` deletes
     the ones no checkout uses (FIXED 2026-10-08), but the hourly sweep does not run `gc` in
     them, so a cache a checkout still uses keeps every commit any slot ever pinned.
