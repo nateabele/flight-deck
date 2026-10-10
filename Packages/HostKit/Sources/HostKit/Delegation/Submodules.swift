@@ -394,6 +394,7 @@ extension Workspace {
             try withStore(cache) {
                 submoduleFetchHook?(full)
                 try fetchIfMissing(link.commit, from: url, into: cache, path: full, allowFile: pinned)
+                try Self.refuseUnsafeNestedPaths(of: link.commit, in: cache, prefix: full, git: git)
                 try placeWorktree(link.commit, at: sub, from: cache, ignoring: ignoring)
             }
             placed.append(full)
@@ -449,6 +450,22 @@ extension Workspace {
             }
         }
         try git.run(["update-ref", "refs/fd/pins/\(commit)", commit], in: cache)
+    }
+
+    /// Refuses a fetched submodule commit that records a nested gitlink at an unsafe path (an
+    /// empty, `.`, `..` or `.git` component), naming it, before anything of the commit is
+    /// checked out. That commit came from a remote, so its tree is untrusted, and git's own
+    /// `mktree` accepts such names. git's checkout would stop at "invalid path" too, but then
+    /// the run fails with a bare git error, and Flight Deck's own guard (`checkSafe`, before
+    /// placing a gitlink) was never the one that held.
+    static func refuseUnsafeNestedPaths(of commit: String, in cache: URL, prefix: String, git: GitRunner) throws {
+        for nested in try SubmoduleScan.gitlinks(of: commit, in: cache, git: git) {
+            let parts = nested.path.split(separator: "/", omittingEmptySubsequences: false)
+            if nested.path.hasPrefix("/") || nested.path.contains("\n")
+                || parts.contains(where: { $0.isEmpty || $0 == "." || $0 == ".." || $0.lowercased() == ".git" }) {
+                throw SyncError.submodule(path: prefix + "/" + nested.path, problem: .unsafePath)
+            }
+        }
     }
 
     /// The lock files a killed fetch leaves in a cache (`shallow.lock`, a ref's `.lock`), each

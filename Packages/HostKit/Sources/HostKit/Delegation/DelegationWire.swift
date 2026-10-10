@@ -38,6 +38,8 @@ import Foundation
 //   submodule_fetch_failed  a submodule's pinned commit could not be fetched from its URL
 //                           (unreachable, refused, or the commit is not there); the message
 //                           names the submodule's path and the URL. Fails the run's checkout.
+//   submodule_unsafe_path   a fetched submodule commit records a nested gitlink at a path with
+//                           a `.`, `..` or `.git` component; refused by name, nothing placed
 //   screen_locked           `screen` asked of a host whose console session is locked
 //   no_console_user         `screen` asked of a host with nobody logged in at the console
 //   screen_unsupported      `screen` asked of a host that has none (Linux)

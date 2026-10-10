@@ -110,6 +110,10 @@ public enum SubmoduleProblem: Equatable, Sendable {
     case fetchFailed(url: String, detail: String)
     /// The host fetched from the URL, and the pinned commit was not there.
     case missingCommit(url: String, commit: String)
+    /// A fetched submodule commit records a nested gitlink whose path has an empty, `.`,
+    /// `..` or `.git` component: placing it would write outside the submodule or into git's
+    /// own files. The host's refusal; nothing is placed.
+    case unsafePath
 
     public var code: String {
         switch self {
@@ -117,6 +121,7 @@ public enum SubmoduleProblem: Equatable, Sendable {
         case .unpushed: return "submodule_unpushed"
         case .noURL: return "submodule_no_url"
         case .fetchFailed, .missingCommit: return "submodule_fetch_failed"
+        case .unsafePath: return "submodule_unsafe_path"
         }
     }
 
@@ -133,6 +138,8 @@ public enum SubmoduleProblem: Equatable, Sendable {
         case .fetchFailed(let url, let detail):
             let detail = SubmoduleURL.redacted(detail.trimmingCharacters(in: .whitespacesAndNewlines))
             return "couldn't fetch submodule \(path) from \(SubmoduleURL.redacted(url)): \(detail); make that URL reachable from the host, then rerun"
+        case .unsafePath:
+            return "refused submodule path \(path): it leaves its parent or enters .git; nothing was placed there. Fix the commit that records it, then rerun"
         case .missingCommit(let url, let commit):
             return "submodule \(path)'s commit \(commit.prefix(12)) is not on \(SubmoduleURL.redacted(url)); push it, then rerun"
         }

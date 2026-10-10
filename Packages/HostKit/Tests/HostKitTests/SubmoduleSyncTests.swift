@@ -701,9 +701,9 @@ final class SubmoduleSyncTests: XCTestCase {
     }
 
     /// A submodule commit fetched from a remote is untrusted: one whose tree has a gitlink
-    /// named `..` (git's own `mktree` accepts it) must fail its placement, and must not have
-    /// the host write or delete outside the submodule (placing `lib/..` would replace the
-    /// slot itself).
+    /// named `..` (git's own `mktree` accepts it) is refused by the host, naming `lib/..`,
+    /// before any of it is checked out, and the host writes and deletes nothing outside the
+    /// submodule (placing `lib/..` would replace the slot itself).
     func testHostileGitlinkPathInASubmoduleIsRefused() async throws {
         let scratch = TempRepo.scratch()
         let (app, lib, _) = try makeApp(in: scratch)
@@ -726,7 +726,11 @@ final class SubmoduleSyncTests: XCTestCase {
         let slots = scratch.appendingPathComponent("host/workspaces/\(controller.uuidString)/\(ref.repoRoot)/checkouts")
 
         let error = await thrown { try await store.checkout(controller: controller, ref: ref, pin: false) }
-        XCTAssertNotNil(error, "placing a tree with a `..` gitlink must fail")
+        // The host's own refusal, by name, and not whatever failed first: before, git's
+        // `worktree add` stopped at "invalid path", so any failure at all passed this test.
+        XCTAssertEqual(error as? SyncError, .submodule(path: "lib/..", problem: .unsafePath), "\(String(describing: error))")
+        XCTAssertEqual((error as? SyncError)?.code, "submodule_unsafe_path")
+        XCTAssertTrue("\(error.map { "\($0)" } ?? "")".contains("lib/.."))
         let slot = try XCTUnwrap(try FileManager.default.contentsOfDirectory(atPath: slots.path).first)
         let main = slots.appendingPathComponent("\(slot)/\(ref.worktreeName)/main.txt")
         XCTAssertTrue(FileManager.default.fileExists(atPath: main.path), "the slot was not replaced through lib/..")
