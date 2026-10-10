@@ -30,6 +30,8 @@ public final class SpentEnrollments: @unchecked Sendable {
     public init(root: URL) { self.root = root }
 
     /// Records `slot` as redeemed. False when it already was, and then nothing is written.
+    /// The check and the record are one call under one lock: there is deliberately no separate
+    /// "is it spent?" query, since checking and then spending could let two enrolls both pass.
     /// Entries whose payload is past `EnrollmentPayload.maxAge` are pruned on the way: that
     /// payload's own validation already refuses it, so the record guards nothing.
     public func spend(slot: UUID, issuedAt: Date, now: Date) throws -> Bool {
@@ -39,11 +41,6 @@ public final class SpentEnrollments: @unchecked Sendable {
         entries.append(Entry(slot: slot, issuedAt: issuedAt))
         try persist(entries)
         return true
-    }
-
-    public func contains(_ slot: UUID, now: Date) throws -> Bool {
-        lock.lock(); defer { lock.unlock() }
-        return try load().contains { $0.slot == slot && !Self.expired($0, now: now) }
     }
 
     /// Undoes a `spend` whose enrollment then failed to store, so a disk error does not burn a

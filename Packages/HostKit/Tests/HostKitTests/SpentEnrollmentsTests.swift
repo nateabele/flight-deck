@@ -14,7 +14,7 @@ final class SpentEnrollmentsTests: XCTestCase {
         let spent = SpentEnrollments(root: root), slot = UUID()
         XCTAssertTrue(try spent.spend(slot: slot, issuedAt: t0, now: t0))
         XCTAssertFalse(try spent.spend(slot: slot, issuedAt: t0, now: t0.addingTimeInterval(60)))
-        XCTAssertTrue(try spent.contains(slot, now: t0.addingTimeInterval(60)))
+        XCTAssertFalse(try spent.spend(slot: slot, issuedAt: t0, now: t0.addingTimeInterval(120)), "still spent")
     }
 
     /// The point of a file: hostd restarts (a reboot, a crashed `serve`) must not reopen the window.
@@ -41,7 +41,8 @@ final class SpentEnrollmentsTests: XCTestCase {
         XCTAssertTrue(try spent.spend(slot: old, issuedAt: t0, now: t0))
         let atMaxAge = t0.addingTimeInterval(EnrollmentPayload.maxAge)
         XCTAssertTrue(try spent.spend(slot: fresh, issuedAt: atMaxAge, now: atMaxAge))
-        XCTAssertTrue(try spent.contains(old, now: atMaxAge), "still redeemable at exactly maxAge, so still guarded")
+        XCTAssertFalse(try spent.spend(slot: old, issuedAt: t0, now: atMaxAge),
+                       "still redeemable at exactly maxAge, so still guarded")
         let past = atMaxAge.addingTimeInterval(1)
         XCTAssertTrue(try spent.spend(slot: UUID(), issuedAt: past, now: past))
         let data = try Data(contentsOf: root.appendingPathComponent("enrollments-spent.json"))
