@@ -2714,9 +2714,25 @@ container; **nothing has run against a real second machine.**
   runs on one snapshot cross-contaminate each other's result commits, and two `xcodebuild`s in one
   checkout share DerivedData, so the second fails with "database is locked". Sharing only for
   `exec` is worth considering.
-- **Host disk grows without bound across worktrees.** Each new worktree gets up to `pool` full
-  checkouts plus their build output, and nothing ages them out; `flightdeck host prune` is the only
-  cleanup, and it is fleet-wide. An LRU age-out of idle slots in the hourly `gc` would bound it.
+- **Host disk grows without bound across worktrees — FIXED (2026-10-10).** Each new worktree got
+  up to `pool` full checkouts plus their build output, and nothing aged them out: the jeeves Linux
+  hostd reached 100% disk with 60 GB of checkouts of one repo, most for worktrees long gone. The
+  hourly `gc` now deletes slots idle past `checkoutIdleTTL` (3 days) by their `.fd-last-used`
+  marker, then evicts unleased slots oldest first while the state root's volume is below
+  `max(15%, 10 GiB)` free (ARCHITECTURE.md, "Checkout retention"). What stays open:
+  - **A slot from before markers falls back once** to its worktree index's mtime (its last
+    apply), then the slot directory's mtime, and that time becomes its marker. A checkout that
+    was leased often but rarely re-applied (the same snapshot run again and again) reads older
+    than it is on that first pass and may go a little early; the next run rebuilds it.
+  - **The TTL is not configurable** outside the `Workspace` initializer: no `delegate.toml` or
+    hostd flag sets it, and every host uses 3 days.
+  - **The high-water pass deletes idle checkouts a user may still want warm** (a big
+    DerivedData) when the disk is tight, oldest first. It never deletes a leased slot, so a
+    disk filled by a single running build stays full until that run ends.
+  - **Submodule caches stay outside retention**, as the item above says: an evicted slot's
+    submodule worktrees go with it, but the caches are deleted only by `host prune`.
+  - **"Worktree gone" is not detected** on purpose: the host cannot see the controller's
+    worktrees, and the TTL covers it.
 
 **Controller adapters**
 - A replay is recognised when offsets go backwards or a state event arrives, so a `queued`→`started`

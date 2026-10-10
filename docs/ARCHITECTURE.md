@@ -317,7 +317,7 @@ live probes: [DELEGATION-PROBES.md](DELEGATION-PROBES.md).
 4. **Host** (`Packages/HostKit/Sources/HostKit/Delegation/`). The hostd's router answers each op
    off the connection's serial receive path (`DelegationHost`: one task per request, and
    `host.info` answered off it too), because `sync.push` waits on channel bytes that arrive on
-   that same connection. Each connection gets its mux at hello and loses it at close. `Workspace` holds the object store and checkouts, `Runner` spawns
+   that same connection. Each connection gets its mux at hello and loses it at close. `Workspace` holds the object store and checkouts (and evicts idle ones, below), `Runner` spawns
    and spools, `ScreenLease` serialises screen runs, `PortCheck` names a port's holder. Both hostds
    (`Sources/HostDaemon`, `Packages/HostDaemonLinux`) wire the same HostKit code.
 
@@ -332,6 +332,28 @@ checkouts (two per worktree by default), each a `git worktree` named after the l
 (never `-x`), so ignored build output survives and builds stay incremental; the tree hash is checked
 before anything runs. Refused up front: LFS repos (`lfs_unsupported`) and git older than 2.40
 (`git_too_old`).
+
+**Checkout retention** (`Workspace.gc`, run hourly by `DelegationHost.standard`; no scheduling of
+its own). Checkouts are the host's real disk cost: each slot carries its build output, and one
+per worktree accumulates, for worktrees the host cannot know are gone. A jeeves hostd filled its
+disk with 60 GB of them, because nothing but `host prune` ever deleted one. Each lease and each
+release now stamps `checkouts/<wt-key>-<slot>/.fd-last-used` with the time (never the directory's
+mtime, which builds keep bumping). gc then:
+1. deletes every slot whose marker is older than `checkoutIdleTTL` (a `Workspace` init parameter,
+   3 days by default), and
+2. if free space on the state root's volume is below `max(15%, 10 GiB)`, deletes unleased slots
+   oldest first by marker until it is back above (`Workspace.volumeSpace`: `statvfs` on Linux, the
+   volume resource keys on macOS, Foundation only).
+
+A deletion is `prune`'s: the slot directory, then `git worktree prune` in the store, which stays,
+so the next run there rebuilds the slot as a delta. A leased slot is never deleted. The check is
+made under the pool lock that `checkout` and `release` take, and an unleased slot is reserved
+in the same hold (gc becomes its holder, not `ready`), so a run that starts mid-gc takes another
+slot or waits rather than lose its tree. A slot from before markers existed falls back once to
+its last apply (its worktree index's mtime), then to the directory's mtime, and that time is
+written into a new marker. gc evicts before it touches git, and one store's failure no longer
+stops the rest: on a full disk git's own steps fail with ENOSPC, and they used to abort gc before
+anything was freed. Submodule caches are not part of retention (FOLLOWUPS).
 
 **Submodules** (`Submodules.swift`, spec §4.2 step 4). The snapshot's tree already pins each
 submodule (a gitlink is a commit id, covered by the tree check); what it lacks is where to fetch
