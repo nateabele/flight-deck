@@ -254,7 +254,12 @@ final class HostService: ObservableObject {
         guard var record = registry.hosts.first(where: { $0.slot == slot }) else { return }
         record.endpoints = Array(endpoints.prefix(HostRecord.maxEndpoints))
         save(record)
-        guard let key = registry.key(for: slot), let link = links.removeValue(forKey: slot) else { return }
+        // The open link's key, never `registry.key(for:)`: that is a Keychain read on the main
+        // thread, and with a prompt up it would hang the UI as long as the prompt stayed
+        // unanswered. No link yet means its key read is still running, and `keyRead` looks the
+        // record up again when it returns, so the new endpoints are used then.
+        guard let link = links.removeValue(forKey: slot) else { return }
+        let key = link.key
         link.onStateChange = nil
         link.onEndpointsChanged = nil
         link.stop()

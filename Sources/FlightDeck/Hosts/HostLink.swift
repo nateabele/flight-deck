@@ -135,7 +135,8 @@ final class HostLink {
     /// persists it and assigns `record`.
     var onEndpointsChanged: (([String]) -> Void)?
 
-    private let key: FleetDeviceKey
+    /// Read by `HostService.setEndpoints` to reopen the link without another Keychain read.
+    let key: FleetDeviceKey
     private let controllerName: String
     private let dial: HostLinkDialing
     private let clock: HostLinkClock

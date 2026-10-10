@@ -220,3 +220,45 @@ final class HostKeyReadTests: XCTestCase {
         XCTAssertEqual(HostService.keyFailureText(-1), "Keychain read failed (OSStatus -1)")
     }
 }
+
+extension HostKeyReadTests {
+    /// `setEndpoints` (a cloud machine's address arriving, or the Mac's public IP moving) once
+    /// reread the key with `registry.key(for:)` on the main thread: a Keychain read, so with a
+    /// prompt up it would hang the whole UI. It must reuse the link's key and read nothing.
+    func testSetEndpointsReopensTheLinkWithoutReadingTheKeychain() async throws {
+        let registry = HostRegistry(fileURL: url, secrets: secrets)
+        let gpu = try registry.add(key: .mint(), name: "gpu", serviceName: "gpu", endpoints: ["10.0.0.6:47410"])
+        let service = HostService(registry: registry, controllerName: "c", dial: dialer, clock: clock)
+        service.start()
+        try await waitUntil { self.dials(to: "10.0.0.6:47410").count == 1 }
+        XCTAssertEqual(secrets.reads(of: gpu.slot), 1)
+
+        // Not held: a held read here would hang the main thread and the test with it. The
+        // read count is what tells the old path (a second read) from the fix.
+        service.setEndpoints(slot: gpu.slot, ["10.0.0.7:47410"])
+
+        try await waitUntil { self.dials(to: "10.0.0.7:47410").count == 1 }
+        XCTAssertEqual(secrets.reads(of: gpu.slot), 1, "no second Keychain read")
+        service.forget(slot: gpu.slot)
+    }
+
+    /// With the key read still waiting on a prompt there is no link to reopen: the new address
+    /// is saved, and the link opens on it once the read returns.
+    func testSetEndpointsDuringAHeldKeyReadIsUsedWhenTheReadReturns() async throws {
+        let registry = HostRegistry(fileURL: url, secrets: secrets)
+        let gpu = try registry.add(key: .mint(), name: "gpu", serviceName: "gpu", endpoints: ["10.0.0.6:47410"])
+        secrets.hold(gpu.slot)
+        held.append(gpu.slot)
+        let service = HostService(registry: registry, controllerName: "c", dial: dialer, clock: clock)
+        service.start()
+
+        service.setEndpoints(slot: gpu.slot, ["10.0.0.7:47410"])
+        XCTAssertEqual(dialer.connections.count, 0)
+
+        secrets.release(gpu.slot)
+        try await waitUntil { self.dials(to: "10.0.0.7:47410").count == 1 }
+        XCTAssertEqual(dials(to: "10.0.0.6:47410").count, 0, "never dialled the stale address")
+        XCTAssertEqual(secrets.reads(of: gpu.slot), 1)
+        service.forget(slot: gpu.slot)
+    }
+}
