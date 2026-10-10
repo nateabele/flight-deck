@@ -416,17 +416,25 @@ extension Workspace {
         if !present() {
             Self.clearStaleLocks(in: cache)
             let env = SubmoduleURL.fetchEnvironment(allowFile: allowFile)
+            // git's own protocol has no low-speed limit and no keepalive, so a server that
+            // accepts and goes quiet held the fetch for the whole `longTimeout`. For it,
+            // progress is asked for and watched: silent for `submoduleStallTimeout`, it dies.
+            let watched = url.lowercased().hasPrefix("git://")
+            let stall = watched ? submoduleStallTimeout : nil
+            let verbosity = watched ? ["--progress"] : ["-q"]
             /// false: the server refused exactly this request (asked only when `refusable`).
             func fetch(_ args: [String], refusable: Bool) throws -> Bool {
                 do {
-                    try git.run(SubmoduleURL.fetchConfig + ["fetch", "-q", "--no-write-fetch-head"] + args,
-                                in: cache, env: env, timeout: GitRunner.longTimeout)
+                    try git.run(SubmoduleURL.fetchConfig + ["fetch"] + verbosity + ["--no-write-fetch-head"] + args,
+                                in: cache, env: env, timeout: GitRunner.longTimeout, stall: stall)
                     return true
                 } catch GitError.failed(_, _, let stderr) {
                     if refusable && SubmoduleURL.refusedOneCommit(stderr) { return false }
                     throw SyncError.submodule(path: path, problem: .fetchFailed(url: url, detail: SubmoduleURL.failureDetail(stderr)))
                 } catch GitError.timedOut(_, let seconds) {
                     throw SyncError.submodule(path: path, problem: .fetchFailed(url: url, detail: "timed out after \(Int(seconds))s"))
+                } catch GitError.stalled(_, let seconds) {
+                    throw SyncError.submodule(path: path, problem: .fetchFailed(url: url, detail: "no progress for \(Int(seconds))s"))
                 }
             }
             // The one commit. Only the server refusing exactly that earns the full fetch; any

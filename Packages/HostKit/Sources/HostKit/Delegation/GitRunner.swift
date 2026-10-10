@@ -12,6 +12,8 @@ public enum GitError: Error, Equatable, CustomStringConvertible {
     case notFound
     case failed(args: [String], status: Int32, stderr: String)
     case timedOut(args: [String], seconds: Double)
+    /// No output on stdout or stderr for `seconds` (`run`'s `stall`), and killed for it.
+    case stalled(args: [String], seconds: Double)
 
     public var description: String {
         switch self {
@@ -20,6 +22,8 @@ public enum GitError: Error, Equatable, CustomStringConvertible {
             return "git \(args.joined(separator: " ")) exited \(status): \(stderr.trimmingCharacters(in: .whitespacesAndNewlines))"
         case .timedOut(let args, let seconds):
             return "git \(args.joined(separator: " ")) timed out after \(Int(seconds))s"
+        case .stalled(let args, let seconds):
+            return "git \(args.joined(separator: " ")) made no progress for \(Int(seconds))s"
         }
     }
 }
@@ -212,18 +216,23 @@ public struct GitRunner: Sendable {
 
     /// Runs `git args` in `dir`. Throws `GitError.failed` for a status outside `accept`, and
     /// `SyncError.gitTooOld` (once per executable, then cached) for git older than 2.40.
+    ///
+    /// `stall` is a progress watchdog: git is killed (its whole group) and `GitError.stalled`
+    /// thrown once stdout and stderr have both been silent that long. Only meaningful for a
+    /// command that reports progress (a `fetch --progress`); `timeout` still caps the whole.
     @discardableResult
     public func run(_ args: [String], in dir: URL? = nil, env extra: [String: String] = [:],
-                    input: Data? = nil, accept: Set<Int32> = [0], timeout: TimeInterval? = nil) throws -> Output {
+                    input: Data? = nil, accept: Set<Int32> = [0], timeout: TimeInterval? = nil,
+                    stall: TimeInterval? = nil) throws -> Output {
         guard let executable else { throw GitError.notFound }
         if GitCancellation.current?.isCancelled == true { throw CancellationError() }
         try Self.requireSupported(executable, environment: environment)
         return try execute(executable, args, in: dir, env: environment.merging(extra) { $1 }, input: input,
-                           accept: accept, timeout: timeout ?? self.timeout)
+                           accept: accept, timeout: timeout ?? self.timeout, stall: stall)
     }
 
     private func execute(_ executable: URL, _ args: [String], in dir: URL?, env: [String: String], input: Data?,
-                         accept: Set<Int32>, timeout: TimeInterval) throws -> Output {
+                         accept: Set<Int32>, timeout: TimeInterval, stall: TimeInterval? = nil) throws -> Output {
         // posix_spawn, not `Process`: git leads a process group of its own on every platform
         // (so a cancel or a timeout reaches ssh and remote helpers with it), starts with no
         // blocked signals, and inherits only its three pipes (see `Spawner.spawnProcess`).
@@ -261,12 +270,23 @@ public struct GitRunner: Sendable {
         // stdout (or the reverse) would otherwise deadlock until the timeout. Closing from the
         // reader, at EOF, also covers the timeout path: a grandchild that outlives a killed git
         // holds the write end, and the read end must stay open until it lets go, then close.
+        // Read in chunks, not to EOF in one call, so the watchdog below can see when the last
+        // byte arrived.
         let drained = DispatchGroup()
+        box.lastOutput = Date()
         for (fd, isOut) in [(out.read, true), (err.read, false)] {
             DispatchQueue.global().async(group: drained) {
-                let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
-                let data = handle.readDataToEndOfFile()
-                box.lock.withLock { if isOut { box.out = data } else { box.err = data } }
+                defer { close(fd) }
+                var chunk = [UInt8](repeating: 0, count: 64 * 1024)
+                while true {
+                    let n = read(fd, &chunk, chunk.count)
+                    if n < 0 && errno == EINTR { continue }
+                    guard n > 0 else { return }
+                    box.lock.withLock {
+                        if isOut { box.out.append(contentsOf: chunk[..<n]) } else { box.err.append(contentsOf: chunk[..<n]) }
+                        box.lastOutput = Date()
+                    }
+                }
             }
         }
         if let inPipe, let input {
@@ -275,7 +295,15 @@ public struct GitRunner: Sendable {
             }
         }
 
-        if exited.wait(timeout: .now() + timeout) == .timedOut {
+        let deadline = Date().addingTimeInterval(timeout)
+        while exited.wait(timeout: .now() + min(1, max(0, deadline.timeIntervalSinceNow))) == .timedOut {
+            if let stall, Date().timeIntervalSince(box.lock.withLock({ box.lastOutput })) >= stall {
+                // Killed outright: a stalled transfer has nothing worth a graceful exit.
+                GitCancellation.kill(pid)
+                _ = exited.wait(timeout: .now() + 2)
+                throw GitError.stalled(args: args, seconds: stall)
+            }
+            guard Date() >= deadline else { continue }
             // The group: git's ssh or helper would otherwise keep the transfer going.
             _ = Foundation.kill(-pid, SIGTERM)
             if exited.wait(timeout: .now() + 2) == .timedOut {
@@ -411,6 +439,7 @@ public struct GitRunner: Sendable {
         var out = Data()
         var err = Data()
         var status: Int32 = 0
+        var lastOutput = Date()
     }
 }
 

@@ -56,6 +56,12 @@ public final class Workspace: WorkspaceStore, @unchecked Sendable {
         set { lock.withLock { _submoduleFetchHook = newValue } }
     }
     private var _submoduleFetchHook: (@Sendable (String) -> Void)?
+    /// How long a `git://` submodule fetch may show no progress before it is killed.
+    var submoduleStallTimeout: TimeInterval {
+        get { lock.withLock { _submoduleStallTimeout } }
+        set { lock.withLock { _submoduleStallTimeout = newValue } }
+    }
+    private var _submoduleStallTimeout: TimeInterval = 120
     /// Test seam: runs as a slot's submodule placement starts, with the slot's path.
     var placementHook: (@Sendable (URL) -> Void)? {
         get { lock.withLock { _placementHook } }

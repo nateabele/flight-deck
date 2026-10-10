@@ -580,6 +580,40 @@ final class SubmoduleSyncTests: XCTestCase {
         XCTAssertTrue(error is CancellationError, "\(String(describing: error))")
     }
 
+    /// git's own protocol has no low-speed limit and no keepalive: a `git://` server that
+    /// accepts and then says nothing held the fetch, the cache lock and the run's slot for the
+    /// hour-long cap. A watchdog kills the fetch once it shows no progress for the limit
+    /// (120 s; 2 s here).
+    func testStalledGitProtocolFetchIsKilled() async throws {
+        let scratch = TempRepo.scratch()
+        let (app, _, _) = try makeApp(in: scratch)
+        let store = Workspace(root: scratch.appendingPathComponent("host"))
+        store.submoduleStallTimeout = 2
+        let pushed = try await push(app, to: store)
+        let stub = try TCPStub(.hang)
+        defer { stub.stop() }
+        let url = "git://127.0.0.1:\(stub.port)/lib.git"
+        let ref = repointed(pushed, to: url)
+        let controller = self.controller
+
+        let ended = Done()
+        let checkout = Task {
+            defer { ended.set() }
+            _ = try await store.checkout(controller: controller, ref: ref, pin: false)
+        }
+        let stopped = await ended.wait(seconds: 20)
+        let died = stub.disconnected == stub.connections && stub.connections > 0
+        stub.stop()   // frees a fetch the watchdog missed, so a failure here does not hang
+        XCTAssertTrue(stopped, "the stalled fetch outlived the watchdog")
+        XCTAssertTrue(died, "the stalled git kept its connection")
+        XCTAssertEqual(stub.connections, 1, "a stall is final, not retried as a full fetch")
+        let error = await thrown { try await checkout.value }
+        guard case .submodule(path: "lib", problem: .fetchFailed(url: url, let detail))? = error as? SyncError else {
+            return XCTFail("\(String(describing: error))")
+        }
+        XCTAssertTrue(detail.contains("no progress"), detail)
+    }
+
     func testFetchesAreBoundedAndNeverPrompt() {
         XCTAssertEqual(SubmoduleURL.fetchConfig, ["-c", "http.lowSpeedLimit=1000", "-c", "http.lowSpeedTime=60"])
         let ssh = SubmoduleURL.fetchEnvironment(allowFile: true)["GIT_SSH_COMMAND"] ?? ""
