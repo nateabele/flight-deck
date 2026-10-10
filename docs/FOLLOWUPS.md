@@ -2582,10 +2582,34 @@ container; **nothing has run against a real second machine.**
 - **Revoking a controller does not delete its `workspaces/<slot>/`** on the host (spec §3.5). Its
   checkouts, and any `include`d secret in them, stay until removed by hand or by
   `flightdeck host prune`.
-- **Submodules are refused** (`submodules_unsupported`), like LFS: decided during the build to keep
-  sync bounded. Spec §4.2 step 4 (recursive submodules) is deferred. **This includes Flight Deck's
-  own repo** (`vendor/ghostty`, `vendor/boringssl`), so `flightdeck run` from any Flight Deck
-  worktree exits 125 until submodules are supported.
+- **Submodules are refused — FIXED (2026-10-08).** Delegation now syncs submodules for the common
+  case (ARCHITECTURE.md, "Submodules"): the controller pins each gitlink with its resolved URL, the
+  host fetches it into a per-URL cache and places it at its pin, nested ones too. What stays out
+  of v1, by decision:
+  - **A dirty submodule is refused** (`submodule_dirty`), and so is one whose commit no
+    remote-tracking branch or tag contains (`submodule_unpushed`). Only the pinned commit
+    travels, so uncommitted work inside a submodule cannot reach the host. Sending it (a
+    snapshot commit per submodule, bundled like the superproject's) is the next step if it
+    is ever needed.
+  - **The unpushed check reads local refs only.** A commit that is on the remote but newer than
+    the last `fetch` in the submodule is refused until `git -C <path> fetch`; a commit only a
+    local tag holds passes and fails later, on the host, as `submodule_fetch_failed`.
+  - **Changes a run makes inside a submodule stay on the host.** They are never in the result,
+    `flightdeck diff` or `apply`; the run's output ends with a warning naming the submodule.
+  - **The host fetches with its own access.** Its git ignores `~/.gitconfig`
+    (`GitRunner(isolated: true)`), so a credential helper configured there is not used: a
+    private `https` submodule fails as `submodule_fetch_failed`. `ssh` URLs use the host
+    user's keys and agent, in batch mode (no prompts). Credentials in the controller's URLs
+    are stripped before they travel, by design, so the controller's token never helps.
+  - **A `git://` fetch has no stall bound of its own.** http has a low-speed limit and ssh has
+    timeouts and keepalives, but git's own protocol has neither: a hung `git://` server holds
+    the fetch until `longTimeout` (an hour) or the run is cancelled, which now kills it.
+  - **Submodule caches are not `gc`ed.** `host ls --disk` lists them and `host prune` deletes
+    the ones no checkout uses (FIXED 2026-10-08), but the hourly sweep does not run `gc` in
+    them, so a cache a checkout still uses keeps every commit any slot ever pinned.
+  - **Unverified across machines.** Tested with real git in temp dirs (HostKit's
+    `SubmoduleSyncTests`), not with a real second host, and not with this repo, whose
+    `vendor/boringssl` URL is on googlesource.com: a host has to reach both that and GitHub.
 - **Phones cannot delegate.** Every `delegate.*` from a paired phone is `out_of_scope`: the phone
   has no UI for it, and delegation runs code on hosts. A phone feature needs that decision
   revisited first.
