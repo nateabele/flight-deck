@@ -43,6 +43,30 @@ public final class SpentEnrollments: @unchecked Sendable {
         return true
     }
 
+    /// Seeds the list with controllers this host already holds, as hostd starts. A slot
+    /// enrolled by a build older than this list was never recorded, so revoking it inside its
+    /// payload's lifetime would leave that payload replayable; seeding every held slot closes
+    /// that upgrade window. Slots paired by code have no payload, and recording them is harmless.
+    ///
+    /// The time given is when the slot was enrolled (`pairedAt`), which can be up to
+    /// `EnrollmentPayload.clockSkew` *before* the payload's own issue time, when the Mac's clock
+    /// ran ahead of this one; the record is kept as if issued `clockSkew` later, so it never
+    /// expires before the payload does. Slots already spent keep their entry, slots whose
+    /// payload is long dead are not written, and nothing is written when nothing changes.
+    public func recordEnrolled(_ slots: [(slot: UUID, enrolledAt: Date)], now: Date) throws {
+        lock.lock(); defer { lock.unlock() }
+        let entries = try load()
+        var kept = entries.filter { !Self.expired($0, now: now) }
+        var changed = kept.count != entries.count
+        for (slot, enrolledAt) in slots where !kept.contains(where: { $0.slot == slot }) {
+            let entry = Entry(slot: slot, issuedAt: enrolledAt.addingTimeInterval(EnrollmentPayload.clockSkew))
+            guard !Self.expired(entry, now: now) else { continue }
+            kept.append(entry)
+            changed = true
+        }
+        if changed { try persist(kept) }
+    }
+
     /// Undoes a `spend` whose enrollment then failed to store, so a disk error does not burn a
     /// machine's only enrollment file.
     public func forget(_ slot: UUID) throws {

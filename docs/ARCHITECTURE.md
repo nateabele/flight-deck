@@ -204,7 +204,8 @@ the running `serve` as the admin socket's `enroll` request, because `serve` read
 future" means the VM clock is behind, and is re-checked for 2 minutes, then kept), a reused slot is
 refused even after its controller is revoked (redeemed slots are recorded in
 `<state root>/enrollments-spent.json`, `0600`, pruned once their payload is past 30 minutes; an
-unreadable list refuses every enrollment rather than guess), and the threshold is kept in `<state root>/idle.json` (the Mac hostd refuses `enroll`;
+unreadable list refuses every enrollment rather than guess; hostd seeds it at start with every
+controller it already holds, so slots enrolled before the list existed are covered too), and the threshold is kept in `<state root>/idle.json` (the Mac hostd refuses `enroll`;
 `hostd-install.sh --no-pair` installs without arming a code for that path). The boundary is
 the filesystem: a `0600` unix socket in a directory the user owns and that is not group- or
 other-writable, checked before bind. It is not authenticated beyond that, so anything running as the

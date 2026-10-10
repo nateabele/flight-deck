@@ -68,4 +68,38 @@ final class SpentEnrollmentsTests: XCTestCase {
         try spent.forget(slot)
         XCTAssertTrue(try spent.spend(slot: slot, issuedAt: t0, now: t0))
     }
+
+    /// hostd seeds the list at start with every controller it already holds, so a slot enrolled
+    /// by a build older than this list is still refused after a revoke. Only slots whose payload
+    /// could still be live are written; the rest would only be pruned again.
+    func testRecordEnrolledSeedsLiveSlotsOnce() throws {
+        let spent = SpentEnrollments(root: root)
+        let recent = UUID(), stale = UUID(), already = UUID()
+        XCTAssertTrue(try spent.spend(slot: already, issuedAt: t0, now: t0))
+        try spent.recordEnrolled([(recent, t0.addingTimeInterval(-60)),
+                                  (stale, t0.addingTimeInterval(-3 * EnrollmentPayload.maxAge)),
+                                  (already, t0)], now: t0)
+        XCTAssertFalse(try spent.spend(slot: recent, issuedAt: t0, now: t0), "seeded")
+        XCTAssertFalse(try spent.spend(slot: already, issuedAt: t0, now: t0), "kept")
+        let text = String(decoding: try Data(contentsOf: root.appendingPathComponent("enrollments-spent.json")), as: UTF8.self)
+        XCTAssertFalse(text.contains(stale.uuidString), "a slot whose payload is long dead is not written")
+        XCTAssertEqual(text.components(separatedBy: already.uuidString).count - 1, 1, "no duplicate entry")
+    }
+
+    /// The seed time is when the slot was enrolled, which can be up to `clockSkew` *before* the
+    /// payload's own issue time (a Mac clock ahead of this one). The record must outlive the
+    /// payload anyway, so it is kept for `clockSkew` past `maxAge` from that time.
+    func testASeededSlotOutlivesAPayloadIssuedAheadOfThisClock() throws {
+        let spent = SpentEnrollments(root: root), slot = UUID()
+        try spent.recordEnrolled([(slot, t0)], now: t0)
+        let lastValid = t0.addingTimeInterval(EnrollmentPayload.clockSkew + EnrollmentPayload.maxAge)
+        XCTAssertFalse(try spent.spend(slot: slot, issuedAt: t0, now: lastValid))
+    }
+
+    /// A host with nothing recent to seed (every controller paired by code, or long ago) gets
+    /// no file it never needed.
+    func testRecordEnrolledWithNothingLiveWritesNothing() throws {
+        try SpentEnrollments(root: root).recordEnrolled([(UUID(), t0.addingTimeInterval(-7200))], now: t0)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("enrollments-spent.json").path))
+    }
 }

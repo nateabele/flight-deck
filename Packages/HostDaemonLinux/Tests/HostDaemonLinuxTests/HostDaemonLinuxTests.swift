@@ -139,6 +139,33 @@ final class AdminEnrollTests: XCTestCase {
         XCTAssertTrue(restarted.store.all().isEmpty)
     }
 
+    /// The upgrade window: a slot enrolled by a hostd older than the spent list was never
+    /// recorded, so after a revoke its payload could be replayed until it aged out. hostd seeds
+    /// the list with every controller it holds when it starts.
+    func testASlotEnrolledBeforeTheSpentListIsRefusedAfterARevoke() throws {
+        let (_, root) = try makeTestHostd()
+        let p = payload()
+        // What the older build left behind: the controller in controllers.json, no spent list.
+        try ControllerStore(root: root).add(PairedController(slot: p.slot, name: "ctl",
+                                                             secret: Data(repeating: 0x11, count: 32), pairedAt: Date()))
+        let upgraded = LinuxHostd(root: root, port: 47499, hostName: "linux-test")
+        XCTAssertEqual(upgraded.handle(.revoke(slot: p.slot)), .ok)
+        guard case .failed(let why) = upgraded.handle(.enroll(p)) else { return XCTFail("replayed after upgrade") }
+        XCTAssertTrue(why.contains("already used"), why)
+        XCTAssertTrue(upgraded.store.all().isEmpty)
+    }
+
+    /// Controllers paired long ago (or by code) have no live payload to guard: starting must not
+    /// write a spent list for them, nor refuse anything new.
+    func testStartingWithOnlyOldControllersWritesNoSpentList() throws {
+        let (_, root) = try makeTestHostd()
+        try ControllerStore(root: root).add(PairedController(slot: UUID(), name: "old", secret: Data(repeating: 1, count: 32),
+                                                             pairedAt: Date(timeIntervalSinceNow: -86_400)))
+        let hostd = LinuxHostd(root: root, port: 47499, hostName: "linux-test")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("enrollments-spent.json").path))
+        XCTAssertEqual(hostd.handle(.enroll(payload())), .ok)
+    }
+
     /// Fail closed: an unreadable spent list cannot prove the slot unspent.
     func testAnUnreadableSpentListRefusesEnrollment() throws {
         let (hostd, root) = try makeTestHostd()

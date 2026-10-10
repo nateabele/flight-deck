@@ -96,6 +96,14 @@ final class LinuxHostd: @unchecked Sendable {
                               delegation: delegation, idle: delegation.idle)
         knownSlots = Set(store.all().map(\.slot))
         _idleThreshold = IdleFile.load(root: root)
+        // Every slot already held counts as spent, so one enrolled by a hostd that predates the
+        // spent list cannot be enrolled again from its payload after a revoke. A failure here
+        // costs nothing extra: `enroll` reads the same list and refuses while it is unreadable.
+        do {
+            try spent.recordEnrolled(store.all().map { ($0.slot, $0.pairedAt) }, now: Date())
+        } catch {
+            FileHandle.standardError.write(Data("could not record enrolled slots as spent: \(error)\n".utf8))
+        }
     }
 
     /// This box's `host:port` list for `helloAck`, from a `getifaddrs` walk: loopback and
