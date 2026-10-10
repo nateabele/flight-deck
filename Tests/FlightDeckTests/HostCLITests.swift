@@ -203,6 +203,8 @@ final class HostCLITests: XCTestCase {
         let states: [(HostLinkState, String)] = [
             (.online(hostName: "m"), "online"), (.offline(lastSeen: nil), "offline"),
             (.connecting, "connecting"), (.refused("r"), "refused"),
+            // Still offline to a script; the reason travels in `detail`.
+            (.keyUnavailable("k"), "offline"),
         ]
         for (state, spelling) in states {
             XCTAssertEqual(HostProjection.row(record, state).status, spelling)

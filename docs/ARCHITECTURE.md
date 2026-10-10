@@ -229,6 +229,15 @@ controllers' PSKs are in `controllers.json`, mode `0600` in a `0700` state root,
 or `~/.local/share/flightdeck-hostd`). A pairing is one slot per controller; revoking closes that
 controller's live connection within a second and refuses its next connect.
 
+**Reading the keys at launch.** `HostService.start()` reads each host's PSK on its own GCD thread
+and opens that host's link as soon as its read returns. A read can block for as long as a Keychain
+prompt stays unanswered: the items are in the legacy login keychain, whose ACL trusts the signing
+identity that created them, so a build signed by a different identity (or team) prompts. After
+`HostService.keyReadPatience` (3 s) the host shows `.keyUnavailable("waiting for Keychain access:
+…")`. A failed read (prompt denied, keychain locked) is retried after 5, 15, 30, 60, 120 and then
+every 300 s, never given up; only a *missing* item is final (`.refused`, re-pair). `host ls`
+reports `.keyUnavailable` as status `offline` with the reason in `detail`.
+
 **Placement, and the open question.** The macOS hostd is a LaunchAgent, so it runs in the GUI login
 session (it stops at logout, which the Hosting tab says). That placement is the spec's bet for
 sub-project C: XCTest UI runs need a GUI session. **That bet (probe P3) is unverified** until C
