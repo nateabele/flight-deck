@@ -1043,8 +1043,8 @@ private struct SpawnedProcess {
 /// `addclosefrom_np(3)` on glibc ≥ 2.34), and on Linux the parent's own fds are created
 /// close-on-exec atomically (`pipe2`, `O_CLOEXEC`), so a `Process` spawned elsewhere in hostd
 /// cannot catch one mid-setup either.
-private enum Spawner {
-    static func spawn(shell: String, command: String, cwd: String, env: [String: String],
+enum Spawner {
+    fileprivate static func spawn(shell: String, command: String, cwd: String, env: [String: String],
                       pty: TerminalSize?) throws -> SpawnedProcess {
         #if canImport(Glibc)
         var actions = posix_spawn_file_actions_t()
@@ -1153,6 +1153,56 @@ private enum Spawner {
         return SpawnedProcess(pid: pid, fds: parentFDs, ptySlave: ptySlave)
     }
 
+    /// `executable` with `argv` (its own argv[0] included), in `cwd`, with `fds` as its stdin,
+    /// stdout and stderr and nothing else (`POSIX_SPAWN_CLOEXEC_DEFAULT` on Darwin,
+    /// `addclosefrom_np(3)` on glibc), leading a process group of its own, with an empty signal
+    /// mask and default dispositions. For `GitRunner`, which used `Process` and so got none of
+    /// these for certain: a group only as Foundation's own choice (measured on Linux, assumed
+    /// on Darwin), the spawning thread's blocked signals (TERM, under XCTest on Linux), and
+    /// every descriptor Foundation left inheritable, which kept git's exit unseen for as long
+    /// as any descendant (ssh, a credential helper) lived.
+    static func spawnProcess(_ executable: String, _ argv: [String], env: [String: String], cwd: String?,
+                             stdin: Int32, stdout: Int32, stderr: Int32) throws -> pid_t {
+        #if canImport(Glibc)
+        var actions = posix_spawn_file_actions_t()
+        var attr = posix_spawnattr_t()
+        #else
+        var actions: posix_spawn_file_actions_t?
+        var attr: posix_spawnattr_t?
+        #endif
+        posix_spawn_file_actions_init(&actions)
+        posix_spawnattr_init(&attr)
+        defer {
+            posix_spawn_file_actions_destroy(&actions)
+            posix_spawnattr_destroy(&attr)
+        }
+        posix_spawn_file_actions_adddup2(&actions, stdin, 0)
+        posix_spawn_file_actions_adddup2(&actions, stdout, 1)
+        posix_spawn_file_actions_adddup2(&actions, stderr, 2)
+        if let cwd, posix_spawn_file_actions_addchdir_np(&actions, cwd) != 0 { throw RunnerError.spawnFailed(errno) }
+        #if canImport(Glibc)
+        guard posix_spawn_file_actions_addclosefrom_np(&actions, 3) == 0 else { throw RunnerError.spawnFailed(errno) }
+        #endif
+        var all = sigset_t(), none = sigset_t()
+        sigfillset(&all)
+        sigemptyset(&none)
+        posix_spawnattr_setsigdefault(&attr, &all)
+        posix_spawnattr_setsigmask(&attr, &none)
+        posix_spawnattr_setpgroup(&attr, 0)
+        var flags = Int32(POSIX_SPAWN_SETSIGDEF) | Int32(POSIX_SPAWN_SETSIGMASK) | Int32(POSIX_SPAWN_SETPGROUP)
+        #if !canImport(Glibc)
+        flags |= Int32(POSIX_SPAWN_CLOEXEC_DEFAULT)
+        #endif
+        posix_spawnattr_setflags(&attr, Int16(flags))
+        var pid: pid_t = 0
+        let envp = env.map { "\($0.key)=\($0.value)" }
+        let rc = withCStrings(argv) { cargv in
+            withCStrings(envp) { cenv in posix_spawn(&pid, executable, &actions, &attr, cargv, cenv) }
+        }
+        guard rc == 0 else { throw RunnerError.spawnFailed(rc) }
+        return pid
+    }
+
     /// Blocks until `pid` exits.
     static func wait(_ pid: pid_t) -> RunExit {
         var status: Int32 = 0
@@ -1165,7 +1215,7 @@ private enum Spawner {
         return low == 0 ? .code((status >> 8) & 0xff) : .signal(low)
     }
 
-    private static func makePipe() throws -> (read: Int32, write: Int32) {
+    static func makePipe() throws -> (read: Int32, write: Int32) {
         var fds: [Int32] = [0, 0]
         #if canImport(Glibc)
         guard Libc.pipe2(&fds, O_CLOEXEC) == 0 else { throw RunnerError.spawnFailed(errno) }
@@ -1189,7 +1239,7 @@ private enum Spawner {
         return fd
     }
 
-    private static func withCStrings<R>(_ strings: [String], _ body: ([UnsafeMutablePointer<CChar>?]) -> R) -> R {
+    static func withCStrings<R>(_ strings: [String], _ body: ([UnsafeMutablePointer<CChar>?]) -> R) -> R {
         var cstrings = strings.map { strdup($0) }
         cstrings.append(nil)
         defer { for p in cstrings { free(p) } }

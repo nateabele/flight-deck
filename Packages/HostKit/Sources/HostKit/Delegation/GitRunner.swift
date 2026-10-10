@@ -1,6 +1,6 @@
 import Foundation
 
-// The sync engine's only door to git (spec §4): the `git` CLI through `Process`, never
+// The sync engine's only door to git (spec §4): the `git` CLI through `posix_spawn`, never
 // libgit2, so the controller and both hosts run the same tool the user's own repo was made
 // with. Every call is synchronous and may block for as long as git takes (a first sync of a big
 // repo is minutes), which is why `Snapshotter`, `BundleMaker`, `Workspace` and `ResultApplier`
@@ -200,9 +200,10 @@ public struct GitRunner: Sendable {
             .first { FileManager.default.isExecutableFile(atPath: $0.path) }
     }
 
-    /// The most paths one command line carries. NSTask refuses more than 4,096 arguments with an
-    /// Objective-C exception Swift cannot catch (the process aborts), and long paths reach the
-    /// kernel's ARG_MAX sooner still; a path list longer than this is split or sent on stdin.
+    /// The most paths one command line carries. Long paths reach the kernel's ARG_MAX, and an
+    /// over-long command line fails the whole call; a path list longer than this is split or
+    /// sent on stdin. (It was also NSTask's limit of 4,096 arguments, an uncatchable abort,
+    /// while git ran through `Process`; the controller's other `Process` callers still have it.)
     static let argumentBatch = 500
 
     /// For the calls that move a whole repository: a first `bundle create`, its `fetch`, and a
@@ -223,57 +224,73 @@ public struct GitRunner: Sendable {
 
     private func execute(_ executable: URL, _ args: [String], in dir: URL?, env: [String: String], input: Data?,
                          accept: Set<Int32>, timeout: TimeInterval) throws -> Output {
-        let p = Process()
-        p.executableURL = executable
-        p.arguments = args
-        if let dir { p.currentDirectoryURL = dir }
-        p.environment = env
-        let out = Pipe(), err = Pipe()
-        p.standardOutput = out
-        p.standardError = err
-        let inPipe = input.map { _ in Pipe() }
-        p.standardInput = inPipe ?? FileHandle.nullDevice
-        let exited = DispatchSemaphore(value: 0)
-        p.terminationHandler = { _ in exited.signal() }
-        try p.run()
+        // posix_spawn, not `Process`: git leads a process group of its own on every platform
+        // (so a cancel or a timeout reaches ssh and remote helpers with it), starts with no
+        // blocked signals, and inherits only its three pipes (see `Spawner.spawnProcess`).
+        let out = try Spawner.makePipe(), err = try Spawner.makePipe()
+        let inPipe = try input.map { _ in try Spawner.makePipe() }
+        // Above 2, like the pipes: a hostd started with stdin closed gets fd 0 back here, and
+        // `dup2(0, 0)` would leave it close-on-exec, so git would start with no stdin at all.
+        let devNull = inPipe == nil ? try Spawner.cloexecAboveStdio(open("/dev/null", O_RDONLY | O_CLOEXEC)) : -1
+        let pid: pid_t
+        do {
+            pid = try Spawner.spawnProcess(executable.path, [executable.path] + args, env: env, cwd: dir?.path,
+                                           stdin: inPipe?.read ?? devNull, stdout: out.write, stderr: err.write)
+        } catch {
+            for fd in [out.read, out.write, err.read, err.write, inPipe?.read ?? -1, inPipe?.write ?? -1, devNull] where fd >= 0 {
+                close(fd)
+            }
+            throw error
+        }
+        // The parent's copies of the child's ends: kept open, a pipe never reaches EOF.
+        for fd in [out.write, err.write, inPipe?.read ?? -1, devNull] where fd >= 0 { close(fd) }
         let cancel = GitCancellation.current
-        if let cancel, !cancel.started(p.processIdentifier) { GitCancellation.kill(p.processIdentifier) }
-        defer { cancel?.ended(p.processIdentifier) }
+        if let cancel, !cancel.started(pid) { GitCancellation.kill(pid) }
+        defer { cancel?.ended(pid) }
+
+        let exited = DispatchSemaphore(value: 0)
+        let box = Box()
+        Thread.detachNewThread {
+            var status: Int32 = 0
+            while waitpid(pid, &status, 0) == -1 && errno == EINTR {}
+            box.lock.withLock { box.status = status }
+            exited.signal()
+        }
 
         // Both pipes drain on their own threads: a git that fills stderr while we block on
-        // stdout (or the reverse) would otherwise deadlock until the timeout. Each reader closes
-        // its own read end once it hits EOF: Foundation never closes them, and two leaked
-        // descriptors per call took a test process past 800 open fds, where Linux corelibs'
-        // `/proc/self/fd` walk in `Process.run` segfaults. Closing from the reader, not here,
-        // also covers the timeout path: a grandchild that outlives a killed git holds the write
-        // end, and the read end must stay open until it lets go, then close.
-        let box = Box()
+        // stdout (or the reverse) would otherwise deadlock until the timeout. Closing from the
+        // reader, at EOF, also covers the timeout path: a grandchild that outlives a killed git
+        // holds the write end, and the read end must stay open until it lets go, then close.
         let drained = DispatchGroup()
-        for (handle, isOut) in [(out.fileHandleForReading, true), (err.fileHandleForReading, false)] {
+        for (fd, isOut) in [(out.read, true), (err.read, false)] {
             DispatchQueue.global().async(group: drained) {
+                let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
                 let data = handle.readDataToEndOfFile()
-                try? handle.close()
                 box.lock.withLock { if isOut { box.out = data } else { box.err = data } }
             }
         }
         if let inPipe, let input {
             DispatchQueue.global().async {
-                Self.writeWithoutSIGPIPE(input, to: inPipe.fileHandleForWriting)
+                Self.writeWithoutSIGPIPE(input, to: FileHandle(fileDescriptor: inPipe.write, closeOnDealloc: false))
             }
         }
 
         if exited.wait(timeout: .now() + timeout) == .timedOut {
-            p.terminate()
+            // The group: git's ssh or helper would otherwise keep the transfer going.
+            _ = Foundation.kill(-pid, SIGTERM)
             if exited.wait(timeout: .now() + 2) == .timedOut {
-                kill(p.processIdentifier, SIGKILL)
+                GitCancellation.kill(pid)
                 _ = exited.wait(timeout: .now() + 2)
             }
             throw GitError.timedOut(args: args, seconds: timeout)
         }
         // A grandchild (a credential helper, a filter) still holding a pipe must not pin us.
         _ = drained.wait(timeout: .now() + 5)
-        let (stdout, stderr) = box.lock.withLock { (box.out, box.err) }
-        let status = p.terminationReason == .exit ? p.terminationStatus : 128 + p.terminationStatus
+        let (stdout, stderr, raw) = box.lock.withLock { (box.out, box.err, box.status) }
+        // WIFEXITED / WTERMSIG by hand (Swift imports neither); a signal reads as 128 + n,
+        // as `Process` reported it.
+        let signal = raw & 0x7f
+        let status = signal == 0 ? (raw >> 8) & 0xff : 128 + signal
         let result = Output(status: status, stdout: stdout, stderr: String(decoding: stderr, as: UTF8.self))
         if cancel?.isCancelled == true, !accept.contains(status) { throw CancellationError() }
         guard accept.contains(status) else {
@@ -393,6 +410,7 @@ public struct GitRunner: Sendable {
         let lock = NSLock()
         var out = Data()
         var err = Data()
+        var status: Int32 = 0
     }
 }
 
@@ -425,11 +443,10 @@ final class GitCancellation: @unchecked Sendable {
 
     func ended(_ pid: pid_t) { _ = lock.withLock { running.remove(pid) } }
 
-    /// SIGKILL to git's process group (Foundation starts each child as a group leader) and to
-    /// git itself. Not TERM: a child inherits the blocked-signal mask of the thread that
-    /// spawned it, and a hostd thread may block TERM (measured: a `Process` child under XCTest
-    /// on Linux has it blocked), so a TERM could go unseen. What a killed fetch leaves behind
-    /// (lock files) is cleared by the next fetch into the same cache.
+    /// SIGKILL to git's process group (`Spawner.spawnProcess` makes git its leader) and to
+    /// git itself. Not TERM: git now starts with no blocked signals, but its ssh or helper may
+    /// block or catch TERM, and a cancel must end the transfer now. What a killed fetch leaves
+    /// behind (lock files) is cleared by the next fetch into the same cache.
     static func kill(_ pid: pid_t) {
         _ = Foundation.kill(-pid, SIGKILL)
         _ = Foundation.kill(pid, SIGKILL)
