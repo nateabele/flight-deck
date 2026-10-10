@@ -267,6 +267,42 @@ final class SubmoduleSyncTests: XCTestCase {
         XCTAssertEqual(try head(second, "lib"), tip)
     }
 
+    /// The hourly `gc` reaches the submodule caches too. Each placed commit is held by a
+    /// `refs/fd/pins/` ref, and nothing ever deleted one, so a cache a checkout still used kept
+    /// every commit any slot had pinned. Now a pin no live worktree has checked out is dropped
+    /// (its objects become collectable by the `gc --auto` that follows); the live one stays,
+    /// and the checkout still works.
+    func testGCReleasesPinsNoCheckoutStillUses() async throws {
+        let scratch = TempRepo.scratch()
+        let (app, lib, old) = try makeApp(in: scratch)
+        let store = Workspace(root: scratch.appendingPathComponent("host"), poolSize: 1)
+        let first = try await store.checkout(controller: controller, ref: try await push(app, to: store), pin: false)
+        await store.release(first)
+        let tip = try lib.work.git("rev-parse", "HEAD")
+        let sub = app.url.appendingPathComponent("lib")
+        try TempRepo.git(["fetch", "-q", "origin"], in: sub)
+        try TempRepo.git(["checkout", "-q", tip], in: sub)
+        try app.commitAll()
+        let second = try await store.checkout(controller: controller, ref: try await push(app, to: store), pin: false)
+        XCTAssertEqual(second.slot, first.slot)
+
+        let caches = store.submoduleCaches(controller: controller)
+        let cache = caches.appendingPathComponent(try XCTUnwrap(
+            FileManager.default.contentsOfDirectory(atPath: caches.path).first))
+        func pins() throws -> [String] {
+            try TempRepo.git(["for-each-ref", "--format=%(refname:lstrip=3)", "refs/fd/pins/"], in: cache)
+                .split(separator: "\n").map(String.init).sorted()
+        }
+        XCTAssertEqual(try pins(), [old, tip].sorted(), "both pins held before the sweep")
+
+        try await store.gc()
+
+        XCTAssertEqual(try pins(), [tip], "the pin the slot moved off is released; the live one stays")
+        XCTAssertEqual(try head(second, "lib"), tip)
+        XCTAssertEqual(text(second, "lib/lib.txt"), "v2\n")
+        XCTAssertEqual(try TempRepo.git(["status", "--porcelain"], in: second.path), "")
+    }
+
     /// A submodule removed from the superproject goes from the slot too. git leaves a
     /// populated submodule directory behind on checkout, and the next result's `add -A` would
     /// commit it back as a gitlink the user deleted.

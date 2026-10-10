@@ -2606,7 +2606,10 @@ container; **nothing has run against a real second machine.**
     the fetch until `longTimeout` (an hour) or the run is cancelled, which now kills it.
   - **Submodule caches are not `gc`ed.** `host ls --disk` lists them and `host prune` deletes
     the ones no checkout uses (FIXED 2026-10-08), but the hourly sweep does not run `gc` in
-    them, so a cache a checkout still uses keeps every commit any slot ever pinned.
+    them, so a cache a checkout still uses keeps every commit any slot ever pinned. **FIXED
+    (2026-10-10):** the hourly `Workspace.gc` now visits each cache under its lock, deletes the
+    `refs/fd/pins/` refs no live worktree has checked out, and runs `gc --auto` there. A commit
+    a full fetch brought in under `refs/fd/remote/` stays reachable from those refs.
   - **Unverified across machines.** Tested with real git in temp dirs (HostKit's
     `SubmoduleSyncTests`), not with a real second host, and not with this repo, whose
     `vendor/boringssl` URL is on googlesource.com: a host has to reach both that and GitHub.

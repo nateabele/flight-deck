@@ -337,6 +337,39 @@ extension Workspace {
         }
     }
 
+    /// The hourly sweep for every controller's submodule caches, from `gc`. Each placed commit
+    /// is held by `refs/fd/pins/<commit>`, and nothing released one, so a cache a checkout
+    /// still used kept every commit any slot had ever pinned. Here a pin no live worktree has
+    /// checked out is deleted, and `gc --auto` then collects as it does for the stores. Under
+    /// the cache's lock, like placement, which fetches, pins and adds its worktree in one hold:
+    /// a pin is never dropped between its fetch and its worktree. A worktree's own `HEAD` keeps
+    /// its commit reachable for `gc` either way; the pin only ever mattered inside that hold.
+    func collectSubmoduleCaches() throws {
+        let fm = FileManager.default
+        let base = root.appendingPathComponent("submodules")
+        for controller in (try? fm.contentsOfDirectory(atPath: base.path)) ?? [] {
+            let caches = base.appendingPathComponent(controller)
+            for name in (try? fm.contentsOfDirectory(atPath: caches.path)) ?? [] {
+                let cache = caches.appendingPathComponent(name)
+                try withStore(cache) {
+                    try git.run(["worktree", "prune"], in: cache)
+                    let live = Set(try git.text(["worktree", "list", "--porcelain"], in: cache)
+                        .split(separator: "\n").compactMap { line -> String? in
+                            line.hasPrefix("HEAD ") ? String(line.dropFirst(5)) : nil
+                        })
+                    let pins = try git.text(["for-each-ref", "--format=%(refname:lstrip=3)", "refs/fd/pins/"], in: cache)
+                        .split(separator: "\n").map(String.init)
+                    let stale = pins.filter { !live.contains($0) }
+                    if !stale.isEmpty {
+                        let script = stale.map { "delete refs/fd/pins/\($0)\n" }.joined()
+                        try git.run(["update-ref", "--stdin"], in: cache, input: Data(script.utf8))
+                    }
+                    try git.run(["gc", "--auto", "-q"], in: cache)
+                }
+            }
+        }
+    }
+
     /// After the superproject's checkout: every gitlink in `top`'s `HEAD`, recursively, at its
     /// commit. The commit is the tree's (already verified), never the pin's; the pin supplies
     /// only the URL. A gitlink with no pin (nested in a submodule the controller never

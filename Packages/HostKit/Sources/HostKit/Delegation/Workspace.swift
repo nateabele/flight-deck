@@ -601,7 +601,8 @@ public final class Workspace: WorkspaceStore, @unchecked Sendable {
     }
 
     /// Expires results nobody acked within `resultTTL` (acked ones are already gone), prunes stale
-    /// worktree records, then `git gc --auto` (§4.7). The host calls it periodically.
+    /// worktree records, then `git gc --auto` (§4.7); then the same for the submodule caches,
+    /// releasing pins no checkout uses (`collectSubmoduleCaches`). The host calls it periodically.
     public func gc(now: Date = Date()) async throws {
         let base = root.appendingPathComponent("workspaces")
         try await GitRunner.offload { [self] in
@@ -613,6 +614,7 @@ public final class Workspace: WorkspaceStore, @unchecked Sendable {
                     try withStore(store) { try collect(store, now: now) }
                 }
             }
+            try collectSubmoduleCaches()
         }
     }
 
