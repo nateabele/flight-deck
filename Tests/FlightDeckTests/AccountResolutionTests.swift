@@ -1,11 +1,12 @@
 import XCTest
+import IntakeKit
 @testable import FlightDeck
 
 @MainActor
 final class AccountResolutionTests: XCTestCase {
     private func store(_ accounts: [AgentAccount], projects: [String: ProjectSettings] = [:]) -> PreferencesStore {
         let store = PreferencesStore(persistence: nil)
-        store.preferences.storedAccounts = accounts
+        store.preferences.accounts = accounts
         store.preferences.storedProjectSettings = projects
         return store
     }
@@ -21,7 +22,7 @@ final class AccountResolutionTests: XCTestCase {
 
     func testAnExplicitAssignmentWins() {
         let top = account(.claude, "top"), chosen = account(.claude, "chosen")
-        let store = store([top, chosen], projects: ["/p": ProjectSettings(accounts: [.claude: chosen.id])])
+        let store = store([top, chosen], projects: ["/p": ProjectSettings(accounts: [.claude: .account(chosen.id)])])
         XCTAssertEqual(store.account(for: .claude, project: "/p")?.id, chosen.id)
     }
 
@@ -29,7 +30,7 @@ final class AccountResolutionTests: XCTestCase {
     /// account — resuming under the wrong login would find no conversation and start a fresh one.
     func testADanglingAssignmentIsBrokenNotAFallback() {
         let top = account(.claude, "top")
-        let store = store([top], projects: ["/p": ProjectSettings(accounts: [.claude: UUID()])])
+        let store = store([top], projects: ["/p": ProjectSettings(accounts: [.claude: .account(UUID())])])
         XCTAssertNil(store.account(for: .claude, project: "/p"))
     }
 
@@ -74,7 +75,7 @@ final class AccountResolutionTests: XCTestCase {
 
     func testRemovingAnAccountClearsProjectsThatReferencedIt() {
         let doomed = account(.claude, "doomed"), keep = account(.claude, "keep")
-        let store = store([keep, doomed], projects: ["/p": ProjectSettings(accounts: [.claude: doomed.id])])
+        let store = store([keep, doomed], projects: ["/p": ProjectSettings(accounts: [.claude: .account(doomed.id)])])
         store.markAccountRemoved(id: doomed.id)
         XCTAssertNil(store.preferences.projectSettings["/p"], "the record became empty and was dropped")
         XCTAssertEqual(store.preferences.accounts(for: .claude).map(\.id), [keep.id],
@@ -89,7 +90,7 @@ final class AccountResolutionTests: XCTestCase {
         let claudeChosen = account(.claude, "claude-chosen")
         let store = store(
             [claudeTop, codexTop, claudeChosen],
-            projects: ["/p": ProjectSettings(accounts: [.claude: claudeChosen.id, .codex: UUID()])]
+            projects: ["/p": ProjectSettings(accounts: [.claude: .account(claudeChosen.id), .codex: .account(UUID())])]
         )
         let agents = [
             AgentSettings(id: .claude, options: .claude(FlagSet())),

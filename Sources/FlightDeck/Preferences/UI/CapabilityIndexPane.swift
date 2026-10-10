@@ -9,6 +9,8 @@ import SwiftUI
 /// should name the same snapshot whatever zone it was taken in.
 struct CapabilityIndexPane: View {
     @ObservedObject var service: CapabilityIndexService
+    /// Where the refresh's account assignment lives (`PreferencesStore.indexAccount`).
+    @ObservedObject var preferences: PreferencesStore
     @State private var selectedCell: CellSelection?
     @State private var editing: ManualDraft?
 
@@ -63,6 +65,11 @@ struct CapabilityIndexPane: View {
             Button(service.isRefreshing ? "Refreshing…" : "Refresh now") { service.startRefresh() }
                 .disabled(service.isRefreshing)
                 .accessibilityIdentifier("index-refresh-now")
+            if service.isRefreshing {
+                Button("Stop") { service.cancelRefresh() }
+                    .help("Stop the refresh, keep the current snapshot and give back the account it leased")
+                    .accessibilityIdentifier("index-refresh-stop")
+            }
             Button("Roll back") { service.rollBack() }
                 .disabled(!service.canRollBack || service.isRefreshing)
                 .help("Make the previous snapshot current")
@@ -248,7 +255,7 @@ struct CapabilityIndexPane: View {
                 Text("Hand-entered scores").font(.headline)
                 Spacer()
                 Button("Add…") {
-                    editing = ManualDraft(entry: ManualModelScores(model: ModelRef(harness: "opencode", model: ""), dimensions: [:]),
+                    editing = ManualDraft(entry: ManualModelScores(model: ModelRef(agent: .claude, model: ""), dimensions: [:]),
                                           original: nil)
                 }
                 .accessibilityIdentifier("index-manual-add")
@@ -275,6 +282,16 @@ struct CapabilityIndexPane: View {
     private var agentSection: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text("Refresh agent").font(.headline)
+            // Trailing-aligned like a FlagRow, at the width of the controls row below so the menu
+            // ends where the token cap does rather than at the far edge of the heatmap.
+            HStack {
+                Text("Account")
+                Spacer()
+                AccountAssignmentPicker(options: IndexAccountChoices.options(for: .claude, in: preferences.preferences.accountList),
+                                        selection: $preferences.indexAccount,
+                                        identifier: "index-account-picker")
+            }
+            .frame(width: 476)
             HStack {
                 TextField("Model", text: Binding(get: { service.config.agent.model },
                                                  set: { var a = service.config.agent; a.model = $0; service.setAgent(a) }))
@@ -290,6 +307,8 @@ struct CapabilityIndexPane: View {
                     .frame(width: 120)
             }
             Text("Runs claude -p with web search and fetch only, once per enabled source. Sources left when the token cap is reached keep their previous values and are marked stale.")
+                .font(.caption).foregroundStyle(.secondary)
+            Text("On a pool, the refresh leases the pool's first account under its soft limit and gives it back when the refresh ends. Claude only: every source runs claude.")
                 .font(.caption).foregroundStyle(.secondary)
             Text("The token cap counts all tokens the agent processes, including cached input it re-reads each turn.")
                 .font(.caption).foregroundStyle(.secondary)
@@ -412,7 +431,7 @@ struct ManualScoresEditor: View {
     let save: (ManualModelScores) -> Void
     private let knobs: [String: String]
     @Environment(\.dismiss) private var dismiss
-    @State private var harness: String
+    @State private var agent: AgentID
     @State private var model: String
     @State private var texts: [String: String]
     @State private var inherit: ModelRef?
@@ -422,7 +441,7 @@ struct ManualScoresEditor: View {
         self.knownModels = knownModels
         self.save = save
         self.knobs = entry.model.knobs
-        _harness = State(initialValue: entry.model.harness.rawValue)
+        _agent = State(initialValue: entry.model.agent)
         _model = State(initialValue: entry.model.model)
         _texts = State(initialValue: entry.dimensions.mapValues { String(format: "%.2f", $0) })
         _inherit = State(initialValue: entry.inheritFrom)
@@ -431,7 +450,11 @@ struct ManualScoresEditor: View {
 
     var body: some View {
         Form {
-            TextField("Harness", text: $harness)
+            // A picker, not the free-text field this was while agents were strings: a hand
+            // score for an agent Flight Deck has no case for could never be routed to.
+            Picker("Agent", selection: $agent) {
+                ForEach(AgentID.allCases, id: \.self) { Text($0.displayName).tag($0) }
+            }
             TextField("Model", text: $model)
             Picker("Inherit from", selection: $inherit) {
                 Text("Nothing").tag(ModelRef?.none)
@@ -447,12 +470,12 @@ struct ManualScoresEditor: View {
                 Spacer()
                 Button("Cancel") { dismiss() }
                 Button("Save") {
-                    save(ManualModelScores(model: ModelRef(harness: HarnessID(trimmed(harness)), model: trimmed(model), knobs: knobs),
+                    save(ManualModelScores(model: ModelRef(agent: agent, model: trimmed(model), knobs: knobs),
                                            dimensions: Self.parse(texts), inheritFrom: inherit, discount: discount))
                     dismiss()
                 }
                 .keyboardShortcut(.defaultAction)
-                .disabled(trimmed(harness).isEmpty || trimmed(model).isEmpty)
+                .disabled(trimmed(model).isEmpty)
             }
         }
         .padding(20)

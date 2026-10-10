@@ -1,5 +1,6 @@
 import FleetKit
 import Foundation
+import IntakeKit
 import OSLog
 
 /// Claude conformance. A thin shell over `ClaudeSession`, which stays the single source of
@@ -13,12 +14,17 @@ import OSLog
 struct ClaudeAdapter: AgentAdapter {
     static let id: AgentID = .claude
 
+    /// The headless facet (unify brief R3): the profile planning runs this agent through.
+    nonisolated static var profile: any AgentProfile { AgentProfiles.profile(for: id) }
+
     /// Claude's screen is the one this build can actually read: `InputBar.read` finds its
     /// one-row input box, `ChoiceDialog` reads its select lists, and both were derived from
     /// the verbatim captures `Fixtures/Claude/dialogs.captured.provenance.json` records with
     /// their sha256s. Everything `SessionStore` types — a phone's message, `/rename`, an
     /// answer to a dialog — goes into that box or that list.
     static let textChannel: AgentTextChannel? = ClaudeTextChannel()
+    /// Carries a conversation to another account's home (`AgentID.conversationTransfer`).
+    static let conversationTransfer: AgentConversationTransfer? = ClaudeConversationTransfer()
     static let dialogDriver: AgentDialogDriver? = ClaudeDialogDriver()
 
     /// Claude's own transience predicate, carried on the transcript record — see
@@ -74,6 +80,10 @@ struct ClaudeAdapter: AgentAdapter {
     static let openPromptReader: AgentOpenPromptReader? = ClaudeOpenPromptReader()
 
     static let searchCorpus: AgentSearchCorpus? = ClaudeSearchCorpus()
+
+    /// **`nil`.** Claude's dialogs exist only on its screen — no API names a pending request —
+    /// so they are answered by `dialogDriver`'s keystrokes or not at all.
+    static let promptResponder: AgentPromptResponder? = nil
 
     private static let logger = Logger(
         subsystem: Bundle.main.bundleIdentifier ?? "dev.flightdeck.FlightDeck",

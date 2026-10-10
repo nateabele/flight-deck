@@ -6,9 +6,31 @@ import Security
 /// `Sendable` because `HostService` reads the secrets off the main thread at launch: a
 /// Keychain read can block (a locked keychain, a slow `securityd`), and launch must not.
 protocol HostSecretStoring: AnyObject, Sendable {
-    func secret(for slot: UUID) -> Data?
+    /// May block for as long as the user leaves a Keychain prompt unanswered: never call it on
+    /// the main thread or on the Swift concurrency pool. `HostService` reads on a GCD thread.
+    func read(_ slot: UUID) -> HostSecretRead
     func set(_ secret: Data, for slot: UUID) throws
     func remove(slot: UUID)
+}
+
+extension HostSecretStoring {
+    /// The secret, or nil whatever the reason it could not be had.
+    func secret(for slot: UUID) -> Data? {
+        if case .found(let secret) = read(slot) { return secret }
+        return nil
+    }
+}
+
+/// What one Keychain read came back with. A missing item and an unreadable one are kept apart
+/// because they need different things from the user: the first a re-pair, the second only a
+/// click on the Keychain prompt, after which a retry succeeds with the same key.
+enum HostSecretRead: Equatable, Sendable {
+    case found(Data)
+    /// No item for this slot: only pairing again can mint a key.
+    case missing
+    /// The item is there but could not be read: the user denied the prompt, the keychain is
+    /// locked, or `securityd` failed. Worth retrying.
+    case failed(status: OSStatus)
 }
 
 /// Why a secret could not be written. Carries the raw `OSStatus` for the reason
@@ -32,13 +54,25 @@ final class KeychainHostSecretStore: HostSecretStoring {
         self.service = service
     }
 
-    func secret(for slot: UUID) -> Data? {
+    /// Blocks while a Keychain prompt is up. The items live in the legacy file keychain,
+    /// whose ACL trusts the code signature that created them, so the first launch of every
+    /// re-signed build asks "Flight Deck wants to use … dev.flightdeck.host" and this call
+    /// waits on the answer: 2026-10-10, for over two hours with no host link opened.
+    func read(_ slot: UUID) -> HostSecretRead {
         var query = identity(slot)
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
         var item: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess else { return nil }
-        return item as? Data
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        switch status {
+        case errSecSuccess:
+            guard let data = item as? Data else { return .failed(status: errSecDecode) }
+            return .found(data)
+        case errSecItemNotFound:
+            return .missing
+        default:
+            return .failed(status: status)
+        }
     }
 
     /// Update in place, inserting only when there is nothing to update — the shape
@@ -83,8 +117,8 @@ final class InMemoryHostSecretStore: HostSecretStoring, @unchecked Sendable {
 
     init() {}
 
-    func secret(for slot: UUID) -> Data? {
-        lock.withLock { secrets[slot] }
+    func read(_ slot: UUID) -> HostSecretRead {
+        lock.withLock { secrets[slot] }.map(HostSecretRead.found) ?? .missing
     }
 
     func set(_ secret: Data, for slot: UUID) {

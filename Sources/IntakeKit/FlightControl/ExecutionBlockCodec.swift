@@ -109,7 +109,14 @@ public enum ExecutionBlockCodec {
             host = s
         }
 
-        return .success(ExecutionBlock(v: v, kind: KindID(kind), harness: HarnessID(harness), model: model,
+        // The block's `harness` key names the agent (unify brief R1 kept the key). An agent this
+        // build has no case for — a block a newer build wrote — is an invalid block, exactly as
+        // an unknown `source.by` is: `AgentID` used to accept any string here, which let such
+        // a block through only to fail later at spawn with "no adapter".
+        guard let agent = AgentID(rawValue: harness) else {
+            return .failure(.invalidField("harness", "unknown agent \(harness)"))
+        }
+        return .success(ExecutionBlock(v: v, kind: KindID(kind), agent: agent, model: model,
                                        knobs: knobs, pool: PoolID(pool),
                                        source: AssignmentSource(by: by, ruleId: ruleId, reason: reason, at: at),
                                        pinned: pinned, host: host))
@@ -121,7 +128,7 @@ public enum ExecutionBlockCodec {
         var source: [String: Any] = ["by": b.source.by.rawValue, "reason": b.source.reason,
                                      "at": iso().string(from: b.source.at)]
         if let r = b.source.ruleId { source["ruleId"] = r }
-        return ["v": b.v, "kind": b.kind.rawValue, "harness": b.harness.rawValue, "model": b.model,
+        return ["v": b.v, "kind": b.kind.rawValue, "harness": b.agent.rawValue, "model": b.model,
                 "knobs": b.knobs, "pool": b.pool.rawValue, "source": source, "pinned": b.pinned,
                 "host": b.host as Any? ?? NSNull()]
     }

@@ -13,7 +13,8 @@ struct UsageEnvironment {
     /// its readings must land under its own id.
     var accounts: @MainActor () -> [AgentAccount]
     var resolvedAccountID: @MainActor (AgentID, UUID?) -> UUID?
-    var capacity: @MainActor () -> CapacityPreferences
+    /// The pools in force — the Accounts list's (`PreferencesStore.effectivePools`).
+    var pools: @MainActor () -> [CapacityPool]
     var usageDirectory: URL
     /// The account's codex `account/rateLimits/read`, or nil when no app-server runs for it.
     var codexRead: @MainActor (UUID?) async throws -> [String: Any]?
@@ -26,10 +27,13 @@ struct UsageEnvironment {
     /// Whether the tab's agent is running (the store has a status for it). A tab whose agent has
     /// exited is still in the sidebar; telling the user about its account's limit is noise.
     var isLive: @MainActor (UUID) -> Bool = { _ in true }
+    /// agy's `/usage` answer as raw JSON, or nil (`GeminiUsageSource.read`). Run off the main
+    /// actor by the caller; defaulted to nothing so a test environment never spawns agy.
+    var geminiUsage: @Sendable () async -> Data? = { nil }
 
     static var empty: UsageEnvironment {
         UsageEnvironment(sessions: { [] }, apiErrors: { [:] }, accounts: { [] },
-                         resolvedAccountID: { _, stored in stored }, capacity: { CapacityPreferences() },
+                         resolvedAccountID: { _, stored in stored }, pools: { [] },
                          usageDirectory: ClaudePluginLocation.usageDirectory, codexRead: { _ in nil },
                          seatActivities: { [] }, notifier: { nil }, isSwarmSession: { _ in false })
     }
@@ -43,18 +47,26 @@ struct UsageEnvironment {
             resolvedAccountID: { [weak preferences] agent, stored in
                 preferences?.resolvedAccountID(for: agent, in: stored) ?? stored
             },
-            capacity: { [weak preferences] in preferences?.capacity ?? CapacityPreferences() },
+            pools: { [weak preferences] in preferences?.effectivePools ?? [] },
             usageDirectory: ClaudePluginLocation.usageDirectory,
             codexRead: { [weak store] account in try await store?.codexRateLimitsRead(account: account) },
             // `intakeService` is lazy, but reading it here is safe: `collapsedStatus` already
             // builds it unconditionally, so this adds no side effect that was not already there.
+            // The capability index's refresh runs are seats too: each is stamped with the account
+            // the refresh leased, so its rate limits meter that account, not the built-in one.
             seatActivities: { [weak store] in
-                guard let intake = store?.intakeService else { return [] }
-                return intake.seatActivities.values.flatMap(\.values) + Array(intake.triageActivities.values)
+                let index = store?.capabilityIndexService?.seatActivities ?? []
+                guard let intake = store?.intakeService else { return index }
+                return intake.seatActivities.values.flatMap(\.values) + Array(intake.triageActivities.values) + index
             },
             notifier: { [weak store] in store?.notifier },
             isSwarmSession: { _ in false },
-            isLive: { [weak store] in store?.statuses[$0] != nil })
+            isLive: { [weak store] in store?.statuses[$0] != nil },
+            geminiUsage: {
+                await Task.detached(priority: .utility) {
+                    GeminiUsageSource.read(path: LoginShellPath.repairing()["PATH"])
+                }.value
+            })
     }
 }
 
@@ -115,6 +127,13 @@ final class UsageService: ObservableObject {
     private let headless = HeadlessClaudeUsageSource()
     private var codexSources: [UUID: CodexRateLimitSource] = [:]
     private var lastCodexPoll: [UUID: Date] = [:]
+    private var lastGrokBilling: [UUID: Date] = [:]
+    private var lastGeminiPoll: Date?
+    private var geminiReadInFlight = false
+    /// Seats already turned into a refusal or a rollout reading, so a seat re-read every tick
+    /// (its `activity.json` stays put while the intake shapes) reports once, not every 30 s.
+    private var seatRejectionsSeen: Set<String> = []
+    private var codexRolloutsSeen: Set<String> = []
     private struct WeakTap { weak var tap: UsageMeterTap? }
     private var taps: [WeakTap] = []
     private var firstSeen: [UUID: Date] = [:]
@@ -183,7 +202,7 @@ final class UsageService: ObservableObject {
 
     func reconfigure() {
         let accounts = environment.accounts()
-        ledger.configure(pools: environment.capacity().effectivePools(accounts: accounts),
+        ledger.configure(pools: environment.pools(),
                          accounts: accounts.map(CapacityPreferences.accountRef))
         revision += 1
     }
@@ -206,11 +225,14 @@ final class UsageService: ObservableObject {
     func tick() async {
         let t = now()
         let sessions = environment.sessions()
+        let seats = environment.seatActivities()
         for s in sessions where firstSeen[s.id] == nil { firstSeen[s.id] = t }
         ingestUsageFiles(sessions)
-        ingestHeadlessSeats()
+        ingestHeadlessSeats(seats)
         ingestAPIErrors(sessions, at: t)
         await pollCodex(sessions, at: t)
+        ingestGrokBilling(sessions, seats: seats)
+        await pollGemini(sessions, seats: seats, at: t)
         flagSilentStatusLine(sessions, at: t)
         noticeManualTabs(sessions)
         revision += 1
@@ -236,6 +258,12 @@ final class UsageService: ObservableObject {
         environment.resolvedAccountID(session.agent, session.accountID).flatMap(ref(forAccount:))
     }
 
+    /// The grok home a tab runs in: its account's, else the built-in `~/.grok`.
+    func grokHome(for session: Session) -> URL {
+        let id = environment.resolvedAccountID(.grok, session.accountID)
+        return environment.accounts().first { $0.id == id }?.home ?? AgentID.grok.builtInHome
+    }
+
     /// The account's `projects/` directory — the root claude writes this tab's transcript under.
     func claudeProjectsRoot(for session: Session) -> URL {
         let id = environment.resolvedAccountID(.claude, session.accountID)
@@ -250,7 +278,9 @@ final class UsageService: ObservableObject {
         switch session.agent {
         case .claude: return TranscriptPointers.claude(session: session, projectsRoot: claudeProjectsRoot(for: session))
         case .codex: return TranscriptPointers.codex(session: session)
-        default: return nil
+        case .grok: return TranscriptPointers.grok(session: session, home: grokHome(for: session))
+        case .gemini: return TranscriptPointers.gemini(session: session)
+        case .opencode: return TranscriptPointers.openCode(session: session)
         }
     }
 
@@ -275,6 +305,31 @@ final class UsageService: ObservableObject {
         return made
     }
 
+    /// grok's weekly meter, from the billing line its own log carries (`GrokBillingSource`):
+    /// one read per account with a grok tab, ingested only when the line is newer than the last
+    /// one taken, so a quiet account is not re-stamped fresh every tick.
+    ///
+    /// A grok planning seat's account is read the same way: headless `grok -p` writes NO billing
+    /// line of its own (grok 1.0.30, probed 2026-10-09 — only the TUI fetches the credits
+    /// config), so a seat meters its account only from the line that account's TUI last left in
+    /// the same home. That is still the right account's quota, just as fresh as its last TUI turn.
+    private func ingestGrokBilling(_ sessions: [Session], seats: [SeatActivity] = []) {
+        let ids = Set(sessions.filter { $0.agent == .grok }.compactMap { environment.resolvedAccountID(.grok, $0.accountID) })
+            .union(seats.filter { $0.agent == .grok }.compactMap { seatAccount($0)?.id })
+        for id in ids {
+            guard let ref = ref(forAccount: id),
+                  let home = environment.accounts().first(where: { $0.id == id })?.home,
+                  let tail = GrokBillingSource.readTail(home: home),
+                  let found = GrokBillingSource.windows(inLogTail: tail)
+            else { continue }
+            let readAt = found.readAt ?? now()
+            guard lastGrokBilling[id] != readAt else { continue }
+            lastGrokBilling[id] = readAt
+            ingest(UsageReading(account: ref, windows: found.windows, readAt: readAt,
+                                source: "grok billing log", hardRejection: false))
+        }
+    }
+
     private func ingestUsageFiles(_ sessions: [Session]) {
         for (stem, file) in usageFiles.scan() {
             guard let tab = sessions.first(where: { $0.agent == .claude && ($0.id == stem || $0.pinnedConversationID == stem) }),
@@ -284,11 +339,72 @@ final class UsageService: ObservableObject {
         }
     }
 
-    /// Headless seats run with Flight Deck's own environment, so they bill the built-in claude
-    /// account (see `IntakeRunnerController`'s environment recipe).
-    private func ingestHeadlessSeats() {
-        guard let id = environment.resolvedAccountID(.claude, nil), let ref = ref(forAccount: id) else { return }
-        for reading in headless.readings(from: environment.seatActivities(), account: ref) { ingest(reading) }
+    /// A headless seat bills the account the app resolved for its project when its runner (or
+    /// triage turn) started, recorded on the seat as `accountID` (unify brief R9) — a Work-pool
+    /// seat's rate-limit windows are Work's, and crediting them to the built-in login would let
+    /// the pool keep leasing an account that is in fact exhausted. A seat with no id (an agent
+    /// with no account record, or a runner from before R9) ran in the built-in home, so it is
+    /// credited there, as every seat once was.
+    ///
+    /// Every agent's seat feeds the meter it can (round 2, item 10), each credited to the account
+    /// the seat billed:
+    /// - claude: the stream's `rate_limit_event`s (`HeadlessClaudeUsageSource`);
+    /// - codex: the rollout the seat wrote in its CODEX_HOME (`ingestCodexSeatRollouts`);
+    /// - grok: its home's billing log line (`ingestGrokBilling`);
+    /// - gemini: agy's `/usage`, polled while the seat runs (`pollGemini`);
+    /// - every non-claude agent: a seat that ended on its vendor's limit refuses its account.
+    private func ingestHeadlessSeats(_ seats: [SeatActivity]) {
+        for reading in headless.readings(from: seats, account: { [self] in seatAccount($0) }) { ingest(reading) }
+        ingestSeatRejections(seats)
+        ingestCodexSeatRollouts(seats)
+    }
+
+    /// The account a seat billed. An id that no longer names an account (purged since) credits
+    /// nobody: its numbers are not the built-in login's either. No id is the agent's built-in.
+    private func seatAccount(_ seat: SeatActivity) -> AccountRef? {
+        if let id = seat.accountID { return ref(forAccount: id) }
+        return environment.resolvedAccountID(seat.agent, nil).flatMap(ref(forAccount:))
+    }
+
+    /// grok and agy streams carry no quota numbers at all, and codex's only in its rollout; what
+    /// every one of them does carry is the refusal itself ("You hit your weekly limit.",
+    /// "usage limit reached", a 429). Classified by the shared vocabulary every profile uses, so
+    /// an overloaded API is never read as this account's limit. Claude is left to its own
+    /// `rate_limit_event`, which says the same thing with a reset time.
+    private func ingestSeatRejections(_ seats: [SeatActivity]) {
+        for seat in seats where seat.agent != .claude {
+            guard let error = seat.error, AgentErrorVocabulary.classify(text: error) == .rateLimited,
+                  let account = seatAccount(seat) else { continue }
+            let key = "\(seat.agent.rawValue)|\(seat.startedAt.timeIntervalSince1970)"
+            guard seatRejectionsSeen.insert(key).inserted else { continue }
+            ingest(UsageReading(account: account, windows: [], readAt: seat.lastEventAt ?? seat.startedAt,
+                                source: "\(seat.agent.displayName) headless", hardRejection: true))
+        }
+        if seatRejectionsSeen.count > 4_096 { seatRejectionsSeen.removeAll() }
+    }
+
+    /// A codex seat's rate limits, from the rollout it wrote: `codex exec --json` has none on
+    /// stdout (codex-cli 0.160.0, probed 2026-10-09). Read once per seat event; a rollout not
+    /// written yet is tried again next tick, until the seat finishes.
+    private func ingestCodexSeatRollouts(_ seats: [SeatActivity]) {
+        for seat in seats where seat.agent == .codex {
+            guard let thread = seat.conversationID, let account = seatAccount(seat) else { continue }
+            let at = seat.lastEventAt ?? seat.startedAt
+            let key = "\(thread)|\(at.timeIntervalSince1970)"
+            guard !codexRolloutsSeen.contains(key) else { continue }
+            let home = environment.accounts().first { $0.id == account.id }?.home ?? AgentID.codex.builtInHome
+            if let url = CodexRolloutFile.find(home: home, thread: thread, near: seat.startedAt),
+               let tail = CodexRolloutFile.tail(url),
+               let found = CodexRolloutRateLimits.newest(inRolloutTail: tail),
+               let reading = CodexRateLimitParser.reading(found.buckets, account: account, readAt: found.readAt ?? at,
+                                                          source: "codex rollout") {
+                codexRolloutsSeen.insert(key)
+                ingest(reading)
+            } else if seat.finished {
+                codexRolloutsSeen.insert(key)
+            }
+        }
+        if codexRolloutsSeen.count > 4_096 { codexRolloutsSeen.removeAll() }
     }
 
     private func ingestAPIErrors(_ sessions: [Session], at t: Date) {
@@ -326,6 +442,28 @@ final class UsageService: ObservableObject {
                 ledger.setSourceError("Codex app-server did not answer within \(Int(codexReadTimeout)) s", account: id)
             }
         }
+    }
+
+    /// agy's quota for the one gemini account (unify brief R5), at most every
+    /// `GeminiUsageSource.pollInterval`, and only while a gemini tab exists: each read spawns agy
+    /// twice. No reading is not an error worth flagging — agy may simply be signed out, and
+    /// `GeminiUsageSource.read` refuses to run `/usage` then rather than open a browser.
+    ///
+    /// A RUNNING gemini planning seat counts like a tab, credited to the account it billed: agy's
+    /// headless stream reports tokens and nothing about quota (agy 1.3.2), so this poll is the
+    /// only meter a seat-only gemini account has. A finished seat starts no poll.
+    private func pollGemini(_ sessions: [Session], seats: [SeatActivity] = [], at t: Date) async {
+        let target = sessions.first(where: { $0.agent == .gemini }).flatMap(accountRef(for:))
+            ?? seats.first(where: { $0.agent == .gemini && !$0.finished }).flatMap(seatAccount)
+        guard let ref = target, !geminiReadInFlight,
+              lastGeminiPoll.map({ t.timeIntervalSince($0) >= GeminiUsageSource.pollInterval }) ?? true
+        else { return }
+        lastGeminiPoll = t
+        geminiReadInFlight = true
+        let data = await environment.geminiUsage()
+        geminiReadInFlight = false
+        guard let data, let windows = GeminiUsageSource.windows(fromUsageJSON: data), !windows.isEmpty else { return }
+        ingest(UsageReading(account: ref, windows: windows, readAt: t, source: "agy /usage", hardRejection: false))
     }
 
     private enum CodexReadOutcome { case result([String: Any]?), failed(Error), timedOut }

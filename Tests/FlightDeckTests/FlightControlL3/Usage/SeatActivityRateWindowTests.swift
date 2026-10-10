@@ -11,7 +11,7 @@ final class SeatActivityRateWindowTests: XCTestCase {
     }
 
     func testKeepsUnifiedWindowsFromTheLiveSample() throws {
-        var p = ActivityParser(harness: .claude, project: URL(fileURLWithPath: "/p"), now: { Date(timeIntervalSince1970: 0) })
+        var p = ActivityParser(agent: .claude, project: URL(fileURLWithPath: "/p"), now: { Date(timeIntervalSince1970: 0) })
         p.feed(try load("claude-stream-activity"))
         XCTAssertEqual(p.activity.rateLimitWindows, [
             UsageWindow(name: "five_hour", utilization: 0.01, resetsAt: Date(timeIntervalSince1970: 1790567400)),
@@ -24,7 +24,7 @@ final class SeatActivityRateWindowTests: XCTestCase {
 
     func testARejectedEventRecordsStatusAndStillSetsRateLimitedAt() {
         let clock = Date(timeIntervalSince1970: 1_790_000_000)
-        var p = ActivityParser(harness: .claude, project: URL(fileURLWithPath: "/p"), now: { clock })
+        var p = ActivityParser(agent: .claude, project: URL(fileURLWithPath: "/p"), now: { clock })
         let line = #"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1790567400,"unifiedWindows":{"five_hour":{"utilization":1.0,"resetsAt":1790567400}}}}"# + "\n"
         p.feed(Data(line.utf8))
         XCTAssertEqual(p.activity.rateLimitStatus, "rejected")
@@ -33,7 +33,7 @@ final class SeatActivityRateWindowTests: XCTestCase {
     }
 
     func testAnEventWithoutWindowsKeepsTheLastWindows() {
-        var p = ActivityParser(harness: .claude, project: URL(fileURLWithPath: "/p"), now: { Date() })
+        var p = ActivityParser(agent: .claude, project: URL(fileURLWithPath: "/p"), now: { Date() })
         p.feed(Data((#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","unifiedWindows":{"five_hour":{"utilization":0.5,"resetsAt":1790567400}}}}"# + "\n").utf8))
         p.feed(Data((#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed"}}"# + "\n").utf8))
         XCTAssertEqual(p.activity.rateLimitWindows?.first?.utilization, 0.5)
@@ -42,7 +42,7 @@ final class SeatActivityRateWindowTests: XCTestCase {
     /// `activity.json` files written before this change have none of the new keys; they must
     /// still decode, or every live round's seat rows go blank after an upgrade.
     func testOldActivityJSONStillDecodes() throws {
-        var a = SeatActivity(harness: .claude, startedAt: Date(timeIntervalSince1970: 0))
+        var a = SeatActivity(agent: .claude, startedAt: Date(timeIntervalSince1970: 0))
         a.rateLimitWindows = [UsageWindow(name: "five_hour", utilization: 0.5, resetsAt: nil)]
         a.rateLimitStatus = "allowed"
         var obj = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(a)) as? [String: Any])

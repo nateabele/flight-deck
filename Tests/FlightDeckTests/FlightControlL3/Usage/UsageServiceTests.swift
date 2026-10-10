@@ -22,9 +22,10 @@ final class UsageServiceTests: XCTestCase {
     private var swarm: Set<UUID> = []
     /// Sessions the store has a status for. nil means every tab is live.
     private var live: Set<UUID>?
-    private var capacity = CapacityPreferences()
+    /// The Accounts list the pools come from; nil means one entry per account, unpooled.
+    private var accountList: AccountList?
     private let notifier = UsageSpyNotifier()
-    private let accounts = [
+    private var accounts = [
         AgentAccount(id: UsageRefs.workID, agent: .claude, displayName: "Work", home: URL(fileURLWithPath: "/tmp/fd-usage/w", isDirectory: true)),
         AgentAccount(id: UsageRefs.spareID, agent: .claude, displayName: "Spare", home: URL(fileURLWithPath: "/tmp/fd-usage/s", isDirectory: true)),
         AgentAccount(id: UsageRefs.codexID, agent: .codex, displayName: "Codex", home: URL(fileURLWithPath: "/tmp/fd-usage/c", isDirectory: true)),
@@ -37,14 +38,15 @@ final class UsageServiceTests: XCTestCase {
     }
     override func tearDownWithError() throws { try? FileManager.default.removeItem(at: dir) }
 
-    private func service(codexReadTimeout: TimeInterval = 20) -> UsageService {
+    private func service(codexReadTimeout: TimeInterval = 20,
+                         geminiUsage: @escaping @Sendable () async -> Data? = { nil }) -> UsageService {
         let c = clock!
         let env = UsageEnvironment(
             sessions: { [unowned self] in self.sessions },
             apiErrors: { [unowned self] in self.apiErrors },
             accounts: { [unowned self] in self.accounts },
             resolvedAccountID: { agent, stored in stored ?? (agent == .claude ? UsageRefs.workID : UsageRefs.codexID) },
-            capacity: { [unowned self] in self.capacity },
+            pools: { [unowned self] in (self.accountList ?? AccountList(entries: self.accounts.map(AccountEntry.account))).effectivePools() },
             usageDirectory: dir,
             codexRead: { [unowned self] _ in
                 self.codexReads += 1
@@ -55,7 +57,8 @@ final class UsageServiceTests: XCTestCase {
             seatActivities: { [unowned self] in self.seats },
             notifier: { [unowned self] in self.notifier },
             isSwarmSession: { [unowned self] in self.swarm.contains($0) },
-            isLive: { [unowned self] in self.live?.contains($0) ?? true })
+            isLive: { [unowned self] in self.live?.contains($0) ?? true },
+            geminiUsage: geminiUsage)
         return UsageService(environment: env, ledger: CapacityLedger(now: { c.now }), now: { c.now }, codexReadTimeout: codexReadTimeout)
     }
 
@@ -157,7 +160,7 @@ final class UsageServiceTests: XCTestCase {
     }
 
     func testHeadlessSeatsMeterTheBuiltInClaudeAccount() async {
-        var a = SeatActivity(harness: .claude, startedAt: Date(timeIntervalSince1970: 0))
+        var a = SeatActivity(agent: .claude, startedAt: Date(timeIntervalSince1970: 0))
         a.rateLimitWindows = [UsageWindow(name: "five_hour", utilization: 0.3, resetsAt: nil)]
         a.rateLimitStatus = "allowed"
         a.lastEventAt = clock.now
@@ -165,6 +168,102 @@ final class UsageServiceTests: XCTestCase {
         let svc = service()
         await svc.tick()
         XCTAssertEqual(svc.ledger.latestReading(account: UsageRefs.workID)?.source, "claude headless")
+    }
+
+    /// Unify brief R9: a seat that billed the project's account (`accountID`) meters THAT
+    /// account, not the built-in one (`Work` here); one whose account is gone credits nobody.
+    func testHeadlessSeatsMeterTheAccountTheyBilled() async {
+        var billed = SeatActivity(agent: .claude, startedAt: Date(timeIntervalSince1970: 0), accountID: UsageRefs.spareID)
+        billed.rateLimitWindows = [UsageWindow(name: "five_hour", utilization: 0.6, resetsAt: nil)]
+        billed.rateLimitStatus = "allowed"
+        billed.lastEventAt = clock.now
+        var orphan = SeatActivity(agent: .claude, startedAt: Date(timeIntervalSince1970: 1), accountID: UUID())
+        orphan.rateLimitWindows = [UsageWindow(name: "five_hour", utilization: 0.9, resetsAt: nil)]
+        orphan.lastEventAt = clock.now
+        seats = [billed, orphan]
+        let svc = service()
+        await svc.tick()
+        XCTAssertEqual(svc.ledger.latestReading(account: UsageRefs.spareID)?.windows.first?.utilization, 0.6)
+        XCTAssertNil(svc.ledger.latestReading(account: UsageRefs.workID), "the built-in account billed nothing")
+    }
+
+    // MARK: - Planning seats of every agent (round 2, item 10)
+
+    private func account(_ agent: AgentID, _ name: String) throws -> AgentAccount {
+        let home = dir.appendingPathComponent(name, isDirectory: true)
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        let made = AgentAccount(agent: agent, displayName: name, home: home)
+        accounts.append(made)
+        return made
+    }
+
+    /// `codex exec --json` carries no rate limits; the rollout codex writes in the seat's own
+    /// CODEX_HOME does. The seat's thread id finds it, under the date the seat started.
+    func testACodexSeatMetersTheAccountItBilledFromItsRollout() async throws {
+        let billed = try account(.codex, "codex-work")
+        let day = Calendar.current.dateComponents([.year, .month, .day], from: clock.now)
+        let folder = billed.home.appendingPathComponent(String(format: "sessions/%04d/%02d/%02d", day.year!, day.month!, day.day!))
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let line = #"{"timestamp":"2026-10-04T17:59:00.000Z","type":"event_msg","payload":{"type":"token_count","info":null,"rate_limits":{"limit_id":"codex","primary":{"used_percent":7.0,"window_minutes":300,"resets_at":1791567291},"secondary":{"used_percent":41.0,"window_minutes":10080,"resets_at":1792017101},"rate_limit_reached_type":null}}}"#
+        try Data((line + "\n").utf8).write(to: folder.appendingPathComponent("rollout-2026-10-04T13-59-00-thread-1.jsonl"))
+        var seat = SeatActivity(agent: .codex, startedAt: clock.now, accountID: billed.id)
+        seat.conversationID = "thread-1"
+        seat.lastEventAt = clock.now
+        seats = [seat]
+        let svc = service()
+        await svc.tick()
+        let reading = try XCTUnwrap(svc.ledger.latestReading(account: billed.id))
+        XCTAssertEqual(reading.source, "codex rollout")
+        XCTAssertEqual(reading.worstWindow?.utilization ?? 0, 0.41, accuracy: 1e-9)
+        XCTAssertNil(svc.ledger.latestReading(account: UsageRefs.codexID), "the built-in codex login billed nothing")
+    }
+
+    /// A grok or gemini seat's stream has no quota numbers, but its refusal does say the limit
+    /// was hit: that refuses the account it billed, once per seat.
+    func testANonClaudeSeatStoppedByItsLimitRefusesTheAccountItBilled() async throws {
+        let billed = try account(.grok, "grok-work")
+        var seat = SeatActivity(agent: .grok, startedAt: clock.now, accountID: billed.id)
+        seat.error = "You hit your weekly limit."
+        seat.lastEventAt = clock.now
+        var failed = SeatActivity(agent: .grok, startedAt: clock.now.addingTimeInterval(1), accountID: UsageRefs.spareID)
+        failed.error = "exited 1"
+        seats = [seat, failed]
+        let svc = service()
+        await svc.tick()
+        XCTAssertEqual(svc.ledger.rejection(account: billed.id)?.source, "Grok headless")
+        XCTAssertNil(svc.ledger.rejection(account: UsageRefs.spareID), "an error that is not a limit refuses nothing")
+    }
+
+    /// Headless grok writes no billing line (grok 1.0.30, probed 2026-10-09), but the home it ran
+    /// in may hold one from that account's TUI: a grok seat meters its account from it.
+    func testAGrokSeatMetersTheAccountItBilledFromItsHomesBillingLine() async throws {
+        let billed = try account(.grok, "grok-home")
+        let logs = billed.home.appendingPathComponent("logs", isDirectory: true)
+        try FileManager.default.createDirectory(at: logs, withIntermediateDirectories: true)
+        let line = #"{"ts":"2026-10-04T17:00:00.000Z","msg":"billing: fetched credits config","ctx":{"config":{"creditUsagePercent":12.0,"currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY","start":"2026-10-01T00:00:00Z","end":"2026-10-08T00:00:00Z"}}}}"#
+        try Data((line + "\n").utf8).write(to: logs.appendingPathComponent("unified.jsonl"))
+        seats = [SeatActivity(agent: .grok, startedAt: clock.now, accountID: billed.id)]
+        let svc = service()
+        await svc.tick()
+        XCTAssertEqual(svc.ledger.latestReading(account: billed.id)?.source, "grok billing log")
+    }
+
+    /// agy's `/usage` is polled while a gemini seat runs, as it is while a gemini tab is open,
+    /// and credited to the account the seat billed. A finished seat starts no poll.
+    func testARunningGeminiSeatPollsAgyForTheAccountItBilled() async throws {
+        let billed = try account(.gemini, "gemini")
+        let usage = #"{"command":{"name":"usage","data":{"groups":[{"name":"Gemini Models","buckets":[{"id":"gemini-5h","remaining_fraction":0.75,"reset_time":"2026-10-04T20:00:00Z"}]}]}}}"#
+        let polls = UsagePollCounter()
+        var done = SeatActivity(agent: .gemini, startedAt: clock.now, accountID: billed.id)
+        done.finished = true
+        seats = [done]
+        let svc = service(geminiUsage: { polls.bump(); return Data(usage.utf8) })
+        await svc.tick()
+        XCTAssertEqual(polls.count, 0)
+        seats = [SeatActivity(agent: .gemini, startedAt: clock.now, accountID: billed.id)]
+        await svc.tick()
+        XCTAssertEqual(polls.count, 1)
+        XCTAssertEqual(svc.ledger.latestReading(account: billed.id)?.worstWindow?.utilization ?? 0, 0.25, accuracy: 1e-9)
     }
 
     // Behavior changed on purpose (final review): the notice is per ACCOUNT per crossing, and a
@@ -257,10 +356,12 @@ final class UsageServiceTests: XCTestCase {
         XCTAssertEqual(svc.ledger.latestReading(account: UsageRefs.spareID)?.worstWindow?.utilization, 0.25)
     }
 
-    func testReconfigurePicksUpStoredPools() {
+    func testReconfigurePicksUpStoredPools() throws {
         let svc = service()
         XCTAssertNil(svc.ledger.pool("pool-night001"))
-        capacity = CapacityPreferences(pools: [.hosted(id: "pool-night001", label: "Night", harness: "claude", accounts: [UsageRefs.spareID])])
+        var list = AccountList(entries: accounts.map(AccountEntry.account))
+        try list.addPool(AccountPool(id: "pool-night001", label: "Night", agent: .claude, members: [accounts[1]]))
+        accountList = list
         svc.reconfigure()
         XCTAssertEqual(svc.ledger.pool("pool-night001")?.accounts, [UsageRefs.spareID])
     }
@@ -319,4 +420,11 @@ final class UsageServiceTests: XCTestCase {
         let svc = service()
         XCTAssertEqual(svc.transcriptPointer(for: SessionRef(id: tab.id, agentName: nil))?.locator, .path(rollout.path))
     }
+}
+
+final class UsagePollCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = 0
+    func bump() { lock.withLock { value += 1 } }
+    var count: Int { lock.withLock { value } }
 }

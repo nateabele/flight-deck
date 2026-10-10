@@ -34,6 +34,21 @@ enum CodexLaunchOverrides {
     }
 }
 
+/// grok's half: `-m` and `--effort` on its command line, carried as `GrokOptions`.
+enum GrokLaunchOverrides {
+    static func apply(_ overrides: LaunchOverrides, to options: AgentOptions) -> RoutingCapability<AgentOptions> {
+        guard case .grok(var grok) = options else { return .unsupported(reason: "grok was handed another agent's options") }
+        if let model = overrides.model { grok.model = model }
+        for (knob, value) in overrides.knobs.sorted(by: { $0.key < $1.key }) {
+            switch knob {
+            case "effort": grok.effort = value
+            default: return .unsupported(reason: "grok has no knob \(knob)")
+            }
+        }
+        return .supported(.grok(grok))
+    }
+}
+
 /// The one way a routing capability may type into a tab: the store's own prompt gate, which
 /// waits for a real composer and queues behind a running turn.
 @MainActor
@@ -50,7 +65,45 @@ protocol CommandSinkAttachable: AnyObject {
 
 extension RoutingCapabilityRegistry {
     func attachCommandSink(_ sink: SessionCommandSink) {
-        for harness in harnesses { (capabilities(for: harness) as? CommandSinkAttachable)?.commands = sink }
+        for agent in agents { (capabilities(for: agent) as? CommandSinkAttachable)?.commands = sink }
+    }
+}
+
+/// A model override for an agy tab. Only a Gemini slug is taken: agy also serves Claude and
+/// GPT-OSS models, and a gemini tab running one would be a gemini tab in name only. agy has no
+/// knobs beyond the model (the slug carries the effort).
+enum GeminiLaunchOverrides {
+    static func apply(_ overrides: LaunchOverrides, to options: AgentOptions) -> RoutingCapability<AgentOptions> {
+        guard case .gemini(var gemini) = options else { return .unsupported(reason: "gemini was handed another agent's options") }
+        if let model = overrides.model {
+            guard GeminiAdapter.isLaunchableModel(model) else {
+                return .unsupported(reason: "\(model) is not a Gemini model agy can launch")
+            }
+            gemini.model = model
+        }
+        if let knob = overrides.knobs.keys.sorted().first {
+            return .unsupported(reason: "gemini has no knob \(knob)")
+        }
+        return .supported(.gemini(gemini))
+    }
+}
+
+/// OpenCode's half: the model is `OpenCodeOptions.model`, sent in the body that creates the
+/// session. Only a `provider/model` id is taken — OpenCode refuses a session whose model names
+/// no provider. No knobs (see `OpenCodeRoutingCapabilities.knobSchema`).
+enum OpenCodeLaunchOverrides {
+    static func apply(_ overrides: LaunchOverrides, to options: AgentOptions) -> RoutingCapability<AgentOptions> {
+        guard case .opencode(var opencode) = options else { return .unsupported(reason: "opencode was handed another agent's options") }
+        if let model = overrides.model {
+            guard OpenCodeOptions(model: model).modelReference != nil else {
+                return .unsupported(reason: "\(model) names no provider; OpenCode needs provider/model")
+            }
+            opencode.model = model
+        }
+        if let knob = overrides.knobs.keys.sorted().first {
+            return .unsupported(reason: "opencode has no knob \(knob)")
+        }
+        return .supported(.opencode(opencode))
     }
 }
 
@@ -62,6 +115,7 @@ enum ContextResetError: Error, Equatable { case refused(String) }
 enum ContextReset {
     static let claudeCommand = "/clear"
     static let codexCommand = "/new"
+    static let geminiCommand = "/clear"
 
     static func typing(_ command: String, into session: Session, via sink: SessionCommandSink?) throws -> RoutingCapability<Void> {
         guard let sink else { return .unsupported(reason: "no command channel attached") }

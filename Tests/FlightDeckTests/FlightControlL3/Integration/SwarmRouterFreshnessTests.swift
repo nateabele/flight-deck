@@ -22,7 +22,7 @@ final class SwarmRouterFreshnessTests: XCTestCase {
     private let lateRule = RoutingRule(
         id: "r-late", sentence: "Use Haiku for tests",
         compiled: CompiledRule(match: .any([.dimension("test-authoring", atLeast: 0.5)]),
-                               assign: RuleAssign(harness: "claude", model: "haiku",
+                               assign: RuleAssign(agent: .claude, model: "haiku",
                                                   knobs: ["effort": "low"], pool: "claude-default")),
         state: .confirmed)
 
@@ -38,7 +38,7 @@ final class SwarmRouterFreshnessTests: XCTestCase {
         let spawn = try XCTUnwrap(rig.spawns.first, "the task spilled to another pool: \(String(describing: rig.waitingReason(task: "fx-valid")))")
         XCTAssertEqual(spawn.block.source.by, .spill)
         XCTAssertEqual(spawn.block.source.ruleId, "r-late", "the spill read the rule in force now, not at install")
-        XCTAssertEqual(spawn.block.harness, "claude")
+        XCTAssertEqual(spawn.block.agent, .claude)
         XCTAssertEqual(spawn.block.model, "haiku")
     }
 
@@ -68,7 +68,7 @@ final class SwarmRouterFreshnessTests: XCTestCase {
     func testSpillTargetsCodexWhileItIsEnabled() async throws {
         try await spillFromAFullClaudePool()
         let spawn = try XCTUnwrap(rig.spawns.first, "\(String(describing: rig.waitingReason(task: "fx-valid")))")
-        XCTAssertEqual(spawn.block.harness, "codex", "control: with codex enabled the spill goes there")
+        XCTAssertEqual(spawn.block.agent, .codex, "control: with codex enabled the spill goes there")
     }
 
     /// Spill catalogs used to be `registry.catalogs(enabled: every harness)`, so an agent switched
@@ -76,7 +76,7 @@ final class SwarmRouterFreshnessTests: XCTestCase {
     func testSpillNeverTargetsADisabledAgent() async throws {
         rig.preferences.preferences.agents.removeAll { $0.id == .codex }
         try await spillFromAFullClaudePool()
-        XCTAssertTrue(rig.spawns.isEmpty, "nothing may start on a disabled agent: \(rig.spawns.map(\.block.harness))")
+        XCTAssertTrue(rig.spawns.isEmpty, "nothing may start on a disabled agent: \(rig.spawns.map(\.block.agent))")
         XCTAssertNotNil(rig.waitingReason(task: "fx-valid"), "the task waits, with a reason")
     }
 }

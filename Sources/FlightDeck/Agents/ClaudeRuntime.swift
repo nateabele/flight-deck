@@ -1,4 +1,5 @@
 import Foundation
+import IntakeKit
 
 /// Claude's runtime: one `TranscriptWatcher` per attached tab (the transcript is per
 /// conversation) plus the single shared `SessionStatusWatcher` (the registry is not).

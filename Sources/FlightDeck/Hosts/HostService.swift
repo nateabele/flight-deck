@@ -4,6 +4,7 @@ import Foundation
 import HostKit
 import Network
 import OSLog
+import Security
 
 /// Why `HostService.pair` did not produce a host.
 enum HostPairingError: Error, Equatable {
@@ -56,32 +57,109 @@ final class HostService: ObservableObject {
         self.clock = clock
     }
 
-    /// Opens a link to every paired host. Returns at once: the Keychain is read on a
-    /// background task, because a read can block on `securityd` and this runs at app
-    /// launch. With no hosts it does nothing at all — no task, no browse, no Keychain.
+    /// Opens a link to every paired host. Returns at once: each host's key is read on its own
+    /// GCD thread, because a read can block on `securityd` and this runs at app launch. With
+    /// no hosts it does nothing at all — no read, no browse, no Keychain.
+    ///
+    /// **One read per host, each opening its own link the moment it returns.** Reading every
+    /// key in one task and opening links only after the last read meant one unanswered
+    /// Keychain prompt held every host offline: on 2026-10-10 a re-signed release prompted for
+    /// m3's key at 12:05 and neither m3 nor jeeves was dialled again until it was answered.
     func start() {
         guard !started else { return }
         started = true
         let records = registry.hosts
         guard !records.isEmpty else { return }
-        for record in records { statuses[record.slot] = .offline(lastSeen: record.lastSeenAt) }
+        for record in records {
+            statuses[record.slot] = .offline(lastSeen: record.lastSeenAt)
+            readKey(record)
+        }
+    }
+
+    // MARK: - Keys
+
+    /// How long a read may run before the host shows why it is not dialling. A read that
+    /// needs no prompt answers in milliseconds; one that runs this long is waiting on the user.
+    nonisolated static let keyReadPatience: TimeInterval = 3
+    /// Between failed reads; the last value repeats, so a denied prompt is asked again every
+    /// five minutes rather than either never (the link latched off) or in a tight loop.
+    nonisolated static let keyRetryBackoff: [TimeInterval] = [5, 15, 30, 60, 120, 300]
+
+    /// Slots with a read running. At most one per host: a second would put a second prompt
+    /// for the same item on screen.
+    private var keyReads: Set<UUID> = []
+    /// Failed reads in a row, per slot. Readable so a test can tell one retry from the next
+    /// once the delay stops growing and the status text stops changing.
+    private(set) var keyAttempts: [UUID: Int] = [:]
+    private var keyTimers: [UUID: HostLinkCancellable] = [:]
+
+    private func readKey(_ record: HostRecord) {
+        let slot = record.slot
+        // `record` only names the slot; `keyRead` looks the record up again, since a read can
+        // outlive several updates to it.
+        guard !keyReads.contains(slot), links[slot] == nil else { return }
+        keyReads.insert(slot)
+        keyTimers[slot]?.cancel()
+        keyTimers[slot] = clock.schedule(after: Self.keyReadPatience) { [weak self] in
+            guard let self, self.keyReads.contains(slot), self.isPaired(slot) else { return }
+            self.statuses[slot] = .keyUnavailable(
+                "waiting for Keychain access: approve Flight Deck's Keychain prompt")
+        }
         let secrets = registry.secrets
-        Task { [weak self] in
-            let found = await Task.detached(priority: .utility) {
-                records.map { ($0, secrets.secret(for: $0.slot)) }
-            }.value
-            guard let self else { return }
-            for (record, secret) in found {
-                guard let secret else {
-                    // Kept, not dropped: the user should see the host and re-pair it, not
-                    // wonder where it went.
-                    Self.logger.error("\(record.name, privacy: .public): no key in the Keychain")
-                    self.statuses[record.slot] = .refused("Pair \(record.name) again: its key is missing")
-                    continue
-                }
-                self.open(record, key: FleetDeviceKey(slot: record.slot, secret: secret))
+        // GCD, not `Task.detached`: a read can block for hours on a prompt, and a blocked
+        // thread in the cooperative pool is one fewer for every other task in the app.
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let result = secrets.read(slot)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated { self?.keyRead(slot, result) }
             }
         }
+    }
+
+    private func keyRead(_ slot: UUID, _ result: HostSecretRead) {
+        keyReads.remove(slot)
+        keyTimers.removeValue(forKey: slot)?.cancel()
+        // Forgotten while the read ran.
+        guard let record = registry.hosts.first(where: { $0.slot == slot }) else { return }
+        switch result {
+        case .found(let secret):
+            keyAttempts[slot] = nil
+            statuses[slot] = .offline(lastSeen: record.lastSeenAt)
+            open(record, key: FleetDeviceKey(slot: slot, secret: secret))
+        case .missing:
+            // Kept, not dropped: the user should see the host and re-pair it, not wonder where
+            // it went. Not retried: no amount of waiting puts a key back.
+            Self.logger.error("\(record.name, privacy: .public): no key in the Keychain")
+            statuses[slot] = .refused("Pair \(record.name) again: its key is missing")
+        case .failed(let status):
+            let attempt = keyAttempts[slot, default: 0]
+            keyAttempts[slot] = attempt + 1
+            let delay = Self.keyRetryBackoff[min(attempt, Self.keyRetryBackoff.count - 1)]
+            Self.logger.error("\(record.name, privacy: .public): Keychain read failed, OSStatus \(status, privacy: .public); retrying in \(Int(delay), privacy: .public)s")
+            statuses[slot] = .keyUnavailable("\(Self.keyFailureText(status)); retrying in \(Int(delay))s")
+            keyTimers[slot] = clock.schedule(after: delay) { [weak self] in
+                guard let self else { return }
+                self.keyTimers[slot] = nil
+                guard let current = self.registry.hosts.first(where: { $0.slot == slot }) else { return }
+                self.readKey(current)
+            }
+        }
+    }
+
+    /// What the user can do about a failed read, in `host ls` and Settings.
+    nonisolated static func keyFailureText(_ status: OSStatus) -> String {
+        switch status {
+        case errSecUserCanceled, errSecAuthFailed:
+            return "Keychain access denied"
+        case errSecInteractionNotAllowed:
+            return "Keychain is locked"
+        default:
+            return "Keychain read failed (OSStatus \(status))"
+        }
+    }
+
+    private func isPaired(_ slot: UUID) -> Bool {
+        registry.hosts.contains { $0.slot == slot }
     }
 
     func info(name: String) async throws -> (HostRecord, HostInfo) {
@@ -185,6 +263,8 @@ final class HostService: ObservableObject {
 
     /// Works while the host is offline. The host keeps our slot until someone revokes it there.
     func forget(slot: UUID) {
+        keyTimers.removeValue(forKey: slot)?.cancel()
+        keyAttempts[slot] = nil
         if let link = links.removeValue(forKey: slot) {
             // Detached first, or `stop()`'s own `.offline` report would put the status back.
             link.onStateChange = nil
@@ -203,8 +283,7 @@ final class HostService: ObservableObject {
 
     private func open(_ record: HostRecord, key: FleetDeviceKey) {
         // Forgotten while its key was being read, or already open.
-        guard links[record.slot] == nil, registry.hosts.contains(where: { $0.slot == record.slot })
-        else { return }
+        guard links[record.slot] == nil, isPaired(record.slot) else { return }
         let link = HostLink(record: record, key: key, controllerName: controllerName,
                             dial: dial, clock: clock)
         let slot = record.slot
@@ -229,7 +308,7 @@ final class HostService: ObservableObject {
         case .offline(let lastSeen?) where lastSeen != record.lastSeenAt:
             record.lastSeenAt = lastSeen
             save(record)
-        case .connecting, .offline, .refused:
+        case .connecting, .offline, .refused, .keyUnavailable:
             break
         }
     }

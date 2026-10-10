@@ -1,4 +1,5 @@
 import OSLog
+import IntakeKit
 import SwiftUI
 
 @main
@@ -134,6 +135,12 @@ struct FlightDeckApp: App {
     }
 
     init() {
+        // First, before anything below starts a thread: the locale variables libghostty would
+        // otherwise `setenv` mid-launch, while threads read `environ` (see `LaunchLocale`).
+        // `GhosttyApp`'s one-time init calls it again right before `ghostty_init`, where it
+        // then finds nothing to change — that call is the guarantee, this one the wider margin.
+        LaunchLocale.prepareProcessEnvironment()
+
         // Constructed eagerly, unlike the store: this only reads `UserDefaults`, and both
         // the Settings scene and the store below need the *same* instance.
         //
@@ -478,7 +485,9 @@ struct FlightDeckApp: App {
             // Routing, spills and the launch sheet use `RoutingService.catalogs()`, which honors
             // Settings. Until L3-R fills `modelCatalog()` these are the L3-0
             // stubs' empty catalogs, so a refresh proposes no aliases before integration.
-            catalogs: { await RoutingCapabilityRegistry.standard().catalogs(enabled: Set(AgentID.allCases.map(\.harnessID))) })
+            catalogs: { await RoutingCapabilityRegistry.standard().catalogs(enabled: Set(AgentID.allCases)) })
+        // The refresh bills a resolved claude account, not the built-in home (round 2, item 11).
+        service.accountResolver = store.accountResolver
         service.startScheduling(clock: store.watchClock)
         return service
     }
@@ -497,13 +506,7 @@ struct FlightDeckApp: App {
         RootWindow(store: store, preferences: preferences,
                    phoneActiveSessions: fleet.phoneActiveSessions)
             .commands {
-                SessionCommands(store: store, preferences: preferences)
-                EditCommands()
-                FontSizeCommands(store: store, preferences: preferences)
-                TabNavigationCommands(store: store)
-                SearchCommands()
-                PlanningCommands()
-                ShortcutOverlayCommands()
+                FlightDeckCommands(store: store, preferences: preferences)
             }
 
         // A `Settings` scene gives ⌘, and the standard Preferences window for free.

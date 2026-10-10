@@ -107,6 +107,8 @@ final class PromptService {
     private struct Derived {
         let url: URL
         let stamp: TranscriptStamp
+        /// `AgentOpenPromptReader.auxiliaryStamp` at the time of the read.
+        var auxiliary: String? = nil
         let result: Result<OpenPrompt, TimelineErrorCode>
     }
 
@@ -161,7 +163,13 @@ final class PromptService {
         session: UUID, agent: String?, call: String, answer: PromptAnswer, token: UUID
     ) -> Result<Void, TimelineErrorCode> {
         let derived: Result<OpenPrompt, TimelineErrorCode>
-        if let agent {
+        if let agent, case .success(let read) = preflight(session),
+           let vouched = read.reader.vouchedSubagentPrompt(inTranscriptAt: read.url, agent: agent) {
+            // An agent whose own files say a subagent's call is a dialog (grok: the child's
+            // unresolved `permission_requested`) needs no hook log to vouch for it. The reader
+            // validates the id before it builds a path.
+            derived = .success(vouched)
+        } else if let agent {
             // Checked before any path is built: this id came off the wire.
             guard SubagentID.isValid(agent) else {
                 record(session, sent: call, open: nil, code: "unknown_agent")
@@ -180,6 +188,14 @@ final class PromptService {
                 derived = subagentOpenPrompt(session, agent: agent)
                     .map { .success($0) } ?? .failure("prompt_changed")
             }
+        } else if let attributed = attributedSubagentPrompt(session) {
+            // The dialog on screen is a subagent's, so a main-agent call cannot be what the
+            // tap answers: the parent's derivation would offer whatever tool the main agent
+            // has in flight, and Allow would land on the subagent's dialog — a different
+            // command from the one the phone showed ("The Plan", 2026-10-09). The subagent's
+            // call id never equals a main-agent call's, so this refuses `prompt_changed` and
+            // logs the call that IS open.
+            derived = .success(attributed.open)
         } else {
             derived = openPrompt(inSession: session)
         }
@@ -233,11 +249,13 @@ final class PromptService {
     func pushedOpenPrompt(inSession session: UUID) -> Result<OpenPrompt, TimelineErrorCode> {
         guard let agent = store.agent(of: session),
               agent.dialogDriver != nil,
-              agent.openPromptReader != nil
+              let reader = agent.openPromptReader
         else { return .failure("unsupported_agent") }
         // Never nil: an unpolled derive always settles inline.
-        return attributingSubagents(session, derive(session, polled: false))
+        let result = attributingSubagents(session, derive(session, polled: false))
             ?? .failure("prompt_changed")
+        recordOffer(session, result, reader: reader)
+        return result
     }
 
     /// `pushedOpenPrompt` for `SessionStore`'s registry tick, which must never block the main
@@ -246,9 +264,38 @@ final class PromptService {
     func polledOpenPrompt(inSession session: UUID) -> Result<OpenPrompt, TimelineErrorCode>? {
         guard let agent = store.agent(of: session),
               agent.dialogDriver != nil,
-              agent.openPromptReader != nil
+              let reader = agent.openPromptReader
         else { return .failure("unsupported_agent") }
-        return attributingSubagents(session, derive(session, polled: true))
+        let result = attributingSubagents(session, derive(session, polled: true))
+        recordOffer(session, result, reader: reader)
+        return result
+    }
+
+    /// The dialog the last push/poll derivation found for `session`, in words, when it must be
+    /// SENT rather than derived on the phone — nil otherwise. Read by `SessionStore` straight
+    /// after `openPromptProbe` succeeds, the way `openPromptAgent(inSession:)` is, so the id and
+    /// the words come from one derivation and can never name two different calls.
+    func offeredOpenPrompt(inSession session: UUID) -> OpenPrompt? { offers[session] }
+
+    /// Written by every scheduled derivation, cleared by every one that does not qualify, so an
+    /// entry never outlives the dialog it describes. See `offeredOpenPrompt(inSession:)`.
+    private var offers: [UUID: OpenPrompt] = [:]
+
+    /// **Only for a reader whose transcript cannot carry the dialog**
+    /// (`AgentOpenPromptReader.transcriptCarriesOpenPrompt`). For claude and grok the phone
+    /// derives the card from its own copy of the transcript, and sending the words as well
+    /// would be two sources for one card that could disagree. A subagent's dialog is never
+    /// offered either: it is read from the subagent's own file, which the phone fetches.
+    private func recordOffer(
+        _ session: UUID, _ result: Result<OpenPrompt, TimelineErrorCode>?,
+        reader: any AgentOpenPromptReader
+    ) {
+        if !reader.transcriptCarriesOpenPrompt, case .success(let open)? = result,
+           attributedAgents[session] == nil {
+            offers[session] = open
+        } else {
+            offers[session] = nil
+        }
     }
 
     /// The tab's own derivation missed. If the hook log named a subagent's call
@@ -269,20 +316,34 @@ final class PromptService {
     /// screen. Only a call the PermissionRequest hook NAMED is offered, which is what
     /// `pendingDialog` carries; every other open call stays the `"subagent_prompt"` refusal,
     /// which errs toward claude's own wording on screen.
+    ///
+    /// **A named subagent dialog is asked first, ahead of the tab's own derivation.** The
+    /// parent keeps working while its subagent waits, and the tab reads `waiting` throughout,
+    /// so the parent's derivation offers whatever tool the main agent has in flight — a running
+    /// call, not a dialog. "The Plan" (2026-10-09) showed four of those in three minutes, and
+    /// an Allow tap on one approved the subagent's dialog, a different command.
     private func attributingSubagents(
         _ session: UUID, _ result: Result<OpenPrompt, TimelineErrorCode>?
     ) -> Result<OpenPrompt, TimelineErrorCode>? {
-        guard case .failure(let code)? = result, code.code == "prompt_changed" else {
-            if case .success? = result { attributedAgents[session] = nil }
-            return result
+        if let attributed = attributedSubagentPrompt(session) {
+            attributedAgents[session] = attributed.agent
+            return .success(attributed.open)
         }
-        if let dialog = pendingDialog(session), let agent = dialog.agentID,
-           let open = subagentOpenPrompt(session, agent: agent), open.callID == dialog.callID {
-            attributedAgents[session] = agent
-            return .success(open)
+        guard case .failure(let code)? = result, code.code == "prompt_changed" else {
+            if case .success(let open)? = result { attributedAgents[session] = owningSubagent(session, open) }
+            return result
         }
         attributedAgents[session] = nil
         return subagentHoldsOpenCall(session) ? .failure("subagent_prompt") : result
+    }
+
+    /// The hook log's subagent dialog, confirmed still unresolved in that subagent's own file.
+    /// Nil for a main-agent dialog, no dialog, or one the file has since answered.
+    private func attributedSubagentPrompt(_ session: UUID) -> (agent: String, open: OpenPrompt)? {
+        guard let dialog = pendingDialog(session), let agent = dialog.agentID,
+              let open = subagentOpenPrompt(session, agent: agent), open.callID == dialog.callID
+        else { return nil }
+        return (agent, open)
     }
 
     /// The subagent whose file held the call the last push/poll derivation returned. Written
@@ -297,10 +358,18 @@ final class PromptService {
     /// that is not waiting, or no transcript. The id is validated here too because it reaches
     /// a path; the wire edge refuses it first, but this is the layer that builds the path.
     private func subagentOpenPrompt(_ session: UUID, agent: String) -> OpenPrompt? {
-        guard SubagentID.isValid(agent), case .success(let read) = preflight(session),
-              let dir = read.reader.subagentTranscripts(for: read.url) else { return nil }
-        let lines = tail(dir.appendingPathComponent("agent-\(agent).jsonl"), Self.tailRecords).lines
+        guard case .success(let read) = preflight(session),
+              let file = read.reader.subagentTranscript(for: read.url, agent: agent) else { return nil }
+        let lines = tail(file, Self.tailRecords).lines
         return read.reader.openPrompt(inSubagentTail: lines)
+    }
+
+    /// The subagent the tab's own derivation took its open call from, if any — grok's reader
+    /// finds a child's card itself (`AgentOpenPromptReader.owningSubagent`), where claude's is
+    /// attributed through the hook log above.
+    private func owningSubagent(_ session: UUID, _ open: OpenPrompt) -> String? {
+        guard case .success(let read) = preflight(session) else { return nil }
+        return read.reader.owningSubagent(of: open, inTranscriptAt: read.url)
     }
 
     /// Per-tab, per-file answers for `subagentHoldsOpenCall`, keyed on each file's stamp the
@@ -375,10 +444,20 @@ final class PromptService {
         derived = derived.filter { store.status(for: $0.key)?.activity == .waiting }
         subagentScans = subagentScans.filter { store.status(for: $0.key)?.activity == .waiting }
         attributedAgents = attributedAgents.filter { store.status(for: $0.key)?.activity == .waiting }
+        offers = offers.filter { store.status(for: $0.key)?.activity == .waiting }
         let read: TranscriptRead
         switch preflight(session) {
         case .failure(let code): return .failure(code)
         case .success(let r): read = r
+        }
+        // **Never cached for a reader whose dialog is not in the transcript.** The stamp below
+        // is a sound key only because a new dialog is an append to that file; agy raises its
+        // next dialog in its step store, and an approval answered at the keyboard can be
+        // followed by the next dialog before the transcript moves — the cache would then serve
+        // the superseded call, and the phone would keep a card the Mac has left. `scan` reads
+        // once and never widens for such a reader, so the uncached read is one bounded look.
+        guard read.reader.transcriptCarriesOpenPrompt else {
+            return Self.scanToEnd(read, tail: tail)
         }
         // Taken BEFORE the read, so an append racing the read leaves the entry keyed on the
         // older stamp and the next tick re-derives — the safe direction.
@@ -387,21 +466,23 @@ final class PromptService {
             // missing file, so the uncached derivation is as cheap as a cache hit.
             return Self.scanToEnd(read, tail: tail)
         }
-        if let hit = derived[session], hit.url == read.url, hit.stamp == stamp {
+        // The reader's other inputs, taken before the read for the stamp's reason.
+        let auxiliary = read.reader.auxiliaryStamp(forTranscriptAt: read.url)
+        if let hit = derived[session], hit.url == read.url, hit.stamp == stamp, hit.auxiliary == auxiliary {
             return hit.result
         }
         if !polled {
             let result = Self.scanToEnd(read, tail: tail)
-            derived[session] = Derived(url: read.url, stamp: stamp, result: result)
+            derived[session] = Derived(url: read.url, stamp: stamp, auxiliary: auxiliary, result: result)
             return result
         }
         if widening.contains(session) { return staleRefusal(session) }
         switch Self.scan(read, tail: tail, reads: 1) {
         case .settled(let result):
-            derived[session] = Derived(url: read.url, stamp: stamp, result: result)
+            derived[session] = Derived(url: read.url, stamp: stamp, auxiliary: auxiliary, result: result)
             return result
         case .needsWider(let step):
-            widen(session, read, stamp: stamp, from: step)
+            widen(session, read, stamp: stamp, auxiliary: auxiliary, from: step)
             return staleRefusal(session)
         }
     }
@@ -412,7 +493,8 @@ final class PromptService {
     }
 
     private func widen(
-        _ session: UUID, _ read: TranscriptRead, stamp: TranscriptStamp, from step: WidenStep
+        _ session: UUID, _ read: TranscriptRead, stamp: TranscriptStamp, auxiliary: String?,
+        from step: WidenStep
     ) {
         widening.insert(session)
         let tail = self.tail
@@ -422,7 +504,8 @@ final class PromptService {
                 MainActor.assumeIsolated {
                     guard let self else { return }
                     self.widening.remove(session)
-                    self.derived[session] = Derived(url: read.url, stamp: stamp, result: result)
+                    self.derived[session] = Derived(url: read.url, stamp: stamp, auxiliary: auxiliary,
+                                                    result: result)
                     self.onPolledSettled?()
                 }
             }
@@ -555,10 +638,13 @@ final class PromptService {
         while true {
             let (lines, hasMore) = tail(read.url, step.limit)
             performed += 1
-            if let open = read.reader.openPrompt(inTranscriptTail: lines, activity: read.activity) {
+            if let open = read.reader.openPrompt(inTranscriptAt: read.url, tail: lines, activity: read.activity) {
                 return .settled(.success(open))
             }
-            guard hasMore, step.limit < maxTailRecords, lines.count > step.previousCount
+            // A reader whose dialog is never a transcript record has nothing a wider window
+            // could find (see `transcriptCarriesOpenPrompt`): one look, and its answer stands.
+            guard read.reader.transcriptCarriesOpenPrompt,
+                  hasMore, step.limit < maxTailRecords, lines.count > step.previousCount
             else { return .settled(.failure("prompt_changed")) }
             step = WidenStep(limit: step.limit * 8, previousCount: lines.count)
             if let reads, performed >= reads { return .needsWider(step) }

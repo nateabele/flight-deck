@@ -1,5 +1,6 @@
 // Tests/FlightDeckTests/ProjectSettingsTests.swift
 import XCTest
+import IntakeKit
 @testable import FlightDeck
 
 final class ProjectSettingsTests: XCTestCase {
@@ -7,7 +8,7 @@ final class ProjectSettingsTests: XCTestCase {
     /// enum-keyed dictionary as a flat alternating array, which is unreadable on disk and
     /// breaks the "raw values are a storage format" contract on `AgentID`.
     func testAgentKeyedDictionariesEncodeAsObjects() throws {
-        let settings = ProjectSettings(defaultAgent: .codex, accounts: [.claude: UUID()], options: [:])
+        let settings = ProjectSettings(defaultAgent: .codex, accounts: [.claude: .account(UUID())], options: [:])
         let json = try JSONSerialization.jsonObject(
             with: try JSONEncoder().encode(settings)
         ) as? [String: Any]
@@ -25,7 +26,7 @@ final class ProjectSettingsTests: XCTestCase {
 
     func testEmptinessSeesADefaultAgentAndAnAccount() {
         XCTAssertFalse(ProjectSettings(defaultAgent: .claude).isEmpty)
-        XCTAssertFalse(ProjectSettings(accounts: [.codex: UUID()]).isEmpty)
+        XCTAssertFalse(ProjectSettings(accounts: [.codex: .account(UUID())]).isEmpty)
     }
 
     func testCodexMergeInheritsNilFieldsAndOverridesSetOnes() {

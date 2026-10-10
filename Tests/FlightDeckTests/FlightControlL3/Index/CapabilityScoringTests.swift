@@ -116,7 +116,7 @@ final class CapabilityScoringTests: XCTestCase {
 
     func testManualScoresWinWithConfidenceOne() {
         let computed = [ModelScores(model: sol, dimensions: ["debugging": DimensionScore(score: 0.2, confidence: 0.5)])]
-        let local = ModelRef(harness: "opencode", model: "ollama/qwen")
+        let local = ModelRef(agent: .gemini, model: "ollama/qwen")
         let out = CapabilityScoring.overlay(computed, manual: [
             ManualModelScores(model: local, dimensions: ["debugging": 0.7, "vibes": 1]),
             ManualModelScores(model: sol, dimensions: ["debugging": 0.9])])
@@ -129,7 +129,7 @@ final class CapabilityScoringTests: XCTestCase {
         let computed = [ModelScores(model: sol, dimensions: [
             "agentic-coding": DimensionScore(score: 0.8, confidence: 0.75, sources: ["a"]),
             "debugging": DimensionScore(score: 0.4, confidence: 1, sources: ["b"])])]
-        let local = ModelRef(harness: "opencode", model: "ollama/qwen")
+        let local = ModelRef(agent: .gemini, model: "ollama/qwen")
         let out = CapabilityScoring.overlay(computed, manual: [
             ManualModelScores(model: local, dimensions: ["debugging": 0.9], inheritFrom: sol)])
         let inherited = dim(out, local, "agentic-coding")!
@@ -141,7 +141,7 @@ final class CapabilityScoringTests: XCTestCase {
     }
 
     func testComputedBeatsInherited() {
-        let local = ModelRef(harness: "opencode", model: "ollama/qwen")
+        let local = ModelRef(agent: .gemini, model: "ollama/qwen")
         let computed = [ModelScores(model: sol, dimensions: ["agentic-coding": DimensionScore(score: 0.8, confidence: 1)]),
                         ModelScores(model: local, dimensions: ["agentic-coding": DimensionScore(score: 0.3, confidence: 0.2)])]
         let out = CapabilityScoring.overlay(computed, manual: [ManualModelScores(model: local, dimensions: [:], inheritFrom: sol)])

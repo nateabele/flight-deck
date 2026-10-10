@@ -54,6 +54,7 @@ or revert blind — check `git status` and leave changes that aren't yours alone
 ./scripts/smoke.sh              # GUI UITest on the UI-test Mac, ends "SMOKE PASS" (see rule 4);
                                 # result bundle + log copied back to DerivedData/smoke-remote/
 ./scripts/test-ui-flight-control.sh  # SwarmUITests on a stub br/am/agent fixture, run on the UI-test Mac via smoke-remote.sh — never loop it
+./scripts/test-menu-bar.sh      # the menu-bar gate: a SwiftUI app around the real Commands + AppKit menus + RootView, fails on any main-menu removal; no focus taken, safe here; also a lane of every full test-unit.sh
 
 # Flake hunting — loops one suspect sequence 20x in a single launch (rule 4).
 # The TEST_RUNNER_ prefix is mandatory; without it the case is silently SKIPPED. smoke-remote.sh
@@ -84,6 +85,11 @@ FD_INFRA_LIVE=1 ./scripts/test-infra-live.sh aws|gcp   # ends INFRA LIVE PASS
 # runs a real model turn that costs real tokens. Never loop it; run it only when you
 # have a specific reason to.
 ./scripts/test-codex-live.sh
+
+# The OpenCode adapter AND OpenCode headless planning against a REAL `opencode` and a scripted
+# model (scripts/opencodeprobe/fake_llm.py): no GPU, no tokens, and your own OpenCode config and
+# data are never touched. Under a minute after the build; needs `opencode` >= 1.18.0 on PATH.
+./scripts/test-opencode-live.sh
 
 flightdeck ls                   # drive Flight Deck itself from a tab's own shell — see docs/HANDOFF.md
 ```
@@ -116,7 +122,7 @@ Releases go through `scripts/swap-release.sh`, run detached — see
 | Path | What |
 |---|---|
 | `Sources/FlightDeck/` | The app. `SessionStore` is the single source of truth (`@MainActor`). |
-| `Sources/FlightDeck/Agents/` | The `AgentAdapter` protocol and both conformers, `ClaudeAdapter` and `CodexAdapter` (the latter under `Agents/Codex/`) — identity, the text/dialog/rename channels, and now `AgentSearchCorpus`, the capability that makes an agent's history searchable. |
+| `Sources/FlightDeck/Agents/` | The `AgentAdapter` protocol and its conformers — `ClaudeAdapter`, `CodexAdapter`, `GrokAdapter`, `GeminiAdapter` and `OpenCodeAdapter` (each under `Agents/<Name>/` except claude's) — identity, the text/dialog/rename channels, `AgentSearchCorpus`, `promptResponder`, and `AgentForwardCompatibility` (keeps `sessions.json`/`preferences.v1` readable by older builds). |
 | `Sources/FlightDeck/GhosttyEmbed/` | **Adapt-copied Ghostty** (MIT, provenance-marked). Vendored-ish — prefer re-pulling upstream to hand-editing. |
 | `Sources/FlightDeck/Preferences/` | Pure flag catalog/parser/serializer/merge + SwiftUI shell. |
 | `Sources/FleetKit/` | Wire types, event fold, pairing payload, and both socket halves — plus both platforms' pairing stores. Swift 6, `Foundation`, `Network`, and `Security` only — compiled for iOS too, which is what enforces that. |

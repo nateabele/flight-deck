@@ -120,6 +120,12 @@ public struct ManualModelScores: Codable, Equatable, Sendable {
     }
 }
 
+/// Decodes one hand-entered score, or nothing when it names an agent this build cannot read.
+private struct LossyManualScores: Decodable {
+    let value: ManualModelScores?
+    init(from decoder: Decoder) throws { value = try? ManualModelScores(from: decoder) }
+}
+
 /// The refresh agent. claude only in v1: it is the harness whose web tools and `--restricted`
 /// isolation were probed (claude 2.1.289 `--help`: `--restricted` removes WebFetch "unless
 /// --tools names them").
@@ -164,7 +170,11 @@ public struct IndexConfig: Codable, Equatable, Sendable {
         v = try c.decodeIfPresent(Int.self, forKey: .v) ?? IndexConfig.currentVersion
         sources = try c.decodeIfPresent([IndexSource].self, forKey: .sources) ?? IndexSourceRegistry.initial
         aliases = try c.decodeIfPresent(AliasTable.self, forKey: .aliases) ?? AliasTable()
-        manual = try c.decodeIfPresent([ManualModelScores].self, forKey: .manual) ?? []
+        // Element by element: a hand-entered score used to name its agent as free text (the
+        // editor's default was "opencode"), and an entry naming an agent this build has no
+        // `AgentID` for must cost that one entry, not the whole config — a config that fails to
+        // load is moved aside with the user's aliases in it.
+        manual = (try c.decodeIfPresent([LossyManualScores].self, forKey: .manual) ?? []).compactMap(\.value)
         agent = try c.decodeIfPresent(IndexAgentSettings.self, forKey: .agent) ?? .standard
         lastRefreshAttemptAt = try c.decodeIfPresent(Date.self, forKey: .lastRefreshAttemptAt)
     }

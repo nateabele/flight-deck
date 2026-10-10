@@ -35,6 +35,11 @@ struct LiveCard: View {
     /// the rows show (`DwellBank.peek`). Triage and the renders keep their own.
     fileprivate var sharedDwell: DwellBank?
     private var dwell: DwellBank { sharedDwell ?? ownDwell }
+    /// Opens the Rounds inspector on a round's chip: what a click on a round chip does, here and
+    /// on the finished-round cards. Nil (triage, renders) draws chips inert.
+    fileprivate var showConfig: ((RoundKey) -> Void)?
+    /// The round picked in the Rounds inspector — the live header's chip shows it picked too.
+    fileprivate var pickedRound: RoundKey?
 
     /// `activity` is `IntakeService.triageActivity(_:)`; `pending` its `pending[id]`.
     static func triage(intake: Intake, activity: SeatActivity?, pending: PendingStart?) -> LiveCard {
@@ -56,14 +61,14 @@ struct LiveCard: View {
                         results: [String: SeatResult] = [:], pending: PendingStart?, editConflict: EditConflictNotice? = nil,
                         selectedRound: Binding<Int?> = .constant(nil), openRound: Binding<Int?> = .constant(nil),
                         selectedSeat: Binding<String?> = .constant(nil),
-                        dwell: DwellBank? = nil,
+                        dwell: DwellBank? = nil, showConfig: ((RoundKey) -> Void)? = nil, pickedRound: RoundKey? = nil,
                         controlBar: @escaping (Date) -> AnyView, board: @escaping (Date) -> AnyView) -> LiveCard {
         LiveCard(intake: intake,
                  kind: .shaping(tape: tape, seats: SeatFiles(activities: activities, records: records, results: results),
                                 editConflict: editConflict, selectedRound: selectedRound, openRound: openRound,
                                 selectedSeat: selectedSeat,
                                 controlBar: controlBar, board: board),
-                 pending: pending, sharedDwell: dwell)
+                 pending: pending, sharedDwell: dwell, showConfig: showConfig, pickedRound: pickedRound)
     }
 
     var body: some View {
@@ -111,7 +116,8 @@ struct LiveCard: View {
                                    // Choosing the head goes back to following it, the same rule
                                    // the board's slots follow.
                                    select: { selectedRound.wrappedValue = $0 == head ? nil : $0 },
-                                   setOpen: { openRound.wrappedValue = $0 })
+                                   setOpen: { openRound.wrappedValue = $0 },
+                                   showConfig: showConfig, pickedRound: pickedRound)
                         .equatable()
                 }
             }
@@ -184,10 +190,18 @@ struct LiveCard: View {
 
     private func sectionHeader(seats: [LiveSeat], now: Date) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Text(sectionTitle)
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(.secondary)
-                .textCase(.uppercase)
+            if let chip = liveChip {
+                // The running round as the Rounds inspector's timeline draws it — the same chip,
+                // live there as here.
+                RoundChip(model: chip, selected: pickedRound == chip.key,
+                          action: showConfig.map { show in { show(chip.key) } })
+                    .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + 4 }
+            } else {
+                Text(sectionTitle)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .textCase(.uppercase)
+            }
             if pending == nil, seats.count > 1 {
                 // Agents done out of agents: the one progress fraction a round honestly has.
                 let done = seats.filter { $0.model.glyph == .done }.count
@@ -208,6 +222,12 @@ struct LiveCard: View {
             }
         }
         .padding(.horizontal, 12)
+    }
+
+    /// The running (or starting) round's chip (`RoundTimeline.live`), for the header.
+    private var liveChip: RoundChipModel? {
+        guard case .shaping(let tape, _, _, _, _, _, _, _) = kind else { return nil }
+        return RoundTimeline.live(tape: tape, starting: pendingRound, config: intake.roundConfig)
     }
 
     private var sectionTitle: String {
@@ -252,8 +272,8 @@ struct LiveCard: View {
     /// the harness actually streaming, since `make` reads a harness mismatch as a fallback and
     /// triage has none.
     private func triageSlot(activity: SeatActivity?) -> Slot? {
-        guard let session = intake.triage, activity == nil || activity?.harness == session.harness else { return nil }
-        return Slot(ModelChoice(harness: session.harness, model: session.model, effort: session.effort))
+        guard let session = intake.triage, activity == nil || activity?.agent == session.agent else { return nil }
+        return Slot(ModelChoice(agent: session.agent, model: session.model, effort: session.effort))
     }
 
     // MARK: - Banners
@@ -314,28 +334,16 @@ enum LiveSeats {
     static func expected(_ round: PlannedRound, config: RoundConfig?) -> [(base: String, requested: Slot?)] {
         guard let c = config else { return [] }
         let p = "\(round.stage.rawValue)-\(round.round)-"
-        switch round.stage {
-        case .draft:
-            return c.drafters.enumerated().map { (base: "\(p)drafter-\($0.offset)", requested: $0.element) }
-        case .synthesis:
-            return [(base: "\(p)synthesizer", requested: c.synthesizer), (base: "\(p)integrator", requested: Slot(c.integrator))]
-        case .refine:
-            // The reviewer runs its choice with no persona (`RoundExecutor.refine`), so the row
-            // doesn't claim one the engine never asked for.
-            guard round.crossCheck else {
-                return [(base: "\(p)reviewer", requested: c.reviewer.map { Slot($0.choice) }),
-                        (base: "\(p)integrator", requested: Slot(c.integrator))]
+        // Who runs the round is `RoundParticipants`' answer — the same one the planner and the
+        // Rounds editor's timeline read — so the rows can't list a seat the chips don't.
+        return RoundParticipants.of(round, config: c).map { seat in
+            let base = p + seat.role + (seat.index.map { "-\($0)" } ?? "")
+            switch seat.role {
+            // The reviewers run their choice with no persona (`RoundExecutor.refine`), so the
+            // row doesn't claim one the engine never asked for.
+            case "reviewer", "crossReviewer": return (base: base, requested: seat.slot.map { Slot($0.choice) })
+            default: return (base: base, requested: seat.slot)
             }
-            // A cross-check round runs a second reviewer (`RoundExecutor.crossCheckRefine`)
-            // between the usual two, so the queued list matches the seats the engine actually
-            // starts instead of showing the cross-reviewer as an unexpected extra run.
-            return [(base: "\(p)reviewer", requested: c.reviewer.map { Slot($0.choice) }),
-                    (base: "\(p)crossReviewer", requested: c.crossReviewer.map { Slot($0.choice) }),
-                    (base: "\(p)integrator", requested: Slot(c.integrator))]
-        case .encode:
-            return [(base: "\(p)encoder", requested: Slot(c.encoder))]
-        case .polish, .freshEyes, .dedup:
-            return [(base: "\(p)polisher", requested: c.polisher.map { Slot($0) })]
         }
     }
 

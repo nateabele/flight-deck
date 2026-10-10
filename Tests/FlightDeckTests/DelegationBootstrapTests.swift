@@ -203,6 +203,65 @@ final class DelegationBootstrapTests: XCTestCase {
         XCTAssertEqual(store.pluginReloadsDue(), [])
     }
 
+    /// The command flips the registry idle → busy → idle for about 90 ms. A poll that catches
+    /// it must not leave the tab looking like it finished a turn.
+    func testTheReloadBlipLeavesUnreadAndLastActiveAlone() {
+        let store = store(hooks: nil)
+        store.appIsActive = { false }
+        var clock = Date(timeIntervalSince1970: 1_000)
+        store.now = { clock }
+        let id = store.newSession(in: temp).id
+        store.applyRegistryForTesting([id: SessionStatus(activity: .idle)])
+        let stamped = store.lastActiveAt(for: id)
+
+        clock += 60
+        store.pluginReloadSentForTesting(id)
+        clock += 0.05
+        store.applyRegistryForTesting([id: SessionStatus(activity: .busy)])
+        clock += 0.5
+        store.applyRegistryForTesting([id: SessionStatus(activity: .idle)])
+
+        XCTAssertFalse(store.unreadIdle.contains(id))
+        XCTAssertEqual(store.lastActiveAt(for: id), stamped)
+    }
+
+    func testRealWorkAfterTheReloadStillMarksTheTab() {
+        let store = store(hooks: nil)
+        store.appIsActive = { false }
+        var clock = Date(timeIntervalSince1970: 1_000)
+        store.now = { clock }
+        let id = store.newSession(in: temp).id
+        store.applyRegistryForTesting([id: SessionStatus(activity: .idle)])
+
+        store.pluginReloadSentForTesting(id)
+        store.applyRegistryForTesting([id: SessionStatus(activity: .busy)])
+        store.applyRegistryForTesting([id: SessionStatus(activity: .idle)])
+        // The blip landed and closed the window: the next turn is the session's own.
+        clock += 1
+        store.applyRegistryForTesting([id: SessionStatus(activity: .busy)])
+        clock += 30
+        store.applyRegistryForTesting([id: SessionStatus(activity: .idle)])
+
+        XCTAssertTrue(store.unreadIdle.contains(id))
+        XCTAssertEqual(store.lastActiveAt(for: id), clock)
+    }
+
+    func testABusySpellThatOutlivesTheWindowStillMarksTheTab() {
+        let store = store(hooks: nil)
+        store.appIsActive = { false }
+        var clock = Date(timeIntervalSince1970: 1_000)
+        store.now = { clock }
+        let id = store.newSession(in: temp).id
+        store.applyRegistryForTesting([id: SessionStatus(activity: .idle)])
+
+        store.pluginReloadSentForTesting(id)
+        store.applyRegistryForTesting([id: SessionStatus(activity: .busy)])
+        clock += PluginReload.quietWindow + 1
+        store.applyRegistryForTesting([id: SessionStatus(activity: .idle)])
+
+        XCTAssertTrue(store.unreadIdle.contains(id))
+    }
+
     func testRestoreAdoptsOnlyTabsWhoseAgentWasStillRunning() {
         let adopted = UUID(), relaunched = UUID()
         let persistence = FakePersistence()

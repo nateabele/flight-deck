@@ -1,14 +1,12 @@
 import XCTest
 @testable import FlightDeck
 
-/// Pins the Task 14 fix-round bug: before `CurrentProjectObserver` existed,
-/// `SessionCommands` had nothing that would notice a project switch on its own — its ⌘N key
+/// Pins the Task 14 fix-round bug: before `CurrentProjectObserver` existed, the File menu's
+/// New Session rows (then `SessionCommands`, now `NewSessionMenuController`) had nothing that
+/// would notice a project switch on its own — its ⌘N key
 /// equivalent closed over `slot.agent` from whatever project was active the *last* time
-/// `preferences` changed and rebuilt `body`. These tests exercise the observer directly rather
-/// than the SwiftUI `Commands` it feeds, since a headless suite cannot render or inspect a
-/// menu bar item, but `CurrentProjectObserver.path` is exactly what `SessionCommands`'s
-/// `agentsForCurrentProject` now reads — proving this follows the active project is proving
-/// ⌘N does too.
+/// `preferences` changed and rebuilt `body`. These tests exercise the observer directly;
+/// `NewSessionMenuTests` covers the File menu items it drives.
 @MainActor
 final class CurrentProjectObserverTests: XCTestCase {
     private func makeStore(_ preferences: PreferencesStore) -> SessionStore {

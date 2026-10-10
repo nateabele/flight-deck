@@ -78,86 +78,59 @@ final class ToolsMenuControllerTests: XCTestCase {
         XCTAssertEqual(ran, ["Terminal"])
     }
 
-    func testInstallingTwiceLeavesOneToolsMenu() {
-        // `install` runs whenever the main menu is rebuilt, so it has to be idempotent.
+    /// The bar as SwiftUI builds it with `ToolsMenuShell`: a Tools menu SwiftUI authored, holding
+    /// its one placeholder.
+    private func barWithShell() -> NSMenu {
         let main = NSMenu()
         main.addItem(withTitle: "View", action: nil, keyEquivalent: "").submenu = NSMenu(title: "View")
+        let shell = NSMenu(title: ToolsMenuShell.title)
+        shell.addItem(withTitle: "—", action: nil, keyEquivalent: "")
+        main.addItem(withTitle: "Tools", action: nil, keyEquivalent: "").submenu = shell
         main.addItem(withTitle: "Window", action: nil, keyEquivalent: "").submenu = NSMenu(title: "Window")
-        let controller = ToolsMenuController()
-        controller.install(in: main)
-        controller.install(in: main)
-        XCTAssertEqual(main.items.filter { $0.submenu?.title == "Tools" }.count, 1)
+        return main
     }
 
-    func testTheMenuLandsAfterViewWhenViewExists() {
-        let main = NSMenu()
-        main.addItem(withTitle: "View", action: nil, keyEquivalent: "").submenu = NSMenu(title: "View")
-        main.addItem(withTitle: "Window", action: nil, keyEquivalent: "").submenu = NSMenu(title: "Window")
-        ToolsMenuController().install(in: main)
-        XCTAssertEqual(main.items.map { $0.submenu?.title }, ["View", "Tools", "Window"])
-    }
+    private func turn() { RunLoop.current.run(until: Date().addingTimeInterval(0.1)) }
 
-    func testTheMenuLandsBeforeWindowWhenViewIsAbsent() {
-        // SwiftUI builds the main menu asynchronously, so installing before View exists is a
-        // real ordering, not a hypothetical one.
-        let main = NSMenu()
-        main.addItem(withTitle: "Window", action: nil, keyEquivalent: "").submenu = NSMenu(title: "Window")
-        ToolsMenuController().install(in: main)
-        XCTAssertEqual(main.items.map { $0.submenu?.title }, ["Tools", "Window"])
-    }
+    private func shell(_ main: NSMenu) -> NSMenu { main.items.first { $0.submenu?.title == "Tools" }!.submenu! }
 
-    func testAPrunedMenuReinstallsItself() {
-        // The bug this exists to prevent, observed in the running app: the menu installs
-        // correctly at `applicationDidFinishLaunching`, and SwiftUI's one-time main-menu
-        // reconciliation then REMOVES it — same NSMenu instance, foreign item pruned. With
-        // nothing to put it back, ⌘O reached no menu item, fell through to the terminal, and
-        // came out as a literal "o" in the running agent's prompt.
-        //
-        // Verified against the real app before writing this: the prune posts
-        // NSMenuDidRemoveItemNotification, which is why re-installation can be driven by an
-        // observer rather than by guessing a delay long enough to outlast SwiftUI.
-        let main = NSMenu()
-        main.addItem(withTitle: "View", action: nil, keyEquivalent: "").submenu = NSMenu(title: "View")
-        main.addItem(withTitle: "Window", action: nil, keyEquivalent: "").submenu = NSMenu(title: "Window")
-
+    /// The items go INTO the SwiftUI-authored menu, so SwiftUI's reconciliation, which removes
+    /// only top-level menus it didn't author, never removes Tools. It used to be an AppKit
+    /// top-level menu, removed and put back on every reconciliation: the blink.
+    func testTheItemsFillTheSwiftUIShellAndAddNoMenuOfTheirOwn() {
+        let main = barWithShell()
         let controller = ToolsMenuController()
         controller.tools = [tool("Editor", "o")]
         controller.install(in: main)
-        XCTAssertTrue(main.items.contains { $0.submenu?.title == "Tools" }, "precondition")
-
-        // Exactly what SwiftUI does to it.
-        let at = try! XCTUnwrap(main.items.firstIndex { $0.submenu?.title == "Tools" })
-        main.removeItem(at: at)
-
-        // Re-insertion is deliberately asynchronous: mutating a menu from inside its own
-        // change notification is not safe, so the controller hops a turn first.
-        let healed = expectation(description: "reinstalled")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { healed.fulfill() }
-        wait(for: [healed], timeout: 2)
-
-        XCTAssertTrue(
-            main.items.contains { $0.submenu?.title == "Tools" },
-            "a pruned Tools menu must put itself back, or the shortcuts silently stop working"
-        )
-        XCTAssertEqual(
-            main.items.map { $0.submenu?.title }, ["View", "Tools", "Window"],
-            "and it must go back in the right place, not appended"
-        )
+        controller.install(in: main)
+        XCTAssertEqual(main.items.map { $0.submenu?.title }, ["View", "Tools", "Window"], "no menu added or moved")
+        XCTAssertEqual(shell(main).items.filter { !$0.isHidden }.map(\.title), ["Editor", "", "Configure Tools…"])
+        XCTAssertEqual(shell(main).items.filter(\.isHidden).map(\.title), ["—"], "SwiftUI's placeholder, hidden")
+        XCTAssertEqual(shell(main).items.first?.keyEquivalent, "o", "the chord is live in the bar")
     }
 
-    func testReinstallingDoesNotDuplicateWhenTheMenuIsStillPresent() {
-        // The observer fires for every removal, including the one `install(in:)` performs on
-        // its own previous copy. Acting on those unconditionally would append a second Tools.
-        let main = NSMenu()
-        main.addItem(withTitle: "Window", action: nil, keyEquivalent: "").submenu = NSMenu(title: "Window")
+    func testEditingTheToolsRewritesTheShellInPlace() {
+        let main = barWithShell()
         let controller = ToolsMenuController()
         controller.install(in: main)
+        let shellBefore = shell(main)
+        controller.tools = [tool("Tower", "g"), tool("Editor", "o")]
+        XCTAssertTrue(shell(main) === shellBefore)
+        XCTAssertEqual(shell(main).items.filter { !$0.isHidden }.prefix(2).map(\.title), ["Tower", "Editor"])
+        XCTAssertEqual(main.items.count, 3)
+    }
+
+    /// Before SwiftUI has built the shell, installing waits for it; the items follow it in.
+    func testTheItemsFollowAShellBuiltLater() {
+        let main = NSMenu()
+        main.addItem(withTitle: "View", action: nil, keyEquivalent: "").submenu = NSMenu(title: "View")
+        let controller = ToolsMenuController()
+        controller.tools = [tool("Editor", "o")]
         controller.install(in: main)
-
-        let settled = expectation(description: "settled")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { settled.fulfill() }
-        wait(for: [settled], timeout: 2)
-
-        XCTAssertEqual(main.items.filter { $0.submenu?.title == "Tools" }.count, 1)
+        let shell = NSMenu(title: ToolsMenuShell.title)
+        shell.addItem(withTitle: "—", action: nil, keyEquivalent: "")
+        main.addItem(withTitle: "Tools", action: nil, keyEquivalent: "").submenu = shell
+        turn()
+        XCTAssertEqual(shell.items.filter { !$0.isHidden }.first?.title, "Editor")
     }
 }

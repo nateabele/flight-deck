@@ -107,13 +107,13 @@ final class FakeUsageMeterSource: UsageMeterSource, @unchecked Sendable {
 final class FakePoolDirectory: PoolDirectory, @unchecked Sendable {
     private let lock = NSLock()
     var summaries: [PoolSummary] = []
-    var defaults: [HarnessID: PoolID] = [:]
+    var defaults: [AgentID: PoolID] = [:]
     func pools() -> [PoolSummary] {
         lock.lock(); defer { lock.unlock() }
         return summaries
     }
-    func defaultPool(for harness: HarnessID) -> PoolID? {
+    func defaultPool(for agent: AgentID) -> PoolID? {
         lock.lock(); defer { lock.unlock() }
-        return defaults[harness]
+        return defaults[agent]
     }
 }

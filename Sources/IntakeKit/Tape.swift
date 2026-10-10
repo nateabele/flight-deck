@@ -3,8 +3,9 @@ import Foundation
 /// A stop the round engine can land on. `draft`/`synthesis`/`encode`/`freshEyes`/`dedup` each
 /// run exactly once per tape (round 0); `refine` and `polish` repeat 1...N, capped by
 /// `RoundConfig.refinementCap`/`polishCap` plus whatever `.extend` has added on top (or `.trim`
-/// taken off).
-public enum Stage: String, Codable, Sendable { case draft, synthesis, refine, encode, polish, freshEyes, dedup }
+/// taken off). Declared in the order a tape runs them, which `allCases` is relied on for (the
+/// board's stage order, and which stages a shaping edit can still change).
+public enum Stage: String, Codable, Sendable, CaseIterable { case draft, synthesis, refine, encode, polish, freshEyes, dedup }
 
 /// How a review round's verdicts split, for the summary a human sees before deciding whether
 /// to extend refinement.

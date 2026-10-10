@@ -31,7 +31,7 @@ final class RoundConfigEditorRenderTests: XCTestCase {
             to: URL(fileURLWithPath: dir).appendingPathComponent("rounds-editor-sketch.png")
         )
 
-        // Cross-check on (Feature plan's default with both harnesses present): the Cross-check
+        // Cross-check on (Feature plan's default with both agents present): the Cross-check
         // picker plus the second reviewer's row sit right under Reviewer.
         let crossCheck = try XCTUnwrap(PresetExpansion.config(for: .featurePlan, available: .defaults))
         try render(
@@ -49,19 +49,89 @@ final class RoundConfigEditorRenderTests: XCTestCase {
             size: NSSize(width: 620, height: 560),
             to: URL(fileURLWithPath: dir).appendingPathComponent("rounds-editor-crosscheck-samefamily.png")
         )
+
+        // Four families, as the live four-way round seats them: claude + codex drafting, Grok
+        // reviewing, Gemini cross-checking. Gemini has no effort row of claude's five values and
+        // both newcomers' data-use notes show. Built from what the gate offers, so a harness not
+        // yet headless-ready simply renders absent rather than failing the render.
+        var four = AvailableModels(choices: [
+            .claude: AvailableModels.defaults.claude!, .codex: AvailableModels.defaults.codex!,
+            .grok: ModelChoice(agent: .grok, model: "grok-4.7", effort: "high"),
+            .gemini: ModelChoice(agent: .gemini, model: "gemini-3.1-pro-high", effort: "high"),
+        ])
+        four.models[.grok] = ["grok-4.7", "grok-4.6"]
+        four.models[.gemini] = ["gemini-3.1-pro-high", "gemini-3.1-pro-low"]
+        var fourFamily = crossCheck
+        fourFamily.drafters = [Slot(AvailableModels.defaults.claude!), Slot(AvailableModels.defaults.codex!)]
+        if let grok = four.choice(for: .grok) { fourFamily.reviewer = Slot(grok) }
+        if let gemini = four.choice(for: .gemini) { fourFamily.crossReviewer = Slot(gemini) }
+        try render(
+            RoundConfigEditor(preset: .featurePlan, config: .constant(fourFamily), available: four),
+            size: NSSize(width: 620, height: 720),
+            to: URL(fileURLWithPath: dir).appendingPathComponent("rounds-editor-four-family.png")
+        )
+    }
+
+    /// Unify brief R9: each seat's read-only "Bills:" line where the per-seat account picker was —
+    /// codex on the project's pool, claude on its account, and a broken grok assignment warned.
+    /// Light and dark.
+    @MainActor
+    func testRenderBillingLines() throws {
+        guard let dir = ProcessInfo.processInfo.environment["FD_ROUNDS_RENDER_DIR"] else {
+            throw XCTSkip("set FD_ROUNDS_RENDER_DIR to render the round-config-editor PNGs")
+        }
+        var config = try XCTUnwrap(PresetExpansion.config(for: .featurePlan, available: .defaults))
+        let grok = ModelChoice(agent: .grok, model: "grok-4.7", effort: "high")
+        config.crossReviewer = Slot(grok)
+        let available = AvailableModels(choices: [.claude: AvailableModels.defaults.claude!, .codex: AvailableModels.defaults.codex!, .grok: grok])
+        let billing: [AgentID: AccountBilling] = [
+            .codex: AccountBilling(text: "Work pool"), .claude: AccountBilling(text: "Personal"),
+            .grok: AccountBilling(text: "a removed account", problem: true),
+        ]
+        for (name, appearance) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
+            try render(RoundConfigEditor(preset: .featurePlan, config: .constant(config), available: available, billing: billing),
+                       size: NSSize(width: 420, height: 700),
+                       to: URL(fileURLWithPath: dir).appendingPathComponent("rounds-editor-billing-\(name).png"),
+                       appearance: appearance)
+        }
+    }
+
+    /// "Check again" under a signed-out agent's note, idle and mid-check, with a reviewer row
+    /// still holding grok after a re-check found it signed out ("grok (unavailable)"). Light and
+    /// dark.
+    @MainActor
+    func testRenderRecheckAgents() throws {
+        guard let dir = ProcessInfo.processInfo.environment["FD_ROUNDS_RENDER_DIR"] else {
+            throw XCTSkip("set FD_ROUNDS_RENDER_DIR to render the round-config-editor PNGs")
+        }
+        var config = try XCTUnwrap(PresetExpansion.config(for: .featurePlan, available: .defaults))
+        config.crossReviewer = Slot(ModelChoice(agent: .grok, model: "grok-4.7", effort: "high"))
+        var available = AvailableModels.defaults
+        available.unavailable[.grok] = "Grok: run `grok login` in a terminal to sign in"
+        for running in [false, true] {
+            for (name, appearance) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
+                let recheck = RoundConfigEditor.AgentRecheck(isRunning: running) {}
+                try render(RoundConfigEditor(preset: .featurePlan, config: .constant(config), available: available,
+                                             recheck: recheck),
+                           size: NSSize(width: 420, height: 640),
+                           to: URL(fileURLWithPath: dir)
+                               .appendingPathComponent("rounds-editor-recheck\(running ? "-running" : "")-\(name).png"),
+                           appearance: appearance)
+            }
+        }
     }
 
     /// Parked offscreen `NSHostingView` + `layer.render(in:)` — screencapture is denied here,
     /// and `cacheDisplay` drops layer-backed SwiftUI content.
     @MainActor
-    private func render(_ view: some View, size: NSSize, to url: URL) throws {
+    private func render(_ view: some View, size: NSSize, to url: URL, appearance: NSAppearance.Name = .darkAqua) throws {
         let root = view.padding(16).frame(width: size.width, height: size.height, alignment: .topLeading)
             .background(Color(nsColor: .windowBackgroundColor))
         let host = NSHostingView(rootView: root)
         host.frame = NSRect(origin: .zero, size: size)
         let window = NSWindow(contentRect: NSRect(x: -10_000, y: -10_000, width: size.width, height: size.height),
                               styleMask: [.borderless], backing: .buffered, defer: false)
-        window.appearance = NSAppearance(named: .darkAqua)
+        window.appearance = NSAppearance(named: appearance)
         window.contentView = host
         window.orderFrontRegardless()
         host.layoutSubtreeIfNeeded()

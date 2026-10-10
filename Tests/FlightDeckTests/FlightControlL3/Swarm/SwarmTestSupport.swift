@@ -150,8 +150,8 @@ enum SwarmFixtures {
     static let project = "/tmp/swarm-project"
 
     static func block(_ pool: PoolID = "codex-subs", model: String = "gpt-6-sol", kind: KindID = "tests",
-                      pinned: Bool = false, harness: HarnessID = "codex") -> ExecutionBlock {
-        ExecutionBlock(kind: kind, harness: harness, model: model, pool: pool,
+                      pinned: Bool = false, agent: AgentID = .codex) -> ExecutionBlock {
+        ExecutionBlock(kind: kind, agent: agent, model: model, pool: pool,
                        source: AssignmentSource(by: pinned ? .manual : .rule, reason: "fixture", at: at), pinned: pinned)
     }
 
@@ -160,8 +160,8 @@ enum SwarmFixtures {
                   agentContext: block.flatMap { try? ExecutionBlockCodec.encode($0, into: nil) })
     }
 
-    static func lease(_ pool: PoolID, _ label: String, harness: HarnessID = "codex") -> AccountLease {
-        AccountLease(pool: pool, account: AccountRef(harness: harness, id: UUID(), label: label))
+    static func lease(_ pool: PoolID, _ label: String, agent: AgentID = .codex) -> AccountLease {
+        AccountLease(pool: pool, account: AccountRef(agent: agent, id: UUID(), label: label))
     }
 }
 

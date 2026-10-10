@@ -9,15 +9,15 @@ import IntakeKit
 /// the footprint and cost fixtures are copied from a live run's `activity.json`
 /// (`runs/synthesis-0-synthesizer` and `runs/synthesis-0-integrator` under a real intake).
 final class SeatRowModelTests: XCTestCase {
-    private let codex = ModelChoice(harness: .codex, model: "gpt-6-sol", effort: "high")
-    private let claude = ModelChoice(harness: .claude, model: "opus", effort: "high")
+    private let codex = ModelChoice(agent: .codex, model: "gpt-6-sol", effort: "high")
+    private let claude = ModelChoice(agent: .claude, model: "opus", effort: "high")
     private let epoch = Date(timeIntervalSince1970: 1_790_000_000)
 
-    private func activity(_ harness: Harness, startedAt: Date, headline: String? = nil, action: ActivityAction? = nil,
+    private func activity(_ agent: AgentID, startedAt: Date, headline: String? = nil, action: ActivityAction? = nil,
                           footprint: [String: Int] = [:], steps: ActivitySteps? = nil, inputTokens: Int? = nil,
                           outputTokens: Int? = nil, rateLimitedAt: Date? = nil, lastEventAt: Date? = nil,
                           costUSD: Double? = nil, finished: Bool = false, error: String? = nil) -> SeatActivity {
-        var a = SeatActivity(harness: harness, startedAt: startedAt)
+        var a = SeatActivity(agent: agent, startedAt: startedAt)
         a.headline = headline; a.action = action; a.footprint = footprint; a.steps = steps
         a.inputTokens = inputTokens; a.outputTokens = outputTokens; a.rateLimitedAt = rateLimitedAt
         a.lastEventAt = lastEventAt; a.costUSD = costUSD; a.finished = finished; a.error = error

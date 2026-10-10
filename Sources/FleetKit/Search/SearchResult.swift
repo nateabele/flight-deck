@@ -24,6 +24,7 @@ public enum AgentGlyph {
         switch agent {
         case "claude": return "sparkle"
         case "codex": return "chevron.left.forwardslash.chevron.right"
+        case "opencode": return "curlybraces"
         default: return nil
         }
     }

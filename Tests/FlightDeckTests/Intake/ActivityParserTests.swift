@@ -21,8 +21,8 @@ final class ActivityParserTests: XCTestCase {
 
     private let project = URL(fileURLWithPath: "/p/proj")
 
-    private func parser(_ h: Harness, cwd: URL? = nil, clock: Clock = Clock()) -> ActivityParser {
-        ActivityParser(harness: h, project: project, cwd: cwd, now: { clock.now })
+    private func parser(_ h: AgentID, cwd: URL? = nil, clock: Clock = Clock()) -> ActivityParser {
+        ActivityParser(agent: h, project: project, cwd: cwd, now: { clock.now })
     }
 
     private func line(_ obj: [String: Any]) -> Data {
@@ -41,7 +41,7 @@ final class ActivityParserTests: XCTestCase {
 
     func testFoldsTheLiveCodexDrafterSample() throws {
         let clock = Clock()
-        var p = ActivityParser(harness: .codex, project: URL(fileURLWithPath: "/Users/me/tallyho"), now: { clock.now })
+        var p = ActivityParser(agent: .codex, project: URL(fileURLWithPath: "/Users/me/tallyho"), now: { clock.now })
         p.feed(try load("codex-stream-activity"))
         let a = p.activity
         // The last tool the drafter ran: `rg --files … | sort && find …`, unwrapped from codex's
@@ -63,7 +63,7 @@ final class ActivityParserTests: XCTestCase {
     /// work dir's own name, counted once per distinct file however many times it was touched.
     func testFoldsTheLiveCodexIntegratorSample() throws {
         let work = URL(fileURLWithPath: "/Users/me/.fd-rounds-live-34E65942-D920-48BB-BF63-B954AE84CC27/intakes/8570E1D1-1E05-4E32-A3BA-AFB4781D0C08/work")
-        var p = ActivityParser(harness: .codex, project: URL(fileURLWithPath: "/Users/me/tallyho"), cwd: work,
+        var p = ActivityParser(agent: .codex, project: URL(fileURLWithPath: "/Users/me/tallyho"), cwd: work,
                                now: { Date(timeIntervalSince1970: 0) })
         p.feed(try load("codex-stream-integrator"))
         XCTAssertEqual(p.activity.footprint, ["work": 2])
@@ -74,7 +74,7 @@ final class ActivityParserTests: XCTestCase {
 
     func testFoldsTheLiveClaudeSample() throws {
         let root = URL(fileURLWithPath: "/private/tmp/claude-501/-Users-me-Projects-flight-deck/9bf1e259-cc02-4f83-884e-27183594e064/scratchpad/cprobe")
-        var p = ActivityParser(harness: .claude, project: root, now: { Date(timeIntervalSince1970: 0) })
+        var p = ActivityParser(agent: .claude, project: root, now: { Date(timeIntervalSince1970: 0) })
         p.feed(try load("claude-stream-activity"))
         let a = p.activity
         XCTAssertEqual(a.action, ActivityAction(verb: "Searching", object: "\"hello\""))
@@ -88,6 +88,16 @@ final class ActivityParserTests: XCTestCase {
         XCTAssertNil(a.headline, "haiku's thinking blocks arrive empty")
         XCTAssertTrue(a.finished)
         XCTAssertNil(a.error)
+    }
+
+    /// The thread id is what finds the codex rollout, the only place a headless codex seat's
+    /// rate limits are written; it must survive the round trip through `activity.json`.
+    func testCodexThreadIDIsRecordedAndPersisted() throws {
+        var p = parser(.codex)
+        p.feed(line(["type": "thread.started", "thread_id": "0000-thread"]))
+        XCTAssertEqual(p.activity.conversationID, "0000-thread")
+        let decoded = try JSONDecoder().decode(SeatActivity.self, from: JSONEncoder().encode(p.activity))
+        XCTAssertEqual(decoded.conversationID, "0000-thread")
     }
 
     // MARK: - Headline
@@ -134,7 +144,7 @@ final class ActivityParserTests: XCTestCase {
             (claudeTool("Bash", ["command": "br list --json"]), .init(verb: "Running", object: "br list --json")),
             (claudeTool("Bash", ["command": "cd sub && swift build"]), .init(verb: "Running", object: "swift build")),
             (codexCommand(#"/bin/zsh -lc "sed -n '1,240p' README.md""#), .init(verb: "Reading", object: "README.md")),
-            (codexCommand(#"/bin/zsh -lc "rg -n \"HarnessOutput\" Sources | head""#), .init(verb: "Searching", object: "\"HarnessOutput\"")),
+            (codexCommand(#"/bin/zsh -lc "rg -n \"HeadlessOutput\" Sources | head""#), .init(verb: "Searching", object: "\"HeadlessOutput\"")),
             (codexCommand(#"/bin/zsh -lc 'git status --short'"#), .init(verb: "Running", object: "git status --short")),
             (codexCommand(#"/bin/zsh -lc "jq length changes.json""#), .init(verb: "Running", object: "jq length changes.json")),
             (line(["type": "item.started", "item": ["type": "file_change", "changes": [["path": "/p/proj/x/y.swift", "kind": "update"]]]]),
@@ -270,7 +280,7 @@ final class ActivityPublisherTests: XCTestCase {
 
     func testWritesAtStartThrottlesToTwoSecondsFlushesTrailingAndWritesAtFinish() throws {
         let clock = Clock(), timers = Timers()
-        let pub = ActivityPublisher(harness: .claude, project: URL(fileURLWithPath: "/p"),
+        let pub = ActivityPublisher(agent: .claude, project: URL(fileURLWithPath: "/p"),
                                     destination: dir.appendingPathComponent("activity.json"), now: { clock.now },
                                     schedule: { delay, work in timers.pending.append((delay, work)) })
         pub.start()
@@ -303,7 +313,7 @@ final class ActivityPublisherTests: XCTestCase {
     }
 
     func testFinishCarriesASpawnFailure() throws {
-        let pub = ActivityPublisher(harness: .codex, project: URL(fileURLWithPath: "/p"),
+        let pub = ActivityPublisher(agent: .codex, project: URL(fileURLWithPath: "/p"),
                                     destination: dir.appendingPathComponent("activity.json"), now: { Date() })
         pub.start()
         pub.finish(exitCode: nil, error: "Could not run codex")

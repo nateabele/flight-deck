@@ -1,11 +1,13 @@
 import SwiftUI
+import IntakeKit
 
 /// Per-project overrides. The project list is the union of currently-open projects and
 /// projects with a saved override — an override outlives the project it belongs to, since
 /// closing a project removes it from `SessionStore` entirely.
 ///
 /// The detail pane is three sections: which agent (also the project's default, per
-/// `ProjectSettings.defaultAgent`), which of that agent's accounts, and that agent's options.
+/// `ProjectSettings.defaultAgent`), which account or pool each agent bills here, and that
+/// agent's options.
 /// The Agent picker doubles as both the default-agent setter AND the selector for what the
 /// sections below edit — but a per-project override applies whenever that agent launches here
 /// regardless of what the picker currently shows, so `hiddenOverrideSummary` names whichever
@@ -13,6 +15,9 @@ import SwiftUI
 struct ProjectsSettingsTab: View {
     @ObservedObject var preferences: PreferencesStore
     @ObservedObject var sessions: SessionStore
+    /// Where grok's and gemini's model lists come from; nil uses the store's own planning
+    /// service. A seam for the offscreen renders, as on `AgentsSettingsTab`.
+    var modelSource: IntakeService?
 
     /// The selection lives on the store, not in `@State`, so a caller outside this view can
     /// point the pane at one project — "Configure…" on a sidebar project row opens Settings
@@ -130,7 +135,9 @@ struct ProjectsSettingsTab: View {
                         Section("Agent") {
                             Picker("Agent", selection: agentBinding(for: path)) {
                                 Text("<Use global settings>").tag(AgentID?.none)
-                                ForEach(AgentID.allCases, id: \.self) { agent in
+                                // Tab-ready agents only (unify brief R4): this choice is what ⌘N
+                                // opens here, so an agent that cannot run a tab must not be one.
+                                ForEach(AgentID.tabReadyCases, id: \.self) { agent in
                                     Text(agent.displayName).tag(AgentID?.some(agent))
                                 }
                             }
@@ -144,17 +151,26 @@ struct ProjectsSettingsTab: View {
                             }
                         }
 
-                        let accounts = preferences.preferences.accounts(for: selectedAgent)
-                        if accounts.count > 1 {
-                            Section("Account") {
-                                Picker("Account", selection: accountBinding(for: path, agent: selectedAgent)) {
-                                    Text("Default (\(accounts.first?.displayName ?? ""))").tag(UUID?.none)
-                                    ForEach(accounts) { account in
-                                        Text(account.displayName).tag(UUID?.some(account.id))
+                        // One row per agent with a choice to make, not just the agent being
+                        // edited: a project can run several agents (planning seats included),
+                        // and each bills its own assignment (unify brief R8).
+                        let list = preferences.preferences.accountList
+                        let choosable = AgentID.allCases.filter {
+                            Self.showsAccountPicker(for: $0, in: list, assigned: settings.accounts[$0])
+                        }
+                        if !choosable.isEmpty {
+                            Section {
+                                ForEach(choosable, id: \.self) { agent in
+                                    LabeledContent(agent.displayName) {
+                                        accountPicker(for: path, agent: agent)
                                     }
                                 }
-                                .labelsHidden()
-                                .accessibilityIdentifier("project-account-picker")
+                            } header: {
+                                Text("Accounts")
+                            } footer: {
+                                Text("A pool gives each new tab and planning run the first of its accounts under the pool's soft limit.")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
                             }
                         }
                     }
@@ -162,14 +178,31 @@ struct ProjectsSettingsTab: View {
             }
 
             Group {
-                switch selectedAgent {
+                switch AgentOptionsPane(agent: selectedAgent) {
                 case .codex:
                     CodexOptionsForm(
                         preferences: preferences,
                         projectOverride: codexOptionsBinding(for: path),
                         header: sections
                     )
-                default:
+                case .model(let agent):
+                    DetectedModelsReader(service: modelSource ?? sessions.intakeService) { available in
+                        TabModelOptionsForm(
+                            agent: agent,
+                            options: optionsBinding(for: path, agent: agent),
+                            inherited: preferences.preferences.agents.first { $0.id == agent }?.options
+                                ?? .empty(for: agent),
+                            available: available,
+                            header: sections
+                        )
+                    }
+                case .opencode:
+                    OpenCodeOptionsForm(
+                        preferences: preferences,
+                        projectOverride: openCodeOptionsBinding(for: path),
+                        header: sections
+                    )
+                case .claudeFlags:
                     FlagEditor(
                         flags: claudeFlagsBinding(for: path),
                         inherited: globalClaudeFlags,
@@ -218,7 +251,43 @@ struct ProjectsSettingsTab: View {
         )
     }
 
-    private func accountBinding(for path: String, agent: AgentID) -> Binding<UUID?> {
+    /// One choice in the Account picker: nil is "Default" (the agent's topmost account).
+    typealias AccountOption = AccountAssignmentOption
+
+    /// What a project can bill `agent`'s work to (unify brief R8): Default — naming the account
+    /// it means today — then each live account of the agent in list order, then each of its
+    /// pools: the user's pools in list order, and last the agent's default pool (its unpooled
+    /// accounts), when it has one. Local pools are left out: they lease an endpoint slot, not an
+    /// account a tab could sign in as.
+    static func accountOptions(for agent: AgentID, in list: AccountList) -> [AccountOption] {
+        let accounts = list.accounts.filter { $0.agent == agent && !$0.isRemoved }
+        var options = [AccountOption(value: nil, title: accounts.first.map { "Default (\($0.displayName))" } ?? "Default",
+                                     isPool: false)]
+        options += accounts.map { AccountOption(value: .account($0.id), title: $0.displayName, isPool: false) }
+        let effective = list.effectivePools().filter { $0.agent == agent && $0.kind == .hosted }
+        options += effective.filter { !$0.isDefault }.map { AccountOption(value: .pool($0.id), title: $0.label, isPool: true) }
+        options += effective.filter(\.isDefault).map { AccountOption(value: .pool($0.id), title: $0.label, isPool: true) }
+        return options
+    }
+
+    /// Whether there is anything to choose: two accounts, or a pool the user made. (A lone
+    /// account's synthesized default pool is that same account, so it is no choice.) Always when
+    /// the project already names something, so a stale or pool assignment can be seen and undone.
+    static func showsAccountPicker(for agent: AgentID, in list: AccountList, assigned: AccountAssignment?) -> Bool {
+        if assigned != nil { return true }
+        let accounts = list.accounts.filter { $0.agent == agent && !$0.isRemoved }
+        let userPools = list.pools.filter { $0.agent == agent && !$0.isDefault && $0.kind == .hosted }
+        return accounts.count > 1 || !userPools.isEmpty
+    }
+
+    private func accountPicker(for path: String, agent: AgentID) -> some View {
+        AccountAssignmentPicker(options: Self.accountOptions(for: agent, in: preferences.preferences.accountList),
+                                selection: accountBinding(for: path, agent: agent),
+                                identifier: "project-account-picker-\(agent.rawValue)")
+    }
+
+    /// Writes an account or a pool assignment; Default clears the agent's assignment.
+    private func accountBinding(for path: String, agent: AgentID) -> Binding<AccountAssignment?> {
         Binding(
             get: { preferences.projectSettings(path).accounts[agent] },
             set: { newValue in
@@ -251,9 +320,28 @@ struct ProjectsSettingsTab: View {
         )
     }
 
+    private func openCodeOptionsBinding(for path: String) -> Binding<OpenCodeOptions> {
+        Binding(
+            get: {
+                guard case .opencode(let opts)? = preferences.projectSettings(path).options[.opencode]
+                else { return OpenCodeOptions() }
+                return opts
+            },
+            set: { newValue in setOptions(.opencode(newValue), for: .opencode, path: path) }
+        )
+    }
+
+    /// grok's or gemini's project override, as the whole `AgentOptions` arm their form edits.
+    private func optionsBinding(for path: String, agent: AgentID) -> Binding<AgentOptions> {
+        Binding(
+            get: { preferences.projectSettings(path).options[agent] ?? .empty(for: agent) },
+            set: { newValue in setOptions(newValue, for: agent, path: path) }
+        )
+    }
+
     /// An emptied override is a removal, not an empty override: persisting the empty value
     /// would keep the project listed forever with its badge hidden and "Remove Overrides"
-    /// disabled, leaving no way to delete it. Shared by both agents' bindings.
+    /// disabled, leaving no way to delete it. Shared by every agent's binding.
     private func setOptions(_ options: AgentOptions, for agent: AgentID, path: String) {
         var settings = preferences.projectSettings(path)
         settings.options[agent] = options.isEmpty ? nil : options

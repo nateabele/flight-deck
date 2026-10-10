@@ -1,4 +1,5 @@
 import Foundation
+import IntakeKit
 
 /// Why a launch failed to produce a usable tab. Named causes rather than one generic string
 /// wherever the fix differs — "install/upgrade codex" reads differently from "codex refused
@@ -23,6 +24,11 @@ enum AgentLaunchError: LocalizedError, Equatable {
     /// actually observed and the only one with a physical fix — libghostty needs a drawable,
     /// and a sleeping or inactive display is not one. See spec §1.1.
     case terminalUnavailable(displayAsleep: Bool)
+    /// `versionTooOld` and `prepareFailed`, for an agent other than codex: those two name Codex
+    /// in their text because they predate the other agents, and an alert blaming Codex for an
+    /// OpenCode failure would send the user to the wrong tool.
+    case agentTooOld(agent: String, found: String, minimum: String)
+    case agentFailed(agent: String, why: String)
 
     var errorDescription: String? {
         switch self {
@@ -41,6 +47,10 @@ enum AgentLaunchError: LocalizedError, Equatable {
         case .accountHomeMissing(let account):
             "The home directory for the “\(account)” account is missing. "
             + "Relocate it in Preferences → Accounts, or choose another account for this project."
+        case .agentTooOld(let agent, let found, let minimum):
+            "\(agent) \(found) is too old; Flight Deck needs \(minimum) or newer."
+        case .agentFailed(let agent, let why):
+            "Could not start the \(agent) session: \(why)"
         case .terminalUnavailable(let displayAsleep):
             displayAsleep
                 ? "Flight Deck could not open a terminal because this Mac's display is asleep. "
@@ -324,7 +334,7 @@ final class CodexProcessTransport: CodexTransport {
     var spawnEnvironment: [String: String]? {
         let base = LoginShellPath.repairing()
         guard let home else { return base }
-        return base.merging([AgentID.codex.homeEnvironmentKey: home.path]) { _, override in override }
+        return base.merging([CodexProfile.homeEnvironmentKey: home.path]) { _, override in override }
     }
 
     /// Spawns the process. `/usr/bin/env` resolves `executable` against `$PATH`, same as

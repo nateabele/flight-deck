@@ -8,6 +8,11 @@ import Foundation
 /// carries it in `TimelineItem.Body.text`. So this is a *derivation* both ends run over data
 /// they already hold — which is also why it lives in `FleetKit` and not in either app. The Mac
 /// and the phone must not run two versions of this rule.
+///
+/// **One exception, and it is not a return of `PendingPrompt`.** For an agent whose transcript
+/// never holds the open call (gemini's agy), there is nothing on the phone to derive from, so
+/// the Mac's own derivation rides `WireSession.openPrompt` — which is why this type is `Codable`
+/// (`Wire.swift`). Every agent whose transcript does carry the call still derives it on both ends.
 public struct PromptQuestion: Equatable, Hashable, Sendable {
     public struct Option: Equatable, Hashable, Sendable {
         public var label: String
@@ -197,6 +202,13 @@ public enum OpenPrompt: Equatable, Sendable {
     ///   heard of degrades to "renders without one" rather than taking the screen down, and
     ///   inventing a dialog for it would be the same mistake as inventing a count. **Add an
     ///   agent to this list when — and only when — something can actually answer for it.**
+    ///   grok joined when its Mac gained a keyed dialog driver (`GrokDialogDriver`): its
+    ///   transcript pairs `tool_call`/`tool_call_update` the way claude's pairs
+    ///   `tool_use`/`tool_result`, so the same rule reads it.
+    ///   `opencode` joined by a third route: its Mac answers over OpenCode's own reply
+    ///   endpoints, by request id, with no keystroke at all (`OpenCodePromptResponder`). Its
+    ///   feed carries the request id as the call id, so the pairing below needs nothing
+    ///   agent-specific.
     ///
     ///   This is presentation only. The refusal that protects a terminal is
     ///   `SessionStore.answerPrompt`'s, over on the Mac, and it is not weakened by anything
@@ -218,7 +230,7 @@ public enum OpenPrompt: Equatable, Sendable {
     public static func find(
         in items: [TimelineItem], agent: String?, activity: String?
     ) -> OpenPrompt? {
-        guard agent == "claude" else { return nil }
+        guard agent == "claude" || agent == "grok" || agent == "opencode" else { return nil }
         guard activity == "waiting" else { return nil }
 
         // Built from the WHOLE feed first. A merged feed can hold a result above its own call

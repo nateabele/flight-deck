@@ -1,28 +1,28 @@
 import Foundation
 
 /// Classifies a finished harness run — exit code, stderr, the structured error events in stdout,
-/// and whatever `HarnessOutput.parse` threw — into a `Diagnosis` the human sees when a round pauses instead of stopping cleanly.
+/// and whatever `HeadlessOutput.parse` threw — into a `Diagnosis` the human sees when a round pauses instead of stopping cleanly.
 /// Rules are checked in a fixed order and matched case-insensitively; the first match wins.
 public enum FailureDiagnosis {
-    /// `harness` disambiguates the login command an `authExpired` diagnosis recommends when the
+    /// `agent` disambiguates the login command an `authExpired` diagnosis recommends when the
     /// failure text itself doesn't name one (a bare "401" or "unauthorized"). It isn't part of
-    /// the brief's signature — callers that don't know which harness ran can omit it and get
+    /// the brief's signature — callers that don't know which agent ran can omit it and get
     /// claude's login command by default.
     ///
     /// Only stderr and the harness's STRUCTURED error reports are read — never the agent's own
     /// text. A drafter whose plan discusses "401 authentication" and then crashes wrote those
     /// words as content; matching them sent the human off to log in again for a crash.
     public static func classify(exitCode: Int32, stdout: Data, stderr: String, parseError: Error?,
-                                 harness: Harness? = nil) -> Diagnosis {
+                                 agent: AgentID? = nil) -> Diagnosis {
         let events = errorEventJSON(in: stdout)
         let errorText = events.compactMap(AgentErrorVocabulary.message(ofErrorEvent:)).joined(separator: "\n")
         let haystack = (stderr + "\n" + errorText).lowercased()
 
         // The CLI's profile classifies each piece of evidence (stderr, and every structured
-        // error event on its own). A profile that recognizes nothing — a grok/gemini stub until
-        // Tracks G/M — falls back to the shared vocabulary, which is what every harness was
-        // matched against before profiles existed.
-        let profile = AgentProfiles.profile(for: harness ?? .claude)
+        // error event on its own). A spelling the profile doesn't recognize falls back to the
+        // shared vocabulary, which is what every harness was matched against before profiles
+        // existed — so a generic "429" still reads as a rate limit on any CLI.
+        let profile = AgentProfiles.profile(for: agent ?? .claude)
         let signals = [AgentErrorSignal.stderr(stderr)] + events.map { .streamErrorEvent(json: $0) }
         let kind = AgentFailureKind.strongest(signals.compactMap { profile.classify(error: $0) ?? AgentErrorVocabulary.classify($0) })
 
@@ -37,13 +37,18 @@ public enum FailureDiagnosis {
             } else if haystack.contains("claude /login") {
                 action = "Run `claude /login` in a terminal"
             } else {
-                switch harness {
+                switch agent {
                 case .codex: action = "Run `codex login` in a terminal"
                 case .claude, .none: action = "Run `claude /login` in a terminal"
-                // Generic until Tracks G/M probe each CLI's real sign-in flow: naming a command
-                // nobody verified would send the human to run something that doesn't exist.
-                case .grok?: action = "Sign in to `\(GrokProfile().binaryName)` in a terminal"
-                case .gemini?: action = "Sign in to `\(GeminiProfile().binaryName)` in a terminal"
+                // `grok login` is grok 1.0.30's sign-in command (`grok login --help`).
+                case .grok?: action = "Run `grok login` in a terminal"
+                // `agy` has no login subcommand: its interactive first run signs in.
+                case .gemini?:
+                    action = haystack.contains("not eligible")
+                        ? "Run `agy` in a terminal and verify your Google account"
+                        : "Run `agy` in a terminal to sign in"
+                // OpenCode signs into providers, not an account (`opencode auth login`).
+                case .opencode?: action = "Run `opencode auth login` in a terminal"
                 }
             }
             return Diagnosis(category: .authExpired, detail: tail(stderr, errorText), action: action)

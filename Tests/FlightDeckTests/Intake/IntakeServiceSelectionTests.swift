@@ -112,6 +112,41 @@ final class IntakeServiceSelectionTests: XCTestCase {
         XCTAssertFalse(relaunched.inspectorShown(forProject: "/b"))
     }
 
+    // MARK: - Inspector mode
+
+    /// The inspector's mode is per plan and survives a relaunch; a discarded plan's is dropped.
+    func testInspectorModeIsPerPlanAndPersists() throws {
+        let a = try seed(project: "/a")
+        let b = try seed(project: "/a", intent: "Another")
+        let svc = makeService()
+        XCTAssertNil(svc.inspectorMode(a), "nothing chosen yet: the layout picks the default")
+        svc.setInspectorMode(.notes, for: a)
+        svc.setInspectorMode(.rounds, for: b)
+        XCTAssertEqual(svc.inspectorMode(a), .notes)
+        XCTAssertEqual(svc.inspectorMode(b), .rounds, "one plan's mode never moves another's")
+        let relaunched = makeService()
+        XCTAssertEqual(relaunched.inspectorMode(a), .notes)
+        XCTAssertEqual(relaunched.inspectorMode(b), .rounds)
+        XCTAssertTrue(relaunched.discard(a))
+        XCTAssertNil(makeService().inspectorMode(a))
+        XCTAssertEqual(makeService().inspectorMode(b), .rounds)
+    }
+
+    /// A mode switch is not news to anything but the inspector. `SessionStore` forwards every
+    /// `IntakeService` publish into its own, so a mode kept in a `@Published` here redrew the
+    /// whole window — root, sidebar, the project page — on each Notes/Rounds click.
+    func testAModeSwitchDoesNotPublishTheService() throws {
+        let a = try seed(project: "/a")
+        let svc = makeService()
+        var publishes = 0
+        let sub = svc.objectWillChange.sink { _ in publishes += 1 }
+        defer { sub.cancel() }
+        svc.setInspectorMode(.notes, for: a)
+        svc.setInspectorMode(.rounds, for: a)
+        XCTAssertEqual(svc.inspectorMode(a), .rounds)
+        XCTAssertEqual(publishes, 0, "a mode switch republished IntakeService \(publishes) times")
+    }
+
     // MARK: - Intakes list collapsed to its rail
 
     /// Per project, and kept by the service rather than `ProjectView` `@State` for the reason

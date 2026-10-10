@@ -71,13 +71,13 @@ final class TapeStoreTests: XCTestCase {
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
             if let activity { try IntakeJSON.encoder.encode(activity).write(to: dir.appendingPathComponent("activity.json")) }
         }
-        var reviewer = SeatActivity(harness: .claude, startedAt: at)
+        var reviewer = SeatActivity(agent: .claude, startedAt: at)
         reviewer.action = ActivityAction(verb: "Reading", object: "plan.md")
-        let integrator = SeatActivity(harness: .codex, startedAt: at)
+        let integrator = SeatActivity(agent: .codex, startedAt: at)
         try put("refine-1-reviewer", reviewer)
         try put("refine-1-integrator", integrator)
-        try put("refine-10-reviewer", SeatActivity(harness: .codex, startedAt: at))
-        try put("draft-1-drafter-0", SeatActivity(harness: .codex, startedAt: at))
+        try put("refine-10-reviewer", SeatActivity(agent: .codex, startedAt: at))
+        try put("draft-1-drafter-0", SeatActivity(agent: .codex, startedAt: at))
         try put("refine-1-reviewer-correction", nil)
         try Data("{".utf8).write(to: store.runDirectory("refine-1-reviewer-correction").appendingPathComponent("activity.json"))
 

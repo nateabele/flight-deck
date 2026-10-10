@@ -1,0 +1,11 @@
+{"ts": "2026-10-08T09:00:00.000Z", "type": "mcp_config_resolved", "servers": []}
+{"ts": "2026-10-08T09:00:01.000Z", "type": "turn_started", "session_id": "0199c6a0-1111-7aaa-8bbb-000000000001", "turn_number": 0}
+{"ts": "2026-10-08T09:00:02.000Z", "type": "phase_changed", "phase": "waiting_for_model"}
+{"ts": "2026-10-08T09:00:03.000Z", "type": "phase_changed", "phase": "tool_execution"}
+{"ts": "2026-10-08T09:00:04.000Z", "type": "tool_started", "tool_name": "read_file"}
+{"ts": "2026-10-08T09:00:05.000Z", "type": "phase_changed", "phase": "permission_prompt"}
+{"ts": "2026-10-08T09:00:06.000Z", "type": "permission_requested", "tool_name": "read_file"}
+{"ts": "2026-10-08T09:00:07.000Z", "type": "permission_resolved", "tool_name": "read_file", "decision": "allow", "wait_ms": 0}
+{"ts": "2026-10-08T09:00:08.000Z", "type": "tool_started", "tool_name": "write"}
+{"ts": "2026-10-08T09:00:09.000Z", "type": "phase_changed", "phase": "permission_prompt"}
+{"ts": "2026-10-08T09:00:10.000Z", "type": "permission_requested", "tool_name": "write"}

@@ -54,13 +54,13 @@ final class RuleValidatorTests: XCTestCase {
             ("both in one term", { $0.terms[2].dimension = "debugging" }, .malformedTerm),
             ("no terms", { $0.terms = [] }, .emptyMatch),
             ("mode", { $0.mode = "some" }, .unknownMode("some")),
-            ("no agent", { $0.harness = nil }, .missingHarness),
-            ("agent", { $0.harness = "gemini" }, .unknownHarness("gemini")),
+            ("no agent", { $0.harness = nil }, .missingAgent),
+            ("agent", { $0.harness = "gemini" }, .unknownAgent("gemini")),
             ("model", { $0.model = "gpt-9" }, .unknownModel("codex", "gpt-9", suggestion: nil)),
             ("knob value", { $0.knobs = [.init(name: "effort", value: "max")] }, .knobRejected("codex", "gpt-6-sol", "effort", "max")),
             ("knob name", { $0.knobs = [.init(name: "agent", value: "build")] }, .knobRejected("codex", "gpt-6-sol", "agent", "build")),
             ("pool", { $0.pool = "nowhere" }, .unknownPool("nowhere")),
-            ("pool owner", { $0.pool = "claude-subs" }, .poolBelongsElsewhere("claude-subs", owner: "claude", harness: "codex")),
+            ("pool owner", { $0.pool = "claude-subs" }, .poolBelongsElsewhere("claude-subs", owner: "claude", agent: "codex")),
             ("fallback pool", { $0.fallbackPool = "nowhere" }, .unknownPool("nowhere")),
             ("fallback is the pool", { $0.fallbackPool = "codex-subs" }, .fallbackIsPrimary("codex-subs")),
             ("declined", { $0.ok = false; $0.reason = "that is not a routing rule" }, .declined("that is not a routing rule")),
@@ -71,8 +71,8 @@ final class RuleValidatorTests: XCTestCase {
     }
 
     func testADisabledAgentIsNamed() {
-        let input = D.input(catalogs: D.catalogsDisabling(["codex"]))
-        XCTAssertEqual(validate(input) { _ in }, .failure(.harnessDisabled("codex")))
+        let input = D.input(catalogs: D.catalogsDisabling([.codex]))
+        XCTAssertEqual(validate(input) { _ in }, .failure(.agentDisabled("codex")))
     }
 
     func testTheFirstErrorWins() {
@@ -86,9 +86,9 @@ final class RuleValidatorTests: XCTestCase {
     }
 
     func testMessagesReadAsSentences() {
-        XCTAssertEqual(RuleValidationError.poolBelongsElsewhere("claude-subs", owner: "claude", harness: "codex").message,
+        XCTAssertEqual(RuleValidationError.poolBelongsElsewhere("claude-subs", owner: "claude", agent: "codex").message,
                        "pool claude-subs belongs to claude, not codex")
-        XCTAssertEqual(RuleValidationError.harnessDisabled("codex").message,
+        XCTAssertEqual(RuleValidationError.agentDisabled("codex").message,
                        "Codex is turned off — enable it under Agents, or name another agent")
     }
 }

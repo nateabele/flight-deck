@@ -143,16 +143,16 @@ final class RoundConfigEditorTests: XCTestCase {
         XCTAssertFalse(RoundConfigEditor.supportsFallback(.polisher))
     }
 
-    // MARK: - switchingHarness
+    // MARK: - switchingAgent
 
     /// Switching a slot's harness must reset both model AND effort to that harness's default
     /// from `available` — a stale model string paired with the new harness would silently
     /// send e.g. codex a claude model name.
     func testSwitchingHarnessResetsModelAndEffort() throws {
         let config = try fullPlan()
-        XCTAssertEqual(config.drafters[0].choice.harness, .codex)
+        XCTAssertEqual(config.drafters[0].choice.agent, .codex)
 
-        let updated = RoundConfigEditor.switchingHarness(config, at: .drafter(0), to: .claude, available: available)
+        let updated = RoundConfigEditor.switchingAgent(config, at: .drafter(0), to: .claude, available: available)
 
         XCTAssertEqual(updated.drafters[0].choice, available.claude)
         XCTAssertTrue(updated.customized)
@@ -163,16 +163,16 @@ final class RoundConfigEditorTests: XCTestCase {
 
     func testSwitchingHarnessOnIntegratorSeat() throws {
         let config = try fullPlan()
-        let updated = RoundConfigEditor.switchingHarness(config, at: .integrator, to: .codex, available: available)
+        let updated = RoundConfigEditor.switchingAgent(config, at: .integrator, to: .codex, available: available)
         XCTAssertEqual(updated.integrator, available.codex)
     }
 
-    // MARK: - harnesses(in:)
+    // MARK: - agents(in:)
 
     func testHarnessesLimitedToAvailable() {
         let codexOnly = AvailableModels(codex: available.codex, claude: nil)
-        XCTAssertEqual(RoundConfigEditor.harnesses(in: codexOnly), [.codex])
-        XCTAssertEqual(RoundConfigEditor.harnesses(in: available), [.codex, .claude])
+        XCTAssertEqual(RoundConfigEditor.agents(in: codexOnly), [.codex])
+        XCTAssertEqual(RoundConfigEditor.agents(in: available), [.codex, .claude])
     }
 
     // MARK: - crossCheckRounds(_:) and summary(preset:config:)

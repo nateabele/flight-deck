@@ -383,11 +383,8 @@ struct BoardModel: Equatable {
         }
     }
 
-    /// Stage order in the planned sequence — `Stage` is declared in that order but isn't
-    /// `CaseIterable`, and IntakeKit is out of scope here.
-    private static func rank(_ s: Stage) -> Int {
-        [Stage.draft, .synthesis, .refine, .encode, .polish, .freshEyes, .dedup].firstIndex(of: s) ?? 0
-    }
+    /// Stage order in the planned sequence — `Stage` is declared in that order.
+    static func rank(_ s: Stage) -> Int { Stage.allCases.firstIndex(of: s) ?? 0 }
 
     /// `group`'s bracket title, longest first, for `DeparturesBoard.fittedBracketTitle` to take
     /// the first that fits: "REFINE 2 OF 3" while one of its rounds is in flight or failed, else

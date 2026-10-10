@@ -1,0 +1,14 @@
+  main ~/proj   25K / 256K │ [Dashboard]
+
+  ┃
+  ┃  Pick a color
+  ┃
+  ┃
+  ┃  1 (○) Red    Warm
+  ┃  2 (○) Blue   Cool
+  ┃  z (○) Type your answer here
+  ┃
+  ┃  [1/3] ↑/↓ navigate · ←/→ question · y copy                         Enter:select
+  ┃
+
+  Tab/Space:question  │  →:expand  │  Ctrl+e:collapse thinking  │  Ctrl+c:cancel  │  Ctrl+.:shortcuts

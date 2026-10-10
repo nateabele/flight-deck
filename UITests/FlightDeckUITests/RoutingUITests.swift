@@ -24,6 +24,7 @@ final class RoutingUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments += ["-ApplePersistenceIgnoreState", "YES", "-FlightDeckResetState", "YES",
                                 "-FlightDeckRoutingFixture", "YES"]
+        dismissFlightDeckCrashReports()
         app.launch()
         app.activate()
         XCTAssertTrue(app.windows.firstMatch.waitForExistence(timeout: 15), "no window appeared")
@@ -36,8 +37,7 @@ final class RoutingUITests: XCTestCase {
         app.typeKey(",", modifierFlags: .command)
         let prefs = app.windows.containing(.button, identifier: "Agents").firstMatch
         XCTAssertTrue(prefs.waitForExistence(timeout: 10), "Settings never opened")
-        prefs.buttons["Flight Control"].click()
-        XCTAssertTrue(prefs.flightControlSectionPicker.waitForExistence(timeout: 5), "the Flight Control tab did not open")
+        prefs.openFlightControlTab()
         return prefs
     }
 

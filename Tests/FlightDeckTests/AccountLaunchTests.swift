@@ -1,4 +1,5 @@
 import XCTest
+import IntakeKit
 @testable import FlightDeck
 
 /// That a tab actually *runs* as its account, and that a tab whose account is gone does not
@@ -46,8 +47,8 @@ final class AccountLaunchTests: XCTestCase {
 
     func testAMissingAccountIsReportedRatherThanSubstituted() async {
         let preferences = PreferencesStore(persistence: nil)
-        preferences.preferences.storedAccounts = []
-        preferences.preferences.storedProjectSettings = ["/p": ProjectSettings(accounts: [.claude: UUID()])]
+        preferences.preferences.accounts = []
+        preferences.preferences.storedProjectSettings = ["/p": ProjectSettings(accounts: [.claude: .account(UUID())])]
         let store = makeStore(preferences)
 
         let result = await store.createSession(agent: .claude, in: "/p")
@@ -68,9 +69,9 @@ final class AccountLaunchTests: XCTestCase {
     func testAnAssignmentNamingARemovedAccountIsReportedRatherThanSubstituted() async {
         let (preferences, work) = configured(.claude)
         let spare = AgentAccount(agent: .claude, displayName: "Spare", home: home("spare"))
-        preferences.preferences.storedAccounts = [work, spare]
+        preferences.preferences.accounts = [work, spare]
         preferences.preferences.storedProjectSettings = [
-            projectURL.path: ProjectSettings(accounts: [.claude: work.id])
+            projectURL.path: ProjectSettings(accounts: [.claude: .account(work.id)])
         ]
         // Directly, not through `markAccountRemoved`: that clears the assignment as it goes,
         // and the assignment is the thing under test. Both states are reachable — a snapshot
@@ -90,8 +91,8 @@ final class AccountLaunchTests: XCTestCase {
     /// app-server to prepare against.
     func testABrokenAccountIsRefusedBeforeCodexIsTouched() async {
         let preferences = PreferencesStore(persistence: nil)
-        preferences.preferences.storedAccounts = []
-        preferences.preferences.storedProjectSettings = ["/p": ProjectSettings(accounts: [.codex: UUID()])]
+        preferences.preferences.accounts = []
+        preferences.preferences.storedProjectSettings = ["/p": ProjectSettings(accounts: [.codex: .account(UUID())])]
         let store = makeStore(preferences)
 
         let result = await store.createSession(agent: .codex, in: "/p")
@@ -110,7 +111,7 @@ final class AccountLaunchTests: XCTestCase {
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         let work = AgentAccount(agent: .claude, displayName: "Work", home: missing)
         let preferences = PreferencesStore(persistence: nil)
-        preferences.preferences.storedAccounts = [work]
+        preferences.preferences.accounts = [work]
         let store = makeStore(preferences)
 
         let result = await store.createSession(agent: .claude, in: "/p")
@@ -126,8 +127,8 @@ final class AccountLaunchTests: XCTestCase {
     /// appears.
     func testTheSynchronousPathRefusesABrokenAccountThroughTheReporter() {
         let preferences = PreferencesStore(persistence: nil)
-        preferences.preferences.storedAccounts = []
-        preferences.preferences.storedProjectSettings = ["/p": ProjectSettings(accounts: [.claude: UUID()])]
+        preferences.preferences.accounts = []
+        preferences.preferences.storedProjectSettings = ["/p": ProjectSettings(accounts: [.claude: .account(UUID())])]
         let store = makeStore(preferences)
 
         store.newSession(in: URL(fileURLWithPath: "/p", isDirectory: true))
@@ -160,9 +161,9 @@ final class AccountLaunchTests: XCTestCase {
     func testTheStampFollowsTheProjectsChoiceRatherThanTheDefault() {
         let (preferences, top) = configured(.claude)
         let chosen = AgentAccount(agent: .claude, displayName: "Chosen", home: home("chosen"))
-        preferences.preferences.storedAccounts = [top, chosen]
+        preferences.preferences.accounts = [top, chosen]
         preferences.preferences.storedProjectSettings = [
-            projectURL.path: ProjectSettings(accounts: [.claude: chosen.id])
+            projectURL.path: ProjectSettings(accounts: [.claude: .account(chosen.id)])
         ]
         let store = makeStore(preferences)
 
@@ -196,7 +197,7 @@ final class AccountLaunchTests: XCTestCase {
     func testAnExplicitlyChosenAccountReachesTheStamp() async throws {
         let (preferences, top) = configured(.claude)
         let chosen = AgentAccount(agent: .claude, displayName: "Chosen", home: home("chosen"))
-        preferences.preferences.storedAccounts = [top, chosen]
+        preferences.preferences.accounts = [top, chosen]
         let store = makeStore(preferences)
         store.newSession(in: projectURL)   // an active project to add the chosen tab beside
 
@@ -209,6 +210,175 @@ final class AccountLaunchTests: XCTestCase {
         XCTAssertEqual(tab.accountID, chosen.id,
                        "the account clicked in the dropdown, not the project's own default")
         XCTAssertNotEqual(chosen.id, top.id, "the fixture must actually disagree with the default")
+    }
+
+    // MARK: - Pool assignments lease (unify brief R8)
+
+    private final class NoticeSpy: Notifying {
+        var notices: [(id: UUID, title: String, body: String)] = []
+        func requestAuthorization() {}
+        func notify(sessionID: UUID, title: String, subtitle: String, body: String) {
+            notices.append((sessionID, title, body))
+        }
+        func withdraw(sessionID: UUID) {}
+    }
+
+    /// A project assigned a two-account claude pool, a ledger that knows the pool, and a store
+    /// whose resolver leases from that ledger rather than the app-wide one.
+    private func pooled() -> (SessionStore, CapacityLedger, AgentAccount, AgentAccount, NoticeSpy) {
+        let first = AgentAccount(agent: .claude, displayName: "First", home: home("first"))
+        let second = AgentAccount(agent: .claude, displayName: "Second", home: home("second"))
+        let preferences = PreferencesStore(persistence: nil)
+        preferences.preferences.accountList = AccountList(entries: [
+            .pool(AccountPool(id: "team", label: "Team", agent: .claude, members: [first, second])),
+        ])
+        preferences.preferences.storedProjectSettings = [
+            projectURL.path: ProjectSettings(accounts: [.claude: .pool("team")])
+        ]
+        let fixed = Date()
+        let ledger = CapacityLedger(now: { fixed })
+        ledger.configure(pools: preferences.effectivePools,
+                         accounts: preferences.preferences.accounts.map(CapacityPreferences.accountRef))
+        let store = makeStore(preferences)
+        store.accountResolver = AccountResolver(preferences: preferences, ledger: ledger)
+        let spy = NoticeSpy()
+        store.notifier = spy
+        return (store, ledger, first, second, spy)
+    }
+
+    private func reading(_ account: AgentAccount, _ utilization: Double) -> UsageReading {
+        UsageReading(account: CapacityPreferences.accountRef(account),
+                     windows: [UsageWindow(name: "5h", utilization: utilization, resetsAt: nil)],
+                     readAt: Date(), source: "test", hardRejection: false)
+    }
+
+    /// The lease is taken at creation, held for the tab's life, and given back when it closes.
+    func testATabOnAPoolProjectLeasesAMemberAndClosingGivesItBack() throws {
+        let (store, ledger, first, _, _) = pooled()
+        let session = store.newSession(in: projectURL)
+        XCTAssertEqual(session.accountID, first.id)
+        XCTAssertEqual(ledger.activeLeases(pool: "team").count, 1)
+        XCTAssertEqual(store.accountResolver?.leases(heldBy: session.id).count, 1)
+
+        store.closeSession(session.id)
+        XCTAssertEqual(ledger.activeLeases(pool: "team"), [])
+    }
+
+    /// The point of leasing: once the first member passes soft, the next tab lands on another.
+    func testATabSkipsAPoolMemberOverSoft() async throws {
+        let (store, ledger, first, second, _) = pooled()
+        ledger.ingest(reading(first, 0.9))
+        let result = await store.createSession(agent: .claude, in: projectURL.path)
+        let id = try result.get()
+        XCTAssertEqual(store.repos.flatMap(\.sessions).first { $0.id == id }?.accountID, second.id)
+        XCTAssertEqual(ledger.activeLeases(pool: "team").map(\.account.id), [second.id],
+                       "createSession leases once, not again inside newSession")
+    }
+
+    /// No member under hard: the tab still opens, on the member with most headroom, and the
+    /// user is told — never blocked silently, never moved off the pool.
+    func testWhenEveryMemberIsOverHardTheTabStartsAndTheUserIsTold() throws {
+        let (store, ledger, first, second, spy) = pooled()
+        ledger.ingest(reading(first, 0.99))
+        ledger.ingest(reading(second, 0.97))
+        let session = store.newSession(in: projectURL)
+        XCTAssertEqual(session.accountID, second.id)
+        XCTAssertEqual(spy.notices.map(\.id), [session.id])
+        XCTAssertTrue(spy.notices.first?.title.contains("Team") ?? false)
+    }
+
+    /// A refusal after the lease was taken must give it back, or the pool leaks a lease per
+    /// failed click.
+    func testARefusedPoolLaunchGivesItsLeaseBack() async {
+        let (store, ledger, first, _, _) = pooled()
+        try? FileManager.default.removeItem(at: first.home)
+        let result = await store.createSession(agent: .claude, in: projectURL.path)
+        guard case .failure(let error) = result else { return XCTFail("expected a refusal") }
+        XCTAssertEqual(error, .accountHomeMissing("First"))
+        XCTAssertEqual(ledger.activeLeases(pool: "team"), [])
+    }
+
+    /// A tab on any member of its project's pool is on the project's login: leasing spreads
+    /// tabs across members, and marking all but the first would mark the feature working.
+    func testATabOnAnyMemberOfItsProjectsPoolIsNotMismatched() throws {
+        let (store, ledger, first, _, _) = pooled()
+        ledger.ingest(reading(first, 0.9))
+        let session = store.newSession(in: projectURL)
+        XCTAssertNotEqual(session.accountID, first.id)
+        XCTAssertFalse(store.accountMismatchedSessionIDs.contains(session.id))
+    }
+
+    // MARK: - Tab leases follow the agent process (round 2, items 8 and 9)
+
+    /// A tab restored after a relaunch never passes through `launchAccount`, and the ledger is in
+    /// memory, so before this the pool counted none of them. Once the restored tab's agent runs,
+    /// it leases again — on the account the tab is STAMPED with, even when the ledger would now
+    /// pick another member: the running agent's conversation lives in that account's home.
+    func testARestoredTabReLeasesTheAccountItRunsAsOnceItsAgentRuns() throws {
+        let (pooledStore, ledger, first, second, _) = pooled()
+        let preferences = try XCTUnwrap(pooledStore.preferences)
+        let persistence = StubPersistence()
+        let id = UUID()
+        persistence.stored = SessionSnapshot(
+            sessions: [.init(id: id, title: "s", workingDirectory: projectURL.path,
+                             pinnedConversationID: UUID(), accountID: second.id)],
+            sessionCounter: 1
+        )
+        let store = makeStore(preferences, persistence: persistence)
+        store.accountResolver = AccountResolver(preferences: preferences, ledger: ledger)
+        var running = false
+        store.agentProcessRunning = { _ in running }
+        XCTAssertTrue(store.restore(directoryExists: { _ in true }))
+        ledger.ingest(reading(first, 0.1))   // a fresh lease would pick `first`
+
+        store.reconcileTabLeases()
+        XCTAssertEqual(ledger.activeLeases(pool: "team"), [], "no agent yet, no lease")
+
+        running = true
+        store.reconcileTabLeases()
+        XCTAssertEqual(ledger.activeLeases(pool: "team").map(\.account.id), [second.id])
+        XCTAssertEqual(store.accountResolver?.leases(heldBy: id).count, 1)
+
+        store.reconcileTabLeases()
+        XCTAssertEqual(ledger.activeLeases(pool: "team").count, 1, "re-taken once, not every sweep")
+    }
+
+    /// The lease follows the agent, not the tab: an exited agent gives it back after the grace,
+    /// and running the agent again in the same tab re-takes it on the same account.
+    func testATabsLeaseIsReleasedWhenItsAgentExitsAndRetakenWhenItRunsAgain() throws {
+        let (store, ledger, _, _, _) = pooled()
+        var clock = Date()
+        store.now = { clock }
+        var running = true
+        store.agentProcessRunning = { _ in running }
+        let session = store.newSession(in: projectURL)
+        XCTAssertEqual(ledger.activeLeases(pool: "team").count, 1)
+
+        store.reconcileTabLeases()
+        XCTAssertEqual(ledger.activeLeases(pool: "team").count, 1, "a running agent keeps its launch lease")
+
+        running = false
+        store.reconcileTabLeases()
+        XCTAssertEqual(ledger.activeLeases(pool: "team").count, 1, "inside the grace a booting tab keeps it")
+        clock += SessionStore.tabLeaseReleaseGrace
+        store.reconcileTabLeases()
+        XCTAssertEqual(ledger.activeLeases(pool: "team"), [], "an exited agent no longer counts")
+
+        running = true
+        store.reconcileTabLeases()
+        XCTAssertEqual(ledger.activeLeases(pool: "team").map(\.account.id), [session.accountID])
+    }
+
+    /// A tab explicitly started on an account outside its project's pool runs on no pool; a
+    /// sweep must not count it against one.
+    func testARunningTabOnAnAccountOutsideItsPoolTakesNoLease() {
+        let (store, ledger, _, _, _) = pooled()
+        let outside = AgentAccount(agent: .claude, displayName: "Outside", home: home("outside"))
+        store.preferences?.preferences.accounts.append(outside)
+        store.agentProcessRunning = { _ in true }
+        _ = store.newSession(in: projectURL, account: outside.id)
+        store.reconcileTabLeases()
+        XCTAssertEqual(ledger.activeLeases(pool: "team"), [])
     }
 
     // MARK: - The sidebar's account-mismatch marker
@@ -235,7 +405,7 @@ final class AccountLaunchTests: XCTestCase {
     func testASessionOnADifferentAccountThanItsProjectIsMismatched() {
         let (preferences, top) = configured(.claude)
         let other = AgentAccount(agent: .claude, displayName: "Other", home: home("other"))
-        preferences.preferences.storedAccounts = [top, other]
+        preferences.preferences.accounts = [top, other]
         let store = makeStore(preferences)
 
         let session = store.newSession(in: projectURL, account: other.id)
@@ -283,7 +453,7 @@ final class AccountLaunchTests: XCTestCase {
             agent: .claude, displayName: "Default", home: AgentID.claude.builtInHome
         )
         let preferences = PreferencesStore(persistence: nil)
-        preferences.preferences.storedAccounts = [builtIn]
+        preferences.preferences.accounts = [builtIn]
         let provider = RecordingProvider()
         retained.append(provider)
         let store = makeStore(preferences, provider: provider)
@@ -330,7 +500,7 @@ final class AccountLaunchTests: XCTestCase {
     func testARestoredTabIsRelaunchedUnderTheAccountItWasCreatedWith() {
         let (preferences, work) = configured(.claude)
         let other = AgentAccount(agent: .claude, displayName: "Other", home: home("other"))
-        preferences.preferences.storedAccounts = [other, work]   // `other` is now the default
+        preferences.preferences.accounts = [other, work]   // `other` is now the default
         let provider = RecordingProvider()
         retained.append(provider)
         let persistence = StubPersistence()
@@ -454,7 +624,7 @@ final class AccountLaunchTests: XCTestCase {
     func testRemovingAnAccountUnderALiveTabLeavesItsWatcherWhereItIs() throws {
         let (preferences, work) = configured(.claude)
         let spare = AgentAccount(agent: .claude, displayName: "Spare", home: home("spare"))
-        preferences.preferences.storedAccounts = [work, spare]
+        preferences.preferences.accounts = [work, spare]
         let tab = UUID()
         let persistence = StubPersistence()
         persistence.stored = SessionSnapshot(
@@ -496,7 +666,7 @@ final class AccountLaunchTests: XCTestCase {
         )
         let other = AgentAccount(agent: .claude, displayName: "Other", home: home("other"))
         let preferences = PreferencesStore(persistence: nil)
-        preferences.preferences.storedAccounts = [builtIn, other]
+        preferences.preferences.accounts = [builtIn, other]
         let tab = UUID()
         let persistence = StubPersistence()
         persistence.stored = SessionSnapshot(
@@ -532,7 +702,7 @@ final class AccountLaunchTests: XCTestCase {
         )
         let other = AgentAccount(agent: .codex, displayName: "Other", home: home("other-codex"))
         let preferences = PreferencesStore(persistence: nil)
-        preferences.preferences.storedAccounts = [builtIn, other]
+        preferences.preferences.accounts = [builtIn, other]
         let tab = UUID()
         let persistence = StubPersistence()
         persistence.stored = SessionSnapshot(
@@ -654,7 +824,7 @@ final class AccountLaunchTests: XCTestCase {
     private func configured(_ agent: AgentID) -> (PreferencesStore, AgentAccount) {
         let account = AgentAccount(agent: agent, displayName: "Work", home: home("work"))
         let preferences = PreferencesStore(persistence: nil)
-        preferences.preferences.storedAccounts = [account]
+        preferences.preferences.accounts = [account]
         return (preferences, account)
     }
 

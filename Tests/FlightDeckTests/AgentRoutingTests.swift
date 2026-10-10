@@ -1,5 +1,6 @@
 import FleetKit
 import XCTest
+import IntakeKit
 @testable import FlightDeck
 
 /// The seam itself: that the store picks an agent's adapter and runtime by the *session's*
@@ -347,6 +348,7 @@ final class AgentRoutingTests: XCTestCase {
     /// which of the two the store asked for.
     private struct StubAdapter: AgentAdapter {
         static let id: AgentID = .claude
+        nonisolated static var profile: any AgentProfile { AgentProfiles.profile(for: .claude) }
         /// Claude's answers, because this stands in for claude — the store reads both
         /// capabilities off `AgentID`, so a stub that disagreed would describe an agent that
         /// does not exist.
@@ -372,6 +374,7 @@ final class AgentRoutingTests: XCTestCase {
         }
         static let openPromptReader: AgentOpenPromptReader? = ClaudeAdapter.openPromptReader
         static let searchCorpus: AgentSearchCorpus? = ClaudeAdapter.searchCorpus
+        static let promptResponder: AgentPromptResponder? = ClaudeAdapter.promptResponder
 
         func prepare(for session: Session, options: AgentOptions) async throws -> AgentBinding {
             binding(for: session)
@@ -406,6 +409,7 @@ final class AgentRoutingTests: XCTestCase {
     /// whether one arrived.
     private struct RecordingRenameAdapter: AgentAdapter {
         static let id: AgentID = .claude
+        nonisolated static var profile: any AgentProfile { AgentProfiles.profile(for: .claude) }
         let recorder: RenameCallRecorder
 
         // Every static requirement delegates to the adapter this stands in for. It exists to
@@ -421,6 +425,7 @@ final class AgentRoutingTests: XCTestCase {
         static var needsRuntimeStart: Bool { ClaudeAdapter.needsRuntimeStart }
         static var hasStatusRegistry: Bool { ClaudeAdapter.hasStatusRegistry }
         static var openPromptReader: (any AgentOpenPromptReader)? { ClaudeAdapter.openPromptReader }
+        static let promptResponder: AgentPromptResponder? = ClaudeAdapter.promptResponder
         static var searchCorpus: (any AgentSearchCorpus)? { ClaudeAdapter.searchCorpus }
         nonisolated static var homeMarkerFile: String { ClaudeAdapter.homeMarkerFile }
 

@@ -78,6 +78,8 @@ struct SessionTimelineScreen: View {
     /// reason the old `reviewingGate` gave: a live re-read would collapse the pushed screen out
     /// from under a reader still mid-review the instant the Mac's gate clears — which `resolve`
     /// itself causes a heartbeat after the reader's own tap.
+    /// Whether the prompt card wants the composer out of the way — see the inset.
+    @State private var promptHidesComposer = false
     @State private var reviewModel: PlanReviewModel?
     /// The row a search jump landed on, briefly. Mirrors `model.scrollTarget` but fades on its
     /// own clock rather than being cleared by the model, so a reader who lingers keeps seeing
@@ -323,7 +325,8 @@ struct SessionTimelineScreen: View {
         .task(id: model.sessionID) {
             model.updateStatus(agent: session?.agent, activity: session?.activity,
                                call: session?.openPromptCall ?? .unreported,
-                               promptAgent: session?.openPromptAgent)
+                               promptAgent: session?.openPromptAgent,
+                               offered: session?.openPrompt)
             model.open()
         }
         // Reported from the SCREEN rather than the model: the model is cached per tab and
@@ -357,9 +360,15 @@ struct SessionTimelineScreen: View {
                     openPromptCall: session?.openPromptCall ?? .unreported,
                     answerless: session?.answerless ?? false,
                     onAbortBlocked: { await onAbortBlocked(model.sessionID) },
-                    fromSubagent: session?.blockedSubagent
+                    fromSubagent: session?.blockedSubagent,
+                    onHidesComposerChange: { promptHidesComposer = $0 }
                 )
-                PromptComposer(session: session, model: model)
+                // Out of the way while an expanded question is up — see
+                // `PromptCard.hidesComposer(for:minimized:)`. Gated on a card being up as well,
+                // so a card that leaves without reporting cannot strand the composer gone.
+                if !(promptHidesComposer && model.blockedPrompt != nil) {
+                    PromptComposer(session: session, model: model)
+                }
             }
         }
         // The other half of `KeyboardLiftedInset`'s hand-done lift, and neither works alone.
@@ -400,7 +409,8 @@ struct SessionTimelineScreen: View {
             model.loadNewer()
             model.updateStatus(agent: session?.agent, activity: session?.activity,
                                call: session?.openPromptCall ?? .unreported,
-                               promptAgent: session?.openPromptAgent)
+                               promptAgent: session?.openPromptAgent,
+                               offered: session?.openPrompt)
         }
         // The second event trigger, and it fires where the first cannot. A dialog answered at
         // the keyboard with the next one raised immediately never leaves `waiting`, so
@@ -412,12 +422,23 @@ struct SessionTimelineScreen: View {
             model.loadNewer()
             model.updateStatus(agent: session?.agent, activity: session?.activity,
                                call: session?.openPromptCall ?? .unreported,
-                               promptAgent: session?.openPromptAgent)
+                               promptAgent: session?.openPromptAgent,
+                               offered: session?.openPrompt)
+        }
+        // The Mac's words for a dialog this phone cannot derive (gemini). They move with
+        // `openPromptCall` above in practice; observed on their own so a change to them alone
+        // still reaches the card.
+        .onChange(of: session?.openPrompt) { _, _ in
+            model.updateStatus(agent: session?.agent, activity: session?.activity,
+                               call: session?.openPromptCall ?? .unreported,
+                               promptAgent: session?.openPromptAgent,
+                               offered: session?.openPrompt)
         }
         .onChange(of: session?.openPromptAgent) { _, _ in
             model.updateStatus(agent: session?.agent, activity: session?.activity,
                                call: session?.openPromptCall ?? .unreported,
-                               promptAgent: session?.openPromptAgent)
+                               promptAgent: session?.openPromptAgent,
+                               offered: session?.openPrompt)
         }
         // The timer, and it is not redundant with the event above: `emitActivity` on the Mac
         // filters to genuine transitions, so a turn that runs busy for four minutes emits
@@ -1186,7 +1207,9 @@ struct SessionTimelineScreen: View {
 /// O(conversation) work per frame, precisely what the timeline's `rebuild()` funnel exists to
 /// keep out of a render. Here, a report re-runs only this body; `content` was built by the
 /// screen and is not re-evaluated.
-private struct KeyboardLiftedInset<Content: View>: View {
+/// Internal rather than private so `UITestHarness.promptKeyboard` lifts its card with this very
+/// type rather than a copy of it.
+struct KeyboardLiftedInset<Content: View>: View {
     @ViewBuilder let content: Content
 
     @State private var settled: CGFloat = 0

@@ -1,4 +1,5 @@
 import Foundation
+import IntakeKit
 
 /// Errors `FlywheelCoordinator.boot` can throw.
 enum FlywheelError: Error, LocalizedError {
@@ -47,6 +48,16 @@ enum FlywheelProgram {
         switch agent {
         case .claude: "claude-code"
         case .codex: "codex-cli"
+        // Verified 2026-10-09 against am 0.3.35 (source 0.3.38) and ntm 9d5ed97: `--program` is
+        // free text that `am` stores and displays but never validates, and neither the guard
+        // nor reservations read it. These are the spellings ntm registers for the same CLIs
+        // (`agentTypeToProgram` passes `grok`/`agy` through), and `agy` is in Agent Mail's own
+        // known-program list as Antigravity. The one thing keyed on it, ATC's liveness prior,
+        // files both under "unknown" (300s silence), exactly as it does ntm's agents; using
+        // `gemini-cli` (120s) would claim the retired Gemini CLI and split us from ntm.
+        case .grok: "grok"
+        case .gemini: "agy"
+        case .opencode: "opencode"
         }
     }
 }

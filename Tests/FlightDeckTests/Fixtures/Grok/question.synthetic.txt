@@ -1,0 +1,12 @@
+  main ~/proj   19K / 256K │ [Dashboard]
+
+  › ask me a colour
+
+  ┃
+  ┃  Red or blue?
+  ┃  1 (○) Red   Choose red.
+  ┃  2 (○) Blue  Choose blue.
+  ┃  z (○) Type your answer here
+  ┃  ↑/↓ navigate · y copy                                       Enter:submit
+
+  Tab:next answer  │  Esc:scrollback  │  Shift+x:dismiss

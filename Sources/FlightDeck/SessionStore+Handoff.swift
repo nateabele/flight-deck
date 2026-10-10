@@ -1,12 +1,24 @@
 import Foundation
+import IntakeKit
 
 extension AgentID {
     /// The slash command that ends this agent's TUI and returns its tab to the shell (verified
     /// against each TUI; see the L3-U plan Task 14 Step 1).
-    var exitCommand: String {
+    ///
+    /// nil for an agent whose TUI has no verified exit command (gemini: agy leaves on Ctrl-C
+    /// pressed twice, a key sequence): a guessed command typed into the wrong TUI is a prompt,
+    /// not an exit. grok's `/quit` was
+    /// verified live (grok 1.0.30): the TUI exits cleanly and the shell prompt returns.
+    var exitCommand: String? {
         switch self {
         case .claude: return "/exit"
-        case .codex: return "/quit"
+        case .codex, .grok: return "/quit"
+        // agy has no exit slash command anyone has verified — it leaves on Ctrl-C pressed twice,
+        // which is a key sequence, not a message `submitPrompt` can type.
+        case .gemini: return nil
+        // OpenCode's text channel is its API (`prompt_async`), not keystrokes: `/exit` sent that
+        // way is a message to the model, never a command to the attached TUI.
+        case .opencode: return nil
         }
     }
 }
@@ -24,6 +36,7 @@ extension SessionStore {
     func retireAgent(_ id: UUID) -> PromptDispatch {
         if statuses[id]?.activity == .waiting { interruptTurn(id, includingDialog: true) }
         let agent = repos.flatMap(\.sessions).first { $0.id == id }?.agent ?? .claude
-        return submitPrompt(agent.exitCommand, token: UUID(), to: id)
+        guard let command = agent.exitCommand else { return .unsupportedAgent }
+        return submitPrompt(command, token: UUID(), to: id)
     }
 }

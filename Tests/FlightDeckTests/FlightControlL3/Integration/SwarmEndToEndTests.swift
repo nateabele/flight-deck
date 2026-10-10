@@ -14,10 +14,10 @@ final class SwarmEndToEndTests: XCTestCase {
     override func setUp() async throws {
         let rule = RoutingRule(id: "r-tests", sentence: "Use Codex for unit and integration tests",
                                compiled: CompiledRule(match: .any([.dimension("test-authoring", atLeast: 0.5)]),
-                                                      assign: RuleAssign(harness: "codex", model: "gpt-6-sol",
+                                                      assign: RuleAssign(agent: .codex, model: "gpt-6-sol",
                                                                          knobs: ["effort": "high"], pool: "codex-default")),
                                state: .confirmed)
-        rig = try L3IntegrationRig.make(accounts: ["Work", "Personal"], harness: "codex", rule: rule, readyTasks: ["fx-valid"])
+        rig = try L3IntegrationRig.make(accounts: ["Work", "Personal"], agent: .codex, rule: rule, readyTasks: ["fx-valid"])
     }
 
     override func tearDown() async throws {
@@ -31,7 +31,7 @@ final class SwarmEndToEndTests: XCTestCase {
         try await rig.launch(cap: 1)
         await rig.tick()
         let spawn = try XCTUnwrap(rig.spawns.first)
-        XCTAssertEqual(spawn.block.harness, "codex")
+        XCTAssertEqual(spawn.block.agent, .codex)
         XCTAssertEqual(spawn.block.model, "gpt-6-sol")
         XCTAssertEqual(spawn.block.source.ruleId, "r-tests", "routed by the confirmed rule, not a default")
         XCTAssertEqual(spawn.lease?.account.label, "Work", "first account in pool order under soft")

@@ -159,6 +159,7 @@ struct HostRow: View {
         case .online: return .green
         case .connecting: return .yellow
         case .refused: return .red
+        case .keyUnavailable: return .orange
         case .offline, nil: return .gray
         }
     }
@@ -167,7 +168,7 @@ struct HostRow: View {
         switch status {
         case .online: return "Connected"
         case .connecting: return "Connecting…"
-        case .refused(let reason): return reason
+        case .refused(let reason), .keyUnavailable(let reason): return reason
         case .offline(let lastSeen): return Self.lastSeenText(lastSeen ?? record.lastSeenAt)
         case nil: return Self.lastSeenText(record.lastSeenAt)
         }

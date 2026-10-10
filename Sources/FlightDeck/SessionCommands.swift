@@ -1,4 +1,5 @@
 import AppKit
+import IntakeKit
 import SwiftUI
 
 /// File-menu items for session creation and renaming. All stay enabled in every state: a
@@ -11,127 +12,17 @@ struct SessionCommands: Commands {
     // including `applyExternalTitle` firing from the transcript watcher's 500ms poll —
     // potentially while the menu is open. The actions below close over the same
     // reference-type instance either way.
+    //
+    // The New Session rows are not here. They follow the current project (its agent order,
+    // its resolved accounts), and a `Commands` that observed that — it used to, through
+    // `CurrentProjectObserver` and `@ObservedObject preferences` — made SwiftUI reconcile the
+    // main menu on every switch between two projects' tabs, removing the Tools menu each time
+    // (11 removals in 10 switches, measured 2026-10-09). They are AppKit items now, placed
+    // above Add Project… (`NewSessionMenuController`).
     let store: SessionStore
-    // `@ObservedObject`, unlike `store` above: this menu's items ARE built from
-    // `preferences.agents` (by way of `agentOrder(forProject:)`, ordered for whichever project
-    // `currentProject.path` names right now), so a reorder in the Agents tab has to rebuild it.
-    // SwiftUI cannot vary a `.keyboardShortcut` at runtime, so each agent list position gets
-    // its own statically-chorded item here — the *button* in the sidebar is the one that reads
-    // live.
-    @ObservedObject var preferences: PreferencesStore
-    // Also `@ObservedObject`, for the project half of the same problem: `store` staying a
-    // plain `let` above means nothing here would otherwise notice a project switch that
-    // happens without a `preferences` change, and ⌘N's key equivalent closes over `slot.agent`
-    // captured at the *last* `body` build — a stale build after such a switch would still fire
-    // the previous project's agent. `CurrentProjectObserver` narrows observation to exactly
-    // that one derived value, so a title edit, an unread flag, or the transcript watcher's poll
-    // still rebuild nothing here. See its own doc comment for why plain `let store` cannot
-    // simply widen to `@ObservedObject`.
-    @ObservedObject private var currentProject: CurrentProjectObserver
-
-    init(store: SessionStore, preferences: PreferencesStore) {
-        self.store = store
-        self.preferences = preferences
-        _currentProject = ObservedObject(wrappedValue: CurrentProjectObserver(store: store))
-    }
-
-    private var agentsForCurrentProject: [AgentSettings] {
-        guard let project = currentProject.path else { return preferences.preferences.agents }
-        return preferences.agentOrder(forProject: project)
-    }
-
-    /// The flat, single-item row for an agent with 0 or 1 accounts. `account` stays nil on
-    /// the create call either way, so it resolves to the project's default — unchanged from
-    /// before nested accounts existed. Carries its list-position shortcut only when one
-    /// exists (`slots(for:)` caps at three agents).
-    @ViewBuilder
-    private func flatAgentRow(agent: AgentSettings, slot: NewSessionAffordance.Slot?) -> some View {
-        if let slot {
-            Button(slot.label) { Task { await store.createFromMenu(agent: agent.id) } }
-                .keyboardShortcut("n", modifiers: NewSessionAffordance.eventModifiers(slot.modifiers))
-        } else {
-            Button("New \(agent.id.displayName) Session") {
-                Task { await store.createFromMenu(agent: agent.id) }
-            }
-        }
-    }
-
-    /// One leaf inside a multi-account agent's submenu. `shortcutModifiers` is non-nil on
-    /// at most one leaf per submenu — the one `NewSessionAffordance.shortcutLeaf` picked —
-    /// everything else renders identically but un-chorded.
-    @ViewBuilder
-    private func accountMenuRow(
-        agent: AgentID, account: UUID, isResolved: Bool, shortcutModifiers: NSEvent.ModifierFlags?
-    ) -> some View {
-        let name = preferences.account(id: account)?.displayName ?? agent.displayName
-        if let shortcutModifiers {
-            Button {
-                Task { await store.createFromMenu(agent: agent, account: account) }
-            } label: {
-                if isResolved { Label(name, systemImage: "checkmark") } else { Text(name) }
-            }
-            .keyboardShortcut("n", modifiers: NewSessionAffordance.eventModifiers(shortcutModifiers))
-        } else {
-            Button {
-                Task { await store.createFromMenu(agent: agent, account: account) }
-            } label: {
-                if isResolved { Label(name, systemImage: "checkmark") } else { Text(name) }
-            }
-        }
-    }
 
     var body: some Commands {
         CommandGroup(replacing: .newItem) {
-            // One entry per agent, in agent order — never two items with the same title.
-            // 0 or 1 accounts renders flat, exactly as before nested accounts existed; 2+
-            // renders as a submenu of account rows instead of a second, duplicate item.
-            //
-            // A submenu-bearing `NSMenuItem` cannot itself carry a key equivalent that
-            // fires while the menu is closed, so the shortcut for a nested agent moves
-            // onto one of its leaves instead of vanishing: AppKit's key-equivalent
-            // matching recurses into submenus, so a leaf's chord still fires without the
-            // submenu ever opening. `NewSessionAffordance.shortcutLeaf` picks the resolved
-            // leaf — the same one already wearing the checkmark — falling back to the
-            // first leaf so the chord is never simply dropped.
-            // Built with `reduce`, not `Dictionary(uniqueKeysWithValues:)`: the Agents list
-            // is meant to hold one row per `AgentID`, but nothing enforces that here, and a
-            // duplicate must not crash the menu — last position wins, same as any other
-            // last-write lookup.
-            let agents = agentsForCurrentProject
-            let slotByAgent = NewSessionAffordance.slots(for: agents).reduce(into: [AgentID: NewSessionAffordance.Slot]()) {
-                $0[$1.agent] = $1
-            }
-            let entries: [NewSessionAffordance.MenuEntry] = currentProject.path.map { project in
-                NewSessionAffordance.menu(
-                    agents: agents, preferences: preferences.preferences,
-                    resolved: preferences.resolvedAccounts(for: agents, project: project)
-                )
-            } ?? []
-            let entryByAgent = entries.reduce(into: [AgentID: NewSessionAffordance.MenuEntry]()) {
-                $0[$1.agent] = $1
-            }
-            // Which account row wears which chord — shared with the sidebar's dropdown so both
-            // menus place shortcuts by one rule instead of each re-deriving it.
-            let chords = NewSessionAffordance.chords(for: entries, agents: agents)
-
-            ForEach(Array(agents.enumerated()), id: \.offset) { _, settings in
-                let slot = slotByAgent[settings.id]
-                if let entry = entryByAgent[settings.id], case .submenu(let agent, let rows) = entry {
-                    Menu("New \(agent.displayName) Session") {
-                        ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
-                            if case .agent(let rowAgent, let account, let isResolved) = row {
-                                accountMenuRow(
-                                    agent: rowAgent, account: account, isResolved: isResolved,
-                                    shortcutModifiers: chords[account]
-                                )
-                            }
-                        }
-                    }
-                } else {
-                    flatAgentRow(agent: settings, slot: slot)
-                }
-            }
-
             Button("Add Project…") { store.addProjectFromMenu() }
                 .keyboardShortcut("a", modifiers: [.command, .shift])
         }

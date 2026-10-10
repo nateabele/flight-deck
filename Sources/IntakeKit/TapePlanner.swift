@@ -23,7 +23,7 @@ public enum TapePlanner {
         if refineTotal > 0 {
             for round in 1...refineTotal {
                 seq.append(PlannedRound(stage: .refine, round: round, major: round == refineTotal,
-                                        crossCheck: crossChecks(round, of: refineTotal, config)))
+                                        crossCheck: RoundParticipants.crossChecks(round: round, of: refineTotal, config: config)))
             }
         }
 
@@ -46,15 +46,11 @@ public enum TapePlanner {
         return seq
     }
 
-    /// "Last" is the last round as the sequence stands now, so an extend makes the new last round
-    /// a cross-check: "one more round" also means "measure coverage again" (coverage spec §3, §7).
-    private static func crossChecks(_ round: Int, of total: Int, _ config: RoundConfig) -> Bool {
-        guard config.crossChecks, let policy = config.crossCheck else { return false }
-        switch policy {
-        case .off: return false
-        case .firstAndLast: return round == 1 || round == total
-        case .every: return true
-        }
+    /// The whole sequence the tape plans NOW (its extend/trim counters folded in) — what the
+    /// Rounds editor's timeline draws its chips from, so the strip shows the rounds the runner
+    /// walks and not a second reckoning of them.
+    public static func plannedRounds(config: RoundConfig, tape: Tape) -> [PlannedRound] {
+        sequence(config: config, extraRefinement: tape.extraRefinement, extraPolish: tape.extraPolish)
     }
 
     /// The next round to run given what exists, or nil when the tape has reached release

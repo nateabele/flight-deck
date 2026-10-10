@@ -30,7 +30,7 @@ final class DeparturesBoardRenderTests: XCTestCase {
         rf1.record.annotations = [.legacy("tighten the rollout", index: 0)]
         // A landed crossReviewer slot (coverage spec §3) so the paused/failed/done states show
         // the board's "×2" mark on RF1 without depending on the planner's own crossCheck policy.
-        let codexChoice = ModelChoice(harness: .codex, model: "gpt-6-sol", effort: "high")
+        let codexChoice = ModelChoice(agent: .codex, model: "gpt-6-sol", effort: "high")
         rf1.record.slots = [SlotOutcome(role: "reviewer", used: codexChoice, requested: codexChoice, status: .ok),
                             SlotOutcome(role: "crossReviewer", used: codexChoice, requested: codexChoice, status: .ok),
                             SlotOutcome(role: "integrator", used: codexChoice, requested: codexChoice, status: .ok)]

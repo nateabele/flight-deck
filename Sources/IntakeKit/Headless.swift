@@ -1,0 +1,563 @@
+import Foundation
+
+/// Whether a headless run is read-only (triage, review, drafting — every seat but the integrator)
+/// or may write inside its own work dir. Defaults to `.readOnly` on `HeadlessRequest` so every
+/// existing caller keeps producing byte-identical argv.
+public enum HeadlessAccess: Sendable, Equatable {
+    case readOnly
+    case writeInWork(URL)
+}
+
+public struct HeadlessRequest: Sendable {
+    public var agent: AgentID, model: String, effort: String
+    public var cwd: URL, readableDirs: [URL], prompt: String
+    public var schemaFile: URL, schemaJSON: String, resumeSessionID: String?
+    public var access: HeadlessAccess
+    /// The account this run bills (grok/gemini spec §3.0). nil is the built-in account — the
+    /// CLI's own default home — so argv and environment are exactly what they were before
+    /// accounts reached planning. A non-nil account is bound by the profile's
+    /// `environment(base:account:)` (via `HeadlessCommand.environment`) and, for codex, picks
+    /// which `config.toml` `service_tier` is carried over from (`build`).
+    public var account: AgentAccountRef?
+    public init(agent: AgentID, model: String, effort: String, cwd: URL, readableDirs: [URL],
+                prompt: String, schemaFile: URL, schemaJSON: String, resumeSessionID: String?,
+                access: HeadlessAccess = .readOnly, account: AgentAccountRef? = nil) {
+        self.agent = agent; self.model = model; self.effort = effort; self.cwd = cwd
+        self.readableDirs = readableDirs; self.prompt = prompt; self.schemaFile = schemaFile
+        self.schemaJSON = schemaJSON; self.resumeSessionID = resumeSessionID; self.access = access
+        self.account = account
+    }
+}
+
+public enum HeadlessCommand {
+    /// Read-only tool set for triage under `claude -p`: file reading plus `br` READ verbs. FD is
+    /// the only `br` writer (spec §5) — no `br create/update/dep` here. `bv` is deliberately
+    /// NOT on this list, for any claude seat: even `Bash(bv --db <path> *)`, scoped to one
+    /// round's shadow, is still a prefix match against the WHOLE command line, so it would also
+    /// match `bv`'s write/mutating flags on that same invocation (`--export*`, `--update --yes`,
+    /// `--rollback`, `--save-baseline`, …). FD runs `bv` itself instead and hands the agent the
+    /// resulting files — see `ShadowAnalytics` in RoundPrompts.swift.
+    public static let claudeReadOnlyTools =
+        "Read Grep Glob Bash(br list *) Bash(br show *) Bash(br graph *) Bash(br ready *)"
+
+    /// Every `br` write verb, denied by name. `--allowedTools` only ADDS allow rules on top of
+    /// the user's and project's settings, so a project `.claude/settings.json` allowing
+    /// `Bash(br:*)` would still let triage write; deny rules beat allow rules wherever they
+    /// come from, so this is what actually holds FD to being the only writer.
+    public static let claudeDeniedTools = ["create", "update", "close", "reopen", "delete", "dep", "label",
+                                           "comments", "sync", "defer", "undefer", "q", "init"]
+        .map { "Bash(br \($0) *)" }.joined(separator: " ")
+
+    /// The integrator's tool set: it merges triage output into files inside its own work dir, so
+    /// it needs to write there — unlike every read-only seat, which only ever reads/greps/`br`s.
+    public static let claudeWriteTools = "Read Edit Write"
+
+    /// Non-edit tools denied in write mode, on top of `--strict-mcp-config` (below): granting
+    /// exactly Read/Edit/Write via `--allowedTools` above is not a sandbox by itself, because
+    /// `--allowedTools` only ADDS to whatever the operator's own settings.json already allows —
+    /// and this machine's has standing allows like `Bash(git add *)` and `Bash(rg:*)` that
+    /// `acceptEdits` would still run unprompted. A bare `Bash` deny beats every one of those
+    /// allows regardless of where they came from, which is what actually confines the integrator
+    /// to Read/Edit/Write; WebFetch/WebSearch/Task/NotebookEdit are denied the same way as
+    /// defense in depth for the same reason, since none of them are edits either.
+    public static let claudeWriteDeniedTools = "Bash WebFetch WebSearch Task NotebookEdit"
+
+    /// The built-in tools a read-only seat is given at all. `--restricted` (below) removes
+    /// Bash unless `--tools` names it, and every `br` read verb in `claudeReadOnlyTools` is a
+    /// Bash rule — so without Bash here the seat could not read the graph. Naming Bash only
+    /// makes it AVAILABLE: under `dontAsk`, anything the allow list above doesn't match is
+    /// still denied. Probed live on claude 2.1.283, 2026-09-27: the init event lists exactly
+    /// these four tools.
+    public static let claudeReadOnlyBuiltins = "Read Grep Glob Bash"
+
+    /// Appended to EVERY headless claude run, read-only and write alike. `--allowedTools` and
+    /// the denies above only ADD rules on top of whatever settings files load, so under
+    /// `dontAsk` a read-only reviewer would inherit standing allows like `Bash(git add *)` — a
+    /// "read-only" seat that can stage files. `--restricted` ignores the user, project AND
+    /// local settings files (the earlier `--setting-sources local` still loaded the project's
+    /// `settings.local.json`), confines the file tools to the working directories plus
+    /// `--add-dir`, and refuses `bypassPermissions`. Probed live on claude 2.1.283,
+    /// 2026-09-27: a restricted run still authenticates, since login lives in the keychain —
+    /// but the settings' `env` block (this machine's `ANTHROPIC_BASE_URL` proxy) is dropped
+    /// with the file, so every caller builds the child's environment with
+    /// `environment(for:base:home:)`, which re-applies it.
+    /// `--strict-mcp-config` with no `--mcp-config` drops every MCP server rather than guessing
+    /// whether an `mcp__*` glob is valid `--disallowedTools` syntax.
+    public static let claudeIsolation = ["--restricted", "--strict-mcp-config"]
+
+    /// Every headless claude run streams its events as JSONL, so a seat shows what it is doing
+    /// while it works — `--output-format json` is silent until the very end. `-p` refuses
+    /// stream-json without `--verbose`. Probed live on claude 2.1.283, 2026-09-27, with
+    /// `--json-schema` and the isolation flags above, fresh and `--resume`: the stream ends in
+    /// the same `result` object `json` printed alone, `structured_output` included (see
+    /// `HeadlessOutput.parse`).
+    public static let claudeStreaming = ["--output-format", "stream-json", "--verbose"]
+
+    /// Prepended to EVERY codex run, fresh, resumed and write alike. `-s` only sandboxes the
+    /// shell commands the model runs; `~/.codex/config.toml` also starts MCP servers (quillmap,
+    /// whose file mutators write anywhere) and `~/.codex/hooks.json` hooks, and both run
+    /// OUTSIDE that sandbox — a read-only drafter that could still edit the user's repo.
+    /// `--ignore-user-config` skips config.toml (auth still comes from `CODEX_HOME`),
+    /// `--ignore-rules` skips execpolicy `.rules` allows, and `--disable hooks` turns the
+    /// hooks feature off, since hooks.json is read from `CODEX_HOME` whether or not the config
+    /// that enabled it loads. Probed live on codex-cli 0.157.1, 2026-09-27: such a run still
+    /// authenticates and answers; this machine's config sets no `model_provider`/`base_url`
+    /// that would need carrying over with `-c`. Every seat passes `-m` and effort explicitly,
+    /// so losing the config's model defaults changes nothing a round depends on. The one
+    /// setting that IS carried over is `service_tier` (`CodexUserConfig`), which `build`
+    /// appends right after these.
+    ///
+    /// `model_reasoning_summary=detailed` is not isolation but has to ride with it: without the
+    /// user config codex emits NO `reasoning` items at all, so every seat's live headline
+    /// (`ActivityParser`) would stay blank. Probed on 0.157.1, 2026-09-27, at medium effort: the
+    /// same prompt produced zero reasoning items without it and a `**Planning file inspection
+    /// using built-ins**` summary with it.
+    public static let codexIsolation = ["--ignore-user-config", "--ignore-rules", "--disable", "hooks",
+                                        "-c", "model_reasoning_summary=detailed"]
+
+    /// Write mode's workspace-write sandbox, narrowed to the work dir alone. By default codex
+    /// also makes `$TMPDIR` and `/tmp` writable — shared scratch another process (or a later
+    /// round) reads — and would add any configured `writable_roots`. Key names verified
+    /// against the codex-cli 0.157.1 binary's config schema.
+    public static let codexWriteSandbox = ["-c", "sandbox_workspace_write.exclude_tmpdir_env_var=true",
+                                           "-c", "sandbox_workspace_write.exclude_slash_tmp=true",
+                                           "-c", "sandbox_workspace_write.writable_roots=[]"]
+
+    // MARK: grok (grok 1.0.30, 2026-10-07 — see GrokProfile for where each fact came from)
+
+    /// grok has no single read-only switch, and `--permission-mode plan` is "accepted for
+    /// compatibility" only — headless it enforces nothing. A read-only seat is therefore built
+    /// from four independent layers, any one of which would hold alone against the common case:
+    /// - `--tools` makes these the ONLY built-in tools that exist (no shell, no edit tool);
+    /// - `--deny` rules beat every allow from every source, including the operator's
+    ///   `~/.claude/settings.json` permissions, which grok also reads;
+    /// - `--permission-mode dontAsk` auto-denies anything not pre-approved instead of
+    ///   prompting nobody — and overrides a `bypassPermissions` default from those settings;
+    /// - `--disallowed-tools Agent` / `--no-subagents` stop a subagent being spawned with a
+    ///   tool set of its own.
+    /// These three tools are on grok's own "never prompts" read-only list, so `dontAsk` lets
+    /// them run without an allow rule.
+    public static let grokReadOnlyTools = "read_file,grep,list_dir"
+
+    /// Deny rules for every tool class that writes, executes or leaves the machine. Tool-class
+    /// names are grok's rule vocabulary (`Edit` and `Write` are one class, both named so a
+    /// rename of either can't reopen it); `MCPTool` with no pattern matches every MCP tool,
+    /// so an MCP server that slipped past the isolation environment still can't be called.
+    public static let grokDeniedRules = ["Edit", "Write", "Bash", "WebFetch", "WebSearch", "MCPTool"] + grokMetadataReadRules
+
+    /// Read denies for repository metadata, on every grok seat. The first live round's grok
+    /// reviewer spent 8 of its 26 tool calls reading `.git` (config, `info/exclude`) and the
+    /// beads DB's metadata — nothing a plan review can use, and context every later turn
+    /// re-sends. The graph reaches a seat as the file FD writes, never through `.beads`.
+    /// `Read(<glob>)` is grok's path rule; it covers `read_file`, `grep` and `list_dir` (probed
+    /// on grok 1.0.30, 2026-10-07: a read of `.git/HEAD` came back "Denied by permission policy").
+    public static let grokMetadataReadRules = ["Read(**/.git/**)", "Read(**/.beads/**)"]
+
+    /// The flags every grok seat gets. `streaming-messages-json` is the Anthropic stream shape:
+    /// tool use streams as it happens (the seat's live row), and the final `result` line carries
+    /// the answer, `structured_output`, `session_id` and usage. `--no-plan` keeps the
+    /// interactive plan-mode tools (which write a plan file) out of a headless run.
+    public static let grokCommon = ["--output-format", "streaming-messages-json", "--disable-web-search",
+                                    "--no-subagents", "--no-plan", "--disallowed-tools", "Agent"]
+
+    /// The integrator's built-in tools: read, plus the two edit tools (`search_replace` edits,
+    /// `write` creates). Still no shell.
+    public static let grokWriteTools = "read_file,grep,list_dir,search_replace,write"
+
+    /// Denied in write mode — `Edit`/`Write` are absent because the integrator needs them; they
+    /// are instead allowed ONLY under its work dir (`Edit(<dir>/**)`), and `dontAsk` denies an
+    /// edit anywhere else rather than asking.
+    public static let grokWriteDeniedRules = ["Bash", "WebFetch", "WebSearch", "MCPTool"] + grokMetadataReadRules
+
+    /// A new conversation's id. grok's `--session-id` must be a valid UUID that names no
+    /// existing session; minting it here (rather than letting grok pick one) means a seat's id
+    /// is known before the child even starts. The stream also reports it, and that reported id
+    /// is what `HeadlessOutput.parse` returns — the minted one only ever goes TO grok.
+    static func mintGrokSessionID() -> String { UUID().uuidString.lowercased() }
+
+    /// The pure check behind `build`'s write-mode `precondition` — a request that fails this
+    /// would sandbox the integrator somewhere other than its own work dir, or let it resume
+    /// (the integrator always starts fresh), so `build` must never construct argv for it.
+    /// Exposed separately so tests can exercise the failure without tripping the trap.
+    public enum HeadlessCommandError: Error, Equatable, Sendable {
+        case cwdNotWorkDir
+        case resumeNotSupportedForWrite
+        /// `build` has no arm for this agent yet (grok/gemini until Tracks G/M land). Thrown,
+        /// never approximated: a guessed argv for a CLI nobody has probed could run a "read-only"
+        /// seat with write tools, which is worse than a round that pauses saying why.
+        case agentNotImplemented(AgentID)
+        /// The model is not one of this agent's own models (a Claude model on `agy`).
+        case modelOutsideFamily(agent: AgentID, model: String)
+    }
+
+    public static func validate(_ r: HeadlessRequest) -> HeadlessCommandError? {
+        guard case .writeInWork(let dir) = r.access else { return nil }
+        if r.cwd != dir { return .cwdNotWorkDir }
+        if r.resumeSessionID != nil { return .resumeNotSupportedForWrite }
+        return nil
+    }
+
+    /// `home` is where `CodexUserConfig` reads the built-in account's `service_tier` from —
+    /// injectable so a test never reads the operator's own config. A bound `r.account` reads
+    /// its own home's instead (`CodexProfile.serviceTierArguments`).
+    public static func build(_ r: HeadlessRequest, home: URL = FileManager.default.homeDirectoryForCurrentUser)
+        throws(HeadlessCommandError) -> (executable: String, arguments: [String], unsetEnvironment: [String]) {
+        if case .writeInWork = r.access {
+            precondition(validate(r) == nil, "HeadlessCommand.build: invalid write-mode request: \(String(describing: validate(r)))")
+        }
+        switch r.agent {
+        case .codex:
+            let effort = ["-m", r.model, "-c", "model_reasoning_effort=\(r.effort)"] + codexIsolation
+                + CodexProfile(userHome: home).serviceTierArguments(account: r.account)
+            let tail = ["--skip-git-repo-check", "--output-schema", r.schemaFile.path]
+            if let s = r.resumeSessionID {
+                // `exec resume` has no -s flag, and IGNORES the session's recorded model unless
+                // -m is passed again (observed 2026-09-26: luna → terra). Pin both.
+                return ("codex", ["exec", "resume", "--json"] + effort + ["-c", "sandbox_mode=\"read-only\""] + tail + [s, r.prompt], [])
+            }
+            let sandbox: [String]
+            switch r.access {
+            case .readOnly: sandbox = ["-s", "read-only"]
+            case .writeInWork: sandbox = ["-s", "workspace-write"] + codexWriteSandbox
+            }
+            return ("codex", ["exec", "--json"] + effort + sandbox + tail + [r.prompt], [])
+        case .claude:
+            // `--permission-mode dontAsk`: a user `defaultMode: bypassPermissions` would
+            // otherwise skip every check, allow list included. `dontAsk` denies anything not
+            // pre-approved rather than prompting — there is nobody to answer a prompt under
+            // `-p`. (`default` is not a choice in claude 2.1.283's `--help`: acceptEdits,
+            // auto, bypassPermissions, manual, dontAsk, plan.)
+            var args: [String]
+            switch r.access {
+            case .readOnly:
+                args = ["-p", r.prompt, "--model", r.model, "--effort", r.effort] + claudeStreaming + [
+                        "--json-schema", r.schemaJSON, "--permission-mode", "dontAsk",
+                        "--tools", claudeReadOnlyBuiltins, "--allowedTools", claudeReadOnlyTools, "--disallowedTools", claudeDeniedTools]
+                for d in r.readableDirs { args += ["--add-dir", d.path] }
+            case .writeInWork(let dir):
+                // readableDirs is deliberately NOT added here: every `--add-dir` also grants
+                // Edit/Write, not just read access, so adding the intake root (the integrator's
+                // one readableDir) would let it write outside its own work dir — the integrator
+                // only ever needs to read plan.md/changes.json, which already live under `dir`.
+                args = ["-p", r.prompt, "--model", r.model, "--effort", r.effort] + claudeStreaming + [
+                        "--json-schema", r.schemaJSON, "--permission-mode", "acceptEdits",
+                        // `--tools` makes Read/Edit/Write the ONLY tools that exist, not just
+                        // the only pre-approved ones (probed: the init event lists exactly
+                        // these three); the denies below stay as defense in depth.
+                        "--tools", claudeWriteTools, "--allowedTools", claudeWriteTools, "--disallowedTools", claudeWriteDeniedTools,
+                        "--add-dir", dir.path]
+            }
+            args += claudeIsolation
+            if let s = r.resumeSessionID { args += ["--resume", s] }
+            // Without these unset, a claude spawned from inside Claude Code silently skips
+            // saving its transcript — and then `--resume` has nothing to resume.
+            return ("claude", args, ClaudeProfile.childSessionVariables)
+        case .grok:
+            var args = ["-p", r.prompt, "--json-schema", r.schemaJSON, "-m", r.model]
+            // An empty effort means "the model's own default" — `--reasoning-effort ""` would be
+            // rejected as an unknown level, failing the seat over a knob nobody set.
+            if !r.effort.isEmpty { args += ["--reasoning-effort", r.effort] }
+            args += ["--cwd", r.cwd.path] + grokCommon + ["--permission-mode", "dontAsk"]
+            switch r.access {
+            case .readOnly:
+                // `readableDirs` needs no flag: `read_file`/`grep` are not path-confined in
+                // grok, so the intake dir is already readable. Narrowing reads with
+                // `Read(...)` rules would only add a way to lock the seat out of its inputs.
+                args += ["--tools", grokReadOnlyTools]
+                for rule in grokDeniedRules { args += ["--deny", rule] }
+            case .writeInWork(let dir):
+                args += ["--tools", grokWriteTools, "--allow", "Edit(\(dir.path)/**)"]
+                for rule in grokWriteDeniedRules { args += ["--deny", rule] }
+            }
+            // Never a title, never bare `--resume` (= the most recent session in this cwd, which
+            // with parallel seats is another seat's): always a UUID, which grok treats as an id.
+            if let s = r.resumeSessionID { args += ["--resume", s] } else { args += ["--session-id", mintGrokSessionID()] }
+            return ("grok", args, [])
+        case .gemini:
+            // agy also serves Claude and GPT-OSS models; a "gemini" seat on one would be
+            // counted as the Gemini family by coverage and cross-check (see
+            // `GeminiProfile.isGeminiModel`), so it is refused, never run.
+            guard GeminiProfile.isGeminiModel(r.model) else { throw .modelOutsideFamily(agent: r.agent, model: r.model) }
+            return ("agy", geminiArguments(r), [])
+        case .opencode:
+            return ("opencode", openCodeArguments(r), [])
+        }
+    }
+
+    /// Every headless `opencode run` (probed on opencode 1.18.34, 2026-10-09 — see
+    /// `OpenCodeProfile` for each fact):
+    /// - `--format json`: one event per line, each with `sessionID`; the answer is the last
+    ///   message's text (`OpenCodeProfile.parse`).
+    /// - the schema rides in the prompt — `run` has no schema flag — and `SchemaRepair` resumes
+    ///   once on an answer that does not validate;
+    /// - `--agent` picks one of the two agents `OpenCodeProfile.environment(…arguments:)`
+    ///   defines: read-only (read/grep/glob/list, nothing else exists) or the integrator (those
+    ///   plus edits under `--dir` only). Never `--auto`, which approves everything not denied;
+    /// - `--dir` is the cwd, stated so the integrator's edit rule is rooted where the run is;
+    /// - `-m` only when a model is set: empty means OpenCode's own configured default, and
+    ///   `--variant` only when an effort is (it is provider-specific).
+    /// Resume is `-s <id>` — the id the run itself reported, never `--continue`, which resumes
+    /// the most recent session (another seat's, with parallel seats).
+    static func openCodeArguments(_ r: HeadlessRequest) -> [String] {
+        let agent: String
+        switch r.access {
+        case .readOnly: agent = OpenCodeProfile.readOnlyAgent
+        case .writeInWork: agent = OpenCodeProfile.integratorAgent
+        }
+        var args = ["run", "--format", "json", "--agent", agent, "--dir", r.cwd.path]
+        if !r.model.isEmpty { args += ["-m", r.model] }
+        if !r.effort.isEmpty { args += ["--variant", r.effort] }
+        if let s = r.resumeSessionID { args += ["-s", s] }
+        // The message last, after `--`, so a prompt that starts with `-` stays a message.
+        args += ["--", r.prompt + OpenCodeProfile.schemaInstruction(r.schemaJSON)]
+        return args
+    }
+
+    /// Appended to every read-only agy seat's prompt. agy ends a headless turn with NO answer
+    /// the moment it auto-denies a tool (probed 2026-10-07), so a seat that "just checks" with a
+    /// write or an unsandboxed command loses its whole turn; saying so up front avoids most of
+    /// those, and `SchemaRepair` resumes the rest once.
+    public static let geminiReadOnlyNote = "\n\n(This run is read-only. Writing or editing files, or running commands "
+        + "that change anything, is denied and ends your turn without an answer. Read and search only.)"
+
+    /// Every headless `agy` run (probed on agy 1.3.1, 2026-10-07):
+    /// - stream-json so the seat shows live activity; the final `result` event carries the same
+    ///   object `--output-format json` prints alone.
+    /// - `--json-schema` gets the schema INLINE, rewritten by `GeminiSchema` — Gemini refuses a
+    ///   `null` inside `enum`, which every strict intake schema with a nullable enum has.
+    /// - No `--effort`: the model id carries it (see `GeminiProfile.modelCatalog`).
+    /// - No `--print-timeout`: since 1.3.1 it defaults to 0, "wait until the turn completes" —
+    ///   the uncapped wait claude and codex seats get (1.2.3 defaulted to 5 minutes).
+    /// - `--disable-slash-commands`: a prompt line that starts with `/` stays data.
+    static func geminiArguments(_ r: HeadlessRequest) -> [String] {
+        var args = ["--output-format", "stream-json", "--json-schema", GeminiSchema.compatible(r.schemaJSON),
+                    "--model", r.model, "--disable-slash-commands"]
+        switch r.access {
+        case .readOnly:
+            // READ-ONLY IS THE PERMISSION SYSTEM, NOT `--mode plan`. Probed: `--mode plan` only
+            // changes the agent's workflow — with permissions skipped it wrote NOTES.md and
+            // edited README.md. In the default mode every write needs a permission headless
+            // mode cannot grant, so it is auto-denied (no file appeared). `--sandbox` lets
+            // read-only shell commands (`ls`, `rg`, `git log`) run without a permission and
+            // blocks their writes ("Operation not permitted"). Never
+            // `--dangerously-skip-permissions`: with it a sandbox-blocked `touch` was simply
+            // retried unsandboxed, and succeeded.
+            args = ["-p", r.prompt + geminiReadOnlyNote] + args + ["--sandbox"]
+            for d in r.readableDirs { args += ["--add-dir", d.path] }
+        case .writeInWork:
+            // `accept-edits` approves edits inside the workspace — the cwd, which `validate`
+            // pins to the work dir — and still denies a write outside it (probed: an edit to
+            // work/plan.md landed, a write to ../OUTSIDE.md was denied). readableDirs are NOT
+            // added: `--add-dir` widens the workspace, i.e. where edits may land.
+            args = ["-p", r.prompt] + args + ["--mode", "accept-edits", "--sandbox"]
+        }
+        // Resume by the id agy itself reported (`conversation_id`) — probed: the resumed turn
+        // keeps the id and remembers the earlier one. Never `--continue`: it resumes the MOST
+        // RECENT conversation, which with parallel seats is another seat's.
+        if let s = r.resumeSessionID { args += ["--conversation", s] }
+        return args
+    }
+
+    /// The complete environment for a child `build` produced, from the caller's resolved
+    /// `base` (PATH already repaired). The ONE place triage (`SystemHeadlessRunner`), every
+    /// round (`RoundExecutor`) and the rule compiler get it from, so they can't drift. The
+    /// CLI's own profile builds it — for claude, the account's settings `env` back underneath
+    /// `base` (`--restricted` drops the file that carries it), the account's home bound, and the
+    /// child-session scrub — and then `build`'s unsets run, so nothing can re-introduce a
+    /// variable `build` removed. `account` nil is the built-in account. `home` is injectable so
+    /// a test never reads the operator's own settings.
+    public static func environment(
+        for command: (executable: String, arguments: [String], unsetEnvironment: [String]),
+        base: [String: String], home: URL = FileManager.default.homeDirectoryForCurrentUser,
+        account: AgentAccountRef? = nil
+    ) -> [String: String] {
+        var environment: [String: String]
+        switch command.executable {
+        case ClaudeProfile().binaryName: environment = ClaudeProfile(userHome: home).environment(base: base, account: account)
+        case CodexProfile().binaryName: environment = CodexProfile(userHome: home).environment(base: base, account: account)
+        // The isolation that keeps a grok seat off the operator's Claude/Cursor hooks and MCP
+        // servers is environment, not argv (see `GrokProfile.isolationEnvironment`) — so every
+        // grok child, triage and round alike, must come through here.
+        case GrokProfile().binaryName: environment = GrokProfile().environment(base: base, account: account)
+        case GeminiProfile().binaryName: environment = GeminiProfile().environment(base: base, account: account)
+        // The seat's permission set is environment (`OPENCODE_CONFIG_CONTENT`), not argv — so,
+        // like grok's isolation, every opencode child must come through here.
+        case OpenCodeProfile().binaryName:
+            environment = OpenCodeProfile().environment(base: base, account: account, arguments: command.arguments)
+        default: environment = base
+        }
+        for key in command.unsetEnvironment { environment.removeValue(forKey: key) }
+        return environment
+    }
+}
+
+public enum HeadlessOutput {
+    public enum ParseError: Error, Equatable {
+        case noSession, noResult, notJSON(String), isError(String)
+        /// No parser for this agent yet (grok/gemini until Tracks G/M land). Unreachable in
+        /// practice — `build` refuses first — but a parse that guessed would hand an unvalidated
+        /// answer to the round.
+        case agentNotImplemented(AgentID)
+    }
+
+    public static func parse(_ agent: AgentID, stdout: Data) throws -> (sessionID: String, structured: Data) {
+        switch agent {
+        case .codex:
+            var session: String?, text: String?
+            for line in stdout.split(separator: UInt8(ascii: "\n")) {
+                guard let obj = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any] else { continue }
+                if obj["type"] as? String == "thread.started" { session = obj["thread_id"] as? String }
+                if obj["type"] as? String == "item.completed",
+                   let item = obj["item"] as? [String: Any], item["type"] as? String == "agent_message" {
+                    text = item["text"] as? String
+                }
+            }
+            guard let session else { throw ParseError.noSession }
+            guard let text else { throw ParseError.noResult }
+            let data = Data(text.utf8)
+            guard (try? JSONSerialization.jsonObject(with: data)) != nil else { throw ParseError.notJSON(text) }
+            return (session, data)
+        case .claude:
+            // `--output-format json`'s single object — kept for fixtures recorded before claude
+            // seats streamed.
+            if let obj = try? JSONSerialization.jsonObject(with: stdout) as? [String: Any] {
+                guard let session = obj["session_id"] as? String else { throw ParseError.noSession }
+                return (session, try claudeStructured(obj))
+            }
+            // stream-json: the session id is on the leading `system/init` line (and every
+            // event after it); the answer is the final `result` event. A stream that never got
+            // that far — killed, crashed — has no answer, whatever it said on the way.
+            var session: String?, result: [String: Any]?
+            for line in stdout.split(separator: UInt8(ascii: "\n")) {
+                guard let obj = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any] else { continue }
+                if let s = obj["session_id"] as? String { session = s }
+                if obj["type"] as? String == "result" { result = obj }
+            }
+            guard let session else { throw ParseError.noSession }
+            guard let result else { throw ParseError.noResult }
+            return (session, try claudeStructured(result))
+        case .grok:
+            return try grokParse(stdout)
+        case .gemini:
+            return try geminiParse(stdout)
+        case .opencode:
+            return try openCodeParse(stdout)
+        }
+    }
+
+    /// `opencode run --format json` (see `OpenCodeProfile.parse`). An `error` event wins over
+    /// any answer — `run` exits 0 on a failed turn, so it is the only failure signal there is.
+    private static func openCodeParse(_ stdout: Data) throws -> (sessionID: String, structured: Data) {
+        let run = OpenCodeProfile.parse(stdout)
+        if let error = run.error { throw ParseError.isError(error) }
+        guard let session = run.sessionID else { throw ParseError.noSession }
+        guard let answer = run.answer else { throw ParseError.noResult }
+        let text = OpenCodeProfile.jsonText(in: answer)
+        let data = Data(text.utf8)
+        guard (try? JSONSerialization.jsonObject(with: data)) != nil else { throw ParseError.notJSON(answer) }
+        return (session, data)
+    }
+
+    /// grok `--output-format streaming-messages-json`: NDJSON whose every line carries
+    /// `session_id`, ending in one `result` line with the answer (`structured_output` under
+    /// `--json-schema`). Also accepts the single-object `--output-format json` shape
+    /// (`sessionId`, `text`), which `--json-schema` alone implies — so a run whose explicit
+    /// format grok ever stops honouring still parses instead of pausing the round.
+    private static func grokParse(_ stdout: Data) throws -> (sessionID: String, structured: Data) {
+        var session: String?, result: [String: Any]?
+        for line in stdout.split(separator: UInt8(ascii: "\n")) {
+            guard let obj = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any] else { continue }
+            // A run that failed before starting a session reports `"session_id":""` (probed:
+            // signed out, grok 1.0.30) — empty is "none", never an id to resume.
+            if let s = obj["session_id"] as? String ?? obj["sessionId"] as? String, !s.isEmpty { session = s }
+            if obj["type"] as? String == "result" || (obj["type"] == nil && obj["text"] != nil) { result = obj }
+        }
+        if var failed = result, failed["is_error"] as? Bool == true {
+            // Checked before the session: a failed run's error is the more useful report, and it
+            // may have no session at all. Its reason is in `errors[]` (strings, probed), with
+            // `result` absent — surface that rather than the bare subtype.
+            if failed["result"] == nil, let errors = failed["errors"] as? [Any], !errors.isEmpty {
+                failed["result"] = errors.map { ($0 as? [String: Any])?["message"] as? String ?? "\($0)" }.joined(separator: "; ")
+            }
+            throw ParseError.isError(failed["result"] as? String ?? failed["subtype"] as? String ?? "is_error")
+        }
+        guard let session else { throw ParseError.noSession }
+        guard var result else { throw ParseError.noResult }
+        if result["result"] == nil, let text = result["text"] as? String { result["result"] = text }
+        if result["structured_output"] == nil, let structured = result["structuredOutput"] { result["structured_output"] = structured }
+        return (session, try claudeStructured(result))
+    }
+
+    /// `agy --output-format stream-json`: `{"event":"init","conversation_id":…}` first, then
+    /// `step_update`s, then `{"event":"result","result":{…}}` — the same object
+    /// `--output-format json` prints alone, which is accepted too. The answer is ONLY
+    /// `structured_output`: the `response` text can carry keys the schema forbids (probed:
+    /// `{"plan":"417","toolAction":…,"toolSummary":…}` beside a clean `structured_output`). A
+    /// result whose `status` is not `SUCCESS` holds an error, not an answer — and a signed-out
+    /// run reports one with an EMPTY conversation id, so the status is checked before the id.
+    private static func geminiParse(_ stdout: Data) throws -> (sessionID: String, structured: Data) {
+        guard let result = geminiResult(stdout) else {
+            throw geminiSession(stdout) == nil ? ParseError.noSession : ParseError.noResult
+        }
+        let status = result["status"] as? String ?? ""
+        guard status == "SUCCESS" else {
+            throw ParseError.isError(result["error"] as? String ?? (status.isEmpty ? "no status" : status))
+        }
+        guard let session = geminiSession(stdout) else { throw ParseError.noSession }
+        if let structured = result["structured_output"], !(structured is NSNull) {
+            return (session, try JSONSerialization.data(withJSONObject: structured, options: .fragmentsAllowed))
+        }
+        // SUCCESS with no answer: agy auto-denied a tool and stopped (`denied_actions`).
+        let denied = (result["denied_actions"] as? [[String: Any]] ?? []).compactMap { $0["action"] as? String }
+        throw ParseError.isError(GeminiProfile.answerlessTurnMarker
+            + (denied.isEmpty ? "" : " (denied: \(denied.joined(separator: ", ")))"))
+    }
+
+    private static func geminiResult(_ stdout: Data) -> [String: Any]? {
+        if let obj = try? JSONSerialization.jsonObject(with: stdout) as? [String: Any], obj["event"] == nil { return obj }
+        var result: [String: Any]?
+        for line in stdout.split(separator: UInt8(ascii: "\n")) {
+            guard let obj = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any] else { continue }
+            if obj["event"] as? String == "result" { result = obj["result"] as? [String: Any] }
+        }
+        return result
+    }
+
+    private static func geminiSession(_ stdout: Data) -> String? {
+        if let s = geminiResult(stdout)?["conversation_id"] as? String, !s.isEmpty { return s }
+        for line in stdout.split(separator: UInt8(ascii: "\n")) {
+            guard let obj = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any] else { continue }
+            if let s = obj["conversation_id"] as? String, !s.isEmpty { return s }
+        }
+        return nil
+    }
+
+    /// The session a run reported even when its output did not parse — so a failed run can
+    /// still be resumed (`SchemaRepair`). agy only: claude and codex runs keep reporting no
+    /// session on a parse failure, exactly as before.
+    public static func reportedSession(_ agent: AgentID, stdout: Data) -> String? {
+        switch agent {
+        case .gemini: return geminiSession(stdout)
+        // OpenCode has no native schema, so an answer that is not JSON is the normal thing
+        // `SchemaRepair` resumes — which needs the session the run reported.
+        case .opencode: return OpenCodeProfile.parse(stdout).sessionID
+        default: return nil
+        }
+    }
+
+    /// The structured answer in a claude `result` object. `is_error` means `result` holds the
+    /// error text, not an answer — parsing it as one would pass a JSON-shaped error message
+    /// off as the seat's output.
+    private static func claudeStructured(_ obj: [String: Any]) throws -> Data {
+        if obj["is_error"] as? Bool == true {
+            throw ParseError.isError(obj["result"] as? String ?? obj["subtype"] as? String ?? "is_error")
+        }
+        if let structured = obj["structured_output"] {
+            return try JSONSerialization.data(withJSONObject: structured)
+        }
+        guard let text = obj["result"] as? String else { throw ParseError.noResult }
+        let data = Data(text.utf8)
+        guard (try? JSONSerialization.jsonObject(with: data)) != nil else { throw ParseError.notJSON(text) }
+        return data
+    }
+}

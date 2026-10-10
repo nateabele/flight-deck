@@ -51,7 +51,7 @@ final class ContextResetTests: XCTestCase {
 
     func testTheStoreAttachesItselfToTheStandardRegistry() async throws {
         let store = SessionStore(provider: nil, persistence: nil)
-        let claude = try XCTUnwrap(store.routingCapabilities.capabilities(for: "claude") as? ClaudeRoutingCapabilities)
+        let claude = try XCTUnwrap(store.routingCapabilities.capabilities(for: .claude) as? ClaudeRoutingCapabilities)
         XCTAssertTrue(claude.commands === store)
     }
 }

@@ -16,6 +16,37 @@ private final class FakeHeadlessRunner: HeadlessRunner, @unchecked Sendable {
     }
 }
 
+/// Records the account each triage turn was bound to (unify brief R9).
+private final class AccountRecordingHeadlessRunner: HeadlessRunner, @unchecked Sendable {
+    private(set) var accounts: [AgentAccountRef?] = []
+    let output: Data
+    init(_ output: Data) { self.output = output }
+    func run(_ command: (executable: String, arguments: [String], unsetEnvironment: [String]),
+             cwd: URL) async throws -> (stdout: Data, stderr: String, exitCode: Int32) { (output, "", 0) }
+    func run(_ command: (executable: String, arguments: [String], unsetEnvironment: [String]), cwd: URL,
+             account: AgentAccountRef?, onStdout: (@Sendable (Data) -> Void)?) async throws -> (stdout: Data, stderr: String, exitCode: Int32) {
+        accounts.append(account)
+        onStdout?(output)
+        return (output, "", 0)
+    }
+}
+
+/// A resolver that answers one fixed account, or refuses, and counts its lease traffic.
+@MainActor
+private final class StubAccountResolver: AccountResolving {
+    var result: Result<ResolvedAccount, AccountResolutionError>
+    private(set) var asked: [(AgentID, String)] = []
+    private(set) var released: [AccountLease] = []
+    init(_ result: Result<ResolvedAccount, AccountResolutionError>) { self.result = result }
+    func billing(_ agent: AgentID, project: String) -> AccountBilling { AccountBilling(text: "stub") }
+    func acquire(_ agent: AgentID, project: String) -> Result<ResolvedAccount, AccountResolutionError> {
+        asked.append((agent, project))
+        return result
+    }
+    func release(_ lease: AccountLease) { released.append(lease) }
+    func adopt(_ lease: AccountLease) {}
+}
+
 /// A triage harness that streams: holds until the test opens the gate, then hands the sink
 /// `first` and `output` as two chunks — so a test can look at the triage while it runs, with
 /// nothing fed yet that a trailing activity flush could land mid-test.
@@ -106,7 +137,7 @@ final class IntakeServiceTests: XCTestCase {
                              hasSession: @escaping (String, String) -> Bool = { _, _ in false },
                              inject: @escaping (String, String, String, UUID) -> Bool = { _, _, _, _ in true }) -> IntakeService {
         IntakeService(store: IntakeStore(root: root), headless: headless, processRunner: br,
-                      triageSettings: TriageSettings(harness: .codex, model: "m1", effort: "high"),
+                      triageSettings: TriageSettings(agent: .codex, model: "m1", effort: "high"),
                       inject: inject, hasSession: hasSession)
     }
 
@@ -135,13 +166,71 @@ final class IntakeServiceTests: XCTestCase {
 
     // MARK: tests
 
+    /// Unify brief R9: triage bills the project's account for its agent, binds that home, records
+    /// the account on its activity, and hands a pool lease back when the turn ends.
+    func testTriageBillsTheProjectsAccountAndReleasesItsLease() async throws {
+        let home = root.appendingPathComponent("accounts/cx")
+        let account = AgentAccount(agent: .codex, displayName: "CX", home: home)
+        let lease = AccountLease(pool: "cx-pool", account: AccountRef(agent: .codex, id: account.id, label: "CX"))
+        let resolver = StubAccountResolver(.success(ResolvedAccount(agent: .codex, account: account, lease: lease, label: "CX pool · CX")))
+        let headless = AccountRecordingHeadlessRunner(Self.codex(Self.questions))
+        let svc = IntakeService(store: IntakeStore(root: root), headless: headless,
+                                processRunner: MutableRunner(Self.brReplies(Self.openGraph)),
+                                triageSettings: TriageSettings(agent: .codex, model: "m1", effort: "high"),
+                                inject: { _, _, _, _ in true }, hasSession: { _, _ in false })
+        svc.accountResolver = resolver
+        let id = await capture(svc, project: "/w/proj")
+        XCTAssertEqual(intake(svc, id).state, .needsAnswers)
+        XCTAssertEqual(resolver.asked.map(\.0), [.codex])
+        XCTAssertEqual(resolver.asked.map(\.1), ["/w/proj"])
+        XCTAssertEqual(headless.accounts, [AgentAccountRef(id: account.id.uuidString, home: home)])
+        XCTAssertEqual(svc.triageActivities[id]?.accountID, account.id)
+        XCTAssertEqual(resolver.released, [lease], "the pool lease lives only as long as the turn")
+    }
+
+    /// Triage on a pool whose every member is over its hard limit still runs, and tells the
+    /// user — the notice a tab in the same project would post.
+    func testTriageOnAnAllOverHardPoolPostsTheNotice() async throws {
+        let account = AgentAccount(agent: .codex, displayName: "CX", home: root.appendingPathComponent("accounts/cx"))
+        let notice = AccountNotice(title: "Every account in “CX pool” is over its limit", body: "Started on “CX”.")
+        let resolver = StubAccountResolver(.success(ResolvedAccount(agent: .codex, account: account, lease: nil,
+                                                                   label: "CX pool · CX", notice: notice)))
+        let svc = IntakeService(store: IntakeStore(root: root), headless: AccountRecordingHeadlessRunner(Self.codex(Self.questions)),
+                                processRunner: MutableRunner(Self.brReplies(Self.openGraph)),
+                                triageSettings: TriageSettings(agent: .codex, model: "m1", effort: "high"),
+                                inject: { _, _, _, _ in true }, hasSession: { _, _ in false })
+        svc.accountResolver = resolver
+        var heard: [(UUID, String, AccountNotice)] = []
+        svc.onAccountNotice = { heard.append(($0, $1, $2)) }
+        let id = await capture(svc, project: "/w/proj")
+        XCTAssertEqual(intake(svc, id).state, .needsAnswers, "the turn still runs")
+        XCTAssertEqual(heard.map(\.0), [id])
+        XCTAssertEqual(heard.map(\.1), ["/w/proj"])
+        XCTAssertEqual(heard.map(\.2), [notice])
+    }
+
+    /// An assignment that cannot be honoured fails triage with the reason, running nothing.
+    func testTriageRefusesAnUnresolvableAccount() async throws {
+        let resolver = StubAccountResolver(.failure(.accountMissing(.codex)))
+        let headless = AccountRecordingHeadlessRunner(Self.codex(Self.questions))
+        let svc = IntakeService(store: IntakeStore(root: root), headless: headless,
+                                processRunner: MutableRunner(Self.brReplies(Self.openGraph)),
+                                triageSettings: TriageSettings(agent: .codex, model: "m1", effort: "high"),
+                                inject: { _, _, _, _ in true }, hasSession: { _, _ in false })
+        svc.accountResolver = resolver
+        let id = await capture(svc)
+        XCTAssertEqual(intake(svc, id).state, .failed)
+        XCTAssertTrue(intake(svc, id).failure?.contains("no longer exists") == true, "\(String(describing: intake(svc, id).failure))")
+        XCTAssertTrue(headless.accounts.isEmpty)
+    }
+
     func testCaptureRunsTriageAndStoresQuestions() async {
         let svc = makeService(headless: FakeHeadlessRunner([Self.codex(Self.questions)]), br: MutableRunner(Self.brReplies(Self.openGraph)))
         let id = await capture(svc)
         let i = intake(svc, id)
         XCTAssertEqual(i.state, .needsAnswers)
         XCTAssertEqual(i.exchanges, [TriageExchange(questions: ["Which README?"])])
-        XCTAssertEqual(i.triage, HarnessSession(harness: .codex, sessionID: "S1", model: "m1", effort: "high"))
+        XCTAssertEqual(i.triage, HeadlessSession(agent: .codex, sessionID: "S1", model: "m1", effort: "high"))
         XCTAssertEqual(svc.attentionCount(forProject: "/p"), 1)
         // Inputs the agent was pointed at exist beside intake.json.
         let dir = IntakeStore(root: root).directory(for: id).appendingPathComponent("triage")
@@ -160,7 +249,7 @@ final class IntakeServiceTests: XCTestCase {
         let headless = StreamingHeadlessRunner(first: command, output: Self.codex(Self.questions))
         let svc = IntakeService(store: IntakeStore(root: root), headless: headless,
                                 processRunner: MutableRunner(Self.brReplies(Self.openGraph)),
-                                triageSettings: TriageSettings(harness: .codex, model: "m1", effort: "high"),
+                                triageSettings: TriageSettings(agent: .codex, model: "m1", effort: "high"),
                                 inject: { _, _, _, _ in true }, hasSession: { _, _ in false })
         svc.capture(intent: "Add a note", project: "/p")
         let id = svc.intakes[0].id
@@ -174,7 +263,7 @@ final class IntakeServiceTests: XCTestCase {
 
         svc.pollTapes()
         let started = try XCTUnwrap(svc.triageActivity(id))
-        XCTAssertEqual(started.harness, .codex)
+        XCTAssertEqual(started.agent, .codex)
         XCTAssertFalse(started.finished)
 
         // Same mtime, new bytes: the tick must not re-read.

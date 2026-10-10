@@ -122,7 +122,10 @@ final class StoreSwarmSpawner: SwarmSpawner, SwarmAgentLauncher {
     /// spawn must close a tab it opened and cannot use (no Agent Mail identity).
     private func createReportingTab(task: TaskRef, block: ExecutionBlock, lease: AccountLease?) async
         -> (result: Result<SessionRef, SpawnError>, tab: UUID?) {
-        guard let agent = AgentID(rawValue: block.harness.rawValue) else { return (.failure(.unsupportedHarness(block.harness)), nil) }
+        // A block can name any `AgentID`, but a spawn opens a TAB: an agent whose adapter cannot
+        // run one yet (unify brief R4, `tabReady`) is refused here rather than launched as a stub.
+        let agent = block.agent
+        guard agent.tabReady else { return (.failure(.unsupportedAgent(agent)), nil) }
         let overrides = LaunchOverrides(model: block.model, knobs: block.knobs)
         switch await create(agent, task.project.path, lease?.account.id, overrides) {
         case .failure(let error):
@@ -143,7 +146,7 @@ final class StoreSwarmSpawner: SwarmSpawner, SwarmAgentLauncher {
     }
 
     func resetContext(_ id: UUID) async -> Bool {
-        guard let session = lookupSession(id), let capabilities = registry.capabilities(for: session.agent.harnessID),
+        guard let session = lookupSession(id), let capabilities = registry.capabilities(for: session.agent),
               let result = try? await capabilities.resetContext(session), case .supported = result else { return false }
         return true
     }

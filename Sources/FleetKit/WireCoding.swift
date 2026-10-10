@@ -34,6 +34,7 @@ extension FleetEvent: Codable {
         case answerless
         case intakes, swarm
         case subagents, openPromptAgent
+        case openPrompt
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -77,7 +78,7 @@ extension FleetEvent: Codable {
             try c.encode(origin, forKey: .origin)
         case .activityChanged(let id, let activity, let waitingFor, let subagentCount,
                               let hasBackgroundWork, let openPromptCall, let answerless,
-                              let subagents, let openPromptAgent):
+                              let subagents, let openPromptAgent, let openPrompt):
             try c.encode(FleetEventTag.activityChanged, forKey: .t)
             try c.encode(id, forKey: .id)
             // `encode` not `encodeIfPresent`: an absent key and an explicit null are the
@@ -98,6 +99,8 @@ extension FleetEvent: Codable {
             // phone must see exactly the bytes it always has for such a session.
             try c.encodeIfPresent(subagents, forKey: .subagents)
             try c.encodeIfPresent(openPromptAgent, forKey: .openPromptAgent)
+            // Absent, not `null`, for every claude tab: see `WireSession.openPrompt`.
+            try c.encodeIfPresent(openPrompt, forKey: .openPrompt)
         case .unreadChanged(let id, let isUnread):
             try c.encode(FleetEventTag.unreadChanged, forKey: .t)
             try c.encode(id, forKey: .id)
@@ -183,7 +186,10 @@ extension FleetEvent: Codable {
                 answerless: try c.decodeIfPresent(Bool.self, forKey: .answerless) ?? false,
                 // Absent from an older Mac, and kept nil: see `WireSession.subagents`.
                 subagents: try c.decodeIfPresent([WireSubagent].self, forKey: .subagents),
-                openPromptAgent: try c.decodeIfPresent(String.self, forKey: .openPromptAgent)
+                openPromptAgent: try c.decodeIfPresent(String.self, forKey: .openPromptAgent),
+                // `try?` for `WireSession.openPrompt`'s reason: one unreadable dialog costs one
+                // card, never the event — and a dropped event is a session frozen in its last state.
+                openPrompt: try? c.decodeIfPresent(WireOpenPrompt.self, forKey: .openPrompt)
             )
         case .unreadChanged:
             self = .unreadChanged(id: try c.decode(UUID.self, forKey: .id),

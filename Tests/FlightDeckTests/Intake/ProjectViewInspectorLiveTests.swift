@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import IntakeKit
 import SwiftUI
 import XCTest
@@ -11,7 +12,7 @@ import XCTest
 /// key-equivalent dispatch. The toggle's label ("Show Inspector" / "Hide Inspector") is what
 /// reads the state back, the way the human reads it.
 ///
-/// Pins the two reported bugs: the inspector (the notes rail, with the plan focused) must
+/// Pins the two reported bugs: the inspector (opened with the plan focused) must
 /// close from ⌥⌘I while the plan editor holds focus, and stay closed; and its open state is
 /// per project and survives the detail column showing something else in between — it was
 /// `ProjectView` `@State`, which a switch away and back reset.
@@ -37,11 +38,21 @@ final class ProjectViewInspectorLiveTests: XCTestCase {
     }
 
     func testInspectorClosesFromTheEditorAndIsRememberedPerProject() throws {
+        // With every display asleep AppKit never finishes the column's open animation, so
+        // `.inspector` drops every later `false`, even one sent 3 s after the open. Measured
+        // 2026-10-09 on unchanged code back to 61e58016: 3 of 3 passes with the displays
+        // awake, a failure at the "panel itself collapsed" check on every run with them asleep.
+        // So an unattended suite run went red overnight. The human can't press ⌥⌘I at a dark
+        // screen, so it is no product bug. A skip, not a looser check: this test is the only
+        // guard on the close race, and only an awake display can show whether it holds.
+        try XCTSkipIf(Self.everyDisplayAsleep(),
+                      "every display is asleep: AppKit's column animation never completes, so the close can't be judged")
         let (store, a, b, session, window) = try openTwoShapingProjects()
         XCTAssertEqual(toggleLabel(in: window), "Show Inspector", "hidden by default (spec §3)")
 
-        // Into the plan, as a click would: the plan focused is what puts the notes rail in the
-        // inspector, and the editor holding focus is where ⌥⌘I has to still work.
+        // Into the plan, as a click would: the editor holding focus is where ⌥⌘I has to still
+        // work. Focus no longer picks the inspector's content (its mode does), so this is also
+        // where the old focus-driven swap to the notes rail would show.
         let editor = try XCTUnwrap(find(PlanNSTextView.self, in: try XCTUnwrap(window.contentView)))
         XCTAssertTrue(window.makeFirstResponder(editor))
         XCTAssertTrue(pressInspectorChord(in: window))
@@ -49,6 +60,13 @@ final class ProjectViewInspectorLiveTests: XCTestCase {
         XCTAssertEqual(toggleLabel(in: window), "Hide Inspector")
         XCTAssertEqual(inspectorCollapsed(in: window), false)
         XCTAssertTrue(window.firstResponder === editor, "the chord was sent with the editor focused")
+        // The mode control is there, still on Rounds (a paused Feature plan's default), with the
+        // plan focused: the focus that used to hand the column to the notes rail moves nothing.
+        let modes = try XCTUnwrap(all(NSSegmentedControl.self, in: try XCTUnwrap(window.contentView)).first { control in
+            (0..<control.segmentCount).map { control.label(forSegment: $0) } == ["Notes", "Rounds"]
+        }, "the inspector's Notes/Rounds control")
+        XCTAssertEqual(modes.segmentCount, 2)
+        XCTAssertEqual(modes.label(forSegment: modes.selectedSegment), "Rounds")
 
         // Pressed while the column is still opening (it takes about a second here) — the case
         // the close was lost in. Settled long enough for the open, then the close, to finish.
@@ -90,6 +108,71 @@ final class ProjectViewInspectorLiveTests: XCTestCase {
         settle(2.0)
         XCTAssertEqual(toggleLabel(in: window), "Hide Inspector")
         XCTAssertEqual(inspectorCollapsed(in: window), false, "the held close saw the reopen and stood down")
+    }
+
+    /// A Notes/Rounds switch redraws the inspector and nothing around it. Before, the mode lived
+    /// in a `@Published` on `IntakeService`, which `SessionStore` forwards, so each click
+    /// re-evaluated `RootView`, `ProjectView`, the detail pane and its live card (measured on
+    /// `4e13c49d`: root 1, project 1, detail 2, live card 2 per switch).
+    ///
+    /// The window's own clock (tape polls, the live card's ticks) still publishes now and then,
+    /// and under a loaded suite one landed inside a sample. So a sample counts only when
+    /// `SessionStore` published nothing while it settled; a publish made by the click itself
+    /// (the old code's, synchronous in `sendAction`) does not disqualify it, so this still fails
+    /// against `4e13c49d`.
+    func testAModeSwitchRedrawsTheInspectorAlone() throws {
+        let (store, _, _, _, window) = try openTwoShapingProjects()
+        XCTAssertTrue(pressInspectorChord(in: window))
+        settle(1.5)
+        let modes = try XCTUnwrap(all(NSSegmentedControl.self, in: try XCTUnwrap(window.contentView)).first { control in
+            (0..<control.segmentCount).map { control.label(forSegment: $0) } == ["Notes", "Rounds"]
+        }, "the inspector's Notes/Rounds control")
+        XCTAssertEqual(modes.label(forSegment: modes.selectedSegment), "Rounds")
+
+        var background = 0
+        let sub = store.objectWillChange.sink { _ in background += 1 }
+        defer { sub.cancel() }
+        var clean: [[String: Int]] = []
+        for segment in [0, 1, 0, 1, 0, 1, 0, 1] {
+            RenderProbe.reset()
+            modes.selectedSegment = segment
+            XCTAssertTrue(modes.sendAction(modes.action, to: modes.target), "the control's click reaches SwiftUI")
+            background = 0
+            settle(0.3)
+            XCTAssertEqual(modes.label(forSegment: modes.selectedSegment), ["Notes", "Rounds"][segment])
+            if background == 0 { clean.append(RenderProbe.counts) }
+        }
+        XCTAssertGreaterThanOrEqual(clean.count, 3, "too few switches free of the window's own publishes")
+        for (step, count) in clean.enumerated() {
+            XCTAssertGreaterThan(count["inspector"] ?? 0, 0, "switch \(step) redrew the inspector: \(count)")
+            for part in ["root", "project", "detail", "liveCard", "header", "plan"] {
+                XCTAssertEqual(count[part] ?? 0, 0, "switch \(step) redrew \(part): \(count)")
+            }
+        }
+    }
+
+    /// Opening the inspector settles: the window stops re-evaluating, and every column still has
+    /// content. The maintainer's 2026-10-09 screenshot after ⌥⌘I showed the sidebar, the Intakes list and
+    /// the inspector as blank panes with only the plan drawn — the main thread busy redrawing.
+    func testOpeningTheInspectorSettlesWithEveryColumnDrawn() throws {
+        let (_, _, _, _, window) = try openTwoShapingProjects()
+        XCTAssertTrue(pressInspectorChord(in: window))
+        settle(2.0)
+        RenderProbe.reset()
+        settle(2.0)
+        let idle = RenderProbe.counts
+        for part in ["root", "project", "detail", "inspector", "header", "plan"] {
+            XCTAssertLessThanOrEqual(idle[part] ?? 0, 1, "\(part) kept re-evaluating with nothing changing: \(idle)")
+        }
+        let content = try XCTUnwrap(window.contentView)
+        let inspector = try XCTUnwrap(all(NSSegmentedControl.self, in: content).first { control in
+            (0..<control.segmentCount).map { control.label(forSegment: $0) } == ["Notes", "Rounds"]
+        }, "the inspector's Notes/Rounds control")
+        XCTAssertGreaterThan(inspector.frame.width, 0)
+        XCTAssertNotNil(inspector.window, "the control is in the window")
+        // The sidebar's and the Intakes list's rows are still there beside it.
+        let lists = all(NSTableView.self, in: content).filter { $0.numberOfRows > 0 && $0.visibleRect.height > 0 }
+        XCTAssertGreaterThanOrEqual(lists.count, 2, "sidebar and Intakes list both drawn: \(lists.map(\.numberOfRows))")
     }
 
     // MARK: - Fixtures
@@ -162,6 +245,14 @@ final class ProjectViewInspectorLiveTests: XCTestCase {
         return window
     }
 
+    private static func everyDisplayAsleep() -> Bool {
+        var count: UInt32 = 0
+        guard CGGetOnlineDisplayList(0, nil, &count) == .success, count > 0 else { return true }
+        var displays = [CGDirectDisplayID](repeating: 0, count: Int(count))
+        guard CGGetOnlineDisplayList(count, &displays, &count) == .success else { return true }
+        return displays.prefix(Int(count)).allSatisfy { CGDisplayIsAsleep($0) != 0 }
+    }
+
     private func settle(_ seconds: TimeInterval = 0.6) {
         RunLoop.current.run(until: Date().addingTimeInterval(seconds))
     }
@@ -187,6 +278,10 @@ final class ProjectViewInspectorLiveTests: XCTestCase {
         guard let content = window.contentView else { return nil }
         let all = controllers(content)
         return all.flatMap(\.splitViewItems).first { $0.behavior == .inspector }?.isCollapsed
+    }
+
+    private func all<T: NSView>(_ type: T.Type, in view: NSView) -> [T] {
+        ((view as? T).map { [$0] } ?? []) + view.subviews.flatMap { all(type, in: $0) }
     }
 
     private func find<T: NSView>(_ type: T.Type, in view: NSView) -> T? {

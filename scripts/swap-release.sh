@@ -144,6 +144,19 @@ if ! codesign --verify --strict "$NEW_APP" >>"$LOG" 2>&1; then
   log "FATAL: new bundle fails codesign --verify — aborting, nothing changed."
   exit 1
 fi
+# 2026-10-10 incident: a Release built from a branch that predated the team switch (ca30548b)
+# was signed by the old team, 2T9E3N27J8. It verified fine, but the Keychain ACL on every
+# saved host secret names the ZM74LQ6QWG requirement, so the app sat on a SecurityAgent prompt
+# for hours with every host offline and nothing logged. A valid signature is not enough: it
+# must be OUR team's. FD_SWAP_EXPECT_TEAM exists only for a deliberate team change.
+EXPECT_TEAM="${FD_SWAP_EXPECT_TEAM:-ZM74LQ6QWG}"
+TEAM="$(codesign -dv "$NEW_APP" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
+log "team:        ${TEAM:-none} (expected $EXPECT_TEAM)"
+if [ "$TEAM" != "$EXPECT_TEAM" ]; then
+  log "FATAL: new bundle is signed by team '${TEAM:-none}', not $EXPECT_TEAM — saved host keys would prompt; aborting, nothing changed."
+  notify "Refused a bundle signed by team ${TEAM:-none}, not $EXPECT_TEAM — nothing changed" "Flight Deck swap refused"
+  exit 1
+fi
 # 2026-09-22 incident: a Debug bundle got swapped into /Applications. Debug and Release key
 # their fd-abduco daemon root differently (/tmp/flight-deck-debug-501 vs /tmp/flight-deck-501)
 # while sessions.json is shared, so the Debug app restored all 55 sessions and attached each

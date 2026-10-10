@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import IntakeKit
 import os
 
 /// Delivers Flight Deck's `delegate` skill to codex through codex's own skill loader: a copy
@@ -141,7 +142,7 @@ enum CodexDelegateSkill {
     /// `CODEX_HOME`, then `~/.codex`.
     static func resolvedHome(_ home: URL?) -> URL {
         home
-            ?? ProcessInfo.processInfo.environment[AgentID.codex.homeEnvironmentKey]
+            ?? ProcessInfo.processInfo.environment[CodexProfile.homeEnvironmentKey]
                 .map { URL(fileURLWithPath: $0, isDirectory: true) }
             ?? AgentID.codex.builtInHome
     }

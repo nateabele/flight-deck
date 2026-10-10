@@ -11,8 +11,8 @@ import XCTest
 /// show the caret staying on its card. Drawn through `LiveCard.shaping`, the way the pane draws it.
 @MainActor
 final class FinishedRoundsRenderTests: XCTestCase {
-    private let codex = ModelChoice(harness: .codex, model: "gpt-6-sol", effort: "high")
-    private let claude = ModelChoice(harness: .claude, model: "opus", effort: "high")
+    private let codex = ModelChoice(agent: .codex, model: "gpt-6-sol", effort: "high")
+    private let claude = ModelChoice(agent: .claude, model: "opus", effort: "high")
     private let now = Date()
 
     private func dir() throws -> URL {

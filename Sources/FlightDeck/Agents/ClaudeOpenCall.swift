@@ -1,5 +1,6 @@
 import FleetKit
 import Foundation
+import IntakeKit
 
 /// What a claude session is blocked on, derived on the Mac from a window of its transcript.
 ///
@@ -53,4 +54,6 @@ struct ClaudeOpenPromptReader: AgentOpenPromptReader {
     func subagentTranscripts(for transcript: URL) -> URL? {
         transcript.deletingPathExtension().appendingPathComponent("subagents", isDirectory: true)
     }
+    /// The blocked `tool_use` is written when the dialog is raised (`ClaudeOpenCall`).
+    var transcriptCarriesOpenPrompt: Bool { true }
 }

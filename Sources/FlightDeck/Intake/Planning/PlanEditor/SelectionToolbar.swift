@@ -277,7 +277,6 @@ final class PlanNotesBridge {
     }
 
     func focusChanged() {
-        if textView?.isFocused == true, let controller, !controller.planFocused { controller.planFocused = true }
         selectionChanged()
     }
 

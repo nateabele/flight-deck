@@ -117,7 +117,7 @@ final class IntakeFleetEmissionTests: XCTestCase {
         func writeSeat(_ run: String, finished: Bool) throws {
             let dir = tapes.runDirectory(run)
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-            try IntakeJSON.encoder.encode(SeatActivity(harness: .codex, startedAt: started))
+            try IntakeJSON.encoder.encode(SeatActivity(agent: .codex, startedAt: started))
                 .write(to: dir.appendingPathComponent("activity.json"))
             try IntakeJSON.encoder.encode(RunRecord(started: started, finished: finished ? Date() : nil, exitCode: finished ? 0 : nil))
                 .write(to: dir.appendingPathComponent("run.json"))

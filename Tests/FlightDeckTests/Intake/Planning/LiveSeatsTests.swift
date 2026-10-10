@@ -5,8 +5,8 @@ import IntakeKit
 /// `LiveSeats` decides which seat rows a shaping round shows and which run speaks for each —
 /// the live card's only logic that isn't already `SeatRowModel`'s.
 final class LiveSeatsTests: XCTestCase {
-    private let codex = ModelChoice(harness: .codex, model: "gpt-6-sol", effort: "high")
-    private let claude = ModelChoice(harness: .claude, model: "opus", effort: "high")
+    private let codex = ModelChoice(agent: .codex, model: "gpt-6-sol", effort: "high")
+    private let claude = ModelChoice(agent: .claude, model: "opus", effort: "high")
     private let t0 = Date(timeIntervalSince1970: 1_790_000_000)
 
     private var config: RoundConfig {
@@ -40,19 +40,19 @@ final class LiveSeatsTests: XCTestCase {
         cfg.crossCheck = .firstAndLast
         let rows = LiveSeats.expected(PlannedRound(stage: .refine, round: 1, major: false, crossCheck: true), config: cfg)
         XCTAssertEqual(rows.map(\.base), ["refine-1-reviewer", "refine-1-crossReviewer", "refine-1-integrator"])
-        XCTAssertEqual(rows[1].requested?.choice.harness, .claude)
+        XCTAssertEqual(rows[1].requested?.choice.agent, .claude)
         XCTAssertEqual(LiveSeats.expected(PlannedRound(stage: .refine, round: 2, major: false), config: cfg).count, 2)
     }
 
     /// A drafter that fell back is ONE row, keyed by its seat, drawn from the newest attempt — and
     /// drafter 10's runs never land on drafter 1's row.
     func testFallbackRunSpeaksForItsSeat() {
-        var failed = SeatActivity(harness: .claude, startedAt: t0)
+        var failed = SeatActivity(agent: .claude, startedAt: t0)
         failed.finished = true; failed.error = "exited 1"
-        var fallback = SeatActivity(harness: .codex, startedAt: t0.addingTimeInterval(80))
+        var fallback = SeatActivity(agent: .codex, startedAt: t0.addingTimeInterval(80))
         fallback.headline = "Questioning whether offline replay can reorder check-ins"
         fallback.lastEventAt = t0.addingTimeInterval(100)
-        let stray = SeatActivity(harness: .codex, startedAt: t0)
+        let stray = SeatActivity(agent: .codex, startedAt: t0)
         let rows = LiveSeats.rows(round: PlannedRound(stage: .draft, round: 0, major: true), config: config,
                                   seats: SeatFiles(activities: ["draft-0-drafter-1": failed,
                                                                 "draft-0-drafter-1-fallback": fallback,
@@ -70,9 +70,9 @@ final class LiveSeatsTests: XCTestCase {
     /// A finished seat's row reads its own run's result.json — the fallback's, not the
     /// failed attempt's — before the round lands.
     func testFinishedSeatShowsItsOwnResult() {
-        var failed = SeatActivity(harness: .claude, startedAt: t0)
+        var failed = SeatActivity(agent: .claude, startedAt: t0)
         failed.finished = true; failed.error = "exited 1"
-        var done = SeatActivity(harness: .codex, startedAt: t0.addingTimeInterval(80))
+        var done = SeatActivity(agent: .codex, startedAt: t0.addingTimeInterval(80))
         done.finished = true
         let rows = LiveSeats.rows(round: PlannedRound(stage: .draft, round: 0, major: true), config: config,
                                   seats: SeatFiles(activities: ["draft-0-drafter-1": failed, "draft-0-drafter-1-fallback": done],
@@ -86,7 +86,7 @@ final class LiveSeatsTests: XCTestCase {
     /// them straight, and said "Running" beside a row that said the seat had not started.
     func testPendingStartHidesTheOldSeatFilesEverywhere() {
         var files = SeatFiles()
-        files.activities["refine-2-reviewer"] = SeatActivity(harness: .codex, startedAt: t0)
+        files.activities["refine-2-reviewer"] = SeatActivity(agent: .codex, startedAt: t0)
         XCTAssertEqual(LiveSeats.files(files, pending: nil).activities.count, 1)
         XCTAssertTrue(LiveSeats.files(files, pending: PendingStart(kind: .round(nil), since: t0)).activities.isEmpty)
     }

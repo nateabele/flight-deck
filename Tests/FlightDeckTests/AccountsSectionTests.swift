@@ -1,4 +1,5 @@
 import XCTest
+import IntakeKit
 @testable import FlightDeck
 
 @MainActor
@@ -75,7 +76,7 @@ final class AccountsSectionTests: XCTestCase {
     func testTheAddSheetRefusesAHomeAnotherAccountAlreadyUses() {
         let store = PreferencesStore(persistence: nil)
         let taken = AgentAccount(agent: .claude, displayName: "W", home: temporary("w"))
-        store.preferences.storedAccounts = [taken]
+        store.preferences.accounts = [taken]
         XCTAssertEqual(
             AccountDraft.validate(home: taken.home.path, agent: .claude, editing: nil, in: store),
             .homeAlreadyUsed
@@ -93,7 +94,7 @@ final class AccountsSectionTests: XCTestCase {
         let store = PreferencesStore(persistence: nil)
         let work = AgentAccount(agent: .claude, displayName: "W", home: temporary("w"))
         let other = AgentAccount(agent: .claude, displayName: "O", home: temporary("o"))
-        store.preferences.storedAccounts = [work, other]
+        store.preferences.accounts = [work, other]
 
         var trashed: [URL] = []
         let ok = AccountsSection.deleteFiles(accountID: work.id, in: store) {
@@ -110,7 +111,7 @@ final class AccountsSectionTests: XCTestCase {
         let store = PreferencesStore(persistence: nil)
         let home = try makeDirectory("only")
         let only = AgentAccount(agent: .claude, displayName: "D", home: home)
-        store.preferences.storedAccounts = [only]
+        store.preferences.accounts = [only]
 
         var trashed: [URL] = []
         let ok = AccountsSection.deleteFiles(accountID: only.id, in: store) {
@@ -127,7 +128,7 @@ final class AccountsSectionTests: XCTestCase {
         let store = PreferencesStore(persistence: nil)
         let work = AgentAccount(agent: .claude, displayName: "W", home: temporary("w"))
         let other = AgentAccount(agent: .claude, displayName: "O", home: temporary("o"))
-        store.preferences.storedAccounts = [work, other]
+        store.preferences.accounts = [work, other]
 
         var trashed: [URL] = []
         let ok = AccountsSection.deleteFiles(accountID: work.id, in: store) {
@@ -200,7 +201,7 @@ final class AccountsSectionTests: XCTestCase {
         let store = PreferencesStore(persistence: nil)
         let home = try makeDirectory("mine", containing: [".claude.json": "{}"])
         let account = AgentAccount(agent: .claude, displayName: "M", home: home)
-        store.preferences.storedAccounts = [account]
+        store.preferences.accounts = [account]
         XCTAssertEqual(
             AccountDraft.validate(home: home.path, agent: .claude, editing: account.id, in: store), .ok
         )
@@ -226,7 +227,7 @@ final class AccountsSectionTests: XCTestCase {
         let store = PreferencesStore(persistence: nil)
         let work = AgentAccount(agent: .claude, displayName: "W", home: temporary("w"))
         let other = AgentAccount(agent: .claude, displayName: "O", home: temporary("o"))
-        store.preferences.storedAccounts = [work, other]
+        store.preferences.accounts = [work, other]
 
         XCTAssertTrue(AccountsSection.remove(accountID: work.id, in: store))
         XCTAssertTrue(store.account(id: work.id)?.isRemoved == true)
@@ -239,7 +240,7 @@ final class AccountsSectionTests: XCTestCase {
     func testRemoveRefusesAnAgentsLastAccountEvenIfTheDialogWasAlreadyOpen() {
         let store = PreferencesStore(persistence: nil)
         let only = AgentAccount(agent: .claude, displayName: "D", home: AgentID.claude.builtInHome)
-        store.preferences.storedAccounts = [only]
+        store.preferences.accounts = [only]
 
         XCTAssertFalse(AccountsSection.remove(accountID: only.id, in: store))
         XCTAssertEqual(store.preferences.accounts.map(\.id), [only.id], "the registry entry survives")
@@ -256,7 +257,7 @@ final class AccountsSectionTests: XCTestCase {
         let store = PreferencesStore(persistence: nil)
         let work = AgentAccount(agent: .claude, displayName: "W", home: temporary("w"))
         let other = AgentAccount(agent: .claude, displayName: "O", home: temporary("o"))
-        store.preferences.storedAccounts = [work, other]
+        store.preferences.accounts = [work, other]
 
         XCTAssertTrue(AccountsSection.remove(accountID: work.id, in: store))
         XCTAssertFalse(AccountsSection.remove(accountID: work.id, in: store))
@@ -277,7 +278,7 @@ final class AccountsSectionTests: XCTestCase {
     func testASessionStoringNoAccountCountsAsBoundToTheBuiltInAccount() {
         let store = PreferencesStore(persistence: nil)
         let builtIn = AgentAccount(agent: .claude, displayName: "D", home: AgentID.claude.builtInHome)
-        store.preferences.storedAccounts = [builtIn]
+        store.preferences.accounts = [builtIn]
         let legacy = Session(title: "t", workingDirectory: "/p", agent: .claude, accountID: nil)
 
         let bound = AccountsSection.boundAccountIDs(in: [legacy], resolvedBy: store)
@@ -291,7 +292,7 @@ final class AccountsSectionTests: XCTestCase {
         let store = PreferencesStore(persistence: nil)
         let builtIn = AgentAccount(agent: .claude, displayName: "D", home: AgentID.claude.builtInHome)
         let work = AgentAccount(agent: .claude, displayName: "W", home: temporary("w"))
-        store.preferences.storedAccounts = [builtIn, work]
+        store.preferences.accounts = [builtIn, work]
 
         let onWork = Session(title: "t", workingDirectory: "/p", agent: .claude, accountID: work.id)
         let dangling = Session(title: "t", workingDirectory: "/p", agent: .claude, accountID: UUID())
@@ -305,7 +306,7 @@ final class AccountsSectionTests: XCTestCase {
         let store = PreferencesStore(persistence: nil)
         let claude = AgentAccount(agent: .claude, displayName: "D", home: AgentID.claude.builtInHome)
         let codex = AgentAccount(agent: .codex, displayName: "D", home: AgentID.codex.builtInHome)
-        store.preferences.storedAccounts = [claude, codex]
+        store.preferences.accounts = [claude, codex]
         let tab = Session(title: "t", workingDirectory: "/p", agent: .codex, accountID: nil)
 
         XCTAssertEqual(AccountsSection.boundAccountIDs(in: [tab], resolvedBy: store), [codex.id])
@@ -349,7 +350,7 @@ final class AccountsSectionTests: XCTestCase {
     func testBoundSessionsAreCountedThroughResolution() {
         let store = PreferencesStore(persistence: nil)
         let builtIn = AgentAccount(agent: .claude, displayName: "D", home: AgentID.claude.builtInHome)
-        store.preferences.storedAccounts = [builtIn]
+        store.preferences.accounts = [builtIn]
         let legacy = Session(title: "s", workingDirectory: "/tmp", agent: .claude, accountID: nil)
         XCTAssertEqual(
             AccountsSection.boundSessionCount(for: builtIn, in: [legacy], resolvedBy: store), 1

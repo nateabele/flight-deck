@@ -32,8 +32,8 @@ enum FlightControlComposition {
         // Without routing there is nothing to route or spill with; a store a test built bare.
         guard let routing = store.flightControlRouting else { return nil }
 
-        // Routing: the pools in force (one `<agent>-default` per agent with a live account, then
-        // the stored pools) — never the stored list alone, which is empty on a fresh install and
+        // Routing: the pools in force (one `<agent>-default` per agent with an unpooled live
+        // account, then the Accounts list's pools) — never the stored list alone, which is empty on a fresh install and
         // would make every task unroutable.
         let ledger = usage.ledger
         let pools = CapacityPoolDirectory { [weak preferences] in
@@ -43,7 +43,7 @@ enum FlightControlComposition {
             guard Thread.isMainThread else { return ledger.allPools }
             return MainActor.assumeIsolated {
                 guard let preferences else { return ledger.allPools }
-                return preferences.capacity.effectivePools(accounts: preferences.preferences.accounts)
+                return preferences.effectivePools
             }
         }
         routing.pools = pools

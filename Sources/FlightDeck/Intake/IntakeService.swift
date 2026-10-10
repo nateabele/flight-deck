@@ -1,11 +1,12 @@
 import AppKit
+import Combine
 import FleetKit
 import IntakeKit
 import OSLog
 
 /// Which harness, model and effort run triage.
 struct TriageSettings: Equatable, Sendable {
-    var harness: Harness
+    var agent: AgentID
     var model: String
     var effort: String
 
@@ -14,12 +15,12 @@ struct TriageSettings: Equatable, Sendable {
     static let codexDefault = TriageSettings(CodexProfile().defaultPlanningChoice)
     static let claudeDefault = TriageSettings(ClaudeProfile().defaultPlanningChoice)
 
-    init(harness: Harness, model: String, effort: String) {
-        self.harness = harness; self.model = model; self.effort = effort
+    init(agent: AgentID, model: String, effort: String) {
+        self.agent = agent; self.model = model; self.effort = effort
     }
 
     init(_ choice: ModelChoice) {
-        self.init(harness: choice.harness, model: choice.model, effort: choice.effort)
+        self.init(agent: choice.agent, model: choice.model, effort: choice.effort)
     }
 
     /// codex when a `codex` is on the login shell's PATH (what `which codex` would say in the
@@ -33,14 +34,110 @@ struct TriageSettings: Equatable, Sendable {
     /// claude defaults for whichever is installed. Neither found falls back to claude alone,
     /// exactly as `detect` does — `PresetExpansion` needs at least one model, and a round that
     /// then fails to find `claude` says so in its own diagnosis rather than never starting.
-    static func available(path: String? = LoginShellPath.repairing()["PATH"]) -> AvailableModels {
+    ///
+    /// Every OTHER harness this build can run (`AgentProfiles.headlessReady`) is offered only
+    /// when its CLI is installed AND its profile's sign-in check passes — `probe` runs that
+    /// check's read-only command. One that fails is recorded in `unavailable` with the reason,
+    /// so the editor can say why it is missing; one that passes brings its listed models.
+    /// `probe` is injectable so a test never spawns the operator's real CLIs.
+    static func available(path: String? = LoginShellPath.repairing()["PATH"],
+                          probe: SignInProbe = .system) -> AvailableModels {
         let codex = installed("codex", path: path), claude = installed("claude", path: path)
-        return AvailableModels(codex: codex ? AvailableModels.defaults.codex : nil,
-                               claude: claude || !codex ? AvailableModels.defaults.claude : nil)
+        var choices: [AgentID: ModelChoice] = [:]
+        choices[.codex] = codex ? AvailableModels.defaults.codex : nil
+        choices[.claude] = claude || !codex ? AvailableModels.defaults.claude : nil
+        var models: [AgentID: [String]] = [:], unavailable: [AgentID: String] = [:]
+        for agent in AgentID.planningOrder where agent != .codex && agent != .claude
+            && AgentProfiles.headlessReady.contains(agent) {
+            let profile = AgentProfiles.profile(for: agent)
+            guard let executable = executable(profile.binaryName, path: path) else {
+                unavailable[agent] = "\(profile.id.displayName): not installed"
+                continue
+            }
+            let check = profile.signInCheck
+            let output = check.arguments.isEmpty ? nil : probe.run(executable, check.arguments, path ?? "")
+            switch output.map(check.readiness) ?? .signedOut(hint: check.signedOutHint) {
+            case .ready:
+                let catalog = profile.modelCatalog
+                var listed: [String] = []
+                if let list = catalog.listArguments {
+                    // grok's list command IS its sign-in check — one spawn, not two.
+                    let listOutput = list == check.arguments ? output : probe.run(executable, list, path ?? "")
+                    listed = listOutput.map { profile.parseModelList($0.stdout) } ?? []
+                }
+                let offered = listed.isEmpty ? catalog.aliases : listed
+                // A listed model wins over the profile's hard-coded default: `parseModelList`
+                // puts the CLI's own default first, and the hard-coded one goes stale (grok's
+                // default moved from grok-4.6 to grok-4.7 on the day it was first probed).
+                let model = listed.first ?? catalog.defaultPlanningModel
+                choices[agent] = ModelChoice(agent: agent, model: model, effort: catalog.defaultPlanningEffort)
+                if !offered.isEmpty { models[agent] = offered }
+            case .signedOut(let hint):
+                unavailable[agent] = hint
+            case .notInstalled:
+                unavailable[agent] = "\(profile.id.displayName): not installed"
+            }
+        }
+        var available = AvailableModels(choices: choices)
+        available.models = models
+        available.unavailable = unavailable
+        return available
     }
 
-    private static func installed(_ tool: String, path: String?) -> Bool {
-        (path ?? "").split(separator: ":").contains { FileManager.default.isExecutableFile(atPath: "\($0)/\(tool)") }
+    /// The closure form of the probe seam, for tests that only need (executable, arguments).
+    static func available(path: String?, probe: @escaping (_ executable: String, _ arguments: [String]) -> SignInCheckOutput?)
+        -> AvailableModels {
+        available(path: path, probe: SignInProbe { executable, arguments, _ in probe(executable, arguments) })
+    }
+
+    private static func installed(_ tool: String, path: String?) -> Bool { executable(tool, path: path) != nil }
+
+    private static func executable(_ tool: String, path: String?) -> String? {
+        (path ?? "").split(separator: ":").lazy.map { "\($0)/\(tool)" }
+            .first { FileManager.default.isExecutableFile(atPath: $0) }
+    }
+}
+
+/// Runs a profile's read-only sign-in check for detection: the executable's full path, its
+/// arguments, and the PATH to run it under; nil when it could not run or did not finish in
+/// time. A seam so detection tests never spawn a real CLI.
+struct SignInProbe: Sendable {
+    var run: @Sendable (_ executable: String, _ arguments: [String], _ path: String) -> SignInCheckOutput?
+
+    /// Output goes to temp FILES, not pipes: a CLI that leaves a helper process holding its
+    /// stdout (grok has a background "leader") would block a pipe read forever, and this runs on
+    /// every launch. 20 s: `agy models` asks Google's servers for the list (`grok models` reads
+    /// a cached login in ~0.25 s) — long enough for a slow network, short enough that a hung
+    /// CLI cannot keep a harness "detecting" forever (it is reported signed out instead).
+    static let system = SignInProbe { executable, arguments, _ in
+        let fm = FileManager.default
+        let dir = fm.temporaryDirectory.appendingPathComponent("fd-signin-\(UUID().uuidString)", isDirectory: true)
+        guard (try? fm.createDirectory(at: dir, withIntermediateDirectories: true)) != nil else { return nil }
+        defer { try? fm.removeItem(at: dir) }
+        let outURL = dir.appendingPathComponent("stdout"), errURL = dir.appendingPathComponent("stderr")
+        guard fm.createFile(atPath: outURL.path, contents: nil), fm.createFile(atPath: errURL.path, contents: nil),
+              let out = try? FileHandle(forWritingTo: outURL), let err = try? FileHandle(forWritingTo: errURL) else { return nil }
+        defer { try? out.close(); try? err.close() }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+        // The same environment a seat on this harness gets, so the check reads the same
+        // login a round would use.
+        process.environment = HeadlessCommand.environment(
+            for: ((executable as NSString).lastPathComponent, arguments, []), base: LoginShellPath.repairing())
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = out
+        process.standardError = err
+        let exited = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in exited.signal() }
+        do { try process.run() } catch { return nil }
+        guard exited.wait(timeout: .now() + 20) == .success else {
+            process.terminate()
+            return nil
+        }
+        return SignInCheckOutput(stdout: (try? String(contentsOf: outURL, encoding: .utf8)) ?? "",
+                                 stderr: (try? String(contentsOf: errURL, encoding: .utf8)) ?? "",
+                                 exitCode: process.terminationStatus)
     }
 }
 
@@ -56,6 +153,14 @@ protocol IntakeRunnerControlling: AnyObject {
     /// Where the runner's `fd-abduco` socket lives, so launch can find a daemon left behind
     /// by an intake that has since stopped shaping.
     func socketPath(for id: UUID) -> String
+    /// Each tick, with the shaping intakes: hand back the pool leases of runners that are gone
+    /// and re-register those of live runners a previous launch spawned (unify brief R9).
+    func syncAccountLeases(_ shaping: [UUID])
+}
+
+extension IntakeRunnerControlling {
+    /// A controller that resolves no accounts holds no leases.
+    func syncAccountLeases(_ shaping: [UUID]) {}
 }
 
 extension IntakeRunnerController: IntakeRunnerControlling {}
@@ -190,10 +295,22 @@ final class IntakeService: ObservableObject {
     /// `projectKey`. Here for the reason `inspectorProjects` is: as `ProjectView` `@State` the
     /// list sprang back open on every switch to another project or tab and back.
     @Published private(set) var collapsedListProjects: Set<String> = []
+    /// The inspector mode last chosen for each plan. Deliberately NOT a `@Published` here:
+    /// `SessionStore` forwards this service's publishes, so a mode kept here redrew the whole
+    /// window on every Notes/Rounds click (`InspectorModeStore` has the numbers).
+    let inspectorModeStore: InspectorModeStore
     /// Each `.shaping` intake's `tape.json` as last read, with the clicks the runner hasn't acked
     /// yet folded on top (`overlays`) — what the detail pane draws and what `attentionCount`
     /// consults. Refreshed on the shared clock (`pollTapes`), and by `send` in the click's turn.
     @Published private(set) var tapes: [UUID: Tape] = [:]
+    /// The Rounds editor's unsaved edit of a shaping intake's config, per intake. Held here
+    /// rather than in the view so every play — the bar, the Run menu, the phone — saves it
+    /// first (`send`): a play that ran the saved agents while the editor showed others would
+    /// run a round nobody chose. Memory only; it dies with shaping (`save`).
+    @Published private(set) var roundConfigDrafts: [UUID: RoundConfig] = [:]
+    /// Why the last save of a shaping intake's config (or the play that tried to save it) was
+    /// refused, for the editor to show. Cleared by the next save that lands.
+    @Published private(set) var roundConfigRefusals: [UUID: String] = [:]
     /// The tape-shaping commands `send` queued that no tape read has acked yet, in seq order —
     /// see `TapeOverlay`. Only `tapes` shows them: `latestTapes` stays the runner's word, since
     /// liveness, resumption and announcements are about what it has done, not what was asked.
@@ -233,7 +350,27 @@ final class IntakeService: ObservableObject {
     private static let collapsedListDefaultsKey = "IntakeListCollapsedByProject"
     /// Filled off the main actor by a detached probe started in `init` (the login-shell PATH
     /// lookup behind it can take seconds on first use); nil until that lands.
-    private var availableModelsCache: AvailableModels?
+    ///
+    /// Published because Settings' grok and gemini model pickers read it too
+    /// (`DetectedModelsReader`): a pane opened before the probe lands must refresh when it does,
+    /// or it would keep offering the built-in fallback list as if it were the account's.
+    @Published private(set) var availableModelsCache: AvailableModels?
+    /// True while a detection runs (launch warm-up, "Check again", or an app-active re-check),
+    /// for the Rounds editor's spinner.
+    @Published private(set) var isDetectingAgents = false
+    /// Planning's agent detection: `TriageSettings.available()` in the app — the login-shell
+    /// PATH plus each profile's sign-in check, 20 s per probe. A seam so tests never spawn a CLI.
+    private let detectAgents: @Sendable () -> AvailableModels
+    /// The detection in flight, which every caller joins: two presses of "Check again", or a
+    /// press during the launch probe, must not spawn every CLI's sign-in check twice and then
+    /// race to publish.
+    private var detection: Task<Void, Never>?
+    /// When the last detection started, for `appDidBecomeActive`'s once-a-minute limit. nil
+    /// when the cache was handed in (a test) rather than detected.
+    private var lastDetectionStart: Date?
+    /// How long `appDidBecomeActive` waits after one detection before starting another.
+    static let activeRecheckInterval: TimeInterval = 60
+    private var activeObserver: AnyCancellable?
     /// nil in a host that cannot run planning rounds; `beginShaping` then fails the intake
     /// with that reason instead of leaving it shaping with nothing behind it.
     private let runner: IntakeRunnerControlling?
@@ -355,8 +492,10 @@ final class IntakeService: ObservableObject {
         now: @escaping () -> Date = Date.init,
         defaults: UserDefaults = .standard,
         readFile: @escaping @Sendable (URL) -> Data? = { try? Data(contentsOf: $0) },
-        announce: @escaping (String) -> Void = IntakeService.postAnnouncement
+        announce: @escaping (String) -> Void = IntakeService.postAnnouncement,
+        detectAgents: @escaping @Sendable () -> AvailableModels = { TriageSettings.available() }
     ) {
+        self.detectAgents = detectAgents
         self.store = store
         self.headless = headless
         self.processRunner = processRunner
@@ -368,6 +507,7 @@ final class IntakeService: ObservableObject {
         self.hasSession = hasSession
         self.now = now
         self.defaults = defaults
+        self.inspectorModeStore = InspectorModeStore(defaults: defaults)
         self.readFile = readFile
         self.announce = announce
         // Cheap-to-lose UI state, same durability class `UserDefaultsPreferencesPersistence`
@@ -412,15 +552,52 @@ final class IntakeService: ObservableObject {
         }
         clock?.add(self) { [weak self] in self?.pollTapes() }
 
-        // Warm the model probe off the main actor so Start never waits on a login shell.
-        if availableModelsCache == nil {
-            Task.detached { [weak self] in
-                let detected = TriageSettings.available()
-                await MainActor.run { [weak self] in
-                    if self?.availableModelsCache == nil { self?.availableModelsCache = detected }
-                }
-            }
+        // Warm the model probe off the main actor so Start never waits on a login shell. Through
+        // `recheckAgents`, so a "Check again" pressed before it lands joins it.
+        if availableModelsCache == nil { recheckAgents() }
+
+        // A CLI signed in while Flight Deck was in the background (`grok login` in another
+        // terminal) shows up when the human comes back, without a press. `appDidBecomeActive`
+        // decides whether that is worth a probe.
+        activeObserver = NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)
+            .sink { [weak self] _ in MainActor.assumeIsolated { _ = self?.appDidBecomeActive() } }
+    }
+
+    // MARK: - Agent detection
+
+    /// Re-runs planning's agent detection off the main actor and publishes the result, so every
+    /// agent menu reading `availableModelsCache` (the Rounds editor, Settings' tab model pickers
+    /// through `DetectedModelsReader`) refreshes — detection used to run once per launch, and an
+    /// agent signed in after it stayed "unavailable" until a relaunch. Joins a detection already
+    /// running rather than starting a second. Never touches a round config: a role whose agent
+    /// is now unavailable keeps it, and the editor labels it so.
+    @discardableResult
+    func recheckAgents() -> Task<Void, Never> {
+        if let detection { return detection }
+        isDetectingAgents = true
+        lastDetectionStart = now()
+        let detect = detectAgents
+        let task = Task { @MainActor [weak self] in
+            let detected = await Task.detached { detect() }.value
+            guard let self else { return }
+            self.availableModelsCache = detected
+            self.isDetectingAgents = false
+            self.detection = nil
         }
+        detection = task
+        return task
+    }
+
+    /// The app became active: re-detect only when the last detection left an agent signed out
+    /// (the one case a login elsewhere can change) and at most once a minute, since a check can
+    /// ask a server (`agy models`) and switching apps is frequent. A CLI that is merely not
+    /// installed does not count — it would cost a probe on every activation, for nothing the
+    /// editor shows. Returns the detection it started or joined, nil when it skipped.
+    @discardableResult
+    func appDidBecomeActive() -> Task<Void, Never>? {
+        guard let available = availableModelsCache, RoundConfigEditor.offersRecheck(available) else { return nil }
+        if let last = lastDetectionStart, now().timeIntervalSince(last) < Self.activeRecheckInterval { return nil }
+        return recheckAgents()
     }
 
     // MARK: - Reads
@@ -542,6 +719,16 @@ final class IntakeService: ObservableObject {
         guard inspectorProjects.contains(key) != shown else { return }
         if shown { inspectorProjects.insert(key) } else { inspectorProjects.remove(key) }
         defaults.set(inspectorProjects.sorted(), forKey: Self.inspectorDefaultsKey)
+    }
+
+    /// The inspector mode last chosen for intake `id`; nil before the human chose one, which
+    /// `DetailLayout.inspectorMode` turns into the plan's default.
+    func inspectorMode(_ id: UUID) -> DetailLayout.InspectorMode? { inspectorModeStore.mode(id) }
+
+    /// Records the mode chosen for `id` and persists it, publishing on `inspectorModeStore`
+    /// only — never on this service (see `inspectorModeStore`).
+    func setInspectorMode(_ mode: DetailLayout.InspectorMode, for id: UUID) {
+        inspectorModeStore.set(mode, for: id)
     }
 
     /// Whether `project`'s Intakes list is collapsed to its rail — expanded until the human
@@ -696,6 +883,14 @@ final class IntakeService: ObservableObject {
     /// ahead of the runner — before `startRunner`, which may block on a spawn.
     func send(_ id: UUID, _ command: TapeCommand) {
         guard intake(id)?.state == .shaping else { return }
+        // A play over an unsaved Rounds edit saves it first, before the command is queued and
+        // the runner started — the runner reads the config once, at its start. A draft that
+        // can't be saved holds the play back, with the reason in the editor, rather than run
+        // agents the editor no longer shows. The one exception is a runner already live (one
+        // folding a note, say): the play only retargets it, and holding it back would leave
+        // the bar dead for as long as that runner lives; the draft stays for the next pause.
+        if Self.startsRounds(command), roundConfigDrafts[id] != nil,
+           let refusal = commitRoundConfigDraft(id), refusal != Self.pauseToEdit { return }
         let seq: Int
         do { seq = try tapeStore(id).appendCommand(command) }
         catch { return fail(id, "Could not queue the command for the planning runner: \(error)") }
@@ -730,6 +925,72 @@ final class IntakeService: ObservableObject {
     func setDefaultPlay(_ id: UUID, _ mode: PlayMode) {
         guard let config = intake(id)?.roundConfig, config.defaultPlay != mode else { return }
         mutate(id) { $0.roundConfig = RoundConfigEditor.setting(config) { $0.defaultPlay = mode } }
+    }
+
+    // MARK: - Rounds edits while shaping
+
+    private static func startsRounds(_ command: TapeCommand) -> Bool {
+        switch command {
+        case .step, .nextMajor, .toReview: true
+        case .pause, .stop, .extend, .trim, .note, .removeNote, .editPlan: false
+        }
+    }
+
+    /// Whether a shaping intake's Rounds editor takes edits right now (`DetailLayout.roundsEditing`):
+    /// the runner's own liveness judgement — heartbeat or spawn grace — plus a play still
+    /// starting, over the newest tape read.
+    func roundConfigEditing(_ id: UUID) -> DetailLayout.RoundsEditing {
+        guard let i = intake(id) else { return .readOnly }
+        guard i.state == .shaping else { return DetailLayout.roundsEditing(state: i.state, status: .idle, runnerLive: false, starting: false) }
+        let tape = latestTapes[id] ?? tapeStore(id).loadTape()
+        return DetailLayout.roundsEditing(state: .shaping, status: tape.status,
+                                          runnerLive: runner?.isRunning(id, tape: tape) == true,
+                                          starting: pending[id] != nil)
+    }
+
+    /// What a shaping intake's editor may still change, from its tape.
+    func shapingEdit(_ id: UUID) -> ShapingEdit { ShapingEdit(tape: latestTapes[id] ?? tapeStore(id).loadTape()) }
+
+    /// Saves `config` as a shaping intake's round config, to apply from the next round. Returns
+    /// nil once saved, else why not: only while nothing runs the tape, and never a change to
+    /// what already ran (`ShapingEdit.refusal`). The write is `intake.json`'s usual atomic save
+    /// of the whole intake, with only `roundConfig` changed. Configs before shaping still go
+    /// through `beginShaping`; this path is for shaping alone.
+    @discardableResult
+    func saveRoundConfig(_ id: UUID, _ config: RoundConfig) -> String? {
+        guard let i = intake(id), i.state == .shaping, let saved = i.roundConfig else {
+            return "Planning has moved on, so these rounds can't change now."
+        }
+        guard roundConfigEditing(id) == .editable else { return Self.pauseToEdit }
+        if let refusal = shapingEdit(id).refusal(from: saved, to: config) { return refusal }
+        mutate(id) { $0.roundConfig = config }
+        roundConfigRefusals[id] = nil
+        return nil
+    }
+
+    /// The editor's line while a round runs, and the refusal of a save that lands then.
+    static let pauseToEdit = "Pause to change agents."
+
+    /// Holds (or, with nil, drops) the editor's unsaved edit. A draft equal to the saved config
+    /// is no edit, and is dropped so the editor never reads as unsaved for nothing.
+    func setRoundConfigDraft(_ id: UUID, _ config: RoundConfig?) {
+        let draft = config == intake(id)?.roundConfig ? nil : config
+        guard roundConfigDrafts[id] != draft else { return }
+        roundConfigDrafts[id] = draft
+        if draft == nil { roundConfigRefusals[id] = nil }
+    }
+
+    /// Saves the held edit. nil once saved (or with nothing held), else the refusal, which the
+    /// editor shows; the draft is kept on a refusal, to fix or revert.
+    @discardableResult
+    func commitRoundConfigDraft(_ id: UUID) -> String? {
+        guard let draft = roundConfigDrafts[id] else { return nil }
+        if let refusal = saveRoundConfig(id, draft) {
+            roundConfigRefusals[id] = refusal
+            return refusal
+        }
+        roundConfigDrafts[id] = nil
+        return nil
     }
 
     // MARK: - Phone commands (spec §6.5)
@@ -906,10 +1167,26 @@ final class IntakeService: ObservableObject {
         availableModelsCache ?? .defaults
     }
 
-    /// Each harness's pickable planning accounts, from preferences — set by `SessionStore`,
-    /// which owns them, so this service never reads preferences itself. Read when the Rounds
-    /// editor draws, never captured, so an account added in Settings shows up next time.
-    var planningAccounts: () -> [Harness: [PlanningAccountOption]] = { [:] }
+    /// The detection itself, or nil until it lands — unlike `availableModels()`, which stands the
+    /// stock defaults in for it. Settings' tab model pickers need the difference: "no list yet"
+    /// and "the CLI listed these" are different notes (`TabModelChoices`).
+    var detectedModels: AvailableModels? { availableModelsCache }
+
+    /// Resolves which account each planning agent bills for a project (unify brief R9) — set by
+    /// `SessionStore`, which owns preferences, so this service never reads them itself. nil (a
+    /// test host) runs triage on the built-in home and shows no billing line.
+    var accountResolver: AccountResolving?
+    /// Told when triage starts on a pool whose every member is over its hard limit (intake id,
+    /// project path, notice) — the runner's starts report through `IntakeRunnerController
+    /// .onAccountNotice`. `SessionStore` posts both as a user notification.
+    var onAccountNotice: ((UUID, String, AccountNotice) -> Void)?
+
+    /// What each agent bills for `project`, for the Rounds editor's read-only "Bills:" line.
+    /// Read when the editor draws, never captured, so a reassignment in Settings shows next time.
+    func planningBilling(project: String) -> [AgentID: AccountBilling] {
+        guard let accountResolver else { return [:] }
+        return Dictionary(uniqueKeysWithValues: AgentID.allCases.map { ($0, accountResolver.billing($0, project: project)) })
+    }
 
     func markEditNoteShown(_ id: UUID) { editNoteShown.insert(id) }
 
@@ -1028,6 +1305,8 @@ final class IntakeService: ObservableObject {
                 runner.reap(id)
                 pendingReaps.remove(id)
             }
+            // After this tick's respawns, so a runner just started is seen inside its grace.
+            runner.syncAccountLeases(Array(shaping))
         }
     }
 
@@ -1282,6 +1561,7 @@ final class IntakeService: ObservableObject {
         if case .noBundledCLI = error { return "this build has no bundled flightdeck CLI" }
         if case .noFdAbduco = error { return "this build has no usable fd-abduco" }
         if case .spawnFailed(let why) = error { return why }
+        if case .accountUnavailable(let why) = error { return why }
         return String(describing: error)
     }
 
@@ -1327,6 +1607,8 @@ final class IntakeService: ObservableObject {
         }
         i.state = .discarded
         save(i)
+        // A discarded plan is never shown again, so its remembered mode would only grow the key.
+        inspectorModeStore.forget(id)
         flapPolicies[id] = nil
         flapSeeded.remove(id)
         return true
@@ -1655,7 +1937,7 @@ final class IntakeService: ObservableObject {
         }
         // A resume is pinned to the session's recorded harness/model/effort, never to the
         // current defaults — a turn must not silently switch models mid-conversation.
-        let session = i.triage.map { TriageSettings(harness: $0.harness, model: $0.model, effort: $0.effort) } ?? settings
+        let session = i.triage.map { TriageSettings(agent: $0.agent, model: $0.model, effort: $0.effort) } ?? settings
 
         var reply = await turnResult(id, prompt: prompt, resume: resume, settings: session, files: files, project: project)
         guard !Task.isCancelled else { return }
@@ -1664,7 +1946,7 @@ final class IntakeService: ObservableObject {
             return
         }
         i = intake(id) ?? i
-        i.triage = HarnessSession(harness: session.harness, sessionID: result.sessionID, model: session.model, effort: session.effort)
+        i.triage = HeadlessSession(agent: session.agent, sessionID: result.sessionID, model: session.model, effort: session.effort)
 
         if case .recommendation(let preset, let reason, var cs?) = result.triage {
             cs.graphObservedAt = observedAt  // FD owns this timestamp — see `Triage.initialPrompt`.
@@ -1728,25 +2010,39 @@ final class IntakeService: ObservableObject {
     /// message plus the raw output, which is what `.failed` shows (spec §11).
     private func turnResult(_ id: UUID, prompt: String, resume: String?, settings: TriageSettings,
                             files: TriageFiles, project: URL) async -> Result<TurnReply, TurnFailure> {
-        let request = HarnessRequest(
-            harness: settings.harness, model: settings.model, effort: settings.effort, cwd: project,
+        // Triage bills the project's account for its agent, as every round seat does (unify
+        // brief R9) — resolved per turn, and a pool's lease held only while the turn runs.
+        var billing: RunnerAccounts.Entry?
+        if let accountResolver {
+            switch accountResolver.acquire(settings.agent, project: project.path) {
+            case .failure(let error): return .failure(TurnFailure(message: "Could not run triage: \(error.message)", raw: nil))
+            case .success(let resolved):
+                billing = resolved.entry
+                // Every member of the assigned pool is over its hard limit: triage still runs,
+                // inside the pool, and the user is told, as a tab would tell them.
+                if let notice = resolved.notice { onAccountNotice?(id, project.path, notice) }
+            }
+        }
+        defer { if let lease = billing?.lease { accountResolver?.release(lease.lease) } }
+        let request = HeadlessRequest(
+            agent: settings.agent, model: settings.model, effort: settings.effort, cwd: project,
             readableDirs: [files.directory], prompt: prompt, schemaFile: files.schema,
-            schemaJSON: Triage.schemaJSON, resumeSessionID: resume)
+            schemaJSON: Triage.schemaJSON, resumeSessionID: resume, account: billing?.ref)
         // The same fold and cadence as a round's seats (`RoundExecutor.attempt`), written beside
         // triage's other files; the clock tick reads it back (`pollTriageActivity`), and the
         // finished fold is published directly below so the last state never waits on a tick.
-        let activity = ActivityPublisher(harness: settings.harness, project: project,
+        let activity = ActivityPublisher(agent: settings.agent, project: project, accountID: billing?.accountID,
                                          destination: files.directory.appendingPathComponent("activity.json"),
                                          now: { Date() })
         activity.start()
         let out: (stdout: Data, stderr: String, exitCode: Int32)
         do {
-            out = try await headless.run(HarnessCommand.build(request), cwd: project,
+            out = try await headless.run(HeadlessCommand.build(request), cwd: project, account: request.account,
                                          onStdout: { activity.feed($0) })
         } catch {
-            activity.finish(exitCode: nil, error: Task.isCancelled ? nil : "Could not run \(settings.harness.rawValue)")
+            activity.finish(exitCode: nil, error: Task.isCancelled ? nil : "Could not run \(settings.agent.rawValue)")
             triageActivities[id] = activity.activity
-            return .failure(TurnFailure(message: "Could not run \(settings.harness.rawValue): \(error)", raw: nil))
+            return .failure(TurnFailure(message: "Could not run \(settings.agent.rawValue): \(error)", raw: nil))
         }
         activity.finish(exitCode: out.exitCode)
         triageActivities[id] = activity.activity
@@ -1754,10 +2050,10 @@ final class IntakeService: ObservableObject {
         let raw = stdout.isEmpty ? out.stderr : stdout
         guard out.exitCode == 0 else {
             let why = out.stderr.firstLine.isEmpty ? stdout.firstLine : out.stderr.firstLine
-            return .failure(TurnFailure(message: "\(settings.harness.rawValue) exited \(out.exitCode): \(why)", raw: raw))
+            return .failure(TurnFailure(message: "\(settings.agent.rawValue) exited \(out.exitCode): \(why)", raw: raw))
         }
         do {
-            let (session, structured) = try HarnessOutput.parse(settings.harness, stdout: out.stdout)
+            let (session, structured) = try HeadlessOutput.parse(settings.agent, stdout: out.stdout)
             return .success(TurnReply(sessionID: session, triage: try Triage.decode(structured), raw: raw))
         } catch {
             return .failure(TurnFailure(message: "Triage did not return the expected JSON: \(error)", raw: raw))
@@ -1848,6 +2144,10 @@ final class IntakeService: ObservableObject {
     /// keeps a triage start (`answer` saves before it sets one), only `.shaping` a round's.
     private func save(_ intake: Intake) {
         try? store.save(intake)
+        if intake.state != .shaping {
+            roundConfigDrafts[intake.id] = nil
+            roundConfigRefusals[intake.id] = nil
+        }
         if let n = intakes.firstIndex(where: { $0.id == intake.id }) {
             if let words = Self.announcement(from: intakes[n].state, to: intake.state) { announce(words) }
             intakes[n] = intake
