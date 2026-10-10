@@ -452,7 +452,10 @@ final class GitRunnerTests: XCTestCase {
         let script = dir.appendingPathComponent("git")
         let real = try TempRepo.git(["--exec-path"], in: dir)   // proves a real git exists
         XCTAssertFalse(real.isEmpty)
-        let gitPath = ["/usr/bin/git", "/opt/homebrew/bin/git", "/usr/local/bin/git"].first { FileManager.default.isExecutableFile(atPath: $0) }!
+        // Prefer a package-manager git: a stock macOS /usr/bin/git is 2.39 (Apple Git-154), which
+        // the version gate rightly refuses, so taking it first failed this test on any Mac whose
+        // newer git lives in /opt/homebrew.
+        let gitPath = ["/opt/homebrew/bin/git", "/usr/local/bin/git", "/usr/bin/git"].first { FileManager.default.isExecutableFile(atPath: $0) }!
         try "#!/bin/sh\nif [ ! -e '\(marker.path)' ]; then touch '\(marker.path)'; exit 1; fi\nexec \(gitPath) \"$@\"\n"
             .write(to: script, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)

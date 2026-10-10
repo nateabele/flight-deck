@@ -385,9 +385,9 @@ final class DelegationHostTests: XCTestCase {
     func testPiecesSplitAtTheWireCap() {
         let data = Data(repeating: 7, count: 150_000)
         let pieces = DelegationHost.pieces(of: data, at: 1000)
-        XCTAssertEqual(pieces.map(\.offset), [1000, 1000 + 65536, 1000 + 131072])
+        XCTAssertEqual(pieces.map(\.offset), [1000, 1000 + 65536, 1000 + 131072] as [Int64])
         XCTAssertEqual(pieces.map(\.data.count), [65536, 65536, 150_000 - 131072])
-        XCTAssertEqual(DelegationHost.pieces(of: Data([1]), at: 9).map(\.offset), [9])
+        XCTAssertEqual(DelegationHost.pieces(of: Data([1]), at: 9).map(\.offset), [9] as [Int64])
     }
 
     /// A slow `host.info` (docker wedged) must not hold the connection's serial queue: the
