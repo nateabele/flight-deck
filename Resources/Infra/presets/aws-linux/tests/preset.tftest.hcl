@@ -16,7 +16,8 @@ mock_provider "aws" {
       locations = ["us-east-1a"]
     }
   }
-  # Likewise no VPCs, which the module refuses as "no default VPC".
+  # Likewise one default VPC: the mock's own default is no VPCs, which the module refuses as
+  # "no default VPC". no_default_vpc_fails_at_plan overrides it back to none.
   mock_data "aws_vpcs" {
     defaults = {
       ids = ["vpc-0123456789abcdef0"]
