@@ -2431,7 +2431,9 @@ flagged as most likely to differ from the tests. The maintainer's to run.
       shown failing first; OpenCode now feeds `AgentOutputScan` from its mirror (round 2 opencode).
     - Test flakes seen under load, each passing alone: `PlanEditorKeystrokeTests` frame budget
       (16.1 to 16.7 ms), `PlanningRenderTests.testASeatBeatRedrawsTheLiveCardAlone`,
-      `DelegationLifecycleTests.testUnknownRunFromTheHostEndsTheRunAsDied`.
+      `DelegationLifecycleTests.testUnknownRunFromTheHostEndsTheRunAsDied`,
+      `OpenCodeRuntimeTests.testABlockedLineInAMirroredReplyIsReported` (seen 2026-10-12 in a
+      full run: the blocked signal list came back empty; 11/11 alone).
     - `testASeatBeatRedrawsTheLiveCardAlone` was hunted before the merge: 0/100 failures run alone
       (25 idle + 25 under full CPU load, on both l3-integration and master, interleaved). The
       full-suite failure is `clarifications: 1` plus a stray `liveCard: 1` in the publish window
