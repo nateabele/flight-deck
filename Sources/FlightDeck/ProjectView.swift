@@ -33,6 +33,18 @@ struct ProjectView: View {
     @State private var paneWidth: CGFloat = 320
     private static let paneWidths: ClosedRange<CGFloat> = 280...420
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.undoManager) private var undoManager
+    /// The plan action waiting on the human's say-so — Move to Trash always, Archive only while
+    /// a round runs (anything else archives at once: it is reversible, and ⌘Z undoes it).
+    @State private var confirming: PlanConfirmation?
+    /// Whether the Intakes list has keyboard focus: ⌃⌘A and ⌘⌫ act on its selected plan only
+    /// then, so ⌘⌫ in the request field or the plan editor still deletes text, not a plan.
+    @FocusState private var listFocused: Bool
+
+    private enum PlanConfirmation: Identifiable {
+        case stopAndArchive(UUID), trash(UUID)
+        var id: UUID { switch self { case .stopAndArchive(let id), .trash(let id): id } }
+    }
 
     init(store: SessionStore, repo: Repo) {
         self.store = store
@@ -45,7 +57,8 @@ struct ProjectView: View {
     /// (parallel-17-19-contract.md).
     private var projectPath: String { repo.url.standardizedFileURL.path }
 
-    private var intakes: [Intake] { intakeService.intakes(forProject: projectPath) }
+    /// The list's rows: the active plans, plus the archived ones under Show Archived.
+    private var intakes: [Intake] { intakeService.listedIntakes(forProject: projectPath) }
 
     /// Binds the List's selection through `IntakeService` instead of local `@State` — the bug
     /// this fixes is that `@State`: switching to another project's row and back gives this
@@ -103,6 +116,28 @@ struct ProjectView: View {
         .onAppear { probeFlywheelStatusIfNeeded() }
         .sheet(item: $reviewIntakeID) { id in
             ReleaseReviewView(store: store, intakeID: id, onClose: { reviewIntakeID = nil })
+        }
+        .alert(confirmationTitle, isPresented: Binding(
+            get: { confirming != nil }, set: { if !$0 { confirming = nil } }
+        ), presenting: confirming) { confirmation in
+            switch confirmation {
+            case .stopAndArchive(let id):
+                Button("Stop and Archive") { archive(id) }
+                // Cancel is the default (Return) for a destructive confirmation, per the HIG.
+                Button("Cancel", role: .cancel) {}.keyboardShortcut(.defaultAction)
+            case .trash(let id):
+                Button("Move to Trash", role: .destructive) { trash(id) }
+                Button("Cancel", role: .cancel) {}.keyboardShortcut(.defaultAction)
+            }
+        } message: { confirmation in
+            switch confirmation {
+            case .stopAndArchive:
+                Text("A round is running. It stops first; the plan and its history stay on disk.")
+            case .trash(let id):
+                Text(intakeService.isRoundRunning(id)
+                     ? "Its drafts, notes and round history go with it. The running round stops first."
+                     : "Its drafts, notes and round history go with it.")
+            }
         }
         .flywheelEnableConfirmations(
             repo: repo, store: store, status: flywheelStatus,
@@ -264,11 +299,16 @@ struct ProjectView: View {
             Text("Intakes").font(.headline).foregroundStyle(.secondary)
             List(selection: selectionBinding) {
                 ForEach(intakes) { intake in
-                    IntakeRow(intake: intake, tape: intakeService.tapes[intake.id])
+                    IntakeRow(intake: intake, tape: intakeService.tapes[intake.id],
+                              archived: intakeService.isArchived(intake.id))
                         .tag(intake.id)
                         .accessibilityIdentifier("intake-row")
+                        .contextMenu { planActions(intake.id) }
                 }
             }
+            .focused($listFocused)
+            .background { if listFocused { planShortcuts } }
+            listFooter
             Divider()
             IntakeComposer(intent: $intent, onTriage: triage)
         }
@@ -306,6 +346,114 @@ struct ProjectView: View {
         withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.25)) {
             intakeService.setIntakeListCollapsed(collapse, inProject: projectPath)
         }
+    }
+
+    // MARK: - Archive and Move to Trash
+
+    /// The selected plan's actions — the row context menu and the footer's action menu both draw
+    /// these, so the two can never offer different things. The shortcuts are live through
+    /// `planShortcuts`, only while the list has focus; here they are labels. The context menu
+    /// shows them (its menu exists only while open); the footer's pull-down does not, since a
+    /// pop-up button offers its menu's key equivalents while closed, and ⌘⌫ in the request field
+    /// would then ask to trash the selected plan.
+    @ViewBuilder private func planActions(_ id: UUID, showsShortcuts: Bool = true) -> some View {
+        if intakeService.isArchived(id) {
+            Button("Unarchive") { intakeService.unarchive(id) }
+        } else {
+            Button("Archive") { requestArchive(id) }
+                .keyboardShortcut(showsShortcuts ? KeyboardShortcut("a", modifiers: [.control, .command]) : nil)
+                .disabled(!intakeService.canArchive(id))
+        }
+        Button("Move to Trash…") { confirming = .trash(id) }
+            .keyboardShortcut(showsShortcuts ? KeyboardShortcut(.delete, modifiers: .command) : nil)
+            .disabled(!intakeService.canArchive(id))
+        Divider()
+        Button("Show in Finder") {
+            NSWorkspace.shared.activateFileViewerSelecting([intakeService.directory(id)])
+        }
+    }
+
+    /// ⌃⌘A (Mail's Archive) and ⌘⌫ (Finder's Move to Trash), as zero-size buttons that exist
+    /// only while the list has focus. View shortcuts rather than menu items: a menu item's key
+    /// equivalent is offered ahead of Ghostty's bindings (`MenuKeyEquivalents`), so ⌘⌫ would
+    /// stop deleting to line start in every terminal; and the menu bar never rebuilds from
+    /// SwiftUI state (ARCHITECTURE.md). Neither chord is bound by a menu here or by libghostty's
+    /// performable defaults (⌘⌫ is its terminal-only delete-line).
+    private var planShortcuts: some View {
+        ZStack {
+            Button("Archive Plan") {
+                if let id = selectionBinding.wrappedValue {
+                    if intakeService.isArchived(id) { intakeService.unarchive(id) } else { requestArchive(id) }
+                }
+            }
+            .keyboardShortcut("a", modifiers: [.control, .command])
+            Button("Move Plan to Trash") {
+                if let id = selectionBinding.wrappedValue, intakeService.canArchive(id) { confirming = .trash(id) }
+            }
+            .keyboardShortcut(.delete, modifiers: .command)
+        }
+        .frame(width: 0, height: 0)
+        .opacity(0)
+        .accessibilityHidden(true)
+    }
+
+    /// Show Archived, and an action menu for the selected plan — the footer's controls, under
+    /// the list they act on.
+    private var listFooter: some View {
+        HStack(spacing: 8) {
+            Toggle("Show Archived", isOn: Binding(
+                get: { intakeService.showsArchived(forProject: projectPath) },
+                set: { intakeService.setShowsArchived($0, inProject: projectPath) }
+            ))
+            .toggleStyle(.checkbox)
+            .controlSize(.small)
+            .accessibilityIdentifier("intake-show-archived")
+            Spacer()
+            Menu {
+                if let id = selectionBinding.wrappedValue { planActions(id, showsShortcuts: false) }
+            } label: {
+                Image(systemName: "ellipsis.circle")
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .disabled(selectionBinding.wrappedValue == nil)
+            .help("Actions for the selected plan")
+            .accessibilityLabel("Plan Actions")
+            .accessibilityIdentifier("intake-plan-actions")
+        }
+    }
+
+    private var confirmationTitle: String {
+        switch confirming {
+        case .stopAndArchive: return "Stop and archive?"
+        case .trash(let id):
+            let title = intakeService.intakes.first { $0.id == id }.map { IntakeTitle(intent: $0.intent).title } ?? "this plan"
+            return "Move “\(title)” to the Trash?"
+        case nil: return ""
+        }
+    }
+
+    /// Archives at once unless a round is running, which asks first — stopping a round is the
+    /// one part of archiving that ⌘Z can't take back.
+    private func requestArchive(_ id: UUID) {
+        guard intakeService.canArchive(id) else { return }
+        if intakeService.isRoundRunning(id) { confirming = .stopAndArchive(id) } else { archive(id) }
+    }
+
+    private func archive(_ id: UUID) {
+        let service = intakeService
+        let project = projectPath
+        guard service.archive(id, inProject: project) else { return }
+        undoManager?.registerUndo(withTarget: service) { service in
+            service.unarchive(id)
+            service.select(id, inProject: project)
+        }
+        undoManager?.setActionName("Archive Plan")
+    }
+
+    private func trash(_ id: UUID) {
+        intakeService.moveToTrash(id, inProject: projectPath)
     }
 
     private func triage() {

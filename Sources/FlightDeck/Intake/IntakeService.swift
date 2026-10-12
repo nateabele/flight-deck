@@ -295,6 +295,19 @@ final class IntakeService: ObservableObject {
     /// `projectKey`. Here for the reason `inspectorProjects` is: as `ProjectView` `@State` the
     /// list sprang back open on every switch to another project or tab and back.
     @Published private(set) var collapsedListProjects: Set<String> = []
+    /// Plans the human archived — read from each intake directory's `archived` marker at launch
+    /// (`IntakeStore.archivedMarker` says why a marker and not an `intake.json` field). Archived
+    /// plans leave `intakes(forProject:)`, so the list, the attention badge, the phone's plan list
+    /// and `intakeDetail` all stop seeing them at once; only `listedIntakes` brings them back.
+    @Published private(set) var archived: Set<UUID> = []
+    /// The projects whose Intakes list shows archived plans too (Show Archived), keyed by
+    /// `projectKey` and persisted like `collapsedListProjects`.
+    @Published private(set) var showArchivedProjects: Set<String> = []
+    /// Plans moved to the Trash whose runner was still live: the directory goes once the runner
+    /// has read its stop and exited — trashing it under a live runner would take the
+    /// `commands.jsonl` it reads the stop from with it, and leave it shaping (and holding its
+    /// account leases) against a directory that is gone. Collected on the clock in `pollTapes`.
+    private var pendingTrash: Set<UUID> = []
     /// The inspector mode last chosen for each plan. Deliberately NOT a `@Published` here:
     /// `SessionStore` forwards this service's publishes, so a mode kept here redrew the whole
     /// window on every Notes/Rounds click (`InspectorModeStore` has the numbers).
@@ -348,6 +361,11 @@ final class IntakeService: ObservableObject {
     private static let inspectorDefaultsKey = "IntakeInspectorByProject"
     /// `UserDefaults` key for `collapsedListProjects`, persisted as an array of paths.
     private static let collapsedListDefaultsKey = "IntakeListCollapsedByProject"
+    /// `UserDefaults` key for `showArchivedProjects`, persisted as an array of paths.
+    private static let showArchivedDefaultsKey = "IntakeListShowArchivedByProject"
+    /// Moves an intake's directory to the Trash — `FileManager.trashItem` in the app, a recorder
+    /// in tests, so no test run ever fills the human's Trash.
+    private let trashItem: (URL) throws -> Void
     /// Filled off the main actor by a detached probe started in `init` (the login-shell PATH
     /// lookup behind it can take seconds on first use); nil until that lands.
     ///
@@ -493,9 +511,11 @@ final class IntakeService: ObservableObject {
         defaults: UserDefaults = .standard,
         readFile: @escaping @Sendable (URL) -> Data? = { try? Data(contentsOf: $0) },
         announce: @escaping (String) -> Void = IntakeService.postAnnouncement,
-        detectAgents: @escaping @Sendable () -> AvailableModels = { TriageSettings.available() }
+        detectAgents: @escaping @Sendable () -> AvailableModels = { TriageSettings.available() },
+        trashItem: @escaping (URL) throws -> Void = { try FileManager.default.trashItem(at: $0, resultingItemURL: nil) }
     ) {
         self.detectAgents = detectAgents
+        self.trashItem = trashItem
         self.store = store
         self.headless = headless
         self.processRunner = processRunner
@@ -519,6 +539,7 @@ final class IntakeService: ObservableObject {
         }
         inspectorProjects = Set(defaults.stringArray(forKey: Self.inspectorDefaultsKey) ?? [])
         collapsedListProjects = Set(defaults.stringArray(forKey: Self.collapsedListDefaultsKey) ?? [])
+        showArchivedProjects = Set(defaults.stringArray(forKey: Self.showArchivedDefaultsKey) ?? [])
 
         // Launch recovery: a turn or release in flight when FD quit has no process left to
         // finish it. Saying "triaging" forever would hide that; `.interrupted` asks the human.
@@ -532,6 +553,7 @@ final class IntakeService: ObservableObject {
             try? store.save(loaded[i])
         }
         intakes = loaded
+        archived = Set(loaded.lazy.map(\.id).filter { store.isArchived(id: $0) })
 
         // `.shaping` is deliberately NOT interrupted: its runner is detached and may still be
         // working, and even a dead one left everything it needs in `tape.json`. The first
@@ -611,8 +633,21 @@ final class IntakeService: ObservableObject {
         URL(fileURLWithPath: path, isDirectory: true).standardizedFileURL.path
     }
 
-    /// Newest first; discarded intakes are kept on disk but never listed.
+    /// The project's active plans, newest first: discarded and archived intakes are kept on disk
+    /// but never listed. Everything that counts or shows plans reads this — the attention badge,
+    /// the phone's plan list (`refreshIntakeSummaries`), `intakeDetail` — so an archived plan
+    /// leaves all of them at once. Only the Mac's list asks for more (`listedIntakes`).
     func intakes(forProject path: String) -> [Intake] {
+        let key = Self.projectKey(path)
+        return intakes.filter {
+            Self.projectKey($0.projectPath) == key && $0.state != .discarded && !archived.contains($0.id)
+        }
+    }
+
+    /// What the project's Intakes list draws: its active plans, plus the archived ones when Show
+    /// Archived is on — in the same newest-first order, so a plan unarchived in place stays put.
+    func listedIntakes(forProject path: String) -> [Intake] {
+        guard showsArchived(forProject: path) else { return intakes(forProject: path) }
         let key = Self.projectKey(path)
         return intakes.filter { Self.projectKey($0.projectPath) == key && $0.state != .discarded }
     }
@@ -634,7 +669,7 @@ final class IntakeService: ObservableObject {
     /// would keep showing a discarded intake instead of falling back to "Select an intake".
     func selection(forProject path: String) -> UUID? {
         guard let id = selectedIntake[Self.projectKey(path)],
-              intakes(forProject: path).contains(where: { $0.id == id })
+              listedIntakes(forProject: path).contains(where: { $0.id == id })
         else { return nil }
         return id
     }
@@ -744,6 +779,106 @@ final class IntakeService: ObservableObject {
         guard collapsedListProjects.contains(key) != collapsed else { return }
         if collapsed { collapsedListProjects.insert(key) } else { collapsedListProjects.remove(key) }
         defaults.set(collapsedListProjects.sorted(), forKey: Self.collapsedListDefaultsKey)
+    }
+
+    // MARK: - Archive and Trash
+
+    func isArchived(_ id: UUID) -> Bool { archived.contains(id) }
+
+    func showsArchived(forProject project: String) -> Bool {
+        showArchivedProjects.contains(Self.projectKey(project))
+    }
+
+    func setShowsArchived(_ shown: Bool, inProject project: String) {
+        let key = Self.projectKey(project)
+        guard showArchivedProjects.contains(key) != shown else { return }
+        if shown { showArchivedProjects.insert(key) } else { showArchivedProjects.remove(key) }
+        defaults.set(showArchivedProjects.sorted(), forKey: Self.showArchivedDefaultsKey)
+    }
+
+    /// A round is going right now (or a play was just asked for): what makes Archive and Move to
+    /// Trash ask "Stop and …?" first rather than act at once.
+    func isRoundRunning(_ id: UUID) -> Bool {
+        guard intake(id)?.state == .shaping else { return false }
+        return latestTapes[id]?.status == .running || pending[id] != nil
+    }
+
+    /// Refused while `.releasing`, for `discard`'s reason: a release half-way through writing
+    /// tasks has to finish (or fail) where the human can see it.
+    func canArchive(_ id: UUID) -> Bool {
+        guard let i = intake(id) else { return false }
+        return i.state != .releasing && i.state != .discarded
+    }
+
+    /// Archives a plan: the marker goes on disk, the plan leaves the active list. A live runner is
+    /// stopped first through `send(.stop)` — the Stop control's own path, so the bar's
+    /// "Stopping…" and the account leases (`syncAccountLeases`, once the runner exits) behave
+    /// exactly as for Stop — and its daemon is collected on the clock. If the plan was selected
+    /// and is now hidden, the selection moves to the next plan (`stepSelection`).
+    @discardableResult
+    func archive(_ id: UUID, inProject project: String) -> Bool {
+        guard canArchive(id), !archived.contains(id) else { return false }
+        let listed = listedIntakes(forProject: project)
+        do { try store.setArchived(true, id: id) } catch { return false }
+        if intake(id)?.state == .shaping, runner?.isRunning(id, tape: latestTapes[id]) == true || isRoundRunning(id) {
+            send(id, .stop)
+            pendingReaps.insert(id)
+        }
+        archived.insert(id)
+        if !showsArchived(forProject: project) { stepSelection(off: id, in: listed, project: project) }
+        return true
+    }
+
+    /// Brings an archived plan back. A plan stopped by its archive stays stopped: the human plays
+    /// it again from the bar.
+    func unarchive(_ id: UUID) {
+        guard archived.contains(id), (try? store.setArchived(false, id: id)) != nil else { return }
+        archived.remove(id)
+    }
+
+    /// Moves a plan's whole directory (drafts, notes, tape, round history) to the Trash, where
+    /// Finder can put it back — never a delete. A live runner is told to stop and the directory
+    /// waits for it to exit (`pendingTrash`); it is marked archived meanwhile, so a quit before
+    /// then relaunches with the plan hidden rather than resurrected. Refused while releasing.
+    @discardableResult
+    func moveToTrash(_ id: UUID, inProject project: String) -> Bool {
+        guard canArchive(id), let i = intake(id) else { return false }
+        let listed = listedIntakes(forProject: project)
+        tasks.removeValue(forKey: id)?.task.cancel()
+        let live = i.state == .shaping && runner?.isRunning(id, tape: latestTapes[id]) == true
+        if live {
+            try? store.setArchived(true, id: id)
+            _ = try? tapeStore(id).appendCommand(.stop)
+            pendingTrash.insert(id)
+        } else {
+            do { try trashItem(store.directory(for: id)) } catch { return false }
+        }
+        stepSelection(off: id, in: listed, project: project)
+        intakes.removeAll { $0.id == id }
+        archived.remove(id)
+        pending[id] = nil
+        inspectorModeStore.forget(id)
+        flapPolicies[id] = nil
+        flapSeeded.remove(id)
+        return true
+    }
+
+    /// If `id` is `project`'s selection, moves it to the plan below `id` in `listed` (the list as
+    /// drawn before `id` left it), else the one above, else nothing — Mail's and Finder's rule, so
+    /// archiving down a list never jumps the selection back to the top.
+    private func stepSelection(off id: UUID, in listed: [Intake], project: String) {
+        guard selectedIntake[Self.projectKey(project)] == id, let n = listed.firstIndex(where: { $0.id == id }) else { return }
+        let next = n + 1 < listed.count ? listed[n + 1].id : (n > 0 ? listed[n - 1].id : nil)
+        select(next, inProject: project)
+    }
+
+    /// Trashes each `pendingTrash` directory whose runner has exited; collects its daemon first.
+    private func collectPendingTrash() {
+        for id in pendingTrash where runner?.isRunning(id, tape: nil) != true {
+            runner?.reap(id)
+            pendingTrash.remove(id)
+            try? trashItem(store.directory(for: id))
+        }
     }
 
     // MARK: - Pipeline
@@ -1235,6 +1370,9 @@ final class IntakeService: ObservableObject {
 
     /// `runs/<run>/` for one of `id`'s seats — what the inspector's seat detail shows and
     /// reveals in the Finder.
+    /// The plan's directory on disk, for Show in Finder.
+    func directory(_ id: UUID) -> URL { store.directory(for: id) }
+
     func runDirectory(_ id: UUID, run: String) -> URL {
         tapeStore(id).runDirectory(run)
     }
@@ -1300,6 +1438,7 @@ final class IntakeService: ObservableObject {
         }
         pollTriageActivity()
         settlePending()
+        collectPendingTrash()
         if let runner {
             for id in pendingReaps where !runner.isRunning(id, tape: nil) {
                 runner.reap(id)

@@ -46,6 +46,16 @@ carried forward on trust.
   added later are covered automatically.
 
 
+## Plan archive and Move to Trash (2026-10-12) — open items
+- The collapsed Intakes rail (`IntakeRail`) draws archived plans undimmed under Show Archived;
+  only the expanded list badges them.
+- Move to Trash has no Undo: the Trash is the recovery path (Finder's Put Back).
+- The UI test checks the row leaves the list after Move to Trash, not that the directory is in the
+  Trash: the test runner cannot read `~/.Trash` without Full Disk Access. The unit suite covers
+  the trash call (`IntakeServiceArchiveTests`).
+- Archived plans are hidden from the phone by `intakes(forProject:)`; the phone has no
+  archive control and no way to see archived plans.
+
 ## Host keys in the legacy keychain (open, 2026-10-10)
 
 A build signed by any identity other than the one that created a host's key prompts for that key

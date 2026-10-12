@@ -47,4 +47,29 @@ final class IntakeStoreTests: XCTestCase {
         XCTAssertEqual(loaded.droppedOps, [5, 3, 1])
         XCTAssertEqual(loaded.confirmedDrift, [7, 2])
     }
+
+    /// Archiving is a marker beside `intake.json`, never a change to it — an older build reading
+    /// (and rewriting) `intake.json` must neither choke on nor drop the archive.
+    func testArchiveIsAMarkerThatLeavesIntakeJSONUntouched() throws {
+        let store = IntakeStore(root: root)
+        let i = Intake(projectPath: "/p", intent: "old plan")
+        try store.save(i)
+        let json = store.directory(for: i.id).appendingPathComponent("intake.json")
+        let before = try Data(contentsOf: json)
+        XCTAssertFalse(store.isArchived(id: i.id))
+
+        try store.setArchived(true, id: i.id)
+        XCTAssertTrue(store.isArchived(id: i.id))
+        XCTAssertEqual(try Data(contentsOf: json), before)
+        XCTAssertEqual(try store.load(id: i.id), i)
+        XCTAssertEqual(store.all().map(\.id), [i.id], "archived intakes still load")
+
+        // A pre-archive build rewriting intake.json does not touch the marker.
+        try store.save(i)
+        XCTAssertTrue(store.isArchived(id: i.id))
+
+        try store.setArchived(false, id: i.id)
+        XCTAssertFalse(store.isArchived(id: i.id))
+        try store.setArchived(false, id: i.id) // idempotent
+    }
 }
