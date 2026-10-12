@@ -6938,6 +6938,11 @@ final class SessionStore: ObservableObject {
         /// phone should look again", and splitting them would invite a client to treat some as
         /// permanent and stop asking. The distinctions are worth a log line, not a wire code.
         case unreadableScreen
+        /// A screen-derived dialog (`answerScreenPrompt`) whose screen no longer shows the dialog
+        /// the phone drew. The same word the transcript path uses for the same fact — the phone
+        /// says "your Mac has moved on" — spelled here because that path's refusal is made by
+        /// `PromptService`, which has no screen to compare.
+        case promptChanged
 
         var errorCode: String? {
             switch self {
@@ -6948,6 +6953,7 @@ final class SessionStore: ObservableObject {
             case .unanswerable: return "unanswerable"
             case .promptNameable: return "prompt_nameable"
             case .unreadableScreen: return "unreadable_screen"
+            case .promptChanged: return "prompt_changed"
             }
         }
     }
@@ -7267,6 +7273,170 @@ final class SessionStore: ObservableObject {
             )
         }
     }
+
+    /// Answer a dialog this Mac read off the **screen** (`ScreenPromptReader`), named by a call id
+    /// that is the screen's own (`ScreenPromptID`) — claude's `/login` menu, its sign-in prompt.
+    ///
+    /// **Everything is re-read here and nothing is trusted from the tick that offered it.** There
+    /// is no transcript to derive from, so the screen is the only authority, and it is asked
+    /// twice: now, before any key, whether it still shows the dialog the phone drew (`callID`
+    /// equal — the identity is a hash of the menu's own words, so a different menu is a different
+    /// id); and, for a menu, again after the arrows, whether the cursor landed on the row whose
+    /// label the phone named. Either disagreeing is a refusal with nothing pressed — or, after
+    /// the arrows, nothing further pressed — never a keypress on a row nobody chose.
+    ///
+    /// **Claude only**, checked first and by agent rather than by driver: another agent's
+    /// `dialogDriver` knows another agent's marker, and this reader is claude's grammar.
+    ///
+    /// The shapes it takes, and nothing else:
+    /// - a menu: `.option` or a one-question, one-pick `.answers`, with no typed text — a menu
+    ///   has no "Type something" row;
+    /// - a sign-in: `.answers` carrying exactly one `AnswerSelection.typed`, which is the code.
+    ///   That reuses the wire's existing free-text selection rather than growing `PromptAnswer`,
+    ///   whose closed vocabulary is a stated security property;
+    /// - `.deny` on either: one Escape, after the identity check. Unlike a transcript dialog's
+    ///   blind deny this one has just read the screen, and an Escape sent to a screen that is no
+    ///   longer the dialog would interrupt a running turn.
+    ///
+    /// `.allow` is refused. Nothing on a screen menu is a permission.
+    ///
+    /// **Labels never reach the unified log.** The aborts below pass no `expected` — that string
+    /// is part of `AnswerAbort.summary`, which goes to os_log — and a sign-in's aborts pass no
+    /// viewport at all, since the whole screen is the authorize URL and its `state`.
+    @discardableResult
+    func answerScreenPrompt(
+        _ call: String, with answer: PromptAnswer, in id: UUID, token: UUID
+    ) -> AnswerDispatch {
+        guard let at = locate(id) else { return .unknownSession }
+        let agent = repos[at.repo].sessions[at.session].agent
+        guard agent == .claude, let driver = agent.dialogDriver else { return .unsupportedAgent }
+        if answeredPromptTokens[id, default: []].contains(token) { return .duplicate }
+        guard statuses[id]?.activity == .waiting else { return .notWaiting }
+        guard let injector = injector(for: id) else {
+            recordScreenAbort(.noInjector)
+            return .unreadableScreen
+        }
+        guard !injecting.contains(id) else {
+            recordScreenAbort(.tabBusy)
+            return .unreadableScreen
+        }
+        guard let viewport = injector.readViewport() else {
+            recordScreenAbort(.unreadableBeforePress)
+            return .unreadableScreen
+        }
+        guard let seen = ScreenPromptReader.read(inViewport: viewport), seen.callID == call else {
+            recordScreenAbort(.screenPromptChanged)
+            return .promptChanged
+        }
+
+        if answer == .deny {
+            remember(answered: token, for: id)
+            driver.deny(injector)
+            return .dispatched
+        }
+
+        switch seen {
+        case .signIn:
+            guard case .answers(let selections) = answer, selections.count == 1,
+                  selections[0].count == 1, let typed = selections[0].first?.text
+            else {
+                recordScreenAbort(.screenAnswerShape)
+                return .unanswerable
+            }
+            // Trimmed first, so a code pasted from a page with a trailing newline is the code;
+            // what remains is held to `acceptsTyped`'s rule (no control characters, which in
+            // claude's one-line field are Return and Escape). The length cap is a sanity bound:
+            // the code is a short token, and a megabyte is not one.
+            let code = typed.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard AnswerPlan.acceptsTyped(code), code.count <= Self.maxSignInCodeLength else {
+                recordScreenAbort(.signInTextRefused)
+                return .unanswerable
+            }
+            remember(answered: token, for: id)
+            injecting.insert(id)
+            injector.sendText(code)
+            // The same seam every drive settles on, then the screen once more: the paste has to
+            // repaint into the field, and the sign-in must STILL be what is up. A login finished
+            // in the Mac's own browser in the meantime would put claude on its next screen, and a
+            // Return there submits whatever that screen has focused.
+            injectionSettle { [weak self] in
+                guard let self else { return }
+                defer { self.injecting.remove(id) }
+                guard let after = injector.readViewport(),
+                      ScreenPromptReader.read(inViewport: after)?.callID == call
+                else {
+                    self.recordScreenAbort(.screenPromptChanged)
+                    return
+                }
+                injector.sendReturn()
+            }
+            return .dispatched
+
+        case .question(_, let questions):
+            guard questions.count == 1, let question = questions.first else { return .unanswerable }
+            let index: Int
+            let label: String
+            switch answer {
+            case .option(let i, let l):
+                (index, label) = (i, l)
+            case .answers(let selections):
+                guard selections.count == 1, selections[0].count == 1,
+                      let pick = selections[0].first, pick.text == nil
+                else {
+                    recordScreenAbort(.screenAnswerShape)
+                    return .unanswerable
+                }
+                (index, label) = (pick.index, pick.label)
+            case .allow, .deny:
+                return .unanswerable
+            }
+            // The client's label against the Mac's own reading of this very screen — the same
+            // check `.option` makes against a transcript, with the screen as the copy.
+            guard question.options.indices.contains(index),
+                  question.options[index].label == label,
+                  driver.row(index, reads: label, inViewport: viewport),
+                  let current = driver.focusedRow(inViewport: viewport),
+                  question.options.indices.contains(current)
+            else {
+                // The one abort that carries the screen, because it is the one that has just
+                // verified the screen is a MENU — a menu's rows are what a person needs to see
+                // to tell a parser bug from a stale tap, and nothing on it is a URL.
+                recordScreenAbort(.screenRowMismatch,
+                                  focused: driver.focusedRow(inViewport: viewport),
+                                  viewport: viewport)
+                return .unreadableScreen
+            }
+            return drive(
+                from: current, to: index,
+                confirm: {
+                    driver.focusedRow(inViewport: $0) == index
+                        && driver.row(index, reads: label, inViewport: $0)
+                        && ScreenPromptReader.read(inViewport: $0)?.callID == call
+                },
+                driver: driver, injector: injector, id: id, token: token
+            )
+
+        case .permission:
+            return .unanswerable
+        }
+    }
+
+    /// Files an abort for `answerScreenPrompt`. **No `expected` and, by default, no viewport**:
+    /// the first is part of `AnswerAbort.summary`, which goes to the unified log, and the second
+    /// is the whole screen — which, while a sign-in is up, is the authorize URL and its `state`.
+    /// A caller passes a viewport only after it has verified the screen holds neither.
+    private func recordScreenAbort(
+        _ check: AnswerAbort.Check, focused: Int? = nil, viewport: String? = nil
+    ) {
+        answerAbortSink(AnswerAbort(
+            check: check, step: nil, purpose: nil, from: 0, to: 0, expected: nil,
+            focused: focused, viewport: viewport
+        ))
+    }
+
+    /// A sign-in code is a short token. This bounds what a phone can paste into claude's field,
+    /// not what claude accepts; it is far above any real code and far below a document.
+    private static let maxSignInCodeLength = 1024
 
     /// Escape, sent blind, for a dialog this Mac cannot name at all.
     ///
@@ -9912,8 +10082,25 @@ final class SessionStore: ObservableObject {
                 codes[id] = code.code
                 let episode = stuckPromptEpisodes[id] ?? StuckEpisode(began: now, reported: 0)
                 stuckPromptEpisodes[id] = episode
-                next[id]?.answerless =
-                    now.timeIntervalSince(episode.began) >= Self.stuckPromptReportLadder[0]
+                let unnameable = now.timeIntervalSince(episode.began) >= Self.stuckPromptReportLadder[0]
+                // **The same debounce `answerless` rides, and for the same reason**: for the
+                // first seconds of any episode this is the ordinary status-file/transcript race,
+                // and a screen read then would offer a card for a dialog the very next tick
+                // names properly. Past it, the transcript has had its chance and has nothing —
+                // which is exactly a dialog claude never writes down (`/login`, `/model`).
+                //
+                // **The episode is deliberately NOT cleared when this finds one.** The transcript
+                // probe fails on every tick for as long as the menu is up; clearing the episode
+                // here would restart the 5 s debounce each time, and the card would blink out and
+                // back every few seconds. It ends the way it always did: the tab stops waiting,
+                // or the transcript names something.
+                if unnameable, let screen = screenPrompt(for: id) {
+                    calls[id] = screen.callID
+                    offers[id] = screen
+                    next[id]?.answerless = false
+                } else {
+                    next[id]?.answerless = unnameable
+                }
             case .failure, nil:
                 // A refusal this Mac cannot yet call "nothing to answer" (`"unsupported_agent"`,
                 // an agent this build cannot even ask) — or no probe installed at all, or an
@@ -9932,6 +10119,24 @@ final class SessionStore: ObservableObject {
             stuckPromptEpisodes[id] = nil
         }
         return (calls, codes, agents, offers)
+    }
+
+    /// The dialog a claude tab's **screen** shows, for the dialogs its transcript never holds —
+    /// see `ScreenPromptReader`. Asked only of a tab whose transcript derivation has already
+    /// failed for longer than the debounce (`derivedOpenPromptCalls`), and only for claude.
+    ///
+    /// **Does not wake a sleeping tab**, which `injector(for:)` would: this runs on every
+    /// registry tick for as long as a dialog stays unnameable, and a poll that rebuilt a
+    /// frozen surface would undo smart sleep by merely looking. A tab with no live surface has
+    /// no screen to read, so it is no card, which is "Waiting for you" as before. The read is
+    /// served from `TextInjecting.readViewport()`'s 500 ms cache, so a 2 Hz tick is at most one
+    /// real read a tick, and only while a tab is blocked on something it cannot name.
+    private func screenPrompt(for id: UUID) -> OpenPrompt? {
+        guard let at = locate(id), repos[at.repo].sessions[at.session].agent == .claude,
+              !rollingOver.contains(id),
+              let viewport = (injectorOverride ?? surfaces[id])?.readViewport()
+        else { return nil }
+        return ScreenPromptReader.read(inViewport: viewport)
     }
 
     /// One tab's identity as it goes on the wire. Never `.unreported` — this build always
@@ -10612,6 +10817,14 @@ struct AnswerAbort: Equatable {
         case optionRowMismatch   = "option-row-mismatch"
         /// A keyed drive's step found a screen other than the one it expects (`KeyedAnswerStep`).
         case keyedScreenMismatch = "keyed-screen-mismatch"
+        /// `answerScreenPrompt`: the screen no longer shows the dialog the phone's call id names.
+        case screenPromptChanged = "screen-prompt-changed"
+        /// `answerScreenPrompt`: the row the phone named is not the row the screen has there.
+        case screenRowMismatch   = "screen-row-mismatch"
+        /// `answerScreenPrompt`: an answer of a shape a screen dialog does not take.
+        case screenAnswerShape   = "screen-answer-shape"
+        /// `answerScreenPrompt`: a sign-in code that is empty, long, or holds a control character.
+        case signInTextRefused   = "sign-in-text-refused"
     }
 
     let check: Check

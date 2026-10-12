@@ -162,6 +162,21 @@ final class PromptService {
     func answer(
         session: UUID, agent: String?, call: String, answer: PromptAnswer, token: UUID
     ) -> Result<Void, TimelineErrorCode> {
+        // **A dialog the Mac read off the screen has no transcript to be derived from**, so the
+        // comparison below could only ever refuse it. Its call id is the screen's own
+        // (`ScreenPromptID`), and the store re-reads the screen and compares THAT — the same
+        // question, asked of the only thing that can answer it. Never a subagent's: a screen
+        // dialog is the tab's own.
+        if ScreenPromptID.isScreenDerived(call) {
+            guard agent == nil else {
+                record(session, sent: call, open: nil, code: "prompt_changed")
+                return .failure("prompt_changed")
+            }
+            let outcome = store.answerScreenPrompt(call, with: answer, in: session, token: token)
+            record(session, sent: call, open: store.openPromptCalls[session], code: outcome.errorCode)
+            if let code = outcome.errorCode { return .failure(TimelineErrorCode(code)) }
+            return .success(())
+        }
         let derived: Result<OpenPrompt, TimelineErrorCode>
         if let agent, case .success(let read) = preflight(session),
            let vouched = read.reader.vouchedSubagentPrompt(inTranscriptAt: read.url, agent: agent) {
