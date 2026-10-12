@@ -26,6 +26,18 @@ settings:
     # FlightDeck it appends to an existing GhosttyEmbed path rather than replacing it, and
     # that ordering is not safe to disturb by folding it into a single project-wide value.
     SWIFT_INCLUDE_PATHS: $(SRCROOT)/Sources/FleetKit/SPAKE2
+    # The version of both apps (Mac and phone), and the hostd release tag (`hostd-v<this>`) the
+    # Add Host sheet's install command downloads from. scripts/build-hostd-linux.sh and the
+    # release scripts read it from this line, so keep it the only MARKETING_VERSION in this file.
+    MARKETING_VERSION: "0.1.0"
+    # The build number. scripts/release-ios.sh overrides it per upload, since App Store
+    # Connect refuses a build number it has already seen.
+    CURRENT_PROJECT_VERSION: "1"
+  configs:
+    # Notarization rejects any executable without the hardened runtime. Release only: Debug
+    # stays as it was, so test injection and the debugger behave exactly as before.
+    Release:
+      ENABLE_HARDENED_RUNTIME: "YES"
 
 # The first Swift package in this repo — everything else vendored here is an xcframework built
 # out of a submodule, and this is not, because there is nothing to build: MarkdownUI is Swift
@@ -78,6 +90,9 @@ targets:
           copyFiles:
             destination: resources
             subpath: ""
+        # Re-signed with the app's identity on copy. The prebuilt binary carries only the
+        # linker's ad-hoc signature, which notarization rejects.
+        attributes: [CodeSignOnCopy]
       # A folder reference, not a plain group — a plain group flattens subdirectories,
       # which would destroy `.claude-plugin/` and `hooks/`. This is the Claude Code
       # plugin Flight Deck loads into its own sessions to receive lifecycle hooks.
@@ -179,10 +194,6 @@ targets:
         # `configFiles` below, not here: a target setting would outrank them and hide the
         # digest scripts/build-hostd-linux.sh writes for a Release build.
         INFOPLIST_FILE: Resources/FlightDeck-Info.plist
-        # The app's version, and the hostd release tag (`hostd-v<this>`) the Add Host sheet's
-        # install command downloads from. scripts/build-hostd-linux.sh reads it from this line,
-        # so keep it the only MARKETING_VERSION in this file.
-        MARKETING_VERSION: "0.1.0"
         SWIFT_OBJC_BRIDGING_HEADER: Sources/FlightDeck/BridgingHeader.h
         HEADER_SEARCH_PATHS: $(SRCROOT)/Sources/FlightDeck/GhosttyEmbed $(SRCROOT)/vendor/boringssl-artifacts/include
         # libghostty (GhosttyKit) statically bundles C++ (glslang); link the C++
@@ -381,6 +392,10 @@ targets:
     settings:
       base:
         PRODUCT_NAME: flightdeck
+        # Embedded in Flight Deck.app, so not installed on its own. Archiving installs every
+        # product that does not skip, and an archive holding more than the one app is a
+        # "generic" archive that Developer ID export refuses.
+        SKIP_INSTALL: "YES"
         PRODUCT_MODULE_NAME: FlightDeckCLI
         LD_RUNPATH_SEARCH_PATHS: "@executable_path/../Frameworks"
         HEADER_SEARCH_PATHS: $(SRCROOT)/vendor/boringssl-artifacts/include
@@ -430,6 +445,10 @@ targets:
       base:
         SWIFT_VERSION: "6.0"
         PRODUCT_NAME: Flight Deck Host
+        # Embedded in Flight Deck.app, so not installed on its own. Archiving installs every
+        # product that does not skip, and an archive holding more than the one app is a
+        # "generic" archive that Developer ID export refuses.
+        SKIP_INSTALL: "YES"
         EXECUTABLE_NAME: flightdeck-hostd
         PRODUCT_MODULE_NAME: HostDaemon
         PRODUCT_BUNDLE_IDENTIFIER: dev.flightdeck.hostd
@@ -539,6 +558,10 @@ targets:
       path: Sources/FlightDeckMobile/Info.plist
       properties:
         CFBundleDisplayName: Flight Deck
+        # From build settings, so the project-wide versions apply. Left out, xcodegen writes
+        # fixed 1.0 / 1 into the generated plist.
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
@@ -641,7 +664,8 @@ schemes:
   FlightDeckMobile:
     build:
       targets:
-        FlightDeckMobile: [run]
+        # `archive` too, for App Store Connect / TestFlight uploads.
+        FlightDeckMobile: [run, archive]
         # `[test]` rather than `[run]`: the bundle is built for the test action (and so by
         # `build-for-testing`, which is what scripts/build-ios.sh runs) but not by a plain
         # `build`, which stays the app-only check it has always been.
