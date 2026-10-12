@@ -175,10 +175,15 @@ public enum OpenPrompt: Equatable, Sendable {
     /// terminal shows — the whole input, not a one-line summary — and the reason string
     /// `WireSession.waitingFor` already carries.
     case permission(callID: String, tool: String?, summary: String?)
+    /// claude's OAuth sign-in, waiting for the code its redirect page shows. **Never derived from
+    /// a transcript** — there is no such record — only read off the Mac's screen and sent
+    /// (`WireOpenPrompt`, `ScreenPromptID.signIn`). `url` is the on-screen authorize URL, already
+    /// vetted by `ClaudeSignInURL`: the one a phone can complete, not the browser's loopback one.
+    case signIn(callID: String, url: String)
 
     public var callID: String {
         switch self {
-        case .question(let id, _), .permission(let id, _, _): return id
+        case .question(let id, _), .permission(let id, _, _), .signIn(let id, _): return id
         }
     }
 

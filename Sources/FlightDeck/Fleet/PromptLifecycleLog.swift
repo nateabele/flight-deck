@@ -27,6 +27,13 @@ struct PromptLifecycleRecord: Equatable {
         case question(options: [Int])
         /// Any other tool awaiting approval. `nil` for a `tool_use` record naming no tool.
         case permission(tool: String?)
+        /// A numbered menu this Mac read off the SCREEN (`ScreenPromptReader`): claude's own TUI
+        /// menus, which have no transcript record. Its row count only — the labels are the
+        /// `detail`, in the file.
+        case screenMenu(rows: Int)
+        /// claude's OAuth sign-in, read off the screen. Nothing about it is recorded beyond
+        /// its id: the URL and the `state` inside it are not for any log.
+        case signIn
     }
 
     /// Why a dialog this Mac believed was open stopped being the one it believes is open.
@@ -175,6 +182,10 @@ struct PromptLifecycleRecord: Equatable {
         case .opened(let call, let agent, .permission(let tool)):
             return "opened call=\(call) agent=\(agent ?? "-") kind=permission"
                 + " tool=\(tool ?? "-")"
+        case .opened(let call, let agent, .screenMenu(let rows)):
+            return "opened call=\(call) agent=\(agent ?? "-") kind=screen-menu rows=\(rows)"
+        case .opened(let call, let agent, .signIn):
+            return "opened call=\(call) agent=\(agent ?? "-") kind=signin"
         case .closed(let call, let reason):
             return "closed call=\(call) reason=\(Self.describe(reason))"
         case .unnamed(let code):

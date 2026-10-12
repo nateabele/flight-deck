@@ -139,6 +139,10 @@ enum CLIOutput {
             if let summary { lines.append(summary) }
             lines.append("call: \(callID)")
             return lines.joined(separator: "\n")
+        case .signIn(let callID, _):
+            // The CLI derives prompts from a transcript, which holds no sign-in; and the URL
+            // carries the attempt's `state`, so it is not printed even if one ever arrives.
+            return "sign-in: answer it on your Mac or phone\ncall: \(callID)"
         }
     }
 
@@ -156,6 +160,9 @@ enum CLIOutput {
                 }))
         case .permission(let callID, let tool, let summary):
             return json(PromptJSON(kind: "permission", call: callID, tool: tool, summary: summary,
+                                   questions: nil))
+        case .signIn(let callID, _):
+            return json(PromptJSON(kind: "signin", call: callID, tool: nil, summary: nil,
                                    questions: nil))
         }
     }
