@@ -141,8 +141,12 @@ final class PlanningInspectorUITests: XCTestCase {
         let app = launch()
         let row = element(app, "intake-row")
         XCTAssertTrue(row.waitForExistence(timeout: 20), "the fixture plan's row never appeared")
-        let badge = element(app, "intake-archived-badge")
-        let showArchived = element(app, "intake-show-archived")
+        // The row combines its children into one element, so the badge is read off the row's
+        // value; and the outer `project-view` identifier overrides the checkbox's own, so the
+        // checkbox is found by its title.
+        let badge = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "identifier == 'intake-row' AND value CONTAINS 'Archived'")).firstMatch
+        let showArchived = app.checkBoxes["Show Archived"].firstMatch
         XCTAssertTrue(showArchived.waitForExistence(timeout: 5), "no Show Archived control under the list")
 
         // Context menu → Archive: the plan leaves the list.
