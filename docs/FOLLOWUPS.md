@@ -2444,6 +2444,9 @@ flagged as most likely to differ from the tests. The maintainer's to run.
       `DelegationLifecycleTests.testUnknownRunFromTheHostEndsTheRunAsDied`,
       `OpenCodeRuntimeTests.testABlockedLineInAMirroredReplyIsReported` (seen 2026-10-12 in a
       full run: the blocked signal list came back empty; 11/11 alone).
+      `ProjectViewInspectorLiveTests.testOpeningTheInspectorSettlesWithEveryColumnDrawn`
+      (seen 2026-10-12 in intake-archive's full run: detail/inspector re-evaluated twice, not
+      once; 5/5 alone).
     - `testASeatBeatRedrawsTheLiveCardAlone` was hunted before the merge: 0/100 failures run alone
       (25 idle + 25 under full CPU load, on both l3-integration and master, interleaved). The
       full-suite failure is `clarifications: 1` plus a stray `liveCard: 1` in the publish window
